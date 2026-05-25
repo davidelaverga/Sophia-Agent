@@ -318,31 +318,49 @@ def extract_session_memories(
                 if isinstance(event_candidate, str) and event_candidate:
                     resolved_event_id = event_candidate
 
-        overlay_metadata = dict(mem0_metadata)
-        if resolved_event_id and not resolved_memory_id:
-            # Capture the event_id so ``reconcile_review_metadata_entries`` (a future
-            # backfill worker) can flip ``sync_state="pending"`` → ``"reconciled"``
-            # once Bug A is fixed and ``wait_for_pending_events`` actually resolves
-            # these to real memory_ids.
-            overlay_metadata["mem0_event_id"] = resolved_event_id
-
-        try:
-            upsert_review_metadata(
-                user_id,
-                memory_id=resolved_memory_id,
-                content=entry["content"],
-                metadata=overlay_metadata,
-                session_id=session_id,
-                sync_state="extraction" if resolved_memory_id else "pending",
-            )
-        except Exception:
-            # A corrupted local store must NEVER take down the extraction loop —
-            # we already wrote to Mem0, the data is durable, the overlay is
-            # best-effort UX scaffolding.
+        # Codex P1 review on PR #130 R14: only write the overlay when Mem0 gave us
+        # a tracking handle — either a resolved memory_id (sync path or successful
+        # event resolution) OR an event_id (queued async write we can reconcile
+        # later). When ``add_memories`` returns an empty list — Mem0 client
+        # unavailable, ``client.add()`` raised, or ``Mem0EventFailedError`` was
+        # caught — both handles are absent. Writing an overlay entry then would
+        # surface a "ghost" pending_review candidate in /memories/recent that was
+        # never persisted remotely and can never be reconciled, polluting the
+        # review UI with false positives. Log + skip + continue the loop instead.
+        if not resolved_memory_id and not resolved_event_id:
             logger.warning(
-                "session.finalization extraction_overlay_write_failed user_id=%s session_id=%s",
-                user_id, session_id, exc_info=True,
+                "session.finalization extraction_overlay_skipped user_id=%s "
+                "session_id=%s reason=no_tracking_id category=%s — Mem0 write "
+                "produced no memory_id or event_id; overlay would be unreconciliable",
+                user_id, session_id, entry.get("category", "fact"),
             )
+        else:
+            overlay_metadata = dict(mem0_metadata)
+            if resolved_event_id and not resolved_memory_id:
+                # Capture the event_id so ``reconcile_review_metadata_entries`` (a
+                # future backfill worker) can flip ``sync_state="pending"`` →
+                # ``"reconciled"`` once Bug A is fixed and
+                # ``wait_for_pending_events`` actually resolves these to real
+                # memory_ids.
+                overlay_metadata["mem0_event_id"] = resolved_event_id
+
+            try:
+                upsert_review_metadata(
+                    user_id,
+                    memory_id=resolved_memory_id,
+                    content=entry["content"],
+                    metadata=overlay_metadata,
+                    session_id=session_id,
+                    sync_state="extraction" if resolved_memory_id else "pending",
+                )
+            except Exception:
+                # A corrupted local store must NEVER take down the extraction loop —
+                # we already wrote to Mem0, the data is durable, the overlay is
+                # best-effort UX scaffolding.
+                logger.warning(
+                    "session.finalization extraction_overlay_write_failed user_id=%s session_id=%s",
+                    user_id, session_id, exc_info=True,
+                )
 
         written_memories.append({
             "content": entry["content"],

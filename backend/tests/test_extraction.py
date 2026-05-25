@@ -712,3 +712,120 @@ class TestReviewMetadataOverlayWrite:
         assert len(result) == 2
         # Both overlay writes were attempted.
         assert mock_upsert.call_count == 2
+
+    @patch("deerflow.sophia.extraction.upsert_review_metadata")
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_extraction_skips_overlay_when_mem0_returns_empty(
+        self, mock_anthropic_mod, mock_add_memories, mock_upsert
+    ):
+        """Codex P1 R14: when ``add_memories`` returns an empty list (Mem0
+        client unavailable, ``client.add()`` raised, or
+        ``Mem0EventFailedError`` was caught), the overlay write MUST be
+        SKIPPED — not written with ``memory_id=None`` and no
+        ``mem0_event_id``.
+
+        Without this guard the overlay store accumulates "ghost"
+        pending_review candidates with no tracking handle. They surface
+        in /memories/recent (via the synthetic ``local:<hash>`` path)
+        but were never persisted remotely and can never be reconciled
+        with a real Mem0 memory, polluting the review UI with permanent
+        false positives.
+        """
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps([_SAMPLE_EXTRACTION[0]])
+        )
+        # Mem0 unavailable / failed → returns [] (per add_memories contract
+        # for unavailable / failed outcomes).
+        mock_add_memories.return_value = []
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_overlay_no_handle",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert mock_upsert.call_count == 0, (
+            f"Overlay MUST NOT be written when Mem0 returned no tracking "
+            f"handle (memory_id or event_id). Got {mock_upsert.call_count} "
+            f"upsert calls — these would create unreconciliable ghost "
+            f"candidates in the review UI."
+        )
+
+    @patch("deerflow.sophia.extraction.upsert_review_metadata")
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_extraction_skips_overlay_when_result_has_no_id_or_event_id(
+        self, mock_anthropic_mod, mock_add_memories, mock_upsert
+    ):
+        """Defensive: even when ``add_memories`` returns a non-empty list,
+        if the entries have neither a real ``id`` nor an ``event_id``
+        (e.g. a malformed Mem0 response shape we don't recognise), the
+        overlay write MUST still skip — same orphan-candidate reasoning."""
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps([_SAMPLE_EXTRACTION[0]])
+        )
+        # Result has SOME shape but no id and no event_id (e.g. malformed
+        # response, or a synthetic ``local:`` placeholder which our
+        # resolved_memory_id check explicitly filters out).
+        mock_add_memories.return_value = [{"memory": "just text, no ids"}]
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_overlay_no_handle_v2",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert mock_upsert.call_count == 0, (
+            "Overlay MUST skip when neither id nor event_id is present, "
+            "regardless of whether the result list is empty or just lacks "
+            "tracking handles."
+        )
+
+    @patch("deerflow.sophia.extraction.upsert_review_metadata")
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_extraction_writes_overlay_when_some_candidates_succeed_and_others_fail(
+        self, mock_anthropic_mod, mock_add_memories, mock_upsert
+    ):
+        """Partial failure: candidate 1's Mem0 write succeeds (memory_id
+        present), candidate 2's fails (empty list). Overlay MUST be
+        written only for candidate 1; candidate 2 is skipped cleanly."""
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        # Two candidates this time.
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps(_SAMPLE_EXTRACTION[:2])
+        )
+        # First add succeeds with a real memory_id; second fails (returns []).
+        mock_add_memories.side_effect = [
+            [{"id": "mem_succeeded", "memory": "ok"}],
+            [],  # Mem0 outage / failed event between writes
+        ]
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_overlay_partial",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        # Only ONE overlay write — the successful one. The failed
+        # candidate is correctly skipped.
+        assert mock_upsert.call_count == 1, (
+            f"Partial-failure case: expected exactly 1 overlay write "
+            f"(for the successful candidate); got {mock_upsert.call_count}"
+        )
+        assert mock_upsert.call_args.kwargs["memory_id"] == "mem_succeeded"
