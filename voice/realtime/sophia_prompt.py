@@ -4,6 +4,10 @@ import ast
 from functools import cache, lru_cache
 from pathlib import Path
 
+from voice.realtime.coreview import (
+    COREVIEW_PROMPT_SOURCE,
+    build_gemini_coreview_prompt_overlay,
+)
 from voice.realtime.skill_slow_state import (
     VoiceSkillSlowStateSeed,
     build_voice_skill_state_seed_block,
@@ -192,6 +196,7 @@ def build_gemini_live_realtime_instructions(
             ritual=ritual,
         ),
         build_gemini_live_spoken_turn_policy_overlay(),
+        build_gemini_coreview_prompt_overlay(),
     ]
     return "\n\n---\n\n".join(block.strip() for block in blocks if block.strip())
 
@@ -231,6 +236,7 @@ def build_gemini_live_realtime_setup_instructions(
             skill_state=skill_state,
         ),
         build_gemini_live_spoken_turn_policy_overlay(),
+        build_gemini_coreview_prompt_overlay(),
     ]
     return "\n\n---\n\n".join(block.strip() for block in blocks if block.strip())
 
@@ -287,7 +293,7 @@ def gemini_live_realtime_instruction_sources(
     ritual: str | None = None,
 ) -> list[str]:
     """Return source labels for Gemini Live prompt parity tests and docs."""
-    return [
+    sources = [
         *sophia_realtime_instruction_sources(
             platform=platform,
             context_mode=context_mode,
@@ -295,6 +301,9 @@ def gemini_live_realtime_instruction_sources(
         ),
         GEMINI_LIVE_SPOKEN_TURN_POLICY_SOURCE,
     ]
+    if build_gemini_coreview_prompt_overlay():
+        sources.append(COREVIEW_PROMPT_SOURCE)
+    return sources
 
 
 @lru_cache(maxsize=1)

@@ -14,6 +14,10 @@ from urllib.parse import urlsplit
 import httpx
 
 from voice.realtime.runtime_selection import VoiceRuntimeMode
+from voice.realtime.coreview import (
+    GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
+    execute_read_artifact_text_feature_gated,
+)
 from voice.realtime.sophia_backend_tools import (
     SophiaBackendToolConfigurationError,
     builder_lifecycle_contract,
@@ -47,6 +51,7 @@ GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES = frozenset(
         GEMINI_CANCEL_ASYNC_TASK_TOOL_NAME,
         GEMINI_LIST_ASYNC_TASKS_TOOL_NAME,
         GEMINI_RETRIEVE_MEMORIES_TOOL_NAME,
+        GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
     }
 )
 
@@ -870,6 +875,21 @@ class GeminiDogfoodToolExecutor:
                 call=call,
                 response=response,
                 result_summary=f"retrieve_memories returned {status} with {count} snippet(s).",
+            )
+
+        if call.name == GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME:
+            response = execute_read_artifact_text_feature_gated(
+                call.args,
+                session_id=session_id,
+                user_id=user_id,
+                provider=provider,
+            )
+            return GeminiDogfoodToolExecution(
+                call=call,
+                response=response,
+                result_summary=str(response["result_summary"]),
+                success=bool(response.get("ok")),
+                error_text=None if response.get("ok") else str(response.get("reason") or "read_artifact_text_unavailable"),
             )
 
         try:

@@ -1,0 +1,104 @@
+export type ArtifactVisualSourceKind = "canvas_stream" | "offscreen_render" | "unsupported"
+
+export type ArtifactVisualSourceStatus = "ready" | "unsupported"
+
+export interface ArtifactVisualSource {
+  kind: ArtifactVisualSourceKind
+  status: ArtifactVisualSourceStatus
+  artifactId: string | null
+  element: HTMLCanvasElement | null
+  stream: MediaStream | null
+  reason: string | null
+  frameRate: number | null
+}
+
+export interface ResolveArtifactVisualSourceOptions {
+  root?: ParentNode | null
+  artifactId?: string | null
+  frameRate?: number
+}
+
+const ARTIFACT_CANVAS_SELECTORS = [
+  "canvas[data-coreview-artifact-canvas='true']",
+  "canvas[data-artifact-canvas='true']",
+  "[data-artifact-region='true'] canvas",
+  "[data-coreview-artifact-region='true'] canvas",
+]
+
+export function resolveArtifactVisualSource({
+  root,
+  artifactId = null,
+  frameRate = 1,
+}: ResolveArtifactVisualSourceOptions = {}): ArtifactVisualSource {
+  const searchRoot = root ?? (typeof document === "undefined" ? null : document)
+  if (!searchRoot) {
+    return unsupportedArtifactVisualSource("document_unavailable", artifactId)
+  }
+
+  const canvas = findArtifactCanvas(searchRoot, artifactId)
+  if (!canvas) {
+    return unsupportedArtifactVisualSource("artifact_canvas_not_found", artifactId)
+  }
+
+  const captureStream = canvas.captureStream
+  if (typeof captureStream !== "function") {
+    return {
+      ...unsupportedArtifactVisualSource("canvas_capture_stream_unavailable", artifactId),
+      element: canvas,
+    }
+  }
+
+  return {
+    kind: "canvas_stream",
+    status: "ready",
+    artifactId,
+    element: canvas,
+    stream: captureStream.call(canvas, frameRate),
+    reason: null,
+    frameRate,
+  }
+}
+
+export function stopArtifactVisualSource(source: ArtifactVisualSource | null | undefined): void {
+  source?.stream?.getTracks().forEach((track) => track.stop())
+}
+
+export function findArtifactCanvas(
+  root: ParentNode,
+  artifactId: string | null = null,
+): HTMLCanvasElement | null {
+  if (artifactId) {
+    const escapedArtifactId = cssEscape(artifactId)
+    const direct = root.querySelector<HTMLCanvasElement>(
+      `canvas[data-artifact-id='${escapedArtifactId}'], canvas[data-coreview-artifact-id='${escapedArtifactId}']`,
+    )
+    if (direct) return direct
+  }
+
+  for (const selector of ARTIFACT_CANVAS_SELECTORS) {
+    const canvas = root.querySelector<HTMLCanvasElement>(selector)
+    if (canvas) return canvas
+  }
+
+  return null
+}
+
+function unsupportedArtifactVisualSource(reason: string, artifactId: string | null): ArtifactVisualSource {
+  return {
+    kind: "unsupported",
+    status: "unsupported",
+    artifactId,
+    element: null,
+    stream: null,
+    reason,
+    frameRate: null,
+  }
+}
+
+function cssEscape(value: string): string {
+  const css = globalThis.CSS as { escape?: (input: string) => string } | undefined
+  if (typeof css?.escape === "function") {
+    return css.escape(value)
+  }
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")
+}
