@@ -63,6 +63,11 @@ describe("ModeToggle", () => {
     expect(screen.getByTestId("mode-toggle-insight-indicator")).toHaveAttribute("data-state", "active")
   })
 
+  it("exposes the visible insight indicator as a panel open button", () => {
+    render(<ModeToggle hasNewInsight={true} showInsightIndicator={true} onInsightClick={vi.fn()} />)
+    expect(screen.getByRole("button", { name: /open new insights panel/i })).toBeInTheDocument()
+  })
+
   it("renders the embedded indicator in the inactive state when insights exist but none are new", () => {
     render(<ModeToggle showInsightIndicator={true} />)
     expect(screen.getByTestId("mode-toggle-insight-indicator")).toHaveAttribute("data-state", "inactive")
@@ -71,6 +76,43 @@ describe("ModeToggle", () => {
   it("hides the embedded indicator when no insight state is available", () => {
     render(<ModeToggle />)
     expect(screen.getByTestId("mode-toggle-insight-indicator")).toHaveAttribute("data-state", "hidden")
+  })
+
+  it("opens the insight panel when the indicator is clicked", async () => {
+    const user = userEvent.setup()
+    const onInsightClick = vi.fn()
+    render(<ModeToggle showInsightIndicator={true} onInsightClick={onInsightClick} />)
+
+    await user.click(screen.getByRole("button", { name: /open insights panel/i }))
+
+    expect(onInsightClick).toHaveBeenCalledTimes(1)
+    expect(mockSetMode).not.toHaveBeenCalled()
+  })
+
+  it("opens the insight panel with Enter and Space", async () => {
+    const user = userEvent.setup()
+    const onInsightClick = vi.fn()
+    render(<ModeToggle showInsightIndicator={true} onInsightClick={onInsightClick} />)
+    const insightButton = screen.getByRole("button", { name: /open insights panel/i })
+
+    insightButton.focus()
+    await user.keyboard("{Enter}")
+    await user.keyboard(" ")
+
+    expect(onInsightClick).toHaveBeenCalledTimes(2)
+  })
+
+  it("does not open the insight panel when no insight indicator is visible", async () => {
+    const user = userEvent.setup()
+    const onInsightClick = vi.fn()
+    render(<ModeToggle onInsightClick={onInsightClick} />)
+    const indicator = screen.getByTestId("mode-toggle-insight-indicator")
+    const indicatorButton = indicator.closest("button")
+
+    expect(indicatorButton).toBeDisabled()
+    expect(screen.queryByRole("button", { name: /open insights panel/i })).not.toBeInTheDocument()
+    await user.click(indicator)
+    expect(onInsightClick).not.toHaveBeenCalled()
   })
 
   it("calls setMode when a different tab is clicked", async () => {
