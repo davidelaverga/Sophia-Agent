@@ -2137,6 +2137,51 @@ class TestMem0RetrievalOverlayAugmentation:
         # no duplicate of mem_real_1.
         assert ids == ["mem_real_1", "local:new_one"]
 
+    def test_local_overlay_surfaces_when_mem0_search_raises(self):
+        """When Mem0 search raises (quota exhaustion, 429, network failure),
+        the middleware must STILL consult the local overlay so the user's
+        just-created memories surface. This is the Sophia "lifeline" during
+        a Mem0 outage — verified production failure mode on 2026-05-26 where
+        Mem0 SEARCH quota was exhausted and per-turn retrieval was dead
+        until the overlay path was wired through this except branch.
+        """
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_prefetch import Mem0RetrievalMiddleware
+
+        local_only = [
+            {
+                "id": "local:lifeline",
+                "memory": "Davide wants to ship the prototype by Friday",
+                "category": "commitment",
+                "metadata": {"status": "pending_review"},
+            }
+        ]
+        mw = Mem0RetrievalMiddleware("user-1")
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
+            side_effect=RuntimeError("Mem0 429 quota exceeded"),
+        ), patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.apply_review_metadata_overlays",
+            return_value=local_only,
+        ):
+            result = mw.before_agent(
+                {
+                    "messages": [_make_message("anything happening on the dog walk schedule?")],
+                    "platform": "text",
+                    "context_mode": "life",
+                },
+                _make_runtime(thread_id="thread-x", platform="text"),
+            )
+
+        # Even though query tokens have ZERO overlap with the memory and
+        # Mem0 search itself raised, the user MUST still get their local
+        # memories back during the outage (graceful degradation).
+        assert result is not None
+        prefetched = result["prefetched_memories"]
+        assert len(prefetched) == 1
+        assert prefetched[0]["id"] == "local:lifeline"
+
     def test_overlay_failure_falls_back_to_mem0_results(self):
         """If the overlay raises, the middleware must still return the Mem0
         results rather than dropping retrieval entirely."""

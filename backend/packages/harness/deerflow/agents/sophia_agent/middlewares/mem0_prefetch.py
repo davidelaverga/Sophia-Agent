@@ -287,6 +287,8 @@ class Mem0RetrievalMiddleware(AgentMiddleware[Mem0RetrievalState]):
         results: list[dict],
         query: str,
         memory_limit: int,
+        *,
+        mem0_failed: bool = False,
     ) -> list[dict]:
         """Merge Mem0 results with local review_metadata overlay entries.
 
@@ -295,6 +297,11 @@ class Mem0RetrievalMiddleware(AgentMiddleware[Mem0RetrievalState]):
         entries — i.e. memories the user created/approved that Mem0's search
         didn't surface. We score the local-only entries by token overlap with
         the query and merge the most relevant ones into the final result.
+
+        When ``mem0_failed`` is True (Mem0 outage / 429 quota exhaustion),
+        we also relax the token-overlap requirement on local-only entries so
+        Sophia still surfaces SOMETHING from the user's memory store during
+        the outage window (degraded mode beats silent failure).
         """
         try:
             overlaid = apply_review_metadata_overlays(self._user_id, list(results))
@@ -331,7 +338,12 @@ class Mem0RetrievalMiddleware(AgentMiddleware[Mem0RetrievalState]):
 
         # Only keep local entries with at least one content-token overlap.
         # If the query has no content tokens (greeting, low-signal), skip.
-        relevant_locals = [mem for overlap, _, mem in scored if overlap > 0]
+        # On the Mem0-failure path we relax the filter (any local entry beats
+        # no memory at all) so Sophia degrades gracefully during outages.
+        if mem0_failed:
+            relevant_locals = [mem for _overlap, _, mem in scored]
+        else:
+            relevant_locals = [mem for overlap, _, mem in scored if overlap > 0]
 
         # Combine and dedupe by id. Mem0 results keep their position (semantic
         # ranking) and local-only entries fill remaining slots up to the limit.
@@ -411,6 +423,7 @@ class Mem0RetrievalMiddleware(AgentMiddleware[Mem0RetrievalState]):
             return results, 0.0
 
         _t_search = time.perf_counter()
+        mem0_failed = False
         try:
             # Pass ``reference_date`` so Mem0 v3 temporal reasoning can anchor
             # relative-time queries ("yesterday", "last week", "earlier this
@@ -424,8 +437,20 @@ class Mem0RetrievalMiddleware(AgentMiddleware[Mem0RetrievalState]):
                 reference_date=datetime.now(UTC),
             )
         except Exception:
-            logger.warning("Mem0 retrieval failed for user %s", self._user_id, exc_info=True)
-            return [], 0.0
+            # Mem0 outage / 429 quota exhaustion / network failure — DON'T
+            # short-circuit retrieval. The local review_metadata overlay is
+            # on-disk and works independently of Mem0; query it so the user
+            # still gets their just-created memories surfaced during the
+            # outage. Verified production failure mode 2026-05-26: Mem0
+            # SEARCH quota exhausted (HTTP 429 from api.mem0.ai) broke
+            # per-turn retrieval entirely until the overlay path was wired
+            # through this except branch.
+            logger.warning(
+                "Mem0 retrieval failed for user %s — falling back to local overlay only",
+                self._user_id, exc_info=True,
+            )
+            results = []
+            mem0_failed = True
 
         search_ms = (time.perf_counter() - _t_search) * 1000
 
@@ -433,8 +458,12 @@ class Mem0RetrievalMiddleware(AgentMiddleware[Mem0RetrievalState]):
         # hidden from search (dedup linking against existing canonical entries,
         # async indexing lag, infer=False storage tier). Augment with the local
         # review_metadata overlay so Sophia can retrieve memories the user just
-        # created/approved even when Mem0's search misses them.
-        results = self._augment_with_local_overlay(results, query, memory_limit)
+        # created/approved even when Mem0's search misses them. This ALSO runs
+        # on the Mem0-failed path above so the overlay continues to surface
+        # candidates during quota / outage windows.
+        results = self._augment_with_local_overlay(
+            results, query, memory_limit, mem0_failed=mem0_failed,
+        )
 
         self._store_voice_results(
             thread_id=thread_id,
