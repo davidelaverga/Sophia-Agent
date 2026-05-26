@@ -91,6 +91,22 @@ class RealtimeMemoryRetrievalGrant:
         return datetime.fromtimestamp(self.expires_at, UTC).isoformat().replace("+00:00", "Z")
 
 
+@dataclass(frozen=True)
+class _PreferredNameCandidate:
+    name: str
+    source: str
+    confidence: float
+    rank: int
+
+
+@dataclass(frozen=True)
+class _PreferredNameResolution:
+    name: str | None
+    source: str
+    conflict: bool
+    candidate_count: int
+
+
 _memory_retrieval_grants: dict[str, RealtimeMemoryRetrievalGrant] = {}
 _memory_retrieval_grants_lock = threading.Lock()
 
@@ -108,9 +124,10 @@ def build_sophia_realtime_context(
     ritual = _clean_optional_text(request.ritual)
     platform = _clean_optional_text(request.platform) or "voice"
 
+    identity_file_status = _user_context_file_status(safe_user_id, "identity.md")
+    handoff_file_status = _user_context_file_status(safe_user_id, "handoffs", "latest.md")
     identity_text = _read_user_context_file(safe_user_id, "identity.md")
     handoff_text = _read_user_context_file(safe_user_id, "handoffs", "latest.md")
-    preferred_name = _extract_preferred_name(identity_text) or _extract_preferred_name(handoff_text)
     identity_excerpt = _bounded_text(identity_text, IDENTITY_EXCERPT_MAX_CHARS)
     handoff_excerpt = _bounded_text(handoff_text, HANDOFF_EXCERPT_MAX_CHARS)
 
@@ -125,6 +142,22 @@ def build_sophia_realtime_context(
         ritual=ritual,
         limit=limit,
     )
+    preferred_name_candidates = _preferred_name_candidates_from_sources(
+        identity_text=identity_text,
+        handoff_text=handoff_text,
+        memories=memories,
+    )
+    mem0_preferred_name_status = "not_needed"
+    mem0_preferred_name_reason: str | None = None
+    if not any(candidate.source == "identity_file" for candidate in preferred_name_candidates):
+        mem0_candidates, mem0_preferred_name_status, mem0_preferred_name_reason = _search_preferred_name_memories(
+            user_id=safe_user_id,
+            context_mode=context_mode,
+            ritual=ritual,
+        )
+        preferred_name_candidates.extend(mem0_candidates)
+    preferred_name_resolution = _resolve_preferred_name(preferred_name_candidates)
+    preferred_name = preferred_name_resolution.name
 
     diagnostics: dict[str, Any] = {
         "schema": REALTIME_CONTEXT_SCHEMA,
@@ -137,9 +170,16 @@ def build_sophia_realtime_context(
         "session_id_present": bool(_clean_optional_text(request.session_id)),
         "mem0_status": mem0_status,
         "mem0_provider_reason": mem0_provider_reason,
+        "mem0_preferred_name_status": mem0_preferred_name_status,
+        "mem0_preferred_name_reason": mem0_preferred_name_reason,
+        "identity_file_status": identity_file_status,
+        "handoff_file_status": handoff_file_status,
         "identity_available": identity_excerpt is not None,
         "handoff_available": handoff_excerpt is not None,
         "preferred_name_available": preferred_name is not None,
+        "preferred_name_source": preferred_name_resolution.source,
+        "preferred_name_conflict": preferred_name_resolution.conflict,
+        "preferred_name_candidate_count": preferred_name_resolution.candidate_count,
         "memory_count": len(memories),
         "memory_limit": limit,
         "memory_categories": sorted({memory.category for memory in memories if memory.category}),
@@ -367,6 +407,13 @@ def build_degraded_realtime_context_response(
             "identity_available": False,
             "handoff_available": False,
             "preferred_name_available": False,
+            "preferred_name_source": "unavailable",
+            "preferred_name_conflict": False,
+            "preferred_name_candidate_count": 0,
+            "identity_file_status": "unavailable",
+            "handoff_file_status": "unavailable",
+            "mem0_preferred_name_status": "error",
+            "mem0_preferred_name_reason": _safe_reason(reason),
             "memory_count": 0,
             "memory_limit": bounded_limit,
         }
@@ -415,6 +462,65 @@ def _search_realtime_memories(
     snippets = [snippet for snippet in snippets if snippet is not None]
     reason = _safe_reason(search_result.get("provider_reason")) if isinstance(search_result, Mapping) else None
     return snippets[:limit], "available", reason or provider_reason
+
+
+def _search_preferred_name_memories(
+    *,
+    user_id: str,
+    context_mode: str,
+    ritual: str | None,
+) -> tuple[list[_PreferredNameCandidate], str, str | None]:
+    try:
+        provider_status = memory_provider_status()
+    except Exception:
+        logger.warning("realtime.context preferred-name mem0 status check failed", exc_info=True)
+        return [], "error", "provider_status_exception"
+
+    provider_reason = _safe_reason(provider_status.get("provider_reason")) or "client_unavailable"
+    if not provider_status.get("available"):
+        if provider_reason == "missing_api_key":
+            return [], "missing_api_key", provider_reason
+        return [], "unavailable", provider_reason
+
+    try:
+        search_result = search_memories_with_diagnostics(
+            user_id=user_id,
+            query=_preferred_name_memory_query(context_mode=context_mode, ritual=ritual),
+            categories=["fact", "preference"],
+            context_mode=None,
+            limit=5,
+            log_content_previews=False,
+            raise_on_error=True,
+        )
+    except Exception:
+        logger.warning("realtime.context preferred-name mem0 search failed", exc_info=True)
+        return [], "error", "provider_exception"
+
+    raw_memories = search_result.get("memories", []) if isinstance(search_result, Mapping) else []
+    if not isinstance(raw_memories, list):
+        raw_memories = []
+    overlaid_memories = _apply_review_metadata_overlays_readonly(user_id, raw_memories)
+    visible_memories = [
+        memory for memory in overlaid_memories
+        if _memory_visible_for_realtime(memory)
+    ]
+
+    candidates: list[_PreferredNameCandidate] = []
+    for index, memory in enumerate(visible_memories):
+        if not isinstance(memory, Mapping):
+            continue
+        content = _memory_content(memory)
+        candidate = _preferred_name_candidate_from_text(
+            content,
+            source="mem0",
+            rank=index,
+            confidence=_preferred_name_confidence(content, source="mem0"),
+        )
+        if candidate is not None:
+            candidates.append(candidate)
+
+    reason = _safe_reason(search_result.get("provider_reason")) if isinstance(search_result, Mapping) else None
+    return candidates, "available", reason or provider_reason
 
 
 def _apply_review_metadata_overlays_readonly(user_id: str, memories: list[dict]) -> list[dict]:
@@ -529,10 +635,32 @@ def _read_user_context_file(user_id: str, *segments: str) -> str | None:
         return None
 
 
+def _user_context_file_status(user_id: str, *segments: str) -> str:
+    try:
+        path = safe_user_path(USERS_DIR, user_id, *segments)
+    except ValueError:
+        return "unavailable"
+    try:
+        return "present" if path.exists() and path.is_file() else "missing"
+    except OSError:
+        logger.warning("realtime.context could not stat user context file %s", "/".join(segments), exc_info=True)
+        return "unavailable"
+
+
 def _memory_context_query(*, context_mode: str, ritual: str | None) -> str:
     parts = [
         "stable facts, preferred name, communication preferences, relationships, commitments, "
         "emotional patterns, and useful context about this user",
+        f"current context mode: {context_mode}",
+    ]
+    if ritual:
+        parts.append(f"active ritual: {ritual}")
+    return ". ".join(parts)
+
+
+def _preferred_name_memory_query(*, context_mode: str, ritual: str | None) -> str:
+    parts = [
+        "preferred name, display name, what the user wants to be called, name correction",
         f"current context mode: {context_mode}",
     ]
     if ritual:
@@ -655,6 +783,112 @@ def _safe_session_id(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.:-]+", "-", cleaned)[:160] or "unknown-session"
 
 
+def _preferred_name_candidates_from_sources(
+    *,
+    identity_text: str | None,
+    handoff_text: str | None,
+    memories: list[RealtimeContextMemory],
+) -> list[_PreferredNameCandidate]:
+    candidates: list[_PreferredNameCandidate] = []
+    identity_candidate = _preferred_name_candidate_from_text(
+        identity_text,
+        source="identity_file",
+        rank=0,
+        confidence=_preferred_name_confidence(identity_text, source="identity_file"),
+    )
+    if identity_candidate is not None:
+        candidates.append(identity_candidate)
+
+    for index, memory in enumerate(memories):
+        candidate = _preferred_name_candidate_from_text(
+            memory.content,
+            source="mem0",
+            rank=index,
+            confidence=_preferred_name_confidence(memory.content, source="mem0"),
+        )
+        if candidate is not None:
+            candidates.append(candidate)
+
+    handoff_candidate = _preferred_name_candidate_from_text(
+        handoff_text,
+        source="handoff",
+        rank=0,
+        confidence=_preferred_name_confidence(handoff_text, source="handoff"),
+    )
+    if handoff_candidate is not None:
+        candidates.append(handoff_candidate)
+    return candidates
+
+
+def _preferred_name_candidate_from_text(
+    text: str | None,
+    *,
+    source: str,
+    rank: int,
+    confidence: float,
+) -> _PreferredNameCandidate | None:
+    name = _extract_preferred_name(text)
+    if not name:
+        return None
+    return _PreferredNameCandidate(
+        name=name,
+        source=source,
+        confidence=confidence,
+        rank=rank,
+    )
+
+
+def _preferred_name_confidence(text: str | None, *, source: str) -> float:
+    if source == "identity_file":
+        return 1.0
+    if not text:
+        return 0.0
+    lowered = text.lower()
+    if "explicit user statement" in lowered or "name correction" in lowered:
+        return 0.97
+    if "preferred name" in lowered or "display name" in lowered:
+        return 0.92
+    if "call me" in lowered or "goes by" in lowered or "name correction" in lowered:
+        return 0.88
+    if "name is" in lowered or "session initiated with" in lowered:
+        return 0.78 if source == "mem0" else 0.58
+    return 0.68 if source == "mem0" else 0.5
+
+
+def _resolve_preferred_name(candidates: list[_PreferredNameCandidate]) -> _PreferredNameResolution:
+    filtered = [candidate for candidate in candidates if candidate.name]
+    if not filtered:
+        return _PreferredNameResolution(
+            name=None,
+            source="unavailable",
+            conflict=False,
+            candidate_count=0,
+        )
+
+    source_priority = {
+        "identity_file": 0,
+        "mem0": 1,
+        "handoff": 2,
+    }
+    sorted_candidates = sorted(
+        filtered,
+        key=lambda candidate: (
+            source_priority.get(candidate.source, 99),
+            -candidate.confidence,
+            candidate.rank,
+            candidate.name.casefold(),
+        ),
+    )
+    best = sorted_candidates[0]
+    unique_names = {candidate.name.casefold() for candidate in sorted_candidates}
+    return _PreferredNameResolution(
+        name=best.name,
+        source=best.source,
+        conflict=len(unique_names) > 1,
+        candidate_count=len(sorted_candidates),
+    )
+
+
 def _extract_preferred_name(text: str | None) -> str | None:
     if not text:
         return None
@@ -664,6 +898,19 @@ def _extract_preferred_name(text: str | None) -> str | None:
     )
     if explicit:
         return _clean_preferred_name(explicit.group(1))
+
+    named_patterns = [
+        r"(?i)\b(?:the\s+)?user'?s\s+(?:preferred\s+name|display\s+name|name)\s+(?:is|as|=)\s+([A-Z][A-Za-z'_-]{1,40}(?:\s+[A-Z][A-Za-z'_-]{1,40}){0,2})\b",
+        r"(?i)\b(?:the\s+)?user\s+(?:goes\s+by|prefers\s+to\s+be\s+called|wants\s+to\s+be\s+called|likes\s+to\s+be\s+called)\s+([A-Z][A-Za-z'_-]{1,40}(?:\s+[A-Z][A-Za-z'_-]{1,40}){0,2})\b",
+        r"(?i)\b(?:my\s+name\s+is|call\s+me|refer\s+to\s+me\s+as|i\s+go\s+by)\s+([A-Z][A-Za-z'_-]{1,40}(?:\s+[A-Z][A-Za-z'_-]{1,40}){0,2})\b",
+        r"(?i)\bname\s+correction\b[^.:\n]{0,80}[:\-]\s*([A-Z][A-Za-z'_-]{1,40}(?:\s+[A-Z][A-Za-z'_-]{1,40}){0,2})\b",
+    ]
+    for pattern in named_patterns:
+        match = re.search(pattern, text)
+        if match:
+            cleaned = _clean_preferred_name(match.group(1))
+            if cleaned:
+                return cleaned
 
     inferred = re.search(
         r"(?m)^\s*([A-Z][A-Za-z'_-]{1,40})\s+"
@@ -681,14 +928,54 @@ def _extract_preferred_name(text: str | None) -> str | None:
 
 def _clean_preferred_name(value: str) -> str | None:
     name = value.strip().strip("-:.,;()[]{}\"'")
-    name = re.split(r"\s+(?:responds|prefers|likes|wants|needs|arrives|uses|is|has)\b", name, maxsplit=1)[0]
+    name = re.split(r"[.,;:!?]\s+", name, maxsplit=1)[0]
+    name = re.split(
+        r"\s+(?:responds|prefers|likes|wants|needs|arrives|uses|is|has|no|not|please|from|instead|because|when|if|but|could|can|remember|going)\b",
+        name,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
     name = name.strip()
     if not name or len(name) > 60:
         return None
     if any(ch in name for ch in ("/", "\\", "\x00", "<", ">", "{", "}")):
         return None
-    if name.lower() in {"user", "unknown", "anonymous", "none", "null", "n/a"}:
+    if not re.fullmatch(r"[A-Za-z][A-Za-z'_-]*(?:\s+[A-Za-z][A-Za-z'_-]*){0,2}", name):
         return None
+    lowered = name.lower()
+    stop_words = {
+        "user",
+        "unknown",
+        "anonymous",
+        "none",
+        "null",
+        "n/a",
+        "na",
+        "the user",
+        "me",
+        "you",
+        "on",
+        "the",
+        "a",
+        "an",
+        "this",
+        "that",
+        "it",
+        "important",
+        "tomorrow",
+        "today",
+        "later",
+        "thing",
+        "one",
+        "someone",
+        "list",
+        "about",
+        "launch",
+    }
+    if lowered in stop_words or any(part in stop_words for part in lowered.split()):
+        return None
+    if name.islower():
+        return " ".join(part[:1].upper() + part[1:] for part in name.split())
     return name
 
 
