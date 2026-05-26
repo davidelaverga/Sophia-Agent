@@ -13,6 +13,13 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from voice.realtime.coreview import (
+    READ_ARTIFACT_TEXT_TOOL_NAME,
+    CoreviewArtifactTextBackend,
+    execute_read_artifact_text,
+    is_coreview_enabled,
+    redacted_read_artifact_text_diagnostic,
+)
 from voice.realtime.runtime_selection import VoiceRuntimeMode
 from voice.realtime.sophia_backend_tools import (
     SophiaBackendToolConfigurationError,
@@ -34,11 +41,12 @@ GEMINI_UPDATE_ASYNC_TASK_TOOL_NAME = "update_async_task"
 GEMINI_CANCEL_ASYNC_TASK_TOOL_NAME = "cancel_async_task"
 GEMINI_LIST_ASYNC_TASKS_TOOL_NAME = "list_async_tasks"
 GEMINI_RETRIEVE_MEMORIES_TOOL_NAME = "retrieve_memories"
+GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = READ_ARTIFACT_TEXT_TOOL_NAME
 GEMINI_DOGFOOD_TOOL_RESPONSE_ACTION = "gemini_tool_response"
 GEMINI_INVALID_EMIT_ARTIFACT_ARGUMENTS = (
     "Invalid emit_artifact arguments. Provide required string fields and retry."
 )
-GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES = frozenset(
+GEMINI_DOGFOOD_BASE_ALLOWED_TOOL_NAMES = frozenset(
     {
         GEMINI_EMIT_ARTIFACT_TOOL_NAME,
         GEMINI_START_BUILDER_TASK_TOOL_NAME,
@@ -49,6 +57,7 @@ GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES = frozenset(
         GEMINI_RETRIEVE_MEMORIES_TOOL_NAME,
     }
 )
+GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES = GEMINI_DOGFOOD_BASE_ALLOWED_TOOL_NAMES
 
 DEFAULT_LANGGRAPH_URL = "http://localhost:2024"
 DEFAULT_REALTIME_MEMORY_RETRIEVAL_TIMEOUT_SECONDS = 8.0
@@ -109,6 +118,8 @@ class GeminiDogfoodToolExecution:
     def diagnostic(self) -> dict[str, Any]:
         if self.call.name == GEMINI_RETRIEVE_MEMORIES_TOOL_NAME:
             return _retrieve_memories_execution_diagnostic(self)
+        if self.call.name == GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME:
+            return _read_artifact_text_execution_diagnostic(self)
 
         task_id = _task_id_from_response(self.response)
         task_status = _task_status_from_response(self.response)
@@ -759,9 +770,11 @@ class GeminiDogfoodToolExecutor:
         *,
         builder_lifecycle_backend: GeminiBuilderLifecycleHttpBackend | None = None,
         memory_backend: GeminiRealtimeMemoryHttpBackend | None = None,
+        artifact_text_backend: CoreviewArtifactTextBackend | None = None,
     ) -> None:
         self._builder_lifecycle_backend = builder_lifecycle_backend or GeminiBuilderLifecycleHttpBackend()
         self._memory_backend = memory_backend or GeminiRealtimeMemoryHttpBackend()
+        self._artifact_text_backend = artifact_text_backend
 
     async def execute(
         self,
@@ -775,8 +788,9 @@ class GeminiDogfoodToolExecutor:
         context_mode: str | None = None,
         memory_retrieval_config: Mapping[str, Any] | None = None,
     ) -> GeminiDogfoodToolExecution:
-        if call.name not in GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES:
-            allowed = ", ".join(sorted(GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES))
+        allowed_tool_names = gemini_dogfood_allowed_tool_names()
+        if call.name not in allowed_tool_names:
+            allowed = ", ".join(sorted(allowed_tool_names))
             raise GeminiDogfoodToolError(
                 f"Gemini Live requested unsupported Sophia tool {call.name!r}. Approved existing tools: {allowed}."
             )
@@ -872,6 +886,43 @@ class GeminiDogfoodToolExecutor:
                 result_summary=f"retrieve_memories returned {status} with {count} snippet(s).",
             )
 
+        if call.name == GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME:
+            response = await execute_read_artifact_text(
+                call.args,
+                user_id=user_id,
+                session_id=session_id,
+                backend=self._artifact_text_backend,
+            )
+            response.update(
+                {
+                    "tool": call.name,
+                    "session_id": session_id,
+                    "runtime": runtime_mode.value,
+                    "provider": provider,
+                    "public_event_boundary": "SophiaEventNormalizer",
+                    "trusted_scope": "authenticated_user_session_artifact",
+                }
+            )
+            ok = bool(response.get("ok"))
+            if ok:
+                result_summary = (
+                    "read_artifact_text returned "
+                    f"{int(response.get('char_count') or 0)} character(s) from "
+                    f"{response.get('source') or 'unknown'}."
+                )
+            else:
+                result_summary = (
+                    "read_artifact_text "
+                    f"{response.get('status') or 'error'}: {response.get('safe_reason') or 'unavailable'}."
+                )
+            return GeminiDogfoodToolExecution(
+                call=call,
+                response=response,
+                result_summary=result_summary,
+                success=ok,
+                error_text=None if ok else result_summary,
+            )
+
         try:
             validated_args = validate_builder_lifecycle_tool_args(call.name, call.args)
             lifecycle_result = await self._builder_lifecycle_backend.execute(
@@ -918,6 +969,12 @@ def gemini_dogfood_tool_declarations() -> list[dict[str, object]]:
             "functionDeclarations": declarations,
         }
     ]
+
+
+def gemini_dogfood_allowed_tool_names() -> frozenset[str]:
+    if not is_coreview_enabled():
+        return GEMINI_DOGFOOD_BASE_ALLOWED_TOOL_NAMES
+    return frozenset({*GEMINI_DOGFOOD_BASE_ALLOWED_TOOL_NAMES, GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME})
 
 
 def _invalid_emit_artifact_arguments_execution(
@@ -1231,6 +1288,27 @@ def _retrieve_memories_execution_diagnostic(
         "ignored_model_arg_names": list(response.get("ignored_model_arg_names") or []),
         "raw_memory_text_excluded": diagnostics.get("raw_memory_text_excluded", True),
         "response": redacted_retrieve_memories_diagnostic(response),
+    }
+
+
+def _read_artifact_text_execution_diagnostic(
+    execution: GeminiDogfoodToolExecution,
+) -> dict[str, Any]:
+    response = execution.response
+    redacted = redacted_read_artifact_text_diagnostic(response)
+    return {
+        "id": execution.call.call_id,
+        "name": execution.call.name,
+        "success": execution.success,
+        "result_summary": execution.result_summary,
+        "status": redacted["status"],
+        "artifact_id": redacted["artifact_id"],
+        "source": redacted["source"],
+        "char_count": redacted["char_count"],
+        "truncated": redacted["truncated"],
+        "safe_reason": redacted["safe_reason"],
+        "raw_artifact_text_excluded": True,
+        "response": redacted,
     }
 
 

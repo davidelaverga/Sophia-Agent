@@ -8,6 +8,10 @@ from voice.realtime.skill_slow_state import (
     VoiceSkillSlowStateSeed,
     build_voice_skill_state_seed_block,
 )
+from voice.realtime.coreview import (
+    COREVIEW_INSTRUCTION_SOURCE,
+    build_coreview_instruction_block,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILLS_PATH = REPO_ROOT / "skills" / "public" / "sophia"
@@ -192,6 +196,7 @@ def build_gemini_live_realtime_instructions(
             ritual=ritual,
         ),
         build_gemini_live_spoken_turn_policy_overlay(),
+        build_coreview_instruction_block(),
     ]
     return "\n\n---\n\n".join(block.strip() for block in blocks if block.strip())
 
@@ -231,6 +236,7 @@ def build_gemini_live_realtime_setup_instructions(
             skill_state=skill_state,
         ),
         build_gemini_live_spoken_turn_policy_overlay(),
+        build_coreview_instruction_block(),
     ]
     return "\n\n---\n\n".join(block.strip() for block in blocks if block.strip())
 
@@ -294,6 +300,7 @@ def gemini_live_realtime_instruction_sources(
             ritual=ritual,
         ),
         GEMINI_LIVE_SPOKEN_TURN_POLICY_SOURCE,
+        *([COREVIEW_INSTRUCTION_SOURCE] if build_coreview_instruction_block() else []),
     ]
 
 

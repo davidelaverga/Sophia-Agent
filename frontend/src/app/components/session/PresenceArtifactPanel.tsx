@@ -2,13 +2,18 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 
+import { useArtifactCoReview } from "../../hooks/useArtifactCoReview"
 import { haptic } from "../../hooks/useHaptics"
 import { buildThreadArtifactHref, formatBuilderArtifactFileSize, getBuilderArtifactFiles } from "../../lib/builder-artifacts"
+import { isSophiaCoReviewEnabled } from "../../lib/co-review-flags"
+import { recordSophiaCaptureEvent } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
 import { isRealReflection } from "../../session/artifacts"
 import { usePresenceStore } from "../../stores/presence-store"
 import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 import type { RitualArtifacts } from "../../types/session"
+
+import { CoReviewControls } from "./CoReviewControls"
 
 interface PresenceArtifactPanelProps {
   artifacts: RitualArtifacts | null | undefined
@@ -51,8 +56,28 @@ export function PresenceArtifactPanel({
   const [reflectionTapped, setReflectionTapped] = useState(false)
   const autoCollapseRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const staggerRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  const coReviewRegionRef = useRef<HTMLDivElement | null>(null)
   const status = usePresenceStore((s) => s.status)
   const hasBuilderLibrary = builderArtifactLibrary.length > 0
+  const coReviewEnabled = isSophiaCoReviewEnabled()
+  const coReviewArtifactId =
+    builderArtifact?.artifactPath ??
+    builderArtifactLibrary[0]?.path ??
+    (threadId ? `session-artifacts:${threadId}` : 'session-artifacts:local')
+  const coReviewSessionId = threadId ?? 'local-session'
+  const coReview = useArtifactCoReview({
+    enabled: coReviewEnabled,
+    artifactId: coReviewArtifactId,
+    sessionId: coReviewSessionId,
+    captureTargetRef: coReviewRegionRef,
+    onTelemetry: (payload) => {
+      recordSophiaCaptureEvent({
+        category: 'co-review',
+        name: 'artifact-region-share',
+        payload,
+      })
+    },
+  })
 
   // Phase lifecycle
   useEffect(() => {
@@ -199,6 +224,7 @@ export function PresenceArtifactPanel({
           </svg>
         </button>
 
+        <div ref={coReviewRegionRef} data-sophia-coreview-artifact-region={coReviewArtifactId}>
         {hasBuilder && builderArtifact && (
           <div
             className={cn(
@@ -534,6 +560,21 @@ export function PresenceArtifactPanel({
             ))}
           </div>
         )}
+        </div>
+
+        <CoReviewControls
+          enabled={coReviewEnabled}
+          state={coReview.state}
+          error={coReview.error}
+          onStart={() => {
+            haptic('medium')
+            void coReview.startCoReview()
+          }}
+          onStop={() => {
+            haptic('light')
+            coReview.stopCoReview('user_exit')
+          }}
+        />
       </div>
     </div>
   )

@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from voice.realtime.coreview import build_coreview_instruction_block
 from voice.realtime.sophia_prompt import (
     build_gemini_live_spoken_turn_policy_overlay,
     build_sophia_realtime_instructions,
@@ -65,6 +66,7 @@ def build_gemini_live_realtime_instructions_with_memory_context(
         memory_context.prompt_block,
         skill_state_prompt_block,
         build_gemini_live_spoken_turn_policy_overlay(),
+        build_coreview_instruction_block(),
     ]
     instructions = "\n\n---\n\n".join(block.strip() for block in blocks if block and block.strip())
     return instructions, memory_context

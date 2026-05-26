@@ -7,6 +7,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from voice.realtime.coreview import (
+    is_coreview_enabled,
+    read_artifact_text_function_declaration,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HARNESS_PACKAGE_PATH = REPO_ROOT / "backend" / "packages" / "harness"
 EMIT_ARTIFACT_TOOL_NAME = "emit_artifact"
@@ -86,11 +91,14 @@ def gemini_retrieve_memories_function_declaration() -> dict[str, object]:
 
 
 def gemini_sophia_function_declarations() -> list[dict[str, object]]:
-    return [
+    declarations = [
         gemini_emit_artifact_function_declaration(),
         *gemini_builder_lifecycle_function_declarations(),
         gemini_retrieve_memories_function_declaration(),
     ]
+    if is_coreview_enabled():
+        declarations.append(read_artifact_text_function_declaration())
+    return declarations
 
 
 def openai_retrieve_memories_function_declaration() -> dict[str, object]:
