@@ -14,6 +14,7 @@ type BuilderCanvasState = {
   recentEvents: BuilderCanvasEventV1[];
   completion: BuilderCompletionEventV1 | null;
   reconnecting: boolean;
+  retiredRuns: Set<string>;
 };
 
 const EMPTY_STATE: BuilderCanvasState = {
@@ -21,9 +22,22 @@ const EMPTY_STATE: BuilderCanvasState = {
   recentEvents: [],
   completion: null,
   reconnecting: false,
+  retiredRuns: new Set(),
 };
 const SNAPSHOT_RECONCILE_MS = 30_000;
-const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+const TERMINAL_STATUSES = new Set<BuilderCanvasTaskSnapshotV1['status']>(['completed', 'failed', 'cancelled']);
+
+function runKey(taskId: string, runId: string): string {
+  return `${taskId}:${runId}`;
+}
+
+function eventRunKey(event: BuilderCanvasEventV1): string {
+  return runKey(event.task_id, event.run_id);
+}
+
+function taskRunKey(task: BuilderCanvasTaskSnapshotV1): string {
+  return runKey(task.task_id, task.run_id);
+}
 
 function eventMatchesTask(event: BuilderCanvasEventV1, task: BuilderCanvasTaskSnapshotV1): boolean {
   return event.task_id === task.task_id && event.run_id === task.run_id;
@@ -79,6 +93,7 @@ function stateFromSnapshot(snapshot: BuilderCanvasSnapshotV1): BuilderCanvasStat
     recentEvents: sortEvents(recentEvents),
     completion: activeCompletion ?? latestTerminalCompletion(recentEvents, activeTask),
     reconnecting: false,
+    retiredRuns: new Set(),
   };
 }
 
@@ -91,7 +106,11 @@ function applySnapshot(current: BuilderCanvasState, snapshot: BuilderCanvasSnaps
     : false;
 
   if (!snapshotTask || !sameRun) {
-    return snapshotState;
+    const retiredRuns = new Set(current.retiredRuns);
+    if (currentTask && snapshotTask) {
+      retiredRuns.add(taskRunKey(currentTask));
+    }
+    return { ...snapshotState, retiredRuns };
   }
 
   const currentRunEvents = current.recentEvents.filter((event) => eventMatchesTask(event, snapshotTask));
@@ -114,20 +133,20 @@ function applySnapshot(current: BuilderCanvasState, snapshot: BuilderCanvasSnaps
     recentEvents,
     completion: snapshotState.completion ?? currentCompletion,
     reconnecting: false,
+    retiredRuns: current.retiredRuns,
   };
 }
 
 function applyEvent(state: BuilderCanvasState, event: BuilderCanvasEventV1): BuilderCanvasState {
   const active = state.activeTask;
   const sameRun = active?.task_id === event.task_id && active?.run_id === event.run_id;
+  if (active && !sameRun && state.retiredRuns.has(eventRunKey(event))) {
+    return state;
+  }
   const latestSequence = sameRun
     ? state.recentEvents.reduce((latest, item) => Math.max(latest, item.sequence), 0)
     : 0;
   if (sameRun && event.kind !== 'terminal' && event.sequence <= latestSequence) {
-    return state;
-  }
-  const shouldReplace = !active || sameRun || event.kind === 'progress' || event.kind === 'terminal';
-  if (!shouldReplace) {
     return state;
   }
   const recentEvents = sameRun
@@ -135,6 +154,10 @@ function applyEvent(state: BuilderCanvasState, event: BuilderCanvasEventV1): Bui
     : [event];
   recentEvents.sort((left, right) => left.sequence - right.sequence);
   const latestActivity = event.activity ?? (sameRun ? active?.latest_activity : undefined);
+  const retiredRuns = new Set(state.retiredRuns);
+  if (active && !sameRun) {
+    retiredRuns.add(taskRunKey(active));
+  }
   return {
     activeTask: {
       parent_thread_id: event.parent_thread_id,
@@ -147,6 +170,7 @@ function applyEvent(state: BuilderCanvasState, event: BuilderCanvasEventV1): Bui
     recentEvents,
     completion: event.kind === 'terminal' ? (event.completion ?? null) : (sameRun ? state.completion : null),
     reconnecting: false,
+    retiredRuns,
   };
 }
 

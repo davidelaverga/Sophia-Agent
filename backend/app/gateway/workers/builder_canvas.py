@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TERMINAL_TTL_SECONDS = 15 * 60
 DEFAULT_HISTORY_SIZE = 64
+DEFAULT_RETIRED_RUNS_SIZE = 128
 _SUBSCRIBER_QUEUE_MAXSIZE = 128
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 _PHASE_LABELS = {
@@ -129,12 +130,16 @@ class BuilderCanvasWorker:
         *,
         history_size: int = DEFAULT_HISTORY_SIZE,
         terminal_ttl_seconds: int = DEFAULT_TERMINAL_TTL_SECONDS,
+        retired_runs_size: int = DEFAULT_RETIRED_RUNS_SIZE,
     ) -> None:
         self._history_size = history_size
         self._terminal_ttl_seconds = terminal_ttl_seconds
+        self._retired_runs_size = retired_runs_size
         self._subscribers: dict[str, list[asyncio.Queue]] = defaultdict(list)
         self._histories: dict[tuple[str, str, str], deque[dict[str, Any]]] = {}
         self._active: dict[str, tuple[str, str]] = {}
+        self._retired_runs: dict[str, deque[tuple[str, str]]] = defaultdict(deque)
+        self._retired_run_keys: dict[str, set[tuple[str, str]]] = defaultdict(set)
         self._terminal_at: dict[tuple[str, str, str], float] = {}
         self._last_sequence: dict[tuple[str, str, str], int] = {}
         self._lock = asyncio.Lock()
@@ -151,11 +156,29 @@ class BuilderCanvasWorker:
             self._last_sequence.pop(key, None)
             parent_thread_id, task_id, run_id = key
             if self._active.get(parent_thread_id) == (task_id, run_id):
+                self._retire_run_locked(parent_thread_id, task_id, run_id)
                 self._active.pop(parent_thread_id, None)
+
+    def _retire_run_locked(self, parent_thread_id: str, task_id: str, run_id: str) -> None:
+        run_key = (task_id, run_id)
+        retired = self._retired_run_keys[parent_thread_id]
+        if run_key in retired:
+            return
+        retired.add(run_key)
+        queue = self._retired_runs[parent_thread_id]
+        queue.append(run_key)
+        while len(queue) > self._retired_runs_size:
+            expired = queue.popleft()
+            retired.discard(expired)
+
+    def _is_retired_run_locked(self, parent_thread_id: str, task_id: str, run_id: str) -> bool:
+        return (task_id, run_id) in self._retired_run_keys.get(parent_thread_id, set())
 
     def _is_replaced_run_locked(self, event: dict[str, Any], key: tuple[str, str, str]) -> bool:
         parent_thread_id, task_id, run_id = key
         active = self._active.get(parent_thread_id)
+        if self._is_retired_run_locked(parent_thread_id, task_id, run_id):
+            return True
         return (
             active is not None
             and active != (task_id, run_id)
@@ -182,6 +205,9 @@ class BuilderCanvasWorker:
         previous = self._last_sequence.get(key, 0)
         parent_thread_id, task_id, run_id = key
         self._last_sequence[key] = max(previous, sequence)
+        previous_active = self._active.get(parent_thread_id)
+        if previous_active is not None and previous_active != (task_id, run_id):
+            self._retire_run_locked(parent_thread_id, previous_active[0], previous_active[1])
         self._active[parent_thread_id] = (task_id, run_id)
         history = self._histories.setdefault(key, deque(maxlen=self._history_size))
         history.append(event)

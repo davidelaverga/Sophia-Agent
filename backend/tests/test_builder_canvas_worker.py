@@ -122,3 +122,46 @@ async def test_new_task_supersedes_delayed_progress_from_prior_task() -> None:
         )
     events = await worker.recent_events("parent-1")
     assert {event["task_id"] for event in events} == {"task-new"}
+
+
+@pytest.mark.anyio
+async def test_expired_replaced_run_cannot_reclaim_active_seed() -> None:
+    worker = BuilderCanvasWorker(terminal_ttl_seconds=-1)
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-old",
+            "run_id": "run-old",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "drafting"},
+        }
+    )
+    await worker.publish_completion(
+        {"thread_id": "parent-1", "task_id": "task-old", "run_id": "run-old", "status": "success"}
+    )
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-new",
+            "run_id": "run-new",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "starting"},
+        }
+    )
+
+    delivered = await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-old",
+            "run_id": "run-old",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "finalizing"},
+        }
+    )
+
+    assert delivered == 0
+    events = await worker.recent_events("parent-1")
+    assert {event["task_id"] for event in events} == {"task-new"}
