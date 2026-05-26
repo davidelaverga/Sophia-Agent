@@ -64,7 +64,7 @@ import { useSessionRouteExperience } from '../../app/session/useSessionRouteExpe
 describe('useSessionRouteExperience', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    cancelBuilderTaskMock.mockResolvedValue({ detail: 'Builder cancelled.' });
+    cancelBuilderTaskMock.mockResolvedValue({ status: 'cancelled', detail: 'Builder cancelled.' });
     getBuilderTaskStatusMock.mockReset();
     useBuilderCanvasMock.mockReturnValue({
       activeTask: null,
@@ -398,6 +398,97 @@ describe('useSessionRouteExperience', () => {
     expect(showToast).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Builder cancelled.', variant: 'info' })
     );
+  });
+
+  it('keeps a builder task visible when cancellation is still running', async () => {
+    cancelBuilderTaskMock.mockResolvedValueOnce({
+      task_id: 'task-builder-1',
+      run_id: 'run-builder-1',
+      status: 'running',
+      detail: 'Builder cancellation was requested.',
+    });
+    const showToast = vi.fn();
+    let builderCanvasState: {
+      activeTask: null | Record<string, unknown>;
+      recentEvents: unknown[];
+      completion: null | Record<string, unknown>;
+      reconnecting: boolean;
+    } = {
+      activeTask: null,
+      recentEvents: [],
+      completion: null,
+      reconnecting: false,
+    };
+    useBuilderCanvasMock.mockImplementation(() => builderCanvasState);
+
+    const { result, rerender } = renderHook(() =>
+      useSessionRouteExperience({
+        sessionId: 'session-1',
+        activeSessionId: 'session-1',
+        activeThreadId: 'thread-1',
+        chatRequestBody: { session_id: 'session-1' },
+        hasValidBackendSessionId: true,
+        backendSessionId: 'session-1',
+        userId: 'user-1',
+        artifacts: null,
+        storedBuilderArtifact: null,
+        storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
+        updateSession: vi.fn(),
+        showUsageLimitModal: vi.fn(),
+        recordConnectivityFailure: vi.fn(),
+        showToast,
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        greetingAnchorId: 'greeting-1',
+        markOffline: vi.fn(),
+      })
+    );
+
+    const streamContractCall = useCompanionStreamContractMock.mock.calls[0][0] as {
+      setBuilderTask: (task: { phase: string; taskId?: string; runId?: string; detail?: string }) => void;
+    };
+
+    act(() => {
+      streamContractCall.setBuilderTask({
+        phase: 'running',
+        taskId: 'task-builder-1',
+        runId: 'run-builder-1',
+        detail: 'Drafting the brief.',
+      });
+    });
+
+    await act(async () => {
+      await result.current.cancelBuilderTask();
+    });
+
+    expect(result.current.builderTask).toMatchObject({
+      phase: 'running',
+      taskId: 'task-builder-1',
+      runId: 'run-builder-1',
+      detail: 'Builder cancellation was requested.',
+    });
+
+    builderCanvasState = {
+      activeTask: {
+        parent_thread_id: 'thread-1',
+        task_id: 'task-builder-1',
+        run_id: 'run-builder-1',
+        status: 'failed',
+        latest_activity: { kind: 'phase', phase: 'finalizing', label: 'Finalizing' },
+      },
+      recentEvents: [],
+      completion: null,
+      reconnecting: false,
+    };
+
+    rerender();
+
+    expect(result.current.builderTask).toMatchObject({
+      phase: 'failed',
+      taskId: 'task-builder-1',
+      runId: 'run-builder-1',
+    });
   });
 
   it('hydrates truthful native canvas activity without legacy task polling', () => {

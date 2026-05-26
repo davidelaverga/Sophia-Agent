@@ -153,12 +153,11 @@ class BuilderCanvasWorker:
                 self._active.pop(parent_thread_id, None)
 
     def _is_replaced_run_locked(self, event: dict[str, Any], key: tuple[str, str, str]) -> bool:
-        parent_thread_id, _, _ = key
+        parent_thread_id, task_id, run_id = key
         active = self._active.get(parent_thread_id)
         return (
             active is not None
-            and active[0] == event["task_id"]
-            and active[1] != event["run_id"]
+            and active != (task_id, run_id)
             and key in self._histories
         )
 
@@ -169,8 +168,8 @@ class BuilderCanvasWorker:
 
     def _accept_event_locked(self, event: dict[str, Any], key: tuple[str, str, str]) -> bool:
         if self._is_replaced_run_locked(event, key):
-            # Once a new run for the same task is visible, delayed deliveries
-            # from the replaced run cannot reclaim the seed.
+            # Once a newer task/run is visible, delayed deliveries from a
+            # previously seen task/run cannot reclaim the active canvas seed.
             return False
         if key in self._terminal_at and event["kind"] != "terminal":
             return False

@@ -87,3 +87,21 @@ async def test_new_run_supersedes_delayed_progress_from_prior_run() -> None:
         )
     events = await worker.recent_events("parent-1")
     assert {event["run_id"] for event in events} == {"run-new"}
+
+
+@pytest.mark.anyio
+async def test_new_task_supersedes_delayed_progress_from_prior_task() -> None:
+    worker = BuilderCanvasWorker()
+    for task_id, sequence in (("task-old", 1), ("task-new", 1), ("task-old", 2)):
+        await worker.publish_progress(
+            {
+                "parent_thread_id": "parent-1",
+                "task_id": task_id,
+                "run_id": "run-1",
+                "sequence": sequence,
+                "event_name": "custom",
+                "data": {"name": "phase", "phase": "drafting"},
+            }
+        )
+    events = await worker.recent_events("parent-1")
+    assert {event["task_id"] for event in events} == {"task-new"}

@@ -263,21 +263,35 @@ export function useSessionRouteExperience({
 
     try {
       const response = await requestBuilderTaskCancellation(activeThreadId, builderTask.taskId, runId);
+      const responseRunId = response.run_id ?? runId;
+      const requestRunKey = builderRunKey(builderTask.taskId, runId);
+      const responseRunKey = builderRunKey(response.task_id ?? builderTask.taskId, responseRunId);
       if (response.status === 'completed' || response.status === 'failed') {
         setBuilderTask((current) => {
-          if (!current || builderRunKey(current.taskId, current.runId) !== builderRunKey(builderTask.taskId, runId)) {
+          if (!current || builderRunKey(current.taskId, current.runId) !== requestRunKey) {
             return current;
           }
           return {
             ...current,
             phase: response.status === 'completed' ? 'completed' : 'failed',
+            runId: responseRunId ?? current.runId,
             detail: response.detail ?? current?.detail,
           };
         });
-      } else {
-        const key = builderRunKey(builderTask.taskId, runId);
-        if (key) dismissedBuilderRunsRef.current.add(key);
+      } else if (response.status === 'cancelled') {
+        if (responseRunKey) dismissedBuilderRunsRef.current.add(responseRunKey);
         setBuilderTask(null);
+      } else {
+        setBuilderTask((current) => {
+          if (!current || builderRunKey(current.taskId, current.runId) !== requestRunKey) {
+            return current;
+          }
+          return {
+            ...current,
+            runId: responseRunId ?? current.runId,
+            detail: response.detail ?? current.detail,
+          };
+        });
       }
       showToast({
         message: response.detail || 'Builder cancelled.',

@@ -13,6 +13,7 @@ export const BUILDER_DISCOVERY_PROMPT =
 
 type CancelBuilderTaskResponse = {
   task_id?: string;
+  run_id?: string;
   status?: string;
   detail?: string | null;
 };
