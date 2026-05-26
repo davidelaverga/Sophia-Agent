@@ -51,6 +51,24 @@ This boundary applies to both Gemini Live and GPT Realtime as a product policy. 
 
 Phase 12.5A made no runtime, prompt-file, VAD, tool, default-provider, or canonical Sophia identity changes.
 
+## Recap Telemetry Debug Export Boundary
+
+Voice telemetry export is scoped to the live `/session` page. It is useful while the voice hook is mounted, but it should not be treated as the post-session recap source of truth after End Session redirects away from `/session`. Once that page unmounts or the hook returns to idle, a later export can reflect default runtime state rather than the final voice session.
+
+Post-session recap debugging should use the recap-page export from `/recap/{sessionId}`. The report type is `recap-telemetry-report`, version `1`, source `recap-ui`. It includes safe lifecycle metadata for the recap request, pending-review memory polling, `session_id` forwarding through `/api/memory/recent`, gateway confirmation fields, artifact readiness, memory commit status, abort/timeout timing, response shape keys, safe trace ids, and a same-session final voice telemetry snapshot when one was captured before the session page unmounted.
+
+The recap export is deliberately privacy-minimized. It does not include raw private memory text, cookies, auth headers, bearer tokens, API keys, provider websocket URLs, provider tokens, config dumps, or environment values. Provider URL fields are reduced to presence booleans when included in the final session snapshot.
+
+Recap status terms are diagnostic, not behavior changes. `Composing recap` means the page is still waiting for recap artifacts or pending-review memory candidates. `no_results` means no pending-review candidates were available for that session and is distinct from a transport failure. `local_review_overlay` means the memory-recent path used local review metadata or local overlay entries and avoided the slow per-memory detail hydration path where possible.
+
+Safe manual recap debugging workflow:
+
+1. Enable DevTools Preserve Log before ending the session.
+2. End the session and open `/recap/{sessionId}`.
+3. Use Export Recap Debug from the recap page.
+4. Compare the report's `sessionId`, recap status, memory-recent path, forwarding flags, duration/abort state, candidate count/source, and safe trace ids with gateway logs.
+5. If needed, call the memory-recent API by `session_id` and inspect only safe metadata/counts, not raw memory payloads.
+
 ## Phase 12.5B-A Sophia Voice Spec Alignment Audit
 
 Phase 12.5B-A is a docs-only alignment audit against the new Sophia Voice spec set in `specs/`. The full audit lives at `docs/audits/sophia-voice-spec-alignment-phase-12-5b-a.md`.

@@ -143,6 +143,15 @@ class MemoryItem(BaseModel):
 class MemoryListResponse(BaseModel):
     memories: list[MemoryItem] = Field(default_factory=list)
     count: int = Field(default=0, description="Total memory count")
+    source: str = Field(default="unknown", description="Safe diagnostic source classification")
+    candidate_count: int = Field(default=0, description="Safe diagnostic candidate count")
+    session_id_received: bool = Field(default=False, description="Whether a diagnostic session_id query param was received")
+    local_overlay_count: int = Field(default=0, description="Count of local review overlay entries returned or applied")
+    skipped_mem0_hydration_for_session_scope: bool = Field(
+        default=False,
+        description="Whether local review metadata supplied enough status metadata to skip per-memory hydration",
+    )
+    trace_id: str | None = Field(default=None, description="Safe request correlation id")
 
 
 class MemoryUpdateRequest(BaseModel):
@@ -427,8 +436,15 @@ def _has_memory_status(mem: dict) -> bool:
     return isinstance(metadata, dict) and isinstance(metadata.get("status"), str)
 
 
-def _hydrate_memories_for_review(user_id: str, client, memories: list[dict], status: str | None) -> list[dict]:
+def _hydrate_memories_for_review(user_id: str, client, memories: list[dict], status: str | None) -> tuple[list[dict], dict[str, Any]]:
     memories = apply_review_metadata_overlays(user_id, memories)
+    local_overlay_count = sum(
+        1
+        for memory in memories
+        if isinstance(memory, dict) and isinstance(memory.get("id"), str) and memory["id"].startswith("local:")
+    )
+    detail_hydration_count = 0
+    skipped_detail_hydration_count = 0
     hydrated: list[dict] = []
 
     for memory in memories:
@@ -442,23 +458,51 @@ def _hydrate_memories_for_review(user_id: str, client, memories: list[dict], sta
         )
 
         if needs_hydration:
+            detail_hydration_count += 1
             try:
                 merged_memory = _merge_memory_detail(memory, client.get(memory_id))
             except Exception:
                 logger.warning("Failed to hydrate memory detail for %s", memory_id, exc_info=True)
+        elif status is not None and has_status:
+            skipped_detail_hydration_count += 1
 
         hydrated.append(merged_memory)
 
     hydrated = apply_review_metadata_overlays(user_id, hydrated)
+    local_overlay_count = max(
+        local_overlay_count,
+        sum(
+            1
+            for memory in hydrated
+            if isinstance(memory, dict) and isinstance(memory.get("id"), str) and memory["id"].startswith("local:")
+        ),
+    )
 
     if not status:
-        return hydrated
+        filtered = hydrated
+    else:
+        filtered = [
+            memory
+            for memory in hydrated
+            if isinstance(memory.get("metadata"), dict) and memory["metadata"].get("status") == status
+        ]
 
-    return [
-        memory
-        for memory in hydrated
-        if isinstance(memory.get("metadata"), dict) and memory["metadata"].get("status") == status
-    ]
+    if not filtered:
+        source = "none"
+    elif local_overlay_count > 0 or skipped_detail_hydration_count > 0:
+        source = "local_review_overlay"
+    elif detail_hydration_count > 0:
+        source = "global_hydration"
+    else:
+        source = "mem0"
+
+    return filtered, {
+        "source": source,
+        "local_overlay_count": local_overlay_count,
+        "detail_hydration_count": detail_hydration_count,
+        "skipped_detail_hydration_count": skipped_detail_hydration_count,
+        "skipped_mem0_hydration_for_session_scope": skipped_detail_hydration_count > 0,
+    }
 
 
 def _get_session_recap_path(user_id: str, session_id: str) -> Path:
@@ -736,27 +780,44 @@ async def retrieve_realtime_memories_internal(
 async def list_memories(
     user_id: str,
     status: str | None = Query(default=None, description="Filter by status (e.g. pending_review)"),
+    session_id: str | None = Query(default=None, description="Optional diagnostic source session identifier"),
 ) -> MemoryListResponse:
     _validate_user(user_id)
     client = _get_mem0_client()
+    trace_id = f"memrecent-{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}"
     try:
         logger.info(
-            "session.finalization list_memories_request user_id=%s status=%s",
+            "session.finalization list_memories_request user_id=%s status=%s session_id_received=%s trace_id=%s",
             user_id,
             status or "<none>",
+            bool(session_id),
+            trace_id,
         )
         result = client.get_all(filters={"user_id": user_id})
         memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
-        memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+        memories_raw, diagnostics = _hydrate_memories_for_review(user_id, client, memories_raw, status)
         memories_raw = _dedupe_memories_by_id(memories_raw)
         items = [_to_memory_item(m) for m in memories_raw]
         logger.info(
-            "session.finalization list_memories_result user_id=%s status=%s count=%s",
+            "session.finalization list_memories_result user_id=%s status=%s count=%s source=%s trace_id=%s",
             user_id,
             status or "<none>",
             len(items),
+            diagnostics.get("source"),
+            trace_id,
         )
-        return MemoryListResponse(memories=items, count=len(items))
+        return MemoryListResponse(
+            memories=items,
+            count=len(items),
+            source=str(diagnostics.get("source") or "unknown"),
+            candidate_count=len(items),
+            session_id_received=bool(session_id),
+            local_overlay_count=int(diagnostics.get("local_overlay_count") or 0),
+            skipped_mem0_hydration_for_session_scope=bool(
+                diagnostics.get("skipped_mem0_hydration_for_session_scope")
+            ),
+            trace_id=trace_id,
+        )
     except Exception as e:
         logger.warning("Failed to list memories for %s: %s", user_id, e)
         raise HTTPException(status_code=503, detail="Memory service unavailable")
@@ -1018,7 +1079,7 @@ async def journal(
                 normalized_search,
                 categories=[selected_category] if selected_category else None,
             )
-            memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+            memories_raw, _ = _hydrate_memories_for_review(user_id, client, memories_raw, status)
 
             # Preserve the previous plain-text search behavior if Mem0 search returns no results.
             if not memories_raw:
@@ -1027,7 +1088,7 @@ async def journal(
                     filters["categories"] = selected_category
                 result = client.get_all(filters=filters)
                 memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
-                memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+                memories_raw, _ = _hydrate_memories_for_review(user_id, client, memories_raw, status)
                 memories_raw = [
                     memory
                     for memory in memories_raw
@@ -1045,7 +1106,7 @@ async def journal(
                 filters["categories"] = selected_category
             result = client.get_all(filters=filters)
             memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
-            memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+            memories_raw, _ = _hydrate_memories_for_review(user_id, client, memories_raw, status)
 
         memories_raw = _sort_memories_desc(memories_raw)
         memories_raw = _dedupe_memories_by_id(memories_raw)

@@ -140,6 +140,12 @@ describe('useRecapArtifactsLoader', () => {
             },
           ],
           count: 1,
+          source: 'local_review_overlay',
+          candidate_count: 1,
+          session_id_received: true,
+          next_proxy_forwarded_session_id: true,
+          gateway_received_session_id: true,
+          trace_id: 'memrecent-loader-test',
           fallbackApplied: true,
         }),
       );
@@ -175,6 +181,18 @@ describe('useRecapArtifactsLoader', () => {
       }),
     );
     expect(result.current.status).toBe('ready');
+    expect(result.current.telemetry.recap.pollCount).toBe(2);
+    expect(result.current.telemetry.memoryRecent).toMatchObject({
+      requested: true,
+      sessionIdIncluded: true,
+      nextProxyForwardedSessionId: true,
+      gatewayReceivedSessionId: true,
+      status: 200,
+      candidateCount: 1,
+      source: 'local_review_overlay',
+      safeTraceId: 'memrecent-loader-test',
+    });
+    expect(typeof result.current.telemetry.memoryRecent.durationMs).toBe('number');
   });
 
   it('hydrates missing memory candidates from the recent memory review queue', async () => {

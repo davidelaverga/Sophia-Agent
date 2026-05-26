@@ -1,6 +1,6 @@
 'use client';
 
-import { ArrowLeft, Home } from 'lucide-react';
+import { ArrowLeft, Download, Home } from 'lucide-react';
 
 import { RetryAction } from '../../components/ui/RetryAction';
 import { cn } from '../../lib/utils';
@@ -10,16 +10,32 @@ type HeaderVariant = 'skeleton' | 'with-title' | 'compact';
 interface RecapPageFloatingHeaderProps {
   variant: HeaderVariant;
   onBack?: () => void;
+  onExportDebug?: () => void;
   onHome?: () => void;
 }
 
-export function RecapPageFloatingHeader({ variant, onBack, onHome }: RecapPageFloatingHeaderProps) {
+export function RecapPageFloatingHeader({ variant, onBack, onExportDebug, onHome }: RecapPageFloatingHeaderProps) {
+  const exportButton = onExportDebug ? (
+    <button
+      onClick={onExportDebug}
+      className="cosmic-chrome-button rounded-xl p-2.5 transition-colors"
+      aria-label="Export recap debug"
+      title="Export Recap Debug"
+      type="button"
+    >
+      <Download className="w-5 h-5" style={{ color: 'var(--cosmic-text-muted)' }} />
+    </button>
+  ) : null;
+
   if (variant === 'skeleton') {
     return (
       <header className="absolute top-0 left-0 right-0 z-50 px-4 py-4">
         <div className="flex items-center justify-between max-w-4xl mx-auto">
           <div className="cosmic-surface-panel h-10 w-10 animate-pulse rounded-xl" />
-          <div className="cosmic-surface-panel h-10 w-10 animate-pulse rounded-xl" />
+          <div className="flex items-center gap-2">
+            {exportButton}
+            <div className="cosmic-surface-panel h-10 w-10 animate-pulse rounded-xl" />
+          </div>
         </div>
       </header>
     );
@@ -40,13 +56,17 @@ export function RecapPageFloatingHeader({ variant, onBack, onHome }: RecapPageFl
           <span className="font-cormorant text-[14px] tracking-[0.06em]" style={{ color: 'var(--cosmic-text-muted)' }}>session recap</span>
         )}
 
-        <button
-          onClick={onHome}
-          className="cosmic-chrome-button rounded-xl p-2.5 transition-colors"
-          aria-label="Go home"
-        >
-          <Home className="w-5 h-5" style={{ color: 'var(--cosmic-text-muted)' }} />
-        </button>
+        <div className="flex items-center gap-2">
+          {exportButton}
+          <button
+            onClick={onHome}
+            className="cosmic-chrome-button rounded-xl p-2.5 transition-colors"
+            aria-label="Go home"
+            type="button"
+          >
+            <Home className="w-5 h-5" style={{ color: 'var(--cosmic-text-muted)' }} />
+          </button>
+        </div>
       </div>
     </header>
   );

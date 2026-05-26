@@ -860,8 +860,44 @@ class TestListMemories:
         resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review")
 
         assert resp.status_code == 200
-        assert resp.json()["count"] == 1
+        data = resp.json()
+        assert data["count"] == 1
+        assert data["source"] == "local_review_overlay"
+        assert data["candidate_count"] == 1
+        assert data["skipped_mem0_hydration_for_session_scope"] is True
+        assert isinstance(data["trace_id"], str)
         mock_mem0.get.assert_not_called()
+
+    def test_recent_memory_diagnostics_reports_session_id_received(self, client, mock_mem0, mock_review_store):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Needs review", "metadata": {"status": "pending_review"}},
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review&session_id=sess-1")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["session_id_received"] is True
+        assert data["candidate_count"] == data["count"] == 1
+        assert data["trace_id"].startswith("memrecent-")
+
+    def test_global_hydration_path_reports_safe_source(self, client, mock_mem0):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Needs review", "metadata": None},
+            {"id": "m2", "memory": "Already approved", "metadata": None},
+        ]
+        mock_mem0.get.side_effect = [
+            {"id": "m1", "memory": "Needs review", "metadata": {"status": "pending_review"}},
+            {"id": "m2", "memory": "Already approved", "metadata": {"status": "approved"}},
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["source"] == "global_hydration"
+        assert data["candidate_count"] == 1
+        assert data["local_overlay_count"] == 0
 
     def test_hydrates_missing_metadata_without_status_filter(self, client, mock_mem0):
         mock_mem0.get_all.return_value = [

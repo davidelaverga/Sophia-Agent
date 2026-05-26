@@ -23,8 +23,10 @@ import {
 } from '../../components/recap';
 import { BuilderDeliverableCard } from '../../components/session/ArtifactsPanel';
 import { haptic } from '../../hooks/useHaptics';
+import { buildRecapTelemetryReport } from '../../lib/recap-telemetry-report';
 import type { MemoryDecision } from '../../lib/recap-types';
 import { useRecapStore } from '../../stores/recap-store';
+import { useSessionHistoryStore } from '../../stores/session-history-store';
 import { useUiStore } from '../../stores/ui-store';
 
 import {
@@ -48,6 +50,7 @@ export default function RecapPage() {
     setDecision,
     allCandidatesReviewed,
     commitMemories,
+    getCommitStatus,
   } = useRecapStore();
   
   // Toast for feedback
@@ -56,6 +59,9 @@ export default function RecapPage() {
   // Get artifacts from store (or mock for development)
   const artifacts = getArtifacts(sessionId);
   const decisions = getDecisions(sessionId);
+  const historyEntry = useSessionHistoryStore((state) =>
+    state.sessions.find((entry) => entry.sessionId === sessionId)
+  );
   
   // Convert decisions array to map for easier access
   const decisionsMap = useMemo(() => {
@@ -66,7 +72,7 @@ export default function RecapPage() {
     return map;
   }, [decisions]);
 
-  const { status, reload } = useRecapArtifactsLoader({
+  const { status, reload, telemetry } = useRecapArtifactsLoader({
     sessionId,
     artifacts,
     setArtifacts,
@@ -104,12 +110,49 @@ export default function RecapPage() {
   const handleRetry = useCallback(() => {
     reload();
   }, [reload]);
+
+  const handleExportDebug = useCallback(() => {
+    try {
+      const exportedAt = new Date().toISOString();
+      const report = buildRecapTelemetryReport({
+        sessionId,
+        route: typeof window === 'undefined' ? `/recap/${sessionId}` : window.location.pathname,
+        pageStatus: status,
+        telemetry,
+        artifacts,
+        decisions,
+        memoryCommitStatus: getCommitStatus(sessionId),
+        historyEntry,
+        exportedAt,
+      });
+      const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+      const href = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      const stamp = exportedAt.replace(/[:.]/g, '-');
+      anchor.href = href;
+      anchor.download = `sophia-recap-telemetry-report-${sessionId}-${stamp}.json`;
+      anchor.click();
+      URL.revokeObjectURL(href);
+      showToast({ message: 'Recap debug report exported.', variant: 'success', durationMs: 1800 });
+    } catch {
+      showToast({ message: 'Could not export recap debug report.', variant: 'error', durationMs: 2200 });
+    }
+  }, [
+    artifacts,
+    decisions,
+    getCommitStatus,
+    historyEntry,
+    sessionId,
+    showToast,
+    status,
+    telemetry,
+  ]);
   
   // Show loading state
   if (status === 'loading') {
     return (
       <div className="min-h-screen bg-transparent relative">
-        <RecapPageFloatingHeader variant="skeleton" />
+        <RecapPageFloatingHeader variant="skeleton" onExportDebug={handleExportDebug} />
         
         {/* Cinematic loading - reuse RecapMemoryOrbit loading state */}
         <RecapMemoryOrbit
@@ -127,6 +170,7 @@ export default function RecapPage() {
       <div className="min-h-screen bg-transparent relative">
         <RecapPageFloatingHeader
           variant="with-title"
+          onExportDebug={handleExportDebug}
           onBack={() => {
             haptic('light');
             router.push('/journal');
@@ -155,6 +199,7 @@ export default function RecapPage() {
     <div className={`min-h-screen bg-transparent relative ${bottomPaddingClass}`}>
       <RecapPageFloatingHeader
         variant="compact"
+        onExportDebug={handleExportDebug}
         onBack={() => {
           haptic('light');
           router.back();

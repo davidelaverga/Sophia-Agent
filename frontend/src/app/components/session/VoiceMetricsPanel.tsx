@@ -20,6 +20,10 @@ import {
 } from "lucide-react"
 import { startTransition, useEffect, useId, useMemo, useRef, useState } from "react"
 
+import {
+  buildLastSessionTelemetrySnapshot,
+  persistLastSessionTelemetrySnapshot,
+} from "../../lib/recap-telemetry-report"
 import { registerSophiaCaptureBridge } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
 import {
@@ -171,17 +175,24 @@ export function VoiceMetricsPanel({
 
       const snapshot = capture?.snapshot() ?? null
       const events = capture?.getEvents() ?? []
+      const nextMetrics = buildVoiceDeveloperMetrics({
+        stage: voiceState.stage,
+        events,
+        snapshot,
+        runtimeError: voiceState.error,
+        runtimeTelemetry: voiceState.runtimeTelemetry ?? null,
+      })
+
+      persistLastSessionTelemetrySnapshot(
+        buildLastSessionTelemetrySnapshot({
+          captureSnapshot: snapshot,
+          metrics: nextMetrics,
+          summary: buildVoiceTelemetrySummary(nextMetrics),
+        }),
+      )
 
       startTransition(() => {
-        setMetrics(
-          buildVoiceDeveloperMetrics({
-            stage: voiceState.stage,
-            events,
-            snapshot,
-            runtimeError: voiceState.error,
-            runtimeTelemetry: voiceState.runtimeTelemetry ?? null,
-          }),
-        )
+        setMetrics(nextMetrics)
       })
     }
 
