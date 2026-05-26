@@ -31,7 +31,12 @@ from deerflow.sophia.review_metadata_store import (
     remove_review_metadata,
     upsert_review_metadata,
 )
-from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
+from deerflow.sophia.session_store import (
+    SessionMessageRecord,
+    SessionRecord,
+    SessionStore,
+    derive_message_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,12 +116,21 @@ def _get_mem0_client():
 
 
 def _resolve_session_record_owner(user_id: str, session_id: str) -> tuple[str, SessionRecord | None]:
-    """Resolve the persisted session owner, including the legacy dev-user fallback."""
+    """Resolve the persisted session owner.
+
+    The legacy ``dev-user`` fallback is allowed only by the filesystem local/dev
+    store. Supabase production reads are scoped strictly by trusted backend
+    ``user_id``.
+    """
     record = _session_store.get(user_id, session_id)
     if record is not None:
         return user_id, record
 
-    if user_id == _LEGACY_SESSION_USER_ID:
+    if user_id == _LEGACY_SESSION_USER_ID or not getattr(
+        _session_store,
+        "allow_legacy_dev_user_fallback",
+        True,
+    ):
         return user_id, None
 
     legacy_record = _session_store.get(_LEGACY_SESSION_USER_ID, session_id)
@@ -642,7 +656,12 @@ def _persist_end_session_transcript(user_id: str, body: SessionEndRequest) -> No
             continue
         records.append(
             SessionMessageRecord(
-                message_id=f"{body.session_id}-end-{index}",
+                message_id=derive_message_id(
+                    session_id=body.session_id,
+                    role=role,
+                    sequence=index,
+                    turn_id=f"end-{index}",
+                ),
                 session_id=body.session_id,
                 thread_id=body.thread_id or record.thread_id,
                 role=role,
@@ -650,11 +669,12 @@ def _persist_end_session_transcript(user_id: str, body: SessionEndRequest) -> No
                 created_at=message.created_at or datetime.now(UTC).isoformat(),
                 source=body.platform or record.platform or "text",
                 final=True,
+                sequence=index,
             )
         )
 
     if records:
-        _session_store.replace_messages(owner_user_id, body.session_id, records)
+        _session_store.append_or_upsert_messages(owner_user_id, body.session_id, records)
 
 
 def _build_debrief_prompt(body: SessionEndRequest, recap_artifacts: dict | None, duration_minutes: int) -> str | None:

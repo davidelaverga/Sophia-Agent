@@ -26,6 +26,12 @@ services:
         sync: false
       - key: MEM0_API_KEY
         sync: false
+      - key: SOPHIA_SESSION_STORE
+        value: supabase
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
       - key: LANGCHAIN_TRACING_V2
         value: "false"
 
@@ -44,6 +50,12 @@ services:
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: MEM0_API_KEY
+        sync: false
+      - key: SOPHIA_SESSION_STORE
+        value: supabase
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       - key: STREAM_API_KEY
         sync: false

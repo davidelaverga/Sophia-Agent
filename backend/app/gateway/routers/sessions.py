@@ -1,7 +1,8 @@
 """Sophia session management — multi-session persistence.
 
-Real CRUD for /api/v1/sessions/* endpoints backed by file-based SessionStore.
-Creates LangGraph threads and persists session records.
+Real CRUD for /api/v1/sessions/* endpoints backed by the configured
+SessionStore implementation. Creates LangGraph threads and persists session
+records plus durable transcript messages.
 """
 
 import os
@@ -14,7 +15,12 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
+from deerflow.sophia.session_store import (
+    SessionMessageRecord,
+    SessionRecord,
+    SessionStore,
+    derive_message_id,
+)
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 
@@ -247,6 +253,8 @@ def _normalize_user_id(user_id: str | None) -> str:
 
 
 def _legacy_user_id_for(user_id: str) -> str | None:
+    if not getattr(_store, "allow_legacy_dev_user_fallback", True):
+        return None
     return None if user_id == _LEGACY_USER_ID else _LEGACY_USER_ID
 
 
@@ -643,7 +651,7 @@ async def get_session_messages(
             ))
 
     if messages:
-        _store.replace_messages(
+        _store.append_or_upsert_messages(
             owner_user_id,
             session_id,
             [
@@ -652,8 +660,9 @@ async def get_session_messages(
                     session_id=session_id,
                     thread_id=thread_id,
                     source="langgraph_checkpointer",
+                    sequence=index,
                 )
-                for response in messages
+                for index, response in enumerate(messages)
             ],
         )
 
@@ -684,14 +693,19 @@ async def persist_session_messages(
     records = [
         message
         for message in (
-            _persist_input_to_message_record(item, session_id=session_id, thread_id=thread_id)
-            for item in body.messages
+            _persist_input_to_message_record(
+                item,
+                session_id=session_id,
+                thread_id=thread_id,
+                sequence=index,
+            )
+            for index, item in enumerate(body.messages)
         )
         if message is not None
     ]
-    _store.replace_messages(owner_user_id, session_id, records)
+    stored_records = _store.append_or_upsert_messages(owner_user_id, session_id, records)
 
-    visible_records = [message for message in records if message.role in {"user", "assistant"}]
+    visible_records = [message for message in stored_records if message.role in {"user", "assistant"}]
     updates: dict[str, object] = {"message_count": sum(1 for message in visible_records if message.role == "user")}
     last_visible = next((message for message in reversed(visible_records) if message.content.strip()), None)
     if last_visible is not None:
@@ -707,7 +721,7 @@ async def persist_session_messages(
         thread_id=thread_id,
         messages=[
             response
-            for response in (_message_record_to_response(message) for message in records)
+            for response in (_message_record_to_response(message) for message in stored_records)
             if response is not None
         ],
     )
@@ -790,10 +804,16 @@ def _response_to_message_record(
     session_id: str,
     thread_id: str,
     source: str,
+    sequence: int = 0,
 ) -> SessionMessageRecord:
     role = "assistant" if response.role == "sophia" else "user"
     return SessionMessageRecord(
-        message_id=response.id or str(uuid.uuid4()),
+        message_id=derive_message_id(
+            session_id=session_id,
+            role=role,
+            sequence=sequence,
+            message_id=response.id,
+        ),
         session_id=session_id,
         thread_id=thread_id,
         role=role,
@@ -801,6 +821,7 @@ def _response_to_message_record(
         created_at=response.created_at or datetime.now(UTC).isoformat(),
         source=source,
         final=True,
+        sequence=sequence,
     )
 
 
@@ -809,12 +830,20 @@ def _persist_input_to_message_record(
     *,
     session_id: str,
     thread_id: str,
+    sequence: int = 0,
 ) -> SessionMessageRecord | None:
     content = _extract_visible_message_text(item.content)
     if not content:
         return None
     role = "assistant" if item.role == "sophia" else item.role
-    message_id = item.message_id or item.id or str(uuid.uuid4())
+    message_id = derive_message_id(
+        session_id=session_id,
+        role=role,
+        sequence=sequence,
+        message_id=item.message_id or item.id,
+        turn_id=item.turn_id,
+        provider_event_id=item.provider_event_id,
+    )
     source = item.source or ("voice" if message_id.startswith("voice-") else "text")
     is_final = item.final if item.final is not None else not bool(item.incomplete)
     return SessionMessageRecord(
@@ -829,6 +858,7 @@ def _persist_input_to_message_record(
         approximate=bool(item.approximate),
         turn_id=item.turn_id,
         provider_event_id=item.provider_event_id,
+        sequence=sequence,
         redaction_level=item.redaction_level,
     )
 

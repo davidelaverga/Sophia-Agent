@@ -1,14 +1,14 @@
 # Sophia Session Continuity And Rehydration
 
 Date: 2026-05-26
-Status: implemented narrow transcript durability slice
+Status: productionized transcript durability contract
 
 ## Source Of Truths
 
 Sophia session continuity has several related but separate stores:
 
-- Session metadata: `SessionStore` writes `users/{user_id}/sessions/{session_id}.json`. This record owns `session_id`, `thread_id`, status, timestamps, title, preview, platform, context, and message count.
-- Transcript messages: `SessionStore` writes `users/{user_id}/transcripts/{session_id}.json`. This sidecar is the durable ordered visible conversation transcript.
+- Session metadata: `SessionStore` is an abstraction selected by `SOPHIA_SESSION_STORE`. Filesystem local/dev writes `users/{user_id}/sessions/{session_id}.json`; production should use Supabase Postgres table `sophia_sessions`.
+- Transcript messages: filesystem local/dev writes `users/{user_id}/transcripts/{session_id}.json`; production should use Supabase Postgres table `sophia_session_messages`. This store is the durable ordered visible conversation transcript.
 - LangGraph checkpointer: the companion graph stores internal graph state by `thread_id`. This may include `messages`, prior artifacts, middleware state, tool state, summaries, and async builder state, but it is not the UI transcript archive.
 - Recap: `users/{user_id}/recaps/{session_id}.json` is the session-finalization envelope and recap artifact state. It must not replace transcript history.
 - Trace: `users/{user_id}/traces/{session_id}.json` is turn telemetry for evaluation and GEPA. It is not a complete chat transcript.
@@ -28,14 +28,14 @@ When a user reopens a conversation, the UI should load by `session_id`, render t
 
 1. Frontend restores or selects a session metadata record.
 2. Frontend calls `GET /api/v1/sessions/{session_id}/messages`.
-3. Gateway returns `users/{user_id}/transcripts/{session_id}.json` if it exists.
-4. If no transcript sidecar exists, gateway falls back to `GET /threads/{thread_id}/state`, extracts visible human/assistant messages, and backfills the transcript sidecar.
+3. Gateway returns durable transcript messages from the configured session store.
+4. If no transcript exists, gateway falls back to `GET /threads/{thread_id}/state`, extracts visible human/assistant messages, and backfills the configured transcript store.
 5. Frontend renders the returned ordered messages before a new user message is sent.
 6. Text sends continue with the same `thread_id`. If the checkpointer no longer has that thread, a later recovery/reseed path should be explicit rather than silently treating recap as transcript.
 
 ## Incremental Persistence
 
-The session page sends visible transcript snapshots to `PUT /api/v1/sessions/{session_id}/messages` as messages change. Browser `pagehide` and hidden-tab events use the `POST` alias for best-effort `sendBeacon`/`keepalive` flushing.
+The session page sends visible transcript snapshots to `PUT /api/v1/sessions/{session_id}/messages` as messages change. Browser `pagehide` and hidden-tab events use the `POST` alias for best-effort `sendBeacon`/`keepalive` flushing. The backend treats these writes as append-or-upsert operations, keyed by stable message ids, so retries do not duplicate transcript rows.
 
 Streaming assistant text may be stored only when marked `final=false` or `incomplete=true`. Completed text and voice turns are stored as final visible messages. Tool calls, artifacts, diagnostics, and raw provider events should not appear in the user-visible transcript unless a later product decision explicitly surfaces them.
 
@@ -53,9 +53,57 @@ A future hardening pass should add deterministic `abandoned`/`interrupted` statu
 
 ## Production Storage Requirements
 
-File-based metadata and transcripts are only durable if the service filesystem is durable and shared with the service that serves session APIs. LangGraph checkpointer state is only durable if configured with SQLite/Postgres or equivalent persistent storage. `config.production.yaml` must explicitly configure a persistent checkpointer if same-thread resume across restarts/deploys is required.
+Render filesystems are ephemeral by default. File-based metadata and transcript sidecars are local/dev conveniences only and must not be the production source of truth.
 
-For multi-service deployments, the gateway must own transcript reads/writes or use shared durable storage. Recap, trace, handoff, transcript, and metadata files must not be split across non-shared ephemeral filesystems.
+Production transcript persistence uses Supabase Postgres:
+
+- Set `SOPHIA_SESSION_STORE=supabase` on backend services that read/write sessions.
+- Set backend-only `SUPABASE_URL`.
+- Set backend-only `SUPABASE_SERVICE_ROLE_KEY`.
+- Run `backend/migrations/2026_05_26_sophia_session_transcripts.sql`.
+
+`SUPABASE_SERVICE_ROLE_KEY` must never be exposed to the frontend. The frontend continues to call existing session APIs; only the trusted backend talks to Supabase.
+
+Supabase Storage may be useful later for large debug/archive blobs, exported transcripts, or diagnostic bundles. It is not the hot-path primary transcript store.
+
+LangGraph checkpointer state is only durable if configured with SQLite/Postgres or equivalent persistent storage. `config.production.yaml` must explicitly configure a persistent checkpointer if same-thread resume across restarts/deploys is required.
+
+For multi-service deployments, the gateway must own transcript reads/writes through the configured store. Recap, trace, handoff, transcript, and metadata files must not be split across non-shared ephemeral filesystems.
+
+## Supabase Schema
+
+`sophia_sessions` stores one row per conversation:
+
+- `id`: stable session id.
+- `user_id`: trusted backend user id.
+- `thread_id`: LangGraph/checkpointer thread id.
+- `mode`: `text`, `voice`, or `mixed`.
+- `status`: `active`, `resumable`, `ended`, `abandoned`, or `interrupted`.
+- `title`, `preview`, `message_count`, timestamps, recap/checkpointer/transcript flags.
+- `metadata`: non-indexed compatibility fields such as `preset_type`, `context_mode`, `platform`, `intention`, and `focus_cue`.
+
+`sophia_session_messages` stores ordered transcript rows:
+
+- `id`: deterministic session-scoped storage id for idempotency.
+- `message_id`: original client/provider message id when present.
+- `session_id`, `user_id`, `thread_id`.
+- `role`, `content`, `source`, `final`, `approximate`, `turn_id`, `provider_event_id`.
+- `sequence` plus `created_at` for stable ordering.
+- `metadata`: diagnostics such as `redaction_level`; do not put secrets here.
+
+## Rollout
+
+1. Run the SQL migration in Supabase.
+2. Add `SOPHIA_SESSION_STORE=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY` to the backend/gateway Render service.
+3. Redeploy the gateway/backend service that serves `/api/v1/sessions`.
+4. Smoke test: start text session, send two turns, refresh, reopen from history, verify transcript.
+5. Smoke test: start voice session, wait for finalized transcript events, end/reopen, verify readable history.
+
+Existing filesystem-only local sessions are not automatically migrated. If preserving old production sessions is necessary, write a one-off backend-only backfill that reads old JSON sidecars and calls the session store abstraction.
+
+## Rollback
+
+If Supabase transcript persistence misbehaves before data migration matters, set `SOPHIA_SESSION_STORE=filesystem` only in local/dev. Do not use filesystem rollback on Render for durable production history. A production rollback should instead redeploy the prior application version while keeping the Supabase tables intact, then fix the backend store code and redeploy.
 
 ## Privacy
 
