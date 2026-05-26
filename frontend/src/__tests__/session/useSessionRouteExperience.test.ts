@@ -231,7 +231,7 @@ describe('useSessionRouteExperience', () => {
       streamContractCall.setBuilderTask({ phase: 'running', detail: 'Drafting the brief.' });
     });
 
-    expect(result.current.builderTask).toEqual({ phase: 'running', detail: 'Drafting the brief.', canvasStreamed: true });
+    expect(result.current.builderTask).toEqual({ phase: 'running', detail: 'Drafting the brief.' });
   });
 
   it('passes active stream state through to voice runtime retry handling', () => {
@@ -735,5 +735,58 @@ describe('useSessionRouteExperience', () => {
         runId: 'run-builder-1',
         detail: 'Finalizing',
       });
+  });
+
+  it('synthesizes completion UI from terminal canvas state when event history is gone', () => {
+    const storedBuilderArtifact = {
+      artifactPath: 'mnt/user-data/outputs/brief.md',
+      artifactTitle: 'Launch brief',
+      artifactType: 'document' as const,
+      decisionsMade: [],
+    };
+
+    useBuilderCanvasMock.mockReturnValue({
+      activeTask: {
+        parent_thread_id: 'thread-1',
+        task_id: 'task-builder-1',
+        run_id: 'run-builder-1',
+        status: 'completed',
+      },
+      recentEvents: [],
+      completion: null,
+      reconnecting: false,
+    });
+
+    const { result } = renderHook(() =>
+      useSessionRouteExperience({
+        sessionId: 'session-1',
+        activeSessionId: 'session-1',
+        activeThreadId: 'thread-1',
+        chatRequestBody: { session_id: 'session-1' },
+        hasValidBackendSessionId: true,
+        backendSessionId: 'session-1',
+        userId: 'user-1',
+        artifacts: null,
+        storedBuilderArtifact,
+        storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
+        updateSession: vi.fn(),
+        showUsageLimitModal: vi.fn(),
+        recordConnectivityFailure: vi.fn(),
+        showToast: vi.fn(),
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        greetingAnchorId: 'greeting-1',
+        markOffline: vi.fn(),
+      })
+    );
+
+    expect(result.current.builderCompletion).toEqual(expect.objectContaining({
+      task_id: 'task-builder-1',
+      run_id: 'run-builder-1',
+      status: 'success',
+      artifact_title: 'Launch brief',
+      artifact_url: '/api/threads/thread-1/artifacts/mnt/user-data/outputs/brief.md',
+    }));
   });
 });

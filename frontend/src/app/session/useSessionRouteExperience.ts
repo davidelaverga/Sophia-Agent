@@ -17,6 +17,7 @@ import type { BuilderTaskV1 } from '../types/builder-task';
 import type { InterruptPayload, RitualArtifacts } from '../types/session';
 import type { SophiaMessageMetadata } from '../types/sophia-ui-message';
 
+import { completionFromTerminalCanvasTask } from './builder-canvas-completion';
 import { useSessionMessageViewModel } from './useSessionMessageViewModel';
 import { useSessionOutboundSend } from './useSessionSendActions';
 import { useSessionVoiceMessages } from './useSessionVoiceMessages';
@@ -135,7 +136,7 @@ export function useSessionRouteExperience({
   const guardedSetBuilderTask = useCallback((task: BuilderTaskV1 | null) => {
     const key = builderRunKey(task?.taskId, task?.runId);
     if (key && dismissedBuilderRunsRef.current.has(key)) return;
-    setBuilderTask(task?.phase === 'running' ? { ...task, canvasStreamed: true } : task);
+    setBuilderTask(task);
   }, []);
 
   const { artifactStatus, ingestArtifacts, applyMemoryCandidates } = useCompanionArtifactsRuntime({
@@ -415,11 +416,17 @@ export function useSessionRouteExperience({
 
   // The authenticated canvas stream carries terminal events as well as live
   // progress, keeping the session to one subscription.
+  const fallbackCanvasCompletion = completionFromTerminalCanvasTask(
+    builderCanvas.activeTask,
+    builderArtifact,
+    activeThreadId,
+  );
+  const builderCompletionCandidate = builderCanvas.completion ?? fallbackCanvasCompletion;
   const effectiveBuilderCompletion: BuilderCompletionEventV1 | null =
-    builderCanvas.completion && !dismissedBuilderRunsRef.current.has(
-      builderRunKey(builderCanvas.completion.task_id, builderCanvas.completion.run_id) ?? '',
+    builderCompletionCandidate && !dismissedBuilderRunsRef.current.has(
+      builderRunKey(builderCompletionCandidate.task_id, builderCompletionCandidate.run_id) ?? '',
     )
-      ? builderCanvas.completion
+      ? builderCompletionCandidate
       : null;
 
   /**
