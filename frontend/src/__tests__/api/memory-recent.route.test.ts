@@ -235,6 +235,45 @@ describe('memory recent route', () => {
     expect(payload.memories[0]).not.toHaveProperty('metadata');
   });
 
+  it('does not run unfiltered fallback after a terminal session-scoped empty response', async () => {
+    fetchSophiaApiMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({
+        memories: [],
+        count: 0,
+        source: 'local_review_overlay',
+        candidate_count: 0,
+        session_id_received: true,
+        local_overlay_count: 0,
+        skipped_mem0_hydration_for_session_scope: true,
+        empty_reason: 'no_session_candidates',
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const request = {
+      nextUrl: new URL('http://localhost:3000/api/memory/recent?status=pending_review&session_id=sess-empty&started_at=2026-03-03T19:46:00.000Z&ended_at=2026-03-03T20:00:00.000Z'),
+    } as unknown as NextRequest;
+
+    const response = await recentMemoriesGET(request);
+    const payload = await response.json();
+
+    expect(fetchSophiaApiMock).toHaveBeenCalledTimes(1);
+    expect(fetchSophiaApiMock).toHaveBeenCalledWith(
+      '/api/sophia/user-123/memories/recent?status=pending_review&session_id=sess-empty',
+      { method: 'GET' },
+    );
+    expect(payload).toMatchObject({
+      memories: [],
+      count: 0,
+      fallbackApplied: false,
+      source: 'local_review_overlay',
+      empty_reason: 'no_session_candidates',
+      skipped_mem0_hydration_for_session_scope: true,
+    });
+  });
+
   it('matches recap memories by top-level session_id and updated_at when local overlay entries omit metadata session linkage', async () => {
     fetchSophiaApiMock.mockResolvedValue(
       new Response(JSON.stringify({

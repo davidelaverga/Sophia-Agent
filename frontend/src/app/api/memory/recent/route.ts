@@ -34,6 +34,7 @@ type GatewayMemoryListPayload = {
   session_id_received?: boolean;
   local_overlay_count?: number;
   skipped_mem0_hydration_for_session_scope?: boolean;
+  empty_reason?: string | null;
   trace_id?: string;
 };
 
@@ -242,6 +243,27 @@ function buildSafeRecentDiagnostics({
   };
 }
 
+function isSessionScopedPendingReviewTerminalEmpty(
+  payload: GatewayMemoryListPayload,
+  sessionId: string | null,
+  status: string | null,
+): boolean {
+  if (!sessionId || status !== 'pending_review') {
+    return false;
+  }
+
+  const record = asRecord(payload);
+  const count = readNumber(record, 'candidate_count') ?? readNumber(record, 'count') ?? 0;
+  const emptyReason = readString(record, 'empty_reason');
+  const source = readString(record, 'source');
+
+  return count === 0 && (
+    emptyReason === 'no_session_candidates'
+    || source === 'local_review_overlay'
+    || source === 'none'
+  );
+}
+
 function selectFallbackMemories(
   memories: NormalizedMemory[],
   sessionId: string | null,
@@ -346,6 +368,20 @@ export async function GET(request: NextRequest) {
         fallbackApplied: false,
         ...buildSafeRecentDiagnostics({
           count: scopedFilteredMemories.length,
+          fallbackApplied: false,
+          gatewayPayload: filteredPayload,
+          sessionId,
+        }),
+      });
+    }
+
+    if (isSessionScopedPendingReviewTerminalEmpty(filteredPayload, sessionId, status)) {
+      return NextResponse.json({
+        memories: [],
+        count: 0,
+        fallbackApplied: false,
+        ...buildSafeRecentDiagnostics({
+          count: 0,
           fallbackApplied: false,
           gatewayPayload: filteredPayload,
           sessionId,

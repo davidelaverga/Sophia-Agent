@@ -255,6 +255,113 @@ describe('useRecapArtifactsLoader', () => {
     expect(result.current.status).toBe('ready');
   });
 
+  it('treats an ended session with no session candidates as terminal empty instead of composing', async () => {
+    const setArtifacts = vi.fn();
+    const artifacts = {
+      sessionId: 'sess-terminal-empty',
+      threadId: 'thread-terminal-empty',
+      sessionType: 'debrief' as const,
+      contextMode: 'work' as const,
+      startedAt: '2026-03-03T19:46:00.000Z',
+      endedAt: '2026-03-03T20:00:00.000Z',
+      takeaway: 'You named the thing clearly.',
+      status: 'ready' as const,
+      memoryCandidates: [],
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        memories: [],
+        count: 0,
+        candidate_count: 0,
+        source: 'local_review_overlay',
+        empty_reason: 'no_session_candidates',
+        unavailable: false,
+        session_id_received: true,
+        next_proxy_forwarded_session_id: true,
+        gateway_received_session_id: true,
+      }),
+    );
+
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const { result } = renderHook(() =>
+      useRecapArtifactsLoader({
+        sessionId: 'sess-terminal-empty',
+        artifacts,
+        setArtifacts,
+      }),
+    );
+
+    await flushEffects();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/memory/recent?status=pending_review&session_id=sess-terminal-empty&started_at=2026-03-03T19%3A46%3A00.000Z&ended_at=2026-03-03T20%3A00%3A00.000Z',
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(result.current.status).toBe('ready');
+    expect(setArtifacts).toHaveBeenCalledWith(
+      'sess-terminal-empty',
+      expect.objectContaining({
+        takeaway: 'You named the thing clearly.',
+        memoryCandidates: [],
+      }),
+    );
+    expect(result.current.telemetry.memoryRecent).toMatchObject({
+      requested: true,
+      terminal: true,
+      emptyReason: 'no_session_candidates',
+      candidateCount: 0,
+      source: 'local_review_overlay',
+    });
+    expect(result.current.telemetry.recap.terminalReason).toBe('no_session_candidates');
+  });
+
+  it('surfaces memory-recent unavailable responses instead of reporting no results', async () => {
+    const setArtifacts = vi.fn();
+    const artifacts = {
+      sessionId: 'sess-unavailable',
+      sessionType: 'debrief' as const,
+      contextMode: 'work' as const,
+      endedAt: '2026-03-03T20:00:00.000Z',
+      takeaway: 'A partial recap exists.',
+      status: 'ready' as const,
+      memoryCandidates: [],
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        memories: [],
+        count: 0,
+        candidate_count: 0,
+        source: 'error',
+        unavailable: true,
+        empty_reason: 'no_session_candidates',
+        session_id_received: true,
+        next_proxy_forwarded_session_id: true,
+      }),
+    );
+
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const { result } = renderHook(() =>
+      useRecapArtifactsLoader({
+        sessionId: 'sess-unavailable',
+        artifacts,
+        setArtifacts,
+      }),
+    );
+
+    await flushEffects();
+
+    expect(result.current.status).toBe('unavailable');
+    expect(result.current.telemetry.memoryRecent).toMatchObject({
+      requested: true,
+      unavailable: true,
+      terminal: false,
+      source: 'error',
+    });
+  });
+
   it('marks the recap as reviewed when no pending candidates remain but approved memories exist in the journal', async () => {
     const setArtifacts = vi.fn();
     const fetchMock = vi
@@ -390,6 +497,10 @@ describe('useRecapArtifactsLoader', () => {
     await flushEffects();
 
     expect(result.current.status).toBe('not_found');
+    expect(result.current.telemetry.memoryRecent).toMatchObject({
+      requested: false,
+      memoryRecentNotRequestedReason: 'session_not_ended',
+    });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

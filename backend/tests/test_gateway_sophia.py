@@ -915,6 +915,28 @@ class TestListMemories:
         assert data["memories"][0]["id"] == "local:target"
         assert mock_review_store["apply"].call_args.kwargs["session_id"] == "sess-target"
 
+    def test_session_scoped_pending_review_zero_overlay_is_terminal_empty(self, client, mock_mem0, mock_review_store):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Needs global hydration", "metadata": None},
+        ]
+        mock_review_store["apply"].side_effect = None
+        mock_review_store["apply"].return_value = [
+            {"id": "m1", "memory": "Needs global hydration", "metadata": None},
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review&session_id=sess-empty")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 0
+        assert data["candidate_count"] == 0
+        assert data["memories"] == []
+        assert data["source"] == "local_review_overlay"
+        assert data["session_id_received"] is True
+        assert data["skipped_mem0_hydration_for_session_scope"] is True
+        assert data["empty_reason"] == "no_session_candidates"
+        mock_mem0.get.assert_not_called()
+
     def test_global_hydration_path_reports_safe_source(self, client, mock_mem0):
         mock_mem0.get_all.return_value = [
             {"id": "m1", "memory": "Needs review", "metadata": None},

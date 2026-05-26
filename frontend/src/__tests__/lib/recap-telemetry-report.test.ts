@@ -188,6 +188,63 @@ describe('recap telemetry report', () => {
     expect(errorReport.recap.status).toBe('error');
   });
 
+  it('exports terminal empty and not-requested reasons for memory recent checks', () => {
+    let terminalTelemetry = createInitialRecapTelemetryState({ sessionId: 'sess-empty' });
+    terminalTelemetry = applyRecapPageStatus(terminalTelemetry, 'ready', '2026-05-25T10:13:01.000Z');
+    terminalTelemetry = applyRecapRequestObservation(terminalTelemetry, {
+      kind: 'memory_recent_pending_review',
+      frontendPath: '/api/memory/recent?status=pending_review&session_id=sess-empty',
+      startedAt: '2026-05-25T10:13:01.000Z',
+      completedAt: '2026-05-25T10:13:01.120Z',
+      durationMs: 120,
+      status: 200,
+      ok: true,
+      aborted: false,
+      abortReason: null,
+      timeoutMs: 15000,
+      responseShapeKeys: ['candidate_count', 'empty_reason', 'memories'],
+      candidateCount: 0,
+      source: 'local_review_overlay',
+      emptyReason: 'no_session_candidates',
+      unavailable: false,
+      terminal: true,
+      sessionIdIncluded: true,
+      nextProxyForwardedSessionId: true,
+      gatewayReceivedSessionId: true,
+    });
+
+    const terminalReport = buildRecapTelemetryReport({
+      sessionId: 'sess-empty',
+      route: '/recap/sess-empty',
+      pageStatus: 'ready',
+      telemetry: terminalTelemetry,
+      artifacts: makeArtifacts({ sessionId: 'sess-empty', memoryCandidates: [] }),
+      decisions: [],
+      memoryCommitStatus: 'idle',
+    });
+
+    expect(terminalReport.recap.status).toBe('no_results');
+    expect(terminalReport.recap.terminalReason).toBe('no_session_candidates');
+    expect(terminalReport.memoryRecent.terminal).toBe(true);
+    expect(terminalReport.memoryRecent.emptyReason).toBe('no_session_candidates');
+    expect(terminalReport.diagnostics.notes).toContain('memory_recent_terminal:no_session_candidates');
+
+    const skippedTelemetry = createInitialRecapTelemetryState({ sessionId: 'sess-skipped' });
+    const skippedReport = buildRecapTelemetryReport({
+      sessionId: 'sess-skipped',
+      route: '/recap/sess-skipped',
+      pageStatus: 'not_found',
+      telemetry: skippedTelemetry,
+      artifacts: null,
+      decisions: [],
+      memoryCommitStatus: 'idle',
+    });
+
+    expect(skippedReport.memoryRecent.requested).toBe(false);
+    expect(skippedReport.memoryRecent.memoryRecentNotRequestedReason).toBe('unknown');
+    expect(skippedReport.diagnostics.warnings).toContain('memory_recent_not_requested_without_specific_reason');
+  });
+
   it('persists and includes only a same-session safe voice telemetry snapshot', () => {
     const metrics = {
       stage: 'speaking',

@@ -5,12 +5,16 @@ import { mapBackendArtifactsToRecapV1 } from '../../lib/artifacts-adapter';
 import { logger } from '../../lib/error-logger';
 import {
   applyRecapPageStatus,
+  applyMemoryRecentNotRequestedReason,
   applyRecapRequestObservation,
   createInitialRecapTelemetryState,
   getResponseShapeKeys,
   inferAbortReason,
+  readLastSessionTelemetrySnapshot,
   safeErrorMessage,
+  type LastSessionTelemetrySnapshot,
   type MemoryRecentEmptyReason,
+  type MemoryRecentNotRequestedReason,
   type MemoryRecentSource,
   type RecapRequestKind,
   type RecapRequestObservation,
@@ -57,11 +61,40 @@ interface RecentMemoriesResponse {
   next_proxy_forwarded_session_id?: boolean;
   gateway_received_session_id?: boolean;
   empty_reason?: string;
+  unavailable?: boolean;
   trace_id?: string;
   debug?: Record<string, unknown>;
 }
 
 type RecapTelemetryRecorder = (observation: RecapRequestObservation) => void;
+type MemoryRecentSkipRecorder = (reason: NonNullable<MemoryRecentNotRequestedReason>) => void;
+
+interface MemoryRecentDiagnostics {
+  candidateCount: number;
+  source: MemoryRecentSource;
+  emptyReason: MemoryRecentEmptyReason;
+  unavailable: boolean;
+  terminal: boolean;
+  nextProxyForwardedSessionId: boolean;
+  gatewayReceivedSessionId: boolean;
+  safeTraceId: string | null;
+}
+
+interface RecentMemoriesFetchResult {
+  memories: NonNullable<RecentMemoriesResponse['memories']>;
+  ok: boolean;
+  unavailable: boolean;
+  terminal: boolean;
+  candidateCount: number;
+  source: MemoryRecentSource;
+  emptyReason: MemoryRecentEmptyReason;
+  errorCode: string | null;
+}
+
+interface HydratedPayloadResult {
+  payload: Record<string, unknown> | null;
+  memoryRecent: RecentMemoriesFetchResult | null;
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -108,14 +141,7 @@ function normalizeEmptyReason(value: string | null): MemoryRecentEmptyReason {
   }
 }
 
-function getMemoryRecentDiagnostics(payload: RecentMemoriesResponse | null): {
-  candidateCount: number;
-  source: MemoryRecentSource;
-  emptyReason: MemoryRecentEmptyReason;
-  nextProxyForwardedSessionId: boolean;
-  gatewayReceivedSessionId: boolean;
-  safeTraceId: string | null;
-} {
+function getMemoryRecentDiagnostics(payload: RecentMemoriesResponse | null): MemoryRecentDiagnostics {
   const root = asRecord(payload);
   const debug = asRecord(root?.debug);
   const memories = Array.isArray(payload?.memories) ? payload.memories : [];
@@ -126,11 +152,28 @@ function getMemoryRecentDiagnostics(payload: RecentMemoriesResponse | null): {
     ?? memories.length;
   const source = normalizeMemoryRecentSource(readString(root, 'source') ?? readString(debug, 'source'));
   const emptyReason = normalizeEmptyReason(readString(root, 'empty_reason') ?? readString(debug, 'empty_reason'));
+  const hasExplicitEmptyReason = emptyReason !== 'unknown';
+  const unavailable =
+    readBoolean(root, 'unavailable')
+    ?? readBoolean(debug, 'unavailable')
+    ?? false;
+  const normalizedSource = source === 'unknown' && candidateCount === 0 ? 'none' : source;
+  const normalizedEmptyReason = emptyReason === 'unknown' && candidateCount === 0 ? 'no_results' : emptyReason;
+  const terminal = !unavailable && (
+    candidateCount > 0
+    || (hasExplicitEmptyReason && (
+      normalizedEmptyReason === 'no_session_candidates'
+      || normalizedEmptyReason === 'no_results'
+      || normalizedEmptyReason === 'filtered_out'
+    ))
+  );
 
   return {
     candidateCount,
-    source: source === 'unknown' && candidateCount === 0 ? 'none' : source,
-    emptyReason: emptyReason === 'unknown' && candidateCount === 0 ? 'no_results' : emptyReason,
+    source: normalizedSource,
+    emptyReason: normalizedEmptyReason,
+    unavailable,
+    terminal,
     nextProxyForwardedSessionId:
       readBoolean(root, 'next_proxy_forwarded_session_id')
       ?? readBoolean(debug, 'next_proxy_forwarded_session_id')
@@ -170,9 +213,18 @@ async function fetchSessionRecentMemories(
   sessionId: string,
   status: RecentMemoryStatus,
   recordTelemetry?: RecapTelemetryRecorder,
-): Promise<NonNullable<RecentMemoriesResponse['memories']>> {
+): Promise<RecentMemoriesFetchResult> {
   if (!payload) {
-    return [];
+    return {
+      memories: [],
+      ok: false,
+      unavailable: false,
+      terminal: false,
+      candidateCount: 0,
+      source: 'unknown',
+      emptyReason: 'unknown',
+      errorCode: 'missing_payload',
+    };
   }
 
   const params = buildRecentMemoriesSearchParams(payload, sessionId, status);
@@ -195,6 +247,7 @@ async function fetchSessionRecentMemories(
     });
 
     if (!response.ok) {
+      const errorCode = `http_${response.status}`;
       recordTelemetry?.({
         kind,
         frontendPath,
@@ -208,9 +261,20 @@ async function fetchSessionRecentMemories(
         timeoutMs,
         responseShapeKeys: [],
         sessionIdIncluded: params.has('session_id'),
-        errorCode: `http_${response.status}`,
+        errorCode,
+        unavailable: true,
+        terminal: true,
       });
-      return [];
+      return {
+        memories: [],
+        ok: false,
+        unavailable: true,
+        terminal: true,
+        candidateCount: 0,
+        source: 'error',
+        emptyReason: 'unknown',
+        errorCode,
+      };
     }
 
     const recentMemories = await response.json() as RecentMemoriesResponse;
@@ -230,17 +294,30 @@ async function fetchSessionRecentMemories(
       candidateCount: diagnostics.candidateCount,
       source: diagnostics.source,
       emptyReason: diagnostics.emptyReason,
+      unavailable: diagnostics.unavailable,
+      terminal: diagnostics.terminal,
       sessionIdIncluded: params.has('session_id'),
       nextProxyForwardedSessionId: diagnostics.nextProxyForwardedSessionId,
       gatewayReceivedSessionId: diagnostics.gatewayReceivedSessionId,
       safeTraceId: diagnostics.safeTraceId,
     });
-    return Array.isArray(recentMemories.memories)
+    const memories = Array.isArray(recentMemories.memories)
       ? recentMemories.memories
       : [];
+    return {
+      memories,
+      ok: response.ok && !diagnostics.unavailable,
+      unavailable: diagnostics.unavailable,
+      terminal: diagnostics.terminal,
+      candidateCount: diagnostics.candidateCount,
+      source: diagnostics.source,
+      emptyReason: diagnostics.emptyReason,
+      errorCode: diagnostics.unavailable ? 'unavailable' : null,
+    };
   } catch (error) {
     const abortReason = inferAbortReason(error, signal);
     const aborted = signal.aborted || abortReason !== null;
+    const errorCode = aborted ? abortReason ?? 'aborted' : 'fetch_error';
     recordTelemetry?.({
       kind,
       frontendPath,
@@ -253,18 +330,29 @@ async function fetchSessionRecentMemories(
       abortReason,
       timeoutMs,
       responseShapeKeys: [],
-      errorCode: aborted ? abortReason ?? 'aborted' : 'fetch_error',
+      errorCode,
       errorSafeMessage: safeErrorMessage(error),
       sessionIdIncluded: params.has('session_id'),
       nextProxyForwardedSessionId: false,
       gatewayReceivedSessionId: false,
+      unavailable: true,
+      terminal: true,
     });
     logger.logError(error, {
       component: 'Recap',
       action: 'fetch_recent_memories',
       memoryStatus: status,
     });
-    return [];
+    return {
+      memories: [],
+      ok: false,
+      unavailable: true,
+      terminal: true,
+      candidateCount: 0,
+      source: 'error',
+      emptyReason: 'unknown',
+      errorCode,
+    };
   }
 }
 
@@ -308,13 +396,61 @@ function buildArtifactsPayloadFromStore(
   };
 }
 
+function isTerminalEmptyMemoryRecent(result: RecentMemoriesFetchResult | null): boolean {
+  return Boolean(
+    result
+    && result.terminal
+    && result.ok
+    && !result.unavailable
+    && result.candidateCount === 0
+    && result.memories.length === 0
+    && (
+      result.emptyReason === 'no_session_candidates'
+      || result.emptyReason === 'no_results'
+      || result.emptyReason === 'filtered_out'
+    )
+  );
+}
+
+function buildEndedSessionMemoryPayload({
+  artifacts,
+  historyEntry,
+  sessionId,
+  snapshot,
+}: {
+  artifacts?: RecapArtifactsV1 | null;
+  historyEntry?: { startedAt?: string; endedAt?: string; presetType?: string; contextMode?: string } | null;
+  sessionId: string;
+  snapshot?: LastSessionTelemetrySnapshot | null;
+}): Record<string, unknown> | null {
+  if (!sessionId) {
+    return null;
+  }
+
+  const endedAt = artifacts?.endedAt || historyEntry?.endedAt || snapshot?.endedAt || null;
+  if (!endedAt) {
+    return null;
+  }
+
+  return {
+    session_id: sessionId,
+    thread_id: artifacts?.threadId || snapshot?.threadId || undefined,
+    session_type: artifacts?.sessionType || historyEntry?.presetType || undefined,
+    context_mode: artifacts?.contextMode || historyEntry?.contextMode || undefined,
+    started_at: artifacts?.startedAt || historyEntry?.startedAt || undefined,
+    ended_at: endedAt,
+    status: 'ready',
+    memory_candidates: [],
+  };
+}
+
 export async function hydrateStoredArtifactsWithRecentMemories(
   artifacts: RecapArtifactsV1,
   sessionId: string,
   historyEntry?: { startedAt?: string; endedAt?: string },
   recordTelemetry?: RecapTelemetryRecorder,
 ): Promise<RecapArtifactsV1 | null> {
-  const hydratedStoredPayload = await hydratePayloadWithRecentMemories(
+  const hydratedStored = await hydratePayloadWithRecentMemories(
     {
       ...buildArtifactsPayloadFromStore(artifacts, sessionId),
       started_at: artifacts.startedAt || historyEntry?.startedAt,
@@ -324,37 +460,52 @@ export async function hydrateStoredArtifactsWithRecentMemories(
     recordTelemetry,
   );
 
-  return mapBackendArtifactsToRecapV1(hydratedStoredPayload, sessionId);
+  return mapBackendArtifactsToRecapV1(hydratedStored.payload, sessionId);
 }
 
 async function hydratePayloadWithRecentMemories(
   payload: Record<string, unknown> | null,
   sessionId: string,
   recordTelemetry?: RecapTelemetryRecorder,
-): Promise<Record<string, unknown> | null> {
+  recordSkipped?: MemoryRecentSkipRecorder,
+): Promise<HydratedPayloadResult> {
   if (!payload) {
-    return null;
+    recordSkipped?.('waiting_for_required_recap_status');
+    return {
+      payload: null,
+      memoryRecent: null,
+    };
   }
 
   if (Array.isArray(payload.memory_candidates) && payload.memory_candidates.length > 0) {
-    return payload;
+    recordSkipped?.('already_resolved');
+    return {
+      payload,
+      memoryRecent: null,
+    };
   }
 
-  const recentMemories = await fetchSessionRecentMemories(payload, sessionId, 'pending_review', recordTelemetry);
-  if (recentMemories.length === 0) {
-    return payload;
+  const memoryRecent = await fetchSessionRecentMemories(payload, sessionId, 'pending_review', recordTelemetry);
+  if (memoryRecent.memories.length === 0) {
+    return {
+      payload,
+      memoryRecent,
+    };
   }
 
   return {
-    ...payload,
-    memory_candidates: recentMemories.map((memory) => ({
-      ...(memory.id ? { id: memory.id } : {}),
-      text: memory.text,
-      category: memory.category,
-      ...(memory.created_at ? { created_at: memory.created_at } : {}),
-      ...(typeof memory.confidence === 'number' ? { confidence: memory.confidence } : {}),
-      ...(memory.reason ? { reason: memory.reason } : {}),
-    })),
+    payload: {
+      ...payload,
+      memory_candidates: memoryRecent.memories.map((memory) => ({
+        ...(memory.id ? { id: memory.id } : {}),
+        text: memory.text,
+        category: memory.category,
+        ...(memory.created_at ? { created_at: memory.created_at } : {}),
+        ...(typeof memory.confidence === 'number' ? { confidence: memory.confidence } : {}),
+        ...(memory.reason ? { reason: memory.reason } : {}),
+      })),
+    },
+    memoryRecent,
   };
 }
 
@@ -364,7 +515,7 @@ async function sessionHasReviewedMemories(
   recordTelemetry?: RecapTelemetryRecorder,
 ): Promise<boolean> {
   const reviewedMemories = await fetchSessionRecentMemories(payload, sessionId, 'approved', recordTelemetry);
-  return reviewedMemories.length > 0;
+  return reviewedMemories.memories.length > 0;
 }
 
 export function useRecapArtifactsLoader({
@@ -380,6 +531,10 @@ export function useRecapArtifactsLoader({
 
   const recordTelemetry = useCallback<RecapTelemetryRecorder>((observation) => {
     setTelemetry((current) => applyRecapRequestObservation(current, observation));
+  }, []);
+
+  const recordMemoryRecentSkipped = useCallback<MemoryRecentSkipRecorder>((reason) => {
+    setTelemetry((current) => applyMemoryRecentNotRequestedReason(current, reason));
   }, []);
 
   const setObservedStatus = useCallback((nextStatus: RecapPageStatus) => {
@@ -399,6 +554,8 @@ export function useRecapArtifactsLoader({
 
       const recentEndHint = getRecentSessionEndHint();
       const hasRecentEndHint = recentEndHint?.sessionId === sessionId;
+      const historyEntry = useSessionHistoryStore.getState().getSession(sessionId);
+      const sessionTelemetrySnapshot = readLastSessionTelemetrySnapshot(sessionId);
 
       const shouldRetryMemories = (endedAt: string | null | undefined) => {
         return hasRecentEndHint || wasEndedRecently(endedAt);
@@ -435,28 +592,61 @@ export function useRecapArtifactsLoader({
       };
 
       if (artifacts) {
-        const historyEntry = useSessionHistoryStore.getState().getSession(sessionId);
-        const shouldRetryStoredMemories = shouldRetryMemories(artifacts.endedAt || historyEntry?.endedAt);
+        const endedSessionPayload = buildEndedSessionMemoryPayload({
+          artifacts,
+          historyEntry,
+          sessionId,
+          snapshot: sessionTelemetrySnapshot,
+        });
+        const shouldRetryStoredMemories = shouldRetryMemories(
+          artifacts.endedAt || historyEntry?.endedAt || sessionTelemetrySnapshot?.endedAt
+        );
         const hasStoredMemories = Array.isArray(artifacts.memoryCandidates) && artifacts.memoryCandidates.length > 0;
+        const baseStoredPayload = buildArtifactsPayloadFromStore(artifacts, sessionId);
         const storedPayload = {
-          ...buildArtifactsPayloadFromStore(artifacts, sessionId),
-          started_at: artifacts.startedAt || historyEntry?.startedAt,
-          ended_at: artifacts.endedAt || historyEntry?.endedAt,
+          ...baseStoredPayload,
+          ...endedSessionPayload,
+          takeaway: baseStoredPayload.takeaway,
+          reflection_candidate: baseStoredPayload.reflection_candidate,
+          memory_candidates: baseStoredPayload.memory_candidates,
+          builder_artifact: baseStoredPayload.builder_artifact,
+          started_at: artifacts.startedAt || historyEntry?.startedAt || endedSessionPayload?.started_at,
+          ended_at: artifacts.endedAt || historyEntry?.endedAt || sessionTelemetrySnapshot?.endedAt,
         };
 
         if (!hasStoredMemories) {
-          const hydratedStoredArtifacts = await hydrateStoredArtifactsWithRecentMemories(
-            artifacts,
+          const hydratedStored = await hydratePayloadWithRecentMemories(
+            storedPayload,
             sessionId,
-            historyEntry,
             recordTelemetry,
+            recordMemoryRecentSkipped,
           );
+          const hydratedStoredArtifacts = mapBackendArtifactsToRecapV1(hydratedStored.payload, sessionId);
 
           if ((hydratedStoredArtifacts?.memoryCandidates?.length ?? 0) > 0) {
             if (hasRecentEndHint) {
               clearRecentSessionEndHint();
             }
             setArtifacts(sessionId, hydratedStoredArtifacts);
+          } else if (hydratedStored.memoryRecent?.unavailable || (hydratedStored.memoryRecent && !hydratedStored.memoryRecent.ok)) {
+            if (hasRecentEndHint) {
+              clearRecentSessionEndHint();
+            }
+            if (hydratedStoredArtifacts) {
+              setArtifacts(sessionId, hydratedStoredArtifacts);
+            }
+            setObservedStatus('unavailable');
+            return;
+          } else if (isTerminalEmptyMemoryRecent(hydratedStored.memoryRecent)) {
+            if (hasRecentEndHint) {
+              clearRecentSessionEndHint();
+            }
+            if (hydratedStoredArtifacts) {
+              setArtifacts(sessionId, hydratedStoredArtifacts);
+            }
+            useSessionHistoryStore.getState().markRecapViewed(sessionId);
+            setObservedStatus('ready');
+            return;
           } else if (await sessionHasReviewedMemories(storedPayload, sessionId, recordTelemetry)) {
             if (hasRecentEndHint) {
               clearRecentSessionEndHint();
@@ -559,12 +749,41 @@ export function useRecapArtifactsLoader({
               }
             : fallbackTopLevelArtifacts ?? sessionMetadataOnly;
 
-          const hydratedArtifactsPayload = await hydratePayloadWithRecentMemories(artifactsPayload, sessionId, recordTelemetry);
-          const mapped = mapBackendArtifactsToRecapV1(hydratedArtifactsPayload, sessionId);
+          const hydratedArtifacts = await hydratePayloadWithRecentMemories(
+            artifactsPayload,
+            sessionId,
+            recordTelemetry,
+            recordMemoryRecentSkipped,
+          );
+          const mapped = mapBackendArtifactsToRecapV1(hydratedArtifacts.payload, sessionId);
 
           if (mapped) {
             const hasMappedMemories = (mapped.memoryCandidates?.length ?? 0) > 0;
-            const shouldRetryFetchedMemories = shouldRetryMemories(mapped.endedAt || (typeof data?.ended_at === 'string' ? data.ended_at : null));
+            const shouldRetryFetchedMemories = shouldRetryMemories(
+              mapped.endedAt
+              || (typeof data?.ended_at === 'string' ? data.ended_at : null)
+              || historyEntry?.endedAt
+              || sessionTelemetrySnapshot?.endedAt
+            );
+
+            if (!hasMappedMemories && (hydratedArtifacts.memoryRecent?.unavailable || (hydratedArtifacts.memoryRecent && !hydratedArtifacts.memoryRecent.ok))) {
+              if (hasRecentEndHint) {
+                clearRecentSessionEndHint();
+              }
+              setArtifacts(sessionId, mapped);
+              setObservedStatus('unavailable');
+              return;
+            }
+
+            if (!hasMappedMemories && isTerminalEmptyMemoryRecent(hydratedArtifacts.memoryRecent)) {
+              if (hasRecentEndHint) {
+                clearRecentSessionEndHint();
+              }
+              setArtifacts(sessionId, mapped);
+              useSessionHistoryStore.getState().markRecapViewed(sessionId);
+              setObservedStatus('ready');
+              return;
+            }
 
             if (!hasMappedMemories && shouldRetryFetchedMemories) {
               // Freshly ended sessions can briefly return an envelope with no
@@ -595,10 +814,39 @@ export function useRecapArtifactsLoader({
             return;
           }
 
+          const endedSessionPayload = buildEndedSessionMemoryPayload({
+            historyEntry,
+            sessionId,
+            snapshot: sessionTelemetrySnapshot,
+          });
+          if (endedSessionPayload) {
+            const hydratedEnded = await hydratePayloadWithRecentMemories(
+              endedSessionPayload,
+              sessionId,
+              recordTelemetry,
+              recordMemoryRecentSkipped,
+            );
+            const endedMapped = mapBackendArtifactsToRecapV1(hydratedEnded.payload, sessionId);
+            if (endedMapped && (isTerminalEmptyMemoryRecent(hydratedEnded.memoryRecent) || (endedMapped.memoryCandidates?.length ?? 0) > 0)) {
+              if (hasRecentEndHint) {
+                clearRecentSessionEndHint();
+              }
+              setArtifacts(sessionId, endedMapped);
+              useSessionHistoryStore.getState().markRecapViewed(sessionId);
+              setObservedStatus('ready');
+              return;
+            }
+            if (hydratedEnded.memoryRecent?.unavailable || (hydratedEnded.memoryRecent && !hydratedEnded.memoryRecent.ok)) {
+              setObservedStatus('unavailable');
+              return;
+            }
+          }
+
           if (scheduleRecentRetry()) {
             return;
           }
 
+          recordMemoryRecentSkipped('session_not_ended');
           setObservedStatus('processing');
           return;
         }
@@ -619,10 +867,39 @@ export function useRecapArtifactsLoader({
         });
 
         if (response.status === 404) {
+          const endedSessionPayload = buildEndedSessionMemoryPayload({
+            historyEntry,
+            sessionId,
+            snapshot: sessionTelemetrySnapshot,
+          });
+          if (endedSessionPayload) {
+            const hydratedEnded = await hydratePayloadWithRecentMemories(
+              endedSessionPayload,
+              sessionId,
+              recordTelemetry,
+              recordMemoryRecentSkipped,
+            );
+            const endedMapped = mapBackendArtifactsToRecapV1(hydratedEnded.payload, sessionId);
+            if (endedMapped && (isTerminalEmptyMemoryRecent(hydratedEnded.memoryRecent) || (endedMapped.memoryCandidates?.length ?? 0) > 0)) {
+              if (hasRecentEndHint) {
+                clearRecentSessionEndHint();
+              }
+              setArtifacts(sessionId, endedMapped);
+              useSessionHistoryStore.getState().markRecapViewed(sessionId);
+              setObservedStatus('ready');
+              return;
+            }
+            if (hydratedEnded.memoryRecent?.unavailable || (hydratedEnded.memoryRecent && !hydratedEnded.memoryRecent.ok)) {
+              setObservedStatus('unavailable');
+              return;
+            }
+          }
+
           if (scheduleRecentRetry()) {
             return;
           }
 
+          recordMemoryRecentSkipped('session_not_ended');
           setObservedStatus('not_found');
           return;
         }
@@ -670,7 +947,7 @@ export function useRecapArtifactsLoader({
         clearTimeout(retryTimer);
       }
     };
-  }, [sessionId, artifacts, setArtifacts, retryCount, recordTelemetry, setObservedStatus]);
+  }, [sessionId, artifacts, setArtifacts, retryCount, recordTelemetry, recordMemoryRecentSkipped, setObservedStatus]);
 
   const reload = useCallback(() => {
     setStatus('loading');

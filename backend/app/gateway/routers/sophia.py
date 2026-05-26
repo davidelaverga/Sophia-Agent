@@ -166,6 +166,7 @@ class MemoryListResponse(BaseModel):
         default=False,
         description="Whether local review metadata supplied enough status metadata to skip per-memory hydration",
     )
+    empty_reason: str | None = Field(default=None, description="Safe empty-result reason for terminal empty responses")
     trace_id: str | None = Field(default=None, description="Safe request correlation id")
 
 
@@ -485,6 +486,25 @@ def _hydrate_memories_for_review(
         for memory in memories
         if isinstance(memory, dict) and isinstance(memory.get("id"), str) and memory["id"].startswith("local:")
     )
+
+    if session_id and status == "pending_review":
+        filtered = [
+            memory
+            for memory in memories
+            if isinstance(memory, dict)
+            and isinstance(memory.get("metadata"), dict)
+            and memory["metadata"].get("status") == status
+            and _memory_session_id(memory) == session_id
+        ]
+        return filtered, {
+            "source": "local_review_overlay",
+            "local_overlay_count": local_overlay_count,
+            "detail_hydration_count": 0,
+            "skipped_detail_hydration_count": len(memories),
+            "skipped_mem0_hydration_for_session_scope": True,
+            "empty_reason": "no_session_candidates" if not filtered else None,
+        }
+
     detail_hydration_count = 0
     skipped_detail_hydration_count = 0
     hydrated: list[dict] = []
@@ -547,6 +567,7 @@ def _hydrate_memories_for_review(
         "detail_hydration_count": detail_hydration_count,
         "skipped_detail_hydration_count": skipped_detail_hydration_count,
         "skipped_mem0_hydration_for_session_scope": skipped_detail_hydration_count > 0,
+        "empty_reason": "no_session_candidates" if session_id and status == "pending_review" and not filtered else None,
     }
 
 
@@ -924,6 +945,7 @@ async def list_memories(
             skipped_mem0_hydration_for_session_scope=bool(
                 diagnostics.get("skipped_mem0_hydration_for_session_scope")
             ),
+            empty_reason=diagnostics.get("empty_reason") if isinstance(diagnostics.get("empty_reason"), str) else None,
             trace_id=trace_id,
         )
     except Exception as e:

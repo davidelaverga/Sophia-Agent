@@ -33,6 +33,16 @@ export type MemoryRecentEmptyReason =
 
 export type RecapAbortReason = 'timeout' | 'navigation' | 'manual' | 'unknown' | null;
 
+export type MemoryRecentNotRequestedReason =
+  | 'missing_session_id'
+  | 'session_not_ended'
+  | 'disabled_by_status'
+  | 'waiting_for_required_recap_status'
+  | 'already_resolved'
+  | 'already_requested'
+  | 'unknown'
+  | null;
+
 export type RecapRequestKind =
   | 'recap'
   | 'memory_recent_pending_review'
@@ -55,6 +65,8 @@ export type RecapRequestObservation = {
   candidateCount?: number | null;
   source?: MemoryRecentSource | null;
   emptyReason?: MemoryRecentEmptyReason | null;
+  unavailable?: boolean;
+  terminal?: boolean;
   sessionIdIncluded?: boolean;
   nextProxyForwardedSessionId?: boolean;
   gatewayReceivedSessionId?: boolean;
@@ -81,9 +93,11 @@ export type RecapTelemetryState = {
     errorCode: string | null;
     errorSafeMessage: string | null;
     responseShapeKeys: string[];
+    terminalReason: string | null;
   };
   memoryRecent: {
     requested: boolean;
+    memoryRecentNotRequestedReason: MemoryRecentNotRequestedReason;
     frontendPath: string | null;
     sessionIdIncluded: boolean;
     nextProxyForwardedSessionId: boolean;
@@ -97,6 +111,8 @@ export type RecapTelemetryState = {
     candidateCount: number | null;
     source: MemoryRecentSource;
     emptyReason: MemoryRecentEmptyReason;
+    unavailable: boolean;
+    terminal: boolean;
     responseShapeKeys: string[];
     pollCount: number;
     lastPollAt: string | null;
@@ -195,9 +211,11 @@ export type RecapTelemetryReport = {
     lastAbortReason: RecapAbortReason;
     errorCode: string | null;
     errorSafeMessage: string | null;
+    terminalReason: string | null;
   };
   memoryRecent: {
     requested: boolean;
+    memoryRecentNotRequestedReason: MemoryRecentNotRequestedReason;
     frontendPath: string | null;
     sessionIdIncluded: boolean;
     nextProxyForwardedSessionId: boolean;
@@ -211,6 +229,8 @@ export type RecapTelemetryReport = {
     candidateCount: number;
     source: MemoryRecentSource;
     emptyReason: MemoryRecentEmptyReason;
+    unavailable: boolean;
+    terminal: boolean;
     responseShapeKeys: string[];
   };
   artifacts: {
@@ -281,9 +301,11 @@ export function createInitialRecapTelemetryState({
       errorCode: null,
       errorSafeMessage: null,
       responseShapeKeys: [],
+      terminalReason: null,
     },
     memoryRecent: {
       requested: false,
+      memoryRecentNotRequestedReason: 'unknown',
       frontendPath: null,
       sessionIdIncluded: false,
       nextProxyForwardedSessionId: false,
@@ -297,6 +319,8 @@ export function createInitialRecapTelemetryState({
       candidateCount: null,
       source: 'unknown',
       emptyReason: 'unknown',
+      unavailable: false,
+      terminal: false,
       responseShapeKeys: [],
       pollCount: 0,
       lastPollAt: null,
@@ -328,6 +352,32 @@ export function applyRecapPageStatus(
       durationMs: state.recap.startedAt && completedAt
         ? Math.max(0, Date.parse(completedAt) - Date.parse(state.recap.startedAt))
         : state.recap.durationMs,
+    },
+  };
+}
+
+export function applyMemoryRecentNotRequestedReason(
+  state: RecapTelemetryState,
+  reason: NonNullable<MemoryRecentNotRequestedReason>,
+  now = new Date().toISOString(),
+): RecapTelemetryState {
+  if (state.memoryRecent.requested) {
+    return {
+      ...state,
+      updatedAt: now,
+      memoryRecent: {
+        ...state.memoryRecent,
+        memoryRecentNotRequestedReason: 'already_requested',
+      },
+    };
+  }
+
+  return {
+    ...state,
+    updatedAt: now,
+    memoryRecent: {
+      ...state.memoryRecent,
+      memoryRecentNotRequestedReason: reason,
     },
   };
 }
@@ -372,14 +422,25 @@ export function applyRecapRequestObservation(
     ? observation.candidateCount
     : state.memoryRecent.candidateCount;
   const abortCount = state.memoryRecent.abortCount + (observation.aborted ? 1 : 0);
+  const unavailable = Boolean(observation.unavailable);
+  const terminal = Boolean(observation.terminal);
+  const emptyReason = observation.emptyReason ?? state.memoryRecent.emptyReason;
+  const terminalReason = terminal && candidateCount === 0 && emptyReason !== 'unknown'
+    ? emptyReason
+    : state.recap.terminalReason;
 
   return {
     ...state,
     updatedAt,
     requests,
+    recap: {
+      ...state.recap,
+      terminalReason,
+    },
     memoryRecent: {
       ...state.memoryRecent,
       requested: true,
+      memoryRecentNotRequestedReason: null,
       frontendPath: observation.frontendPath,
       sessionIdIncluded: Boolean(observation.sessionIdIncluded),
       nextProxyForwardedSessionId: Boolean(observation.nextProxyForwardedSessionId),
@@ -392,7 +453,9 @@ export function applyRecapRequestObservation(
       lastAbortReason: observation.aborted ? observation.abortReason : state.memoryRecent.lastAbortReason,
       candidateCount,
       source: observation.source ?? state.memoryRecent.source,
-      emptyReason: observation.emptyReason ?? state.memoryRecent.emptyReason,
+      emptyReason,
+      unavailable,
+      terminal,
       responseShapeKeys: observation.responseShapeKeys,
       pollCount: state.memoryRecent.pollCount + 1,
       lastPollAt: observation.startedAt,
@@ -464,9 +527,11 @@ export function buildRecapTelemetryReport({
       lastAbortReason: telemetry.recap.lastAbortReason,
       errorCode: isError ? telemetry.recap.errorCode ?? pageStatus : telemetry.recap.errorCode,
       errorSafeMessage: isError ? telemetry.recap.errorSafeMessage : telemetry.recap.errorSafeMessage,
+      terminalReason: telemetry.recap.terminalReason,
     },
     memoryRecent: {
       requested: telemetry.memoryRecent.requested,
+      memoryRecentNotRequestedReason: telemetry.memoryRecent.memoryRecentNotRequestedReason,
       frontendPath: telemetry.memoryRecent.frontendPath,
       sessionIdIncluded: telemetry.memoryRecent.sessionIdIncluded,
       nextProxyForwardedSessionId: telemetry.memoryRecent.nextProxyForwardedSessionId,
@@ -480,6 +545,8 @@ export function buildRecapTelemetryReport({
       candidateCount: telemetry.memoryRecent.candidateCount ?? memoryCandidateCount,
       source: telemetry.memoryRecent.source,
       emptyReason: telemetry.memoryRecent.emptyReason,
+      unavailable: telemetry.memoryRecent.unavailable,
+      terminal: telemetry.memoryRecent.terminal,
       responseShapeKeys: telemetry.memoryRecent.responseShapeKeys,
     },
     artifacts: {
@@ -777,6 +844,10 @@ function buildWarnings(
     warnings.push('memory_recent_fetch_timed_out');
   }
 
+  if (!telemetry.memoryRecent.requested && telemetry.memoryRecent.memoryRecentNotRequestedReason === 'unknown') {
+    warnings.push('memory_recent_not_requested_without_specific_reason');
+  }
+
   if (telemetry.recap.lastAbortReason === 'timeout') {
     warnings.push('recap_fetch_timed_out');
   }
@@ -800,6 +871,14 @@ function buildNotes(
 
   if (recapStatus === 'no_results') {
     notes.push('no_results_means_no_pending_review_candidates_for_this_session_not_a_recap_transport_failure');
+  }
+
+  if (!telemetry.memoryRecent.requested && telemetry.memoryRecent.memoryRecentNotRequestedReason) {
+    notes.push(`memory_recent_not_requested:${telemetry.memoryRecent.memoryRecentNotRequestedReason}`);
+  }
+
+  if (telemetry.memoryRecent.terminal && telemetry.memoryRecent.emptyReason !== 'unknown') {
+    notes.push(`memory_recent_terminal:${telemetry.memoryRecent.emptyReason}`);
   }
 
   if (telemetry.memoryRecent.source === 'local_review_overlay') {
