@@ -21,11 +21,12 @@ from deerflow.sophia.session_store import SessionRecord, SessionStore
 def client():
     """Create a test client with the Sophia router."""
     from app.gateway.auth import require_authorized_user_scope
-    from app.gateway.routers.sophia import internal_router, router
+    from app.gateway.routers.sophia import internal_router, overlay_internal_router, router
 
     app = FastAPI()
     app.include_router(router)
     app.include_router(internal_router)
+    app.include_router(overlay_internal_router)
     app.dependency_overrides[require_authorized_user_scope] = lambda: "test_user"
     return TestClient(app)
 
@@ -2304,4 +2305,50 @@ class TestSessionEnd:
             "/api/sophia/user;hack/end-session",
             json={"session_id": "s1", "thread_id": "t1"},
         )
+        assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# /internal/sophia-overlay/{user_id} — HTTP-bridge for langgraph reads
+# (May 2026: gateway and langgraph have separate Render disks)
+# ---------------------------------------------------------------------------
+
+
+class TestOverlayInternalEndpoint:
+    """The langgraph service fetches the gateway's local overlay store via
+    this endpoint so per-turn retrieval can see overlay writes made by the
+    gateway's create_memory + offline pipeline."""
+
+    def test_returns_disk_store_for_valid_user(self, client, tmp_path):
+        from deerflow.sophia import review_metadata_store as store
+
+        with patch.object(store, "USERS_DIR", tmp_path):
+            store.upsert_review_metadata(
+                "valid_user",
+                content="Bridge test entry",
+                metadata={"status": "approved", "category": "fact"},
+                session_id="sess_bridge",
+            )
+
+            resp = client.get("/internal/sophia-overlay/valid_user")
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["version"] == 1
+        assert any(
+            entry.get("content") == "Bridge test entry"
+            for entry in payload["entries"]
+        )
+
+    def test_returns_empty_store_for_unknown_user(self, client, tmp_path):
+        from deerflow.sophia import review_metadata_store as store
+
+        with patch.object(store, "USERS_DIR", tmp_path):
+            resp = client.get("/internal/sophia-overlay/never_seen_user")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"version": 1, "entries": []}
+
+    def test_rejects_invalid_user_id(self, client):
+        resp = client.get("/internal/sophia-overlay/has;semicolon")
         assert resp.status_code == 400

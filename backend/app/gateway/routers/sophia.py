@@ -50,6 +50,38 @@ router = APIRouter(
 )
 internal_router = APIRouter(prefix="/internal/sophia-realtime", tags=["sophia-realtime-internal"])
 
+# HTTP-bridge endpoint for the per-turn retrieval middleware running on the
+# langgraph service to read the gateway's local review_metadata overlay.
+# See ``review_metadata_store.py`` module docstring for the full rationale
+# (gateway + langgraph have separate Render disks; gateway is the sole
+# writer; this endpoint lets langgraph see those writes).
+overlay_internal_router = APIRouter(prefix="/internal/sophia-overlay", tags=["sophia-overlay-internal"])
+
+
+@overlay_internal_router.get(
+    "/{user_id}",
+    summary="Internal: return raw review_metadata overlay for HTTP-bridge readers",
+)
+async def get_review_overlay(user_id: str) -> dict[str, Any]:
+    """Return the gateway's local overlay store for ``user_id``.
+
+    Mounted on the internal prefix with no public-facing auth — relies on
+    Render's private network isolation (only services in the same project
+    can reach internal endpoints). Used exclusively by the langgraph
+    service's ``Mem0RetrievalMiddleware`` so per-turn retrieval can see
+    memories written by the gateway-side ``create_memory`` endpoint and
+    the offline pipeline.
+    """
+    from deerflow.sophia.review_metadata_store import _load_store_from_disk
+
+    try:
+        return _load_store_from_disk(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user_id")
+    except Exception:
+        logger.warning("Overlay HTTP-bridge read failed for %s", user_id, exc_info=True)
+        raise HTTPException(status_code=503, detail="Overlay unavailable")
+
 # Strong references to background tasks to prevent GC cancellation
 _background_tasks: set = set()
 _session_store = SessionStore()
