@@ -26,6 +26,7 @@ import type {
   OpenSessionsResponse,
   SessionListResponse,
   SessionUpdateRequest,
+  SessionMessagesPersistRequest,
   SessionMessagesResponse,
 } from '../../types/session';
 
@@ -462,6 +463,29 @@ export async function getSessionMessages(
   return fetchWithAuth<SessionMessagesResponse>(
     `${SESSIONS_BASE}/${sessionId}/messages${params.size > 0 ? `?${params.toString()}` : ''}`,
     { method: 'GET' }
+  );
+}
+
+/**
+ * Persist an ordered visible transcript snapshot for a session.
+ * Called as messages finalize so history survives refresh/back/close.
+ */
+export async function persistSessionMessages(
+  sessionId: string,
+  body: SessionMessagesPersistRequest,
+  userId?: string
+): Promise<ApiResponse<SessionMessagesResponse>> {
+  const params = new URLSearchParams();
+  if (typeof userId === 'string' && userId.trim()) {
+    params.set('user_id', userId.trim());
+  }
+
+  return fetchWithAuth<SessionMessagesResponse>(
+    `${SESSIONS_BASE}/${sessionId}/messages${params.size > 0 ? `?${params.toString()}` : ''}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }
   );
 }
 

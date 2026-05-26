@@ -486,6 +486,78 @@ def test_get_session_messages_strips_tool_use_metadata_from_ai_content(isolated_
             },
         ],
     }
+    stored_messages = isolated_session_store.list_messages("dev-user", "session-with-tool-blocks")
+    assert [message.content for message in stored_messages] == [
+        "I still miss him.",
+        "Two years in, and you're still asking about it.",
+    ]
+
+
+def test_persist_session_messages_writes_durable_transcript(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="session-with-transcript",
+            thread_id="thread-with-transcript",
+            user_id="dev-user",
+            status="open",
+        )
+    )
+
+    response = client.put(
+        "/api/v1/sessions/session-with-transcript/messages?user_id=dev-user",
+        json={
+            "thread_id": "thread-with-transcript",
+            "messages": [
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "content": "This is a session persistence test.",
+                    "created_at": "2026-04-15T00:01:00+00:00",
+                    "source": "text",
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "content": "I am tracking the thread with you.",
+                    "created_at": "2026-04-15T00:01:05+00:00",
+                    "source": "voice",
+                    "approximate": True,
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "session_id": "session-with-transcript",
+        "thread_id": "thread-with-transcript",
+        "messages": [
+            {
+                "id": "user-1",
+                "role": "user",
+                "content": "This is a session persistence test.",
+                "created_at": "2026-04-15T00:01:00+00:00",
+            },
+            {
+                "id": "assistant-1",
+                "role": "sophia",
+                "content": "I am tracking the thread with you.",
+                "created_at": "2026-04-15T00:01:05+00:00",
+            },
+        ],
+    }
+
+    stored_messages = isolated_session_store.list_messages("dev-user", "session-with-transcript")
+    assert len(stored_messages) == 2
+    assert stored_messages[1].source == "voice"
+    assert stored_messages[1].approximate is True
+
+    with patch("app.gateway.routers.sessions.httpx.AsyncClient") as mock_client_cls:
+        get_response = client.get("/api/v1/sessions/session-with-transcript/messages?user_id=dev-user")
+
+    assert get_response.status_code == 200
+    assert get_response.json()["messages"][0]["content"] == "This is a session persistence test."
+    mock_client_cls.assert_not_called()
 
 
 @pytest.mark.parametrize(

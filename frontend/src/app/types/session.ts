@@ -313,6 +313,33 @@ export interface SessionMessagesResponse {
 }
 
 /**
+ * PUT /api/v1/sessions/{id}/messages - Request message
+ */
+export interface SessionMessagePersistItem {
+  id?: string;
+  message_id?: string;
+  role: 'user' | 'assistant' | 'sophia' | 'system' | 'tool' | 'artifact';
+  content: string;
+  created_at?: string | null;
+  source?: string | null;
+  final?: boolean;
+  incomplete?: boolean;
+  approximate?: boolean;
+  turn_id?: string | null;
+  provider_event_id?: string | null;
+  redaction_level?: 'none' | 'private' | 'diagnostic_only';
+}
+
+/**
+ * PUT /api/v1/sessions/{id}/messages - Request
+ */
+export interface SessionMessagesPersistRequest {
+  user_id?: string;
+  thread_id?: string | null;
+  messages: SessionMessagePersistItem[];
+}
+
+/**
  * POST /api/v1/sessions/micro-briefing - Request
  */
 export interface MicroBriefingRequest {

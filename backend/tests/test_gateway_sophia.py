@@ -1595,6 +1595,12 @@ class TestSessionEnd:
         queued_state = mock_queue.call_args.args[3]
         assert queued_state is not None
         assert queued_state["messages"][0]["content"] == "I needed to talk this through."
+        transcript = store.list_messages("test_user", "sess-001")
+        assert [message.role for message in transcript] == ["user", "assistant"]
+        assert [message.content for message in transcript] == [
+            "I needed to talk this through.",
+            "You stayed with it.",
+        ]
 
     def test_duplicate_end_session_reuses_existing_recap_and_queues_once(self, client, tmp_path):
         store = SessionStore(tmp_path)
@@ -1641,6 +1647,7 @@ class TestSessionEnd:
         assert record is not None
         assert record.status == "ended"
         assert record.ended_at == "2026-04-05T10:00:00+00:00"
+        assert len(store.list_messages("test_user", "sess-dupe")) == 2
 
     def test_missing_session_id_returns_422(self, client):
         resp = client.post(

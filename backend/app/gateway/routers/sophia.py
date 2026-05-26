@@ -31,7 +31,7 @@ from deerflow.sophia.review_metadata_store import (
     remove_review_metadata,
     upsert_review_metadata,
 )
-from deerflow.sophia.session_store import SessionRecord, SessionStore
+from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -622,6 +622,39 @@ def _build_thread_state_from_end_request(body: SessionEndRequest) -> dict | None
         thread_state["artifacts"] = [recap_artifacts]
 
     return thread_state
+
+
+def _persist_end_session_transcript(user_id: str, body: SessionEndRequest) -> None:
+    if not body.messages:
+        return
+
+    owner_user_id, record = _resolve_session_record_owner(user_id, body.session_id)
+    if record is None:
+        return
+
+    records: list[SessionMessageRecord] = []
+    for index, message in enumerate(body.messages):
+        content = message.content.strip()
+        if not content:
+            continue
+        role = "assistant" if message.role in {"assistant", "sophia"} else message.role
+        if role not in {"user", "assistant", "system", "tool", "artifact"}:
+            continue
+        records.append(
+            SessionMessageRecord(
+                message_id=f"{body.session_id}-end-{index}",
+                session_id=body.session_id,
+                thread_id=body.thread_id or record.thread_id,
+                role=role,
+                content=content,
+                created_at=message.created_at or datetime.now(UTC).isoformat(),
+                source=body.platform or record.platform or "text",
+                final=True,
+            )
+        )
+
+    if records:
+        _session_store.replace_messages(owner_user_id, body.session_id, records)
 
 
 def _build_debrief_prompt(body: SessionEndRequest, recap_artifacts: dict | None, duration_minutes: int) -> str | None:
@@ -1799,6 +1832,7 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
 
     if isinstance(existing_recap, dict):
         existing_ended_at = existing_recap.get("ended_at") if isinstance(existing_recap.get("ended_at"), str) else ended_at
+        _persist_end_session_transcript(user_id, body)
         _mark_session_record_ended(user_id, body.session_id, existing_ended_at)
         try:
             from app.gateway.inactivity_watcher import unregister_thread
@@ -1838,6 +1872,7 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
         logger.warning("Failed to persist recap for %s/%s: %s", user_id, body.session_id, e)
 
     _mark_session_record_ended(user_id, body.session_id, ended_at)
+    _persist_end_session_transcript(user_id, body)
 
     # Remove from inactivity tracking — session explicitly ended
     try:

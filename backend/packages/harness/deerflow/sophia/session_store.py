@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 SessionStatus = Literal["open", "paused", "ended"]
+SessionMessageRole = Literal["user", "assistant", "system", "tool", "artifact"]
 
 
 class SessionRecord(BaseModel):
@@ -43,6 +44,23 @@ class SessionRecord(BaseModel):
     focus_cue: str | None = None
 
 
+class SessionMessageRecord(BaseModel):
+    """Persistent ordered transcript message for a Sophia session."""
+
+    message_id: str
+    session_id: str
+    thread_id: str
+    role: SessionMessageRole
+    content: str
+    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+    source: str = "text"
+    final: bool = True
+    approximate: bool = False
+    turn_id: str | None = None
+    provider_event_id: str | None = None
+    redaction_level: str = "none"
+
+
 # ---------------------------------------------------------------------------
 # Store
 # ---------------------------------------------------------------------------
@@ -56,6 +74,7 @@ class SessionStore:
     File layout::
 
         {base_path}/{user_id}/sessions/{session_id}.json
+        {base_path}/{user_id}/transcripts/{session_id}.json
     """
 
     def __init__(self, base_path: Path | None = None) -> None:
@@ -68,6 +87,12 @@ class SessionStore:
 
     def _session_path(self, user_id: str, session_id: str) -> Path:
         return self._user_dir(user_id) / f"{session_id}.json"
+
+    def _transcript_dir(self, user_id: str) -> Path:
+        return self._base / user_id / "transcripts"
+
+    def _transcript_path(self, user_id: str, session_id: str) -> Path:
+        return self._transcript_dir(user_id) / f"{session_id}.json"
 
     def _write(self, record: SessionRecord) -> None:
         path = self._session_path(record.user_id, record.session_id)
@@ -83,6 +108,37 @@ class SessionStore:
         except (json.JSONDecodeError, Exception):
             logger.warning("Corrupt session file: %s", path)
             return None
+
+    def _write_messages(self, user_id: str, session_id: str, messages: list[SessionMessageRecord]) -> None:
+        path = self._transcript_path(user_id, session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "session_id": session_id,
+            "updated_at": datetime.now(UTC).isoformat(),
+            "messages": [message.model_dump() for message in messages],
+        }
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _read_messages(self, user_id: str, session_id: str) -> list[SessionMessageRecord]:
+        path = self._transcript_path(user_id, session_id)
+        if not path.is_file():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            raw_messages = data.get("messages", []) if isinstance(data, dict) else data
+            if not isinstance(raw_messages, list):
+                return []
+            messages: list[SessionMessageRecord] = []
+            for item in raw_messages:
+                if not isinstance(item, dict):
+                    continue
+                message = SessionMessageRecord.model_validate(item)
+                if message.session_id == session_id:
+                    messages.append(message)
+            return messages
+        except (json.JSONDecodeError, Exception):
+            logger.warning("Corrupt session transcript file: %s", path)
+            return []
 
     # -- public API ----------------------------------------------------------
 
@@ -127,6 +183,11 @@ class SessionStore:
         if not path.is_file():
             return False
         path.unlink()
+        transcript_path = self._transcript_path(user_id, session_id)
+        try:
+            transcript_path.unlink()
+        except FileNotFoundError:
+            pass
         return True
 
     def delete_all(self, user_id: str) -> list[SessionRecord]:
@@ -145,8 +206,60 @@ class SessionStore:
             except FileNotFoundError:
                 continue
 
+        transcript_dir = self._transcript_dir(user_id)
+        if transcript_dir.is_dir():
+            for path in transcript_dir.glob("*.json"):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    continue
+
         deleted_records.sort(key=lambda record: record.updated_at, reverse=True)
         return deleted_records
+
+    def list_messages(self, user_id: str, session_id: str) -> list[SessionMessageRecord]:
+        """Return the durable ordered transcript for a session."""
+        return self._read_messages(user_id, session_id)
+
+    def replace_messages(
+        self,
+        user_id: str,
+        session_id: str,
+        messages: list[SessionMessageRecord],
+    ) -> list[SessionMessageRecord]:
+        """Replace the transcript atomically with an ordered visible transcript snapshot."""
+        filtered = [message for message in messages if message.session_id == session_id]
+        self._write_messages(user_id, session_id, filtered)
+        return filtered
+
+    def append_message(
+        self,
+        user_id: str,
+        session_id: str,
+        message: SessionMessageRecord,
+    ) -> list[SessionMessageRecord]:
+        """Append or update one transcript message without duplicating provider retries."""
+        messages = self._read_messages(user_id, session_id)
+        dedupe_key = (
+            ("provider_event_id", message.provider_event_id)
+            if message.provider_event_id
+            else ("message_id", message.message_id)
+        )
+        replaced = False
+        for index, existing in enumerate(messages):
+            existing_key = (
+                ("provider_event_id", existing.provider_event_id)
+                if existing.provider_event_id
+                else ("message_id", existing.message_id)
+            )
+            if existing_key == dedupe_key:
+                messages[index] = message
+                replaced = True
+                break
+        if not replaced:
+            messages.append(message)
+        self._write_messages(user_id, session_id, messages)
+        return messages
 
     def list_open(self, user_id: str) -> list[SessionRecord]:
         """Return all resumable sessions for a user, newest first."""
