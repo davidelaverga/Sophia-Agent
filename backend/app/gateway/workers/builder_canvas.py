@@ -232,6 +232,14 @@ class BuilderCanvasWorker:
             return None
         return sequence
 
+    def _completion_run_id_locked(self, parent_thread_id: str, task_id: str, run_id: Any) -> str | None:
+        if isinstance(run_id, str) and run_id:
+            return run_id
+        active = self._active.get(parent_thread_id)
+        if active is not None and active[0] == task_id:
+            return active[1]
+        return None
+
     async def _publish_event(self, event: dict[str, Any]) -> int:
         parent_thread_id = event["parent_thread_id"]
         key = (parent_thread_id, event["task_id"], event["run_id"])
@@ -280,12 +288,16 @@ class BuilderCanvasWorker:
     async def publish_completion(self, payload: dict[str, Any]) -> int:
         parent = payload.get("thread_id")
         task_id = payload.get("task_id")
-        run_id = payload.get("run_id")
-        if not all(isinstance(value, str) and value for value in (parent, task_id, run_id)):
+        if not all(isinstance(value, str) and value for value in (parent, task_id)):
             return 0
-        key = (parent, task_id, run_id)
         async with self._lock:
+            run_id = self._completion_run_id_locked(parent, task_id, payload.get("run_id"))
+            if run_id is None:
+                return 0
+            key = (parent, task_id, run_id)
             sequence = self._last_sequence.get(key, 0) + 1
+        completion = {**payload, "run_id": run_id}
+        key = (parent, task_id, run_id)
         event = {
             "version": 1,
             "event_id": f"{task_id}:{run_id}:{sequence}",
@@ -296,7 +308,7 @@ class BuilderCanvasWorker:
             "occurred_at": payload.get("completed_at") or _now_iso(),
             "kind": "terminal",
             "status": _public_terminal_status(payload.get("status")),
-            "completion": payload,
+            "completion": completion,
         }
         return await self._publish_event(event)
 

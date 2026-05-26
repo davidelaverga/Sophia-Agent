@@ -106,11 +106,7 @@ function applySnapshot(current: BuilderCanvasState, snapshot: BuilderCanvasSnaps
     : false;
 
   if (!snapshotTask || !sameRun) {
-    const retiredRuns = new Set(current.retiredRuns);
-    if (currentTask && snapshotTask) {
-      retiredRuns.add(taskRunKey(currentTask));
-    }
-    return { ...snapshotState, retiredRuns };
+    return { ...snapshotState, retiredRuns: current.retiredRuns };
   }
 
   const currentRunEvents = current.recentEvents.filter((event) => eventMatchesTask(event, snapshotTask));

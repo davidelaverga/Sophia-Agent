@@ -208,6 +208,54 @@ describe('useBuilderCanvas', () => {
     expect(result.current.completion).toBeNull();
   });
 
+  it('does not retire a live stream run when a stale snapshot reports a different run', async () => {
+    mockFetchSnapshots(SNAPSHOT, SNAPSHOT);
+
+    const { result } = renderHook(() => useBuilderCanvas('thread-1'));
+    await waitFor(() => expect(result.current.activeTask?.run_id).toBe('run-1'));
+
+    act(() => {
+      FakeEventSource.instances[0].emit({
+        version: 1,
+        event_id: 'task-1:run-2:1',
+        sequence: 1,
+        parent_thread_id: 'thread-1',
+        task_id: 'task-1',
+        run_id: 'run-2',
+        occurred_at: '2026-05-25T10:00:01Z',
+        kind: 'progress',
+        status: 'running',
+        activity: { kind: 'phase', phase: 'drafting', label: 'Drafting live run' },
+      });
+    });
+
+    await waitFor(() => expect(result.current.activeTask?.run_id).toBe('run-2'));
+
+    act(() => {
+      FakeEventSource.instances[0].onerror?.();
+    });
+
+    await waitFor(() => expect(result.current.activeTask?.run_id).toBe('run-1'));
+
+    act(() => {
+      FakeEventSource.instances[0].emit({
+        version: 1,
+        event_id: 'task-1:run-2:2',
+        sequence: 2,
+        parent_thread_id: 'thread-1',
+        task_id: 'task-1',
+        run_id: 'run-2',
+        occurred_at: '2026-05-25T10:00:02Z',
+        kind: 'progress',
+        status: 'running',
+        activity: { kind: 'phase', phase: 'finalizing', label: 'Finalizing live run' },
+      });
+    });
+
+    expect(result.current.activeTask?.run_id).toBe('run-2');
+    expect(result.current.activeTask?.latest_activity?.label).toBe('Finalizing live run');
+  });
+
   it('ignores stale terminal snapshot events when a newer active run exists', async () => {
     const oldCompletion = { thread_id: 'thread-1', task_id: 'task-1', run_id: 'run-1', status: 'success' } as const;
     const oldTerminal: BuilderCanvasEventV1 = {

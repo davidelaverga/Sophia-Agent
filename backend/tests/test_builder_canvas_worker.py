@@ -72,6 +72,55 @@ async def test_terminal_closes_run_and_replay_starts_after_event_id() -> None:
 
 
 @pytest.mark.anyio
+async def test_completion_without_run_id_uses_active_same_task_run() -> None:
+    worker = BuilderCanvasWorker()
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "starting"},
+        }
+    )
+
+    delivered = await worker.publish_completion(
+        {"thread_id": "parent-1", "task_id": "task-1", "status": "success"}
+    )
+
+    events = await worker.recent_events("parent-1")
+    assert delivered == 0
+    assert events[-1]["kind"] == "terminal"
+    assert events[-1]["run_id"] == "run-1"
+    assert events[-1]["completion"]["run_id"] == "run-1"
+
+
+@pytest.mark.anyio
+async def test_completion_without_run_id_does_not_close_different_active_task() -> None:
+    worker = BuilderCanvasWorker()
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-active",
+            "run_id": "run-active",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "starting"},
+        }
+    )
+
+    delivered = await worker.publish_completion(
+        {"thread_id": "parent-1", "task_id": "task-missing", "status": "success"}
+    )
+
+    events = await worker.recent_events("parent-1")
+    assert delivered == 0
+    assert len(events) == 1
+    assert events[0]["task_id"] == "task-active"
+
+
+@pytest.mark.anyio
 async def test_done_phase_is_projected_to_browser_activity() -> None:
     worker = BuilderCanvasWorker()
     await worker.publish_progress(
