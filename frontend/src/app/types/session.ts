@@ -145,9 +145,14 @@ export interface SessionEndRequest {
   turn_count?: number;
   platform?: 'voice' | 'text' | 'ios_voice';
   messages?: Array<{
+    id?: string;
+    message_id?: string;
     role: 'user' | 'assistant' | 'system';
     content: string;
     created_at?: string;
+    source?: 'voice' | 'text';
+    final?: boolean;
+    incomplete?: boolean;
   }>;
   recap_artifacts?: {
     takeaway?: string;

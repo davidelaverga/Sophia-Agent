@@ -106,6 +106,7 @@ describe('useSessionStreamPersistence', () => {
         messages: [
           {
             id: 'user-1',
+            message_id: 'user-1',
             role: 'user',
             content: 'restore this later',
             created_at: '2026-04-15T00:01:00.000Z',
@@ -115,6 +116,7 @@ describe('useSessionStreamPersistence', () => {
           },
           {
             id: 'assistant-1',
+            message_id: 'assistant-1',
             role: 'assistant',
             content: 'I will keep the thread warm.',
             created_at: '2026-04-15T00:01:05.000Z',
@@ -126,5 +128,116 @@ describe('useSessionStreamPersistence', () => {
       },
       'user-1',
     );
+  });
+
+  it('does not persist a UI-only fallback greeting', async () => {
+    const updateMessages = vi.fn();
+
+    useSessionStore.setState((state) => ({
+      session: state.session
+        ? {
+            ...state.session,
+            greetingMessageId: 'greeting-1',
+          }
+        : state.session,
+    }));
+
+    renderHook(() =>
+      useSessionStreamPersistence({
+        messages: [
+          {
+            id: 'greeting-1',
+            role: 'assistant',
+            content: "I'm here with you. What's on your mind?",
+            createdAt: '2026-04-15T00:00:00.000Z',
+          },
+        ],
+        chatStatus: 'ready',
+        updateMessages,
+      })
+    );
+
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(persistSessionMessagesMock).not.toHaveBeenCalled();
+  });
+
+  it('persists only finalized visible messages while an assistant response is streaming', async () => {
+    const updateMessages = vi.fn();
+
+    renderHook(() =>
+      useSessionStreamPersistence({
+        messages: [
+          {
+            id: 'user-1',
+            role: 'user',
+            content: 'Can you repeat that?',
+            createdAt: '2026-04-15T00:01:00.000Z',
+          },
+          {
+            id: 'assistant-streaming',
+            role: 'assistant',
+            content: 'Of co',
+            createdAt: '2026-04-15T00:01:03.000Z',
+          },
+        ],
+        chatStatus: 'streaming',
+        updateMessages,
+      })
+    );
+
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect(persistSessionMessagesMock).toHaveBeenCalledWith(
+      '11111111-1111-4111-8111-111111111111',
+      {
+        user_id: 'user-1',
+        thread_id: 'thread-1',
+        messages: [
+          {
+            id: 'user-1',
+            message_id: 'user-1',
+            role: 'user',
+            content: 'Can you repeat that?',
+            created_at: '2026-04-15T00:01:00.000Z',
+            source: 'text',
+            final: true,
+            incomplete: false,
+          },
+        ],
+      },
+      'user-1',
+    );
+  });
+
+  it('uses stable message ids across repeated transcript persistence calls', async () => {
+    const updateMessages = vi.fn();
+    const messages = [
+      {
+        id: 'user-1',
+        role: 'user' as const,
+        content: 'green harbor notebook',
+        createdAt: '2026-04-15T00:01:00.000Z',
+      },
+    ];
+
+    const { rerender } = renderHook(
+      ({ nextMessages }) =>
+        useSessionStreamPersistence({
+          messages: nextMessages,
+          chatStatus: 'ready',
+          updateMessages,
+        }),
+      { initialProps: { nextMessages: messages } },
+    );
+
+    await vi.advanceTimersByTimeAsync(200);
+    rerender({ nextMessages: [...messages] });
+    await vi.advanceTimersByTimeAsync(200);
+
+    const firstPayload = persistSessionMessagesMock.mock.calls[0]?.[1] as { messages: Array<{ message_id: string }> };
+    const secondPayload = persistSessionMessagesMock.mock.calls[1]?.[1] as { messages: Array<{ message_id: string }> };
+    expect(firstPayload.messages[0].message_id).toBe('user-1');
+    expect(secondPayload.messages[0].message_id).toBe('user-1');
   });
 });

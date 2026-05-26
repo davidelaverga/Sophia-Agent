@@ -52,7 +52,10 @@ def mock_mem0():
 @pytest.fixture(autouse=True)
 def mock_review_store():
     with (
-        patch("app.gateway.routers.sophia.apply_review_metadata_overlays", side_effect=lambda _user_id, memories: memories) as mock_apply,
+        patch(
+            "app.gateway.routers.sophia.apply_review_metadata_overlays",
+            side_effect=lambda _user_id, memories, **_kwargs: memories,
+        ) as mock_apply,
         patch("app.gateway.routers.sophia.upsert_review_metadata") as mock_upsert,
         patch("app.gateway.routers.sophia.remove_review_metadata") as mock_remove,
     ):
@@ -870,7 +873,7 @@ class TestListMemories:
 
     def test_recent_memory_diagnostics_reports_session_id_received(self, client, mock_mem0, mock_review_store):
         mock_mem0.get_all.return_value = [
-            {"id": "m1", "memory": "Needs review", "metadata": {"status": "pending_review"}},
+            {"id": "m1", "memory": "Needs review", "metadata": {"status": "pending_review", "session_id": "sess-1"}},
         ]
 
         resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review&session_id=sess-1")
@@ -880,6 +883,37 @@ class TestListMemories:
         assert data["session_id_received"] is True
         assert data["candidate_count"] == data["count"] == 1
         assert data["trace_id"].startswith("memrecent-")
+
+    def test_session_scoped_pending_review_uses_local_review_overlay(self, client, mock_mem0, mock_review_store):
+        mock_mem0.get_all.return_value = []
+        mock_review_store["apply"].side_effect = None
+        mock_review_store["apply"].return_value = [
+            {
+                "id": "local:target",
+                "session_id": "sess-target",
+                "memory": "Fresh target recap memory",
+                "metadata": {"status": "pending_review", "category": "lesson"},
+                "updated_at": "2026-04-17T15:12:23.465604+00:00",
+            },
+            {
+                "id": "local:other",
+                "session_id": "sess-other",
+                "memory": "Other recap memory",
+                "metadata": {"status": "pending_review", "category": "lesson"},
+                "updated_at": "2026-04-17T15:13:23.465604+00:00",
+            },
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review&session_id=sess-target")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["source"] == "local_review_overlay"
+        assert data["session_id_received"] is True
+        assert data["local_overlay_count"] == 2
+        assert data["count"] == 1
+        assert data["memories"][0]["id"] == "local:target"
+        assert mock_review_store["apply"].call_args.kwargs["session_id"] == "sess-target"
 
     def test_global_hydration_path_reports_safe_source(self, client, mock_mem0):
         mock_mem0.get_all.return_value = [

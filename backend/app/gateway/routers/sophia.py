@@ -35,6 +35,7 @@ from deerflow.sophia.session_store import (
     SessionMessageRecord,
     SessionRecord,
     SessionStore,
+    canonical_visible_messages,
     derive_message_id,
 )
 
@@ -286,9 +287,18 @@ class CategoryMemoryResponse(BaseModel):
 
 
 class SessionMessageInput(BaseModel):
+    id: str | None = Field(default=None, description="Stable client message ID")
+    message_id: str | None = Field(default=None, description="Stable provider/backend message ID")
     role: str = Field(..., description="Message role")
     content: str = Field(default="", description="Message text content")
     created_at: str | None = Field(default=None, description="Client timestamp")
+    source: str | None = Field(default=None, description="Client/source transport")
+    final: bool | None = Field(default=None, description="Whether message content is finalized")
+    incomplete: bool | None = Field(default=None, description="Whether message was interrupted mid-stream")
+    approximate: bool | None = Field(default=None, description="Whether content is approximate")
+    turn_id: str | None = Field(default=None, description="Stable turn ID")
+    provider_event_id: str | None = Field(default=None, description="Stable provider event ID")
+    redaction_level: str = Field(default="none", description="Redaction level")
 
 
 class SessionRecapArtifactsPayload(BaseModel):
@@ -450,8 +460,26 @@ def _has_memory_status(mem: dict) -> bool:
     return isinstance(metadata, dict) and isinstance(metadata.get("status"), str)
 
 
-def _hydrate_memories_for_review(user_id: str, client, memories: list[dict], status: str | None) -> tuple[list[dict], dict[str, Any]]:
-    memories = apply_review_metadata_overlays(user_id, memories)
+def _memory_session_id(memory: dict) -> str | None:
+    session_id = memory.get("session_id") if isinstance(memory, dict) else None
+    if isinstance(session_id, str) and session_id:
+        return session_id
+
+    metadata = memory.get("metadata") if isinstance(memory, dict) else None
+    metadata_session_id = metadata.get("session_id") if isinstance(metadata, dict) else None
+    return metadata_session_id if isinstance(metadata_session_id, str) and metadata_session_id else None
+
+
+def _hydrate_memories_for_review(
+    user_id: str,
+    client,
+    memories: list[dict],
+    status: str | None,
+    *,
+    session_id: str | None = None,
+) -> tuple[list[dict], dict[str, Any]]:
+    scoped_overlay_session_id = session_id if status == "pending_review" else None
+    memories = apply_review_metadata_overlays(user_id, memories, session_id=scoped_overlay_session_id)
     local_overlay_count = sum(
         1
         for memory in memories
@@ -482,7 +510,7 @@ def _hydrate_memories_for_review(user_id: str, client, memories: list[dict], sta
 
         hydrated.append(merged_memory)
 
-    hydrated = apply_review_metadata_overlays(user_id, hydrated)
+    hydrated = apply_review_metadata_overlays(user_id, hydrated, session_id=scoped_overlay_session_id)
     local_overlay_count = max(
         local_overlay_count,
         sum(
@@ -500,6 +528,9 @@ def _hydrate_memories_for_review(user_id: str, client, memories: list[dict], sta
             for memory in hydrated
             if isinstance(memory.get("metadata"), dict) and memory["metadata"].get("status") == status
         ]
+
+    if session_id and status == "pending_review":
+        filtered = [memory for memory in filtered if _memory_session_id(memory) == session_id]
 
     if not filtered:
         source = "none"
@@ -615,6 +646,8 @@ def _build_thread_state_from_end_request(body: SessionEndRequest) -> dict | None
         }
         for message in body.messages
         if message.content.strip()
+        and (message.role in {"user", "assistant", "sophia"})
+        and (message.final if message.final is not None else not bool(message.incomplete))
     ]
     recap_artifacts = body.recap_artifacts.model_dump(exclude_none=True) if body.recap_artifacts else None
 
@@ -647,34 +680,50 @@ def _persist_end_session_transcript(user_id: str, body: SessionEndRequest) -> No
         return
 
     records: list[SessionMessageRecord] = []
-    for index, message in enumerate(body.messages):
+    for message in body.messages:
         content = message.content.strip()
         if not content:
             continue
         role = "assistant" if message.role in {"assistant", "sophia"} else message.role
-        if role not in {"user", "assistant", "system", "tool", "artifact"}:
+        if role not in {"user", "assistant"}:
+            continue
+        is_final = message.final if message.final is not None else not bool(message.incomplete)
+        if not is_final:
             continue
         records.append(
             SessionMessageRecord(
                 message_id=derive_message_id(
                     session_id=body.session_id,
                     role=role,
-                    sequence=index,
-                    turn_id=f"end-{index}",
+                    sequence=len(records),
+                    message_id=message.message_id or message.id,
+                    turn_id=message.turn_id,
+                    provider_event_id=message.provider_event_id,
+                    content=content,
                 ),
                 session_id=body.session_id,
                 thread_id=body.thread_id or record.thread_id,
                 role=role,
                 content=content,
                 created_at=message.created_at or datetime.now(UTC).isoformat(),
-                source=body.platform or record.platform or "text",
+                source=message.source or body.platform or record.platform or "text",
                 final=True,
-                sequence=index,
+                approximate=bool(message.approximate),
+                turn_id=message.turn_id,
+                provider_event_id=message.provider_event_id,
+                sequence=len(records),
+                redaction_level=message.redaction_level,
             )
         )
 
     if records:
-        _session_store.append_or_upsert_messages(owner_user_id, body.session_id, records)
+        stored_records = _session_store.replace_messages(owner_user_id, body.session_id, records)
+        visible_records = canonical_visible_messages(stored_records)
+        updates: dict[str, object] = {"message_count": len(visible_records)}
+        last_visible = next((message for message in reversed(visible_records) if message.content.strip()), None)
+        if last_visible is not None:
+            updates["last_message_preview"] = last_visible.content.strip()[:200]
+        _session_store.update(owner_user_id, body.session_id, **updates)
 
 
 def _build_debrief_prompt(body: SessionEndRequest, recap_artifacts: dict | None, duration_minutes: int) -> str | None:
@@ -848,7 +897,13 @@ async def list_memories(
         )
         result = client.get_all(filters={"user_id": user_id})
         memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
-        memories_raw, diagnostics = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+        memories_raw, diagnostics = _hydrate_memories_for_review(
+            user_id,
+            client,
+            memories_raw,
+            status,
+            session_id=session_id,
+        )
         memories_raw = _dedupe_memories_by_id(memories_raw)
         items = [_to_memory_item(m) for m in memories_raw]
         logger.info(

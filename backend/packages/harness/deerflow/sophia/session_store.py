@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -108,6 +109,13 @@ class SessionTranscriptStore(Protocol):
         messages: list[SessionMessageRecord],
     ) -> list[SessionMessageRecord]: ...
 
+    def replace_messages(
+        self,
+        user_id: str,
+        session_id: str,
+        messages: list[SessionMessageRecord],
+    ) -> list[SessionMessageRecord]: ...
+
     def list_messages(self, user_id: str, session_id: str) -> list[SessionMessageRecord]: ...
 
     def mark_session_ended(self, user_id: str, session_id: str) -> SessionRecord | None: ...
@@ -158,6 +166,17 @@ def _message_sort_key(message: SessionMessageRecord) -> tuple[int, str, str]:
     return (message.sequence, message.created_at or "", message.message_id)
 
 
+def _normalize_message_content(content: str | None) -> str:
+    return " ".join((content or "").split()).strip()
+
+
+def _message_content_hash(content: str | None) -> str:
+    normalized = _normalize_message_content(content).lower()
+    if not normalized:
+        return ""
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
 def _message_dedupe_key(message: SessionMessageRecord) -> tuple[str, str]:
     if message.provider_event_id:
         return ("provider_event_id", message.provider_event_id)
@@ -174,17 +193,30 @@ def derive_message_id(
     message_id: str | None = None,
     turn_id: str | None = None,
     provider_event_id: str | None = None,
+    content: str | None = None,
 ) -> str:
     """Return a stable id for transcript retry/idempotency.
 
     Client/provider ids are preserved when present. If absent, a deterministic
-    UUIDv5 is derived from session + turn/provider/sequence information.
+    UUIDv5 is derived from session + role plus stable provider/turn and content
+    information. Sequence remains an ordering hint, never the sole identity
+    source when visible content is available.
     """
 
     candidate = (message_id or "").strip()
     if candidate:
         return candidate
-    stable_basis = provider_event_id or turn_id or f"{sequence}:{role}"
+
+    content_hash = _message_content_hash(content)
+    stable_anchor = provider_event_id or turn_id
+    if stable_anchor and content_hash:
+        stable_basis = f"{stable_anchor}:{content_hash}"
+    elif stable_anchor:
+        stable_basis = stable_anchor
+    elif content_hash:
+        stable_basis = f"{sequence}:{content_hash}"
+    else:
+        stable_basis = f"{sequence}:{role}"
     return str(uuid.uuid5(_MESSAGE_ID_NAMESPACE, f"{session_id}:{role}:{stable_basis}"))
 
 
@@ -196,6 +228,77 @@ def _storage_message_row_id(message: SessionMessageRecord) -> str:
         or f"{message.sequence}:{message.role}"
     )
     return str(uuid.uuid5(_MESSAGE_ID_NAMESPACE, f"{message.session_id}:{message.role}:{stable_basis}"))
+
+
+def _message_identity_keys(message: SessionMessageRecord) -> list[tuple[str, str]]:
+    keys: list[tuple[str, str]] = []
+    if message.provider_event_id:
+        keys.append(("provider_event_id", message.provider_event_id))
+    if message.message_id:
+        keys.append(("message_id", message.message_id))
+    if message.turn_id:
+        keys.append(("turn", f"{message.turn_id}:{message.role}"))
+
+    content_hash = _message_content_hash(message.content)
+    if content_hash and message.created_at:
+        keys.append(("content_at", f"{message.role}:{message.created_at}:{content_hash}"))
+    if content_hash:
+        keys.append(("content_order", f"{message.role}:{message.sequence}:{content_hash}"))
+
+    if not keys:
+        keys.append(("row", _storage_message_row_id(message)))
+    return keys
+
+
+def _prefer_message(left: SessionMessageRecord, right: SessionMessageRecord) -> SessionMessageRecord:
+    left_score = (
+        1 if left.final else 0,
+        0 if left.approximate else 1,
+        len(_normalize_message_content(left.content)),
+        left.created_at or "",
+    )
+    right_score = (
+        1 if right.final else 0,
+        0 if right.approximate else 1,
+        len(_normalize_message_content(right.content)),
+        right.created_at or "",
+    )
+    return right if right_score >= left_score else left
+
+
+def canonical_visible_messages(messages: list[SessionMessageRecord]) -> list[SessionMessageRecord]:
+    """Return final, visible transcript messages in deterministic order.
+
+    This is intentionally defensive: production may already contain duplicate
+    rows written by older snapshot/end-session paths with different ids. We keep
+    the most complete copy for matching message ids/provider ids/turn ids and
+    for exact role+timestamp+content collisions.
+    """
+
+    deduped: list[SessionMessageRecord] = []
+    index_by_key: dict[tuple[str, str], int] = {}
+
+    for message in sorted(messages, key=_message_sort_key):
+        if message.role not in {"user", "assistant"}:
+            continue
+        if not message.final:
+            continue
+        if not _normalize_message_content(message.content):
+            continue
+
+        keys = _message_identity_keys(message)
+        existing_index = next((index_by_key[key] for key in keys if key in index_by_key), None)
+        if existing_index is None:
+            index_by_key.update({key: len(deduped) for key in keys})
+            deduped.append(message)
+            continue
+
+        preferred = _prefer_message(deduped[existing_index], message)
+        deduped[existing_index] = preferred
+        for key in _message_identity_keys(preferred):
+            index_by_key[key] = existing_index
+
+    return sorted(deduped, key=_message_sort_key)
 
 
 def _coerce_mode(record: SessionRecord) -> SessionMode:
@@ -533,6 +636,11 @@ class SupabaseSessionTranscriptStore:
     def _table_url(self, table: str) -> str:
         return f"{self._config.url}/rest/v1/{table}"
 
+    def _text_in_filter(self, values: list[str]) -> str:
+        escaped = [value.replace("\\", "\\\\").replace('"', '\\"') for value in values]
+        quoted = [f'"{value}"' for value in escaped]
+        return f"({','.join(quoted)})"
+
     def _request(
         self,
         method: str,
@@ -779,6 +887,52 @@ class SupabaseSessionTranscriptStore:
         )
         return self.list_messages(user_id, session_id)
 
+    def replace_messages(
+        self,
+        user_id: str,
+        session_id: str,
+        messages: list[SessionMessageRecord],
+    ) -> list[SessionMessageRecord]:
+        records = [message for message in messages if message.session_id == session_id]
+        if not records:
+            return self.list_messages(user_id, session_id)
+
+        rows = [self._message_row_from_record(user_id, message) for message in records]
+        canonical_row_ids = [str(row["id"]) for row in rows]
+        self._request(
+            "POST",
+            self._config.messages_table,
+            params={"on_conflict": "id"},
+            json_body=rows,
+            prefer="resolution=merge-duplicates,return=minimal",
+        )
+        self._request(
+            "DELETE",
+            self._config.messages_table,
+            params={
+                "session_id": f"eq.{session_id}",
+                "user_id": f"eq.{user_id}",
+                "id": f"not.in.{self._text_in_filter(canonical_row_ids)}",
+            },
+            prefer="return=minimal",
+        )
+
+        last_message_at = max((message.created_at for message in records if message.created_at), default=None)
+        patch: dict[str, object] = {
+            "transcript_available": True,
+            "updated_at": _now_iso(),
+        }
+        if last_message_at:
+            patch["last_message_at"] = last_message_at
+        self._request(
+            "PATCH",
+            self._config.sessions_table,
+            params={"id": f"eq.{session_id}", "user_id": f"eq.{user_id}"},
+            json_body=patch,
+            prefer="return=minimal",
+        )
+        return self.list_messages(user_id, session_id)
+
     def list_messages(self, user_id: str, session_id: str) -> list[SessionMessageRecord]:
         result = self._request(
             "GET",
@@ -851,20 +1005,6 @@ class SupabaseSessionTranscriptStore:
             prefer="return=minimal",
         )
         return records
-
-    def replace_messages(
-        self,
-        user_id: str,
-        session_id: str,
-        messages: list[SessionMessageRecord],
-    ) -> list[SessionMessageRecord]:
-        self._request(
-            "DELETE",
-            self._config.messages_table,
-            params={"session_id": f"eq.{session_id}", "user_id": f"eq.{user_id}"},
-            prefer="return=minimal",
-        )
-        return self.append_or_upsert_messages(user_id, session_id, messages)
 
     def append_message(
         self,

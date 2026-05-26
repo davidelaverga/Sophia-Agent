@@ -13,6 +13,36 @@ interface UseSessionStreamPersistenceParams {
   updateMessages: (messages: SessionMessage[]) => void;
 }
 
+function normalizeMessageContent(content: string) {
+  return content.trim().replace(/\s+/g, ' ');
+}
+
+function stableContentHash(value: string) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = ((hash << 5) - hash) + value.charCodeAt(index);
+    hash |= 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+function deriveStableMessageId({
+  sessionId,
+  role,
+  content,
+  createdAt,
+  index,
+}: {
+  sessionId: string;
+  role: 'user' | 'assistant';
+  content: string;
+  createdAt: string;
+  index: number;
+}) {
+  const basis = `${sessionId}:${role}:${createdAt}:${stableContentHash(normalizeMessageContent(content).toLowerCase())}:${index}`;
+  return `snapshot-${stableContentHash(basis)}`;
+}
+
 export function useSessionStreamPersistence({
   messages,
   chatStatus,
@@ -27,6 +57,7 @@ export function useSessionStreamPersistence({
     threadId?: string;
     messages: Array<{
       id: string;
+      message_id: string;
       role: 'user' | 'assistant';
       content: string;
       created_at: string;
@@ -118,17 +149,49 @@ export function useSessionStreamPersistence({
       clearTimeout(persistTimerRef.current);
     }
 
+    const isPlaceholderGreeting = (message: SessionMessage, index: number) => (
+      index === 0 &&
+      message.role === 'assistant' &&
+      (
+        message.id === session.greetingMessageId ||
+        message.id === 'greeting-1' ||
+        message.id.startsWith('fallback-')
+      )
+    );
+
     const transcript = toStore
-      .filter((message) => message.role === 'user' || message.role === 'assistant')
-      .map((message) => ({
-        id: message.id,
-        role: message.role,
-        content: message.content,
-        created_at: message.createdAt,
-        source: message.id.startsWith('voice-') ? 'voice' : 'text',
-        final: !message.incomplete,
-        incomplete: Boolean(message.incomplete),
-      }));
+      .filter((message, index) => {
+        if (message.role !== 'user' && message.role !== 'assistant') return false;
+        if (!normalizeMessageContent(message.content)) return false;
+        if (message.role === 'assistant' && message.incomplete) return false;
+        if (isPlaceholderGreeting(message, index)) return false;
+        return true;
+      })
+      .map((message, index) => {
+        const stableId = message.id || deriveStableMessageId({
+          sessionId: session.sessionId,
+          role: message.role,
+          content: message.content,
+          createdAt: message.createdAt,
+          index,
+        });
+        return {
+          id: stableId,
+          message_id: stableId,
+          role: message.role,
+          content: message.content,
+          created_at: message.createdAt,
+          source: message.id.startsWith('voice-') ? 'voice' : 'text',
+          final: !message.incomplete,
+          incomplete: Boolean(message.incomplete),
+        };
+      });
+
+    if (transcript.length === 0) {
+      latestPersistPayloadRef.current = null;
+      return;
+    }
+
     latestPersistPayloadRef.current = {
       sessionId: session.sessionId,
       userId: session.userId,

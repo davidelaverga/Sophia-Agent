@@ -19,6 +19,7 @@ from deerflow.sophia.session_store import (
     SessionMessageRecord,
     SessionRecord,
     SessionStore,
+    canonical_visible_messages,
     derive_message_id,
 )
 
@@ -574,12 +575,14 @@ async def get_session_messages(
         raise HTTPException(status_code=404, detail="Session not found.")
 
     thread_id = record.thread_id
+    durable_records = canonical_visible_messages(_store.list_messages(owner_user_id, session_id))
     durable_messages = [
         _message_record_to_response(message)
-        for message in _store.list_messages(owner_user_id, session_id)
+        for message in durable_records
         if _message_record_to_response(message) is not None
     ]
     if durable_messages:
+        _update_session_from_visible_records(owner_user_id, session_id, durable_records, record)
         return SessionMessagesResponse(
             session_id=session_id,
             thread_id=thread_id,
@@ -651,7 +654,7 @@ async def get_session_messages(
             ))
 
     if messages:
-        _store.append_or_upsert_messages(
+        _store.replace_messages(
             owner_user_id,
             session_id,
             [
@@ -664,6 +667,12 @@ async def get_session_messages(
                 )
                 for index, response in enumerate(messages)
             ],
+        )
+        _update_session_from_visible_records(
+            owner_user_id,
+            session_id,
+            canonical_visible_messages(_store.list_messages(owner_user_id, session_id)),
+            record,
         )
 
     return SessionMessagesResponse(
@@ -690,38 +699,26 @@ async def persist_session_messages(
         raise HTTPException(status_code=404, detail="Session not found.")
 
     thread_id = body.thread_id or record.thread_id
-    records = [
-        message
-        for message in (
-            _persist_input_to_message_record(
-                item,
-                session_id=session_id,
-                thread_id=thread_id,
-                sequence=index,
-            )
-            for index, item in enumerate(body.messages)
+    records: list[SessionMessageRecord] = []
+    for item in body.messages:
+        message = _persist_input_to_message_record(
+            item,
+            session_id=session_id,
+            thread_id=thread_id,
+            sequence=len(records),
         )
-        if message is not None
-    ]
-    stored_records = _store.append_or_upsert_messages(owner_user_id, session_id, records)
-
-    visible_records = [message for message in stored_records if message.role in {"user", "assistant"}]
-    updates: dict[str, object] = {"message_count": sum(1 for message in visible_records if message.role == "user")}
-    last_visible = next((message for message in reversed(visible_records) if message.content.strip()), None)
-    if last_visible is not None:
-        preview = _normalize_message_preview(last_visible.content)
-        if preview:
-            updates["last_message_preview"] = preview
-            if not record.title or record.title.strip().lower() == "new session":
-                updates["title"] = _build_session_title(preview)
-    _store.update(owner_user_id, session_id, **updates)
+        if message is not None:
+            records.append(message)
+    stored_records = _store.replace_messages(owner_user_id, session_id, records)
+    visible_records = canonical_visible_messages(stored_records)
+    _update_session_from_visible_records(owner_user_id, session_id, visible_records, record)
 
     return SessionMessagesResponse(
         session_id=session_id,
         thread_id=thread_id,
         messages=[
             response
-            for response in (_message_record_to_response(message) for message in stored_records)
+            for response in (_message_record_to_response(message) for message in visible_records)
             if response is not None
         ],
     )
@@ -813,6 +810,7 @@ def _response_to_message_record(
             role=role,
             sequence=sequence,
             message_id=response.id,
+            content=response.content,
         ),
         session_id=session_id,
         thread_id=thread_id,
@@ -823,6 +821,23 @@ def _response_to_message_record(
         final=True,
         sequence=sequence,
     )
+
+
+def _update_session_from_visible_records(
+    owner_user_id: str,
+    session_id: str,
+    visible_records: list[SessionMessageRecord],
+    record: SessionRecord,
+) -> None:
+    updates: dict[str, object] = {"message_count": len(visible_records)}
+    last_visible = next((message for message in reversed(visible_records) if message.content.strip()), None)
+    if last_visible is not None:
+        preview = _normalize_message_preview(last_visible.content)
+        if preview:
+            updates["last_message_preview"] = preview
+            if not record.title or record.title.strip().lower() == "new session":
+                updates["title"] = _build_session_title(preview)
+    _store.update(owner_user_id, session_id, **updates)
 
 
 def _persist_input_to_message_record(
@@ -836,6 +851,11 @@ def _persist_input_to_message_record(
     if not content:
         return None
     role = "assistant" if item.role == "sophia" else item.role
+    if role not in {"user", "assistant"}:
+        return None
+    is_final = item.final if item.final is not None else not bool(item.incomplete)
+    if not is_final:
+        return None
     message_id = derive_message_id(
         session_id=session_id,
         role=role,
@@ -843,9 +863,9 @@ def _persist_input_to_message_record(
         message_id=item.message_id or item.id,
         turn_id=item.turn_id,
         provider_event_id=item.provider_event_id,
+        content=content,
     )
     source = item.source or ("voice" if message_id.startswith("voice-") else "text")
-    is_final = item.final if item.final is not None else not bool(item.incomplete)
     return SessionMessageRecord(
         message_id=message_id,
         session_id=session_id,

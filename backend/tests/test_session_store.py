@@ -86,8 +86,19 @@ class FakeSupabasePostgrest:
     def _matches(self, row: dict, params: dict[str, str]) -> bool:
         for key in ("id", "user_id", "session_id"):
             value = params.get(key)
-            if value and value.startswith("eq.") and str(row.get(key)) != value[3:]:
+            if not value:
+                continue
+            if value.startswith("eq.") and str(row.get(key)) != value[3:]:
                 return False
+            if value.startswith("not.in."):
+                raw_values = value.removeprefix("not.in.").strip("()")
+                blocked = {
+                    item.strip().strip('"')
+                    for item in raw_values.split(",")
+                    if item.strip()
+                }
+                if str(row.get(key)) in blocked:
+                    return False
         return True
 
     def _handle_sessions(self, request: httpx.Request, params: dict[str, str]) -> httpx.Response:
@@ -209,6 +220,35 @@ def test_supabase_store_append_and_retry_are_idempotent():
     assert len(messages) == 1
     assert messages[0].content == "final"
     assert fake.sessions["session-1"]["transcript_available"] is True
+
+
+def test_supabase_store_replace_messages_upserts_then_removes_stale_rows():
+    fake = FakeSupabasePostgrest()
+    store = _supabase_store(fake)
+    store.upsert_session(SessionRecord(session_id="session-1", thread_id="thread-1", user_id="user-1"))
+    stale = SessionMessageRecord(
+        message_id="stale-greeting",
+        session_id="session-1",
+        thread_id="thread-1",
+        role="assistant",
+        content="I'm here with you. What's on your mind?",
+        sequence=0,
+    )
+    canonical = SessionMessageRecord(
+        message_id="user-1",
+        session_id="session-1",
+        thread_id="thread-1",
+        role="user",
+        content="green harbor notebook",
+        sequence=0,
+    )
+
+    store.append_or_upsert_messages("user-1", "session-1", [stale])
+    messages = store.replace_messages("user-1", "session-1", [canonical])
+
+    assert len(fake.messages) == 1
+    assert [message.message_id for message in messages] == ["user-1"]
+    assert messages[0].content == "green harbor notebook"
 
 
 def test_supabase_store_user_boundary_blocks_cross_user_reads():

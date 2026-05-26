@@ -65,6 +65,32 @@ def test_apply_review_metadata_overlays_appends_local_only_entries(tmp_path):
         assert overlaid[0]["metadata"]["status"] == "pending_review"
 
 
+def test_apply_review_metadata_overlays_scopes_local_only_entries_by_session(tmp_path):
+    import deerflow.sophia.review_metadata_store as store
+
+    with patch.object(store, "USERS_DIR", tmp_path):
+        store.upsert_review_metadata(
+            "user1",
+            content="Target session pending memory",
+            metadata={"status": "pending_review", "category": "lesson"},
+            session_id="sess_target",
+            sync_state="local_only",
+        )
+        store.upsert_review_metadata(
+            "user1",
+            content="Other session pending memory",
+            metadata={"status": "pending_review", "category": "lesson"},
+            session_id="sess_other",
+            sync_state="local_only",
+        )
+
+        overlaid = store.apply_review_metadata_overlays("user1", [], session_id="sess_target")
+
+        assert len(overlaid) == 1
+        assert overlaid[0]["session_id"] == "sess_target"
+        assert overlaid[0]["memory"] == "Target session pending memory"
+
+
 def test_reconcile_review_metadata_entries_matches_equivalent_real_memory(tmp_path):
     import deerflow.sophia.review_metadata_store as store
 
