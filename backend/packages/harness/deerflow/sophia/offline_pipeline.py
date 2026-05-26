@@ -30,7 +30,7 @@ import httpx
 
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path, validate_user_id
-from deerflow.sophia.extraction import extract_session_memories
+from deerflow.sophia.extraction import analyze_explicit_remember_messages, extract_session_memories
 from deerflow.sophia.handoffs import generate_handoff
 from deerflow.sophia.identity import maybe_update_identity
 from deerflow.sophia.mem0_client import reconcile_review_metadata_with_mem0
@@ -215,13 +215,21 @@ def run_offline_pipeline(
                 }
             )
         extracted_memories = extract_session_memories(
-            user_id, session_id, serialized_messages, session_metadata,
+            user_id,
+            session_id,
+            serialized_messages,
+            session_metadata,
+            require_memory_write=True,
         )
         reconcile_review_metadata_with_mem0(user_id)
         if extraction_scope is not None:
             _mark_memory_extraction_success(
                 extraction_scope,
                 extraction_run_id=extraction_run_id,
+                diagnostics=_build_memory_extraction_diagnostics(
+                    serialized_messages,
+                    extracted_memories,
+                ),
             )
         steps["extraction"] = "ok"
         logger.info(
@@ -434,15 +442,49 @@ def _message_record_to_extraction_message(message: SessionMessageRecord) -> dict
     }
 
 
+def _build_memory_extraction_diagnostics(
+    serialized_messages: list[dict[str, Any]],
+    extracted_memories: list[dict],
+) -> dict[str, Any]:
+    explicit_analysis = analyze_explicit_remember_messages(serialized_messages)
+    rejection_reasons: dict[str, int] = {}
+    for rejection in explicit_analysis["rejections"]:
+        reason = str(rejection.get("reason") or "unknown")
+        rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+
+    candidate_count = len(extracted_memories)
+    no_candidate_reason: str | None = None
+    if candidate_count == 0:
+        no_candidate_reason = "no_candidate"
+        if explicit_analysis["rejections"]:
+            no_candidate_reason = "policy_filtered"
+
+    return {
+        "candidate_count": candidate_count,
+        "explicit_remember_count": explicit_analysis["explicit_count"],
+        "explicit_remember_candidate_count": len(explicit_analysis["entries"]),
+        "explicit_remember_rejection_reasons": rejection_reasons,
+        "no_candidate_reason": no_candidate_reason,
+    }
+
+
 def _mark_memory_extraction_success(
     extraction_scope: dict[str, Any],
     *,
     extraction_run_id: str,
+    diagnostics: dict[str, Any] | None = None,
 ) -> None:
     range_end = extraction_scope.get("range_end")
     if not isinstance(range_end, int):
         return
     store = extraction_scope["store"]
+    record_metadata = dict(extraction_scope["record"].metadata or {})
+    if diagnostics is not None:
+        record_metadata["last_memory_extraction_diagnostics"] = {
+            "range_start": extraction_scope.get("range_start"),
+            "range_end": range_end,
+            **diagnostics,
+        }
     store.update(
         extraction_scope["user_id"],
         extraction_scope["session_id"],
@@ -458,6 +500,7 @@ def _mark_memory_extraction_success(
         memory_extraction_error_code=None,
         memory_extraction_range_start=extraction_scope.get("range_start"),
         memory_extraction_range_end=range_end,
+        metadata=record_metadata,
     )
 
 
