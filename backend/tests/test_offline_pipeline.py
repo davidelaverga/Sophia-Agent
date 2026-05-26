@@ -208,6 +208,407 @@ class TestIdempotency:
 
 
 # ==================================================================
+# Incremental durable transcript extraction
+# ==================================================================
+
+
+class TestIncrementalExtraction:
+    def test_extracts_only_messages_after_processed_until_sequence(self, tmp_path, monkeypatch, mock_steps):
+        from deerflow.sophia import offline_pipeline as module
+        from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
+
+        store = SessionStore(tmp_path / "users")
+        store.create(
+            SessionRecord(
+                session_id="sess_range",
+                thread_id="thread_range",
+                user_id="user_abc",
+                status="ended",
+                memory_processed_until_sequence=20,
+            )
+        )
+        store.replace_messages(
+            "user_abc",
+            "sess_range",
+            [
+                SessionMessageRecord(
+                    message_id=f"m-{sequence}",
+                    session_id="sess_range",
+                    thread_id="thread_range",
+                    role="user" if sequence % 2 else "assistant",
+                    content=f"message {sequence}",
+                    sequence=sequence,
+                )
+                for sequence in range(1, 23)
+            ],
+        )
+        monkeypatch.setattr(module, "SessionStore", lambda: store)
+
+        result = module.run_offline_pipeline(
+            user_id="user_abc",
+            session_id="sess_range",
+            thread_id="thread_range",
+            thread_state=_make_thread_state(),
+        )
+
+        assert result["status"] == "completed"
+        extracted_messages = mock_steps["extraction"].call_args.args[2]
+        metadata = mock_steps["extraction"].call_args.args[3]
+        assert [message["content"] for message in extracted_messages] == ["message 21", "message 22"]
+        assert metadata["sequence_start"] == 21
+        assert metadata["sequence_end"] == 22
+        assert metadata["source_message_ids"] == ["m-21", "m-22"]
+        assert metadata["thread_id"] == "thread_range"
+        assert metadata["extraction_run_id"].startswith("extract-")
+
+        record = store.get("user_abc", "sess_range")
+        assert record is not None
+        assert record.memory_processed_until_sequence == 22
+        assert record.memory_extraction_status == "completed"
+        assert record.memory_extraction_range_start == 21
+        assert record.memory_extraction_range_end == 22
+
+    def test_no_new_messages_skips_extraction(self, tmp_path, monkeypatch, mock_steps):
+        from deerflow.sophia import offline_pipeline as module
+        from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
+
+        store = SessionStore(tmp_path / "users")
+        store.create(
+            SessionRecord(
+                session_id="sess_done",
+                thread_id="thread_done",
+                user_id="user_abc",
+                status="ended",
+                memory_processed_until_sequence=2,
+            )
+        )
+        store.replace_messages(
+            "user_abc",
+            "sess_done",
+            [
+                SessionMessageRecord(
+                    message_id="m-1",
+                    session_id="sess_done",
+                    thread_id="thread_done",
+                    role="user",
+                    content="already handled",
+                    sequence=1,
+                ),
+                SessionMessageRecord(
+                    message_id="m-2",
+                    session_id="sess_done",
+                    thread_id="thread_done",
+                    role="assistant",
+                    content="already handled too",
+                    sequence=2,
+                ),
+            ],
+        )
+        monkeypatch.setattr(module, "SessionStore", lambda: store)
+
+        result = module.run_offline_pipeline(
+            user_id="user_abc",
+            session_id="sess_done",
+            thread_id="thread_done",
+            thread_state=_make_thread_state(),
+        )
+
+        assert result["status"] == "no_new_messages"
+        assert result["steps"]["extraction"] == "no_new_messages"
+        mock_steps["extraction"].assert_not_called()
+
+    def test_failed_extraction_does_not_advance_checkpoint(self, tmp_path, monkeypatch, mock_steps):
+        from deerflow.sophia import offline_pipeline as module
+        from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
+
+        store = SessionStore(tmp_path / "users")
+        store.create(
+            SessionRecord(
+                session_id="sess_fail_checkpoint",
+                thread_id="thread_fail_checkpoint",
+                user_id="user_abc",
+                status="ended",
+                memory_processed_until_sequence=20,
+            )
+        )
+        store.replace_messages(
+            "user_abc",
+            "sess_fail_checkpoint",
+            [
+                SessionMessageRecord(
+                    message_id="m-21",
+                    session_id="sess_fail_checkpoint",
+                    thread_id="thread_fail_checkpoint",
+                    role="user",
+                    content="new segment only",
+                    sequence=21,
+                )
+            ],
+        )
+        monkeypatch.setattr(module, "SessionStore", lambda: store)
+        mock_steps["extraction"].side_effect = RuntimeError("mem0 unavailable")
+
+        result = module.run_offline_pipeline(
+            user_id="user_abc",
+            session_id="sess_fail_checkpoint",
+            thread_id="thread_fail_checkpoint",
+            thread_state=_make_thread_state(),
+        )
+
+        assert result["status"] == "completed"
+        assert result["steps"]["extraction"] == "error"
+        record = store.get("user_abc", "sess_fail_checkpoint")
+        assert record is not None
+        assert record.memory_processed_until_sequence == 20
+        assert record.memory_extraction_status == "error"
+        assert record.memory_extraction_range_start == 21
+        assert record.memory_extraction_range_end == 21
+
+    def test_resumed_range_explicit_remember_preference_creates_one_candidate(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from deerflow.sophia import offline_pipeline as module
+        from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
+
+        store = SessionStore(tmp_path / "users")
+        store.create(
+            SessionRecord(
+                session_id="sess_resumed_explicit",
+                thread_id="thread_resumed_explicit",
+                user_id="user_abc",
+                status="ended",
+                memory_processed_until_sequence=6,
+                recap_processed_until_sequence=6,
+            )
+        )
+        transcript = [
+            ("m-1", "user", "old range preference is sparkling water", 1),
+            ("m-2", "assistant", "Noted earlier.", 2),
+            ("m-3", "user", "old range filler", 3),
+            ("m-4", "assistant", "old range reply", 4),
+            ("m-5", "user", "working project phrase is amber bridge", 5),
+            ("m-6", "assistant", "The phrase is amber bridge.", 6),
+            (
+                "m-7",
+                "user",
+                "I want to continue this same conversation. What was the working project phrase?",
+                7,
+            ),
+            ("m-8", "assistant", "The working project phrase is amber bridge.", 8),
+            (
+                "m-9",
+                "user",
+                "Please remember that my preferred evening tea is chamomile tea because it helps me wind down.",
+                9,
+            ),
+            ("m-10", "assistant", "Got it - chamomile tea for your evening tea preference.", 10),
+        ]
+        store.replace_messages(
+            "user_abc",
+            "sess_resumed_explicit",
+            [
+                SessionMessageRecord(
+                    message_id=message_id,
+                    session_id="sess_resumed_explicit",
+                    thread_id="thread_resumed_explicit",
+                    role=role,
+                    content=content,
+                    sequence=sequence,
+                )
+                for message_id, role, content, sequence in transcript
+            ],
+        )
+        monkeypatch.setattr(module, "SessionStore", lambda: store)
+
+        response = MagicMock()
+        content_block = MagicMock()
+        content_block.text = "[]"
+        response.content = [content_block]
+
+        with patch("deerflow.sophia.extraction.anthropic") as mock_anthropic_mod, \
+            patch("deerflow.sophia.extraction.add_memories") as mock_add_memories, \
+            patch.object(module, "write_session_trace"), \
+            patch.object(module, "reconcile_review_metadata_with_mem0", return_value=0), \
+            patch.object(module, "generate_smart_opener", return_value="How are you feeling today?"), \
+            patch.object(module, "generate_handoff"), \
+            patch.object(module, "_write_offline_recap", return_value="ok"), \
+            patch.object(module, "maybe_update_identity", return_value=False):
+            mock_client = MagicMock()
+            mock_anthropic_mod.Anthropic.return_value = mock_client
+            mock_client.messages.create.return_value = response
+            mock_add_memories.return_value = [{"id": "mem_tea"}]
+
+            result = module.run_offline_pipeline(
+                user_id="user_abc",
+                session_id="sess_resumed_explicit",
+                thread_id="thread_resumed_explicit",
+                thread_state=_make_thread_state(),
+            )
+            second = module.run_offline_pipeline(
+                user_id="user_abc",
+                session_id="sess_resumed_explicit",
+                thread_id="thread_resumed_explicit",
+                thread_state=_make_thread_state(),
+            )
+
+        assert result["status"] == "completed"
+        assert result["extraction_range"] == {
+            "last_processed_sequence": 6,
+            "current_max_sequence": 10,
+            "sequence_start": 7,
+            "sequence_end": 10,
+        }
+        prompt = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+        assert "I want to continue this same conversation" in prompt
+        assert "preferred evening tea is chamomile tea" in prompt
+        assert "old range preference is sparkling water" not in prompt
+        mock_add_memories.assert_called_once()
+        add_kwargs = mock_add_memories.call_args.kwargs
+        assert add_kwargs["messages"][0]["content"] == (
+            "User's preferred evening tea is chamomile tea because it helps them wind down."
+        )
+        metadata = add_kwargs["metadata"]
+        assert metadata["sequence_start"] == 9
+        assert metadata["sequence_end"] == 10
+        assert metadata["source_message_ids"] == ["m-9", "m-10"]
+
+        record = store.get("user_abc", "sess_resumed_explicit")
+        assert record is not None
+        assert record.memory_processed_until_sequence == 10
+        assert record.recap_processed_until_sequence == 10
+        assert record.memory_extraction_status == "completed"
+        diagnostics = record.metadata["last_memory_extraction_diagnostics"]
+        assert diagnostics["candidate_count"] == 1
+        assert diagnostics["explicit_remember_count"] == 1
+        assert diagnostics["explicit_remember_candidate_count"] == 1
+        assert diagnostics["no_candidate_reason"] is None
+        assert second["status"] == "no_new_messages"
+        assert mock_add_memories.call_count == 1
+
+    def test_zero_candidate_success_records_no_candidate_diagnostic(
+        self,
+        tmp_path,
+        monkeypatch,
+        mock_steps,
+    ):
+        from deerflow.sophia import offline_pipeline as module
+        from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
+
+        store = SessionStore(tmp_path / "users")
+        store.create(
+            SessionRecord(
+                session_id="sess_no_candidate",
+                thread_id="thread_no_candidate",
+                user_id="user_abc",
+                status="ended",
+                memory_processed_until_sequence=0,
+            )
+        )
+        store.replace_messages(
+            "user_abc",
+            "sess_no_candidate",
+            [
+                SessionMessageRecord(
+                    message_id="m-1",
+                    session_id="sess_no_candidate",
+                    thread_id="thread_no_candidate",
+                    role="user",
+                    content="Just checking in.",
+                    sequence=1,
+                ),
+                SessionMessageRecord(
+                    message_id="m-2",
+                    session_id="sess_no_candidate",
+                    thread_id="thread_no_candidate",
+                    role="assistant",
+                    content="I am here.",
+                    sequence=2,
+                ),
+            ],
+        )
+        monkeypatch.setattr(module, "SessionStore", lambda: store)
+        mock_steps["extraction"].return_value = []
+
+        result = module.run_offline_pipeline(
+            user_id="user_abc",
+            session_id="sess_no_candidate",
+            thread_id="thread_no_candidate",
+            thread_state=_make_thread_state(),
+        )
+
+        assert result["steps"]["extraction"] == "ok"
+        record = store.get("user_abc", "sess_no_candidate")
+        assert record is not None
+        assert record.memory_processed_until_sequence == 2
+        diagnostics = record.metadata["last_memory_extraction_diagnostics"]
+        assert diagnostics["candidate_count"] == 0
+        assert diagnostics["explicit_remember_count"] == 0
+        assert diagnostics["no_candidate_reason"] == "no_candidate"
+
+    def test_explicit_remember_rejection_records_safe_reason(
+        self,
+        tmp_path,
+        monkeypatch,
+        mock_steps,
+    ):
+        from deerflow.sophia import offline_pipeline as module
+        from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
+
+        store = SessionStore(tmp_path / "users")
+        store.create(
+            SessionRecord(
+                session_id="sess_reject_secret",
+                thread_id="thread_reject_secret",
+                user_id="user_abc",
+                status="ended",
+                memory_processed_until_sequence=0,
+            )
+        )
+        store.replace_messages(
+            "user_abc",
+            "sess_reject_secret",
+            [
+                SessionMessageRecord(
+                    message_id="m-1",
+                    session_id="sess_reject_secret",
+                    thread_id="thread_reject_secret",
+                    role="user",
+                    content="Please remember this temporary security token is red rabbit seven.",
+                    sequence=1,
+                ),
+                SessionMessageRecord(
+                    message_id="m-2",
+                    session_id="sess_reject_secret",
+                    thread_id="thread_reject_secret",
+                    role="assistant",
+                    content="I cannot store that.",
+                    sequence=2,
+                ),
+            ],
+        )
+        monkeypatch.setattr(module, "SessionStore", lambda: store)
+        mock_steps["extraction"].return_value = []
+
+        result = module.run_offline_pipeline(
+            user_id="user_abc",
+            session_id="sess_reject_secret",
+            thread_id="thread_reject_secret",
+            thread_state=_make_thread_state(),
+        )
+
+        assert result["steps"]["extraction"] == "ok"
+        record = store.get("user_abc", "sess_reject_secret")
+        assert record is not None
+        diagnostics = record.metadata["last_memory_extraction_diagnostics"]
+        assert diagnostics["explicit_remember_count"] == 1
+        assert diagnostics["explicit_remember_rejection_reasons"] == {"credential_like": 1}
+        assert diagnostics["no_candidate_reason"] == "policy_filtered"
+        assert "red rabbit" not in str(diagnostics)
+
+
+# ==================================================================
 # Step failure isolation
 # ==================================================================
 

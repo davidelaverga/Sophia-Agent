@@ -12,7 +12,8 @@ processes the completed session through 7 steps:
 7. Visual artifact check (placeholder)
 
 Each step is independent — failure in one does not block the others.
-The pipeline is idempotent via a module-level ``_processed_sessions`` set.
+The pipeline is idempotent via durable processed_until checkpoints plus a
+module-level ``_processed_sessions`` guard for same-process duplicate ranges.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import logging
 import math
 import os
 import threading
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -29,20 +31,40 @@ import httpx
 
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path, validate_user_id
-from deerflow.sophia.extraction import ExtractionParseError, extract_session_memories
+from deerflow.sophia.extraction import (
+    ExtractionParseError,
+    analyze_explicit_remember_messages,
+    extract_session_memories,
+)
 from deerflow.sophia.handoffs import generate_handoff
 from deerflow.sophia.identity import maybe_update_identity
+from deerflow.sophia.mem0_client import reconcile_review_metadata_with_mem0
+from deerflow.sophia.session_store import (
+    SessionMessageRecord,
+    SessionStore,
+    canonical_visible_messages,
+)
 from deerflow.sophia.smart_opener import generate_smart_opener
 from deerflow.sophia.trace_logger import write_session_trace
 
 logger = logging.getLogger(__name__)
 
 # Two-stage idempotency tracking — sufficient for single-process deployments.
-# If multi-process is needed later, upgrade to a file-based marker.
+# Origin/main introduced durable ``processed_until`` checkpoints in
+# ``SessionStore`` (``memory_processed_until_sequence`` /
+# ``recap_processed_until_sequence``) that OWN cross-process safety; the
+# module-level sets below remain authoritative for same-process in-flight /
+# duplicate-range protection.
 #
 # `_processed_sessions`: sessions that have completed extraction successfully
 #   (or where extraction returned an empty list — LLM said no candidates, no
-#   point retrying). Promoted into this set ONLY at the end of the pipeline.
+#   point retrying). Keyed by bare session_id. Cross-process safety for
+#   incremental range tracking is owned by SessionStore's
+#   ``memory_processed_until_sequence`` / ``recap_processed_until_sequence``
+#   checkpoints — the orchestrator short-circuits to ``no_new_messages``
+#   when SessionStore reports the scope is empty BEFORE adding to this set,
+#   so a transcript that grows after a previous run is still picked up.
+#   Promoted into this set ONLY at the end of the pipeline.
 #
 # `_in_flight_sessions`: sessions currently being processed. Acquired at the
 #   start (atomically with the processed-set check) and released in `finally`.
@@ -180,6 +202,19 @@ def run_offline_pipeline(
     current_force_reprocess = force_reprocess
 
     for iteration in range(_MAX_DEFERRED_RERUN_ITERATIONS):
+        # --- Durable no-new-messages short-circuit ---
+        # When SessionStore has a record AND its incremental scope is empty
+        # (``memory_processed_until_sequence`` == ``current_max_sequence``),
+        # return ``no_new_messages`` before touching the in-memory idempotency
+        # set. This is the resumed-session-with-no-growth case: a previous run
+        # already processed the transcript through this point, no new turns
+        # have landed, nothing to do. ``force_reprocess`` does NOT bypass this
+        # — there's still literally nothing to reprocess.
+        durable_short_circuit = _maybe_no_new_messages_result(user_id, session_id)
+        if durable_short_circuit is not None and not current_force_reprocess:
+            final_result = durable_short_circuit
+            break
+
         # --- Two-stage idempotency check (see _acquire_pipeline_slot for full
         # behavior; extracted to keep this function below sentrux CC threshold). ---
         # Pass our own thread_state as ``pending_thread_state`` so that if THIS
@@ -236,34 +271,58 @@ def run_offline_pipeline(
                     "session_id": session_id,
                 }
             else:
-                # Run the 7-step body in a helper to keep this orchestrator
-                # below the sentrux CC threshold. ``_run_pipeline_steps`` owns
-                # all the per-step try/except + extraction parse-error handling.
-                steps, extraction_retryable = _run_pipeline_steps(
-                    user_id, session_id, thread_id, resolved_thread_state,
-                )
+                # Load the incremental extraction scope ONCE per iteration so
+                # we can (a) short-circuit when there are no new messages and
+                # (b) include the ``extraction_range`` block in the completion
+                # envelope below.
+                pre_scope = _load_incremental_extraction_scope(user_id, session_id)
+                if pre_scope is not None and not pre_scope["selected_messages"]:
+                    # Short-circuit: skip the 7-step body, don't promote to
+                    # ``_processed_sessions``, but DO release the in-flight
+                    # slot in ``finally`` below so a later turn that grows
+                    # the transcript can re-enter the pipeline.
+                    logger.info(
+                        "session.finalization no_new_messages user_id=%s session_id=%s last_processed=%s current_max=%s",
+                        user_id, session_id,
+                        pre_scope["last_processed_sequence"],
+                        pre_scope["current_max_sequence"],
+                    )
+                    iteration_result = {
+                        "status": "no_new_messages",
+                        "session_id": session_id,
+                        "steps": {"extraction": "no_new_messages"},
+                        "extraction_range": _scope_range_for_result(pre_scope),
+                    }
+                else:
+                    # Run the 7-step body in a helper to keep this orchestrator
+                    # below the sentrux CC threshold. ``_run_pipeline_steps`` owns
+                    # all the per-step try/except + extraction parse-error handling.
+                    steps, extraction_retryable = _run_pipeline_steps(
+                        user_id, session_id, thread_id, resolved_thread_state,
+                    )
 
-                # --- PROMOTE to _processed_sessions ONLY if extraction was not
-                # retryable. On parse error / other extraction exception, leave
-                # the session unprocessed so the next trigger (inactivity,
-                # explicit end_session with force_reprocess=True, etc.) gets a
-                # chance to retry.
-                if not extraction_retryable:
-                    with _processed_lock:
-                        _processed_sessions.add(session_id)
+                    # --- PROMOTE to _processed_sessions ONLY if extraction was not
+                    # retryable. On parse error / other extraction exception, leave
+                    # the session unprocessed so the next trigger (inactivity,
+                    # explicit end_session with force_reprocess=True, etc.) gets a
+                    # chance to retry.
+                    if not extraction_retryable:
+                        with _processed_lock:
+                            _processed_sessions.add(session_id)
 
-                logger.info(
-                    "session.finalization pipeline_complete user_id=%s "
-                    "session_id=%s extraction_retryable=%s steps=%s",
-                    user_id, session_id, extraction_retryable, steps,
-                )
+                    logger.info(
+                        "session.finalization pipeline_complete user_id=%s "
+                        "session_id=%s extraction_retryable=%s steps=%s",
+                        user_id, session_id, extraction_retryable, steps,
+                    )
 
-                iteration_result = {
-                    "status": "completed",
-                    "session_id": session_id,
-                    "steps": steps,
-                    "extraction_retryable": extraction_retryable,
-                }
+                    iteration_result = {
+                        "status": "completed",
+                        "session_id": session_id,
+                        "steps": steps,
+                        "extraction_retryable": extraction_retryable,
+                        "extraction_range": _scope_range_for_result(pre_scope),
+                    }
         except Exception as exc:
             # Capture for re-raise AFTER the loop (P1 R12). Do NOT catch
             # BaseException — KeyboardInterrupt / SystemExit should propagate
@@ -393,6 +452,7 @@ def _run_pipeline_steps(
 
     steps: dict[str, str] = {}
     extraction_retryable = False
+    extraction_scope = _load_incremental_extraction_scope(user_id, session_id)
 
     # Step 1: Trace logging
     try:
@@ -407,10 +467,60 @@ def _run_pipeline_steps(
     # → not retryable.
     extracted_memories: list[dict] = []
     try:
-        serialized_messages = _serialize_messages(messages)
+        extraction_run_id = f"extract-{uuid.uuid4()}"
+        if extraction_scope is not None:
+            serialized_messages = [
+                _message_record_to_extraction_message(message)
+                for message in extraction_scope["selected_messages"]
+            ]
+            source_message_ids = [
+                message.message_id
+                for message in extraction_scope["selected_messages"]
+                if message.message_id
+            ]
+            session_metadata.update(
+                {
+                    "thread_id": thread_id,
+                    "sequence_start": extraction_scope["range_start"],
+                    "sequence_end": extraction_scope["range_end"],
+                    "source_message_ids": source_message_ids,
+                    "extraction_run_id": extraction_run_id,
+                }
+            )
+        else:
+            serialized_messages = _serialize_messages(messages)
+            session_metadata.update(
+                {
+                    "thread_id": thread_id,
+                    "extraction_run_id": extraction_run_id,
+                }
+            )
         extracted_memories = extract_session_memories(
-            user_id, session_id, serialized_messages, session_metadata,
+            user_id,
+            session_id,
+            serialized_messages,
+            session_metadata,
+            require_memory_write=True,
         )
+        # Best-effort: reconcile any local-overlay review metadata to Mem0
+        # (no-op in v3 mode but kept on the success path so future v2-style
+        # consumers see the side effect).
+        try:
+            reconcile_review_metadata_with_mem0(user_id)
+        except Exception:
+            logger.warning(
+                "session.finalization reconcile_review_metadata_failed user_id=%s session_id=%s",
+                user_id, session_id, exc_info=True,
+            )
+        if extraction_scope is not None:
+            _mark_memory_extraction_success(
+                extraction_scope,
+                extraction_run_id=extraction_run_id,
+                diagnostics=_build_memory_extraction_diagnostics(
+                    serialized_messages,
+                    extracted_memories,
+                ),
+            )
         steps["extraction"] = "ok"
         logger.info(
             "session.finalization pipeline_extraction_complete user_id=%s session_id=%s memory_count=%s",
@@ -435,6 +545,8 @@ def _run_pipeline_steps(
         extraction_retryable = True
     except Exception:
         logger.error("Pipeline step 'extraction' failed for session %s", session_id, exc_info=True)
+        if extraction_scope is not None:
+            _mark_memory_extraction_failure(extraction_scope)
         steps["extraction"] = "error"
         extraction_retryable = True
 
@@ -661,6 +773,196 @@ def _acquire_pipeline_slot(
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+
+def _load_incremental_extraction_scope(user_id: str, session_id: str) -> dict[str, Any] | None:
+    """Load the durable unprocessed transcript range, if SessionStore has it."""
+    try:
+        store = SessionStore()
+        record = store.get(user_id, session_id)
+        if record is None:
+            return None
+        visible_messages = canonical_visible_messages(store.list_messages(user_id, session_id))
+    except Exception:
+        logger.warning(
+            "session.finalization durable_scope_unavailable user_id=%s session_id=%s",
+            user_id,
+            session_id,
+            exc_info=True,
+        )
+        return None
+
+    last_processed = max(0, int(record.memory_processed_until_sequence or 0))
+    current_max = max((message.sequence for message in visible_messages), default=0)
+    selected_messages = [
+        message
+        for message in visible_messages
+        if last_processed < message.sequence <= current_max
+    ]
+    range_start = selected_messages[0].sequence if selected_messages else None
+    range_end = selected_messages[-1].sequence if selected_messages else None
+
+    return {
+        "store": store,
+        "record": record,
+        "user_id": user_id,
+        "session_id": session_id,
+        "selected_messages": selected_messages,
+        "last_processed_sequence": last_processed,
+        "current_max_sequence": current_max,
+        "range_start": range_start,
+        "range_end": range_end,
+    }
+
+
+def _scope_range_for_result(extraction_scope: dict[str, Any] | None) -> dict[str, int | None] | None:
+    if extraction_scope is None:
+        return None
+    return {
+        "last_processed_sequence": extraction_scope["last_processed_sequence"],
+        "current_max_sequence": extraction_scope["current_max_sequence"],
+        "sequence_start": extraction_scope["range_start"],
+        "sequence_end": extraction_scope["range_end"],
+    }
+
+
+def _maybe_no_new_messages_result(
+    user_id: str,
+    session_id: str,
+) -> dict[str, Any] | None:
+    """Return a ``no_new_messages`` envelope when SessionStore advertises an
+    incremental scope with nothing new to extract, else ``None``.
+
+    Called from ``run_offline_pipeline`` at the TOP of each iteration so the
+    durable SessionStore checkpoint wins over the in-memory
+    ``_processed_sessions`` set. Two callers depend on this:
+
+      1. Resumed session, no new turns: SessionStore record exists, all
+         messages already processed → return ``no_new_messages`` (test
+         ``test_resumed_range_explicit_remember_preference_creates_one_candidate``
+         exercises this on the second of two back-to-back runs).
+      2. Legacy in-memory path (no SessionStore record): returns ``None``;
+         the orchestrator falls through to its bare-session-id
+         ``_processed_sessions`` check (``already_processed`` semantics).
+
+    Returns ``None`` on SessionStore lookup failure so a transient backend
+    blip doesn't mask the legacy idempotency path.
+    """
+    extraction_scope = _load_incremental_extraction_scope(user_id, session_id)
+    if extraction_scope is None:
+        return None
+    if extraction_scope["selected_messages"]:
+        return None
+    logger.info(
+        "session.finalization no_new_messages user_id=%s session_id=%s last_processed=%s current_max=%s",
+        user_id,
+        session_id,
+        extraction_scope["last_processed_sequence"],
+        extraction_scope["current_max_sequence"],
+    )
+    return {
+        "status": "no_new_messages",
+        "session_id": session_id,
+        "steps": {"extraction": "no_new_messages"},
+        "extraction_range": _scope_range_for_result(extraction_scope),
+    }
+
+
+def _message_record_to_extraction_message(message: SessionMessageRecord) -> dict[str, Any]:
+    return {
+        "role": message.role,
+        "content": message.content,
+        "sequence": message.sequence,
+        "message_id": message.message_id,
+        "metadata": {
+            "sequence": message.sequence,
+            "message_id": message.message_id,
+            "created_at": message.created_at,
+            "source": message.source,
+        },
+    }
+
+
+def _build_memory_extraction_diagnostics(
+    serialized_messages: list[dict[str, Any]],
+    extracted_memories: list[dict],
+) -> dict[str, Any]:
+    explicit_analysis = analyze_explicit_remember_messages(serialized_messages)
+    rejection_reasons: dict[str, int] = {}
+    for rejection in explicit_analysis["rejections"]:
+        reason = str(rejection.get("reason") or "unknown")
+        rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+
+    candidate_count = len(extracted_memories)
+    no_candidate_reason: str | None = None
+    if candidate_count == 0:
+        no_candidate_reason = "no_candidate"
+        if explicit_analysis["rejections"]:
+            no_candidate_reason = "policy_filtered"
+
+    return {
+        "candidate_count": candidate_count,
+        "explicit_remember_count": explicit_analysis["explicit_count"],
+        "explicit_remember_candidate_count": len(explicit_analysis["entries"]),
+        "explicit_remember_rejection_reasons": rejection_reasons,
+        "no_candidate_reason": no_candidate_reason,
+    }
+
+
+def _mark_memory_extraction_success(
+    extraction_scope: dict[str, Any],
+    *,
+    extraction_run_id: str,
+    diagnostics: dict[str, Any] | None = None,
+) -> None:
+    range_end = extraction_scope.get("range_end")
+    if not isinstance(range_end, int):
+        return
+    store = extraction_scope["store"]
+    record_metadata = dict(extraction_scope["record"].metadata or {})
+    if diagnostics is not None:
+        record_metadata["last_memory_extraction_diagnostics"] = {
+            "range_start": extraction_scope.get("range_start"),
+            "range_end": range_end,
+            **diagnostics,
+        }
+    store.update(
+        extraction_scope["user_id"],
+        extraction_scope["session_id"],
+        memory_processed_until_sequence=range_end,
+        recap_processed_until_sequence=max(
+            int(extraction_scope.get("current_max_sequence") or range_end),
+            int(extraction_scope["record"].recap_processed_until_sequence or 0),
+        ),
+        last_memory_extraction_at=datetime.now(UTC).isoformat(),
+        last_recap_extraction_at=datetime.now(UTC).isoformat(),
+        last_memory_extraction_run_id=extraction_run_id,
+        memory_extraction_status="completed",
+        memory_extraction_error_code=None,
+        memory_extraction_range_start=extraction_scope.get("range_start"),
+        memory_extraction_range_end=range_end,
+        metadata=record_metadata,
+    )
+
+
+def _mark_memory_extraction_failure(extraction_scope: dict[str, Any]) -> None:
+    try:
+        store = extraction_scope["store"]
+        store.update(
+            extraction_scope["user_id"],
+            extraction_scope["session_id"],
+            memory_extraction_status="error",
+            memory_extraction_error_code="extraction_failed",
+            memory_extraction_range_start=extraction_scope.get("range_start"),
+            memory_extraction_range_end=extraction_scope.get("range_end"),
+        )
+    except Exception:
+        logger.warning(
+            "session.finalization extraction_failure_checkpoint_failed user_id=%s session_id=%s",
+            extraction_scope.get("user_id"),
+            extraction_scope.get("session_id"),
+            exc_info=True,
+        )
 
 
 def _write_offline_recap(

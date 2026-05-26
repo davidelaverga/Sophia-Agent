@@ -2220,7 +2220,7 @@ class TestSessionEnd:
         assert first.status_code == 202
         assert second.status_code == 202
         assert first.json()["status"] == "pipeline_queued"
-        assert second.json()["status"] == "pipeline_queued"
+        assert second.json()["status"] == "no_new_messages"
         assert second.json()["ended_at"] == "2026-04-05T10:00:00+00:00"
         mock_queue.assert_called_once()
 
@@ -2231,6 +2231,66 @@ class TestSessionEnd:
         assert record.status == "ended"
         assert record.ended_at == "2026-04-05T10:00:00+00:00"
         assert len(store.list_messages("test_user", "sess-dupe")) == 2
+
+    def test_continuation_with_existing_recap_queues_only_when_transcript_grew(self, client, tmp_path):
+        store = SessionStore(tmp_path)
+        store.create(
+            SessionRecord(
+                session_id="sess-continued",
+                thread_id="thread-continued",
+                user_id="test_user",
+                status="open",
+                memory_processed_until_sequence=2,
+            )
+        )
+        recap_path = tmp_path / "test_user" / "recaps" / "sess-continued.json"
+        recap_path.parent.mkdir(parents=True, exist_ok=True)
+        recap_path.write_text(
+            json.dumps({
+                "session_id": "sess-continued",
+                "thread_id": "thread-continued",
+                "started_at": "2026-04-05T09:52:00+00:00",
+                "ended_at": "2026-04-05T10:00:00+00:00",
+                "turn_count": 2,
+                "status": "ready",
+                "recap_artifacts": {"takeaway": "first segment"},
+            }),
+            encoding="utf-8",
+        )
+
+        payload = {
+            "session_id": "sess-continued",
+            "thread_id": "thread-continued",
+            "started_at": "2026-04-05T09:52:00+00:00",
+            "ended_at": "2026-04-12T10:05:00+00:00",
+            "offer_debrief": False,
+            "session_type": "open",
+            "context_mode": "life",
+            "turn_count": 4,
+            "messages": [
+                {"id": "m1", "role": "user", "content": "old first"},
+                {"id": "m2", "role": "assistant", "content": "old reply"},
+                {"id": "m3", "role": "user", "content": "new continuation"},
+                {"id": "m4", "role": "assistant", "content": "new reply"},
+            ],
+        }
+
+        with patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue, \
+             patch("app.gateway.routers.sophia.USERS_DIR", tmp_path), \
+             patch("app.gateway.routers.sophia._session_store", store):
+            response = client.post("/api/sophia/test_user/end-session", json=payload)
+
+        assert response.status_code == 202
+        assert response.json()["status"] == "pipeline_queued"
+        mock_queue.assert_called_once()
+        queued_state = mock_queue.call_args.args[3]
+        assert queued_state["messages"][-1]["content"] == "new reply"
+
+        record = store.get("test_user", "sess-continued")
+        assert record is not None
+        assert record.status == "ended"
+        assert record.ended_at == "2026-04-12T10:05:00+00:00"
+        assert [message.sequence for message in store.list_messages("test_user", "sess-continued")] == [1, 2, 3, 4]
 
     def test_missing_session_id_returns_422(self, client):
         resp = client.post(

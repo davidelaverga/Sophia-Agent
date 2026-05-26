@@ -81,6 +81,13 @@ class SessionInfoResponse(BaseModel):
     platform: str = "text"
     intention: str | None = None
     focus_cue: str | None = None
+    checkpointer_available: bool | None = None
+    transcript_available: bool = False
+    active_segment_started_at: str | None = None
+    segment_count: int = 1
+    continuation_count: int = 0
+    memory_processed_until_sequence: int = 0
+    recap_processed_until_sequence: int = 0
 
 
 class ActiveSessionResponse(BaseModel):
@@ -303,6 +310,34 @@ def _resolve_session_record(user_id: str, session_id: str) -> tuple[str, Session
 
     return user_id, None
 
+
+def _activate_session_for_continuation(
+    owner_user_id: str,
+    record: SessionRecord,
+    *,
+    started_at: str | None = None,
+) -> SessionRecord:
+    """Move a paused or ended conversation back into an interactive segment."""
+    now = started_at or datetime.now(UTC).isoformat()
+    updates: dict[str, object] = {
+        "status": "open",
+        "ended_at": None,
+    }
+
+    if record.status == "ended":
+        updates.update(
+            {
+                "active_segment_started_at": now,
+                "segment_count": max(1, record.segment_count) + 1,
+                "continuation_count": record.continuation_count + 1,
+            }
+        )
+    elif record.status in {"paused", "resumable"}:
+        updates["active_segment_started_at"] = record.active_segment_started_at or now
+
+    updated = _store.update(owner_user_id, record.session_id, **updates)
+    return updated or record
+
 @router.post("/start", response_model=SessionStartResponse)
 async def start_session(body: SessionStartRequest) -> SessionStartResponse:
     """Create a new session with a real LangGraph thread and persist it."""
@@ -425,15 +460,14 @@ async def update_session(
         if requested_status is None:
             return _record_to_info(record)
 
-    if requested_status is not None and record.status == "ended":
-        raise HTTPException(status_code=409, detail="Ended sessions cannot change status.")
-
     if updates:
         record = _store.update(owner_user_id, session_id, **updates)
         if record is None:
             raise HTTPException(status_code=404, detail="Session not found.")
 
     if requested_status == "paused":
+        if record.status == "ended":
+            raise HTTPException(status_code=409, detail="Ended sessions can only be continued by reopening.")
         from app.gateway.inactivity_watcher import unregister_thread
 
         record = _store.pause(owner_user_id, session_id)
@@ -443,9 +477,7 @@ async def update_session(
     elif requested_status == "open":
         from app.gateway.inactivity_watcher import register_activity
 
-        record = _store.resume(owner_user_id, session_id)
-        if record is None:
-            raise HTTPException(status_code=404, detail="Session not found.")
+        record = _activate_session_for_continuation(owner_user_id, record)
         register_activity(
             record.thread_id,
             owner_user_id,
@@ -663,7 +695,7 @@ async def get_session_messages(
                     session_id=session_id,
                     thread_id=thread_id,
                     source="langgraph_checkpointer",
-                    sequence=index,
+                    sequence=index + 1,
                 )
                 for index, response in enumerate(messages)
             ],
@@ -699,13 +731,20 @@ async def persist_session_messages(
         raise HTTPException(status_code=404, detail="Session not found.")
 
     thread_id = body.thread_id or record.thread_id
+    if thread_id != record.thread_id:
+        record = _store.update(
+            owner_user_id,
+            session_id,
+            thread_id=thread_id,
+            checkpointer_available=True,
+        ) or record
     records: list[SessionMessageRecord] = []
     for item in body.messages:
         message = _persist_input_to_message_record(
             item,
             session_id=session_id,
             thread_id=thread_id,
-            sequence=len(records),
+            sequence=len(records) + 1,
         )
         if message is not None:
             records.append(message)
@@ -748,10 +787,11 @@ async def touch_session(
     owner_user_id, record = _resolve_session_record(normalized_user_id, session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
+
+    if record.status in {"ended", "paused", "resumable"}:
+        record = _activate_session_for_continuation(owner_user_id, record)
+
     updates: dict = {"message_count": record.message_count + 1}
-    if record.status == "paused":
-        updates["status"] = "open"
-        updates["ended_at"] = None
     normalized_preview = _normalize_message_preview(message_preview)
     if normalized_preview:
         updates["last_message_preview"] = normalized_preview
@@ -899,6 +939,13 @@ def _record_to_info(record: SessionRecord) -> SessionInfoResponse:
         platform=record.platform,
         intention=record.intention,
         focus_cue=record.focus_cue,
+        checkpointer_available=record.checkpointer_available,
+        transcript_available=record.transcript_available,
+        active_segment_started_at=record.active_segment_started_at,
+        segment_count=record.segment_count,
+        continuation_count=record.continuation_count,
+        memory_processed_until_sequence=record.memory_processed_until_sequence,
+        recap_processed_until_sequence=record.recap_processed_until_sequence,
     )
 
 
