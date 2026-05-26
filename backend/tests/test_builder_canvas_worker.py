@@ -165,3 +165,28 @@ async def test_expired_replaced_run_cannot_reclaim_active_seed() -> None:
     assert delivered == 0
     events = await worker.recent_events("parent-1")
     assert {event["task_id"] for event in events} == {"task-new"}
+
+
+@pytest.mark.anyio
+async def test_evicted_retired_run_purges_retained_state() -> None:
+    worker = BuilderCanvasWorker(retired_runs_size=1)
+    for task_id in ("task-old", "task-mid", "task-new"):
+        await worker.publish_progress(
+            {
+                "parent_thread_id": "parent-1",
+                "task_id": task_id,
+                "run_id": "run-1",
+                "sequence": 1,
+                "event_name": "custom",
+                "data": {"name": "phase", "phase": "drafting"},
+            }
+        )
+
+    evicted_key = ("parent-1", "task-old", "run-1")
+    assert evicted_key not in worker._histories
+    assert evicted_key not in worker._last_sequence
+    assert evicted_key not in worker._terminal_at
+    assert ("task-old", "run-1") not in worker._retired_run_keys["parent-1"]
+
+    events = await worker.recent_events("parent-1")
+    assert {event["task_id"] for event in events} == {"task-new"}

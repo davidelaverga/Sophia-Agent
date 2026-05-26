@@ -151,13 +151,17 @@ class BuilderCanvasWorker:
             if now - ended_at > self._terminal_ttl_seconds
         ]
         for key in expired:
-            self._terminal_at.pop(key, None)
-            self._histories.pop(key, None)
-            self._last_sequence.pop(key, None)
+            self._purge_run_locked(*key)
             parent_thread_id, task_id, run_id = key
             if self._active.get(parent_thread_id) == (task_id, run_id):
                 self._retire_run_locked(parent_thread_id, task_id, run_id)
                 self._active.pop(parent_thread_id, None)
+
+    def _purge_run_locked(self, parent_thread_id: str, task_id: str, run_id: str) -> None:
+        key = (parent_thread_id, task_id, run_id)
+        self._terminal_at.pop(key, None)
+        self._histories.pop(key, None)
+        self._last_sequence.pop(key, None)
 
     def _retire_run_locked(self, parent_thread_id: str, task_id: str, run_id: str) -> None:
         run_key = (task_id, run_id)
@@ -170,6 +174,7 @@ class BuilderCanvasWorker:
         while len(queue) > self._retired_runs_size:
             expired = queue.popleft()
             retired.discard(expired)
+            self._purge_run_locked(parent_thread_id, expired[0], expired[1])
 
     def _is_retired_run_locked(self, parent_thread_id: str, task_id: str, run_id: str) -> bool:
         return (task_id, run_id) in self._retired_run_keys.get(parent_thread_id, set())
