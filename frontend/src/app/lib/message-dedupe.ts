@@ -90,6 +90,16 @@ export function dedupeMessages(messages: ChatMessage[]): ChatMessage[] {
     const existing = seen.get(key)
 
     if (!existing) {
+      const duplicateEntry = Array.from(seen.entries()).find(([, candidate]) =>
+        areDuplicates(candidate, message)
+      )
+
+      if (duplicateEntry) {
+        const [duplicateKey, duplicateMessage] = duplicateEntry
+        seen.set(duplicateKey, pickBetterMessage(duplicateMessage, message))
+        continue
+      }
+
       seen.set(key, message)
       continue
     }

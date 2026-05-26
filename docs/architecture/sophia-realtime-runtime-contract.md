@@ -51,6 +51,24 @@ This boundary applies to both Gemini Live and GPT Realtime as a product policy. 
 
 Phase 12.5A made no runtime, prompt-file, VAD, tool, default-provider, or canonical Sophia identity changes.
 
+## Recap Telemetry Debug Export Boundary
+
+Voice telemetry export is scoped to the live `/session` page. It is useful while the voice hook is mounted, but it should not be treated as the post-session recap source of truth after End Session redirects away from `/session`. Once that page unmounts or the hook returns to idle, a later export can reflect default runtime state rather than the final voice session.
+
+Post-session recap debugging should use the recap-page export from `/recap/{sessionId}`. The report type is `recap-telemetry-report`, version `1`, source `recap-ui`. It includes safe lifecycle metadata for the recap request, pending-review memory polling, `session_id` forwarding through `/api/memory/recent`, gateway confirmation fields, artifact readiness, memory commit status, abort/timeout timing, response shape keys, safe trace ids, and a same-session final voice telemetry snapshot when one was captured before the session page unmounted.
+
+The recap export is deliberately privacy-minimized. It does not include raw private memory text, cookies, auth headers, bearer tokens, API keys, provider websocket URLs, provider tokens, config dumps, or environment values. Provider URL fields are reduced to presence booleans when included in the final session snapshot.
+
+Recap status terms are diagnostic, not behavior changes. `Composing recap` means the page is still waiting for recap artifacts or pending-review memory candidates. `no_results` means no pending-review candidates were available for that session and is distinct from a transport failure. `local_review_overlay` means the memory-recent path used local review metadata or local overlay entries and avoided the slow per-memory detail hydration path where possible.
+
+Safe manual recap debugging workflow:
+
+1. Enable DevTools Preserve Log before ending the session.
+2. End the session and open `/recap/{sessionId}`.
+3. Use Export Recap Debug from the recap page.
+4. Compare the report's `sessionId`, recap status, memory-recent path, forwarding flags, duration/abort state, candidate count/source, and safe trace ids with gateway logs.
+5. If needed, call the memory-recent API by `session_id` and inspect only safe metadata/counts, not raw memory payloads.
+
 ## Phase 12.5B-A Sophia Voice Spec Alignment Audit
 
 Phase 12.5B-A is a docs-only alignment audit against the new Sophia Voice spec set in `specs/`. The full audit lives at `docs/audits/sophia-voice-spec-alignment-phase-12-5b-a.md`.
@@ -983,6 +1001,10 @@ Legacy cascade voice turns already call DeerFlow `sophia_agent` through `runs/st
 The Gemini production and browser dogfood session managers build a setup-time `<gemini_live_user_context>` block from trusted session context. The block may include a preferred name, a bounded identity excerpt, a bounded latest handoff excerpt, and bounded Mem0 memory snippets. The prompt block never uses a model-supplied user id, and diagnostics expose only compact presence/count/category/length/status metadata, not raw memory text.
 
 Production Gemini voice now receives that setup context from a backend/gateway-owned bounded payload. The gateway assembles `sophia_realtime_context_v1` from backend-owned identity, latest handoff, review-metadata-filtered Mem0 snippets, and diagnostics, then passes it to the voice runtime as `realtime_context` during `POST /production/realtime/gemini/browser-sessions`. The voice runtime consumes this safe payload only; it does not import the backend Mem0 client or read local `users/**` files for production setup context. Direct dogfood use without a provided payload degrades to empty setup context.
+
+Preferred-name resolution is explicit inside the gateway payload. Source order is: canonical `users/{user_id}/identity.md` when present, high-confidence Mem0 `fact`/`preference` memories that state a preferred/display name or explicit name correction, then the latest handoff as a weak inference source. Missing identity files do not fail session setup; diagnostics report `identity_file_status`, `handoff_file_status`, `preferred_name_source`, `preferred_name_conflict`, `preferred_name_candidate_count`, and `mem0_preferred_name_status`. These diagnostics expose source/status only, never the raw preferred name or raw memory text.
+
+Explicit user corrections such as "my name is X", "call me X", "refer to me as X", or "I go by X" are handled by the offline extraction pipeline, not by an in-turn write. The pipeline creates a deterministic pending-review Mem0 candidate tagged `preferred_name` and `explicit_user_statement` when the phrase is unambiguous; ambiguous phrases such as "my name is on the list" or "call me tomorrow" do not update identity. This preserves the architecture rule that Mem0 writes happen offline while giving Gemini setup a durable preferred-name source on the next fresh session after finalization.
 
 ## Gemini Live Startup Preconnect
 

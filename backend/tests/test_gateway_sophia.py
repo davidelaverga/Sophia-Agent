@@ -52,7 +52,10 @@ def mock_mem0():
 @pytest.fixture(autouse=True)
 def mock_review_store():
     with (
-        patch("app.gateway.routers.sophia.apply_review_metadata_overlays", side_effect=lambda _user_id, memories: memories) as mock_apply,
+        patch(
+            "app.gateway.routers.sophia.apply_review_metadata_overlays",
+            side_effect=lambda _user_id, memories, **_kwargs: memories,
+        ) as mock_apply,
         patch("app.gateway.routers.sophia.upsert_review_metadata") as mock_upsert,
         patch("app.gateway.routers.sophia.remove_review_metadata") as mock_remove,
     ):
@@ -187,7 +190,169 @@ class TestRealtimeContext:
         assert data["memories"] == []
         assert data["diagnostics"]["identity_available"] is True
         assert data["diagnostics"]["handoff_available"] is True
+        assert data["diagnostics"]["identity_file_status"] == "present"
+        assert data["diagnostics"]["handoff_file_status"] == "present"
+        assert data["diagnostics"]["preferred_name_source"] == "identity_file"
+        assert data["diagnostics"]["preferred_name_conflict"] is False
         assert data["diagnostics"]["mem0_status"] == "missing_api_key"
+
+    def test_realtime_context_promotes_mem0_preferred_name_when_identity_missing(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "_apply_review_metadata_overlays_readonly",
+            lambda _user_id, memories: memories,
+        )
+
+        def fake_search(**kwargs):  # noqa: ANN202
+            calls.append(dict(kwargs))
+            query = str(kwargs.get("query", ""))
+            if "what the user wants to be called" in query:
+                return {
+                    "memories": [
+                        {
+                            "id": "m-name",
+                            "content": "Preferred name: Mira. Explicit user statement.",
+                            "category": "fact",
+                            "score": 0.99,
+                        }
+                    ],
+                    "provider_status": "available",
+                    "provider_reason": "sdk_client",
+                }
+            return {
+                "memories": [
+                    {
+                        "id": "m-other",
+                        "content": "User prefers concise context.",
+                        "category": "preference",
+                        "score": 0.8,
+                    }
+                ],
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            }
+
+        monkeypatch.setattr(context_module, "search_memories_with_diagnostics", fake_search)
+
+        resp = client.post("/api/sophia/test_user/realtime/context", json={"platform": "voice"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["preferred_name"] == "Mira"
+        assert data["diagnostics"]["identity_file_status"] == "missing"
+        assert data["diagnostics"]["handoff_file_status"] == "missing"
+        assert data["diagnostics"]["preferred_name_source"] == "mem0"
+        assert data["diagnostics"]["preferred_name_available"] is True
+        assert data["diagnostics"]["preferred_name_conflict"] is False
+        assert data["diagnostics"]["mem0_preferred_name_status"] == "available"
+        assert "Mira" not in json.dumps(data["diagnostics"])
+        assert calls[-1]["categories"] == ["fact", "preference"]
+        assert calls[-1]["log_content_previews"] is False
+
+    def test_realtime_context_prefers_mem0_correction_over_handoff_inference(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        user_dir = tmp_path / "test_user" / "handoffs"
+        user_dir.mkdir(parents=True)
+        (user_dir / "latest.md").write_text(
+            "Session initiated with Daniel. Keep the opener grounded.",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "_apply_review_metadata_overlays_readonly",
+            lambda _user_id, memories: memories,
+        )
+        monkeypatch.setattr(
+            context_module,
+            "search_memories_with_diagnostics",
+            lambda **kwargs: {
+                "memories": [
+                    {
+                        "id": "m-name",
+                        "content": "Preferred name: Mira. Explicit user statement.",
+                        "category": "fact",
+                        "score": 0.99,
+                    }
+                ]
+                if "what the user wants to be called" in str(kwargs.get("query", ""))
+                else [],
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+
+        resp = client.post("/api/sophia/test_user/realtime/context", json={})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["preferred_name"] == "Mira"
+        assert data["diagnostics"]["preferred_name_source"] == "mem0"
+        assert data["diagnostics"]["preferred_name_conflict"] is True
+        assert data["diagnostics"]["handoff_file_status"] == "present"
+        assert "Mira" not in json.dumps(data["diagnostics"])
+        assert "Daniel" not in json.dumps(data["diagnostics"])
+
+    def test_realtime_context_missing_identity_and_mem0_no_results_does_not_invent_name(
+        self,
+        client,
+        tmp_path,
+        monkeypatch,
+    ):
+        from app.gateway import sophia_realtime_context as context_module
+
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "search_memories_with_diagnostics",
+            lambda **_kwargs: {
+                "memories": [],
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+
+        resp = client.post("/api/sophia/test_user/realtime/context", json={})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["preferred_name"] is None
+        assert data["diagnostics"]["preferred_name_source"] == "unavailable"
+        assert data["diagnostics"]["preferred_name_available"] is False
+        assert data["diagnostics"]["identity_file_status"] == "missing"
+        assert data["diagnostics"]["mem0_preferred_name_status"] == "available"
 
     def test_returns_bounded_mem0_snippets_when_provider_available(self, client, tmp_path, monkeypatch):
         from app.gateway import sophia_realtime_context as context_module
@@ -698,8 +863,97 @@ class TestListMemories:
         resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review")
 
         assert resp.status_code == 200
-        assert resp.json()["count"] == 1
+        data = resp.json()
+        assert data["count"] == 1
+        assert data["source"] == "local_review_overlay"
+        assert data["candidate_count"] == 1
+        assert data["skipped_mem0_hydration_for_session_scope"] is True
+        assert isinstance(data["trace_id"], str)
         mock_mem0.get.assert_not_called()
+
+    def test_recent_memory_diagnostics_reports_session_id_received(self, client, mock_mem0, mock_review_store):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Needs review", "metadata": {"status": "pending_review", "session_id": "sess-1"}},
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review&session_id=sess-1")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["session_id_received"] is True
+        assert data["candidate_count"] == data["count"] == 1
+        assert data["trace_id"].startswith("memrecent-")
+
+    def test_session_scoped_pending_review_uses_local_review_overlay(self, client, mock_mem0, mock_review_store):
+        mock_mem0.get_all.return_value = []
+        mock_review_store["apply"].side_effect = None
+        mock_review_store["apply"].return_value = [
+            {
+                "id": "local:target",
+                "session_id": "sess-target",
+                "memory": "Fresh target recap memory",
+                "metadata": {"status": "pending_review", "category": "lesson"},
+                "updated_at": "2026-04-17T15:12:23.465604+00:00",
+            },
+            {
+                "id": "local:other",
+                "session_id": "sess-other",
+                "memory": "Other recap memory",
+                "metadata": {"status": "pending_review", "category": "lesson"},
+                "updated_at": "2026-04-17T15:13:23.465604+00:00",
+            },
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review&session_id=sess-target")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["source"] == "local_review_overlay"
+        assert data["session_id_received"] is True
+        assert data["local_overlay_count"] == 2
+        assert data["count"] == 1
+        assert data["memories"][0]["id"] == "local:target"
+        assert mock_review_store["apply"].call_args.kwargs["session_id"] == "sess-target"
+
+    def test_session_scoped_pending_review_zero_overlay_is_terminal_empty(self, client, mock_mem0, mock_review_store):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Needs global hydration", "metadata": None},
+        ]
+        mock_review_store["apply"].side_effect = None
+        mock_review_store["apply"].return_value = [
+            {"id": "m1", "memory": "Needs global hydration", "metadata": None},
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review&session_id=sess-empty")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 0
+        assert data["candidate_count"] == 0
+        assert data["memories"] == []
+        assert data["source"] == "local_review_overlay"
+        assert data["session_id_received"] is True
+        assert data["skipped_mem0_hydration_for_session_scope"] is True
+        assert data["empty_reason"] == "no_session_candidates"
+        mock_mem0.get.assert_not_called()
+
+    def test_global_hydration_path_reports_safe_source(self, client, mock_mem0):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Needs review", "metadata": None},
+            {"id": "m2", "memory": "Already approved", "metadata": None},
+        ]
+        mock_mem0.get.side_effect = [
+            {"id": "m1", "memory": "Needs review", "metadata": {"status": "pending_review"}},
+            {"id": "m2", "memory": "Already approved", "metadata": {"status": "approved"}},
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["source"] == "global_hydration"
+        assert data["candidate_count"] == 1
+        assert data["local_overlay_count"] == 0
 
     def test_hydrates_missing_metadata_without_status_filter(self, client, mock_mem0):
         mock_mem0.get_all.return_value = [
@@ -1397,6 +1651,12 @@ class TestSessionEnd:
         queued_state = mock_queue.call_args.args[3]
         assert queued_state is not None
         assert queued_state["messages"][0]["content"] == "I needed to talk this through."
+        transcript = store.list_messages("test_user", "sess-001")
+        assert [message.role for message in transcript] == ["user", "assistant"]
+        assert [message.content for message in transcript] == [
+            "I needed to talk this through.",
+            "You stayed with it.",
+        ]
 
     def test_duplicate_end_session_reuses_existing_recap_and_queues_once(self, client, tmp_path):
         store = SessionStore(tmp_path)
@@ -1443,6 +1703,7 @@ class TestSessionEnd:
         assert record is not None
         assert record.status == "ended"
         assert record.ended_at == "2026-04-05T10:00:00+00:00"
+        assert len(store.list_messages("test_user", "sess-dupe")) == 2
 
     def test_missing_session_id_returns_422(self, client):
         resp = client.post(

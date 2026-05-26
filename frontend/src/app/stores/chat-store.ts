@@ -336,14 +336,15 @@ export const useChatStore = create<ChatStore>()(persist((set, get) => ({
         set({ isLoadingHistory: false, lastError: "error" in result ? result.error : "Unknown error" })
         return false
       }
-      const restored: ChatMessage[] = result.data.messages.map((m) => ({
+      const { dedupeMessages } = await import("../lib/message-dedupe")
+      const restored: ChatMessage[] = dedupeMessages(result.data.messages.map((m) => ({
         id: m.id || createMessageId(),
         role: m.role === "user" ? "user" : "sophia",
         content: m.content,
         createdAt: m.created_at ? new Date(m.created_at).getTime() : Date.now(),
         status: "complete" as const,
         source: "text" as const,
-      }))
+      })))
       set({
         messages: restored,
         conversationId: sessionId,
@@ -352,11 +353,11 @@ export const useChatStore = create<ChatStore>()(persist((set, get) => ({
       })
 
       const { useSessionStore } = await import("./session-store")
-      const sessionMessages = result.data.messages.map((message) => ({
-        id: message.id || createMessageId(),
+      const sessionMessages = restored.map((message) => ({
+        id: message.id,
         role: message.role === "user" ? "user" as const : "assistant" as const,
         content: message.content,
-        createdAt: message.created_at || new Date().toISOString(),
+        createdAt: new Date(message.createdAt).toISOString(),
       }))
 
       useSessionStore.getState().updateMessages(sessionMessages)

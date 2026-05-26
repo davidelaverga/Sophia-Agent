@@ -145,9 +145,14 @@ export interface SessionEndRequest {
   turn_count?: number;
   platform?: 'voice' | 'text' | 'ios_voice';
   messages?: Array<{
+    id?: string;
+    message_id?: string;
     role: 'user' | 'assistant' | 'system';
     content: string;
     created_at?: string;
+    source?: 'voice' | 'text';
+    final?: boolean;
+    incomplete?: boolean;
   }>;
   recap_artifacts?: {
     takeaway?: string;
@@ -310,6 +315,33 @@ export interface SessionMessagesResponse {
   session_id: string;
   thread_id: string;
   messages: SessionMessageItem[];
+}
+
+/**
+ * PUT /api/v1/sessions/{id}/messages - Request message
+ */
+export interface SessionMessagePersistItem {
+  id?: string;
+  message_id?: string;
+  role: 'user' | 'assistant' | 'sophia' | 'system' | 'tool' | 'artifact';
+  content: string;
+  created_at?: string | null;
+  source?: string | null;
+  final?: boolean;
+  incomplete?: boolean;
+  approximate?: boolean;
+  turn_id?: string | null;
+  provider_event_id?: string | null;
+  redaction_level?: 'none' | 'private' | 'diagnostic_only';
+}
+
+/**
+ * PUT /api/v1/sessions/{id}/messages - Request
+ */
+export interface SessionMessagesPersistRequest {
+  user_id?: string;
+  thread_id?: string | null;
+  messages: SessionMessagePersistItem[];
 }
 
 /**

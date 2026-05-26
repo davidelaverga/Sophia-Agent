@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 import app.gateway.routers.sessions as sessions_router
 from app.gateway.routers.sessions import router
-from deerflow.sophia.session_store import SessionRecord, SessionStore
+from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
 
 app = FastAPI()
 app.include_router(router)
@@ -486,6 +486,277 @@ def test_get_session_messages_strips_tool_use_metadata_from_ai_content(isolated_
             },
         ],
     }
+    stored_messages = isolated_session_store.list_messages("dev-user", "session-with-tool-blocks")
+    assert [message.content for message in stored_messages] == [
+        "I still miss him.",
+        "Two years in, and you're still asking about it.",
+    ]
+
+
+def test_persist_session_messages_writes_durable_transcript(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="session-with-transcript",
+            thread_id="thread-with-transcript",
+            user_id="dev-user",
+            status="open",
+        )
+    )
+
+    response = client.put(
+        "/api/v1/sessions/session-with-transcript/messages?user_id=dev-user",
+        json={
+            "thread_id": "thread-with-transcript",
+            "messages": [
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "content": "This is a session persistence test.",
+                    "created_at": "2026-04-15T00:01:00+00:00",
+                    "source": "text",
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "content": "I am tracking the thread with you.",
+                    "created_at": "2026-04-15T00:01:05+00:00",
+                    "source": "voice",
+                    "approximate": True,
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "session_id": "session-with-transcript",
+        "thread_id": "thread-with-transcript",
+        "messages": [
+            {
+                "id": "user-1",
+                "role": "user",
+                "content": "This is a session persistence test.",
+                "created_at": "2026-04-15T00:01:00+00:00",
+            },
+            {
+                "id": "assistant-1",
+                "role": "sophia",
+                "content": "I am tracking the thread with you.",
+                "created_at": "2026-04-15T00:01:05+00:00",
+            },
+        ],
+    }
+
+    stored_messages = isolated_session_store.list_messages("dev-user", "session-with-transcript")
+    assert len(stored_messages) == 2
+    assert stored_messages[1].source == "voice"
+    assert stored_messages[1].approximate is True
+
+    with patch("app.gateway.routers.sessions.httpx.AsyncClient") as mock_client_cls:
+        get_response = client.get("/api/v1/sessions/session-with-transcript/messages?user_id=dev-user")
+
+    assert get_response.status_code == 200
+    assert get_response.json()["messages"][0]["content"] == "This is a session persistence test."
+    mock_client_cls.assert_not_called()
+
+
+def test_repeated_session_message_snapshots_are_idempotent(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="session-idempotent",
+            thread_id="thread-idempotent",
+            user_id="dev-user",
+            status="open",
+        )
+    )
+    payload = {
+        "thread_id": "thread-idempotent",
+        "messages": [
+            {
+                "id": "user-stable",
+                "message_id": "user-stable",
+                "role": "user",
+                "content": "green harbor notebook",
+                "created_at": "2026-04-15T00:01:00+00:00",
+            },
+            {
+                "id": "assistant-stable",
+                "message_id": "assistant-stable",
+                "role": "assistant",
+                "content": "I heard green harbor notebook.",
+                "created_at": "2026-04-15T00:01:05+00:00",
+            },
+        ],
+    }
+
+    first = client.put("/api/v1/sessions/session-idempotent/messages?user_id=dev-user", json=payload)
+    second = client.post("/api/v1/sessions/session-idempotent/messages?user_id=dev-user", json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(isolated_session_store.list_messages("dev-user", "session-idempotent")) == 2
+    assert [message["content"] for message in second.json()["messages"]] == [
+        "green harbor notebook",
+        "I heard green harbor notebook.",
+    ]
+    record = isolated_session_store.get("dev-user", "session-idempotent")
+    assert record is not None
+    assert record.message_count == 2
+
+
+def test_session_message_snapshot_replaces_pagehide_and_end_session_duplicates(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="session-replace",
+            thread_id="thread-replace",
+            user_id="dev-user",
+            status="open",
+        )
+    )
+    isolated_session_store.append_or_upsert_messages(
+        "dev-user",
+        "session-replace",
+        [
+            # Simulates an older End Session write that used a different id.
+            SessionMessageRecord(
+                message_id="end-duplicate",
+                session_id="session-replace",
+                thread_id="thread-replace",
+                role="user",
+                content="Can you repeat that?",
+                created_at="2026-04-15T00:01:00+00:00",
+                sequence=99,
+            )
+        ],
+    )
+
+    response = client.put(
+        "/api/v1/sessions/session-replace/messages?user_id=dev-user",
+        json={
+            "thread_id": "thread-replace",
+            "messages": [
+                {
+                    "id": "user-stable",
+                    "role": "user",
+                    "content": "Can you repeat that?",
+                    "created_at": "2026-04-15T00:01:00+00:00",
+                },
+                {
+                    "id": "assistant-stable",
+                    "role": "assistant",
+                    "content": "Of course. I said I am with you.",
+                    "created_at": "2026-04-15T00:01:05+00:00",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    stored_messages = isolated_session_store.list_messages("dev-user", "session-replace")
+    assert [message.message_id for message in stored_messages] == ["user-stable", "assistant-stable"]
+    assert [message.sequence for message in stored_messages] == [0, 1]
+
+
+def test_persist_session_messages_filters_incomplete_assistant_and_counts_visible(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="session-final-only",
+            thread_id="thread-final-only",
+            user_id="dev-user",
+            status="open",
+        )
+    )
+
+    response = client.put(
+        "/api/v1/sessions/session-final-only/messages?user_id=dev-user",
+        json={
+            "thread_id": "thread-final-only",
+            "messages": [
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "content": "Can you repeat that?",
+                    "created_at": "2026-04-15T00:01:00+00:00",
+                },
+                {
+                    "id": "assistant-streaming",
+                    "role": "assistant",
+                    "content": "Of co",
+                    "created_at": "2026-04-15T00:01:02+00:00",
+                    "final": False,
+                    "incomplete": True,
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["messages"] == [
+        {
+            "id": "user-1",
+            "role": "user",
+            "content": "Can you repeat that?",
+            "created_at": "2026-04-15T00:01:00+00:00",
+        }
+    ]
+    record = isolated_session_store.get("dev-user", "session-final-only")
+    assert record is not None
+    assert record.message_count == 1
+
+
+def test_get_session_messages_returns_deduped_ordered_visible_rows(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="session-deduped-read",
+            thread_id="thread-deduped-read",
+            user_id="dev-user",
+            status="ended",
+        )
+    )
+    isolated_session_store.append_or_upsert_messages(
+        "dev-user",
+        "session-deduped-read",
+        [
+            SessionMessageRecord(
+                message_id="user-original",
+                session_id="session-deduped-read",
+                thread_id="thread-deduped-read",
+                role="user",
+                content="green harbor notebook",
+                created_at="2026-04-15T00:01:00+00:00",
+                sequence=1,
+            ),
+            SessionMessageRecord(
+                message_id="user-duplicate",
+                session_id="session-deduped-read",
+                thread_id="thread-deduped-read",
+                role="user",
+                content="green harbor notebook",
+                created_at="2026-04-15T00:01:00+00:00",
+                sequence=3,
+            ),
+            SessionMessageRecord(
+                message_id="assistant-1",
+                session_id="session-deduped-read",
+                thread_id="thread-deduped-read",
+                role="assistant",
+                content="I wrote that down.",
+                created_at="2026-04-15T00:01:05+00:00",
+                sequence=3,
+            ),
+        ],
+    )
+
+    response = client.get("/api/v1/sessions/session-deduped-read/messages?user_id=dev-user")
+
+    assert response.status_code == 200
+    assert [message["content"] for message in response.json()["messages"]] == [
+        "green harbor notebook",
+        "I wrote that down.",
+    ]
+    record = isolated_session_store.get("dev-user", "session-deduped-read")
+    assert record is not None
+    assert record.message_count == 2
 
 
 @pytest.mark.parametrize(

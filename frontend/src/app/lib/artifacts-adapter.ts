@@ -221,6 +221,10 @@ function normalizeStatus(
   reflectionCandidate?: RecapArtifactsV1['reflectionCandidate'],
   memoryCandidates: MemoryCandidateV1[] = []
 ): RecapArtifactsV1['status'] {
+  if (rawStatus === 'ready') {
+    return 'ready';
+  }
+
   if (rawStatus === 'processing' || rawStatus === 'pending') {
     return 'processing';
   }

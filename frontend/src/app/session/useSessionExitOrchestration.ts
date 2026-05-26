@@ -9,6 +9,8 @@ type ExitGuardMessage = {
   role: 'user' | 'assistant';
   content: string;
   createdAt: string;
+  source?: 'voice' | 'text';
+  incomplete?: boolean;
 };
 
 type PersistedSessionMessage = ExitGuardMessage & {
@@ -42,6 +44,7 @@ type UseSessionExitOrchestrationParams = {
   userId?: string;
   persistedThreadId?: string;
   threadId?: string;
+  greetingMessageId?: string;
   persistedSessionId?: string;
   responseMode: 'text' | 'voice';
   messages: ExitGuardMessage[];
@@ -71,6 +74,7 @@ export function useSessionExitOrchestration({
   userId,
   persistedThreadId,
   threadId,
+  greetingMessageId,
   persistedSessionId,
   responseMode,
   messages,
@@ -113,6 +117,7 @@ export function useSessionExitOrchestration({
     userId,
     persistedThreadId,
     threadId,
+    greetingMessageId,
     messages,
   });
 

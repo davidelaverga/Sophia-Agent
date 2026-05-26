@@ -352,7 +352,12 @@ def reconcile_review_metadata_entries(user_id: str, memories: list[dict]) -> int
     return changed
 
 
-def apply_review_metadata_overlays(user_id: str, memories: list[dict]) -> list[dict]:
+def apply_review_metadata_overlays(
+    user_id: str,
+    memories: list[dict],
+    *,
+    session_id: str | None = None,
+) -> list[dict]:
     reconcile_review_metadata_entries(user_id, memories)
     store = _load_store(user_id)
     entries = store["entries"]
@@ -406,6 +411,9 @@ def apply_review_metadata_overlays(user_id: str, memories: list[dict]) -> list[d
         overlaid_memories.append(merged_memory)
 
     for entry in entries:
+        if session_id and entry.get("session_id") != session_id:
+            continue
+
         entry_key = entry.get("memory_id") or entry.get("content_hash")
         if not isinstance(entry_key, str) or entry_key in matched_keys:
             continue
