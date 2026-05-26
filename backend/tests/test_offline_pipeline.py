@@ -225,6 +225,164 @@ class TestIdempotency:
 
 
 # ==================================================================
+# Incremental durable transcript extraction
+# ==================================================================
+
+
+class TestIncrementalExtraction:
+    def test_extracts_only_messages_after_processed_until_sequence(self, tmp_path, monkeypatch, mock_steps):
+        from deerflow.sophia import offline_pipeline as module
+        from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
+
+        store = SessionStore(tmp_path / "users")
+        store.create(
+            SessionRecord(
+                session_id="sess_range",
+                thread_id="thread_range",
+                user_id="user_abc",
+                status="ended",
+                memory_processed_until_sequence=20,
+            )
+        )
+        store.replace_messages(
+            "user_abc",
+            "sess_range",
+            [
+                SessionMessageRecord(
+                    message_id=f"m-{sequence}",
+                    session_id="sess_range",
+                    thread_id="thread_range",
+                    role="user" if sequence % 2 else "assistant",
+                    content=f"message {sequence}",
+                    sequence=sequence,
+                )
+                for sequence in range(1, 23)
+            ],
+        )
+        monkeypatch.setattr(module, "SessionStore", lambda: store)
+
+        result = module.run_offline_pipeline(
+            user_id="user_abc",
+            session_id="sess_range",
+            thread_id="thread_range",
+            thread_state=_make_thread_state(),
+        )
+
+        assert result["status"] == "completed"
+        extracted_messages = mock_steps["extraction"].call_args.args[2]
+        metadata = mock_steps["extraction"].call_args.args[3]
+        assert [message["content"] for message in extracted_messages] == ["message 21", "message 22"]
+        assert metadata["sequence_start"] == 21
+        assert metadata["sequence_end"] == 22
+        assert metadata["source_message_ids"] == ["m-21", "m-22"]
+        assert metadata["thread_id"] == "thread_range"
+        assert metadata["extraction_run_id"].startswith("extract-")
+
+        record = store.get("user_abc", "sess_range")
+        assert record is not None
+        assert record.memory_processed_until_sequence == 22
+        assert record.memory_extraction_status == "completed"
+        assert record.memory_extraction_range_start == 21
+        assert record.memory_extraction_range_end == 22
+
+    def test_no_new_messages_skips_extraction(self, tmp_path, monkeypatch, mock_steps):
+        from deerflow.sophia import offline_pipeline as module
+        from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
+
+        store = SessionStore(tmp_path / "users")
+        store.create(
+            SessionRecord(
+                session_id="sess_done",
+                thread_id="thread_done",
+                user_id="user_abc",
+                status="ended",
+                memory_processed_until_sequence=2,
+            )
+        )
+        store.replace_messages(
+            "user_abc",
+            "sess_done",
+            [
+                SessionMessageRecord(
+                    message_id="m-1",
+                    session_id="sess_done",
+                    thread_id="thread_done",
+                    role="user",
+                    content="already handled",
+                    sequence=1,
+                ),
+                SessionMessageRecord(
+                    message_id="m-2",
+                    session_id="sess_done",
+                    thread_id="thread_done",
+                    role="assistant",
+                    content="already handled too",
+                    sequence=2,
+                ),
+            ],
+        )
+        monkeypatch.setattr(module, "SessionStore", lambda: store)
+
+        result = module.run_offline_pipeline(
+            user_id="user_abc",
+            session_id="sess_done",
+            thread_id="thread_done",
+            thread_state=_make_thread_state(),
+        )
+
+        assert result["status"] == "no_new_messages"
+        assert result["steps"]["extraction"] == "no_new_messages"
+        mock_steps["extraction"].assert_not_called()
+
+    def test_failed_extraction_does_not_advance_checkpoint(self, tmp_path, monkeypatch, mock_steps):
+        from deerflow.sophia import offline_pipeline as module
+        from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
+
+        store = SessionStore(tmp_path / "users")
+        store.create(
+            SessionRecord(
+                session_id="sess_fail_checkpoint",
+                thread_id="thread_fail_checkpoint",
+                user_id="user_abc",
+                status="ended",
+                memory_processed_until_sequence=20,
+            )
+        )
+        store.replace_messages(
+            "user_abc",
+            "sess_fail_checkpoint",
+            [
+                SessionMessageRecord(
+                    message_id="m-21",
+                    session_id="sess_fail_checkpoint",
+                    thread_id="thread_fail_checkpoint",
+                    role="user",
+                    content="new segment only",
+                    sequence=21,
+                )
+            ],
+        )
+        monkeypatch.setattr(module, "SessionStore", lambda: store)
+        mock_steps["extraction"].side_effect = RuntimeError("mem0 unavailable")
+
+        result = module.run_offline_pipeline(
+            user_id="user_abc",
+            session_id="sess_fail_checkpoint",
+            thread_id="thread_fail_checkpoint",
+            thread_state=_make_thread_state(),
+        )
+
+        assert result["status"] == "completed"
+        assert result["steps"]["extraction"] == "error"
+        record = store.get("user_abc", "sess_fail_checkpoint")
+        assert record is not None
+        assert record.memory_processed_until_sequence == 20
+        assert record.memory_extraction_status == "error"
+        assert record.memory_extraction_range_start == 21
+        assert record.memory_extraction_range_end == 21
+
+
+# ==================================================================
 # Step failure isolation
 # ==================================================================
 

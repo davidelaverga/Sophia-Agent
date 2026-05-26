@@ -221,6 +221,15 @@ def _write_extracted_memories(
             "platform": platform,
             "context_mode": context_mode,
         }
+        for metadata_key in (
+            "thread_id",
+            "sequence_start",
+            "sequence_end",
+            "source_message_ids",
+            "extraction_run_id",
+        ):
+            if metadata.get(metadata_key) is not None:
+                mem0_metadata[metadata_key] = metadata[metadata_key]
 
         entry_meta = entry.get("metadata", {})
         if not isinstance(entry_meta, dict):

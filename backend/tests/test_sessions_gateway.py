@@ -205,6 +205,13 @@ def test_active_session_returns_most_recent_open_record(isolated_session_store):
             "platform": "text",
             "intention": None,
             "focus_cue": None,
+            "checkpointer_available": None,
+            "transcript_available": False,
+            "active_segment_started_at": None,
+            "segment_count": 1,
+            "continuation_count": 0,
+            "memory_processed_until_sequence": 0,
+            "recap_processed_until_sequence": 0,
         },
     }
 
@@ -333,7 +340,7 @@ def test_update_session_can_pause_and_resume_resumable_sessions(isolated_session
     )
 
 
-def test_update_session_rejects_reopening_ended_sessions(isolated_session_store):
+def test_update_session_can_reopen_ended_sessions_for_continuation(isolated_session_store):
     isolated_session_store.create(
         SessionRecord(
             session_id="session-ended",
@@ -349,8 +356,17 @@ def test_update_session_rejects_reopening_ended_sessions(isolated_session_store)
         json={"status": "open"},
     )
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == "Ended sessions cannot change status."
+    assert response.status_code == 200
+    assert response.json()["status"] == "open"
+    assert response.json()["thread_id"] == "thread-ended"
+
+    record = isolated_session_store.get("dev-user", "session-ended")
+    assert record is not None
+    assert record.status == "open"
+    assert record.ended_at is None
+    assert record.segment_count == 2
+    assert record.continuation_count == 1
+    assert record.active_segment_started_at is not None
 
 
 def test_touch_session_resumes_paused_session(isolated_session_store):
@@ -375,6 +391,42 @@ def test_touch_session_resumes_paused_session(isolated_session_store):
     assert response.json()["status"] == "open"
     assert response.json()["turn_count"] == 3
     mock_register_activity.assert_called_once_with("thread-paused", "dev-user", "paused-session", "work")
+
+
+def test_touch_session_reopens_ended_session_and_keeps_ids(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="ended-session",
+            thread_id="thread-ended",
+            user_id="dev-user",
+            status="ended",
+            context_mode="life",
+            ended_at="2026-04-15T00:10:00+00:00",
+            message_count=20,
+        )
+    )
+
+    with patch("app.gateway.inactivity_watcher.register_activity") as mock_register_activity:
+        response = client.post(
+            "/api/v1/sessions/ended-session/touch?user_id=dev-user&message_preview="
+            "continuing%20from%20where%20we%20left%20off",
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["session_id"] == "ended-session"
+    assert payload["thread_id"] == "thread-ended"
+    assert payload["status"] == "open"
+    assert payload["turn_count"] == 21
+    assert payload["ended_at"] is None
+    mock_register_activity.assert_called_once_with("thread-ended", "dev-user", "ended-session", "life")
+
+    record = isolated_session_store.get("dev-user", "ended-session")
+    assert record is not None
+    assert record.status == "open"
+    assert record.segment_count == 2
+    assert record.continuation_count == 1
+    assert record.active_segment_started_at is not None
 
 
 def test_touch_session_falls_back_to_legacy_dev_user_records(isolated_session_store):
@@ -654,7 +706,7 @@ def test_session_message_snapshot_replaces_pagehide_and_end_session_duplicates(i
     assert response.status_code == 200
     stored_messages = isolated_session_store.list_messages("dev-user", "session-replace")
     assert [message.message_id for message in stored_messages] == ["user-stable", "assistant-stable"]
-    assert [message.sequence for message in stored_messages] == [0, 1]
+    assert [message.sequence for message in stored_messages] == [1, 2]
 
 
 def test_persist_session_messages_filters_incomplete_assistant_and_counts_visible(isolated_session_store):

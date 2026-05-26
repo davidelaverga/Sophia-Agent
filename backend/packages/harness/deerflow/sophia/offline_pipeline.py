@@ -12,7 +12,8 @@ processes the completed session through 7 steps:
 7. Visual artifact check (placeholder)
 
 Each step is independent — failure in one does not block the others.
-The pipeline is idempotent via a module-level ``_processed_sessions`` set.
+The pipeline is idempotent via durable processed_until checkpoints plus a
+module-level ``_processed_sessions`` guard for same-process duplicate ranges.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import json
 import logging
 import os
 import threading
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -32,13 +34,18 @@ from deerflow.sophia.extraction import extract_session_memories
 from deerflow.sophia.handoffs import generate_handoff
 from deerflow.sophia.identity import maybe_update_identity
 from deerflow.sophia.mem0_client import reconcile_review_metadata_with_mem0
+from deerflow.sophia.session_store import (
+    SessionMessageRecord,
+    SessionStore,
+    canonical_visible_messages,
+)
 from deerflow.sophia.smart_opener import generate_smart_opener
 from deerflow.sophia.trace_logger import write_session_trace
 
 logger = logging.getLogger(__name__)
 
-# Module-level idempotency guard — sufficient for single-process deployments.
-# If multi-process is needed later, upgrade to a file-based marker.
+# Module-level idempotency guard for in-flight/same-process duplicate ranges.
+# Durable processed_until checkpoints in SessionStore own cross-process safety.
 _processed_sessions: set[str] = set()
 _processed_lock = threading.Lock()
 
@@ -106,13 +113,6 @@ def run_offline_pipeline(
         thread_state is not None,
     )
 
-    # --- Idempotency check (atomic check-and-add to prevent TOCTOU race) ---
-    with _processed_lock:
-        if session_id in _processed_sessions:
-            logger.info("Session %s already processed — skipping", session_id)
-            return {"status": "already_processed", "session_id": session_id}
-        _processed_sessions.add(session_id)
-
     # --- Thread state: fetch from LangGraph if not provided ---
     if thread_state is None:
         thread_state = _fetch_thread_state(thread_id)
@@ -123,9 +123,6 @@ def run_offline_pipeline(
                 session_id,
                 thread_id,
             )
-            # Remove from processed set so a retry can succeed after a transient failure
-            with _processed_lock:
-                _processed_sessions.discard(session_id)
             return {"status": "error", "reason": "no_thread_state", "session_id": session_id}
         logger.info("Fetched thread_state from LangGraph for session %s", session_id)
 
@@ -146,6 +143,33 @@ def run_offline_pipeline(
     )
 
     steps: dict[str, str] = {}
+    extraction_scope = _load_incremental_extraction_scope(user_id, session_id)
+    processing_key = _build_processing_key(session_id, extraction_scope, messages)
+
+    with _processed_lock:
+        if processing_key in _processed_sessions:
+            logger.info("Session range %s already processed — skipping", processing_key)
+            return {
+                "status": "already_processed",
+                "session_id": session_id,
+                "extraction_range": _scope_range_for_result(extraction_scope),
+            }
+        _processed_sessions.add(processing_key)
+
+    if extraction_scope is not None and not extraction_scope["selected_messages"]:
+        logger.info(
+            "session.finalization no_new_messages user_id=%s session_id=%s last_processed=%s current_max=%s",
+            user_id,
+            session_id,
+            extraction_scope["last_processed_sequence"],
+            extraction_scope["current_max_sequence"],
+        )
+        return {
+            "status": "no_new_messages",
+            "session_id": session_id,
+            "steps": {"extraction": "no_new_messages"},
+            "extraction_range": _scope_range_for_result(extraction_scope),
+        }
 
     # ------------------------------------------------------------------
     # Step 1: Trace logging
@@ -162,11 +186,43 @@ def run_offline_pipeline(
     # ------------------------------------------------------------------
     extracted_memories: list[dict] = []
     try:
-        serialized_messages = _serialize_messages(messages)
+        extraction_run_id = f"extract-{uuid.uuid4()}"
+        if extraction_scope is not None:
+            serialized_messages = [
+                _message_record_to_extraction_message(message)
+                for message in extraction_scope["selected_messages"]
+            ]
+            source_message_ids = [
+                message.message_id
+                for message in extraction_scope["selected_messages"]
+                if message.message_id
+            ]
+            session_metadata.update(
+                {
+                    "thread_id": thread_id,
+                    "sequence_start": extraction_scope["range_start"],
+                    "sequence_end": extraction_scope["range_end"],
+                    "source_message_ids": source_message_ids,
+                    "extraction_run_id": extraction_run_id,
+                }
+            )
+        else:
+            serialized_messages = _serialize_messages(messages)
+            session_metadata.update(
+                {
+                    "thread_id": thread_id,
+                    "extraction_run_id": extraction_run_id,
+                }
+            )
         extracted_memories = extract_session_memories(
             user_id, session_id, serialized_messages, session_metadata,
         )
         reconcile_review_metadata_with_mem0(user_id)
+        if extraction_scope is not None:
+            _mark_memory_extraction_success(
+                extraction_scope,
+                extraction_run_id=extraction_run_id,
+            )
         steps["extraction"] = "ok"
         logger.info(
             "session.finalization pipeline_extraction_complete user_id=%s session_id=%s memory_count=%s",
@@ -176,7 +232,11 @@ def run_offline_pipeline(
         )
     except Exception:
         logger.error("Pipeline step 'extraction' failed for session %s", session_id, exc_info=True)
+        if extraction_scope is not None:
+            _mark_memory_extraction_failure(extraction_scope)
         steps["extraction"] = "error"
+        with _processed_lock:
+            _processed_sessions.discard(processing_key)
 
     # ------------------------------------------------------------------
     # Step 3: Smart opener generation
@@ -269,8 +329,6 @@ def run_offline_pipeline(
         logger.error("Pipeline step 'visual_check' failed for session %s", session_id, exc_info=True)
         steps["visual_check"] = "error"
 
-    # (session_id already added at the top via _processed_lock)
-
     logger.info(
         "session.finalization pipeline_complete user_id=%s session_id=%s steps=%s",
         user_id,
@@ -282,6 +340,7 @@ def run_offline_pipeline(
         "status": "completed",
         "session_id": session_id,
         "steps": steps,
+        "extraction_range": _scope_range_for_result(extraction_scope),
     }
 
 
@@ -293,6 +352,133 @@ def reset_processed_sessions() -> None:
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+
+def _load_incremental_extraction_scope(user_id: str, session_id: str) -> dict[str, Any] | None:
+    """Load the durable unprocessed transcript range, if SessionStore has it."""
+    try:
+        store = SessionStore()
+        record = store.get(user_id, session_id)
+        if record is None:
+            return None
+        visible_messages = canonical_visible_messages(store.list_messages(user_id, session_id))
+    except Exception:
+        logger.warning(
+            "session.finalization durable_scope_unavailable user_id=%s session_id=%s",
+            user_id,
+            session_id,
+            exc_info=True,
+        )
+        return None
+
+    last_processed = max(0, int(record.memory_processed_until_sequence or 0))
+    current_max = max((message.sequence for message in visible_messages), default=0)
+    selected_messages = [
+        message
+        for message in visible_messages
+        if last_processed < message.sequence <= current_max
+    ]
+    range_start = selected_messages[0].sequence if selected_messages else None
+    range_end = selected_messages[-1].sequence if selected_messages else None
+
+    return {
+        "store": store,
+        "record": record,
+        "user_id": user_id,
+        "session_id": session_id,
+        "selected_messages": selected_messages,
+        "last_processed_sequence": last_processed,
+        "current_max_sequence": current_max,
+        "range_start": range_start,
+        "range_end": range_end,
+    }
+
+
+def _build_processing_key(
+    session_id: str,
+    extraction_scope: dict[str, Any] | None,
+    messages: list,
+) -> str:
+    if extraction_scope is None:
+        return f"{session_id}:legacy:{len(messages)}"
+    return (
+        f"{session_id}:"
+        f"{extraction_scope['last_processed_sequence']}:"
+        f"{extraction_scope['current_max_sequence']}"
+    )
+
+
+def _scope_range_for_result(extraction_scope: dict[str, Any] | None) -> dict[str, int | None] | None:
+    if extraction_scope is None:
+        return None
+    return {
+        "last_processed_sequence": extraction_scope["last_processed_sequence"],
+        "current_max_sequence": extraction_scope["current_max_sequence"],
+        "sequence_start": extraction_scope["range_start"],
+        "sequence_end": extraction_scope["range_end"],
+    }
+
+
+def _message_record_to_extraction_message(message: SessionMessageRecord) -> dict[str, Any]:
+    return {
+        "role": message.role,
+        "content": message.content,
+        "sequence": message.sequence,
+        "message_id": message.message_id,
+        "metadata": {
+            "sequence": message.sequence,
+            "message_id": message.message_id,
+            "created_at": message.created_at,
+            "source": message.source,
+        },
+    }
+
+
+def _mark_memory_extraction_success(
+    extraction_scope: dict[str, Any],
+    *,
+    extraction_run_id: str,
+) -> None:
+    range_end = extraction_scope.get("range_end")
+    if not isinstance(range_end, int):
+        return
+    store = extraction_scope["store"]
+    store.update(
+        extraction_scope["user_id"],
+        extraction_scope["session_id"],
+        memory_processed_until_sequence=range_end,
+        recap_processed_until_sequence=max(
+            int(extraction_scope.get("current_max_sequence") or range_end),
+            int(extraction_scope["record"].recap_processed_until_sequence or 0),
+        ),
+        last_memory_extraction_at=datetime.now(UTC).isoformat(),
+        last_recap_extraction_at=datetime.now(UTC).isoformat(),
+        last_memory_extraction_run_id=extraction_run_id,
+        memory_extraction_status="completed",
+        memory_extraction_error_code=None,
+        memory_extraction_range_start=extraction_scope.get("range_start"),
+        memory_extraction_range_end=range_end,
+    )
+
+
+def _mark_memory_extraction_failure(extraction_scope: dict[str, Any]) -> None:
+    try:
+        store = extraction_scope["store"]
+        store.update(
+            extraction_scope["user_id"],
+            extraction_scope["session_id"],
+            memory_extraction_status="error",
+            memory_extraction_error_code="extraction_failed",
+            memory_extraction_range_start=extraction_scope.get("range_start"),
+            memory_extraction_range_end=extraction_scope.get("range_end"),
+        )
+    except Exception:
+        logger.warning(
+            "session.finalization extraction_failure_checkpoint_failed user_id=%s session_id=%s",
+            extraction_scope.get("user_id"),
+            extraction_scope.get("session_id"),
+            exc_info=True,
+        )
 
 
 def _write_offline_recap(

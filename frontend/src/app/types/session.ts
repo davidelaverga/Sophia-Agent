@@ -272,6 +272,13 @@ export interface SessionInfo {
   platform?: string;
   intention?: string;
   focus_cue?: string;
+  checkpointer_available?: boolean | null;
+  transcript_available?: boolean;
+  active_segment_started_at?: string | null;
+  segment_count?: number;
+  continuation_count?: number;
+  memory_processed_until_sequence?: number;
+  recap_processed_until_sequence?: number;
 }
 
 /**

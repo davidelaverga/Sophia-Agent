@@ -27,8 +27,34 @@ CREATE TABLE IF NOT EXISTS public.sophia_sessions (
     recap_status             TEXT,
     checkpointer_available   BOOLEAN,
     transcript_available     BOOLEAN NOT NULL DEFAULT false,
+    memory_processed_until_sequence INTEGER NOT NULL DEFAULT 0,
+    recap_processed_until_sequence   INTEGER NOT NULL DEFAULT 0,
+    last_memory_extraction_at        TIMESTAMPTZ,
+    last_recap_extraction_at         TIMESTAMPTZ,
+    last_memory_extraction_run_id    TEXT,
+    memory_extraction_status         TEXT,
+    memory_extraction_error_code     TEXT,
+    memory_extraction_range_start    INTEGER,
+    memory_extraction_range_end      INTEGER,
+    active_segment_started_at        TIMESTAMPTZ,
+    segment_count                    INTEGER NOT NULL DEFAULT 1,
+    continuation_count               INTEGER NOT NULL DEFAULT 0,
     metadata                 JSONB NOT NULL DEFAULT '{}'::jsonb
 );
+
+ALTER TABLE public.sophia_sessions
+    ADD COLUMN IF NOT EXISTS memory_processed_until_sequence INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS recap_processed_until_sequence INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS last_memory_extraction_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS last_recap_extraction_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS last_memory_extraction_run_id TEXT,
+    ADD COLUMN IF NOT EXISTS memory_extraction_status TEXT,
+    ADD COLUMN IF NOT EXISTS memory_extraction_error_code TEXT,
+    ADD COLUMN IF NOT EXISTS memory_extraction_range_start INTEGER,
+    ADD COLUMN IF NOT EXISTS memory_extraction_range_end INTEGER,
+    ADD COLUMN IF NOT EXISTS active_segment_started_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS segment_count INTEGER NOT NULL DEFAULT 1,
+    ADD COLUMN IF NOT EXISTS continuation_count INTEGER NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS sophia_sessions_user_updated_idx
     ON public.sophia_sessions (user_id, updated_at DESC);

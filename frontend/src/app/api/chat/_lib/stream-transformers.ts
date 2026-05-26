@@ -13,6 +13,11 @@ type StreamMeta = {
   skill_used?: string;
   emotion_detected?: string;
   pending_interrupt?: object | null;
+  checkpointer_resume?: boolean;
+  resumed_from_thread?: boolean;
+  recovered_from_transcript?: boolean;
+  stale_thread_id?: string;
+  new_thread_id?: string;
 };
 
 type LeadFilterState = {
