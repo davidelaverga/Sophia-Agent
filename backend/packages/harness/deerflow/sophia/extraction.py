@@ -202,6 +202,101 @@ def _preferred_name_from_memory_content(text: str) -> str | None:
     return _extract_explicit_preferred_name_from_text(text)
 
 
+def _emit_deterministic_fallback(
+    user_id: str,
+    session_id: str,
+    deterministic_entries: list[dict],
+    metadata: dict,
+) -> list[dict]:
+    """Write deterministic-only entries (or return []) when the LLM path failed.
+
+    Used by the FileNotFoundError + Anthropic-call-failed branches of
+    ``extract_session_memories``. Extracting this dedupes those two branches
+    and keeps the orchestrator below the sentrux CC ≥ 16 cap.
+    """
+    if not deterministic_entries:
+        return []
+    return _write_extracted_memories(
+        user_id=user_id,
+        session_id=session_id,
+        extracted=deterministic_entries,
+        metadata=metadata,
+    )
+
+
+def _parse_extraction_with_deterministic_fallback(
+    *,
+    response_text: str,
+    session_id: str,
+    user_id: str,
+    deterministic_entries: list[dict],
+) -> list | None:
+    """Parse the LLM extraction response, falling back to deterministic entries.
+
+    Returns:
+      - ``None`` when the LLM legitimately returned no candidates (empty
+        after fence-strip). Caller short-circuits with ``return []``.
+      - A list (possibly the deterministic_entries fallback) on success.
+
+    Raises:
+      ``ExtractionParseError`` when neither the LLM nor deterministic
+      extraction produced a usable list — preserves the H.1 retry contract
+      so the offline pipeline leaves the session unprocessed for retry
+      on the next trigger.
+
+    Three outcomes the orchestrator used to handle inline (now extracted
+    to bring ``extract_session_memories`` below the sentrux CC cap):
+
+      1. Empty after fence-strip → return ``None`` (no candidates)
+      2. JSON parse error or non-list → deterministic fallback if any,
+         else raise ``ExtractionParseError``
+      3. Successful list parse → merge with deterministic_entries and return
+    """
+    cleaned = _strip_markdown_fences(response_text)
+    if not cleaned:
+        logger.info(
+            "[Extraction] empty response — LLM returned no candidates "
+            "(user_id=%s session_id=%s)",
+            user_id, session_id,
+        )
+        return None
+
+    try:
+        extracted = json.loads(cleaned)
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.error(
+            "Failed to parse extraction response for session %s: %s",
+            session_id,
+            response_text[:200] if response_text else "(empty)",
+        )
+        # Merge resolution: prefer deterministic fallback (user-stated
+        # preferred name is a critical UX signal we can extract without
+        # the LLM), but preserve H.1 retry semantics when NO fallback
+        # exists — raise so the pipeline doesn't lock the session in
+        # ``_processed_sessions``.
+        if not deterministic_entries:
+            raise ExtractionParseError(
+                f"Extraction JSON parse failed for session {session_id}"
+            ) from exc
+        extracted = list(deterministic_entries)
+
+    if not isinstance(extracted, list):
+        logger.error(
+            "Extraction response is not a list for session %s (got %s)",
+            session_id, type(extracted).__name__,
+        )
+        if not deterministic_entries:
+            raise ExtractionParseError(
+                f"Extraction response is not a list for session {session_id}"
+            )
+        extracted = list(deterministic_entries)
+
+    # Always merge deterministic preferred-name entries into the result.
+    # ``_merge_preferred_name_entries`` dedupes — if the LLM already produced
+    # an equivalent name entry, the deterministic one is folded in.
+    return _merge_preferred_name_entries(extracted, deterministic_entries)
+
+
 def _importance_label(score: float) -> str:
     """Map an importance score [0..1] to its three-tier label."""
     if score >= 0.8:
@@ -453,13 +548,8 @@ def extract_session_memories(
         template = _load_template()
     except FileNotFoundError:
         logger.error("Extraction template not found at %s", _EXTRACTION_TEMPLATE_PATH)
-        if not deterministic_entries:
-            return []
-        return _write_extracted_memories(
-            user_id=user_id,
-            session_id=session_id,
-            extracted=deterministic_entries,
-            metadata=metadata,
+        return _emit_deterministic_fallback(
+            user_id, session_id, deterministic_entries, metadata
         )
 
     # Use manual replacement instead of str.format() because the template
@@ -490,73 +580,24 @@ def extract_session_memories(
         response_text = response.content[0].text
     except Exception:
         logger.error("Anthropic API call failed for session %s", session_id, exc_info=True)
-        if not deterministic_entries:
-            return []
-        return _write_extracted_memories(
-            user_id=user_id,
-            session_id=session_id,
-            extracted=deterministic_entries,
-            metadata=metadata,
+        return _emit_deterministic_fallback(
+            user_id, session_id, deterministic_entries, metadata
         )
 
-    # Parse JSON response. Distinguish three outcomes:
-    #   1. Empty after fence-strip (LLM returned a bare fence or whitespace) →
-    #      return [] cleanly so the pipeline marks the session processed.
-    #      Retrying won't help — the LLM said nothing.
-    #   2. JSON parse error on non-empty content → raise ExtractionParseError
-    #      so the pipeline leaves the session unprocessed and retries on the
-    #      next trigger.
-    #   3. Successful parse → return the list (possibly empty if LLM said "[]"
-    #      explicitly, treated same as case 1).
-    cleaned = _strip_markdown_fences(response_text)
-    if not cleaned:
-        logger.info(
-            "[Extraction] empty response — LLM returned no candidates (user_id=%s session_id=%s)",
-            user_id,
-            session_id,
-        )
+    # Parse JSON response + apply deterministic fallback in a helper to keep
+    # this orchestrator below the sentrux CC ≥ 16 gate. The helper raises
+    # ``ExtractionParseError`` when neither the LLM nor the deterministic
+    # extractor produced usable output (H.1 retry contract); the empty-but-
+    # valid case returns ``None`` so we short-circuit cleanly.
+    parsed = _parse_extraction_with_deterministic_fallback(
+        response_text=response_text,
+        session_id=session_id,
+        user_id=user_id,
+        deterministic_entries=deterministic_entries,
+    )
+    if parsed is None:
         return []
-
-    try:
-        extracted = json.loads(cleaned)
-    except (json.JSONDecodeError, TypeError) as exc:
-        logger.error(
-            "Failed to parse extraction response for session %s: %s",
-            session_id,
-            response_text[:200] if response_text else "(empty)",
-        )
-        # Merge resolution: prefer main's deterministic fallback when
-        # available (a user-stated preferred name is a critical UX signal
-        # we can extract without the LLM), but preserve our H.1 retry
-        # semantics when NO fallback exists — raise so the pipeline leaves
-        # the session unprocessed and retries on the next trigger instead
-        # of silently locking the session in ``_processed_sessions``.
-        if deterministic_entries:
-            extracted = list(deterministic_entries)
-        else:
-            raise ExtractionParseError(
-                f"Extraction JSON parse failed for session {session_id}"
-            ) from exc
-
-    if not isinstance(extracted, list):
-        logger.error(
-            "Extraction response is not a list for session %s (got %s)",
-            session_id,
-            type(extracted).__name__,
-        )
-        # Same merge: deterministic fallback if available, otherwise raise.
-        if deterministic_entries:
-            extracted = list(deterministic_entries)
-        else:
-            raise ExtractionParseError(
-                f"Extraction response is not a list for session {session_id}"
-            )
-
-    # Main's contract: always merge deterministic preferred-name entries
-    # into the result. ``_merge_preferred_name_entries`` dedupes — if the
-    # LLM already produced an equivalent name entry, the deterministic one
-    # is folded in; otherwise it's added.
-    extracted = _merge_preferred_name_entries(extracted, deterministic_entries)
+    extracted = parsed
 
     logger.info(
         "session.finalization extraction_candidates user_id=%s session_id=%s candidate_count=%s",
