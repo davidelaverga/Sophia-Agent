@@ -33,7 +33,13 @@ from deerflow.sophia.review_metadata_store import (
     remove_review_metadata,
     upsert_review_metadata,
 )
-from deerflow.sophia.session_store import SessionRecord, SessionStore
+from deerflow.sophia.session_store import (
+    SessionMessageRecord,
+    SessionRecord,
+    SessionStore,
+    canonical_visible_messages,
+    derive_message_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,12 +132,21 @@ def _get_mem0_client():
 
 
 def _resolve_session_record_owner(user_id: str, session_id: str) -> tuple[str, SessionRecord | None]:
-    """Resolve the persisted session owner, including the legacy dev-user fallback."""
+    """Resolve the persisted session owner.
+
+    The legacy ``dev-user`` fallback is allowed only by the filesystem local/dev
+    store. Supabase production reads are scoped strictly by trusted backend
+    ``user_id``.
+    """
     record = _session_store.get(user_id, session_id)
     if record is not None:
         return user_id, record
 
-    if user_id == _LEGACY_SESSION_USER_ID:
+    if user_id == _LEGACY_SESSION_USER_ID or not getattr(
+        _session_store,
+        "allow_legacy_dev_user_fallback",
+        True,
+    ):
         return user_id, None
 
     legacy_record = _session_store.get(_LEGACY_SESSION_USER_ID, session_id)
@@ -158,6 +173,16 @@ class MemoryItem(BaseModel):
 class MemoryListResponse(BaseModel):
     memories: list[MemoryItem] = Field(default_factory=list)
     count: int = Field(default=0, description="Total memory count")
+    source: str = Field(default="unknown", description="Safe diagnostic source classification")
+    candidate_count: int = Field(default=0, description="Safe diagnostic candidate count")
+    session_id_received: bool = Field(default=False, description="Whether a diagnostic session_id query param was received")
+    local_overlay_count: int = Field(default=0, description="Count of local review overlay entries returned or applied")
+    skipped_mem0_hydration_for_session_scope: bool = Field(
+        default=False,
+        description="Whether local review metadata supplied enough status metadata to skip per-memory hydration",
+    )
+    empty_reason: str | None = Field(default=None, description="Safe empty-result reason for terminal empty responses")
+    trace_id: str | None = Field(default=None, description="Safe request correlation id")
 
 
 class MemoryUpdateRequest(BaseModel):
@@ -278,9 +303,18 @@ class CategoryMemoryResponse(BaseModel):
 
 
 class SessionMessageInput(BaseModel):
+    id: str | None = Field(default=None, description="Stable client message ID")
+    message_id: str | None = Field(default=None, description="Stable provider/backend message ID")
     role: str = Field(..., description="Message role")
     content: str = Field(default="", description="Message text content")
     created_at: str | None = Field(default=None, description="Client timestamp")
+    source: str | None = Field(default=None, description="Client/source transport")
+    final: bool | None = Field(default=None, description="Whether message content is finalized")
+    incomplete: bool | None = Field(default=None, description="Whether message was interrupted mid-stream")
+    approximate: bool | None = Field(default=None, description="Whether content is approximate")
+    turn_id: str | None = Field(default=None, description="Stable turn ID")
+    provider_event_id: str | None = Field(default=None, description="Stable provider event ID")
+    redaction_level: str = Field(default="none", description="Redaction level")
 
 
 class SessionRecapArtifactsPayload(BaseModel):
@@ -488,10 +522,36 @@ def _hydrate_memories_for_review(
     memories: list[dict],
     status: str | None,
     *,
-    hydrate_missing_status: bool = True,
-    hydrate_missing_detail: bool = True,
-) -> list[dict]:
-    memories = apply_review_metadata_overlays(user_id, memories)
+    session_id: str | None = None,
+) -> tuple[list[dict], dict[str, Any]]:
+    scoped_overlay_session_id = session_id if status == "pending_review" else None
+    memories = apply_review_metadata_overlays(user_id, memories, session_id=scoped_overlay_session_id)
+    local_overlay_count = sum(
+        1
+        for memory in memories
+        if isinstance(memory, dict) and isinstance(memory.get("id"), str) and memory["id"].startswith("local:")
+    )
+
+    if session_id and status == "pending_review":
+        filtered = [
+            memory
+            for memory in memories
+            if isinstance(memory, dict)
+            and isinstance(memory.get("metadata"), dict)
+            and memory["metadata"].get("status") == status
+            and _memory_session_id(memory) == session_id
+        ]
+        return filtered, {
+            "source": "local_review_overlay",
+            "local_overlay_count": local_overlay_count,
+            "detail_hydration_count": 0,
+            "skipped_detail_hydration_count": len(memories),
+            "skipped_mem0_hydration_for_session_scope": True,
+            "empty_reason": "no_session_candidates" if not filtered else None,
+        }
+
+    detail_hydration_count = 0
+    skipped_detail_hydration_count = 0
     hydrated: list[dict] = []
 
     for memory in memories:
@@ -500,21 +560,60 @@ def _hydrate_memories_for_review(
         has_status = status is not None and _has_memory_status(memory)
 
         needs_hydration = memory_id and (
-            (hydrate_missing_status and status is not None and not has_status)
-            or (hydrate_missing_detail and _should_hydrate_memory_detail(memory) and not has_status)
+            (status is not None and not has_status)
+            or (_should_hydrate_memory_detail(memory) and not has_status)
         )
 
         if needs_hydration:
+            detail_hydration_count += 1
             try:
                 merged_memory = _merge_memory_detail(memory, client.get(memory_id))
             except Exception:
                 logger.warning("Failed to hydrate memory detail for %s", memory_id, exc_info=True)
+        elif status is not None and has_status:
+            skipped_detail_hydration_count += 1
 
         hydrated.append(merged_memory)
 
-    hydrated = apply_review_metadata_overlays(user_id, hydrated)
+    hydrated = apply_review_metadata_overlays(user_id, hydrated, session_id=scoped_overlay_session_id)
+    local_overlay_count = max(
+        local_overlay_count,
+        sum(
+            1
+            for memory in hydrated
+            if isinstance(memory, dict) and isinstance(memory.get("id"), str) and memory["id"].startswith("local:")
+        ),
+    )
 
-    return _filter_memories_for_review(hydrated, status=status)
+    if not status:
+        filtered = hydrated
+    else:
+        filtered = [
+            memory
+            for memory in hydrated
+            if isinstance(memory.get("metadata"), dict) and memory["metadata"].get("status") == status
+        ]
+
+    if session_id and status == "pending_review":
+        filtered = [memory for memory in filtered if _memory_session_id(memory) == session_id]
+
+    if not filtered:
+        source = "none"
+    elif local_overlay_count > 0 or skipped_detail_hydration_count > 0:
+        source = "local_review_overlay"
+    elif detail_hydration_count > 0:
+        source = "global_hydration"
+    else:
+        source = "mem0"
+
+    return filtered, {
+        "source": source,
+        "local_overlay_count": local_overlay_count,
+        "detail_hydration_count": detail_hydration_count,
+        "skipped_detail_hydration_count": skipped_detail_hydration_count,
+        "skipped_mem0_hydration_for_session_scope": skipped_detail_hydration_count > 0,
+        "empty_reason": "no_session_candidates" if session_id and status == "pending_review" and not filtered else None,
+    }
 
 
 def _is_memory_record(item: dict) -> bool:
@@ -799,6 +898,8 @@ def _build_thread_state_from_end_request(body: SessionEndRequest) -> dict | None
         }
         for message in body.messages
         if message.content.strip()
+        and (message.role in {"user", "assistant", "sophia"})
+        and (message.final if message.final is not None else not bool(message.incomplete))
     ]
     recap_artifacts = body.recap_artifacts.model_dump(exclude_none=True) if body.recap_artifacts else None
 
@@ -820,6 +921,61 @@ def _build_thread_state_from_end_request(body: SessionEndRequest) -> dict | None
         thread_state["artifacts"] = [recap_artifacts]
 
     return thread_state
+
+
+def _persist_end_session_transcript(user_id: str, body: SessionEndRequest) -> None:
+    if not body.messages:
+        return
+
+    owner_user_id, record = _resolve_session_record_owner(user_id, body.session_id)
+    if record is None:
+        return
+
+    records: list[SessionMessageRecord] = []
+    for message in body.messages:
+        content = message.content.strip()
+        if not content:
+            continue
+        role = "assistant" if message.role in {"assistant", "sophia"} else message.role
+        if role not in {"user", "assistant"}:
+            continue
+        is_final = message.final if message.final is not None else not bool(message.incomplete)
+        if not is_final:
+            continue
+        records.append(
+            SessionMessageRecord(
+                message_id=derive_message_id(
+                    session_id=body.session_id,
+                    role=role,
+                    sequence=len(records),
+                    message_id=message.message_id or message.id,
+                    turn_id=message.turn_id,
+                    provider_event_id=message.provider_event_id,
+                    content=content,
+                ),
+                session_id=body.session_id,
+                thread_id=body.thread_id or record.thread_id,
+                role=role,
+                content=content,
+                created_at=message.created_at or datetime.now(UTC).isoformat(),
+                source=message.source or body.platform or record.platform or "text",
+                final=True,
+                approximate=bool(message.approximate),
+                turn_id=message.turn_id,
+                provider_event_id=message.provider_event_id,
+                sequence=len(records),
+                redaction_level=message.redaction_level,
+            )
+        )
+
+    if records:
+        stored_records = _session_store.replace_messages(owner_user_id, body.session_id, records)
+        visible_records = canonical_visible_messages(stored_records)
+        updates: dict[str, object] = {"message_count": len(visible_records)}
+        last_visible = next((message for message in reversed(visible_records) if message.content.strip()), None)
+        if last_visible is not None:
+            updates["last_message_preview"] = last_visible.content.strip()[:200]
+        _session_store.update(owner_user_id, body.session_id, **updates)
 
 
 def _build_debrief_prompt(body: SessionEndRequest, recap_artifacts: dict | None, duration_minutes: int) -> str | None:
@@ -990,16 +1146,37 @@ async def list_memories(
     session_id: str | None = Query(default=None, description="Filter by source session identifier"),
 ) -> MemoryListResponse:
     _validate_user(user_id)
+    client = _get_mem0_client()
+    trace_id = f"memrecent-{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}"
     try:
         logger.info(
-            "session.finalization list_memories_request user_id=%s status=%s session_id=%s",
+            "session.finalization list_memories_request user_id=%s status=%s session_id_received=%s trace_id=%s",
             user_id,
             status or "<none>",
-            session_id or "<none>",
+            bool(session_id),
+            trace_id,
         )
+        # Fast-path: session-scoped status filter (typically the recap flow)
+        # can resolve entirely from the local review_metadata overlay when
+        # the offline pipeline has already written candidates for this
+        # session. Skip the full Mem0 ``get_all`` scan in that case so a
+        # cold recap doesn't pay for a multi-page pagination just to throw
+        # most of it away.
         if session_id and status:
+            overlay_only_memories = apply_review_metadata_overlays(
+                user_id,
+                [],
+                session_id=session_id if status == "pending_review" else None,
+            )
+            local_overlay_total = sum(
+                1
+                for memory in overlay_only_memories
+                if isinstance(memory, dict)
+                and isinstance(memory.get("id"), str)
+                and memory["id"].startswith("local:")
+            )
             local_review_memories = _filter_memories_for_review(
-                apply_review_metadata_overlays(user_id, []),
+                overlay_only_memories,
                 status=status,
                 session_id=session_id,
             )
@@ -1007,36 +1184,57 @@ async def list_memories(
                 local_review_memories = _dedupe_memories_by_id(local_review_memories)
                 items = [_to_memory_item(m) for m in local_review_memories]
                 logger.info(
-                    "session.finalization list_memories_result user_id=%s status=%s session_id=%s count=%s source=local_review_overlay",
+                    "session.finalization list_memories_result user_id=%s status=%s session_id=%s count=%s source=local_review_overlay trace_id=%s",
                     user_id,
                     status,
                     session_id,
                     len(items),
+                    trace_id,
                 )
-                return MemoryListResponse(memories=items, count=len(items))
+                return MemoryListResponse(
+                    memories=items,
+                    count=len(items),
+                    source="local_review_overlay",
+                    candidate_count=len(items),
+                    session_id_received=True,
+                    local_overlay_count=local_overlay_total or len(items),
+                    skipped_mem0_hydration_for_session_scope=True,
+                    empty_reason=None,
+                    trace_id=trace_id,
+                )
 
-        client = _get_mem0_client()
         memories_raw = _get_all_paginated(client, {"user_id": user_id})
-        memories_raw = _hydrate_memories_for_review(
+        memories_raw, diagnostics = _hydrate_memories_for_review(
             user_id,
             client,
             memories_raw,
             status,
-            hydrate_missing_status=session_id is None,
-            hydrate_missing_detail=session_id is None,
+            session_id=session_id,
         )
-        if session_id:
-            memories_raw = _filter_memories_for_review(memories_raw, session_id=session_id)
         memories_raw = _dedupe_memories_by_id(memories_raw)
         items = [_to_memory_item(m) for m in memories_raw]
         logger.info(
-            "session.finalization list_memories_result user_id=%s status=%s session_id=%s count=%s",
+            "session.finalization list_memories_result user_id=%s status=%s session_id=%s count=%s source=%s trace_id=%s",
             user_id,
             status or "<none>",
             session_id or "<none>",
             len(items),
+            diagnostics.get("source"),
+            trace_id,
         )
-        return MemoryListResponse(memories=items, count=len(items))
+        return MemoryListResponse(
+            memories=items,
+            count=len(items),
+            source=str(diagnostics.get("source") or "unknown"),
+            candidate_count=len(items),
+            session_id_received=bool(session_id),
+            local_overlay_count=int(diagnostics.get("local_overlay_count") or 0),
+            skipped_mem0_hydration_for_session_scope=bool(
+                diagnostics.get("skipped_mem0_hydration_for_session_scope")
+            ),
+            empty_reason=diagnostics.get("empty_reason") if isinstance(diagnostics.get("empty_reason"), str) else None,
+            trace_id=trace_id,
+        )
     except Exception as e:
         logger.warning("Failed to list memories for %s: %s", user_id, e)
         raise HTTPException(status_code=503, detail="Memory service unavailable")
@@ -1345,7 +1543,7 @@ async def journal(
                 normalized_search,
                 categories=[selected_category] if selected_category else None,
             )
-            memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+            memories_raw, _ = _hydrate_memories_for_review(user_id, client, memories_raw, status)
 
             # Preserve the previous plain-text search behavior if Mem0 search returns no results.
             if not memories_raw:
@@ -1353,7 +1551,7 @@ async def journal(
                 if selected_category:
                     filters["categories"] = selected_category
                 memories_raw = _get_all_paginated(client, filters)
-                memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+                memories_raw, _ = _hydrate_memories_for_review(user_id, client, memories_raw, status)
                 memories_raw = [
                     memory
                     for memory in memories_raw
@@ -1370,7 +1568,7 @@ async def journal(
             if selected_category:
                 filters["categories"] = selected_category
             memories_raw = _get_all_paginated(client, filters)
-            memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+            memories_raw, _ = _hydrate_memories_for_review(user_id, client, memories_raw, status)
 
         memories_raw = _sort_memories_desc(memories_raw)
         memories_raw = _dedupe_memories_by_id(memories_raw)
@@ -2061,6 +2259,7 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
 
     if isinstance(existing_recap, dict):
         existing_ended_at = existing_recap.get("ended_at") if isinstance(existing_recap.get("ended_at"), str) else ended_at
+        _persist_end_session_transcript(user_id, body)
         _mark_session_record_ended(user_id, body.session_id, existing_ended_at)
         try:
             from app.gateway.inactivity_watcher import unregister_thread
@@ -2100,6 +2299,7 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
         logger.warning("Failed to persist recap for %s/%s: %s", user_id, body.session_id, e)
 
     _mark_session_record_ended(user_id, body.session_id, ended_at)
+    _persist_end_session_transcript(user_id, body)
 
     # Remove from inactivity tracking — session explicitly ended
     try:

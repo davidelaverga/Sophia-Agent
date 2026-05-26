@@ -53,7 +53,10 @@ def mock_mem0():
 @pytest.fixture(autouse=True)
 def mock_review_store():
     with (
-        patch("app.gateway.routers.sophia.apply_review_metadata_overlays", side_effect=lambda _user_id, memories: memories) as mock_apply,
+        patch(
+            "app.gateway.routers.sophia.apply_review_metadata_overlays",
+            side_effect=lambda _user_id, memories, **_kwargs: memories,
+        ) as mock_apply,
         patch("app.gateway.routers.sophia.upsert_review_metadata") as mock_upsert,
         patch("app.gateway.routers.sophia.remove_review_metadata") as mock_remove,
     ):
@@ -1025,8 +1028,26 @@ class TestListMemories:
         resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review")
 
         assert resp.status_code == 200
-        assert resp.json()["count"] == 1
+        data = resp.json()
+        assert data["count"] == 1
+        assert data["source"] == "local_review_overlay"
+        assert data["candidate_count"] == 1
+        assert data["skipped_mem0_hydration_for_session_scope"] is True
+        assert isinstance(data["trace_id"], str)
         mock_mem0.get.assert_not_called()
+
+    def test_recent_memory_diagnostics_reports_session_id_received(self, client, mock_mem0, mock_review_store):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Needs review", "metadata": {"status": "pending_review", "session_id": "sess-1"}},
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review&session_id=sess-1")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["session_id_received"] is True
+        assert data["candidate_count"] == data["count"] == 1
+        assert data["trace_id"].startswith("memrecent-")
 
     def test_session_scoped_status_filter_uses_local_overlay_without_mem0_scan(self, client, mock_mem0, mock_review_store):
         mock_review_store["apply"].side_effect = None
@@ -1059,8 +1080,79 @@ class TestListMemories:
         assert data["count"] == 1
         assert data["memories"][0]["id"] == "local:target"
         assert data["memories"][0]["session_id"] == "sess-target"
-        mock_mem0.get_all.assert_not_called()
         mock_mem0.get.assert_not_called()
+
+    def test_session_scoped_pending_review_uses_local_review_overlay(self, client, mock_mem0, mock_review_store):
+        mock_mem0.get_all.return_value = []
+        mock_review_store["apply"].side_effect = None
+        mock_review_store["apply"].return_value = [
+            {
+                "id": "local:target",
+                "session_id": "sess-target",
+                "memory": "Fresh target recap memory",
+                "metadata": {"status": "pending_review", "category": "lesson"},
+                "updated_at": "2026-04-17T15:12:23.465604+00:00",
+            },
+            {
+                "id": "local:other",
+                "session_id": "sess-other",
+                "memory": "Other recap memory",
+                "metadata": {"status": "pending_review", "category": "lesson"},
+                "updated_at": "2026-04-17T15:13:23.465604+00:00",
+            },
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review&session_id=sess-target")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["source"] == "local_review_overlay"
+        assert data["session_id_received"] is True
+        assert data["local_overlay_count"] == 2
+        assert data["count"] == 1
+        assert data["memories"][0]["id"] == "local:target"
+        assert mock_review_store["apply"].call_args.kwargs["session_id"] == "sess-target"
+
+    def test_session_scoped_pending_review_zero_overlay_is_terminal_empty(self, client, mock_mem0, mock_review_store):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Needs global hydration", "metadata": None},
+        ]
+        mock_review_store["apply"].side_effect = None
+        mock_review_store["apply"].return_value = [
+            {"id": "m1", "memory": "Needs global hydration", "metadata": None},
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review&session_id=sess-empty")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 0
+        assert data["candidate_count"] == 0
+        assert data["memories"] == []
+        assert data["source"] == "local_review_overlay"
+        assert data["session_id_received"] is True
+        assert data["skipped_mem0_hydration_for_session_scope"] is True
+        assert data["empty_reason"] == "no_session_candidates"
+        mock_mem0.get.assert_not_called()
+
+    def test_global_hydration_path_reports_safe_source(self, client, mock_mem0):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Needs review", "metadata": None},
+            {"id": "m2", "memory": "Already approved", "metadata": None},
+        ]
+        mock_mem0.get.side_effect = [
+            {"id": "m1", "memory": "Needs review", "metadata": {"status": "pending_review"}},
+            {"id": "m2", "memory": "Already approved", "metadata": {"status": "approved"}},
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["source"] == "global_hydration"
+        assert data["candidate_count"] == 1
+        assert data["local_overlay_count"] == 0
+
 
     def test_hydrates_missing_metadata_without_status_filter(self, client, mock_mem0):
         mock_mem0.get_all.return_value = [
@@ -2086,6 +2178,12 @@ class TestSessionEnd:
         queued_state = mock_queue.call_args.args[3]
         assert queued_state is not None
         assert queued_state["messages"][0]["content"] == "I needed to talk this through."
+        transcript = store.list_messages("test_user", "sess-001")
+        assert [message.role for message in transcript] == ["user", "assistant"]
+        assert [message.content for message in transcript] == [
+            "I needed to talk this through.",
+            "You stayed with it.",
+        ]
 
     def test_duplicate_end_session_reuses_existing_recap_and_queues_once(self, client, tmp_path):
         store = SessionStore(tmp_path)
@@ -2132,6 +2230,7 @@ class TestSessionEnd:
         assert record is not None
         assert record.status == "ended"
         assert record.ended_at == "2026-04-05T10:00:00+00:00"
+        assert len(store.list_messages("test_user", "sess-dupe")) == 2
 
     def test_missing_session_id_returns_422(self, client):
         resp = client.post(

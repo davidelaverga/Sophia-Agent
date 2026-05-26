@@ -426,11 +426,13 @@ class TestBuildSessionMetadata:
             ],
         }
 
-        with patch("deerflow.sophia.session_store.SessionStore.get", return_value=record) as mock_get:
+        fake_store = MagicMock()
+        fake_store.get.return_value = record
+        with patch("deerflow.sophia.session_store.SessionStore", return_value=fake_store):
             meta = _build_session_metadata(state, user_id="user1", session_id="current-session")
 
         assert meta["session_start_unix"] == 86400
-        mock_get.assert_called_once_with("user1", "current-session")
+        fake_store.get.assert_called_once_with("user1", "current-session")
 
     def test_session_start_unix_uses_only_current_session_messages_when_scoped(self):
         """Fallback to message timestamps only within the finalized session."""
@@ -444,7 +446,9 @@ class TestBuildSessionMetadata:
             ],
         }
 
-        with patch("deerflow.sophia.session_store.SessionStore.get", return_value=None):
+        _fake_store = MagicMock()
+        _fake_store.get.return_value = None
+        with patch("deerflow.sophia.session_store.SessionStore", return_value=_fake_store):
             meta = _build_session_metadata(state, user_id="user1", session_id="current-session")
 
         assert meta["session_start_unix"] == 200
@@ -461,7 +465,9 @@ class TestBuildSessionMetadata:
             ],
         }
 
-        with patch("deerflow.sophia.session_store.SessionStore.get", return_value=None):
+        _fake_store = MagicMock()
+        _fake_store.get.return_value = None
+        with patch("deerflow.sophia.session_store.SessionStore", return_value=_fake_store):
             meta = _build_session_metadata(state, user_id="user1", session_id="current-session")
 
         assert meta["session_start_unix"] == 200
@@ -478,7 +484,9 @@ class TestBuildSessionMetadata:
             ],
         }
 
-        with patch("deerflow.sophia.session_store.SessionStore.get", return_value=None):
+        _fake_store = MagicMock()
+        _fake_store.get.return_value = None
+        with patch("deerflow.sophia.session_store.SessionStore", return_value=_fake_store):
             meta = _build_session_metadata(state, user_id="user1", session_id="current-session")
 
         assert meta["session_start_unix"] == 300
@@ -494,7 +502,9 @@ class TestBuildSessionMetadata:
             ],
         }
 
-        with patch("deerflow.sophia.session_store.SessionStore.get", return_value=None):
+        _fake_store = MagicMock()
+        _fake_store.get.return_value = None
+        with patch("deerflow.sophia.session_store.SessionStore", return_value=_fake_store):
             meta = _build_session_metadata(state, user_id="user1", session_id="current-session")
 
         assert meta["session_start_unix"] == 1715900100
@@ -510,7 +520,9 @@ class TestBuildSessionMetadata:
             ],
         }
 
-        with patch("deerflow.sophia.session_store.SessionStore.get", return_value=None):
+        _fake_store = MagicMock()
+        _fake_store.get.return_value = None
+        with patch("deerflow.sophia.session_store.SessionStore", return_value=_fake_store):
             meta = _build_session_metadata(state, user_id="user1", session_id="current-session")
 
         assert meta["session_start_unix"] is None

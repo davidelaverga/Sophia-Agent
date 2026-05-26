@@ -1,9 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useChatStore, type ChatMessage } from '../../app/stores/chat-store'
+import { useSessionStore } from '../../app/stores/session-store'
+
+const { getSessionMessagesMock } = vi.hoisted(() => ({
+  getSessionMessagesMock: vi.fn(),
+}))
+
+vi.mock('../../app/lib/api/sessions-api', () => ({
+  getSessionMessages: (...args: unknown[]) => getSessionMessagesMock(...args),
+}))
 
 function resetChatStoreForTest() {
   localStorage.clear()
+  getSessionMessagesMock.mockReset()
   useChatStore.setState({
     messages: [],
     composerValue: '',
@@ -21,6 +31,7 @@ function resetChatStoreForTest() {
     streamAttempt: 0,
     lastUserTurnId: undefined,
   })
+  useSessionStore.setState({ session: null })
 }
 
 describe('chat-store route runtime bridge', () => {
@@ -128,5 +139,62 @@ describe('chat-store route runtime bridge', () => {
     expect(state.isLocked).toBe(true)
     expect(state.streamStatus).toBe('streaming')
     expect(state.activeReplyId).toBe('assistant-1')
+  })
+
+  it('loadSession renders deduped backend messages instead of duplicate history rows', async () => {
+    getSessionMessagesMock.mockResolvedValue({
+      success: true,
+      data: {
+        session_id: 'sess-1',
+        thread_id: 'thread-1',
+        messages: [
+          {
+            id: 'user-a',
+            role: 'user',
+            content: 'green harbor notebook',
+            created_at: '2026-04-15T00:01:00.000Z',
+          },
+          {
+            id: 'user-b',
+            role: 'user',
+            content: 'green harbor notebook',
+            created_at: '2026-04-15T00:01:00.100Z',
+          },
+          {
+            id: 'assistant-1',
+            role: 'sophia',
+            content: 'I have that.',
+            created_at: '2026-04-15T00:01:05.000Z',
+          },
+        ],
+      },
+    })
+    useSessionStore.setState({
+      session: {
+        sessionId: 'sess-1',
+        threadId: 'thread-1',
+        userId: 'user-1',
+        presetType: 'open',
+        contextMode: 'life',
+        status: 'ended',
+        voiceMode: false,
+        startedAt: '2026-04-15T00:00:00.000Z',
+        lastActivityAt: '2026-04-15T00:10:00.000Z',
+        isActive: false,
+        companionInvokesCount: 0,
+      },
+    })
+
+    const loaded = await useChatStore.getState().loadSession('sess-1', 'user-1')
+
+    expect(loaded).toBe(true)
+    expect(useChatStore.getState().messages.map((message) => message.content)).toEqual([
+      'green harbor notebook',
+      'I have that.',
+    ])
+    expect(useSessionStore.getState().session?.messages?.map((message) => message.content)).toEqual([
+      'green harbor notebook',
+      'I have that.',
+    ])
   })
 })

@@ -714,6 +714,7 @@ function SessionPageContent() {
     userId,
     persistedThreadId: session?.threadId,
     threadId: resolvedThreadId,
+    greetingMessageId,
     persistedSessionId: session?.sessionId,
     responseMode: exitProtectionResponseMode,
     messages,
