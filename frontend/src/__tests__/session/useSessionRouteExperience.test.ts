@@ -457,6 +457,79 @@ describe('useSessionRouteExperience', () => {
     expect(getBuilderTaskStatusMock).not.toHaveBeenCalled();
   });
 
+  it('does not let a dismissed run hide a later run for the same builder task', () => {
+    let builderCanvasState = {
+      activeTask: {
+        parent_thread_id: 'thread-1',
+        task_id: 'task-builder-1',
+        run_id: 'run-old',
+        status: 'running',
+        latest_activity: { kind: 'phase', phase: 'drafting', label: 'Drafting old run' },
+      },
+      recentEvents: [],
+      completion: null,
+      reconnecting: false,
+    };
+    useBuilderCanvasMock.mockImplementation(() => builderCanvasState);
+
+    const { result, rerender } = renderHook(() =>
+      useSessionRouteExperience({
+        sessionId: 'session-1',
+        activeSessionId: 'session-1',
+        activeThreadId: 'thread-1',
+        chatRequestBody: { session_id: 'session-1' },
+        hasValidBackendSessionId: true,
+        backendSessionId: 'session-1',
+        userId: 'user-1',
+        artifacts: null,
+        storedBuilderArtifact: null,
+        storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
+        updateSession: vi.fn(),
+        showUsageLimitModal: vi.fn(),
+        recordConnectivityFailure: vi.fn(),
+        showToast: vi.fn(),
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        greetingAnchorId: 'greeting-1',
+        markOffline: vi.fn(),
+      })
+    );
+
+    expect(result.current.builderTask).toMatchObject({
+      taskId: 'task-builder-1',
+      runId: 'run-old',
+      detail: 'Drafting old run',
+    });
+
+    act(() => {
+      result.current.clearBuilderTask();
+    });
+
+    expect(result.current.builderTask).toBeNull();
+
+    builderCanvasState = {
+      activeTask: {
+        parent_thread_id: 'thread-1',
+        task_id: 'task-builder-1',
+        run_id: 'run-new',
+        status: 'running',
+        latest_activity: { kind: 'phase', phase: 'drafting', label: 'Drafting new run' },
+      },
+      recentEvents: [],
+      completion: null,
+      reconnecting: false,
+    };
+
+    rerender();
+
+    expect(result.current.builderTask).toMatchObject({
+      taskId: 'task-builder-1',
+      runId: 'run-new',
+      detail: 'Drafting new run',
+    });
+  });
+
   it('maps terminal canvas failure into the visible builder state', () => {
       useBuilderCanvasMock.mockReturnValue({
         activeTask: {

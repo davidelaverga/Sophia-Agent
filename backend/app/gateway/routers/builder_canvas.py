@@ -134,6 +134,7 @@ def _cancel_detail_for_status(status: str) -> str:
         "completed": "Builder already finished before cancellation could be applied.",
         "failed": "Builder already stopped with an error before cancellation could be applied.",
         "cancelled": "Builder was already cancelled.",
+        "running": "Builder cancellation was requested.",
     }.get(status, "Builder was cancelled before finishing the deliverable.")
 
 
@@ -159,9 +160,17 @@ async def _cancel_builder_run(
             detail=_cancel_detail_for_status(current_status),
         )
     try:
-        await client.runs.cancel(task_id, run_id, action="interrupt")
+        await client.runs.cancel(task_id, run_id, wait=True, action="interrupt")
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Builder cancellation is unavailable") from exc
+    final_status = await _native_run_status_for_client(client, task_id, run_id, current_status)
+    if final_status != "cancelled":
+        return BuilderCanvasCancelResponse(
+            task_id=task_id,
+            run_id=run_id,
+            status=final_status,
+            detail=_cancel_detail_for_status(final_status),
+        )
     worker = get_builder_canvas_worker(request.app)
     await worker.publish_completion(
         {
@@ -176,7 +185,7 @@ async def _cancel_builder_run(
         task_id=task_id,
         run_id=run_id,
         status="cancelled",
-        detail=_cancel_detail_for_status("cancelled"),
+        detail="Builder was cancelled before finishing the deliverable.",
     )
 
 

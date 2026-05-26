@@ -55,6 +55,11 @@ type UseSessionRouteExperienceParams = {
   memoryHighlightsCount?: number;
 };
 
+function builderRunKey(taskId?: string | null, runId?: string | null): string | null {
+  if (!taskId) return null;
+  return `${taskId}:${runId ?? ''}`;
+}
+
 export function useSessionRouteExperience({
   sessionId,
   activeSessionId,
@@ -85,8 +90,8 @@ export function useSessionRouteExperience({
   const [isCancellingBuilderTask, setIsCancellingBuilderTask] = useState(false);
   const builderCanvas = useBuilderCanvas(activeThreadId, { enabled: Boolean(activeThreadId) });
   const lastBuilderCaptureSignatureRef = useRef<string | null>(null);
-  /** Task IDs dismissed after download — stale SSE events for these are rejected. */
-  const dismissedTaskIdsRef = useRef(new Set<string>());
+  /** Builder run identities dismissed by the user — stale SSE events for these are rejected. */
+  const dismissedBuilderRunsRef = useRef(new Set<string>());
 
   const setBuilderArtifactAndPersist = useCallback((nextBuilderArtifact: BuilderArtifactV1 | null) => {
     setBuilderArtifact(nextBuilderArtifact);
@@ -113,8 +118,9 @@ export function useSessionRouteExperience({
 
   const clearBuilderTask = useCallback(() => {
     setBuilderTask((current) => {
-      if (current?.taskId) {
-        dismissedTaskIdsRef.current.add(current.taskId);
+      const key = builderRunKey(current?.taskId, current?.runId);
+      if (key) {
+        dismissedBuilderRunsRef.current.add(key);
       }
       return null;
     });
@@ -125,9 +131,10 @@ export function useSessionRouteExperience({
     storeBuilderArtifact(null);
   }, [storeBuilderArtifact]);
 
-  /** Setter that rejects stale SSE events for tasks the user already dismissed. */
+  /** Setter that rejects stale SSE events for runs the user already dismissed. */
   const guardedSetBuilderTask = useCallback((task: BuilderTaskV1 | null) => {
-    if (task?.taskId && dismissedTaskIdsRef.current.has(task.taskId)) return;
+    const key = builderRunKey(task?.taskId, task?.runId);
+    if (key && dismissedBuilderRunsRef.current.has(key)) return;
     setBuilderTask(task?.phase === 'running' ? { ...task, canvasStreamed: true } : task);
   }, []);
 
@@ -165,14 +172,15 @@ export function useSessionRouteExperience({
     setBuilderTask(null);
     setIsCancellingBuilderTask(false);
     lastBuilderCaptureSignatureRef.current = null;
-    dismissedTaskIdsRef.current.clear();
+    dismissedBuilderRunsRef.current.clear();
   }, [activeSessionId, storedBuilderArtifact]);
 
   // Native builder-canvas snapshot plus SSE is the single lifecycle source
   // for browser progress, reload recovery, and terminal delivery.
   useEffect(() => {
     const active = builderCanvas.activeTask;
-    if (!active || dismissedTaskIdsRef.current.has(active.task_id)) {
+    const activeKey = builderRunKey(active?.task_id, active?.run_id);
+    if (!active || (activeKey && dismissedBuilderRunsRef.current.has(activeKey))) {
       return;
     }
     const phase: BuilderTaskV1['phase'] = active.status === 'completed'
@@ -190,7 +198,7 @@ export function useSessionRouteExperience({
         status: 'done' as const,
       }));
     setBuilderTask((current) => ({
-      ...(current?.taskId === active.task_id ? current : {}),
+      ...(current?.taskId === active.task_id && current.runId === active.run_id ? current : {}),
       phase,
       taskId: active.task_id,
       runId: active.run_id,
@@ -255,8 +263,22 @@ export function useSessionRouteExperience({
 
     try {
       const response = await requestBuilderTaskCancellation(activeThreadId, builderTask.taskId, runId);
-      dismissedTaskIdsRef.current.add(builderTask.taskId);
-      setBuilderTask(null);
+      if (response.status === 'completed' || response.status === 'failed') {
+        setBuilderTask((current) => {
+          if (!current || builderRunKey(current.taskId, current.runId) !== builderRunKey(builderTask.taskId, runId)) {
+            return current;
+          }
+          return {
+            ...current,
+            phase: response.status === 'completed' ? 'completed' : 'failed',
+            detail: response.detail ?? current?.detail,
+          };
+        });
+      } else {
+        const key = builderRunKey(builderTask.taskId, runId);
+        if (key) dismissedBuilderRunsRef.current.add(key);
+        setBuilderTask(null);
+      }
       showToast({
         message: response.detail || 'Builder cancelled.',
         variant: 'info',
@@ -377,7 +399,9 @@ export function useSessionRouteExperience({
   // The authenticated canvas stream carries terminal events as well as live
   // progress, keeping the session to one subscription.
   const effectiveBuilderCompletion: BuilderCompletionEventV1 | null =
-    builderCanvas.completion && !dismissedTaskIdsRef.current.has(builderCanvas.completion.task_id)
+    builderCanvas.completion && !dismissedBuilderRunsRef.current.has(
+      builderRunKey(builderCanvas.completion.task_id, builderCanvas.completion.run_id) ?? '',
+    )
       ? builderCanvas.completion
       : null;
 
@@ -394,7 +418,8 @@ export function useSessionRouteExperience({
   const handleBuilderRetry = useCallback(
     (event: BuilderCompletionEventV1) => {
       void sendMessage({ text: 'yes, please try that again' });
-      dismissedTaskIdsRef.current.add(event.task_id);
+      const key = builderRunKey(event.task_id, event.run_id);
+      if (key) dismissedBuilderRunsRef.current.add(key);
     },
     [sendMessage],
   );
@@ -402,16 +427,19 @@ export function useSessionRouteExperience({
   /**
    * PR-B: handler for the completion card's Open / Download dismissal.
    *
-   * Marks the task_id as dismissed so a /last fetch on remount won't
+   * Marks the task/run as dismissed so a /last fetch on remount won't
    * resurrect the card. Clears the local ``builderTask`` state so the
    * card unmounts in the current view as well.
    */
   const handleBuilderCompletionDismiss = useCallback(
     (event: BuilderCompletionEventV1) => {
-      dismissedTaskIdsRef.current.add(event.task_id);
-      clearBuilderTask();
+      const key = builderRunKey(event.task_id, event.run_id);
+      if (key) dismissedBuilderRunsRef.current.add(key);
+      setBuilderTask((current) => (
+        builderRunKey(current?.taskId, current?.runId) === key ? null : current
+      ));
     },
-    [clearBuilderTask],
+    [],
   );
 
   return {

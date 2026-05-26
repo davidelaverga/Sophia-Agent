@@ -106,11 +106,15 @@ async def test_cancel_validates_native_task_and_publishes_terminal(app: FastAPI,
     cancelled: list[tuple[str, str, str]] = []
 
     class Runs:
-        async def get(self, task_id: str, run_id: str):
-            return {"status": "running"}
+        status = "running"
 
-        async def cancel(self, task_id: str, run_id: str, action: str):
+        async def get(self, task_id: str, run_id: str):
+            return {"status": self.status}
+
+        async def cancel(self, task_id: str, run_id: str, wait: bool, action: str):
             cancelled.append((task_id, run_id, action))
+            assert wait is True
+            self.status = "interrupted"
 
     monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", tasks)
     monkeypatch.setattr(builder_canvas, "get_client", lambda url: SimpleNamespace(runs=Runs()))
@@ -136,7 +140,7 @@ async def test_cancel_does_not_publish_cancel_for_already_terminal_run(app: Fast
         async def get(self, task_id: str, run_id: str):
             return {"status": "success"}
 
-        async def cancel(self, task_id: str, run_id: str, action: str):
+        async def cancel(self, task_id: str, run_id: str, wait: bool, action: str):
             cancelled.append((task_id, run_id, action))
 
     worker = app.state._builder_canvas_worker
@@ -165,6 +169,48 @@ async def test_cancel_does_not_publish_cancel_for_already_terminal_run(app: Fast
 
 
 @pytest.mark.anyio
+async def test_cancel_does_not_publish_cancel_when_confirmed_status_is_success(app: FastAPI, monkeypatch) -> None:
+    async def tasks(_parent: str):
+        return [{"agent_name": "sophia_builder", "task_id": "task-1", "run_id": "run-1", "status": "running"}]
+
+    cancelled: list[tuple[str, str, str]] = []
+
+    class Runs:
+        call_count = 0
+
+        async def get(self, task_id: str, run_id: str):
+            self.call_count += 1
+            return {"status": "running" if self.call_count == 1 else "success"}
+
+        async def cancel(self, task_id: str, run_id: str, wait: bool, action: str):
+            cancelled.append((task_id, run_id, action))
+            assert wait is True
+
+    worker = app.state._builder_canvas_worker
+    await worker.publish_progress({
+        "parent_thread_id": "parent-1",
+        "task_id": "task-1",
+        "run_id": "run-1",
+        "sequence": 1,
+        "event_name": "custom",
+        "data": {"name": "phase", "phase": "finalizing"},
+    })
+    monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", tasks)
+    monkeypatch.setattr(builder_canvas, "get_client", lambda url: SimpleNamespace(runs=Runs()))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/sophia/user-1/threads/parent-1/builder-canvas/tasks/task-1/runs/run-1/cancel"
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+    assert cancelled == [("task-1", "run-1", "interrupt")]
+    events = await worker.recent_events("parent-1")
+    assert [event["kind"] for event in events] == ["progress"]
+
+
+@pytest.mark.anyio
 async def test_cancel_resolves_latest_native_run_when_run_id_is_absent(app: FastAPI, monkeypatch) -> None:
     async def tasks(_parent: str):
         return [
@@ -175,11 +221,15 @@ async def test_cancel_resolves_latest_native_run_when_run_id_is_absent(app: Fast
     cancelled: list[tuple[str, str, str]] = []
 
     class Runs:
-        async def get(self, task_id: str, run_id: str):
-            return {"status": "running"}
+        status = "running"
 
-        async def cancel(self, task_id: str, run_id: str, action: str):
+        async def get(self, task_id: str, run_id: str):
+            return {"status": self.status}
+
+        async def cancel(self, task_id: str, run_id: str, wait: bool, action: str):
             cancelled.append((task_id, run_id, action))
+            assert wait is True
+            self.status = "interrupted"
 
     monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", tasks)
     monkeypatch.setattr(builder_canvas, "get_client", lambda url: SimpleNamespace(runs=Runs()))
