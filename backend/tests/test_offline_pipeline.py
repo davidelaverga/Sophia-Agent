@@ -317,6 +317,132 @@ class TestIncrementalExtraction:
         assert result["steps"]["extraction"] == "no_new_messages"
         mock_steps["extraction"].assert_not_called()
 
+    def test_resumed_session_with_new_messages_bypasses_already_processed(
+        self, tmp_path, monkeypatch, mock_steps,
+    ):
+        """Codex P1 review on PR #130 merge: resumed sessions with new turns
+        in SessionStore MUST bypass the in-memory ``_processed_sessions``
+        short-circuit so incremental extraction runs without the caller
+        having to pass ``force_reprocess=True``.
+
+        Scenario: first run successfully extracts messages 1..2, promotes
+        the session to ``_processed_sessions``, and advances
+        ``memory_processed_until_sequence=2``. The user then continues the
+        conversation (messages 3..4 land in SessionStore). A subsequent
+        pipeline trigger (e.g. inactivity_watcher, with default
+        ``force_reprocess=False``) MUST process the new range — not return
+        ``already_processed`` and silently drop the new messages.
+        """
+        from deerflow.sophia import offline_pipeline as module
+        from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
+
+        store = SessionStore(tmp_path / "users")
+        store.create(
+            SessionRecord(
+                session_id="sess_resumed_growth",
+                thread_id="thread_resumed_growth",
+                user_id="user_abc",
+                status="ended",
+                memory_processed_until_sequence=0,
+            )
+        )
+        # First-run transcript: messages 1..2.
+        store.replace_messages(
+            "user_abc",
+            "sess_resumed_growth",
+            [
+                SessionMessageRecord(
+                    message_id="m-1",
+                    session_id="sess_resumed_growth",
+                    thread_id="thread_resumed_growth",
+                    role="user",
+                    content="first batch user",
+                    sequence=1,
+                ),
+                SessionMessageRecord(
+                    message_id="m-2",
+                    session_id="sess_resumed_growth",
+                    thread_id="thread_resumed_growth",
+                    role="assistant",
+                    content="first batch reply",
+                    sequence=2,
+                ),
+            ],
+        )
+        monkeypatch.setattr(module, "SessionStore", lambda: store)
+
+        first = module.run_offline_pipeline(
+            user_id="user_abc",
+            session_id="sess_resumed_growth",
+            thread_id="thread_resumed_growth",
+            thread_state=_make_thread_state(),
+        )
+        assert first["status"] == "completed"
+        assert mock_steps["extraction"].call_count == 1
+        record_after_first = store.get("user_abc", "sess_resumed_growth")
+        assert record_after_first is not None
+        assert record_after_first.memory_processed_until_sequence == 2
+
+        # User keeps talking — messages 3..4 land in SessionStore.
+        store.replace_messages(
+            "user_abc",
+            "sess_resumed_growth",
+            [
+                SessionMessageRecord(
+                    message_id="m-1",
+                    session_id="sess_resumed_growth",
+                    thread_id="thread_resumed_growth",
+                    role="user",
+                    content="first batch user",
+                    sequence=1,
+                ),
+                SessionMessageRecord(
+                    message_id="m-2",
+                    session_id="sess_resumed_growth",
+                    thread_id="thread_resumed_growth",
+                    role="assistant",
+                    content="first batch reply",
+                    sequence=2,
+                ),
+                SessionMessageRecord(
+                    message_id="m-3",
+                    session_id="sess_resumed_growth",
+                    thread_id="thread_resumed_growth",
+                    role="user",
+                    content="new turn after first run",
+                    sequence=3,
+                ),
+                SessionMessageRecord(
+                    message_id="m-4",
+                    session_id="sess_resumed_growth",
+                    thread_id="thread_resumed_growth",
+                    role="assistant",
+                    content="reply to new turn",
+                    sequence=4,
+                ),
+            ],
+        )
+
+        # Second pipeline trigger — default force_reprocess=False.
+        # Must NOT return "already_processed"; must process the new range 3..4.
+        second = module.run_offline_pipeline(
+            user_id="user_abc",
+            session_id="sess_resumed_growth",
+            thread_id="thread_resumed_growth",
+            thread_state=_make_thread_state(),
+        )
+
+        assert second["status"] == "completed", (
+            f"Resumed session with new messages must not short-circuit as "
+            f"already_processed. Got status={second['status']!r}."
+        )
+        assert mock_steps["extraction"].call_count == 2, (
+            "Extraction must run a second time for the new message range."
+        )
+        record_after_second = store.get("user_abc", "sess_resumed_growth")
+        assert record_after_second is not None
+        assert record_after_second.memory_processed_until_sequence == 4
+
     def test_failed_extraction_does_not_advance_checkpoint(self, tmp_path, monkeypatch, mock_steps):
         from deerflow.sophia import offline_pipeline as module
         from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore

@@ -202,17 +202,33 @@ def run_offline_pipeline(
     current_force_reprocess = force_reprocess
 
     for iteration in range(_MAX_DEFERRED_RERUN_ITERATIONS):
+        # --- Single SessionStore scope load per iteration ---
+        # We use the scope for TWO independent decisions: (a) the durable
+        # no-new-messages short-circuit and (b) bypassing the in-memory
+        # ``_processed_sessions`` set when the resumed session has grown.
+        extraction_scope = _load_incremental_extraction_scope(user_id, session_id)
+        has_durable_record = extraction_scope is not None
+        has_new_messages = bool(extraction_scope and extraction_scope["selected_messages"])
+
         # --- Durable no-new-messages short-circuit ---
-        # When SessionStore has a record AND its incremental scope is empty
-        # (``memory_processed_until_sequence`` == ``current_max_sequence``),
-        # return ``no_new_messages`` before touching the in-memory idempotency
-        # set. This is the resumed-session-with-no-growth case: a previous run
-        # already processed the transcript through this point, no new turns
-        # have landed, nothing to do. ``force_reprocess`` does NOT bypass this
-        # — there's still literally nothing to reprocess.
-        durable_short_circuit = _maybe_no_new_messages_result(user_id, session_id)
-        if durable_short_circuit is not None and not current_force_reprocess:
-            final_result = durable_short_circuit
+        # SessionStore record exists AND ``memory_processed_until_sequence``
+        # is caught up to ``current_max_sequence``. This is the resumed-
+        # session-with-no-growth case: nothing to do. ``force_reprocess`` does
+        # NOT bypass this — there's still literally nothing to reprocess.
+        if has_durable_record and not has_new_messages and not current_force_reprocess:
+            logger.info(
+                "session.finalization no_new_messages user_id=%s session_id=%s "
+                "last_processed=%s current_max=%s",
+                user_id, session_id,
+                extraction_scope["last_processed_sequence"],
+                extraction_scope["current_max_sequence"],
+            )
+            final_result = {
+                "status": "no_new_messages",
+                "session_id": session_id,
+                "steps": {"extraction": "no_new_messages"},
+                "extraction_range": _scope_range_for_result(extraction_scope),
+            }
             break
 
         # --- Two-stage idempotency check (see _acquire_pipeline_slot for full
@@ -222,9 +238,18 @@ def run_offline_pipeline(
         # picks up OUR state for the deferred rerun (not the first run's stale
         # snapshot). Codex P1 review on PR #130 — critical for the /end_session
         # race where the explicit caller has newer messages/artifacts.
+        #
+        # Incremental-resume bypass (Codex P1 review on PR #130 merge): when
+        # SessionStore confirms new messages exist for a session that's already
+        # in ``_processed_sessions`` (resumed session, user kept talking after
+        # the first pipeline run finished), bypass the ``already_processed``
+        # short-circuit the same way explicit ``force_reprocess`` does.
+        # Otherwise a resumed session would skip extraction permanently unless
+        # the caller passed ``force_reprocess=True``, which breaks normal
+        # incremental processing.
         slot = _acquire_pipeline_slot(
             user_id, session_id, thread_id,
-            force_reprocess=current_force_reprocess,
+            force_reprocess=current_force_reprocess or has_new_messages,
             pending_thread_state=current_thread_state,
         )
         if slot != "proceed":
@@ -823,48 +848,6 @@ def _scope_range_for_result(extraction_scope: dict[str, Any] | None) -> dict[str
         "current_max_sequence": extraction_scope["current_max_sequence"],
         "sequence_start": extraction_scope["range_start"],
         "sequence_end": extraction_scope["range_end"],
-    }
-
-
-def _maybe_no_new_messages_result(
-    user_id: str,
-    session_id: str,
-) -> dict[str, Any] | None:
-    """Return a ``no_new_messages`` envelope when SessionStore advertises an
-    incremental scope with nothing new to extract, else ``None``.
-
-    Called from ``run_offline_pipeline`` at the TOP of each iteration so the
-    durable SessionStore checkpoint wins over the in-memory
-    ``_processed_sessions`` set. Two callers depend on this:
-
-      1. Resumed session, no new turns: SessionStore record exists, all
-         messages already processed → return ``no_new_messages`` (test
-         ``test_resumed_range_explicit_remember_preference_creates_one_candidate``
-         exercises this on the second of two back-to-back runs).
-      2. Legacy in-memory path (no SessionStore record): returns ``None``;
-         the orchestrator falls through to its bare-session-id
-         ``_processed_sessions`` check (``already_processed`` semantics).
-
-    Returns ``None`` on SessionStore lookup failure so a transient backend
-    blip doesn't mask the legacy idempotency path.
-    """
-    extraction_scope = _load_incremental_extraction_scope(user_id, session_id)
-    if extraction_scope is None:
-        return None
-    if extraction_scope["selected_messages"]:
-        return None
-    logger.info(
-        "session.finalization no_new_messages user_id=%s session_id=%s last_processed=%s current_max=%s",
-        user_id,
-        session_id,
-        extraction_scope["last_processed_sequence"],
-        extraction_scope["current_max_sequence"],
-    )
-    return {
-        "status": "no_new_messages",
-        "session_id": session_id,
-        "steps": {"extraction": "no_new_messages"},
-        "extraction_range": _scope_range_for_result(extraction_scope),
     }
 
 
