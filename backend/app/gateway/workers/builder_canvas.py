@@ -28,6 +28,7 @@ _PHASE_LABELS = {
     "researching": "Researching sources",
     "drafting": "Drafting",
     "finalizing": "Finalizing",
+    "done": "Done",
 }
 
 

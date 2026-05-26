@@ -79,6 +79,21 @@ async def _post_cancel(app: FastAPI):
         )
 
 
+def test_thread_owner_validation_uses_direct_thread_lookup(monkeypatch) -> None:
+    class Store:
+        def find_session_by_thread_id(self, user_id: str, thread_id: str):
+            assert user_id == "user-1"
+            assert thread_id == "older-parent-thread"
+            return SessionRecord(session_id="old-session", thread_id=thread_id, user_id=user_id)
+
+        def list_recent(self, user_id: str, limit: int = 30):  # pragma: no cover - regression guard
+            raise AssertionError("ownership checks must not use a capped recent-session scan")
+
+    monkeypatch.setattr(builder_canvas, "_session_store", Store())
+
+    builder_canvas._require_thread_owner("user-1", "older-parent-thread")
+
+
 @pytest.fixture
 def app(tmp_path, monkeypatch) -> FastAPI:
     store = SessionStore(tmp_path / "users")

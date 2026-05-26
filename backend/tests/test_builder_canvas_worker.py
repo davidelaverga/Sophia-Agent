@@ -72,6 +72,23 @@ async def test_terminal_closes_run_and_replay_starts_after_event_id() -> None:
 
 
 @pytest.mark.anyio
+async def test_done_phase_is_projected_to_browser_activity() -> None:
+    worker = BuilderCanvasWorker()
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "done"},
+        }
+    )
+    events = await worker.recent_events("parent-1")
+    assert events[0]["activity"] == {"kind": "phase", "phase": "done", "label": "Done"}
+
+
+@pytest.mark.anyio
 async def test_new_run_supersedes_delayed_progress_from_prior_run() -> None:
     worker = BuilderCanvasWorker()
     for run_id, sequence in (("run-old", 1), ("run-new", 1), ("run-old", 2)):

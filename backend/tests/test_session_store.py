@@ -64,6 +64,18 @@ def test_filesystem_store_appends_messages_idempotently(tmp_path):
     assert store.get_session("user-1", "session-1").transcript_available is True
 
 
+def test_filesystem_store_finds_session_by_thread_id(tmp_path):
+    store = SessionStore(tmp_path)
+    store.upsert_session(SessionRecord(session_id="session-1", thread_id="thread-1", user_id="user-1"))
+    store.upsert_session(SessionRecord(session_id="session-2", thread_id="thread-2", user_id="user-2"))
+
+    record = store.find_session_by_thread_id("user-1", "thread-1")
+
+    assert record is not None
+    assert record.session_id == "session-1"
+    assert store.find_session_by_thread_id("user-2", "thread-1") is None
+
+
 class FakeSupabasePostgrest:
     def __init__(self) -> None:
         self.sessions: dict[str, dict] = {}
@@ -84,7 +96,7 @@ class FakeSupabasePostgrest:
         return json.loads(request.content.decode("utf-8"))
 
     def _matches(self, row: dict, params: dict[str, str]) -> bool:
-        for key in ("id", "user_id", "session_id"):
+        for key in ("id", "user_id", "session_id", "thread_id"):
             value = params.get(key)
             if not value:
                 continue
@@ -196,6 +208,19 @@ def test_supabase_store_upserts_and_lists_sessions():
     assert record.status == "open"
     assert record.platform == "voice"
     assert [session.session_id for session in store.list_sessions("user-1")] == ["session-1"]
+
+
+def test_supabase_store_finds_session_by_thread_id():
+    fake = FakeSupabasePostgrest()
+    store = _supabase_store(fake)
+    store.upsert_session(SessionRecord(session_id="session-1", thread_id="thread-1", user_id="user-1"))
+    store.upsert_session(SessionRecord(session_id="session-2", thread_id="thread-2", user_id="user-2"))
+
+    record = store.find_session_by_thread_id("user-1", "thread-1")
+
+    assert record is not None
+    assert record.session_id == "session-1"
+    assert store.find_session_by_thread_id("user-2", "thread-1") is None
 
 
 def test_supabase_store_append_and_retry_are_idempotent():

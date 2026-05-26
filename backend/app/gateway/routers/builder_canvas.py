@@ -51,8 +51,7 @@ def _langgraph_url() -> str:
 
 
 def _require_thread_owner(user_id: str, parent_thread_id: str) -> None:
-    records = _session_store.list_recent(user_id, limit=10000)
-    if any(record.thread_id == parent_thread_id for record in records):
+    if _session_store.find_session_by_thread_id(user_id, parent_thread_id) is not None:
         return
     raise HTTPException(status_code=404, detail="Thread not found")
 
