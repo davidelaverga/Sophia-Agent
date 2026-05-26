@@ -1998,6 +1998,176 @@ class TestMem0MemoryMiddleware:
         mock_search.assert_not_called()
 
 
+# --- Local review_metadata overlay augmentation (Mem0RetrievalMiddleware) ---
+
+
+class TestMem0RetrievalOverlayAugmentation:
+    """The retrieval middleware must surface local-overlay entries when Mem0
+    search misses them (Mem0 v3 pending_review + dedup-linking quirks)."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_voice_fastcache(self):
+        from deerflow.agents.sophia_agent.middlewares import mem0_prefetch
+
+        mem0_prefetch._VOICE_FASTCACHE.clear()
+        yield
+        mem0_prefetch._VOICE_FASTCACHE.clear()
+
+    def test_local_only_surfaced_when_mem0_empty_and_query_overlaps(self):
+        """If Mem0 returns 0 hits but a local overlay entry shares content
+        tokens with the query, that local entry should be returned."""
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_prefetch import Mem0RetrievalMiddleware
+
+        local_only = [
+            {
+                "id": "local:abc",
+                "memory": "Davide is preparing the investor pitch for Thursday",
+                "category": "commitment",
+                "metadata": {"status": "pending_review", "category": "commitment"},
+            }
+        ]
+        mw = Mem0RetrievalMiddleware("user-1")
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
+            return_value=[],
+        ), patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.apply_review_metadata_overlays",
+            return_value=local_only,
+        ):
+            result = mw.before_agent(
+                {
+                    "messages": [_make_message("how is the investor pitch coming along?")],
+                    "platform": "text",
+                    "context_mode": "work",
+                },
+                _make_runtime(thread_id="thread-x", platform="text"),
+            )
+
+        assert result is not None
+        prefetched = result["prefetched_memories"]
+        assert len(prefetched) == 1
+        assert prefetched[0]["id"] == "local:abc"
+        # MemoryInjectionMiddleware reads `content`, not `memory`; the overlay
+        # helper must normalize so the downstream injection sees the text.
+        assert prefetched[0]["content"] == "Davide is preparing the investor pitch for Thursday"
+
+    def test_local_only_skipped_when_no_token_overlap(self):
+        """A local-only entry that shares no content tokens with the query
+        should not be surfaced (avoid dumping unrelated entries)."""
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_prefetch import Mem0RetrievalMiddleware
+
+        local_only = [
+            {
+                "id": "local:xyz",
+                "memory": "Davide enjoys hiking weekends",
+                "category": "preference",
+                "metadata": {"status": "approved"},
+            }
+        ]
+        mw = Mem0RetrievalMiddleware("user-1")
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
+            return_value=[],
+        ), patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.apply_review_metadata_overlays",
+            return_value=local_only,
+        ):
+            result = mw.before_agent(
+                {
+                    "messages": [_make_message("schedule calendar meeting tomorrow morning")],
+                    "platform": "text",
+                    "context_mode": "work",
+                },
+                _make_runtime(thread_id="thread-x", platform="text"),
+            )
+
+        assert result is not None
+        # No token overlap between memory ("davide/enjoys/hiking/weekends") and
+        # query ("schedule/calendar/meeting/tomorrow/morning") → local-only
+        # entry is suppressed.
+        assert result["prefetched_memories"] == []
+
+    def test_mem0_results_and_local_dedup_by_id(self):
+        """A local entry already matched to a Mem0 hit (same id) must not be
+        double-counted."""
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_prefetch import Mem0RetrievalMiddleware
+
+        mem0_hit = {
+            "id": "mem_real_1",
+            "content": "Davide ships the report by Friday",
+            "category": "commitment",
+        }
+        # Overlay returns the same Mem0 entry (enriched) + a new local-only one.
+        overlaid = [
+            mem0_hit,
+            {
+                "id": "local:new_one",
+                "memory": "Davide commits to shipping the prototype this Friday",
+                "category": "commitment",
+                "metadata": {"status": "pending_review"},
+            },
+        ]
+        mw = Mem0RetrievalMiddleware("user-1")
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
+            return_value=[mem0_hit],
+        ), patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.apply_review_metadata_overlays",
+            return_value=overlaid,
+        ):
+            result = mw.before_agent(
+                {
+                    "messages": [_make_message("what did I commit to ship Friday?")],
+                    "platform": "text",
+                    "context_mode": "work",
+                },
+                _make_runtime(thread_id="thread-x", platform="text"),
+            )
+
+        assert result is not None
+        prefetched = result["prefetched_memories"]
+        ids = [m.get("id") for m in prefetched]
+        # Mem0 hit appears first (semantic ranking), local-only appended after,
+        # no duplicate of mem_real_1.
+        assert ids == ["mem_real_1", "local:new_one"]
+
+    def test_overlay_failure_falls_back_to_mem0_results(self):
+        """If the overlay raises, the middleware must still return the Mem0
+        results rather than dropping retrieval entirely."""
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_prefetch import Mem0RetrievalMiddleware
+
+        mem0_results = [
+            {"id": "mem_1", "content": "Davide likes early mornings", "category": "preference"},
+        ]
+        mw = Mem0RetrievalMiddleware("user-1")
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
+            return_value=mem0_results,
+        ), patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.apply_review_metadata_overlays",
+            side_effect=RuntimeError("overlay store corrupted"),
+        ):
+            result = mw.before_agent(
+                {
+                    "messages": [_make_message("what time does Davide like to wake up?")],
+                    "platform": "text",
+                    "context_mode": "life",
+                },
+                _make_runtime(thread_id="thread-x", platform="text"),
+            )
+
+        assert result is not None
+        assert [m["id"] for m in result["prefetched_memories"]] == ["mem_1"]
+
+
 # --- SophiaTitleMiddleware ---
 
 class TestSophiaTitleMiddleware:

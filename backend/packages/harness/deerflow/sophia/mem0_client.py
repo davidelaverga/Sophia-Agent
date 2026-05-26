@@ -658,7 +658,7 @@ def add_memories(
     metadata: dict | None = None,
     timestamp: int | None = None,
     wait_for_events: bool = True,
-    infer: bool = False,
+    infer: bool = True,
 ) -> list[dict]:
     """Write memories to Mem0 for a user session using v3 SDK.
 
@@ -668,8 +668,8 @@ def add_memories(
     "completed-empty" from "service failure" should use
     ``add_memories_with_outcome`` instead.
 
-    ``infer`` defaults to ``False`` (verbatim store) — see
-    ``add_memories_with_outcome`` for the full rationale.
+    ``infer`` defaults to ``True`` (Mem0's default extraction behavior). See
+    ``add_memories_with_outcome`` for the rationale on toggling this.
     """
     memories, _outcome = add_memories_with_outcome(
         user_id,
@@ -691,7 +691,7 @@ def add_memories_with_outcome(
     metadata: dict | None = None,
     timestamp: int | None = None,
     wait_for_events: bool = True,
-    infer: bool = False,
+    infer: bool = True,
 ) -> tuple[list[dict], MemoryAddOutcome]:
     """Write memories to Mem0 and return BOTH the memories AND the outcome.
 
@@ -721,31 +721,27 @@ def add_memories_with_outcome(
     event wrapper immediately so they can persist a local pending-review
     overlay while Mem0 continues processing asynchronously.
 
-    ``infer`` defaults to ``False`` (verbatim store). Per Mem0's API reference,
-    ``infer=True`` (Mem0's default) "runs the extraction LLM" on the message
-    body — Mem0's OWN LLM re-extracts semantic memories from whatever we
-    submit. That double-extraction was the root cause of the May 26 prod test
-    failure where:
+    ``infer`` defaults to ``True`` (Mem0's documented default — runs Mem0's
+    own extraction LLM on each message). The May 26 prod test originally
+    flipped this to ``False`` to bypass Mem0's double-extraction, but live
+    probing on 2026-05-26 revealed a worse failure mode for ``infer=False``:
+    for users with existing extracted memories, ``infer=False`` writes land
+    in storage (fetchable by ID via ``v1/memories/<id>/``) but DO NOT appear
+    in ``client.search()`` or ``client.get_all()`` results — they're invisible
+    to per-turn retrieval. ``infer=True`` memories sometimes get
+    deduplicated/linked against existing canonical entries (losing custom
+    metadata) but at least the surviving canonical memories are searchable.
 
-      - Pipeline candidates (already LLM-extracted by Claude Haiku) went to
-        Mem0 with custom metadata (``target_date``, ``category``, ``status``,
-        ``importance_score``, ...)
-      - Mem0's auto-extraction created event-internal sub-memories that
-        NEVER appeared in ``v2/memories`` / ``client.search()`` results
-      - Our metadata was stripped on the "linked" canonical memories
-      - Sophia's per-turn retrieval couldn't find today's commitments
+    The fix for the underlying retrieval gap (newly-created memories not
+    surfacing) lives in ``Mem0RetrievalMiddleware._augment_with_local_overlay``
+    — the middleware queries the local ``review_metadata`` store alongside
+    Mem0's search and merges relevant local-only entries into the prompt.
+    That overlay is the canonical source of truth for status / category /
+    custom metadata, so Mem0's double-extraction stripping it from canonical
+    memories no longer breaks retrieval.
 
-    With ``infer=False``: Mem0 stores each message verbatim as a canonical
-    memory WITH our metadata intact. The response is synchronous-looking
-    (returns ``results: [{id, event: "ADD", memory}]``) and the memory
-    appears in ``v2/memories`` immediately. Verified empirically on
-    2026-05-26 — a probe ``client.add(..., infer=False)`` landed in
-    ``v2/memories`` within 8 seconds with all metadata preserved
-    (``target_date``, ``category``, ``status``, ``importance_score``,
-    ``probe_marker``).
-
-    Callers that genuinely want Mem0's LLM extraction (e.g. raw conversation
-    dumps without pre-extraction) can pass ``infer=True`` explicitly.
+    Callers that need verbatim-store semantics for a specific reason can
+    pass ``infer=False`` explicitly.
     """
     client = _get_client()
     if client is None:

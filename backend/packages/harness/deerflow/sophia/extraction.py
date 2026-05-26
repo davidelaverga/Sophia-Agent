@@ -798,24 +798,20 @@ def _write_extracted_memories(
       temporal reasoning anchors correctly. Do NOT fall back to ``now()`` —
       that would re-date historical turns and break relative-time queries.
     - **R13 review_status mirror**: write BOTH ``status`` and ``review_status``.
-    - **infer=False** (May 26 prod-test finding): bypass Mem0 v3's own LLM
-      extraction. Our Claude Haiku already produced a clean structured
-      candidate — letting Mem0's LLM re-extract from our single-message
-      add() turned the result into event-internal sub-memories that NEVER
-      surfaced in ``v2/memories``/``client.search()`` and stripped our
-      ``target_date`` / ``category`` / ``status`` metadata. With
-      ``infer=False`` (Mem0 API ref:
-      https://docs.mem0.ai/api-reference/memory/add-memories), Mem0 stores
-      the content verbatim as a canonical searchable memory with our
-      metadata intact. Live-probed 2026-05-26 — round-trip 8s, all 6
-      metadata fields preserved (target_date, category, status, etc.).
-    - **wait_for_events=True**: ``infer=False`` makes the add return
-      synchronously-looking (results[].id populated) so polling completes
-      quickly. Re-enabled from the cherry-pick path so the recap UI sees
-      real canonical memory IDs, not event-only event_ids.
-    - **R14 overlay write with tracking-id guard**: still writes to the
-      local overlay so the recap UI shows pending_review candidates even
-      if Mem0 is briefly unavailable.
+    - **infer=True (Mem0's default)**: the May 26 prod-test originally flipped
+      this to ``False`` to bypass Mem0's double-extraction, but a follow-up
+      probe revealed ``infer=False`` writes are invisible to
+      ``client.search()`` / ``client.get_all()`` for users with existing
+      extracted memories (fetchable only by ID). With ``infer=True``, some
+      memories get dedup-linked to existing canonical entries (losing
+      custom metadata), but the surviving canonicals ARE searchable. The
+      local-overlay retrieval path in ``Mem0RetrievalMiddleware`` is now the
+      canonical source of truth for ``status`` / ``category`` / custom
+      metadata, so Mem0's stripping no longer breaks per-turn retrieval.
+    - **R14 overlay write with tracking-id guard**: writes to the local
+      overlay BEFORE relying on Mem0's response, so the recap UI shows
+      pending_review candidates and the per-turn retrieval middleware can
+      surface them even when Mem0 deduplicates or drops the new content.
 
     Sub-concerns are extracted into helpers (``_build_mem0_metadata_for_entry``,
     ``_resolve_tracking_handles``, ``_write_overlay_for_extracted_entry``) to
@@ -868,18 +864,18 @@ def _write_extracted_memories(
         if entry_meta.get("explicit_remember_source"):
             mem0_metadata["explicit_remember_source"] = entry_meta["explicit_remember_source"]
 
-        # infer=False: store our pre-extracted candidate VERBATIM as a
-        # canonical Mem0 memory with metadata intact (see _write_extracted_memories
-        # docstring for the full rationale). wait_for_events=True (the new default):
-        # with infer=False the add returns ~synchronously, so polling resolves
-        # quickly and the result carries a real memory_id (not just an event_id).
+        # Use Mem0's default infer=True so the resulting canonical memories
+        # are searchable. Mem0 may dedup-link this content to an existing
+        # canonical entry (stripping our custom metadata in that case), but
+        # the local overlay write below preserves the metadata for retrieval
+        # via Mem0RetrievalMiddleware._augment_with_local_overlay. See
+        # _write_extracted_memories docstring for the full rationale.
         result = add_memories(
             user_id=user_id,
             messages=[{"role": "user", "content": entry["content"]}],
             session_id=session_id,
             metadata=mem0_metadata,
             timestamp=session_start_unix,
-            infer=False,
         )
 
         _write_overlay_for_extracted_entry(

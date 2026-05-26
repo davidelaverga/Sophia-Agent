@@ -195,10 +195,12 @@ class TestExtractSessionMemories:
 
         assert call_kwargs["user_id"] == "user1"
         assert call_kwargs["session_id"] == "sess_005"
-        # May 26 prod-test finding: pass infer=False so Mem0 stores our
-        # Claude-Haiku-extracted candidate verbatim (preserves metadata +
-        # makes the memory searchable). See test_extraction_passes_infer_false_to_add_memories.
-        assert call_kwargs["infer"] is False
+        # extraction.py no longer pins infer explicitly — it relies on
+        # add_memories' default of infer=True (Mem0's documented default).
+        # The infer=False approach made writes invisible to client.search()
+        # for users with existing extracted memories. The retrieval gap is
+        # closed by Mem0RetrievalMiddleware._augment_with_local_overlay.
+        assert "infer" not in call_kwargs
 
         meta = call_kwargs["metadata"]
         assert meta["review_status"] == "pending_review"
@@ -1036,9 +1038,10 @@ class TestReviewMetadataOverlayWrite:
         content_hash with ``mem0_event_id`` stashed in metadata so a
         reconciler can backfill later.
 
-        Note: with ``infer=False`` (the new May-26 default), Mem0's response
-        normally carries a resolved ``id`` — this test forces the legacy
-        event-only shape to verify the overlay still surfaces correctly.
+        Note: with Mem0's default ``infer=True``, async event resolution can
+        produce a resolved ``id`` once polling completes — this test forces
+        the legacy event-only shape (e.g. a polling timeout) to verify the
+        overlay still surfaces correctly via content_hash keying.
         """
         from deerflow.sophia.extraction import extract_session_memories
 
@@ -1058,9 +1061,10 @@ class TestReviewMetadataOverlayWrite:
             session_metadata=_SESSION_METADATA,
         )
 
-        # infer=False is the new contract (verbatim store), pinned by the
-        # separate test_extraction_passes_infer_false_to_add_memories test.
-        assert mock_add_memories.call_args.kwargs.get("infer") is False
+        # extraction.py no longer pins infer — it relies on add_memories'
+        # default of infer=True (Mem0's documented default). Pinned by the
+        # separate test_extraction_does_not_pin_infer_to_add_memories test.
+        assert "infer" not in mock_add_memories.call_args.kwargs
         assert mock_upsert.call_count == 1
         call_kwargs = mock_upsert.call_args.kwargs
         assert call_kwargs["memory_id"] is None
@@ -1268,30 +1272,25 @@ class TestReviewMetadataOverlayWrite:
     @patch("deerflow.sophia.extraction.upsert_review_metadata")
     @patch("deerflow.sophia.extraction.add_memories")
     @patch("deerflow.sophia.extraction.anthropic")
-    def test_extraction_passes_infer_false_to_add_memories(
+    def test_extraction_does_not_pin_infer_to_add_memories(
         self, mock_anthropic_mod, mock_add_memories, mock_upsert
     ):
-        """May 26 prod-test finding: ``add_memories`` MUST be called with
-        ``infer=False`` from the offline-pipeline extraction path.
+        """extraction.py MUST NOT pin ``infer`` when calling ``add_memories``
+        — let it fall through to the default (``infer=True``, Mem0's
+        documented default).
 
-        Mem0 v3's default ``infer=True`` runs Mem0's OWN LLM extraction on
-        the single-message ``add()`` payload — a SECOND extraction on top
-        of our Claude Haiku extraction. That double-extraction:
-
-          - Creates event-internal sub-memories that never surface in
-            ``v2/memories`` or ``client.search()``
-          - Strips our custom metadata (``target_date``, ``category``,
-            ``status``, ``importance_score``) from the resulting record
-          - Made today's commitments unreachable to Sophia's per-turn
-            retrieval (operator observed "she is not retrieving the
-            temporal memory" on 2026-05-26)
-
-        With ``infer=False``, Mem0 stores the content verbatim as a
-        canonical searchable memory with our metadata intact. Live-probed
-        2026-05-26: round-trip <8s, all 6 metadata fields preserved.
+        Historical context: PR #130 originally pinned ``infer=False`` here to
+        bypass Mem0's double-extraction on our pre-extracted candidates. A
+        follow-up live probe on 2026-05-26 revealed ``infer=False`` writes
+        are invisible to ``client.search()`` / ``client.get_all()`` for
+        users with existing extracted memories (fetchable only by ID). The
+        per-turn retrieval middleware now closes the resulting gap via
+        ``Mem0RetrievalMiddleware._augment_with_local_overlay``, which
+        queries the local ``review_metadata`` store alongside Mem0 and
+        surfaces any local-only entries the user has just created/approved.
 
         This test pins the contract so a future refactor can't silently
-        revert to Mem0's default.
+        re-introduce ``infer=False`` here.
         """
         from deerflow.sophia.extraction import extract_session_memories
 
@@ -1304,20 +1303,16 @@ class TestReviewMetadataOverlayWrite:
 
         extract_session_memories(
             user_id="user1",
-            session_id="sess_infer_false",
+            session_id="sess_infer_default",
             messages=_SAMPLE_MESSAGES,
             session_metadata=_SESSION_METADATA,
         )
 
         assert mock_add_memories.call_count == 1
         call_kwargs = mock_add_memories.call_args.kwargs
-        assert "infer" in call_kwargs, (
-            "extraction.py MUST explicitly pass infer=False to add_memories "
-            "(do not rely on the default — make the contract self-documenting)"
-        )
-        assert call_kwargs["infer"] is False, (
-            f"add_memories MUST be called with infer=False from extraction.py; "
-            f"got infer={call_kwargs['infer']!r}. This is the May 26 prod-test "
-            f"finding — infer=True caused double LLM extraction and made new "
-            f"memories invisible to client.search()."
+        assert "infer" not in call_kwargs, (
+            f"extraction.py MUST NOT pin infer when calling add_memories — "
+            f"let it default to Mem0's infer=True. infer=False makes writes "
+            f"invisible to client.search() for users with existing memories. "
+            f"Got infer={call_kwargs.get('infer')!r}."
         )

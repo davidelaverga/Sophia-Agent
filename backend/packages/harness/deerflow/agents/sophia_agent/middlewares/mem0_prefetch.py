@@ -26,6 +26,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.utils import extract_last_message_text, log_middleware
 from deerflow.sophia.mem0_client import search_memories, warm_up
+from deerflow.sophia.review_metadata_store import apply_review_metadata_overlays
 
 logger = logging.getLogger(__name__)
 
@@ -278,6 +279,83 @@ class Mem0RetrievalMiddleware(AgentMiddleware[Mem0RetrievalState]):
         )
 
     # ------------------------------------------------------------------
+    # Local review_metadata overlay
+    # ------------------------------------------------------------------
+
+    def _augment_with_local_overlay(
+        self,
+        results: list[dict],
+        query: str,
+        memory_limit: int,
+    ) -> list[dict]:
+        """Merge Mem0 results with local review_metadata overlay entries.
+
+        ``apply_review_metadata_overlays`` returns the original Mem0 results
+        (possibly enriched with local metadata) followed by any local-only
+        entries — i.e. memories the user created/approved that Mem0's search
+        didn't surface. We score the local-only entries by token overlap with
+        the query and merge the most relevant ones into the final result.
+        """
+        try:
+            overlaid = apply_review_metadata_overlays(self._user_id, list(results))
+        except Exception:
+            logger.warning(
+                "[Mem0Retrieval] overlay failed for user %s",
+                self._user_id,
+                exc_info=True,
+            )
+            return results
+
+        original_count = len(results)
+        enriched_mem0 = overlaid[:original_count]
+        local_only = overlaid[original_count:]
+
+        # Normalize local-only entries — apply_review_metadata_overlays emits
+        # `memory` but not `content`; MemoryInjectionMiddleware reads `content`.
+        for mem in local_only:
+            if not mem.get("content"):
+                mem["content"] = mem.get("memory", "")
+
+        # Score local-only entries by content-token overlap with the query.
+        # We use content_tokens (stopword-filtered) so "what's my name?" only
+        # matches on "name" rather than every common word.
+        query_toks = self.content_tokens(query)
+        scored: list[tuple[int, int, dict]] = []
+        for idx, mem in enumerate(local_only):
+            mem_toks = self.content_tokens(mem.get("content", ""))
+            overlap = len(query_toks & mem_toks) if query_toks else 0
+            # Tie-break by reverse insertion order so most recently appended
+            # entries (likely newer in updated_at) win over older ties.
+            scored.append((overlap, -idx, mem))
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+
+        # Only keep local entries with at least one content-token overlap.
+        # If the query has no content tokens (greeting, low-signal), skip.
+        relevant_locals = [mem for overlap, _, mem in scored if overlap > 0]
+
+        # Combine and dedupe by id. Mem0 results keep their position (semantic
+        # ranking) and local-only entries fill remaining slots up to the limit.
+        combined = list(enriched_mem0) + relevant_locals
+        seen_ids: set[str] = set()
+        deduped: list[dict] = []
+        for mem in combined:
+            mid = mem.get("id")
+            if isinstance(mid, str) and mid:
+                if mid in seen_ids:
+                    continue
+                seen_ids.add(mid)
+            deduped.append(mem)
+
+        final = deduped[:memory_limit]
+        locals_added = max(0, len(final) - original_count)
+        if locals_added > 0:
+            logger.info(
+                "[Mem0Retrieval] overlay_augmented user_id=%s mem0=%d locals_added=%d total=%d",
+                self._user_id, original_count, locals_added, len(final),
+            )
+        return final
+
+    # ------------------------------------------------------------------
     # Search
     # ------------------------------------------------------------------
 
@@ -350,6 +428,14 @@ class Mem0RetrievalMiddleware(AgentMiddleware[Mem0RetrievalState]):
             return [], 0.0
 
         search_ms = (time.perf_counter() - _t_search) * 1000
+
+        # Mem0 v3 quirk: pending_review + freshly-extracted memories are sometimes
+        # hidden from search (dedup linking against existing canonical entries,
+        # async indexing lag, infer=False storage tier). Augment with the local
+        # review_metadata overlay so Sophia can retrieve memories the user just
+        # created/approved even when Mem0's search misses them.
+        results = self._augment_with_local_overlay(results, query, memory_limit)
+
         self._store_voice_results(
             thread_id=thread_id,
             platform=platform,

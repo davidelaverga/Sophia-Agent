@@ -496,17 +496,25 @@ class TestAddMemories:
                 )
                 assert mock_client.add.call_args.kwargs["run_id"] == "sess_abc"
 
-    def test_add_defaults_infer_false_to_bypass_mem0_extraction(self):
-        """May 26 prod-test finding: ``add_memories`` MUST default to
-        ``infer=False`` and thread that through to ``client.add(...)``.
+    def test_add_defaults_infer_true_matching_mem0_documented_default(self):
+        """``add_memories`` defaults to ``infer=True`` (Mem0's documented
+        default — runs Mem0's extraction LLM on each message).
 
-        With Mem0 v3's default ``infer=True``, Mem0 runs its own LLM
-        extraction on the message — double-extraction on top of Sophia's
-        Claude Haiku pre-extraction. That created event-internal sub-
-        memories invisible to ``client.search()`` and stripped our custom
-        metadata (target_date, category, status). The cure: ``infer=False``
-        stores the content verbatim as a canonical searchable memory.
-        Live-probed against api.mem0.ai on 2026-05-26 — confirmed working.
+        Historical context: PR #130 originally flipped this to ``False`` to
+        bypass Mem0's double-extraction on Sophia's already-extracted
+        candidates. Live probing on 2026-05-26 then revealed a worse failure
+        mode: ``infer=False`` writes land in storage (fetchable by ID via
+        ``v1/memories/<id>/``) but DO NOT appear in ``client.search()`` /
+        ``client.get_all()`` for users with existing extracted memories —
+        invisible to per-turn retrieval. ``infer=True`` memories sometimes
+        get dedup-linked to existing canonical entries (losing custom
+        metadata) but at least the canonical memories that survive ARE
+        searchable.
+
+        The underlying retrieval-gap fix lives in
+        ``Mem0RetrievalMiddleware._augment_with_local_overlay`` — the
+        middleware queries the local ``review_metadata`` store alongside
+        Mem0 and merges relevant local-only entries into the prompt.
         """
         from deerflow.sophia.mem0_client import add_memories
 
@@ -526,39 +534,39 @@ class TestAddMemories:
                 )
 
         assert "infer" in mock_client.add.call_args.kwargs, (
-            "client.add(...) MUST be called with an explicit infer= kwarg — "
-            "do not rely on Mem0's implicit default (which is True / "
-            "auto-extract)."
+            "client.add(...) MUST be called with an explicit infer= kwarg so "
+            "the default contract is unambiguous to readers."
         )
-        assert mock_client.add.call_args.kwargs["infer"] is False, (
-            f"add_memories MUST default to infer=False so our Claude-Haiku-"
-            f"extracted candidates are stored verbatim, not re-extracted by "
-            f"Mem0's LLM. Got infer={mock_client.add.call_args.kwargs['infer']!r}."
+        assert mock_client.add.call_args.kwargs["infer"] is True, (
+            f"add_memories MUST default to infer=True (Mem0's documented "
+            f"default). infer=False makes new writes invisible to client.search() "
+            f"for users with existing extracted memories. Got "
+            f"infer={mock_client.add.call_args.kwargs['infer']!r}."
         )
 
-    def test_add_threads_explicit_infer_true_through_to_client(self):
-        """Callers that genuinely want Mem0's LLM extraction (e.g. raw
-        conversation dumps without pre-extraction) can pass
-        ``infer=True`` explicitly. Verify the kwarg flows through."""
+    def test_add_threads_explicit_infer_false_through_to_client(self):
+        """Callers that need verbatim-store semantics (raw dumps that must
+        not be re-extracted) can pass ``infer=False`` explicitly. Verify
+        the kwarg flows through unchanged."""
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
-        mock_client.add.return_value = [{"event_id": "evt_raw", "memory": None}]
+        mock_client.add.return_value = [{"id": "mem_verbatim", "memory": "raw"}]
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
             with patch(
                 "deerflow.sophia.mem0_client.wait_for_pending_events",
-                return_value=([{"id": "mem_extracted"}], set()),
+                return_value=([], set()),
             ):
                 add_memories(
                     user_id="user1",
-                    messages=[{"role": "user", "content": "raw chat"}],
+                    messages=[{"role": "user", "content": "raw verbatim"}],
                     session_id="sess_raw",
-                    infer=True,
+                    infer=False,
                 )
 
-        assert mock_client.add.call_args.kwargs["infer"] is True
+        assert mock_client.add.call_args.kwargs["infer"] is False
 
     def test_add_with_no_api_key_returns_empty(self):
         from deerflow.sophia.mem0_client import add_memories
