@@ -39,6 +39,9 @@ class BuilderCanvasCancelResponse(BaseModel):
     detail: str
 
 
+_TERMINAL_CANVAS_STATUSES = {"completed", "failed", "cancelled"}
+
+
 def _langgraph_url() -> str:
     return (
         os.getenv("SOPHIA_LANGGRAPH_BASE_URL")
@@ -112,14 +115,26 @@ def _map_native_status(status: str | None) -> str:
     }.get(str(status or "").lower(), "running")
 
 
-async def _native_run_status(task_id: str, run_id: str, fallback: str | None) -> str:
-    client = get_client(url=_langgraph_url())
+async def _native_run_status_for_client(client: Any, task_id: str, run_id: str, fallback: str | None) -> str:
     try:
         run = await client.runs.get(task_id, run_id)
     except Exception:
         return _map_native_status(fallback)
     raw_status = run.get("status") if isinstance(run, dict) else None
     return _map_native_status(str(raw_status) if raw_status else fallback)
+
+
+async def _native_run_status(task_id: str, run_id: str, fallback: str | None) -> str:
+    client = get_client(url=_langgraph_url())
+    return await _native_run_status_for_client(client, task_id, run_id, fallback)
+
+
+def _cancel_detail_for_status(status: str) -> str:
+    return {
+        "completed": "Builder already finished before cancellation could be applied.",
+        "failed": "Builder already stopped with an error before cancellation could be applied.",
+        "cancelled": "Builder was already cancelled.",
+    }.get(status, "Builder was cancelled before finishing the deliverable.")
 
 
 def _format_sse(payload: dict[str, Any]) -> bytes:
@@ -132,8 +147,17 @@ async def _cancel_builder_run(
     task_id: str,
     run_id: str,
     request: Request,
+    fallback_status: str | None = None,
 ) -> BuilderCanvasCancelResponse:
     client = get_client(url=_langgraph_url())
+    current_status = await _native_run_status_for_client(client, task_id, run_id, fallback_status)
+    if current_status in _TERMINAL_CANVAS_STATUSES:
+        return BuilderCanvasCancelResponse(
+            task_id=task_id,
+            run_id=run_id,
+            status=current_status,
+            detail=_cancel_detail_for_status(current_status),
+        )
     try:
         await client.runs.cancel(task_id, run_id, action="interrupt")
     except Exception as exc:
@@ -152,7 +176,7 @@ async def _cancel_builder_run(
         task_id=task_id,
         run_id=run_id,
         status="cancelled",
-        detail="Builder was cancelled before finishing the deliverable.",
+        detail=_cancel_detail_for_status("cancelled"),
     )
 
 
@@ -230,8 +254,9 @@ async def cancel_builder_canvas_task(
     request: Request,
 ) -> BuilderCanvasCancelResponse:
     _require_thread_owner(user_id, parent_thread_id)
-    await _authorized_task(parent_thread_id, task_id, run_id)
-    return await _cancel_builder_run(parent_thread_id, task_id, run_id, request)
+    task = await _authorized_task(parent_thread_id, task_id, run_id)
+    fallback_status = task.get("status") if isinstance(task.get("status"), str) else None
+    return await _cancel_builder_run(parent_thread_id, task_id, run_id, request, fallback_status)
 
 
 @router.post(
@@ -245,5 +270,6 @@ async def cancel_latest_builder_canvas_task_run(
     request: Request,
 ) -> BuilderCanvasCancelResponse:
     _require_thread_owner(user_id, parent_thread_id)
-    _task, run_id = await _authorized_latest_task(parent_thread_id, task_id)
-    return await _cancel_builder_run(parent_thread_id, task_id, run_id, request)
+    task, run_id = await _authorized_latest_task(parent_thread_id, task_id)
+    fallback_status = task.get("status") if isinstance(task.get("status"), str) else None
+    return await _cancel_builder_run(parent_thread_id, task_id, run_id, request, fallback_status)
