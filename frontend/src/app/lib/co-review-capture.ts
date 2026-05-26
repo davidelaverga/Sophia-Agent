@@ -1,6 +1,7 @@
-export type ArtifactVisualSourceKind = "canvas_stream" | "offscreen_render" | "unsupported"
+export type ArtifactVisualSourceKind = "canvas_element" | "canvas_stream" | "offscreen_render" | "unsupported"
 
 export type ArtifactVisualSourceStatus = "ready" | "unsupported"
+export type ArtifactVisualSourceMode = "stream" | "still_frame"
 
 export interface ArtifactVisualSource {
   kind: ArtifactVisualSourceKind
@@ -16,6 +17,7 @@ export interface ResolveArtifactVisualSourceOptions {
   root?: ParentNode | null
   artifactId?: string | null
   frameRate?: number
+  mode?: ArtifactVisualSourceMode
 }
 
 const ARTIFACT_CANVAS_SELECTORS = [
@@ -29,6 +31,7 @@ export function resolveArtifactVisualSource({
   root,
   artifactId = null,
   frameRate = 1,
+  mode = "stream",
 }: ResolveArtifactVisualSourceOptions = {}): ArtifactVisualSource {
   const searchRoot = root ?? (typeof document === "undefined" ? null : document)
   if (!searchRoot) {
@@ -38,6 +41,18 @@ export function resolveArtifactVisualSource({
   const canvas = findArtifactCanvas(searchRoot, artifactId)
   if (!canvas) {
     return unsupportedArtifactVisualSource("artifact_canvas_not_found", artifactId)
+  }
+
+  if (mode === "still_frame") {
+    return {
+      kind: "canvas_element",
+      status: "ready",
+      artifactId,
+      element: canvas,
+      stream: null,
+      reason: null,
+      frameRate: null,
+    }
   }
 
   const captureStream = canvas.captureStream

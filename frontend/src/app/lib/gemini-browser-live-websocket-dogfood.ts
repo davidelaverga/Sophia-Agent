@@ -1,3 +1,5 @@
+import { isCoReviewStillFrameEnabled } from './co-review-flags';
+
 export type GeminiBrowserLiveDogfoodStage =
   | 'starting_backend_session'
   | 'requesting_microphone'
@@ -406,6 +408,7 @@ export interface GeminiBrowserLiveDogfoodConnectOptions {
   webSocketFactory?: WebSocketFactory;
   getUserMedia?: GetUserMediaLike;
   audioContextFactory?: AudioContextFactory;
+  coreviewStillFrameEnabled?: boolean;
   onStage?: (stage: GeminiBrowserLiveDogfoodStage) => void;
   onProviderEvent?: (event: unknown) => void;
   onOutputAudio?: () => void;
@@ -442,9 +445,37 @@ export interface GeminiBrowserLiveDogfoodConnection {
   websocket: WebSocketLike;
   localStream: MediaStream;
   sendText: (text: string) => void;
+  sendArtifactFrame: (frame: GeminiArtifactFramePayload) => GeminiArtifactFrameSendResult;
   setMicrophoneMuted: (muted: boolean) => void;
   flushOutputAudio: () => GeminiOutputAudioPlaybackState;
   close: () => Promise<void>;
+}
+
+export interface GeminiArtifactFrameDimensions {
+  width: number;
+  height: number;
+}
+
+export interface GeminiArtifactFramePayload {
+  artifactId?: string | null;
+  data: string;
+  mimeType: string;
+  byteLength: number;
+  dimensions: GeminiArtifactFrameDimensions;
+  rawFrameExcluded: true;
+}
+
+export interface GeminiArtifactFrameSendResult {
+  ok: boolean;
+  supported: boolean;
+  providerAcceptedFrame: boolean;
+  websocketSendAccepted: boolean;
+  frameBytes: number;
+  frameDimensions: GeminiArtifactFrameDimensions;
+  frameSendLatencyMs: number;
+  estimatedVisualCost: number | null;
+  error: string | null;
+  rawFrameExcluded: true;
 }
 
 interface BrowserSessionPayload {
@@ -1686,6 +1717,11 @@ export async function connectGeminiBrowserLiveDogfood(
         }
         websocket.send(JSON.stringify({ realtimeInput: { text } }));
       },
+      sendArtifactFrame: (frame: GeminiArtifactFramePayload) => sendGeminiArtifactFrameOverWebSocket({
+        websocket,
+        frame,
+        enabled: options.coreviewStillFrameEnabled ?? isCoReviewStillFrameEnabled(),
+      }),
       setMicrophoneMuted: (muted: boolean) => {
         localStream?.getAudioTracks().forEach((track) => {
           track.enabled = !muted;
@@ -1731,6 +1767,87 @@ export function buildGeminiLiveWebSocketUrl(baseUrl: string, token: string): str
     const separator = baseUrl.includes('?') ? '&' : '?';
     return `${baseUrl}${separator}access_token=${encodeURIComponent(token)}`;
   }
+}
+
+export function buildGeminiArtifactFrameRealtimeInput(
+  frame: GeminiArtifactFramePayload,
+): Record<string, unknown> {
+  return {
+    realtimeInput: {
+      mediaChunks: [
+        {
+          mimeType: frame.mimeType,
+          data: frame.data,
+        },
+      ],
+    },
+  };
+}
+
+function sendGeminiArtifactFrameOverWebSocket({
+  websocket,
+  frame,
+  enabled,
+}: {
+  websocket: WebSocketLike;
+  frame: GeminiArtifactFramePayload;
+  enabled: boolean;
+}): GeminiArtifactFrameSendResult {
+  const startedAt = monotonicNowMs();
+  const baseResult = {
+    frameBytes: frame.byteLength,
+    frameDimensions: frame.dimensions,
+    estimatedVisualCost: null,
+    rawFrameExcluded: true as const,
+  };
+
+  if (!enabled) {
+    return {
+      ...baseResult,
+      ok: false,
+      supported: false,
+      providerAcceptedFrame: false,
+      websocketSendAccepted: false,
+      frameSendLatencyMs: elapsedMs(startedAt),
+      error: 'coreview_still_frame_feature_flag_disabled',
+    };
+  }
+
+  if (websocket.readyState !== WEBSOCKET_OPEN) {
+    return {
+      ...baseResult,
+      ok: false,
+      supported: true,
+      providerAcceptedFrame: false,
+      websocketSendAccepted: false,
+      frameSendLatencyMs: elapsedMs(startedAt),
+      error: 'gemini_live_websocket_not_open',
+    };
+  }
+
+  try {
+    websocket.send(JSON.stringify(buildGeminiArtifactFrameRealtimeInput(frame)));
+  } catch {
+    return {
+      ...baseResult,
+      ok: false,
+      supported: true,
+      providerAcceptedFrame: false,
+      websocketSendAccepted: false,
+      frameSendLatencyMs: elapsedMs(startedAt),
+      error: 'gemini_artifact_frame_send_failed',
+    };
+  }
+
+  return {
+    ...baseResult,
+    ok: true,
+    supported: true,
+    providerAcceptedFrame: false,
+    websocketSendAccepted: true,
+    frameSendLatencyMs: elapsedMs(startedAt),
+    error: null,
+  };
 }
 
 export function isGeminiSetupCompleteMessage(event: unknown): boolean {

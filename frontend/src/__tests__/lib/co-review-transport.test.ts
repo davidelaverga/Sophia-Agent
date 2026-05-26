@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import type { ArtifactVisualSource } from "../../app/lib/co-review-capture"
+import { GeminiStillFrameTransport } from "../../app/lib/co-review-still-frame-transport"
 import {
   AudioWebSocketUnsupportedTransport,
   CoReviewSessionMachine,
@@ -16,6 +17,45 @@ const unsupportedVisualSource: ArtifactVisualSource = {
   stream: null,
   reason: "artifact_canvas_not_found",
   frameRate: null,
+}
+
+const originalToBlob = HTMLCanvasElement.prototype.toBlob
+
+afterEach(() => {
+  Object.defineProperty(HTMLCanvasElement.prototype, "toBlob", {
+    configurable: true,
+    value: originalToBlob,
+  })
+})
+
+function readyCanvasSource(): ArtifactVisualSource {
+  const canvas = document.createElement("canvas")
+  canvas.width = 320
+  canvas.height = 160
+  return {
+    kind: "canvas_element",
+    status: "ready",
+    artifactId: "artifact-1",
+    element: canvas,
+    stream: null,
+    reason: null,
+    frameRate: null,
+  }
+}
+
+function mockCanvasEncoding() {
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
+    fillStyle: "",
+    fillRect: vi.fn(),
+    drawImage: vi.fn(),
+  } as unknown as CanvasRenderingContext2D)
+
+  Object.defineProperty(HTMLCanvasElement.prototype, "toBlob", {
+    configurable: true,
+    value(callback: BlobCallback, mimeType?: string) {
+      callback(new Blob([new Uint8Array(32)], { type: mimeType || "image/jpeg" }))
+    },
+  })
 }
 
 describe("co-review dual-path state machine", () => {
@@ -82,5 +122,72 @@ describe("co-review dual-path state machine", () => {
     expect(serialized).not.toContain("base64-do-not-include-me")
     expect(Object.keys(telemetry)).not.toContain("rawArtifactText")
     expect(Object.keys(telemetry)).not.toContain("rawFrameData")
+  })
+
+  it("enters still_frame mode and records safe frame telemetry when the sender accepts a frame", async () => {
+    mockCanvasEncoding()
+    const sender = {
+      sendArtifactFrame: vi.fn((frame) => ({
+        ok: true,
+        supported: true,
+        providerAcceptedFrame: false,
+        websocketSendAccepted: true,
+        frameBytes: frame.byteLength,
+        frameDimensions: frame.dimensions,
+        frameSendLatencyMs: 12,
+        estimatedVisualCost: null,
+        error: null,
+        rawFrameExcluded: true as const,
+      })),
+    }
+    const transport = new GeminiStillFrameTransport(sender)
+    const machine = new CoReviewSessionMachine({ transport })
+
+    const state = await machine.startCoReview({
+      normalSessionId: "normal-1",
+      sessionId: "session-1",
+      threadId: "thread-1",
+      artifactId: "artifact-1",
+      visualSource: readyCanvasSource(),
+    })
+
+    expect(state.state).toBe("co_review_live")
+    expect(state.videoOrFrameMode).toBe("still_frame")
+    expect(state.frameSentCount).toBe(1)
+    expect(state.frameBytes).toBe(32)
+    expect(state.frameDimensions).toEqual({ width: 320, height: 160 })
+    expect(state.frameSendLatencyMs).toBe(12)
+    expect(state.providerAcceptedFrame).toBe(false)
+    expect(sender.sendArtifactFrame).toHaveBeenCalledTimes(1)
+  })
+
+  it("Stop Looking disables future sends on the still-frame transport", async () => {
+    mockCanvasEncoding()
+    const transport = new GeminiStillFrameTransport({
+      sendArtifactFrame: vi.fn((frame) => ({
+        ok: true,
+        supported: true,
+        providerAcceptedFrame: false,
+        websocketSendAccepted: true,
+        frameBytes: frame.byteLength,
+        frameDimensions: frame.dimensions,
+        frameSendLatencyMs: 3,
+        estimatedVisualCost: null,
+        error: null,
+        rawFrameExcluded: true as const,
+      })),
+    })
+    const machine = new CoReviewSessionMachine({ transport })
+
+    await machine.startCoReview({
+      normalSessionId: "normal-1",
+      sessionId: "session-1",
+      threadId: "thread-1",
+      artifactId: "artifact-1",
+      visualSource: readyCanvasSource(),
+    })
+    await machine.stopCoReview()
+
+    await expect(transport.sendFrame?.(new Blob())).rejects.toThrow("co_review_stopped")
   })
 })

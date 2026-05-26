@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 COREVIEW_FEATURE_FLAG = "SOPHIA_GEMINI_COREVIEW_ENABLED"
+COREVIEW_STILL_FRAME_FEATURE_FLAG = "SOPHIA_GEMINI_COREVIEW_STILL_FRAME_ENABLED"
 GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = "read_artifact_text"
 COREVIEW_PROMPT_SOURCE = "voice/realtime/coreview.py::build_gemini_coreview_prompt_overlay"
 
@@ -17,6 +18,7 @@ Artifact co-review is a separate, explicitly entered mode. Apply these rules onl
 - Visual input is limited to the artifact region selected by the app. Never ask for or imply whole-screen, whole-tab, desktop, or browser chrome access.
 - The user must see a persistent looking indicator while visual input is active.
 - Stop Looking ends visual input. After it stops, return to normal voice behavior.
+- Still-frame co-review is single-frame or low-rate artifact-canvas input, not continuous video.
 - Use visual input only for layout, composition, color, spacing, rough structure, and other visual qualities.
 - Exact words, numbers, table values, labels, citations, and data must come from read_artifact_text or another trusted backend artifact reader, not from vision.
 - Do not store frames, screenshots, audio, video, provider credentials, or raw artifact text in telemetry.
@@ -51,6 +53,12 @@ def is_coreview_enabled(value: str | None = None) -> bool:
     return str(value or "").strip().lower() in _TRUE_VALUES
 
 
+def is_coreview_still_frame_enabled(value: str | None = None) -> bool:
+    if value is None:
+        value = os.getenv(COREVIEW_STILL_FRAME_FEATURE_FLAG)
+    return str(value or "").strip().lower() in _TRUE_VALUES
+
+
 def build_gemini_coreview_prompt_overlay(*, enabled: bool | None = None) -> str:
     if enabled is None:
         enabled = is_coreview_enabled()
@@ -60,12 +68,13 @@ def build_gemini_coreview_prompt_overlay(*, enabled: bool | None = None) -> str:
 def detect_gemini_coreview_media_support(*, coreview_enabled: bool | None = None) -> CoreviewMediaSupportReport:
     if coreview_enabled is None:
         coreview_enabled = is_coreview_enabled()
+    still_frame_enabled = coreview_enabled and is_coreview_still_frame_enabled()
 
     return CoreviewMediaSupportReport(
         transport_kind="gemini_live_audio_websocket_current_path",
         media_capable_session_possible="unknown",
         continuous_video_supported=False,
-        still_frames_supported=False,
+        still_frames_supported=still_frame_enabled,
         tools_supported_in_normal_voice=True,
         tools_supported_in_coreview_media="unknown",
         read_artifact_text_available=coreview_enabled,
@@ -80,13 +89,13 @@ def detect_gemini_coreview_media_support(*, coreview_enabled: bool | None = None
         blockers=(
             "Current browser Gemini path sends audio/text over BidiGenerateContent WebSocket only.",
             "No repo code exposes RTCPeerConnection/addTrack/replaceTrack for Gemini visual input.",
-            "No Gemini co-review adapter implements send_frame, send_image, or attach_video_track.",
+            "Still-frame WebSocket mediaChunks send is experimental and not provider-ack verified.",
             "Installed Vision Agents package exposes generic video-track helpers, not a wired Gemini media session.",
             "Artifact panel is DOM-first; artifact-scoped visual input needs a canvas renderer or safe still-frame path.",
         ),
         recommended_next_step=(
-            "Keep normal voice untouched. Spike a feature-flagged still-frame path from an artifact canvas "
-            "or wait for a proven provider media transport before continuous co-review."
+            "Keep normal voice untouched. Manually smoke-test one feature-flagged artifact-canvas still frame "
+            "before attempting low-rate stills or continuous co-review."
         ),
         safe_telemetry_fields=(
             "normalVoiceSessionId",
@@ -100,6 +109,13 @@ def detect_gemini_coreview_media_support(*, coreview_enabled: bool | None = None
             "normalVoiceRestored",
             "sessionHandoffMs",
             "videoOrFrameMode",
+            "frameSentCount",
+            "frameBytes",
+            "frameDimensions",
+            "frameSendLatencyMs",
+            "providerAcceptedFrame",
+            "visualResponseObserved",
+            "toolCallStillWorks",
             "frameCount",
             "estimatedVisualCost",
         ),
