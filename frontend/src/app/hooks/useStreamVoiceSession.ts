@@ -20,6 +20,8 @@ import {
   connectGeminiBrowserLiveFromBootstrap,
   type GeminiBrowserLiveDogfoodConnection,
   type GeminiBargeInTranscriptHandoffDiagnostic,
+  type GeminiArtifactFramePayload,
+  type GeminiArtifactFrameSendResult,
   type GeminiBrowserLiveSessionBootstrap,
 } from "../lib/gemini-browser-live-websocket-dogfood"
 import { recordSophiaCaptureEvent } from "../lib/session-capture"
@@ -156,6 +158,7 @@ export type StreamVoiceSessionReturn = {
   unlockAudio: () => void
   /** No-op — reflection TTS goes through Stream agent. Returns false (not spoken). */
   speakText: (text: string, traceId?: string) => Promise<boolean>
+  sendArtifactFrame: (frame: GeminiArtifactFramePayload) => GeminiArtifactFrameSendResult
 }
 
 // ---------------------------------------------------------------------------
@@ -1144,6 +1147,26 @@ export function useStreamVoiceSession(
       // Best-effort cleanup for unused preconnected sessions.
     }
   }, [clearPreparedVoiceConnectRefs, userId])
+
+  const sendArtifactFrame = useCallback((frame: GeminiArtifactFramePayload): GeminiArtifactFrameSendResult => {
+    const activeGeminiConnection = geminiConnectionRef.current
+    if (activeGeminiConnection) {
+      return activeGeminiConnection.sendArtifactFrame(frame)
+    }
+
+    return {
+      ok: false,
+      supported: true,
+      providerAcceptedFrame: false,
+      websocketSendAccepted: false,
+      frameBytes: frame.byteLength,
+      frameDimensions: frame.dimensions,
+      frameSendLatencyMs: 0,
+      estimatedVisualCost: null,
+      error: "gemini_live_websocket_not_open",
+      rawFrameExcluded: true,
+    }
+  }, [])
 
   const prewarmVoiceConnect = useCallback(() => {
     if (!userId) {
@@ -3197,5 +3220,6 @@ export function useStreamVoiceSession(
     stream: null,
     unlockAudio: () => {},
     speakText: async () => false,
+    sendArtifactFrame,
   }
 }

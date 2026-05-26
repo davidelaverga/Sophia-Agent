@@ -41,16 +41,55 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
     this.stopped = false
     this.activeSource = input.visualSource
 
+    logCoreviewBreadcrumb("frameEncodeStarted", {
+      artifactId: input.artifactId,
+      sourceKind: input.visualSource.kind,
+      sourceStatus: input.visualSource.status,
+    })
     const encoded = await encodeArtifactStillFrame(input.visualSource)
     if (encoded.ok === false) {
       stopArtifactVisualSource(input.visualSource)
+      logCoreviewBreadcrumb("coReviewStartError", {
+        error: encoded.reason,
+        stage: "frame_encode",
+      })
       return this.errorResult(encoded.reason)
     }
+    logCoreviewBreadcrumb("frameEncodeSucceeded", {
+      artifactId: encoded.payload.artifactId,
+      frameBytes: encoded.payload.byteLength,
+      frameDimensions: encoded.payload.dimensions,
+      frameMimeType: encoded.payload.mimeType,
+    })
     if (this.stopped) {
+      logCoreviewBreadcrumb("coReviewStartError", {
+        error: "co_review_stopped_before_frame_send",
+        stage: "before_frame_send",
+      })
       return this.errorResult("co_review_stopped_before_frame_send")
     }
 
+    logCoreviewBreadcrumb("sendArtifactFrameAvailable", {
+      available: typeof this.sender.sendArtifactFrame === "function",
+    })
+    logCoreviewBreadcrumb("sendArtifactFrameAttempted", {
+      artifactId: encoded.payload.artifactId,
+      frameBytes: encoded.payload.byteLength,
+      frameDimensions: encoded.payload.dimensions,
+      frameMimeType: encoded.payload.mimeType,
+    })
     const sent = await this.sender.sendArtifactFrame(encoded.payload)
+    logCoreviewBreadcrumb("sendArtifactFrameResult", {
+      ok: sent.ok,
+      supported: sent.supported,
+      providerAcceptedFrame: sent.providerAcceptedFrame,
+      websocketSendAccepted: sent.websocketSendAccepted ?? null,
+      frameBytes: sent.frameBytes,
+      frameDimensions: sent.frameDimensions,
+      frameSendLatencyMs: sent.frameSendLatencyMs,
+      estimatedVisualCost: sent.estimatedVisualCost,
+      error: sent.error,
+    })
     if (!sent.ok) {
       stopArtifactVisualSource(input.visualSource)
       return {
@@ -138,4 +177,12 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
       error,
     }
   }
+}
+
+function logCoreviewBreadcrumb(event: string, details: Record<string, unknown> = {}) {
+  if (typeof console === "undefined") return
+  console.info?.(`[coreview] ${event}`, {
+    ...details,
+    rawFrameExcluded: true,
+  })
 }

@@ -22,6 +22,8 @@ export { VoiceCaption } from './VoiceCaption';
 export { VoiceMetricsPanel } from './VoiceMetricsPanel';
 export { BuilderReadyPill } from './BuilderReadyPill';
 export { PresenceArtifactPanel, ArtifactToggleIcon } from './PresenceArtifactPanel';
+export { CoreviewFixtureArtifact, COREVIEW_FIXTURE_ARTIFACT_ID } from './CoreviewFixtureArtifact';
+export { CoreviewFixtureLauncher } from './CoreviewFixtureLauncher';
 export { WhisperIndicator } from './WhisperIndicator';
 export { ReflectionOverlay } from './ReflectionOverlay';
 export { EmergenceOverlay } from './EmergenceOverlay';

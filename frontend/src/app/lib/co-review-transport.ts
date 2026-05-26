@@ -198,7 +198,28 @@ export class CoReviewSessionMachine {
     })
 
     const startMark = this.clock()
-    const result = await this.transport.startCoReview(input)
+    let result: CoReviewStartResult
+    try {
+      result = await this.transport.startCoReview(input)
+    } catch (error) {
+      const coReviewStartLatencyMs = elapsedMs(this.clock(), startMark)
+      this.update({
+        state: "co_review_error",
+        coReviewSessionId: null,
+        visualInputStatus: "error",
+        toolAvailability: "unavailable",
+        videoOrFrameMode: "none",
+        normalVoicePaused: false,
+        sessionHandoffMs: null,
+        estimatedVisualCost: null,
+        coReviewStartLatencyMs,
+        providerAcceptedFrame: false,
+        visualResponseObserved: false,
+        toolCallStillWorks: null,
+        error: error instanceof Error ? error.message : "co_review_transport_start_exception",
+      })
+      return this.state()
+    }
     const coReviewStartLatencyMs = elapsedMs(this.clock(), startMark)
 
     if (!result.ok) {

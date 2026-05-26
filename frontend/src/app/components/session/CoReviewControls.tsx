@@ -77,7 +77,14 @@ export function coReviewStatusText(
     if (state.videoOrFrameMode === "still_frame") return "still-frame mode"
     return "media session live"
   }
-  if (state.state === "co_review_error") return "tool unavailable"
+  if (state.state === "co_review_error") return coReviewErrorText(state.error)
   if (!transportStatus.continuousVideoSupported) return "continuous unsupported"
   return transportStatus.statusText
+}
+
+function coReviewErrorText(error: string | null): string {
+  if (!error) return "still-frame unavailable"
+  if (error === "artifact_canvas_not_found") return "Canvas not found"
+  if (error === "sendArtifactFrame_missing") return "sendArtifactFrame missing"
+  return `still-frame unavailable: ${error}`
 }

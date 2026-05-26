@@ -65,9 +65,9 @@ describe("CoReviewControls", () => {
     expect(onStop).toHaveBeenCalledTimes(1)
   })
 
-  it("reports tool unavailable for safe transport errors", () => {
+  it("reports a visible safe reason for transport errors", () => {
     renderControls({ state: "co_review_error", error: "unsupported" })
 
-    expect(screen.getByText("tool unavailable")).toBeInTheDocument()
+    expect(screen.getByText("still-frame unavailable: unsupported")).toBeInTheDocument()
   })
 })

@@ -2,22 +2,30 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 
+import { useArtifactCoReview } from "../../hooks/useArtifactCoReview"
 import { haptic } from "../../hooks/useHaptics"
 import { buildThreadArtifactHref, formatBuilderArtifactFileSize, getBuilderArtifactFiles } from "../../lib/builder-artifacts"
+import type { CoReviewMediaTransport } from "../../lib/co-review-transport"
 import { cn } from "../../lib/utils"
 import { isRealReflection } from "../../session/artifacts"
 import { usePresenceStore } from "../../stores/presence-store"
 import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 import type { RitualArtifacts } from "../../types/session"
+import { CoReviewControls } from "./CoReviewControls"
+import { CoreviewFixtureArtifact, COREVIEW_FIXTURE_ARTIFACT_ID } from "./CoreviewFixtureArtifact"
 
 interface PresenceArtifactPanelProps {
   artifacts: RitualArtifacts | null | undefined
   builderArtifact?: BuilderArtifactV1 | null
   builderArtifactLibrary?: BuilderArtifactLibraryItemV1[]
+  sessionId?: string | null
+  normalSessionId?: string | null
   threadId?: string
   isVisible: boolean
   onDismiss: () => void
   isVoiceMode: boolean
+  showCoReviewFixture?: boolean
+  coReviewTransport?: CoReviewMediaTransport
   onReflectionTap?: (reflection: { prompt: string; why?: string }) => void
   onMemoryApprove?: (index: number) => void
   onMemoryReject?: (index: number) => void
@@ -38,10 +46,14 @@ export function PresenceArtifactPanel({
   artifacts,
   builderArtifact,
   builderArtifactLibrary = [],
+  sessionId,
+  normalSessionId,
   threadId,
   isVisible,
   onDismiss,
   isVoiceMode,
+  showCoReviewFixture = false,
+  coReviewTransport,
   onReflectionTap,
   onMemoryApprove,
   onMemoryReject,
@@ -51,12 +63,23 @@ export function PresenceArtifactPanel({
   const [reflectionTapped, setReflectionTapped] = useState(false)
   const autoCollapseRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const staggerRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  const [fixtureRoot, setFixtureRoot] = useState<HTMLDivElement | null>(null)
   const status = usePresenceStore((s) => s.status)
   const hasBuilderLibrary = builderArtifactLibrary.length > 0
+  const hasCoReviewFixture = showCoReviewFixture
+  const coReview = useArtifactCoReview({
+    sessionId: sessionId ?? null,
+    normalSessionId: normalSessionId ?? null,
+    threadId: threadId ?? null,
+    artifactId: hasCoReviewFixture ? COREVIEW_FIXTURE_ARTIFACT_ID : null,
+    artifactRoot: fixtureRoot,
+    featureEnabled: hasCoReviewFixture,
+    transport: coReviewTransport,
+  })
 
   // Phase lifecycle
   useEffect(() => {
-    if (isVisible && (artifacts || builderArtifact || hasBuilderLibrary)) {
+    if (isVisible && (artifacts || builderArtifact || hasBuilderLibrary || hasCoReviewFixture)) {
       setPhase("entering")
       setRevealStep(0)
       setReflectionTapped(false)
@@ -67,7 +90,7 @@ export function PresenceArtifactPanel({
       return () => clearTimeout(t)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isVisible, artifacts, builderArtifact, hasBuilderLibrary])
+  }, [isVisible, artifacts, builderArtifact, hasBuilderLibrary, hasCoReviewFixture])
 
   // Staggered reveal — each piece fades in like a star brightening
   useEffect(() => {
@@ -93,7 +116,7 @@ export function PresenceArtifactPanel({
       clearTimeout(autoCollapseRef.current)
       autoCollapseRef.current = null
     }
-    if (phase === "visible" && isVoiceMode && !builderArtifact && !hasBuilderLibrary) {
+    if (phase === "visible" && isVoiceMode && !builderArtifact && !hasBuilderLibrary && !hasCoReviewFixture) {
       autoCollapseRef.current = setTimeout(() => {
         autoCollapseRef.current = null
         onDismiss()
@@ -102,7 +125,7 @@ export function PresenceArtifactPanel({
     return () => {
       if (autoCollapseRef.current) clearTimeout(autoCollapseRef.current)
     }
-  }, [phase, isVoiceMode, onDismiss, builderArtifact, hasBuilderLibrary])
+  }, [phase, isVoiceMode, onDismiss, builderArtifact, hasBuilderLibrary, hasCoReviewFixture])
 
   const handleDismiss = useCallback(() => {
     haptic("light")
@@ -119,7 +142,7 @@ export function PresenceArtifactPanel({
     })
   }, [artifacts?.reflection_candidate, reflectionTapped, onReflectionTap])
 
-  if ((!artifacts && !builderArtifact && !hasBuilderLibrary) || phase === "hidden") return null
+  if ((!artifacts && !builderArtifact && !hasBuilderLibrary && !hasCoReviewFixture) || phase === "hidden") return null
 
   const takeaway = artifacts?.takeaway
   const reflection_candidate = artifacts?.reflection_candidate
@@ -129,7 +152,7 @@ export function PresenceArtifactPanel({
   const hasReflection = isRealReflection(reflection_candidate?.prompt)
   const hasMemories = memory_candidates && memory_candidates.length > 0
   const hasTakeaway = !!takeaway?.trim()
-  const hasContent = hasBuilder || hasBuilderLibrary || hasTakeaway || hasReflection || hasMemories
+  const hasContent = hasBuilder || hasBuilderLibrary || hasTakeaway || hasReflection || hasMemories || hasCoReviewFixture
 
   if (!hasContent) return null
 
@@ -198,6 +221,39 @@ export function PresenceArtifactPanel({
             <path d="M2 2l8 8M10 2l-8 8" strokeLinecap="round" />
           </svg>
         </button>
+
+        {hasCoReviewFixture && (
+          <div
+            ref={setFixtureRoot}
+            className={cn(
+              "mb-4 space-y-3 transition-all duration-[1400ms] ease-out",
+              revealStep >= 1 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
+            )}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-center">
+              <p
+                className="text-[9px] tracking-[0.18em] uppercase"
+                style={{ color: "var(--cosmic-text-faint)" }}
+              >
+                local co-review fixture
+              </p>
+            </div>
+            <CoreviewFixtureArtifact
+              sessionId={sessionId}
+              normalSessionId={normalSessionId}
+            />
+            <CoReviewControls
+              state={coReview.state}
+              transportStatus={coReview.transportStatus}
+              onStart={() => { void coReview.startReview() }}
+              onStop={() => { void coReview.stopReview() }}
+              canStart={coReview.canStart}
+              featureEnabled={coReview.enabled}
+              className="justify-center"
+            />
+          </div>
+        )}
 
         {hasBuilder && builderArtifact && (
           <div

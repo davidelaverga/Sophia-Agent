@@ -44,23 +44,57 @@ export function useArtifactCoReview({
   }
 
   const startReview = useCallback(async () => {
+    logCoreviewBreadcrumb("coReviewStartClicked", {
+      artifactId,
+      hasSessionId: Boolean(sessionId),
+      hasThreadId: Boolean(threadId),
+      transportKind: transportRef.current.kind,
+      requestedMode: transportRef.current.supportsStillFrames() ? "still_frame" : "stream",
+    })
+
     if (!featureEnabled || !sessionId || !threadId || !artifactId) {
+      logCoreviewBreadcrumb("coReviewStartError", {
+        reason: "missing_required_start_context",
+        featureEnabled,
+        hasSessionId: Boolean(sessionId),
+        hasThreadId: Boolean(threadId),
+        hasArtifactId: Boolean(artifactId),
+      })
       return state
     }
 
+    const requestedMode = transportRef.current.supportsStillFrames() ? "still_frame" : "stream"
     const visualSource = resolveArtifactVisualSource({
       root: artifactRoot,
       artifactId,
-      mode: transportRef.current.supportsStillFrames() ? "still_frame" : "stream",
+      mode: requestedMode,
     })
 
-    return machineRef.current.startCoReview({
+    logCoreviewBreadcrumb("canvasFound", {
+      found: visualSource.status === "ready",
+      artifactId,
+      sourceKind: visualSource.kind,
+      mode: requestedMode,
+      reason: visualSource.reason,
+    })
+
+    const nextState = await machineRef.current.startCoReview({
       normalSessionId,
       sessionId,
       threadId,
       artifactId,
       visualSource,
     })
+
+    if (nextState.state === "co_review_error") {
+      logCoreviewBreadcrumb("coReviewStartError", {
+        error: nextState.error,
+        visualInputStatus: nextState.visualInputStatus,
+        toolAvailability: nextState.toolAvailability,
+      })
+    }
+    logCoreviewBreadcrumb("coReviewStateAfterStart", safeCoReviewTelemetryFromState(nextState))
+    return nextState
   }, [artifactId, artifactRoot, featureEnabled, normalSessionId, sessionId, state, threadId])
 
   const stopReview = useCallback(async () => {
@@ -78,4 +112,12 @@ export function useArtifactCoReview({
     startReview,
     stopReview,
   }
+}
+
+function logCoreviewBreadcrumb(event: string, details: Record<string, unknown> = {}) {
+  if (typeof console === "undefined") return
+  console.info?.(`[coreview] ${event}`, {
+    ...details,
+    rawFrameExcluded: true,
+  })
 }
