@@ -71,6 +71,46 @@ describe('useBuilderCanvas', () => {
     expect(FakeEventSource.instances[0].url).toContain('/canvas/events');
   });
 
+  it('clears stale state immediately when switching parent threads', async () => {
+    mockFetchSnapshots(
+      {
+        version: 1,
+        active_task: {
+          parent_thread_id: 'thread-1',
+          task_id: 'task-1',
+          run_id: 'run-1',
+          status: 'completed',
+          completion: { thread_id: 'thread-1', task_id: 'task-1', run_id: 'run-1', status: 'success' },
+        },
+        recent_events: [],
+      },
+      {
+        version: 1,
+        active_task: {
+          parent_thread_id: 'thread-2',
+          task_id: 'task-2',
+          run_id: 'run-2',
+          status: 'running',
+        },
+        recent_events: [],
+      },
+    );
+
+    const { result, rerender } = renderHook(
+      ({ threadId }: { threadId: string }) => useBuilderCanvas(threadId),
+      { initialProps: { threadId: 'thread-1' } },
+    );
+
+    await waitFor(() => expect(result.current.completion?.task_id).toBe('task-1'));
+
+    rerender({ threadId: 'thread-2' });
+
+    expect(result.current.activeTask).toBeNull();
+    expect(result.current.completion).toBeNull();
+    expect(result.current.recentEvents).toHaveLength(0);
+    await waitFor(() => expect(result.current.activeTask?.parent_thread_id).toBe('thread-2'));
+  });
+
   it('merges activity and terminal completion from the unified stream', async () => {
     const { result } = renderHook(() => useBuilderCanvas('thread-1'));
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));

@@ -178,8 +178,8 @@ export function useBuilderCanvas(
   const [state, setState] = useState<BuilderCanvasState>(EMPTY_STATE);
 
   useEffect(() => {
+    setState(EMPTY_STATE);
     if (!enabled || !parentThreadId) {
-      setState(EMPTY_STATE);
       return;
     }
     const encodedThreadId = encodeURIComponent(parentThreadId);
