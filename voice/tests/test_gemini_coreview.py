@@ -4,6 +4,7 @@ import pytest
 
 from voice.realtime.coreview import (
     COREVIEW_FEATURE_FLAG,
+    COREVIEW_STILL_FRAME_FEATURE_FLAG,
     GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
     build_gemini_coreview_prompt_overlay,
     coreview_tool_parity_status,
@@ -43,6 +44,7 @@ def test_coreview_prompt_appears_only_when_enabled(monkeypatch) -> None:
     prompt = build_gemini_live_realtime_setup_instructions()
     assert "<gemini_coreview_artifact_policy>" in prompt
     assert "Exact words, numbers, table values" in prompt
+    assert "Still-frame co-review" in prompt
 
 
 def test_normal_voice_tool_declarations_unchanged_when_flag_off(monkeypatch) -> None:
@@ -72,6 +74,7 @@ def test_coreview_tool_declaration_is_opt_in(monkeypatch) -> None:
 
 def test_media_transport_support_detection_reports_unsupported_safely(monkeypatch) -> None:
     monkeypatch.delenv(COREVIEW_FEATURE_FLAG, raising=False)
+    monkeypatch.delenv(COREVIEW_STILL_FRAME_FEATURE_FLAG, raising=False)
 
     report = detect_gemini_coreview_media_support()
 
@@ -81,7 +84,20 @@ def test_media_transport_support_detection_reports_unsupported_safely(monkeypatc
     assert report.tools_supported_in_normal_voice is True
     assert report.tools_supported_in_coreview_media == "unknown"
     assert report.read_artifact_text_available is False
-    assert any("No Gemini co-review adapter" in blocker for blocker in report.blockers)
+    assert any("not provider-ack verified" in blocker for blocker in report.blockers)
+
+
+def test_still_frame_support_detection_is_separately_feature_flagged(monkeypatch) -> None:
+    monkeypatch.setenv(COREVIEW_FEATURE_FLAG, "1")
+    monkeypatch.delenv(COREVIEW_STILL_FRAME_FEATURE_FLAG, raising=False)
+    assert detect_gemini_coreview_media_support().still_frames_supported is False
+
+    monkeypatch.setenv(COREVIEW_STILL_FRAME_FEATURE_FLAG, "1")
+    report = detect_gemini_coreview_media_support()
+
+    assert report.still_frames_supported is True
+    assert "frameBytes" in report.safe_telemetry_fields
+    assert "providerAcceptedFrame" in report.safe_telemetry_fields
 
 
 def test_tool_parity_status_is_reported(monkeypatch) -> None:

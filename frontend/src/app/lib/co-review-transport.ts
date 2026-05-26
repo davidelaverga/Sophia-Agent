@@ -1,5 +1,6 @@
 import type { ArtifactVisualSource } from "./co-review-capture"
 import { stopArtifactVisualSource } from "./co-review-capture"
+import type { ArtifactFrameDimensions } from "./co-review-frame"
 
 export const CO_REVIEW_STATES = [
   "normal_voice",
@@ -36,6 +37,13 @@ export interface CoReviewSessionState {
   normalVoiceRestored: boolean
   sessionHandoffMs: number | null
   estimatedVisualCost: number | null
+  frameSentCount: number
+  frameBytes: number | null
+  frameDimensions: ArtifactFrameDimensions | null
+  frameSendLatencyMs: number | null
+  providerAcceptedFrame: boolean
+  visualResponseObserved: boolean
+  toolCallStillWorks: boolean | null
 }
 
 export interface CoReviewStartInput {
@@ -56,6 +64,13 @@ export interface CoReviewStartResult {
   sessionHandoffMs: number | null
   estimatedVisualCost: number | null
   error: string | null
+  frameSentCount?: number
+  frameBytes?: number | null
+  frameDimensions?: ArtifactFrameDimensions | null
+  frameSendLatencyMs?: number | null
+  providerAcceptedFrame?: boolean
+  visualResponseObserved?: boolean
+  toolCallStillWorks?: boolean | null
 }
 
 export interface CoReviewStopResult {
@@ -197,6 +212,14 @@ export class CoReviewSessionMachine {
         sessionHandoffMs: result.sessionHandoffMs,
         estimatedVisualCost: result.estimatedVisualCost,
         coReviewStartLatencyMs,
+        frameCount: result.frameSentCount ?? this.current.frameCount,
+        frameSentCount: result.frameSentCount ?? this.current.frameSentCount,
+        frameBytes: result.frameBytes ?? this.current.frameBytes,
+        frameDimensions: result.frameDimensions ?? this.current.frameDimensions,
+        frameSendLatencyMs: result.frameSendLatencyMs ?? this.current.frameSendLatencyMs,
+        providerAcceptedFrame: result.providerAcceptedFrame ?? false,
+        visualResponseObserved: result.visualResponseObserved ?? false,
+        toolCallStillWorks: result.toolCallStillWorks ?? null,
         error: result.error ?? "co_review_transport_start_failed",
       })
       return this.state()
@@ -212,6 +235,14 @@ export class CoReviewSessionMachine {
       sessionHandoffMs: result.sessionHandoffMs,
       estimatedVisualCost: result.estimatedVisualCost,
       coReviewStartLatencyMs,
+      frameCount: result.frameSentCount ?? this.current.frameCount,
+      frameSentCount: result.frameSentCount ?? this.current.frameSentCount,
+      frameBytes: result.frameBytes ?? this.current.frameBytes,
+      frameDimensions: result.frameDimensions ?? this.current.frameDimensions,
+      frameSendLatencyMs: result.frameSendLatencyMs ?? this.current.frameSendLatencyMs,
+      providerAcceptedFrame: result.providerAcceptedFrame ?? false,
+      visualResponseObserved: result.visualResponseObserved ?? false,
+      toolCallStillWorks: result.toolCallStillWorks ?? null,
       error: null,
     })
     return this.state()
@@ -238,6 +269,7 @@ export class CoReviewSessionMachine {
       normalVoiceRestored: result.normalVoiceRestored,
       normalVoicePaused: false,
       videoOrFrameMode: "none",
+      visualResponseObserved: false,
     })
     return this.state()
   }
@@ -274,12 +306,21 @@ export function initialCoReviewState(transportKind = "none"): CoReviewSessionSta
     normalVoiceRestored: false,
     sessionHandoffMs: null,
     estimatedVisualCost: null,
+    frameSentCount: 0,
+    frameBytes: null,
+    frameDimensions: null,
+    frameSendLatencyMs: null,
+    providerAcceptedFrame: false,
+    visualResponseObserved: false,
+    toolCallStillWorks: null,
   }
 }
 
+type SafeCoReviewTelemetryValue = string | number | boolean | null | ArtifactFrameDimensions
+
 export function safeCoReviewTelemetryFromState(
   state: CoReviewSessionState,
-): Record<string, string | number | boolean | null> {
+): Record<string, SafeCoReviewTelemetryValue> {
   return {
     normalVoiceSessionId: state.normalSessionId,
     coReviewSessionId: state.coReviewSessionId,
@@ -293,6 +334,13 @@ export function safeCoReviewTelemetryFromState(
     sessionHandoffMs: state.sessionHandoffMs,
     videoOrFrameMode: state.videoOrFrameMode,
     frameCount: state.frameCount,
+    frameSentCount: state.frameSentCount,
+    frameBytes: state.frameBytes,
+    frameDimensions: state.frameDimensions,
+    frameSendLatencyMs: state.frameSendLatencyMs,
+    providerAcceptedFrame: state.providerAcceptedFrame,
+    visualResponseObserved: state.visualResponseObserved,
+    toolCallStillWorks: state.toolCallStillWorks,
     estimatedVisualCost: state.estimatedVisualCost,
   }
 }

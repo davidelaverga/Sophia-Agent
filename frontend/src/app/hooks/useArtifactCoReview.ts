@@ -51,6 +51,7 @@ export function useArtifactCoReview({
     const visualSource = resolveArtifactVisualSource({
       root: artifactRoot,
       artifactId,
+      mode: transportRef.current.supportsStillFrames() ? "still_frame" : "stream",
     })
 
     return machineRef.current.startCoReview({

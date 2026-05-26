@@ -65,4 +65,29 @@ describe("co-review artifact capture", () => {
     expect(source.reason).toBe("canvas_capture_stream_unavailable")
     expect(getDisplayMedia).not.toHaveBeenCalled()
   })
+
+  it("resolves still-frame canvas sources without requiring captureStream", () => {
+    const getDisplayMedia = vi.fn()
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getDisplayMedia },
+    })
+
+    const root = document.createElement("section")
+    const canvas = document.createElement("canvas")
+    canvas.dataset.coreviewArtifactCanvas = "true"
+    root.appendChild(canvas)
+
+    const source = resolveArtifactVisualSource({
+      root,
+      artifactId: "artifact-4",
+      mode: "still_frame",
+    })
+
+    expect(source.status).toBe("ready")
+    expect(source.kind).toBe("canvas_element")
+    expect(source.element).toBe(canvas)
+    expect(source.stream).toBeNull()
+    expect(getDisplayMedia).not.toHaveBeenCalled()
+  })
 })
