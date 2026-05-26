@@ -302,4 +302,36 @@ describe('useBuilderCanvas', () => {
     expect(result.current.completion?.status).toBe('success');
     expect(result.current.reconnecting).toBe(false);
   });
+
+  it('does not downgrade terminal stream state when same-run snapshot is stale', async () => {
+    mockFetchSnapshots(SNAPSHOT, SNAPSHOT);
+
+    const { result } = renderHook(() => useBuilderCanvas('thread-1'));
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+
+    act(() => {
+      FakeEventSource.instances[0].emit({
+        version: 1,
+        event_id: 'task-1:run-1:2',
+        sequence: 2,
+        parent_thread_id: 'thread-1',
+        task_id: 'task-1',
+        run_id: 'run-1',
+        occurred_at: '2026-05-25T10:00:02Z',
+        kind: 'terminal',
+        status: 'completed',
+        completion: { thread_id: 'thread-1', task_id: 'task-1', run_id: 'run-1', status: 'success' },
+      });
+    });
+
+    await waitFor(() => expect(result.current.activeTask?.status).toBe('completed'));
+
+    act(() => {
+      FakeEventSource.instances[0].onerror?.();
+    });
+
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(2));
+    expect(result.current.activeTask?.status).toBe('completed');
+    expect(result.current.completion?.status).toBe('success');
+  });
 });

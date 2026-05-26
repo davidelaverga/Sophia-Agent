@@ -23,6 +23,7 @@ const EMPTY_STATE: BuilderCanvasState = {
   reconnecting: false,
 };
 const SNAPSHOT_RECONCILE_MS = 30_000;
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 function eventMatchesTask(event: BuilderCanvasEventV1, task: BuilderCanvasTaskSnapshotV1): boolean {
   return event.task_id === task.task_id && event.run_id === task.run_id;
@@ -48,6 +49,10 @@ function latestTerminalCompletion(
 
 function sortEvents(events: BuilderCanvasEventV1[]): BuilderCanvasEventV1[] {
   return [...events].sort((left, right) => left.sequence - right.sequence);
+}
+
+function isTerminalStatus(status: BuilderCanvasTaskSnapshotV1['status']): boolean {
+  return TERMINAL_STATUSES.has(status);
 }
 
 function mergeEvents(
@@ -92,9 +97,20 @@ function applySnapshot(current: BuilderCanvasState, snapshot: BuilderCanvasSnaps
   const currentRunEvents = current.recentEvents.filter((event) => eventMatchesTask(event, snapshotTask));
   const recentEvents = mergeEvents(currentRunEvents, snapshotState.recentEvents);
   const currentCompletion = completionMatchesTask(current.completion, snapshotTask) ? current.completion : null;
+  const keepLocalTerminal = currentTask
+    && isTerminalStatus(currentTask.status)
+    && !isTerminalStatus(snapshotTask.status);
+  const activeTask = keepLocalTerminal
+    ? {
+      ...snapshotTask,
+      ...currentTask,
+      latest_activity: currentTask.latest_activity ?? snapshotTask.latest_activity,
+      completion: currentTask.completion ?? snapshotTask.completion,
+    }
+    : snapshotState.activeTask;
 
   return {
-    activeTask: snapshotState.activeTask,
+    activeTask,
     recentEvents,
     completion: snapshotState.completion ?? currentCompletion,
     reconnecting: false,

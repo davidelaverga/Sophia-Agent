@@ -197,15 +197,18 @@ export function useSessionRouteExperience({
         title: event.activity?.label ?? 'Working on deliverable',
         status: 'done' as const,
       }));
-    setBuilderTask((current) => ({
-      ...(current?.taskId === active.task_id && current.runId === active.run_id ? current : {}),
-      phase,
-      taskId: active.task_id,
-      runId: active.run_id,
-      detail: active.latest_activity?.label ?? current?.detail ?? 'Starting',
-      ...(activityLog.length ? { activityLog } : {}),
-      canvasStreamed: true,
-    }));
+    setBuilderTask((current) => {
+      const sameRun = current?.taskId === active.task_id && current.runId === active.run_id;
+      return {
+        ...(sameRun ? current : {}),
+        phase,
+        taskId: active.task_id,
+        runId: active.run_id,
+        detail: active.latest_activity?.label ?? (sameRun ? current?.detail : undefined) ?? 'Starting',
+        ...(activityLog.length ? { activityLog } : {}),
+        canvasStreamed: true,
+      };
+    });
   }, [builderCanvas.activeTask, builderCanvas.recentEvents]);
 
   useEffect(() => {
