@@ -20,7 +20,6 @@ from deerflow.sophia.session_store import SessionStore
 router = APIRouter(
     prefix="/api/sophia",
     tags=["builder-canvas"],
-    dependencies=[Depends(require_authorized_user_scope)],
 )
 
 _session_store = SessionStore()
@@ -50,8 +49,8 @@ def _langgraph_url() -> str:
     ).strip().rstrip("/")
 
 
-def _require_thread_owner(user_id: str, parent_thread_id: str) -> None:
-    if _session_store.find_session_by_thread_id(user_id, parent_thread_id) is not None:
+def _require_thread_owner(authenticated_user_id: str, parent_thread_id: str) -> None:
+    if _session_store.find_session_by_thread_id(authenticated_user_id, parent_thread_id) is not None:
         return
     raise HTTPException(status_code=404, detail="Thread not found")
 
@@ -203,8 +202,9 @@ async def builder_canvas_snapshot(
     user_id: str,
     parent_thread_id: str,
     request: Request,
+    authenticated_user_id: str = Depends(require_authorized_user_scope),
 ) -> BuilderCanvasSnapshot:
-    _require_thread_owner(user_id, parent_thread_id)
+    _require_thread_owner(authenticated_user_id, parent_thread_id)
     worker = get_builder_canvas_worker(request.app)
     task = _latest_builder_task(await _parent_builder_tasks(parent_thread_id))
     recent_events = await worker.recent_events(parent_thread_id)
@@ -231,8 +231,9 @@ async def stream_builder_canvas_events(
     user_id: str,
     parent_thread_id: str,
     request: Request,
+    authenticated_user_id: str = Depends(require_authorized_user_scope),
 ) -> StreamingResponse:
-    _require_thread_owner(user_id, parent_thread_id)
+    _require_thread_owner(authenticated_user_id, parent_thread_id)
     worker = get_builder_canvas_worker(request.app)
     last_event_id = request.headers.get("last-event-id")
 
@@ -267,8 +268,9 @@ async def cancel_builder_canvas_task(
     task_id: str,
     run_id: str,
     request: Request,
+    authenticated_user_id: str = Depends(require_authorized_user_scope),
 ) -> BuilderCanvasCancelResponse:
-    _require_thread_owner(user_id, parent_thread_id)
+    _require_thread_owner(authenticated_user_id, parent_thread_id)
     task = await _authorized_task(parent_thread_id, task_id, run_id)
     fallback_status = task.get("status") if isinstance(task.get("status"), str) else None
     return await _cancel_builder_run(parent_thread_id, task_id, run_id, request, fallback_status)
@@ -283,8 +285,9 @@ async def cancel_latest_builder_canvas_task_run(
     parent_thread_id: str,
     task_id: str,
     request: Request,
+    authenticated_user_id: str = Depends(require_authorized_user_scope),
 ) -> BuilderCanvasCancelResponse:
-    _require_thread_owner(user_id, parent_thread_id)
+    _require_thread_owner(authenticated_user_id, parent_thread_id)
     task, run_id = await _authorized_latest_task(parent_thread_id, task_id)
     fallback_status = task.get("status") if isinstance(task.get("status"), str) else None
     return await _cancel_builder_run(parent_thread_id, task_id, run_id, request, fallback_status)

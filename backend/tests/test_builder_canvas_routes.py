@@ -198,6 +198,23 @@ async def test_snapshot_rejects_thread_not_owned_by_user(app: FastAPI) -> None:
 
 
 @pytest.mark.anyio
+async def test_snapshot_uses_authenticated_user_for_thread_ownership(
+    app: FastAPI,
+    monkeypatch,
+) -> None:
+    async def tasks(_parent: str):
+        return []
+
+    monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", tasks)
+    app.dependency_overrides[require_authorized_user_scope] = lambda: "other-user"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/sophia/user-1/threads/parent-1/builder-canvas/snapshot")
+
+    assert response.status_code == 404
+
+
+@pytest.mark.anyio
 async def test_cancel_validates_native_task_and_publishes_terminal(app: FastAPI, monkeypatch) -> None:
     cancelled: list[tuple[str, str, str]] = []
 
