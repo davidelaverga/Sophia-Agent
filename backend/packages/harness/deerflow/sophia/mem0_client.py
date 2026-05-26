@@ -658,6 +658,7 @@ def add_memories(
     metadata: dict | None = None,
     timestamp: int | None = None,
     wait_for_events: bool = True,
+    infer: bool = False,
 ) -> list[dict]:
     """Write memories to Mem0 for a user session using v3 SDK.
 
@@ -666,6 +667,9 @@ def add_memories(
     current contract; callers that need to differentiate
     "completed-empty" from "service failure" should use
     ``add_memories_with_outcome`` instead.
+
+    ``infer`` defaults to ``False`` (verbatim store) — see
+    ``add_memories_with_outcome`` for the full rationale.
     """
     memories, _outcome = add_memories_with_outcome(
         user_id,
@@ -674,6 +678,7 @@ def add_memories(
         metadata=metadata,
         timestamp=timestamp,
         wait_for_events=wait_for_events,
+        infer=infer,
     )
     return memories
 
@@ -686,6 +691,7 @@ def add_memories_with_outcome(
     metadata: dict | None = None,
     timestamp: int | None = None,
     wait_for_events: bool = True,
+    infer: bool = False,
 ) -> tuple[list[dict], MemoryAddOutcome]:
     """Write memories to Mem0 and return BOTH the memories AND the outcome.
 
@@ -714,6 +720,32 @@ def add_memories_with_outcome(
     Set ``wait_for_events=False`` for offline extraction paths that need the
     event wrapper immediately so they can persist a local pending-review
     overlay while Mem0 continues processing asynchronously.
+
+    ``infer`` defaults to ``False`` (verbatim store). Per Mem0's API reference,
+    ``infer=True`` (Mem0's default) "runs the extraction LLM" on the message
+    body — Mem0's OWN LLM re-extracts semantic memories from whatever we
+    submit. That double-extraction was the root cause of the May 26 prod test
+    failure where:
+
+      - Pipeline candidates (already LLM-extracted by Claude Haiku) went to
+        Mem0 with custom metadata (``target_date``, ``category``, ``status``,
+        ``importance_score``, ...)
+      - Mem0's auto-extraction created event-internal sub-memories that
+        NEVER appeared in ``v2/memories`` / ``client.search()`` results
+      - Our metadata was stripped on the "linked" canonical memories
+      - Sophia's per-turn retrieval couldn't find today's commitments
+
+    With ``infer=False``: Mem0 stores each message verbatim as a canonical
+    memory WITH our metadata intact. The response is synchronous-looking
+    (returns ``results: [{id, event: "ADD", memory}]``) and the memory
+    appears in ``v2/memories`` immediately. Verified empirically on
+    2026-05-26 — a probe ``client.add(..., infer=False)`` landed in
+    ``v2/memories`` within 8 seconds with all metadata preserved
+    (``target_date``, ``category``, ``status``, ``importance_score``,
+    ``probe_marker``).
+
+    Callers that genuinely want Mem0's LLM extraction (e.g. raw conversation
+    dumps without pre-extraction) can pass ``infer=True`` explicitly.
     """
     client = _get_client()
     if client is None:
@@ -740,6 +772,7 @@ def add_memories_with_outcome(
         "messages": messages,
         "user_id": user_id,
         "run_id": session_id,
+        "infer": infer,
     }
     if resolved_metadata:
         add_kwargs["metadata"] = resolved_metadata

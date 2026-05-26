@@ -431,11 +431,24 @@ def _write_extracted_memories(
       temporal reasoning anchors correctly. Do NOT fall back to ``now()`` —
       that would re-date historical turns and break relative-time queries.
     - **R13 review_status mirror**: write BOTH ``status`` and ``review_status``.
-    - **wait_for_events=False** (cherry-picked from fix/mem0-v3-recap-regression):
-      skip wait_for_pending_events here — the recap UI reads from the local
-      overlay below, blocking on event polling is wasted runtime.
-    - **R14 overlay write with tracking-id guard**: only write when Mem0
-      returned a tracking handle.
+    - **infer=False** (May 26 prod-test finding): bypass Mem0 v3's own LLM
+      extraction. Our Claude Haiku already produced a clean structured
+      candidate — letting Mem0's LLM re-extract from our single-message
+      add() turned the result into event-internal sub-memories that NEVER
+      surfaced in ``v2/memories``/``client.search()`` and stripped our
+      ``target_date`` / ``category`` / ``status`` metadata. With
+      ``infer=False`` (Mem0 API ref:
+      https://docs.mem0.ai/api-reference/memory/add-memories), Mem0 stores
+      the content verbatim as a canonical searchable memory with our
+      metadata intact. Live-probed 2026-05-26 — round-trip 8s, all 6
+      metadata fields preserved (target_date, category, status, etc.).
+    - **wait_for_events=True**: ``infer=False`` makes the add return
+      synchronously-looking (results[].id populated) so polling completes
+      quickly. Re-enabled from the cherry-pick path so the recap UI sees
+      real canonical memory IDs, not event-only event_ids.
+    - **R14 overlay write with tracking-id guard**: still writes to the
+      local overlay so the recap UI shows pending_review candidates even
+      if Mem0 is briefly unavailable.
 
     Sub-concerns are extracted into helpers (``_build_mem0_metadata_for_entry``,
     ``_resolve_tracking_handles``, ``_write_overlay_for_extracted_entry``) to
@@ -464,15 +477,18 @@ def _write_extracted_memories(
             entry, platform=platform, context_mode=context_mode,
         )
 
-        # wait_for_events=False: recap UI reads from the local overlay; blocking
-        # on Mem0 event polling here is wasted runtime under Bug A SDK-shape mismatch.
+        # infer=False: store our pre-extracted candidate VERBATIM as a
+        # canonical Mem0 memory with metadata intact (see _write_extracted_memories
+        # docstring for the full rationale). wait_for_events=True (the new default):
+        # with infer=False the add returns ~synchronously, so polling resolves
+        # quickly and the result carries a real memory_id (not just an event_id).
         result = add_memories(
             user_id=user_id,
             messages=[{"role": "user", "content": entry["content"]}],
             session_id=session_id,
             metadata=mem0_metadata,
             timestamp=session_start_unix,
-            wait_for_events=False,
+            infer=False,
         )
 
         _write_overlay_for_extracted_entry(

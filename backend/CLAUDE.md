@@ -445,6 +445,20 @@ What DID matter for clearing the gate:
 
 Local sentrux: `mcp__sentrux__rescan` then `mcp__sentrux__health`. CI is authoritative when local and CI scans disagree.
 
+### Mem0 v3 `infer=False` — bypass Mem0's auto-extraction (PR #130, May 26 prod-test finding)
+
+The Sophia offline pipeline does its own structured extraction with Claude Haiku in [`extraction.py::extract_session_memories`](packages/harness/deerflow/sophia/extraction.py) — every candidate already has `target_date`, `category`, `status`, `importance_score`, `tone_estimate`, etc. attached. We then submit each candidate as a single-message `client.add(messages=[{"role": "user", "content": <candidate>}], metadata={...})`.
+
+**Mem0 v3's default `infer=True` runs ITS OWN LLM extraction on that single message** ([Mem0 API ref](https://docs.mem0.ai/api-reference/memory/add-memories)) — a SECOND extraction pass on top of ours. That double-extraction was the root cause of the May 26 prod-test failure where temporal queries didn't surface today's commitments:
+
+- Mem0's auto-extraction creates event-internal sub-memories (`event.results[].id`) that **never appear in `client.get_all()` or `client.search()`** — they live only in the event log
+- Our custom metadata (`target_date`, `category`, `status`) gets stripped on the resulting canonical memories
+- Mem0 v3 sometimes "links" the new content to existing canonical memories rather than creating new ones, losing the new content entirely from search
+
+**Fix**: `add_memories(..., infer=False)` is the default in `mem0_client.py`. Mem0 stores each message **verbatim** as a canonical searchable memory **with our metadata intact**. Verified empirically 2026-05-26: live probe round-trip <8s, all 6 metadata fields preserved (`target_date`, `category`, `status`, `review_status`, `importance_score`, custom marker).
+
+Regression coverage: `tests/test_mem0_client.py::TestAddMemories::test_add_defaults_infer_false_to_bypass_mem0_extraction` + `tests/test_extraction.py::TestReviewMetadataOverlayWrite::test_extraction_passes_infer_false_to_add_memories`. Callers that genuinely want Mem0's LLM extraction (e.g. raw conversation dumps without pre-extraction) can pass `infer=True` explicitly.
+
 ### Memory System (`packages/harness/deerflow/agents/memory/`)
 
 **Components**:

@@ -195,7 +195,10 @@ class TestExtractSessionMemories:
 
         assert call_kwargs["user_id"] == "user1"
         assert call_kwargs["session_id"] == "sess_005"
-        assert call_kwargs["wait_for_events"] is False
+        # May 26 prod-test finding: pass infer=False so Mem0 stores our
+        # Claude-Haiku-extracted candidate verbatim (preserves metadata +
+        # makes the memory searchable). See test_extraction_passes_infer_false_to_add_memories.
+        assert call_kwargs["infer"] is False
 
         meta = call_kwargs["metadata"]
         assert meta["review_status"] == "pending_review"
@@ -777,11 +780,19 @@ class TestReviewMetadataOverlayWrite:
     @patch("deerflow.sophia.extraction.upsert_review_metadata")
     @patch("deerflow.sophia.extraction.add_memories")
     @patch("deerflow.sophia.extraction.anthropic")
-    def test_extraction_writes_event_overlay_without_waiting_for_mem0_polling(
+    def test_extraction_writes_event_overlay_when_only_event_id_returned(
         self, mock_anthropic_mod, mock_add_memories, mock_upsert
     ):
-        """Offline extraction must surface recap candidates from event handles
-        immediately instead of blocking the UI on serial Mem0 event polling."""
+        """Defensive — when Mem0 returns an event_id without an id (e.g. a
+        future SDK version reverts to async-by-default, or some edge path
+        produces an event handle only), the overlay MUST be keyed by
+        content_hash with ``mem0_event_id`` stashed in metadata so a
+        reconciler can backfill later.
+
+        Note: with ``infer=False`` (the new May-26 default), Mem0's response
+        normally carries a resolved ``id`` — this test forces the legacy
+        event-only shape to verify the overlay still surfaces correctly.
+        """
         from deerflow.sophia.extraction import extract_session_memories
 
         mock_client = MagicMock()
@@ -800,7 +811,9 @@ class TestReviewMetadataOverlayWrite:
             session_metadata=_SESSION_METADATA,
         )
 
-        assert mock_add_memories.call_args.kwargs["wait_for_events"] is False
+        # infer=False is the new contract (verbatim store), pinned by the
+        # separate test_extraction_passes_infer_false_to_add_memories test.
+        assert mock_add_memories.call_args.kwargs.get("infer") is False
         assert mock_upsert.call_count == 1
         call_kwargs = mock_upsert.call_args.kwargs
         assert call_kwargs["memory_id"] is None
@@ -1004,3 +1017,60 @@ class TestReviewMetadataOverlayWrite:
             f"(for the successful candidate); got {mock_upsert.call_count}"
         )
         assert mock_upsert.call_args.kwargs["memory_id"] == "mem_succeeded"
+
+    @patch("deerflow.sophia.extraction.upsert_review_metadata")
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_extraction_passes_infer_false_to_add_memories(
+        self, mock_anthropic_mod, mock_add_memories, mock_upsert
+    ):
+        """May 26 prod-test finding: ``add_memories`` MUST be called with
+        ``infer=False`` from the offline-pipeline extraction path.
+
+        Mem0 v3's default ``infer=True`` runs Mem0's OWN LLM extraction on
+        the single-message ``add()`` payload — a SECOND extraction on top
+        of our Claude Haiku extraction. That double-extraction:
+
+          - Creates event-internal sub-memories that never surface in
+            ``v2/memories`` or ``client.search()``
+          - Strips our custom metadata (``target_date``, ``category``,
+            ``status``, ``importance_score``) from the resulting record
+          - Made today's commitments unreachable to Sophia's per-turn
+            retrieval (operator observed "she is not retrieving the
+            temporal memory" on 2026-05-26)
+
+        With ``infer=False``, Mem0 stores the content verbatim as a
+        canonical searchable memory with our metadata intact. Live-probed
+        2026-05-26: round-trip <8s, all 6 metadata fields preserved.
+
+        This test pins the contract so a future refactor can't silently
+        revert to Mem0's default.
+        """
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps([_SAMPLE_EXTRACTION[2]])  # "decision" candidate
+        )
+        mock_add_memories.return_value = [{"id": "mem_canonical", "memory": "ok"}]
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_infer_false",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert mock_add_memories.call_count == 1
+        call_kwargs = mock_add_memories.call_args.kwargs
+        assert "infer" in call_kwargs, (
+            "extraction.py MUST explicitly pass infer=False to add_memories "
+            "(do not rely on the default — make the contract self-documenting)"
+        )
+        assert call_kwargs["infer"] is False, (
+            f"add_memories MUST be called with infer=False from extraction.py; "
+            f"got infer={call_kwargs['infer']!r}. This is the May 26 prod-test "
+            f"finding — infer=True caused double LLM extraction and made new "
+            f"memories invisible to client.search()."
+        )
