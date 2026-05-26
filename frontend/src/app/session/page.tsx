@@ -1108,6 +1108,7 @@ function SessionPageContent() {
                 isBusy={isTyping}
                 showInsightIndicator={hasArtifactsContent || hasNewArtifacts}
                 hasNewInsight={hasNewArtifacts}
+                onInsightClick={handleOpenArtifactsPanel}
               />
             </div>
           )}
@@ -1141,6 +1142,7 @@ function SessionPageContent() {
                         isBusy={isTyping}
                         showInsightIndicator={hasArtifactsContent || hasNewArtifacts}
                         hasNewInsight={hasNewArtifacts}
+                        onInsightClick={handleOpenArtifactsPanel}
                       />
                     </div>
                   )

@@ -27,6 +27,7 @@ describe('session page exit UI contract', () => {
 
     expect(source).toContain('showInsightIndicator={hasArtifactsContent || hasNewArtifacts}');
     expect(source).toContain('hasNewInsight={hasNewArtifacts}');
+    expect(source).toContain('onInsightClick={handleOpenArtifactsPanel}');
     expect(source).not.toContain('<ArtifactToggleIcon');
   });
 });
