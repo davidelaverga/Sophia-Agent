@@ -22,6 +22,7 @@ const EMPTY_STATE: BuilderCanvasState = {
   completion: null,
   reconnecting: false,
 };
+const SNAPSHOT_RECONCILE_MS = 30_000;
 
 function eventMatchesTask(event: BuilderCanvasEventV1, task: BuilderCanvasTaskSnapshotV1): boolean {
   return event.task_id === task.task_id && event.run_id === task.run_id;
@@ -148,7 +149,6 @@ export function useBuilderCanvas(
     const encodedThreadId = encodeURIComponent(parentThreadId);
     const basePath = `/api/sophia/builder/threads/${encodedThreadId}/canvas`;
     let cancelled = false;
-
     const hydrateSnapshot = () => fetch(`${basePath}/snapshot`, { cache: 'no-store' })
       .then(async (response) => {
         if (!response.ok || cancelled) return;
@@ -157,10 +157,14 @@ export function useBuilderCanvas(
       })
       .catch(() => undefined);
     void hydrateSnapshot();
+    const reconcileTimer = setInterval(() => {
+      void hydrateSnapshot();
+    }, SNAPSHOT_RECONCILE_MS);
 
     if (typeof EventSource !== 'function') {
       return () => {
         cancelled = true;
+        clearInterval(reconcileTimer);
       };
     }
     const source = new EventSource(`${basePath}/events`);
@@ -186,6 +190,7 @@ export function useBuilderCanvas(
     };
     return () => {
       cancelled = true;
+      clearInterval(reconcileTimer);
       source.close();
     };
   }, [enabled, parentThreadId]);

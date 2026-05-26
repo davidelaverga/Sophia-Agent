@@ -53,6 +53,23 @@ class _RunningThenSuccessfulRuns:
         assert wait is True
 
 
+class _RunningThenReadFailureRuns:
+    call_count = 0
+
+    def __init__(self, cancelled: list[tuple[str, str, str]]) -> None:
+        self.cancelled = cancelled
+
+    async def get(self, task_id: str, run_id: str):
+        self.call_count += 1
+        if self.call_count == 1:
+            return {"status": "running"}
+        raise RuntimeError("transient status read failure")
+
+    async def cancel(self, task_id: str, run_id: str, wait: bool, action: str):
+        self.cancelled.append((task_id, run_id, action))
+        assert wait is True
+
+
 async def _publish_finalizing_progress(app: FastAPI) -> None:
     await app.state._builder_canvas_worker.publish_progress({
         "parent_thread_id": "parent-1",
@@ -232,6 +249,31 @@ async def test_cancel_does_not_publish_cancel_when_native_status_is_success(
     assert len(events) == 1
     assert events[0]["kind"] == "progress"
     assert events[-1]["status"] == "running"
+
+
+@pytest.mark.anyio
+async def test_cancel_publishes_cancel_when_status_reread_fails_after_successful_cancel(
+    app: FastAPI,
+    monkeypatch,
+) -> None:
+    cancelled: list[tuple[str, str, str]] = []
+
+    await _publish_finalizing_progress(app)
+    monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", _single_running_builder_task)
+    monkeypatch.setattr(
+        builder_canvas,
+        "get_client",
+        _client_factory(_RunningThenReadFailureRuns(cancelled)),
+    )
+
+    response = await _post_cancel(app)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+    assert cancelled == [("task-1", "run-1", "interrupt")]
+    events = await app.state._builder_canvas_worker.recent_events("parent-1")
+    assert events[-1]["kind"] == "terminal"
+    assert events[-1]["status"] == "cancelled"
 
 
 @pytest.mark.anyio

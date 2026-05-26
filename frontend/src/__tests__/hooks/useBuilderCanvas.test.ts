@@ -53,6 +53,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   globalThis.fetch = ORIGINAL_FETCH;
   (globalThis as { EventSource?: unknown }).EventSource = ORIGINAL_EVENT_SOURCE;
   vi.restoreAllMocks();
@@ -258,5 +259,47 @@ describe('useBuilderCanvas', () => {
     await waitFor(() => expect(result.current.activeTask?.status).toBe('completed'));
     expect(result.current.recentEvents.map((event) => event.sequence)).toEqual([1, 2]);
     expect(result.current.completion?.status).toBe('success');
+  });
+
+  it('reconciles snapshot state periodically while the stream stays open', async () => {
+    vi.useFakeTimers();
+    const terminalSnapshot: BuilderCanvasSnapshotV1 = {
+      version: 1,
+      active_task: {
+        parent_thread_id: 'thread-1',
+        task_id: 'task-1',
+        run_id: 'run-1',
+        status: 'completed',
+        completion: { thread_id: 'thread-1', task_id: 'task-1', run_id: 'run-1', status: 'success' },
+      },
+      recent_events: [{
+        version: 1,
+        event_id: 'task-1:run-1:2',
+        sequence: 2,
+        parent_thread_id: 'thread-1',
+        task_id: 'task-1',
+        run_id: 'run-1',
+        occurred_at: '2026-05-25T10:00:02Z',
+        kind: 'terminal',
+        status: 'completed',
+        completion: { thread_id: 'thread-1', task_id: 'task-1', run_id: 'run-1', status: 'success' },
+      }],
+    };
+    mockFetchSnapshots(SNAPSHOT, terminalSnapshot);
+
+    const { result } = renderHook(() => useBuilderCanvas('thread-1'));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(result.current.activeTask?.status).toBe('running');
+    expect(FakeEventSource.instances).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+
+    expect(result.current.activeTask?.status).toBe('completed');
+    expect(result.current.completion?.status).toBe('success');
+    expect(result.current.reconnecting).toBe(false);
   });
 });

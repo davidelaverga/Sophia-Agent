@@ -114,13 +114,20 @@ def _map_native_status(status: str | None) -> str:
     }.get(str(status or "").lower(), "running")
 
 
-async def _native_run_status_for_client(client: Any, task_id: str, run_id: str, fallback: str | None) -> str:
+async def _read_native_run_status_for_client(client: Any, task_id: str, run_id: str) -> str | None:
     try:
         run = await client.runs.get(task_id, run_id)
     except Exception:
-        return _map_native_status(fallback)
+        return None
     raw_status = run.get("status") if isinstance(run, dict) else None
-    return _map_native_status(str(raw_status) if raw_status else fallback)
+    return _map_native_status(str(raw_status)) if raw_status else None
+
+
+async def _native_run_status_for_client(client: Any, task_id: str, run_id: str, fallback: str | None) -> str:
+    status = await _read_native_run_status_for_client(client, task_id, run_id)
+    if status is None:
+        return _map_native_status(fallback)
+    return status
 
 
 async def _native_run_status(task_id: str, run_id: str, fallback: str | None) -> str:
@@ -162,8 +169,8 @@ async def _cancel_builder_run(
         await client.runs.cancel(task_id, run_id, wait=True, action="interrupt")
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Builder cancellation is unavailable") from exc
-    final_status = await _native_run_status_for_client(client, task_id, run_id, current_status)
-    if final_status != "cancelled":
+    final_status = await _read_native_run_status_for_client(client, task_id, run_id)
+    if final_status is not None and final_status != "cancelled":
         return BuilderCanvasCancelResponse(
             task_id=task_id,
             run_id=run_id,
