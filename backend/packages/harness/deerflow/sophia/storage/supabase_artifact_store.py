@@ -16,6 +16,7 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -58,8 +59,11 @@ def is_configured() -> bool:
 
 
 def _object_url(config: SupabaseConfig, object_path: str) -> str:
-    # Path segments stay as-is; Supabase Storage accepts raw file names.
-    return f"{config.url}/storage/v1/object/{config.bucket}/{object_path}"
+    return f"{config.url}/storage/v1/object/{config.bucket}/{_encoded_object_path(object_path)}"
+
+
+def _encoded_object_path(object_path: str) -> str:
+    return "/".join(quote(segment, safe="") for segment in object_path.split("/"))
 
 
 def _list_url(config: SupabaseConfig) -> str:
@@ -314,7 +318,7 @@ def create_signed_url(
         return None
 
     object_path = _object_path(thread_id, filename)
-    sign_url = f"{config.url}/storage/v1/object/sign/{config.bucket}/{object_path}"
+    sign_url = f"{config.url}/storage/v1/object/sign/{config.bucket}/{_encoded_object_path(object_path)}"
     headers = {
         "Authorization": f"Bearer {config.service_role_key}",
         "apikey": config.service_role_key,

@@ -39,7 +39,7 @@ import logging
 import os
 import time
 from datetime import UTC, datetime
-from typing import Any, NotRequired, override
+from typing import Any, NotRequired, TypedDict, override
 
 import httpx
 from langchain.agents import AgentState
@@ -110,6 +110,16 @@ def _gateway_url() -> str:
 # Bounded — entries removed via add_done_callback(discard) on
 # completion.
 _POST_TASKS: set[asyncio.Task] = set()
+
+
+class _ProgressPost(TypedDict, total=False):
+    task_id: str
+    run_id: str
+    event_name: str
+    data: Any
+    parent_thread_id: str | None
+    sequence: int | None
+    occurred_at: str | None
 
 
 def _classify_tool(tool_name: str) -> str | None:
@@ -283,6 +293,46 @@ def _schedule_post(
     task.add_done_callback(_POST_TASKS.discard)
 
 
+async def _post_progress_events_in_order(events: list[_ProgressPost]) -> None:
+    for event in events:
+        await _post_progress_event(**event)
+
+
+def _schedule_ordered_posts(events: list[_ProgressPost]) -> None:
+    """Schedule multiple webhook POSTs in the order provided."""
+    if not events:
+        return
+    if len(events) == 1:
+        _schedule_post(**events[0])
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.debug(
+            "BuilderProgress: no running loop; skipping ordered webhook batch task_id=%s",
+            events[0].get("task_id"),
+        )
+        return
+    task = loop.create_task(_post_progress_events_in_order(events))
+    _POST_TASKS.add(task)
+    task.add_done_callback(_POST_TASKS.discard)
+
+
+def _phase_post(
+    task_id: str,
+    run_id: str,
+    phase: str,
+    event_context: dict[str, Any] | None = None,
+) -> _ProgressPost:
+    return {
+        "task_id": task_id,
+        "run_id": run_id,
+        "event_name": "custom",
+        "data": {"name": "phase", "phase": phase},
+        **(event_context or {}),
+    }
+
+
 def _emit_phase(
     task_id: str,
     run_id: str,
@@ -290,13 +340,7 @@ def _emit_phase(
     event_context: dict[str, Any] | None = None,
 ) -> None:
     """Send a ``{name: "phase", phase: <phase>}`` custom event."""
-    _schedule_post(
-        task_id=task_id,
-        run_id=run_id,
-        event_name="custom",
-        data={"name": "phase", "phase": phase},
-        **(event_context or {}),
-    )
+    _schedule_post(**_phase_post(task_id, run_id, phase, event_context))
 
 
 # Codex P1 (post-Phase-4I review): per-tool argument allow-list. The
@@ -372,13 +416,13 @@ def _trim_tool_args(name: str, args: dict) -> dict:
     return out
 
 
-def _emit_updates(
+def _updates_post(
     task_id: str,
     run_id: str,
     tool_calls: list,
     event_context: dict[str, Any] | None = None,
-) -> None:
-    """Send an ``updates`` event carrying the latest tool_calls.
+) -> _ProgressPost | None:
+    """Build an ``updates`` event carrying the latest tool_calls.
 
     The renderer's ``_on_updates`` extracts tool_calls from the
     ``{node_name: {messages: [{tool_calls: [...]}]}}`` envelope so we
@@ -408,14 +452,26 @@ def _emit_updates(
         trimmed_args = _trim_tool_args(str(name), raw_args if isinstance(raw_args, dict) else {})
         serializable.append({"name": name, "args": trimmed_args})
     if not serializable:
-        return
-    _schedule_post(
-        task_id=task_id,
-        run_id=run_id,
-        event_name="updates",
-        data={"agent": {"messages": [{"tool_calls": serializable}]}},
+        return None
+    return {
+        "task_id": task_id,
+        "run_id": run_id,
+        "event_name": "updates",
+        "data": {"agent": {"messages": [{"tool_calls": serializable}]}},
         **(event_context or {}),
-    )
+    }
+
+
+def _emit_updates(
+    task_id: str,
+    run_id: str,
+    tool_calls: list,
+    event_context: dict[str, Any] | None = None,
+) -> None:
+    """Send an ``updates`` event carrying the latest tool_calls."""
+    post = _updates_post(task_id, run_id, tool_calls, event_context)
+    if post is not None:
+        _schedule_post(**post)
 
 
 def _latest_ai_tool_calls(messages: list) -> list:
@@ -500,12 +556,17 @@ class BuilderProgressMiddleware(AgentMiddleware[BuilderProgressState]):
             return None
         # Always emit the tool_calls (activity lines like searching/drafting).
         updates_context, updates_sequence = _web_event_context(state)
-        _emit_updates(task_id, run_id, tool_calls, updates_context)
+        updates_post = _updates_post(task_id, run_id, tool_calls, updates_context)
+        if updates_post is None:
+            log_middleware("BuilderProgress", "no serializable tool_calls", _t0)
+            return None
         if new_phase is None:
+            _schedule_ordered_posts([updates_post])
             log_middleware("BuilderProgress", "tool_calls emitted, no phase change", _t0)
             return _sequence_update(updates_sequence)
         last_phase = state.get("builder_progress_last_phase")
         if new_phase == last_phase:
+            _schedule_ordered_posts([updates_post])
             log_middleware(
                 "BuilderProgress",
                 f"phase unchanged ({new_phase}); tool_calls emitted only",
@@ -513,7 +574,10 @@ class BuilderProgressMiddleware(AgentMiddleware[BuilderProgressState]):
             )
             return _sequence_update(updates_sequence)
         phase_context, phase_sequence = _web_event_context(state, offset=2)
-        _emit_phase(task_id, run_id, new_phase, phase_context)
+        _schedule_ordered_posts([
+            updates_post,
+            _phase_post(task_id, run_id, new_phase, phase_context),
+        ])
         log_middleware(
             "BuilderProgress",
             f"aafter_model emit phase={new_phase} task_id={task_id}",

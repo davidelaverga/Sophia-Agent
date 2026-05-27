@@ -90,6 +90,29 @@ def test_upload_honors_custom_bucket(monkeypatch) -> None:
     assert "/storage/v1/object/custom_bucket/thread-2/deck.pptx" in captured["url"]
 
 
+def test_upload_encodes_object_path_segments(monkeypatch) -> None:
+    _configure(monkeypatch)
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    object_path = supabase_artifact_store.upload_artifact(
+        thread_id="thread-1",
+        filename="reports/report #1?.pdf",
+        content=b"x",
+        client=client,
+    )
+
+    assert object_path == "thread-1/reports/report #1?.pdf"
+    assert captured["url"] == (
+        "https://example.supabase.co/storage/v1/object/"
+        "sophia_builder/thread-1/reports/report%20%231%3F.pdf"
+    )
+
+
 def test_download_returns_none_on_404(monkeypatch) -> None:
     _configure(monkeypatch)
 
@@ -119,6 +142,27 @@ def test_download_returns_bytes_and_content_type(monkeypatch) -> None:
     )
 
     assert result == (b"stored", "text/markdown")
+
+
+def test_signed_url_request_encodes_object_path_segments(monkeypatch) -> None:
+    _configure(monkeypatch)
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"signedURL": "/object/sign/sophia_builder/token"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    supabase_artifact_store.create_signed_url(
+        thread_id="thread-1",
+        filename="report #1?.pdf",
+        client=client,
+    )
+
+    assert captured["url"] == (
+        "https://example.supabase.co/storage/v1/object/sign/"
+        "sophia_builder/thread-1/report%20%231%3F.pdf"
+    )
 
 
 def test_upload_rejects_blank_thread_or_filename(monkeypatch) -> None:
