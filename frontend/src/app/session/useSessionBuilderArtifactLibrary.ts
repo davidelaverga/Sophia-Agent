@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { BuilderArtifactLibraryItemV1 } from '../types/builder-artifact';
 
@@ -50,9 +50,22 @@ export function useSessionBuilderArtifactLibrary({
 }) {
   const [items, setItems] = useState<BuilderArtifactLibraryItemV1[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const activeThreadRef = useRef<string | undefined>(threadId);
+  const latestRequestRef = useRef(0);
+
+  activeThreadRef.current = threadId;
 
   const load = useCallback(async (signal?: AbortSignal) => {
-    if (!threadId) {
+    const requestedThreadId = threadId;
+    const requestId = latestRequestRef.current + 1;
+    latestRequestRef.current = requestId;
+    const isCurrentRequest = () => (
+      !signal?.aborted
+      && activeThreadRef.current === requestedThreadId
+      && latestRequestRef.current === requestId
+    );
+
+    if (!requestedThreadId) {
       setItems([]);
       setIsLoading(false);
       return;
@@ -60,25 +73,32 @@ export function useSessionBuilderArtifactLibrary({
 
     setIsLoading(true);
     try {
-      const response = await fetch(`/api/threads/${encodeURIComponent(threadId)}/artifacts`, {
+      const response = await fetch(`/api/threads/${encodeURIComponent(requestedThreadId)}/artifacts`, {
         method: 'GET',
         cache: 'no-store',
         signal,
       });
 
       if (!response.ok) {
-        setItems([]);
+        if (isCurrentRequest()) {
+          setItems([]);
+        }
         return;
       }
 
       const payload = await response.json() as BuilderArtifactLibraryResponse;
-      setItems(normalizeBuilderArtifactLibrary(payload));
+      if (typeof payload.thread_id === 'string' && payload.thread_id !== requestedThreadId) {
+        return;
+      }
+      if (isCurrentRequest()) {
+        setItems(normalizeBuilderArtifactLibrary(payload));
+      }
     } catch {
-      if (!signal?.aborted) {
+      if (isCurrentRequest()) {
         setItems([]);
       }
     } finally {
-      if (!signal?.aborted) {
+      if (isCurrentRequest()) {
         setIsLoading(false);
       }
     }
