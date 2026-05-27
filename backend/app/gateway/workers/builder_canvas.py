@@ -145,6 +145,8 @@ class BuilderCanvasWorker:
         self._subscribers: dict[str, list[asyncio.Queue]] = defaultdict(list)
         self._histories: dict[tuple[str, str, str], deque[dict[str, Any]]] = {}
         self._active: dict[str, tuple[str, str]] = {}
+        self._run_order: dict[str, dict[tuple[str, str], int]] = defaultdict(dict)
+        self._next_run_order = 0
         self._retired_runs: dict[str, deque[tuple[str, str]]] = defaultdict(deque)
         self._retired_run_keys: dict[str, set[tuple[str, str]]] = defaultdict(set)
         self._terminal_at: dict[tuple[str, str, str], float] = {}
@@ -170,6 +172,14 @@ class BuilderCanvasWorker:
         self._histories.pop(key, None)
         self._last_sequence.pop(key, None)
 
+    def _observe_run_locked(self, parent_thread_id: str, task_id: str, run_id: str) -> None:
+        run_key = (task_id, run_id)
+        orders = self._run_order[parent_thread_id]
+        if run_key in orders:
+            return
+        self._next_run_order += 1
+        orders[run_key] = self._next_run_order
+
     def _retire_run_locked(self, parent_thread_id: str, task_id: str, run_id: str) -> None:
         run_key = (task_id, run_id)
         retired = self._retired_run_keys[parent_thread_id]
@@ -193,8 +203,13 @@ class BuilderCanvasWorker:
             return True
         if active is None or active == (task_id, run_id):
             return False
-        if event["kind"] == "terminal":
+        run_orders = self._run_order.get(parent_thread_id, {})
+        active_order = run_orders.get(active)
+        event_order = run_orders.get((task_id, run_id))
+        if active_order is not None and event_order is not None and event_order < active_order:
             return True
+        if event["kind"] == "terminal":
+            return False
         return key in self._histories
 
     def _is_duplicate_terminal_locked(self, event: dict[str, Any], key: tuple[str, str, str]) -> bool:
@@ -278,6 +293,7 @@ class BuilderCanvasWorker:
         delivered = 0
         async with self._lock:
             self._expire_locked()
+            self._observe_run_locked(parent_thread_id, event["task_id"], event["run_id"])
             sequence = self._event_sequence_locked(event, key)
             if sequence is None:
                 self._log_event_decision("dropped", event, reason="stale_sequence")
@@ -314,6 +330,9 @@ class BuilderCanvasWorker:
                 payload.get("event_name"),
             )
             return 0
+        async with self._lock:
+            self._expire_locked()
+            self._observe_run_locked(parent, task_id, run_id)
         activity = _project_activity(str(payload.get("event_name") or ""), payload.get("data"))
         if activity is None:
             logger.info(

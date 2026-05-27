@@ -205,7 +205,7 @@ async def test_new_task_supersedes_delayed_progress_from_prior_task() -> None:
 
 
 @pytest.mark.anyio
-async def test_new_task_supersedes_delayed_terminal_from_unseen_prior_task() -> None:
+async def test_new_task_supersedes_delayed_terminal_from_prior_task_without_public_activity() -> None:
     worker = BuilderCanvasWorker()
     await worker.publish_progress(
         {
@@ -235,6 +235,32 @@ async def test_new_task_supersedes_delayed_terminal_from_unseen_prior_task() -> 
     assert delivered == 0
     events = await worker.recent_events("parent-1")
     assert {event["task_id"] for event in events} == {"task-new"}
+
+
+@pytest.mark.anyio
+async def test_terminal_only_new_task_replaces_prior_active_task() -> None:
+    worker = BuilderCanvasWorker()
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-old",
+            "run_id": "run-old",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "starting"},
+        }
+    )
+
+    delivered = await worker.publish_completion(
+        {"thread_id": "parent-1", "task_id": "task-new", "run_id": "run-new", "status": "success"}
+    )
+
+    assert delivered == 0
+    events = await worker.recent_events("parent-1")
+    assert len(events) == 1
+    assert events[0]["kind"] == "terminal"
+    assert events[0]["task_id"] == "task-new"
+    assert events[0]["run_id"] == "run-new"
 
 
 @pytest.mark.anyio
