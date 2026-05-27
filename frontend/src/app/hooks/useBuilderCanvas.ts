@@ -134,20 +134,35 @@ function applySnapshot(current: BuilderCanvasState, snapshot: BuilderCanvasSnaps
     ? currentTask?.task_id === snapshotTask.task_id && currentTask?.run_id === snapshotTask.run_id
     : false;
 
-  if (!snapshotTask || !sameRun) {
+  if (!snapshotTask) {
+    return {
+      ...snapshotState,
+      retiredRuns: current.retiredRuns,
+      runOrder: current.runOrder,
+      nextRunOrder: current.nextRunOrder,
+    };
+  }
+
+  if (!sameRun) {
     const retiredRuns = new Set(current.retiredRuns);
     let runOrder = current.runOrder;
     let nextRunOrder = current.nextRunOrder;
-    let snapshotOrder: number | undefined;
-    if (snapshotTask) {
-      const observed = observeRun(runOrder, nextRunOrder, taskRunKey(snapshotTask));
-      runOrder = observed.runOrder;
-      nextRunOrder = observed.nextRunOrder;
-      snapshotOrder = observed.order;
-    }
-    if (currentTask && snapshotTask) {
+    const observed = observeRun(runOrder, nextRunOrder, taskRunKey(snapshotTask));
+    runOrder = observed.runOrder;
+    nextRunOrder = observed.nextRunOrder;
+    const snapshotOrder = observed.order;
+    if (currentTask) {
       const currentOrder = runOrder.get(taskRunKey(currentTask));
-      if (currentOrder === undefined || snapshotOrder === undefined || snapshotOrder > currentOrder) {
+      if (currentOrder !== undefined && snapshotOrder <= currentOrder) {
+        return {
+          ...current,
+          reconnecting: false,
+          retiredRuns,
+          runOrder,
+          nextRunOrder,
+        };
+      }
+      if (currentOrder === undefined || snapshotOrder > currentOrder) {
         retiredRuns.add(taskRunKey(currentTask));
       }
     }

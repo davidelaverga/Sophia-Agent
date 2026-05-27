@@ -275,7 +275,9 @@ describe('useBuilderCanvas', () => {
       FakeEventSource.instances[0].onerror?.();
     });
 
-    await waitFor(() => expect(result.current.activeTask?.run_id).toBe('run-1'));
+    await waitFor(() => expect(result.current.reconnecting).toBe(false));
+    expect(result.current.activeTask?.run_id).toBe('run-2');
+    expect(result.current.activeTask?.latest_activity?.label).toBe('Drafting live run');
 
     act(() => {
       FakeEventSource.instances[0].emit({
