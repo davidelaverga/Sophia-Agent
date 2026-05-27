@@ -1599,4 +1599,209 @@ describe('buildVoiceDeveloperMetrics', () => {
       ]),
     );
   });
+
+  it('summarizes safe Coreview visual and exact-text telemetry from current-run events', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-05-27T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { sessionId: 'session-dev' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-05-27T12:00:01.000Z',
+        category: 'voice-session',
+        name: 'gemini-artifact-frame-send',
+        payload: {
+          runtime: 'gemini_live',
+          result: {
+            coreviewSendStage: 'start',
+            artifactId: 'artifact-1',
+            ok: true,
+            websocketSendAccepted: true,
+            frameBytes: 1024,
+            frameDimensions: { width: 640, height: 360 },
+            visualSourceKind: 'canvas_element',
+            frameSendLatencyMs: 12,
+            imageCountAfterFrame: 1,
+            videoDurationSecondsAfterFrame: 0.25,
+            audioDurationSecondsAfterFrame: 2,
+            visualResponseObserved: true,
+            rawFrameExcluded: true,
+          },
+        },
+      }),
+      buildEvent({
+        seq: 3,
+        at: '2026-05-27T12:00:02.000Z',
+        category: 'voice-session',
+        name: 'gemini-artifact-frame-send',
+        payload: {
+          runtime: 'gemini_live',
+          result: {
+            coreviewSendStage: 'refresh',
+            artifactId: 'artifact-1',
+            ok: true,
+            websocketSendAccepted: true,
+            frameBytes: 2048,
+            frameDimensions: { width: 800, height: 450 },
+            visualSourceKind: 'canvas_element',
+            frameSendLatencyMs: 18,
+            rawFrameExcluded: true,
+          },
+        },
+      }),
+      buildEvent({
+        seq: 4,
+        at: '2026-05-27T12:00:03.000Z',
+        category: 'voice-session',
+        name: 'gemini-tool-loop-diagnostic',
+        payload: {
+          runtime: 'gemini_live',
+          phase: 'tool_call_received',
+          toolName: 'read_artifact_text',
+          success: true,
+          diagnostic: {
+            toolCall: { name: 'read_artifact_text', args: null },
+          },
+        },
+      }),
+      buildEvent({
+        seq: 5,
+        at: '2026-05-27T12:00:03.050Z',
+        category: 'voice-session',
+        name: 'gemini-tool-loop-diagnostic',
+        payload: {
+          runtime: 'gemini_live',
+          phase: 'tool_response_sent',
+          toolName: 'read_artifact_text',
+          success: true,
+          diagnostic: {
+            toolCall: { name: 'read_artifact_text', args: null },
+            backendResponse: {
+              ok: true,
+              source: 'builder_metadata',
+              status: 'success',
+              char_count: 77,
+              truncated: false,
+              latency_ms: 4,
+              raw_artifact_text_excluded: true,
+            },
+          },
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-05-27T12:00:04.000Z'),
+    });
+
+    expect(metrics.coreview.visual).toMatchObject({
+      coreviewEnabled: true,
+      frameSentCount: 2,
+      initialFrameSent: true,
+      refreshFrameCount: 1,
+      lastFrameBytes: 2048,
+      lastFrameDimensions: { width: 800, height: 450 },
+      totalFrameBytes: 3072,
+      maxFrameSendLatencyMs: 18,
+      providerUsageImageCount: 1,
+      providerUsageVideoDurationSeconds: 0.25,
+      providerUsageAudioDurationSeconds: 2,
+      visualResponseObserved: true,
+      toolCallAfterFrameObserved: true,
+      rawFrameExcluded: true,
+    });
+    expect(metrics.coreview.exactText).toMatchObject({
+      exactTextCallCount: 1,
+      exactTextSuccessCount: 1,
+      exactTextFailureCount: 0,
+      exactTextSources: expect.objectContaining({ builder_metadata: 1 }),
+      lastExactTextStatus: 'success',
+      lastExactTextSource: 'builder_metadata',
+      lastExactTextCharCount: 77,
+      lastExactTextTruncated: false,
+      lastExactTextLatencyMs: 4,
+      rawArtifactTextExcluded: true,
+      rawQueryExcluded: true,
+    });
+  });
+
+  it('counts Coreview frame and exact-text failures without raw payloads', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-05-27T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { sessionId: 'session-dev' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-05-27T12:00:01.000Z',
+        category: 'voice-session',
+        name: 'gemini-artifact-frame-send',
+        payload: {
+          runtime: 'gemini_live',
+          result: {
+            coreviewSendStage: 'start',
+            artifactId: 'artifact-1',
+            ok: false,
+            websocketSendAccepted: true,
+            websocketClosedAfterFrameSend: true,
+            frameBytes: 1024,
+            frameDimensions: { width: 640, height: 360 },
+            frameSendLatencyMs: 9,
+            error: 'frame_send_closed_gemini_websocket',
+            rawFrameExcluded: true,
+          },
+        },
+      }),
+      buildEvent({
+        seq: 3,
+        at: '2026-05-27T12:00:02.000Z',
+        category: 'voice-session',
+        name: 'gemini-tool-loop-diagnostic',
+        payload: {
+          runtime: 'gemini_live',
+          phase: 'tool_response_sent',
+          toolName: 'read_artifact_text',
+          success: false,
+          diagnostic: {
+            toolCall: { name: 'read_artifact_text', args: null },
+            backendResponse: {
+              ok: false,
+              status: 'forbidden',
+              safe_reason: 'The artifact text source is registered for a different session or thread.',
+              char_count: 0,
+              latency_ms: 3,
+              raw_artifact_text_excluded: true,
+            },
+          },
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-05-27T12:00:04.000Z'),
+    });
+    const serialized = JSON.stringify(metrics.coreview);
+
+    expect(metrics.coreview.visual.frameSendFailureCount).toBe(1);
+    expect(metrics.coreview.visual.lastFrameSendFailureReason).toBe('frame_send_closed_gemini_websocket');
+    expect(metrics.coreview.visual.websocketClosedAfterFrameCount).toBe(1);
+    expect(metrics.coreview.exactText.exactTextFailureCount).toBe(1);
+    expect(metrics.coreview.exactText.exactTextSources.unsupported).toBe(1);
+    expect(metrics.coreview.exactText.lastExactTextStatus).toBe('forbidden');
+    expect(serialized).not.toContain('base64');
+    expect(serialized).not.toContain('raw artifact body');
+  });
 });

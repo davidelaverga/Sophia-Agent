@@ -180,11 +180,18 @@ describe("co-review dual-path state machine", () => {
     expect(state.state).toBe("co_review_live")
     expect(state.videoOrFrameMode).toBe("still_frame")
     expect(state.frameSentCount).toBe(1)
+    expect(state.initialFrameSent).toBe(true)
+    expect(state.refreshFrameCount).toBe(0)
+    expect(state.totalFrameBytes).toBe(32)
     expect(state.frameBytes).toBe(32)
     expect(state.frameDimensions).toEqual({ width: 320, height: 160 })
     expect(state.frameSendLatencyMs).toBe(12)
     expect(state.providerAcceptedFrame).toBe(false)
     expect(sender.sendArtifactFrame).toHaveBeenCalledTimes(1)
+    expect(sender.sendArtifactFrame).toHaveBeenCalledWith(
+      expect.objectContaining({ visualSourceKind: "canvas_element" }),
+      { coreviewSendStage: "start" },
+    )
   })
 
   it("Refresh View sends one additional frame and records safe refresh telemetry", async () => {
@@ -230,6 +237,8 @@ describe("co-review dual-path state machine", () => {
     expect(state.state).toBe("co_review_live")
     expect(state.frameSentCount).toBe(2)
     expect(state.frameCount).toBe(2)
+    expect(state.refreshFrameCount).toBe(1)
+    expect(state.totalFrameBytes).toBe(64)
     expect(state.refreshFrameRequested).toBe(true)
     expect(state.refreshFrameResult).toBe("success")
     expect(state.refreshFrameLatencyMs).not.toBeNull()
@@ -243,11 +252,15 @@ describe("co-review dual-path state machine", () => {
       refreshFrameRequested: true,
       refreshFrameResult: "success",
       frameSentCount: 2,
+      initialFrameSent: true,
+      refreshFrameCount: 1,
+      totalFrameBytes: 64,
       lastFrameBytes: 32,
       lastFrameDimensions: { width: 320, height: 160 },
       websocketStateBeforeRefresh: "open",
       websocketStateAfterRefresh: "open",
       websocketClosedAfterRefresh: false,
+      websocketClosedAfterFrameCount: 0,
       rawFrameExcluded: true,
     })
     expect(serialized).not.toContain("base64")
@@ -284,6 +297,8 @@ describe("co-review dual-path state machine", () => {
     expect(state.visualInputStatus).toBe("error")
     expect(state.toolAvailability).toBe("unavailable")
     expect(sender.sendArtifactFrame).not.toHaveBeenCalled()
+    expect(state.frameSendFailureCount).toBe(1)
+    expect(state.lastFrameSendFailureReason).toBe("gemini_live_websocket_not_open")
   })
 
   it("blocks Refresh View with a safe reason when the websocket closes after start", async () => {
@@ -387,6 +402,9 @@ describe("co-review dual-path state machine", () => {
     expect(state.visualInputStatus).toBe("error")
     expect(state.toolAvailability).toBe("unavailable")
     expect(state.frameSentCount).toBe(0)
+    expect(state.frameSendFailureCount).toBe(1)
+    expect(state.lastFrameSendFailureReason).toBe("frame_send_closed_gemini_websocket")
+    expect(state.websocketClosedAfterFrameCount).toBe(1)
   })
 
   it("clears looking state when refresh closes the Gemini websocket", async () => {
@@ -455,6 +473,9 @@ describe("co-review dual-path state machine", () => {
     expect(state.websocketStateAfterRefresh).toBe("closed")
     expect(state.websocketClosedAfterRefresh).toBe(true)
     expect(state.frameSentCount).toBe(1)
+    expect(state.frameSendFailureCount).toBe(1)
+    expect(state.lastFrameSendFailureReason).toBe("frame_send_closed_gemini_websocket")
+    expect(state.websocketClosedAfterFrameCount).toBe(1)
     expect(sender.sendArtifactFrame).toHaveBeenCalledTimes(2)
   })
 

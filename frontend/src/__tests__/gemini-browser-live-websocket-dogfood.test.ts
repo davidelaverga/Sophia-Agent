@@ -930,6 +930,74 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(result.timeFromFrameSendToCloseMs).not.toBeNull();
   });
 
+  it('captures usageMetadata image_count after an artifact frame when Gemini emits it', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch();
+    const fakeAudioContext = new FakeAudioContext();
+    let websocket: FakeWebSocket | null = null;
+    const providerTelemetry: unknown[] = [];
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+      onProviderEventTelemetry: (telemetry) => providerTelemetry.push(telemetry),
+    });
+    const originalSend = websocket?.send.bind(websocket);
+    if (!websocket || !originalSend) throw new Error('test websocket missing');
+    websocket.send = (data: string) => {
+      originalSend(data);
+      if (data.includes('"video"')) {
+        queueMicrotask(() => websocket?.emitMessage({
+          usageMetadata: {
+            image_count: 1,
+            video_duration_seconds: 0.25,
+            audio_duration_seconds: 2,
+            total_token_count: 123,
+          },
+        }));
+      }
+    };
+
+    const result = await connection.sendArtifactFrame({
+      artifactId: 'artifact-1',
+      visualSourceKind: 'canvas_element',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true,
+    }, { coreviewSendStage: 'start' });
+
+    expect(result.imageCountAfterFrame).toBe(1);
+    expect(result.videoDurationSecondsAfterFrame).toBe(0.25);
+    expect(result.audioDurationSecondsAfterFrame).toBe(2);
+    expect(result.providerAcceptedFrame).toBe(true);
+    expect(result.usageMetadataAfterFrame).toEqual({
+      imageCount: 1,
+      videoDurationSeconds: 0.25,
+      audioDurationSeconds: 2,
+      totalTokenCount: 123,
+      rawUsageMetadataExcluded: true,
+    });
+    expect(providerTelemetry.at(-1)).toMatchObject({
+      usageMetadata: {
+        imageCount: 1,
+        videoDurationSeconds: 0.25,
+        audioDurationSeconds: 2,
+        totalTokenCount: 123,
+        rawUsageMetadataExcluded: true,
+      },
+    });
+
+    await connection.close();
+  });
+
   it('keeps multiple raw input frames as candidates without suppressing assistant audio', async () => {
     const fetchMock = vi
       .fn()
@@ -2034,7 +2102,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       truncated: false,
       status: 'success',
       safe_reason: null,
-      latency_ms: null,
+      latency_ms: expect.any(Number),
       raw_artifact_text_excluded: true,
     });
 

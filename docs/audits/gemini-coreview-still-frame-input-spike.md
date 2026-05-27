@@ -177,6 +177,20 @@ Telemetry and privacy:
 - Raw artifact text is sent only as the provider tool response when needed for the answer; it is not copied into tool-loop diagnostics or telemetry.
 - Safe telemetry records artifact id, source, char count, truncated flag, status/safe reason, and latency when available.
 
+## Usage and cost telemetry
+
+Date: 2026-05-27
+Branch: `spike/gemini-coreview-still-frame-input-clean`
+
+Coreview now exports a safe `coreview` telemetry object in the Session voice telemetry report:
+
+- `coreview.visual` tracks whether Coreview was enabled/live, artifact id, visual source kind, initial frame sent, refresh frame count, total/last frame bytes, last dimensions, send latency, send failures, safe failure reason, WebSocket-closed-after-frame count, visual response observation, and whether tool calls were observed after a frame.
+- `coreview.exactText` tracks `read_artifact_text` call/success/failure counts, source counts for `fixture`, `builder_metadata`, `artifact_store`, and `unsupported`, last status/source, char count, truncated flag, and latency.
+- Provider usage metadata is reduced to safe count/duration fields. If Gemini emits usage metadata after a frame, `image_count`/`imageCount` is captured as `providerUsageImageCount`; `video_duration_seconds` and `audio_duration_seconds` are captured when present.
+- Frame telemetry records counts, dimensions, byte sizes, and timings only. It does not export raw frames, base64 payloads, screenshots, or WebSocket credential material.
+- Exact-text telemetry records source/status/latency/char counts only. It does not export raw artifact text or the raw user query.
+- No dollar estimates are included yet. Product billing and user-visible pricing remain out of scope until provider pricing is explicitly configured or documented in the app.
+
 ## Answers
 
 ### 1. Can we encode a clean artifact frame safely?

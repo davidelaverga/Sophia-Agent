@@ -21,6 +21,7 @@ import {
   type GeminiBrowserLiveDogfoodConnection,
   type GeminiBargeInTranscriptHandoffDiagnostic,
   type GeminiArtifactFramePayload,
+  type GeminiArtifactFrameSendContext,
   type GeminiArtifactFrameSendResult,
   type GeminiArtifactFrameTransportStatusSnapshot,
   type GeminiBrowserLiveSessionBootstrap,
@@ -159,7 +160,10 @@ export type StreamVoiceSessionReturn = {
   unlockAudio: () => void
   /** No-op — reflection TTS goes through Stream agent. Returns false (not spoken). */
   speakText: (text: string, traceId?: string) => Promise<boolean>
-  sendArtifactFrame: (frame: GeminiArtifactFramePayload) => Promise<GeminiArtifactFrameSendResult> | GeminiArtifactFrameSendResult
+  sendArtifactFrame: (
+    frame: GeminiArtifactFramePayload,
+    context?: GeminiArtifactFrameSendContext,
+  ) => Promise<GeminiArtifactFrameSendResult> | GeminiArtifactFrameSendResult
   getArtifactFrameTransportStatus: () => GeminiArtifactFrameTransportStatusSnapshot
 }
 
@@ -1184,10 +1188,13 @@ export function useStreamVoiceSession(
     })
   }, [])
 
-  const sendArtifactFrame = useCallback((frame: GeminiArtifactFramePayload): Promise<GeminiArtifactFrameSendResult> | GeminiArtifactFrameSendResult => {
+  const sendArtifactFrame = useCallback((
+    frame: GeminiArtifactFramePayload,
+    context?: GeminiArtifactFrameSendContext,
+  ): Promise<GeminiArtifactFrameSendResult> | GeminiArtifactFrameSendResult => {
     const activeGeminiConnection = geminiConnectionRef.current
     if (activeGeminiConnection) {
-      return activeGeminiConnection.sendArtifactFrame(frame).then((result) => {
+      return activeGeminiConnection.sendArtifactFrame(frame, context).then((result) => {
         recordArtifactFrameSendResult(result)
         return result
       })
@@ -1195,6 +1202,8 @@ export function useStreamVoiceSession(
 
     const now = new Date().toISOString()
     const result: GeminiArtifactFrameSendResult = {
+      coreviewSendStage: context?.coreviewSendStage ?? null,
+      artifactId: frame.artifactId ?? null,
       ok: false,
       supported: true,
       providerAcceptedFrame: false,
@@ -1206,6 +1215,7 @@ export function useStreamVoiceSession(
       framePayloadSchemaVersion: "realtimeInput.video.v1",
       frameBytes: frame.byteLength,
       frameDimensions: frame.dimensions,
+      visualSourceKind: frame.visualSourceKind ?? null,
       mimeType: frame.mimeType,
       frameSendLatencyMs: 0,
       sendStartedAt: now,
@@ -1225,6 +1235,8 @@ export function useStreamVoiceSession(
       timeFromFrameSendToCloseMs: null,
       usageMetadataAfterFrame: null,
       imageCountAfterFrame: null,
+      videoDurationSecondsAfterFrame: null,
+      audioDurationSecondsAfterFrame: null,
       visualResponseObserved: false,
       estimatedVisualCost: null,
       error: "gemini_live_websocket_not_open",

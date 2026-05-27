@@ -254,6 +254,7 @@ export interface GeminiBrowserLiveProviderEventTelemetry {
   primaryCategory: GeminiProviderEventCategory | 'unknown';
   categories: GeminiProviderEventCategory[];
   categoryCounts: GeminiProviderEventCategoryCounts;
+  usageMetadata: GeminiUsageMetadataTelemetry | null;
   relayClassification: GeminiRelayClassification;
   relayClassificationReason: string;
   relayShouldRelay: boolean;
@@ -448,7 +449,10 @@ export interface GeminiBrowserLiveDogfoodConnection {
   websocket: WebSocketLike;
   localStream: MediaStream;
   sendText: (text: string) => void;
-  sendArtifactFrame: (frame: GeminiArtifactFramePayload) => Promise<GeminiArtifactFrameSendResult>;
+  sendArtifactFrame: (
+    frame: GeminiArtifactFramePayload,
+    context?: GeminiArtifactFrameSendContext,
+  ) => Promise<GeminiArtifactFrameSendResult>;
   getArtifactFrameTransportStatus: () => GeminiArtifactFrameTransportStatusSnapshot;
   setMicrophoneMuted: (muted: boolean) => void;
   flushOutputAudio: () => GeminiOutputAudioPlaybackState;
@@ -462,11 +466,24 @@ export interface GeminiArtifactFrameDimensions {
 
 export interface GeminiArtifactFramePayload {
   artifactId?: string | null;
+  visualSourceKind?: string | null;
   data: string;
   mimeType: string;
   byteLength: number;
   dimensions: GeminiArtifactFrameDimensions;
   rawFrameExcluded: true;
+}
+
+export interface GeminiArtifactFrameSendContext {
+  coreviewSendStage?: 'start' | 'refresh' | null;
+}
+
+export interface GeminiUsageMetadataTelemetry {
+  imageCount: number | null;
+  videoDurationSeconds: number | null;
+  audioDurationSeconds: number | null;
+  totalTokenCount: number | null;
+  rawUsageMetadataExcluded: true;
 }
 
 export interface GeminiArtifactFrameTransportStatusSnapshot {
@@ -481,6 +498,8 @@ export interface GeminiArtifactFrameTransportStatusSnapshot {
 }
 
 export interface GeminiArtifactFrameSendResult {
+  coreviewSendStage: 'start' | 'refresh' | null;
+  artifactId: string | null;
   ok: boolean;
   supported: boolean;
   providerAcceptedFrame: boolean;
@@ -492,6 +511,7 @@ export interface GeminiArtifactFrameSendResult {
   framePayloadSchemaVersion: string;
   frameBytes: number;
   frameDimensions: GeminiArtifactFrameDimensions;
+  visualSourceKind: string | null;
   mimeType: string;
   frameSendLatencyMs: number;
   sendStartedAt: string;
@@ -509,8 +529,10 @@ export interface GeminiArtifactFrameSendResult {
   websocketCloseAt: string | null;
   websocketClosedAfterFrameSend: boolean;
   timeFromFrameSendToCloseMs: number | null;
-  usageMetadataAfterFrame: Record<string, unknown> | null;
+  usageMetadataAfterFrame: GeminiUsageMetadataTelemetry | null;
   imageCountAfterFrame: number | null;
+  videoDurationSecondsAfterFrame: number | null;
+  audioDurationSecondsAfterFrame: number | null;
   visualResponseObserved: boolean;
   estimatedVisualCost: number | null;
   error: string | null;
@@ -1813,9 +1835,13 @@ export async function connectGeminiBrowserLiveDogfood(
         }
         websocket.send(JSON.stringify({ realtimeInput: { text } }));
       },
-      sendArtifactFrame: (frame: GeminiArtifactFramePayload) => sendGeminiArtifactFrameOverWebSocket({
+      sendArtifactFrame: (
+        frame: GeminiArtifactFramePayload,
+        context?: GeminiArtifactFrameSendContext,
+      ) => sendGeminiArtifactFrameOverWebSocket({
         websocket,
         frame,
+        context,
         enabled: options.coreviewStillFrameEnabled ?? isCoReviewStillFrameEnabled(),
         providerSnapshot: snapshotArtifactFrameProviderState,
         transportSnapshot: snapshotArtifactFrameTransportStatus,
@@ -1896,12 +1922,14 @@ export function buildGeminiArtifactTextReaderHint(artifactId: string): Record<st
 async function sendGeminiArtifactFrameOverWebSocket({
   websocket,
   frame,
+  context,
   enabled,
   providerSnapshot,
   transportSnapshot,
 }: {
   websocket: WebSocketLike;
   frame: GeminiArtifactFramePayload;
+  context?: GeminiArtifactFrameSendContext;
   enabled: boolean;
   providerSnapshot: () => {
     providerEventCount: number;
@@ -1917,8 +1945,11 @@ async function sendGeminiArtifactFrameOverWebSocket({
   const providerBefore = providerSnapshot();
   const transportBefore = transportSnapshot();
   const baseResult = {
+    coreviewSendStage: context?.coreviewSendStage ?? null,
+    artifactId: frame.artifactId ?? null,
     frameBytes: frame.byteLength,
     frameDimensions: frame.dimensions,
+    visualSourceKind: frame.visualSourceKind ?? null,
     mimeType: frame.mimeType,
     framePayloadSchemaVersion: GEMINI_ARTIFACT_FRAME_PAYLOAD_SCHEMA_VERSION,
     websocketReadyStateBefore: transportBefore.websocketReadyState,
@@ -1965,6 +1996,8 @@ async function sendGeminiArtifactFrameOverWebSocket({
       timeFromFrameSendToCloseMs: null,
       usageMetadataAfterFrame: usageMetadataObservedAfterFrame(providerAfter, providerBefore.providerEventCount),
       imageCountAfterFrame: imageCountObservedAfterFrame(providerAfter, providerBefore.providerEventCount),
+      videoDurationSecondsAfterFrame: usageDurationObservedAfterFrame(providerAfter, providerBefore.providerEventCount, 'video'),
+      audioDurationSecondsAfterFrame: usageDurationObservedAfterFrame(providerAfter, providerBefore.providerEventCount, 'audio'),
       visualResponseObserved: false,
       error: 'coreview_still_frame_feature_flag_disabled',
     });
@@ -1995,6 +2028,8 @@ async function sendGeminiArtifactFrameOverWebSocket({
       timeFromFrameSendToCloseMs: null,
       usageMetadataAfterFrame: usageMetadataObservedAfterFrame(providerAfter, providerBefore.providerEventCount),
       imageCountAfterFrame: imageCountObservedAfterFrame(providerAfter, providerBefore.providerEventCount),
+      videoDurationSecondsAfterFrame: usageDurationObservedAfterFrame(providerAfter, providerBefore.providerEventCount, 'video'),
+      audioDurationSecondsAfterFrame: usageDurationObservedAfterFrame(providerAfter, providerBefore.providerEventCount, 'audio'),
       visualResponseObserved: false,
       error: 'gemini_live_websocket_not_open',
     });
@@ -2030,6 +2065,8 @@ async function sendGeminiArtifactFrameOverWebSocket({
       timeFromFrameSendToCloseMs: null,
       usageMetadataAfterFrame: usageMetadataObservedAfterFrame(providerAfter, providerBefore.providerEventCount),
       imageCountAfterFrame: imageCountObservedAfterFrame(providerAfter, providerBefore.providerEventCount),
+      videoDurationSecondsAfterFrame: usageDurationObservedAfterFrame(providerAfter, providerBefore.providerEventCount, 'video'),
+      audioDurationSecondsAfterFrame: usageDurationObservedAfterFrame(providerAfter, providerBefore.providerEventCount, 'audio'),
       visualResponseObserved: false,
       error: 'gemini_artifact_frame_send_failed',
     });
@@ -2044,6 +2081,8 @@ async function sendGeminiArtifactFrameOverWebSocket({
     ? latencyMsFromIso(sendStartedAt, transportAfter.websocketCloseAt)
     : null;
   const imageCountAfterFrame = imageCountObservedAfterFrame(providerAfter, providerBefore.providerEventCount);
+  const videoDurationSecondsAfterFrame = usageDurationObservedAfterFrame(providerAfter, providerBefore.providerEventCount, 'video');
+  const audioDurationSecondsAfterFrame = usageDurationObservedAfterFrame(providerAfter, providerBefore.providerEventCount, 'audio');
   const visualResponseObserved = providerAfter.providerEventCount > providerBefore.providerEventCount
     && Boolean(providerAfter.lastProviderEventType && providerAfter.lastProviderEventType !== 'setupComplete');
 
@@ -2069,6 +2108,8 @@ async function sendGeminiArtifactFrameOverWebSocket({
     timeFromFrameSendToCloseMs: closeElapsedMs,
     usageMetadataAfterFrame: usageMetadataObservedAfterFrame(providerAfter, providerBefore.providerEventCount),
     imageCountAfterFrame,
+    videoDurationSecondsAfterFrame,
+    audioDurationSecondsAfterFrame,
     visualResponseObserved,
     error: websocketClosedAfterFrameSend ? 'frame_send_closed_gemini_websocket' : null,
   });
@@ -2327,6 +2368,9 @@ export function recordGeminiProviderEventTelemetry(
     primaryCategory: categories[0] ?? 'unknown',
     categories,
     categoryCounts: cloneGeminiProviderEventCategoryCounts(counts),
+    usageMetadata: isRecord(event)
+      ? buildGeminiUsageMetadataTelemetry(recordFromAnyKey(event, 'usageMetadata', 'usage_metadata'))
+      : null,
     relayClassification: relayClassification.classification,
     relayClassificationReason: relayClassification.reason,
     relayShouldRelay: relayClassification.shouldRelay,
@@ -3738,19 +3782,46 @@ function readGeminiUsageMetadataImageCount(metadata: Record<string, unknown> | n
   return numberFromAnyKey(metadata, 'imageCount', 'image_count');
 }
 
+function readGeminiUsageMetadataDurationSeconds(
+  metadata: Record<string, unknown> | null,
+  kind: 'audio' | 'video',
+): number | null {
+  if (!metadata) {
+    return null;
+  }
+  return kind === 'audio'
+    ? numberFromAnyKey(metadata, 'audioDurationSeconds', 'audio_duration_seconds')
+    : numberFromAnyKey(metadata, 'videoDurationSeconds', 'video_duration_seconds');
+}
+
+function buildGeminiUsageMetadataTelemetry(
+  metadata: Record<string, unknown> | null,
+): GeminiUsageMetadataTelemetry | null {
+  if (!metadata) {
+    return null;
+  }
+  return {
+    imageCount: readGeminiUsageMetadataImageCount(metadata),
+    videoDurationSeconds: readGeminiUsageMetadataDurationSeconds(metadata, 'video'),
+    audioDurationSeconds: readGeminiUsageMetadataDurationSeconds(metadata, 'audio'),
+    totalTokenCount: numberFromAnyKey(metadata, 'totalTokenCount', 'total_token_count'),
+    rawUsageMetadataExcluded: true,
+  };
+}
+
 function usageMetadataObservedAfterFrame(
   providerAfter: {
     usageMetadata: Record<string, unknown> | null;
     usageMetadataReceiveSequence: number | null;
   },
   providerEventCountBefore: number,
-): Record<string, unknown> | null {
+): GeminiUsageMetadataTelemetry | null {
   if (
     providerAfter.usageMetadata
     && typeof providerAfter.usageMetadataReceiveSequence === 'number'
     && providerAfter.usageMetadataReceiveSequence > providerEventCountBefore
   ) {
-    return providerAfter.usageMetadata;
+    return buildGeminiUsageMetadataTelemetry(providerAfter.usageMetadata);
   }
   return null;
 }
@@ -3768,6 +3839,24 @@ function imageCountObservedAfterFrame(
     && providerAfter.usageMetadataReceiveSequence > providerEventCountBefore
   ) {
     return providerAfter.imageCount;
+  }
+  return null;
+}
+
+function usageDurationObservedAfterFrame(
+  providerAfter: {
+    usageMetadata: Record<string, unknown> | null;
+    usageMetadataReceiveSequence: number | null;
+  },
+  providerEventCountBefore: number,
+  kind: 'audio' | 'video',
+): number | null {
+  if (
+    providerAfter.usageMetadata
+    && typeof providerAfter.usageMetadataReceiveSequence === 'number'
+    && providerAfter.usageMetadataReceiveSequence > providerEventCountBefore
+  ) {
+    return readGeminiUsageMetadataDurationSeconds(providerAfter.usageMetadata, kind);
   }
   return null;
 }
@@ -3868,14 +3957,25 @@ function applyCoreviewReadArtifactTextSideband(
     return functionResponse;
   }
 
+  const startedAtMs = monotonicNowMs();
   const sidebandResponse = readCoreviewArtifactTextSideband({ artifactId, sessionId });
+  const latencyMs = elapsedMs(startedAtMs);
   if (!sidebandResponse.ok) {
-    return functionResponse;
+    return {
+      ...functionResponse,
+      response: {
+        ...sidebandResponse,
+        latency_ms: latencyMs,
+      },
+    };
   }
 
   return {
     ...functionResponse,
-    response: sidebandResponse,
+    response: {
+      ...sidebandResponse,
+      latency_ms: latencyMs,
+    },
   };
 }
 

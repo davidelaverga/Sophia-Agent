@@ -154,6 +154,9 @@ def test_still_frame_support_detection_is_separately_feature_flagged(monkeypatch
 
     assert report.still_frames_supported is True
     assert "frameBytes" in report.safe_telemetry_fields
+    assert "refreshFrameCount" in report.safe_telemetry_fields
+    assert "providerUsageImageCount" in report.safe_telemetry_fields
+    assert "exactTextCallCount" in report.safe_telemetry_fields
     assert "providerAcceptedFrame" in report.safe_telemetry_fields
 
 

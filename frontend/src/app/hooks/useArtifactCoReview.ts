@@ -12,6 +12,7 @@ import {
   type CoReviewMediaTransport,
   type CoReviewSessionState,
 } from "../lib/co-review-transport"
+import { recordSophiaCaptureEvent } from "../lib/session-capture"
 
 export interface UseArtifactCoReviewOptions {
   sessionId: string | null
@@ -98,12 +99,15 @@ export function useArtifactCoReview({
       })
     }
     logCoreviewBreadcrumb("coReviewStateAfterStart", safeCoReviewTelemetryFromState(nextState))
+    recordCoreviewTelemetry("start", nextState, { featureEnabled })
     return nextState
   }, [artifactId, artifactRoot, featureEnabled, missingCanvasReason, normalSessionId, sessionId, state, threadId])
 
   const stopReview = useCallback(async () => {
-    return machineRef.current.stopCoReview()
-  }, [])
+    const nextState = await machineRef.current.stopCoReview()
+    recordCoreviewTelemetry("stop", nextState, { featureEnabled })
+    return nextState
+  }, [featureEnabled])
 
   const refreshReview = useCallback(async () => {
     logCoreviewBreadcrumb("coReviewRefreshClicked", {
@@ -156,6 +160,7 @@ export function useArtifactCoReview({
       })
     }
     logCoreviewBreadcrumb("coReviewStateAfterRefresh", safeCoReviewTelemetryFromState(nextState))
+    recordCoreviewTelemetry("refresh", nextState, { featureEnabled })
     return nextState
   }, [artifactId, artifactRoot, featureEnabled, missingCanvasReason, sessionId, state, threadId])
 
@@ -221,7 +226,8 @@ export function useArtifactCoReview({
       statusText: transportStatus.statusText,
     })
     void machineRef.current?.failCoReview(error || "frame_send_closed_gemini_websocket")
-  }, [state.refreshFrameInProgress, state.state, transportStatus.statusText, transportStatus.visualTransportSupported])
+      .then((nextState) => recordCoreviewTelemetry("transport_closed", nextState, { featureEnabled }))
+  }, [featureEnabled, state.refreshFrameInProgress, state.state, transportStatus.statusText, transportStatus.visualTransportSupported])
 
   return {
     enabled: featureEnabled,
@@ -241,5 +247,25 @@ function logCoreviewBreadcrumb(event: string, details: Record<string, unknown> =
   console.info?.(`[coreview] ${event}`, {
     ...details,
     rawFrameExcluded: true,
+  })
+}
+
+function recordCoreviewTelemetry(
+  action: "start" | "refresh" | "stop" | "transport_closed",
+  state: CoReviewSessionState,
+  details: { featureEnabled: boolean },
+) {
+  recordSophiaCaptureEvent({
+    category: "voice-session",
+    name: "coreview-state",
+    payload: {
+      action,
+      sessionId: state.sessionId,
+      threadId: state.threadId,
+      coreview: {
+        coreviewEnabled: details.featureEnabled,
+        ...safeCoReviewTelemetryFromState(state),
+      },
+    },
   })
 }

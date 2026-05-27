@@ -12,9 +12,11 @@ import type {
   CoReviewStartResult,
   CoReviewStopResult,
   CoReviewTransportStatus,
+  CoreviewUsageMetadataAfterFrame,
 } from "./co-review-transport"
 
 export interface ArtifactFrameSendResult {
+  coreviewSendStage?: "start" | "refresh" | null
   ok: boolean
   supported: boolean
   providerAcceptedFrame: boolean
@@ -43,12 +45,16 @@ export interface ArtifactFrameSendResult {
   websocketCloseAt?: string | null
   websocketClosedAfterFrameSend?: boolean
   timeFromFrameSendToCloseMs?: number | null
-  usageMetadataAfterFrame?: Record<string, unknown> | null
+  usageMetadataAfterFrame?: CoreviewUsageMetadataAfterFrame | null
   imageCountAfterFrame?: number | null
   visualResponseObserved?: boolean
   estimatedVisualCost: number | null
   error: string | null
   rawFrameExcluded: true
+}
+
+export interface ArtifactFrameSendContext {
+  coreviewSendStage: "start" | "refresh"
 }
 
 export interface ArtifactFrameSenderStatus {
@@ -63,7 +69,10 @@ export interface ArtifactFrameSenderStatus {
 }
 
 export interface ArtifactFrameSender {
-  sendArtifactFrame(frame: ArtifactEncodedFramePayload): Promise<ArtifactFrameSendResult> | ArtifactFrameSendResult
+  sendArtifactFrame(
+    frame: ArtifactEncodedFramePayload,
+    context?: ArtifactFrameSendContext,
+  ): Promise<ArtifactFrameSendResult> | ArtifactFrameSendResult
   getStatus?(): ArtifactFrameSenderStatus
 }
 
@@ -78,9 +87,12 @@ interface StillFrameSendOutcome {
   providerAcceptedFrame: boolean
   visualResponseObserved: boolean
   estimatedVisualCost: number | null
+  imageCountAfterFrame: number | null
+  usageMetadataAfterFrame: CoreviewUsageMetadataAfterFrame | null
   websocketStateBeforeRefresh: string | null
   websocketStateAfterRefresh: string | null
   websocketClosedAfterRefresh: boolean
+  websocketClosedAfterFrameSend: boolean
 }
 
 export class GeminiStillFrameTransport implements CoReviewMediaTransport {
@@ -108,6 +120,9 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
         providerAcceptedFrame: outcome.providerAcceptedFrame,
         estimatedVisualCost: outcome.estimatedVisualCost,
         visualResponseObserved: outcome.visualResponseObserved,
+        imageCountAfterFrame: outcome.imageCountAfterFrame,
+        usageMetadataAfterFrame: outcome.usageMetadataAfterFrame,
+        websocketClosedAfterFrameSend: outcome.websocketClosedAfterFrameSend,
       }
     }
 
@@ -127,6 +142,9 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
       frameSendLatencyMs: outcome.frameSendLatencyMs,
       providerAcceptedFrame: outcome.providerAcceptedFrame,
       visualResponseObserved: outcome.visualResponseObserved,
+      imageCountAfterFrame: outcome.imageCountAfterFrame,
+      usageMetadataAfterFrame: outcome.usageMetadataAfterFrame,
+      websocketClosedAfterFrameSend: outcome.websocketClosedAfterFrameSend,
       toolCallStillWorks: null,
     }
   }
@@ -159,6 +177,8 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
         websocketStateBeforeRefresh: outcome.websocketStateBeforeRefresh,
         websocketStateAfterRefresh: outcome.websocketStateAfterRefresh,
         websocketClosedAfterRefresh: outcome.websocketClosedAfterRefresh,
+        imageCountAfterFrame: outcome.imageCountAfterFrame,
+        usageMetadataAfterFrame: outcome.usageMetadataAfterFrame,
       }
     }
 
@@ -177,6 +197,8 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
       websocketStateBeforeRefresh: outcome.websocketStateBeforeRefresh,
       websocketStateAfterRefresh: outcome.websocketStateAfterRefresh,
       websocketClosedAfterRefresh: outcome.websocketClosedAfterRefresh,
+      imageCountAfterFrame: outcome.imageCountAfterFrame,
+      usageMetadataAfterFrame: outcome.usageMetadataAfterFrame,
     }
   }
 
@@ -314,7 +336,7 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
       frameDimensions: encoded.payload.dimensions,
       frameMimeType: encoded.payload.mimeType,
     })
-    const sent = await this.sender.sendArtifactFrame(encoded.payload)
+    const sent = await this.sender.sendArtifactFrame(encoded.payload, { coreviewSendStage: stage })
     const senderStatusAfter = this.sender.getStatus?.()
     const websocketStateBeforeRefresh = websocketReadyStateLabel(sent.websocketReadyStateBefore ?? null)
       ?? senderStatusBefore?.websocketState
@@ -374,9 +396,12 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
         providerAcceptedFrame: sent.providerAcceptedFrame,
         visualResponseObserved: sent.visualResponseObserved ?? false,
         estimatedVisualCost: sent.estimatedVisualCost,
+        imageCountAfterFrame: sent.imageCountAfterFrame ?? null,
+        usageMetadataAfterFrame: sent.usageMetadataAfterFrame ?? null,
         websocketStateBeforeRefresh,
         websocketStateAfterRefresh,
         websocketClosedAfterRefresh,
+        websocketClosedAfterFrameSend: sent.websocketClosedAfterFrameSend ?? websocketClosedAfterRefresh,
       })
     }
 
@@ -391,9 +416,12 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
       providerAcceptedFrame: sent.providerAcceptedFrame,
       visualResponseObserved: sent.visualResponseObserved ?? false,
       estimatedVisualCost: sent.estimatedVisualCost,
+      imageCountAfterFrame: sent.imageCountAfterFrame ?? null,
+      usageMetadataAfterFrame: sent.usageMetadataAfterFrame ?? null,
       websocketStateBeforeRefresh,
       websocketStateAfterRefresh,
       websocketClosedAfterRefresh,
+      websocketClosedAfterFrameSend: sent.websocketClosedAfterFrameSend ?? websocketClosedAfterRefresh,
     }
   }
 
@@ -412,9 +440,12 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
       providerAcceptedFrame: overrides.providerAcceptedFrame ?? false,
       visualResponseObserved: overrides.visualResponseObserved ?? false,
       estimatedVisualCost: overrides.estimatedVisualCost ?? null,
+      imageCountAfterFrame: overrides.imageCountAfterFrame ?? null,
+      usageMetadataAfterFrame: overrides.usageMetadataAfterFrame ?? null,
       websocketStateBeforeRefresh: overrides.websocketStateBeforeRefresh ?? null,
       websocketStateAfterRefresh: overrides.websocketStateAfterRefresh ?? null,
       websocketClosedAfterRefresh: overrides.websocketClosedAfterRefresh ?? false,
+      websocketClosedAfterFrameSend: overrides.websocketClosedAfterFrameSend ?? false,
     }
   }
 

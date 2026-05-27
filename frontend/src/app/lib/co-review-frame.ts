@@ -12,6 +12,7 @@ export interface ArtifactFrameDimensions {
 
 export interface ArtifactEncodedFramePayload {
   artifactId: string | null
+  visualSourceKind: ArtifactVisualSource["kind"]
   data: string
   mimeType: string
   byteLength: number
@@ -83,6 +84,7 @@ export async function encodeArtifactStillFrame(
       ok: true,
       payload: {
         artifactId: source.artifactId,
+        visualSourceKind: source.kind,
         data: await blobToBase64(blob),
         mimeType: blob.type || mimeType,
         byteLength: blob.size,
@@ -154,12 +156,14 @@ export function safeArtifactFrameTelemetry(
   frameBytes: number
   frameDimensions: ArtifactFrameDimensions
   frameMimeType: string
+  visualSourceKind: ArtifactVisualSource["kind"]
   rawFrameExcluded: true
 } {
   return {
     frameBytes: payload.byteLength,
     frameDimensions: payload.dimensions,
     frameMimeType: payload.mimeType,
+    visualSourceKind: payload.visualSourceKind,
     rawFrameExcluded: true,
   }
 }
