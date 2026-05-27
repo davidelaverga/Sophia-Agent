@@ -2,6 +2,8 @@ import asyncio
 import os
 from pathlib import Path
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 import app.gateway.routers.artifacts as artifacts_router
@@ -142,6 +144,92 @@ def test_list_artifacts_keeps_local_results_when_supabase_listing_fails(tmp_path
 
     assert [item.path for item in response.artifacts] == ["mnt/user-data/outputs/brief.md"]
     assert "Supabase artifact list failed" in caplog.text
+
+
+def test_list_artifacts_requires_thread_owner_before_supabase_listing(tmp_path, monkeypatch) -> None:
+    missing_outputs = tmp_path / "missing" / "outputs"
+    supabase_calls: list[str] = []
+
+    class FakeSessionStore:
+        def find_session_by_thread_id(self, user_id: str, thread_id: str):
+            assert user_id == "user-1"
+            assert thread_id == "thread-1"
+            return None
+
+    monkeypatch.setattr(artifacts_router, "_session_store", FakeSessionStore())
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: missing_outputs)
+    monkeypatch.setattr(
+        artifacts_router.supabase_artifact_store,
+        "list_artifacts",
+        lambda *, thread_id: supabase_calls.append(thread_id) or [],
+    )
+
+    import fastapi
+
+    try:
+        asyncio.run(artifacts_router.list_artifacts("thread-1", authenticated_user_id="user-1"))
+    except fastapi.HTTPException as exc:
+        assert exc.status_code == 404
+    else:
+        raise AssertionError("Expected 404 for non-owned thread")
+    assert supabase_calls == []
+
+
+def test_list_artifacts_route_requires_authentication(monkeypatch) -> None:
+    monkeypatch.delenv("SOPHIA_AUTH_BYPASS", raising=False)
+    app = FastAPI()
+    app.include_router(artifacts_router.router)
+
+    response = TestClient(app).get("/api/threads/thread-1/artifacts")
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Missing bearer token"
+
+
+def test_get_artifact_requires_thread_owner_before_supabase_download(tmp_path, monkeypatch) -> None:
+    outputs_dir = tmp_path / "outputs"
+    workspace_outputs_dir = tmp_path / "workspace" / "outputs"
+    download_calls: list[str] = []
+
+    class FakeSessionStore:
+        def find_session_by_thread_id(self, user_id: str, thread_id: str):
+            assert user_id == "user-1"
+            assert thread_id == "thread-1"
+            return None
+
+    def resolve_path(_thread_id: str, virtual_path: str) -> Path:
+        if virtual_path == "mnt/user-data/outputs/report.md":
+            return outputs_dir / "report.md"
+        if virtual_path == "mnt/user-data/workspace/outputs/report.md":
+            return workspace_outputs_dir / "report.md"
+        raise AssertionError(f"Unexpected virtual path: {virtual_path}")
+
+    monkeypatch.setattr(artifacts_router, "_session_store", FakeSessionStore())
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", resolve_path)
+    monkeypatch.setattr(
+        artifacts_router.supabase_artifact_store,
+        "download_artifact",
+        lambda *, thread_id, filename: download_calls.append(filename) or None,
+    )
+
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""})
+
+    import fastapi
+
+    try:
+        asyncio.run(
+            artifacts_router.get_artifact(
+                "thread-1",
+                "mnt/user-data/outputs/report.md",
+                request,
+                authenticated_user_id="user-1",
+            )
+        )
+    except fastapi.HTTPException as exc:
+        assert exc.status_code == 404
+    else:
+        raise AssertionError("Expected 404 for non-owned thread")
+    assert download_calls == []
 
 
 def test_get_artifact_falls_back_to_workspace_outputs_when_primary_output_is_missing(tmp_path, monkeypatch) -> None:

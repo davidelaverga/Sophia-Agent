@@ -117,3 +117,13 @@ async def require_authorized_user_scope(request: Request) -> str:
         raise HTTPException(status_code=403, detail="Token does not grant access to this user")
 
     return user_id
+
+
+async def require_authenticated_user(request: Request) -> str:
+    """Return the authenticated user for routes without a user_id path segment."""
+    if _is_explicit_bypass_enabled():
+        return _get_bypass_user_id()
+
+    token = _extract_bearer_token(request)
+    authenticated_user = await _get_authenticated_user(token)
+    return authenticated_user["id"].strip()
