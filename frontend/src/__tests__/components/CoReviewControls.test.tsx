@@ -70,4 +70,10 @@ describe("CoReviewControls", () => {
 
     expect(screen.getByText("still-frame unavailable: unsupported")).toBeInTheDocument()
   })
+
+  it("surfaces guarded DOM-only failures verbatim", () => {
+    renderControls({ state: "co_review_error", error: "dom_artifact_requires_safe_renderer" })
+
+    expect(screen.getByText("still-frame unavailable: dom_artifact_requires_safe_renderer")).toBeInTheDocument()
+  })
 })

@@ -15,7 +15,7 @@ The official Gemini Live API reference documents WebSocket sessions that can exc
 
 Recommendation: keep normal voice untouched and proceed with a feature-flagged still-frame/artifact-canvas proof before any continuous video implementation. Continuous media should wait for a real Gemini media adapter or provider path change that can be tested with artifact-scoped frames and tool/sideband behavior.
 
-Follow-up result on `spike/gemini-coreview-still-frame-input-clean`: the fixture still-frame proof passed manual provider smoke at commit `38583674` using the corrected `realtimeInput.video` payload. Sophia could keep talking while the Q3 Launch Review fixture was open, the app showed `Sophia is looking at this artifact`, and Sophia could discuss the artifact contents after one still frame. This proves the guarded fixture path only. Continuous video remains unproven, exact text/numbers still require `read_artifact_text`, and real artifacts still need a clean canvas/offscreen renderer.
+Follow-up result on `spike/gemini-coreview-still-frame-input-clean`: the fixture still-frame proof passed manual provider smoke at commit `38583674` using the corrected `realtimeInput.video` payload. Sophia could keep talking while the Q3 Launch Review fixture was open, the app showed `Sophia is looking at this artifact`, and Sophia could discuss the artifact contents after one still frame. This proves the guarded fixture path only. Continuous video remains unproven, exact text/numbers still require `read_artifact_text`, and the guarded real-artifact metadata canvas path is implemented locally but still needs its own provider smoke.
 
 ## Current Normal Voice Path
 
@@ -126,7 +126,9 @@ Capture policy:
 
 Current app implication:
 
-- Since the artifact panel is DOM-first today, most existing artifacts will report unsupported until a canvas renderer or still-frame renderer exists.
+- The artifact panel is still DOM-first overall.
+- A guarded builder-artifact metadata/overview canvas now exists behind `NEXT_PUBLIC_SOPHIA_COREVIEW_REAL_ARTIFACT_ENABLED`.
+- Companion takeaway/reflection/memory DOM artifacts still report unsupported until a safe renderer exists.
 
 ## Tool Policy
 
@@ -166,7 +168,7 @@ Rules:
   - `still-frame mode`
   - `tool unavailable`
 
-The scaffold is intentionally not wired into the production artifact panel by default.
+The scaffold remains off by default and only reaches the production artifact panel when the guarded fixture or real-artifact flags are enabled.
 
 ## Telemetry
 
@@ -247,7 +249,7 @@ Disallowed:
     - The safe fields listed above, plus provider usage counters if/when exposed by the session.
 
 17. What exact blockers remain?
-    - No Gemini media adapter in repo, no artifact canvas renderer for current DOM artifacts, tool parity unproven for a second media session, audio routing not proven, and no manual provider test without new transport code.
+   - No Gemini media adapter in repo, no safe renderer for current DOM-only artifacts, tool parity unproven for a second media session, audio routing not proven, and no manual provider test yet for the guarded real-artifact canvas path.
 
 ## Privacy Confirmation
 
@@ -285,11 +287,11 @@ Voice/backend:
 
 ## Recommendation
 
-Do not proceed directly to continuous media co-review. Use the passed still-frame fixture proof as the guarded implementation path:
+Do not proceed directly to continuous media co-review. Use the passed still-frame fixture proof plus the guarded real-artifact metadata canvas as the local implementation path:
 
 1. Keep normal voice unchanged.
 2. Keep co-review/still-frame/fixture flags default off.
-3. Replace the fixture source with a real artifact canvas/offscreen renderer.
+3. Run a manual provider smoke on the guarded real-artifact path.
 4. Encode a single frame or explicit user-triggered refresh frames through the current `realtimeInput.video` still-frame payload.
 5. Route exact data questions through the trusted `read_artifact_text` sideband.
 6. Measure setup latency, stop latency, usage metadata, image count, and tool-call behavior.

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { CoreviewFixtureLauncher } from "../../../app/components/session/CoreviewFixtureLauncher"
 import { PresenceArtifactPanel } from "../../../app/components/session/PresenceArtifactPanel"
 import { COREVIEW_FIXTURE_ARTIFACT_ID } from "../../../app/components/session/CoreviewFixtureArtifact"
+import { buildCoreviewRealArtifactId } from "../../../app/components/session/CoreviewRealArtifactCanvas"
 import { isCoReviewFixtureEnabled } from "../../../app/lib/co-review-flags"
 import { GeminiStillFrameTransport } from "../../../app/lib/co-review-still-frame-transport"
 
@@ -15,9 +16,27 @@ vi.mock("../../../app/hooks/useHaptics", () => ({
 
 const originalToBlob = HTMLCanvasElement.prototype.toBlob
 const originalMediaDevices = Object.getOwnPropertyDescriptor(navigator, "mediaDevices")
+const originalCoreviewFlag = process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_ENABLED
+const originalStillFrameFlag = process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_STILL_FRAME_ENABLED
+const originalRealArtifactFlag = process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_REAL_ARTIFACT_ENABLED
 
 let getContextSpy: ReturnType<typeof vi.spyOn> | null = null
 let getDisplayMedia: ReturnType<typeof vi.fn>
+
+const BUILDER_ARTIFACT = {
+  artifactType: "document",
+  artifactTitle: "Launch brief overview",
+  artifactPath: "mnt/user-data/outputs/launch-brief.pdf",
+  supportingFiles: ["mnt/user-data/outputs/launch-brief-notes.md"],
+  decisionsMade: [
+    "Kept the visual review focused on builder metadata.",
+    "Left exact table values to read_artifact_text.",
+  ],
+  companionSummary: "Overview card for the completed launch brief.",
+  userNextAction: "Open the PDF for the full deliverable.",
+  confidence: 0.74,
+  stepsCompleted: 3,
+}
 
 function renderFixturePanel({
   showCoReviewFixture,
@@ -36,15 +55,17 @@ function renderFixturePanel({
     })),
   }),
   artifacts = null,
+  builderArtifact = null,
 }: {
   showCoReviewFixture: boolean
   transport?: GeminiStillFrameTransport
   artifacts?: ComponentProps<typeof PresenceArtifactPanel>["artifacts"]
+  builderArtifact?: ComponentProps<typeof PresenceArtifactPanel>["builderArtifact"]
 }) {
   render(
     <PresenceArtifactPanel
       artifacts={artifacts}
-      builderArtifact={null}
+      builderArtifact={builderArtifact}
       builderArtifactLibrary={[]}
       sessionId="session-1"
       normalSessionId="normal-1"
@@ -102,6 +123,7 @@ function mockCanvasApis() {
     fillRect: vi.fn(),
     fillText: vi.fn(),
     lineTo: vi.fn(),
+    measureText: vi.fn((text: string) => ({ width: text.length * 8 })),
     moveTo: vi.fn(),
     stroke: vi.fn(),
     strokeRect: vi.fn(),
@@ -120,10 +142,17 @@ function mockCanvasApis() {
   })
 }
 
+function setRealArtifactFlags(enabled: boolean) {
+  process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_ENABLED = enabled ? "true" : "false"
+  process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_STILL_FRAME_ENABLED = enabled ? "true" : "false"
+  process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_REAL_ARTIFACT_ENABLED = enabled ? "true" : "false"
+}
+
 describe("CoreviewFixtureArtifact in the presence panel", () => {
   beforeEach(() => {
     mockCanvasApis()
     getDisplayMedia = vi.fn()
+    setRealArtifactFlags(false)
     Object.defineProperty(navigator, "mediaDevices", {
       configurable: true,
       value: { getDisplayMedia },
@@ -142,6 +171,9 @@ describe("CoreviewFixtureArtifact in the presence panel", () => {
     } else {
       delete (navigator as Navigator & { mediaDevices?: MediaDevices }).mediaDevices
     }
+    process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_ENABLED = originalCoreviewFlag
+    process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_STILL_FRAME_ENABLED = originalStillFrameFlag
+    process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_REAL_ARTIFACT_ENABLED = originalRealArtifactFlag
   })
 
   it("keeps the fixture hidden by default", () => {
@@ -179,6 +211,83 @@ describe("CoreviewFixtureArtifact in the presence panel", () => {
     expect(canvas).toHaveAttribute("data-coreview-artifact-canvas", "true")
     expect(screen.getByTestId("coreview-fixture-artifact")).toHaveAttribute("data-artifact-region", "true")
     expect(screen.getByTestId("coreview-fixture-artifact")).toHaveAttribute("data-coreview-artifact-region", "true")
+  })
+
+  it("renders the guarded builder metadata canvas when the real-artifact flag is enabled", async () => {
+    setRealArtifactFlags(true)
+
+    renderFixturePanel({
+      showCoReviewFixture: false,
+      builderArtifact: BUILDER_ARTIFACT,
+    })
+
+    const artifactId = buildCoreviewRealArtifactId(BUILDER_ARTIFACT)
+    const canvas = await screen.findByLabelText("Builder artifact metadata overview canvas")
+
+    expect(canvas).toHaveAttribute("data-artifact-id", artifactId)
+    expect(canvas).toHaveAttribute("data-coreview-artifact-id", artifactId)
+    expect(canvas).toHaveAttribute("data-artifact-canvas", "true")
+    expect(canvas).toHaveAttribute("data-coreview-artifact-canvas", "true")
+    expect(canvas).toHaveAttribute("data-coreview-offscreen-render", "true")
+    expect(screen.getByTestId("coreview-real-artifact-canvas")).toHaveAttribute("data-artifact-region", "true")
+    expect(screen.getByRole("button", { name: /review together/i })).toBeInTheDocument()
+  })
+
+  it("Review Together uses the guarded real builder artifact canvas without screen capture", async () => {
+    setRealArtifactFlags(true)
+    const user = userEvent.setup()
+    const sendArtifactFrame = vi.fn((frame) => ({
+      ok: true,
+      supported: true,
+      providerAcceptedFrame: false,
+      websocketSendAccepted: true,
+      frameBytes: frame.byteLength,
+      frameDimensions: frame.dimensions,
+      frameSendLatencyMs: 7,
+      estimatedVisualCost: null,
+      error: null,
+      rawFrameExcluded: true as const,
+    }))
+    const transport = new GeminiStillFrameTransport({ sendArtifactFrame })
+
+    renderFixturePanel({
+      showCoReviewFixture: false,
+      builderArtifact: BUILDER_ARTIFACT,
+      transport,
+    })
+
+    await user.click(screen.getByRole("button", { name: /review together/i }))
+
+    await waitFor(() => expect(sendArtifactFrame).toHaveBeenCalledTimes(1))
+    expect(sendArtifactFrame.mock.calls[0]?.[0]).toMatchObject({
+      artifactId: buildCoreviewRealArtifactId(BUILDER_ARTIFACT),
+      rawFrameExcluded: true,
+    })
+    expect(screen.getByRole("status", { name: /looking at this artifact/i })).toBeInTheDocument()
+    expect(getDisplayMedia).not.toHaveBeenCalled()
+  })
+
+  it("DOM-only artifacts fail closed with the safe renderer reason", async () => {
+    setRealArtifactFlags(true)
+    const user = userEvent.setup()
+    const sendArtifactFrame = vi.fn()
+    const transport = new GeminiStillFrameTransport({ sendArtifactFrame })
+
+    renderFixturePanel({
+      showCoReviewFixture: false,
+      artifacts: {
+        takeaway: "Focus on the big picture first.",
+      } as ComponentProps<typeof PresenceArtifactPanel>["artifacts"],
+      transport,
+    })
+
+    await user.click(screen.getByRole("button", { name: /review together/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText("still-frame unavailable: dom_artifact_requires_safe_renderer")).toBeInTheDocument()
+    })
+    expect(sendArtifactFrame).not.toHaveBeenCalled()
+    expect(getDisplayMedia).not.toHaveBeenCalled()
   })
 
   it("/session page root keeps Open Coreview Fixture hidden when the flag gate is off", () => {

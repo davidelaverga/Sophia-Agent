@@ -20,6 +20,7 @@ Repo reality is narrower:
 - This spike adds an experimental still-frame sender behind a separate still-frame flag.
 - After `38583674`, the repo implementation sends the still frame as `realtimeInput.video` with `{ mimeType, data }`, not the earlier media-chunk payload shape.
 - A manual provider smoke after `38583674` confirmed provider-visible still-frame co-review for the corrected `realtimeInput.video` fixture path.
+- The guarded real-artifact builder-metadata canvas path is now implemented behind `NEXT_PUBLIC_SOPHIA_COREVIEW_REAL_ARTIFACT_ENABLED`, but provider acceptance and visual response for that path remain unobserved.
 - Continuous video/screen-share is still unproven on the current transport.
 - Exact words, numbers, table values, labels, citations, and data still require `read_artifact_text` or another trusted sideband text path.
 
@@ -40,7 +41,8 @@ Frontend artifact frame source:
 
 - `co-review-capture.ts` now supports a `mode: "still_frame"` lookup that returns a canvas element without requiring `canvas.captureStream`.
 - Stream mode still requires `captureStream`.
-- DOM-only artifacts remain unsupported.
+- Builder artifacts can now provide a guarded offscreen metadata/overview canvas when `NEXT_PUBLIC_SOPHIA_COREVIEW_REAL_ARTIFACT_ENABLED` is on.
+- DOM-only artifacts still remain unsupported and fail closed with explicit safe reasons.
 - `getDisplayMedia` is never called.
 
 Frame encoder:
@@ -81,6 +83,44 @@ Voice/prompt:
 - Exact words, numbers, table values, labels, citations, and data still require `read_artifact_text`.
 - `read_artifact_text` remains feature-gated.
 
+## Real artifact canvas source - guarded implementation
+
+Date: 2026-05-27
+Branch: `spike/gemini-coreview-still-frame-input-clean`
+Source commit: `01911684`
+Flag: `NEXT_PUBLIC_SOPHIA_COREVIEW_REAL_ARTIFACT_ENABLED`
+
+What it supports:
+
+- Builder artifact metadata/overview canvas only.
+- Review Together can use that guarded canvas from `PresenceArtifactPanel` when the real-artifact flag is enabled.
+- Fixture canvas path remains intact and has passed provider smoke.
+
+What it does not support:
+
+- Actual builder file contents are not captured.
+- Companion takeaway/reflection/memory DOM cards are not captured.
+- Arbitrary DOM artifact capture is not allowed.
+- Exact words, numbers, and table data through vision are not trusted; use `read_artifact_text`.
+
+Failure modes:
+
+- `real_artifact_canvas_unavailable`
+- `dom_artifact_requires_safe_renderer`
+
+Privacy:
+
+- No `getDisplayMedia`
+- No whole DOM capture
+- No whole window/tab capture
+- No raw frame telemetry
+- No raw artifact text telemetry
+
+Manual provider status:
+
+- Fixture path: provider smoke passed.
+- Real builder-artifact path: provider smoke still pending.
+
 ## Answers
 
 ### 1. Can we encode a clean artifact frame safely?
@@ -94,6 +134,8 @@ The route can construct and send a `realtimeInput.video` JSON payload when the s
 ### 3. If yes, does Gemini react to the visual frame?
 
 Yes for the guarded fixture path. In the manual provider smoke, Sophia entered the looking state, stayed voice-responsive, and could recognize/discuss the visible Q3 Launch Review fixture contents after the still frame was sent.
+
+The guarded real builder-artifact path is implemented locally but still needs its own manual provider smoke, and no provider ack/visual response event exists in the current automated tests for that path.
 
 This does not prove continuous video, whole-screen capture, multiple-frame reliability, or real artifact rendering.
 
@@ -158,7 +200,7 @@ Interpretation:
 - Still-frame artifact co-review is viable as a guarded proof of concept.
 - The fixture path is proven for at least one provider-visible still frame.
 - Continuous live video/screen-share remains unproven and is still a no-go on the current transport.
-- Real artifact integration still needs a clean artifact canvas/offscreen renderer path.
+- The guarded real-artifact canvas path is now implemented, but provider-visible smoke for that path is still pending.
 - Exact text and numeric answers still require `read_artifact_text` or an equivalent trusted sideband text path.
 
 Remaining unknowns:
@@ -177,17 +219,18 @@ Still-frame co-review is a guarded proof-of-concept **go** for the fixture path:
 
 - Go for artifact-canvas encoding and experimental `realtimeInput.video` payload construction.
 - Go for provider-visible fixture co-review behind flags on the corrected still-frame payload path.
+- Go for the guarded builder artifact metadata/overview canvas path behind `NEXT_PUBLIC_SOPHIA_COREVIEW_REAL_ARTIFACT_ENABLED` as a local implementation step.
+- No-go for claiming provider visual understanding of the new real-artifact path until a real Gemini run confirms frame acceptance and visual response.
+- No-go for DOM-only companion artifacts until a safe renderer exists.
 - No-go for continuous live video/screen-share on the current transport.
-- No-go for real artifacts until a clean artifact canvas/offscreen renderer exists.
 - No-go for exact text via vision; continue using `read_artifact_text`.
 
-## Next Recommended Implementation
+## Recommended Next Steps
 
-1. Keep normal voice path unchanged.
-2. Keep still-frame co-review behind flags.
-3. Replace the fixture source with a real artifact canvas/offscreen renderer.
-4. Add resend-frame triggers on user action: `refresh view`, scroll/zoom, or review-step changes.
-5. Wire trusted `read_artifact_text` for exact words and numbers.
-6. Add telemetry for `image_count` / `usageMetadata` if the provider emits it.
-7. Add a production UX review: entry, looking indicator, Stop Looking, and privacy language.
-8. Only later revisit continuous media/video.
+1. Run a manual provider smoke with a completed builder artifact while `NEXT_PUBLIC_SOPHIA_COREVIEW_REAL_ARTIFACT_ENABLED` is on.
+2. Keep normal voice behavior unchanged and still-frame co-review behind flags.
+3. Add resend-frame triggers on user action: `refresh view`, scroll/zoom, or review-step changes.
+4. Integrate trusted `read_artifact_text` for exact words, numbers, and file-body questions.
+5. Add usage/cost telemetry from provider metadata once a real-artifact run is observed.
+6. Polish the production UX after the visual and exact-text paths are both confirmed.
+7. Only later revisit continuous media/video.

@@ -90,4 +90,41 @@ describe("co-review artifact capture", () => {
     expect(source.stream).toBeNull()
     expect(getDisplayMedia).not.toHaveBeenCalled()
   })
+
+  it("uses the guarded real-artifact missing-canvas reason without falling back to broader capture", () => {
+    const getDisplayMedia = vi.fn()
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getDisplayMedia },
+    })
+
+    const root = document.createElement("section")
+    const source = resolveArtifactVisualSource({
+      root,
+      artifactId: "artifact-5",
+      mode: "still_frame",
+      missingCanvasReason: "real_artifact_canvas_unavailable",
+    })
+
+    expect(source.status).toBe("unsupported")
+    expect(source.reason).toBe("real_artifact_canvas_unavailable")
+    expect(getDisplayMedia).not.toHaveBeenCalled()
+  })
+
+  it("marks offscreen-rendered builder canvases as offscreen_render sources", () => {
+    const root = document.createElement("section")
+    const canvas = document.createElement("canvas")
+    canvas.dataset.artifactId = "artifact-6"
+    canvas.dataset.coreviewOffscreenRender = "true"
+    root.appendChild(canvas)
+
+    const source = resolveArtifactVisualSource({
+      root,
+      artifactId: "artifact-6",
+      mode: "still_frame",
+    })
+
+    expect(source.status).toBe("ready")
+    expect(source.kind).toBe("offscreen_render")
+  })
 })

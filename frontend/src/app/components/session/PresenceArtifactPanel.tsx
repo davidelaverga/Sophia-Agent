@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { useArtifactCoReview } from "../../hooks/useArtifactCoReview"
 import { haptic } from "../../hooks/useHaptics"
 import { buildThreadArtifactHref, formatBuilderArtifactFileSize, getBuilderArtifactFiles } from "../../lib/builder-artifacts"
+import { isCoReviewRealArtifactEnabled } from "../../lib/co-review-flags"
 import type { CoReviewMediaTransport } from "../../lib/co-review-transport"
 import { cn } from "../../lib/utils"
 import { isRealReflection } from "../../session/artifacts"
@@ -13,6 +14,7 @@ import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../type
 import type { RitualArtifacts } from "../../types/session"
 import { CoReviewControls } from "./CoReviewControls"
 import { CoreviewFixtureArtifact, COREVIEW_FIXTURE_ARTIFACT_ID } from "./CoreviewFixtureArtifact"
+import { buildCoreviewRealArtifactId, CoreviewRealArtifactCanvas } from "./CoreviewRealArtifactCanvas"
 
 interface PresenceArtifactPanelProps {
   artifacts: RitualArtifacts | null | undefined
@@ -64,9 +66,28 @@ export function PresenceArtifactPanel({
   const autoCollapseRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const staggerRef = useRef<ReturnType<typeof setTimeout>[]>([])
   const [fixtureRoot, setFixtureRoot] = useState<HTMLDivElement | null>(null)
+  const [builderArtifactRoot, setBuilderArtifactRoot] = useState<HTMLDivElement | null>(null)
+  const [domArtifactRoot, setDomArtifactRoot] = useState<HTMLDivElement | null>(null)
   const status = usePresenceStore((s) => s.status)
   const hasBuilderLibrary = builderArtifactLibrary.length > 0
   const hasCoReviewFixture = showCoReviewFixture
+  const takeaway = artifacts?.takeaway
+  const reflection_candidate = artifacts?.reflection_candidate
+  const memory_candidates = artifacts?.memory_candidates
+  const hasBuilder = !!builderArtifact
+  const hasReflection = isRealReflection(reflection_candidate?.prompt)
+  const hasMemories = memory_candidates && memory_candidates.length > 0
+  const hasTakeaway = !!takeaway?.trim()
+  const realArtifactCoReviewEnabled = isCoReviewRealArtifactEnabled()
+  const builderArtifactId = builderArtifact && realArtifactCoReviewEnabled
+    ? buildCoreviewRealArtifactId(builderArtifact)
+    : null
+  const showDomArtifactCoReview = Boolean(
+    realArtifactCoReviewEnabled
+    && !hasCoReviewFixture
+    && !builderArtifactId
+    && (hasTakeaway || hasReflection || hasMemories),
+  )
   const coReview = useArtifactCoReview({
     sessionId: sessionId ?? null,
     normalSessionId: normalSessionId ?? null,
@@ -75,6 +96,26 @@ export function PresenceArtifactPanel({
     artifactRoot: fixtureRoot,
     featureEnabled: hasCoReviewFixture,
     transport: coReviewTransport,
+  })
+  const builderArtifactCoReview = useArtifactCoReview({
+    sessionId: sessionId ?? null,
+    normalSessionId: normalSessionId ?? null,
+    threadId: threadId ?? null,
+    artifactId: builderArtifactId,
+    artifactRoot: builderArtifactRoot,
+    featureEnabled: Boolean(builderArtifactId),
+    transport: coReviewTransport,
+    missingCanvasReason: "real_artifact_canvas_unavailable",
+  })
+  const domArtifactCoReview = useArtifactCoReview({
+    sessionId: sessionId ?? null,
+    normalSessionId: normalSessionId ?? null,
+    threadId: threadId ?? null,
+    artifactId: showDomArtifactCoReview ? "coreview-real-artifact-dom-panel" : null,
+    artifactRoot: domArtifactRoot,
+    featureEnabled: showDomArtifactCoReview,
+    transport: coReviewTransport,
+    missingCanvasReason: "dom_artifact_requires_safe_renderer",
   })
 
   // Phase lifecycle
@@ -116,7 +157,7 @@ export function PresenceArtifactPanel({
       clearTimeout(autoCollapseRef.current)
       autoCollapseRef.current = null
     }
-    if (phase === "visible" && isVoiceMode && !builderArtifact && !hasBuilderLibrary && !hasCoReviewFixture) {
+    if (phase === "visible" && isVoiceMode && !builderArtifact && !hasBuilderLibrary && !hasCoReviewFixture && !showDomArtifactCoReview) {
       autoCollapseRef.current = setTimeout(() => {
         autoCollapseRef.current = null
         onDismiss()
@@ -125,7 +166,7 @@ export function PresenceArtifactPanel({
     return () => {
       if (autoCollapseRef.current) clearTimeout(autoCollapseRef.current)
     }
-  }, [phase, isVoiceMode, onDismiss, builderArtifact, hasBuilderLibrary, hasCoReviewFixture])
+  }, [phase, isVoiceMode, onDismiss, builderArtifact, hasBuilderLibrary, hasCoReviewFixture, showDomArtifactCoReview])
 
   const handleDismiss = useCallback(() => {
     haptic("light")
@@ -144,14 +185,7 @@ export function PresenceArtifactPanel({
 
   if ((!artifacts && !builderArtifact && !hasBuilderLibrary && !hasCoReviewFixture) || phase === "hidden") return null
 
-  const takeaway = artifacts?.takeaway
-  const reflection_candidate = artifacts?.reflection_candidate
-  const memory_candidates = artifacts?.memory_candidates
   const builderFiles = getBuilderArtifactFiles(builderArtifact)
-  const hasBuilder = !!builderArtifact
-  const hasReflection = isRealReflection(reflection_candidate?.prompt)
-  const hasMemories = memory_candidates && memory_candidates.length > 0
-  const hasTakeaway = !!takeaway?.trim()
   const hasContent = hasBuilder || hasBuilderLibrary || hasTakeaway || hasReflection || hasMemories || hasCoReviewFixture
 
   if (!hasContent) return null
@@ -257,11 +291,21 @@ export function PresenceArtifactPanel({
 
         {hasBuilder && builderArtifact && (
           <div
+            ref={setBuilderArtifactRoot}
             className={cn(
-              "mb-4 transition-all duration-[1400ms] ease-out",
+              "relative mb-4 transition-all duration-[1400ms] ease-out",
               revealStep >= 1 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
             )}
           >
+            {builderArtifactId && (
+              <CoreviewRealArtifactCanvas
+                artifactId={builderArtifactId}
+                builderArtifact={builderArtifact}
+                sessionId={sessionId}
+                normalSessionId={normalSessionId}
+              />
+            )}
+
             {/* Type badge — centered */}
             <div className="text-center mb-3">
               <span
@@ -363,6 +407,20 @@ export function PresenceArtifactPanel({
                 })}
               </div>
             )}
+
+            {builderArtifactId && (
+              <div className="mt-4" onClick={(e) => e.stopPropagation()}>
+                <CoReviewControls
+                  state={builderArtifactCoReview.state}
+                  transportStatus={builderArtifactCoReview.transportStatus}
+                  onStart={() => { void builderArtifactCoReview.startReview() }}
+                  onStop={() => { void builderArtifactCoReview.stopReview() }}
+                  canStart={builderArtifactCoReview.canStart}
+                  featureEnabled={builderArtifactCoReview.enabled}
+                  className="justify-center"
+                />
+              </div>
+            )}
           </div>
         )}
 
@@ -444,152 +502,168 @@ export function PresenceArtifactPanel({
           </div>
         )}
 
-        {/* === TAKEAWAY === emerges like a fading-in constellation */}
-        {hasTakeaway && (
-          <div
-            className={cn(
-              "transition-all duration-[1400ms] ease-out",
-              revealStep >= 1 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
-            )}
-          >
-            <p
-              className="font-cormorant text-[17px] leading-[1.75] font-light text-center"
-              style={{
-                color: revealStep >= 1 ? 'var(--cosmic-text-strong)' : 'transparent',
-                textShadow: isActive
-                  ? `0 0 24px color-mix(in srgb, ${bloomColor} 22%, transparent)`
-                  : "none",
-                transition: 'color 1.4s ease, text-shadow 2s ease',
-              }}
-            >
-              {takeaway}
-            </p>
-          </div>
-        )}
-
-        {/* === DIVIDER === thin luminous line, like a nebula filament */}
-        {hasTakeaway && (hasReflection || hasMemories) && (
-          <div
-            className={cn(
-              "mx-auto my-4 transition-all duration-[1200ms] ease-out",
-              revealStep >= 2 ? "opacity-100 scale-x-100" : "opacity-0 scale-x-0"
-            )}
-            style={{
-              width: "32px",
-              height: "1px",
-              background: `linear-gradient(90deg, transparent, color-mix(in srgb, ${bloomColor} 25%, var(--cosmic-text-faint)), transparent)`,
-              transformOrigin: "center",
-            }}
-          />
-        )}
-
-        {/* === REFLECTION === the invitation, slightly brighter, interactive */}
-        {hasReflection && (
-          <div
-            className={cn(
-              "transition-all duration-[1400ms] ease-out",
-              revealStep >= 3 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
-            )}
-          >
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                handleReflectionTap()
-              }}
-              disabled={reflectionTapped || !onReflectionTap}
+        <div ref={setDomArtifactRoot}>
+          {/* === TAKEAWAY === emerges like a fading-in constellation */}
+          {hasTakeaway && (
+            <div
               className={cn(
-                "w-full text-center transition-all duration-700",
-                !reflectionTapped && onReflectionTap
-                  ? "cursor-pointer hover:scale-[1.01] active:scale-[0.99]"
-                  : "cursor-default",
-                reflectionTapped && "opacity-40"
+                "transition-all duration-[1400ms] ease-out",
+                revealStep >= 1 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
               )}
             >
               <p
-                className="font-cormorant text-[15px] italic leading-[1.7] font-light"
+                className="font-cormorant text-[17px] leading-[1.75] font-light text-center"
                 style={{
-                  color: reflectionTapped ? 'var(--cosmic-text-whisper)' : 'var(--cosmic-text-strong)',
-                  textShadow: !reflectionTapped && isActive
-                    ? `0 0 20px color-mix(in srgb, ${bloomColor} 18%, transparent)`
+                  color: revealStep >= 1 ? 'var(--cosmic-text-strong)' : 'transparent',
+                  textShadow: isActive
+                    ? `0 0 24px color-mix(in srgb, ${bloomColor} 22%, transparent)`
                     : "none",
-                  transition: "color 0.7s ease, text-shadow 1s ease",
+                  transition: 'color 1.4s ease, text-shadow 2s ease',
                 }}
               >
-                {reflection_candidate.prompt}
+                {takeaway}
               </p>
-              {reflection_candidate.why && !reflectionTapped && (
-                <p className="mt-1.5 text-[10px] tracking-[0.08em] font-light" style={{ color: 'var(--cosmic-text-faint)' }}>
-                  {reflection_candidate.why}
-                </p>
-              )}
-              {!reflectionTapped && onReflectionTap && (
-                <span
-                  className="inline-block mt-2.5 text-[9px] tracking-[0.14em] uppercase transition-colors duration-700"
-                  style={{ color: `color-mix(in srgb, ${bloomColor} 40%, var(--cosmic-text-faint))` }}
-                >
-                  tap to reflect
-                </span>
-              )}
-              {reflectionTapped && (
-                <span className="inline-block mt-1.5 text-[9px] tracking-[0.14em] uppercase" style={{ color: 'var(--cosmic-text-faint)' }}>
-                  sent
-                </span>
-              )}
-            </button>
-          </div>
-        )}
+            </div>
+          )}
 
-        {/* === MEMORY CONSTELLATION === tiny stars, each a memory */}
-        {hasMemories && (
-          <div
-            className={cn(
-              "mt-4 flex justify-center gap-2 flex-wrap transition-all duration-[1200ms] ease-out",
-              revealStep >= 4 ? "opacity-100" : "opacity-0"
-            )}
-          >
-            {memory_candidates.slice(0, 5).map((mem, i) => (
-              <span
-                key={i}
-                className={cn(
-                  "group/mem relative text-[9px] tracking-[0.12em] lowercase px-2 py-[3px]",
-                  "transition-all duration-[800ms] cursor-default",
-                )}
-                style={{
-                  color: 'var(--cosmic-text-muted)',
-                  animationDelay: `${i * 200}ms`,
+          {/* === DIVIDER === thin luminous line, like a nebula filament */}
+          {hasTakeaway && (hasReflection || hasMemories) && (
+            <div
+              className={cn(
+                "mx-auto my-4 transition-all duration-[1200ms] ease-out",
+                revealStep >= 2 ? "opacity-100 scale-x-100" : "opacity-0 scale-x-0"
+              )}
+              style={{
+                width: "32px",
+                height: "1px",
+                background: `linear-gradient(90deg, transparent, color-mix(in srgb, ${bloomColor} 25%, var(--cosmic-text-faint)), transparent)`,
+                transformOrigin: "center",
+              }}
+            />
+          )}
+
+          {/* === REFLECTION === the invitation, slightly brighter, interactive */}
+          {hasReflection && (
+            <div
+              className={cn(
+                "transition-all duration-[1400ms] ease-out",
+                revealStep >= 3 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
+              )}
+            >
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  handleReflectionTap()
                 }}
-                onClick={(e) => e.stopPropagation()}
+                disabled={reflectionTapped || !onReflectionTap}
+                className={cn(
+                  "w-full text-center transition-all duration-700",
+                  !reflectionTapped && onReflectionTap
+                    ? "cursor-pointer hover:scale-[1.01] active:scale-[0.99]"
+                    : "cursor-default",
+                  reflectionTapped && "opacity-40"
+                )}
               >
-                {mem.memory || mem.category}
-                {/* Approve/reject on hover — tiny cosmic dust */}
-                {(onMemoryApprove || onMemoryReject) && (
-                  <span className="hidden group-hover/mem:inline-flex items-center gap-0.5 ml-1">
-                    {onMemoryApprove && (
-                      <button
-                        onClick={() => { haptic("light"); onMemoryApprove(i) }}
-                        className="transition-colors hover:text-[var(--cosmic-text)]"
-                        style={{ color: 'var(--cosmic-text-faint)' }}
-                        aria-label="Save memory"
-                      >
-                        ✓
-                      </button>
-                    )}
-                    {onMemoryReject && (
-                      <button
-                        onClick={() => { haptic("light"); onMemoryReject(i) }}
-                        className="transition-colors hover:text-[var(--cosmic-text-muted)]"
-                        style={{ color: 'var(--cosmic-text-faint)' }}
-                        aria-label="Skip memory"
-                      >
-                        ×
-                      </button>
-                    )}
+                <p
+                  className="font-cormorant text-[15px] italic leading-[1.7] font-light"
+                  style={{
+                    color: reflectionTapped ? 'var(--cosmic-text-whisper)' : 'var(--cosmic-text-strong)',
+                    textShadow: !reflectionTapped && isActive
+                      ? `0 0 20px color-mix(in srgb, ${bloomColor} 18%, transparent)`
+                      : "none",
+                    transition: "color 0.7s ease, text-shadow 1s ease",
+                  }}
+                >
+                  {reflection_candidate.prompt}
+                </p>
+                {reflection_candidate.why && !reflectionTapped && (
+                  <p className="mt-1.5 text-[10px] tracking-[0.08em] font-light" style={{ color: 'var(--cosmic-text-faint)' }}>
+                    {reflection_candidate.why}
+                  </p>
+                )}
+                {!reflectionTapped && onReflectionTap && (
+                  <span
+                    className="inline-block mt-2.5 text-[9px] tracking-[0.14em] uppercase transition-colors duration-700"
+                    style={{ color: `color-mix(in srgb, ${bloomColor} 40%, var(--cosmic-text-faint))` }}
+                  >
+                    tap to reflect
                   </span>
                 )}
-              </span>
-            ))}
-          </div>
-        )}
+                {reflectionTapped && (
+                  <span className="inline-block mt-1.5 text-[9px] tracking-[0.14em] uppercase" style={{ color: 'var(--cosmic-text-faint)' }}>
+                    sent
+                  </span>
+                )}
+              </button>
+            </div>
+          )}
+
+          {/* === MEMORY CONSTELLATION === tiny stars, each a memory */}
+          {hasMemories && (
+            <div
+              className={cn(
+                "mt-4 flex justify-center gap-2 flex-wrap transition-all duration-[1200ms] ease-out",
+                revealStep >= 4 ? "opacity-100" : "opacity-0"
+              )}
+            >
+              {memory_candidates.slice(0, 5).map((mem, i) => (
+                <span
+                  key={i}
+                  className={cn(
+                    "group/mem relative text-[9px] tracking-[0.12em] lowercase px-2 py-[3px]",
+                    "transition-all duration-[800ms] cursor-default",
+                  )}
+                  style={{
+                    color: 'var(--cosmic-text-muted)',
+                    animationDelay: `${i * 200}ms`,
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {mem.memory || mem.category}
+                  {/* Approve/reject on hover — tiny cosmic dust */}
+                  {(onMemoryApprove || onMemoryReject) && (
+                    <span className="hidden group-hover/mem:inline-flex items-center gap-0.5 ml-1">
+                      {onMemoryApprove && (
+                        <button
+                          onClick={() => { haptic("light"); onMemoryApprove(i) }}
+                          className="transition-colors hover:text-[var(--cosmic-text)]"
+                          style={{ color: 'var(--cosmic-text-faint)' }}
+                          aria-label="Save memory"
+                        >
+                          ✓
+                        </button>
+                      )}
+                      {onMemoryReject && (
+                        <button
+                          onClick={() => { haptic("light"); onMemoryReject(i) }}
+                          className="transition-colors hover:text-[var(--cosmic-text-muted)]"
+                          style={{ color: 'var(--cosmic-text-faint)' }}
+                          aria-label="Skip memory"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </span>
+                  )}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {showDomArtifactCoReview && (
+            <div className="mt-4" onClick={(e) => e.stopPropagation()}>
+              <CoReviewControls
+                state={domArtifactCoReview.state}
+                transportStatus={domArtifactCoReview.transportStatus}
+                onStart={() => { void domArtifactCoReview.startReview() }}
+                onStop={() => { void domArtifactCoReview.stopReview() }}
+                canStart={domArtifactCoReview.canStart}
+                featureEnabled={domArtifactCoReview.enabled}
+                className="justify-center"
+              />
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )

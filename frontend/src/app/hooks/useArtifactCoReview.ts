@@ -21,6 +21,7 @@ export interface UseArtifactCoReviewOptions {
   artifactRoot?: ParentNode | null
   featureEnabled?: boolean
   transport?: CoReviewMediaTransport
+  missingCanvasReason?: string
 }
 
 export function useArtifactCoReview({
@@ -31,6 +32,7 @@ export function useArtifactCoReview({
   artifactRoot = null,
   featureEnabled = isCoReviewEnabled(),
   transport,
+  missingCanvasReason,
 }: UseArtifactCoReviewOptions) {
   const transportRef = useRef<CoReviewMediaTransport>(transport ?? new AudioWebSocketUnsupportedTransport())
   const [state, setState] = useState<CoReviewSessionState>(() => initialCoReviewState(transportRef.current.kind))
@@ -68,6 +70,7 @@ export function useArtifactCoReview({
       root: artifactRoot,
       artifactId,
       mode: requestedMode,
+      missingCanvasReason,
     })
 
     logCoreviewBreadcrumb("canvasFound", {
@@ -95,7 +98,7 @@ export function useArtifactCoReview({
     }
     logCoreviewBreadcrumb("coReviewStateAfterStart", safeCoReviewTelemetryFromState(nextState))
     return nextState
-  }, [artifactId, artifactRoot, featureEnabled, normalSessionId, sessionId, state, threadId])
+  }, [artifactId, artifactRoot, featureEnabled, missingCanvasReason, normalSessionId, sessionId, state, threadId])
 
   const stopReview = useCallback(async () => {
     return machineRef.current.stopCoReview()
