@@ -140,6 +140,75 @@ async def test_done_phase_is_projected_to_browser_activity() -> None:
 
 
 @pytest.mark.anyio
+async def test_out_of_order_paired_progress_events_are_retained_in_sequence_order() -> None:
+    worker = BuilderCanvasWorker()
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "sequence": 2,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "researching"},
+        }
+    )
+
+    delivered = await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "sequence": 1,
+            "event_name": "updates",
+            "data": {
+                "agent": {
+                    "messages": [{
+                        "tool_calls": [{"name": "builder_web_search", "args": {"query": "private"}}],
+                    }],
+                },
+            },
+        }
+    )
+
+    assert delivered == 0
+    events = await worker.recent_events("parent-1")
+    assert [event["sequence"] for event in events] == [1, 2]
+    assert events[0]["activity"] == {"kind": "tool_activity", "category": "research", "label": "Searching"}
+    assert events[1]["activity"] == {"kind": "phase", "phase": "researching", "label": "Researching"}
+
+
+@pytest.mark.anyio
+async def test_duplicate_out_of_order_progress_event_is_dropped() -> None:
+    worker = BuilderCanvasWorker()
+    payload = {
+        "parent_thread_id": "parent-1",
+        "task_id": "task-1",
+        "run_id": "run-1",
+        "sequence": 1,
+        "event_name": "custom",
+        "data": {"name": "phase", "phase": "researching"},
+    }
+    await worker.publish_progress(payload)
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "sequence": 2,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "drafting"},
+        }
+    )
+
+    delivered = await worker.publish_progress(payload)
+
+    assert delivered == 0
+    events = await worker.recent_events("parent-1")
+    assert [event["sequence"] for event in events] == [1, 2]
+    assert len(events) == 2
+
+
+@pytest.mark.anyio
 async def test_canvas_logs_terminal_artifact_presence(caplog) -> None:
     caplog.set_level(logging.INFO)
     worker = BuilderCanvasWorker()

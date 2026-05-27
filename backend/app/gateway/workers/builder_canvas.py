@@ -222,6 +222,12 @@ class BuilderCanvasWorker:
             return False
         return any(item["kind"] == "terminal" for item in self._histories.get(key, ()))
 
+    def _is_duplicate_event_locked(self, event: dict[str, Any], key: tuple[str, str, str]) -> bool:
+        event_id = event.get("event_id")
+        if not isinstance(event_id, str) or not event_id:
+            return False
+        return any(item.get("event_id") == event_id for item in self._histories.get(key, ()))
+
     def _drop_reason_locked(self, event: dict[str, Any], key: tuple[str, str, str]) -> str | None:
         if self._is_replaced_run_locked(event, key):
             # Once another task/run is visible, delayed terminal deliveries
@@ -231,6 +237,8 @@ class BuilderCanvasWorker:
             return "run_already_terminal"
         if self._is_duplicate_terminal_locked(event, key):
             return "duplicate_terminal"
+        if self._is_duplicate_event_locked(event, key):
+            return "duplicate_event"
         return None
 
     def _accept_event_locked(self, event: dict[str, Any], key: tuple[str, str, str]) -> bool:
@@ -268,13 +276,16 @@ class BuilderCanvasWorker:
         self._active[parent_thread_id] = (task_id, run_id)
         history = self._histories.setdefault(key, deque(maxlen=self._history_size))
         history.append(event)
+        sorted_history = sorted(history, key=lambda item: int(item.get("sequence") or 0))
+        history.clear()
+        history.extend(sorted_history)
         if event["kind"] == "terminal":
             self._terminal_at[key] = time.monotonic()
 
     def _event_sequence_locked(self, event: dict[str, Any], key: tuple[str, str, str]) -> int | None:
         previous = self._last_sequence.get(key, 0)
         sequence = int(event["sequence"])
-        if event["kind"] != "terminal" and sequence <= previous:
+        if event["kind"] != "terminal" and sequence <= previous - self._history_size:
             logger.info(
                 "Builder canvas: stale sequence dropped key=%s sequence=%s prior=%s",
                 key,
