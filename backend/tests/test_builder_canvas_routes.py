@@ -199,6 +199,40 @@ async def test_snapshot_selects_latest_task_by_last_updated_at(app: FastAPI, mon
 
 
 @pytest.mark.anyio
+async def test_snapshot_prefers_running_task_over_newer_terminal_task(app: FastAPI, monkeypatch) -> None:
+    async def tasks(_parent: str):
+        return [
+            {
+                "agent_name": "sophia_builder",
+                "task_id": "task-old",
+                "run_id": "run-old",
+                "status": "success",
+                "last_updated_at": "2026-05-25T10:05:00Z",
+            },
+            {
+                "agent_name": "sophia_builder",
+                "task_id": "task-new",
+                "run_id": "run-new",
+                "status": "running",
+                "last_updated_at": "2026-05-25T10:03:00Z",
+            },
+        ]
+
+    async def status(_task: str, _run: str, _fallback: str | None):
+        return "running"
+
+    monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", tasks)
+    monkeypatch.setattr(builder_canvas, "_native_run_status", status)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/sophia/user-1/threads/parent-1/builder-canvas/snapshot")
+
+    assert response.status_code == 200
+    assert response.json()["active_task"]["task_id"] == "task-new"
+    assert response.json()["active_task"]["run_id"] == "run-new"
+
+
+@pytest.mark.anyio
 async def test_snapshot_includes_terminal_completion_artifact_data(app: FastAPI, monkeypatch) -> None:
     async def tasks(_parent: str):
         return [

@@ -39,6 +39,16 @@ class BuilderCanvasCancelResponse(BaseModel):
 
 
 _TERMINAL_CANVAS_STATUSES = {"completed", "failed", "cancelled"}
+_TERMINAL_TASK_STATUSES = {
+    "success",
+    "completed",
+    "error",
+    "failed",
+    "timeout",
+    "timed_out",
+    "interrupted",
+    "cancelled",
+}
 
 
 def _langgraph_url() -> str:
@@ -72,13 +82,19 @@ async def _parent_builder_tasks(parent_thread_id: str) -> list[dict[str, Any]]:
     ]
 
 
+def _task_updated_at(task: dict[str, Any]) -> str:
+    return str(task.get("last_updated_at") or task.get("updated_at") or task.get("created_at") or "")
+
+
+def _is_terminal_task(task: dict[str, Any]) -> bool:
+    return str(task.get("status") or "").lower() in _TERMINAL_TASK_STATUSES
+
+
 def _latest_builder_task(tasks: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not tasks:
         return None
-    return max(
-        tasks,
-        key=lambda task: str(task.get("last_updated_at") or task.get("updated_at") or task.get("created_at") or ""),
-    )
+    active_tasks = [task for task in tasks if not _is_terminal_task(task)]
+    return max(active_tasks or tasks, key=_task_updated_at)
 
 
 async def _authorized_task(parent_thread_id: str, task_id: str, run_id: str) -> dict[str, Any]:
