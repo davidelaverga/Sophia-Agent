@@ -155,3 +155,105 @@ def test_app_config_failure_falls_through_to_default(monkeypatch) -> None:
     )
     assert vision_gate.supports_vision("claude-sonnet-4-6") is True
     assert vision_gate.supports_vision("gpt-4-unknown") is False
+
+
+# ─── alias-lookup regressions (Codex P2 on PR #132) ──────────────────────────
+
+
+def _patch_app_config_models(monkeypatch, models: list[ModelConfig]) -> None:
+    """Wire a fake AppConfig with the given ModelConfig list.
+
+    ``AppConfig.get_model_config`` only matches on ``name``, so the
+    helper preserves that semantic for the ``by_name`` lookup; the
+    secondary ``.model`` scan in vision_gate then walks ``.models``.
+    """
+    app = SimpleNamespace(
+        models=models,
+        get_model_config=lambda name: next(
+            (m for m in models if m.name == name), None
+        ),
+    )
+    monkeypatch.setattr(
+        "deerflow.config.app_config.get_app_config",
+        lambda: app,
+    )
+
+
+def test_alias_entry_explicit_true_enables_unknown_model(monkeypatch) -> None:
+    """Config alias `- name: foo\\n    model: bar` with supports_vision=true
+    must enable vision when the caller passes ``bar`` (not ``foo``)."""
+    aliased = ModelConfig(
+        name="my-custom-vision-alias",
+        use="langchain_anthropic:ChatAnthropic",
+        model="some-future-vision-model",
+        supports_vision=True,
+    )
+    _patch_app_config_models(monkeypatch, [aliased])
+
+    # Caller passed the provider model string, not the config name.
+    assert vision_gate.supports_vision("some-future-vision-model") is True, (
+        "Builder's _resolve_builder_model_name returns model_cfg.model, "
+        "not model_cfg.name. The gate must scan by .model so operator "
+        "overrides on aliased entries are honored."
+    )
+
+
+def test_alias_entry_explicit_false_disables_default_model(monkeypatch) -> None:
+    """Config alias targeting a default-set model with supports_vision=false
+    must beat the fallback — operator's explicit disable wins."""
+    aliased_disable = ModelConfig(
+        name="claude-sonnet-aliased",
+        use="langchain_anthropic:ChatAnthropic",
+        model="claude-sonnet-4-6",
+        supports_vision=False,
+    )
+    _patch_app_config_models(monkeypatch, [aliased_disable])
+
+    # Without the alias lookup, this would return True via the default
+    # set (claude-sonnet-4-6 is in _DEFAULT_VISION_MODELS), masking the
+    # operator's explicit disable.
+    assert vision_gate.supports_vision("claude-sonnet-4-6") is False, (
+        "Operator's explicit supports_vision=false on an aliased entry "
+        "must beat the default set — otherwise the fallback silently "
+        "overrides operator intent."
+    )
+
+
+def test_name_match_wins_over_alias_match(monkeypatch) -> None:
+    """If two entries match (one by name, one by .model), the name match
+    wins. That's the explicit address; the .model match is the fallback."""
+    by_name_entry = ModelConfig(
+        name="claude-sonnet-4-6",
+        use="langchain_anthropic:ChatAnthropic",
+        model="claude-sonnet-4-6",
+        supports_vision=True,
+    )
+    by_model_entry = ModelConfig(
+        name="aliased-sonnet",
+        use="langchain_anthropic:ChatAnthropic",
+        model="claude-sonnet-4-6",
+        supports_vision=False,
+    )
+    # Order shouldn't matter — name match must win regardless.
+    _patch_app_config_models(monkeypatch, [by_model_entry, by_name_entry])
+
+    assert vision_gate.supports_vision("claude-sonnet-4-6") is True
+
+
+def test_alias_entry_omitting_supports_vision_falls_through(monkeypatch) -> None:
+    """An alias entry that omits supports_vision must NOT mask the
+    default set — same defaulted-vs-explicit distinction as the
+    name-match path."""
+    aliased_omitted = ModelConfig(
+        name="claude-sonnet-aliased",
+        use="langchain_anthropic:ChatAnthropic",
+        model="claude-sonnet-4-6",
+        # supports_vision omitted on purpose
+    )
+    _patch_app_config_models(monkeypatch, [aliased_omitted])
+
+    assert vision_gate.supports_vision("claude-sonnet-4-6") is True, (
+        "Alias entry omitted supports_vision (defaulted to False). The "
+        "gate must treat that as 'not configured' and fall through to "
+        "the default set, just like it does for the name-match path."
+    )
