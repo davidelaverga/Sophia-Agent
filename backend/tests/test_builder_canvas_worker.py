@@ -264,6 +264,31 @@ async def test_terminal_only_new_task_replaces_prior_active_task() -> None:
 
 
 @pytest.mark.anyio
+async def test_unobserved_terminal_for_same_active_task_does_not_replace_current_run() -> None:
+    worker = BuilderCanvasWorker()
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-new",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "drafting"},
+        }
+    )
+
+    delivered = await worker.publish_completion(
+        {"thread_id": "parent-1", "task_id": "task-1", "run_id": "run-old", "status": "success"}
+    )
+
+    assert delivered == 0
+    events = await worker.recent_events("parent-1")
+    assert len(events) == 1
+    assert events[0]["kind"] == "progress"
+    assert events[0]["run_id"] == "run-new"
+
+
+@pytest.mark.anyio
 async def test_expired_replaced_run_cannot_reclaim_active_seed() -> None:
     worker = BuilderCanvasWorker(terminal_ttl_seconds=-1)
     await worker.publish_progress(

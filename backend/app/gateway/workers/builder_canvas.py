@@ -180,6 +180,9 @@ class BuilderCanvasWorker:
         self._next_run_order += 1
         orders[run_key] = self._next_run_order
 
+    def _has_observed_run_locked(self, parent_thread_id: str, task_id: str, run_id: str) -> bool:
+        return (task_id, run_id) in self._run_order.get(parent_thread_id, {})
+
     def _retire_run_locked(self, parent_thread_id: str, task_id: str, run_id: str) -> None:
         run_key = (task_id, run_id)
         retired = self._retired_run_keys[parent_thread_id]
@@ -209,6 +212,8 @@ class BuilderCanvasWorker:
         if active_order is not None and event_order is not None and event_order < active_order:
             return True
         if event["kind"] == "terminal":
+            if active[0] == task_id and not event.get("_run_observed_before_publish"):
+                return True
             return False
         return key in self._histories
 
@@ -293,6 +298,12 @@ class BuilderCanvasWorker:
         delivered = 0
         async with self._lock:
             self._expire_locked()
+            observed_before_publish = self._has_observed_run_locked(
+                parent_thread_id,
+                event["task_id"],
+                event["run_id"],
+            )
+            event = {**event, "_run_observed_before_publish": observed_before_publish}
             self._observe_run_locked(parent_thread_id, event["task_id"], event["run_id"])
             sequence = self._event_sequence_locked(event, key)
             if sequence is None:
@@ -305,6 +316,7 @@ class BuilderCanvasWorker:
             self._log_event_decision("accepted", event)
             event = dict(event)
             event.pop("_source_event_name", None)
+            event.pop("_run_observed_before_publish", None)
             self._record_event_locked(event, key, sequence)
             queues = list(self._subscribers.get(parent_thread_id, []))
         for queue in queues:
