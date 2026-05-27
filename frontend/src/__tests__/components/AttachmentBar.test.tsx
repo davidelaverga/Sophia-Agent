@@ -196,7 +196,13 @@ describe('AttachmentBar — Codex P2 per-turn cap', () => {
     expect(useAttachmentsStore.getState().items).toHaveLength(0);
   });
 
-  it('removing an uploading chip does NOT fire DELETE (nothing to delete yet)', () => {
+  it('removing an uploading chip transitions it to "deleting" (Codex P2 — keeps send-gate honest)', () => {
+    // Critical: the chip MUST stay in the store while the upload
+    // is in flight, otherwise selectHasUploadsInFlight stops
+    // gating the composer and the user could submit a turn while
+    // the upload is still writing to disk. uploadOneFile will see
+    // the "deleting" status when its fetch settles and DELETE the
+    // resulting file. See Codex P2 #2 on PR #132.
     useAttachmentsStore.getState().add({
       clientId: 'pending-1',
       filename: 'inflight.png',
@@ -211,8 +217,14 @@ describe('AttachmentBar — Codex P2 per-turn cap', () => {
     const removeBtn = screen.getByLabelText('Remove inflight.png');
     fireEvent.click(removeBtn);
 
+    // No DELETE fires here (file isn't on disk yet — uploadOneFile
+    // will fire it after the upload settles).
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(useAttachmentsStore.getState().items).toHaveLength(0);
+    // Chip stays in store with status "deleting" so the send-gate
+    // (selectHasUploadsInFlight) keeps composing locked.
+    const items = useAttachmentsStore.getState().items;
+    expect(items).toHaveLength(1);
+    expect(items[0]?.status).toBe('deleting');
   });
 
   it('removing an errored chip does NOT fire DELETE (no file on disk to remove)', () => {
@@ -262,6 +274,92 @@ describe('AttachmentBar — Codex P2 per-turn cap', () => {
     // Important: chip is NOT auto-removed. The user sees the failure
     // and can retry; the file is still on disk and we'd rather show
     // the inconsistency than silently lose track of it.
+  });
+
+  it('upload-then-discard race: file that lands during a discard gets DELETEd (Codex P2)', async () => {
+    // Codex P2 #2 PR #132 race scenario: user picks a file → upload
+    // starts → user clicks × BEFORE upload finishes → upload then
+    // succeeds (bytes are on disk now) → uploadOneFile must see the
+    // "deleting" status and fire DELETE on the resulting file
+    // rather than silently marking it "uploaded".
+    let resolveUpload: ((value: Response) => void) | null = null;
+    const uploadPromise = new Promise<Response>((resolve) => {
+      resolveUpload = resolve;
+    });
+    const deleteResponse = new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+    const fetchMock = vi
+      .spyOn(global, 'fetch')
+      .mockImplementationOnce(() => uploadPromise)  // first call: POST /uploads
+      .mockResolvedValueOnce(deleteResponse);        // second call: DELETE /uploads/{name}
+
+    render(<AttachmentBar threadId="thread-Z" />);
+    const input = screen.getByTestId('attachment-bar-file-input') as HTMLInputElement;
+    dispatchFilesOnto(input, [makeFile('race.png')]);
+
+    // Upload is in flight — chip is "uploading".
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const itemsMid = useAttachmentsStore.getState().items;
+    expect(itemsMid).toHaveLength(1);
+    expect(itemsMid[0]?.status).toBe('uploading');
+
+    // User clicks × mid-upload.
+    fireEvent.click(screen.getByLabelText('Remove race.png'));
+    const itemsAfterDiscard = useAttachmentsStore.getState().items;
+    expect(itemsAfterDiscard[0]?.status).toBe('deleting');
+
+    // Now let the upload "land". uploadOneFile should see the
+    // "deleting" status, fire DELETE, then drop the chip.
+    resolveUpload!(
+      new Response(
+        JSON.stringify({ success: true, files: [{ filename: 'race.png', size: '1024' }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+
+    // Wait for all promise chains to settle.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // DELETE must have been fired with the correct URL.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [deleteUrl, deleteInit] = fetchMock.mock.calls[1] as [string, RequestInit | undefined];
+    expect(deleteUrl).toBe('/api/threads/thread-Z/uploads/race.png');
+    expect(deleteInit?.method).toBe('DELETE');
+
+    // Chip is gone — race is fully resolved.
+    expect(useAttachmentsStore.getState().items).toHaveLength(0);
+  });
+
+  it('upload-then-discard race where the upload fails just drops the chip (no DELETE)', async () => {
+    // Same race shape but the upload errors out before completion.
+    // No file ever landed on disk → no DELETE needed; the chip is
+    // just removed from the store.
+    let resolveUpload: ((value: Response) => void) | null = null;
+    const uploadPromise = new Promise<Response>((resolve) => {
+      resolveUpload = resolve;
+    });
+    const fetchMock = vi.spyOn(global, 'fetch').mockImplementationOnce(() => uploadPromise);
+
+    render(<AttachmentBar threadId="thread-Z" />);
+    const input = screen.getByTestId('attachment-bar-file-input') as HTMLInputElement;
+    dispatchFilesOnto(input, [makeFile('flaky.png')]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fireEvent.click(screen.getByLabelText('Remove flaky.png'));
+
+    // Upload errors out (5xx — no file on disk).
+    resolveUpload!(new Response('boom', { status: 503 }));
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Only the POST was fired; no DELETE needed because nothing
+    // landed on disk.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(useAttachmentsStore.getState().items).toHaveLength(0);
   });
 
   it('tags each accepted item with the threadId prop', () => {

@@ -160,73 +160,118 @@ function buildRegistration(
 }
 
 /**
- * DELETE the chip's underlying file from the backend uploads
- * directory and remove the chip from the store on success. Codex
- * P2 PR #132: without this, a "removed" file remains on disk and
- * ``start_builder_task._copy_parent_uploaded_images`` later picks
- * it up for the builder briefing — defeating the user's discard
- * intent.
- *
- * Behavior:
- * - status === "uploaded": fire DELETE first; on 2xx remove the
- *   chip; on any failure (HTTP error or thrown) flip the chip to
- *   ``error`` so the user knows the file is still on disk.
- * - status === "uploading" / "deleting": the upload (or a prior
- *   delete) is in flight — just remove the chip locally; the
- *   in-flight request will either succeed (orphaning the file —
- *   already known limitation, see ``hasUploadsInFlight`` gate) or
- *   fail.
- * - status === "error": nothing to delete, remove locally.
- *
- * The chip transitions to ``deleting`` while the DELETE is in
- * flight so the composer's ``hasUploadsInFlight`` gate keeps the
- * send button disabled — otherwise a user could submit a turn
- * while we're still trying to purge the discarded file.
+ * Fire ``DELETE`` against the backend uploads directory for a
+ * specific filename in a thread. Returns ``true`` on 2xx; ``false``
+ * on any failure. Doesn't touch the store — caller decides what
+ * to do with the result.
  */
-async function deleteAttachment(
+async function deleteUploadedFile(threadId: string, filename: string): Promise<boolean> {
+  try {
+    const res = await fetch(
+      `/api/threads/${encodeURIComponent(threadId)}/uploads/${encodeURIComponent(filename)}`,
+      { method: "DELETE" },
+    )
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Handle the × click on a chip.
+ *
+ * Codex P2 PR #132 (two-part):
+ *
+ * - status === "uploaded": file is already on disk. Transition the
+ *   chip to ``deleting`` (Loader2 visible, send-gate stays on),
+ *   fire DELETE, remove on 2xx; flip to ``error`` on failure so
+ *   the user knows the file is still on disk.
+ *
+ * - status === "uploading": THE UPLOAD IS STILL IN FLIGHT. We MUST
+ *   keep the chip in the store with a "still in flight" status
+ *   (``deleting``) so ``selectHasUploadsInFlight`` continues to
+ *   gate the composer. ``uploadOneFile`` will see the ``deleting``
+ *   status when its fetch settles and act accordingly: DELETE the
+ *   resulting file if upload succeeded, just drop the chip if it
+ *   failed. If we instead removed the chip here, the upload would
+ *   still complete (writing bytes to the sandbox) and the user
+ *   could submit a turn or start a builder task with an orphaned
+ *   file on disk that ``_copy_parent_uploaded_images`` would later
+ *   surface.
+ *
+ * - status === "deleting": already discarded; ignore the click.
+ *
+ * - status === "error": no file on disk; just remove locally.
+ */
+async function handleChipDiscard(
   item: PendingAttachment,
   threadId: string,
   remove: (clientId: string) => void,
   update: (clientId: string, patch: Partial<PendingAttachment>) => void,
 ): Promise<void> {
-  if (item.status !== "uploaded") {
+  if (item.status === "deleting") return
+  if (item.status === "error") {
     remove(item.clientId)
     return
   }
-  update(item.clientId, { status: "deleting", error: undefined })
-  try {
-    const res = await fetch(
-      `/api/threads/${encodeURIComponent(threadId)}/uploads/${encodeURIComponent(item.filename)}`,
-      { method: "DELETE" },
-    )
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "")
-      update(item.clientId, {
-        status: "error",
-        error: `Couldn't remove from server (${res.status}). ${errText.slice(0, 120)} The file may still be in this session's uploads.`,
-      })
-      return
-    }
-    remove(item.clientId)
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Network error"
-    update(item.clientId, {
-      status: "error",
-      error: `Couldn't remove from server: ${message}. The file may still be in this session's uploads.`,
-    })
+  if (item.status === "uploading") {
+    // Don't remove from the store — uploadOneFile will read the
+    // current status when its fetch settles and DELETE / drop as
+    // appropriate. Just flip the status so the gate stays honest
+    // and the chip spinner reflects the discard intent.
+    update(item.clientId, { status: "deleting", error: undefined })
+    return
   }
+  // status === "uploaded"
+  update(item.clientId, { status: "deleting", error: undefined })
+  const ok = await deleteUploadedFile(threadId, item.filename)
+  if (ok) {
+    remove(item.clientId)
+    return
+  }
+  update(item.clientId, {
+    status: "error",
+    error: "Couldn't remove from server. The file may still be in this session's uploads.",
+  })
 }
 
 /**
- * Upload one file and apply the resulting store patch. Centralizes
- * the "success → uploaded chip", "non-2xx → error chip", and
- * "thrown → network error chip" branches so the per-file loop
- * stays a flat for-iteration.
+ * Read the current store status for ``clientId`` — needed because
+ * the user can transition a chip to ``deleting`` (via × click)
+ * while its upload is still in flight. ``uploadOneFile`` re-reads
+ * after the fetch settles so it can DELETE the resulting file
+ * instead of silently marking it ``uploaded``. Codex P2 PR #132.
+ */
+function readChipStatus(clientId: string): PendingAttachment["status"] | null {
+  const item = useAttachmentsStore
+    .getState()
+    .items.find((entry) => entry.clientId === clientId)
+  return item ? item.status : null
+}
+
+/**
+ * Upload one file and apply the resulting store patch.
+ *
+ * Codex P2 PR #132 — race handling: between the time we POST and
+ * the time we get a response, the user can click × on the chip.
+ * ``handleChipDiscard`` flips the chip's status to ``deleting``
+ * but DOES NOT remove it (so ``selectHasUploadsInFlight`` keeps the
+ * send-gate on). When this function's fetch resolves, it checks
+ * the current chip status:
+ *
+ * - status is still ``uploading``: normal happy path → mark
+ *   ``uploaded`` (or ``error``).
+ * - status is ``deleting``: user discarded mid-upload. If the
+ *   upload succeeded (file now on disk), fire DELETE on it; either
+ *   way drop the chip from the store. Without this branch the file
+ *   would stay on disk and a later ``start_builder_task`` would
+ *   surface it to the builder despite the user's discard.
  */
 async function uploadOneFile(
   reg: Registration,
   threadId: string,
   update: (clientId: string, patch: Partial<PendingAttachment>) => void,
+  remove: (clientId: string) => void,
 ): Promise<void> {
   const fd = new FormData()
   fd.append("files", reg.file, reg.file.name)
@@ -237,6 +282,13 @@ async function uploadOneFile(
     )
     if (!res.ok) {
       const errText = await res.text().catch(() => "")
+      // Whether the chip is still ``uploading`` or already
+      // ``deleting``, there's nothing on disk to clean up — drop
+      // the chip if discarded, mark error otherwise.
+      if (readChipStatus(reg.item.clientId) === "deleting") {
+        remove(reg.item.clientId)
+        return
+      }
       update(reg.item.clientId, {
         status: "error",
         error: `Upload failed (${res.status}). ${errText.slice(0, 120)}`,
@@ -244,18 +296,39 @@ async function uploadOneFile(
       return
     }
     const data = (await res.json()) as UploadResponseShape
-    // Backend echoes one entry per uploaded file. We sent one, so
-    // we take the first; still match by filename to be safe.
     const echo =
       data.files?.find((entry) => entry.filename === reg.file.name) ??
       data.files?.[0]
     if (!echo) {
+      // Upload succeeded but echo missing — server's behavior is
+      // ambiguous. Safer to leave the chip in error than to assume
+      // anything about disk state.
+      if (readChipStatus(reg.item.clientId) === "deleting") {
+        remove(reg.item.clientId)
+        return
+      }
       update(reg.item.clientId, {
         status: "error",
         error: "Upload succeeded but server returned no file metadata.",
       })
       return
     }
+    // Upload landed. Did the user discard during the upload?
+    if (readChipStatus(reg.item.clientId) === "deleting") {
+      // File is on disk. Fire DELETE; on failure leave an error
+      // chip so the user knows the file is stranded.
+      const deleted = await deleteUploadedFile(threadId, echo.filename)
+      if (deleted) {
+        remove(reg.item.clientId)
+      } else {
+        update(reg.item.clientId, {
+          status: "error",
+          error: "Couldn't remove the uploaded file from the server. It may still be in this session's uploads.",
+        })
+      }
+      return
+    }
+    // Normal happy path.
     update(reg.item.clientId, {
       status: "uploaded",
       filename: echo.filename,
@@ -263,6 +336,10 @@ async function uploadOneFile(
       hasMarkdownConversion: Boolean(echo.markdown_file),
     })
   } catch (error) {
+    if (readChipStatus(reg.item.clientId) === "deleting") {
+      remove(reg.item.clientId)
+      return
+    }
     const message = error instanceof Error ? error.message : "Network error"
     update(reg.item.clientId, { status: "error", error: message })
   }
@@ -293,7 +370,7 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
         remove(item.clientId)
         return
       }
-      void deleteAttachment(item, threadId, remove, update)
+      void handleChipDiscard(item, threadId, remove, update)
     },
     [threadId, remove, update],
   )
@@ -329,10 +406,10 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
       // backend's per-thread sandbox dir from racing on parallel writes.
       for (const reg of registrations) {
         if (reg.skip) continue
-        await uploadOneFile(reg, threadId, update)
+        await uploadOneFile(reg, threadId, update, remove)
       }
     },
-    [threadId, add, update],
+    [threadId, add, update, remove],
   )
 
   const tooltip = isInteractive

@@ -27,14 +27,6 @@ import { getAuthenticatedUserId, getUserScopedAuthToken } from "../../../../../l
 import { getPrimaryGatewayUrl } from "../../../../_lib/gateway-url";
 import { userOwnsThread } from "../_lib/ownership";
 
-// Same allow-list as ``view_user_image`` / the prompt-injection
-// guard in ``builder_task._SAFE_UPLOADED_IMAGE_PATH``: alphanumerics,
-// dot, underscore, dash. Anything else can't be a legitimate
-// filename written by our gateway upload route (which itself
-// rejects path separators via ``Path(file.filename).name``), and
-// admitting other characters here would risk path traversal even
-// after ``encodeURIComponent``.
-const SAFE_FILENAME = /^[A-Za-z0-9._-]+$/;
 // Match the backend's resolver-level cap; longer values wouldn't
 // survive most filesystems and are almost certainly malformed.
 const MAX_FILENAME_LENGTH = 255;
@@ -43,15 +35,41 @@ function isSafeThreadId(value: string | undefined): value is string {
   return Boolean(value) && /^[a-zA-Z0-9_-]+$/.test(value!);
 }
 
+/**
+ * Mirrors the Python-side ``view_user_image._is_safe_filename``:
+ * reject empty / ``.`` / ``..`` / path separators / dotfiles /
+ * oversized / control chars. Anything else is a legitimate filename
+ * that the gateway upload route accepts.
+ *
+ * Codex P2 PR #132: an earlier version of this validator used a
+ * strict allow-list (``[A-Za-z0-9._-]+``) borrowed from the
+ * builder-side prompt-injection guards. That was overly strict for
+ * the DELETE path — a perfectly normal filename like
+ * ``Screenshot 2026-05-27 at 10.00.png`` (spaces) would be
+ * accepted by the upload route, then rejected by DELETE, leaving
+ * the chip stuck in error and the bytes stranded on disk. The
+ * DELETE allow-list now matches what the upload-side actually
+ * admits. The builder-side strict regex still protects the prompt
+ * downstream — a separate concern from this proxy's job of letting
+ * the user remove what they uploaded.
+ */
 function isSafeFilename(value: string | undefined): value is string {
   if (!value || value === "." || value === "..") return false;
-  // Reject hidden files (leading dot). Mirrors the Python-side
-  // ``view_user_image._is_safe_filename`` so the two stay consistent
-  // — a ``.DS_Store`` or ``.env`` should never be addressable here
-  // even though the character set otherwise allows ``.``.
-  if (value.startsWith(".")) return false;
   if (value.length > MAX_FILENAME_LENGTH) return false;
-  return SAFE_FILENAME.test(value);
+  // Path separators — POSIX and Windows.
+  if (value.includes("/") || value.includes("\\")) return false;
+  // Hidden files (leading dot) — consistent with
+  // ``view_user_image._is_safe_filename``; keeps ``.DS_Store`` /
+  // ``.env`` style names unaddressable.
+  if (value.startsWith(".")) return false;
+  // Control characters (0x00–0x1F + DEL 0x7F). Newlines/NUL in a
+  // filename are pathological and the upload route wouldn't have
+  // produced them; reject defensively.
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) return false;
+  }
+  return true;
 }
 
 export async function DELETE(

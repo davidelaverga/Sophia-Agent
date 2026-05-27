@@ -46,9 +46,56 @@ describe('DELETE /api/threads/[threadId]/uploads/[filename] proxy', () => {
     expect(res.status).toBe(400);
   });
 
-  it('rejects an unsafe filename with 400 (path separators, dotfiles, etc.)', async () => {
-    for (const filename of ['../passwd', 'a/b.png', '.hidden', '.', '..', 'with space.png', '<tag>.png']) {
-      // Each fresh: no fetch mocked, ownership check shouldn't fire.
+  it('rejects only filenames the gateway upload route would also reject (Codex P2)', async () => {
+    // Path separators + dotfiles + pseudo-paths. Anything else is a
+    // legitimate filename the gateway upload sanitizer accepts and
+    // we must let through (e.g. "Screenshot 2026-05-27 at 10.00.png"
+    // — spaces are fine; an earlier strict allow-list rejected them
+    // and left chips stuck in error).
+    const rejected = ['../passwd', 'a/b.png', 'a\\b.png', '.hidden', '.', '..'];
+    for (const filename of rejected) {
+      const fetchSpy = vi.spyOn(global, 'fetch');
+      const res = await DELETE(makeRequest(), {
+        params: Promise.resolve({ threadId: 'thread-abc', filename }),
+      });
+      expect(res.status).toBe(400);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('accepts filenames the upload route also accepts: spaces, parens, brackets', async () => {
+    // These are filesystem-legal and the gateway upload sanitizer
+    // admits them (it only normalizes path separators via
+    // ``Path(file.filename).name``). The DELETE proxy must too —
+    // otherwise the user can't delete files they uploaded.
+    const accepted = [
+      'Screenshot 2026-05-27 at 10.00.png',
+      'photo (1).png',
+      'weird<tag>.png',
+      "quote'inside.png",
+      'a.b-c_d.png',
+    ];
+    for (const filename of accepted) {
+      const fetchMock = mockOwnershipOk('thread-abc').mockResolvedValueOnce(
+        new Response(JSON.stringify({ success: true }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+      const res = await DELETE(makeRequest(), {
+        params: Promise.resolve({ threadId: 'thread-abc', filename }),
+      });
+      expect(res.status).toBe(200);
+      // 2 calls: ownership lookup + DELETE forward.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      fetchMock.mockRestore();
+    }
+  });
+
+  it('rejects filenames with control characters (newline/NUL/etc.) with 400', async () => {
+    const pathological = ['evil\n.png', 'a\0.png', 'tab\there.png'];
+    for (const filename of pathological) {
       const fetchSpy = vi.spyOn(global, 'fetch');
       const res = await DELETE(makeRequest(), {
         params: Promise.resolve({ threadId: 'thread-abc', filename }),
