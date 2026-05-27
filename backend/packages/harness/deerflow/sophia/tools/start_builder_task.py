@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -139,6 +140,18 @@ _TASK_TYPE_PREFIXES: dict[str, str] = {
 _BUILDER_COPY_IMAGE_EXTENSIONS: frozenset[str] = frozenset(
     {".jpg", ".jpeg", ".png", ".webp"}
 )
+
+
+# Strict allow-list for filenames that may be copied into the builder's
+# sandbox and later named in its briefing block. Codex P2 on PR #132:
+# the gateway upload sanitizer rejects path separators but not
+# newlines, angle brackets, or other characters that could break out
+# of the ``<uploaded_images>`` prompt tag. Filtering at this boundary
+# keeps dangerous names out of ``delegation_context`` entirely, so
+# even if the briefing renderer's own allow-list
+# (``builder_task._SAFE_UPLOADED_IMAGE_PATH``) were ever bypassed,
+# the underlying filesystem entries are already safe.
+_SAFE_COPY_FILENAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def _max_builder_image_bytes() -> int:
@@ -512,6 +525,15 @@ def _select_copyable_images(
         if not f.is_file() or f.name.startswith("."):
             continue
         if f.suffix.lower() not in _BUILDER_COPY_IMAGE_EXTENSIONS:
+            continue
+        if not _SAFE_COPY_FILENAME.match(f.name):
+            logger.warning(
+                "[Builder] skipping image with unsafe filename %r from parent thread %s — "
+                "name contains characters outside the [A-Za-z0-9._-] allow-list "
+                "(prompt-injection guard).",
+                f.name,
+                parent_thread_id,
+            )
             continue
         try:
             size = f.stat().st_size

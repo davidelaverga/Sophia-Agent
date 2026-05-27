@@ -18,15 +18,25 @@ vi.mock('../../app/api/_lib/gateway-url', () => ({
 
 import { POST } from '../../app/api/threads/[threadId]/uploads/route';
 
-function makeRequest(formData: FormData, options: { failFormData?: boolean } = {}): NextRequest {
+function makeRequest(
+  formData: FormData,
+  options: { failFormData?: boolean; contentLength?: string | null } = {},
+): NextRequest {
   // We bypass the real Request constructor here because round-tripping
   // a FormData containing File instances through `new Request({ body:
   // formData })` and then re-parsing via `.formData()` hangs in
   // vitest's undici-on-jsdom env (browser polyfill parses but with
-  // a slow blocking File reader). The route only calls `formData()`
-  // on the request, so this minimal shim is sufficient for the
-  // contract under test.
+  // a slow blocking File reader). The route calls `.headers.get()`
+  // (for the content-length pre-parse cap, Codex P2 PR #132) and
+  // `.formData()` on the request — this minimal shim covers both.
+  const headerMap = new Map<string, string>();
+  if (options.contentLength !== undefined && options.contentLength !== null) {
+    headerMap.set('content-length', options.contentLength);
+  }
   return {
+    headers: {
+      get: (name: string) => headerMap.get(name.toLowerCase()) ?? null,
+    },
     formData: async () => {
       if (options.failFormData) throw new Error('boom: bad multipart');
       return formData;
@@ -87,6 +97,14 @@ describe('/api/threads/[threadId]/uploads proxy', () => {
   });
 
   it('rejects empty file lists with 400', async () => {
+    // Ownership lookup runs before body parse now (Codex P2 PR #132) —
+    // mock it so the flow reaches the empty-files check below.
+    vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ sessions: [{ thread_id: 'thread-abc' }], total: 1 }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
     const fd = new FormData();
     fd.append('notes', 'not a file');
     const res = await POST(makeRequest(fd), {
@@ -267,23 +285,52 @@ describe('/api/threads/[threadId]/uploads proxy', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('rejects oversized uploads with 413', async () => {
-    // Fake a File with size > 60 MB cap without allocating real bytes —
-    // the route reads `.size` for the cap check, not the actual buffer.
+  it('rejects oversized uploads with 413 via content-length pre-parse check', async () => {
+    // Codex P2 on PR #132: oversized uploads should be rejected from
+    // the content-length header BEFORE the body is buffered. No
+    // ownership lookup happens because the size gate fires first.
+    const oversizedBytes = 61 * 1024 * 1024;
+    const res = await POST(
+      {
+        headers: {
+          get: (name: string) => name.toLowerCase() === 'content-length' ? String(oversizedBytes) : null,
+        },
+        formData: async () => {
+          throw new Error('formData() should NOT be called when content-length already exceeds the cap');
+        },
+      } as unknown as NextRequest,
+      { params: Promise.resolve({ threadId: 'thread-abc' }) },
+    );
+    expect(res.status).toBe(413);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/content-length/i);
+  });
+
+  it('rejects oversized uploads with 413 via post-parse backstop (chunked, no content-length)', async () => {
+    // Defense in depth: if the client sends a chunked multipart with
+    // NO content-length header (or lies about it), the per-file size
+    // sum after parsing must still catch it.
+    vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ sessions: [{ thread_id: 'thread-abc' }], total: 1 }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
     const fakeBig: File = {
       name: 'big.png',
       size: 61 * 1024 * 1024,
       type: 'image/png',
     } as unknown as File;
     Object.setPrototypeOf(fakeBig, File.prototype);
-    // We can't put a fake File through real FormData.append (it validates),
-    // so use a Map-like stand-in that satisfies the route's `.getAll('files')`
-    // contract.
     const fakeFd = {
       getAll: (key: string) => (key === 'files' ? [fakeBig] : []),
     } as unknown as FormData;
     const res = await POST(
       {
+        headers: {
+          // No content-length → cannot pre-check, falls through to body parse.
+          get: () => null,
+        },
         formData: async () => fakeFd,
       } as unknown as NextRequest,
       { params: Promise.resolve({ threadId: 'thread-abc' }) },
@@ -292,9 +339,38 @@ describe('/api/threads/[threadId]/uploads proxy', () => {
   });
 
   it('returns 400 when the multipart body itself is malformed', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ sessions: [{ thread_id: 'thread-abc' }], total: 1 }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
     const res = await POST(makeRequest(new FormData(), { failFormData: true }), {
       params: Promise.resolve({ threadId: 'thread-abc' }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it('does not buffer the multipart body when the ownership check fails (Codex P2)', async () => {
+    // Ownership lookup returns no matching session → 403. The route
+    // must reject BEFORE calling request.formData() so a malicious
+    // authenticated user can't make the Next.js process buffer
+    // arbitrary multipart bytes just to be rejected post-parse.
+    vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ sessions: [], total: 0 }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const formDataMock = vi.fn(async () => new FormData());
+    const res = await POST(
+      {
+        headers: { get: () => null },
+        formData: formDataMock,
+      } as unknown as NextRequest,
+      { params: Promise.resolve({ threadId: 'thread-not-mine' }) },
+    );
+    expect(res.status).toBe(403);
+    expect(formDataMock).not.toHaveBeenCalled();
   });
 });

@@ -92,6 +92,19 @@ export async function POST(
 ): Promise<Response> {
   const { threadId } = await context.params;
 
+  // Order matters here: we want every cheap, local rejection to fire
+  // BEFORE the expensive ones (network round-trips, body buffering).
+  // The pipeline is:
+  //   1. threadId format check (cheap, local)
+  //   2. auth check (cheap, local)
+  //   3. content-length cap (cheap, local — keeps a malicious 1 GB body
+  //      from being buffered into memory just to be rejected post-parse)
+  //   4. thread-ownership check (one HTTP round-trip — see userOwnsThread)
+  //   5. body parse (expensive — buffers the multipart into memory)
+  //   6. per-batch size cap (backstop in case content-length lied / was
+  //      missing for a chunked upload)
+  //   7. forward to backend
+
   if (!threadId || !/^[a-zA-Z0-9_-]+$/.test(threadId)) {
     return NextResponse.json(
       { error: "Invalid threadId" },
@@ -102,6 +115,45 @@ export async function POST(
   const userId = await getAuthenticatedUserId();
   if (!userId) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
+
+  // Codex P2 on PR #132: enforce the envelope cap on the
+  // ``content-length`` header BEFORE calling ``request.formData()``
+  // (which buffers the entire multipart body into memory). A logged-in
+  // attacker who bypasses the file picker and posts a 1 GB body
+  // shouldn't be able to make the Next.js process spend memory on it.
+  // Chunked uploads without ``content-length`` fall through to the
+  // post-parse backstop below — we accept the latency cost there
+  // because chunk-encoded multipart from a browser is unusual.
+  const contentLengthHeader = request.headers.get("content-length");
+  if (contentLengthHeader) {
+    const contentLength = Number(contentLengthHeader);
+    if (Number.isFinite(contentLength) && contentLength > MAX_TOTAL_UPLOAD_BYTES) {
+      return NextResponse.json(
+        {
+          error: `Upload too large (${contentLength} bytes per content-length header). Max ${MAX_TOTAL_UPLOAD_BYTES} bytes per request.`,
+        },
+        { status: 413 }
+      );
+    }
+  }
+
+  const gatewayUrl = getPrimaryGatewayUrl();
+  const apiKey = await getUserScopedAuthToken();
+
+  // Codex P1: verify the authenticated user owns this threadId before
+  // forwarding. Without this check, a logged-in user who learns
+  // another user's threadId could plant files in that thread's
+  // sandbox — which view_user_image and the builder image-copy path
+  // would then surface to the victim. Moved up here (before body
+  // parse) so the ownership-failure path also avoids buffering the
+  // entire multipart payload — Codex P2 part 2.
+  const owns = await userOwnsThread(threadId, userId, apiKey, gatewayUrl);
+  if (!owns) {
+    return NextResponse.json(
+      { error: "Thread not owned by current user" },
+      { status: 403 },
+    );
   }
 
   let formData: FormData;
@@ -124,6 +176,8 @@ export async function POST(
   }
   const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
   if (totalBytes > MAX_TOTAL_UPLOAD_BYTES) {
+    // Post-parse backstop: caps chunked uploads (no content-length)
+    // and any case where the client lied about content-length.
     return NextResponse.json(
       {
         error: `Upload too large (${totalBytes} bytes). Max ${MAX_TOTAL_UPLOAD_BYTES} bytes per request.`,
@@ -137,22 +191,6 @@ export async function POST(
   const proxied = new FormData();
   for (const file of files) {
     proxied.append("files", file, file.name);
-  }
-
-  const gatewayUrl = getPrimaryGatewayUrl();
-  const apiKey = await getUserScopedAuthToken();
-
-  // Codex P1: verify the authenticated user owns this threadId before
-  // forwarding. Without this check, a logged-in user who learns
-  // another user's threadId could plant files in that thread's
-  // sandbox — which view_user_image and the builder image-copy path
-  // would then surface to the victim.
-  const owns = await userOwnsThread(threadId, userId, apiKey, gatewayUrl);
-  if (!owns) {
-    return NextResponse.json(
-      { error: "Thread not owned by current user" },
-      { status: 403 },
-    );
   }
 
   const targetUrl = `${gatewayUrl}/api/threads/${encodeURIComponent(threadId)}/uploads`;
