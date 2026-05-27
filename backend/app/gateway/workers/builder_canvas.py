@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +26,13 @@ DEFAULT_RETIRED_RUNS_SIZE = 128
 _SUBSCRIBER_QUEUE_MAXSIZE = 128
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 _PHASE_LABELS = {
-    "starting": "Working",
+    "starting": "Creating plan",
     "researching": "Researching",
-    "drafting": "Drafting",
-    "finalizing": "Finalizing",
-    "done": "Done",
+    "drafting": "Creating artifact",
+    "finalizing": "Creating artifact",
+    "done": "Success",
 }
+_CHECK_COMMAND_PREFIXES = ("test", "pytest", "pnpm", "npm", "yarn", "uv", "ruff", "mypy", "tsc")
 
 
 def _now_iso() -> str:
@@ -50,19 +52,109 @@ def _public_terminal_status(status: str | None) -> str:
     }.get(str(status or "").lower(), "failed")
 
 
-def _tool_activity(tool_name: str) -> dict[str, str]:
+def _short_text(value: Any, *, limit: int = 80) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(value.split())
+    if not cleaned:
+        return None
+    return cleaned[: max(0, limit - 1)] + "…" if len(cleaned) > limit else cleaned
+
+
+def _source_domain(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    parsed = urlparse(value.strip())
+    host = parsed.netloc or parsed.path.split("/", 1)[0]
+    host = host.lower().removeprefix("www.")
+    if " " in host or "." not in host:
+        return None
+    return host or None
+
+
+def _source_details(args: Any) -> dict[str, str]:
+    if not isinstance(args, dict):
+        return {}
+    url = args.get("url") or args.get("source_url") or args.get("href")
+    title = args.get("title") or args.get("source_title") or args.get("page_title")
+    details: dict[str, str] = {}
+    domain = _source_domain(url)
+    source_title = _short_text(title, limit=72)
+    if domain:
+        details["source_domain"] = domain
+    if source_title:
+        details["source_title"] = source_title
+        details["detail"] = source_title
+    elif domain:
+        details["detail"] = domain
+    return details
+
+
+def _is_check_command(args: Any) -> bool:
+    if not isinstance(args, dict):
+        return False
+    command = args.get("command") or args.get("cmd")
+    if not isinstance(command, str):
+        return False
+    cleaned = command.strip().lower()
+    return any(cleaned.startswith(prefix) for prefix in _CHECK_COMMAND_PREFIXES)
+
+
+def _activity(
+    *,
+    action: str,
+    label: str,
+    category: str,
+    kind: str = "tool_activity",
+    **extra: str,
+) -> dict[str, str]:
+    return {
+        "kind": kind,
+        "category": category,
+        "action": action,
+        "label": label,
+        **{key: value for key, value in extra.items() if isinstance(value, str) and value},
+    }
+
+
+def _tool_activity(call: dict[str, Any], *, plan_seen: bool) -> dict[str, str]:
+    tool_name = str(call.get("name") or "").lower()
+    args = call.get("args")
     name = tool_name.lower()
-    if any(token in name for token in ("search", "browse", "scrape", "tavily", "firecrawl")):
-        return {"kind": "tool_activity", "category": "research", "label": "Searching"}
-    if any(token in name for token in ("fetch", "jina")):
-        return {"kind": "tool_activity", "category": "research", "label": "Reading"}
-    if any(token in name for token in ("write_file", "str_replace", "edit_file")):
-        return {"kind": "tool_activity", "category": "draft", "label": "Drafting"}
+    if any(token in name for token in ("search", "scrape", "tavily", "firecrawl")):
+        return _activity(
+            action="searching_web",
+            category="research",
+            label="Searching web",
+        )
+    if any(token in name for token in ("fetch", "browse", "jina")):
+        return _activity(
+            action="reading_source",
+            category="research",
+            label="Reading source",
+            **_source_details(args),
+        )
+    if name in {"write_todos", "todo_write"}:
+        return _activity(
+            action="updating_plan" if plan_seen else "creating_plan",
+            category="plan",
+            label="Updating plan" if plan_seen else "Creating plan",
+        )
+    if any(token in name for token in ("write_file", "create_file")):
+        return _activity(action="writing_file", category="draft", label="Writing file")
+    if "read_file" in name:
+        return _activity(action="reading_file", category="draft", label="Reading file")
+    if any(token in name for token in ("str_replace", "edit_file")):
+        return _activity(action="editing_file", category="draft", label="Editing file")
+    if name in {"bash", "shell"}:
+        if _is_check_command(args):
+            return _activity(action="running_check", category="finalize", label="Running check")
+        return _activity(action="creating_artifact", category="draft", label="Creating artifact")
     if "render" in name:
-        return {"kind": "tool_activity", "category": "render", "label": "Rendering"}
+        return _activity(action="creating_artifact", category="render", label="Creating artifact")
     if any(token in name for token in ("emit_artifact", "emit_builder_artifact", "package")):
-        return {"kind": "tool_activity", "category": "package", "label": "Wrapping up"}
-    return {"kind": "tool_activity", "category": "finalize", "label": "Working"}
+        return _activity(action="packaging_artifact", category="package", label="Packaging artifact")
+    return _activity(action="creating_artifact", category="draft", label="Creating artifact")
 
 
 def _phase_activity(data: Any) -> dict[str, str] | None:
@@ -71,7 +163,27 @@ def _phase_activity(data: Any) -> dict[str, str] | None:
     phase = str(data.get("phase") or "")
     if phase not in _PHASE_LABELS:
         return None
-    return {"kind": "phase", "phase": phase, "label": _PHASE_LABELS[phase]}
+    action = {
+        "starting": "creating_plan",
+        "researching": "researching",
+        "drafting": "creating_artifact",
+        "finalizing": "creating_artifact",
+        "done": "success",
+    }[phase]
+    category = {
+        "starting": "plan",
+        "researching": "research",
+        "drafting": "draft",
+        "finalizing": "package",
+        "done": "finalize",
+    }[phase]
+    return {
+        "kind": "phase",
+        "phase": phase,
+        "category": category,
+        "action": action,
+        "label": _PHASE_LABELS[phase],
+    }
 
 
 def _message_tool_calls(message: Any) -> list[Any]:
@@ -94,23 +206,23 @@ def _agent_messages(data: Any) -> list[Any]:
     return messages if isinstance(messages, list) else []
 
 
-def _latest_tool_name(data: Any) -> str | None:
+def _latest_tool_call(data: Any) -> dict[str, Any] | None:
     messages = _agent_messages(data)
     if not isinstance(messages, list):
         return None
     for message in reversed(messages):
         for call in reversed(_message_tool_calls(message)):
-            if tool_name := _call_tool_name(call):
-                return tool_name
+            if isinstance(call, dict) and _call_tool_name(call):
+                return call
     return None
 
 
-def _project_activity(event_name: str, data: Any) -> dict[str, str] | None:
+def _project_activity(event_name: str, data: Any, *, plan_seen: bool) -> dict[str, str] | None:
     if event_name == "custom":
         return _phase_activity(data)
     if event_name == "updates":
-        tool_name = _latest_tool_name(data)
-        return _tool_activity(tool_name) if tool_name else None
+        tool_call = _latest_tool_call(data)
+        return _tool_activity(tool_call, plan_seen=plan_seen) if tool_call else None
     return None
 
 
@@ -151,6 +263,7 @@ class BuilderCanvasWorker:
         self._retired_run_keys: dict[str, set[tuple[str, str]]] = defaultdict(set)
         self._terminal_at: dict[tuple[str, str, str], float] = {}
         self._last_sequence: dict[tuple[str, str, str], int] = {}
+        self._plan_seen: set[tuple[str, str, str]] = set()
         self._lock = asyncio.Lock()
 
     def _expire_locked(self) -> None:
@@ -171,6 +284,7 @@ class BuilderCanvasWorker:
         self._terminal_at.pop(key, None)
         self._histories.pop(key, None)
         self._last_sequence.pop(key, None)
+        self._plan_seen.discard(key)
 
     def _observe_run_locked(self, parent_thread_id: str, task_id: str, run_id: str) -> None:
         run_key = (task_id, run_id)
@@ -250,7 +364,7 @@ class BuilderCanvasWorker:
         logger.info(
             "Builder canvas: event %s kind=%s reason=%s parent_thread_id=%s task_id=%s run_id=%s "
             "sequence=%s event_name=%s activity_kind=%s activity_category=%s status=%s "
-            "has_artifact_url=%s has_artifact_path=%s",
+            "activity_action=%s has_artifact_url=%s has_artifact_path=%s",
             decision,
             event.get("kind"),
             reason,
@@ -262,6 +376,7 @@ class BuilderCanvasWorker:
             activity.get("kind") if isinstance(activity, dict) else None,
             activity.get("category") if isinstance(activity, dict) else None,
             event.get("status"),
+            activity.get("action") if isinstance(activity, dict) else None,
             _completion_has(completion, "artifact_url"),
             _completion_has(completion, "artifact_path"),
         )
@@ -281,6 +396,9 @@ class BuilderCanvasWorker:
         history.extend(sorted_history)
         if event["kind"] == "terminal":
             self._terminal_at[key] = time.monotonic()
+        activity = event.get("activity")
+        if isinstance(activity, dict) and activity.get("action") in {"creating_plan", "updating_plan"}:
+            self._plan_seen.add(key)
 
     def _event_sequence_locked(self, event: dict[str, Any], key: tuple[str, str, str]) -> int | None:
         previous = self._last_sequence.get(key, 0)
@@ -356,7 +474,8 @@ class BuilderCanvasWorker:
         async with self._lock:
             self._expire_locked()
             self._observe_run_locked(parent, task_id, run_id)
-        activity = _project_activity(str(payload.get("event_name") or ""), payload.get("data"))
+            plan_seen = (parent, task_id, run_id) in self._plan_seen
+        activity = _project_activity(str(payload.get("event_name") or ""), payload.get("data"), plan_seen=plan_seen)
         if activity is None:
             logger.info(
                 "Builder canvas: progress dropped reason=no_public_activity parent_thread_id=%s task_id=%s run_id=%s sequence=%s event_name=%s",
@@ -412,6 +531,12 @@ class BuilderCanvasWorker:
             sequence = self._last_sequence.get(key, 0) + 1
         completion = {**payload, "run_id": run_id}
         key = (parent, task_id, run_id)
+        status = _public_terminal_status(payload.get("status"))
+        terminal_activity = {
+            "completed": _activity(action="success", category="finalize", label="Success", kind="phase"),
+            "failed": _activity(action="failed", category="finalize", label="Failed", kind="phase"),
+            "cancelled": _activity(action="cancelled", category="finalize", label="Cancelled", kind="phase"),
+        }[status]
         event = {
             "version": 1,
             "event_id": f"{task_id}:{run_id}:{sequence}",
@@ -421,7 +546,8 @@ class BuilderCanvasWorker:
             "run_id": run_id,
             "occurred_at": payload.get("completed_at") or _now_iso(),
             "kind": "terminal",
-            "status": _public_terminal_status(payload.get("status")),
+            "status": status,
+            "activity": terminal_activity,
             "completion": completion,
             "_source_event_name": "builder_completion",
         }

@@ -103,6 +103,19 @@ describe("BuilderCompletionCard — success variant", () => {
     )
   })
 
+  it("explains when a successful completion has no artifact action yet", () => {
+    const event: BuilderCompletionEventV1 = {
+      ...SUCCESS_EVENT,
+      artifact_path: undefined,
+      artifact_url: undefined,
+    }
+
+    render(<BuilderCompletionCard event={event} />)
+    expect(screen.queryByRole("button", { name: /open/i })).toBeNull()
+    expect(screen.queryByRole("link", { name: /download/i })).toBeNull()
+    expect(screen.getByText(/keep checking the library/i)).toBeTruthy()
+  })
+
   it("invokes onDownload when the Download link is clicked", () => {
     const onDownload = vi.fn()
     render(<BuilderCompletionCard event={SUCCESS_EVENT} onDownload={onDownload} />)

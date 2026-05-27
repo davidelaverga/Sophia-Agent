@@ -46,7 +46,11 @@ export type BuilderActivityEntryV1 = {
   type: 'tool_call' | 'thinking';
   title: string;
   tool?: string;
+  action?: string;
   detail?: string;
+  sourceDomain?: string;
+  sourceTitle?: string;
+  count?: number;
   status?: 'running' | 'done' | 'error';
 };
 

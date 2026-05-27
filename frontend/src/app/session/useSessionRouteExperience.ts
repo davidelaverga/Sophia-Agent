@@ -13,6 +13,7 @@ import {
 import { debugLog } from '../lib/debug-logger';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
 import type { BuilderArtifactV1 } from '../types/builder-artifact';
+import type { BuilderCanvasActivity } from '../types/builder-canvas';
 import type { BuilderCompletionEventV1 } from '../types/builder-completion';
 import type { BuilderTaskV1 } from '../types/builder-task';
 import type { InterruptPayload, RitualArtifacts } from '../types/session';
@@ -61,6 +62,14 @@ type UseSessionRouteExperienceParams = {
 function builderRunKey(taskId?: string | null, runId?: string | null): string | null {
   if (!taskId) return null;
   return `${taskId}:${runId ?? ''}`;
+}
+
+function canvasActivityDetail(activity: BuilderCanvasActivity | undefined): string | undefined {
+  if (!activity) return undefined;
+  if (activity.source_title && activity.source_domain) {
+    return `${activity.source_title} · ${activity.source_domain}`;
+  }
+  return activity.detail ?? activity.source_title ?? activity.source_domain ?? undefined;
 }
 
 export function useSessionRouteExperience({
@@ -196,8 +205,13 @@ export function useSessionRouteExperience({
     const activityLog = builderCanvas.recentEvents
       .filter((event) => event.task_id === active.task_id && event.run_id === active.run_id && event.activity)
       .map((event) => ({
-        type: 'thinking' as const,
+        type: event.activity?.kind === 'tool_activity' ? 'tool_call' as const : 'thinking' as const,
         title: event.activity?.label ?? 'Working on deliverable',
+        ...(event.activity?.action ? { action: event.activity.action } : {}),
+        ...(event.activity?.category ? { tool: event.activity.category } : {}),
+        ...(canvasActivityDetail(event.activity) ? { detail: canvasActivityDetail(event.activity) } : {}),
+        ...(event.activity?.source_domain ? { sourceDomain: event.activity.source_domain } : {}),
+        ...(event.activity?.source_title ? { sourceTitle: event.activity.source_title } : {}),
         status: 'done' as const,
       }));
     setBuilderTask((current) => {
@@ -207,7 +221,7 @@ export function useSessionRouteExperience({
         phase,
         taskId: active.task_id,
         runId: active.run_id,
-        detail: active.latest_activity?.label ?? (sameRun ? current?.detail : undefined) ?? 'Starting',
+        detail: active.latest_activity?.label ?? (sameRun ? current?.detail : undefined) ?? 'Creating plan',
         ...(activityLog.length ? { activityLog } : {}),
         canvasStreamed: true,
       };

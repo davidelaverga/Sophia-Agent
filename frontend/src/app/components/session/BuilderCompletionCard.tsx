@@ -1,5 +1,6 @@
 'use client';
 
+import { ArrowUpRight, Download } from 'lucide-react';
 import { useMemo, type MouseEventHandler } from 'react';
 
 import { buildThreadArtifactHref } from '../../lib/builder-artifacts';
@@ -127,6 +128,7 @@ export function BuilderCompletionCard({
 
   const showOpen = event.status === 'success' && Boolean(openHref);
   const showDownload = event.status === 'success' && Boolean(downloadHref);
+  const showMissingActionHint = event.status === 'success' && !showOpen && !showDownload;
   const showRetry = event.status === 'error' || event.status === 'timeout';
   const showDismiss = Boolean(onDismiss);
 
@@ -223,6 +225,15 @@ export function BuilderCompletionCard({
               about: {event.task_brief}
             </p>
           )}
+
+          {showMissingActionHint && (
+            <p
+              className={cn(compact ? 'mt-1 text-[9px] leading-4' : 'mt-1.5 text-[10px] leading-4.5')}
+              style={{ color: 'var(--cosmic-text-whisper)' }}
+            >
+              Artifact metadata has not reached this tab yet. I will keep checking the library.
+            </p>
+          )}
         </div>
       </div>
 
@@ -241,7 +252,10 @@ export function BuilderCompletionCard({
               color: meta.accentVar,
             }}
           >
-            open
+            <span className="inline-flex items-center gap-1">
+              <ArrowUpRight className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+              open
+            </span>
           </button>
         )}
 
@@ -262,7 +276,10 @@ export function BuilderCompletionCard({
             }}
             aria-label="Download artifact"
           >
-            download
+            <span className="inline-flex items-center gap-1">
+              <Download className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+              download
+            </span>
           </a>
         )}
 

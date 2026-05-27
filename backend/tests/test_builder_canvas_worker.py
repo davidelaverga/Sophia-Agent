@@ -32,13 +32,49 @@ async def test_progress_projection_is_curated_and_replayable() -> None:
     )
     assert delivered == 0
     events = await worker.replay_after("parent-1", None)
-    assert events[0]["activity"] == {
-        "kind": "tool_activity",
-        "category": "research",
-        "label": "Searching",
-    }
+    assert events[0]["activity"]["label"] == "Searching web"
+    assert events[0]["activity"]["action"] == "searching_web"
+    assert "source_domain" not in events[0]["activity"]
     assert "private query" not in str(events)
+    assert "https://private.example" not in str(events)
     assert events[0]["event_id"] == "task-1:run-1:1"
+
+
+@pytest.mark.anyio
+async def test_fetch_projection_includes_only_safe_source_domain_and_title() -> None:
+    worker = BuilderCanvasWorker()
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "sequence": 1,
+            "event_name": "updates",
+            "data": {
+                "agent": {
+                    "messages": [{
+                        "tool_calls": [{
+                            "name": "builder_web_fetch",
+                            "args": {
+                                "url": "https://www.example.com/private/article?token=secret",
+                                "title": "Public Article Title",
+                                "query": "private query",
+                            },
+                        }],
+                    }],
+                },
+            },
+        }
+    )
+
+    events = await worker.recent_events("parent-1")
+    assert events[0]["activity"]["label"] == "Reading source"
+    assert events[0]["activity"]["action"] == "reading_source"
+    assert events[0]["activity"]["source_domain"] == "example.com"
+    assert events[0]["activity"]["source_title"] == "Public Article Title"
+    assert "https://www.example.com/private/article" not in str(events)
+    assert "private query" not in str(events)
+    assert "token=secret" not in str(events)
 
 
 @pytest.mark.anyio
@@ -136,7 +172,13 @@ async def test_done_phase_is_projected_to_browser_activity() -> None:
         }
     )
     events = await worker.recent_events("parent-1")
-    assert events[0]["activity"] == {"kind": "phase", "phase": "done", "label": "Done"}
+    assert events[0]["activity"] == {
+        "kind": "phase",
+        "phase": "done",
+        "category": "finalize",
+        "action": "success",
+        "label": "Success",
+    }
 
 
 @pytest.mark.anyio
@@ -173,8 +215,67 @@ async def test_out_of_order_paired_progress_events_are_retained_in_sequence_orde
     assert delivered == 0
     events = await worker.recent_events("parent-1")
     assert [event["sequence"] for event in events] == [1, 2]
-    assert events[0]["activity"] == {"kind": "tool_activity", "category": "research", "label": "Searching"}
-    assert events[1]["activity"] == {"kind": "phase", "phase": "researching", "label": "Researching"}
+    assert events[0]["activity"]["label"] == "Searching web"
+    assert events[0]["activity"]["action"] == "searching_web"
+    assert events[1]["activity"]["label"] == "Researching"
+    assert events[1]["activity"]["action"] == "researching"
+
+
+@pytest.mark.anyio
+async def test_plan_tool_distinguishes_create_and_update_plan() -> None:
+    worker = BuilderCanvasWorker()
+    for sequence in (1, 2):
+        await worker.publish_progress(
+            {
+                "parent_thread_id": "parent-1",
+                "task_id": "task-1",
+                "run_id": "run-1",
+                "sequence": sequence,
+                "event_name": "updates",
+                "data": {
+                    "agent": {
+                        "messages": [{
+                            "tool_calls": [{"name": "write_todos", "args": {"todos": ["private"]}}],
+                        }],
+                    },
+                },
+            }
+        )
+
+    events = await worker.recent_events("parent-1")
+    assert [event["activity"]["label"] for event in events] == ["Creating plan", "Updating plan"]
+    assert [event["activity"]["action"] for event in events] == ["creating_plan", "updating_plan"]
+
+
+@pytest.mark.anyio
+async def test_file_and_check_tools_use_normalized_public_labels() -> None:
+    worker = BuilderCanvasWorker()
+    tool_calls = [
+        ("write_file", {"path": "/secret/path/report.html"}, "Writing file", "writing_file"),
+        ("read_file", {"path": "/secret/path/report.html"}, "Reading file", "reading_file"),
+        ("str_replace", {"path": "/secret/path/report.html"}, "Editing file", "editing_file"),
+        ("bash", {"command": "pytest tests/test_private.py -q"}, "Running check", "running_check"),
+        ("emit_builder_artifact", {"artifact_title": "Private title"}, "Packaging artifact", "packaging_artifact"),
+    ]
+    for sequence, (name, args, _, _) in enumerate(tool_calls, start=1):
+        await worker.publish_progress(
+            {
+                "parent_thread_id": "parent-1",
+                "task_id": "task-1",
+                "run_id": "run-1",
+                "sequence": sequence,
+                "event_name": "updates",
+                "data": {"agent": {"messages": [{"tool_calls": [{"name": name, "args": args}]}]}},
+            }
+        )
+
+    events = await worker.recent_events("parent-1")
+    assert [(event["activity"]["label"], event["activity"]["action"]) for event in events] == [
+        (label, action) for _, _, label, action in tool_calls
+    ]
+    assert "/secret/path" not in str(events)
+    assert "pytest tests/test_private.py" not in str(events)
+    assert "Private title" not in str(events)
 
 
 @pytest.mark.anyio

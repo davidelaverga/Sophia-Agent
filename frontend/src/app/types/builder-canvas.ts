@@ -6,13 +6,46 @@ export type BuilderCanvasActivity =
   | {
     kind: 'phase';
     phase: 'starting' | 'researching' | 'drafting' | 'finalizing' | 'done';
+    category?: BuilderCanvasActivityCategory;
+    action?: BuilderCanvasActivityAction;
     label: string;
+    detail?: string;
+    source_domain?: string;
+    source_title?: string;
   }
   | {
     kind: 'tool_activity';
-    category: 'research' | 'draft' | 'render' | 'package' | 'finalize';
+    category: BuilderCanvasActivityCategory;
+    action?: BuilderCanvasActivityAction;
     label: string;
+    detail?: string;
+    source_domain?: string;
+    source_title?: string;
   };
+
+export type BuilderCanvasActivityCategory =
+  | 'research'
+  | 'plan'
+  | 'draft'
+  | 'render'
+  | 'package'
+  | 'finalize';
+
+export type BuilderCanvasActivityAction =
+  | 'researching'
+  | 'searching_web'
+  | 'reading_source'
+  | 'creating_plan'
+  | 'updating_plan'
+  | 'creating_artifact'
+  | 'writing_file'
+  | 'reading_file'
+  | 'editing_file'
+  | 'running_check'
+  | 'packaging_artifact'
+  | 'success'
+  | 'failed'
+  | 'cancelled';
 
 export type BuilderCanvasEventV1 = {
   version: 1;

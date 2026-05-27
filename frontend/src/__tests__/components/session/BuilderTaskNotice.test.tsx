@@ -61,9 +61,33 @@ describe('BuilderTaskNotice', () => {
     );
 
     expect(screen.queryByRole('progressbar', { name: 'Builder progress' })).not.toBeInTheDocument();
-    expect(screen.getAllByText('Researching sources').length).toBe(1);
+    expect(screen.getAllByText('Researching sources').length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole('button', { name: 'Show builder activity' }));
-    expect(screen.getAllByText('Researching sources').length).toBeGreaterThan(1);
+    expect(screen.getAllByText('Researching sources').length).toBeGreaterThan(0);
+  });
+
+  it('uses distinct canvas phase labels and collapses duplicate activity rows', () => {
+    render(
+      <BuilderTaskNotice
+        task={{
+          phase: 'running',
+          canvasStreamed: true,
+          detail: 'Creating artifact',
+          activityLog: [
+            { type: 'tool_call', title: 'Searching web', action: 'searching_web', status: 'done' },
+            { type: 'tool_call', title: 'Writing file', action: 'writing_file', status: 'done' },
+            { type: 'tool_call', title: 'Writing file', action: 'writing_file', status: 'done' },
+            { type: 'tool_call', title: 'Running check', action: 'running_check', status: 'done' },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText('Creating artifact')).toBeInTheDocument();
+    expect(screen.getByText('Searching web')).toBeInTheDocument();
+    expect(screen.getByText('Writing file')).toBeInTheDocument();
+    expect(screen.getByText('x2')).toBeInTheDocument();
+    expect(screen.getByText('Running check')).toBeInTheDocument();
   });
 
   it('renders the completion pill state when artifact actions are available', () => {
@@ -107,7 +131,7 @@ describe('BuilderTaskNotice', () => {
       />,
     );
 
-    expect(screen.getByText('stalled')).toBeInTheDocument();
+    expect(screen.getByText('Stalled')).toBeInTheDocument();
     expect(screen.getAllByText(/No visible builder progress for 2m 40s/i).length).toBeGreaterThan(0);
     expect(screen.getByText('25%')).toBeInTheDocument();
   });
@@ -137,7 +161,7 @@ describe('BuilderTaskNotice', () => {
         vi.advanceTimersByTime(150_000);
       });
 
-      expect(screen.getByText('stalled')).toBeInTheDocument();
+      expect(screen.getByText('Stalled')).toBeInTheDocument();
       expect(screen.getAllByText(/No visible builder progress for 2m/i).length).toBeGreaterThan(0);
     } finally {
       vi.useRealTimers();

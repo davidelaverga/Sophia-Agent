@@ -1,6 +1,15 @@
 'use client';
 
-import { ChevronDown, ChevronUp } from 'lucide-react';
+import {
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  ListChecks,
+  Search,
+  Sparkles,
+  XCircle,
+  type LucideIcon,
+} from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type MouseEventHandler } from 'react';
 
 import { cn } from '../../lib/utils';
@@ -25,12 +34,13 @@ type BuilderTaskNoticeProps = {
 const PHASE_META: Record<BuilderTaskV1['phase'], {
   label: string;
   accentVar: string;
+  icon: LucideIcon;
 }> = {
-  running:   { label: 'building',    accentVar: 'var(--sophia-purple)' },
-  completed: { label: 'ready',       accentVar: 'var(--cosmic-teal)' },
-  failed:    { label: 'failed',      accentVar: 'var(--sophia-error, #f87171)' },
-  timed_out: { label: 'timed out',   accentVar: 'var(--cosmic-amber)' },
-  cancelled: { label: 'cancelled',   accentVar: 'var(--cosmic-text-faint)' },
+  running:   { label: 'Creating artifact', accentVar: 'var(--sophia-purple)', icon: Sparkles },
+  completed: { label: 'Success',           accentVar: 'var(--cosmic-teal)', icon: CheckCircle2 },
+  failed:    { label: 'Failed',            accentVar: 'var(--sophia-error, #f87171)', icon: XCircle },
+  timed_out: { label: 'Failed',            accentVar: 'var(--cosmic-amber)', icon: XCircle },
+  cancelled: { label: 'Cancelled',         accentVar: 'var(--cosmic-text-faint)', icon: XCircle },
 };
 
 const PROGRESSBAR_LABEL = 'Builder progress';
@@ -101,9 +111,32 @@ function applyLiveTiming(task: BuilderTaskV1, nowMs: number, receivedAtMs: numbe
   };
 }
 
-function getDisplayMeta(task: BuilderTaskV1): { label: string; accentVar: string } {
+function latestAction(task: BuilderTaskV1): string | undefined {
+  return task.activityLog?.[task.activityLog.length - 1]?.action;
+}
+
+function getDisplayMeta(task: BuilderTaskV1): { label: string; accentVar: string; icon: LucideIcon } {
   if (task.phase === 'running' && task.stuck) {
-    return { label: 'stalled', accentVar: 'var(--cosmic-amber)' };
+    return { label: 'Stalled', accentVar: 'var(--cosmic-amber)', icon: XCircle };
+  }
+
+  if (task.phase === 'running') {
+    const action = latestAction(task);
+    if (action === 'searching_web' || action === 'reading_source' || action === 'researching') {
+      return { label: 'Researching', accentVar: 'var(--cosmic-teal)', icon: Search };
+    }
+    if (action === 'creating_plan') {
+      return { label: 'Creating plan', accentVar: 'var(--cosmic-amber)', icon: ListChecks };
+    }
+    if (action === 'updating_plan') {
+      return { label: 'Updating plan', accentVar: 'var(--cosmic-amber)', icon: ListChecks };
+    }
+    if (task.detail === 'Researching') {
+      return { label: 'Researching', accentVar: 'var(--cosmic-teal)', icon: Search };
+    }
+    if (task.detail === 'Creating plan' || task.detail === 'Updating plan') {
+      return { label: task.detail, accentVar: 'var(--cosmic-amber)', icon: ListChecks };
+    }
   }
 
   return PHASE_META[task.phase];
@@ -271,7 +304,13 @@ function getSecondaryMeta(task: BuilderTaskV1): string | null {
 }
 
 /* ── Constellation spinner ── 3 tiny particles orbiting a breathing core */
-function BuilderConstellation() {
+function BuilderConstellation({
+  accentVar,
+  Icon,
+}: {
+  accentVar: string;
+  Icon: LucideIcon;
+}) {
   const particles = [
     { delay: '0s',    duration: '3s',   radius: '14px', size: 3,   opacity: 0.6 },
     { delay: '0.9s',  duration: '4.2s', radius: '10px', size: 2,   opacity: 0.4 },
@@ -280,17 +319,17 @@ function BuilderConstellation() {
 
   return (
     <div className="relative flex items-center justify-center" style={{ width: 40, height: 40 }}>
-      {/* Core — breathing glow */}
       <div
-        className="absolute rounded-full"
+        className="absolute flex h-5 w-5 items-center justify-center rounded-full"
         style={{
-          width: 6,
-          height: 6,
-          background: 'var(--sophia-purple)',
+          color: accentVar,
+          background: `color-mix(in srgb, ${accentVar} 12%, transparent)`,
+          border: `1px solid color-mix(in srgb, ${accentVar} 24%, transparent)`,
           animation: 'builder-core-breath 2.4s ease-in-out infinite',
         }}
-      />
-      {/* Orbiting particles */}
+      >
+        <Icon size={12} />
+      </div>
       {particles.map((p, i) => (
         <div
           key={i}
@@ -305,7 +344,7 @@ function BuilderConstellation() {
             style={{
               width: p.size,
               height: p.size,
-              background: 'var(--sophia-purple)',
+              background: accentVar,
               opacity: p.opacity,
             }}
           />
@@ -318,14 +357,16 @@ function BuilderConstellation() {
 function BuilderStatusGlyph({
   isRunning,
   accentVar,
+  Icon,
   compact,
 }: {
   isRunning: boolean;
   accentVar: string;
+  Icon: LucideIcon;
   compact?: boolean;
 }) {
   if (isRunning) {
-    return <BuilderConstellation />;
+    return <BuilderConstellation accentVar={accentVar} Icon={Icon} />;
   }
 
   return (
@@ -340,13 +381,7 @@ function BuilderStatusGlyph({
         boxShadow: `0 0 18px color-mix(in srgb, ${accentVar} 16%, transparent)`,
       }}
     >
-      <span
-        className="h-2.5 w-2.5 rounded-full"
-        style={{
-          background: accentVar,
-          boxShadow: `0 0 12px color-mix(in srgb, ${accentVar} 40%, transparent)`,
-        }}
-      />
+      <Icon size={compact ? 15 : 17} />
     </div>
   );
 }
@@ -531,10 +566,15 @@ export function BuilderTaskNotice({
     identity: task.taskId ?? task.label ?? '__builder__',
   });
   const liveTask = useMemo(() => applyLiveTiming(task, nowMs, taskReceivedAtMs), [task, nowMs, taskReceivedAtMs]);
+  const previewActivityLog = useMemo(() => {
+    if (!liveTask.activityLog || liveTask.activityLog.length === 0) return undefined;
+    return isDetailOpen ? liveTask.activityLog : liveTask.activityLog.slice(-6);
+  }, [isDetailOpen, liveTask.activityLog]);
   const taskStartMs = parseTimestampMs(task.startedAt) ?? taskFirstSeenMsRef.current;
   const elapsedMs = Math.max(nowMs - taskStartMs, 0);
   const meta = getDisplayMeta(liveTask);
   const detail = getDetail(liveTask, elapsedMs);
+  const visibleDetail = detail && detail !== meta.label ? detail : null;
   const showDismiss = Boolean(onDismiss && task.phase !== 'running');
   const showCancel = Boolean(onCancel && task.phase === 'running');
   const isRunning = liveTask.phase === 'running';
@@ -637,20 +677,20 @@ export function BuilderTaskNotice({
       )}
       style={{
         borderColor: `color-mix(in srgb, ${meta.accentVar} 20%, var(--cosmic-border-soft))`,
-        background: 'color-mix(in srgb, var(--cosmic-panel) 84%, transparent)',
-        boxShadow: `0 16px 36px color-mix(in srgb, ${meta.accentVar} 8%, transparent)`,
+        background: `linear-gradient(180deg, color-mix(in srgb, ${meta.accentVar} 7%, var(--cosmic-panel)), color-mix(in srgb, var(--cosmic-panel) 86%, transparent))`,
+        boxShadow: `0 16px 38px color-mix(in srgb, ${meta.accentVar} 11%, transparent)`,
       }}
     >
       <div className={cn('flex items-start', compact ? 'gap-2.5' : 'gap-3')}>
         <div className="shrink-0">
-          <BuilderStatusGlyph isRunning={isRunning} accentVar={meta.accentVar} compact={compact} />
+          <BuilderStatusGlyph isRunning={isRunning} accentVar={meta.accentVar} Icon={meta.icon} compact={compact} />
         </div>
 
         <div className="min-w-0 flex-1">
           <div className={cn('flex items-center', compact ? 'gap-1.5' : 'gap-2')}>
             <span
-              className={cn(compact ? 'text-[9px]' : 'text-[10px]', 'tracking-[0.14em] lowercase')}
-              style={{ color: 'var(--cosmic-text-whisper)' }}
+              className={cn(compact ? 'text-[9px]' : 'text-[10px]', 'tracking-[0.12em]')}
+              style={{ color: meta.accentVar }}
             >
               {meta.label}
             </span>
@@ -665,12 +705,12 @@ export function BuilderTaskNotice({
             </span>
           </div>
 
-          {detail && (
+          {visibleDetail && (
             <p
               className={cn(compact ? 'mt-0.5 text-[10px] leading-4.5' : 'mt-1 text-[11px] leading-5')}
               style={{ color: 'var(--cosmic-text-faint)' }}
             >
-              {detail}
+              {visibleDetail}
             </p>
           )}
         </div>
@@ -692,12 +732,15 @@ export function BuilderTaskNotice({
             className={cn('flex items-center gap-1 transition-opacity hover:opacity-100', compact ? 'mt-1 text-[9px]' : 'mt-1.5 text-[10px]')}
             style={{ color: 'var(--cosmic-text-faint)' }}
           >
-            <span>activity</span>
+            <span>{isDetailOpen ? 'showing full activity' : 'recent activity'}</span>
             {isDetailOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
           </button>
         )}
-        {(!liveTask.canvasStreamed || isDetailOpen) && (
-          <BuilderSeedDetail task={liveTask} compact={compact} />
+        {(!liveTask.canvasStreamed || previewActivityLog) && (
+          <BuilderSeedDetail
+            task={previewActivityLog ? { ...liveTask, activityLog: previewActivityLog } : liveTask}
+            compact={compact}
+          />
         )}
       </div>
 

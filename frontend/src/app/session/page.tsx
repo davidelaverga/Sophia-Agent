@@ -54,6 +54,7 @@ import { debugLog } from '../lib/debug-logger';
 import { errorCopy } from '../lib/error-copy';
 import { cn } from '../lib/utils';
 import { useUiStore } from '../stores/ui-store';
+import type { BuilderCompletionEventV1 } from '../types/builder-completion';
 
 import { useSessionBuilderArtifactLibrary } from './useSessionBuilderArtifactLibrary';
 import { useSessionCompanionIntegration } from './useSessionCompanionIntegration';
@@ -641,6 +642,40 @@ function SessionPageContent() {
     () => buildThreadArtifactHref(resolvedThreadId, builderPrimaryFile?.path, { download: true }),
     [builderPrimaryFile?.path, resolvedThreadId],
   );
+  const builderCompletionForDisplay: BuilderCompletionEventV1 | null = useMemo(() => {
+    if (!builderCompletion) {
+      return null;
+    }
+    const hasActionPath = Boolean(builderCompletion.artifact_path || builderCompletion.artifact_url);
+    if (hasActionPath || builderCompletion.status !== 'success' || !builderPrimaryFile?.path) {
+      return builderCompletion;
+    }
+    const recovered: BuilderCompletionEventV1 = {
+      ...builderCompletion,
+      thread_id: builderCompletion.thread_id || resolvedThreadId || '',
+      artifact_path: builderPrimaryFile.path,
+      artifact_filename: builderCompletion.artifact_filename ?? builderPrimaryFile.name,
+      artifact_title: builderCompletion.artifact_title ?? builderReadyTitle,
+      source: builderCompletion.source ?? 'artifact_library_recovery',
+    };
+    console.warn('[builder-artifacts] completion action recovered from library', {
+      thread_id: resolvedThreadId?.slice(0, 12) ?? null,
+      task_id: builderCompletion.task_id.slice(0, 12),
+      run_id: builderCompletion.run_id?.slice(0, 12) ?? null,
+      artifact_path_present: true,
+    });
+    return recovered;
+  }, [builderCompletion, builderPrimaryFile?.name, builderPrimaryFile?.path, builderReadyTitle, resolvedThreadId]);
+
+  useEffect(() => {
+    if (!builderCompletionForDisplay || builderCompletionForDisplay.status !== 'success') return;
+    if (builderCompletionForDisplay.artifact_path || builderCompletionForDisplay.artifact_url) return;
+    console.warn('[builder-artifacts] terminal completion has no action href', {
+      thread_id: builderCompletionForDisplay.thread_id.slice(0, 12),
+      task_id: builderCompletionForDisplay.task_id.slice(0, 12),
+      run_id: builderCompletionForDisplay.run_id?.slice(0, 12) ?? null,
+    });
+  }, [builderCompletionForDisplay]);
   const builderReadyDismissed = Boolean(
     builderPrimaryFile?.path && dismissedBuilderLibraryPath === builderPrimaryFile.path,
   );
@@ -1122,16 +1157,16 @@ function SessionPageContent() {
             with the original task brief inline. We only fall through to the
             running BuilderTaskNotice while the task is still in flight.
           */}
-          {focusMode === 'text' && builderCompletion && (
+          {focusMode === 'text' && builderCompletionForDisplay && (
             <BuilderCompletionCard
-              event={builderCompletion}
+              event={builderCompletionForDisplay}
               onRetry={handleBuilderRetry}
               onDismiss={handleBuilderCompletionDismiss}
               onDownload={() => haptic('medium')}
             />
           )}
           {focusMode === 'text'
-            && !builderCompletion
+            && !builderCompletionForDisplay
             && showBuilderTaskNotice
             && builderTask && (
             <BuilderTaskNotice
@@ -1147,7 +1182,7 @@ function SessionPageContent() {
           )}
 
           {/* Builder completion pill — text mode: inline above composer */}
-          {focusMode === 'text' && !showArtifacts && showArtifactsUi && builderPrimaryFile && !showBuilderTaskNotice && !builderCompletion && !builderReadyDismissed && (
+          {focusMode === 'text' && !showArtifacts && showArtifactsUi && builderPrimaryFile && !showBuilderTaskNotice && !builderCompletionForDisplay && !builderReadyDismissed && (
             <div className="mb-2 flex justify-center">
               <BuilderReadyPill
                 title={builderReadyTitle}
@@ -1162,7 +1197,7 @@ function SessionPageContent() {
           )}
 
           {/* Builder completion pill — voice mode: fixed above mode toggle */}
-          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && !isVoiceCaptionVisible && builderPrimaryFile && !showBuilderTaskNotice && !builderCompletion && !builderReadyDismissed && (
+          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && !isVoiceCaptionVisible && builderPrimaryFile && !showBuilderTaskNotice && !builderCompletionForDisplay && !builderReadyDismissed && (
             <div
               className="fixed left-1/2 -translate-x-1/2 z-30 flex justify-center"
               style={{ bottom: voiceArtifactToggleBottom, opacity: voiceBuilderAccessoryOpacity, transition: 'opacity 0.6s ease' }}
@@ -1181,13 +1216,13 @@ function SessionPageContent() {
           )}
 
           {/* PR-B: voice-mode equivalent of the completion card. */}
-          {focusMode !== 'text' && builderCompletion && (
+          {focusMode !== 'text' && builderCompletionForDisplay && (
             <div
               className="fixed left-1/2 -translate-x-1/2 z-40"
               style={{ bottom: '180px', opacity: voiceBuilderChromeOpacity, transition: 'opacity 0.6s ease' }}
             >
               <BuilderCompletionCard
-                event={builderCompletion}
+                event={builderCompletionForDisplay}
                 onRetry={handleBuilderRetry}
                 onDismiss={handleBuilderCompletionDismiss}
                 onDownload={() => haptic('medium')}
@@ -1196,7 +1231,7 @@ function SessionPageContent() {
             </div>
           )}
           {focusMode !== 'text'
-            && !builderCompletion
+            && !builderCompletionForDisplay
             && showBuilderTaskNotice
             && builderTask && (
             <div

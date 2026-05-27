@@ -160,7 +160,13 @@ async def test_snapshot_uses_native_task_identity_and_activity(app: FastAPI, mon
         "task_id": "task-1",
         "run_id": "run-1",
         "status": "running",
-        "latest_activity": {"kind": "phase", "phase": "drafting", "label": "Drafting"},
+        "latest_activity": {
+            "kind": "phase",
+            "phase": "drafting",
+            "category": "draft",
+            "action": "creating_artifact",
+            "label": "Creating artifact",
+        },
     }
 
 

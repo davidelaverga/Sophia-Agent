@@ -301,6 +301,9 @@ export function useBuilderCanvas(
         logCanvasClient('sse-error', {
           parent_thread_id: shortId(parentThreadId),
         });
+        logCanvasClient('sse-timeout-reconnect', {
+          parent_thread_id: shortId(parentThreadId),
+        });
         setState((current) => ({ ...current, reconnecting: true }));
         void hydrateSnapshot();
       }

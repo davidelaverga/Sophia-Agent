@@ -510,7 +510,7 @@ describe('useSessionRouteExperience', () => {
         occurred_at: '2026-05-25T10:00:00Z',
         kind: 'progress',
         status: 'running',
-        activity: { kind: 'phase', phase: 'drafting', label: 'Drafting' },
+        activity: { kind: 'tool_activity', category: 'research', action: 'searching_web', label: 'Searching web', source_domain: 'example.com', source_title: 'Example source' },
       }],
       completion: null,
       reconnecting: false,
@@ -544,6 +544,13 @@ describe('useSessionRouteExperience', () => {
       runId: 'run-builder-1',
       detail: 'Drafting',
       canvasStreamed: true,
+    });
+    expect(result.current.builderTask?.activityLog?.[0]).toMatchObject({
+      type: 'tool_call',
+      title: 'Searching web',
+      action: 'searching_web',
+      detail: 'Example source · example.com',
+      sourceDomain: 'example.com',
     });
     expect(getBuilderTaskStatusMock).not.toHaveBeenCalled();
   });
@@ -689,7 +696,7 @@ describe('useSessionRouteExperience', () => {
     expect(result.current.builderTask).toMatchObject({
       taskId: 'task-builder-1',
       runId: 'run-new',
-      detail: 'Starting',
+      detail: 'Creating plan',
     });
   });
 
