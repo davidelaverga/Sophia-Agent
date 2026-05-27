@@ -1,9 +1,15 @@
 import { stopArtifactVisualSource } from "./co-review-capture"
 import {
+  runCoreviewRepeatedFrameProbe,
+  type CoreviewRepeatedFrameProbeResult,
+  type RunCoreviewRepeatedFrameProbeOptions,
+} from "./co-review-continuous-video-probe"
+import {
   encodeArtifactStillFrame,
   type ArtifactEncodedFramePayload,
   type ArtifactFrameDimensions,
 } from "./co-review-frame"
+import { isCoReviewVideoProbeEnabled } from "./co-review-flags"
 import type {
   CoReviewMediaTransport,
   CoReviewRefreshInput,
@@ -16,7 +22,7 @@ import type {
 } from "./co-review-transport"
 
 export interface ArtifactFrameSendResult {
-  coreviewSendStage?: "start" | "refresh" | null
+  coreviewSendStage?: "start" | "refresh" | "repeated_probe" | null
   ok: boolean
   supported: boolean
   providerAcceptedFrame: boolean
@@ -54,7 +60,7 @@ export interface ArtifactFrameSendResult {
 }
 
 export interface ArtifactFrameSendContext {
-  coreviewSendStage: "start" | "refresh"
+  coreviewSendStage: "start" | "refresh" | "repeated_probe"
 }
 
 export interface ArtifactFrameSenderStatus {
@@ -74,6 +80,14 @@ export interface ArtifactFrameSender {
     context?: ArtifactFrameSendContext,
   ): Promise<ArtifactFrameSendResult> | ArtifactFrameSendResult
   getStatus?(): ArtifactFrameSenderStatus
+}
+
+export interface GeminiStillFrameTransportOptions {
+  repeatedFrameProbeEnabled?: boolean
+  repeatedFrameProbeMaxFrames?: number
+  repeatedFrameProbeIntervalMs?: number
+  repeatedFrameProbeInitialDelayMs?: number
+  repeatedFrameProbeSleep?: RunCoreviewRepeatedFrameProbeOptions["sleep"]
 }
 
 interface StillFrameSendOutcome {
@@ -100,8 +114,13 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
 
   private stopped = false
   private activeSource: CoReviewStartInput["visualSource"] | null = null
+  private repeatedFrameProbeAbort: AbortController | null = null
+  private repeatedFrameProbePromise: Promise<CoreviewRepeatedFrameProbeResult> | null = null
 
-  constructor(private readonly sender: ArtifactFrameSender) {}
+  constructor(
+    private readonly sender: ArtifactFrameSender,
+    private readonly options: GeminiStillFrameTransportOptions = {},
+  ) {}
 
   async startCoReview(input: CoReviewStartInput): Promise<CoReviewStartResult> {
     this.stopped = false
@@ -126,7 +145,7 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
       }
     }
 
-    return {
+    const result: CoReviewStartResult = {
       ok: true,
       coReviewSessionId: `${input.sessionId}:still-frame`,
       visualInputStatus: "live",
@@ -147,6 +166,8 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
       websocketClosedAfterFrameSend: outcome.websocketClosedAfterFrameSend,
       toolCallStillWorks: null,
     }
+    this.startRepeatedFrameProbe(input.visualSource)
+    return result
   }
 
   async refreshCoReview(input: CoReviewRefreshInput): Promise<CoReviewRefreshResult> {
@@ -210,6 +231,7 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
       websocketReadyStateBefore: before?.websocketReadyState ?? null,
     })
     this.stopped = true
+    this.repeatedFrameProbeAbort?.abort()
     stopArtifactVisualSource(this.activeSource)
     this.activeSource = null
     const after = this.sender.getStatus?.()
@@ -267,6 +289,44 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
 
   supportsStillFrames(): boolean {
     return true
+  }
+
+  getRepeatedFrameProbeResult(): Promise<CoreviewRepeatedFrameProbeResult> | null {
+    return this.repeatedFrameProbePromise
+  }
+
+  private startRepeatedFrameProbe(visualSource: CoReviewStartInput["visualSource"]): void {
+    const enabled = this.options.repeatedFrameProbeEnabled ?? isCoReviewVideoProbeEnabled()
+    if (!enabled || this.stopped) {
+      this.repeatedFrameProbePromise = null
+      return
+    }
+
+    this.repeatedFrameProbeAbort?.abort()
+    const controller = new AbortController()
+    this.repeatedFrameProbeAbort = controller
+    this.repeatedFrameProbePromise = runCoreviewRepeatedFrameProbe({
+      visualSource,
+      sender: this.sender,
+      enabled,
+      maxFrames: this.options.repeatedFrameProbeMaxFrames,
+      intervalMs: this.options.repeatedFrameProbeIntervalMs,
+      initialDelayMs: this.options.repeatedFrameProbeInitialDelayMs,
+      sleep: this.options.repeatedFrameProbeSleep,
+      signal: controller.signal,
+    }).then((result) => {
+      logCoreviewBreadcrumb("repeatedFrameProbeResult", {
+        label: result.label,
+        ok: result.ok,
+        framesAttempted: result.framesAttempted,
+        framesSent: result.framesSent,
+        stoppedReason: result.stoppedReason,
+        firstError: result.firstError,
+        websocketClosed: result.websocketClosed,
+        rawFrameExcluded: true,
+      })
+      return result
+    })
   }
 
   private async sendCurrentStillFrame(

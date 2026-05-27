@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import type { ArtifactVisualSource } from "../../app/lib/co-review-capture"
+import { runCoreviewRepeatedFrameProbe } from "../../app/lib/co-review-continuous-video-probe"
 import { GeminiStillFrameTransport } from "../../app/lib/co-review-still-frame-transport"
 import {
   AudioWebSocketUnsupportedTransport,
@@ -514,4 +515,131 @@ describe("co-review dual-path state machine", () => {
     expect(state.state).toBe("normal_voice_restored")
     expect(state.refreshFrameResult).toBe("blocked")
   })
+
+  it("keeps the repeated-frame probe hidden unless its dev flag is enabled", async () => {
+    mockCanvasEncoding()
+    const sender = {
+      sendArtifactFrame: vi.fn((frame) => ({
+        ok: true,
+        supported: true,
+        providerAcceptedFrame: false,
+        websocketSendAccepted: true,
+        frameBytes: frame.byteLength,
+        frameDimensions: frame.dimensions,
+        frameSendLatencyMs: 4,
+        estimatedVisualCost: null,
+        error: null,
+        rawFrameExcluded: true as const,
+      })),
+    }
+
+    const result = await runCoreviewRepeatedFrameProbe({
+      visualSource: readyCanvasSource(),
+      sender,
+      enabled: false,
+      maxFrames: 5,
+      initialDelayMs: 0,
+      sleep: async () => undefined,
+    })
+
+    expect(result.enabled).toBe(false)
+    expect(result.stoppedReason).toBe("disabled")
+    expect(result.framesAttempted).toBe(0)
+    expect(sender.sendArtifactFrame).not.toHaveBeenCalled()
+  })
+
+  it("caps the repeated-frame probe at five frames", async () => {
+    mockCanvasEncoding()
+    const sender = {
+      sendArtifactFrame: vi.fn((frame) => ({
+        ok: true,
+        supported: true,
+        providerAcceptedFrame: false,
+        websocketSendAccepted: true,
+        frameBytes: frame.byteLength,
+        frameDimensions: frame.dimensions,
+        frameSendLatencyMs: 4,
+        usageMetadataAfterFrame: { imageCount: 1, rawUsageMetadataExcluded: true as const },
+        imageCountAfterFrame: 1,
+        estimatedVisualCost: null,
+        error: null,
+        rawFrameExcluded: true as const,
+      })),
+    }
+
+    const result = await runCoreviewRepeatedFrameProbe({
+      visualSource: readyCanvasSource(),
+      sender,
+      enabled: true,
+      maxFrames: 20,
+      intervalMs: 1000,
+      initialDelayMs: 0,
+      sleep: async () => undefined,
+    })
+
+    expect(result.label).toBe("repeated-frame probe")
+    expect(result.requestedFrames).toBe(20)
+    expect(result.maxFrames).toBe(5)
+    expect(result.framesAttempted).toBe(5)
+    expect(result.framesSent).toBe(5)
+    expect(result.stoppedReason).toBe("completed")
+    expect(result.providerUsageImageCount).toBe(1)
+    expect(sender.sendArtifactFrame).toHaveBeenCalledTimes(5)
+    expect(sender.sendArtifactFrame).toHaveBeenLastCalledWith(
+      expect.objectContaining({ visualSourceKind: "canvas_element" }),
+      { coreviewSendStage: "repeated_probe" },
+    )
+  })
+
+  it("Stop Looking cancels an active repeated-frame probe", async () => {
+    mockCanvasEncoding()
+    const sender = {
+      sendArtifactFrame: vi.fn((frame) => ({
+        ok: true,
+        supported: true,
+        providerAcceptedFrame: false,
+        websocketSendAccepted: true,
+        frameBytes: frame.byteLength,
+        frameDimensions: frame.dimensions,
+        frameSendLatencyMs: 4,
+        estimatedVisualCost: null,
+        error: null,
+        rawFrameExcluded: true as const,
+      })),
+    }
+    const sleep = vi.fn((_ms: number, signal?: AbortSignal) => (
+      signal?.aborted
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }))
+    ))
+    const transport = new GeminiStillFrameTransport(sender, {
+      repeatedFrameProbeEnabled: true,
+      repeatedFrameProbeMaxFrames: 5,
+      repeatedFrameProbeInitialDelayMs: 0,
+      repeatedFrameProbeIntervalMs: 1000,
+      repeatedFrameProbeSleep: sleep,
+    })
+    const machine = new CoReviewSessionMachine({ transport })
+
+    await machine.startCoReview({
+      normalSessionId: "normal-1",
+      sessionId: "session-1",
+      threadId: "thread-1",
+      artifactId: "artifact-1",
+      visualSource: readyCanvasSource(),
+    })
+    await waitForMicrotasks()
+    expect(sender.sendArtifactFrame).toHaveBeenCalledTimes(2)
+
+    await machine.stopCoReview()
+    const probeResult = await transport.getRepeatedFrameProbeResult()
+
+    expect(probeResult?.stoppedReason).toBe("cancelled")
+    expect(probeResult?.framesSent).toBe(1)
+    expect(sender.sendArtifactFrame).toHaveBeenCalledTimes(2)
+  })
 })
+
+function waitForMicrotasks(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
+}

@@ -475,7 +475,7 @@ export interface GeminiArtifactFramePayload {
 }
 
 export interface GeminiArtifactFrameSendContext {
-  coreviewSendStage?: 'start' | 'refresh' | null;
+  coreviewSendStage?: 'start' | 'refresh' | 'repeated_probe' | null;
 }
 
 export interface GeminiUsageMetadataTelemetry {
@@ -498,7 +498,7 @@ export interface GeminiArtifactFrameTransportStatusSnapshot {
 }
 
 export interface GeminiArtifactFrameSendResult {
-  coreviewSendStage: 'start' | 'refresh' | null;
+  coreviewSendStage: 'start' | 'refresh' | 'repeated_probe' | null;
   artifactId: string | null;
   ok: boolean;
   supported: boolean;
