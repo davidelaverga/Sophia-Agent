@@ -1,7 +1,7 @@
 """Tests for the voice gateway endpoint."""
 
-import re
 import logging
+import re
 from unittest.mock import ANY, AsyncMock, patch
 
 import httpx
