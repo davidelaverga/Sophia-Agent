@@ -1,6 +1,8 @@
 import { type NextRequest } from 'next/server';
 
-import { getAuthenticatedUserId } from '../../../lib/auth/server-auth';
+import { getPrimaryGatewayUrl } from '../../_lib/gateway-url';
+import { userOwnsThread } from '../../../lib/api/thread-ownership';
+import { getAuthenticatedUserId, getUserScopedAuthToken } from '../../../lib/auth/server-auth';
 import { normalizeBuilderArtifactPayload } from '../../../lib/builder-artifacts';
 import { logger } from '../../../lib/error-logger';
 import { apiLimiters } from '../../../lib/rate-limiter';
@@ -150,6 +152,43 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
         JSON.stringify({ error: 'Invalid user_id format' }),
         { status: 400, headers: { 'Content-Type': 'application/json' } },
       );
+    }
+
+    // Codex P1 PR #132: when the client sends ``attached_files``,
+    // verify they actually own the target thread before forwarding.
+    // Otherwise an authenticated caller could spoof a foreign
+    // ``thread_id`` + ``attached_files`` payload and trick the
+    // companion into calling ``view_user_image`` /
+    // ``read_user_document`` against the victim's sandbox.
+    //
+    // Scoped to "has attachments AND has explicit threadId" so the
+    // existing new-session bootstrap flow (no threadId → backend
+    // creates a fresh thread) is unaffected. A request that sends
+    // attachments but no threadId is malformed in practice (where
+    // would the attachments have been uploaded to?) so we treat it
+    // as a 400 condition implicitly via the empty ownership-check
+    // bypass.
+    //
+    // Broader follow-up: hardening EVERY chat turn (not just
+    // attachment-bearing ones) against threadId spoofing is a
+    // separate concern. The chat post-handler already trusts
+    // ``user_id`` from the auth session, but ``thread_id`` from
+    // the body is still spoofable in the no-attachment path. A
+    // backend ticket to bind ``thread_id`` to the auth-token's
+    // user on the gateway side would close that gap globally.
+    if (attachedFiles.length > 0 && typeof threadId === 'string' && threadId) {
+      const gatewayUrl = getPrimaryGatewayUrl();
+      const apiKey = await getUserScopedAuthToken();
+      const owns = await userOwnsThread(threadId, userId, apiKey, gatewayUrl);
+      if (!owns) {
+        return new Response(
+          JSON.stringify({
+            error: 'Thread not owned by current user',
+            code: 'THREAD_OWNERSHIP_REJECTED',
+          }),
+          { status: 403, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
     }
 
     if (USE_MOCK) {
