@@ -148,11 +148,21 @@ export function useSessionOutboundSend({
       : undefined;
 
     await sendChatMessage({ text: normalizedText }, requestOptions);
-    // Once the turn has been dispatched, the attachments belong to that
-    // turn — clear them so the next turn starts with a fresh chip list.
-    // The chat-side payload already snapshotted the filenames, so
-    // clearing here doesn't race with the in-flight request.
-    useAttachmentsStore.getState().clear();
+
+    // Once the turn has been dispatched, the attachments belong to
+    // that turn — clear them so the next turn starts with a fresh
+    // chip list. Scope the clear to THIS thread only so attachments
+    // the user uploaded in a different open thread aren't wiped
+    // (Codex P2 PR #132). The chat-side payload already snapshotted
+    // the filenames in chatRequestBody.attached_files, so clearing
+    // here doesn't race with the in-flight request.
+    const threadIdForClear = typeof chatRequestBody?.thread_id === 'string'
+      ? chatRequestBody.thread_id
+      : null;
+    if (threadIdForClear) {
+      useAttachmentsStore.getState().clearForThread(threadIdForClear);
+    }
+
     await syncSessionDescriptor(normalizedText);
   }, [
     chatRequestBody,

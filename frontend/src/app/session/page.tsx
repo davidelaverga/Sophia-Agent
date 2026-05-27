@@ -175,6 +175,7 @@ function SessionPageContent() {
     greetingAnchorId,
     memoryHighlights,
     chatRequestBody,
+    hasUploadsInFlight,
   } = useSessionPageContext({
     bootstrapSessionId: bootstrap?.sessionId,
     bootstrapMessageId: bootstrap?.messageId,
@@ -1148,15 +1149,33 @@ function SessionPageContent() {
               picker UI; the companion can still view images uploaded via
               other channels. */}
           {focusMode === 'text' && resolvedThreadId && (
-            <div className="mb-2">
+            <div className="mb-2 flex flex-col gap-1">
               <AttachmentBar
                 threadId={resolvedThreadId}
                 disabled={isTyping || isReadOnly}
               />
+              {hasUploadsInFlight && (
+                <span
+                  className="text-xs text-sophia-text2"
+                  data-testid="attachment-bar-uploads-pending-hint"
+                  role="status"
+                  aria-live="polite"
+                >
+                  Waiting for upload to finish…
+                </span>
+              )}
             </div>
           )}
 
-          {/* Voice-First Composer */}
+          {/* Voice-First Composer.
+              ``disabled`` includes ``hasUploadsInFlight`` so the user
+              can't submit while an attachment is still uploading —
+              otherwise the in-flight item gets filtered out of
+              ``attached_files`` and ``clearForThread`` wipes it
+              post-dispatch, orphaning the upload (Codex P2 PR #132).
+              In text mode AttachmentBar manages the chips above; in
+              voice mode there's no attachment surface, so the gate is
+              a no-op there. */}
           <VoiceComposerErrorBoundary>
             <VoiceFirstComposer
               value={input}
@@ -1164,7 +1183,7 @@ function SessionPageContent() {
               onSubmit={handleSubmit}
               onMicClick={handleMicClick}
               placeholder={isReadOnly ? 'Read-only session' : inputPlaceholder}
-              disabled={isTyping || isReadOnly}
+              disabled={isTyping || isReadOnly || hasUploadsInFlight}
               inputRef={inputRef}
               justSent={justSent}
               voiceStatus={voiceStatus}

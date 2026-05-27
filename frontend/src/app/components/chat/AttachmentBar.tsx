@@ -21,7 +21,11 @@
 import { FileText, ImageIcon, Loader2, Paperclip, X } from "lucide-react"
 import { useCallback, useId, useRef, type ChangeEvent } from "react"
 
-import { useAttachmentsStore, type PendingAttachment } from "../../stores/attachments-store"
+import {
+  selectItemsForThread,
+  useAttachmentsStore,
+  type PendingAttachment,
+} from "../../stores/attachments-store"
 
 // File extensions the upstream view_image_tool accepts (kept in sync with
 // the backend's _BUILDER_COPY_IMAGE_EXTENSIONS — see PR #132 Codex P3).
@@ -93,7 +97,10 @@ type UploadResponseShape = {
 }
 
 export function AttachmentBar({ threadId, disabled = false, className }: AttachmentBarProps) {
-  const items = useAttachmentsStore((state) => state.items)
+  // Show only chips owned by the current thread (Codex P2 PR #132).
+  // If a user uploaded in thread A and switched to B, A's chips
+  // disappear here — they reappear when the user navigates back to A.
+  const items = useAttachmentsStore(selectItemsForThread(threadId))
   const add = useAttachmentsStore((state) => state.add)
   const update = useAttachmentsStore((state) => state.update)
   const remove = useAttachmentsStore((state) => state.remove)
@@ -118,7 +125,9 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
       const files = Array.from(filesList)
 
       // Pre-register each file as "uploading" before kicking off the
-      // network call so the chips appear instantly.
+      // network call so the chips appear instantly. Tag each item
+      // with the current threadId so the store can scope display +
+      // cleanup to this session (Codex P2 PR #132).
       const registrations = files.map((file) => {
         const cap = maxBytesFor(file.name)
         if (file.size > cap) {
@@ -130,6 +139,7 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
             status: "error",
             error: `${kind === "image" ? "Image" : "File"} too large (${formatBytes(file.size)}). Max ${formatBytes(cap)} for ${kind}s.`,
             hasMarkdownConversion: false,
+            threadId,
           }
           add(item)
           return { file, item, skip: true }
@@ -140,6 +150,7 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
           size: file.size,
           status: "uploading",
           hasMarkdownConversion: false,
+          threadId,
         }
         add(item)
         return { file, item, skip: false }
