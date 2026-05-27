@@ -38,4 +38,12 @@ describe('session page exit UI contract', () => {
     expect(source).toContain('isVisible={coReviewFixtureEnabled}');
     expect(source).toContain('coReviewTransport={coReviewTransport}');
   });
+
+  it('allows artifact-library recovery after a builder task has reached a terminal phase', () => {
+    const source = readAppFile('app/session/page.tsx');
+
+    expect(source).toContain("const isBuilderActivelyRunning = builderTask?.phase === 'running';");
+    expect(source).toContain('!isBuilderActivelyRunning ? builderArtifactLibrary[0] : null');
+    expect(source).not.toContain('!builderTask ? builderArtifactLibrary[0] : null');
+  });
 });

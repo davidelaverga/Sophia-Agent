@@ -624,7 +624,8 @@ function SessionPageContent() {
     () => getBuilderArtifactFiles(builderArtifact)[0] ?? null,
     [builderArtifact],
   );
-  const builderLibraryPrimaryFile = recoveredBuilderLibraryItem ?? (!builderTask ? builderArtifactLibrary[0] : null) ?? null;
+  const isBuilderActivelyRunning = builderTask?.phase === 'running';
+  const builderLibraryPrimaryFile = recoveredBuilderLibraryItem ?? (!isBuilderActivelyRunning ? builderArtifactLibrary[0] : null) ?? null;
   const builderPrimaryFile = builderArtifactPrimaryFile ?? (
     builderLibraryPrimaryFile
       ? {
