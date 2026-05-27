@@ -20,6 +20,10 @@ import {
   connectGeminiBrowserLiveFromBootstrap,
   type GeminiBrowserLiveDogfoodConnection,
   type GeminiBargeInTranscriptHandoffDiagnostic,
+  type GeminiArtifactFramePayload,
+  type GeminiArtifactFrameSendContext,
+  type GeminiArtifactFrameSendResult,
+  type GeminiArtifactFrameTransportStatusSnapshot,
   type GeminiBrowserLiveSessionBootstrap,
 } from "../lib/gemini-browser-live-websocket-dogfood"
 import { recordSophiaCaptureEvent } from "../lib/session-capture"
@@ -156,6 +160,11 @@ export type StreamVoiceSessionReturn = {
   unlockAudio: () => void
   /** No-op — reflection TTS goes through Stream agent. Returns false (not spoken). */
   speakText: (text: string, traceId?: string) => Promise<boolean>
+  sendArtifactFrame: (
+    frame: GeminiArtifactFramePayload,
+    context?: GeminiArtifactFrameSendContext,
+  ) => Promise<GeminiArtifactFrameSendResult> | GeminiArtifactFrameSendResult
+  getArtifactFrameTransportStatus: () => GeminiArtifactFrameTransportStatusSnapshot
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +284,9 @@ function createGeminiRuntimeTelemetry(params: Partial<Extract<VoiceRuntimeTeleme
     websocketDiagnosticCount: params.websocketDiagnosticCount ?? 0,
     lastWebSocketDiagnosticAt: params.lastWebSocketDiagnosticAt ?? null,
     lastWebSocketErrorText: params.lastWebSocketErrorText ?? null,
+    lastWebSocketCloseCode: params.lastWebSocketCloseCode ?? null,
+    lastWebSocketCloseReasonSafe: params.lastWebSocketCloseReasonSafe ?? null,
+    lastWebSocketCloseWasClean: params.lastWebSocketCloseWasClean ?? null,
     toolCallCount: params.toolCallCount ?? 0,
     toolResponseCount: params.toolResponseCount ?? 0,
     toolRejectionCount: params.toolRejectionCount ?? 0,
@@ -1144,6 +1156,95 @@ export function useStreamVoiceSession(
       // Best-effort cleanup for unused preconnected sessions.
     }
   }, [clearPreparedVoiceConnectRefs, userId])
+
+  const getArtifactFrameTransportStatus = useCallback((): GeminiArtifactFrameTransportStatusSnapshot => {
+    const activeGeminiConnection = geminiConnectionRef.current
+    if (activeGeminiConnection) {
+      return activeGeminiConnection.getArtifactFrameTransportStatus()
+    }
+
+    return {
+      websocketReadyState: null,
+      websocketState: "closed",
+      websocketOpen: false,
+      websocketCloseCode: null,
+      websocketCloseReasonSafe: null,
+      websocketCloseWasClean: null,
+      websocketCloseAt: null,
+      error: "gemini_live_websocket_not_open",
+    }
+  }, [])
+
+  const recordArtifactFrameSendResult = useCallback((result: GeminiArtifactFrameSendResult) => {
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "gemini-artifact-frame-send",
+      payload: {
+        runtime: "gemini_live",
+        sessionId: sessionIdRef.current ?? null,
+        voiceAgentSessionId: geminiConnectionRef.current?.sessionId ?? null,
+        result,
+      },
+    })
+  }, [])
+
+  const sendArtifactFrame = useCallback((
+    frame: GeminiArtifactFramePayload,
+    context?: GeminiArtifactFrameSendContext,
+  ): Promise<GeminiArtifactFrameSendResult> | GeminiArtifactFrameSendResult => {
+    const activeGeminiConnection = geminiConnectionRef.current
+    if (activeGeminiConnection) {
+      return activeGeminiConnection.sendArtifactFrame(frame, context).then((result) => {
+        recordArtifactFrameSendResult(result)
+        return result
+      })
+    }
+
+    const now = new Date().toISOString()
+    const result: GeminiArtifactFrameSendResult = {
+      coreviewSendStage: context?.coreviewSendStage ?? null,
+      artifactId: frame.artifactId ?? null,
+      ok: false,
+      supported: true,
+      providerAcceptedFrame: false,
+      websocketSendAccepted: false,
+      websocketReadyStateBefore: null,
+      websocketReadyStateAfter: null,
+      websocketOpenBeforeSend: false,
+      websocketOpenAfterSend: false,
+      framePayloadSchemaVersion: "realtimeInput.video.v1",
+      frameBytes: frame.byteLength,
+      frameDimensions: frame.dimensions,
+      visualSourceKind: frame.visualSourceKind ?? null,
+      mimeType: frame.mimeType,
+      frameSendLatencyMs: 0,
+      sendStartedAt: now,
+      sendCompletedAt: now,
+      sendDurationMs: 0,
+      sendExceptionName: null,
+      sendExceptionSafeMessage: null,
+      providerEventCountBefore: null,
+      providerEventCountAfter: null,
+      lastProviderEventTypeBefore: null,
+      lastProviderEventTypeAfter: null,
+      websocketCloseCode: null,
+      websocketCloseReasonSafe: null,
+      websocketCloseWasClean: null,
+      websocketCloseAt: null,
+      websocketClosedAfterFrameSend: false,
+      timeFromFrameSendToCloseMs: null,
+      usageMetadataAfterFrame: null,
+      imageCountAfterFrame: null,
+      videoDurationSecondsAfterFrame: null,
+      audioDurationSecondsAfterFrame: null,
+      visualResponseObserved: false,
+      estimatedVisualCost: null,
+      error: "gemini_live_websocket_not_open",
+      rawFrameExcluded: true,
+    }
+    recordArtifactFrameSendResult(result)
+    return result
+  }, [recordArtifactFrameSendResult])
 
   const prewarmVoiceConnect = useCallback(() => {
     if (!userId) {
@@ -2653,6 +2754,9 @@ export function useStreamVoiceSession(
                   websocketDiagnosticCount: current.websocketDiagnosticCount + 1,
                   lastWebSocketDiagnosticAt: diagnostic.timestamp,
                   lastWebSocketErrorText: diagnostic.message,
+                  lastWebSocketCloseCode: diagnostic.kind === "close" ? diagnostic.closeCode : current.lastWebSocketCloseCode,
+                  lastWebSocketCloseReasonSafe: diagnostic.kind === "close" ? diagnostic.closeReason : current.lastWebSocketCloseReasonSafe,
+                  lastWebSocketCloseWasClean: diagnostic.kind === "close" ? diagnostic.wasClean : current.lastWebSocketCloseWasClean,
                   websocketState: websocketState as GeminiRuntimeWebSocketState,
                 }
               : current)
@@ -3197,5 +3301,7 @@ export function useStreamVoiceSession(
     stream: null,
     unlockAudio: () => {},
     speakText: async () => false,
+    sendArtifactFrame,
+    getArtifactFrameTransportStatus,
   }
 }

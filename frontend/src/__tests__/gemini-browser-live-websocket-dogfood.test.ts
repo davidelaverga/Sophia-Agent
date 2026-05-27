@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  buildGeminiArtifactFrameRealtimeInput,
+  buildGeminiArtifactTextReaderHint,
   buildGeminiLiveWebSocketUrl,
   categorizeGeminiProviderEvent,
   classifyGeminiProviderEventForRelay,
@@ -25,6 +27,10 @@ import {
   type GeminiBargeInTranscriptHandoffDiagnostic,
   type GeminiBrowserLiveDogfoodToolLoopDiagnostic,
 } from '../app/lib/gemini-browser-live-websocket-dogfood';
+import {
+  clearCoreviewArtifactTextRegistryForTests,
+  registerCoreviewArtifactText,
+} from '../app/lib/coreview-artifact-text';
 
 const emitArtifactArgs = {
   session_goal: 'Probe Gemini artifacts.',
@@ -80,9 +86,9 @@ class FakeWebSocket {
     }
   }
 
-  close() {
+  close(code = 1000, reason = 'test close') {
     this.readyState = 3;
-    this.onclose?.({} as CloseEvent);
+    this.onclose?.({ code, reason, wasClean: true } as CloseEvent);
   }
 
   emitMessage(payload: Record<string, unknown>) {
@@ -97,9 +103,9 @@ class FakeWebSocket {
     this.onerror?.({} as Event);
   }
 
-  emitClose() {
+  emitClose(code = 1006, reason = 'provider closed test socket', wasClean = false) {
     this.readyState = 3;
-    this.onclose?.({} as CloseEvent);
+    this.onclose?.({ code, reason, wasClean } as CloseEvent);
   }
 }
 
@@ -140,7 +146,33 @@ class FakeAudioContext {
   });
 }
 
+function makeGeminiBrowserSessionFetch(sessionId = 'browser-gemini-1') {
+  return vi
+    .fn()
+    .mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          session_id: sessionId,
+          websocket_url: 'wss://gemini.example/live',
+          ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+          setup: {
+            model: 'models/gemini-3.1-flash-live-preview',
+            inputAudioTranscription: {},
+            tools: [{ functionDeclarations: [{ name: 'emit_artifact' }] }],
+          },
+          stream_url: `/api/sophia/voice/dogfood/gemini/events?session_id=${sessionId}`,
+        }),
+        { status: 201, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202 }));
+}
+
 describe('Gemini browser Live WebSocket dogfood connector', () => {
+  afterEach(() => {
+    clearCoreviewArtifactTextRegistryForTests();
+  });
+
   it('builds the constrained Live WebSocket URL with only the ephemeral token', () => {
     expect(
       buildGeminiLiveWebSocketUrl(
@@ -153,6 +185,31 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
 
     const encoded = pcm16Base64FromFloat32(new Float32Array([0, 1, -1]), 16000);
     expect(Buffer.from(encoded, 'base64')).toHaveLength(6);
+  });
+
+  it('builds the experimental artifact still-frame realtimeInput video payload without telemetry fields', () => {
+    expect(buildGeminiArtifactFrameRealtimeInput({
+      artifactId: 'artifact-1',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true,
+    })).toEqual({
+      realtimeInput: {
+        video: {
+          mimeType: 'image/jpeg',
+          data: 'base64-frame',
+        },
+      },
+    });
+    expect(buildGeminiArtifactTextReaderHint('artifact-1')).toEqual({
+      realtimeInput: {
+        text: expect.stringContaining('read_artifact_text'),
+      },
+    });
+    expect(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'))).toContain('artifact-1');
+    expect(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'))).not.toContain('base64-frame');
   });
 
   it('decodes Gemini output PCM16 little-endian bytes into normalized float samples', () => {
@@ -374,6 +431,27 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     ]);
     expect(JSON.stringify(memoryToolCalls)).not.toContain('favorite childhood movie secret phrase');
     expect(JSON.stringify(memoryToolCalls)).not.toContain('model-user-id');
+    const readArtifactToolCalls = readGeminiToolCallsFromEvent({
+      toolCall: {
+        functionCalls: [
+          {
+            id: 'read-artifact-call-1',
+            name: 'read_artifact_text',
+            args: {
+              artifact_id: 'coreview-fixture-q3-launch-review',
+              query: 'What exact number is in the table?',
+            },
+          },
+        ],
+      },
+    });
+    expect(readArtifactToolCalls[0]?.args).toMatchObject({
+      artifact_id: 'coreview-fixture-q3-launch-review',
+      query_length: 'What exact number is in the table?'.length,
+      query_fingerprint: expect.stringMatching(/^fnv1a32:[a-f0-9]{8}$/),
+      raw_query_excluded: true,
+    });
+    expect(JSON.stringify(readArtifactToolCalls)).not.toContain('What exact number is in the table?');
     expect(readGeminiConfiguredToolNames({
       tools: [
         {
@@ -665,6 +743,259 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       }),
     );
     expect(relayStatuses.at(-1)).toBe('disconnected');
+  });
+
+  it('does not send artifact frames while the still-frame flag is off', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch();
+    const fakeAudioContext = new FakeAudioContext();
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      coreviewStillFrameEnabled: false,
+    });
+    const sentCountAfterSetup = websocket?.sent.length ?? 0;
+
+    const result = await connection.sendArtifactFrame({
+      artifactId: 'artifact-1',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true,
+    });
+    connection.sendText('hello');
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe('coreview_still_frame_feature_flag_disabled');
+    expect(websocket?.sent).toHaveLength(sentCountAfterSetup + 1);
+    expect(websocket?.sent.at(-1)).toBe(JSON.stringify({ realtimeInput: { text: 'hello' } }));
+
+    await connection.close();
+  });
+
+  it('sends an experimental video artifact frame only when the still-frame flag is on', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch();
+    const fakeAudioContext = new FakeAudioContext();
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+
+    const result = await connection.sendArtifactFrame({
+      artifactId: 'artifact-1',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true,
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: true,
+      supported: true,
+      websocketSendAccepted: true,
+      providerAcceptedFrame: false,
+      websocketReadyStateBefore: 1,
+      websocketReadyStateAfter: 1,
+      websocketOpenBeforeSend: true,
+      websocketOpenAfterSend: true,
+      framePayloadSchemaVersion: 'realtimeInput.video.v1',
+      frameBytes: 12,
+      frameDimensions: { width: 640, height: 360 },
+      mimeType: 'image/jpeg',
+      rawFrameExcluded: true,
+    }));
+    expect(websocket?.sent.at(-2)).toBe(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1')));
+    expect(websocket?.sent.at(-1)).toBe(JSON.stringify({
+      realtimeInput: {
+        video: {
+          mimeType: 'image/jpeg',
+          data: 'base64-frame',
+        },
+      },
+    }));
+
+    await connection.close();
+  });
+
+  it('returns a safe unavailable result when the Gemini WebSocket is already closed', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch();
+    const fakeAudioContext = new FakeAudioContext();
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+
+    websocket?.emitClose(4000, 'provider rejected previous frame', false);
+    const result = await connection.sendArtifactFrame({
+      artifactId: 'artifact-1',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true,
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: false,
+      supported: true,
+      websocketSendAccepted: false,
+      websocketReadyStateBefore: 3,
+      websocketReadyStateAfter: 3,
+      websocketOpenBeforeSend: false,
+      websocketOpenAfterSend: false,
+      websocketCloseCode: 4000,
+      websocketCloseReasonSafe: 'provider rejected previous frame',
+      error: 'gemini_live_websocket_not_open',
+      rawFrameExcluded: true,
+    }));
+
+    await connection.close();
+  });
+
+  it('reports frame_send_closed_gemini_websocket when the socket closes after the frame send', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch();
+    const fakeAudioContext = new FakeAudioContext();
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+    const originalSend = websocket?.send.bind(websocket);
+    if (!websocket || !originalSend) throw new Error('test websocket missing');
+    websocket.send = (data: string) => {
+      originalSend(data);
+      if (data.includes('"video"')) {
+        queueMicrotask(() => websocket?.emitClose(1007, 'invalid video frame payload', false));
+      }
+    };
+
+    const result = await connection.sendArtifactFrame({
+      artifactId: 'artifact-1',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true,
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: false,
+      supported: true,
+      websocketSendAccepted: true,
+      websocketReadyStateBefore: 1,
+      websocketReadyStateAfter: 3,
+      websocketOpenBeforeSend: true,
+      websocketOpenAfterSend: false,
+      websocketCloseCode: 1007,
+      websocketCloseReasonSafe: 'invalid video frame payload',
+      websocketClosedAfterFrameSend: true,
+      error: 'frame_send_closed_gemini_websocket',
+      rawFrameExcluded: true,
+    }));
+    expect(result.timeFromFrameSendToCloseMs).not.toBeNull();
+  });
+
+  it('captures usageMetadata image_count after an artifact frame when Gemini emits it', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch();
+    const fakeAudioContext = new FakeAudioContext();
+    let websocket: FakeWebSocket | null = null;
+    const providerTelemetry: unknown[] = [];
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+      onProviderEventTelemetry: (telemetry) => providerTelemetry.push(telemetry),
+    });
+    const originalSend = websocket?.send.bind(websocket);
+    if (!websocket || !originalSend) throw new Error('test websocket missing');
+    websocket.send = (data: string) => {
+      originalSend(data);
+      if (data.includes('"video"')) {
+        queueMicrotask(() => websocket?.emitMessage({
+          usageMetadata: {
+            image_count: 1,
+            video_duration_seconds: 0.25,
+            audio_duration_seconds: 2,
+            total_token_count: 123,
+          },
+        }));
+      }
+    };
+
+    const result = await connection.sendArtifactFrame({
+      artifactId: 'artifact-1',
+      visualSourceKind: 'canvas_element',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true,
+    }, { coreviewSendStage: 'start' });
+
+    expect(result.imageCountAfterFrame).toBe(1);
+    expect(result.videoDurationSecondsAfterFrame).toBe(0.25);
+    expect(result.audioDurationSecondsAfterFrame).toBe(2);
+    expect(result.providerAcceptedFrame).toBe(true);
+    expect(result.usageMetadataAfterFrame).toEqual({
+      imageCount: 1,
+      videoDurationSeconds: 0.25,
+      audioDurationSeconds: 2,
+      totalTokenCount: 123,
+      rawUsageMetadataExcluded: true,
+    });
+    expect(providerTelemetry.at(-1)).toMatchObject({
+      usageMetadata: {
+        imageCount: 1,
+        videoDurationSeconds: 0.25,
+        audioDurationSeconds: 2,
+        totalTokenCount: 123,
+        rawUsageMetadataExcluded: true,
+      },
+    });
+
+    await connection.close();
   });
 
   it('keeps multiple raw input frames as candidates without suppressing assistant audio', async () => {
@@ -1646,6 +1977,133 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         query_fingerprint: 'sha256:query1234567890',
         result_preview_included: false,
       },
+    });
+
+    await connection.close();
+  });
+
+  it('fills read_artifact_text from the trusted sideband and redacts raw artifact text telemetry', async () => {
+    const rawArtifactText = 'Title: Launch brief overview\nFile count: 2\nBudget delta: 17.4%';
+    registerCoreviewArtifactText({
+      artifactId: 'coreview-real-artifact-launch-brief',
+      source: 'builder_metadata',
+      text: rawArtifactText,
+      sessionIds: ['browser-gemini-read-text-loop'],
+      threadId: 'thread-1',
+    });
+    const backendUnavailableResponse = {
+      ok: false,
+      artifact_id: 'coreview-real-artifact-launch-brief',
+      status: 'unsupported',
+      safe_reason: 'Backend reader has metadata only through the app sideband.',
+    };
+    const toolResponsePayload = {
+      toolResponse: {
+        functionResponses: [
+          {
+            id: 'read-artifact-call-1',
+            name: 'read_artifact_text',
+            response: backendUnavailableResponse,
+          },
+        ],
+      },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-read-text-loop',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: {
+              model: 'models/gemini-3.1-flash-live-preview',
+              tools: [{ functionDeclarations: [{ name: 'read_artifact_text' }] }],
+              inputAudioTranscription: {},
+            },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-read-text-loop',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            accepted: true,
+            client_actions: [
+              {
+                type: 'gemini_tool_response',
+                payload: toolResponsePayload,
+                result_summary: 'read_artifact_text returned unsupported.',
+              },
+            ],
+            tool_diagnostics: [
+              {
+                id: 'read-artifact-call-1',
+                name: 'read_artifact_text',
+                success: false,
+                result_summary: 'read_artifact_text returned unsupported.',
+                response: {
+                  ...backendUnavailableResponse,
+                  raw_artifact_text_excluded: true,
+                },
+              },
+            ],
+          }),
+          { status: 202, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(null, { status: 202 }));
+    const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
+    });
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          {
+            id: 'read-artifact-call-1',
+            name: 'read_artifact_text',
+            args: {
+              artifact_id: 'coreview-real-artifact-launch-brief',
+              query: 'What exact budget delta is shown?',
+            },
+          },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => expect(JSON.stringify(websocket?.sent)).toContain('Budget delta: 17.4%'));
+
+    const serializedDiagnostics = JSON.stringify(toolDiagnostics);
+    const responseSent = toolDiagnostics.find((diagnostic) => diagnostic.phase === 'tool_response_sent');
+
+    expect(serializedDiagnostics).not.toContain(rawArtifactText);
+    expect(serializedDiagnostics).not.toContain('Budget delta: 17.4%');
+    expect(serializedDiagnostics).not.toContain('What exact budget delta is shown?');
+    expect(responseSent?.resultSummary).toBe(`read_artifact_text returned builder_metadata text (${rawArtifactText.length} chars).`);
+    expect(responseSent?.backendResponse).toEqual({
+      ok: true,
+      artifact_id: 'coreview-real-artifact-launch-brief',
+      source: 'builder_metadata',
+      char_count: rawArtifactText.length,
+      truncated: false,
+      status: 'success',
+      safe_reason: null,
+      latency_ms: expect.any(Number),
+      raw_artifact_text_excluded: true,
     });
 
     await connection.close();

@@ -10,6 +10,7 @@ import {
   Clock3,
   Download,
   Ear,
+  Eye,
   Gauge,
   GripVertical,
   Mic,
@@ -259,6 +260,13 @@ export function VoiceMetricsPanel({
             hint: "Gemini server messages observed",
             icon: AudioLines,
             tone: gemini.providerEventCount > 0 ? "good" : "neutral",
+          },
+          {
+            label: "Coreview frames",
+            value: String(metrics.coreview.visual.frameSentCount),
+            hint: "artifact still frames sent",
+            icon: Eye,
+            tone: metrics.coreview.visual.frameSendFailureCount > 0 ? "warn" : metrics.coreview.visual.frameSentCount > 0 ? "good" : "neutral",
           },
           {
             label: "Artifacts",
@@ -1089,6 +1097,7 @@ function GeminiRuntimeDetails({
 }) {
   const gemini = metrics.sessionTelemetry.gemini
   if (!gemini) return null
+  const coreview = metrics.coreview
 
   return (
     <>
@@ -1213,8 +1222,10 @@ function GeminiRuntimeDetails({
               ["Last relay diagnostic", formatIsoAge(gemini.lastRelayDiagnosticAt)],
               ["WebSocket diagnostics", String(gemini.websocketDiagnosticCount)],
               ["Last WebSocket diagnostic", formatIsoAge(gemini.lastWebSocketDiagnosticAt)],
+              ["Last WebSocket close", gemini.lastWebSocketCloseCode != null ? `${gemini.lastWebSocketCloseCode}${gemini.lastWebSocketCloseWasClean === false ? " unclean" : ""}` : "none"],
               ["Last relay error", gemini.lastRelayErrorText ? truncate(gemini.lastRelayErrorText, 52) : "none"],
               ["Last WebSocket error", gemini.lastWebSocketErrorText ? truncate(gemini.lastWebSocketErrorText, 52) : "none"],
+              ["Last close reason", gemini.lastWebSocketCloseReasonSafe ? truncate(gemini.lastWebSocketCloseReasonSafe, 52) : "none"],
             ]}
             footer="Relay degradation is allowed to be visible here without re-labeling it as a legacy Stream or TTS bottleneck."
             tone={relayTone(gemini.relayStatus, gemini.consecutiveRelayFailures)}
@@ -1238,6 +1249,29 @@ function GeminiRuntimeDetails({
             ]}
             footer="Gemini tool-loop diagnostics are counted from production-safe callback metadata, not raw provider payload display."
             tone={gemini.toolRejectionCount > 0 ? "warn" : gemini.toolCallCount > 0 ? "good" : "neutral"}
+          />
+
+          <InfoCard
+            icon={Eye}
+            title="Coreview"
+            rows={[
+              ["Frames sent", String(coreview.visual.frameSentCount)],
+              ["Refresh frames", String(coreview.visual.refreshFrameCount)],
+              ["Last frame", formatBytes(coreview.visual.lastFrameBytes)],
+              ["Max send latency", formatMs(coreview.visual.maxFrameSendLatencyMs)],
+              ["Frame failures", String(coreview.visual.frameSendFailureCount)],
+              ["Closed after frame", String(coreview.visual.websocketClosedAfterFrameCount)],
+              ["Provider image count", coreview.visual.providerUsageImageCount === null ? "pending" : String(coreview.visual.providerUsageImageCount)],
+              ["Exact-text calls", String(coreview.exactText.exactTextCallCount)],
+              ["Last text source", coreview.exactText.lastExactTextSource ?? "pending"],
+              ["Last text status", coreview.exactText.lastExactTextStatus ?? "pending"],
+            ]}
+            footer={coreview.visual.lastFrameSendFailureReason ?? "Coreview telemetry excludes raw frames, base64, raw text, and raw queries."}
+            tone={coreview.visual.frameSendFailureCount > 0 || coreview.exactText.exactTextFailureCount > 0
+              ? "warn"
+              : coreview.visual.frameSentCount > 0 || coreview.exactText.exactTextCallCount > 0
+                ? "good"
+                : "neutral"}
           />
 
           <InfoCard
@@ -1497,6 +1531,12 @@ function formatMs(value: number | null): string {
   if (value === null) return "--"
   if (value < 1000) return `${Math.round(value)} ms`
   return `${(value / 1000).toFixed(2)} s`
+}
+
+function formatBytes(value: number | null): string {
+  if (value === null) return "--"
+  if (value < 1024) return `${Math.round(value)} B`
+  return `${(value / 1024).toFixed(1)} KB`
 }
 
 function formatStatus(value: string | null): string {

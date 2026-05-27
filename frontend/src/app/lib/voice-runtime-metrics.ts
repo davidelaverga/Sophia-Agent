@@ -29,6 +29,51 @@ export type VoiceArtifactTelemetryCounts = {
   artifactCountMismatch: boolean
 }
 
+export type CoreviewExactTextSource = "fixture" | "builder_metadata" | "artifact_store" | "unsupported"
+
+export type CoreviewVisualTelemetry = {
+  coreviewEnabled: boolean
+  coreviewSessionActive: boolean
+  coreviewArtifactId: string | null
+  visualSourceKind: string | null
+  frameSentCount: number
+  initialFrameSent: boolean
+  refreshFrameCount: number
+  lastFrameBytes: number | null
+  lastFrameDimensions: { width: number; height: number } | null
+  totalFrameBytes: number
+  lastFrameSendLatencyMs: number | null
+  maxFrameSendLatencyMs: number | null
+  frameSendFailureCount: number
+  lastFrameSendFailureReason: string | null
+  websocketClosedAfterFrameCount: number
+  providerUsageImageCount: number | null
+  providerUsageVideoDurationSeconds: number | null
+  providerUsageAudioDurationSeconds: number | null
+  visualResponseObserved: boolean
+  toolCallAfterFrameObserved: boolean
+  rawFrameExcluded: true
+}
+
+export type CoreviewExactTextTelemetry = {
+  exactTextCallCount: number
+  exactTextSuccessCount: number
+  exactTextFailureCount: number
+  exactTextSources: Record<CoreviewExactTextSource, number>
+  lastExactTextStatus: string | null
+  lastExactTextSource: CoreviewExactTextSource | null
+  lastExactTextCharCount: number | null
+  lastExactTextTruncated: boolean | null
+  lastExactTextLatencyMs: number | null
+  rawArtifactTextExcluded: true
+  rawQueryExcluded: true
+}
+
+export type CoreviewUsageTelemetry = {
+  visual: CoreviewVisualTelemetry
+  exactText: CoreviewExactTextTelemetry
+}
+
 export type VoiceMetricsTimelineItem = {
   id: string
   at: string
@@ -286,6 +331,9 @@ export type GeminiSessionTelemetry = {
     websocketDiagnosticCount: number
     lastWebSocketDiagnosticAt: string | null
     lastWebSocketErrorText: string | null
+    lastWebSocketCloseCode?: number | null
+    lastWebSocketCloseReasonSafe?: string | null
+    lastWebSocketCloseWasClean?: boolean | null
     toolCallCount: number
     toolResponseCount: number
     toolRejectionCount: number
@@ -344,6 +392,7 @@ export type VoiceDeveloperMetrics = {
     diagnostics: number
     builderEvents: number
   }
+  coreview: CoreviewUsageTelemetry
   timings: {
     joinLatencyMs: number | null
     sessionReadyMs: number | null
@@ -467,6 +516,7 @@ const DEFAULT_MICROPHONE: VoiceDeveloperMetrics["microphone"] = {
 }
 
 const GEMINI_EMIT_ARTIFACT_TOOL_NAME = "emit_artifact"
+const GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = "read_artifact_text"
 const GEMINI_BUILDER_TOOL_NAMES = new Set([
   "start_builder_task",
   "check_async_task",
@@ -474,6 +524,12 @@ const GEMINI_BUILDER_TOOL_NAMES = new Set([
   "cancel_async_task",
   "list_async_tasks",
 ])
+const COREVIEW_EXACT_TEXT_SOURCES: CoreviewExactTextSource[] = [
+  "fixture",
+  "builder_metadata",
+  "artifact_store",
+  "unsupported",
+]
 
 const NULL_LIKE_ARTIFACT_STRINGS = new Set(["null", "none", "undefined", "n/a"])
 const FALLBACK_ARTIFACT_TAKEAWAYS = new Set([
@@ -508,6 +564,15 @@ function asStringArray(value: unknown): string[] | null {
 
 function asBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null
+}
+
+function numberFromKeys(record: Record<string, unknown> | null | undefined, keys: string[]): number | null {
+  if (!record) return null
+  for (const key of keys) {
+    const value = asFiniteNumber(record[key])
+    if (value !== null) return value
+  }
+  return null
 }
 
 function asRealArtifactString(value: unknown): string | null {
@@ -702,6 +767,249 @@ export function buildVoiceArtifactTelemetryCounts({
   snapshot?: SophiaCaptureSnapshot | null
 }): VoiceArtifactTelemetryCounts {
   return buildArtifactTelemetryCountsFromEvents(events.map(normalizeEvent), snapshot ?? null)
+}
+
+function defaultExactTextSources(): Record<CoreviewExactTextSource, number> {
+  return Object.fromEntries(COREVIEW_EXACT_TEXT_SOURCES.map((source) => [source, 0])) as Record<CoreviewExactTextSource, number>
+}
+
+function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
+  return {
+    visual: {
+      coreviewEnabled: false,
+      coreviewSessionActive: false,
+      coreviewArtifactId: null,
+      visualSourceKind: null,
+      frameSentCount: 0,
+      initialFrameSent: false,
+      refreshFrameCount: 0,
+      lastFrameBytes: null,
+      lastFrameDimensions: null,
+      totalFrameBytes: 0,
+      lastFrameSendLatencyMs: null,
+      maxFrameSendLatencyMs: null,
+      frameSendFailureCount: 0,
+      lastFrameSendFailureReason: null,
+      websocketClosedAfterFrameCount: 0,
+      providerUsageImageCount: null,
+      providerUsageVideoDurationSeconds: null,
+      providerUsageAudioDurationSeconds: null,
+      visualResponseObserved: false,
+      toolCallAfterFrameObserved: false,
+      rawFrameExcluded: true,
+    },
+    exactText: {
+      exactTextCallCount: 0,
+      exactTextSuccessCount: 0,
+      exactTextFailureCount: 0,
+      exactTextSources: defaultExactTextSources(),
+      lastExactTextStatus: null,
+      lastExactTextSource: null,
+      lastExactTextCharCount: null,
+      lastExactTextTruncated: null,
+      lastExactTextLatencyMs: null,
+      rawArtifactTextExcluded: true,
+      rawQueryExcluded: true,
+    },
+  }
+}
+
+function buildCoreviewUsageTelemetry(activeEvents: NormalizedVoiceCaptureEvent[]): CoreviewUsageTelemetry {
+  return {
+    visual: buildCoreviewVisualTelemetry(activeEvents),
+    exactText: buildCoreviewExactTextTelemetry(activeEvents),
+  }
+}
+
+function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[]): CoreviewVisualTelemetry {
+  const visual = buildDefaultCoreviewTelemetry().visual
+  const frameEvents = activeEvents.filter((event) => event.name === "gemini-artifact-frame-send")
+  const stateEvents = activeEvents
+    .filter((event) => event.name === "coreview-state")
+    .map((event) => asRecord(eventData(event)?.coreview))
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const latestState = stateEvents.at(-1) ?? null
+  const firstFrameSeq = frameEvents.find((event) => {
+    const result = coreviewFrameResult(event)
+    return result !== null && frameWasSent(result)
+  })?.seq ?? null
+
+  visual.coreviewEnabled = stateEvents.some((entry) => asBoolean(entry.coreviewEnabled) === true) || frameEvents.length > 0
+  visual.coreviewSessionActive = asBoolean(latestState?.coreviewSessionActive) ?? false
+  visual.coreviewArtifactId = asString(latestState?.coreviewArtifactId)
+  visual.visualSourceKind = asString(latestState?.visualSourceKind)
+  const stateFrameSentCount = numberFromKeys(latestState, ["frameSentCount"]) ?? 0
+  const stateRefreshFrameCount = numberFromKeys(latestState, ["refreshFrameCount"]) ?? 0
+  const stateTotalFrameBytes = numberFromKeys(latestState, ["totalFrameBytes"]) ?? 0
+  const stateFrameSendFailureCount = numberFromKeys(latestState, ["frameSendFailureCount"]) ?? 0
+  const stateWebsocketClosedAfterFrameCount = numberFromKeys(latestState, ["websocketClosedAfterFrameCount"]) ?? 0
+  visual.initialFrameSent = asBoolean(latestState?.initialFrameSent) ?? false
+  visual.lastFrameBytes = numberFromKeys(latestState, ["lastFrameBytes", "frameBytes"])
+  visual.lastFrameDimensions = asFrameDimensions(latestState?.lastFrameDimensions) ?? asFrameDimensions(latestState?.frameDimensions)
+  visual.lastFrameSendLatencyMs = numberFromKeys(latestState, ["lastFrameSendLatencyMs", "frameSendLatencyMs"])
+  visual.maxFrameSendLatencyMs = numberFromKeys(latestState, ["maxFrameSendLatencyMs"])
+  visual.lastFrameSendFailureReason = asString(latestState?.lastFrameSendFailureReason)
+  visual.providerUsageImageCount = numberFromKeys(latestState, ["providerUsageImageCount"])
+  visual.providerUsageVideoDurationSeconds = numberFromKeys(latestState, ["providerUsageVideoDurationSeconds"])
+  visual.providerUsageAudioDurationSeconds = numberFromKeys(latestState, ["providerUsageAudioDurationSeconds"])
+  visual.visualResponseObserved = asBoolean(latestState?.visualResponseObserved) ?? false
+  visual.toolCallAfterFrameObserved = asBoolean(latestState?.toolCallAfterFrameObserved) ?? false
+
+  for (const event of frameEvents) {
+    const result = coreviewFrameResult(event)
+    if (!result) continue
+
+    const sent = frameWasSent(result)
+    const ok = asBoolean(result.ok) === true
+    const bytes = numberFromKeys(result, ["frameBytes", "frame_bytes"])
+    const latency = numberFromKeys(result, ["frameSendLatencyMs", "frame_send_latency_ms"])
+    const stage = asString(result.coreviewSendStage)
+
+    visual.coreviewEnabled = true
+    visual.coreviewArtifactId = visual.coreviewArtifactId ?? asString(result.artifactId) ?? asString(result.artifact_id)
+    visual.visualSourceKind = asString(result.visualSourceKind) ?? visual.visualSourceKind
+    if (sent) {
+      visual.frameSentCount += 1
+      visual.totalFrameBytes += bytes ?? 0
+      visual.lastFrameBytes = bytes ?? visual.lastFrameBytes
+      visual.lastFrameDimensions = asFrameDimensions(result.frameDimensions) ?? visual.lastFrameDimensions
+      if (stage === "refresh") {
+        visual.refreshFrameCount += 1
+      } else if (stage === "start") {
+        visual.initialFrameSent = true
+      }
+    }
+    if (!ok) {
+      visual.frameSendFailureCount += 1
+      visual.lastFrameSendFailureReason = asString(result.error) ?? "artifact_frame_send_failed"
+    }
+    if (asBoolean(result.websocketClosedAfterFrameSend) === true) {
+      visual.websocketClosedAfterFrameCount += 1
+    }
+    visual.lastFrameSendLatencyMs = latency ?? visual.lastFrameSendLatencyMs
+    visual.maxFrameSendLatencyMs = maxNullableNumber(visual.maxFrameSendLatencyMs, latency)
+    visual.providerUsageImageCount = numberFromKeys(result, ["imageCountAfterFrame", "image_count_after_frame"])
+      ?? numberFromKeys(asRecord(result.usageMetadataAfterFrame), ["imageCount", "image_count"])
+      ?? visual.providerUsageImageCount
+    visual.providerUsageVideoDurationSeconds = numberFromKeys(result, ["videoDurationSecondsAfterFrame", "video_duration_seconds_after_frame"])
+      ?? numberFromKeys(asRecord(result.usageMetadataAfterFrame), ["videoDurationSeconds", "video_duration_seconds"])
+      ?? visual.providerUsageVideoDurationSeconds
+    visual.providerUsageAudioDurationSeconds = numberFromKeys(result, ["audioDurationSecondsAfterFrame", "audio_duration_seconds_after_frame"])
+      ?? numberFromKeys(asRecord(result.usageMetadataAfterFrame), ["audioDurationSeconds", "audio_duration_seconds"])
+      ?? visual.providerUsageAudioDurationSeconds
+    visual.visualResponseObserved = visual.visualResponseObserved || asBoolean(result.visualResponseObserved) === true
+  }
+
+  for (const event of activeEvents) {
+    if (event.name !== "gemini-provider-event-correlation") continue
+    const telemetry = asRecord(eventData(event)?.telemetry)
+    const usage = asRecord(telemetry?.usageMetadata)
+    visual.providerUsageImageCount = numberFromKeys(usage, ["imageCount", "image_count"]) ?? visual.providerUsageImageCount
+    visual.providerUsageVideoDurationSeconds = numberFromKeys(usage, ["videoDurationSeconds", "video_duration_seconds"]) ?? visual.providerUsageVideoDurationSeconds
+    visual.providerUsageAudioDurationSeconds = numberFromKeys(usage, ["audioDurationSeconds", "audio_duration_seconds"]) ?? visual.providerUsageAudioDurationSeconds
+  }
+
+  if (firstFrameSeq !== null) {
+    visual.toolCallAfterFrameObserved = visual.toolCallAfterFrameObserved || activeEvents.some((event) => (
+      event.seq > firstFrameSeq
+      && event.name === "gemini-tool-loop-diagnostic"
+      && geminiToolName(event) !== null
+      && ["tool_call_received", "tool_response_sent"].includes(asString(eventData(event)?.phase) ?? "")
+    ))
+  }
+  visual.frameSentCount = Math.max(visual.frameSentCount, stateFrameSentCount)
+  visual.refreshFrameCount = Math.max(visual.refreshFrameCount, stateRefreshFrameCount)
+  visual.totalFrameBytes = Math.max(visual.totalFrameBytes, stateTotalFrameBytes)
+  visual.frameSendFailureCount = Math.max(visual.frameSendFailureCount, stateFrameSendFailureCount)
+  visual.websocketClosedAfterFrameCount = Math.max(visual.websocketClosedAfterFrameCount, stateWebsocketClosedAfterFrameCount)
+  visual.initialFrameSent = visual.initialFrameSent || (visual.frameSentCount > 0 && visual.refreshFrameCount < visual.frameSentCount)
+  return visual
+}
+
+function buildCoreviewExactTextTelemetry(activeEvents: NormalizedVoiceCaptureEvent[]): CoreviewExactTextTelemetry {
+  const exactText = buildDefaultCoreviewTelemetry().exactText
+  const readEvents = activeEvents.filter((event) => (
+    event.name === "gemini-tool-loop-diagnostic"
+    && geminiToolName(event) === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME
+  ))
+  const finalPhases = new Set(["tool_response_sent", "tool_response_send_failed", "tool_response_send_suppressed", "tool_execution_rejected"])
+
+  exactText.exactTextCallCount = countWhere(readEvents, (event) => asString(eventData(event)?.phase) === "tool_call_received")
+
+  for (const event of readEvents) {
+    const data = eventData(event)
+    const phase = asString(data?.phase)
+    if (!phase || !finalPhases.has(phase)) continue
+
+    const diagnostic = asRecord(data?.diagnostic)
+    const backendResponse = coreviewReadArtifactTextResponse(diagnostic)
+    const success = asBoolean(data?.success) === true
+      || asBoolean(diagnostic?.success) === true
+      || asBoolean(backendResponse?.ok) === true
+    const status = success ? "success" : asString(backendResponse?.status) ?? phase
+    const source = normalizeCoreviewExactTextSource(asString(backendResponse?.source), success)
+    const latency = numberFromKeys(backendResponse, ["latency_ms", "latencyMs"])
+      ?? numberFromKeys(diagnostic, ["latency_ms", "latencyMs"])
+
+    if (success) {
+      exactText.exactTextSuccessCount += 1
+    } else {
+      exactText.exactTextFailureCount += 1
+    }
+    exactText.exactTextSources[source] += 1
+    exactText.lastExactTextStatus = status
+    exactText.lastExactTextSource = source
+    exactText.lastExactTextCharCount = numberFromKeys(backendResponse, ["char_count", "charCount"]) ?? 0
+    exactText.lastExactTextTruncated = asBoolean(backendResponse?.truncated) ?? false
+    exactText.lastExactTextLatencyMs = latency
+  }
+
+  exactText.exactTextCallCount = Math.max(
+    exactText.exactTextCallCount,
+    exactText.exactTextSuccessCount + exactText.exactTextFailureCount,
+  )
+
+  return exactText
+}
+
+function coreviewFrameResult(event: NormalizedVoiceCaptureEvent): Record<string, unknown> | null {
+  return asRecord(eventData(event)?.result) ?? asRecord(eventData(event))
+}
+
+function frameWasSent(result: Record<string, unknown>): boolean {
+  return asBoolean(result.websocketSendAccepted) === true || asBoolean(result.ok) === true
+}
+
+function asFrameDimensions(value: unknown): { width: number; height: number } | null {
+  const record = asRecord(value)
+  const width = asFiniteNumber(record?.width)
+  const height = asFiniteNumber(record?.height)
+  return width !== null && height !== null ? { width, height } : null
+}
+
+function maxNullableNumber(current: number | null, candidate: number | null): number | null {
+  if (candidate === null) return current
+  return current === null ? candidate : Math.max(current, candidate)
+}
+
+function normalizeCoreviewExactTextSource(
+  source: string | null,
+  success: boolean,
+): CoreviewExactTextSource {
+  if (!success) return "unsupported"
+  if (source === "fixture" || source === "builder_metadata" || source === "artifact_store") {
+    return source
+  }
+  return "unsupported"
+}
+
+function coreviewReadArtifactTextResponse(
+  diagnostic: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (!diagnostic) return null
+  const backendResponse = asRecord(diagnostic.backendResponse) ?? asRecord(diagnostic.backend_response)
+  const nestedResponse = asRecord(backendResponse?.response)
+  return nestedResponse ?? backendResponse ?? asRecord(diagnostic.response)
 }
 
 function eventData(event: NormalizedVoiceCaptureEvent): Record<string, unknown> | null {
@@ -1367,6 +1675,9 @@ function buildSessionTelemetry(params: {
         websocketDiagnosticCount,
         lastWebSocketDiagnosticAt: hookTelemetry?.lastWebSocketDiagnosticAt ?? asString(websocketDiagnostic?.timestamp),
         lastWebSocketErrorText: hookTelemetry?.lastWebSocketErrorText ?? asString(websocketDiagnostic?.message),
+        lastWebSocketCloseCode: hookTelemetry?.lastWebSocketCloseCode ?? asFiniteNumber(websocketDiagnostic?.closeCode),
+        lastWebSocketCloseReasonSafe: hookTelemetry?.lastWebSocketCloseReasonSafe ?? asString(websocketDiagnostic?.closeReason),
+        lastWebSocketCloseWasClean: hookTelemetry?.lastWebSocketCloseWasClean ?? asBoolean(websocketDiagnostic?.wasClean),
         toolCallCount,
         toolResponseCount,
         toolRejectionCount,
@@ -3115,6 +3426,7 @@ export function buildVoiceDeveloperMetrics({
     lastTurn,
     nowMs,
   })
+  const coreview = buildCoreviewUsageTelemetry(activeEvents)
 
   return {
     stage,
@@ -3122,6 +3434,7 @@ export function buildVoiceDeveloperMetrics({
     sessionIds,
     transport,
     counts,
+    coreview,
     timings,
     lastTurn,
     microphone,
