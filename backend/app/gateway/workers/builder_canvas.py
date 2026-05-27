@@ -402,6 +402,11 @@ class BuilderCanvasWorker:
 
     def _event_sequence_locked(self, event: dict[str, Any], key: tuple[str, str, str]) -> int | None:
         previous = self._last_sequence.get(key, 0)
+        if event["kind"] == "terminal" and event.get("_allocate_sequence"):
+            sequence = previous + 1
+            event["sequence"] = sequence
+            event["event_id"] = f"{event['task_id']}:{event['run_id']}:{sequence}"
+            return sequence
         sequence = int(event["sequence"])
         if event["kind"] != "terminal" and sequence <= previous - self._history_size:
             logger.info(
@@ -446,6 +451,7 @@ class BuilderCanvasWorker:
             event = dict(event)
             event.pop("_source_event_name", None)
             event.pop("_run_observed_before_publish", None)
+            event.pop("_allocate_sequence", None)
             self._record_event_locked(event, key, sequence)
             queues = list(self._subscribers.get(parent_thread_id, []))
         for queue in queues:
@@ -527,10 +533,7 @@ class BuilderCanvasWorker:
                     _completion_has(payload, "artifact_path"),
                 )
                 return 0
-            key = (parent, task_id, run_id)
-            sequence = self._last_sequence.get(key, 0) + 1
         completion = {**payload, "run_id": run_id}
-        key = (parent, task_id, run_id)
         status = _public_terminal_status(payload.get("status"))
         terminal_activity = {
             "completed": _activity(action="success", category="finalize", label="Success", kind="phase"),
@@ -539,8 +542,6 @@ class BuilderCanvasWorker:
         }[status]
         event = {
             "version": 1,
-            "event_id": f"{task_id}:{run_id}:{sequence}",
-            "sequence": sequence,
             "parent_thread_id": parent,
             "task_id": task_id,
             "run_id": run_id,
@@ -550,6 +551,7 @@ class BuilderCanvasWorker:
             "activity": terminal_activity,
             "completion": completion,
             "_source_event_name": "builder_completion",
+            "_allocate_sequence": True,
         }
         return await self._publish_event(event)
 

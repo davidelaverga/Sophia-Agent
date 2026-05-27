@@ -339,6 +339,60 @@ async def test_canvas_logs_terminal_artifact_presence(caplog) -> None:
 
 
 @pytest.mark.anyio
+async def test_terminal_sequence_is_allocated_after_racing_final_progress() -> None:
+    class RacingWorker(BuilderCanvasWorker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.injected_final_progress = False
+
+        async def _publish_event(self, event):
+            if event["kind"] == "terminal" and not self.injected_final_progress:
+                self.injected_final_progress = True
+                await self.publish_progress(
+                    {
+                        "parent_thread_id": "parent-1",
+                        "task_id": "task-1",
+                        "run_id": "run-1",
+                        "sequence": 2,
+                        "event_name": "custom",
+                        "data": {"name": "phase", "phase": "finalizing"},
+                    }
+                )
+            return await super()._publish_event(event)
+
+    worker = RacingWorker()
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "drafting"},
+        }
+    )
+
+    await worker.publish_completion(
+        {
+            "thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "status": "success",
+            "artifact_path": "mnt/user-data/outputs/report.html",
+        }
+    )
+
+    events = await worker.recent_events("parent-1")
+    assert [(event["kind"], event["sequence"]) for event in events] == [
+        ("progress", 1),
+        ("progress", 2),
+        ("terminal", 3),
+    ]
+    assert events[-1]["event_id"] == "task-1:run-1:3"
+    assert events[-1]["completion"]["artifact_path"] == "mnt/user-data/outputs/report.html"
+
+
+@pytest.mark.anyio
 async def test_new_run_supersedes_delayed_progress_from_prior_run() -> None:
     worker = BuilderCanvasWorker()
     for run_id, sequence in (("run-old", 1), ("run-new", 1), ("run-old", 2)):
