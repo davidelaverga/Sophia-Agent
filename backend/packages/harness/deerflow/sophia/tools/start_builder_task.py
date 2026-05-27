@@ -41,6 +41,7 @@ import datetime as dt
 import logging
 import shutil
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from langchain.tools import ToolRuntime, tool
@@ -138,6 +139,21 @@ _TASK_TYPE_PREFIXES: dict[str, str] = {
 _BUILDER_COPY_IMAGE_EXTENSIONS: frozenset[str] = frozenset(
     {".jpg", ".jpeg", ".png", ".webp"}
 )
+
+
+def _max_builder_image_bytes() -> int:
+    """Per-image size cap for builder-side vision copy.
+
+    Read lazily from ``view_user_image.MAX_VIEWABLE_IMAGE_BYTES`` so the
+    companion and builder share a single source of truth — bumping the
+    cap there flows through here automatically. Lazy because
+    ``view_user_image`` lazy-imports its sandbox helpers (see that
+    module's TYPE_CHECKING dance), and we'd rather not invert the
+    dependency at module-load time.
+    """
+    from deerflow.sophia.tools.view_user_image import MAX_VIEWABLE_IMAGE_BYTES
+
+    return MAX_VIEWABLE_IMAGE_BYTES
 
 
 # Demo-prompt detection. Mirrors ``switch_to_builder``'s heuristic so users
@@ -499,13 +515,43 @@ def _copy_parent_uploaded_images(
     if not parent_uploads.is_dir():
         return []
 
-    image_files = sorted(
-        f
-        for f in parent_uploads.iterdir()
-        if f.is_file()
-        and not f.name.startswith(".")
-        and f.suffix.lower() in _BUILDER_COPY_IMAGE_EXTENSIONS
-    )
+    max_bytes = _max_builder_image_bytes()
+    image_files: list[Path] = []
+    oversized: list[tuple[str, int]] = []
+    for f in sorted(parent_uploads.iterdir()):
+        if not f.is_file() or f.name.startswith("."):
+            continue
+        if f.suffix.lower() not in _BUILDER_COPY_IMAGE_EXTENSIONS:
+            continue
+        try:
+            size = f.stat().st_size
+        except OSError:
+            # Treat stat failures as "skip" rather than copying a file
+            # whose size we can't validate — same conservative stance
+            # the companion's view_user_image takes.
+            continue
+        if size > max_bytes:
+            oversized.append((f.name, size))
+            continue
+        image_files.append(f)
+
+    if oversized:
+        # Surface the skip explicitly so an operator debugging "why
+        # didn't the builder see my image" has a single log line to
+        # grep. The companion-side view_user_image returns a clean tool
+        # error in the same situation; on the builder side the file
+        # simply isn't surfaced in the briefing.
+        for name, size in oversized:
+            logger.warning(
+                "[Builder] skipping oversized image %s (%d bytes > %d cap) "
+                "from parent thread %s — the builder's vision tool would "
+                "trip Anthropic's request-size limit.",
+                name,
+                size,
+                max_bytes,
+                parent_thread_id,
+            )
+
     if not image_files:
         return []
 

@@ -143,6 +143,79 @@ def test_view_user_image_falls_through_to_outputs(tmp_path: Path, monkeypatch) -
     assert "/mnt/user-data/outputs/chart.png" in viewed
 
 
+def test_view_user_image_rejects_oversized_image_before_base64(tmp_path: Path, monkeypatch) -> None:
+    """Codex P2 on PR #132 — files above MAX_VIEWABLE_IMAGE_BYTES must
+    be rejected before we read + base64-encode them, otherwise the
+    next model turn fails with a provider 400 (request > 32 MB)
+    instead of a clean tool-side error the model can relay."""
+    from deerflow.sandbox import tools as sandbox_tools_mod
+    from deerflow.sophia.tools import view_user_image as view_mod
+
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    big = uploads / "huge.png"
+    # Write 1 byte past the cap. We don't need real PNG bytes for this
+    # test — the size check fires before the base64 read.
+    big.write_bytes(b"\x00" * (view_mod.MAX_VIEWABLE_IMAGE_BYTES + 1))
+
+    monkeypatch.setattr(
+        sandbox_tools_mod,
+        "replace_virtual_path",
+        lambda virtual, _td: str(uploads / virtual.rsplit("/", 1)[-1]),
+    )
+    monkeypatch.setattr(sandbox_tools_mod, "get_thread_data", lambda _r: {})
+
+    runtime = _make_runtime("t1", {})
+    result = view_mod.view_user_image.func(
+        runtime=runtime,
+        image_filename="huge.png",
+        tool_call_id="tc-1",
+    )
+
+    assert isinstance(result, Command)
+    # MUST NOT have written viewed_images — otherwise the middleware
+    # would still inject the (truncated/empty) image on the next turn.
+    assert "viewed_images" not in result.update
+    body = _content(result).lower()
+    assert "above the" in body and "vision cap" in body
+    assert "read_user_document" in body, (
+        "Error message must steer the user toward read_user_document for "
+        "text-extraction (no size cap) so they have a path forward when "
+        "their image is actually a screenshot of a long document."
+    )
+
+
+def test_view_user_image_just_under_cap_passes(tmp_path: Path, monkeypatch) -> None:
+    """Boundary check: a file exactly at the cap must still succeed."""
+    from deerflow.sandbox import tools as sandbox_tools_mod
+    from deerflow.sophia.tools import view_user_image as view_mod
+
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    # Use a fake-but-decodable PNG-extension file; the size check is what
+    # we're exercising. base64 will just encode whatever bytes are present.
+    edge = uploads / "edge.png"
+    edge.write_bytes(b"\x00" * view_mod.MAX_VIEWABLE_IMAGE_BYTES)
+
+    monkeypatch.setattr(
+        sandbox_tools_mod,
+        "replace_virtual_path",
+        lambda virtual, _td: str(uploads / virtual.rsplit("/", 1)[-1]),
+    )
+    monkeypatch.setattr(sandbox_tools_mod, "get_thread_data", lambda _r: {})
+
+    runtime = _make_runtime("t1", {})
+    result = view_mod.view_user_image.func(
+        runtime=runtime,
+        image_filename="edge.png",
+        tool_call_id="tc-1",
+    )
+    assert "viewed_images" in result.update, (
+        "A file at exactly MAX_VIEWABLE_IMAGE_BYTES must pass — the "
+        "comparison is strict greater-than, not greater-or-equal."
+    )
+
+
 def test_view_user_image_reports_not_found(tmp_path: Path, monkeypatch) -> None:
     from deerflow.sandbox import tools as sandbox_tools_mod
 

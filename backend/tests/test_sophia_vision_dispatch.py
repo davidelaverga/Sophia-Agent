@@ -84,6 +84,52 @@ def test_copy_filters_to_image_extensions(tmp_path: Path, monkeypatch) -> None:
     assert not (builder_uploads / ".DS_Store").exists()
 
 
+def test_copy_skips_oversized_images(tmp_path: Path, monkeypatch, caplog) -> None:
+    """Codex P2 on PR #132 — images larger than MAX_VIEWABLE_IMAGE_BYTES
+    must NOT be copied into the builder sandbox, since the builder's
+    upstream view_image_tool would base64-inject them and trip
+    Anthropic's request-size limit. The skip is logged so an operator
+    can debug "why didn't the builder see my image"."""
+    import logging
+
+    from deerflow.sophia.tools.view_user_image import MAX_VIEWABLE_IMAGE_BYTES
+
+    parent_uploads = tmp_path / "parent" / "uploads"
+    parent_uploads.mkdir(parents=True)
+    builder_uploads = tmp_path / "builder" / "uploads"
+
+    # Just-under-cap image: must be copied.
+    small = parent_uploads / "small.png"
+    small.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 1024)
+    # Just-over-cap image: must be skipped + logged.
+    big = parent_uploads / "big.png"
+    big.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * MAX_VIEWABLE_IMAGE_BYTES)
+
+    def _resolve_dir(tid: str) -> Path:
+        return parent_uploads if tid == "p1" else builder_uploads
+
+    fake_paths = SimpleNamespace(sandbox_uploads_dir=_resolve_dir)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: fake_paths)
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.sophia.tools.start_builder_task"):
+        virtual_paths = sbt._copy_parent_uploaded_images(
+            parent_thread_id="p1",
+            builder_thread_id="b1",
+        )
+
+    assert virtual_paths == ["/mnt/user-data/uploads/small.png"]
+    assert (builder_uploads / "small.png").is_file()
+    assert not (builder_uploads / "big.png").exists(), (
+        "Oversized images must NOT make it into the builder's sandbox — "
+        "they'd trip the next builder turn with a provider 400."
+    )
+    # The skip should be visible in logs for operator debugging.
+    assert any(
+        "skipping oversized image big.png" in record.message
+        for record in caplog.records
+    ), f"Expected an oversized-skip log line; got: {[r.message for r in caplog.records]}"
+
+
 def test_copy_extensions_subset_of_view_image_tool_accepted_set() -> None:
     """Lock invariant: every extension we copy must be one view_image_tool will read.
 

@@ -34,9 +34,25 @@ const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"])
 const ACCEPTED_FILE_TYPES =
   ".jpg,.jpeg,.png,.webp,.pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.md,.markdown,.txt,.csv,.tsv,.json,.yaml,.yml"
 
-// Cap individual files to keep the proxy/gateway behavior predictable.
-// 25 MB covers typical screenshots, slide decks, and PDF reports.
-const MAX_FILE_BYTES = 25 * 1024 * 1024
+// Per-file size caps. Images are tighter than documents because the
+// vision tool base64-injects raw bytes into the next model request —
+// a 10 MiB image becomes ~13.4 MiB of base64, leaving comfortable
+// headroom under Anthropic's 32 MB request envelope. The Python-side
+// guard in `view_user_image.MAX_VIEWABLE_IMAGE_BYTES` (10 MiB) is the
+// hard enforcement; this client-side cap just gives the user
+// immediate feedback at file-pick time so they don't wait for upload
+// + tool call to learn the file's too big. Codex P2 on PR #132.
+//
+// Documents stay at 25 MiB because read_user_document extracts TEXT
+// (via markitdown) before the model sees anything — image bytes never
+// hit the request envelope, so a 20 MiB PPTX with embedded images is
+// safe to upload.
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024
+const MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
+
+function maxBytesFor(filename: string): number {
+  return isImage(filename) ? MAX_IMAGE_BYTES : MAX_DOCUMENT_BYTES
+}
 
 type AttachmentBarProps = {
   /** Thread the uploads land under. */
@@ -104,13 +120,15 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
       // Pre-register each file as "uploading" before kicking off the
       // network call so the chips appear instantly.
       const registrations = files.map((file) => {
-        if (file.size > MAX_FILE_BYTES) {
+        const cap = maxBytesFor(file.name)
+        if (file.size > cap) {
+          const kind = isImage(file.name) ? "image" : "document"
           const item: PendingAttachment = {
             clientId: makeClientId(),
             filename: file.name,
             size: file.size,
             status: "error",
-            error: `File too large (${formatBytes(file.size)}). Max ${formatBytes(MAX_FILE_BYTES)}.`,
+            error: `${kind === "image" ? "Image" : "File"} too large (${formatBytes(file.size)}). Max ${formatBytes(cap)} for ${kind}s.`,
             hasMarkdownConversion: false,
           }
           add(item)

@@ -43,6 +43,29 @@ _SUPPORTED_IMAGE_EXTENSIONS: frozenset[str] = frozenset(
     {".jpg", ".jpeg", ".png", ".webp"}
 )
 
+
+# Pre-base64 size cap. base64 expands raw bytes by ~33% (4/3 + padding),
+# so a 10 MiB image becomes ~13.4 MiB of base64. Anthropic's standard
+# request envelope is 32 MB total — once you add the system prompt, the
+# conversation history, the rest of the user message, and JSON
+# overhead, a single image over ~10 MiB raw risks tripping the
+# provider's 400 "request too large" before the tool result even
+# returns. We cap here so the tool returns a *clean* error the model
+# can relay to the user, instead of the next turn failing with a
+# provider-level error the user doesn't understand. Codex P2 on
+# PR #132.
+#
+# 10 MiB is a deliberate compromise: comfortably above iPhone photos
+# (2–5 MiB) and most screenshots, below the request-envelope cliff.
+# A future spec that wants higher-res input should land server-side
+# image downsampling (Pillow) and lift this cap.
+#
+# Exported so ``start_builder_task._copy_parent_uploaded_images`` can
+# pre-filter oversized images out of the builder's sandbox copy — same
+# rationale on the builder side (it uses upstream ``view_image_tool``
+# directly, which has no size cap either).
+MAX_VIEWABLE_IMAGE_BYTES: int = 10 * 1024 * 1024
+
 # Virtual-path roots searched, in order. Uploads first because the user
 # explicitly placed it there; outputs second covers rendered companion
 # artifacts (e.g. a chart Sophia emitted earlier in the session).
@@ -134,6 +157,41 @@ def view_user_image(
                     ToolMessage(
                         f"Error: image {image_filename!r} not found in this thread. Searched: {searched}. "
                         f"If the user just uploaded it, the upload may not have completed yet — ask them to retry.",
+                        tool_call_id=tool_call_id,
+                    )
+                ]
+            }
+        )
+
+    # Pre-base64 size guard — see MAX_VIEWABLE_IMAGE_BYTES comment for
+    # why this matters. Must happen BEFORE read_bytes() so a 50 MiB
+    # image doesn't get fully loaded into memory just to be rejected.
+    try:
+        file_size = resolved_actual.stat().st_size
+    except OSError as exc:
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        f"Error reading image metadata: {exc}",
+                        tool_call_id=tool_call_id,
+                    )
+                ]
+            }
+        )
+    if file_size > MAX_VIEWABLE_IMAGE_BYTES:
+        size_mib = file_size / (1024 * 1024)
+        limit_mib = MAX_VIEWABLE_IMAGE_BYTES / (1024 * 1024)
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        f"Error: image {image_filename!r} is {size_mib:.1f} MiB, above the "
+                        f"{limit_mib:.0f} MiB vision cap. After base64 encoding it would push the "
+                        f"next request past Anthropic's 32 MB envelope. Ask the user to crop or "
+                        f"resize the image (or convert to a more efficient format like .webp) "
+                        f"and re-upload. For documents, use read_user_document instead — text "
+                        f"extraction has no such cap.",
                         tool_call_id=tool_call_id,
                     )
                 ]
