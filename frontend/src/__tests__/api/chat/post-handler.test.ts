@@ -65,6 +65,7 @@ describe('handleChatPost auth hardening', () => {
         contextMode: 'life',
         platform: 'text',
         rawMessageLength: 12,
+        attachedFiles: [],
       },
     });
     getAuthenticatedUserIdMock.mockResolvedValue('session-user-1');

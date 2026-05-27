@@ -17,6 +17,7 @@
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { AttachmentBar } from '../components/chat/AttachmentBar';
 import {
   VoiceComposerErrorBoundary,
 } from '../components/error-boundaries';
@@ -1125,6 +1126,21 @@ function SessionPageContent() {
             </div>
           )}
           
+          {/* Attachment bar — file picker + chips. Sits above the composer
+              so the user sees what they've uploaded and what's about to be
+              referenced this turn. Disabled in voice-only mode (focusMode
+              !== 'text') because voice turns don't benefit from a file
+              picker UI; the companion can still view images uploaded via
+              other channels. */}
+          {focusMode === 'text' && resolvedThreadId && (
+            <div className="mb-2">
+              <AttachmentBar
+                threadId={resolvedThreadId}
+                disabled={isTyping || isReadOnly}
+              />
+            </div>
+          )}
+
           {/* Voice-First Composer */}
           <VoiceComposerErrorBoundary>
             <VoiceFirstComposer

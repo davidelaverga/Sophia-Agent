@@ -4,6 +4,7 @@ import { getAuthenticatedUserId } from '../../../lib/auth/server-auth';
 import { normalizeBuilderArtifactPayload } from '../../../lib/builder-artifacts';
 import { logger } from '../../../lib/error-logger';
 import { apiLimiters } from '../../../lib/rate-limiter';
+import { buildAttachmentPrompt } from '../../../stores/attachment-prompt';
 
 import { fetchBackendStreamWithBootstrap, isValidSophiaUserId } from './backend-client';
 import { parseAndValidateChatPayload } from './chat-request';
@@ -115,13 +116,27 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
     }
 
     const {
-      userMessage,
+      userMessage: rawUserMessage,
       sessionId,
       threadId,
       sessionType,
       contextMode,
       platform,
     } = parsed.data;
+
+    // When the user attached files via AttachmentBar, prepend a short
+    // synthesized note so the companion knows which uploaded filenames
+    // it can pass to view_user_image / read_user_document this turn.
+    // Without this hint, Sophia would either need to call `ls` (extra
+    // tool turn) or guess that uploads exist.
+    //
+    // Defensive coalesce: parseAndValidateChatPayload guarantees this
+    // field is an array, but tests that mock the validator might omit
+    // it. Treat undefined as the empty case rather than throwing.
+    const attachedFiles = parsed.data.attachedFiles ?? [];
+    const userMessage = attachedFiles.length > 0
+      ? `${buildAttachmentPrompt(attachedFiles)}\n\n${rawUserMessage}`
+      : rawUserMessage;
 
     const userId = await getAuthenticatedUserId();
     if (!userId) {

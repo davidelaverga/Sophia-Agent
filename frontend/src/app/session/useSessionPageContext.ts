@@ -6,6 +6,7 @@ import { authBypassEnabled, authBypassUserId } from '../lib/auth/dev-bypass';
 import { logger } from '../lib/error-logger';
 import { getSessionGreetingMessage } from '../lib/time-greetings';
 import { isUuid } from '../lib/utils';
+import { useAttachmentsStore } from '../stores/attachments-store';
 import { useChatStore } from '../stores/chat-store';
 import { useMessageMetadataStore } from '../stores/message-metadata-store';
 import { useSessionStore, selectSession, selectArtifacts, selectBuilderArtifact, selectMessages } from '../stores/session-store';
@@ -42,6 +43,14 @@ export function useSessionPageContext({
   const currentThreadId = useMessageMetadataStore((state) => state.currentThreadId);
   const currentMetadataSessionId = useMessageMetadataStore((state) => state.currentSessionId);
   const platform = usePlatformSignal();
+  // Subscribe to pending attachments so the chatRequestBody includes
+  // the latest filenames on every send. The transport memoizes on
+  // chatRequestBody identity — when the user adds/removes a file, the
+  // body identity changes and the next POST picks it up. Mid-stream
+  // mutations aren't an issue because AttachmentBar disables itself
+  // while a turn is in flight (chip removal still works locally; the
+  // next turn picks up the new list).
+  const pendingAttachments = useAttachmentsStore((state) => state.items);
 
   const sessionId = session?.sessionId || chatConversationId || 'default-session';
   const backendSessionId = session?.sessionId || bootstrapSessionId;
@@ -66,6 +75,15 @@ export function useSessionPageContext({
   const greetingMessageId = session?.greetingMessageId || 'greeting-1';
   const greetingAnchorId = session?.greetingMessageId || bootstrapMessageId || null;
   const memoryHighlights = session?.memoryHighlights ?? bootstrapMemoryHighlights;
+  // Successfully-uploaded attachment filenames for this turn. The
+  // post-handler prepends a synthesized note so Sophia knows to call
+  // view_user_image / read_user_document on them. Sanitization
+  // (no paths, no leading dots) happens server-side too as a
+  // defense-in-depth; this client-side filter is just for cleanliness.
+  const attachedFiles = pendingAttachments
+    .filter((item) => item.status === 'uploaded')
+    .map((item) => item.filename);
+
   const chatRequestBody = safeSessionId
     ? {
         session_id: safeSessionId,
@@ -74,6 +92,7 @@ export function useSessionPageContext({
         session_type: sessionPresetType,
         context_mode: sessionContextMode,
         platform,
+        attached_files: attachedFiles,
       }
     : undefined;
 

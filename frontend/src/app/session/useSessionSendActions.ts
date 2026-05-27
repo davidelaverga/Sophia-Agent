@@ -5,6 +5,7 @@ import { haptic } from '../hooks/useHaptics';
 import { isError, touchSession } from '../lib/api/sessions-api';
 import { debugLog } from '../lib/debug-logger';
 import { chatSanitizer } from '../lib/sanitize';
+import { useAttachmentsStore } from '../stores/attachments-store';
 import { useSessionStore } from '../stores/session-store';
 
 import { shouldBlockOutboundDuplicate, shouldBlockSubmitDuplicate } from './send-gate';
@@ -147,6 +148,11 @@ export function useSessionOutboundSend({
       : undefined;
 
     await sendChatMessage({ text: normalizedText }, requestOptions);
+    // Once the turn has been dispatched, the attachments belong to that
+    // turn — clear them so the next turn starts with a fresh chip list.
+    // The chat-side payload already snapshotted the filenames, so
+    // clearing here doesn't race with the in-flight request.
+    useAttachmentsStore.getState().clear();
     await syncSessionDescriptor(normalizedText);
   }, [
     chatRequestBody,
