@@ -128,11 +128,18 @@ def test_companion_excludes_vision_middleware_when_disabled(monkeypatch) -> None
     tool_names = [getattr(t, "name", None) for t in captured["tools"] if isinstance(t, BaseTool)]
 
     assert "SophiaViewImageMiddleware" not in middleware_names
-    # Tools are NOT gated on supports_vision today — the companion always
-    # exposes view_user_image / read_user_document so the model can attempt
-    # to use them and get a clear "vision not supported" error path if the
-    # middleware happens to be off. This matches how `retrieve_memories` is
-    # always registered even when Mem0 may be down. If a future spec wants
-    # to hide the tools entirely, gate them here too.
-    assert "view_user_image" in tool_names
+    # view_user_image is gated on the same `supports_vision` decision as
+    # the middleware. Codex P2 on PR #132: keeping the tool registered
+    # without the middleware would let the model call view_user_image,
+    # see a success tool result, but never actually receive image blocks
+    # on the next turn — the companion would confidently report "I see
+    # the image" without seeing anything. Hiding the tool keeps the
+    # model's apparent capabilities honest.
+    assert "view_user_image" not in tool_names, (
+        "view_user_image must NOT be registered when vision is disabled — "
+        "the tool would succeed but the model would never get image content "
+        "blocks because SophiaViewImageMiddleware is also off."
+    )
+    # read_user_document stays unconditional since it returns text and
+    # doesn't depend on vision wiring.
     assert "read_user_document" in tool_names

@@ -126,8 +126,17 @@ _TASK_TYPE_PREFIXES: dict[str, str] = {
 # builder typically generates its own text deliverables and doesn't need
 # the user's text files copied over (and shipping a 50 MB PDF across is
 # wasteful when the companion already extracted what it needed).
+#
+# MUST stay a subset of the extensions ``view_image_tool`` actually
+# accepts. Upstream rejects ``.gif`` (see
+# ``deerflow.tools.builtins.view_image_tool``'s ``valid_extensions``
+# check), so copying GIFs across and surfacing them in the builder
+# briefing would teach the model to make a guaranteed-failing
+# ``view_image_tool(image_path="...gif")`` call. If upstream ever adds
+# GIF support, add it here AND verify the builder briefing wording in
+# ``BuilderTaskMiddleware`` still matches.
 _BUILDER_COPY_IMAGE_EXTENSIONS: frozenset[str] = frozenset(
-    {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+    {".jpg", ".jpeg", ".png", ".webp"}
 )
 
 

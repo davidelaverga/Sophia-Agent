@@ -287,15 +287,16 @@ def make_sophia_agent(config: RunnableConfig):
         # turn when view_user_image (or upstream view_image) calls have
         # completed. Conditional on the companion model supporting vision;
         # gating mirrors the builder so the tool list and middleware chain
-        # stay in lock-step. SophiaViewImageMiddleware recognizes both
-        # tool names since the companion uses the narrow view_user_image
-        # wrapper rather than upstream view_image_tool directly. Sits
-        # after Artifact so artifact emission isn't shadowed by mid-stream
-        # image injection, and before PromptAssembly so the injected
-        # HumanMessage participates in prompt finalization.
+        # stay in lock-step (see vision_enabled use below in tool list).
+        # SophiaViewImageMiddleware recognizes both tool names since the
+        # companion uses the narrow view_user_image wrapper rather than
+        # upstream view_image_tool directly. Sits after Artifact so
+        # artifact emission isn't shadowed by mid-stream image injection,
+        # and before PromptAssembly so the injected HumanMessage
+        # participates in prompt finalization.
         *(
             [SophiaViewImageMiddleware()]
-            if supports_vision("claude-haiku-4-5-20251001")
+            if (vision_enabled := supports_vision("claude-haiku-4-5-20251001"))
             else []
         ),
         # 15. Deterministic Builder command routing for explicit document requests
@@ -359,7 +360,15 @@ def make_sophia_agent(config: RunnableConfig):
         emit_artifact,
         start_builder_task,
         retrieve_memories,
-        view_user_image,
+        # view_user_image is gated on the same `vision_enabled` decision
+        # that governs SophiaViewImageMiddleware. Without the middleware,
+        # the tool would write to state["viewed_images"] but the image
+        # content blocks would never reach the model — so the companion
+        # would report success on a tool call it can't actually fulfill.
+        # Hiding the tool when vision is off keeps the model's apparent
+        # capabilities honest. read_user_document stays unconditional
+        # since it returns text and doesn't depend on vision.
+        *([view_user_image] if vision_enabled else []),
         read_user_document,
         *web_tools,
     ]
