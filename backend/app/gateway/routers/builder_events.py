@@ -63,6 +63,7 @@ class BuilderCompletionEvent(BaseModel):
     status: str = Field(..., description="success | error | timeout | cancelled")
     task_type: str | None = None
     task_brief: str | None = None
+    artifact_path: str | None = None
     artifact_url: str | None = None
     artifact_title: str | None = None
     artifact_type: str | None = None

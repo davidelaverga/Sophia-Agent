@@ -17,6 +17,7 @@ export type BuilderCompletionEventV1 = {
   status: BuilderCompletionStatus;
   task_type?: string | null;
   task_brief?: string | null;
+  artifact_path?: string | null;
   artifact_url?: string | null;
   artifact_title?: string | null;
   artifact_type?: string | null;

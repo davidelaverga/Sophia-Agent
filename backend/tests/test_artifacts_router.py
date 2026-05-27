@@ -41,6 +41,7 @@ def test_list_artifacts_returns_output_files_sorted_by_modified_time(tmp_path, m
     os.utime(newer_file, (1_700_000_100, 1_700_000_100))
 
     monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: outputs_dir)
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "list_artifacts", lambda *, thread_id: [])
 
     response = asyncio.run(artifacts_router.list_artifacts("thread-1"))
 
@@ -53,6 +54,94 @@ def test_list_artifacts_returns_output_files_sorted_by_modified_time(tmp_path, m
     assert response.artifacts[0].size_bytes == len("second")
     assert response.artifacts[0].mime_type == "text/plain"
     assert response.artifacts[1].name == "first.md"
+
+
+def test_list_artifacts_includes_supabase_objects_when_local_outputs_are_missing(tmp_path, monkeypatch) -> None:
+    missing_outputs = tmp_path / "missing" / "outputs"
+    supabase_info = artifacts_router.supabase_artifact_store.SupabaseArtifactInfo(
+        filename="prompt_engineering.md",
+        size_bytes=123,
+        modified_at="2026-05-26T22:46:50Z",
+        content_type="text/markdown",
+    )
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: missing_outputs)
+    monkeypatch.setattr(
+        artifacts_router.supabase_artifact_store,
+        "list_artifacts",
+        lambda *, thread_id: [supabase_info],
+    )
+
+    response = asyncio.run(artifacts_router.list_artifacts("thread-1"))
+
+    assert [item.path for item in response.artifacts] == [
+        "mnt/user-data/outputs/prompt_engineering.md",
+    ]
+    assert response.artifacts[0].size_bytes == 123
+    assert response.artifacts[0].mime_type == "text/markdown"
+
+
+def test_list_artifacts_merges_and_dedupes_local_and_supabase(tmp_path, monkeypatch) -> None:
+    outputs_dir = tmp_path / "outputs"
+    outputs_dir.mkdir()
+    local_file = outputs_dir / "brief.md"
+    local_file.write_text("local", encoding="utf-8")
+    os.utime(local_file, (1_700_000_200, 1_700_000_200))
+
+    supabase_items = [
+        artifacts_router.supabase_artifact_store.SupabaseArtifactInfo(
+            filename="brief.md",
+            size_bytes=999,
+            modified_at="2026-05-26T22:46:50Z",
+            content_type="text/markdown",
+        ),
+        artifacts_router.supabase_artifact_store.SupabaseArtifactInfo(
+            filename="nested/second.txt",
+            size_bytes=6,
+            modified_at="2026-05-26T22:46:51Z",
+            content_type="text/plain",
+        ),
+        artifacts_router.supabase_artifact_store.SupabaseArtifactInfo(
+            filename="_generate_pdf.py",
+            size_bytes=10,
+            modified_at="2026-05-26T22:46:52Z",
+            content_type="text/x-python",
+        ),
+    ]
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: outputs_dir)
+    monkeypatch.setattr(
+        artifacts_router.supabase_artifact_store,
+        "list_artifacts",
+        lambda *, thread_id: supabase_items,
+    )
+
+    response = asyncio.run(artifacts_router.list_artifacts("thread-1"))
+
+    paths = [item.path for item in response.artifacts]
+    assert "mnt/user-data/outputs/brief.md" in paths
+    assert "mnt/user-data/outputs/nested/second.txt" in paths
+    assert "mnt/user-data/outputs/_generate_pdf.py" not in paths
+    brief = next(item for item in response.artifacts if item.path.endswith("/brief.md"))
+    assert brief.size_bytes == len("local")
+
+
+def test_list_artifacts_keeps_local_results_when_supabase_listing_fails(tmp_path, monkeypatch, caplog) -> None:
+    outputs_dir = tmp_path / "outputs"
+    outputs_dir.mkdir()
+    local_file = outputs_dir / "brief.md"
+    local_file.write_text("local", encoding="utf-8")
+
+    def raise_list(*, thread_id: str):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: outputs_dir)
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "list_artifacts", raise_list)
+
+    response = asyncio.run(artifacts_router.list_artifacts("thread-1"))
+
+    assert [item.path for item in response.artifacts] == ["mnt/user-data/outputs/brief.md"]
+    assert "Supabase artifact list failed" in caplog.text
 
 
 def test_get_artifact_falls_back_to_workspace_outputs_when_primary_output_is_missing(tmp_path, monkeypatch) -> None:
@@ -187,4 +276,3 @@ def test_get_artifact_returns_404_when_local_missing_and_supabase_has_no_object(
         assert exc.status_code == 404
     else:
         raise AssertionError("Expected 404 when both local and Supabase copies are missing")
-

@@ -1,11 +1,12 @@
 """Tests for the voice gateway endpoint."""
 
 import re
+import logging
 from unittest.mock import ANY, AsyncMock, patch
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.gateway.auth import require_authorized_user_scope
@@ -939,6 +940,39 @@ class TestGeminiBrowserDogfoodGateway:
                 "provider_categories": ["serverContent", "inputTranscription"],
             },
         )
+
+    def test_production_relay_logs_safe_metadata_on_upstream_rejection(self, caplog):
+        caplog.set_level(logging.WARNING)
+
+        async def reject_runtime(*args, **kwargs):
+            raise HTTPException(
+                status_code=422,
+                detail="Gemini Live toolCall omitted functionCalls.",
+            )
+
+        with patch(
+            "app.gateway.routers.voice._proxy_voice_runtime_json",
+            new_callable=AsyncMock,
+            side_effect=reject_runtime,
+        ):
+            resp = client.post(
+                "/api/sophia/user_123/voice/gemini/relay",
+                json={
+                    "session_id": "gemini-prod-sensitive",
+                    "event": {"serverContent": {"inputTranscription": {"text": "private transcript"}}},
+                    "provider_receive_sequence": 84,
+                    "provider_relay_sequence": 12,
+                    "relay_correlation_id": "gemini-84",
+                    "provider_primary_category": "inputTranscription",
+                    "provider_categories": ["serverContent", "inputTranscription"],
+                },
+            )
+
+        assert resp.status_code == 422
+        assert "voice.gemini.relay failed" in caplog.text
+        assert "gemini-84" in caplog.text
+        assert "inputTranscription" in caplog.text
+        assert "private transcript" not in caplog.text
 
 
 @pytest.mark.anyio

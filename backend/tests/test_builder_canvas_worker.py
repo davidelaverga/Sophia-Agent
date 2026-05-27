@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from app.gateway.workers.builder_canvas import BuilderCanvasWorker
@@ -33,7 +35,7 @@ async def test_progress_projection_is_curated_and_replayable() -> None:
     assert events[0]["activity"] == {
         "kind": "tool_activity",
         "category": "research",
-        "label": "Researching sources",
+        "label": "Searching",
     }
     assert "private query" not in str(events)
     assert events[0]["event_id"] == "task-1:run-1:1"
@@ -135,6 +137,35 @@ async def test_done_phase_is_projected_to_browser_activity() -> None:
     )
     events = await worker.recent_events("parent-1")
     assert events[0]["activity"] == {"kind": "phase", "phase": "done", "label": "Done"}
+
+
+@pytest.mark.anyio
+async def test_canvas_logs_terminal_artifact_presence(caplog) -> None:
+    caplog.set_level(logging.INFO)
+    worker = BuilderCanvasWorker()
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "starting"},
+        }
+    )
+
+    await worker.publish_completion(
+        {
+            "thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "status": "success",
+            "artifact_path": "mnt/user-data/outputs/brief.md",
+        }
+    )
+
+    assert "Builder canvas: event accepted" in caplog.text
+    assert "has_artifact_path=True" in caplog.text
 
 
 @pytest.mark.anyio

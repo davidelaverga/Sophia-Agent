@@ -2,6 +2,7 @@
 
 import { useMemo, type MouseEventHandler } from 'react';
 
+import { buildThreadArtifactHref } from '../../lib/builder-artifacts';
 import { cn } from '../../lib/utils';
 import type { BuilderCompletionEventV1 } from '../../types/builder-completion';
 
@@ -113,27 +114,32 @@ export function BuilderCompletionCard({
   const meta = STATUS_META[event.status];
   const title = useMemo(() => deriveTitle(event), [event]);
   const body = useMemo(() => deriveBody(event), [event]);
+  const artifactProxyHref = useMemo(
+    () => buildThreadArtifactHref(event.thread_id, event.artifact_path),
+    [event.artifact_path, event.thread_id],
+  );
+  const artifactProxyDownloadHref = useMemo(
+    () => buildThreadArtifactHref(event.thread_id, event.artifact_path, { download: true }),
+    [event.artifact_path, event.thread_id],
+  );
+  const openHref = event.artifact_url || artifactProxyHref;
+  const downloadHref = artifactProxyDownloadHref || event.artifact_url || null;
 
-  const showOpen = event.status === 'success' && Boolean(event.artifact_url);
-  // Download is shown alongside Open on success — same signed URL, but
-  // anchors with a ``download`` attribute force browser save instead of
-  // navigation. Matches the BuilderReadyPill UX so users have a familiar
-  // primary (Open) + secondary (Download) action set on success cards.
-  const showDownload = showOpen;
+  const showOpen = event.status === 'success' && Boolean(openHref);
+  const showDownload = event.status === 'success' && Boolean(downloadHref);
   const showRetry = event.status === 'error' || event.status === 'timeout';
   const showDismiss = Boolean(onDismiss);
 
   const handleOpen: MouseEventHandler<HTMLButtonElement> = (e) => {
     e.preventDefault();
-    if (event.artifact_url) {
-      window.open(event.artifact_url, '_blank', 'noopener,noreferrer');
+    if (openHref) {
+      window.open(openHref, '_blank', 'noopener,noreferrer');
     }
     onOpen?.(event);
   };
 
-  // Native anchor click — the ``download`` attribute on the <a> tells the
-  // browser to save the linked URL instead of navigating to it. We don't
-  // call preventDefault because we WANT the browser's default to fire.
+  // Prefer Sophia's same-origin proxy for downloads so Content-Disposition
+  // works even when the signed Supabase URL is absent or cross-origin.
   const handleDownload: MouseEventHandler<HTMLAnchorElement> = () => {
     onDownload?.(event);
   };
@@ -221,7 +227,7 @@ export function BuilderCompletionCard({
       </div>
 
       <div className={cn('flex items-center justify-end gap-2', compact ? 'mt-2' : 'mt-2.5')}>
-        {showOpen && event.artifact_url && (
+        {showOpen && (
           <button
             type="button"
             onClick={handleOpen}
@@ -239,9 +245,9 @@ export function BuilderCompletionCard({
           </button>
         )}
 
-        {showDownload && event.artifact_url && (
+        {showDownload && downloadHref && (
           <a
-            href={event.artifact_url}
+            href={downloadHref}
             download={event.artifact_filename || true}
             onClick={handleDownload}
             className={cn(

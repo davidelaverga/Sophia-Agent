@@ -25,8 +25,8 @@ DEFAULT_RETIRED_RUNS_SIZE = 128
 _SUBSCRIBER_QUEUE_MAXSIZE = 128
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 _PHASE_LABELS = {
-    "starting": "Starting",
-    "researching": "Researching sources",
+    "starting": "Working",
+    "researching": "Researching",
     "drafting": "Drafting",
     "finalizing": "Finalizing",
     "done": "Done",
@@ -52,15 +52,17 @@ def _public_terminal_status(status: str | None) -> str:
 
 def _tool_activity(tool_name: str) -> dict[str, str]:
     name = tool_name.lower()
-    if any(token in name for token in ("search", "fetch", "browse", "scrape", "tavily", "jina", "firecrawl")):
-        return {"kind": "tool_activity", "category": "research", "label": "Researching sources"}
+    if any(token in name for token in ("search", "browse", "scrape", "tavily", "firecrawl")):
+        return {"kind": "tool_activity", "category": "research", "label": "Searching"}
+    if any(token in name for token in ("fetch", "jina")):
+        return {"kind": "tool_activity", "category": "research", "label": "Reading"}
     if any(token in name for token in ("write_file", "str_replace", "edit_file")):
-        return {"kind": "tool_activity", "category": "draft", "label": "Drafting deliverable"}
+        return {"kind": "tool_activity", "category": "draft", "label": "Drafting"}
     if "render" in name:
-        return {"kind": "tool_activity", "category": "render", "label": "Rendering output"}
+        return {"kind": "tool_activity", "category": "render", "label": "Rendering"}
     if any(token in name for token in ("emit_artifact", "emit_builder_artifact", "package")):
-        return {"kind": "tool_activity", "category": "package", "label": "Packaging deliverable"}
-    return {"kind": "tool_activity", "category": "finalize", "label": "Working on deliverable"}
+        return {"kind": "tool_activity", "category": "package", "label": "Wrapping up"}
+    return {"kind": "tool_activity", "category": "finalize", "label": "Working"}
 
 
 def _phase_activity(data: Any) -> dict[str, str] | None:
@@ -120,6 +122,11 @@ def _required_str(payload: dict[str, Any], key: str) -> str | None:
 def _positive_sequence(payload: dict[str, Any]) -> int | None:
     sequence = payload.get("sequence")
     return sequence if isinstance(sequence, int) and sequence >= 1 else None
+
+
+def _completion_has(completion: dict[str, Any] | None, key: str) -> bool:
+    value = completion.get(key) if isinstance(completion, dict) else None
+    return isinstance(value, str) and bool(value.strip())
 
 
 class BuilderCanvasWorker:
@@ -195,16 +202,41 @@ class BuilderCanvasWorker:
             return False
         return any(item["kind"] == "terminal" for item in self._histories.get(key, ()))
 
-    def _accept_event_locked(self, event: dict[str, Any], key: tuple[str, str, str]) -> bool:
+    def _drop_reason_locked(self, event: dict[str, Any], key: tuple[str, str, str]) -> str | None:
         if self._is_replaced_run_locked(event, key):
             # Once a newer task/run is visible, delayed deliveries from a
             # previously seen task/run cannot reclaim the active canvas seed.
-            return False
+            return "replaced_run"
         if key in self._terminal_at and event["kind"] != "terminal":
-            return False
+            return "run_already_terminal"
         if self._is_duplicate_terminal_locked(event, key):
-            return False
-        return True
+            return "duplicate_terminal"
+        return None
+
+    def _accept_event_locked(self, event: dict[str, Any], key: tuple[str, str, str]) -> bool:
+        return self._drop_reason_locked(event, key) is None
+
+    def _log_event_decision(self, decision: str, event: dict[str, Any], *, reason: str | None = None) -> None:
+        activity = event.get("activity")
+        completion = event.get("completion") if isinstance(event.get("completion"), dict) else None
+        logger.info(
+            "Builder canvas: event %s kind=%s reason=%s parent_thread_id=%s task_id=%s run_id=%s "
+            "sequence=%s event_name=%s activity_kind=%s activity_category=%s status=%s "
+            "has_artifact_url=%s has_artifact_path=%s",
+            decision,
+            event.get("kind"),
+            reason,
+            event.get("parent_thread_id"),
+            event.get("task_id"),
+            event.get("run_id"),
+            event.get("sequence"),
+            event.get("_source_event_name"),
+            activity.get("kind") if isinstance(activity, dict) else None,
+            activity.get("category") if isinstance(activity, dict) else None,
+            event.get("status"),
+            _completion_has(completion, "artifact_url"),
+            _completion_has(completion, "artifact_path"),
+        )
 
     def _record_event_locked(self, event: dict[str, Any], key: tuple[str, str, str], sequence: int) -> None:
         previous = self._last_sequence.get(key, 0)
@@ -248,9 +280,15 @@ class BuilderCanvasWorker:
             self._expire_locked()
             sequence = self._event_sequence_locked(event, key)
             if sequence is None:
+                self._log_event_decision("dropped", event, reason="stale_sequence")
                 return 0
-            if not self._accept_event_locked(event, key):
+            drop_reason = self._drop_reason_locked(event, key)
+            if drop_reason is not None:
+                self._log_event_decision("dropped", event, reason=drop_reason)
                 return 0
+            self._log_event_decision("accepted", event)
+            event = dict(event)
+            event.pop("_source_event_name", None)
             self._record_event_locked(event, key, sequence)
             queues = list(self._subscribers.get(parent_thread_id, []))
         for queue in queues:
@@ -267,9 +305,25 @@ class BuilderCanvasWorker:
         run_id = _required_str(payload, "run_id")
         sequence = _positive_sequence(payload)
         if parent is None or task_id is None or run_id is None or sequence is None:
+            logger.info(
+                "Builder canvas: progress dropped reason=invalid_identity parent_thread_id=%s task_id=%s run_id=%s sequence=%s event_name=%s",
+                parent,
+                task_id,
+                run_id,
+                payload.get("sequence"),
+                payload.get("event_name"),
+            )
             return 0
         activity = _project_activity(str(payload.get("event_name") or ""), payload.get("data"))
         if activity is None:
+            logger.info(
+                "Builder canvas: progress dropped reason=no_public_activity parent_thread_id=%s task_id=%s run_id=%s sequence=%s event_name=%s",
+                parent,
+                task_id,
+                run_id,
+                sequence,
+                payload.get("event_name"),
+            )
             return 0
         event = {
             "version": 1,
@@ -282,6 +336,7 @@ class BuilderCanvasWorker:
             "kind": "progress",
             "status": "running",
             "activity": activity,
+            "_source_event_name": payload.get("event_name"),
         }
         return await self._publish_event(event)
 
@@ -289,10 +344,27 @@ class BuilderCanvasWorker:
         parent = payload.get("thread_id")
         task_id = payload.get("task_id")
         if not all(isinstance(value, str) and value for value in (parent, task_id)):
+            logger.info(
+                "Builder canvas: terminal dropped reason=invalid_identity parent_thread_id=%s task_id=%s run_id=%s status=%s has_artifact_url=%s has_artifact_path=%s",
+                parent,
+                task_id,
+                payload.get("run_id"),
+                payload.get("status"),
+                _completion_has(payload, "artifact_url"),
+                _completion_has(payload, "artifact_path"),
+            )
             return 0
         async with self._lock:
             run_id = self._completion_run_id_locked(parent, task_id, payload.get("run_id"))
             if run_id is None:
+                logger.info(
+                    "Builder canvas: terminal dropped reason=missing_run_id parent_thread_id=%s task_id=%s status=%s has_artifact_url=%s has_artifact_path=%s",
+                    parent,
+                    task_id,
+                    payload.get("status"),
+                    _completion_has(payload, "artifact_url"),
+                    _completion_has(payload, "artifact_path"),
+                )
                 return 0
             key = (parent, task_id, run_id)
             sequence = self._last_sequence.get(key, 0) + 1
@@ -309,6 +381,7 @@ class BuilderCanvasWorker:
             "kind": "terminal",
             "status": _public_terminal_status(payload.get("status")),
             "completion": completion,
+            "_source_event_name": "builder_completion",
         }
         return await self._publish_event(event)
 

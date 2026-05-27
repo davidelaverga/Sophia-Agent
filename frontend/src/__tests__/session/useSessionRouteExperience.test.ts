@@ -786,6 +786,7 @@ describe('useSessionRouteExperience', () => {
       run_id: 'run-builder-1',
       status: 'success',
       artifact_title: 'Launch brief',
+      artifact_path: 'mnt/user-data/outputs/brief.md',
       artifact_url: '/api/threads/thread-1/artifacts/mnt/user-data/outputs/brief.md',
     }));
   });

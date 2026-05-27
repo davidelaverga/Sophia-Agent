@@ -48,6 +48,7 @@ export function completionFromTerminalCanvasTask(
     run_id: activeTask.run_id,
     status,
     source: 'builder_canvas_snapshot',
+    ...(primaryFile?.path ? { artifact_path: primaryFile.path } : {}),
     ...(artifactUrl ? { artifact_url: artifactUrl } : {}),
     ...(primaryFile?.name ? { artifact_filename: primaryFile.name } : {}),
     ...(builderArtifact?.artifactTitle ? { artifact_title: builderArtifact.artifactTitle } : {}),

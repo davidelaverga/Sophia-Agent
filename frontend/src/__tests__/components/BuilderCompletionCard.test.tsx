@@ -9,6 +9,7 @@ const SUCCESS_EVENT: BuilderCompletionEventV1 = {
   task_id: "task-1",
   status: "success",
   task_brief: "Write a one-pager about LLM time-series solutions.",
+  artifact_path: "mnt/user-data/outputs/llm_time_series.md",
   artifact_url: "https://example.com/llm_time_series.md",
   artifact_title: "LLM Time-Series Solutions",
   artifact_type: "document",
@@ -71,14 +72,35 @@ describe("BuilderCompletionCard — success variant", () => {
     expect(screen.queryByRole("button", { name: /try again/i })).toBeNull()
   })
 
-  it("renders a Download anchor with the signed URL and download attribute", () => {
+  it("renders a Download anchor with the same-origin proxy and download attribute", () => {
     render(<BuilderCompletionCard event={SUCCESS_EVENT} />)
     const link = screen.getByRole("link", { name: /download/i })
-    expect(link.getAttribute("href")).toBe(SUCCESS_EVENT.artifact_url)
+    expect(link.getAttribute("href")).toBe(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/llm_time_series.md?download=true",
+    )
     // The download attribute makes the browser save instead of navigating.
     expect(link.hasAttribute("download")).toBe(true)
     // Filename hint is preferred over the boolean form.
     expect(link.getAttribute("download")).toBe(SUCCESS_EVENT.artifact_filename)
+  })
+
+  it("falls back to artifact_path when the signed URL is missing", () => {
+    const event: BuilderCompletionEventV1 = {
+      ...SUCCESS_EVENT,
+      artifact_url: undefined,
+    }
+
+    render(<BuilderCompletionCard event={event} />)
+    fireEvent.click(screen.getByRole("button", { name: /open/i }))
+    expect(window.open).toHaveBeenCalledWith(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/llm_time_series.md",
+      "_blank",
+      "noopener,noreferrer",
+    )
+    expect(screen.getByRole("link", { name: /download/i })).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/llm_time_series.md?download=true",
+    )
   })
 
   it("invokes onDownload when the Download link is clicked", () => {

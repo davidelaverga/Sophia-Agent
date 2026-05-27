@@ -52,6 +52,7 @@ describe('completionFromTerminalCanvasTask', () => {
       artifact_title: 'Launch brief',
       artifact_type: 'document',
       artifact_filename: 'brief.md',
+      artifact_path: 'mnt/user-data/outputs/brief.md',
       artifact_url: '/api/threads/thread-1/artifacts/mnt/user-data/outputs/brief.md',
       summary: 'A concise launch brief is ready.',
       user_next_action: 'Open the brief.',

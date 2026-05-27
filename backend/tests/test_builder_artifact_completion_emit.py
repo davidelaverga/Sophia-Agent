@@ -172,6 +172,7 @@ def test_build_completion_payload_from_artifact_success_shape():
     assert payload["status"] == "success"  # _map_status normalizes "completed" -> "success"
     assert payload["task_type"] == "document"
     assert payload["task_brief"] == "Build a brief about X"
+    assert payload["artifact_path"] == "mnt/user-data/outputs/foo.md"
     assert payload["artifact_url"] == "https://supabase.test/foo.md"
     assert payload["artifact_filename"] == "foo.md"
     assert payload["artifact_title"] == "Foo One-Pager"
@@ -181,6 +182,25 @@ def test_build_completion_payload_from_artifact_success_shape():
     assert payload["user_id"] == "alice"
     assert payload["source"] == "builder_artifact_middleware"
     assert payload["trace_id"] == "trace-1"
+
+
+def test_completion_payload_preserves_artifact_path_when_signed_url_missing():
+    runtime = _make_runtime(
+        builder_thread_id="t-build",
+        builder_run_id="r-1",
+        parent_thread_id="t-parent",
+    )
+    state = _make_state(task_brief="Build a brief about X", task_type="document")
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    assert payload["status"] == "success"
+    assert payload["artifact_path"] == "mnt/user-data/outputs/foo.md"
+    assert payload["artifact_filename"] == "foo.md"
+    assert payload["artifact_url"] is None
 
 
 def test_build_completion_payload_run_id_is_none_when_runtime_missing_it():

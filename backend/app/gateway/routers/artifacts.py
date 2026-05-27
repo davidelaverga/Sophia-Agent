@@ -32,6 +32,11 @@ class ThreadArtifactListResponse(BaseModel):
     artifacts: list[ThreadArtifactListItem] = Field(default_factory=list)
 
 
+def _is_builder_internal(name: str) -> bool:
+    # Builder generator/helper scripts are byproducts, not deliverables.
+    return name.startswith("_") and name.endswith(".py")
+
+
 def is_text_file_by_content(path: Path, sample_size: int = 8192) -> bool:
     """Check if file is text by examining content for null bytes."""
     try:
@@ -184,40 +189,73 @@ def _try_serve_from_supabase(thread_id: str, path: str, request: Request) -> Res
 async def list_artifacts(thread_id: str) -> ThreadArtifactListResponse:
     outputs_path = resolve_thread_virtual_path(thread_id, _OUTPUTS_VIRTUAL_PATH)
 
-    if not outputs_path.exists():
-        return ThreadArtifactListResponse(thread_id=thread_id, artifacts=[])
+    artifacts_by_path: dict[str, ThreadArtifactListItem] = {}
+    local_count = 0
 
-    if not outputs_path.is_dir():
+    if outputs_path.exists() and not outputs_path.is_dir():
         raise HTTPException(status_code=400, detail=f"Path is not a directory: {_OUTPUTS_VIRTUAL_PATH}")
 
-    # Filter out builder-internal generator/helper scripts.
-    # Convention (see builder_task.py completion_instruction): scripts that
-    # produce a binary deliverable are named `_generate_<name>.py`,
-    # `_gen_<name>.py`, `_launcher.py`, etc. Those live under outputs/ as
-    # byproducts of the build process but should never be surfaced to the
-    # user as deliverables — the user wants the PDF/PPTX/DOCX, not the
-    # script that made it.
-    def _is_builder_internal(name: str) -> bool:
-        return name.startswith("_") and name.endswith(".py")
+    if outputs_path.exists():
+        files_with_stat = [
+            (candidate, candidate.stat())
+            for candidate in outputs_path.rglob("*")
+            if candidate.is_file() and not _is_builder_internal(candidate.name)
+        ]
+        local_count = len(files_with_stat)
+        for file_path, stat_result in files_with_stat:
+            relative_path = file_path.relative_to(outputs_path).as_posix()
+            mime_type, _ = mimetypes.guess_type(file_path.name)
+            path = f"{_OUTPUTS_VIRTUAL_PATH}/{relative_path}"
+            artifacts_by_path[path] = ThreadArtifactListItem(
+                path=path,
+                name=file_path.name,
+                size_bytes=stat_result.st_size,
+                modified_at=datetime.fromtimestamp(stat_result.st_mtime, tz=UTC).isoformat(),
+                mime_type=mime_type,
+            )
 
-    files_with_stat = [
-        (candidate, candidate.stat())
-        for candidate in outputs_path.rglob("*")
-        if candidate.is_file() and not _is_builder_internal(candidate.name)
-    ]
-    files_with_stat.sort(key=lambda item: item[1].st_mtime, reverse=True)
+    supabase_count = 0
+    try:
+        supabase_artifacts = supabase_artifact_store.list_artifacts(thread_id=thread_id)
+    except Exception as exc:  # noqa: BLE001 — listing is best-effort.
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        logger.warning(
+            "Supabase artifact list failed: thread_id=%s error_type=%s status=%s",
+            thread_id,
+            exc.__class__.__name__,
+            status_code,
+        )
+        supabase_artifacts = []
 
-    artifacts: list[ThreadArtifactListItem] = []
-    for file_path, stat_result in files_with_stat:
-        relative_path = file_path.relative_to(outputs_path).as_posix()
-        mime_type, _ = mimetypes.guess_type(file_path.name)
-        artifacts.append(ThreadArtifactListItem(
-            path=f"{_OUTPUTS_VIRTUAL_PATH}/{relative_path}",
-            name=file_path.name,
-            size_bytes=stat_result.st_size,
-            modified_at=datetime.fromtimestamp(stat_result.st_mtime, tz=UTC).isoformat(),
+    for artifact in supabase_artifacts:
+        if _is_builder_internal(Path(artifact.filename).name):
+            continue
+        path = f"{_OUTPUTS_VIRTUAL_PATH}/{artifact.filename}"
+        if path in artifacts_by_path:
+            continue
+        mime_type = artifact.content_type or mimetypes.guess_type(artifact.filename)[0]
+        artifacts_by_path[path] = ThreadArtifactListItem(
+            path=path,
+            name=Path(artifact.filename).name,
+            size_bytes=artifact.size_bytes,
+            modified_at=artifact.modified_at,
             mime_type=mime_type,
-        ))
+        )
+        supabase_count += 1
+
+    artifacts = sorted(
+        artifacts_by_path.values(),
+        key=lambda item: item.modified_at,
+        reverse=True,
+    )
+
+    logger.info(
+        "Artifact list resolved: thread_id=%s local_count=%d supabase_count=%d merged_count=%d",
+        thread_id,
+        local_count,
+        supabase_count,
+        len(artifacts),
+    )
 
     return ThreadArtifactListResponse(thread_id=thread_id, artifacts=artifacts)
 

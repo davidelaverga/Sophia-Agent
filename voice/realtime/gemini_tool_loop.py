@@ -196,6 +196,11 @@ class GeminiBuilderLifecycleHttpBackend:
     ) -> GeminiBuilderLifecycleResult:
         existing_task_id = _active_builder_task_id(async_tasks)
         if existing_task_id:
+            logger.info(
+                "gemini.builder_lifecycle.start_builder_task duplicate_suppressed session_id=%s existing_task_id=%s",
+                session_id,
+                existing_task_id,
+            )
             response = {
                 "ok": True,
                 "tool": GEMINI_START_BUILDER_TASK_TOOL_NAME,
@@ -299,6 +304,14 @@ class GeminiBuilderLifecycleHttpBackend:
             "provider": provider,
             "result_summary": f"Launched builder task. task_id: {thread_id}.",
         }
+        logger.info(
+            "gemini.builder_lifecycle.start_builder_task launched session_id=%s task_id=%s run_id=%s status=%s task_type=%s",
+            session_id,
+            thread_id,
+            run_id,
+            response["status"],
+            task_type,
+        )
         return GeminiBuilderLifecycleResult(
             response=response,
             result_summary=f"Existing Sophia builder task launched: {thread_id}.",

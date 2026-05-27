@@ -14,6 +14,8 @@ import logging
 import mimetypes
 import os
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 
@@ -29,6 +31,14 @@ class SupabaseConfig:
     url: str
     service_role_key: str
     bucket: str
+
+
+@dataclass(frozen=True)
+class SupabaseArtifactInfo:
+    filename: str
+    size_bytes: int
+    modified_at: str
+    content_type: str | None = None
 
 
 def _load_config() -> SupabaseConfig | None:
@@ -52,12 +62,69 @@ def _object_url(config: SupabaseConfig, object_path: str) -> str:
     return f"{config.url}/storage/v1/object/{config.bucket}/{object_path}"
 
 
+def _list_url(config: SupabaseConfig) -> str:
+    return f"{config.url}/storage/v1/object/list/{config.bucket}"
+
+
 def _object_path(thread_id: str, filename: str) -> str:
     safe_thread = thread_id.strip().strip("/")
     safe_name = filename.strip().lstrip("/")
     if not safe_thread or not safe_name:
         raise ValueError("thread_id and filename are required")
     return f"{safe_thread}/{safe_name}"
+
+
+def _thread_prefix(thread_id: str) -> str:
+    safe_thread = thread_id.strip().strip("/")
+    if not safe_thread:
+        raise ValueError("thread_id is required")
+    return f"{safe_thread}/"
+
+
+def _metadata_value(record: dict[str, Any], *keys: str) -> Any:
+    metadata = record.get("metadata")
+    for key in keys:
+        if key in record:
+            return record[key]
+        if isinstance(metadata, dict) and key in metadata:
+            return metadata[key]
+    return None
+
+
+def _coerce_size(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return number if number >= 0 else 0
+
+
+def _coerce_modified_at(value: Any) -> str:
+    if isinstance(value, str) and value:
+        return value
+    return datetime.now(UTC).isoformat()
+
+
+def _info_from_list_record(prefix: str, record: Any) -> SupabaseArtifactInfo | None:
+    if not isinstance(record, dict):
+        return None
+    raw_name = record.get("name")
+    if not isinstance(raw_name, str) or not raw_name:
+        return None
+    filename = raw_name[len(prefix) :] if raw_name.startswith(prefix) else raw_name
+    filename = filename.strip().lstrip("/")
+    if not filename or filename.endswith("/"):
+        return None
+    size = _coerce_size(_metadata_value(record, "size", "contentLength", "content_length"))
+    content_type = _metadata_value(record, "mimetype", "mimeType", "contentType", "content_type")
+    return SupabaseArtifactInfo(
+        filename=filename,
+        size_bytes=size,
+        modified_at=_coerce_modified_at(
+            record.get("updated_at") or record.get("created_at") or record.get("last_accessed_at")
+        ),
+        content_type=content_type if isinstance(content_type, str) and content_type else None,
+    )
 
 
 def upload_artifact(
@@ -107,6 +174,68 @@ def upload_artifact(
         len(content),
     )
     return object_path
+
+
+def list_artifacts(
+    thread_id: str,
+    *,
+    client: httpx.Client | None = None,
+    limit: int = 1000,
+) -> list[SupabaseArtifactInfo]:
+    """List artifacts stored under ``sophia_builder/{thread_id}/``.
+
+    Returns an empty list when Supabase is not configured or the prefix has no
+    objects. Raises :class:`httpx.HTTPError` for transport or unexpected HTTP
+    failures so gateway callers can log the failure without hiding local files.
+    """
+    config = _load_config()
+    if config is None:
+        return []
+
+    prefix = _thread_prefix(thread_id)
+    url = _list_url(config)
+    headers = {
+        "Authorization": f"Bearer {config.service_role_key}",
+        "apikey": config.service_role_key,
+        "Content-Type": "application/json",
+    }
+    page_size = max(1, min(int(limit), 1000))
+
+    owns_client = client is None
+    http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
+    try:
+        offset = 0
+        artifacts: list[SupabaseArtifactInfo] = []
+        while True:
+            response = http.post(
+                url,
+                headers=headers,
+                json={
+                    "prefix": prefix,
+                    "limit": page_size,
+                    "offset": offset,
+                    "sortBy": {"column": "updated_at", "order": "desc"},
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+            if not isinstance(data, list):
+                logger.warning(
+                    "Supabase artifact list returned non-list payload for thread_id=%s",
+                    thread_id,
+                )
+                return artifacts
+            page = [
+                info for item in data
+                if (info := _info_from_list_record(prefix, item)) is not None
+            ]
+            artifacts.extend(page)
+            if len(data) < page_size:
+                return artifacts
+            offset += page_size
+    finally:
+        if owns_client:
+            http.close()
 
 
 def check_artifact_exists(

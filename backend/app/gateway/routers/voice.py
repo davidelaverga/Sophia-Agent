@@ -415,6 +415,33 @@ def _build_gemini_production_disconnect_url() -> str:
     return "/api/sophia/voice/gemini/disconnect"
 
 
+def _safe_prefix(value: object, *, length: int = 24) -> str | None:
+    return value[:length] if isinstance(value, str) and value else None
+
+
+def _safe_voice_error_detail(detail: object) -> str | None:
+    if isinstance(detail, str) and detail:
+        return detail[:240]
+    return None
+
+
+def _gemini_relay_log_context(
+    *,
+    user_id: str,
+    session_id: str,
+    body: "GeminiBrowserDogfoodRelayRequest",
+) -> dict[str, object]:
+    return {
+        "user_id": user_id,
+        "session_id_prefix": _safe_prefix(session_id),
+        "relay_correlation_id": _safe_prefix(body.relay_correlation_id),
+        "provider_receive_sequence": body.provider_receive_sequence,
+        "provider_relay_sequence": body.provider_relay_sequence,
+        "provider_primary_category": body.provider_primary_category,
+        "provider_categories": list(body.provider_categories or [])[:6],
+    }
+
+
 async def _raise_voice_dogfood_error(response: httpx.Response) -> None:
     try:
         payload = response.json()
@@ -1208,10 +1235,24 @@ async def gemini_production_relay(
     body: GeminiBrowserDogfoodRelayRequest,
 ) -> dict[str, object]:
     encoded_session_id = quote(body.session_id, safe="")
-    payload = await _proxy_voice_runtime_json(
-        "POST",
-        f"/production/realtime/gemini/browser-sessions/{encoded_session_id}/provider-events",
-        json_body=body.voice_relay_payload(),
+    log_context = _gemini_relay_log_context(user_id=user_id, session_id=body.session_id, body=body)
+    try:
+        payload = await _proxy_voice_runtime_json(
+            "POST",
+            f"/production/realtime/gemini/browser-sessions/{encoded_session_id}/provider-events",
+            json_body=body.voice_relay_payload(),
+        )
+    except HTTPException as exc:
+        logger.warning(
+            "voice.gemini.relay failed status=%s detail=%s context=%s",
+            exc.status_code,
+            _safe_voice_error_detail(exc.detail),
+            log_context,
+        )
+        raise
+    logger.info(
+        "voice.gemini.relay accepted status=202 context=%s",
+        log_context,
     )
     payload["stream_url"] = _build_gemini_production_events_stream_url(body.session_id)
     return payload
