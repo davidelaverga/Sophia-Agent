@@ -54,17 +54,32 @@ describe("BuilderCompletionCard — success variant", () => {
     expect(screen.getByText("ready")).toBeTruthy()
   })
 
-  it("opens the artifact URL in a new tab when 'open' is clicked", () => {
+  it("prefers the same-origin artifact proxy when 'open' is clicked", () => {
     const onOpen = vi.fn()
     render(<BuilderCompletionCard event={SUCCESS_EVENT} onOpen={onOpen} />)
     const button = screen.getByRole("button", { name: /open/i })
     fireEvent.click(button)
     expect(window.open).toHaveBeenCalledWith(
-      "https://example.com/llm_time_series.md",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/llm_time_series.md",
       "_blank",
       "noopener,noreferrer",
     )
     expect(onOpen).toHaveBeenCalledWith(SUCCESS_EVENT)
+  })
+
+  it("falls back to the signed URL when artifact_path is missing", () => {
+    const event: BuilderCompletionEventV1 = {
+      ...SUCCESS_EVENT,
+      artifact_path: undefined,
+    }
+
+    render(<BuilderCompletionCard event={event} />)
+    fireEvent.click(screen.getByRole("button", { name: /open/i }))
+    expect(window.open).toHaveBeenCalledWith(
+      "https://example.com/llm_time_series.md",
+      "_blank",
+      "noopener,noreferrer",
+    )
   })
 
   it("does NOT show retry on success", () => {

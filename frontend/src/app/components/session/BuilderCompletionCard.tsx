@@ -123,7 +123,7 @@ export function BuilderCompletionCard({
     () => buildThreadArtifactHref(event.thread_id, event.artifact_path, { download: true }),
     [event.artifact_path, event.thread_id],
   );
-  const openHref = event.artifact_url || artifactProxyHref;
+  const openHref = artifactProxyHref || event.artifact_url || null;
   const downloadHref = artifactProxyDownloadHref || event.artifact_url || null;
 
   const showOpen = event.status === 'success' && Boolean(openHref);
