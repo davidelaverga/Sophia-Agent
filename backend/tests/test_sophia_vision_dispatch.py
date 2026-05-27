@@ -122,7 +122,7 @@ def test_copy_extensions_subset_of_view_image_tool_accepted_set() -> None:
 
 def test_builder_task_middleware_injects_uploads_block_when_present(monkeypatch) -> None:
     """When delegation_context carries uploaded_image_paths, the builder
-    briefing must surface them so the model knows to call view_image_tool."""
+    briefing must surface them so the model knows the paths exist."""
     from deerflow.agents.sophia_agent.middlewares import builder_task as bt_mod
 
     state = {
@@ -145,10 +145,65 @@ def test_builder_task_middleware_injects_uploads_block_when_present(monkeypatch)
     assert "<uploaded_images>" in briefing
     assert "/mnt/user-data/uploads/diagram.png" in briefing
     assert "/mnt/user-data/uploads/screenshot.jpg" in briefing
-    assert "view_image_tool" in briefing, (
-        "The uploads block must explicitly name view_image_tool so the model "
-        "knows which tool to call — otherwise the prompt lists paths without "
-        "telling the builder how to consume them."
+
+
+def test_builder_task_middleware_uploads_block_uses_registered_tool_name() -> None:
+    """Uploads briefing must use the registered LLM-facing tool name.
+
+    ``@tool("view_image", ...)`` on the upstream tool sets the
+    model-visible name to ``view_image``. The Python identifier
+    ``view_image_tool`` is what we import in builder_agent.py, but the
+    model never sees that — it only sees the decorator's first
+    argument. If the briefing tells the model to call
+    ``view_image_tool(...)`` (the Python identifier) and the model
+    echoes the prompt literally, LangGraph's tool router rejects the
+    call with "tool not found". Codex P2 on PR #132.
+
+    This test resolves the registered name from the tool object so a
+    future upstream rename forces both sides (the prompt + this test)
+    to be updated together.
+    """
+    from deerflow.agents.sophia_agent.middlewares import builder_task as bt_mod
+    from deerflow.tools.builtins.view_image_tool import view_image_tool
+
+    registered_name = view_image_tool.name
+    assert registered_name == "view_image", (
+        f"Upstream renamed view_image_tool to {registered_name!r}. Update "
+        "the uploads briefing in BuilderTaskMiddleware to match the new "
+        "name."
+    )
+
+    state = {
+        "messages": [],
+        "delegation_context": {
+            "companion_artifact": {},
+            "task_type": "research",
+            "uploaded_image_paths": ["/mnt/user-data/uploads/diagram.png"],
+        },
+        "system_prompt_blocks": [],
+    }
+    mw = bt_mod.BuilderTaskMiddleware()
+    update = mw.before_agent(state, runtime=None)
+    briefing = update["system_prompt_blocks"][-1]
+
+    expected_call_shape = f"`{registered_name}(image_path="
+    assert expected_call_shape in briefing, (
+        f"Uploads briefing must instruct the model to call "
+        f"`{registered_name}(image_path=...)`. Got briefing without that "
+        "string — the model would emit a non-existent tool name if it "
+        "echoes the prompt literally."
+    )
+
+    # Negative guard: ensure the Python identifier isn't there as a
+    # call instruction (`view_image_tool(`). A future revert to the
+    # Python name would silently break image handoff; this catches it.
+    # We only check for the function-call shape so the word can still
+    # appear in prose ("the upstream view_image_tool object", etc.).
+    assert "view_image_tool(" not in briefing, (
+        "Uploads briefing names `view_image_tool(` instead of the "
+        "registered tool name `view_image(`. The Python identifier "
+        "differs from the @tool('view_image') decorator's first arg — "
+        "the model only sees the decorator name."
     )
 
 

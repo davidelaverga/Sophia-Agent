@@ -286,17 +286,27 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
 
         # Uploaded images carried across from the parent (companion)
         # thread. ``start_builder_task`` copies image files into this
-        # builder's sandbox at dispatch time so ``view_image_tool`` can
-        # read them by virtual path. Surface them here so the model
-        # actually knows they exist instead of having to discover them
-        # via ls/read.
+        # builder's sandbox at dispatch time so the vision tool can read
+        # them by virtual path. Surface them here so the model actually
+        # knows they exist instead of having to discover them via
+        # ls/read.
+        #
+        # IMPORTANT: prompt with the registered LLM-facing tool name
+        # (``view_image``), NOT the Python identifier
+        # (``view_image_tool``). Upstream decorates the tool with
+        # ``@tool("view_image", ...)`` — the model only sees the
+        # decorator's first argument. If the prompt says
+        # ``view_image_tool(...)`` and the model echoes it literally,
+        # the LangGraph tool router rejects the call with "tool not
+        # found". Codex P2 on PR #132. Regression:
+        # ``test_builder_task_middleware_uploads_block_uses_registered_tool_name``.
         uploaded_image_paths = delegation_context.get("uploaded_image_paths") or []
         if isinstance(uploaded_image_paths, list) and uploaded_image_paths:
             path_lines = "\n".join(f"- {p}" for p in uploaded_image_paths)
             sections.append(
                 "<uploaded_images>\n"
                 "The user uploaded these images. They are available in this sandbox at the paths below.\n"
-                "Use `view_image_tool(image_path=...)` to inspect any image you need to reference, "
+                "Use `view_image(image_path=...)` to inspect any image you need to reference, "
                 "describe, or QA in your deliverable. View only the images that are actually relevant — "
                 "each view costs context tokens.\n"
                 f"{path_lines}\n"
