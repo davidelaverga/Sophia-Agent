@@ -31,6 +31,14 @@ const EMPTY_STATE: BuilderCanvasState = {
 const SNAPSHOT_RECONCILE_MS = 30_000;
 const TERMINAL_STATUSES = new Set<BuilderCanvasTaskSnapshotV1['status']>(['completed', 'failed', 'cancelled']);
 
+function shortId(value: string | null | undefined): string | null {
+  return value ? value.slice(0, 12) : null;
+}
+
+function logCanvasClient(event: string, payload: Record<string, unknown>) {
+  console.warn('[builder-canvas]', event, payload);
+}
+
 function runKey(taskId: string, runId: string): string {
   return `${taskId}:${runId}`;
 }
@@ -221,6 +229,10 @@ export function useBuilderCanvas(
 
   useEffect(() => {
     setState(EMPTY_STATE);
+    logCanvasClient('hook-start', {
+      enabled,
+      parent_thread_id: shortId(parentThreadId),
+    });
     if (!enabled || !parentThreadId) {
       return;
     }
@@ -229,11 +241,28 @@ export function useBuilderCanvas(
     let cancelled = false;
     const hydrateSnapshot = () => fetch(`${basePath}/snapshot`, { cache: 'no-store' })
       .then(async (response) => {
+        logCanvasClient('snapshot-response', {
+          parent_thread_id: shortId(parentThreadId),
+          status: response.status,
+          ok: response.ok,
+        });
         if (!response.ok || cancelled) return;
         const snapshot = await response.json() as BuilderCanvasSnapshotV1;
+        logCanvasClient('snapshot-hydrated', {
+          parent_thread_id: shortId(parentThreadId),
+          active_task_id: shortId(snapshot.active_task?.task_id),
+          active_run_id: shortId(snapshot.active_task?.run_id),
+          active_status: snapshot.active_task?.status ?? null,
+          recent_events: snapshot.recent_events.length,
+        });
         setState((current) => applySnapshot(current, snapshot));
       })
-      .catch(() => undefined);
+      .catch((error) => {
+        logCanvasClient('snapshot-error', {
+          parent_thread_id: shortId(parentThreadId),
+          error: error instanceof Error ? error.name : 'unknown',
+        });
+      });
     void hydrateSnapshot();
     const reconcileTimer = setInterval(() => {
       void hydrateSnapshot();
@@ -250,19 +279,37 @@ export function useBuilderCanvas(
       if (cancelled) return;
       try {
         const event = JSON.parse(message.data) as BuilderCanvasEventV1;
+        logCanvasClient('event', {
+          parent_thread_id: shortId(parentThreadId),
+          event_id: shortId(event.event_id),
+          task_id: shortId(event.task_id),
+          run_id: shortId(event.run_id),
+          sequence: event.sequence,
+          kind: event.kind,
+          status: event.status,
+        });
         setState((current) => applyEvent(current, event));
       } catch {
         // Ignore malformed server data and leave the last truthful state visible.
+        logCanvasClient('event-malformed', {
+          parent_thread_id: shortId(parentThreadId),
+        });
       }
     };
     source.onerror = () => {
       if (!cancelled) {
+        logCanvasClient('sse-error', {
+          parent_thread_id: shortId(parentThreadId),
+        });
         setState((current) => ({ ...current, reconnecting: true }));
         void hydrateSnapshot();
       }
     };
     source.onopen = () => {
       if (!cancelled) {
+        logCanvasClient('sse-open', {
+          parent_thread_id: shortId(parentThreadId),
+        });
         setState((current) => ({ ...current, reconnecting: false }));
       }
     };

@@ -5,6 +5,7 @@ import { useCompanionChatRuntime } from '../companion-runtime/chat-runtime';
 import { getCompanionRouteProfile } from '../companion-runtime/route-profiles';
 import { useCompanionStreamContract } from '../companion-runtime/stream-contract';
 import { useCompanionVoiceRuntime } from '../companion-runtime/voice-runtime';
+import { useAppVersionFreshness } from '../hooks/useAppVersionFreshness';
 import { useBuilderCanvas } from '../hooks/useBuilderCanvas';
 import {
   cancelBuilderTask as requestBuilderTaskCancellation,
@@ -29,6 +30,7 @@ type ShowToastFn = (args: {
   message: string;
   variant: ToastVariant;
   durationMs?: number;
+  action?: { label: string; onClick: () => void };
 }) => void;
 
 type UseSessionRouteExperienceParams = {
@@ -255,6 +257,15 @@ export function useSessionRouteExperience({
     showToast,
   });
 
+  const canReloadForFreshBuild = chatStatus !== 'streaming' && chatStatus !== 'submitted';
+  const { checkFreshness: checkAppVersionFreshness } = useAppVersionFreshness({
+    enabled: Boolean(activeSessionId || sessionId),
+    showToast,
+    sessionId: activeSessionId || sessionId,
+    threadId: activeThreadId,
+    canAutoReload: canReloadForFreshBuild,
+  });
+
   const cancelBuilderTask = useCallback(async () => {
     if (!activeThreadId || !builderTask?.taskId || builderTask.phase !== 'running' || isCancellingBuilderTask) {
       return;
@@ -356,6 +367,13 @@ export function useSessionRouteExperience({
    */
   const sendMessage: typeof rawSendMessage = useCallback(
     async (...args) => {
+      const appVersionFresh = await checkAppVersionFreshness({
+        reason: 'before-send',
+        reloadIfStale: true,
+      });
+      if (!appVersionFresh) {
+        return;
+      }
       if (
         builderTask?.taskId &&
         builderTask.phase === 'running' &&
@@ -365,7 +383,7 @@ export function useSessionRouteExperience({
       }
       return rawSendMessage(...args);
     },
-    [builderTask, cancelBuilderTask, isCancellingBuilderTask, rawSendMessage],
+    [builderTask, cancelBuilderTask, checkAppVersionFreshness, isCancellingBuilderTask, rawSendMessage],
   );
 
   const { appendVoiceUserMessage, appendVoiceAssistantMessage } = useSessionVoiceMessages({

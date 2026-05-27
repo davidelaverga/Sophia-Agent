@@ -443,20 +443,79 @@ function SessionPageContent() {
     showToast,
   });
 
+  const [artifactLibraryRefreshNonce, setArtifactLibraryRefreshNonce] = useState(0);
+  const [builderLibraryBaseline, setBuilderLibraryBaseline] = useState<Set<string> | null>(null);
+  const [dismissedBuilderLibraryPath, setDismissedBuilderLibraryPath] = useState<string | null>(null);
+
   const builderArtifactRefreshToken = useMemo(() => [
     builderArtifact?.artifactTitle ?? '',
     builderArtifact?.artifactPath ?? '',
     (builderArtifact?.supportingFiles ?? []).join('|'),
-  ].join('::'), [builderArtifact]);
+    builderTask?.taskId ?? '',
+    builderTask?.runId ?? '',
+    builderTask?.phase ?? '',
+    builderCompletion?.task_id ?? '',
+    builderCompletion?.run_id ?? '',
+    artifactLibraryRefreshNonce,
+  ].join('::'), [artifactLibraryRefreshNonce, builderArtifact, builderCompletion?.run_id, builderCompletion?.task_id, builderTask?.phase, builderTask?.runId, builderTask?.taskId]);
 
   const {
     items: builderArtifactLibrary,
   } = useSessionBuilderArtifactLibrary({
     threadId: resolvedThreadId,
     refreshToken: builderArtifactRefreshToken,
+    pollIntervalMs: builderTask?.phase === 'running' ? 5000 : null,
+    refreshOnFocus: true,
   });
 
   const hasBuilderArtifactLibrary = builderArtifactLibrary.length > 0;
+  const builderArtifactLibraryRef = useRef(builderArtifactLibrary);
+
+  useEffect(() => {
+    builderArtifactLibraryRef.current = builderArtifactLibrary;
+  }, [builderArtifactLibrary]);
+
+  useEffect(() => {
+    if (!builderTask?.taskId || builderTask.phase !== 'running') {
+      setBuilderLibraryBaseline(null);
+      return;
+    }
+    setBuilderLibraryBaseline(
+      new Set(
+        builderArtifactLibraryRef.current.map((item) => `${item.path}:${item.modifiedAt ?? ''}:${item.sizeBytes ?? ''}`),
+      ),
+    );
+  }, [builderTask?.phase, builderTask?.runId, builderTask?.taskId]);
+
+  useEffect(() => {
+    if (builderTask?.taskId || builderCompletion?.task_id) {
+      setArtifactLibraryRefreshNonce((value) => value + 1);
+    }
+  }, [builderCompletion?.run_id, builderCompletion?.task_id, builderTask?.phase, builderTask?.runId, builderTask?.taskId]);
+
+  useEffect(() => {
+    if (chatStatus === 'ready') {
+      setArtifactLibraryRefreshNonce((value) => value + 1);
+    }
+  }, [chatStatus]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const refresh = () => {
+      setArtifactLibraryRefreshNonce((value) => value + 1);
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') {
+        refresh();
+      }
+    };
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
+  }, []);
 
   const {
     hasArtifactsContent,
@@ -537,15 +596,48 @@ function SessionPageContent() {
   }, [artifacts, builderArtifact, builderArtifactLibrary]);
 
   const hasDesktopStyleBadge = hasPendingArtifacts || waitingArtifactCount > 0;
-  const showBuilderTaskNotice = Boolean(builderTask);
-  const builderPrimaryFile = useMemo(
+  const recoveredBuilderLibraryItem = useMemo(() => {
+    if (builderTask?.phase !== 'running' || !builderLibraryBaseline) {
+      return null;
+    }
+    return builderArtifactLibrary.find((item) => (
+      !builderLibraryBaseline.has(`${item.path}:${item.modifiedAt ?? ''}:${item.sizeBytes ?? ''}`)
+    )) ?? null;
+  }, [builderArtifactLibrary, builderLibraryBaseline, builderTask?.phase]);
+  const builderArtifactPrimaryFile = useMemo(
     () => getBuilderArtifactFiles(builderArtifact)[0] ?? null,
     [builderArtifact],
   );
+  const builderLibraryPrimaryFile = recoveredBuilderLibraryItem ?? (!builderTask ? builderArtifactLibrary[0] : null) ?? null;
+  const builderPrimaryFile = builderArtifactPrimaryFile ?? (
+    builderLibraryPrimaryFile
+      ? {
+          path: builderLibraryPrimaryFile.path,
+          name: builderLibraryPrimaryFile.name,
+          label: builderLibraryPrimaryFile.name,
+          isPrimary: true,
+        }
+      : null
+  );
+  const hasRecoveredBuilderArtifact = Boolean(recoveredBuilderLibraryItem);
+  const showBuilderTaskNotice = Boolean(builderTask) && !hasRecoveredBuilderArtifact;
+  const builderReadyTitle = builderArtifact?.artifactTitle ?? builderPrimaryFile?.name ?? 'Builder deliverable';
   const builderDownloadHref = useMemo(
     () => buildThreadArtifactHref(resolvedThreadId, builderPrimaryFile?.path, { download: true }),
     [builderPrimaryFile?.path, resolvedThreadId],
   );
+  const builderReadyDismissed = Boolean(
+    builderPrimaryFile?.path && dismissedBuilderLibraryPath === builderPrimaryFile.path,
+  );
+  const dismissVisibleBuilderArtifact = useCallback(() => {
+    if (builderPrimaryFile?.path) {
+      setDismissedBuilderLibraryPath(builderPrimaryFile.path);
+    }
+    if (hasRecoveredBuilderArtifact) {
+      clearBuilderTask();
+    }
+    clearBuilderArtifact();
+  }, [builderPrimaryFile?.path, clearBuilderArtifact, clearBuilderTask, hasRecoveredBuilderArtifact]);
   const voiceBuilderChromeOpacity = Math.max(chromeOpacity, 0.94);
   const voiceBuilderAccessoryOpacity = Math.max(chromeOpacity, 0.62);
   const voiceArtifactToggleBottom = 'calc(9.25rem + env(safe-area-inset-bottom, 0px))';
@@ -1028,14 +1120,14 @@ function SessionPageContent() {
           )}
 
           {/* Builder completion pill — text mode: inline above composer */}
-          {focusMode === 'text' && !showArtifacts && showArtifactsUi && builderArtifact && !builderTask && (
+          {focusMode === 'text' && !showArtifacts && showArtifactsUi && builderPrimaryFile && !showBuilderTaskNotice && !builderCompletion && !builderReadyDismissed && (
             <div className="mb-2 flex justify-center">
               <BuilderReadyPill
-                title={builderArtifact.artifactTitle}
+                title={builderReadyTitle}
                 onOpen={handleOpenArtifactsPanel}
                 downloadHref={builderDownloadHref}
                 onDownload={() => haptic('medium')}
-                onDismiss={clearBuilderArtifact}
+                onDismiss={dismissVisibleBuilderArtifact}
                 itemCount={builderArtifactLibrary.length || undefined}
                 isNew={hasNewArtifacts}
               />
@@ -1043,17 +1135,17 @@ function SessionPageContent() {
           )}
 
           {/* Builder completion pill — voice mode: fixed above mode toggle */}
-          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && !isVoiceCaptionVisible && !builderTask && builderArtifact && (
+          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && !isVoiceCaptionVisible && builderPrimaryFile && !showBuilderTaskNotice && !builderCompletion && !builderReadyDismissed && (
             <div
               className="fixed left-1/2 -translate-x-1/2 z-30 flex justify-center"
               style={{ bottom: voiceArtifactToggleBottom, opacity: voiceBuilderAccessoryOpacity, transition: 'opacity 0.6s ease' }}
             >
               <BuilderReadyPill
-                title={builderArtifact.artifactTitle}
+                title={builderReadyTitle}
                 onOpen={handleOpenArtifactsPanel}
                 downloadHref={builderDownloadHref}
                 onDownload={() => haptic('medium')}
-                onDismiss={clearBuilderArtifact}
+                onDismiss={dismissVisibleBuilderArtifact}
                 itemCount={builderArtifactLibrary.length || undefined}
                 isNew={hasNewArtifacts}
                 compact={true}

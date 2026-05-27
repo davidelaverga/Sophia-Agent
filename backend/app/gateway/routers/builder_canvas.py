@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from datetime import UTC, datetime
 from typing import Any
@@ -23,6 +24,7 @@ router = APIRouter(
 )
 
 _session_store = SessionStore()
+logger = logging.getLogger(__name__)
 
 
 class BuilderCanvasSnapshot(BaseModel):
@@ -51,6 +53,10 @@ _TERMINAL_TASK_STATUSES = {
 }
 
 
+def _short_id(value: str | None) -> str | None:
+    return value[:12] if value else None
+
+
 def _langgraph_url() -> str:
     return (
         os.getenv("SOPHIA_LANGGRAPH_BASE_URL")
@@ -62,7 +68,17 @@ def _langgraph_url() -> str:
 
 def _require_thread_owner(authenticated_user_id: str, parent_thread_id: str) -> None:
     if _session_store.find_session_by_thread_id(authenticated_user_id, parent_thread_id) is not None:
+        logger.info(
+            "Builder canvas route ownership accepted user_id=%s parent_thread_id=%s",
+            _short_id(authenticated_user_id),
+            _short_id(parent_thread_id),
+        )
         return
+    logger.warning(
+        "Builder canvas route ownership rejected user_id=%s parent_thread_id=%s",
+        _short_id(authenticated_user_id),
+        _short_id(parent_thread_id),
+    )
     raise HTTPException(status_code=404, detail="Thread not found")
 
 
@@ -334,11 +350,29 @@ async def builder_canvas_snapshot(
     worker = get_builder_canvas_worker(request.app)
     task = _latest_builder_task(await _parent_builder_tasks(parent_thread_id))
     recent_events = await worker.recent_events(parent_thread_id)
+    worker_summary = await worker.active_summary(parent_thread_id)
     if task is None:
+        logger.info(
+            "Builder canvas snapshot served user_id=%s parent_thread_id=%s active_task_present=%s recent_events=%s worker_subscribers=%s",
+            _short_id(authenticated_user_id),
+            _short_id(parent_thread_id),
+            False,
+            len(recent_events),
+            worker_summary.get("subscriber_count"),
+        )
         return BuilderCanvasSnapshot(recent_events=recent_events)
     task_id = task.get("task_id")
     run_id = task.get("run_id")
     if not isinstance(task_id, str) or not isinstance(run_id, str):
+        logger.info(
+            "Builder canvas snapshot served user_id=%s parent_thread_id=%s active_task_present=%s valid_identity=%s recent_events=%s worker_subscribers=%s",
+            _short_id(authenticated_user_id),
+            _short_id(parent_thread_id),
+            True,
+            False,
+            len(recent_events),
+            worker_summary.get("subscriber_count"),
+        )
         return BuilderCanvasSnapshot(recent_events=recent_events)
     status = await _native_run_status(task_id, run_id, task.get("status"))
     latest_activity = await worker.latest_activity(parent_thread_id, task_id, run_id)
@@ -358,6 +392,19 @@ async def builder_canvas_snapshot(
     )
     if completion is not None:
         active_task["completion"] = completion
+    logger.info(
+        "Builder canvas snapshot served user_id=%s parent_thread_id=%s active_task_present=%s task_id=%s run_id=%s status=%s recent_events=%s worker_retained_events=%s worker_subscribers=%s has_completion=%s",
+        _short_id(authenticated_user_id),
+        _short_id(parent_thread_id),
+        True,
+        _short_id(task_id),
+        _short_id(run_id),
+        status,
+        len(recent_events),
+        worker_summary.get("retained_event_count"),
+        worker_summary.get("subscriber_count"),
+        completion is not None,
+    )
     return BuilderCanvasSnapshot(active_task=active_task, recent_events=recent_events)
 
 
@@ -371,13 +418,37 @@ async def stream_builder_canvas_events(
     _require_thread_owner(authenticated_user_id, parent_thread_id)
     worker = get_builder_canvas_worker(request.app)
     last_event_id = request.headers.get("last-event-id")
+    worker_summary = await worker.active_summary(parent_thread_id)
+    logger.info(
+        "Builder canvas events opening user_id=%s parent_thread_id=%s last_event_id=%s active_task_id=%s active_run_id=%s retained_events=%s subscriber_count=%s",
+        _short_id(authenticated_user_id),
+        _short_id(parent_thread_id),
+        _short_id(last_event_id),
+        _short_id(worker_summary.get("active_task_id")),
+        _short_id(worker_summary.get("active_run_id")),
+        worker_summary.get("retained_event_count"),
+        worker_summary.get("subscriber_count"),
+    )
 
     async def _events():
         async with worker.subscribe(parent_thread_id) as queue:
-            for event in await worker.replay_after(parent_thread_id, last_event_id):
+            replay_events = await worker.replay_after(parent_thread_id, last_event_id)
+            logger.info(
+                "Builder canvas events replay user_id=%s parent_thread_id=%s replay_count=%s last_event_id=%s",
+                _short_id(authenticated_user_id),
+                _short_id(parent_thread_id),
+                len(replay_events),
+                _short_id(last_event_id),
+            )
+            for event in replay_events:
                 yield _format_sse(event)
             while True:
                 if await request.is_disconnected():
+                    logger.info(
+                        "Builder canvas events disconnected user_id=%s parent_thread_id=%s",
+                        _short_id(authenticated_user_id),
+                        _short_id(parent_thread_id),
+                    )
                     return
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=15.0)

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import type { BuilderArtifactLibraryItemV1 } from '../types/builder-artifact';
 
@@ -40,61 +40,92 @@ function normalizeBuilderArtifactLibrary(
 export function useSessionBuilderArtifactLibrary({
   threadId,
   refreshToken,
+  pollIntervalMs,
+  refreshOnFocus = true,
 }: {
   threadId?: string;
   refreshToken?: string;
+  pollIntervalMs?: number | null;
+  refreshOnFocus?: boolean;
 }) {
   const [items, setItems] = useState<BuilderArtifactLibraryItemV1[]>([]);
   const [isLoading, setIsLoading] = useState(false);
 
-  useEffect(() => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     if (!threadId) {
       setItems([]);
       setIsLoading(false);
       return;
     }
 
-    const controller = new AbortController();
-    let cancelled = false;
+    setIsLoading(true);
+    try {
+      const response = await fetch(`/api/threads/${encodeURIComponent(threadId)}/artifacts`, {
+        method: 'GET',
+        cache: 'no-store',
+        signal,
+      });
 
-    const load = async () => {
-      setIsLoading(true);
-      try {
-        const response = await fetch(`/api/threads/${encodeURIComponent(threadId)}/artifacts`, {
-          method: 'GET',
-          cache: 'no-store',
-          signal: controller.signal,
-        });
-
-        if (!response.ok) {
-          if (!cancelled) {
-            setItems([]);
-          }
-          return;
-        }
-
-        const payload = await response.json() as BuilderArtifactLibraryResponse;
-        if (!cancelled) {
-          setItems(normalizeBuilderArtifactLibrary(payload));
-        }
-      } catch {
-        if (!cancelled && !controller.signal.aborted) {
-          setItems([]);
-        }
-      } finally {
-        if (!cancelled) {
-          setIsLoading(false);
-        }
+      if (!response.ok) {
+        setItems([]);
+        return;
       }
-    };
 
-    void load();
+      const payload = await response.json() as BuilderArtifactLibraryResponse;
+      setItems(normalizeBuilderArtifactLibrary(payload));
+    } catch {
+      if (!signal?.aborted) {
+        setItems([]);
+      }
+    } finally {
+      if (!signal?.aborted) {
+        setIsLoading(false);
+      }
+    }
+  }, [threadId]);
 
+  useEffect(() => {
+    if (threadId) return;
+    setItems([]);
+    setIsLoading(false);
+  }, [threadId]);
+
+  useEffect(() => {
+    if (!threadId) return;
+    const controller = new AbortController();
+    void load(controller.signal);
     return () => {
-      cancelled = true;
       controller.abort();
     };
-  }, [refreshToken, threadId]);
+  }, [load, refreshToken, threadId]);
+
+  useEffect(() => {
+    if (!threadId || !pollIntervalMs || pollIntervalMs <= 0) return;
+    const interval = window.setInterval(() => {
+      void load();
+    }, pollIntervalMs);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [load, pollIntervalMs, threadId]);
+
+  useEffect(() => {
+    if (!threadId || !refreshOnFocus || typeof window === 'undefined') return;
+    const refresh = () => {
+      void load();
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') {
+        void load();
+      }
+    };
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
+  }, [load, refreshOnFocus, threadId]);
 
   return {
     items,

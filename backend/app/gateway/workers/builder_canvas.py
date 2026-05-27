@@ -435,6 +435,20 @@ class BuilderCanvasWorker:
                 return []
             return list(self._histories.get((parent_thread_id, *active), []))
 
+    async def active_summary(self, parent_thread_id: str) -> dict[str, Any]:
+        async with self._lock:
+            self._expire_locked()
+            active = self._active.get(parent_thread_id)
+            event_count = 0
+            if active is not None:
+                event_count = len(self._histories.get((parent_thread_id, *active), ()))
+            return {
+                "active_task_id": active[0] if active else None,
+                "active_run_id": active[1] if active else None,
+                "retained_event_count": event_count,
+                "subscriber_count": len(self._subscribers.get(parent_thread_id, ())),
+            }
+
     async def latest_activity(self, parent_thread_id: str, task_id: str, run_id: str) -> dict[str, Any] | None:
         async with self._lock:
             self._expire_locked()
@@ -458,6 +472,12 @@ class BuilderCanvasWorker:
         queue: asyncio.Queue = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_MAXSIZE)
         async with self._lock:
             self._subscribers[parent_thread_id].append(queue)
+            subscriber_count = len(self._subscribers[parent_thread_id])
+        logger.info(
+            "Builder canvas: subscriber opened parent_thread_id=%s subscriber_count=%s",
+            parent_thread_id,
+            subscriber_count,
+        )
         try:
             yield queue
         finally:
@@ -465,8 +485,14 @@ class BuilderCanvasWorker:
                 queues = self._subscribers.get(parent_thread_id, [])
                 if queue in queues:
                     queues.remove(queue)
+                subscriber_count = len(queues)
                 if not queues:
                     self._subscribers.pop(parent_thread_id, None)
+            logger.info(
+                "Builder canvas: subscriber closed parent_thread_id=%s subscriber_count=%s",
+                parent_thread_id,
+                subscriber_count,
+            )
 
 
 _WORKER_ATTR = "_builder_canvas_worker"

@@ -129,7 +129,7 @@ describe('useSessionRouteExperience', () => {
     });
   });
 
-  it('wires the ritual route through canonical companion runtime modules', () => {
+  it('wires the ritual route through canonical companion runtime modules', async () => {
     const interruptHandler = vi.fn();
 
     const { result } = renderHook(() =>
@@ -221,7 +221,7 @@ describe('useSessionRouteExperience', () => {
     // Sanity-check the delegation: invoking the wrapped sendMessage with
     // no in-flight builder calls the raw mock with identical args.
     const wrappedSendMessage = useCompanionVoiceRuntimeMock.mock.calls[0][0].sendMessage;
-    void wrappedSendMessage({ text: 'ping' });
+    await wrappedSendMessage({ text: 'ping' });
     expect(sendMessage).toHaveBeenCalledWith({ text: 'ping' });
 
     expect(setOnUserTranscriptHandler).toHaveBeenCalledWith(appendVoiceUserMessage);
