@@ -61,6 +61,124 @@ const MAX_TOTAL_UPLOAD_BYTES = 60 * 1024 * 1024; // 60 MB across all files in on
  * ``user_id`` query to the auth token rather than trusting it as a
  * query param) is a separate concern tracked in the PR thread.
  */
+/**
+ * Enforce the envelope cap on the ``content-length`` header BEFORE
+ * calling ``request.formData()`` (which buffers the entire multipart
+ * body into memory). Returns a 413 Response when the header alone is
+ * over the cap; ``null`` when the request is fine OR the header was
+ * absent (chunked uploads fall through to the post-parse backstop).
+ * Codex P2 PR #132.
+ */
+function enforceContentLengthCap(request: NextRequest): Response | null {
+  const header = request.headers.get("content-length");
+  if (!header) return null;
+  const contentLength = Number(header);
+  if (!Number.isFinite(contentLength) || contentLength <= MAX_TOTAL_UPLOAD_BYTES) {
+    return null;
+  }
+  return NextResponse.json(
+    {
+      error: `Upload too large (${contentLength} bytes per content-length header). Max ${MAX_TOTAL_UPLOAD_BYTES} bytes per request.`,
+    },
+    { status: 413 },
+  );
+}
+
+
+/**
+ * Parse the multipart body and apply the size + content checks.
+ * Returns ``{ files }`` on success or a populated ``Response`` on
+ * any validation failure — the route's POST handler just returns
+ * whichever it gets back.
+ */
+async function parseAndValidateFiles(
+  request: NextRequest,
+): Promise<{ files: File[] } | Response> {
+  let formData: FormData;
+  try {
+    formData = await request.formData();
+  } catch {
+    return NextResponse.json(
+      { error: "Invalid multipart body" },
+      { status: 400 },
+    );
+  }
+  const files = formData.getAll("files").filter((entry): entry is File => entry instanceof File);
+  if (files.length === 0) {
+    return NextResponse.json(
+      { error: "No files provided. Send under the 'files' field name." },
+      { status: 400 },
+    );
+  }
+  const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+  if (totalBytes > MAX_TOTAL_UPLOAD_BYTES) {
+    // Post-parse backstop: catches chunked uploads (no content-length)
+    // and clients that lied about content-length.
+    return NextResponse.json(
+      {
+        error: `Upload too large (${totalBytes} bytes). Max ${MAX_TOTAL_UPLOAD_BYTES} bytes per request.`,
+      },
+      { status: 413 },
+    );
+  }
+  return { files };
+}
+
+
+/**
+ * Forward the validated multipart body to the backend gateway and
+ * map its response into a Next.js Response. Centralizes the
+ * Bearer-header + no-Content-Type FormData contract (see comment
+ * inline) and the gateway-error → JSON envelope conversion.
+ */
+async function forwardUploadToGateway(
+  files: File[],
+  threadId: string,
+  apiKey: string | null,
+  gatewayUrl: string,
+): Promise<Response> {
+  // Rebuild a fresh FormData so we don't leak any client-only Symbols
+  // through fetch's serializer.
+  const proxied = new FormData();
+  for (const file of files) {
+    proxied.append("files", file, file.name);
+  }
+  // NOTE: do NOT set Content-Type — fetch auto-sets the multipart
+  // boundary when body is FormData. Setting it manually breaks the
+  // boundary and the backend rejects the request as malformed.
+  const headers: Record<string, string> = {};
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+  const targetUrl = `${gatewayUrl}/api/threads/${encodeURIComponent(threadId)}/uploads`;
+  try {
+    const upstream = await fetch(targetUrl, {
+      method: "POST",
+      headers,
+      body: proxied,
+    });
+    if (!upstream.ok) {
+      const errorText = await upstream.text();
+      return NextResponse.json(
+        {
+          error: `Gateway upload failed (${upstream.status})`,
+          detail: errorText.slice(0, 500),
+        },
+        { status: upstream.status },
+      );
+    }
+    const data = await upstream.json();
+    return NextResponse.json(data, { status: 200 });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return NextResponse.json(
+      { error: `Failed to reach gateway: ${message}` },
+      { status: 502 },
+    );
+  }
+}
+
+
 async function userOwnsThread(
   threadId: string,
   userId: string,
@@ -108,10 +226,7 @@ export async function POST(
   //   7. forward to backend
 
   if (!threadId || !/^[a-zA-Z0-9_-]+$/.test(threadId)) {
-    return NextResponse.json(
-      { error: "Invalid threadId" },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "Invalid threadId" }, { status: 400 });
   }
 
   const userId = await getAuthenticatedUserId();
@@ -119,37 +234,12 @@ export async function POST(
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
 
-  // Codex P2 on PR #132: enforce the envelope cap on the
-  // ``content-length`` header BEFORE calling ``request.formData()``
-  // (which buffers the entire multipart body into memory). A logged-in
-  // attacker who bypasses the file picker and posts a 1 GB body
-  // shouldn't be able to make the Next.js process spend memory on it.
-  // Chunked uploads without ``content-length`` fall through to the
-  // post-parse backstop below — we accept the latency cost there
-  // because chunk-encoded multipart from a browser is unusual.
-  const contentLengthHeader = request.headers.get("content-length");
-  if (contentLengthHeader) {
-    const contentLength = Number(contentLengthHeader);
-    if (Number.isFinite(contentLength) && contentLength > MAX_TOTAL_UPLOAD_BYTES) {
-      return NextResponse.json(
-        {
-          error: `Upload too large (${contentLength} bytes per content-length header). Max ${MAX_TOTAL_UPLOAD_BYTES} bytes per request.`,
-        },
-        { status: 413 }
-      );
-    }
-  }
+  const oversizedResponse = enforceContentLengthCap(request);
+  if (oversizedResponse) return oversizedResponse;
 
   const gatewayUrl = getPrimaryGatewayUrl();
   const apiKey = await getUserScopedAuthToken();
 
-  // Codex P1: verify the authenticated user owns this threadId before
-  // forwarding. Without this check, a logged-in user who learns
-  // another user's threadId could plant files in that thread's
-  // sandbox — which view_user_image and the builder image-copy path
-  // would then surface to the victim. Moved up here (before body
-  // parse) so the ownership-failure path also avoids buffering the
-  // entire multipart payload — Codex P2 part 2.
   const owns = await userOwnsThread(threadId, userId, apiKey, gatewayUrl);
   if (!owns) {
     return NextResponse.json(
@@ -158,78 +248,8 @@ export async function POST(
     );
   }
 
-  let formData: FormData;
-  try {
-    formData = await request.formData();
-  } catch {
-    return NextResponse.json(
-      { error: "Invalid multipart body" },
-      { status: 400 }
-    );
-  }
+  const parsed = await parseAndValidateFiles(request);
+  if (parsed instanceof Response) return parsed;
 
-  // Validate we actually have files and they fit our envelope.
-  const files = formData.getAll("files").filter((entry): entry is File => entry instanceof File);
-  if (files.length === 0) {
-    return NextResponse.json(
-      { error: "No files provided. Send under the 'files' field name." },
-      { status: 400 }
-    );
-  }
-  const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
-  if (totalBytes > MAX_TOTAL_UPLOAD_BYTES) {
-    // Post-parse backstop: caps chunked uploads (no content-length)
-    // and any case where the client lied about content-length.
-    return NextResponse.json(
-      {
-        error: `Upload too large (${totalBytes} bytes). Max ${MAX_TOTAL_UPLOAD_BYTES} bytes per request.`,
-      },
-      { status: 413 }
-    );
-  }
-
-  // Rebuild a fresh FormData so we don't leak any client-only Symbols
-  // through fetch's serializer; iterate explicitly to keep filenames.
-  const proxied = new FormData();
-  for (const file of files) {
-    proxied.append("files", file, file.name);
-  }
-
-  const targetUrl = `${gatewayUrl}/api/threads/${encodeURIComponent(threadId)}/uploads`;
-
-  const headers: Record<string, string> = {};
-  if (apiKey) {
-    headers.Authorization = `Bearer ${apiKey}`;
-  }
-  // NOTE: do NOT set Content-Type here — fetch auto-sets the multipart
-  // boundary when body is a FormData. Setting it manually breaks the
-  // boundary and the backend rejects the request as malformed.
-
-  try {
-    const upstream = await fetch(targetUrl, {
-      method: "POST",
-      headers,
-      body: proxied,
-    });
-
-    if (!upstream.ok) {
-      const errorText = await upstream.text();
-      return NextResponse.json(
-        {
-          error: `Gateway upload failed (${upstream.status})`,
-          detail: errorText.slice(0, 500),
-        },
-        { status: upstream.status }
-      );
-    }
-
-    const data = await upstream.json();
-    return NextResponse.json(data, { status: 200 });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    return NextResponse.json(
-      { error: `Failed to reach gateway: ${message}` },
-      { status: 502 }
-    );
-  }
+  return forwardUploadToGateway(parsed.files, threadId, apiKey, gatewayUrl);
 }

@@ -97,6 +97,119 @@ type UploadResponseShape = {
   error?: string
 }
 
+type Registration = { file: File; item: PendingAttachment; skip: boolean }
+
+/**
+ * Build the chip-store registration for a single picked file:
+ * either an "uploading" item (slot consumed) OR an "error" item
+ * (oversized / cap-exceeded) that won't be uploaded.
+ *
+ * Extracted out of ``handleFileSelection`` so the bar's main change
+ * handler stays simple enough to keep its cyclomatic complexity
+ * below the Sentrux gate.
+ */
+function buildRegistration(
+  file: File,
+  threadId: string,
+  remainingSlots: number,
+): Registration {
+  const cap = maxBytesFor(file.name)
+  if (file.size > cap) {
+    const kind = isImage(file.name) ? "image" : "document"
+    return {
+      file,
+      skip: true,
+      item: {
+        clientId: makeClientId(),
+        filename: file.name,
+        size: file.size,
+        status: "error",
+        error: `${kind === "image" ? "Image" : "File"} too large (${formatBytes(file.size)}). Max ${formatBytes(cap)} for ${kind}s.`,
+        hasMarkdownConversion: false,
+        threadId,
+      },
+    }
+  }
+  if (remainingSlots <= 0) {
+    return {
+      file,
+      skip: true,
+      item: {
+        clientId: makeClientId(),
+        filename: file.name,
+        size: file.size,
+        status: "error",
+        error: `Max ${MAX_ATTACHED_FILES_PER_TURN} attachments per message. Remove some before adding more.`,
+        hasMarkdownConversion: false,
+        threadId,
+      },
+    }
+  }
+  return {
+    file,
+    skip: false,
+    item: {
+      clientId: makeClientId(),
+      filename: file.name,
+      size: file.size,
+      status: "uploading",
+      hasMarkdownConversion: false,
+      threadId,
+    },
+  }
+}
+
+/**
+ * Upload one file and apply the resulting store patch. Centralizes
+ * the "success → uploaded chip", "non-2xx → error chip", and
+ * "thrown → network error chip" branches so the per-file loop
+ * stays a flat for-iteration.
+ */
+async function uploadOneFile(
+  reg: Registration,
+  threadId: string,
+  update: (clientId: string, patch: Partial<PendingAttachment>) => void,
+): Promise<void> {
+  const fd = new FormData()
+  fd.append("files", reg.file, reg.file.name)
+  try {
+    const res = await fetch(
+      `/api/threads/${encodeURIComponent(threadId)}/uploads`,
+      { method: "POST", body: fd },
+    )
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "")
+      update(reg.item.clientId, {
+        status: "error",
+        error: `Upload failed (${res.status}). ${errText.slice(0, 120)}`,
+      })
+      return
+    }
+    const data = (await res.json()) as UploadResponseShape
+    // Backend echoes one entry per uploaded file. We sent one, so
+    // we take the first; still match by filename to be safe.
+    const echo =
+      data.files?.find((entry) => entry.filename === reg.file.name) ??
+      data.files?.[0]
+    if (!echo) {
+      update(reg.item.clientId, {
+        status: "error",
+        error: "Upload succeeded but server returned no file metadata.",
+      })
+      return
+    }
+    update(reg.item.clientId, {
+      status: "uploaded",
+      filename: echo.filename,
+      size: Number(echo.size) || reg.item.size,
+      hasMarkdownConversion: Boolean(echo.markdown_file),
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Network error"
+    update(reg.item.clientId, { status: "error", error: message })
+  }
+}
+
 export function AttachmentBar({ threadId, disabled = false, className }: AttachmentBarProps) {
   // Show only chips owned by the current thread (Codex P2 PR #132).
   // If a user uploaded in thread A and switched to B, A's chips
@@ -123,120 +236,34 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
       event.target.value = ""
       if (!filesList || filesList.length === 0 || !threadId) return
 
-      const files = Array.from(filesList)
-
-      // Enforce the same per-turn cap as the server-side post-handler
-      // BEFORE we upload anything — otherwise files over the cap
-      // upload successfully but get silently dropped from
-      // attached_files when parseAndValidateChatPayload truncates
-      // at MAX_ATTACHED_FILES_PER_TURN, then clearForThread wipes
-      // the chips post-dispatch and the user is left wondering why
-      // Sophia ignored some uploads. Codex P2 on PR #132.
-      //
-      // We count items already in the store for this thread that
-      // could plausibly land in attached_files (uploaded + still-
-      // uploading). Errored items don't count — they won't be sent.
-      // Read items fresh from the store rather than from the closure
-      // to avoid a stale-snapshot race when the user picks files
-      // faster than the render loop.
+      // Read items fresh from the store (not the closure) to avoid a
+      // stale-snapshot race when the user picks files faster than the
+      // render loop. Codex P2 PR #132: server-side post-handler caps
+      // attached_files at MAX_ATTACHED_FILES_PER_TURN, so files over
+      // the cap MUST be rejected here rather than silently dropped
+      // after upload.
       const currentItems = selectItemsForThread(threadId)(
-        useAttachmentsStore.getState()
+        useAttachmentsStore.getState(),
       )
-      const existingCounted = currentItems.filter(
-        (item) => item.status !== "error"
-      ).length
+      const existingCounted = currentItems.filter((i) => i.status !== "error").length
       let remainingSlots = Math.max(MAX_ATTACHED_FILES_PER_TURN - existingCounted, 0)
 
-      // Pre-register each file as "uploading" before kicking off the
-      // network call so the chips appear instantly. Tag each item
-      // with the current threadId so the store can scope display +
-      // cleanup to this session (Codex P2 PR #132).
-      const registrations = files.map((file) => {
-        const cap = maxBytesFor(file.name)
-        if (file.size > cap) {
-          const kind = isImage(file.name) ? "image" : "document"
-          const item: PendingAttachment = {
-            clientId: makeClientId(),
-            filename: file.name,
-            size: file.size,
-            status: "error",
-            error: `${kind === "image" ? "Image" : "File"} too large (${formatBytes(file.size)}). Max ${formatBytes(cap)} for ${kind}s.`,
-            hasMarkdownConversion: false,
-            threadId,
-          }
-          add(item)
-          return { file, item, skip: true }
-        }
-        if (remainingSlots <= 0) {
-          const item: PendingAttachment = {
-            clientId: makeClientId(),
-            filename: file.name,
-            size: file.size,
-            status: "error",
-            error: `Max ${MAX_ATTACHED_FILES_PER_TURN} attachments per message. Remove some before adding more.`,
-            hasMarkdownConversion: false,
-            threadId,
-          }
-          add(item)
-          return { file, item, skip: true }
-        }
-        remainingSlots -= 1
-        const item: PendingAttachment = {
-          clientId: makeClientId(),
-          filename: file.name,
-          size: file.size,
-          status: "uploading",
-          hasMarkdownConversion: false,
-          threadId,
-        }
-        add(item)
-        return { file, item, skip: false }
-      })
+      const registrations: Registration[] = []
+      for (const file of Array.from(filesList)) {
+        const reg = buildRegistration(file, threadId, remainingSlots)
+        add(reg.item)
+        if (!reg.skip) remainingSlots -= 1
+        registrations.push(reg)
+      }
 
       // Upload one at a time to keep error attribution simple and the
       // backend's per-thread sandbox dir from racing on parallel writes.
       for (const reg of registrations) {
         if (reg.skip) continue
-        const fd = new FormData()
-        fd.append("files", reg.file, reg.file.name)
-
-        try {
-          const res = await fetch(
-            `/api/threads/${encodeURIComponent(threadId)}/uploads`,
-            { method: "POST", body: fd }
-          )
-          if (!res.ok) {
-            const errText = await res.text().catch(() => "")
-            update(reg.item.clientId, {
-              status: "error",
-              error: `Upload failed (${res.status}). ${errText.slice(0, 120)}`,
-            })
-            continue
-          }
-          const data = (await res.json()) as UploadResponseShape
-          // The backend echoes one entry per uploaded file. We sent one,
-          // so we take the first; we still match by filename to be safe.
-          const echo = data.files?.find((entry) => entry.filename === reg.file.name) ?? data.files?.[0]
-          if (!echo) {
-            update(reg.item.clientId, {
-              status: "error",
-              error: "Upload succeeded but server returned no file metadata.",
-            })
-            continue
-          }
-          update(reg.item.clientId, {
-            status: "uploaded",
-            filename: echo.filename,
-            size: Number(echo.size) || reg.item.size,
-            hasMarkdownConversion: Boolean(echo.markdown_file),
-          })
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "Network error"
-          update(reg.item.clientId, { status: "error", error: message })
-        }
+        await uploadOneFile(reg, threadId, update)
       }
     },
-    [threadId, add, update]
+    [threadId, add, update],
   )
 
   const tooltip = isInteractive
