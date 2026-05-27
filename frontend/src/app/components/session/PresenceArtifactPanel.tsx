@@ -7,6 +7,10 @@ import { haptic } from "../../hooks/useHaptics"
 import { buildThreadArtifactHref, formatBuilderArtifactFileSize, getBuilderArtifactFiles } from "../../lib/builder-artifacts"
 import { isCoReviewRealArtifactEnabled } from "../../lib/co-review-flags"
 import type { CoReviewMediaTransport } from "../../lib/co-review-transport"
+import {
+  buildCoreviewCompanionArtifactText,
+  registerCoreviewArtifactText,
+} from "../../lib/coreview-artifact-text"
 import { cn } from "../../lib/utils"
 import { isRealReflection } from "../../session/artifacts"
 import { usePresenceStore } from "../../stores/presence-store"
@@ -117,6 +121,23 @@ export function PresenceArtifactPanel({
     transport: coReviewTransport,
     missingCanvasReason: "dom_artifact_requires_safe_renderer",
   })
+
+  useEffect(() => {
+    if (!showDomArtifactCoReview || !artifacts) {
+      return undefined
+    }
+    const text = buildCoreviewCompanionArtifactText(artifacts)
+    if (!text) {
+      return undefined
+    }
+    return registerCoreviewArtifactText({
+      artifactId: "coreview-real-artifact-dom-panel",
+      source: "artifact_store",
+      text,
+      sessionIds: [sessionId, normalSessionId],
+      threadId,
+    })
+  }, [artifacts, normalSessionId, sessionId, showDomArtifactCoReview, threadId])
 
   // Phase lifecycle
   useEffect(() => {
@@ -276,6 +297,7 @@ export function PresenceArtifactPanel({
             <CoreviewFixtureArtifact
               sessionId={sessionId}
               normalSessionId={normalSessionId}
+              threadId={threadId}
             />
             <CoReviewControls
               state={coReview.state}
@@ -305,6 +327,7 @@ export function PresenceArtifactPanel({
                 builderArtifact={builderArtifact}
                 sessionId={sessionId}
                 normalSessionId={normalSessionId}
+                threadId={threadId}
               />
             )}
 

@@ -141,6 +141,42 @@ If refresh succeeds, Sophia stays in the looking state and the UI reports `Last 
 
 This is the next safe step toward video-like co-review without claiming continuous video. Auto-refresh and continuous video remain future work. Exact words, numbers, table values, labels, citations, and data still require `read_artifact_text`.
 
+## Exact text path — read_artifact_text
+
+Date: 2026-05-27
+Branch: `spike/gemini-coreview-still-frame-input-clean`
+
+Coreview now has a trusted exact-text/data path separate from visual frames.
+
+What is supported:
+
+- Fixture exact text is supported by the backend `read_artifact_text` tool for `coreview-fixture-q3-launch-review`.
+- The fixture reader returns the exact trusted text: `Q3 Launch Review`, `Strengths`, `Risks`, `North = 42`, and `budget delta is 17.4%`.
+- Guarded builder-artifact metadata is supported through the app-side trusted sideband registered by `CoreviewRealArtifactCanvas`.
+- Builder metadata text covers title/name, artifact type, file count, listed files, visible summary, next action, confidence, steps, decisions, and sources.
+- Companion takeaway/reflection/memory panel text is supported from the existing structured artifact data when registered; it does not scrape arbitrary DOM.
+
+What remains unsupported:
+
+- Builder file body contents are not read unless a trusted file reader is added.
+- Unknown or unregistered artifacts return safe `not_found`.
+- Artifacts registered for a different session/thread return safe `forbidden` in the sideband helper.
+- DOM-only visual capture remains unsupported without a safe renderer.
+
+Tool and prompt integration:
+
+- `read_artifact_text` remains default-off and appears in Gemini tool declarations only when `SOPHIA_GEMINI_COREVIEW_ENABLED` is truthy.
+- Coreview prompt policy now tells Gemini to call `read_artifact_text` for exact headings, numbers, table values, labels, citations, and fine print.
+- The still-frame sender sends a small artifact-id hint to Gemini before the visual frame so the model knows which `artifact_id` to use.
+- If the reader returns `unavailable`, `unsupported`, `forbidden`, or `not_found`, Sophia should say the exact text is unavailable instead of guessing from vision.
+
+Telemetry and privacy:
+
+- No OCR was added.
+- No raw frames/base64 are stored.
+- Raw artifact text is sent only as the provider tool response when needed for the answer; it is not copied into tool-loop diagnostics or telemetry.
+- Safe telemetry records artifact id, source, char count, truncated flag, status/safe reason, and latency when available.
+
 ## Answers
 
 ### 1. Can we encode a clean artifact frame safely?
@@ -249,7 +285,7 @@ Still-frame co-review is a guarded proof-of-concept **go** for the fixture path:
 
 1. Run a manual provider smoke with a completed builder artifact while `NEXT_PUBLIC_SOPHIA_COREVIEW_REAL_ARTIFACT_ENABLED` is on.
 2. Keep normal voice behavior unchanged and still-frame co-review behind flags.
-3. Integrate trusted `read_artifact_text` for exact words, numbers, and file-body questions.
+3. Add a trusted builder file-body reader if exact full deliverable contents need to be answerable inside Coreview.
 4. Add usage/cost telemetry from provider metadata once repeated refresh and a real-artifact run are observed.
 5. Polish the production UX after the visual and exact-text paths are both confirmed.
 6. Consider low-rate auto-refresh only as future work behind a default-off flag.

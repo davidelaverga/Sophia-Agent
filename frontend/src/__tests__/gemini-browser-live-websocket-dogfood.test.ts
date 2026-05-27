@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   buildGeminiArtifactFrameRealtimeInput,
+  buildGeminiArtifactTextReaderHint,
   buildGeminiLiveWebSocketUrl,
   categorizeGeminiProviderEvent,
   classifyGeminiProviderEventForRelay,
@@ -26,6 +27,10 @@ import {
   type GeminiBargeInTranscriptHandoffDiagnostic,
   type GeminiBrowserLiveDogfoodToolLoopDiagnostic,
 } from '../app/lib/gemini-browser-live-websocket-dogfood';
+import {
+  clearCoreviewArtifactTextRegistryForTests,
+  registerCoreviewArtifactText,
+} from '../app/lib/coreview-artifact-text';
 
 const emitArtifactArgs = {
   session_goal: 'Probe Gemini artifacts.',
@@ -164,6 +169,10 @@ function makeGeminiBrowserSessionFetch(sessionId = 'browser-gemini-1') {
 }
 
 describe('Gemini browser Live WebSocket dogfood connector', () => {
+  afterEach(() => {
+    clearCoreviewArtifactTextRegistryForTests();
+  });
+
   it('builds the constrained Live WebSocket URL with only the ephemeral token', () => {
     expect(
       buildGeminiLiveWebSocketUrl(
@@ -194,6 +203,13 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         },
       },
     });
+    expect(buildGeminiArtifactTextReaderHint('artifact-1')).toEqual({
+      realtimeInput: {
+        text: expect.stringContaining('read_artifact_text'),
+      },
+    });
+    expect(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'))).toContain('artifact-1');
+    expect(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'))).not.toContain('base64-frame');
   });
 
   it('decodes Gemini output PCM16 little-endian bytes into normalized float samples', () => {
@@ -415,6 +431,27 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     ]);
     expect(JSON.stringify(memoryToolCalls)).not.toContain('favorite childhood movie secret phrase');
     expect(JSON.stringify(memoryToolCalls)).not.toContain('model-user-id');
+    const readArtifactToolCalls = readGeminiToolCallsFromEvent({
+      toolCall: {
+        functionCalls: [
+          {
+            id: 'read-artifact-call-1',
+            name: 'read_artifact_text',
+            args: {
+              artifact_id: 'coreview-fixture-q3-launch-review',
+              query: 'What exact number is in the table?',
+            },
+          },
+        ],
+      },
+    });
+    expect(readArtifactToolCalls[0]?.args).toMatchObject({
+      artifact_id: 'coreview-fixture-q3-launch-review',
+      query_length: 'What exact number is in the table?'.length,
+      query_fingerprint: expect.stringMatching(/^fnv1a32:[a-f0-9]{8}$/),
+      raw_query_excluded: true,
+    });
+    expect(JSON.stringify(readArtifactToolCalls)).not.toContain('What exact number is in the table?');
     expect(readGeminiConfiguredToolNames({
       tools: [
         {
@@ -785,6 +822,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       mimeType: 'image/jpeg',
       rawFrameExcluded: true,
     }));
+    expect(websocket?.sent.at(-2)).toBe(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1')));
     expect(websocket?.sent.at(-1)).toBe(JSON.stringify({
       realtimeInput: {
         video: {
@@ -1871,6 +1909,133 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         query_fingerprint: 'sha256:query1234567890',
         result_preview_included: false,
       },
+    });
+
+    await connection.close();
+  });
+
+  it('fills read_artifact_text from the trusted sideband and redacts raw artifact text telemetry', async () => {
+    const rawArtifactText = 'Title: Launch brief overview\nFile count: 2\nBudget delta: 17.4%';
+    registerCoreviewArtifactText({
+      artifactId: 'coreview-real-artifact-launch-brief',
+      source: 'builder_metadata',
+      text: rawArtifactText,
+      sessionIds: ['browser-gemini-read-text-loop'],
+      threadId: 'thread-1',
+    });
+    const backendUnavailableResponse = {
+      ok: false,
+      artifact_id: 'coreview-real-artifact-launch-brief',
+      status: 'unsupported',
+      safe_reason: 'Backend reader has metadata only through the app sideband.',
+    };
+    const toolResponsePayload = {
+      toolResponse: {
+        functionResponses: [
+          {
+            id: 'read-artifact-call-1',
+            name: 'read_artifact_text',
+            response: backendUnavailableResponse,
+          },
+        ],
+      },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-read-text-loop',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: {
+              model: 'models/gemini-3.1-flash-live-preview',
+              tools: [{ functionDeclarations: [{ name: 'read_artifact_text' }] }],
+              inputAudioTranscription: {},
+            },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-read-text-loop',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            accepted: true,
+            client_actions: [
+              {
+                type: 'gemini_tool_response',
+                payload: toolResponsePayload,
+                result_summary: 'read_artifact_text returned unsupported.',
+              },
+            ],
+            tool_diagnostics: [
+              {
+                id: 'read-artifact-call-1',
+                name: 'read_artifact_text',
+                success: false,
+                result_summary: 'read_artifact_text returned unsupported.',
+                response: {
+                  ...backendUnavailableResponse,
+                  raw_artifact_text_excluded: true,
+                },
+              },
+            ],
+          }),
+          { status: 202, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(null, { status: 202 }));
+    const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
+    });
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          {
+            id: 'read-artifact-call-1',
+            name: 'read_artifact_text',
+            args: {
+              artifact_id: 'coreview-real-artifact-launch-brief',
+              query: 'What exact budget delta is shown?',
+            },
+          },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => expect(JSON.stringify(websocket?.sent)).toContain('Budget delta: 17.4%'));
+
+    const serializedDiagnostics = JSON.stringify(toolDiagnostics);
+    const responseSent = toolDiagnostics.find((diagnostic) => diagnostic.phase === 'tool_response_sent');
+
+    expect(serializedDiagnostics).not.toContain(rawArtifactText);
+    expect(serializedDiagnostics).not.toContain('Budget delta: 17.4%');
+    expect(serializedDiagnostics).not.toContain('What exact budget delta is shown?');
+    expect(responseSent?.resultSummary).toBe(`read_artifact_text returned builder_metadata text (${rawArtifactText.length} chars).`);
+    expect(responseSent?.backendResponse).toEqual({
+      ok: true,
+      artifact_id: 'coreview-real-artifact-launch-brief',
+      source: 'builder_metadata',
+      char_count: rawArtifactText.length,
+      truncated: false,
+      status: 'success',
+      safe_reason: null,
+      latency_ms: null,
+      raw_artifact_text_excluded: true,
     });
 
     await connection.close();

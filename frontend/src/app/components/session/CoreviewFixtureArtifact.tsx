@@ -2,18 +2,33 @@
 
 import { useEffect, useRef } from "react"
 
+import {
+  COREVIEW_FIXTURE_EXACT_TEXT,
+  registerCoreviewArtifactText,
+} from "../../lib/coreview-artifact-text"
+
 export const COREVIEW_FIXTURE_ARTIFACT_ID = "coreview-fixture-q3-launch-review"
 
 interface CoreviewFixtureArtifactProps {
   sessionId?: string | null
   normalSessionId?: string | null
+  threadId?: string | null
 }
 
 export function CoreviewFixtureArtifact({
   sessionId = null,
   normalSessionId = null,
+  threadId = null,
 }: CoreviewFixtureArtifactProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+
+  useEffect(() => registerCoreviewArtifactText({
+    artifactId: COREVIEW_FIXTURE_ARTIFACT_ID,
+    source: "fixture",
+    text: COREVIEW_FIXTURE_EXACT_TEXT,
+    sessionIds: [sessionId, normalSessionId],
+    threadId,
+  }), [normalSessionId, sessionId, threadId])
 
   useEffect(() => {
     const canvas = canvasRef.current

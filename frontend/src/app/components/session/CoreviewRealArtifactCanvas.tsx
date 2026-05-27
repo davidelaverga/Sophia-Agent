@@ -7,6 +7,10 @@ import {
   getBuilderArtifactFiles,
   normalizeBuilderArtifactPath,
 } from "../../lib/builder-artifacts"
+import {
+  buildCoreviewBuilderMetadataText,
+  registerCoreviewArtifactText,
+} from "../../lib/coreview-artifact-text"
 import type { BuilderArtifactV1 } from "../../types/builder-artifact"
 
 const CANVAS_WIDTH = 960
@@ -20,6 +24,7 @@ interface CoreviewRealArtifactCanvasProps {
   builderArtifact: BuilderArtifactV1
   sessionId?: string | null
   normalSessionId?: string | null
+  threadId?: string | null
 }
 
 export function CoreviewRealArtifactCanvas({
@@ -27,8 +32,17 @@ export function CoreviewRealArtifactCanvas({
   builderArtifact,
   sessionId = null,
   normalSessionId = null,
+  threadId = null,
 }: CoreviewRealArtifactCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+
+  useEffect(() => registerCoreviewArtifactText({
+    artifactId,
+    source: "builder_metadata",
+    text: buildCoreviewBuilderMetadataText(builderArtifact),
+    sessionIds: [sessionId, normalSessionId],
+    threadId,
+  }), [artifactId, builderArtifact, normalSessionId, sessionId, threadId])
 
   useEffect(() => {
     const canvas = canvasRef.current

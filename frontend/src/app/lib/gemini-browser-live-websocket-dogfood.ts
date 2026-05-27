@@ -1,4 +1,7 @@
 import { isCoReviewStillFrameEnabled } from './co-review-flags';
+import {
+  readCoreviewArtifactTextSideband,
+} from './coreview-artifact-text';
 
 export type GeminiBrowserLiveDogfoodStage =
   | 'starting_backend_session'
@@ -690,6 +693,7 @@ const RELAYABLE_GEMINI_PROVIDER_EVENT_KEYS = new Set([
   'error',
 ]);
 const ZERO_FIELD_GEMINI_PROVIDER_EVENT_KEYS = new Set(['setupComplete', 'setup_complete']);
+const GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = 'read_artifact_text';
 const GEMINI_PROVIDER_EVENT_CATEGORIES: GeminiProviderEventCategory[] = [
   'setupComplete',
   'serverContent',
@@ -1662,6 +1666,7 @@ export async function connectGeminiBrowserLiveDogfood(
             handleGeminiRelayClientActions({
               relayResponse,
               websocket,
+              sessionId: browserSession.sessionId,
               toolCallLedger,
               onToolCallLedgerUpdate: notifyToolCallLedgerUpdate,
               onToolLoopDiagnostic: options.onToolLoopDiagnostic,
@@ -1876,6 +1881,18 @@ export function buildGeminiArtifactFrameRealtimeInput(
   };
 }
 
+export function buildGeminiArtifactTextReaderHint(artifactId: string): Record<string, unknown> {
+  return {
+    realtimeInput: {
+      text: [
+        `Coreview active artifact_id: ${artifactId}.`,
+        'For exact words, numbers, table values, labels, or fine print, call read_artifact_text with this artifact_id before answering.',
+        'Use the visual frame only for layout, composition, color, and spatial structure.',
+      ].join(' '),
+    },
+  };
+}
+
 async function sendGeminiArtifactFrameOverWebSocket({
   websocket,
   frame,
@@ -1984,6 +2001,9 @@ async function sendGeminiArtifactFrameOverWebSocket({
   }
 
   try {
+    if (frame.artifactId) {
+      websocket.send(JSON.stringify(buildGeminiArtifactTextReaderHint(frame.artifactId)));
+    }
     websocket.send(JSON.stringify(buildGeminiArtifactFrameRealtimeInput(frame)));
   } catch (error) {
     const providerAfter = providerSnapshot();
@@ -2645,6 +2665,7 @@ function relayResponseKind(clientActionCount: number, toolDiagnosticCount: numbe
 function handleGeminiRelayClientActions(options: {
   relayResponse: GeminiBrowserLiveDogfoodRelayResponse;
   websocket: WebSocketLike | null;
+  sessionId: string;
   toolCallLedger: Map<string, GeminiBrowserLiveToolCallLedgerEntry>;
   onToolCallLedgerUpdate?: (entry: GeminiBrowserLiveToolCallLedgerEntry) => void;
   onToolLoopDiagnostic?: (diagnostic: GeminiBrowserLiveDogfoodToolLoopDiagnostic) => void;
@@ -2688,7 +2709,8 @@ function handleGeminiRelayClientActions(options: {
       continue;
     }
 
-    const functionResponses = readGeminiFunctionResponsesFromToolResponse(action.payload);
+    const functionResponses = readGeminiFunctionResponsesFromToolResponse(action.payload)
+      .map((functionResponse) => applyCoreviewReadArtifactTextSideband(functionResponse, options.sessionId));
     const fallbackSummary = stringFromAnyKey(action, 'result_summary', 'resultSummary');
     const activeFunctionResponses: Record<string, unknown>[] = [];
     const suppressedFunctionResponses: Record<string, unknown>[] = [];
@@ -2736,9 +2758,9 @@ function handleGeminiRelayClientActions(options: {
       continue;
     }
 
-    const payloadToSend = activeFunctionResponses.length === functionResponses.length
-      ? action.payload
-      : replaceGeminiFunctionResponsesInToolResponse(action.payload, activeFunctionResponses);
+    const payloadToSend = functionResponses.length > 0
+      ? replaceGeminiFunctionResponsesInToolResponse(action.payload, activeFunctionResponses)
+      : action.payload;
     try {
       if (options.websocket?.readyState !== WEBSOCKET_OPEN) {
         throw new Error('Gemini Live WebSocket is not open for toolResponse send-back.');
@@ -3828,6 +3850,35 @@ function readGeminiFunctionResponsesFromToolResponse(payload: Record<string, unk
   return responses.filter(isRecord).map((response) => ({ ...response }));
 }
 
+function applyCoreviewReadArtifactTextSideband(
+  functionResponse: Record<string, unknown>,
+  sessionId: string,
+): Record<string, unknown> {
+  if (stringFromAnyKey(functionResponse, 'name') !== GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
+    return functionResponse;
+  }
+
+  const response = recordFromAnyKey(functionResponse, 'response');
+  if (!response || response.ok === true) {
+    return functionResponse;
+  }
+
+  const artifactId = stringFromAnyKey(response, 'artifact_id', 'artifactId');
+  if (!artifactId) {
+    return functionResponse;
+  }
+
+  const sidebandResponse = readCoreviewArtifactTextSideband({ artifactId, sessionId });
+  if (!sidebandResponse.ok) {
+    return functionResponse;
+  }
+
+  return {
+    ...functionResponse,
+    response: sidebandResponse,
+  };
+}
+
 function replaceGeminiFunctionResponsesInToolResponse(
   payload: Record<string, unknown>,
   functionResponses: Record<string, unknown>[],
@@ -3886,6 +3937,14 @@ function responseSummaryFromFunctionResponse(functionResponse: Record<string, un
     const count = numberFromAnyKey(response, 'count') ?? 0;
     return `retrieve_memories returned ${status} with ${count} snippet(s).`;
   }
+  if (stringFromAnyKey(functionResponse, 'name') === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
+    if (response.ok === true) {
+      const source = stringFromAnyKey(response, 'source') ?? 'unknown';
+      const charCount = numberFromAnyKey(response, 'char_count', 'charCount') ?? 0;
+      return `read_artifact_text returned ${source} text (${charCount} chars).`;
+    }
+    return `read_artifact_text returned ${stringFromAnyKey(response, 'status') ?? 'unavailable'}.`;
+  }
   const summary = stringFromAnyKey(response, 'result_summary', 'resultSummary', 'message', 'backend_tool_loop');
   if (summary) {
     return summary;
@@ -3897,6 +3956,18 @@ function redactToolCallArgsForTelemetry(
   toolName: string | null,
   args: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
+  if (toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME && args) {
+    const query = stringFromAnyKey(args, 'query');
+    const reason = stringFromAnyKey(args, 'reason');
+    return {
+      artifact_id: stringFromAnyKey(args, 'artifact_id', 'artifactId'),
+      query_length: query?.length ?? 0,
+      query_fingerprint: query ? telemetryTextFingerprint(query) : null,
+      reason_length: reason?.length ?? 0,
+      raw_query_excluded: true,
+    };
+  }
+
   if (toolName !== GEMINI_RETRIEVE_MEMORIES_TOOL_NAME || !args) {
     return args;
   }
@@ -3915,6 +3986,10 @@ function redactBackendResponseForToolTelemetry(
   toolName: string | null,
   response: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
+  if (toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME && response) {
+    return redactReadArtifactTextResponseForTelemetry(response);
+  }
+
   if (toolName !== GEMINI_RETRIEVE_MEMORIES_TOOL_NAME || !response) {
     return response;
   }
@@ -3937,6 +4012,22 @@ function redactBackendResponseForToolTelemetry(
     raw_memory_text_excluded: true,
     raw_query_excluded: true,
     diagnostics: diagnostics ? redactRetrieveMemoriesDiagnosticsForTelemetry(diagnostics) : null,
+  };
+}
+
+function redactReadArtifactTextResponseForTelemetry(
+  response: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ok: response.ok === true,
+    artifact_id: stringFromAnyKey(response, 'artifact_id', 'artifactId'),
+    source: stringFromAnyKey(response, 'source'),
+    char_count: numberFromAnyKey(response, 'char_count', 'charCount') ?? 0,
+    truncated: response.truncated === true,
+    status: response.ok === true ? 'success' : stringFromAnyKey(response, 'status'),
+    safe_reason: response.ok === true ? null : stringFromAnyKey(response, 'safe_reason', 'safeReason'),
+    latency_ms: numberFromAnyKey(response, 'latency_ms', 'latencyMs'),
+    raw_artifact_text_excluded: true,
   };
 }
 

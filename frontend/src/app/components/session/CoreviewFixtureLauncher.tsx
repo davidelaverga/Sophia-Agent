@@ -125,6 +125,7 @@ export function CoreviewFixtureLauncher({
               <CoreviewFixtureArtifact
                 sessionId={fixtureSessionId}
                 normalSessionId={fixtureNormalSessionId}
+                threadId={fixtureThreadId}
               />
             </div>
 

@@ -9,6 +9,11 @@ import { COREVIEW_FIXTURE_ARTIFACT_ID } from "../../../app/components/session/Co
 import { buildCoreviewRealArtifactId } from "../../../app/components/session/CoreviewRealArtifactCanvas"
 import { isCoReviewFixtureEnabled } from "../../../app/lib/co-review-flags"
 import { GeminiStillFrameTransport } from "../../../app/lib/co-review-still-frame-transport"
+import {
+  clearCoreviewArtifactTextRegistryForTests,
+  COREVIEW_FIXTURE_EXACT_TEXT,
+  readCoreviewArtifactTextSideband,
+} from "../../../app/lib/coreview-artifact-text"
 
 vi.mock("../../../app/hooks/useHaptics", () => ({
   haptic: vi.fn(),
@@ -186,6 +191,7 @@ describe("CoreviewFixtureArtifact in the presence panel", () => {
   })
 
   afterEach(() => {
+    clearCoreviewArtifactTextRegistryForTests()
     getContextSpy?.mockRestore()
     getContextSpy = null
     Object.defineProperty(HTMLCanvasElement.prototype, "toBlob", {
@@ -239,6 +245,25 @@ describe("CoreviewFixtureArtifact in the presence panel", () => {
     expect(screen.getByTestId("coreview-fixture-artifact")).toHaveAttribute("data-coreview-artifact-region", "true")
   })
 
+  it("registers fixture exact text for read_artifact_text without OCR", async () => {
+    renderFixturePanel({ showCoReviewFixture: true })
+
+    await screen.findByLabelText("Q3 Launch Review fixture artifact")
+
+    expect(readCoreviewArtifactTextSideband({
+      artifactId: COREVIEW_FIXTURE_ARTIFACT_ID,
+      sessionId: "session-1",
+      threadId: "thread-1",
+    })).toEqual({
+      ok: true,
+      artifact_id: COREVIEW_FIXTURE_ARTIFACT_ID,
+      source: "fixture",
+      text: COREVIEW_FIXTURE_EXACT_TEXT,
+      truncated: false,
+      char_count: COREVIEW_FIXTURE_EXACT_TEXT.length,
+    })
+  })
+
   it("renders the guarded builder metadata canvas when the real-artifact flag is enabled", async () => {
     setRealArtifactFlags(true)
 
@@ -257,6 +282,45 @@ describe("CoreviewFixtureArtifact in the presence panel", () => {
     expect(canvas).toHaveAttribute("data-coreview-offscreen-render", "true")
     expect(screen.getByTestId("coreview-real-artifact-canvas")).toHaveAttribute("data-artifact-region", "true")
     expect(screen.getByRole("button", { name: /review together/i })).toBeInTheDocument()
+  })
+
+  it("registers guarded builder metadata text and rejects the wrong session", async () => {
+    setRealArtifactFlags(true)
+
+    renderFixturePanel({
+      showCoReviewFixture: false,
+      builderArtifact: BUILDER_ARTIFACT,
+    })
+
+    const artifactId = buildCoreviewRealArtifactId(BUILDER_ARTIFACT)
+    await screen.findByLabelText("Builder artifact metadata overview canvas")
+
+    const response = readCoreviewArtifactTextSideband({
+      artifactId,
+      sessionId: "session-1",
+      threadId: "thread-1",
+    })
+    expect(response).toMatchObject({
+      ok: true,
+      artifact_id: artifactId,
+      source: "builder_metadata",
+      truncated: false,
+    })
+    if (!response.ok) throw new Error("expected builder metadata text")
+    expect(response.text).toContain("Title: Launch brief overview")
+    expect(response.text).toContain("Artifact type: Document")
+    expect(response.text).toContain("File count: 2")
+    expect(response.text).toContain("Builder file contents: unsupported")
+
+    expect(readCoreviewArtifactTextSideband({
+      artifactId,
+      sessionId: "other-session",
+      threadId: "thread-1",
+    })).toMatchObject({
+      ok: false,
+      artifact_id: artifactId,
+      status: "forbidden",
+    })
   })
 
   it("Review Together uses the guarded real builder artifact canvas without screen capture", async () => {

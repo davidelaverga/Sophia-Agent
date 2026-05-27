@@ -4,6 +4,8 @@ import pytest
 
 from voice.realtime.coreview import (
     COREVIEW_FEATURE_FLAG,
+    COREVIEW_FIXTURE_ARTIFACT_ID,
+    COREVIEW_FIXTURE_EXACT_TEXT,
     COREVIEW_STILL_FRAME_FEATURE_FLAG,
     GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
     build_gemini_coreview_prompt_overlay,
@@ -30,8 +32,7 @@ def test_read_artifact_text_remains_feature_flagged_by_default(monkeypatch) -> N
         provider="gemini",
     )
     assert response["ok"] is False
-    assert response["status"] == "disabled"
-    assert response["raw_artifact_text_excluded"] is True
+    assert response["status"] == "unavailable"
     assert "exact number" not in response.values()
 
 
@@ -44,6 +45,7 @@ def test_coreview_prompt_appears_only_when_enabled(monkeypatch) -> None:
     prompt = build_gemini_live_realtime_setup_instructions()
     assert "<gemini_coreview_artifact_policy>" in prompt
     assert "Exact words, numbers, table values" in prompt
+    assert "call read_artifact_text with the active artifact_id" in prompt
     assert "Still-frame co-review" in prompt
 
 
@@ -70,6 +72,61 @@ def test_coreview_tool_declaration_is_opt_in(monkeypatch) -> None:
 
     assert declarations[-1]["name"] == GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME
     assert declarations[-1]["parameters"]["required"] == ["artifact_id", "query"]
+
+
+def test_read_artifact_text_returns_fixture_exact_text(monkeypatch) -> None:
+    monkeypatch.setenv(COREVIEW_FEATURE_FLAG, "true")
+
+    response = execute_read_artifact_text_feature_gated(
+        {"artifact_id": COREVIEW_FIXTURE_ARTIFACT_ID, "query": "exact table value"},
+        session_id="session-1",
+        user_id="user-1",
+        provider="gemini",
+    )
+
+    assert response == {
+        "ok": True,
+        "artifact_id": COREVIEW_FIXTURE_ARTIFACT_ID,
+        "source": "fixture",
+        "text": COREVIEW_FIXTURE_EXACT_TEXT,
+        "truncated": False,
+        "char_count": len(COREVIEW_FIXTURE_EXACT_TEXT),
+    }
+
+
+def test_read_artifact_text_returns_safe_unsupported_for_unknown_real_artifact(monkeypatch) -> None:
+    monkeypatch.setenv(COREVIEW_FEATURE_FLAG, "true")
+
+    response = execute_read_artifact_text_feature_gated(
+        {"artifact_id": "coreview-real-artifact-report-md", "query": "read the body"},
+        session_id="session-1",
+        user_id="user-1",
+        provider="gemini",
+    )
+
+    assert response["ok"] is False
+    assert response["artifact_id"] == "coreview-real-artifact-report-md"
+    assert response["status"] == "unsupported"
+    assert "unsupported" in response["safe_reason"].lower()
+    assert "read the body" not in response.values()
+
+
+def test_read_artifact_text_returns_safe_not_found_for_unregistered_artifact(monkeypatch) -> None:
+    monkeypatch.setenv(COREVIEW_FEATURE_FLAG, "true")
+
+    response = execute_read_artifact_text_feature_gated(
+        {"artifact_id": "artifact-from-another-session", "query": "heading"},
+        session_id="session-1",
+        user_id="user-1",
+        provider="gemini",
+    )
+
+    assert response == {
+        "ok": False,
+        "artifact_id": "artifact-from-another-session",
+        "status": "not_found",
+        "safe_reason": "No trusted artifact text source is registered for that artifact_id.",
+    }
 
 
 def test_media_transport_support_detection_reports_unsupported_safely(monkeypatch) -> None:
@@ -128,9 +185,42 @@ async def test_read_artifact_text_tool_loop_returns_flagged_safe_status(monkeypa
     )
 
     assert execution.success is False
-    assert execution.response["status"] == "disabled"
-    assert execution.response["raw_artifact_text_excluded"] is True
+    assert execution.response["status"] == "unavailable"
     assert "tiny table value" not in execution.response.values()
+
+
+@pytest.mark.anyio
+async def test_read_artifact_text_tool_loop_returns_fixture_without_raw_text_telemetry(monkeypatch) -> None:
+    monkeypatch.setenv(COREVIEW_FEATURE_FLAG, "true")
+    executor = GeminiDogfoodToolExecutor()
+
+    execution = await executor.execute(
+        GeminiLiveFunctionCall(
+            call_id="call-1",
+            name=GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
+            args={"artifact_id": COREVIEW_FIXTURE_ARTIFACT_ID, "query": "What exact number is in the table?"},
+        ),
+        session_id="session-1",
+        user_id="user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="gemini",
+    )
+
+    diagnostic = execution.diagnostic()
+
+    assert execution.success is True
+    assert execution.response["text"] == COREVIEW_FIXTURE_EXACT_TEXT
+    assert diagnostic["response"] == {
+        "ok": True,
+        "artifact_id": COREVIEW_FIXTURE_ARTIFACT_ID,
+        "source": "fixture",
+        "char_count": len(COREVIEW_FIXTURE_EXACT_TEXT),
+        "truncated": False,
+        "status": "success",
+        "latency_ms": diagnostic["latency_ms"],
+        "raw_artifact_text_excluded": True,
+    }
+    assert COREVIEW_FIXTURE_EXACT_TEXT not in str(diagnostic)
 
 
 def test_explicit_overlay_builder_is_empty_when_disabled() -> None:
