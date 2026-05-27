@@ -10,20 +10,38 @@ import {
 } from "../../app/lib/co-review-transport"
 
 const transportStatus = new AudioWebSocketUnsupportedTransport().status()
+const liveStillFrameTransportStatus = {
+  ...transportStatus,
+  visualTransportSupported: true,
+  toolsSupportedInCoReview: true,
+  stillFramesSupported: true,
+  statusText: "still-frame mode",
+}
 
-function renderControls(state: Partial<CoReviewSessionState> = {}, featureEnabled = true) {
+function renderControls(
+  state: Partial<CoReviewSessionState> = {},
+  featureEnabled = true,
+  options: {
+    canRefresh?: boolean
+    transportStatusOverride?: typeof transportStatus
+  } = {},
+) {
   const onStart = vi.fn()
   const onStop = vi.fn()
+  const onRefresh = vi.fn()
+  const currentTransportStatus = options.transportStatusOverride ?? transportStatus
   render(
     <CoReviewControls
-      state={{ ...initialCoReviewState(transportStatus.kind), ...state }}
-      transportStatus={transportStatus}
+      state={{ ...initialCoReviewState(currentTransportStatus.kind), ...state }}
+      transportStatus={currentTransportStatus}
       onStart={onStart}
       onStop={onStop}
+      onRefresh={onRefresh}
+      canRefresh={options.canRefresh ?? false}
       featureEnabled={featureEnabled}
     />,
   )
-  return { onStart, onStop }
+  return { onStart, onStop, onRefresh }
 }
 
 describe("CoReviewControls", () => {
@@ -54,6 +72,89 @@ describe("CoReviewControls", () => {
     })
     expect(screen.getByRole("status", { name: /looking at this artifact/i })).toBeInTheDocument()
     expect(screen.getByText("still-frame mode")).toBeInTheDocument()
+  })
+
+  it("keeps Refresh View hidden until co-review is live", () => {
+    renderControls({ state: "normal_voice" })
+
+    expect(screen.queryByRole("button", { name: /refresh view/i })).not.toBeInTheDocument()
+  })
+
+  it("shows Refresh View while live and dispatches through the provided handler", async () => {
+    const user = userEvent.setup()
+    const { onRefresh } = renderControls(
+      {
+        state: "co_review_live",
+        visualInputStatus: "live",
+        videoOrFrameMode: "still_frame",
+      },
+      true,
+      {
+        canRefresh: true,
+        transportStatusOverride: liveStillFrameTransportStatus,
+      },
+    )
+
+    await user.click(screen.getByRole("button", { name: /refresh view/i }))
+
+    expect(onRefresh).toHaveBeenCalledTimes(1)
+  })
+
+  it("disables Refresh View when the websocket is not open", () => {
+    renderControls(
+      {
+        state: "co_review_live",
+        visualInputStatus: "live",
+        videoOrFrameMode: "still_frame",
+      },
+      true,
+      {
+        canRefresh: true,
+        transportStatusOverride: {
+          ...liveStillFrameTransportStatus,
+          visualTransportSupported: false,
+          statusText: "still-frame unavailable: gemini_live_websocket_not_open",
+        },
+      },
+    )
+
+    expect(screen.getByRole("button", { name: /refresh view/i })).toBeDisabled()
+  })
+
+  it("shows safe Refresh View status text", () => {
+    renderControls(
+      {
+        state: "co_review_live",
+        visualInputStatus: "live",
+        refreshFrameInProgress: true,
+        refreshFrameResult: "refreshing",
+      },
+      true,
+      {
+        transportStatusOverride: liveStillFrameTransportStatus,
+      },
+    )
+    expect(screen.getByText("Refreshing…")).toBeInTheDocument()
+
+    renderControls(
+      {
+        state: "co_review_live",
+        visualInputStatus: "live",
+        refreshFrameResult: "success",
+      },
+      true,
+      {
+        transportStatusOverride: liveStillFrameTransportStatus,
+      },
+    )
+    expect(screen.getByText("Last refreshed just now")).toBeInTheDocument()
+
+    renderControls({
+      state: "co_review_error",
+      refreshFrameResult: "error",
+      refreshErrorSafeReason: "frame_send_closed_gemini_websocket",
+    })
+    expect(screen.getByText("Refresh failed: frame_send_closed_gemini_websocket")).toBeInTheDocument()
   })
 
   it("Stop Looking exits through the provided handler", async () => {

@@ -6,6 +6,8 @@ import {
 } from "./co-review-frame"
 import type {
   CoReviewMediaTransport,
+  CoReviewRefreshInput,
+  CoReviewRefreshResult,
   CoReviewStartInput,
   CoReviewStartResult,
   CoReviewStopResult,
@@ -65,6 +67,22 @@ export interface ArtifactFrameSender {
   getStatus?(): ArtifactFrameSenderStatus
 }
 
+interface StillFrameSendOutcome {
+  ok: boolean
+  visualInputStatus: "live" | "unsupported" | "error"
+  toolAvailability: "available" | "sideband_only" | "unavailable"
+  error: string | null
+  frameBytes: number | null
+  frameDimensions: ArtifactFrameDimensions | null
+  frameSendLatencyMs: number | null
+  providerAcceptedFrame: boolean
+  visualResponseObserved: boolean
+  estimatedVisualCost: number | null
+  websocketStateBeforeRefresh: string | null
+  websocketStateAfterRefresh: string | null
+  websocketClosedAfterRefresh: boolean
+}
+
 export class GeminiStillFrameTransport implements CoReviewMediaTransport {
   readonly kind = "gemini_live_websocket_still_frame_experimental"
 
@@ -76,111 +94,20 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
   async startCoReview(input: CoReviewStartInput): Promise<CoReviewStartResult> {
     this.stopped = false
     this.activeSource = input.visualSource
-    const preflightStatus = this.sender.getStatus?.()
-    if (preflightStatus && !preflightStatus.websocketOpen) {
-      stopArtifactVisualSource(input.visualSource)
-      logCoreviewBreadcrumb("sendArtifactFramePreflightFailed", {
-        error: preflightStatus.error ?? "gemini_live_websocket_not_open",
-        websocketReadyStateBefore: preflightStatus.websocketReadyState,
-        websocketState: preflightStatus.websocketState,
-        websocketCloseCode: preflightStatus.websocketCloseCode,
-        websocketCloseReasonSafe: preflightStatus.websocketCloseReasonSafe,
-        websocketCloseWasClean: preflightStatus.websocketCloseWasClean,
-        websocketCloseAt: preflightStatus.websocketCloseAt,
-      })
-      return this.errorResult(preflightStatus.error ?? "gemini_live_websocket_not_open", {
-        visualInputStatus: "error",
-        toolAvailability: "unavailable",
-      })
-    }
-
-    logCoreviewBreadcrumb("frameEncodeStarted", {
-      artifactId: input.artifactId,
-      sourceKind: input.visualSource.kind,
-      sourceStatus: input.visualSource.status,
-    })
-    const encoded = await encodeArtifactStillFrame(input.visualSource)
-    if (encoded.ok === false) {
-      stopArtifactVisualSource(input.visualSource)
-      logCoreviewBreadcrumb("coReviewStartError", {
-        error: encoded.reason,
-        stage: "frame_encode",
-      })
-      return this.errorResult(encoded.reason)
-    }
-    logCoreviewBreadcrumb("frameEncodeSucceeded", {
-      artifactId: encoded.payload.artifactId,
-      frameBytes: encoded.payload.byteLength,
-      frameDimensions: encoded.payload.dimensions,
-      frameMimeType: encoded.payload.mimeType,
-    })
-    if (this.stopped) {
-      logCoreviewBreadcrumb("coReviewStartError", {
-        error: "co_review_stopped_before_frame_send",
-        stage: "before_frame_send",
-      })
-      return this.errorResult("co_review_stopped_before_frame_send")
-    }
-
-    logCoreviewBreadcrumb("sendArtifactFrameAvailable", {
-      available: typeof this.sender.sendArtifactFrame === "function",
-    })
-    logCoreviewBreadcrumb("sendArtifactFrameAttempted", {
-      artifactId: encoded.payload.artifactId,
-      frameBytes: encoded.payload.byteLength,
-      frameDimensions: encoded.payload.dimensions,
-      frameMimeType: encoded.payload.mimeType,
-    })
-    const sent = await this.sender.sendArtifactFrame(encoded.payload)
-    logCoreviewBreadcrumb("sendArtifactFrameResult", {
-      ok: sent.ok,
-      supported: sent.supported,
-      providerAcceptedFrame: sent.providerAcceptedFrame,
-      websocketSendAccepted: sent.websocketSendAccepted ?? null,
-      websocketReadyStateBefore: sent.websocketReadyStateBefore ?? null,
-      websocketReadyStateAfter: sent.websocketReadyStateAfter ?? null,
-      websocketOpenBeforeSend: sent.websocketOpenBeforeSend ?? null,
-      websocketOpenAfterSend: sent.websocketOpenAfterSend ?? null,
-      framePayloadSchemaVersion: sent.framePayloadSchemaVersion ?? null,
-      frameBytes: sent.frameBytes,
-      frameDimensions: sent.frameDimensions,
-      mimeType: sent.mimeType ?? null,
-      frameSendLatencyMs: sent.frameSendLatencyMs,
-      sendStartedAt: sent.sendStartedAt ?? null,
-      sendCompletedAt: sent.sendCompletedAt ?? null,
-      sendDurationMs: sent.sendDurationMs ?? null,
-      sendExceptionName: sent.sendExceptionName ?? null,
-      sendExceptionSafeMessage: sent.sendExceptionSafeMessage ?? null,
-      providerEventCountBefore: sent.providerEventCountBefore ?? null,
-      providerEventCountAfter: sent.providerEventCountAfter ?? null,
-      lastProviderEventTypeBefore: sent.lastProviderEventTypeBefore ?? null,
-      lastProviderEventTypeAfter: sent.lastProviderEventTypeAfter ?? null,
-      websocketCloseCode: sent.websocketCloseCode ?? null,
-      websocketCloseReasonSafe: sent.websocketCloseReasonSafe ?? null,
-      websocketCloseWasClean: sent.websocketCloseWasClean ?? null,
-      websocketCloseAt: sent.websocketCloseAt ?? null,
-      websocketClosedAfterFrameSend: sent.websocketClosedAfterFrameSend ?? false,
-      timeFromFrameSendToCloseMs: sent.timeFromFrameSendToCloseMs ?? null,
-      usageMetadataAfterFrame: sent.usageMetadataAfterFrame ? "present" : null,
-      imageCountAfterFrame: sent.imageCountAfterFrame ?? null,
-      visualResponseObserved: sent.visualResponseObserved ?? false,
-      estimatedVisualCost: sent.estimatedVisualCost,
-      error: sent.error,
-    })
-    if (!sent.ok) {
-      stopArtifactVisualSource(input.visualSource)
+    const outcome = await this.sendCurrentStillFrame(input.visualSource, input.artifactId, "start")
+    if (!outcome.ok) {
       return {
-        ...this.errorResult(sent.error ?? "artifact_frame_send_failed", {
-          visualInputStatus: sent.error === "frame_send_closed_gemini_websocket" ? "error" : "unsupported",
-          toolAvailability: sent.error === "frame_send_closed_gemini_websocket" ? "unavailable" : "sideband_only",
+        ...this.errorResult(outcome.error ?? "artifact_frame_send_failed", {
+          visualInputStatus: outcome.visualInputStatus,
+          toolAvailability: outcome.toolAvailability,
         }),
         frameSentCount: 0,
-        frameBytes: sent.frameBytes,
-        frameDimensions: sent.frameDimensions,
-        frameSendLatencyMs: sent.frameSendLatencyMs,
-        providerAcceptedFrame: sent.providerAcceptedFrame,
-        estimatedVisualCost: sent.estimatedVisualCost,
-        visualResponseObserved: sent.visualResponseObserved ?? false,
+        frameBytes: outcome.frameBytes,
+        frameDimensions: outcome.frameDimensions,
+        frameSendLatencyMs: outcome.frameSendLatencyMs,
+        providerAcceptedFrame: outcome.providerAcceptedFrame,
+        estimatedVisualCost: outcome.estimatedVisualCost,
+        visualResponseObserved: outcome.visualResponseObserved,
       }
     }
 
@@ -192,15 +119,64 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
       videoOrFrameMode: "still_frame",
       normalVoicePaused: false,
       sessionHandoffMs: null,
-      estimatedVisualCost: sent.estimatedVisualCost,
+      estimatedVisualCost: outcome.estimatedVisualCost,
       error: null,
       frameSentCount: 1,
-      frameBytes: sent.frameBytes,
-      frameDimensions: sent.frameDimensions,
-      frameSendLatencyMs: sent.frameSendLatencyMs ?? encoded.encodeLatencyMs,
-      providerAcceptedFrame: sent.providerAcceptedFrame,
-      visualResponseObserved: sent.visualResponseObserved ?? false,
+      frameBytes: outcome.frameBytes,
+      frameDimensions: outcome.frameDimensions,
+      frameSendLatencyMs: outcome.frameSendLatencyMs,
+      providerAcceptedFrame: outcome.providerAcceptedFrame,
+      visualResponseObserved: outcome.visualResponseObserved,
       toolCallStillWorks: null,
+    }
+  }
+
+  async refreshCoReview(input: CoReviewRefreshInput): Promise<CoReviewRefreshResult> {
+    if (this.stopped) {
+      stopArtifactVisualSource(input.visualSource)
+      return this.refreshErrorResult("co_review_stopped", {
+        websocketStateBeforeRefresh: null,
+        websocketStateAfterRefresh: null,
+        websocketClosedAfterRefresh: false,
+      })
+    }
+
+    this.activeSource = input.visualSource
+    const outcome = await this.sendCurrentStillFrame(input.visualSource, input.artifactId, "refresh")
+    if (!outcome.ok) {
+      return {
+        ok: false,
+        visualInputStatus: outcome.visualInputStatus,
+        toolAvailability: outcome.toolAvailability,
+        error: outcome.error ?? "artifact_frame_refresh_failed",
+        frameSentCount: 0,
+        frameBytes: outcome.frameBytes,
+        frameDimensions: outcome.frameDimensions,
+        frameSendLatencyMs: outcome.frameSendLatencyMs,
+        providerAcceptedFrame: outcome.providerAcceptedFrame,
+        visualResponseObserved: outcome.visualResponseObserved,
+        estimatedVisualCost: outcome.estimatedVisualCost,
+        websocketStateBeforeRefresh: outcome.websocketStateBeforeRefresh,
+        websocketStateAfterRefresh: outcome.websocketStateAfterRefresh,
+        websocketClosedAfterRefresh: outcome.websocketClosedAfterRefresh,
+      }
+    }
+
+    return {
+      ok: true,
+      visualInputStatus: "live",
+      toolAvailability: "available",
+      error: null,
+      frameSentCount: 1,
+      frameBytes: outcome.frameBytes,
+      frameDimensions: outcome.frameDimensions,
+      frameSendLatencyMs: outcome.frameSendLatencyMs,
+      providerAcceptedFrame: outcome.providerAcceptedFrame,
+      visualResponseObserved: outcome.visualResponseObserved,
+      estimatedVisualCost: outcome.estimatedVisualCost,
+      websocketStateBeforeRefresh: outcome.websocketStateBeforeRefresh,
+      websocketStateAfterRefresh: outcome.websocketStateAfterRefresh,
+      websocketClosedAfterRefresh: outcome.websocketClosedAfterRefresh,
     }
   }
 
@@ -271,6 +247,177 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
     return true
   }
 
+  private async sendCurrentStillFrame(
+    visualSource: CoReviewStartInput["visualSource"],
+    artifactId: string,
+    stage: "start" | "refresh",
+  ): Promise<StillFrameSendOutcome> {
+    const preflightStatus = this.sender.getStatus?.()
+    if (preflightStatus && !preflightStatus.websocketOpen) {
+      stopArtifactVisualSource(visualSource)
+      logCoreviewBreadcrumb(stage === "refresh" ? "refreshFramePreflightFailed" : "sendArtifactFramePreflightFailed", {
+        error: preflightStatus.error ?? "gemini_live_websocket_not_open",
+        websocketReadyStateBefore: preflightStatus.websocketReadyState,
+        websocketState: preflightStatus.websocketState,
+        websocketCloseCode: preflightStatus.websocketCloseCode,
+        websocketCloseReasonSafe: preflightStatus.websocketCloseReasonSafe,
+        websocketCloseWasClean: preflightStatus.websocketCloseWasClean,
+        websocketCloseAt: preflightStatus.websocketCloseAt,
+      })
+      return this.frameErrorOutcome(preflightStatus.error ?? "gemini_live_websocket_not_open", {
+        visualInputStatus: "error",
+        toolAvailability: "unavailable",
+        websocketStateBeforeRefresh: preflightStatus.websocketState,
+        websocketStateAfterRefresh: preflightStatus.websocketState,
+        websocketClosedAfterRefresh: false,
+      })
+    }
+
+    logCoreviewBreadcrumb(stage === "refresh" ? "refreshFrameEncodeStarted" : "frameEncodeStarted", {
+      artifactId,
+      sourceKind: visualSource.kind,
+      sourceStatus: visualSource.status,
+    })
+    const encoded = await encodeArtifactStillFrame(visualSource)
+    if (encoded.ok === false) {
+      stopArtifactVisualSource(visualSource)
+      logCoreviewBreadcrumb(stage === "refresh" ? "coReviewRefreshError" : "coReviewStartError", {
+        error: encoded.reason,
+        stage: "frame_encode",
+      })
+      return this.frameErrorOutcome(encoded.reason)
+    }
+    logCoreviewBreadcrumb(stage === "refresh" ? "refreshFrameEncodeSucceeded" : "frameEncodeSucceeded", {
+      artifactId: encoded.payload.artifactId,
+      frameBytes: encoded.payload.byteLength,
+      frameDimensions: encoded.payload.dimensions,
+      frameMimeType: encoded.payload.mimeType,
+    })
+    if (this.stopped) {
+      stopArtifactVisualSource(visualSource)
+      const error = stage === "refresh" ? "co_review_stopped_before_refresh_frame_send" : "co_review_stopped_before_frame_send"
+      logCoreviewBreadcrumb(stage === "refresh" ? "coReviewRefreshError" : "coReviewStartError", {
+        error,
+        stage: "before_frame_send",
+      })
+      return this.frameErrorOutcome(error)
+    }
+
+    const senderStatusBefore = this.sender.getStatus?.()
+    logCoreviewBreadcrumb("sendArtifactFrameAvailable", {
+      available: typeof this.sender.sendArtifactFrame === "function",
+      refresh: stage === "refresh",
+    })
+    logCoreviewBreadcrumb(stage === "refresh" ? "refreshFrameSendAttempted" : "sendArtifactFrameAttempted", {
+      artifactId: encoded.payload.artifactId,
+      frameBytes: encoded.payload.byteLength,
+      frameDimensions: encoded.payload.dimensions,
+      frameMimeType: encoded.payload.mimeType,
+    })
+    const sent = await this.sender.sendArtifactFrame(encoded.payload)
+    const senderStatusAfter = this.sender.getStatus?.()
+    const websocketStateBeforeRefresh = websocketReadyStateLabel(sent.websocketReadyStateBefore ?? null)
+      ?? senderStatusBefore?.websocketState
+      ?? null
+    const websocketStateAfterRefresh = websocketReadyStateLabel(sent.websocketReadyStateAfter ?? null)
+      ?? senderStatusAfter?.websocketState
+      ?? null
+    const websocketClosedAfterRefresh = sent.websocketClosedAfterFrameSend
+      ?? Boolean((senderStatusBefore?.websocketOpen ?? sent.websocketOpenBeforeSend) && !(senderStatusAfter?.websocketOpen ?? sent.websocketOpenAfterSend))
+
+    logCoreviewBreadcrumb(stage === "refresh" ? "refreshFrameResult" : "sendArtifactFrameResult", {
+      ok: sent.ok,
+      supported: sent.supported,
+      providerAcceptedFrame: sent.providerAcceptedFrame,
+      websocketSendAccepted: sent.websocketSendAccepted ?? null,
+      websocketReadyStateBefore: sent.websocketReadyStateBefore ?? null,
+      websocketReadyStateAfter: sent.websocketReadyStateAfter ?? null,
+      websocketOpenBeforeSend: sent.websocketOpenBeforeSend ?? null,
+      websocketOpenAfterSend: sent.websocketOpenAfterSend ?? null,
+      websocketStateBeforeRefresh,
+      websocketStateAfterRefresh,
+      websocketClosedAfterRefresh,
+      framePayloadSchemaVersion: sent.framePayloadSchemaVersion ?? null,
+      frameBytes: sent.frameBytes,
+      frameDimensions: sent.frameDimensions,
+      mimeType: sent.mimeType ?? null,
+      frameSendLatencyMs: sent.frameSendLatencyMs,
+      sendStartedAt: sent.sendStartedAt ?? null,
+      sendCompletedAt: sent.sendCompletedAt ?? null,
+      sendDurationMs: sent.sendDurationMs ?? null,
+      sendExceptionName: sent.sendExceptionName ?? null,
+      sendExceptionSafeMessage: sent.sendExceptionSafeMessage ?? null,
+      providerEventCountBefore: sent.providerEventCountBefore ?? null,
+      providerEventCountAfter: sent.providerEventCountAfter ?? null,
+      lastProviderEventTypeBefore: sent.lastProviderEventTypeBefore ?? null,
+      lastProviderEventTypeAfter: sent.lastProviderEventTypeAfter ?? null,
+      websocketCloseCode: sent.websocketCloseCode ?? null,
+      websocketCloseReasonSafe: sent.websocketCloseReasonSafe ?? null,
+      websocketCloseWasClean: sent.websocketCloseWasClean ?? null,
+      websocketCloseAt: sent.websocketCloseAt ?? null,
+      websocketClosedAfterFrameSend: sent.websocketClosedAfterFrameSend ?? false,
+      timeFromFrameSendToCloseMs: sent.timeFromFrameSendToCloseMs ?? null,
+      usageMetadataAfterFrame: sent.usageMetadataAfterFrame ? "present" : null,
+      imageCountAfterFrame: sent.imageCountAfterFrame ?? null,
+      visualResponseObserved: sent.visualResponseObserved ?? false,
+      estimatedVisualCost: sent.estimatedVisualCost,
+      error: sent.error,
+    })
+    if (!sent.ok) {
+      stopArtifactVisualSource(visualSource)
+      return this.frameErrorOutcome(sent.error ?? "artifact_frame_send_failed", {
+        visualInputStatus: sent.error === "frame_send_closed_gemini_websocket" ? "error" : "unsupported",
+        toolAvailability: sent.error === "frame_send_closed_gemini_websocket" ? "unavailable" : "sideband_only",
+        frameBytes: sent.frameBytes,
+        frameDimensions: sent.frameDimensions,
+        frameSendLatencyMs: sent.frameSendLatencyMs,
+        providerAcceptedFrame: sent.providerAcceptedFrame,
+        visualResponseObserved: sent.visualResponseObserved ?? false,
+        estimatedVisualCost: sent.estimatedVisualCost,
+        websocketStateBeforeRefresh,
+        websocketStateAfterRefresh,
+        websocketClosedAfterRefresh,
+      })
+    }
+
+    return {
+      ok: true,
+      visualInputStatus: "live",
+      toolAvailability: "available",
+      error: null,
+      frameBytes: sent.frameBytes,
+      frameDimensions: sent.frameDimensions,
+      frameSendLatencyMs: sent.frameSendLatencyMs ?? encoded.encodeLatencyMs,
+      providerAcceptedFrame: sent.providerAcceptedFrame,
+      visualResponseObserved: sent.visualResponseObserved ?? false,
+      estimatedVisualCost: sent.estimatedVisualCost,
+      websocketStateBeforeRefresh,
+      websocketStateAfterRefresh,
+      websocketClosedAfterRefresh,
+    }
+  }
+
+  private frameErrorOutcome(
+    error: string,
+    overrides: Partial<StillFrameSendOutcome> = {},
+  ): StillFrameSendOutcome {
+    return {
+      ok: false,
+      visualInputStatus: overrides.visualInputStatus ?? "unsupported",
+      toolAvailability: overrides.toolAvailability ?? "sideband_only",
+      error,
+      frameBytes: overrides.frameBytes ?? null,
+      frameDimensions: overrides.frameDimensions ?? null,
+      frameSendLatencyMs: overrides.frameSendLatencyMs ?? null,
+      providerAcceptedFrame: overrides.providerAcceptedFrame ?? false,
+      visualResponseObserved: overrides.visualResponseObserved ?? false,
+      estimatedVisualCost: overrides.estimatedVisualCost ?? null,
+      websocketStateBeforeRefresh: overrides.websocketStateBeforeRefresh ?? null,
+      websocketStateAfterRefresh: overrides.websocketStateAfterRefresh ?? null,
+      websocketClosedAfterRefresh: overrides.websocketClosedAfterRefresh ?? false,
+    }
+  }
+
   private errorResult(
     error: string,
     overrides: Partial<Pick<CoReviewStartResult, "visualInputStatus" | "toolAvailability">> = {},
@@ -287,6 +434,37 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
       error,
     }
   }
+
+  private refreshErrorResult(
+    error: string,
+    overrides: Pick<
+      CoReviewRefreshResult,
+      "websocketStateBeforeRefresh" | "websocketStateAfterRefresh" | "websocketClosedAfterRefresh"
+    >,
+  ): CoReviewRefreshResult {
+    return {
+      ok: false,
+      visualInputStatus: "error",
+      toolAvailability: "unavailable",
+      error,
+      frameSentCount: 0,
+      frameBytes: null,
+      frameDimensions: null,
+      frameSendLatencyMs: null,
+      providerAcceptedFrame: false,
+      visualResponseObserved: false,
+      estimatedVisualCost: null,
+      ...overrides,
+    }
+  }
+}
+
+function websocketReadyStateLabel(readyState: number | null): string | null {
+  if (readyState === 0) return "connecting"
+  if (readyState === 1) return "open"
+  if (readyState === 2) return "closing"
+  if (readyState === 3) return "closed"
+  return null
 }
 
 function logCoreviewBreadcrumb(event: string, details: Record<string, unknown> = {}) {

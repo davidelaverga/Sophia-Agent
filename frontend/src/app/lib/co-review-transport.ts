@@ -15,6 +15,7 @@ export type CoReviewStateName = (typeof CO_REVIEW_STATES)[number]
 export type VisualInputStatus = "inactive" | "unsupported" | "connecting" | "live" | "stopped" | "error"
 export type ToolAvailability = "unknown" | "available" | "sideband_only" | "unavailable"
 export type VideoOrFrameMode = "none" | "continuous_video" | "still_frame"
+export type RefreshFrameResult = "idle" | "refreshing" | "success" | "error" | "blocked"
 
 export interface CoReviewSessionState {
   state: CoReviewStateName
@@ -41,6 +42,18 @@ export interface CoReviewSessionState {
   frameBytes: number | null
   frameDimensions: ArtifactFrameDimensions | null
   frameSendLatencyMs: number | null
+  refreshFrameRequested: boolean
+  refreshFrameInProgress: boolean
+  refreshFrameStartedAt: string | null
+  refreshFrameLatencyMs: number | null
+  refreshFrameResult: RefreshFrameResult
+  lastRefreshAt: string | null
+  lastFrameBytes: number | null
+  lastFrameDimensions: ArtifactFrameDimensions | null
+  websocketStateBeforeRefresh: string | null
+  websocketStateAfterRefresh: string | null
+  websocketClosedAfterRefresh: boolean
+  refreshErrorSafeReason: string | null
   providerAcceptedFrame: boolean
   visualResponseObserved: boolean
   toolCallStillWorks: boolean | null
@@ -80,6 +93,28 @@ export interface CoReviewStopResult {
   error: string | null
 }
 
+export interface CoReviewRefreshInput {
+  artifactId: string
+  visualSource: ArtifactVisualSource
+}
+
+export interface CoReviewRefreshResult {
+  ok: boolean
+  visualInputStatus: VisualInputStatus
+  toolAvailability: ToolAvailability
+  error: string | null
+  frameSentCount?: number
+  frameBytes?: number | null
+  frameDimensions?: ArtifactFrameDimensions | null
+  frameSendLatencyMs?: number | null
+  providerAcceptedFrame?: boolean
+  visualResponseObserved?: boolean
+  estimatedVisualCost?: number | null
+  websocketStateBeforeRefresh?: string | null
+  websocketStateAfterRefresh?: string | null
+  websocketClosedAfterRefresh?: boolean
+}
+
 export interface CoReviewTransportStatus {
   kind: string
   visualTransportSupported: boolean
@@ -92,6 +127,7 @@ export interface CoReviewTransportStatus {
 export interface CoReviewMediaTransport {
   readonly kind: string
   startCoReview(input: CoReviewStartInput): Promise<CoReviewStartResult>
+  refreshCoReview(input: CoReviewRefreshInput): Promise<CoReviewRefreshResult>
   stopCoReview(): Promise<CoReviewStopResult>
   sendFrame?(frame: Blob): Promise<void>
   attachVideoTrack?(track: MediaStreamTrack): Promise<void>
@@ -128,6 +164,19 @@ export class AudioWebSocketUnsupportedTransport implements CoReviewMediaTranspor
     }
   }
 
+  async refreshCoReview(input: CoReviewRefreshInput): Promise<CoReviewRefreshResult> {
+    stopArtifactVisualSource(input.visualSource)
+    return {
+      ok: false,
+      visualInputStatus: "unsupported",
+      toolAvailability: "sideband_only",
+      error: "current_gemini_audio_websocket_has_no_artifact_media_input",
+      websocketStateBeforeRefresh: "unsupported",
+      websocketStateAfterRefresh: "unsupported",
+      websocketClosedAfterRefresh: false,
+    }
+  }
+
   status(): CoReviewTransportStatus {
     return {
       kind: this.kind,
@@ -157,6 +206,7 @@ export class CoReviewSessionMachine {
   private readonly transport: CoReviewMediaTransport
   private readonly onStateChange?: (state: CoReviewSessionState) => void
   private readonly clock: () => number
+  private refreshRequestId = 0
 
   constructor({
     transport = new AudioWebSocketUnsupportedTransport(),
@@ -180,6 +230,7 @@ export class CoReviewSessionMachine {
   }
 
   async startCoReview(input: CoReviewStartInput): Promise<CoReviewSessionState> {
+    this.refreshRequestId += 1
     const startedAt = new Date().toISOString()
     this.update({
       state: "co_review_starting",
@@ -195,6 +246,18 @@ export class CoReviewSessionMachine {
       error: null,
       transportKind: this.transport.kind,
       normalVoiceRestored: false,
+      refreshFrameRequested: false,
+      refreshFrameInProgress: false,
+      refreshFrameStartedAt: null,
+      refreshFrameLatencyMs: null,
+      refreshFrameResult: "idle",
+      lastRefreshAt: null,
+      lastFrameBytes: null,
+      lastFrameDimensions: null,
+      websocketStateBeforeRefresh: null,
+      websocketStateAfterRefresh: null,
+      websocketClosedAfterRefresh: false,
+      refreshErrorSafeReason: null,
     })
 
     const startMark = this.clock()
@@ -238,6 +301,8 @@ export class CoReviewSessionMachine {
         frameBytes: result.frameBytes ?? this.current.frameBytes,
         frameDimensions: result.frameDimensions ?? this.current.frameDimensions,
         frameSendLatencyMs: result.frameSendLatencyMs ?? this.current.frameSendLatencyMs,
+        lastFrameBytes: result.frameBytes ?? this.current.lastFrameBytes,
+        lastFrameDimensions: result.frameDimensions ?? this.current.lastFrameDimensions,
         providerAcceptedFrame: result.providerAcceptedFrame ?? false,
         visualResponseObserved: result.visualResponseObserved ?? false,
         toolCallStillWorks: result.toolCallStillWorks ?? null,
@@ -261,6 +326,8 @@ export class CoReviewSessionMachine {
       frameBytes: result.frameBytes ?? this.current.frameBytes,
       frameDimensions: result.frameDimensions ?? this.current.frameDimensions,
       frameSendLatencyMs: result.frameSendLatencyMs ?? this.current.frameSendLatencyMs,
+      lastFrameBytes: result.frameBytes ?? this.current.lastFrameBytes,
+      lastFrameDimensions: result.frameDimensions ?? this.current.lastFrameDimensions,
       providerAcceptedFrame: result.providerAcceptedFrame ?? false,
       visualResponseObserved: result.visualResponseObserved ?? false,
       toolCallStillWorks: result.toolCallStillWorks ?? null,
@@ -270,10 +337,12 @@ export class CoReviewSessionMachine {
   }
 
   async stopCoReview(): Promise<CoReviewSessionState> {
+    this.refreshRequestId += 1
     this.update({
       state: "co_review_stopping",
       visualInputStatus: this.current.visualInputStatus === "inactive" ? "inactive" : "stopped",
       stoppedAt: new Date().toISOString(),
+      refreshFrameInProgress: false,
     })
 
     const stopMark = this.clock()
@@ -291,11 +360,13 @@ export class CoReviewSessionMachine {
       normalVoicePaused: false,
       videoOrFrameMode: "none",
       visualResponseObserved: false,
+      refreshFrameInProgress: false,
     })
     return this.state()
   }
 
   async failCoReview(error: string): Promise<CoReviewSessionState> {
+    this.refreshRequestId += 1
     try {
       await this.transport.stopCoReview()
     } catch {
@@ -314,6 +385,121 @@ export class CoReviewSessionMachine {
       videoOrFrameMode: "none",
       visualResponseObserved: false,
       toolCallStillWorks: null,
+      refreshFrameInProgress: false,
+    })
+    return this.state()
+  }
+
+  async refreshCoReview(input: CoReviewRefreshInput): Promise<CoReviewSessionState> {
+    if (this.current.state !== "co_review_live") {
+      this.update({
+        refreshFrameRequested: true,
+        refreshFrameInProgress: false,
+        refreshFrameResult: "blocked",
+        refreshErrorSafeReason: "co_review_not_live",
+      })
+      return this.state()
+    }
+
+    if (this.current.refreshFrameInProgress) {
+      this.update({
+        refreshFrameRequested: true,
+        refreshFrameResult: "blocked",
+        refreshErrorSafeReason: "refresh_already_in_progress",
+      })
+      return this.state()
+    }
+
+    const refreshId = this.refreshRequestId + 1
+    this.refreshRequestId = refreshId
+    const refreshFrameStartedAt = new Date().toISOString()
+    const refreshMark = this.clock()
+    this.update({
+      refreshFrameRequested: true,
+      refreshFrameInProgress: true,
+      refreshFrameStartedAt,
+      refreshFrameLatencyMs: null,
+      refreshFrameResult: "refreshing",
+      refreshErrorSafeReason: null,
+      websocketStateBeforeRefresh: null,
+      websocketStateAfterRefresh: null,
+      websocketClosedAfterRefresh: false,
+    })
+
+    let result: CoReviewRefreshResult
+    try {
+      result = await this.transport.refreshCoReview(input)
+    } catch (error) {
+      result = {
+        ok: false,
+        visualInputStatus: "error",
+        toolAvailability: "unavailable",
+        error: error instanceof Error ? error.message : "co_review_refresh_exception",
+        websocketStateBeforeRefresh: null,
+        websocketStateAfterRefresh: null,
+        websocketClosedAfterRefresh: false,
+      }
+    }
+
+    if (refreshId !== this.refreshRequestId || this.current.state !== "co_review_live") {
+      return this.state()
+    }
+
+    const refreshFrameLatencyMs = elapsedMs(this.clock(), refreshMark)
+    if (!result.ok) {
+      this.update({
+        state: "co_review_error",
+        visualInputStatus: result.visualInputStatus,
+        toolAvailability: result.toolAvailability,
+        coReviewSessionId: null,
+        error: result.error ?? "artifact_frame_refresh_failed",
+        videoOrFrameMode: "none",
+        normalVoicePaused: false,
+        normalVoiceRestored: true,
+        refreshFrameInProgress: false,
+        refreshFrameLatencyMs,
+        refreshFrameResult: "error",
+        refreshErrorSafeReason: result.error ?? "artifact_frame_refresh_failed",
+        websocketStateBeforeRefresh: result.websocketStateBeforeRefresh ?? null,
+        websocketStateAfterRefresh: result.websocketStateAfterRefresh ?? null,
+        websocketClosedAfterRefresh: result.websocketClosedAfterRefresh ?? false,
+        frameBytes: result.frameBytes ?? this.current.frameBytes,
+        frameDimensions: result.frameDimensions ?? this.current.frameDimensions,
+        frameSendLatencyMs: result.frameSendLatencyMs ?? this.current.frameSendLatencyMs,
+        lastFrameBytes: result.frameBytes ?? this.current.lastFrameBytes,
+        lastFrameDimensions: result.frameDimensions ?? this.current.lastFrameDimensions,
+        providerAcceptedFrame: result.providerAcceptedFrame ?? false,
+        visualResponseObserved: result.visualResponseObserved ?? false,
+        estimatedVisualCost: result.estimatedVisualCost ?? this.current.estimatedVisualCost,
+      })
+      return this.state()
+    }
+
+    const additionalFrames = result.frameSentCount ?? 1
+    this.update({
+      state: "co_review_live",
+      visualInputStatus: result.visualInputStatus,
+      toolAvailability: result.toolAvailability,
+      error: null,
+      videoOrFrameMode: "still_frame",
+      refreshFrameInProgress: false,
+      refreshFrameLatencyMs,
+      refreshFrameResult: "success",
+      lastRefreshAt: new Date().toISOString(),
+      refreshErrorSafeReason: null,
+      websocketStateBeforeRefresh: result.websocketStateBeforeRefresh ?? null,
+      websocketStateAfterRefresh: result.websocketStateAfterRefresh ?? null,
+      websocketClosedAfterRefresh: result.websocketClosedAfterRefresh ?? false,
+      frameCount: this.current.frameCount + additionalFrames,
+      frameSentCount: this.current.frameSentCount + additionalFrames,
+      frameBytes: result.frameBytes ?? this.current.frameBytes,
+      frameDimensions: result.frameDimensions ?? this.current.frameDimensions,
+      frameSendLatencyMs: result.frameSendLatencyMs ?? this.current.frameSendLatencyMs,
+      lastFrameBytes: result.frameBytes ?? this.current.lastFrameBytes,
+      lastFrameDimensions: result.frameDimensions ?? this.current.lastFrameDimensions,
+      providerAcceptedFrame: result.providerAcceptedFrame ?? this.current.providerAcceptedFrame,
+      visualResponseObserved: result.visualResponseObserved ?? this.current.visualResponseObserved,
+      estimatedVisualCost: result.estimatedVisualCost ?? this.current.estimatedVisualCost,
     })
     return this.state()
   }
@@ -354,6 +540,18 @@ export function initialCoReviewState(transportKind = "none"): CoReviewSessionSta
     frameBytes: null,
     frameDimensions: null,
     frameSendLatencyMs: null,
+    refreshFrameRequested: false,
+    refreshFrameInProgress: false,
+    refreshFrameStartedAt: null,
+    refreshFrameLatencyMs: null,
+    refreshFrameResult: "idle",
+    lastRefreshAt: null,
+    lastFrameBytes: null,
+    lastFrameDimensions: null,
+    websocketStateBeforeRefresh: null,
+    websocketStateAfterRefresh: null,
+    websocketClosedAfterRefresh: false,
+    refreshErrorSafeReason: null,
     providerAcceptedFrame: false,
     visualResponseObserved: false,
     toolCallStillWorks: null,
@@ -382,6 +580,17 @@ export function safeCoReviewTelemetryFromState(
     frameBytes: state.frameBytes,
     frameDimensions: state.frameDimensions,
     frameSendLatencyMs: state.frameSendLatencyMs,
+    refreshFrameRequested: state.refreshFrameRequested,
+    refreshFrameStartedAt: state.refreshFrameStartedAt,
+    refreshFrameLatencyMs: state.refreshFrameLatencyMs,
+    refreshFrameResult: state.refreshFrameResult,
+    lastFrameBytes: state.lastFrameBytes,
+    lastFrameDimensions: state.lastFrameDimensions,
+    websocketStateBeforeRefresh: state.websocketStateBeforeRefresh,
+    websocketStateAfterRefresh: state.websocketStateAfterRefresh,
+    websocketClosedAfterRefresh: state.websocketClosedAfterRefresh,
+    refreshErrorSafeReason: state.refreshErrorSafeReason,
+    rawFrameExcluded: true,
     providerAcceptedFrame: state.providerAcceptedFrame,
     visualResponseObserved: state.visualResponseObserved,
     toolCallStillWorks: state.toolCallStillWorks,

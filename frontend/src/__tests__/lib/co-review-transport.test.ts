@@ -43,6 +43,32 @@ function readyCanvasSource(): ArtifactVisualSource {
   }
 }
 
+function openWebsocketStatus() {
+  return {
+    websocketReadyState: 1,
+    websocketState: "open",
+    websocketOpen: true,
+    websocketCloseCode: null,
+    websocketCloseReasonSafe: null,
+    websocketCloseWasClean: null,
+    websocketCloseAt: null,
+    error: null,
+  }
+}
+
+function closedWebsocketStatus() {
+  return {
+    websocketReadyState: 3,
+    websocketState: "closed",
+    websocketOpen: false,
+    websocketCloseCode: 1007,
+    websocketCloseReasonSafe: "invalid frame",
+    websocketCloseWasClean: false,
+    websocketCloseAt: "2026-05-27T00:00:00.000Z",
+    error: "gemini_live_websocket_not_open",
+  }
+}
+
 function mockCanvasEncoding() {
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
     fillStyle: "",
@@ -161,6 +187,72 @@ describe("co-review dual-path state machine", () => {
     expect(sender.sendArtifactFrame).toHaveBeenCalledTimes(1)
   })
 
+  it("Refresh View sends one additional frame and records safe refresh telemetry", async () => {
+    mockCanvasEncoding()
+    const sender = {
+      getStatus: vi.fn(() => openWebsocketStatus()),
+      sendArtifactFrame: vi.fn((frame) => ({
+        ok: true,
+        supported: true,
+        providerAcceptedFrame: false,
+        websocketSendAccepted: true,
+        websocketReadyStateBefore: 1,
+        websocketReadyStateAfter: 1,
+        websocketOpenBeforeSend: true,
+        websocketOpenAfterSend: true,
+        framePayloadSchemaVersion: "realtimeInput.video.v1",
+        frameBytes: frame.byteLength,
+        frameDimensions: frame.dimensions,
+        mimeType: frame.mimeType,
+        frameSendLatencyMs: 11,
+        estimatedVisualCost: null,
+        error: null,
+        rawFrameExcluded: true as const,
+      })),
+    }
+    const transport = new GeminiStillFrameTransport(sender)
+    const machine = new CoReviewSessionMachine({ transport })
+
+    await machine.startCoReview({
+      normalSessionId: "normal-1",
+      sessionId: "session-1",
+      threadId: "thread-1",
+      artifactId: "artifact-1",
+      visualSource: readyCanvasSource(),
+    })
+    const state = await machine.refreshCoReview({
+      artifactId: "artifact-1",
+      visualSource: readyCanvasSource(),
+    })
+    const telemetry = safeCoReviewTelemetryFromState(state)
+    const serialized = JSON.stringify(telemetry)
+
+    expect(state.state).toBe("co_review_live")
+    expect(state.frameSentCount).toBe(2)
+    expect(state.frameCount).toBe(2)
+    expect(state.refreshFrameRequested).toBe(true)
+    expect(state.refreshFrameResult).toBe("success")
+    expect(state.refreshFrameLatencyMs).not.toBeNull()
+    expect(state.lastFrameBytes).toBe(32)
+    expect(state.lastFrameDimensions).toEqual({ width: 320, height: 160 })
+    expect(state.websocketStateBeforeRefresh).toBe("open")
+    expect(state.websocketStateAfterRefresh).toBe("open")
+    expect(state.websocketClosedAfterRefresh).toBe(false)
+    expect(sender.sendArtifactFrame).toHaveBeenCalledTimes(2)
+    expect(telemetry).toMatchObject({
+      refreshFrameRequested: true,
+      refreshFrameResult: "success",
+      frameSentCount: 2,
+      lastFrameBytes: 32,
+      lastFrameDimensions: { width: 320, height: 160 },
+      websocketStateBeforeRefresh: "open",
+      websocketStateAfterRefresh: "open",
+      websocketClosedAfterRefresh: false,
+      rawFrameExcluded: true,
+    })
+    expect(serialized).not.toContain("base64")
+  })
+
   it("shows a safe error before encoding when the Gemini websocket is closed", async () => {
     mockCanvasEncoding()
     const sender = {
@@ -192,6 +284,52 @@ describe("co-review dual-path state machine", () => {
     expect(state.visualInputStatus).toBe("error")
     expect(state.toolAvailability).toBe("unavailable")
     expect(sender.sendArtifactFrame).not.toHaveBeenCalled()
+  })
+
+  it("blocks Refresh View with a safe reason when the websocket closes after start", async () => {
+    mockCanvasEncoding()
+    const getStatus = vi.fn()
+      .mockReturnValueOnce(openWebsocketStatus())
+      .mockReturnValueOnce(openWebsocketStatus())
+      .mockReturnValueOnce(openWebsocketStatus())
+      .mockReturnValue(closedWebsocketStatus())
+    const sender = {
+      getStatus,
+      sendArtifactFrame: vi.fn((frame) => ({
+        ok: true,
+        supported: true,
+        providerAcceptedFrame: false,
+        websocketSendAccepted: true,
+        frameBytes: frame.byteLength,
+        frameDimensions: frame.dimensions,
+        frameSendLatencyMs: 5,
+        estimatedVisualCost: null,
+        error: null,
+        rawFrameExcluded: true as const,
+      })),
+    }
+    const transport = new GeminiStillFrameTransport(sender)
+    const machine = new CoReviewSessionMachine({ transport })
+
+    await machine.startCoReview({
+      normalSessionId: "normal-1",
+      sessionId: "session-1",
+      threadId: "thread-1",
+      artifactId: "artifact-1",
+      visualSource: readyCanvasSource(),
+    })
+    const state = await machine.refreshCoReview({
+      artifactId: "artifact-1",
+      visualSource: readyCanvasSource(),
+    })
+
+    expect(state.state).toBe("co_review_error")
+    expect(state.error).toBe("gemini_live_websocket_not_open")
+    expect(state.refreshFrameResult).toBe("error")
+    expect(state.refreshErrorSafeReason).toBe("gemini_live_websocket_not_open")
+    expect(state.websocketStateBeforeRefresh).toBe("closed")
+    expect(state.websocketStateAfterRefresh).toBe("closed")
+    expect(sender.sendArtifactFrame).toHaveBeenCalledTimes(1)
   })
 
   it("does not enter looking state when frame send closes the Gemini websocket", async () => {
@@ -251,6 +389,75 @@ describe("co-review dual-path state machine", () => {
     expect(state.frameSentCount).toBe(0)
   })
 
+  it("clears looking state when refresh closes the Gemini websocket", async () => {
+    mockCanvasEncoding()
+    const sender = {
+      getStatus: vi.fn(() => openWebsocketStatus()),
+      sendArtifactFrame: vi.fn()
+        .mockImplementationOnce((frame) => ({
+          ok: true,
+          supported: true,
+          providerAcceptedFrame: false,
+          websocketSendAccepted: true,
+          websocketReadyStateBefore: 1,
+          websocketReadyStateAfter: 1,
+          websocketOpenBeforeSend: true,
+          websocketOpenAfterSend: true,
+          framePayloadSchemaVersion: "realtimeInput.video.v1",
+          frameBytes: frame.byteLength,
+          frameDimensions: frame.dimensions,
+          mimeType: frame.mimeType,
+          frameSendLatencyMs: 5,
+          estimatedVisualCost: null,
+          error: null,
+          rawFrameExcluded: true as const,
+        }))
+        .mockImplementationOnce((frame) => ({
+          ok: false,
+          supported: true,
+          providerAcceptedFrame: false,
+          websocketSendAccepted: true,
+          websocketReadyStateBefore: 1,
+          websocketReadyStateAfter: 3,
+          websocketOpenBeforeSend: true,
+          websocketOpenAfterSend: false,
+          framePayloadSchemaVersion: "realtimeInput.video.v1",
+          frameBytes: frame.byteLength,
+          frameDimensions: frame.dimensions,
+          mimeType: frame.mimeType,
+          frameSendLatencyMs: 9,
+          estimatedVisualCost: null,
+          websocketClosedAfterFrameSend: true,
+          error: "frame_send_closed_gemini_websocket",
+          rawFrameExcluded: true as const,
+        })),
+    }
+    const transport = new GeminiStillFrameTransport(sender)
+    const machine = new CoReviewSessionMachine({ transport })
+
+    await machine.startCoReview({
+      normalSessionId: "normal-1",
+      sessionId: "session-1",
+      threadId: "thread-1",
+      artifactId: "artifact-1",
+      visualSource: readyCanvasSource(),
+    })
+    const state = await machine.refreshCoReview({
+      artifactId: "artifact-1",
+      visualSource: readyCanvasSource(),
+    })
+
+    expect(state.state).toBe("co_review_error")
+    expect(state.error).toBe("frame_send_closed_gemini_websocket")
+    expect(state.refreshFrameResult).toBe("error")
+    expect(state.refreshErrorSafeReason).toBe("frame_send_closed_gemini_websocket")
+    expect(state.websocketStateBeforeRefresh).toBe("open")
+    expect(state.websocketStateAfterRefresh).toBe("closed")
+    expect(state.websocketClosedAfterRefresh).toBe(true)
+    expect(state.frameSentCount).toBe(1)
+    expect(sender.sendArtifactFrame).toHaveBeenCalledTimes(2)
+  })
+
   it("Stop Looking disables future sends on the still-frame transport", async () => {
     mockCanvasEncoding()
     const transport = new GeminiStillFrameTransport({
@@ -279,5 +486,11 @@ describe("co-review dual-path state machine", () => {
     await machine.stopCoReview()
 
     await expect(transport.sendFrame?.(new Blob())).rejects.toThrow("co_review_stopped")
+    const state = await machine.refreshCoReview({
+      artifactId: "artifact-1",
+      visualSource: readyCanvasSource(),
+    })
+    expect(state.state).toBe("normal_voice_restored")
+    expect(state.refreshFrameResult).toBe("blocked")
   })
 })

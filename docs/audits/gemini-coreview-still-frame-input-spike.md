@@ -75,6 +75,7 @@ State machine:
 
 - `GeminiStillFrameTransport` sends one encoded artifact frame on co-review start.
 - Successful WebSocket send enters `co_review_live` with `videoOrFrameMode="still_frame"`.
+- While co-review is live, `Refresh View` can send one additional guarded artifact still frame through the same `realtimeInput.video` path.
 - `Stop Looking` stops visual source tracks and blocks future sends on that transport instance.
 
 Voice/prompt:
@@ -120,6 +121,25 @@ Manual provider status:
 
 - Fixture path: provider smoke passed.
 - Real builder-artifact path: provider smoke still pending.
+
+## Refresh View — manual low-rate visual refresh
+
+Date: 2026-05-27
+Branch: `spike/gemini-coreview-still-frame-input-clean`
+
+`Refresh View` is the Phase 2 low-rate refresh step. It appears only while Coreview is live and `Sophia is looking at this artifact` is visible. A click re-resolves the current active artifact canvas source, encodes one new capped still frame, and sends that frame over the existing Gemini Live WebSocket as `realtimeInput.video`.
+
+This is not continuous video. It is an explicit user-triggered refresh, gated by Coreview state, visual-source availability, WebSocket availability, and in-flight send state. It preserves the same privacy constraints as initial still-frame start:
+
+- No `getDisplayMedia`.
+- No whole DOM/window/tab capture.
+- No DOM-only artifact capture without a safe renderer.
+- No raw frame/base64 telemetry.
+- Safe telemetry records request/result, latency, frame count, bytes, dimensions, WebSocket state before/after refresh, closed-after-refresh, and safe error reason only.
+
+If refresh succeeds, Sophia stays in the looking state and the UI reports `Last refreshed just now`. If refresh fails, the UI shows `Refresh failed: <safe reason>`; closed WebSocket failures use `gemini_live_websocket_not_open` before send or `frame_send_closed_gemini_websocket` after send. `Stop Looking` hides `Refresh View` and blocks future refresh sends while preserving normal voice.
+
+This is the next safe step toward video-like co-review without claiming continuous video. Auto-refresh and continuous video remain future work. Exact words, numbers, table values, labels, citations, and data still require `read_artifact_text`.
 
 ## Answers
 
@@ -207,7 +227,7 @@ Remaining unknowns:
 
 - Provider usage metadata / `image_count` visibility.
 - Latency and cost envelope.
-- Reliability across multiple frames.
+- Reliability across repeated manual refresh frames.
 - Behavior with real artifacts rather than the fixture.
 - Exact text/data tool integration.
 - Production UX polish.
@@ -229,8 +249,8 @@ Still-frame co-review is a guarded proof-of-concept **go** for the fixture path:
 
 1. Run a manual provider smoke with a completed builder artifact while `NEXT_PUBLIC_SOPHIA_COREVIEW_REAL_ARTIFACT_ENABLED` is on.
 2. Keep normal voice behavior unchanged and still-frame co-review behind flags.
-3. Add resend-frame triggers on user action: `refresh view`, scroll/zoom, or review-step changes.
-4. Integrate trusted `read_artifact_text` for exact words, numbers, and file-body questions.
-5. Add usage/cost telemetry from provider metadata once a real-artifact run is observed.
-6. Polish the production UX after the visual and exact-text paths are both confirmed.
+3. Integrate trusted `read_artifact_text` for exact words, numbers, and file-body questions.
+4. Add usage/cost telemetry from provider metadata once repeated refresh and a real-artifact run are observed.
+5. Polish the production UX after the visual and exact-text paths are both confirmed.
+6. Consider low-rate auto-refresh only as future work behind a default-off flag.
 7. Only later revisit continuous media/video.

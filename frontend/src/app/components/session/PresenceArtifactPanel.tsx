@@ -282,7 +282,9 @@ export function PresenceArtifactPanel({
               transportStatus={coReview.transportStatus}
               onStart={() => { void coReview.startReview() }}
               onStop={() => { void coReview.stopReview() }}
+              onRefresh={() => { void coReview.refreshReview() }}
               canStart={coReview.canStart}
+              canRefresh={coReview.canRefresh}
               featureEnabled={coReview.enabled}
               className="justify-center"
             />
@@ -415,7 +417,9 @@ export function PresenceArtifactPanel({
                   transportStatus={builderArtifactCoReview.transportStatus}
                   onStart={() => { void builderArtifactCoReview.startReview() }}
                   onStop={() => { void builderArtifactCoReview.stopReview() }}
+                  onRefresh={() => { void builderArtifactCoReview.refreshReview() }}
                   canStart={builderArtifactCoReview.canStart}
+                  canRefresh={builderArtifactCoReview.canRefresh}
                   featureEnabled={builderArtifactCoReview.enabled}
                   className="justify-center"
                 />
@@ -657,7 +661,9 @@ export function PresenceArtifactPanel({
                 transportStatus={domArtifactCoReview.transportStatus}
                 onStart={() => { void domArtifactCoReview.startReview() }}
                 onStop={() => { void domArtifactCoReview.stopReview() }}
+                onRefresh={() => { void domArtifactCoReview.refreshReview() }}
                 canStart={domArtifactCoReview.canStart}
+                canRefresh={domArtifactCoReview.canRefresh}
                 featureEnabled={domArtifactCoReview.enabled}
                 className="justify-center"
               />

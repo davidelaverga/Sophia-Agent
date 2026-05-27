@@ -36,6 +36,7 @@ export function useArtifactCoReview({
 }: UseArtifactCoReviewOptions) {
   const transportRef = useRef<CoReviewMediaTransport>(transport ?? new AudioWebSocketUnsupportedTransport())
   const [state, setState] = useState<CoReviewSessionState>(() => initialCoReviewState(transportRef.current.kind))
+  const [refreshSourceReady, setRefreshSourceReady] = useState(false)
   const machineRef = useRef<CoReviewSessionMachine | null>(null)
 
   if (!machineRef.current) {
@@ -104,6 +105,60 @@ export function useArtifactCoReview({
     return machineRef.current.stopCoReview()
   }, [])
 
+  const refreshReview = useCallback(async () => {
+    logCoreviewBreadcrumb("coReviewRefreshClicked", {
+      artifactId,
+      hasSessionId: Boolean(sessionId),
+      hasThreadId: Boolean(threadId),
+      transportKind: transportRef.current.kind,
+      websocketStateBeforeRefresh: transportRef.current.status().statusText,
+    })
+
+    if (!featureEnabled || !sessionId || !threadId || !artifactId || state.state !== "co_review_live") {
+      logCoreviewBreadcrumb("coReviewRefreshError", {
+        reason: "missing_required_refresh_context",
+        featureEnabled,
+        hasSessionId: Boolean(sessionId),
+        hasThreadId: Boolean(threadId),
+        hasArtifactId: Boolean(artifactId),
+        currentState: state.state,
+      })
+      return state
+    }
+
+    const visualSource = resolveArtifactVisualSource({
+      root: artifactRoot,
+      artifactId,
+      mode: "still_frame",
+      missingCanvasReason,
+    })
+
+    logCoreviewBreadcrumb("coReviewRefreshCanvasFound", {
+      found: visualSource.status === "ready",
+      artifactId,
+      sourceKind: visualSource.kind,
+      mode: "still_frame",
+      reason: visualSource.reason,
+    })
+
+    const nextState = await machineRef.current.refreshCoReview({
+      artifactId,
+      visualSource,
+    })
+
+    if (nextState.refreshFrameResult === "error" || nextState.state === "co_review_error") {
+      logCoreviewBreadcrumb("coReviewRefreshError", {
+        error: nextState.refreshErrorSafeReason ?? nextState.error,
+        visualInputStatus: nextState.visualInputStatus,
+        websocketStateBeforeRefresh: nextState.websocketStateBeforeRefresh,
+        websocketStateAfterRefresh: nextState.websocketStateAfterRefresh,
+        websocketClosedAfterRefresh: nextState.websocketClosedAfterRefresh,
+      })
+    }
+    logCoreviewBreadcrumb("coReviewStateAfterRefresh", safeCoReviewTelemetryFromState(nextState))
+    return nextState
+  }, [artifactId, artifactRoot, featureEnabled, missingCanvasReason, sessionId, state, threadId])
+
   const telemetry = useMemo(() => safeCoReviewTelemetryFromState(state), [state])
   const transportStatus = machineRef.current.status()
   const canStart = Boolean(
@@ -113,9 +168,47 @@ export function useArtifactCoReview({
     && artifactId
     && transportStatus.visualTransportSupported,
   )
+  const canRefresh = Boolean(
+    featureEnabled
+    && sessionId
+    && threadId
+    && artifactId
+    && state.state === "co_review_live"
+    && state.visualInputStatus === "live"
+    && !state.refreshFrameInProgress
+    && refreshSourceReady
+    && transportStatus.visualTransportSupported
+  )
 
   useEffect(() => {
-    if (state.state !== "co_review_live" || transportStatus.visualTransportSupported) {
+    if (!featureEnabled || state.state !== "co_review_live" || !artifactId) {
+      setRefreshSourceReady(false)
+      return
+    }
+
+    const visualSource = resolveArtifactVisualSource({
+      root: artifactRoot,
+      artifactId,
+      mode: "still_frame",
+      missingCanvasReason,
+    })
+    setRefreshSourceReady(visualSource.status === "ready")
+  }, [
+    artifactId,
+    artifactRoot,
+    featureEnabled,
+    missingCanvasReason,
+    state.frameSentCount,
+    state.refreshFrameResult,
+    state.state,
+  ])
+
+  useEffect(() => {
+    if (
+      state.state !== "co_review_live"
+      || state.refreshFrameInProgress
+      || transportStatus.visualTransportSupported
+    ) {
       return
     }
 
@@ -128,7 +221,7 @@ export function useArtifactCoReview({
       statusText: transportStatus.statusText,
     })
     void machineRef.current?.failCoReview(error || "frame_send_closed_gemini_websocket")
-  }, [state.state, transportStatus.statusText, transportStatus.visualTransportSupported])
+  }, [state.refreshFrameInProgress, state.state, transportStatus.statusText, transportStatus.visualTransportSupported])
 
   return {
     enabled: featureEnabled,
@@ -136,8 +229,10 @@ export function useArtifactCoReview({
     telemetry,
     transportStatus,
     canStart,
+    canRefresh,
     startReview,
     stopReview,
+    refreshReview,
   }
 }
 

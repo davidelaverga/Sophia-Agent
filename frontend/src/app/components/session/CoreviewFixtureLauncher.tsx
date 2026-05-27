@@ -134,7 +134,9 @@ export function CoreviewFixtureLauncher({
                 transportStatus={coReview.transportStatus}
                 onStart={() => { void coReview.startReview() }}
                 onStop={() => { void coReview.stopReview() }}
+                onRefresh={() => { void coReview.refreshReview() }}
                 canStart={coReview.canStart}
+                canRefresh={coReview.canRefresh}
                 featureEnabled={coReview.enabled}
                 className="justify-center"
               />

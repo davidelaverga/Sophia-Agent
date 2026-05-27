@@ -1,6 +1,6 @@
 "use client"
 
-import { Eye, EyeOff, Loader2 } from "lucide-react"
+import { Eye, EyeOff, Loader2, RotateCw } from "lucide-react"
 
 import { isCoReviewEnabled } from "../../lib/co-review-flags"
 import type { CoReviewSessionState, CoReviewTransportStatus } from "../../lib/co-review-transport"
@@ -11,7 +11,9 @@ interface CoReviewControlsProps {
   transportStatus: CoReviewTransportStatus
   onStart: () => void
   onStop: () => void
+  onRefresh?: () => void
   canStart?: boolean
+  canRefresh?: boolean
   featureEnabled?: boolean
   className?: string
 }
@@ -21,7 +23,9 @@ export function CoReviewControls({
   transportStatus,
   onStart,
   onStop,
+  onRefresh,
   canStart = true,
+  canRefresh = false,
   featureEnabled = isCoReviewEnabled(),
   className,
 }: CoReviewControlsProps) {
@@ -31,9 +35,17 @@ export function CoReviewControls({
   const isLive = state.state === "co_review_live"
   const isStopping = state.state === "co_review_stopping"
   const statusText = coReviewStatusText(state, transportStatus)
+  const refreshStatusText = coReviewRefreshStatusText(state)
+  const refreshDisabled = Boolean(
+    !onRefresh
+    || !canRefresh
+    || state.refreshFrameInProgress
+    || state.visualInputStatus !== "live"
+    || !transportStatus.visualTransportSupported
+  )
 
   return (
-    <div className={cn("flex items-center gap-2 text-xs text-white/70", className)}>
+    <div className={cn("flex flex-wrap items-center gap-2 text-xs text-white/70", className)}>
       {isLive ? (
         <div
           aria-label="Sophia is looking at this artifact"
@@ -43,6 +55,22 @@ export function CoReviewControls({
           <Eye className="h-3.5 w-3.5" aria-hidden="true" />
           <span>Sophia is looking at this artifact</span>
         </div>
+      ) : null}
+
+      {isLive ? (
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={refreshDisabled}
+          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-emerald-300/30 bg-emerald-300/10 px-2.5 text-emerald-50 transition hover:bg-emerald-300/15 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {state.refreshFrameInProgress ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+          ) : (
+            <RotateCw className="h-3.5 w-3.5" aria-hidden="true" />
+          )}
+          <span>Refresh View</span>
+        </button>
       ) : null}
 
       <button
@@ -64,6 +92,11 @@ export function CoReviewControls({
       <span aria-live="polite" className="text-white/50">
         {statusText}
       </span>
+      {refreshStatusText ? (
+        <span aria-live="polite" className="text-white/50">
+          {refreshStatusText}
+        </span>
+      ) : null}
     </div>
   )
 }
@@ -83,6 +116,15 @@ export function coReviewStatusText(
   }
   if (!transportStatus.continuousVideoSupported) return "continuous unsupported"
   return transportStatus.statusText
+}
+
+export function coReviewRefreshStatusText(state: CoReviewSessionState): string | null {
+  if (state.refreshFrameInProgress || state.refreshFrameResult === "refreshing") return "Refreshing…"
+  if (state.refreshFrameResult === "success" && state.state === "co_review_live") return "Last refreshed just now"
+  if (state.refreshFrameResult === "error") {
+    return `Refresh failed: ${state.refreshErrorSafeReason ?? state.error ?? "artifact_frame_refresh_failed"}`
+  }
+  return null
 }
 
 function coReviewErrorText(error: string | null): string {

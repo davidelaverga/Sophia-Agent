@@ -142,6 +142,32 @@ function mockCanvasApis() {
   })
 }
 
+function openWebsocketStatus() {
+  return {
+    websocketReadyState: 1,
+    websocketState: "open",
+    websocketOpen: true,
+    websocketCloseCode: null,
+    websocketCloseReasonSafe: null,
+    websocketCloseWasClean: null,
+    websocketCloseAt: null,
+    error: null,
+  }
+}
+
+function closedWebsocketStatus() {
+  return {
+    websocketReadyState: 3,
+    websocketState: "closed",
+    websocketOpen: false,
+    websocketCloseCode: 1007,
+    websocketCloseReasonSafe: "invalid frame",
+    websocketCloseWasClean: false,
+    websocketCloseAt: "2026-05-27T00:00:00.000Z",
+    error: "gemini_live_websocket_not_open",
+  }
+}
+
 function setRealArtifactFlags(enabled: boolean) {
   process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_ENABLED = enabled ? "true" : "false"
   process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_STILL_FRAME_ENABLED = enabled ? "true" : "false"
@@ -349,6 +375,47 @@ describe("CoreviewFixtureArtifact in the presence panel", () => {
     expect(getDisplayMedia).not.toHaveBeenCalled()
   })
 
+  it("Refresh View sends one additional root fixture frame without screen capture", async () => {
+    const user = userEvent.setup()
+    const sendArtifactFrame = vi.fn((frame) => ({
+      ok: true,
+      supported: true,
+      providerAcceptedFrame: false,
+      websocketSendAccepted: true,
+      websocketReadyStateBefore: 1,
+      websocketReadyStateAfter: 1,
+      websocketOpenBeforeSend: true,
+      websocketOpenAfterSend: true,
+      framePayloadSchemaVersion: "realtimeInput.video.v1",
+      frameBytes: frame.byteLength,
+      frameDimensions: frame.dimensions,
+      mimeType: frame.mimeType,
+      frameSendLatencyMs: 6,
+      estimatedVisualCost: null,
+      error: null,
+      rawFrameExcluded: true as const,
+    }))
+    const transport = new GeminiStillFrameTransport({
+      getStatus: () => openWebsocketStatus(),
+      sendArtifactFrame,
+    })
+
+    renderRootLauncher({ isVisible: true, transport })
+
+    await user.click(screen.getByRole("button", { name: /open coreview fixture/i }))
+    await user.click(await screen.findByRole("button", { name: /review together/i }))
+    await waitFor(() => expect(sendArtifactFrame).toHaveBeenCalledTimes(1))
+
+    const refreshButton = await screen.findByRole("button", { name: /refresh view/i })
+    await waitFor(() => expect(refreshButton).toBeEnabled())
+    await user.click(refreshButton)
+
+    await waitFor(() => expect(sendArtifactFrame).toHaveBeenCalledTimes(2))
+    expect(screen.getByText("Last refreshed just now")).toBeInTheDocument()
+    expect(screen.getByRole("status", { name: /looking at this artifact/i })).toBeInTheDocument()
+    expect(getDisplayMedia).not.toHaveBeenCalled()
+  })
+
   it("shows a visible closed-websocket error without entering looking state", async () => {
     const user = userEvent.setup()
     const sendArtifactFrame = vi.fn()
@@ -374,6 +441,49 @@ describe("CoreviewFixtureArtifact in the presence panel", () => {
     expect(screen.getByRole("button", { name: /review together/i })).toBeDisabled()
     expect(sendArtifactFrame).not.toHaveBeenCalled()
     expect(screen.queryByRole("status", { name: /looking at this artifact/i })).not.toBeInTheDocument()
+  })
+
+  it("Refresh View shows a safe error when the websocket is closed before refresh", async () => {
+    const user = userEvent.setup()
+    let websocketClosed = false
+    const sendArtifactFrame = vi.fn((frame) => ({
+      ok: true,
+      supported: true,
+      providerAcceptedFrame: false,
+      websocketSendAccepted: true,
+      websocketReadyStateBefore: 1,
+      websocketReadyStateAfter: 1,
+      websocketOpenBeforeSend: true,
+      websocketOpenAfterSend: true,
+      framePayloadSchemaVersion: "realtimeInput.video.v1",
+      frameBytes: frame.byteLength,
+      frameDimensions: frame.dimensions,
+      mimeType: frame.mimeType,
+      frameSendLatencyMs: 6,
+      estimatedVisualCost: null,
+      error: null,
+      rawFrameExcluded: true as const,
+    }))
+    const transport = new GeminiStillFrameTransport({
+      getStatus: () => websocketClosed ? closedWebsocketStatus() : openWebsocketStatus(),
+      sendArtifactFrame,
+    })
+
+    renderRootLauncher({ isVisible: true, transport })
+
+    await user.click(screen.getByRole("button", { name: /open coreview fixture/i }))
+    await user.click(await screen.findByRole("button", { name: /review together/i }))
+    await waitFor(() => expect(sendArtifactFrame).toHaveBeenCalledTimes(1))
+
+    const refreshButton = await screen.findByRole("button", { name: /refresh view/i })
+    await waitFor(() => expect(refreshButton).toBeEnabled())
+    websocketClosed = true
+    await user.click(refreshButton)
+
+    expect(await screen.findByText("Refresh failed: gemini_live_websocket_not_open")).toBeInTheDocument()
+    expect(sendArtifactFrame).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole("status", { name: /looking at this artifact/i })).not.toBeInTheDocument()
+    expect(getDisplayMedia).not.toHaveBeenCalled()
   })
 
   it("shows frame send failure reason in the fixture modal", async () => {
@@ -410,6 +520,65 @@ describe("CoreviewFixtureArtifact in the presence panel", () => {
     expect(screen.queryByRole("status", { name: /looking at this artifact/i })).not.toBeInTheDocument()
   })
 
+  it("Refresh View shows a safe error on failed refresh send", async () => {
+    const user = userEvent.setup()
+    const sendArtifactFrame = vi.fn()
+      .mockImplementationOnce((frame) => ({
+        ok: true,
+        supported: true,
+        providerAcceptedFrame: false,
+        websocketSendAccepted: true,
+        websocketReadyStateBefore: 1,
+        websocketReadyStateAfter: 1,
+        websocketOpenBeforeSend: true,
+        websocketOpenAfterSend: true,
+        framePayloadSchemaVersion: "realtimeInput.video.v1",
+        frameBytes: frame.byteLength,
+        frameDimensions: frame.dimensions,
+        mimeType: frame.mimeType,
+        frameSendLatencyMs: 6,
+        estimatedVisualCost: null,
+        error: null,
+        rawFrameExcluded: true as const,
+      }))
+      .mockImplementationOnce((frame) => ({
+        ok: false,
+        supported: true,
+        providerAcceptedFrame: false,
+        websocketSendAccepted: true,
+        websocketReadyStateBefore: 1,
+        websocketReadyStateAfter: 3,
+        websocketOpenBeforeSend: true,
+        websocketOpenAfterSend: false,
+        framePayloadSchemaVersion: "realtimeInput.video.v1",
+        frameBytes: frame.byteLength,
+        frameDimensions: frame.dimensions,
+        mimeType: frame.mimeType,
+        frameSendLatencyMs: 8,
+        estimatedVisualCost: null,
+        websocketClosedAfterFrameSend: true,
+        error: "frame_send_closed_gemini_websocket",
+        rawFrameExcluded: true as const,
+      }))
+    const transport = new GeminiStillFrameTransport({
+      getStatus: () => openWebsocketStatus(),
+      sendArtifactFrame,
+    })
+
+    renderRootLauncher({ isVisible: true, transport })
+
+    await user.click(screen.getByRole("button", { name: /open coreview fixture/i }))
+    await user.click(await screen.findByRole("button", { name: /review together/i }))
+    await waitFor(() => expect(sendArtifactFrame).toHaveBeenCalledTimes(1))
+    const refreshButton = await screen.findByRole("button", { name: /refresh view/i })
+    await waitFor(() => expect(refreshButton).toBeEnabled())
+    await user.click(refreshButton)
+
+    expect(await screen.findByText("Refresh failed: frame_send_closed_gemini_websocket")).toBeInTheDocument()
+    expect(sendArtifactFrame).toHaveBeenCalledTimes(2)
+    expect(screen.queryByRole("status", { name: /looking at this artifact/i })).not.toBeInTheDocument()
+  })
+
   it("Stop Looking restores the root fixture control and disables future frame sends", async () => {
     const user = userEvent.setup()
     const transport = new GeminiStillFrameTransport({
@@ -438,6 +607,7 @@ describe("CoreviewFixtureArtifact in the presence panel", () => {
     await waitFor(() => {
       expect(screen.queryByRole("status", { name: /looking at this artifact/i })).not.toBeInTheDocument()
     })
+    expect(screen.queryByRole("button", { name: /refresh view/i })).not.toBeInTheDocument()
     expect(screen.getByRole("button", { name: /review together/i })).toBeInTheDocument()
     await expect(transport.sendFrame?.(new Blob())).rejects.toThrow("co_review_stopped")
   })
