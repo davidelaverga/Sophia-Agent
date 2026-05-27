@@ -1,9 +1,10 @@
 # Gemini Co-review Still-frame Input Spike
 
-Date: 2026-05-26
-Branch: `spike/gemini-coreview-still-frame-input`
+Date: 2026-05-26 / 2026-05-27 local
+Branch: `spike/gemini-coreview-still-frame-input-clean`
 Baseline: `8c10fdc3`
-Prior dual-path commit carried forward: `f30a890c` cherry-pick of `eea0d2e1`
+Commit tested: `38583674` (`spike: harden coreview still-frame websocket lifecycle`)
+Prior dual-path commit carried forward: `bfaac662`
 
 ## Goal
 
@@ -17,14 +18,20 @@ Repo reality is narrower:
 
 - Current Sophia browser Gemini path sends `realtimeInput.audio`, `realtimeInput.text`, and `toolResponse`.
 - This spike adds an experimental `realtimeInput.mediaChunks[]` still-frame sender behind a separate still-frame flag.
-- No real provider run was performed in this spike, so provider acceptance and visual response remain unobserved.
+- A manual provider smoke after `38583674` confirmed provider-visible still-frame co-review for the fixture path.
+- Continuous video/screen-share is still unproven on the current transport.
+- Exact words, numbers, table values, labels, citations, and data still require `read_artifact_text` or another trusted sideband text path.
 
 ## Feature Flags
 
 - `NEXT_PUBLIC_SOPHIA_COREVIEW_ENABLED`: default off.
+- `NEXT_PUBLIC_SOPHIA_COREVIEW_STILL_FRAME_ENABLED`: default off; frontend build/runtime still-frame flag used by the browser adapter.
+- `NEXT_PUBLIC_SOPHIA_COREVIEW_FIXTURE_ENABLED`: default off; fixture launcher is available only when co-review and still-frame are also enabled.
+- `SOPHIA_GEMINI_COREVIEW_ENABLED`: default off; backend coreview/read-artifact-text prompt and tool gate.
+- `SOPHIA_GEMINI_COREVIEW_STILL_FRAME_ENABLED`: default off; backend-side still-frame support flag.
 - `SOPHIA_GEMINI_SCREENSHARE_COREVIEW_ENABLED`: remains off; no screen-share path added.
-- `SOPHIA_GEMINI_COREVIEW_STILL_FRAME_ENABLED`: new backend-side still-frame support flag.
-- `NEXT_PUBLIC_SOPHIA_COREVIEW_STILL_FRAME_ENABLED`: frontend build/runtime still-frame flag used by the browser adapter.
+
+The flag helpers only treat explicit truthy values (`1`, `true`, `yes`, `on`) as enabled. No production path is enabled by default.
 
 ## What Changed
 
@@ -83,15 +90,17 @@ Yes, for artifact canvases. The encoder creates a new clean canvas and draws onl
 
 ### 2. Can the current Gemini WebSocket route send image/media chunks?
 
-The route can construct and send a `realtimeInput.mediaChunks[]` JSON payload when the still-frame flag is on. This proves browser-side payload construction and WebSocket send mechanics, not provider acceptance.
+The route can construct and send a `realtimeInput.mediaChunks[]` JSON payload when the still-frame flag is on. Local tests prove browser-side payload construction and WebSocket send mechanics. The manual provider smoke proved the fixture path is provider-visible at least once.
 
 ### 3. If yes, does Gemini react to the visual frame?
 
-Not proven. No live provider manual run was performed, and no provider ack/visual response event exists in the current local tests.
+Yes for the guarded fixture path. In the manual provider smoke, Sophia entered the looking state, stayed voice-responsive, and could recognize/discuss the visible Q3 Launch Review fixture contents after the still frame was sent.
+
+This does not prove continuous video, whole-screen capture, multiple-frame reliability, or real artifact rendering.
 
 ### 4. Can tools still work?
 
-Normal tool setup is unchanged, and the still-frame sender uses the same Live WebSocket session. Existing tool declaration tests still pass. A live provider test is still needed to prove function calling remains reliable after a media chunk.
+Normal tool setup is unchanged, and the still-frame sender uses the same Live WebSocket session. Existing tool declaration tests still pass. The manual smoke proved voice remained responsive after the media chunk. Exact text/data tool integration and broader tool-call reliability after media still need dedicated coverage.
 
 ### 5. What latency/cost does one frame or 1 FPS stills add?
 
@@ -124,25 +133,61 @@ Yes by policy. Visual frames are for layout/composition/color/rough structure on
 - Co-review is explicit and indicator-gated.
 - Stop Looking disables future frame sends.
 
+## Manual provider smoke — PASS
+
+Date: 2026-05-26 / 2026-05-27 local
+
+Branch: `spike/gemini-coreview-still-frame-input-clean`
+
+Commit tested: `38583674`
+
+Result:
+
+- The Coreview fixture launched successfully.
+- The Q3 Launch Review fixture artifact was visible.
+- `Review Together` entered the looking state and displayed `Sophia is looking at this artifact`.
+- Still-frame mode was active.
+- The user could keep speaking with Sophia while the fixture artifact was open.
+- Sophia recognized and discussed the artifact contents.
+- No screen-share prompt appeared.
+- No whole-screen capture was used.
+- No raw frame telemetry was added.
+
+Interpretation:
+
+- Still-frame artifact co-review is viable as a guarded proof of concept.
+- The fixture path is proven for at least one provider-visible still frame.
+- Continuous live video/screen-share remains unproven and is still a no-go on the current transport.
+- Real artifact integration still needs a clean artifact canvas/offscreen renderer path.
+- Exact text and numeric answers still require `read_artifact_text` or an equivalent trusted sideband text path.
+
+Remaining unknowns:
+
+- Provider usage metadata / `image_count` visibility.
+- Latency and cost envelope.
+- Reliability across multiple frames.
+- Behavior with real artifacts rather than the fixture.
+- Exact text/data tool integration.
+- Production UX polish.
+- Separate session vs. piggyback decision for longer reviews.
+
 ## Go / No-go
 
-Still-frame co-review is a guarded **partial go**:
+Still-frame co-review is a guarded proof-of-concept **go** for the fixture path:
 
 - Go for artifact-canvas encoding and experimental WebSocket payload construction.
-- No-go for claiming provider visual understanding until a real Gemini run confirms frame acceptance and visual response.
-- No-go for DOM artifacts until a clean renderer exists.
+- Go for provider-visible fixture co-review behind flags.
+- No-go for continuous live video/screen-share on the current transport.
+- No-go for real artifacts until a clean artifact canvas/offscreen renderer exists.
 - No-go for exact text via vision; continue using `read_artifact_text`.
 
-## Recommended Next Test
+## Next Recommended Implementation
 
-Run a manual provider smoke test with the still-frame flag enabled:
-
-1. Start normal Gemini voice.
-2. Render a synthetic artifact canvas with visible layout and tiny text.
-3. Enter Review Together.
-4. Send exactly one still frame.
-5. Ask what Sophia notices visually.
-6. Ask for exact tiny text or a number.
-7. Confirm visual answer uses layout only and exact answer uses `read_artifact_text` or refuses honestly.
-8. Check `UsageMetadata.image_count`, latency, and tool-call behavior.
-9. Confirm telemetry contains only dimensions, byte sizes, statuses, and latency.
+1. Keep normal voice path unchanged.
+2. Keep still-frame co-review behind flags.
+3. Replace the fixture source with a real artifact canvas/offscreen renderer.
+4. Add resend-frame triggers on user action: `refresh view`, scroll/zoom, or review-step changes.
+5. Wire trusted `read_artifact_text` for exact words and numbers.
+6. Add telemetry for `image_count` / `usageMetadata` if the provider emits it.
+7. Add a production UX review: entry, looking indicator, Stop Looking, and privacy language.
+8. Only later revisit continuous media/video.

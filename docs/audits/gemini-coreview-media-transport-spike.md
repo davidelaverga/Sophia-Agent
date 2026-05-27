@@ -15,6 +15,8 @@ The official Gemini Live API reference documents WebSocket sessions that can exc
 
 Recommendation: keep normal voice untouched and proceed with a feature-flagged still-frame/artifact-canvas proof before any continuous video implementation. Continuous media should wait for a real Gemini media adapter or provider path change that can be tested with artifact-scoped frames and tool/sideband behavior.
 
+Follow-up result on `spike/gemini-coreview-still-frame-input-clean`: the fixture still-frame proof passed manual provider smoke at commit `38583674`. Sophia could keep talking while the Q3 Launch Review fixture was open, the app showed `Sophia is looking at this artifact`, and Sophia could discuss the artifact contents after one still frame. This proves the guarded fixture path only. Continuous video remains unproven, exact text/numbers still require `read_artifact_text`, and real artifacts still need a clean canvas/offscreen renderer.
+
 ## Current Normal Voice Path
 
 Code map:
@@ -278,12 +280,13 @@ Voice/backend:
 
 ## Recommendation
 
-Do not proceed directly to continuous media co-review. Proceed with a smaller still-frame transport spike:
+Do not proceed directly to continuous media co-review. Use the passed still-frame fixture proof as the guarded implementation path:
 
-1. Render only the active artifact region to canvas.
-2. Encode a single frame or 1 FPS stills as provider-supported media chunks.
-3. Keep normal voice unchanged.
-4. Route exact data questions through the trusted `read_artifact_text` sideband.
-5. Measure setup latency, stop latency, usage metadata, and whether tool calls remain reliable.
+1. Keep normal voice unchanged.
+2. Keep co-review/still-frame/fixture flags default off.
+3. Replace the fixture source with a real artifact canvas/offscreen renderer.
+4. Encode a single frame or explicit user-triggered refresh frames as provider-supported media chunks.
+5. Route exact data questions through the trusted `read_artifact_text` sideband.
+6. Measure setup latency, stop latency, usage metadata, image count, and tool-call behavior.
 
-If that still-frame path cannot be proven with current Gemini Live semantics, block Option B until the provider transport changes or a server-owned Gemini media session is implemented.
+Still do not proceed to continuous media/video until the provider transport and production UX can be tested cleanly.
