@@ -16,11 +16,13 @@ export function ModeToggle({
   isBusy = false,
   showInsightIndicator = false,
   hasNewInsight = false,
+  onInsightClick,
 }: {
   opacity?: number
   isBusy?: boolean
   showInsightIndicator?: boolean
   hasNewInsight?: boolean
+  onInsightClick?: () => void
 }) {
   const currentMode = useUiStore((s) => s.mode)
   const setMode = useUiStore((s) => s.setMode)
@@ -33,6 +35,7 @@ export function ModeToggle({
     : showInsightIndicator
       ? "inactive"
       : "hidden"
+  const canOpenInsight = showInsightIndicator && Boolean(onInsightClick)
 
   function handleSelect(mode: FocusMode) {
     if (mode === currentMode) return
@@ -111,16 +114,31 @@ export function ModeToggle({
             </button>
 
             {index === 0 && (
-              <span
-                aria-hidden="true"
-                className="inline-flex h-6 w-4 shrink-0 items-center justify-center"
+              <button
+                type="button"
+                aria-hidden={canOpenInsight ? undefined : true}
+                aria-label={hasNewInsight ? "Open new insights panel" : "Open insights panel"}
+                disabled={!canOpenInsight}
+                onClick={() => {
+                  if (!canOpenInsight) return
+                  onInsightClick?.()
+                }}
+                className={[
+                  "inline-flex h-6 w-4 shrink-0 appearance-none items-center justify-center rounded-full border-0 bg-transparent p-0",
+                  "transition-transform duration-200 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20",
+                  canOpenInsight
+                    ? "cursor-pointer hover:scale-110 active:scale-95"
+                    : "pointer-events-none cursor-default",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
               >
                 <span
                   data-testid="mode-toggle-insight-indicator"
                   data-state={insightState}
                   className="mode-toggle-insight-indicator"
                 />
-              </span>
+              </button>
             )}
           </Fragment>
         )

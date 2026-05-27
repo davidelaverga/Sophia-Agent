@@ -250,6 +250,49 @@ function buildMetrics(): VoiceDeveloperMetrics {
       diagnostics: 1,
       builderEvents: 0,
     },
+    coreview: {
+      visual: {
+        coreviewEnabled: true,
+        coreviewSessionActive: true,
+        coreviewArtifactId: 'artifact-1',
+        visualSourceKind: 'canvas_element',
+        frameSentCount: 1,
+        initialFrameSent: true,
+        refreshFrameCount: 0,
+        lastFrameBytes: 1024,
+        lastFrameDimensions: { width: 640, height: 360 },
+        totalFrameBytes: 1024,
+        lastFrameSendLatencyMs: 12,
+        maxFrameSendLatencyMs: 12,
+        frameSendFailureCount: 0,
+        lastFrameSendFailureReason: null,
+        websocketClosedAfterFrameCount: 0,
+        providerUsageImageCount: 1,
+        providerUsageVideoDurationSeconds: 0.25,
+        providerUsageAudioDurationSeconds: 2,
+        visualResponseObserved: true,
+        toolCallAfterFrameObserved: true,
+        rawFrameExcluded: true,
+      },
+      exactText: {
+        exactTextCallCount: 1,
+        exactTextSuccessCount: 1,
+        exactTextFailureCount: 0,
+        exactTextSources: {
+          fixture: 0,
+          builder_metadata: 1,
+          artifact_store: 0,
+          unsupported: 0,
+        },
+        lastExactTextStatus: 'success',
+        lastExactTextSource: 'builder_metadata',
+        lastExactTextCharCount: 77,
+        lastExactTextTruncated: false,
+        lastExactTextLatencyMs: 4,
+        rawArtifactTextExcluded: true,
+        rawQueryExcluded: true,
+      },
+    },
   } as unknown as VoiceDeveloperMetrics;
 }
 
@@ -1125,6 +1168,72 @@ describe('buildVoiceTelemetryReport', () => {
     expect(report.turnCaptureDiagnostics.omittedEventCount).toBe(40);
     expect(report.turnCaptureDiagnostics.events[0]?.timelineSequence).toBe(41);
     expect(report.turnCaptureDiagnostics.summary.counts.inputAudioFrameSent).toBe(260);
+  });
+
+  it('exports safe Coreview telemetry and strips raw frame or artifact text fields', () => {
+    const report = buildVoiceTelemetryReport({
+      exportedAt: '2026-05-20T12:00:05.000Z',
+      summary: buildSummary(),
+      metrics: buildMetrics(),
+      captureBundle: buildCaptureBundle([
+        {
+          seq: 1,
+          recordedAt: '2026-05-20T12:00:00.000Z',
+          category: 'voice-session',
+          name: 'start-talking-requested',
+          payload: { sessionId: 'current-session', runtime: 'gemini_live' },
+        },
+        {
+          seq: 2,
+          recordedAt: '2026-05-20T12:00:01.000Z',
+          category: 'voice-session',
+          name: 'gemini-artifact-frame-send',
+          payload: {
+            runtime: 'gemini_live',
+            result: {
+              ok: true,
+              websocketSendAccepted: true,
+              frameBytes: 1024,
+              frameDimensions: { width: 640, height: 360 },
+              data: 'base64-raw-frame',
+              rawFrameData: 'raw-frame-bytes',
+              rawFrameExcluded: true,
+            },
+          },
+        },
+        {
+          seq: 3,
+          recordedAt: '2026-05-20T12:00:02.000Z',
+          category: 'voice-session',
+          name: 'gemini-tool-loop-diagnostic',
+          payload: {
+            runtime: 'gemini_live',
+            phase: 'tool_response_sent',
+            toolName: 'read_artifact_text',
+            success: true,
+            diagnostic: {
+              toolCall: { name: 'read_artifact_text', args: null },
+              backendResponse: {
+                ok: true,
+                source: 'builder_metadata',
+                char_count: 77,
+                status: 'success',
+                raw_artifact_text_excluded: true,
+              },
+            },
+          },
+        },
+      ]),
+    });
+    const serialized = JSON.stringify(report);
+
+    expect(report.coreview.visual.frameSentCount).toBe(1);
+    expect(report.coreview.exactText.exactTextSuccessCount).toBe(1);
+    expect(report.coreview.exactText.lastExactTextSource).toBe('builder_metadata');
+    expect(serialized).not.toContain('base64-raw-frame');
+    expect(serialized).not.toContain('raw-frame-bytes');
+    expect(serialized).not.toContain('raw artifact body');
+    expect(serialized).not.toContain('What exact text');
   });
 
 });

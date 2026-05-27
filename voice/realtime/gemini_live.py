@@ -281,6 +281,12 @@ class GeminiLiveEventMapper:
                             "provider_event_name": "usageMetadata",
                             "total_token_count": usage_metadata.get("totalTokenCount")
                             or usage_metadata.get("total_token_count"),
+                            "image_count": usage_metadata.get("imageCount")
+                            or usage_metadata.get("image_count"),
+                            "video_duration_seconds": usage_metadata.get("videoDurationSeconds")
+                            or usage_metadata.get("video_duration_seconds"),
+                            "audio_duration_seconds": usage_metadata.get("audioDurationSeconds")
+                            or usage_metadata.get("audio_duration_seconds"),
                         },
                         raw=raw,
                     )

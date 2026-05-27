@@ -2,6 +2,7 @@ import type { SophiaCaptureBundle, SophiaCaptureSnapshot } from './session-captu
 import { buildTurnCaptureDiagnostics, type TurnCaptureDiagnostics } from './turn-capture-diagnostics';
 import {
   buildVoiceArtifactTelemetryCounts,
+  type CoreviewUsageTelemetry,
   type VoiceDeveloperMetrics,
   type VoiceTelemetrySummary,
 } from './voice-runtime-metrics';
@@ -29,6 +30,7 @@ export type VoiceTelemetryReport = {
   source: 'session-ui';
   exportedAt: string;
   summary: VoiceTelemetrySummary;
+  coreview: CoreviewUsageTelemetry;
   metrics: VoiceDeveloperMetrics;
   diagnosticsSummary: {
     geminiRelayBackend: Record<string, unknown> | null;
@@ -54,6 +56,7 @@ const SENSITIVE_QUERY_PARAMS = new Set([
   'token',
 ]);
 const GEMINI_RETRIEVE_MEMORIES_TOOL_NAME = 'retrieve_memories';
+const GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = 'read_artifact_text';
 const RETRIEVE_MEMORIES_SAFE_TOOL_EXECUTION_KEYS = new Set([
   'any_result_exact_query_terms_present',
   'cache_status',
@@ -76,6 +79,16 @@ const RETRIEVE_MEMORIES_SAFE_TOOL_EXECUTION_KEYS = new Set([
   'status',
   'trusted_user_id_source',
 ]);
+const READ_ARTIFACT_TEXT_SAFE_TOOL_EXECUTION_KEYS = new Set([
+  'artifact_id',
+  'char_count',
+  'latency_ms',
+  'raw_artifact_text_excluded',
+  'safe_reason',
+  'source',
+  'status',
+  'truncated',
+]);
 
 export function buildVoiceTelemetryReport({
   captureBundle,
@@ -92,13 +105,15 @@ export function buildVoiceTelemetryReport({
   const selected = selectCurrentRunEvents(captureBundle.events, captureBundle.snapshot);
   const reconciledMetrics = reconcileArtifactTelemetryMetrics(metrics, captureBundle.snapshot, selected.events);
 
+  const sanitizedMetrics = sanitizeTelemetryValue(reconciledMetrics) as VoiceDeveloperMetrics;
   return {
     reportType: 'voice-telemetry-report',
     version: 2,
     source: 'session-ui',
     exportedAt: resolvedExportedAt,
     summary: sanitizeTelemetryValue(summary) as VoiceTelemetrySummary,
-    metrics: sanitizeTelemetryValue(reconciledMetrics) as VoiceDeveloperMetrics,
+    coreview: sanitizeTelemetryValue(reconciledMetrics.coreview) as CoreviewUsageTelemetry,
+    metrics: sanitizedMetrics,
     diagnosticsSummary: buildDiagnosticsSummary(captureBundle, selected),
     turnCaptureDiagnostics: sanitizeTelemetryValue(
       buildTurnCaptureDiagnostics(selected.events, reconciledMetrics),
@@ -435,6 +450,14 @@ function compactLatestToolExecution(latestToolExecution: Record<string, unknown>
       }
     }
   }
+  if (toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
+    for (const key of READ_ARTIFACT_TEXT_SAFE_TOOL_EXECUTION_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(latestToolExecution, key)) {
+        compact[key] = latestToolExecution[key];
+      }
+    }
+    compact.raw_query_excluded = true;
+  }
   return compact;
 }
 
@@ -738,6 +761,9 @@ function buildDiagnosticsSummary(
 }
 
 function compactTelemetryCaptureEvent(event: CaptureEvent): CaptureEvent {
+  if (event.name === 'gemini-artifact-frame-send') {
+    return compactCoreviewFrameEvent(event);
+  }
   if (event.name !== 'gemini-relay-trace') {
     return event;
   }
@@ -757,4 +783,29 @@ function compactTelemetryCaptureEvent(event: CaptureEvent): CaptureEvent {
       },
     },
   };
+}
+
+function compactCoreviewFrameEvent(event: CaptureEvent): CaptureEvent {
+  const payload = asRecord(event.payload);
+  const result = asRecord(payload?.result);
+  if (!payload || !result) {
+    return event;
+  }
+  const redactedResult = Object.fromEntries(
+    Object.entries(result).filter(([key]) => !isRawCoreviewFrameKey(key)),
+  );
+  return {
+    ...event,
+    payload: {
+      ...payload,
+      result: {
+        ...redactedResult,
+        rawFrameExcluded: true,
+      },
+    },
+  };
+}
+
+function isRawCoreviewFrameKey(key: string): boolean {
+  return /^(data|base64|frameData|rawFrameData|raw_frame_data|imageData|image_data)$/u.test(key);
 }

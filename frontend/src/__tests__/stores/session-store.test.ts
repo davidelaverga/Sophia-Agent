@@ -482,7 +482,7 @@ describe('Session Store', () => {
       });
     });
 
-    it('revalidates stale persisted open sessions and restores ended sessions as read-only', async () => {
+    it('revalidates stale persisted open sessions and restores ended sessions as continuable', async () => {
       const { restoreOpenSession } = useSessionStore.getState();
 
       getSessionMock.mockResolvedValue({
@@ -547,11 +547,16 @@ describe('Session Store', () => {
       expect(getSessionMock).toHaveBeenCalledWith('sess-stale', 'dev-user');
       expect(state.session).toMatchObject({
         sessionId: 'sess-stale',
-        status: 'ended',
-        isActive: false,
-        endedAt: '2026-04-15T00:10:00.000Z',
+        threadId: 'thread-stale',
+        status: 'active',
+        isActive: true,
       });
-      expect(state.openSessions).toEqual([]);
+      expect(state.session?.endedAt).toBeUndefined();
+      expect(state.openSessions[0]).toMatchObject({
+        session_id: 'sess-stale',
+        thread_id: 'thread-stale',
+        status: 'open',
+      });
       expect(state.recentSessions[0]).toMatchObject({
         session_id: 'sess-stale',
         status: 'ended',

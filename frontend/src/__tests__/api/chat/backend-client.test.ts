@@ -180,6 +180,63 @@ describe('fetchBackendStreamWithBootstrap', () => {
     expect(result.upstream.status).toBe(200);
   });
 
+  it('reseeds a fresh thread from bounded transcript when the old thread is missing', async () => {
+    getServerAuthTokenMock.mockResolvedValue('user-token');
+    const staleThreadResponse = {
+      ok: false,
+      status: 404,
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+      clone: vi.fn(() => ({ text: vi.fn().mockResolvedValue('Thread or assistant not found') })),
+    } as unknown as Response;
+
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(staleThreadResponse)
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        messages: [
+          { role: 'user', content: 'For this conversation only, the phrase is amber bridge.' },
+          { role: 'sophia', content: 'Got it for this thread.' },
+        ],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ thread_id: 'thread-recovered-1' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response('event: message\ndata: ok\n\n', {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      }));
+
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await fetchBackendStreamWithBootstrap(
+      'http://localhost:2026/api/langgraph/threads',
+      {
+        ...basePayload,
+        thread_id: 'thread-missing-1',
+        message: 'What was the phrase?',
+      },
+    );
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      expect.stringMatching(/\/api\/v1\/sessions\/123e4567-e89b-12d3-a456-426614174000\/messages\?user_id=user-123$/),
+      expect.objectContaining({ method: 'GET' }),
+    );
+    const runBody = JSON.parse(String((fetchMock.mock.calls[3][1] as RequestInit).body));
+    expect(runBody.input.messages).toHaveLength(2);
+    expect(runBody.input.messages[0].content).toContain('amber bridge');
+    expect(runBody.input.messages[1]).toEqual({ role: 'user', content: 'What was the phrase?' });
+    expect(result.threadId).toBe('thread-recovered-1');
+    expect(result.checkpointerResume).toBe(false);
+    expect(result.resumedFromThread).toBe(false);
+    expect(result.recoveredFromTranscript).toBe(true);
+    expect(result.staleThreadId).toBe('thread-missing-1');
+    expect(result.newThreadId).toBe('thread-recovered-1');
+  });
+
   it('accepts production auth provider user_id shapes', () => {
     expect(isValidSophiaUserId('123e4567-e89b-12d3-a456-426614174000')).toBe(true);
     expect(isValidSophiaUserId('clx8k2n9s0000abcd1234efgh')).toBe(true);

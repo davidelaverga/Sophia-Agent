@@ -67,6 +67,18 @@ class SessionRecord(BaseModel):
     recap_status: str | None = None
     checkpointer_available: bool | None = None
     transcript_available: bool = False
+    memory_processed_until_sequence: int = 0
+    recap_processed_until_sequence: int = 0
+    last_memory_extraction_at: str | None = None
+    last_recap_extraction_at: str | None = None
+    last_memory_extraction_run_id: str | None = None
+    memory_extraction_status: str | None = None
+    memory_extraction_error_code: str | None = None
+    memory_extraction_range_start: int | None = None
+    memory_extraction_range_end: int | None = None
+    active_segment_started_at: str | None = None
+    segment_count: int = 1
+    continuation_count: int = 0
     intention: str | None = None
     focus_cue: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -712,6 +724,18 @@ class SupabaseSessionTranscriptStore:
             "recap_status": record.recap_status,
             "checkpointer_available": record.checkpointer_available,
             "transcript_available": record.transcript_available,
+            "memory_processed_until_sequence": record.memory_processed_until_sequence,
+            "recap_processed_until_sequence": record.recap_processed_until_sequence,
+            "last_memory_extraction_at": record.last_memory_extraction_at,
+            "last_recap_extraction_at": record.last_recap_extraction_at,
+            "last_memory_extraction_run_id": record.last_memory_extraction_run_id,
+            "memory_extraction_status": record.memory_extraction_status,
+            "memory_extraction_error_code": record.memory_extraction_error_code,
+            "memory_extraction_range_start": record.memory_extraction_range_start,
+            "memory_extraction_range_end": record.memory_extraction_range_end,
+            "active_segment_started_at": record.active_segment_started_at,
+            "segment_count": record.segment_count,
+            "continuation_count": record.continuation_count,
             "metadata": metadata,
         }
 
@@ -748,6 +772,50 @@ class SupabaseSessionTranscriptStore:
                 else None
             ),
             transcript_available=bool(row.get("transcript_available")),
+            memory_processed_until_sequence=int(row.get("memory_processed_until_sequence") or 0),
+            recap_processed_until_sequence=int(row.get("recap_processed_until_sequence") or 0),
+            last_memory_extraction_at=(
+                row.get("last_memory_extraction_at")
+                if isinstance(row.get("last_memory_extraction_at"), str)
+                else None
+            ),
+            last_recap_extraction_at=(
+                row.get("last_recap_extraction_at")
+                if isinstance(row.get("last_recap_extraction_at"), str)
+                else None
+            ),
+            last_memory_extraction_run_id=(
+                row.get("last_memory_extraction_run_id")
+                if isinstance(row.get("last_memory_extraction_run_id"), str)
+                else None
+            ),
+            memory_extraction_status=(
+                row.get("memory_extraction_status")
+                if isinstance(row.get("memory_extraction_status"), str)
+                else None
+            ),
+            memory_extraction_error_code=(
+                row.get("memory_extraction_error_code")
+                if isinstance(row.get("memory_extraction_error_code"), str)
+                else None
+            ),
+            memory_extraction_range_start=(
+                int(row.get("memory_extraction_range_start"))
+                if row.get("memory_extraction_range_start") is not None
+                else None
+            ),
+            memory_extraction_range_end=(
+                int(row.get("memory_extraction_range_end"))
+                if row.get("memory_extraction_range_end") is not None
+                else None
+            ),
+            active_segment_started_at=(
+                row.get("active_segment_started_at")
+                if isinstance(row.get("active_segment_started_at"), str)
+                else None
+            ),
+            segment_count=int(row.get("segment_count") or 1),
+            continuation_count=int(row.get("continuation_count") or 0),
             intention=metadata.get("intention") if isinstance(metadata.get("intention"), str) else None,
             focus_cue=metadata.get("focus_cue") if isinstance(metadata.get("focus_cue"), str) else None,
             metadata=dict(metadata),

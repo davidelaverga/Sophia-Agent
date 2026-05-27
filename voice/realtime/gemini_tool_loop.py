@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -14,6 +15,12 @@ from urllib.parse import urlsplit
 import httpx
 
 from voice.realtime.runtime_selection import VoiceRuntimeMode
+from voice.realtime.coreview import (
+    GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
+    execute_read_artifact_text_feature_gated,
+    read_artifact_text_result_summary,
+    redacted_read_artifact_text_diagnostic,
+)
 from voice.realtime.sophia_backend_tools import (
     SophiaBackendToolConfigurationError,
     builder_lifecycle_contract,
@@ -47,6 +54,7 @@ GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES = frozenset(
         GEMINI_CANCEL_ASYNC_TASK_TOOL_NAME,
         GEMINI_LIST_ASYNC_TASKS_TOOL_NAME,
         GEMINI_RETRIEVE_MEMORIES_TOOL_NAME,
+        GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
     }
 )
 
@@ -105,10 +113,13 @@ class GeminiDogfoodToolExecution:
     error_text: str | None = None
     updated_async_tasks: dict[str, dict[str, Any]] | None = None
     public_artifact: dict[str, Any] | None = None
+    diagnostic_metadata: dict[str, Any] | None = None
 
     def diagnostic(self) -> dict[str, Any]:
         if self.call.name == GEMINI_RETRIEVE_MEMORIES_TOOL_NAME:
             return _retrieve_memories_execution_diagnostic(self)
+        if self.call.name == GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME:
+            return _read_artifact_text_execution_diagnostic(self)
 
         task_id = _task_id_from_response(self.response)
         task_status = _task_status_from_response(self.response)
@@ -885,6 +896,27 @@ class GeminiDogfoodToolExecutor:
                 result_summary=f"retrieve_memories returned {status} with {count} snippet(s).",
             )
 
+        if call.name == GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME:
+            started_at = time.perf_counter()
+            response = execute_read_artifact_text_feature_gated(
+                call.args,
+                session_id=session_id,
+                user_id=user_id,
+                provider=provider,
+            )
+            latency_ms = max(int((time.perf_counter() - started_at) * 1000), 0)
+            result_summary = read_artifact_text_result_summary(response)
+            return GeminiDogfoodToolExecution(
+                call=call,
+                response=response,
+                result_summary=result_summary,
+                success=bool(response.get("ok")),
+                error_text=None if response.get("ok") else str(
+                    response.get("safe_reason") or "read_artifact_text_unavailable"
+                ),
+                diagnostic_metadata={"latency_ms": latency_ms},
+            )
+
         try:
             validated_args = validate_builder_lifecycle_tool_args(call.name, call.args)
             lifecycle_result = await self._builder_lifecycle_backend.execute(
@@ -1244,6 +1276,35 @@ def _retrieve_memories_execution_diagnostic(
         "ignored_model_arg_names": list(response.get("ignored_model_arg_names") or []),
         "raw_memory_text_excluded": diagnostics.get("raw_memory_text_excluded", True),
         "response": redacted_retrieve_memories_diagnostic(response),
+    }
+
+
+def _read_artifact_text_execution_diagnostic(
+    execution: GeminiDogfoodToolExecution,
+) -> dict[str, Any]:
+    latency_ms = None
+    if isinstance(execution.diagnostic_metadata, Mapping):
+        raw_latency_ms = execution.diagnostic_metadata.get("latency_ms")
+        if isinstance(raw_latency_ms, int):
+            latency_ms = raw_latency_ms
+    redacted_response = redacted_read_artifact_text_diagnostic(
+        execution.response,
+        latency_ms=latency_ms,
+    )
+    return {
+        "id": execution.call.call_id,
+        "name": execution.call.name,
+        "success": execution.success,
+        "result_summary": execution.result_summary,
+        "artifact_id": redacted_response.get("artifact_id"),
+        "source": redacted_response.get("source"),
+        "char_count": redacted_response.get("char_count"),
+        "truncated": redacted_response.get("truncated"),
+        "status": redacted_response.get("status"),
+        "safe_reason": redacted_response.get("safe_reason"),
+        "latency_ms": latency_ms,
+        "raw_artifact_text_excluded": True,
+        "response": redacted_response,
     }
 
 

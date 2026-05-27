@@ -24,6 +24,8 @@ Sophia session continuity has several related but separate stores:
 
 When a user reopens a conversation, the UI should load by `session_id`, render the transcript sidecar, and continue text turns with the stored `thread_id` when available.
 
+Ended sessions are resumable conversations, not immutable archives. Opening an ended session renders the stored transcript and allows the next user message to continue the same `session_id`. The backend reactivates the row on the first new message, preserves the current `thread_id` when LangGraph still has it, increments the continuation/segment counters, and appends new transcript rows after the previous max sequence.
+
 ## Reopen Flow
 
 1. Frontend restores or selects a session metadata record.
@@ -31,13 +33,15 @@ When a user reopens a conversation, the UI should load by `session_id`, render t
 3. Gateway returns durable transcript messages from the configured session store.
 4. If no transcript exists, gateway falls back to `GET /threads/{thread_id}/state`, extracts visible human/assistant messages, and backfills the configured transcript store.
 5. Frontend renders the returned ordered messages before a new user message is sent.
-6. Text sends continue with the same `thread_id`. If the checkpointer no longer has that thread, a later recovery/reseed path should be explicit rather than silently treating recap as transcript.
+6. Text sends continue with the same `thread_id`. If LangGraph reports the thread is missing, the chat proxy creates a fresh thread, seeds it with a bounded excerpt of recent durable transcript messages, and marks the stream metadata with `recovered_from_transcript=true`.
 
 ## Incremental Persistence
 
 The session page sends visible transcript snapshots to `PUT /api/v1/sessions/{session_id}/messages` as messages change. Browser `pagehide` and hidden-tab events use the `POST` alias for best-effort `sendBeacon`/`keepalive` flushing. The backend treats these writes as append-or-upsert operations, keyed by stable message ids, so retries do not duplicate transcript rows.
 
 Streaming assistant text may be stored only when marked `final=false` or `incomplete=true`. Completed text and voice turns are stored as final visible messages. Tool calls, artifacts, diagnostics, and raw provider events should not appear in the user-visible transcript unless a later product decision explicitly surfaces them.
+
+Session finalization is incremental. `sophia_sessions.memory_processed_until_sequence` and `recap_processed_until_sequence` record the last successfully processed transcript sequence. The offline pipeline extracts only durable messages with `sequence > memory_processed_until_sequence`; successful extraction advances the checkpoint to the range end, while failures leave it untouched. Candidate metadata carries `session_id`, `thread_id`, `sequence_start`, `sequence_end`, `source_message_ids`, and `extraction_run_id` so review overlays can distinguish continuation segments without relying on Mem0 semantic dedupe.
 
 ## Voice Reopen Semantics
 
@@ -80,6 +84,7 @@ For multi-service deployments, the gateway must own transcript reads/writes thro
 - `mode`: `text`, `voice`, or `mixed`.
 - `status`: `active`, `resumable`, `ended`, `abandoned`, or `interrupted`.
 - `title`, `preview`, `message_count`, timestamps, recap/checkpointer/transcript flags.
+- `memory_processed_until_sequence`, `recap_processed_until_sequence`, extraction timestamps/status/range, `active_segment_started_at`, `segment_count`, and `continuation_count` for resumable finalization.
 - `metadata`: non-indexed compatibility fields such as `preset_type`, `context_mode`, `platform`, `intention`, and `focus_cue`.
 
 `sophia_session_messages` stores ordered transcript rows:
