@@ -21,6 +21,7 @@
 import { FileText, ImageIcon, Loader2, Paperclip, X } from "lucide-react"
 import { useCallback, useId, useRef, type ChangeEvent } from "react"
 
+import { MAX_ATTACHED_FILES_PER_TURN } from "../../lib/chat-constants"
 import {
   selectItemsForThread,
   useAttachmentsStore,
@@ -124,6 +125,28 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
 
       const files = Array.from(filesList)
 
+      // Enforce the same per-turn cap as the server-side post-handler
+      // BEFORE we upload anything — otherwise files over the cap
+      // upload successfully but get silently dropped from
+      // attached_files when parseAndValidateChatPayload truncates
+      // at MAX_ATTACHED_FILES_PER_TURN, then clearForThread wipes
+      // the chips post-dispatch and the user is left wondering why
+      // Sophia ignored some uploads. Codex P2 on PR #132.
+      //
+      // We count items already in the store for this thread that
+      // could plausibly land in attached_files (uploaded + still-
+      // uploading). Errored items don't count — they won't be sent.
+      // Read items fresh from the store rather than from the closure
+      // to avoid a stale-snapshot race when the user picks files
+      // faster than the render loop.
+      const currentItems = selectItemsForThread(threadId)(
+        useAttachmentsStore.getState()
+      )
+      const existingCounted = currentItems.filter(
+        (item) => item.status !== "error"
+      ).length
+      let remainingSlots = Math.max(MAX_ATTACHED_FILES_PER_TURN - existingCounted, 0)
+
       // Pre-register each file as "uploading" before kicking off the
       // network call so the chips appear instantly. Tag each item
       // with the current threadId so the store can scope display +
@@ -144,6 +167,20 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
           add(item)
           return { file, item, skip: true }
         }
+        if (remainingSlots <= 0) {
+          const item: PendingAttachment = {
+            clientId: makeClientId(),
+            filename: file.name,
+            size: file.size,
+            status: "error",
+            error: `Max ${MAX_ATTACHED_FILES_PER_TURN} attachments per message. Remove some before adding more.`,
+            hasMarkdownConversion: false,
+            threadId,
+          }
+          add(item)
+          return { file, item, skip: true }
+        }
+        remainingSlots -= 1
         const item: PendingAttachment = {
           clientId: makeClientId(),
           filename: file.name,

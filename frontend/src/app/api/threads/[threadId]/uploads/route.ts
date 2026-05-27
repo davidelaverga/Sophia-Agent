@@ -38,20 +38,22 @@ import { getPrimaryGatewayUrl } from "../../../_lib/gateway-url";
 // the proxy from streaming pathological payloads.
 const MAX_TOTAL_UPLOAD_BYTES = 60 * 1024 * 1024; // 60 MB across all files in one request
 
-// Upper bound for the ownership-lookup page size. 100 matches the
-// gateway endpoint's ``limit`` ceiling and comfortably covers any
-// realistic per-user session history. If a user somehow has >100
-// sessions and the target thread is older than the most recent 100,
-// the upload is rejected — acceptable trade-off for not iterating
-// a paginated lookup on every upload.
-const OWNERSHIP_LOOKUP_LIMIT = 100;
-
 
 /**
  * Confirm that ``threadId`` belongs to ``userId`` by listing the
- * user's sessions via the gateway. Returns ``true`` only on an
- * explicit match; any error path (network failure, malformed
- * response, mismatched thread) fails closed.
+ * user's *open* (resumable) sessions via the gateway. Returns
+ * ``true`` only on an explicit match; any error path (network
+ * failure, malformed response, mismatched thread) fails closed.
+ *
+ * **Why ``/api/sessions/open`` and not ``/list``** (Codex P2 PR
+ * #132): the recent-sessions ``/list`` endpoint caps at 100 entries
+ * — a power user with >100 sessions whose target thread is older
+ * than the most recent 100 would get falsely 403'd. The ``/open``
+ * endpoint returns ALL resumable sessions with NO limit. Uploads
+ * only happen on active sessions anyway (the AttachmentBar is gated
+ * on ``resolvedThreadId`` from ``useSessionStore.session``, which
+ * tracks the currently-active/paused session), so ``/open`` is the
+ * exact set we care about.
  *
  * The Bearer header carries the user-scoped backend token, so the
  * gateway sees the same identity that authenticated against
@@ -65,7 +67,7 @@ async function userOwnsThread(
   apiKey: string | null,
   gatewayUrl: string,
 ): Promise<boolean> {
-  const url = `${gatewayUrl}/api/sessions/list?user_id=${encodeURIComponent(userId)}&limit=${OWNERSHIP_LOOKUP_LIMIT}`;
+  const url = `${gatewayUrl}/api/sessions/open?user_id=${encodeURIComponent(userId)}`;
   const headers: Record<string, string> = { Accept: "application/json" };
   if (apiKey) {
     headers.Authorization = `Bearer ${apiKey}`;

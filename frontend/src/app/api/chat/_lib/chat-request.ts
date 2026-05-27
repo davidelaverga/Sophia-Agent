@@ -1,3 +1,5 @@
+import { MAX_ATTACHED_FILES_PER_TURN } from '../../../lib/chat-constants';
+
 import { secureLog } from './config';
 import {
   extractRawMessage,
@@ -24,12 +26,6 @@ export interface ValidatedChatRequest {
    */
   attachedFiles: string[];
 }
-
-// Cap matches AttachmentBar's per-message upload count — and the
-// per-turn prompt-tokens we're willing to spend naming files. 12 is
-// generous for typical "look at these 3 screenshots" UX and bounded
-// enough that a malicious client can't blow the system prompt budget.
-const MAX_ATTACHED_FILES_PER_TURN = 12;
 
 function sanitizeAttachedFilename(value: unknown): string | null {
   if (typeof value !== 'string') return null;

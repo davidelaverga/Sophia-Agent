@@ -46,7 +46,7 @@ function makeRequest(
 
 /**
  * Default fetch mock for proxy tests that need both:
- *   1. The ownership-lookup call (GET /api/sessions/list)
+ *   1. The ownership-lookup call (GET /api/sessions/open)
  *   2. The upload-forward call (POST /api/threads/{id}/uploads)
  *
  * Returns the ownership response from the first call and the upload
@@ -139,7 +139,7 @@ describe('/api/threads/[threadId]/uploads proxy', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
     const [ownershipUrl, ownershipInit] = fetchMock.mock.calls[0];
-    expect(ownershipUrl).toBe('https://gateway.example/api/sessions/list?user_id=user_test&limit=100');
+    expect(ownershipUrl).toBe('https://gateway.example/api/sessions/open?user_id=user_test');
     expect((ownershipInit as RequestInit | undefined)?.method).toBe('GET');
 
     const [uploadUrl, uploadInit] = fetchMock.mock.calls[1] as [string, RequestInit | undefined];
@@ -200,7 +200,41 @@ describe('/api/threads/[threadId]/uploads proxy', () => {
     // at the ownership check.
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [ownershipUrl] = fetchMock.mock.calls[0];
-    expect(ownershipUrl).toBe('https://gateway.example/api/sessions/list?user_id=user_test&limit=100');
+    expect(ownershipUrl).toBe('https://gateway.example/api/sessions/open?user_id=user_test');
+  });
+
+  it('verifies ownership against /open (unbounded), not /list (capped at 100) — Codex P2', async () => {
+    // Regression: /list caps at 100 entries, so a power user with
+    // >100 sessions whose target thread is older than the most recent
+    // 100 would get falsely 403'd. /open returns ALL resumable
+    // sessions with no limit, which is the right set for uploads
+    // (uploads only happen on active sessions).
+    const fetchMock = vi.spyOn(global, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ sessions: [{ thread_id: 'thread-abc' }], count: 1 }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ success: true, files: [{ filename: 'x.png', size: '1' }] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      );
+
+    const fd = new FormData();
+    fd.append('files', new File([new Uint8Array([1])], 'x.png', { type: 'image/png' }));
+    const res = await POST(makeRequest(fd), {
+      params: Promise.resolve({ threadId: 'thread-abc' }),
+    });
+
+    expect(res.status).toBe(200);
+    const [ownershipUrl] = fetchMock.mock.calls[0] as [string, RequestInit | undefined];
+    expect(ownershipUrl).toBe('https://gateway.example/api/sessions/open?user_id=user_test');
+    // Explicit guard: do NOT regress to /list with a limit.
+    expect(ownershipUrl).not.toMatch(/\/list\?/);
+    expect(ownershipUrl).not.toMatch(/[?&]limit=/);
   });
 
   it('fails closed when the ownership lookup itself errors (403)', async () => {
