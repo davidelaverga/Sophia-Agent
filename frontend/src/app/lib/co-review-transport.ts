@@ -295,6 +295,29 @@ export class CoReviewSessionMachine {
     return this.state()
   }
 
+  async failCoReview(error: string): Promise<CoReviewSessionState> {
+    try {
+      await this.transport.stopCoReview()
+    } catch {
+      // Co-review cleanup must not close or destabilize the normal voice socket.
+    }
+
+    this.update({
+      state: "co_review_error",
+      visualInputStatus: "error",
+      toolAvailability: "unavailable",
+      coReviewSessionId: null,
+      stoppedAt: new Date().toISOString(),
+      error,
+      normalVoiceRestored: true,
+      normalVoicePaused: false,
+      videoOrFrameMode: "none",
+      visualResponseObserved: false,
+      toolCallStillWorks: null,
+    })
+    return this.state()
+  }
+
   status(): CoReviewTransportStatus {
     return this.transport.status()
   }

@@ -464,8 +464,11 @@ function SessionPageContent() {
   const coReviewSessionId = backendSessionId || safeSessionId || sessionId || (coReviewFixtureEnabled ? 'local-coreview-fixture-session' : null);
   const artifactPanelThreadId = resolvedThreadId || (coReviewFixtureEnabled ? coReviewSessionId ?? 'local-coreview-fixture-thread' : undefined);
   const coReviewTransport = useMemo(
-    () => new GeminiStillFrameTransport({ sendArtifactFrame: voiceState.sendArtifactFrame }),
-    [voiceState.sendArtifactFrame],
+    () => new GeminiStillFrameTransport({
+      sendArtifactFrame: voiceState.sendArtifactFrame,
+      getStatus: voiceState.getArtifactFrameTransportStatus,
+    }),
+    [voiceState.getArtifactFrameTransportStatus, voiceState.sendArtifactFrame],
   );
 
   const {

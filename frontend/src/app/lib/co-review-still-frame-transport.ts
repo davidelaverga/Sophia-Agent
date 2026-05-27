@@ -17,16 +17,52 @@ export interface ArtifactFrameSendResult {
   supported: boolean
   providerAcceptedFrame: boolean
   websocketSendAccepted?: boolean
+  websocketReadyStateBefore?: number | null
+  websocketReadyStateAfter?: number | null
+  websocketOpenBeforeSend?: boolean
+  websocketOpenAfterSend?: boolean
+  framePayloadSchemaVersion?: string
   frameBytes: number
   frameDimensions: ArtifactFrameDimensions
+  mimeType?: string
   frameSendLatencyMs: number | null
+  sendStartedAt?: string
+  sendCompletedAt?: string
+  sendDurationMs?: number
+  sendExceptionName?: string | null
+  sendExceptionSafeMessage?: string | null
+  providerEventCountBefore?: number | null
+  providerEventCountAfter?: number | null
+  lastProviderEventTypeBefore?: string | null
+  lastProviderEventTypeAfter?: string | null
+  websocketCloseCode?: number | null
+  websocketCloseReasonSafe?: string | null
+  websocketCloseWasClean?: boolean | null
+  websocketCloseAt?: string | null
+  websocketClosedAfterFrameSend?: boolean
+  timeFromFrameSendToCloseMs?: number | null
+  usageMetadataAfterFrame?: Record<string, unknown> | null
+  imageCountAfterFrame?: number | null
+  visualResponseObserved?: boolean
   estimatedVisualCost: number | null
   error: string | null
   rawFrameExcluded: true
 }
 
+export interface ArtifactFrameSenderStatus {
+  websocketReadyState: number | null
+  websocketState: string
+  websocketOpen: boolean
+  websocketCloseCode: number | null
+  websocketCloseReasonSafe: string | null
+  websocketCloseWasClean: boolean | null
+  websocketCloseAt: string | null
+  error: string | null
+}
+
 export interface ArtifactFrameSender {
   sendArtifactFrame(frame: ArtifactEncodedFramePayload): Promise<ArtifactFrameSendResult> | ArtifactFrameSendResult
+  getStatus?(): ArtifactFrameSenderStatus
 }
 
 export class GeminiStillFrameTransport implements CoReviewMediaTransport {
@@ -40,6 +76,23 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
   async startCoReview(input: CoReviewStartInput): Promise<CoReviewStartResult> {
     this.stopped = false
     this.activeSource = input.visualSource
+    const preflightStatus = this.sender.getStatus?.()
+    if (preflightStatus && !preflightStatus.websocketOpen) {
+      stopArtifactVisualSource(input.visualSource)
+      logCoreviewBreadcrumb("sendArtifactFramePreflightFailed", {
+        error: preflightStatus.error ?? "gemini_live_websocket_not_open",
+        websocketReadyStateBefore: preflightStatus.websocketReadyState,
+        websocketState: preflightStatus.websocketState,
+        websocketCloseCode: preflightStatus.websocketCloseCode,
+        websocketCloseReasonSafe: preflightStatus.websocketCloseReasonSafe,
+        websocketCloseWasClean: preflightStatus.websocketCloseWasClean,
+        websocketCloseAt: preflightStatus.websocketCloseAt,
+      })
+      return this.errorResult(preflightStatus.error ?? "gemini_live_websocket_not_open", {
+        visualInputStatus: "error",
+        toolAvailability: "unavailable",
+      })
+    }
 
     logCoreviewBreadcrumb("frameEncodeStarted", {
       artifactId: input.artifactId,
@@ -84,22 +137,50 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
       supported: sent.supported,
       providerAcceptedFrame: sent.providerAcceptedFrame,
       websocketSendAccepted: sent.websocketSendAccepted ?? null,
+      websocketReadyStateBefore: sent.websocketReadyStateBefore ?? null,
+      websocketReadyStateAfter: sent.websocketReadyStateAfter ?? null,
+      websocketOpenBeforeSend: sent.websocketOpenBeforeSend ?? null,
+      websocketOpenAfterSend: sent.websocketOpenAfterSend ?? null,
+      framePayloadSchemaVersion: sent.framePayloadSchemaVersion ?? null,
       frameBytes: sent.frameBytes,
       frameDimensions: sent.frameDimensions,
+      mimeType: sent.mimeType ?? null,
       frameSendLatencyMs: sent.frameSendLatencyMs,
+      sendStartedAt: sent.sendStartedAt ?? null,
+      sendCompletedAt: sent.sendCompletedAt ?? null,
+      sendDurationMs: sent.sendDurationMs ?? null,
+      sendExceptionName: sent.sendExceptionName ?? null,
+      sendExceptionSafeMessage: sent.sendExceptionSafeMessage ?? null,
+      providerEventCountBefore: sent.providerEventCountBefore ?? null,
+      providerEventCountAfter: sent.providerEventCountAfter ?? null,
+      lastProviderEventTypeBefore: sent.lastProviderEventTypeBefore ?? null,
+      lastProviderEventTypeAfter: sent.lastProviderEventTypeAfter ?? null,
+      websocketCloseCode: sent.websocketCloseCode ?? null,
+      websocketCloseReasonSafe: sent.websocketCloseReasonSafe ?? null,
+      websocketCloseWasClean: sent.websocketCloseWasClean ?? null,
+      websocketCloseAt: sent.websocketCloseAt ?? null,
+      websocketClosedAfterFrameSend: sent.websocketClosedAfterFrameSend ?? false,
+      timeFromFrameSendToCloseMs: sent.timeFromFrameSendToCloseMs ?? null,
+      usageMetadataAfterFrame: sent.usageMetadataAfterFrame ? "present" : null,
+      imageCountAfterFrame: sent.imageCountAfterFrame ?? null,
+      visualResponseObserved: sent.visualResponseObserved ?? false,
       estimatedVisualCost: sent.estimatedVisualCost,
       error: sent.error,
     })
     if (!sent.ok) {
       stopArtifactVisualSource(input.visualSource)
       return {
-        ...this.errorResult(sent.error ?? "artifact_frame_send_failed"),
+        ...this.errorResult(sent.error ?? "artifact_frame_send_failed", {
+          visualInputStatus: sent.error === "frame_send_closed_gemini_websocket" ? "error" : "unsupported",
+          toolAvailability: sent.error === "frame_send_closed_gemini_websocket" ? "unavailable" : "sideband_only",
+        }),
         frameSentCount: 0,
         frameBytes: sent.frameBytes,
         frameDimensions: sent.frameDimensions,
         frameSendLatencyMs: sent.frameSendLatencyMs,
         providerAcceptedFrame: sent.providerAcceptedFrame,
         estimatedVisualCost: sent.estimatedVisualCost,
+        visualResponseObserved: sent.visualResponseObserved ?? false,
       }
     }
 
@@ -118,15 +199,29 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
       frameDimensions: sent.frameDimensions,
       frameSendLatencyMs: sent.frameSendLatencyMs ?? encoded.encodeLatencyMs,
       providerAcceptedFrame: sent.providerAcceptedFrame,
-      visualResponseObserved: false,
+      visualResponseObserved: sent.visualResponseObserved ?? false,
       toolCallStillWorks: null,
     }
   }
 
   async stopCoReview(): Promise<CoReviewStopResult> {
+    const before = this.sender.getStatus?.()
+    logCoreviewBreadcrumb("stopClicked", {
+      visualInputStatusBefore: this.activeSource ? "live" : "stopped",
+      normalVoiceWebsocketStateBefore: before?.websocketState ?? null,
+      websocketReadyStateBefore: before?.websocketReadyState ?? null,
+    })
     this.stopped = true
     stopArtifactVisualSource(this.activeSource)
     this.activeSource = null
+    const after = this.sender.getStatus?.()
+    logCoreviewBreadcrumb("stopCompleted", {
+      visualInputStatusAfter: "stopped",
+      normalVoiceWebsocketStateAfter: after?.websocketState ?? null,
+      websocketReadyStateAfter: after?.websocketReadyState ?? null,
+      didStopCloseNormalVoiceSocket: Boolean(before?.websocketOpen && after && !after.websocketOpen),
+      didStopOnlyClearCoreviewState: true,
+    })
     return {
       ok: true,
       visualInputStatus: "stopped",
@@ -142,6 +237,18 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
   }
 
   status(): CoReviewTransportStatus {
+    const senderStatus = this.sender.getStatus?.()
+    if (senderStatus && !senderStatus.websocketOpen) {
+      return {
+        kind: this.kind,
+        visualTransportSupported: false,
+        toolsSupportedInCoReview: false,
+        continuousVideoSupported: false,
+        stillFramesSupported: true,
+        statusText: `still-frame unavailable: ${senderStatus.error ?? "gemini_live_websocket_not_open"}`,
+      }
+    }
+
     return {
       kind: this.kind,
       visualTransportSupported: true,
@@ -164,12 +271,15 @@ export class GeminiStillFrameTransport implements CoReviewMediaTransport {
     return true
   }
 
-  private errorResult(error: string): CoReviewStartResult {
+  private errorResult(
+    error: string,
+    overrides: Partial<Pick<CoReviewStartResult, "visualInputStatus" | "toolAvailability">> = {},
+  ): CoReviewStartResult {
     return {
       ok: false,
       coReviewSessionId: null,
-      visualInputStatus: "unsupported",
-      toolAvailability: "sideband_only",
+      visualInputStatus: overrides.visualInputStatus ?? "unsupported",
+      toolAvailability: overrides.toolAvailability ?? "sideband_only",
       videoOrFrameMode: "none",
       normalVoicePaused: false,
       sessionHandoffMs: null,

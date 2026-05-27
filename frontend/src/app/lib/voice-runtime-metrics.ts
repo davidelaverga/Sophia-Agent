@@ -286,6 +286,9 @@ export type GeminiSessionTelemetry = {
     websocketDiagnosticCount: number
     lastWebSocketDiagnosticAt: string | null
     lastWebSocketErrorText: string | null
+    lastWebSocketCloseCode?: number | null
+    lastWebSocketCloseReasonSafe?: string | null
+    lastWebSocketCloseWasClean?: boolean | null
     toolCallCount: number
     toolResponseCount: number
     toolRejectionCount: number
@@ -1367,6 +1370,9 @@ function buildSessionTelemetry(params: {
         websocketDiagnosticCount,
         lastWebSocketDiagnosticAt: hookTelemetry?.lastWebSocketDiagnosticAt ?? asString(websocketDiagnostic?.timestamp),
         lastWebSocketErrorText: hookTelemetry?.lastWebSocketErrorText ?? asString(websocketDiagnostic?.message),
+        lastWebSocketCloseCode: hookTelemetry?.lastWebSocketCloseCode ?? asFiniteNumber(websocketDiagnostic?.closeCode),
+        lastWebSocketCloseReasonSafe: hookTelemetry?.lastWebSocketCloseReasonSafe ?? asString(websocketDiagnostic?.closeReason),
+        lastWebSocketCloseWasClean: hookTelemetry?.lastWebSocketCloseWasClean ?? asBoolean(websocketDiagnostic?.wasClean),
         toolCallCount,
         toolResponseCount,
         toolRejectionCount,

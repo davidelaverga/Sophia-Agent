@@ -240,6 +240,67 @@ describe("CoreviewFixtureArtifact in the presence panel", () => {
     expect(getDisplayMedia).not.toHaveBeenCalled()
   })
 
+  it("shows a visible closed-websocket error without entering looking state", async () => {
+    const user = userEvent.setup()
+    const sendArtifactFrame = vi.fn()
+    const transport = new GeminiStillFrameTransport({
+      getStatus: () => ({
+        websocketReadyState: 3,
+        websocketState: "closed",
+        websocketOpen: false,
+        websocketCloseCode: 1007,
+        websocketCloseReasonSafe: "invalid frame",
+        websocketCloseWasClean: false,
+        websocketCloseAt: "2026-05-27T00:00:00.000Z",
+        error: "gemini_live_websocket_not_open",
+      }),
+      sendArtifactFrame,
+    })
+
+    renderRootLauncher({ isVisible: true, transport })
+
+    await user.click(screen.getByRole("button", { name: /open coreview fixture/i }))
+
+    expect(await screen.findAllByText("still-frame unavailable: gemini_live_websocket_not_open")).toHaveLength(2)
+    expect(screen.getByRole("button", { name: /review together/i })).toBeDisabled()
+    expect(sendArtifactFrame).not.toHaveBeenCalled()
+    expect(screen.queryByRole("status", { name: /looking at this artifact/i })).not.toBeInTheDocument()
+  })
+
+  it("shows frame send failure reason in the fixture modal", async () => {
+    const user = userEvent.setup()
+    const transport = new GeminiStillFrameTransport({
+      sendArtifactFrame: vi.fn((frame) => ({
+        ok: false,
+        supported: true,
+        providerAcceptedFrame: false,
+        websocketSendAccepted: true,
+        websocketReadyStateBefore: 1,
+        websocketReadyStateAfter: 3,
+        websocketOpenBeforeSend: true,
+        websocketOpenAfterSend: false,
+        framePayloadSchemaVersion: "realtimeInput.video.v1",
+        frameBytes: frame.byteLength,
+        frameDimensions: frame.dimensions,
+        mimeType: frame.mimeType,
+        frameSendLatencyMs: 7,
+        estimatedVisualCost: null,
+        websocketClosedAfterFrameSend: true,
+        error: "frame_send_closed_gemini_websocket",
+        rawFrameExcluded: true as const,
+      })),
+    })
+
+    renderRootLauncher({ isVisible: true, transport })
+
+    await user.click(screen.getByRole("button", { name: /open coreview fixture/i }))
+    await user.click(await screen.findByRole("button", { name: /review together/i }))
+
+    expect(await screen.findByText("still-frame unavailable: frame_send_closed_gemini_websocket")).toBeInTheDocument()
+    expect(screen.getByText("frame_send_closed_gemini_websocket")).toBeInTheDocument()
+    expect(screen.queryByRole("status", { name: /looking at this artifact/i })).not.toBeInTheDocument()
+  })
+
   it("Stop Looking restores the root fixture control and disables future frame sends", async () => {
     const user = userEvent.setup()
     const transport = new GeminiStillFrameTransport({

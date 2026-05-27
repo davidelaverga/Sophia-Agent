@@ -78,6 +78,9 @@ export function coReviewStatusText(
     return "media session live"
   }
   if (state.state === "co_review_error") return coReviewErrorText(state.error)
+  if (transportStatus.stillFramesSupported && !transportStatus.visualTransportSupported) {
+    return transportStatus.statusText
+  }
   if (!transportStatus.continuousVideoSupported) return "continuous unsupported"
   return transportStatus.statusText
 }

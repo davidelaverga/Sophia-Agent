@@ -139,6 +139,9 @@ export type GeminiRuntimeTelemetry = {
   websocketDiagnosticCount: number
   lastWebSocketDiagnosticAt: string | null
   lastWebSocketErrorText: string | null
+  lastWebSocketCloseCode?: number | null
+  lastWebSocketCloseReasonSafe?: string | null
+  lastWebSocketCloseWasClean?: boolean | null
   toolCallCount: number
   toolResponseCount: number
   toolRejectionCount: number

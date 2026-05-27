@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { resolveArtifactVisualSource } from "../lib/co-review-capture"
 import { isCoReviewEnabled } from "../lib/co-review-flags"
@@ -102,13 +102,37 @@ export function useArtifactCoReview({
   }, [])
 
   const telemetry = useMemo(() => safeCoReviewTelemetryFromState(state), [state])
+  const transportStatus = machineRef.current.status()
+  const canStart = Boolean(
+    featureEnabled
+    && sessionId
+    && threadId
+    && artifactId
+    && transportStatus.visualTransportSupported,
+  )
+
+  useEffect(() => {
+    if (state.state !== "co_review_live" || transportStatus.visualTransportSupported) {
+      return
+    }
+
+    const error = transportStatus.statusText.includes(": ")
+      ? transportStatus.statusText.split(": ").slice(1).join(": ")
+      : "frame_send_closed_gemini_websocket"
+    logCoreviewBreadcrumb("coReviewTransportClosedWhileLive", {
+      error,
+      transportKind: transportRef.current.kind,
+      statusText: transportStatus.statusText,
+    })
+    void machineRef.current?.failCoReview(error || "frame_send_closed_gemini_websocket")
+  }, [state.state, transportStatus.statusText, transportStatus.visualTransportSupported])
 
   return {
     enabled: featureEnabled,
     state,
     telemetry,
-    transportStatus: machineRef.current.status(),
-    canStart: Boolean(featureEnabled && sessionId && threadId && artifactId),
+    transportStatus,
+    canStart,
     startReview,
     stopReview,
   }

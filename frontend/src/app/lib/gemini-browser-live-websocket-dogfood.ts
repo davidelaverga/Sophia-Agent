@@ -445,7 +445,8 @@ export interface GeminiBrowserLiveDogfoodConnection {
   websocket: WebSocketLike;
   localStream: MediaStream;
   sendText: (text: string) => void;
-  sendArtifactFrame: (frame: GeminiArtifactFramePayload) => GeminiArtifactFrameSendResult;
+  sendArtifactFrame: (frame: GeminiArtifactFramePayload) => Promise<GeminiArtifactFrameSendResult>;
+  getArtifactFrameTransportStatus: () => GeminiArtifactFrameTransportStatusSnapshot;
   setMicrophoneMuted: (muted: boolean) => void;
   flushOutputAudio: () => GeminiOutputAudioPlaybackState;
   close: () => Promise<void>;
@@ -465,14 +466,49 @@ export interface GeminiArtifactFramePayload {
   rawFrameExcluded: true;
 }
 
+export interface GeminiArtifactFrameTransportStatusSnapshot {
+  websocketReadyState: number | null;
+  websocketState: string;
+  websocketOpen: boolean;
+  websocketCloseCode: number | null;
+  websocketCloseReasonSafe: string | null;
+  websocketCloseWasClean: boolean | null;
+  websocketCloseAt: string | null;
+  error: string | null;
+}
+
 export interface GeminiArtifactFrameSendResult {
   ok: boolean;
   supported: boolean;
   providerAcceptedFrame: boolean;
   websocketSendAccepted: boolean;
+  websocketReadyStateBefore: number | null;
+  websocketReadyStateAfter: number | null;
+  websocketOpenBeforeSend: boolean;
+  websocketOpenAfterSend: boolean;
+  framePayloadSchemaVersion: string;
   frameBytes: number;
   frameDimensions: GeminiArtifactFrameDimensions;
+  mimeType: string;
   frameSendLatencyMs: number;
+  sendStartedAt: string;
+  sendCompletedAt: string;
+  sendDurationMs: number;
+  sendExceptionName: string | null;
+  sendExceptionSafeMessage: string | null;
+  providerEventCountBefore: number | null;
+  providerEventCountAfter: number | null;
+  lastProviderEventTypeBefore: string | null;
+  lastProviderEventTypeAfter: string | null;
+  websocketCloseCode: number | null;
+  websocketCloseReasonSafe: string | null;
+  websocketCloseWasClean: boolean | null;
+  websocketCloseAt: string | null;
+  websocketClosedAfterFrameSend: boolean;
+  timeFromFrameSendToCloseMs: number | null;
+  usageMetadataAfterFrame: Record<string, unknown> | null;
+  imageCountAfterFrame: number | null;
+  visualResponseObserved: boolean;
   estimatedVisualCost: number | null;
   error: string | null;
   rawFrameExcluded: true;
@@ -631,6 +667,9 @@ const MAX_TRANSCRIPTION_TELEMETRY_PREVIEW_CHARS = 240;
 const GEMINI_RETRIEVE_MEMORIES_TOOL_NAME = 'retrieve_memories';
 const GEMINI_TRANSCRIPT_COALESCING_DISABLED_REASON: GeminiTranscriptCoalescingDisabledReason = 'provider_output_transcription_is_delta_like';
 const WEBSOCKET_OPEN = 1;
+const GEMINI_ARTIFACT_FRAME_PAYLOAD_SCHEMA_VERSION = 'realtimeInput.video.v1';
+const ARTIFACT_FRAME_SEND_SETTLE_MS = 125;
+const MAX_SAFE_DIAGNOSTIC_TEXT_CHARS = 180;
 const BARGE_IN_CANDIDATE_DECAY_MS = 650;
 const PROVIDER_INPUT_TRANSCRIPTION_CONFIRMATION_DELAY_MS = 350;
 const RELAYABLE_GEMINI_PROVIDER_EVENT_KEYS = new Set([
@@ -691,6 +730,16 @@ export async function connectGeminiBrowserLiveDogfood(
   let relayFailureCount = 0;
   let providerReceiveSequence = 0;
   let providerRelaySequence = 0;
+  let lastProviderEventType: string | null = null;
+  let latestUsageMetadata: Record<string, unknown> | null = null;
+  let latestUsageMetadataReceiveSequence: number | null = null;
+  let lastWebSocketClose: {
+    at: string;
+    atMs: number;
+    closeCode: number | null;
+    closeReasonSafe: string | null;
+    wasClean: boolean | null;
+  } | null = null;
   let orderedRelayTaskSequence = 0;
   let orderedRelayDraining = false;
   let assistantTranscriptPartialSegmentOrdinal = 0;
@@ -862,6 +911,48 @@ export async function connectGeminiBrowserLiveDogfood(
 
   const notifyToolCallLedgerUpdate = (entry: GeminiBrowserLiveToolCallLedgerEntry) => {
     options.onToolCallLedgerUpdate?.({ ...entry });
+  };
+
+  const snapshotArtifactFrameProviderState = () => ({
+    providerEventCount: providerReceiveSequence,
+    lastProviderEventType,
+    usageMetadata: latestUsageMetadata ? { ...latestUsageMetadata } : null,
+    usageMetadataReceiveSequence: latestUsageMetadataReceiveSequence,
+    imageCount: readGeminiUsageMetadataImageCount(latestUsageMetadata),
+  });
+
+  const snapshotArtifactFrameTransportStatus = (): GeminiArtifactFrameTransportStatusSnapshot => {
+    const websocketReadyState = typeof websocket?.readyState === 'number' ? websocket.readyState : null;
+    const websocketOpen = websocketReadyState === WEBSOCKET_OPEN;
+    return {
+      websocketReadyState,
+      websocketState: websocketReadyStateLabel(websocketReadyState),
+      websocketOpen,
+      websocketCloseCode: lastWebSocketClose?.closeCode ?? null,
+      websocketCloseReasonSafe: lastWebSocketClose?.closeReasonSafe ?? null,
+      websocketCloseWasClean: lastWebSocketClose?.wasClean ?? null,
+      websocketCloseAt: lastWebSocketClose?.at ?? null,
+      error: websocketOpen ? null : 'gemini_live_websocket_not_open',
+    };
+  };
+
+  const recordWebSocketDiagnostic = (
+    diagnostic: Omit<GeminiBrowserLiveDogfoodWebSocketDiagnostic, 'relayFailureAlreadyObserved'>,
+  ) => {
+    if (diagnostic.kind === 'close') {
+      lastWebSocketClose = {
+        at: diagnostic.timestamp,
+        atMs: monotonicNowMs(),
+        closeCode: diagnostic.closeCode,
+        closeReasonSafe: sanitizeDiagnosticText(diagnostic.closeReason),
+        wasClean: diagnostic.wasClean,
+      };
+    }
+    options.onWebSocketDiagnostic?.({
+      ...diagnostic,
+      closeReason: sanitizeDiagnosticText(diagnostic.closeReason),
+      relayFailureAlreadyObserved: relayFailureObserved,
+    });
   };
 
   const defaultPlaybackState = (): GeminiOutputAudioPlaybackState => ({
@@ -1408,15 +1499,20 @@ export async function connectGeminiBrowserLiveDogfood(
     const setupComplete = waitForGeminiSetupComplete(websocket, {
       onProviderEvent: options.onProviderEvent,
       onProviderEventTelemetry: (event, receiveMetadata) => {
-        options.onProviderEventTelemetry?.(
-          recordGeminiProviderEventTelemetry(
-            providerCategoryCounts,
-            relayClassificationCounts,
-            event,
-            receiveMetadata.providerReceivedAt,
-            receiveMetadata,
-          ),
+        const telemetry = recordGeminiProviderEventTelemetry(
+          providerCategoryCounts,
+          relayClassificationCounts,
+          event,
+          receiveMetadata.providerReceivedAt,
+          receiveMetadata,
         );
+        lastProviderEventType = telemetry.primaryCategory;
+        const usageMetadata = recordFromAnyKey(event, 'usageMetadata', 'usage_metadata');
+        if (usageMetadata) {
+          latestUsageMetadata = { ...usageMetadata };
+          latestUsageMetadataReceiveSequence = receiveMetadata.providerReceiveSequence;
+        }
+        options.onProviderEventTelemetry?.(telemetry);
       },
       onProviderToolEvent: (event) => {
         const timestamp = new Date().toISOString();
@@ -1676,12 +1772,7 @@ export async function connectGeminiBrowserLiveDogfood(
         });
       },
       onToolLoopDiagnostic: options.onToolLoopDiagnostic,
-      onWebSocketDiagnostic: (diagnostic) => {
-        options.onWebSocketDiagnostic?.({
-          ...diagnostic,
-          relayFailureAlreadyObserved: relayFailureObserved,
-        });
-      },
+      onWebSocketDiagnostic: recordWebSocketDiagnostic,
     });
 
     notifyStage('sending_setup');
@@ -1721,7 +1812,10 @@ export async function connectGeminiBrowserLiveDogfood(
         websocket,
         frame,
         enabled: options.coreviewStillFrameEnabled ?? isCoReviewStillFrameEnabled(),
+        providerSnapshot: snapshotArtifactFrameProviderState,
+        transportSnapshot: snapshotArtifactFrameTransportStatus,
       }),
+      getArtifactFrameTransportStatus: snapshotArtifactFrameTransportStatus,
       setMicrophoneMuted: (muted: boolean) => {
         localStream?.getAudioTracks().forEach((track) => {
           track.enabled = !muted;
@@ -1774,80 +1868,190 @@ export function buildGeminiArtifactFrameRealtimeInput(
 ): Record<string, unknown> {
   return {
     realtimeInput: {
-      mediaChunks: [
-        {
-          mimeType: frame.mimeType,
-          data: frame.data,
-        },
-      ],
+      video: {
+        mimeType: frame.mimeType,
+        data: frame.data,
+      },
     },
   };
 }
 
-function sendGeminiArtifactFrameOverWebSocket({
+async function sendGeminiArtifactFrameOverWebSocket({
   websocket,
   frame,
   enabled,
+  providerSnapshot,
+  transportSnapshot,
 }: {
   websocket: WebSocketLike;
   frame: GeminiArtifactFramePayload;
   enabled: boolean;
-}): GeminiArtifactFrameSendResult {
-  const startedAt = monotonicNowMs();
+  providerSnapshot: () => {
+    providerEventCount: number;
+    lastProviderEventType: string | null;
+    usageMetadata: Record<string, unknown> | null;
+    usageMetadataReceiveSequence: number | null;
+    imageCount: number | null;
+  };
+  transportSnapshot: () => GeminiArtifactFrameTransportStatusSnapshot;
+}): Promise<GeminiArtifactFrameSendResult> {
+  const sendStartedAtMs = monotonicNowMs();
+  const sendStartedAt = new Date().toISOString();
+  const providerBefore = providerSnapshot();
+  const transportBefore = transportSnapshot();
   const baseResult = {
     frameBytes: frame.byteLength,
     frameDimensions: frame.dimensions,
+    mimeType: frame.mimeType,
+    framePayloadSchemaVersion: GEMINI_ARTIFACT_FRAME_PAYLOAD_SCHEMA_VERSION,
+    websocketReadyStateBefore: transportBefore.websocketReadyState,
+    websocketOpenBeforeSend: transportBefore.websocketOpen,
+    sendStartedAt,
+    providerEventCountBefore: providerBefore.providerEventCount,
+    lastProviderEventTypeBefore: providerBefore.lastProviderEventType,
     estimatedVisualCost: null,
     rawFrameExcluded: true as const,
   };
+  const finish = (
+    patch: Omit<
+      GeminiArtifactFrameSendResult,
+      keyof typeof baseResult
+    > & Partial<Pick<GeminiArtifactFrameSendResult, keyof typeof baseResult>>,
+  ): GeminiArtifactFrameSendResult => ({
+    ...baseResult,
+    ...patch,
+  });
 
   if (!enabled) {
-    return {
-      ...baseResult,
+    const providerAfter = providerSnapshot();
+    const transportAfter = transportSnapshot();
+    const sendCompletedAt = new Date().toISOString();
+    return finish({
       ok: false,
       supported: false,
       providerAcceptedFrame: false,
       websocketSendAccepted: false,
-      frameSendLatencyMs: elapsedMs(startedAt),
+      websocketReadyStateAfter: transportAfter.websocketReadyState,
+      websocketOpenAfterSend: transportAfter.websocketOpen,
+      frameSendLatencyMs: elapsedMs(sendStartedAtMs),
+      sendCompletedAt,
+      sendDurationMs: elapsedMs(sendStartedAtMs),
+      sendExceptionName: null,
+      sendExceptionSafeMessage: null,
+      providerEventCountAfter: providerAfter.providerEventCount,
+      lastProviderEventTypeAfter: providerAfter.lastProviderEventType,
+      websocketCloseCode: transportAfter.websocketCloseCode,
+      websocketCloseReasonSafe: transportAfter.websocketCloseReasonSafe,
+      websocketCloseWasClean: transportAfter.websocketCloseWasClean,
+      websocketCloseAt: transportAfter.websocketCloseAt,
+      websocketClosedAfterFrameSend: false,
+      timeFromFrameSendToCloseMs: null,
+      usageMetadataAfterFrame: usageMetadataObservedAfterFrame(providerAfter, providerBefore.providerEventCount),
+      imageCountAfterFrame: imageCountObservedAfterFrame(providerAfter, providerBefore.providerEventCount),
+      visualResponseObserved: false,
       error: 'coreview_still_frame_feature_flag_disabled',
-    };
+    });
   }
 
   if (websocket.readyState !== WEBSOCKET_OPEN) {
-    return {
-      ...baseResult,
+    const providerAfter = providerSnapshot();
+    const transportAfter = transportSnapshot();
+    return finish({
       ok: false,
       supported: true,
       providerAcceptedFrame: false,
       websocketSendAccepted: false,
-      frameSendLatencyMs: elapsedMs(startedAt),
+      websocketReadyStateAfter: transportAfter.websocketReadyState,
+      websocketOpenAfterSend: transportAfter.websocketOpen,
+      frameSendLatencyMs: elapsedMs(sendStartedAtMs),
+      sendCompletedAt: new Date().toISOString(),
+      sendDurationMs: elapsedMs(sendStartedAtMs),
+      sendExceptionName: null,
+      sendExceptionSafeMessage: null,
+      providerEventCountAfter: providerAfter.providerEventCount,
+      lastProviderEventTypeAfter: providerAfter.lastProviderEventType,
+      websocketCloseCode: transportAfter.websocketCloseCode,
+      websocketCloseReasonSafe: transportAfter.websocketCloseReasonSafe,
+      websocketCloseWasClean: transportAfter.websocketCloseWasClean,
+      websocketCloseAt: transportAfter.websocketCloseAt,
+      websocketClosedAfterFrameSend: false,
+      timeFromFrameSendToCloseMs: null,
+      usageMetadataAfterFrame: usageMetadataObservedAfterFrame(providerAfter, providerBefore.providerEventCount),
+      imageCountAfterFrame: imageCountObservedAfterFrame(providerAfter, providerBefore.providerEventCount),
+      visualResponseObserved: false,
       error: 'gemini_live_websocket_not_open',
-    };
+    });
   }
 
   try {
     websocket.send(JSON.stringify(buildGeminiArtifactFrameRealtimeInput(frame)));
-  } catch {
-    return {
-      ...baseResult,
+  } catch (error) {
+    const providerAfter = providerSnapshot();
+    const transportAfter = transportSnapshot();
+    return finish({
       ok: false,
       supported: true,
       providerAcceptedFrame: false,
       websocketSendAccepted: false,
-      frameSendLatencyMs: elapsedMs(startedAt),
+      websocketReadyStateAfter: transportAfter.websocketReadyState,
+      websocketOpenAfterSend: transportAfter.websocketOpen,
+      frameSendLatencyMs: elapsedMs(sendStartedAtMs),
+      sendCompletedAt: new Date().toISOString(),
+      sendDurationMs: elapsedMs(sendStartedAtMs),
+      sendExceptionName: error instanceof Error ? error.name : 'UnknownError',
+      sendExceptionSafeMessage: sanitizeDiagnosticText(error instanceof Error ? error.message : String(error)),
+      providerEventCountAfter: providerAfter.providerEventCount,
+      lastProviderEventTypeAfter: providerAfter.lastProviderEventType,
+      websocketCloseCode: transportAfter.websocketCloseCode,
+      websocketCloseReasonSafe: transportAfter.websocketCloseReasonSafe,
+      websocketCloseWasClean: transportAfter.websocketCloseWasClean,
+      websocketCloseAt: transportAfter.websocketCloseAt,
+      websocketClosedAfterFrameSend: false,
+      timeFromFrameSendToCloseMs: null,
+      usageMetadataAfterFrame: usageMetadataObservedAfterFrame(providerAfter, providerBefore.providerEventCount),
+      imageCountAfterFrame: imageCountObservedAfterFrame(providerAfter, providerBefore.providerEventCount),
+      visualResponseObserved: false,
       error: 'gemini_artifact_frame_send_failed',
-    };
+    });
   }
 
-  return {
-    ...baseResult,
-    ok: true,
+  await waitMs(ARTIFACT_FRAME_SEND_SETTLE_MS);
+
+  const providerAfter = providerSnapshot();
+  const transportAfter = transportSnapshot();
+  const websocketClosedAfterFrameSend = !transportAfter.websocketOpen;
+  const closeElapsedMs = websocketClosedAfterFrameSend && transportAfter.websocketCloseAt
+    ? latencyMsFromIso(sendStartedAt, transportAfter.websocketCloseAt)
+    : null;
+  const imageCountAfterFrame = imageCountObservedAfterFrame(providerAfter, providerBefore.providerEventCount);
+  const visualResponseObserved = providerAfter.providerEventCount > providerBefore.providerEventCount
+    && Boolean(providerAfter.lastProviderEventType && providerAfter.lastProviderEventType !== 'setupComplete');
+
+  return finish({
+    ok: !websocketClosedAfterFrameSend,
     supported: true,
-    providerAcceptedFrame: false,
+    providerAcceptedFrame: !websocketClosedAfterFrameSend && typeof imageCountAfterFrame === 'number' && imageCountAfterFrame > 0,
     websocketSendAccepted: true,
-    frameSendLatencyMs: elapsedMs(startedAt),
-    error: null,
-  };
+    websocketReadyStateAfter: transportAfter.websocketReadyState,
+    websocketOpenAfterSend: transportAfter.websocketOpen,
+    frameSendLatencyMs: elapsedMs(sendStartedAtMs),
+    sendCompletedAt: new Date().toISOString(),
+    sendDurationMs: elapsedMs(sendStartedAtMs),
+    sendExceptionName: null,
+    sendExceptionSafeMessage: null,
+    providerEventCountAfter: providerAfter.providerEventCount,
+    lastProviderEventTypeAfter: providerAfter.lastProviderEventType,
+    websocketCloseCode: transportAfter.websocketCloseCode,
+    websocketCloseReasonSafe: transportAfter.websocketCloseReasonSafe,
+    websocketCloseWasClean: transportAfter.websocketCloseWasClean,
+    websocketCloseAt: transportAfter.websocketCloseAt,
+    websocketClosedAfterFrameSend,
+    timeFromFrameSendToCloseMs: closeElapsedMs,
+    usageMetadataAfterFrame: usageMetadataObservedAfterFrame(providerAfter, providerBefore.providerEventCount),
+    imageCountAfterFrame,
+    visualResponseObserved,
+    error: websocketClosedAfterFrameSend ? 'frame_send_closed_gemini_websocket' : null,
+  });
 }
 
 export function isGeminiSetupCompleteMessage(event: unknown): boolean {
@@ -3485,6 +3689,65 @@ function latencyMsFromIso(startIso: string | null | undefined, endIso: string): 
     return null;
   }
   return Math.max(0, Math.round(endMs - startMs));
+}
+
+function waitMs(durationMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, durationMs);
+  });
+}
+
+function sanitizeDiagnosticText(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) {
+    return null;
+  }
+  const withoutTokens = value
+    .replace(/access_token=[^&\s]+/gi, 'access_token=[redacted]')
+    .replace(/auth_tokens\/[A-Za-z0-9._~+-]+/g, 'auth_tokens/[redacted]');
+  return withoutTokens.length > MAX_SAFE_DIAGNOSTIC_TEXT_CHARS
+    ? `${withoutTokens.slice(0, MAX_SAFE_DIAGNOSTIC_TEXT_CHARS)}...`
+    : withoutTokens;
+}
+
+function readGeminiUsageMetadataImageCount(metadata: Record<string, unknown> | null): number | null {
+  if (!metadata) {
+    return null;
+  }
+  return numberFromAnyKey(metadata, 'imageCount', 'image_count');
+}
+
+function usageMetadataObservedAfterFrame(
+  providerAfter: {
+    usageMetadata: Record<string, unknown> | null;
+    usageMetadataReceiveSequence: number | null;
+  },
+  providerEventCountBefore: number,
+): Record<string, unknown> | null {
+  if (
+    providerAfter.usageMetadata
+    && typeof providerAfter.usageMetadataReceiveSequence === 'number'
+    && providerAfter.usageMetadataReceiveSequence > providerEventCountBefore
+  ) {
+    return providerAfter.usageMetadata;
+  }
+  return null;
+}
+
+function imageCountObservedAfterFrame(
+  providerAfter: {
+    imageCount: number | null;
+    usageMetadataReceiveSequence: number | null;
+  },
+  providerEventCountBefore: number,
+): number | null {
+  if (
+    typeof providerAfter.imageCount === 'number'
+    && typeof providerAfter.usageMetadataReceiveSequence === 'number'
+    && providerAfter.usageMetadataReceiveSequence > providerEventCountBefore
+  ) {
+    return providerAfter.imageCount;
+  }
+  return null;
 }
 
 function percentile(values: number[], percentileValue: number): number | null {

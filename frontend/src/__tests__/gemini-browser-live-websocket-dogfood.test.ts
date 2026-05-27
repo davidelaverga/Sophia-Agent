@@ -81,9 +81,9 @@ class FakeWebSocket {
     }
   }
 
-  close() {
+  close(code = 1000, reason = 'test close') {
     this.readyState = 3;
-    this.onclose?.({} as CloseEvent);
+    this.onclose?.({ code, reason, wasClean: true } as CloseEvent);
   }
 
   emitMessage(payload: Record<string, unknown>) {
@@ -98,9 +98,9 @@ class FakeWebSocket {
     this.onerror?.({} as Event);
   }
 
-  emitClose() {
+  emitClose(code = 1006, reason = 'provider closed test socket', wasClean = false) {
     this.readyState = 3;
-    this.onclose?.({} as CloseEvent);
+    this.onclose?.({ code, reason, wasClean } as CloseEvent);
   }
 }
 
@@ -178,7 +178,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(Buffer.from(encoded, 'base64')).toHaveLength(6);
   });
 
-  it('builds the experimental artifact still-frame realtimeInput payload without telemetry fields', () => {
+  it('builds the experimental artifact still-frame realtimeInput video payload without telemetry fields', () => {
     expect(buildGeminiArtifactFrameRealtimeInput({
       artifactId: 'artifact-1',
       data: 'base64-frame',
@@ -188,12 +188,10 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       rawFrameExcluded: true,
     })).toEqual({
       realtimeInput: {
-        mediaChunks: [
-          {
-            mimeType: 'image/jpeg',
-            data: 'base64-frame',
-          },
-        ],
+        video: {
+          mimeType: 'image/jpeg',
+          data: 'base64-frame',
+        },
       },
     });
   });
@@ -728,7 +726,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     });
     const sentCountAfterSetup = websocket?.sent.length ?? 0;
 
-    const result = connection.sendArtifactFrame({
+    const result = await connection.sendArtifactFrame({
       artifactId: 'artifact-1',
       data: 'base64-frame',
       mimeType: 'image/jpeg',
@@ -746,7 +744,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     await connection.close();
   });
 
-  it('sends an experimental mediaChunks artifact frame only when the still-frame flag is on', async () => {
+  it('sends an experimental video artifact frame only when the still-frame flag is on', async () => {
     const fetchMock = makeGeminiBrowserSessionFetch();
     const fakeAudioContext = new FakeAudioContext();
     let websocket: FakeWebSocket | null = null;
@@ -763,7 +761,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       coreviewStillFrameEnabled: true,
     });
 
-    const result = connection.sendArtifactFrame({
+    const result = await connection.sendArtifactFrame({
       artifactId: 'artifact-1',
       data: 'base64-frame',
       mimeType: 'image/jpeg',
@@ -777,22 +775,121 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       supported: true,
       websocketSendAccepted: true,
       providerAcceptedFrame: false,
+      websocketReadyStateBefore: 1,
+      websocketReadyStateAfter: 1,
+      websocketOpenBeforeSend: true,
+      websocketOpenAfterSend: true,
+      framePayloadSchemaVersion: 'realtimeInput.video.v1',
       frameBytes: 12,
       frameDimensions: { width: 640, height: 360 },
+      mimeType: 'image/jpeg',
       rawFrameExcluded: true,
     }));
     expect(websocket?.sent.at(-1)).toBe(JSON.stringify({
       realtimeInput: {
-        mediaChunks: [
-          {
-            mimeType: 'image/jpeg',
-            data: 'base64-frame',
-          },
-        ],
+        video: {
+          mimeType: 'image/jpeg',
+          data: 'base64-frame',
+        },
       },
     }));
 
     await connection.close();
+  });
+
+  it('returns a safe unavailable result when the Gemini WebSocket is already closed', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch();
+    const fakeAudioContext = new FakeAudioContext();
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+
+    websocket?.emitClose(4000, 'provider rejected previous frame', false);
+    const result = await connection.sendArtifactFrame({
+      artifactId: 'artifact-1',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true,
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: false,
+      supported: true,
+      websocketSendAccepted: false,
+      websocketReadyStateBefore: 3,
+      websocketReadyStateAfter: 3,
+      websocketOpenBeforeSend: false,
+      websocketOpenAfterSend: false,
+      websocketCloseCode: 4000,
+      websocketCloseReasonSafe: 'provider rejected previous frame',
+      error: 'gemini_live_websocket_not_open',
+      rawFrameExcluded: true,
+    }));
+
+    await connection.close();
+  });
+
+  it('reports frame_send_closed_gemini_websocket when the socket closes after the frame send', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch();
+    const fakeAudioContext = new FakeAudioContext();
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+    const originalSend = websocket?.send.bind(websocket);
+    if (!websocket || !originalSend) throw new Error('test websocket missing');
+    websocket.send = (data: string) => {
+      originalSend(data);
+      if (data.includes('"video"')) {
+        queueMicrotask(() => websocket?.emitClose(1007, 'invalid video frame payload', false));
+      }
+    };
+
+    const result = await connection.sendArtifactFrame({
+      artifactId: 'artifact-1',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true,
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: false,
+      supported: true,
+      websocketSendAccepted: true,
+      websocketReadyStateBefore: 1,
+      websocketReadyStateAfter: 3,
+      websocketOpenBeforeSend: true,
+      websocketOpenAfterSend: false,
+      websocketCloseCode: 1007,
+      websocketCloseReasonSafe: 'invalid video frame payload',
+      websocketClosedAfterFrameSend: true,
+      error: 'frame_send_closed_gemini_websocket',
+      rawFrameExcluded: true,
+    }));
+    expect(result.timeFromFrameSendToCloseMs).not.toBeNull();
   });
 
   it('keeps multiple raw input frames as candidates without suppressing assistant audio', async () => {

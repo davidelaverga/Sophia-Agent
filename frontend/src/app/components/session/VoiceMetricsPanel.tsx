@@ -1213,8 +1213,10 @@ function GeminiRuntimeDetails({
               ["Last relay diagnostic", formatIsoAge(gemini.lastRelayDiagnosticAt)],
               ["WebSocket diagnostics", String(gemini.websocketDiagnosticCount)],
               ["Last WebSocket diagnostic", formatIsoAge(gemini.lastWebSocketDiagnosticAt)],
+              ["Last WebSocket close", gemini.lastWebSocketCloseCode != null ? `${gemini.lastWebSocketCloseCode}${gemini.lastWebSocketCloseWasClean === false ? " unclean" : ""}` : "none"],
               ["Last relay error", gemini.lastRelayErrorText ? truncate(gemini.lastRelayErrorText, 52) : "none"],
               ["Last WebSocket error", gemini.lastWebSocketErrorText ? truncate(gemini.lastWebSocketErrorText, 52) : "none"],
+              ["Last close reason", gemini.lastWebSocketCloseReasonSafe ? truncate(gemini.lastWebSocketCloseReasonSafe, 52) : "none"],
             ]}
             footer="Relay degradation is allowed to be visible here without re-labeling it as a legacy Stream or TTS bottleneck."
             tone={relayTone(gemini.relayStatus, gemini.consecutiveRelayFailures)}
