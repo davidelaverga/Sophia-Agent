@@ -23,7 +23,7 @@ import { create } from "zustand"
 
 export { buildAttachmentPrompt } from "./attachment-prompt"
 
-export type AttachmentStatus = "uploading" | "uploaded" | "error"
+export type AttachmentStatus = "uploading" | "uploaded" | "deleting" | "error"
 
 export type PendingAttachment = {
   /** Bare filename — what the model needs to call view_user_image. */
@@ -93,14 +93,22 @@ export function selectItemsForThread(
       : []
 }
 
-/** True if any item for ``threadId`` is still mid-upload. */
+/**
+ * True if any item for ``threadId`` is still mid-upload OR mid-
+ * delete. ``deleting`` counts here because we don't want the user
+ * submitting a turn while we're still trying to purge a discarded
+ * file from the server — if the DELETE is still in flight when the
+ * model runs, the builder copy path might still see the file.
+ */
 export function selectHasUploadsInFlight(
   threadId: string | null | undefined,
 ): (state: AttachmentsState) => boolean {
   return (state) =>
     Boolean(threadId) &&
     state.items.some(
-      (item) => item.threadId === threadId && item.status === "uploading",
+      (item) =>
+        item.threadId === threadId &&
+        (item.status === "uploading" || item.status === "deleting"),
     )
 }
 

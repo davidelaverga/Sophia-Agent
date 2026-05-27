@@ -160,6 +160,64 @@ function buildRegistration(
 }
 
 /**
+ * DELETE the chip's underlying file from the backend uploads
+ * directory and remove the chip from the store on success. Codex
+ * P2 PR #132: without this, a "removed" file remains on disk and
+ * ``start_builder_task._copy_parent_uploaded_images`` later picks
+ * it up for the builder briefing — defeating the user's discard
+ * intent.
+ *
+ * Behavior:
+ * - status === "uploaded": fire DELETE first; on 2xx remove the
+ *   chip; on any failure (HTTP error or thrown) flip the chip to
+ *   ``error`` so the user knows the file is still on disk.
+ * - status === "uploading" / "deleting": the upload (or a prior
+ *   delete) is in flight — just remove the chip locally; the
+ *   in-flight request will either succeed (orphaning the file —
+ *   already known limitation, see ``hasUploadsInFlight`` gate) or
+ *   fail.
+ * - status === "error": nothing to delete, remove locally.
+ *
+ * The chip transitions to ``deleting`` while the DELETE is in
+ * flight so the composer's ``hasUploadsInFlight`` gate keeps the
+ * send button disabled — otherwise a user could submit a turn
+ * while we're still trying to purge the discarded file.
+ */
+async function deleteAttachment(
+  item: PendingAttachment,
+  threadId: string,
+  remove: (clientId: string) => void,
+  update: (clientId: string, patch: Partial<PendingAttachment>) => void,
+): Promise<void> {
+  if (item.status !== "uploaded") {
+    remove(item.clientId)
+    return
+  }
+  update(item.clientId, { status: "deleting", error: undefined })
+  try {
+    const res = await fetch(
+      `/api/threads/${encodeURIComponent(threadId)}/uploads/${encodeURIComponent(item.filename)}`,
+      { method: "DELETE" },
+    )
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "")
+      update(item.clientId, {
+        status: "error",
+        error: `Couldn't remove from server (${res.status}). ${errText.slice(0, 120)} The file may still be in this session's uploads.`,
+      })
+      return
+    }
+    remove(item.clientId)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Network error"
+    update(item.clientId, {
+      status: "error",
+      error: `Couldn't remove from server: ${message}. The file may still be in this session's uploads.`,
+    })
+  }
+}
+
+/**
  * Upload one file and apply the resulting store patch. Centralizes
  * the "success → uploaded chip", "non-2xx → error chip", and
  * "thrown → network error chip" branches so the per-file loop
@@ -228,6 +286,17 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
     if (!isInteractive) return
     inputRef.current?.click()
   }, [isInteractive])
+
+  const handleRemoveChip = useCallback(
+    (item: PendingAttachment) => {
+      if (!threadId) {
+        remove(item.clientId)
+        return
+      }
+      void deleteAttachment(item, threadId, remove, update)
+    },
+    [threadId, remove, update],
+  )
 
   const handleFileSelection = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
@@ -310,10 +379,11 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
         const Icon = isImage(item.filename) ? ImageIcon : FileText
         const baseChipClass =
           "inline-flex h-8 max-w-[14rem] items-center gap-1.5 rounded-full border px-3 text-xs"
+        const isInFlight = item.status === "uploading" || item.status === "deleting"
         const statusClass =
           item.status === "error"
             ? "border-red-400/60 bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300"
-            : item.status === "uploading"
+            : isInFlight
               ? "border-sophia-input-border bg-sophia-surface text-sophia-text2"
               : "border-sophia-purple/40 bg-sophia-purple/10 text-sophia-purple"
         return (
@@ -324,7 +394,7 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
             data-testid="attachment-chip"
             data-status={item.status}
           >
-            {item.status === "uploading" ? (
+            {isInFlight ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
               <Icon className="h-3.5 w-3.5" />
@@ -332,9 +402,10 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
             <span className="truncate">{item.filename}</span>
             <button
               type="button"
-              onClick={() => remove(item.clientId)}
+              onClick={() => handleRemoveChip(item)}
               aria-label={`Remove ${item.filename}`}
-              className="ml-0.5 rounded-full p-0.5 transition-colors hover:bg-black/10 dark:hover:bg-white/10"
+              disabled={item.status === "deleting"}
+              className="ml-0.5 rounded-full p-0.5 transition-colors hover:bg-black/10 dark:hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <X className="h-3 w-3" />
             </button>
