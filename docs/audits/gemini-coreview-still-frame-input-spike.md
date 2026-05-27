@@ -12,13 +12,14 @@ Prove the next smallest visual-input path for Gemini co-review: encode only the 
 
 ## Provider Reference
 
-The current Google Cloud Gemini Live reference says a WebSocket session can send text, audio, or video to Gemini and receive audio, text, or function call requests. Client messages include `realtimeInput`, and the reference describes that realtime input can carry audio or video. It also documents function call requests and `UsageMetadata` fields including image count, video duration, and audio duration.
+The current Google Cloud Gemini Live reference says a WebSocket session can send text, audio, or video to Gemini and receive audio, text, or function call requests. Client messages include `realtimeInput`, and the reference describes that realtime input can carry audio or video. Related provider/reference discussion may use `media_chunks[]` / `mediaChunks` language, and the reference also documents function call requests and `UsageMetadata` fields including image count, video duration, and audio duration.
 
 Repo reality is narrower:
 
 - Current Sophia browser Gemini path sends `realtimeInput.audio`, `realtimeInput.text`, and `toolResponse`.
-- This spike adds an experimental `realtimeInput.mediaChunks[]` still-frame sender behind a separate still-frame flag.
-- A manual provider smoke after `38583674` confirmed provider-visible still-frame co-review for the fixture path.
+- This spike adds an experimental still-frame sender behind a separate still-frame flag.
+- After `38583674`, the repo implementation sends the still frame as `realtimeInput.video` with `{ mimeType, data }`, not the earlier media-chunk payload shape.
+- A manual provider smoke after `38583674` confirmed provider-visible still-frame co-review for the corrected `realtimeInput.video` fixture path.
 - Continuous video/screen-share is still unproven on the current transport.
 - Exact words, numbers, table values, labels, citations, and data still require `read_artifact_text` or another trusted sideband text path.
 
@@ -60,12 +61,10 @@ Gemini sender:
 ```json
 {
   "realtimeInput": {
-    "mediaChunks": [
-      {
-        "mimeType": "image/jpeg",
-        "data": "<base64 omitted>"
-      }
-    ]
+    "video": {
+      "mimeType": "image/jpeg",
+      "data": "<base64 omitted>"
+    }
   }
 }
 ```
@@ -88,9 +87,9 @@ Voice/prompt:
 
 Yes, for artifact canvases. The encoder creates a new clean canvas and draws only the active artifact canvas into it. It caps dimensions and bytes. DOM-only artifacts still return unsupported.
 
-### 2. Can the current Gemini WebSocket route send image/media chunks?
+### 2. Can the current Gemini WebSocket route send a still frame?
 
-The route can construct and send a `realtimeInput.mediaChunks[]` JSON payload when the still-frame flag is on. Local tests prove browser-side payload construction and WebSocket send mechanics. The manual provider smoke proved the fixture path is provider-visible at least once.
+The route can construct and send a `realtimeInput.video` JSON payload when the still-frame flag is on. Local tests prove browser-side payload construction and WebSocket send mechanics. The manual provider smoke proved the corrected `realtimeInput.video` fixture path is provider-visible at least once.
 
 ### 3. If yes, does Gemini react to the visual frame?
 
@@ -100,7 +99,7 @@ This does not prove continuous video, whole-screen capture, multiple-frame relia
 
 ### 4. Can tools still work?
 
-Normal tool setup is unchanged, and the still-frame sender uses the same Live WebSocket session. Existing tool declaration tests still pass. The manual smoke proved voice remained responsive after the media chunk. Exact text/data tool integration and broader tool-call reliability after media still need dedicated coverage.
+Normal tool setup is unchanged, and the still-frame sender uses the same Live WebSocket session. Existing tool declaration tests still pass. The manual smoke proved voice remained responsive after the `realtimeInput.video` still-frame payload. Exact text/data tool integration and broader tool-call reliability after media still need dedicated coverage.
 
 ### 5. What latency/cost does one frame or 1 FPS stills add?
 
@@ -149,6 +148,7 @@ Result:
 - Still-frame mode was active.
 - The user could keep speaking with Sophia while the fixture artifact was open.
 - Sophia recognized and discussed the artifact contents.
+- The provider-visible still frame used the corrected `realtimeInput.video` path.
 - No screen-share prompt appeared.
 - No whole-screen capture was used.
 - No raw frame telemetry was added.
@@ -175,8 +175,8 @@ Remaining unknowns:
 
 Still-frame co-review is a guarded proof-of-concept **go** for the fixture path:
 
-- Go for artifact-canvas encoding and experimental WebSocket payload construction.
-- Go for provider-visible fixture co-review behind flags.
+- Go for artifact-canvas encoding and experimental `realtimeInput.video` payload construction.
+- Go for provider-visible fixture co-review behind flags on the corrected still-frame payload path.
 - No-go for continuous live video/screen-share on the current transport.
 - No-go for real artifacts until a clean artifact canvas/offscreen renderer exists.
 - No-go for exact text via vision; continue using `read_artifact_text`.

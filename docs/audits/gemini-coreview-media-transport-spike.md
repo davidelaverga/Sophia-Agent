@@ -15,7 +15,7 @@ The official Gemini Live API reference documents WebSocket sessions that can exc
 
 Recommendation: keep normal voice untouched and proceed with a feature-flagged still-frame/artifact-canvas proof before any continuous video implementation. Continuous media should wait for a real Gemini media adapter or provider path change that can be tested with artifact-scoped frames and tool/sideband behavior.
 
-Follow-up result on `spike/gemini-coreview-still-frame-input-clean`: the fixture still-frame proof passed manual provider smoke at commit `38583674`. Sophia could keep talking while the Q3 Launch Review fixture was open, the app showed `Sophia is looking at this artifact`, and Sophia could discuss the artifact contents after one still frame. This proves the guarded fixture path only. Continuous video remains unproven, exact text/numbers still require `read_artifact_text`, and real artifacts still need a clean canvas/offscreen renderer.
+Follow-up result on `spike/gemini-coreview-still-frame-input-clean`: the fixture still-frame proof passed manual provider smoke at commit `38583674` using the corrected `realtimeInput.video` payload. Sophia could keep talking while the Q3 Launch Review fixture was open, the app showed `Sophia is looking at this artifact`, and Sophia could discuss the artifact contents after one still frame. This proves the guarded fixture path only. Continuous video remains unproven, exact text/numbers still require `read_artifact_text`, and real artifacts still need a clean canvas/offscreen renderer.
 
 ## Current Normal Voice Path
 
@@ -48,9 +48,14 @@ Candidate provider path:
 - Tool response remains `BidiGenerateContentToolResponse`.
 - Usage metadata can potentially report visual cost via `image_count` and `video_duration_seconds`.
 
-Repo blockers:
+Current repo follow-up:
 
-- Current frontend Gemini path sends only audio/text JSON and has no media chunk encoder.
+- The post-`38583674` still-frame implementation uses `realtimeInput.video` with `{ mimeType, data }`.
+- `media_chunks[]` / `mediaChunks` remains provider-reference context here, not the current repo's still-frame payload shape.
+
+Original transport-spike repo blockers:
+
+- At the original transport-spike baseline, the frontend Gemini path sent only audio/text JSON and had no media encoder.
 - Current backend `GeminiLiveProviderSession` exposes `send_audio`, `send_text`, and `send_tool_result`, but no image/frame/video methods.
 - No Gemini WebRTC path exists in this repo.
 - Installed Vision Agents exposes generic `video_track`, `video_queue`, and `video_forwarder` helpers, but no wired Gemini WebRTC or screen-share mode in this app.
@@ -233,7 +238,7 @@ Disallowed:
     - Not generally today. DOM-first artifacts need a canvas renderer or safe still-frame renderer.
 
 14. Can visual input be sent as video track, image frame chunks, periodic stills, or not at all?
-    - Current app: not at all. Candidate provider path: media chunks. Recommended next proof: periodic still frames from artifact canvas.
+    - Original transport-spike app: not at all. Provider reference context: media chunks/video under realtime input. Follow-up still-frame implementation: `realtimeInput.video` from an artifact canvas/fixture.
 
 15. What provider billing/usage metadata is available for visual input?
     - Official Gemini Live `UsageMetadata` includes `image_count`, `video_duration_seconds`, and `audio_duration_seconds`.
@@ -285,7 +290,7 @@ Do not proceed directly to continuous media co-review. Use the passed still-fram
 1. Keep normal voice unchanged.
 2. Keep co-review/still-frame/fixture flags default off.
 3. Replace the fixture source with a real artifact canvas/offscreen renderer.
-4. Encode a single frame or explicit user-triggered refresh frames as provider-supported media chunks.
+4. Encode a single frame or explicit user-triggered refresh frames through the current `realtimeInput.video` still-frame payload.
 5. Route exact data questions through the trusted `read_artifact_text` sideband.
 6. Measure setup latency, stop latency, usage metadata, image count, and tool-call behavior.
 
