@@ -9,6 +9,8 @@ type ExitGuardMessage = {
   role: 'user' | 'assistant';
   content: string;
   createdAt: string;
+  source?: 'voice' | 'text';
+  incomplete?: boolean;
 };
 
 type PersistedSessionMessage = ExitGuardMessage & {
@@ -19,6 +21,7 @@ type UseSessionExitOrchestrationParams = {
   isReadOnly: boolean;
   isSophiaResponding: boolean;
   stopStreaming: () => void;
+  stopVoiceTransport?: () => Promise<void> | void;
   setEnding: (isEnding: boolean) => void;
   sessionId: string;
   sessionStartedAt?: string;
@@ -41,6 +44,7 @@ type UseSessionExitOrchestrationParams = {
   userId?: string;
   persistedThreadId?: string;
   threadId?: string;
+  greetingMessageId?: string;
   persistedSessionId?: string;
   responseMode: 'text' | 'voice';
   messages: ExitGuardMessage[];
@@ -52,6 +56,7 @@ export function useSessionExitOrchestration({
   isReadOnly,
   isSophiaResponding,
   stopStreaming,
+  stopVoiceTransport,
   setEnding,
   sessionId,
   sessionStartedAt,
@@ -69,6 +74,7 @@ export function useSessionExitOrchestration({
   userId,
   persistedThreadId,
   threadId,
+  greetingMessageId,
   persistedSessionId,
   responseMode,
   messages,
@@ -93,6 +99,7 @@ export function useSessionExitOrchestration({
     isReadOnly,
     isSophiaResponding,
     stopStreaming,
+    stopVoiceTransport,
     setEnding,
     sessionId,
     sessionStartedAt,
@@ -110,6 +117,7 @@ export function useSessionExitOrchestration({
     userId,
     persistedThreadId,
     threadId,
+    greetingMessageId,
     messages,
   });
 

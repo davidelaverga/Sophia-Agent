@@ -13,18 +13,29 @@ const FALLBACK_TAKEAWAYS = new Set([
   'companion error - fallback response',
 ]);
 
+const NULL_LIKE_ARTIFACT_STRINGS = new Set([
+  'null',
+  'none',
+  'undefined',
+  'n/a',
+]);
+
 function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
+  return typeof value === 'string'
+    && value.trim().length > 0
+    && !NULL_LIKE_ARTIFACT_STRINGS.has(value.trim().toLowerCase());
 }
 
 export function isRealReflection(prompt: string | undefined): boolean {
   if (!prompt) return false;
+  if (NULL_LIKE_ARTIFACT_STRINGS.has(prompt.trim().toLowerCase())) return false;
   return !FALLBACK_REFLECTIONS.has(prompt.trim().toLowerCase());
 }
 
 export function isRealTakeaway(takeaway: string | undefined): boolean {
   if (!takeaway) return false;
   if (takeaway.trim().length === 0) return false;
+  if (NULL_LIKE_ARTIFACT_STRINGS.has(takeaway.trim().toLowerCase())) return false;
   return !FALLBACK_TAKEAWAYS.has(takeaway.trim().toLowerCase());
 }
 
@@ -145,7 +156,7 @@ export function getLiveArtifactStatus(artifacts: RitualArtifacts): {
   reflection: 'waiting' | 'capturing' | 'ready';
   memories: 'waiting' | 'capturing' | 'ready';
 } {
-  const hasReflection = !!artifacts.reflection_candidate?.prompt;
+  const hasReflection = isRealReflection(artifacts.reflection_candidate?.prompt);
   const hasMemories = (artifacts.memory_candidates?.length ?? 0) > 0;
 
   return {
@@ -160,7 +171,7 @@ export function getPersistedArtifactStatus(artifacts: RitualArtifacts): {
   reflection: 'waiting' | 'capturing' | 'ready';
   memories: 'waiting' | 'capturing' | 'ready';
 } {
-  const hasReflection = !!artifacts.reflection_candidate?.prompt;
+  const hasReflection = isRealReflection(artifacts.reflection_candidate?.prompt);
   const hasMemories = (artifacts.memory_candidates?.length ?? 0) > 0;
 
   return {

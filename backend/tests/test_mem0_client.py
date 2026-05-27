@@ -2,6 +2,7 @@
 
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,10 +17,12 @@ def _reset_mem0_client():
     mod._cache.clear()
     mod._client = None
     mod._client_initialized = False
+    mod._client_unavailable_reason = None
     yield
     mod._cache.clear()
     mod._client = None
     mod._client_initialized = False
+    mod._client_unavailable_reason = None
 
 
 class TestSearchMemories:
@@ -29,6 +32,69 @@ class TestSearchMemories:
         with patch.dict("os.environ", {"MEM0_API_KEY": ""}):
             result = search_memories("user1", "test query")
             assert result == []
+
+    def test_search_diagnostics_reports_missing_api_key(self):
+        from deerflow.sophia.mem0_client import search_memories_with_diagnostics
+
+        with patch.dict("os.environ", {"MEM0_API_KEY": ""}):
+            result = search_memories_with_diagnostics("user1", "test query")
+
+        assert result["memories"] == []
+        assert result["provider_status"] == "unavailable"
+        assert result["provider_reason"] == "missing_api_key"
+
+    def test_search_diagnostics_can_raise_provider_error(self):
+        from deerflow.sophia.mem0_client import MemoryProviderSearchError, search_memories_with_diagnostics
+
+        mock_client = MagicMock()
+        mock_client.search.side_effect = RuntimeError("api down")
+        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
+            with pytest.raises(MemoryProviderSearchError) as exc_info:
+                search_memories_with_diagnostics("user1", "query", raise_on_error=True)
+
+        assert exc_info.value.reason == "provider_exception"
+
+    def test_rest_fallback_search_when_sdk_missing(self):
+        from deerflow.sophia.mem0_client import search_memories_with_diagnostics
+
+        class FakeResponse:
+            def raise_for_status(self):  # noqa: ANN202
+                return None
+
+            def json(self):  # noqa: ANN202
+                return [{"id": "m1", "memory": "fact 1", "metadata": {"category": "fact"}}]
+
+        class FakeClient:
+            def __init__(self, **kwargs):  # noqa: ANN003
+                self.kwargs = kwargs
+                self.posts = []
+
+            def __enter__(self):  # noqa: ANN202
+                return self
+
+            def __exit__(self, *_args):  # noqa: ANN202
+                return None
+
+            def post(self, path, json):  # noqa: ANN001, A002, ANN202
+                self.posts.append((path, json))
+                return FakeResponse()
+
+        fake_client = FakeClient()
+        fake_httpx = SimpleNamespace(Client=lambda **_kwargs: fake_client)
+
+        with (
+            patch.dict("os.environ", {"MEM0_API_KEY": "test-key"}),
+            patch("deerflow.sophia.mem0_client._get_client", return_value=None),
+            patch("deerflow.sophia.mem0_client._httpx_module", return_value=fake_httpx),
+        ):
+            result = search_memories_with_diagnostics("user1", "query", limit=3)
+
+        assert result["provider_status"] == "available"
+        assert result["provider_transport"] == "mem0_rest"
+        assert result["memories"][0]["content"] == "fact 1"
+        assert fake_client.posts == [
+            ("/v2/memories/search/", {"query": "query", "filters": {"user_id": "user1"}, "limit": 3})
+        ]
 
     def test_cache_hit_returns_same_results(self):
         from deerflow.sophia.mem0_client import search_memories

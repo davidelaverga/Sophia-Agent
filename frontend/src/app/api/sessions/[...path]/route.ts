@@ -160,3 +160,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ pa
   const { path } = await params;
   return proxyRequest(req, path || []);
 }
+
+export async function PUT(req: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
+  const { path } = await params;
+  return proxyRequest(req, path || []);
+}

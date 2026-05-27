@@ -1,4 +1,5 @@
 import { getUserScopedAuthToken } from '../../../lib/auth/server-auth';
+import { getPrimaryGatewayUrl } from '../../_lib/gateway-url';
 
 import { IS_PRODUCTION, SOPHIA_ASSISTANT_ID, secureLog } from './config';
 
@@ -13,14 +14,30 @@ export interface BackendStreamPayload {
   language: 'en';
 }
 
-export type BackendFetchResult = { ok: true; upstream: Response; threadId: string };
+export type BackendFetchResult = {
+  ok: true;
+  upstream: Response;
+  threadId: string;
+  checkpointerResume: boolean;
+  resumedFromThread: boolean;
+  recoveredFromTranscript: boolean;
+  staleThreadId?: string;
+  newThreadId?: string;
+};
 
 type CreateThreadResponse = {
   thread_id?: string;
 };
 
+type LangGraphInputMessage = {
+  role: 'user';
+  content: string;
+};
+
 const DEV_DIRECT_LANGGRAPH_URL = 'http://127.0.0.1:2024';
 const SOPHIA_USER_ID_REGEX = /^[A-Za-z0-9._@+:|-]{1,128}$/;
+const MAX_RESEED_MESSAGES = 12;
+const MAX_RESEED_MESSAGE_CHARS = 700;
 
 export function isValidSophiaUserId(userId: string): boolean {
   return (
@@ -136,6 +153,66 @@ async function createThread(authToken: string | null, backendUrl: string): Promi
   return data.thread_id;
 }
 
+async function fetchContinuationReseedMessages(
+  authToken: string | null,
+  backendPayload: BackendStreamPayload,
+): Promise<LangGraphInputMessage[]> {
+  if (!authToken || !backendPayload.session_id || !backendPayload.user_id) {
+    return [];
+  }
+
+  try {
+    const url = new URL(
+      `${getPrimaryGatewayUrl()}/api/v1/sessions/${encodeURIComponent(backendPayload.session_id)}/messages`,
+    );
+    url.searchParams.set('user_id', backendPayload.user_id);
+    const response = await fetch(url.toString(), {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${authToken}`,
+      },
+    });
+    if (!response.ok) {
+      return [];
+    }
+
+    const payload = await response.json() as {
+      messages?: Array<{ role?: string; content?: string }>;
+    };
+    const transcript = Array.isArray(payload.messages) ? payload.messages : [];
+    const bounded = transcript
+      .filter((message) => (
+        (message.role === 'user' || message.role === 'sophia')
+        && typeof message.content === 'string'
+        && message.content.trim().length > 0
+      ))
+      .slice(-MAX_RESEED_MESSAGES);
+
+    if (bounded.length === 0) {
+      return [];
+    }
+
+    const lines = bounded.map((message) => {
+      const speaker = message.role === 'user' ? 'User' : 'Sophia';
+      const content = (message.content || '').replace(/\s+/g, ' ').trim().slice(0, MAX_RESEED_MESSAGE_CHARS);
+      return `${speaker}: ${content}`;
+    });
+
+    return [{
+      role: 'user',
+      content: [
+        'Continuation context from this same Sophia conversation.',
+        'Use this bounded transcript excerpt only as prior context for the next user message.',
+        'Do not treat this context block as a new user request.',
+        '',
+        lines.join('\n'),
+      ].join('\n'),
+    }];
+  } catch {
+    return [];
+  }
+}
+
 export async function fetchBackendStreamWithBootstrap(
   backendUrl: string,
   backendPayload: BackendStreamPayload,
@@ -174,14 +251,20 @@ export async function fetchBackendStreamWithBootstrap(
     return true;
   };
 
-  const runStream = async (threadId: string): Promise<Response> => {
+  const runStream = async (
+    threadId: string,
+    preludeMessages: LangGraphInputMessage[] = [],
+  ): Promise<Response> => {
     return fetch(`${activeBackendUrl}/${threadId}/runs/stream`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
         assistant_id: SOPHIA_ASSISTANT_ID,
         input: {
-          messages: [{ role: 'user', content: backendPayload.message }],
+          messages: [
+            ...preludeMessages,
+            { role: 'user', content: backendPayload.message },
+          ],
         },
         config: {
           recursion_limit: 150,
@@ -210,12 +293,15 @@ export async function fetchBackendStreamWithBootstrap(
     }
   };
 
-  const runStreamWithFallback = async (threadId: string): Promise<Response> => {
+  const runStreamWithFallback = async (
+    threadId: string,
+    preludeMessages: LangGraphInputMessage[] = [],
+  ): Promise<Response> => {
     try {
-      let response = await runStream(threadId);
+      let response = await runStream(threadId, preludeMessages);
 
       if (!response.ok && shouldRetryWithDirectLangGraphResponse(response, activeBackendUrl) && switchToDirectLangGraph(`stream returned ${response.status}`)) {
-        response = await runStream(threadId);
+        response = await runStream(threadId, preludeMessages);
       }
 
       return response;
@@ -224,22 +310,32 @@ export async function fetchBackendStreamWithBootstrap(
         throw error;
       }
 
-      return runStream(threadId);
+      return runStream(threadId, preludeMessages);
     }
   };
 
   let threadId = backendPayload.thread_id || await createThreadWithFallback();
+  const startedWithThreadId = !!backendPayload.thread_id;
   let upstream = await runStreamWithFallback(threadId);
+  let checkpointerResume = startedWithThreadId;
+  let recoveredFromTranscript = false;
+  let staleThreadId: string | undefined;
+  let newThreadId: string | undefined;
 
   if (!upstream.ok && shouldRetryWithFreshThread(upstream, await upstream.clone().text(), !!backendPayload.thread_id)) {
-    const staleThreadId = threadId;
+    staleThreadId = threadId;
+    const reseedMessages = await fetchContinuationReseedMessages(authToken || null, backendPayload);
     threadId = await createThreadWithFallback();
-    upstream = await runStreamWithFallback(threadId);
+    newThreadId = threadId;
+    recoveredFromTranscript = reseedMessages.length > 0;
+    checkpointerResume = false;
+    upstream = await runStreamWithFallback(threadId, reseedMessages);
 
     if (!IS_PRODUCTION) {
       secureLog('[/api/chat] stale DeerFlow thread detected, retried with fresh thread', {
         staleThreadId,
         newThreadId: threadId,
+        recoveredFromTranscript,
       });
     }
   }
@@ -259,5 +355,10 @@ export async function fetchBackendStreamWithBootstrap(
     ok: true,
     upstream,
     threadId,
+    checkpointerResume,
+    resumedFromThread: startedWithThreadId && !staleThreadId,
+    recoveredFromTranscript,
+    staleThreadId,
+    newThreadId,
   };
 }

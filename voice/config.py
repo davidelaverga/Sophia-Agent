@@ -7,11 +7,29 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from voice.realtime.gemini_live import (
+    DEFAULT_GEMINI_LIVE_MODEL,
+    GEMINI_LIVE_ADAPTER_FEATURE_FLAG,
+    GEMINI_LIVE_VOICE_NAME_ENV,
+)
+from voice.realtime.openai_realtime import (
+    DEFAULT_OPENAI_REALTIME_MODEL,
+    OPENAI_REALTIME_ADAPTER_FEATURE_FLAG,
+)
+from voice.realtime.runtime_selection import (
+    EXPERIMENTAL_RUNTIME_FEATURE_FLAG,
+    GEMINI_PRODUCTION_ROUTE_FEATURE_FLAG,
+    VoiceRuntimeMode,
+    VoiceRuntimeSelection,
+    build_voice_runtime_selection,
+    parse_voice_runtime_mode,
+    validate_active_voice_runtime_mode,
+)
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 VOICE_DIR = ROOT_DIR / "voice"
 
-for env_file in (VOICE_DIR / ".env", ROOT_DIR / ".env"):
+for env_file in (VOICE_DIR / ".env", ROOT_DIR / ".env", ROOT_DIR / "backend" / ".env"):
     if env_file.exists():
         load_dotenv(env_file, override=False)
 
@@ -19,6 +37,8 @@ for env_file in (VOICE_DIR / ".env", ROOT_DIR / ".env"):
 SUPPORTED_BACKEND_MODES = {"shim", "deerflow"}
 SUPPORTED_PLATFORMS = {"voice", "text", "ios_voice"}
 SUPPORTED_SHIM_FAILURE_STAGES = {"ready", "request", "stream", "artifact", "timeout"}
+OPENAI_REALTIME_API_KEY_ENV = "OPENAI_API_KEY"
+GEMINI_LIVE_API_KEY_ENVS = ("GOOGLE_API_KEY", "GEMINI_API_KEY")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -55,6 +75,14 @@ def _env_optional(name: str) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+def _env_present(name: str) -> bool:
+    return bool((os.getenv(name) or "").strip())
+
+
+def _env_any_present(names: tuple[str, ...]) -> bool:
+    return any(_env_present(name) for name in names)
 
 
 @dataclass(frozen=True)
@@ -96,6 +124,15 @@ class VoiceSettings:
     rhythm_base_min_ms: int
     rhythm_base_max_ms: int
     same_turn_repeat_debounce_ms: int
+    voice_runtime_mode: str = VoiceRuntimeMode.LEGACY_CASCADE.value
+    experimental_realtime_runtime_enabled: bool = False
+    realtime_shadow_parity_enabled: bool = False
+    openai_realtime_adapter_enabled: bool = False
+    openai_realtime_model: str = DEFAULT_OPENAI_REALTIME_MODEL
+    gemini_live_adapter_enabled: bool = False
+    gemini_production_route_enabled: bool = False
+    gemini_live_model: str = DEFAULT_GEMINI_LIVE_MODEL
+    gemini_live_voice_name: str | None = None
 
     @property
     def llm_label(self) -> str:
@@ -112,6 +149,20 @@ class VoiceSettings:
             "Do not sound clinical, robotic, or like a generic assistant."
         )
 
+    @property
+    def selected_voice_runtime_mode(self) -> VoiceRuntimeMode:
+        return parse_voice_runtime_mode(self.voice_runtime_mode)
+
+    @property
+    def voice_runtime_selection(self) -> VoiceRuntimeSelection:
+        return build_voice_runtime_selection(
+            mode=self.voice_runtime_mode,
+            shadow_parity_enabled=self.realtime_shadow_parity_enabled,
+            experimental_runtime_enabled=self.experimental_realtime_runtime_enabled,
+            openai_realtime_adapter_enabled=self.openai_realtime_adapter_enabled,
+            gemini_live_adapter_enabled=self.gemini_live_adapter_enabled,
+        )
+
     def validate(self) -> None:
         if self.backend_mode not in SUPPORTED_BACKEND_MODES:
             supported = ", ".join(sorted(SUPPORTED_BACKEND_MODES))
@@ -125,13 +176,29 @@ class VoiceSettings:
                 f"Unsupported SOPHIA_PLATFORM={self.platform!r}. Use one of: {supported}."
             )
 
+        selected_runtime_mode = validate_active_voice_runtime_mode(
+            self.voice_runtime_mode,
+            experimental_runtime_enabled=self.experimental_realtime_runtime_enabled,
+            openai_realtime_adapter_enabled=self.openai_realtime_adapter_enabled,
+            gemini_live_adapter_enabled=self.gemini_live_adapter_enabled,
+            shadow_parity_enabled=self.realtime_shadow_parity_enabled,
+        )
+
         required_env = [
             "STREAM_API_KEY",
             "STREAM_API_SECRET",
-            "DEEPGRAM_API_KEY",
-            "CARTESIA_API_KEY",
         ]
-        missing = [name for name in required_env if not os.getenv(name)]
+        if selected_runtime_mode == VoiceRuntimeMode.LEGACY_CASCADE:
+            required_env.extend(["DEEPGRAM_API_KEY", "CARTESIA_API_KEY"])
+        if selected_runtime_mode == VoiceRuntimeMode.OPENAI_REALTIME:
+            required_env.append(OPENAI_REALTIME_API_KEY_ENV)
+
+        missing = [name for name in required_env if not _env_present(name)]
+        if (
+            selected_runtime_mode == VoiceRuntimeMode.GEMINI_LIVE
+            and not _env_any_present(GEMINI_LIVE_API_KEY_ENVS)
+        ):
+            missing.append("GOOGLE_API_KEY or GEMINI_API_KEY")
         if missing:
             joined = ", ".join(missing)
             raise ValueError(f"Missing required voice environment variables: {joined}.")
@@ -235,6 +302,39 @@ def get_settings() -> VoiceSettings:
         same_turn_repeat_debounce_ms=_env_int(
             "SOPHIA_SAME_TURN_REPEAT_DEBOUNCE_MS", 1200
         ),
+        voice_runtime_mode=_env_first(
+            ("SOPHIA_VOICE_RUNTIME_MODE",),
+            VoiceRuntimeMode.LEGACY_CASCADE.value,
+        ),
+        experimental_realtime_runtime_enabled=_env_bool(
+            EXPERIMENTAL_RUNTIME_FEATURE_FLAG,
+            False,
+        ),
+        realtime_shadow_parity_enabled=_env_bool(
+            "SOPHIA_VOICE_REALTIME_SHADOW_PARITY_ENABLED",
+            False,
+        ),
+        openai_realtime_adapter_enabled=_env_bool(
+            OPENAI_REALTIME_ADAPTER_FEATURE_FLAG,
+            False,
+        ),
+        openai_realtime_model=os.getenv(
+            "SOPHIA_OPENAI_REALTIME_MODEL",
+            DEFAULT_OPENAI_REALTIME_MODEL,
+        ).strip(),
+        gemini_live_adapter_enabled=_env_bool(
+            GEMINI_LIVE_ADAPTER_FEATURE_FLAG,
+            False,
+        ),
+        gemini_production_route_enabled=_env_bool(
+            GEMINI_PRODUCTION_ROUTE_FEATURE_FLAG,
+            False,
+        ),
+        gemini_live_model=os.getenv(
+            "SOPHIA_GEMINI_LIVE_MODEL",
+            DEFAULT_GEMINI_LIVE_MODEL,
+        ).strip(),
+        gemini_live_voice_name=_env_optional(GEMINI_LIVE_VOICE_NAME_ENV),
     )
     settings.validate()
     return settings

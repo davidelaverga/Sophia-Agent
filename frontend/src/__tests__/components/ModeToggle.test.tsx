@@ -9,6 +9,7 @@ import { ModeToggle } from "../../app/components/ModeToggle"
 const mockSetMode = vi.fn()
 const mockSetManualOverride = vi.fn()
 let mockMode = "voice" as "voice" | "text"
+const mockHaptic = vi.fn()
 
 vi.mock("../../app/stores/ui-store", () => ({
   useUiStore: (selector: (s: Record<string, unknown>) => unknown) =>
@@ -16,9 +17,17 @@ vi.mock("../../app/stores/ui-store", () => ({
 }))
 
 let mockCanSwitchToVoice = { canSwitch: true, message: undefined as string | undefined }
+let mockCanSwitchToChat = { canSwitch: true, message: undefined as string | undefined }
 
 vi.mock("../../app/hooks/useModeSwitch", () => ({
-  useModeSwitch: () => ({ canSwitchToVoice: mockCanSwitchToVoice }),
+  useModeSwitch: () => ({
+    canSwitchToVoice: mockCanSwitchToVoice,
+    canSwitchToChat: mockCanSwitchToChat,
+  }),
+}))
+
+vi.mock("../../app/hooks/useHaptics", () => ({
+  haptic: (...args: unknown[]) => mockHaptic(...args),
 }))
 
 // --- Tests -----------------------------------------------------------------
@@ -28,6 +37,7 @@ describe("ModeToggle", () => {
     vi.clearAllMocks()
     mockMode = "voice"
     mockCanSwitchToVoice = { canSwitch: true, message: undefined }
+    mockCanSwitchToChat = { canSwitch: true, message: undefined }
   })
 
   it("renders voice and text tabs", () => {
@@ -36,11 +46,73 @@ describe("ModeToggle", () => {
     expect(screen.getByRole("tab", { name: /text/i })).toBeInTheDocument()
   })
 
+  it("does not render a standalone new insight pill label", () => {
+    render(<ModeToggle hasNewInsight={true} showInsightIndicator={true} />)
+    expect(screen.queryByText(/^new insight$/i)).not.toBeInTheDocument()
+  })
+
   it("highlights the active tab", () => {
     render(<ModeToggle />)
     const voiceTab = screen.getByRole("tab", { name: /voice/i })
     expect(voiceTab).toHaveAttribute("aria-selected", "true")
     expect(screen.getByRole("tab", { name: /text/i })).toHaveAttribute("aria-selected", "false")
+  })
+
+  it("renders the embedded indicator in the active state when new insight is available", () => {
+    render(<ModeToggle hasNewInsight={true} showInsightIndicator={true} />)
+    expect(screen.getByTestId("mode-toggle-insight-indicator")).toHaveAttribute("data-state", "active")
+  })
+
+  it("exposes the visible insight indicator as a panel open button", () => {
+    render(<ModeToggle hasNewInsight={true} showInsightIndicator={true} onInsightClick={vi.fn()} />)
+    expect(screen.getByRole("button", { name: /open new insights panel/i })).toBeInTheDocument()
+  })
+
+  it("renders the embedded indicator in the inactive state when insights exist but none are new", () => {
+    render(<ModeToggle showInsightIndicator={true} />)
+    expect(screen.getByTestId("mode-toggle-insight-indicator")).toHaveAttribute("data-state", "inactive")
+  })
+
+  it("hides the embedded indicator when no insight state is available", () => {
+    render(<ModeToggle />)
+    expect(screen.getByTestId("mode-toggle-insight-indicator")).toHaveAttribute("data-state", "hidden")
+  })
+
+  it("opens the insight panel when the indicator is clicked", async () => {
+    const user = userEvent.setup()
+    const onInsightClick = vi.fn()
+    render(<ModeToggle showInsightIndicator={true} onInsightClick={onInsightClick} />)
+
+    await user.click(screen.getByRole("button", { name: /open insights panel/i }))
+
+    expect(onInsightClick).toHaveBeenCalledTimes(1)
+    expect(mockSetMode).not.toHaveBeenCalled()
+  })
+
+  it("opens the insight panel with Enter and Space", async () => {
+    const user = userEvent.setup()
+    const onInsightClick = vi.fn()
+    render(<ModeToggle showInsightIndicator={true} onInsightClick={onInsightClick} />)
+    const insightButton = screen.getByRole("button", { name: /open insights panel/i })
+
+    insightButton.focus()
+    await user.keyboard("{Enter}")
+    await user.keyboard(" ")
+
+    expect(onInsightClick).toHaveBeenCalledTimes(2)
+  })
+
+  it("does not open the insight panel when no insight indicator is visible", async () => {
+    const user = userEvent.setup()
+    const onInsightClick = vi.fn()
+    render(<ModeToggle onInsightClick={onInsightClick} />)
+    const indicator = screen.getByTestId("mode-toggle-insight-indicator")
+    const indicatorButton = indicator.closest("button")
+
+    expect(indicatorButton).toBeDisabled()
+    expect(screen.queryByRole("button", { name: /open insights panel/i })).not.toBeInTheDocument()
+    await user.click(indicator)
+    expect(onInsightClick).not.toHaveBeenCalled()
   })
 
   it("calls setMode when a different tab is clicked", async () => {
@@ -59,6 +131,7 @@ describe("ModeToggle", () => {
   })
 
   it("disables voice tab when canSwitchToVoice is false", async () => {
+    mockMode = "text"
     mockCanSwitchToVoice = { canSwitch: false, message: "Voice is busy" }
     const user = userEvent.setup()
     render(<ModeToggle />)
@@ -69,8 +142,20 @@ describe("ModeToggle", () => {
   })
 
   it("shows tooltip on disabled voice tab", () => {
+    mockMode = "text"
     mockCanSwitchToVoice = { canSwitch: false, message: "Voice is busy" }
     render(<ModeToggle />)
     expect(screen.getByRole("tab", { name: /voice/i })).toHaveAttribute("title", "Voice is busy")
+  })
+
+  it("disables text tab when canSwitchToChat is false", async () => {
+    mockMode = "voice"
+    mockCanSwitchToChat = { canSwitch: false, message: "Text is busy" }
+    const user = userEvent.setup()
+    render(<ModeToggle />)
+    const textTab = screen.getByRole("tab", { name: /text/i })
+    expect(textTab).toBeDisabled()
+    await user.click(textTab)
+    expect(mockSetMode).not.toHaveBeenCalled()
   })
 })

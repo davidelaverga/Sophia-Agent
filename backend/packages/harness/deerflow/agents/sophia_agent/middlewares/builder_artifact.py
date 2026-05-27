@@ -20,7 +20,7 @@ from typing import Any, NotRequired, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, hook_config
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
@@ -146,6 +146,10 @@ class BuilderArtifactState(AgentState):
     # we route directly to the hard-ceiling fallback instead of letting
     # the model retry into the LangGraph recursion limit.
     builder_consecutive_empty_emit_rejections: NotRequired[int]
+    # Phase 2F.3: idempotency flag. Set once we've injected a path-
+    # correction HumanMessage after N consecutive write_file_tool errors,
+    # so we don't repeat the correction on every subsequent before_model.
+    builder_path_correction_emitted: NotRequired[bool]
 
 
 class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
@@ -813,6 +817,180 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             force_reason,
         )
         return self._forced_write_tool_choice()
+
+    # Phase 2F.3: after N consecutive write_file_tool errors, inject a
+    # corrective HumanMessage so the model breaks out of the loop and
+    # writes to the canonical /mnt/user-data/outputs/ path. The threshold
+    # is intentionally tight (3) so we recover fast; idempotency is
+    # tracked via ``builder_path_correction_emitted`` in state.
+    _PATH_CORRECTION_ERROR_THRESHOLD = 3
+    _PATH_CORRECTION_LOOKBACK = 8  # cap scan range so we don't walk huge histories
+
+    @staticmethod
+    def _count_trailing_write_file_errors(messages: list, lookback: int) -> int:
+        """Count trailing ToolMessages from write_file_tool whose content
+        starts with "Error". Stops at the first non-error / non-write_file
+        ToolMessage so we only count an UNBROKEN trailing streak.
+
+        Other message types (AIMessage, HumanMessage) between the
+        trailing tool results are tolerated — we walk backwards through
+        the most recent ToolMessages, ignoring intervening ai/human msgs,
+        and count only the consecutive write_file ones.
+        """
+        count = 0
+        scanned = 0
+        for msg in reversed(messages):
+            scanned += 1
+            if scanned > lookback:
+                break
+            if not isinstance(msg, ToolMessage):
+                continue
+            name = getattr(msg, "name", None) or ""
+            if name not in ("write_file", "write_file_tool"):
+                # Non-write_file tool result — streak broken.
+                return count
+            content = getattr(msg, "content", None)
+            if isinstance(content, str) and content.startswith("Error"):
+                count += 1
+            else:
+                return count
+        return count
+
+    def _maybe_inject_path_correction(
+        self, state: BuilderArtifactState
+    ) -> dict[str, Any] | None:
+        """Phase 2F.3: detect ``write_file_tool`` error loops and inject a
+        single corrective HumanMessage so the model recovers.
+
+        Production failure 2026-05-22 19:54-20:14 UTC: builder spent 20+
+        minutes retrying write_file_tool with bare filenames (test.md,
+        test2.md, etc.), each rejected with PermissionError. The model
+        kept retrying with similar bad names. Phase 2F.2 fixes the bare-
+        filename case via auto-prefix; Phase 2F.3 is the defensive
+        escape hatch for any residual write_file-error loop.
+
+        Idempotent: once we emit the correction (tracked via
+        ``builder_path_correction_emitted``), don't emit again on this
+        run. The model has already been told; further repetition adds
+        noise without value.
+        """
+        if state.get("builder_path_correction_emitted"):
+            return None
+        messages = state.get("messages") or []
+        count = self._count_trailing_write_file_errors(
+            messages, self._PATH_CORRECTION_LOOKBACK
+        )
+        if count < self._PATH_CORRECTION_ERROR_THRESHOLD:
+            return None
+        logger.warning(
+            "[BuilderArtifact] %d consecutive write_file_tool errors detected "
+            "— injecting path-correction directive (Phase 2F.3 escape hatch).",
+            count,
+        )
+        correction = HumanMessage(
+            content=(
+                "[Sophia/path-correction directive]\n"
+                f"Your last {count} write_file_tool calls all failed with "
+                "errors. This usually means the path you used is not under "
+                "/mnt/user-data/outputs/.\n\n"
+                "STOP retrying with the same kind of path. Your NEXT "
+                "write_file_tool call MUST use an absolute path starting "
+                "with `/mnt/user-data/outputs/`, e.g. "
+                "`/mnt/user-data/outputs/my-document.md`. If you only had a "
+                "bare filename like `report.md`, prepend "
+                "`/mnt/user-data/outputs/` to it.\n\n"
+                "After the file is on disk under /mnt/user-data/outputs/, "
+                "call emit_builder_artifact with that exact path to deliver "
+                "the artifact and end this run."
+            )
+        )
+        return {
+            "messages": [correction],
+            "builder_path_correction_emitted": True,
+        }
+
+    @staticmethod
+    def _is_post_interrupt_update(messages: list) -> bool:
+        """Detect whether the latest HumanMessage in ``messages`` arrived
+        AFTER the builder had already started working — the signal that
+        ``update_async_task`` interrupted an in-flight run and appended a
+        new user message via deepagents' ``multitask_strategy="interrupt"``.
+
+        Heuristic: the latest message is a ``HumanMessage`` AND somewhere
+        earlier in the conversation there is an ``AIMessage`` carrying
+        ``tool_calls``. That AIMessage proves the builder did work (made
+        tool calls) before the new user instruction landed.
+
+        This is a one-shot trigger: as soon as the model responds, the
+        latest message becomes an AIMessage and the heuristic stops
+        matching for that turn-cycle. The caller resets the counter once,
+        then the normal counter-increment logic runs unchanged.
+        """
+        if not messages:
+            return False
+        latest = messages[-1]
+        if not isinstance(latest, HumanMessage):
+            return False
+        # Look backward for any AIMessage with tool_calls (builder did
+        # real work before this new instruction).
+        for msg in reversed(messages[:-1]):
+            if isinstance(msg, AIMessage):
+                tool_calls = getattr(msg, "tool_calls", None) or []
+                if tool_calls:
+                    return True
+        return False
+
+    def _maybe_reset_turn_budget(
+        self, state: BuilderArtifactState
+    ) -> dict[str, Any] | None:
+        """Phase 2E.1: when an interrupted builder run resumes with a new
+        user instruction, reset ``builder_non_artifact_turns`` to 0 so the
+        post-update work gets a fresh turn budget. Without this, the
+        pre-interrupt research turns count against the post-update writing
+        budget and the builder hits the hard ceiling without producing a
+        deliverable (production failure 2026-05-21 21:18-21:46 UTC).
+        """
+        messages = state.get("messages") or []
+        if not self._is_post_interrupt_update(messages):
+            return None
+        current = int(state.get("builder_non_artifact_turns", 0) or 0)
+        if current <= 0:
+            return None  # Nothing to reset — fresh run.
+        logger.info(
+            "[BuilderArtifact] post-interrupt update detected — resetting "
+            "builder_non_artifact_turns: %d → 0 (fresh budget for the update)",
+            current,
+        )
+        return {"builder_non_artifact_turns": 0}
+
+    def _combined_before_model_updates(
+        self, state: BuilderArtifactState
+    ) -> dict | None:
+        """Run all before_model state-update probes (Phase 2E.1 turn-budget
+        reset + Phase 2F.3 path-correction injection) and merge their
+        returns into a single update dict for the langgraph reducer."""
+        update: dict[str, Any] = {}
+        reset = self._maybe_reset_turn_budget(state)
+        if isinstance(reset, dict):
+            update.update(reset)
+        correction = self._maybe_inject_path_correction(state)
+        if isinstance(correction, dict):
+            # Merge: ``messages`` reducer concatenates, scalar flags overwrite.
+            for key, value in correction.items():
+                update[key] = value
+        return update or None
+
+    @override
+    def before_model(
+        self, state: BuilderArtifactState, runtime: Runtime | None = None
+    ) -> dict | None:
+        return self._combined_before_model_updates(state)
+
+    @override
+    async def abefore_model(
+        self, state: BuilderArtifactState, runtime: Runtime | None = None
+    ) -> dict | None:
+        return self._combined_before_model_updates(state)
 
     @override
     def wrap_model_call(

@@ -21,4 +21,21 @@ describe('session page exit UI contract', () => {
     expect(source).toContain('handleStartDebrief');
     expect(source).toContain('handleSkipToRecap');
   });
+
+  it('wires the session mode toggle to the embedded insight indicator instead of the standalone pill', () => {
+    const source = readAppFile('app/session/page.tsx');
+
+    expect(source).toContain('showInsightIndicator={hasArtifactsContent || hasNewArtifacts}');
+    expect(source).toContain('hasNewInsight={hasNewArtifacts}');
+    expect(source).toContain('onInsightClick={handleOpenArtifactsPanel}');
+    expect(source).not.toContain('<ArtifactToggleIcon');
+  });
+
+  it('mounts the Coreview fixture launcher directly in the /session root', () => {
+    const source = readAppFile('app/session/page.tsx');
+
+    expect(source).toContain('<CoreviewFixtureLauncher');
+    expect(source).toContain('isVisible={coReviewFixtureEnabled}');
+    expect(source).toContain('coReviewTransport={coReviewTransport}');
+  });
 });

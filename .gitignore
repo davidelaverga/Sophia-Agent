@@ -20,7 +20,16 @@ venv/
 
 # Environment variables
 .env
+.env.*
 .envtest
+backend/.env*
+frontend/.env*
+voice/.env*
+!.env.example
+!backend/.env.example
+!frontend/.env.example
+!frontend/.env.local.example
+!voice/.env.example
 
 # Configuration files
 config.yaml
@@ -46,12 +55,30 @@ skills/custom/*
 logs/
 log/
 
+# Sophia local runtime data. Existing tracked fixtures remain tracked; these
+# patterns keep new local sessions, recaps, and traces out of normal status.
+users/**/recaps/*.json
+users/**/traces/*.json
+backend/users/**/sessions/*.json
+backend/users/**/transcripts/*.json
+
+# Sophia voice local telemetry exports
+**/sophia-voice-telemetry-report-*.json
+**/sophia-voice-telemetry-report-*.zip
+
 # Local git hooks (keep only on this machine, do not push)
 .githooks/
 
 # pnpm
 .pnpm-store
+frontend/node_modules/
 sandbox_image_cache.tar
+
+# Repo-local validation worktrees
+.worktrees/
+
+# Voice local virtual environment
+voice/.venv/
 
 # ignore the legacy `web` folder
 web/

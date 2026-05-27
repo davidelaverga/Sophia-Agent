@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from langgraph.types import Command
 
 
@@ -313,3 +314,136 @@ def test_async_subagent_middleware_after_builder_command(monkeypatch):
     assert middleware_types.index("BuilderCommandMiddleware") < middleware_types.index(
         "AsyncSubAgentMiddleware"
     ), "AsyncSubAgentMiddleware must sit AFTER BuilderCommandMiddleware"
+
+
+# ---------- lifecycle-tool discipline (companion system prompt) -------------
+
+
+_LIFECYCLE_TOOLS_WITH_ACK = [
+    ("start_builder_task", "Starting the build now"),
+    ("update_async_task", "updating the build"),
+    ("check_async_task", "Let me check on it"),
+    ("cancel_async_task", "cancelling the build"),
+    ("list_async_tasks", "Pulling up your in-flight"),
+]
+
+
+@pytest.mark.parametrize("tool_name,ack_marker", _LIFECYCLE_TOOLS_WITH_ACK)
+def test_async_builder_system_prompt_covers_all_five_lifecycle_tools_with_ack_example(
+    tool_name, ack_marker
+):
+    """The companion's async-subagent preamble must teach every lifecycle
+    tool with at least one cue-phrase line AND an ack example so the model
+    has full coverage of intent → tool → ack."""
+    module = importlib.import_module("deerflow.agents.sophia_agent.agent")
+    prompt = module._ASYNC_BUILDER_SYSTEM_PROMPT
+    assert tool_name in prompt, f"{tool_name} missing from _ASYNC_BUILDER_SYSTEM_PROMPT"
+    assert ack_marker in prompt, f"ack marker '{ack_marker}' missing for {tool_name}"
+
+
+def test_async_builder_system_prompt_has_stale_status_and_full_task_id_rules():
+    """deepagents docs flag stale-status reporting and task_id truncation
+    as top failure modes; both rules must be present in the preamble."""
+    module = importlib.import_module("deerflow.agents.sophia_agent.agent")
+    prompt = module._ASYNC_BUILDER_SYSTEM_PROMPT.lower()
+    assert "stale" in prompt
+    assert "full task_id" in prompt or "full `task_id`" in prompt
+
+
+def test_async_builder_system_prompt_has_update_failure_handling():
+    """If update_async_task itself errors, the companion must NOT fall back
+    to start_builder_task — the preamble must say so explicitly."""
+    module = importlib.import_module("deerflow.agents.sophia_agent.agent")
+    prompt = module._ASYNC_BUILDER_SYSTEM_PROMPT
+    assert "update_async_task" in prompt
+    assert "error" in prompt.lower()
+    # Critical anti-pattern guard.
+    assert "do not call" in prompt.lower() or "do NOT call" in prompt
+    assert "start_builder_task" in prompt
+
+
+def test_artifact_instructions_lists_ack_example_per_lifecycle_tool():
+    """Read the markdown skill file from disk and confirm every lifecycle
+    tool has its ack example so the model emits the right next_step /
+    takeaway."""
+    from deerflow.agents.sophia_agent.paths import SKILLS_PATH
+
+    text = (SKILLS_PATH / "artifact_instructions.md").read_text(encoding="utf-8")
+    for tool_name, ack_marker in _LIFECYCLE_TOOLS_WITH_ACK:
+        assert tool_name in text, f"{tool_name} missing from artifact_instructions.md"
+        assert ack_marker in text, f"ack '{ack_marker}' missing from artifact_instructions.md"
+
+
+def test_update_async_task_wrapped_with_terminal_guard(monkeypatch):
+    """Phase 2B chain-membership invariant: the native deepagents
+    ``update_async_task`` must be filtered from the middleware's tool list
+    and replaced by the Phase 2B terminal-thread-guard wrapper.
+
+    A future refactor that drops the wrapper would silently regress to the
+    behaviour that caused the 2026-05-20 19:53–19:57 production dangling-tool
+    loop — this test pins the wrap in place.
+    """
+    companion_module = importlib.import_module("deerflow.agents.sophia_agent.agent")
+    captured: dict = {}
+    _stub_companion_for_chain_inspection(monkeypatch, companion_module, captured)
+
+    companion_module.make_sophia_agent({"configurable": {"user_id": "user_123"}})
+
+    async_middleware = _find_async_middleware(captured["middleware"])
+    update_tools = [
+        t for t in getattr(async_middleware, "tools", [])
+        if getattr(t, "name", None) == "update_async_task"
+    ]
+    # Exactly one update_async_task tool — the wrapper, not the native.
+    assert len(update_tools) == 1, (
+        f"Expected exactly one update_async_task tool; found {len(update_tools)}"
+    )
+    wrapper = update_tools[0]
+    # The wrapper's func / coroutine must come from the Phase 2B module,
+    # not from deepagents.middleware.async_subagents.
+    func_module = (getattr(wrapper.func, "__module__", None)
+                   or getattr(wrapper.coroutine, "__module__", None) or "")
+    assert "update_async_task_wrapper" in func_module, (
+        f"update_async_task tool is not the Phase 2B wrapper "
+        f"(func module={func_module!r}). Wrapper must shadow the native dispatch."
+    )
+
+
+def test_async_builder_system_prompt_names_terminal_redirect_rule():
+    """The system-prompt preamble must explicitly tell the model that
+    update_async_task is for ACTIVE builds only, and that terminal builds
+    require start_builder_task with a brief that references the prior
+    artifact."""
+    module = importlib.import_module("deerflow.agents.sophia_agent.agent")
+    prompt = module._ASYNC_BUILDER_SYSTEM_PROMPT
+    # Active-only language for update_async_task.
+    assert "RUNNING" in prompt or "running" in prompt.lower()
+    # Terminal-status language.
+    assert "TERMINAL" in prompt or "terminal" in prompt.lower()
+    # The directive: terminal modify cues → start_builder_task with
+    # prior-artifact-referencing brief.
+    assert "start_builder_task" in prompt
+    assert "prior artifact" in prompt.lower() or "previous version" in prompt.lower()
+
+
+def test_lifecycle_tool_observer_middleware_registered_in_companion_chain(monkeypatch):
+    """The observer middleware emits one structured log per lifecycle-tool
+    call. Chain-membership test so a future refactor cannot silently drop
+    the production observability hook.
+    """
+    companion_module = importlib.import_module("deerflow.agents.sophia_agent.agent")
+    captured: dict = {}
+    _stub_companion_for_chain_inspection(monkeypatch, companion_module, captured)
+
+    companion_module.make_sophia_agent({"configurable": {"user_id": "user_123"}})
+
+    middleware_types = [type(mw).__name__ for mw in captured["middleware"]]
+    assert "LifecycleToolObserverMiddleware" in middleware_types
+    # Must sit between BuildAwarenessMiddleware and ArtifactMiddleware so the
+    # active-build block shapes the turn first and emit_artifact comes after.
+    assert middleware_types.index("BuildAwarenessMiddleware") < middleware_types.index(
+        "LifecycleToolObserverMiddleware"
+    )
+    assert middleware_types.index("LifecycleToolObserverMiddleware") < middleware_types.index(
+        "ArtifactMiddleware"
+    )

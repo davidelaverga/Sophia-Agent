@@ -677,6 +677,15 @@ async def _dispatch_via_asgi(
             # ``runtime.config["configurable"]``. State carries the
             # canonical value (see ``delegation_with_parent`` above).
             "parent_thread_id": parent_thread_id,
+            # Codex P1 review 2026-05-22: explicitly populate
+            # ``graph_id`` so tools running inside the builder run can
+            # gate behaviour by it (see
+            # ``deerflow.sandbox.tools._is_builder_runtime_context``).
+            # langgraph_api propagates this server-side for logging
+            # but does NOT guarantee it lands in
+            # ``runtime.config["configurable"]`` at tool-execution
+            # time — explicit is safe.
+            "graph_id": _ASYNC_BUILDER_AGENT_NAME,
         }
     }
     if parent_model:
@@ -767,7 +776,24 @@ async def _start_builder_task_impl(
             "[Builder] duplicate start_builder_task suppressed: task_id=%s",
             existing_task_id,
         )
-        return f"A builder task is already in progress (task_id={existing_task_id}). Wait for it to complete or call check_async_task to see status."
+        return (
+            f"A builder task is already in progress (task_id={existing_task_id}). "
+            f"DO NOT call start_builder_task again — duplicate launches are rejected.\n"
+            f"Pick the lifecycle tool that matches the user's intent, then emit_artifact "
+            f"ONCE with a short ack and end the turn:\n"
+            f"- Modify scope (add/remove/change section, length, format): "
+            f"update_async_task(task_id=\"{existing_task_id}\", message=<delta as builder instructions>) "
+            f"→ ack like \"Got it, updating the build to include X.\"\n"
+            f"- Status / progress check: check_async_task(task_id=\"{existing_task_id}\") "
+            f"→ ack like \"Let me check on it now.\"\n"
+            f"- User wants to stop the build: cancel_async_task(task_id=\"{existing_task_id}\") "
+            f"→ ack like \"Got it, cancelling the build now.\"\n"
+            f"- User referenced multiple tasks: list_async_tasks() "
+            f"(no status_filter — pending and interrupted are also active; let the "
+            f"caller see all builds) → ack like \"Pulling up your in-flight builds.\"\n"
+            f"Use the FULL task_id verbatim — never truncate. Do not respond in plain text "
+            f"without calling one of these. Never chain two lifecycle tools on the same turn."
+        )
 
     companion_artifact, artifact_source, artifact_diagnostics = _resolve_companion_artifact(state)
     user_id, user_id_source, user_id_diagnostics = _resolve_user_id(

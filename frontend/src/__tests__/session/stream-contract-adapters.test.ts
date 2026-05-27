@@ -64,6 +64,35 @@ describe('stream-contract-adapters', () => {
     });
   });
 
+  it('unwraps nested live voice artifact envelopes before artifact ingestion', () => {
+    const payload = parseArtifactsPayload({
+      artifact: {
+        session_goal: 'Stay grounded in the voice session.',
+        takeaway: 'The user stayed with the hard part.',
+        reflection: 'What changed when you named it?',
+        tone_estimate: 2,
+        voice_speed: 'gentle',
+      },
+    });
+
+    expect(payload).toEqual({
+      session_goal: 'Stay grounded in the voice session.',
+      takeaway: 'The user stayed with the hard part.',
+      reflection: 'What changed when you named it?',
+      tone_estimate: 2,
+      voice_speed: 'gentle',
+    });
+  });
+
+  it('unwraps payload and double-data artifact envelopes when no top-level artifact fields exist', () => {
+    expect(parseArtifactsPayload({ payload: { takeaway: 'Payload takeaway' } })).toEqual({
+      takeaway: 'Payload takeaway',
+    });
+    expect(parseArtifactsPayload({ type: 'sophia.artifact', data: { takeaway: 'Data takeaway' } })).toEqual({
+      takeaway: 'Data takeaway',
+    });
+  });
+
   it('normalizes builder artifact payloads and file paths', () => {
     const payload = parseBuilderArtifactPayload({
       artifact_title: 'Sprint brief',

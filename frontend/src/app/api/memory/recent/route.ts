@@ -26,11 +26,36 @@ type NormalizedMemory = {
   metadata?: Record<string, unknown> | null;
 };
 
+type GatewayMemoryListPayload = {
+  memories?: GatewayMemory[];
+  count?: number;
+  source?: string;
+  candidate_count?: number;
+  session_id_received?: boolean;
+  local_overlay_count?: number;
+  skipped_mem0_hydration_for_session_scope?: boolean;
+  empty_reason?: string | null;
+  trace_id?: string;
+};
+
 const FALLBACK_WINDOW_BEFORE_MS = 10 * 60 * 1000;
 const FALLBACK_WINDOW_AFTER_MS = 30 * 60 * 1000;
 
-function createUnavailableRecentMemoriesResponse() {
-  return NextResponse.json({ memories: [], count: 0, fallbackApplied: true, unavailable: true });
+function createUnavailableRecentMemoriesResponse(sessionId?: string | null) {
+  return NextResponse.json({
+    memories: [],
+    count: 0,
+    fallbackApplied: true,
+    unavailable: true,
+    ...buildSafeRecentDiagnostics({
+      count: 0,
+      fallbackApplied: true,
+      gatewayPayload: null,
+      sessionId,
+      sourceOverride: 'error',
+      unavailable: true,
+    }),
+  });
 }
 
 function getMemoryStatus(memory: NormalizedMemory): string | null {
@@ -118,10 +143,13 @@ function normalizeGatewayMemory(memory: GatewayMemory): NormalizedMemory | null 
   };
 }
 
-async function fetchMemoryList(userId: string, status?: string | null): Promise<Response> {
+async function fetchMemoryList(userId: string, status?: string | null, sessionId?: string | null): Promise<Response> {
   const params = new URLSearchParams();
   if (status) {
     params.set('status', status);
+  }
+  if (sessionId) {
+    params.set('session_id', sessionId);
   }
 
   const query = params.toString();
@@ -130,6 +158,109 @@ async function fetchMemoryList(userId: string, status?: string | null): Promise<
   return fetchSophiaApi(
     `/api/sophia/${encodeURIComponent(userId)}/memories/recent${suffix}`,
     { method: 'GET' },
+  );
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function readNumber(record: Record<string, unknown> | null, key: string): number | null {
+  const value = record?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function readString(record: Record<string, unknown> | null, key: string): string | null {
+  const value = record?.[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+
+function readBoolean(record: Record<string, unknown> | null, key: string): boolean | null {
+  const value = record?.[key];
+  return typeof value === 'boolean' ? value : null;
+}
+
+function normalizeSource(value: string | null, fallbackApplied: boolean, count: number): string {
+  switch (value) {
+    case 'local_review_overlay':
+    case 'global_hydration':
+    case 'mem0':
+    case 'none':
+    case 'error':
+      return value;
+    default:
+      if (fallbackApplied) {
+        return 'global_hydration';
+      }
+      return count > 0 ? 'mem0' : 'none';
+  }
+}
+
+function buildSafeRecentDiagnostics({
+  count,
+  fallbackApplied,
+  gatewayPayload,
+  sessionId,
+  sourceOverride,
+  unavailable = false,
+}: {
+  count: number;
+  fallbackApplied: boolean;
+  gatewayPayload: GatewayMemoryListPayload | null;
+  sessionId?: string | null;
+  sourceOverride?: string;
+  unavailable?: boolean;
+}) {
+  const gatewayRecord = asRecord(gatewayPayload);
+  const source = normalizeSource(
+    sourceOverride ?? readString(gatewayRecord, 'source'),
+    fallbackApplied,
+    count,
+  );
+  const diagnostics = {
+    source,
+    candidate_count: count,
+    session_id_received: Boolean(sessionId),
+    next_proxy_forwarded_session_id: Boolean(sessionId),
+    gateway_received_session_id: readBoolean(gatewayRecord, 'session_id_received') === true,
+    local_overlay_count: readNumber(gatewayRecord, 'local_overlay_count') ?? 0,
+    skipped_mem0_hydration_for_session_scope:
+      readBoolean(gatewayRecord, 'skipped_mem0_hydration_for_session_scope') ?? false,
+    trace_id: readString(gatewayRecord, 'trace_id'),
+    empty_reason: count > 0
+      ? null
+      : sessionId
+        ? 'no_session_candidates'
+        : 'no_results',
+    unavailable,
+  };
+
+  return {
+    ...diagnostics,
+    debug: diagnostics,
+  };
+}
+
+function isSessionScopedPendingReviewTerminalEmpty(
+  payload: GatewayMemoryListPayload,
+  sessionId: string | null,
+  status: string | null,
+): boolean {
+  if (!sessionId || status !== 'pending_review') {
+    return false;
+  }
+
+  const record = asRecord(payload);
+  const count = readNumber(record, 'candidate_count') ?? readNumber(record, 'count') ?? 0;
+  const emptyReason = readString(record, 'empty_reason');
+  const source = readString(record, 'source');
+
+  return count === 0 && (
+    emptyReason === 'no_session_candidates'
+    || source === 'local_review_overlay'
+    || source === 'none'
   );
 }
 
@@ -173,9 +304,10 @@ export async function GET(request: NextRequest) {
   try {
     const status = request.nextUrl.searchParams.get('status');
     const userId = await resolveSophiaUserId();
+    const sessionId = request.nextUrl.searchParams.get('session_id');
     if (!userId) {
       if (status === 'pending_review') {
-        return createUnavailableRecentMemoriesResponse();
+        return createUnavailableRecentMemoriesResponse(sessionId);
       }
 
       return NextResponse.json(
@@ -184,17 +316,16 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const sessionId = request.nextUrl.searchParams.get('session_id');
     const startedAt = request.nextUrl.searchParams.get('started_at');
     const endedAt = request.nextUrl.searchParams.get('ended_at');
     const shouldApplyScopedFilter = Boolean(status && (sessionId || startedAt || endedAt));
 
-    const filteredResponse = await fetchMemoryList(userId, status);
+    const filteredResponse = await fetchMemoryList(userId, status, sessionId);
     const filteredText = await filteredResponse.text();
 
     if (!filteredResponse.ok) {
       if (status === 'pending_review' && [401, 403, 503].includes(filteredResponse.status)) {
-        return createUnavailableRecentMemoriesResponse();
+        return createUnavailableRecentMemoriesResponse(sessionId);
       }
 
       return new NextResponse(filteredText, {
@@ -206,7 +337,7 @@ export async function GET(request: NextRequest) {
     }
 
     const filteredPayload = filteredText
-      ? JSON.parse(filteredText) as { memories?: GatewayMemory[]; count?: number }
+      ? JSON.parse(filteredText) as GatewayMemoryListPayload
       : { memories: [], count: 0 };
 
     const filteredMemories = Array.isArray(filteredPayload.memories)
@@ -218,6 +349,12 @@ export async function GET(request: NextRequest) {
         memories: filteredMemories.map(({ metadata: _metadata, ...memory }) => memory),
         count: filteredMemories.length,
         fallbackApplied: false,
+        ...buildSafeRecentDiagnostics({
+          count: filteredMemories.length,
+          fallbackApplied: false,
+          gatewayPayload: filteredPayload,
+          sessionId,
+        }),
       });
     }
 
@@ -229,18 +366,49 @@ export async function GET(request: NextRequest) {
         memories: scopedFilteredMemories.map(({ metadata: _metadata, ...memory }) => memory),
         count: scopedFilteredMemories.length,
         fallbackApplied: false,
+        ...buildSafeRecentDiagnostics({
+          count: scopedFilteredMemories.length,
+          fallbackApplied: false,
+          gatewayPayload: filteredPayload,
+          sessionId,
+        }),
       });
     }
 
-    const unfilteredResponse = await fetchMemoryList(userId);
+    if (isSessionScopedPendingReviewTerminalEmpty(filteredPayload, sessionId, status)) {
+      return NextResponse.json({
+        memories: [],
+        count: 0,
+        fallbackApplied: false,
+        ...buildSafeRecentDiagnostics({
+          count: 0,
+          fallbackApplied: false,
+          gatewayPayload: filteredPayload,
+          sessionId,
+        }),
+      });
+    }
+
+    const unfilteredResponse = await fetchMemoryList(userId, null, sessionId);
     const unfilteredText = await unfilteredResponse.text();
 
     if (!unfilteredResponse.ok) {
-      return NextResponse.json({ memories: [], count: 0, fallbackApplied: true });
+      return NextResponse.json({
+        memories: [],
+        count: 0,
+        fallbackApplied: true,
+        ...buildSafeRecentDiagnostics({
+          count: 0,
+          fallbackApplied: true,
+          gatewayPayload: null,
+          sessionId,
+          sourceOverride: 'error',
+        }),
+      });
     }
 
     const unfilteredPayload = unfilteredText
-      ? JSON.parse(unfilteredText) as { memories?: GatewayMemory[]; count?: number }
+      ? JSON.parse(unfilteredText) as GatewayMemoryListPayload
       : { memories: [], count: 0 };
 
     const allMemories = Array.isArray(unfilteredPayload.memories)
@@ -254,6 +422,12 @@ export async function GET(request: NextRequest) {
       memories: scopedMemories.map(({ metadata: _metadata, ...memory }) => memory),
       count: scopedMemories.length,
       fallbackApplied: true,
+      ...buildSafeRecentDiagnostics({
+        count: scopedMemories.length,
+        fallbackApplied: true,
+        gatewayPayload: unfilteredPayload,
+        sessionId,
+      }),
     });
   } catch (error) {
     logger.logError(error, { component: 'api/memory/recent', action: 'list_recent_memories' });

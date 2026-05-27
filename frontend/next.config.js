@@ -94,6 +94,8 @@ const nextConfig = {
                     ]
                   : []),
                 'https://api.cartesia.ai', // Voice API
+                'https://api.openai.com', // OpenAI Realtime browser SDP exchange
+                'wss://generativelanguage.googleapis.com', // Gemini Live browser WebSocket
                 'https://cdn.jsdelivr.net', // External CDN assets
                 'https://*.mem0.ai', // Mem0 APIs
                 'https://*.stream-io-api.com', // Stream Video REST API

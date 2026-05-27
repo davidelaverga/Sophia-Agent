@@ -59,9 +59,7 @@ export function VoiceFocusView({ voiceState }: VoiceFocusViewProps) {
       {/* Chat collapsed indicator - easy switch to chat mode */}
       <ChatCollapsed />
 
-      {/* Voice telemetry panel intentionally hidden — diagnostic mission complete. Re-enable by
-          removing the `false &&` guard when investigating latency regressions. */}
-      {false && <VoiceMetricsPanel voiceState={voiceState} defaultExpanded={false} layout="floating" />}
+        <VoiceMetricsPanel voiceState={voiceState} defaultExpanded={false} layout="floating" />
       
       <section 
         className={`rounded-2xl bg-sophia-surface p-6 shadow-soft animate-fadeIn transition-all duration-500 ${

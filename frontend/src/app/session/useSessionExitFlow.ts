@@ -27,9 +27,13 @@ interface DebriefData {
 }
 
 type ExitSessionMessage = {
+  id?: string;
+  messageId?: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   createdAt?: string;
+  source?: 'voice' | 'text';
+  incomplete?: boolean;
 };
 
 function mapLiveArtifactsToRecapV1({
@@ -168,24 +172,47 @@ function mergeRecapArtifacts(
   };
 }
 
-function serializeSessionMessages(messages?: ExitSessionMessage[]): NonNullable<SessionEndRequest['messages']> {
+function serializeSessionMessages(
+  messages?: ExitSessionMessage[],
+  greetingMessageId?: string,
+): NonNullable<SessionEndRequest['messages']> {
   if (!Array.isArray(messages)) {
     return [];
   }
 
   return messages
     .map((message) => ({
+      id: message.id,
+      message_id: message.messageId ?? message.id,
       role: message.role,
       content: typeof message.content === 'string' ? message.content.trim() : '',
       created_at: message.createdAt,
+      source: message.source,
+      final: !message.incomplete,
+      incomplete: Boolean(message.incomplete),
     }))
-    .filter((message) => message.content.length > 0);
+    .filter((message, index) => {
+      if (message.content.length === 0 || message.role === 'system' || !message.final) {
+        return false;
+      }
+
+      return !(
+        index === 0 &&
+        message.role === 'assistant' &&
+        (
+          message.id === greetingMessageId ||
+          message.id === 'greeting-1' ||
+          (typeof message.id === 'string' && message.id.startsWith('fallback-'))
+        )
+      );
+    });
 }
 
 interface UseSessionExitFlowParams {
   isReadOnly: boolean;
   isSophiaResponding: boolean;
   stopStreaming: () => void;
+  stopVoiceTransport?: () => Promise<void> | void;
   setEnding: (isEnding: boolean) => void;
   sessionId: string;
   sessionStartedAt?: string;
@@ -203,6 +230,7 @@ interface UseSessionExitFlowParams {
   userId?: string;
   persistedThreadId?: string;
   threadId?: string;
+  greetingMessageId?: string;
   messages?: ExitSessionMessage[];
 }
 
@@ -210,6 +238,7 @@ export function useSessionExitFlow({
   isReadOnly,
   isSophiaResponding,
   stopStreaming,
+  stopVoiceTransport,
   setEnding,
   sessionId,
   sessionStartedAt,
@@ -227,6 +256,7 @@ export function useSessionExitFlow({
   userId,
   persistedThreadId,
   threadId,
+  greetingMessageId,
   messages,
 }: UseSessionExitFlowParams) {
   const [showExitConfirm, setShowExitConfirm] = useState(false);
@@ -284,7 +314,7 @@ export function useSessionExitFlow({
     const contextMode = sessionContextMode || 'life';
     // Session exit should always continue into the recap flow.
     const shouldOfferDebrief = false;
-    const serializedMessages = serializeSessionMessages(messages);
+    const serializedMessages = serializeSessionMessages(messages, greetingMessageId);
     const serializedArtifacts = serializeLiveArtifactsForSessionEnd(currentArtifacts, currentBuilderArtifact);
 
     try {
@@ -429,12 +459,29 @@ export function useSessionExitFlow({
       }
     }
 
+    if (stopVoiceTransport) {
+      try {
+        await stopVoiceTransport();
+      } catch (error) {
+        logger.logError(error, {
+          component: 'SessionPage',
+          action: 'voice_intentional_end_cleanup',
+          metadata: {
+            voiceDisconnectKind: 'intentional_end_cleanup',
+            sessionIdPresent: Boolean(recapSessionId),
+            threadIdPresent: Boolean(recapThreadId),
+          },
+        });
+      }
+    }
+
     // Start emergence flow instead of navigating directly
     setPendingRecapSessionId(recapSessionId);
     setShowEmergence(true);
     setEnding(false);
   }, [
     stopStreaming,
+    stopVoiceTransport,
     setEnding,
     sessionId,
     sessionStartedAt,
@@ -446,6 +493,7 @@ export function useSessionExitFlow({
     userId,
     persistedThreadId,
     threadId,
+    greetingMessageId,
     messages,
   ]);
 

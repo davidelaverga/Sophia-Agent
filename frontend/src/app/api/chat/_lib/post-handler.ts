@@ -252,6 +252,11 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
         const transformStream = createSSEToUIMessageStream(upstream.body, {
           thread_id: responseThreadId,
           session_id: sessionId,
+          checkpointer_resume: backendFetch.checkpointerResume,
+          resumed_from_thread: backendFetch.resumedFromThread,
+          recovered_from_transcript: backendFetch.recoveredFromTranscript,
+          stale_thread_id: backendFetch.staleThreadId,
+          new_thread_id: backendFetch.newThreadId,
         });
         return new Response(transformStream, {
           headers: {
@@ -287,6 +292,11 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
         skill_used: backendResponse.skill_used,
         emotion_detected: backendResponse.emotion_detected,
         pending_interrupt: pendingInterrupt,
+        checkpointer_resume: backendFetch.checkpointerResume,
+        resumed_from_thread: backendFetch.resumedFromThread,
+        recovered_from_transcript: backendFetch.recoveredFromTranscript,
+        stale_thread_id: backendFetch.staleThreadId,
+        new_thread_id: backendFetch.newThreadId,
       }, artifacts, builderArtifact);
 
       return new Response(stream, {

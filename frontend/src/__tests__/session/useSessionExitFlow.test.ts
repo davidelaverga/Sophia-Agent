@@ -2,6 +2,7 @@ import { act, renderHook } from '@testing-library/react';
 import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { clearRecentSessionEndHint, getRecentSessionEndHint } from '../../app/lib/recent-session-end';
 import { useSessionExitFlow } from '../../app/session/useSessionExitFlow';
 import { useSessionPageGuards } from '../../app/session/useSessionPageGuards';
 
@@ -55,6 +56,7 @@ vi.mock('../../app/lib/session-teardown', () => ({
 describe('useSessionExitFlow', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    clearRecentSessionEndHint();
   });
 
   it('keeps the end-session flow on emergence and recap instead of offering debrief', async () => {
@@ -528,5 +530,70 @@ describe('useSessionExitFlow', () => {
     const paths = navigateToMock.mock.calls.map(([path]) => path);
     expect(paths).toContain('/recap/session-guard');
     expect(paths).not.toContain('/');
+  });
+
+  it('finalizes an intentional voice end before cleaning up voice transport and marks the recent recap hint', async () => {
+    const calls: string[] = [];
+    endSessionApiMock.mockImplementation(async () => {
+      calls.push('canonical-finalizer');
+      return {
+        success: true,
+        data: {
+          session_id: 'session-voice-end',
+          ended_at: '2026-03-03T21:30:00.000Z',
+          duration_minutes: 7,
+          turn_count: 3,
+          offer_debrief: false,
+          debrief_prompt: undefined,
+          recap_artifacts: undefined,
+        },
+      };
+    });
+    isSuccessMock.mockImplementation((result: { success?: boolean }) => result.success === true);
+
+    const stopVoiceTransportMock = vi.fn(async () => {
+      calls.push('transport-cleanup');
+    });
+    const navigateToMock = vi.fn();
+
+    const { result } = renderHook(() =>
+      useSessionExitFlow({
+        isReadOnly: false,
+        isSophiaResponding: false,
+        stopStreaming: vi.fn(),
+        stopVoiceTransport: stopVoiceTransportMock,
+        setEnding: vi.fn(),
+        sessionId: 'session-voice-end',
+        sessionStartedAt: '2026-03-03T21:23:00.000Z',
+        sessionPresetType: 'open',
+        sessionContextMode: 'life',
+        messageCount: 3,
+        endSessionStore: vi.fn(),
+        clearSessionStore: vi.fn(),
+        clearBootstrap: vi.fn(),
+        navigateTo: navigateToMock,
+        promoteToDebriefMode: vi.fn(),
+        startDebriefWithLLM: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleVoiceEndSession();
+    });
+
+    expect(endSessionApiMock).toHaveBeenCalledTimes(1);
+    expect(stopVoiceTransportMock).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual(['canonical-finalizer', 'transport-cleanup']);
+    expect(result.current.showEmergence).toBe(true);
+    expect(getRecentSessionEndHint()).toBeNull();
+
+    await act(async () => {
+      result.current.handleEmergenceComplete();
+    });
+
+    expect(getRecentSessionEndHint()).toEqual(
+      expect.objectContaining({ sessionId: 'session-voice-end' }),
+    );
+    expect(navigateToMock).toHaveBeenCalledWith('/recap/session-voice-end');
   });
 });

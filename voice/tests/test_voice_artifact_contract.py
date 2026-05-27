@@ -9,12 +9,14 @@ from unittest.mock import AsyncMock
 import pytest
 import voice.server as server
 from fastapi.testclient import TestClient
-from vision_agents.core.stt.events import STTTranscriptEvent
-from vision_agents.core.turn_detection.events import TurnEndedEvent
-from vision_agents.core.tts.events import TTSSynthesisStartEvent
 
 from voice.server import attach_runtime_observers
 from voice.tests.conftest import make_settings
+from voice.vision_agents_compat import (
+    STTTranscriptEvent,
+    TTSSynthesisStartEvent,
+    TurnEndedEvent,
+)
 
 
 class FakeEventBus:
@@ -269,6 +271,9 @@ async def test_create_agent_wires_llm_to_stream_custom_events(monkeypatch) -> No
         def note_first_text_emitted(self, user_id: str) -> None:
             return None
 
+        def note_backend_progress(self, user_id: str) -> None:
+            return None
+
     class FakeRhythmTracker:
         def __init__(self, **kwargs) -> None:  # noqa: ANN003
             return None
@@ -484,6 +489,9 @@ async def test_create_agent_skips_non_substantive_simple_response(monkeypatch) -
             return None
 
         def note_first_text_emitted(self, user_id: str) -> None:
+            return None
+
+        def note_backend_progress(self, user_id: str) -> None:
             return None
 
         def note_continuation_handling(self, user_id: str | None) -> None:

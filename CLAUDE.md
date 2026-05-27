@@ -25,6 +25,9 @@ Three platforms, one intelligence layer: web voice, web text, iOS voice.
 8. **Pipeline prompt templates are not skill files.** Files in `backend/src/sophia/prompts/` are pipeline inputs. They go to Claude Haiku in offline processing. They must never appear in the agent's per-turn context.
 9. **RitualMiddleware must be at position 11 (before SkillRouter at 12).** Order is load-bearing. SkillRouter reads `active_ritual` from state — if Ritual hasn't run first, skill routing has no ritual context.
 10. **The offline pipeline is idempotent.** Use the `processed_sessions` set to prevent double processing.
+11. **Builder artifacts must land under `/mnt/user-data/outputs/`** (PR #129 / Phase 2F). `BuilderArtifactMiddleware._has_output_file()` scans only that prefix; files outside it count as "no output". `write_file_tool` auto-prefixes BARE filenames (e.g. `report.md`) to that dir, but only when `runtime.config["configurable"]["graph_id"] == "sophia_builder"` OR `state["delegation_context"]` is populated (builder-context gate via `_is_builder_runtime_context`). Other callers — companion, lead_agent, tests — keep strict path validation.
+12. **`langgraph dev --n-jobs-per-worker 10`** (PR #129 / Phase 2A). The CLI hardcodes default 1 and explicitly overrides any external env var (`langgraph_api/cli.py:262-263, 286` — "Don't overwrite"). The flag lives in `backend/Dockerfile.langgraph` CMD; do NOT add `N_JOBS_PER_WORKER` to Render env — it will be silently dropped. `render.yaml` carries a comment documenting this trap.
+13. **`task_type` must come from `_CANONICAL_TASK_TYPES = {document, research, presentation, frontend, visual_report}`** (PR #129 codex P1). Never default to `"build"` or any other string — `StartBuilderTaskInput` validation rejects it. The `update_async_task_wrapper`'s `_safe_task_type` walks `tracked` first, then `delegation_context`, then falls back to `"document"`. Add a graph_id-based + delegation_context-based two-tier check anywhere you need to identify a builder context.
 ---
 ## Repository Structure
 ```
@@ -117,6 +120,13 @@ middlewares = [
     # 12b. deepagents AsyncSubAgentMiddleware — always-on. Owns lifecycle
     #      (check/update/cancel/list_async_task). start_async_task is
     #      filtered; the model launches builds via start_builder_task.
+    #      PR #129 (Phase 2B): update_async_task is ALSO filtered and
+    #      replaced by a terminal-thread-guarded wrapper (see
+    #      ``deerflow.sophia.tools.update_async_task_wrapper``). On a
+    #      terminal target the wrapper redirects to start_builder_task
+    #      with a v2 brief instead of letting the native dispatch
+    #      create a new run on a finished thread (which would loop on
+    #      dangling tool calls).
     AsyncSubAgentMiddleware(...),
     # 13–14. DeerFlow (adapted)
     SophiaTitleMiddleware(),
@@ -238,6 +248,12 @@ tools = [
 ]
 # Plus the four lifecycle tools native to deepagents AsyncSubAgentMiddleware:
 # check_async_task / update_async_task / cancel_async_task / list_async_tasks.
+# update_async_task is filtered + replaced by ``make_update_async_task_wrapper``
+# (Phase 2B): on a terminal target → redirect to start_builder_task with v2
+# brief; on a non-terminal target → augment user message with file-target
+# directive + slug-derived filename + "RESUMING (not restarting)" language,
+# then delegate to native. The wrapper also re-checks live SDK status to
+# defeat ~10s cache staleness from BuildAwarenessMiddleware.
 # (start_async_task is filtered out — the model only launches via the
 # enriched start_builder_task wrapper.)
 ```

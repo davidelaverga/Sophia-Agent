@@ -58,7 +58,7 @@ export function useSessionPageContext({
   const userId = session?.userId || (authBypassEnabled ? authBypassUserId : 'anonymous');
   const sessionPresetType = session?.presetType;
   const sessionContextMode = session?.contextMode;
-  const isReadOnly = session?.status === 'ended';
+  const isReadOnly = session?.status === 'ended' && !session.isActive;
   const safeSessionId = hasValidBackendSessionId ? backendSessionId : undefined;
   const hasMatchingMetadataThreadId = safeSessionId && currentMetadataSessionId === safeSessionId;
   const metadataThreadCollidesWithSessionId = hasMatchingMetadataThreadId

@@ -12,6 +12,10 @@ import logging
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+from deerflow.sophia.tools.retrieve_memories_contract import (
+    retrieve_memories_for_text_companion,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,23 +36,11 @@ def make_retrieve_memories_tool(user_id: str) -> StructuredTool:
 
     def _retrieve_memories(query: str, categories: list[str] | None = None) -> str:
         try:
-            from deerflow.sophia.mem0_client import search_memories
-
-            results = search_memories(
+            return retrieve_memories_for_text_companion(
                 user_id=user_id,
                 query=query,
                 categories=categories or [],
             )
-
-            if not results:
-                return "No relevant memories found."
-
-            lines = []
-            for mem in results[:15]:
-                lines.append(f"- {mem.get('content', '')}")
-
-            return "\n".join(lines)
-
         except Exception:
             logger.warning("Memory retrieval failed", exc_info=True)
             return "Memory retrieval temporarily unavailable."

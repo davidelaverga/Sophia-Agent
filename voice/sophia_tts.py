@@ -6,11 +6,11 @@ import re
 import time
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Iterator
 
-from vision_agents.core.tts.events import TTSAudioEvent, TTSErrorEvent
 from vision_agents.plugins.cartesia import TTS as CartesiaTTS
 from getstream.video.rtc.track_util import AudioFormat, PcmData
 
 from voice.config import VoiceSettings
+from voice.vision_agents_compat import TTSAudioEvent, TTSErrorEvent
 from voice.voice_delivery_profile import classify_emotion_family, resolve_voice_delivery
 
 if TYPE_CHECKING:

@@ -124,6 +124,13 @@ def test_start_builder_task_dispatches_via_asgi(monkeypatch):
     # builder fails with "Thread ID is required" on its first turn.
     config_payload = captured["run_kwargs"]["config"]
     assert config_payload["configurable"]["thread_id"] == "asgi-1"
+    # Codex P1 review 2026-05-22: configurable must also include
+    # ``graph_id`` so tools running inside the builder run (notably
+    # write_file_tool's auto-prefix gate) can identify the builder
+    # context deterministically. langgraph_api propagates this
+    # server-side for logging but does NOT guarantee it appears in
+    # runtime.config["configurable"] at tool-execution time.
+    assert config_payload["configurable"]["graph_id"] == "sophia_builder"
 
 
 def test_dispatch_sets_stream_resumable_true(monkeypatch):
@@ -197,6 +204,112 @@ def test_start_builder_task_duplicate_protection(monkeypatch):
     assert isinstance(response, str)
     assert "already in progress" in response
     assert "existing-1" in response
+
+
+def test_duplicate_launch_text_enumerates_all_four_lifecycle_tools(monkeypatch):
+    """The duplicate-rejection ToolMessage must teach the model the full
+    lifecycle-tool matrix so it picks the right alternative instead of
+    looping on start_builder_task / check_async_task."""
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    monkeypatch.setattr(
+        "langgraph_sdk.get_client",
+        lambda url=None: (_ for _ in ()).throw(
+            AssertionError("SDK client must not be created on duplicate launch")
+        ),
+    )
+
+    runtime = _make_runtime(
+        {
+            "async_tasks": {
+                "abc-uuid-123": {
+                    "task_id": "abc-uuid-123",
+                    "agent_name": "sophia_builder",
+                    "thread_id": "abc-uuid-123",
+                    "run_id": "r-existing",
+                    "status": "running",
+                    "created_at": "2026-04-24T00:00:00Z",
+                    "last_checked_at": "2026-04-24T00:00:00Z",
+                    "last_updated_at": "2026-04-24T00:00:00Z",
+                }
+            }
+        }
+    )
+
+    response = asyncio.run(
+        module.start_builder_task.coroutine(
+            description="Make another deck",
+            task_type="presentation",
+            runtime=runtime,
+        )
+    )
+    assert isinstance(response, str)
+    for tool_name in (
+        "update_async_task",
+        "check_async_task",
+        "cancel_async_task",
+        "list_async_tasks",
+    ):
+        assert tool_name in response, f"{tool_name} missing from rejection text"
+    # Each lifecycle alternative must include the FULL task_id verbatim so the
+    # model can copy-paste the call shape without hallucinating an id.
+    # Note: list_async_tasks() takes no task_id, so we expect >= 3 (update,
+    # check, cancel).
+    assert response.count("abc-uuid-123") >= 3
+    # At least one ack example per alternative branch.
+    assert "Got it, updating" in response
+    assert "Let me check" in response
+    assert "cancelling the build" in response
+    assert "Pulling up your in-flight builds" in response
+    # Regression guard: the recall path must NOT hard-code
+    # ``status_filter="running"`` — pending and interrupted are also active
+    # in our terminal-blacklist model, so a "running"-only filter would
+    # report no in-flight builds even when a build is still active.
+    assert 'status_filter="running"' not in response
+
+
+def test_duplicate_launch_text_does_not_truncate_task_id(monkeypatch):
+    """Regression guard: deepagents docs call out task_id truncation as a
+    common failure mode. The rejection text must always carry the FULL id."""
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    monkeypatch.setattr(
+        "langgraph_sdk.get_client",
+        lambda url=None: (_ for _ in ()).throw(
+            AssertionError("SDK client must not be created on duplicate launch")
+        ),
+    )
+
+    full_task_id = "019fbe43-2c1a-4d7b-91d8-77ae1f6c5e22"
+    runtime = _make_runtime(
+        {
+            "async_tasks": {
+                full_task_id: {
+                    "task_id": full_task_id,
+                    "agent_name": "sophia_builder",
+                    "thread_id": full_task_id,
+                    "run_id": "r-existing",
+                    "status": "running",
+                    "created_at": "2026-04-24T00:00:00Z",
+                    "last_checked_at": "2026-04-24T00:00:00Z",
+                    "last_updated_at": "2026-04-24T00:00:00Z",
+                }
+            }
+        }
+    )
+
+    response = asyncio.run(
+        module.start_builder_task.coroutine(
+            description="Make another deck",
+            task_type="presentation",
+            runtime=runtime,
+        )
+    )
+    assert isinstance(response, str)
+    assert full_task_id in response
+    # No ellipsis-style truncation patterns.
+    assert "…" not in response
+    assert "..." not in response
 
 
 def test_start_builder_task_duplicate_protection_allows_after_terminal(monkeypatch):

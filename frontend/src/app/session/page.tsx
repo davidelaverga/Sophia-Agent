@@ -31,7 +31,6 @@ import {
   VoiceMetricsPanel,
   BuilderReadyPill,
   PresenceArtifactPanel,
-  ArtifactToggleIcon,
   WhisperIndicator,
   ReflectionOverlay,
   EmergenceOverlay,
@@ -39,6 +38,7 @@ import {
   FeedbackToast,
 } from '../components/session';
 import { BuilderCompletionCard } from '../components/session/BuilderCompletionCard';
+import { CoreviewFixtureLauncher } from '../components/session/CoreviewFixtureLauncher';
 import { BuilderTaskNotice } from '../components/session/BuilderTaskNotice';
 import { SessionLayout } from '../components/SessionLayout';
 import { SessionExpiredModal, MultiTabModal } from '../components/ui';
@@ -49,6 +49,8 @@ import { useIdleTimeout } from '../hooks/useIdleTimeout';
 import { useSessionBootstrap } from '../hooks/useSessionBootstrap';
 import { useSessionPersistence } from '../hooks/useSessionPersistence';
 import { buildThreadArtifactHref, getBuilderArtifactFiles } from '../lib/builder-artifacts';
+import { isCoReviewFixtureEnabled } from '../lib/co-review-flags';
+import { GeminiStillFrameTransport } from '../lib/co-review-still-frame-transport';
 import { debugLog } from '../lib/debug-logger';
 import { errorCopy } from '../lib/error-copy';
 import { cn } from '../lib/utils';
@@ -287,6 +289,7 @@ function SessionPageContent() {
     setCurrentContext,
     setMessageMetadata,
     greetingAnchorId,
+    sessionVoiceMode: session?.voiceMode,
     markOffline,
     debugEnabled,
     memoryHighlightsCount: memoryHighlights?.length ?? 0,
@@ -458,8 +461,19 @@ function SessionPageContent() {
   });
 
   const hasBuilderArtifactLibrary = builderArtifactLibrary.length > 0;
+  const coReviewFixtureEnabled = isCoReviewFixtureEnabled();
+  const coReviewSessionId = backendSessionId || safeSessionId || sessionId || (coReviewFixtureEnabled ? 'local-coreview-fixture-session' : null);
+  const artifactPanelThreadId = resolvedThreadId || (coReviewFixtureEnabled ? coReviewSessionId ?? 'local-coreview-fixture-thread' : undefined);
+  const coReviewTransport = useMemo(
+    () => new GeminiStillFrameTransport({
+      sendArtifactFrame: voiceState.sendArtifactFrame,
+      getStatus: voiceState.getArtifactFrameTransportStatus,
+    }),
+    [voiceState.getArtifactFrameTransportStatus, voiceState.sendArtifactFrame],
+  );
 
   const {
+    hasArtifactsContent,
     showArtifactsUi,
     isSophiaResponding,
     exitProtectionResponseMode,
@@ -473,6 +487,7 @@ function SessionPageContent() {
     artifacts,
     builderArtifact,
     hasBuilderArtifactLibrary,
+    hasCoReviewFixture: coReviewFixtureEnabled,
     isBuilderRunning: builderTask?.phase === 'running',
     isStreaming,
     isReflectionVoiceFlowActive,
@@ -494,14 +509,14 @@ function SessionPageContent() {
     const hasTakeaway = Boolean(artifacts?.takeaway?.trim());
     const hasReflection = Boolean(artifacts?.reflection_candidate?.prompt?.trim());
     const memoryCount = artifacts?.memory_candidates?.length ?? 0;
-    return (hasBuilderArtifact ? 1 : 0) + (hasTakeaway ? 1 : 0) + (hasReflection ? 1 : 0) + Math.min(1, memoryCount);
-  }, [artifacts, builderArtifact, hasBuilderArtifactLibrary]);
+    return (hasBuilderArtifact ? 1 : 0) + (coReviewFixtureEnabled ? 1 : 0) + (hasTakeaway ? 1 : 0) + (hasReflection ? 1 : 0) + Math.min(1, memoryCount);
+  }, [artifacts, builderArtifact, hasBuilderArtifactLibrary, coReviewFixtureEnabled]);
 
   const readyArtifactCount = useMemo(() => {
     return [artifactStatus.takeaway, artifactStatus.reflection, artifactStatus.memories].filter(
       (status) => status === 'ready'
-    ).length + ((builderArtifact || hasBuilderArtifactLibrary) ? 1 : 0);
-  }, [artifactStatus, builderArtifact, hasBuilderArtifactLibrary]);
+    ).length + ((builderArtifact || hasBuilderArtifactLibrary) ? 1 : 0) + (coReviewFixtureEnabled ? 1 : 0);
+  }, [artifactStatus, builderArtifact, hasBuilderArtifactLibrary, coReviewFixtureEnabled]);
 
   const waitingArtifactCount = useMemo(() => {
     return [artifactStatus.takeaway, artifactStatus.reflection, artifactStatus.memories].filter(
@@ -532,9 +547,10 @@ function SessionPageContent() {
       .filter((memory) => memory.length > 0)
       .join('|');
     const library = builderArtifactLibrary.map((item) => item.path).join('|');
+    const fixture = coReviewFixtureEnabled ? 'coreview-fixture-q3-launch-review' : '';
 
-    return `${builder}::${library}::${takeaway}::${reflection}::${memories}`;
-  }, [artifacts, builderArtifact, builderArtifactLibrary]);
+    return `${builder}::${library}::${fixture}::${takeaway}::${reflection}::${memories}`;
+  }, [artifacts, builderArtifact, builderArtifactLibrary, coReviewFixtureEnabled]);
 
   const hasDesktopStyleBadge = hasPendingArtifacts || waitingArtifactCount > 0;
   const showBuilderTaskNotice = Boolean(builderTask);
@@ -655,6 +671,7 @@ function SessionPageContent() {
     stopStreaming: () => {
       void stopStreaming();
     },
+    stopVoiceTransport: voiceState.stopVoiceTransport,
     setEnding,
     sessionId,
     sessionStartedAt: session?.startedAt,
@@ -713,6 +730,7 @@ function SessionPageContent() {
     userId,
     persistedThreadId: session?.threadId,
     threadId: resolvedThreadId,
+    greetingMessageId,
     persistedSessionId: session?.sessionId,
     responseMode: exitProtectionResponseMode,
     messages,
@@ -883,13 +901,18 @@ function SessionPageContent() {
       isReadOnly={isReadOnly}
       presenceRef={presenceRef}
     >
+      <CoreviewFixtureLauncher
+        isVisible={coReviewFixtureEnabled}
+        sessionId={coReviewSessionId}
+        normalSessionId={coReviewSessionId}
+        threadId={artifactPanelThreadId}
+        coReviewTransport={coReviewTransport}
+      />
+
       <div className="relative flex h-full animate-fadeIn">
         {/* Main Chat Area */}
         <div className="relative z-10 flex-1 flex flex-col min-w-0 overflow-hidden">
-          {/* Voice telemetry panel is intentionally hidden in production sessions. It served its
-              diagnostic purpose during the voice transport migration. Keep the component mounted
-              path commented for quick re-enable when benchmarking regressions. */}
-          {false && <VoiceMetricsPanel voiceState={voiceState} defaultExpanded={false} layout="floating" />}
+            <VoiceMetricsPanel voiceState={voiceState} defaultExpanded={false} layout="floating" />
 
           {/* Reading corridor — calms the nebula behind text so messages are effortless to read.
               A radial vignette that darkens the center (where text lives) and fades to
@@ -987,10 +1010,14 @@ function SessionPageContent() {
               artifacts={artifacts}
               builderArtifact={builderArtifact}
               builderArtifactLibrary={builderArtifactLibrary}
-              threadId={resolvedThreadId}
+              sessionId={coReviewSessionId}
+              normalSessionId={coReviewSessionId}
+              threadId={artifactPanelThreadId}
               isVisible={showArtifacts && showArtifactsUi}
               onDismiss={handleCloseArtifactsPanel}
               isVoiceMode={false}
+              showCoReviewFixture={coReviewFixtureEnabled}
+              coReviewTransport={coReviewTransport}
               onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
               onMemoryApprove={handleMemoryApprove}
               onMemoryReject={handleMemoryReject}
@@ -1028,55 +1055,37 @@ function SessionPageContent() {
             />
           )}
 
-          {/* Artifact toggle pill — text mode: inline above composer */}
-          {focusMode === 'text' && !showArtifacts && showArtifactsUi && (
-            builderArtifact && !builderTask ? (
-              <div className="mb-2 flex justify-center">
-                <BuilderReadyPill
-                  title={builderArtifact.artifactTitle}
-                  onOpen={handleOpenArtifactsPanel}
-                  downloadHref={builderDownloadHref}
-                  onDownload={() => haptic('medium')}
-                  onDismiss={clearBuilderArtifact}
-                  itemCount={builderArtifactLibrary.length || undefined}
-                  isNew={hasNewArtifacts}
-                />
-              </div>
-            ) : (
-              <div className="flex justify-center mb-2">
-                <ArtifactToggleIcon
-                  hasArtifacts={Boolean(builderArtifact || hasBuilderArtifactLibrary || artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length)}
-                  onClick={handleOpenArtifactsPanel}
-                  isNew={hasNewArtifacts}
-                />
-              </div>
-            )
+          {/* Builder completion pill — text mode: inline above composer */}
+          {focusMode === 'text' && !showArtifacts && showArtifactsUi && builderArtifact && !builderTask && (
+            <div className="mb-2 flex justify-center">
+              <BuilderReadyPill
+                title={builderArtifact.artifactTitle}
+                onOpen={handleOpenArtifactsPanel}
+                downloadHref={builderDownloadHref}
+                onDownload={() => haptic('medium')}
+                onDismiss={clearBuilderArtifact}
+                itemCount={builderArtifactLibrary.length || undefined}
+                isNew={hasNewArtifacts}
+              />
+            </div>
           )}
 
-          {/* Artifact toggle pill — voice mode: fixed above mode toggle */}
-          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && !isVoiceCaptionVisible && !builderTask && (
+          {/* Builder completion pill — voice mode: fixed above mode toggle */}
+          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && !isVoiceCaptionVisible && !builderTask && builderArtifact && (
             <div
               className="fixed left-1/2 -translate-x-1/2 z-30 flex justify-center"
               style={{ bottom: voiceArtifactToggleBottom, opacity: voiceBuilderAccessoryOpacity, transition: 'opacity 0.6s ease' }}
             >
-              {builderArtifact && !builderTask ? (
-                <BuilderReadyPill
-                  title={builderArtifact.artifactTitle}
-                  onOpen={handleOpenArtifactsPanel}
-                  downloadHref={builderDownloadHref}
-                  onDownload={() => haptic('medium')}
-                  onDismiss={clearBuilderArtifact}
-                  itemCount={builderArtifactLibrary.length || undefined}
-                  isNew={hasNewArtifacts}
-                  compact={true}
-                />
-              ) : (
-                <ArtifactToggleIcon
-                  hasArtifacts={Boolean(builderArtifact || hasBuilderArtifactLibrary || artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length)}
-                  onClick={handleOpenArtifactsPanel}
-                  isNew={hasNewArtifacts}
-                />
-              )}
+              <BuilderReadyPill
+                title={builderArtifact.artifactTitle}
+                onOpen={handleOpenArtifactsPanel}
+                downloadHref={builderDownloadHref}
+                onDownload={() => haptic('medium')}
+                onDismiss={clearBuilderArtifact}
+                itemCount={builderArtifactLibrary.length || undefined}
+                isNew={hasNewArtifacts}
+                compact={true}
+              />
             </div>
           )}
 
@@ -1119,10 +1128,16 @@ function SessionPageContent() {
 
           {focusMode === 'text' && (
             <div
-              className="mb-3 flex justify-center"
+              className="mb-3 flex flex-col items-center gap-2"
               style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
             >
-              <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
+              <ModeToggle
+                opacity={chromeOpacity}
+                isBusy={isTyping}
+                showInsightIndicator={hasArtifactsContent || hasNewArtifacts}
+                hasNewInsight={hasNewArtifacts}
+                onInsightClick={handleOpenArtifactsPanel}
+              />
             </div>
           )}
           
@@ -1162,10 +1177,16 @@ function SessionPageContent() {
               slotBeforeText={focusMode !== 'text'
                 ? (
                     <div
-                      className="flex justify-center"
+                      className="flex flex-col items-center gap-2"
                       style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
                     >
-                      <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
+                      <ModeToggle
+                        opacity={chromeOpacity}
+                        isBusy={isTyping}
+                        showInsightIndicator={hasArtifactsContent || hasNewArtifacts}
+                        hasNewInsight={hasNewArtifacts}
+                        onInsightClick={handleOpenArtifactsPanel}
+                      />
                     </div>
                   )
                 : undefined}
@@ -1179,10 +1200,14 @@ function SessionPageContent() {
             artifacts={artifacts}
             builderArtifact={builderArtifact}
             builderArtifactLibrary={builderArtifactLibrary}
-            threadId={resolvedThreadId}
+            sessionId={coReviewSessionId}
+            normalSessionId={coReviewSessionId}
+            threadId={artifactPanelThreadId}
             isVisible={showArtifacts && showArtifactsUi}
             onDismiss={handleCloseArtifactsPanel}
             isVoiceMode={true}
+            showCoReviewFixture={coReviewFixtureEnabled}
+            coReviewTransport={coReviewTransport}
             onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
             onMemoryApprove={handleMemoryApprove}
             onMemoryReject={handleMemoryReject}

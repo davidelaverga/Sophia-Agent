@@ -10,10 +10,20 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from pydantic import BaseModel, Field, ValidationError
 
 from app.gateway.auth import require_authorized_user_scope
+from app.gateway.sophia_realtime_context import (
+    REALTIME_MEMORY_RETRIEVAL_TOKEN_HEADER,
+    RealtimeContextRequest,
+    RealtimeContextResponse,
+    RealtimeMemoryRetrieveRequest,
+    build_realtime_memory_retrieve_error_envelope,
+    build_sophia_realtime_context,
+    retrieve_sophia_realtime_memories,
+    retrieve_sophia_realtime_memories_for_grant,
+)
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path
 from deerflow.sophia.review_metadata_store import (
@@ -21,7 +31,13 @@ from deerflow.sophia.review_metadata_store import (
     remove_review_metadata,
     upsert_review_metadata,
 )
-from deerflow.sophia.session_store import SessionRecord, SessionStore
+from deerflow.sophia.session_store import (
+    SessionMessageRecord,
+    SessionRecord,
+    SessionStore,
+    canonical_visible_messages,
+    derive_message_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +46,7 @@ router = APIRouter(
     tags=["sophia"],
     dependencies=[Depends(require_authorized_user_scope)],
 )
+internal_router = APIRouter(prefix="/internal/sophia-realtime", tags=["sophia-realtime-internal"])
 
 # Strong references to background tasks to prevent GC cancellation
 _background_tasks: set = set()
@@ -50,6 +67,43 @@ def _validate_user(user_id: str) -> str:
         raise HTTPException(status_code=400, detail="Invalid user_id format")
 
 
+async def _parse_realtime_memory_retrieve_request(
+    request: Request,
+) -> tuple[RealtimeMemoryRetrieveRequest | None, dict[str, Any] | None]:
+    raw_body = await request.body()
+    if raw_body.strip():
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError:
+            return None, build_realtime_memory_retrieve_error_envelope(
+                status="invalid_request",
+                provider_status="error",
+                provider_reason="invalid_json_request",
+                diagnostics={"validation_error": "invalid_json_body"},
+            )
+    else:
+        payload = {}
+    try:
+        return RealtimeMemoryRetrieveRequest.model_validate(payload), None
+    except ValidationError as exc:
+        return None, build_realtime_memory_retrieve_error_envelope(
+            status="invalid_request",
+            provider_status="error",
+            provider_reason="request_validation_error",
+            diagnostics={
+                "validation_error": "schema",
+                "validation_error_count": len(exc.errors()),
+                "validation_errors": [
+                    {
+                        "loc": [str(part) for part in error.get("loc", [])],
+                        "type": str(error.get("type") or "unknown")[:80],
+                    }
+                    for error in exc.errors()[:5]
+                ],
+            },
+        )
+
+
 def _get_mem0_client():
     """Get Mem0 MemoryClient or raise 503."""
     try:
@@ -63,12 +117,21 @@ def _get_mem0_client():
 
 
 def _resolve_session_record_owner(user_id: str, session_id: str) -> tuple[str, SessionRecord | None]:
-    """Resolve the persisted session owner, including the legacy dev-user fallback."""
+    """Resolve the persisted session owner.
+
+    The legacy ``dev-user`` fallback is allowed only by the filesystem local/dev
+    store. Supabase production reads are scoped strictly by trusted backend
+    ``user_id``.
+    """
     record = _session_store.get(user_id, session_id)
     if record is not None:
         return user_id, record
 
-    if user_id == _LEGACY_SESSION_USER_ID:
+    if user_id == _LEGACY_SESSION_USER_ID or not getattr(
+        _session_store,
+        "allow_legacy_dev_user_fallback",
+        True,
+    ):
         return user_id, None
 
     legacy_record = _session_store.get(_LEGACY_SESSION_USER_ID, session_id)
@@ -95,6 +158,16 @@ class MemoryItem(BaseModel):
 class MemoryListResponse(BaseModel):
     memories: list[MemoryItem] = Field(default_factory=list)
     count: int = Field(default=0, description="Total memory count")
+    source: str = Field(default="unknown", description="Safe diagnostic source classification")
+    candidate_count: int = Field(default=0, description="Safe diagnostic candidate count")
+    session_id_received: bool = Field(default=False, description="Whether a diagnostic session_id query param was received")
+    local_overlay_count: int = Field(default=0, description="Count of local review overlay entries returned or applied")
+    skipped_mem0_hydration_for_session_scope: bool = Field(
+        default=False,
+        description="Whether local review metadata supplied enough status metadata to skip per-memory hydration",
+    )
+    empty_reason: str | None = Field(default=None, description="Safe empty-result reason for terminal empty responses")
+    trace_id: str | None = Field(default=None, description="Safe request correlation id")
 
 
 class MemoryUpdateRequest(BaseModel):
@@ -215,9 +288,18 @@ class CategoryMemoryResponse(BaseModel):
 
 
 class SessionMessageInput(BaseModel):
+    id: str | None = Field(default=None, description="Stable client message ID")
+    message_id: str | None = Field(default=None, description="Stable provider/backend message ID")
     role: str = Field(..., description="Message role")
     content: str = Field(default="", description="Message text content")
     created_at: str | None = Field(default=None, description="Client timestamp")
+    source: str | None = Field(default=None, description="Client/source transport")
+    final: bool | None = Field(default=None, description="Whether message content is finalized")
+    incomplete: bool | None = Field(default=None, description="Whether message was interrupted mid-stream")
+    approximate: bool | None = Field(default=None, description="Whether content is approximate")
+    turn_id: str | None = Field(default=None, description="Stable turn ID")
+    provider_event_id: str | None = Field(default=None, description="Stable provider event ID")
+    redaction_level: str = Field(default="none", description="Redaction level")
 
 
 class SessionRecapArtifactsPayload(BaseModel):
@@ -379,8 +461,52 @@ def _has_memory_status(mem: dict) -> bool:
     return isinstance(metadata, dict) and isinstance(metadata.get("status"), str)
 
 
-def _hydrate_memories_for_review(user_id: str, client, memories: list[dict], status: str | None) -> list[dict]:
-    memories = apply_review_metadata_overlays(user_id, memories)
+def _memory_session_id(memory: dict) -> str | None:
+    session_id = memory.get("session_id") if isinstance(memory, dict) else None
+    if isinstance(session_id, str) and session_id:
+        return session_id
+
+    metadata = memory.get("metadata") if isinstance(memory, dict) else None
+    metadata_session_id = metadata.get("session_id") if isinstance(metadata, dict) else None
+    return metadata_session_id if isinstance(metadata_session_id, str) and metadata_session_id else None
+
+
+def _hydrate_memories_for_review(
+    user_id: str,
+    client,
+    memories: list[dict],
+    status: str | None,
+    *,
+    session_id: str | None = None,
+) -> tuple[list[dict], dict[str, Any]]:
+    scoped_overlay_session_id = session_id if status == "pending_review" else None
+    memories = apply_review_metadata_overlays(user_id, memories, session_id=scoped_overlay_session_id)
+    local_overlay_count = sum(
+        1
+        for memory in memories
+        if isinstance(memory, dict) and isinstance(memory.get("id"), str) and memory["id"].startswith("local:")
+    )
+
+    if session_id and status == "pending_review":
+        filtered = [
+            memory
+            for memory in memories
+            if isinstance(memory, dict)
+            and isinstance(memory.get("metadata"), dict)
+            and memory["metadata"].get("status") == status
+            and _memory_session_id(memory) == session_id
+        ]
+        return filtered, {
+            "source": "local_review_overlay",
+            "local_overlay_count": local_overlay_count,
+            "detail_hydration_count": 0,
+            "skipped_detail_hydration_count": len(memories),
+            "skipped_mem0_hydration_for_session_scope": True,
+            "empty_reason": "no_session_candidates" if not filtered else None,
+        }
+
+    detail_hydration_count = 0
+    skipped_detail_hydration_count = 0
     hydrated: list[dict] = []
 
     for memory in memories:
@@ -394,23 +520,55 @@ def _hydrate_memories_for_review(user_id: str, client, memories: list[dict], sta
         )
 
         if needs_hydration:
+            detail_hydration_count += 1
             try:
                 merged_memory = _merge_memory_detail(memory, client.get(memory_id))
             except Exception:
                 logger.warning("Failed to hydrate memory detail for %s", memory_id, exc_info=True)
+        elif status is not None and has_status:
+            skipped_detail_hydration_count += 1
 
         hydrated.append(merged_memory)
 
-    hydrated = apply_review_metadata_overlays(user_id, hydrated)
+    hydrated = apply_review_metadata_overlays(user_id, hydrated, session_id=scoped_overlay_session_id)
+    local_overlay_count = max(
+        local_overlay_count,
+        sum(
+            1
+            for memory in hydrated
+            if isinstance(memory, dict) and isinstance(memory.get("id"), str) and memory["id"].startswith("local:")
+        ),
+    )
 
     if not status:
-        return hydrated
+        filtered = hydrated
+    else:
+        filtered = [
+            memory
+            for memory in hydrated
+            if isinstance(memory.get("metadata"), dict) and memory["metadata"].get("status") == status
+        ]
 
-    return [
-        memory
-        for memory in hydrated
-        if isinstance(memory.get("metadata"), dict) and memory["metadata"].get("status") == status
-    ]
+    if session_id and status == "pending_review":
+        filtered = [memory for memory in filtered if _memory_session_id(memory) == session_id]
+
+    if not filtered:
+        source = "none"
+    elif local_overlay_count > 0 or skipped_detail_hydration_count > 0:
+        source = "local_review_overlay"
+    elif detail_hydration_count > 0:
+        source = "global_hydration"
+    else:
+        source = "mem0"
+
+    return filtered, {
+        "source": source,
+        "local_overlay_count": local_overlay_count,
+        "detail_hydration_count": detail_hydration_count,
+        "skipped_detail_hydration_count": skipped_detail_hydration_count,
+        "skipped_mem0_hydration_for_session_scope": skipped_detail_hydration_count > 0,
+        "empty_reason": "no_session_candidates" if session_id and status == "pending_review" and not filtered else None,
+    }
 
 
 def _get_session_recap_path(user_id: str, session_id: str) -> Path:
@@ -472,6 +630,49 @@ def _build_session_recap_payload(body: SessionEndRequest, ended_at: str) -> dict
     }
 
 
+def _build_session_end_response_from_recap(
+    body: SessionEndRequest,
+    recap_payload: dict,
+    status: str = "pipeline_queued",
+) -> SessionEndResponse:
+    ended_at = recap_payload.get("ended_at") if isinstance(recap_payload.get("ended_at"), str) else body.ended_at
+    started_at = recap_payload.get("started_at") if isinstance(recap_payload.get("started_at"), str) else body.started_at
+    turn_count = recap_payload.get("turn_count")
+    if not isinstance(turn_count, int):
+        turn_count = body.turn_count if body.turn_count is not None else len(body.messages)
+
+    recap_artifacts = recap_payload.get("recap_artifacts")
+    if not isinstance(recap_artifacts, dict):
+        recap_artifacts = None
+
+    duration_minutes = _compute_duration_minutes(started_at, ended_at)
+    debrief_prompt = _build_debrief_prompt(body, recap_artifacts, duration_minutes)
+    return SessionEndResponse(
+        status=status,
+        session_id=body.session_id,
+        ended_at=ended_at,
+        duration_minutes=duration_minutes,
+        turn_count=turn_count,
+        recap_artifacts=recap_artifacts,
+        offer_debrief=debrief_prompt is not None,
+        debrief_prompt=debrief_prompt,
+    )
+
+
+def _get_memory_extraction_window(user_id: str, session_id: str) -> tuple[int, int, bool]:
+    """Return last processed sequence, current max sequence, and whether new messages exist."""
+    owner_user_id, record = _resolve_session_record_owner(user_id, session_id)
+    if record is None:
+        return 0, 0, True
+
+    visible_messages = canonical_visible_messages(
+        _session_store.list_messages(owner_user_id, session_id)
+    )
+    current_max = max((message.sequence for message in visible_messages), default=0)
+    last_processed = max(0, int(record.memory_processed_until_sequence or 0))
+    return last_processed, current_max, current_max > last_processed
+
+
 def _build_thread_state_from_end_request(body: SessionEndRequest) -> dict | None:
     serialized_messages = [
         {
@@ -480,6 +681,8 @@ def _build_thread_state_from_end_request(body: SessionEndRequest) -> dict | None
         }
         for message in body.messages
         if message.content.strip()
+        and (message.role in {"user", "assistant", "sophia"})
+        and (message.final if message.final is not None else not bool(message.incomplete))
     ]
     recap_artifacts = body.recap_artifacts.model_dump(exclude_none=True) if body.recap_artifacts else None
 
@@ -501,6 +704,96 @@ def _build_thread_state_from_end_request(body: SessionEndRequest) -> dict | None
         thread_state["artifacts"] = [recap_artifacts]
 
     return thread_state
+
+
+def _persist_end_session_transcript(user_id: str, body: SessionEndRequest) -> None:
+    if not body.messages:
+        return
+
+    owner_user_id, record = _resolve_session_record_owner(user_id, body.session_id)
+    if record is None:
+        return
+
+    existing_visible = canonical_visible_messages(
+        _session_store.list_messages(owner_user_id, body.session_id)
+    )
+    existing_ids = {message.message_id for message in existing_visible if message.message_id}
+    existing_contents = [message.content.strip() for message in existing_visible if message.content.strip()]
+    body_first_content = next(
+        (message.content.strip() for message in body.messages if message.content.strip()),
+        "",
+    )
+    body_has_existing_id = any(
+        (message.message_id or message.id) in existing_ids
+        for message in body.messages
+        if message.message_id or message.id
+    )
+    body_looks_like_full_snapshot = (
+        not existing_visible
+        or body_has_existing_id
+        or (bool(body_first_content) and bool(existing_contents) and body_first_content == existing_contents[0])
+    )
+    base_sequence = 0 if body_looks_like_full_snapshot else max(
+        (message.sequence for message in existing_visible),
+        default=0,
+    )
+
+    records: list[SessionMessageRecord] = []
+    for message in body.messages:
+        content = message.content.strip()
+        if not content:
+            continue
+        role = "assistant" if message.role in {"assistant", "sophia"} else message.role
+        if role not in {"user", "assistant"}:
+            continue
+        is_final = message.final if message.final is not None else not bool(message.incomplete)
+        if not is_final:
+            continue
+        sequence = base_sequence + len(records) + 1
+        records.append(
+            SessionMessageRecord(
+                message_id=derive_message_id(
+                    session_id=body.session_id,
+                    role=role,
+                    sequence=sequence,
+                    message_id=message.message_id or message.id,
+                    turn_id=message.turn_id,
+                    provider_event_id=message.provider_event_id,
+                    content=content,
+                ),
+                session_id=body.session_id,
+                thread_id=body.thread_id or record.thread_id,
+                role=role,
+                content=content,
+                created_at=message.created_at or datetime.now(UTC).isoformat(),
+                source=message.source or body.platform or record.platform or "text",
+                final=True,
+                approximate=bool(message.approximate),
+                turn_id=message.turn_id,
+                provider_event_id=message.provider_event_id,
+                sequence=sequence,
+                redaction_level=message.redaction_level,
+            )
+        )
+
+    if records:
+        if body.thread_id and body.thread_id != record.thread_id:
+            record = _session_store.update(
+                owner_user_id,
+                body.session_id,
+                thread_id=body.thread_id,
+                checkpointer_available=True,
+            ) or record
+        if body_looks_like_full_snapshot:
+            stored_records = _session_store.replace_messages(owner_user_id, body.session_id, records)
+        else:
+            stored_records = _session_store.append_or_upsert_messages(owner_user_id, body.session_id, records)
+        visible_records = canonical_visible_messages(stored_records)
+        updates: dict[str, object] = {"message_count": len(visible_records)}
+        last_visible = next((message for message in reversed(visible_records) if message.content.strip()), None)
+        if last_visible is not None:
+            updates["last_message_preview"] = last_visible.content.strip()[:200]
+        _session_store.update(owner_user_id, body.session_id, **updates)
 
 
 def _build_debrief_prompt(body: SessionEndRequest, recap_artifacts: dict | None, duration_minutes: int) -> str | None:
@@ -546,8 +839,108 @@ def _queue_offline_pipeline(user_id: str, session_id: str, thread_id: str, threa
     task.add_done_callback(_background_tasks.discard)
 
 
+def _mark_session_record_ended(user_id: str, session_id: str, ended_at: str) -> None:
+    owner_user_id, record = _resolve_session_record_owner(user_id, session_id)
+    if record is None or record.status == "ended":
+        return
+
+    ended_record = _session_store.update(
+        owner_user_id,
+        session_id,
+        status="ended",
+        ended_at=ended_at,
+    )
+    if ended_record is None:
+        logger.warning(
+            "session.finalization failed_to_persist_session_end user_id=%s session_id=%s",
+            owner_user_id,
+            session_id,
+        )
+
+
 # ---------------------------------------------------------------------------
-# 1. Memory List
+# 1. Realtime Context
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/{user_id}/realtime/context",
+    response_model=RealtimeContextResponse,
+    summary="Get bounded realtime context for Sophia voice",
+    description="Returns backend-owned setup context for realtime voice sessions.",
+)
+async def get_realtime_context(
+    user_id: str,
+    body: RealtimeContextRequest | None = None,
+) -> RealtimeContextResponse:
+    _validate_user(user_id)
+    return await asyncio.to_thread(
+        build_sophia_realtime_context,
+        user_id=user_id,
+        request=body or RealtimeContextRequest(),
+    )
+
+
+@router.post(
+    "/{user_id}/realtime/memories/retrieve",
+    summary="Retrieve bounded realtime memories for Sophia voice",
+    description="Executes query-only realtime memory retrieval using backend-owned Mem0 access.",
+)
+async def retrieve_realtime_memories(
+    user_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    _validate_user(user_id)
+    body, error_envelope = await _parse_realtime_memory_retrieve_request(request)
+    if error_envelope is not None:
+        return error_envelope
+    try:
+        return await asyncio.to_thread(
+            retrieve_sophia_realtime_memories,
+            user_id=user_id,
+            request=body,
+        )
+    except Exception:
+        logger.warning("sophia.realtime_memory_retrieve public callback failed", exc_info=True)
+        return build_realtime_memory_retrieve_error_envelope(
+            status="error",
+            provider_status="error",
+            provider_reason="gateway_retrieval_exception",
+            request=body,
+            diagnostics={"callback_scope": "public"},
+        )
+
+
+@internal_router.post(
+    "/memories/retrieve",
+    summary="Internal Gemini realtime memory retrieval callback",
+    description="Protected by a gateway-minted session grant; used by sophia-voice only.",
+)
+async def retrieve_realtime_memories_internal(
+    request: Request,
+    token: str | None = Header(default=None, alias=REALTIME_MEMORY_RETRIEVAL_TOKEN_HEADER),
+) -> dict[str, Any]:
+    body, error_envelope = await _parse_realtime_memory_retrieve_request(request)
+    if error_envelope is not None:
+        return error_envelope
+    try:
+        return await asyncio.to_thread(
+            retrieve_sophia_realtime_memories_for_grant,
+            token=token or "",
+            request=body,
+        )
+    except Exception:
+        logger.warning("sophia.realtime_memory_retrieve internal callback failed", exc_info=True)
+        return build_realtime_memory_retrieve_error_envelope(
+            status="error",
+            provider_status="error",
+            provider_reason="gateway_retrieval_exception",
+            request=body,
+            diagnostics={"callback_scope": "internal"},
+        )
+
+
+# ---------------------------------------------------------------------------
+# 2. Memory List
 # ---------------------------------------------------------------------------
 
 @router.get(
@@ -559,34 +952,58 @@ def _queue_offline_pipeline(user_id: str, session_id: str, thread_id: str, threa
 async def list_memories(
     user_id: str,
     status: str | None = Query(default=None, description="Filter by status (e.g. pending_review)"),
+    session_id: str | None = Query(default=None, description="Optional diagnostic source session identifier"),
 ) -> MemoryListResponse:
     _validate_user(user_id)
     client = _get_mem0_client()
+    trace_id = f"memrecent-{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}"
     try:
         logger.info(
-            "session.finalization list_memories_request user_id=%s status=%s",
+            "session.finalization list_memories_request user_id=%s status=%s session_id_received=%s trace_id=%s",
             user_id,
             status or "<none>",
+            bool(session_id),
+            trace_id,
         )
         result = client.get_all(filters={"user_id": user_id})
         memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
-        memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+        memories_raw, diagnostics = _hydrate_memories_for_review(
+            user_id,
+            client,
+            memories_raw,
+            status,
+            session_id=session_id,
+        )
         memories_raw = _dedupe_memories_by_id(memories_raw)
         items = [_to_memory_item(m) for m in memories_raw]
         logger.info(
-            "session.finalization list_memories_result user_id=%s status=%s count=%s",
+            "session.finalization list_memories_result user_id=%s status=%s count=%s source=%s trace_id=%s",
             user_id,
             status or "<none>",
             len(items),
+            diagnostics.get("source"),
+            trace_id,
         )
-        return MemoryListResponse(memories=items, count=len(items))
+        return MemoryListResponse(
+            memories=items,
+            count=len(items),
+            source=str(diagnostics.get("source") or "unknown"),
+            candidate_count=len(items),
+            session_id_received=bool(session_id),
+            local_overlay_count=int(diagnostics.get("local_overlay_count") or 0),
+            skipped_mem0_hydration_for_session_scope=bool(
+                diagnostics.get("skipped_mem0_hydration_for_session_scope")
+            ),
+            empty_reason=diagnostics.get("empty_reason") if isinstance(diagnostics.get("empty_reason"), str) else None,
+            trace_id=trace_id,
+        )
     except Exception as e:
         logger.warning("Failed to list memories for %s: %s", user_id, e)
         raise HTTPException(status_code=503, detail="Memory service unavailable")
 
 
 # ---------------------------------------------------------------------------
-# 2. Memory CRUD
+# 3. Memory CRUD
 # ---------------------------------------------------------------------------
 
 @router.post(
@@ -841,7 +1258,7 @@ async def journal(
                 normalized_search,
                 categories=[selected_category] if selected_category else None,
             )
-            memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+            memories_raw, _ = _hydrate_memories_for_review(user_id, client, memories_raw, status)
 
             # Preserve the previous plain-text search behavior if Mem0 search returns no results.
             if not memories_raw:
@@ -850,7 +1267,7 @@ async def journal(
                     filters["categories"] = selected_category
                 result = client.get_all(filters=filters)
                 memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
-                memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+                memories_raw, _ = _hydrate_memories_for_review(user_id, client, memories_raw, status)
                 memories_raw = [
                     memory
                     for memory in memories_raw
@@ -868,7 +1285,7 @@ async def journal(
                 filters["categories"] = selected_category
             result = client.get_all(filters=filters)
             memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
-            memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+            memories_raw, _ = _hydrate_memories_for_review(user_id, client, memories_raw, status)
 
         memories_raw = _sort_memories_desc(memories_raw)
         memories_raw = _dedupe_memories_by_id(memories_raw)
@@ -1537,6 +1954,7 @@ async def cancel_task(user_id: str, task_id: str) -> TaskCancelResponse:
 )
 async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndResponse:
     _validate_user(user_id)
+    ended_at = body.ended_at or datetime.now(UTC).isoformat()
 
     logger.info(
         "session.finalization end_session_request user_id=%s session_id=%s thread_id=%s message_count=%s has_recap_artifacts=%s",
@@ -1547,38 +1965,77 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
         body.recap_artifacts is not None,
     )
 
-    ended_at = body.ended_at or datetime.now(UTC).isoformat()
-    recap_payload = _build_session_recap_payload(body, ended_at)
+    try:
+        existing_recap = _read_session_recap(user_id, body.session_id)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "session.finalization existing_recap_read_failed user_id=%s session_id=%s error=%s",
+            user_id,
+            body.session_id,
+            exc,
+        )
+        existing_recap = None
+
+    _persist_end_session_transcript(user_id, body)
+    last_processed_sequence, current_max_sequence, has_new_messages = _get_memory_extraction_window(
+        user_id,
+        body.session_id,
+    )
+    if isinstance(existing_recap, dict):
+        recap_turn_count = existing_recap.get("turn_count")
+        if isinstance(recap_turn_count, int):
+            has_new_messages = current_max_sequence > max(last_processed_sequence, recap_turn_count)
+
+    if isinstance(existing_recap, dict) and not has_new_messages:
+        existing_ended_at = existing_recap.get("ended_at") if isinstance(existing_recap.get("ended_at"), str) else ended_at
+        _mark_session_record_ended(user_id, body.session_id, existing_ended_at)
+        try:
+            from app.gateway.inactivity_watcher import unregister_thread
+            unregister_thread(body.thread_id)
+        except ImportError:
+            pass
+
+        logger.info(
+            "session.finalization duplicate_suppressed user_id=%s session_id=%s thread_id=%s duplicateFinalizationSuppressed=%s recapPipelineQueued=%s currentMaxSequence=%s",
+            user_id,
+            body.session_id,
+            body.thread_id,
+            True,
+            False,
+            current_max_sequence,
+        )
+        return _build_session_end_response_from_recap(
+            body,
+            existing_recap,
+            status="no_new_messages",
+        )
+
+    recap_payload = existing_recap if isinstance(existing_recap, dict) else _build_session_recap_payload(body, ended_at)
     duration_minutes = _compute_duration_minutes(body.started_at, ended_at)
     turn_count = recap_payload.get("turn_count", 0)
     recap_artifacts = recap_payload.get("recap_artifacts")
     debrief_prompt = _build_debrief_prompt(body, recap_artifacts, duration_minutes)
 
-    try:
-        _write_session_recap(user_id, body.session_id, recap_payload)
+    if not isinstance(existing_recap, dict):
+        try:
+            _write_session_recap(user_id, body.session_id, recap_payload)
+            logger.info(
+                "session.finalization recap_persisted user_id=%s session_id=%s status=%s",
+                user_id,
+                body.session_id,
+                recap_payload.get("status"),
+            )
+        except OSError as e:
+            logger.warning("Failed to persist recap for %s/%s: %s", user_id, body.session_id, e)
+    else:
         logger.info(
-            "session.finalization recap_persisted user_id=%s session_id=%s status=%s",
+            "session.finalization continuation_existing_recap_preserved user_id=%s session_id=%s currentMaxSequence=%s",
             user_id,
             body.session_id,
-            recap_payload.get("status"),
+            current_max_sequence,
         )
-    except OSError as e:
-        logger.warning("Failed to persist recap for %s/%s: %s", user_id, body.session_id, e)
 
-    owner_user_id, record = _resolve_session_record_owner(user_id, body.session_id)
-    if record is not None and record.status != "ended":
-        ended_record = _session_store.update(
-            owner_user_id,
-            body.session_id,
-            status="ended",
-            ended_at=ended_at,
-        )
-        if ended_record is None:
-            logger.warning(
-                "session.finalization failed_to_persist_session_end user_id=%s session_id=%s",
-                owner_user_id,
-                body.session_id,
-            )
+    _mark_session_record_ended(user_id, body.session_id, ended_at)
 
     # Remove from inactivity tracking — session explicitly ended
     try:
@@ -1595,10 +2052,11 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
             _build_thread_state_from_end_request(body),
         )
         logger.info(
-            "session.finalization end_session_queued user_id=%s session_id=%s thread_id=%s",
+            "session.finalization end_session_queued user_id=%s session_id=%s thread_id=%s recapPipelineQueued=%s",
             user_id,
             body.session_id,
             body.thread_id,
+            True,
         )
         return SessionEndResponse(
             status="pipeline_queued",

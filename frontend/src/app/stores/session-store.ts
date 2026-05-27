@@ -366,18 +366,28 @@ export const useSessionStore = create<SessionState>()(
         }
 
         const resolvedStatus = normalizeBackendSessionStatus(resolvedSessionInfo.status);
-        const resolvedIsInteractive = resolvedStatus !== 'ended';
+        const isEndedContinuation = resolvedStatus === 'ended' && Boolean(resolvedSessionInfo.thread_id);
+        const resolvedIsInteractive = resolvedStatus !== 'ended' || isEndedContinuation;
+        const clientStatus = isEndedContinuation ? 'active' : mapBackendStatusToClient(resolvedStatus);
+        const openSessionInfo: SessionInfo = isEndedContinuation
+          ? {
+              ...resolvedSessionInfo,
+              status: 'open',
+              ended_at: null,
+            }
+          : resolvedSessionInfo;
         const restored: SessionClientStore = {
           sessionId: resolvedSessionInfo.session_id,
           threadId: resolvedSessionInfo.thread_id,
           userId: resolvedUserId,
           presetType: (resolvedSessionInfo.session_type as PresetType) || 'open',
           contextMode: (resolvedSessionInfo.preset_context as ContextMode) || 'life',
-          status: mapBackendStatusToClient(resolvedStatus),
+          status: clientStatus,
           voiceMode: resolvedSessionInfo.platform === 'voice' || resolvedSessionInfo.platform === 'ios_voice',
           startedAt: resolvedSessionInfo.started_at,
           lastActivityAt: resolvedSessionInfo.updated_at,
-          endedAt: resolvedStatus === 'ended' ? resolvedSessionInfo.ended_at ?? undefined : undefined,
+          endedAt: isEndedContinuation || resolvedStatus !== 'ended' ? undefined : resolvedSessionInfo.ended_at ?? undefined,
+          activeSegmentStartedAt: resolvedSessionInfo.active_segment_started_at ?? undefined,
           intention: resolvedSessionInfo.intention ?? undefined,
           focusCue: resolvedSessionInfo.focus_cue ?? undefined,
           isActive: resolvedIsInteractive,
@@ -385,17 +395,17 @@ export const useSessionStore = create<SessionState>()(
         };
 
         set((state) => {
-          const upsertSessions = (sessions: SessionInfo[]) => sortSessionsByUpdatedAt([
-            resolvedSessionInfo,
+          const upsertSessions = (sessions: SessionInfo[], entry: SessionInfo) => sortSessionsByUpdatedAt([
+            entry,
             ...sessions.filter((entry) => entry.session_id !== resolvedSessionInfo.session_id),
           ]);
 
           return {
             session: restored,
             openSessions: resolvedIsInteractive
-              ? upsertSessions(state.openSessions)
+              ? upsertSessions(state.openSessions, openSessionInfo)
               : state.openSessions.filter((entry) => entry.session_id !== resolvedSessionInfo.session_id),
-            recentSessions: upsertSessions(state.recentSessions),
+            recentSessions: upsertSessions(state.recentSessions, resolvedSessionInfo),
             error: null,
           };
         });

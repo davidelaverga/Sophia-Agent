@@ -63,7 +63,20 @@ export function useSessionChatInitialization({
 }: UseSessionChatInitializationParams) {
   const hasInitializedRef = useRef(false);
   const initialGreetingSetRef = useRef(false);
+  const initializedSessionIdRef = useRef<string | null>(null);
+  const initializedFromStoredRef = useRef(false);
   const [isInitializingChat, setIsInitializingChat] = useState(true);
+
+  useEffect(() => {
+    const nextSessionId = session?.sessionId ?? null;
+    if (initializedSessionIdRef.current === nextSessionId) return;
+
+    initializedSessionIdRef.current = nextSessionId;
+    hasInitializedRef.current = false;
+    initialGreetingSetRef.current = false;
+    initializedFromStoredRef.current = false;
+    setIsInitializingChat(Boolean(nextSessionId));
+  }, [session?.sessionId]);
 
   // R42: Smart opener fallback — if no greeting arrives within 2s, fire default
   useEffect(() => {
@@ -95,8 +108,10 @@ export function useSessionChatInitialization({
     if (!session) return;
 
     if (storedMessages && storedMessages.length > 0) {
-      if (!hasInitializedRef.current) {
+      if (!hasInitializedRef.current || !initializedFromStoredRef.current) {
         hasInitializedRef.current = true;
+        initialGreetingSetRef.current = false;
+        initializedFromStoredRef.current = true;
 
         storedMessages.forEach((message) => {
           setMessageTimestamp(message.id, message.createdAt || new Date().toISOString());
@@ -179,8 +194,7 @@ export function useSessionChatInitialization({
       effectiveGreeting = bootstrap.greetingMessage;
       effectiveGreetingId = bootstrap.messageId;
     } else {
-      effectiveGreeting = initialGreeting;
-      effectiveGreetingId = greetingMessageId;
+      return;
     }
 
     const normalizedGreeting = normalizeGreetingForDisplay({

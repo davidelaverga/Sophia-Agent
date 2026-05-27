@@ -1,7 +1,8 @@
 """Sophia session management — multi-session persistence.
 
-Real CRUD for /api/v1/sessions/* endpoints backed by file-based SessionStore.
-Creates LangGraph threads and persists session records.
+Real CRUD for /api/v1/sessions/* endpoints backed by the configured
+SessionStore implementation. Creates LangGraph threads and persists session
+records plus durable transcript messages.
 """
 
 import os
@@ -14,7 +15,13 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from deerflow.sophia.session_store import SessionRecord, SessionStore
+from deerflow.sophia.session_store import (
+    SessionMessageRecord,
+    SessionRecord,
+    SessionStore,
+    canonical_visible_messages,
+    derive_message_id,
+)
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 
@@ -74,6 +81,13 @@ class SessionInfoResponse(BaseModel):
     platform: str = "text"
     intention: str | None = None
     focus_cue: str | None = None
+    checkpointer_available: bool | None = None
+    transcript_available: bool = False
+    active_segment_started_at: str | None = None
+    segment_count: int = 1
+    continuation_count: int = 0
+    memory_processed_until_sequence: int = 0
+    recap_processed_until_sequence: int = 0
 
 
 class ActiveSessionResponse(BaseModel):
@@ -247,6 +261,8 @@ def _normalize_user_id(user_id: str | None) -> str:
 
 
 def _legacy_user_id_for(user_id: str) -> str | None:
+    if not getattr(_store, "allow_legacy_dev_user_fallback", True):
+        return None
     return None if user_id == _LEGACY_USER_ID else _LEGACY_USER_ID
 
 
@@ -293,6 +309,34 @@ def _resolve_session_record(user_id: str, session_id: str) -> tuple[str, Session
         return legacy_user_id, legacy_record
 
     return user_id, None
+
+
+def _activate_session_for_continuation(
+    owner_user_id: str,
+    record: SessionRecord,
+    *,
+    started_at: str | None = None,
+) -> SessionRecord:
+    """Move a paused or ended conversation back into an interactive segment."""
+    now = started_at or datetime.now(UTC).isoformat()
+    updates: dict[str, object] = {
+        "status": "open",
+        "ended_at": None,
+    }
+
+    if record.status == "ended":
+        updates.update(
+            {
+                "active_segment_started_at": now,
+                "segment_count": max(1, record.segment_count) + 1,
+                "continuation_count": record.continuation_count + 1,
+            }
+        )
+    elif record.status in {"paused", "resumable"}:
+        updates["active_segment_started_at"] = record.active_segment_started_at or now
+
+    updated = _store.update(owner_user_id, record.session_id, **updates)
+    return updated or record
 
 @router.post("/start", response_model=SessionStartResponse)
 async def start_session(body: SessionStartRequest) -> SessionStartResponse:
@@ -416,15 +460,14 @@ async def update_session(
         if requested_status is None:
             return _record_to_info(record)
 
-    if requested_status is not None and record.status == "ended":
-        raise HTTPException(status_code=409, detail="Ended sessions cannot change status.")
-
     if updates:
         record = _store.update(owner_user_id, session_id, **updates)
         if record is None:
             raise HTTPException(status_code=404, detail="Session not found.")
 
     if requested_status == "paused":
+        if record.status == "ended":
+            raise HTTPException(status_code=409, detail="Ended sessions can only be continued by reopening.")
         from app.gateway.inactivity_watcher import unregister_thread
 
         record = _store.pause(owner_user_id, session_id)
@@ -434,9 +477,7 @@ async def update_session(
     elif requested_status == "open":
         from app.gateway.inactivity_watcher import register_activity
 
-        record = _store.resume(owner_user_id, session_id)
-        if record is None:
-            raise HTTPException(status_code=404, detail="Session not found.")
+        record = _activate_session_for_continuation(owner_user_id, record)
         register_activity(
             record.thread_id,
             owner_user_id,
@@ -534,17 +575,52 @@ class SessionMessagesResponse(BaseModel):
     messages: list[SessionMessageResponse]
 
 
+class SessionMessagePersistInput(BaseModel):
+    id: str | None = None
+    message_id: str | None = None
+    role: Literal["user", "assistant", "sophia", "system", "tool", "artifact"]
+    content: str = ""
+    created_at: str | None = None
+    source: str | None = None
+    final: bool | None = None
+    incomplete: bool | None = None
+    approximate: bool | None = None
+    turn_id: str | None = None
+    provider_event_id: str | None = None
+    redaction_level: Literal["none", "private", "diagnostic_only"] = "none"
+
+
+class SessionMessagesPersistRequest(BaseModel):
+    user_id: str = "dev-user"
+    thread_id: str | None = None
+    messages: list[SessionMessagePersistInput]
+
+
 @router.get("/{session_id}/messages", response_model=SessionMessagesResponse)
 async def get_session_messages(
     session_id: str,
     user_id: str = Query(default="dev-user"),
 ) -> SessionMessagesResponse:
-    """Retrieve conversation history from the LangGraph thread state."""
-    _, record = _resolve_session_record(_normalize_user_id(user_id), session_id)
+    """Retrieve durable conversation history, falling back to LangGraph state."""
+    owner_user_id, record = _resolve_session_record(_normalize_user_id(user_id), session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
 
     thread_id = record.thread_id
+    durable_records = canonical_visible_messages(_store.list_messages(owner_user_id, session_id))
+    durable_messages = [
+        _message_record_to_response(message)
+        for message in durable_records
+        if _message_record_to_response(message) is not None
+    ]
+    if durable_messages:
+        _update_session_from_visible_records(owner_user_id, session_id, durable_records, record)
+        return SessionMessagesResponse(
+            session_id=session_id,
+            thread_id=thread_id,
+            messages=durable_messages,
+        )
+
     base_url = _get_langgraph_base_url()
 
     try:
@@ -609,11 +685,92 @@ async def get_session_messages(
                 created_at=None,
             ))
 
+    if messages:
+        _store.replace_messages(
+            owner_user_id,
+            session_id,
+            [
+                _response_to_message_record(
+                    response,
+                    session_id=session_id,
+                    thread_id=thread_id,
+                    source="langgraph_checkpointer",
+                    sequence=index + 1,
+                )
+                for index, response in enumerate(messages)
+            ],
+        )
+        _update_session_from_visible_records(
+            owner_user_id,
+            session_id,
+            canonical_visible_messages(_store.list_messages(owner_user_id, session_id)),
+            record,
+        )
+
     return SessionMessagesResponse(
         session_id=session_id,
         thread_id=thread_id,
         messages=messages,
     )
+
+
+@router.put("/{session_id}/messages", response_model=SessionMessagesResponse)
+async def persist_session_messages(
+    session_id: str,
+    body: SessionMessagesPersistRequest,
+    user_id: str = Query(default="dev-user"),
+) -> SessionMessagesResponse:
+    """Persist an ordered transcript snapshot for a session.
+
+    The client calls this with finalized visible transcript updates. Streaming
+    partials may be included only when marked incomplete/final=false.
+    """
+    normalized_user_id = _normalize_user_id(user_id or body.user_id)
+    owner_user_id, record = _resolve_session_record(normalized_user_id, session_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    thread_id = body.thread_id or record.thread_id
+    if thread_id != record.thread_id:
+        record = _store.update(
+            owner_user_id,
+            session_id,
+            thread_id=thread_id,
+            checkpointer_available=True,
+        ) or record
+    records: list[SessionMessageRecord] = []
+    for item in body.messages:
+        message = _persist_input_to_message_record(
+            item,
+            session_id=session_id,
+            thread_id=thread_id,
+            sequence=len(records) + 1,
+        )
+        if message is not None:
+            records.append(message)
+    stored_records = _store.replace_messages(owner_user_id, session_id, records)
+    visible_records = canonical_visible_messages(stored_records)
+    _update_session_from_visible_records(owner_user_id, session_id, visible_records, record)
+
+    return SessionMessagesResponse(
+        session_id=session_id,
+        thread_id=thread_id,
+        messages=[
+            response
+            for response in (_message_record_to_response(message) for message in visible_records)
+            if response is not None
+        ],
+    )
+
+
+@router.post("/{session_id}/messages", response_model=SessionMessagesResponse)
+async def persist_session_messages_beacon(
+    session_id: str,
+    body: SessionMessagesPersistRequest,
+    user_id: str = Query(default="dev-user"),
+) -> SessionMessagesResponse:
+    """POST alias for browser sendBeacon/keepalive transcript flushes."""
+    return await persist_session_messages(session_id, body, user_id)
 
 
 @router.post("/{session_id}/touch", response_model=SessionInfoResponse)
@@ -630,10 +787,11 @@ async def touch_session(
     owner_user_id, record = _resolve_session_record(normalized_user_id, session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
+
+    if record.status in {"ended", "paused", "resumable"}:
+        record = _activate_session_for_continuation(owner_user_id, record)
+
     updates: dict = {"message_count": record.message_count + 1}
-    if record.status == "paused":
-        updates["status"] = "open"
-        updates["ended_at"] = None
     normalized_preview = _normalize_message_preview(message_preview)
     if normalized_preview:
         updates["last_message_preview"] = normalized_preview
@@ -658,6 +816,113 @@ async def touch_session(
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _message_record_to_response(message: SessionMessageRecord) -> SessionMessageResponse | None:
+    if message.role == "user":
+        role = "user"
+    elif message.role == "assistant":
+        role = "sophia"
+    else:
+        return None
+
+    content = _extract_visible_message_text(message.content)
+    if not content:
+        return None
+    return SessionMessageResponse(
+        id=message.message_id,
+        role=role,
+        content=content,
+        created_at=message.created_at,
+    )
+
+
+def _response_to_message_record(
+    response: SessionMessageResponse,
+    *,
+    session_id: str,
+    thread_id: str,
+    source: str,
+    sequence: int = 0,
+) -> SessionMessageRecord:
+    role = "assistant" if response.role == "sophia" else "user"
+    return SessionMessageRecord(
+        message_id=derive_message_id(
+            session_id=session_id,
+            role=role,
+            sequence=sequence,
+            message_id=response.id,
+            content=response.content,
+        ),
+        session_id=session_id,
+        thread_id=thread_id,
+        role=role,
+        content=response.content,
+        created_at=response.created_at or datetime.now(UTC).isoformat(),
+        source=source,
+        final=True,
+        sequence=sequence,
+    )
+
+
+def _update_session_from_visible_records(
+    owner_user_id: str,
+    session_id: str,
+    visible_records: list[SessionMessageRecord],
+    record: SessionRecord,
+) -> None:
+    updates: dict[str, object] = {"message_count": len(visible_records)}
+    last_visible = next((message for message in reversed(visible_records) if message.content.strip()), None)
+    if last_visible is not None:
+        preview = _normalize_message_preview(last_visible.content)
+        if preview:
+            updates["last_message_preview"] = preview
+            if not record.title or record.title.strip().lower() == "new session":
+                updates["title"] = _build_session_title(preview)
+    _store.update(owner_user_id, session_id, **updates)
+
+
+def _persist_input_to_message_record(
+    item: SessionMessagePersistInput,
+    *,
+    session_id: str,
+    thread_id: str,
+    sequence: int = 0,
+) -> SessionMessageRecord | None:
+    content = _extract_visible_message_text(item.content)
+    if not content:
+        return None
+    role = "assistant" if item.role == "sophia" else item.role
+    if role not in {"user", "assistant"}:
+        return None
+    is_final = item.final if item.final is not None else not bool(item.incomplete)
+    if not is_final:
+        return None
+    message_id = derive_message_id(
+        session_id=session_id,
+        role=role,
+        sequence=sequence,
+        message_id=item.message_id or item.id,
+        turn_id=item.turn_id,
+        provider_event_id=item.provider_event_id,
+        content=content,
+    )
+    source = item.source or ("voice" if message_id.startswith("voice-") else "text")
+    return SessionMessageRecord(
+        message_id=message_id,
+        session_id=session_id,
+        thread_id=thread_id,
+        role=role,
+        content=content,
+        created_at=item.created_at or datetime.now(UTC).isoformat(),
+        source=source,
+        final=is_final,
+        approximate=bool(item.approximate),
+        turn_id=item.turn_id,
+        provider_event_id=item.provider_event_id,
+        sequence=sequence,
+        redaction_level=item.redaction_level,
+    )
+
+
 def _record_to_info(record: SessionRecord) -> SessionInfoResponse:
     return SessionInfoResponse(
         session_id=record.session_id,
@@ -674,6 +939,13 @@ def _record_to_info(record: SessionRecord) -> SessionInfoResponse:
         platform=record.platform,
         intention=record.intention,
         focus_cue=record.focus_cue,
+        checkpointer_available=record.checkpointer_available,
+        transcript_available=record.transcript_available,
+        active_segment_started_at=record.active_segment_started_at,
+        segment_count=record.segment_count,
+        continuation_count=record.continuation_count,
+        memory_processed_until_sequence=record.memory_processed_until_sequence,
+        recap_processed_until_sequence=record.recap_processed_until_sequence,
     )
 
 

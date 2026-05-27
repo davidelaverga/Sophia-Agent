@@ -9,6 +9,7 @@
 import { cookies, headers } from 'next/headers'
 
 import { getSession } from '@/server/better-auth'
+import { buildLegacyBackendUser, issueLegacyBackendToken } from '@/server/legacy-backend-auth'
 
 import { debugWarn } from '../debug-logger'
 import { logger } from '../error-logger'
@@ -17,7 +18,6 @@ import { providerLogin } from './backend-auth'
 import { authBypassEnabled, authBypassUserId } from './dev-bypass'
 
 const COOKIE_NAME = 'sophia-backend-token'
-const DEV_BYPASS_BACKEND_TOKEN = 'dev-bypass-token'
 
 function normalizeUserId(value: string | null | undefined): string | null {
   if (typeof value !== 'string') {
@@ -128,6 +128,34 @@ async function tryHydrateUserScopedAuthToken(): Promise<string> {
   }
 }
 
+function issueBypassBackendToken(): string {
+  const bypassUserId = normalizeUserId(authBypassUserId)
+
+  if (!bypassUserId) {
+    logger.logError(new Error('Auth bypass enabled without a valid bypass user id'), {
+      component: 'Server Auth',
+      action: 'issue_bypass_backend_token',
+    })
+    return ''
+  }
+
+  try {
+    return issueLegacyBackendToken(
+      buildLegacyBackendUser({
+        id: bypassUserId,
+        email: '',
+        username: bypassUserId,
+      }),
+    )
+  } catch (error) {
+    logger.logError(error instanceof Error ? error : new Error('Failed to issue bypass backend token'), {
+      component: 'Server Auth',
+      action: 'issue_bypass_backend_token',
+    })
+    return ''
+  }
+}
+
 export async function getAuthenticatedUserId(): Promise<string | null> {
   if (authBypassEnabled) {
     return normalizeUserId(authBypassUserId)
@@ -148,7 +176,7 @@ export async function getUserScopedAuthToken(): Promise<string> {
   }
 
   if (authBypassEnabled) {
-    return getFallbackServerToken() || DEV_BYPASS_BACKEND_TOKEN
+    return getFallbackServerToken() || issueBypassBackendToken()
   }
 
   const hydratedToken = await tryHydrateUserScopedAuthToken()
@@ -165,7 +193,7 @@ export async function getUserScopedAuthToken(): Promise<string> {
 
 export async function refreshUserScopedAuthToken(): Promise<string> {
   if (authBypassEnabled) {
-    return getFallbackServerToken() || DEV_BYPASS_BACKEND_TOKEN
+    return getFallbackServerToken() || issueBypassBackendToken()
   }
 
   return tryHydrateUserScopedAuthToken()
@@ -197,7 +225,7 @@ export async function getServerAuthToken(): Promise<string> {
   }
 
   if (authBypassEnabled) {
-    return getFallbackServerToken() || DEV_BYPASS_BACKEND_TOKEN
+    return getFallbackServerToken() || issueBypassBackendToken()
   }
 
   return getFallbackServerToken()

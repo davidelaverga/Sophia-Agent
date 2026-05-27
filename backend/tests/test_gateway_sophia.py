@@ -20,10 +20,11 @@ from deerflow.sophia.session_store import SessionRecord, SessionStore
 def client():
     """Create a test client with the Sophia router."""
     from app.gateway.auth import require_authorized_user_scope
-    from app.gateway.routers.sophia import router
+    from app.gateway.routers.sophia import internal_router, router
 
     app = FastAPI()
     app.include_router(router)
+    app.include_router(internal_router)
     app.dependency_overrides[require_authorized_user_scope] = lambda: "test_user"
     return TestClient(app)
 
@@ -31,10 +32,11 @@ def client():
 @pytest.fixture
 def secure_client():
     """Create a test client with the real auth dependency enabled."""
-    from app.gateway.routers.sophia import router
+    from app.gateway.routers.sophia import internal_router, router
 
     app = FastAPI()
     app.include_router(router)
+    app.include_router(internal_router)
     return TestClient(app)
 
 
@@ -50,7 +52,10 @@ def mock_mem0():
 @pytest.fixture(autouse=True)
 def mock_review_store():
     with (
-        patch("app.gateway.routers.sophia.apply_review_metadata_overlays", side_effect=lambda _user_id, memories: memories) as mock_apply,
+        patch(
+            "app.gateway.routers.sophia.apply_review_metadata_overlays",
+            side_effect=lambda _user_id, memories, **_kwargs: memories,
+        ) as mock_apply,
         patch("app.gateway.routers.sophia.upsert_review_metadata") as mock_upsert,
         patch("app.gateway.routers.sophia.remove_review_metadata") as mock_remove,
     ):
@@ -143,6 +148,622 @@ class TestUserScopedAuthorization:
         resp = secure_client.get("/api/sophia/e2e-user/memories/recent")
 
         assert resp.status_code == 401
+
+
+class TestRealtimeContext:
+    def test_requires_authorization_when_auth_dependency_is_active(self, secure_client):
+        resp = secure_client.post("/api/sophia/test_user/realtime/context", json={})
+
+        assert resp.status_code == 401
+
+    def test_returns_identity_and_handoff_when_available(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        user_dir = tmp_path / "test_user"
+        (user_dir / "handoffs").mkdir(parents=True)
+        (user_dir / "identity.md").write_text(
+            "Name: Luis\nLuis responds well to direct acknowledgments.",
+            encoding="utf-8",
+        )
+        (user_dir / "handoffs" / "latest.md").write_text(
+            "Session initiated with Luis. Keep the opener grounded.",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": False,
+                "provider_status": "unavailable",
+                "provider_reason": "missing_api_key",
+            },
+        )
+
+        resp = client.post("/api/sophia/test_user/realtime/context", json={"platform": "voice"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["preferred_name"] == "Luis"
+        assert "direct acknowledgments" in data["identity_excerpt"]
+        assert "Keep the opener grounded" in data["handoff_excerpt"]
+        assert data["memories"] == []
+        assert data["diagnostics"]["identity_available"] is True
+        assert data["diagnostics"]["handoff_available"] is True
+        assert data["diagnostics"]["identity_file_status"] == "present"
+        assert data["diagnostics"]["handoff_file_status"] == "present"
+        assert data["diagnostics"]["preferred_name_source"] == "identity_file"
+        assert data["diagnostics"]["preferred_name_conflict"] is False
+        assert data["diagnostics"]["mem0_status"] == "missing_api_key"
+
+    def test_realtime_context_promotes_mem0_preferred_name_when_identity_missing(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "_apply_review_metadata_overlays_readonly",
+            lambda _user_id, memories: memories,
+        )
+
+        def fake_search(**kwargs):  # noqa: ANN202
+            calls.append(dict(kwargs))
+            query = str(kwargs.get("query", ""))
+            if "what the user wants to be called" in query:
+                return {
+                    "memories": [
+                        {
+                            "id": "m-name",
+                            "content": "Preferred name: Mira. Explicit user statement.",
+                            "category": "fact",
+                            "score": 0.99,
+                        }
+                    ],
+                    "provider_status": "available",
+                    "provider_reason": "sdk_client",
+                }
+            return {
+                "memories": [
+                    {
+                        "id": "m-other",
+                        "content": "User prefers concise context.",
+                        "category": "preference",
+                        "score": 0.8,
+                    }
+                ],
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            }
+
+        monkeypatch.setattr(context_module, "search_memories_with_diagnostics", fake_search)
+
+        resp = client.post("/api/sophia/test_user/realtime/context", json={"platform": "voice"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["preferred_name"] == "Mira"
+        assert data["diagnostics"]["identity_file_status"] == "missing"
+        assert data["diagnostics"]["handoff_file_status"] == "missing"
+        assert data["diagnostics"]["preferred_name_source"] == "mem0"
+        assert data["diagnostics"]["preferred_name_available"] is True
+        assert data["diagnostics"]["preferred_name_conflict"] is False
+        assert data["diagnostics"]["mem0_preferred_name_status"] == "available"
+        assert "Mira" not in json.dumps(data["diagnostics"])
+        assert calls[-1]["categories"] == ["fact", "preference"]
+        assert calls[-1]["log_content_previews"] is False
+
+    def test_realtime_context_prefers_mem0_correction_over_handoff_inference(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        user_dir = tmp_path / "test_user" / "handoffs"
+        user_dir.mkdir(parents=True)
+        (user_dir / "latest.md").write_text(
+            "Session initiated with Daniel. Keep the opener grounded.",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "_apply_review_metadata_overlays_readonly",
+            lambda _user_id, memories: memories,
+        )
+        monkeypatch.setattr(
+            context_module,
+            "search_memories_with_diagnostics",
+            lambda **kwargs: {
+                "memories": [
+                    {
+                        "id": "m-name",
+                        "content": "Preferred name: Mira. Explicit user statement.",
+                        "category": "fact",
+                        "score": 0.99,
+                    }
+                ]
+                if "what the user wants to be called" in str(kwargs.get("query", ""))
+                else [],
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+
+        resp = client.post("/api/sophia/test_user/realtime/context", json={})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["preferred_name"] == "Mira"
+        assert data["diagnostics"]["preferred_name_source"] == "mem0"
+        assert data["diagnostics"]["preferred_name_conflict"] is True
+        assert data["diagnostics"]["handoff_file_status"] == "present"
+        assert "Mira" not in json.dumps(data["diagnostics"])
+        assert "Daniel" not in json.dumps(data["diagnostics"])
+
+    def test_realtime_context_missing_identity_and_mem0_no_results_does_not_invent_name(
+        self,
+        client,
+        tmp_path,
+        monkeypatch,
+    ):
+        from app.gateway import sophia_realtime_context as context_module
+
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "search_memories_with_diagnostics",
+            lambda **_kwargs: {
+                "memories": [],
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+
+        resp = client.post("/api/sophia/test_user/realtime/context", json={})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["preferred_name"] is None
+        assert data["diagnostics"]["preferred_name_source"] == "unavailable"
+        assert data["diagnostics"]["preferred_name_available"] is False
+        assert data["diagnostics"]["identity_file_status"] == "missing"
+        assert data["diagnostics"]["mem0_preferred_name_status"] == "available"
+
+    def test_returns_bounded_mem0_snippets_when_provider_available(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "_apply_review_metadata_overlays_readonly",
+            lambda _user_id, memories: memories,
+        )
+
+        def fake_search(**kwargs):  # noqa: ANN202
+            calls.append(dict(kwargs))
+            return {
+                "memories": [
+                    {"id": "m1", "content": "Luis prefers crisp context.", "category": "preference", "score": 0.9},
+                    {"id": "m2", "content": "Luis is preparing a demo.", "category": "commitment", "score": 0.8},
+                    {"id": "m3", "content": "This one should be outside the requested limit.", "category": "fact"},
+                ],
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            }
+
+        monkeypatch.setattr(context_module, "search_memories_with_diagnostics", fake_search)
+
+        resp = client.post(
+            "/api/sophia/test_user/realtime/context",
+            json={"context_mode": "work", "ritual": "debrief", "limit": 2},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [memory["id"] for memory in data["memories"]] == ["m1", "m2"]
+        assert data["diagnostics"]["mem0_status"] == "available"
+        assert data["diagnostics"]["memory_count"] == 2
+        assert calls[0]["user_id"] == "test_user"
+        assert calls[0]["limit"] == 2
+        assert calls[0]["log_content_previews"] is False
+        assert calls[0]["raise_on_error"] is True
+        assert "ritual_context" in calls[0]["categories"]
+
+    def test_mem0_error_degrades_with_diagnostics(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "search_memories_with_diagnostics",
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        resp = client.post("/api/sophia/test_user/realtime/context", json={})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["memories"] == []
+        assert data["diagnostics"]["mem0_status"] == "error"
+        assert data["diagnostics"]["mem0_provider_reason"] == "provider_exception"
+        assert data["diagnostics"]["memory_count"] == 0
+
+    def test_limit_is_capped_server_side(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "_apply_review_metadata_overlays_readonly",
+            lambda _user_id, memories: memories,
+        )
+
+        def fake_search(**kwargs):  # noqa: ANN202
+            calls.append(dict(kwargs))
+            return {
+                "memories": [
+                    {"id": f"m{i}", "content": f"Memory {i}", "category": "fact"}
+                    for i in range(12)
+                ],
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            }
+
+        monkeypatch.setattr(context_module, "search_memories_with_diagnostics", fake_search)
+
+        resp = client.post("/api/sophia/test_user/realtime/context", json={"limit": 99})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert calls[0]["limit"] == 10
+        assert len(data["memories"]) == 10
+        assert data["diagnostics"]["memory_limit"] == 10
+
+    def test_dynamic_memory_retrieve_returns_bounded_success(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "_apply_review_metadata_overlays_readonly",
+            lambda _user_id, memories: memories,
+        )
+
+        def fake_search(**kwargs):  # noqa: ANN202
+            calls.append(dict(kwargs))
+            return {
+                "memories": [
+                    {"id": f"m{i}", "content": f"Memory {i}", "category": "preference"}
+                    for i in range(8)
+                ],
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+                "provider_transport": "mem0_sdk",
+                "cache_status": "miss",
+            }
+
+        monkeypatch.setattr(context_module, "search_memories_with_diagnostics", fake_search)
+
+        resp = client.post(
+            "/api/sophia/test_user/realtime/memories/retrieve",
+            json={
+                "query": "gaming focus cue",
+                "context_mode": "gaming",
+                "limit": 99,
+                "user_id": "model_supplied_user",
+                "categories": ["relationship"],
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["schema"] == "sophia_realtime_memory_retrieve_response_v1"
+        assert data["status"] == "success"
+        assert data["count"] == 5
+        assert [memory["rank"] for memory in data["memories"]] == [1, 2, 3, 4, 5]
+        assert data["trusted_user_id_source"] == "authenticated_realtime_session"
+        assert data["diagnostics"]["dynamic_retrieval_source"] == "gateway"
+        assert data["diagnostics"]["raw_memory_text_excluded"] is True
+        assert data["diagnostics"]["memory_limit"] == 5
+        assert calls[0]["user_id"] == "test_user"
+        assert calls[0]["limit"] == 5
+        assert "preference" in calls[0]["categories"]
+        assert "strategy" in calls[0]["categories"]
+
+    def test_dynamic_memory_retrieve_returns_no_results_when_provider_empty(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "search_memories_with_diagnostics",
+            lambda **_kwargs: {
+                "memories": [],
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+
+        resp = client.post(
+            "/api/sophia/test_user/realtime/memories/retrieve",
+            json={"query": "childhood movie"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["status"] == "no_results"
+        assert data["memories"] == []
+        assert data["diagnostics"]["provider_status"] == "available"
+
+    def test_dynamic_memory_retrieve_degrades_when_provider_unavailable(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": False,
+                "provider_status": "unavailable",
+                "provider_reason": "missing_api_key",
+            },
+        )
+
+        resp = client.post(
+            "/api/sophia/test_user/realtime/memories/retrieve",
+            json={"query": "what do you remember about gaming"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is False
+        assert data["status"] == "unavailable"
+        assert data["provider_reason"] == "missing_api_key"
+        assert data["diagnostics"]["raw_memory_text_excluded"] is True
+        assert resp.headers["content-type"].startswith("application/json")
+
+    def test_dynamic_memory_retrieve_internal_grant_binds_trusted_user(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        calls: list[dict[str, object]] = []
+        grant = context_module.create_realtime_memory_retrieval_grant(
+            user_id="test_user",
+            session_id="gemini-prod-session",
+        )
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "_apply_review_metadata_overlays_readonly",
+            lambda _user_id, memories: memories,
+        )
+
+        def fake_search(**kwargs):  # noqa: ANN202
+            calls.append(dict(kwargs))
+            return {
+                "memories": [{"id": "m1", "content": "Trusted user memory.", "category": "fact"}],
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            }
+
+        monkeypatch.setattr(context_module, "search_memories_with_diagnostics", fake_search)
+
+        resp = client.post(
+            "/internal/sophia-realtime/memories/retrieve",
+            headers={context_module.REALTIME_MEMORY_RETRIEVAL_TOKEN_HEADER: grant.token},
+            json={"query": "trusted memory", "user_id": "model_supplied_user"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "success"
+        assert data["session_id"] == "gemini-prod-session"
+        assert calls[0]["user_id"] == "test_user"
+
+    @pytest.mark.parametrize(
+        ("headers", "expected_status", "expected_reason"),
+        [
+            ({}, "unauthorized", "missing_grant"),
+            ({"X-Sophia-Realtime-Memory-Token": "not-a-real-grant"}, "unauthorized", "invalid_grant"),
+        ],
+    )
+    def test_dynamic_memory_retrieve_internal_grant_failures_return_json_envelope(
+        self,
+        client,
+        headers,
+        expected_status,
+        expected_reason,
+    ):
+        resp = client.post(
+            "/internal/sophia-realtime/memories/retrieve",
+            headers=headers,
+            json={"query": "trusted memory"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/json")
+        data = resp.json()
+        assert data["schema"] == "sophia_realtime_memory_retrieve_response_v1"
+        assert data["ok"] is False
+        assert data["status"] == expected_status
+        assert data["provider_status"] == "unavailable"
+        assert data["provider_reason"] == expected_reason
+        assert data["memories"] == []
+        assert data["count"] == 0
+        assert data["diagnostics"]["grant_status"] == expected_reason
+
+    def test_dynamic_memory_retrieve_internal_expired_grant_returns_json_envelope(self, client):
+        from app.gateway import sophia_realtime_context as context_module
+
+        grant = context_module.create_realtime_memory_retrieval_grant(
+            user_id="test_user",
+            session_id="expired-session",
+        )
+        with context_module._memory_retrieval_grants_lock:
+            context_module._memory_retrieval_grants[grant.token] = context_module.RealtimeMemoryRetrievalGrant(
+                token=grant.token,
+                user_id=grant.user_id,
+                session_id=grant.session_id,
+                expires_at=0,
+            )
+
+        resp = client.post(
+            "/internal/sophia-realtime/memories/retrieve",
+            headers={context_module.REALTIME_MEMORY_RETRIEVAL_TOKEN_HEADER: grant.token},
+            json={"query": "trusted memory"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "expired_grant"
+        assert data["provider_reason"] == "expired_grant"
+        assert data["diagnostics"]["grant_status"] == "expired_grant"
+
+    def test_dynamic_memory_retrieve_internal_validation_error_returns_json_envelope(self, client):
+        from app.gateway import sophia_realtime_context as context_module
+
+        grant = context_module.create_realtime_memory_retrieval_grant(
+            user_id="test_user",
+            session_id="validation-session",
+        )
+
+        resp = client.post(
+            "/internal/sophia-realtime/memories/retrieve",
+            headers={context_module.REALTIME_MEMORY_RETRIEVAL_TOKEN_HEADER: grant.token},
+            json=["not", "an", "object"],
+        )
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/json")
+        data = resp.json()
+        assert data["status"] == "invalid_request"
+        assert data["provider_status"] == "error"
+        assert data["provider_reason"] == "request_validation_error"
+        assert data["memories"] == []
+
+    def test_dynamic_memory_retrieve_public_validation_error_returns_json_envelope(self, client):
+        resp = client.post(
+            "/api/sophia/test_user/realtime/memories/retrieve",
+            json=["not", "an", "object"],
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "invalid_request"
+        assert data["provider_reason"] == "request_validation_error"
+        assert data["count"] == 0
+
+    def test_dynamic_memory_retrieve_search_error_returns_error_without_500(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "search_memories_with_diagnostics",
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        resp = client.post(
+            "/api/sophia/test_user/realtime/memories/retrieve",
+            json={"query": "stored context"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "error"
+        assert data["provider_status"] == "error"
+        assert data["diagnostics"]["raw_memory_text_excluded"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -242,8 +863,97 @@ class TestListMemories:
         resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review")
 
         assert resp.status_code == 200
-        assert resp.json()["count"] == 1
+        data = resp.json()
+        assert data["count"] == 1
+        assert data["source"] == "local_review_overlay"
+        assert data["candidate_count"] == 1
+        assert data["skipped_mem0_hydration_for_session_scope"] is True
+        assert isinstance(data["trace_id"], str)
         mock_mem0.get.assert_not_called()
+
+    def test_recent_memory_diagnostics_reports_session_id_received(self, client, mock_mem0, mock_review_store):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Needs review", "metadata": {"status": "pending_review", "session_id": "sess-1"}},
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review&session_id=sess-1")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["session_id_received"] is True
+        assert data["candidate_count"] == data["count"] == 1
+        assert data["trace_id"].startswith("memrecent-")
+
+    def test_session_scoped_pending_review_uses_local_review_overlay(self, client, mock_mem0, mock_review_store):
+        mock_mem0.get_all.return_value = []
+        mock_review_store["apply"].side_effect = None
+        mock_review_store["apply"].return_value = [
+            {
+                "id": "local:target",
+                "session_id": "sess-target",
+                "memory": "Fresh target recap memory",
+                "metadata": {"status": "pending_review", "category": "lesson"},
+                "updated_at": "2026-04-17T15:12:23.465604+00:00",
+            },
+            {
+                "id": "local:other",
+                "session_id": "sess-other",
+                "memory": "Other recap memory",
+                "metadata": {"status": "pending_review", "category": "lesson"},
+                "updated_at": "2026-04-17T15:13:23.465604+00:00",
+            },
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review&session_id=sess-target")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["source"] == "local_review_overlay"
+        assert data["session_id_received"] is True
+        assert data["local_overlay_count"] == 2
+        assert data["count"] == 1
+        assert data["memories"][0]["id"] == "local:target"
+        assert mock_review_store["apply"].call_args.kwargs["session_id"] == "sess-target"
+
+    def test_session_scoped_pending_review_zero_overlay_is_terminal_empty(self, client, mock_mem0, mock_review_store):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Needs global hydration", "metadata": None},
+        ]
+        mock_review_store["apply"].side_effect = None
+        mock_review_store["apply"].return_value = [
+            {"id": "m1", "memory": "Needs global hydration", "metadata": None},
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review&session_id=sess-empty")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 0
+        assert data["candidate_count"] == 0
+        assert data["memories"] == []
+        assert data["source"] == "local_review_overlay"
+        assert data["session_id_received"] is True
+        assert data["skipped_mem0_hydration_for_session_scope"] is True
+        assert data["empty_reason"] == "no_session_candidates"
+        mock_mem0.get.assert_not_called()
+
+    def test_global_hydration_path_reports_safe_source(self, client, mock_mem0):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Needs review", "metadata": None},
+            {"id": "m2", "memory": "Already approved", "metadata": None},
+        ]
+        mock_mem0.get.side_effect = [
+            {"id": "m1", "memory": "Needs review", "metadata": {"status": "pending_review"}},
+            {"id": "m2", "memory": "Already approved", "metadata": {"status": "approved"}},
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["source"] == "global_hydration"
+        assert data["candidate_count"] == 1
+        assert data["local_overlay_count"] == 0
 
     def test_hydrates_missing_metadata_without_status_filter(self, client, mock_mem0):
         mock_mem0.get_all.return_value = [
@@ -941,6 +1651,119 @@ class TestSessionEnd:
         queued_state = mock_queue.call_args.args[3]
         assert queued_state is not None
         assert queued_state["messages"][0]["content"] == "I needed to talk this through."
+        transcript = store.list_messages("test_user", "sess-001")
+        assert [message.role for message in transcript] == ["user", "assistant"]
+        assert [message.content for message in transcript] == [
+            "I needed to talk this through.",
+            "You stayed with it.",
+        ]
+
+    def test_duplicate_end_session_reuses_existing_recap_and_queues_once(self, client, tmp_path):
+        store = SessionStore(tmp_path)
+        store.create(
+            SessionRecord(
+                session_id="sess-dupe",
+                thread_id="thread-dupe",
+                user_id="test_user",
+                status="open",
+            )
+        )
+        payload = {
+            "session_id": "sess-dupe",
+            "thread_id": "thread-dupe",
+            "started_at": "2026-04-05T09:52:00+00:00",
+            "ended_at": "2026-04-05T10:00:00+00:00",
+            "offer_debrief": False,
+            "session_type": "open",
+            "context_mode": "life",
+            "turn_count": 2,
+            "messages": [
+                {"role": "user", "content": "Let's close this cleanly."},
+                {"role": "assistant", "content": "Closed with care."},
+            ],
+        }
+
+        with patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue, \
+             patch("app.gateway.routers.sophia.USERS_DIR", tmp_path), \
+             patch("app.gateway.routers.sophia._session_store", store):
+            first = client.post("/api/sophia/test_user/end-session", json=payload)
+            second_payload = {**payload, "ended_at": "2026-04-05T10:05:00+00:00"}
+            second = client.post("/api/sophia/test_user/end-session", json=second_payload)
+
+        assert first.status_code == 202
+        assert second.status_code == 202
+        assert first.json()["status"] == "pipeline_queued"
+        assert second.json()["status"] == "no_new_messages"
+        assert second.json()["ended_at"] == "2026-04-05T10:00:00+00:00"
+        mock_queue.assert_called_once()
+
+        saved = json.loads((tmp_path / "test_user" / "recaps" / "sess-dupe.json").read_text(encoding="utf-8"))
+        assert saved["ended_at"] == "2026-04-05T10:00:00+00:00"
+        record = store.get("test_user", "sess-dupe")
+        assert record is not None
+        assert record.status == "ended"
+        assert record.ended_at == "2026-04-05T10:00:00+00:00"
+        assert len(store.list_messages("test_user", "sess-dupe")) == 2
+
+    def test_continuation_with_existing_recap_queues_only_when_transcript_grew(self, client, tmp_path):
+        store = SessionStore(tmp_path)
+        store.create(
+            SessionRecord(
+                session_id="sess-continued",
+                thread_id="thread-continued",
+                user_id="test_user",
+                status="open",
+                memory_processed_until_sequence=2,
+            )
+        )
+        recap_path = tmp_path / "test_user" / "recaps" / "sess-continued.json"
+        recap_path.parent.mkdir(parents=True, exist_ok=True)
+        recap_path.write_text(
+            json.dumps({
+                "session_id": "sess-continued",
+                "thread_id": "thread-continued",
+                "started_at": "2026-04-05T09:52:00+00:00",
+                "ended_at": "2026-04-05T10:00:00+00:00",
+                "turn_count": 2,
+                "status": "ready",
+                "recap_artifacts": {"takeaway": "first segment"},
+            }),
+            encoding="utf-8",
+        )
+
+        payload = {
+            "session_id": "sess-continued",
+            "thread_id": "thread-continued",
+            "started_at": "2026-04-05T09:52:00+00:00",
+            "ended_at": "2026-04-12T10:05:00+00:00",
+            "offer_debrief": False,
+            "session_type": "open",
+            "context_mode": "life",
+            "turn_count": 4,
+            "messages": [
+                {"id": "m1", "role": "user", "content": "old first"},
+                {"id": "m2", "role": "assistant", "content": "old reply"},
+                {"id": "m3", "role": "user", "content": "new continuation"},
+                {"id": "m4", "role": "assistant", "content": "new reply"},
+            ],
+        }
+
+        with patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue, \
+             patch("app.gateway.routers.sophia.USERS_DIR", tmp_path), \
+             patch("app.gateway.routers.sophia._session_store", store):
+            response = client.post("/api/sophia/test_user/end-session", json=payload)
+
+        assert response.status_code == 202
+        assert response.json()["status"] == "pipeline_queued"
+        mock_queue.assert_called_once()
+        queued_state = mock_queue.call_args.args[3]
+        assert queued_state["messages"][-1]["content"] == "new reply"
+
+        record = store.get("test_user", "sess-continued")
+        assert record is not None
+        assert record.status == "ended"
+        assert record.ended_at == "2026-04-12T10:05:00+00:00"
+        assert [message.sequence for message in store.list_messages("test_user", "sess-continued")] == [1, 2, 3, 4]
 
     def test_missing_session_id_returns_422(self, client):
         resp = client.post(

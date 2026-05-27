@@ -2,6 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const pushMock = vi.fn();
 const resolveDashboardBootstrapStateMock = vi.fn();
 const useSessionStoreMock = vi.fn();
 const useConnectivityStoreMock = vi.fn();
@@ -21,6 +22,17 @@ vi.mock('../../app/lib/recent-session-end', () => ({
   getRecentSessionEndHint: () => null,
   clearRecentSessionEndHint: vi.fn(),
   markRecentSessionEnd: vi.fn(),
+}));
+
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({
+    push: pushMock,
+    replace: vi.fn(),
+    back: vi.fn(),
+    forward: vi.fn(),
+    refresh: vi.fn(),
+    prefetch: vi.fn(),
+  }),
 }));
 
 vi.mock('../../app/providers', () => ({
@@ -152,10 +164,6 @@ vi.mock('../../app/components/HistoryDrawer', () => ({
   HistoryDrawer: () => <div data-testid="history-drawer" />,
 }));
 
-vi.mock('../../app/components/dashboard/SettingsDrawer', () => ({
-  SettingsDrawer: () => <div data-testid="settings-drawer" />,
-}));
-
 vi.mock('../../app/components/dashboard/DashboardSidebar', () => ({
   RecentSessionsSidebar: () => <div data-testid="recent-sessions-sidebar" />,
   MobileBottomSheet: ({ isOpen, children }: { isOpen: boolean; children: React.ReactNode }) => (
@@ -180,6 +188,7 @@ describe('EnhancedFieldDashboard bootstrap UI precedence', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     sessionStartLoadingMock = false;
+    pushMock.mockReset();
     startSessionMock.mockReset();
     resumeSessionMock.mockReset();
     startSessionEntryMock.mockReset();
@@ -240,6 +249,25 @@ describe('EnhancedFieldDashboard bootstrap UI precedence', () => {
     });
 
     expect(screen.queryByText('How To Start')).not.toBeInTheDocument();
+  });
+
+  it('routes dashboard Settings directly to /settings without opening Field controls', async () => {
+    const user = userEvent.setup();
+    resolveDashboardBootstrapStateMock.mockResolvedValue({
+      mode: 'none',
+    });
+
+    render(<EnhancedFieldDashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('ritual-orbit')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getAllByRole('button', { name: 'Settings' })[0]);
+
+    expect(pushMock).toHaveBeenCalledWith('/settings');
+    expect(screen.queryByRole('dialog', { name: /field controls/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/field controls/i)).not.toBeInTheDocument();
   });
 
   it('keeps ResumeBanner hidden while a session launch is loading', async () => {

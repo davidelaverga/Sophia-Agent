@@ -11,6 +11,15 @@ It documents the **actual runtime contract** as implemented today. Any field, st
 
 Do not cross over. The companion cannot create files. The builder cannot hold the conversation.
 
+## Companion Artifact vs Builder Deliverable
+
+The word artifact has two meanings in this system. Do not collapse them.
+
+- **Companion artifact**: a lightweight `emit_artifact` record for Sophia's current turn: short reflection artifact, session takeaway, emotional/meta-assessment, internal orientation, or Presence artifact UI state. If the user asks to create or test a short reflection artifact, use `emit_artifact` and do NOT start Builder.
+- **Builder deliverable**: a user-facing output that takes async work: document, file, report, markdown draft, slides, presentation, visual report, frontend, research deliverable, or downloadable artifact. Use `start_builder_task` only for this class.
+
+Routing rule: short reflection artifact -> `emit_artifact`; document/file/report/build/downloadable deliverable -> Builder; ambiguous artifact wording -> ask one clarifying question instead of launching Builder.
+
 ## Data Contract
 
 ### Delegation call (`start_builder_task`)
@@ -27,7 +36,7 @@ start_builder_task(
 
 Before calling, the companion MUST have all specs. The builder cannot ask clarifying questions. The wrapper enriches the description with relevant memories from this session, current emotional context, active ritual, and explicit URLs the user provided — so a well-formed `description` need not repeat those.
 
-The wrapper returns immediately with a task_id; companion keeps talking to the user while the build runs in the background.
+The wrapper returns immediately with a real task_id; companion keeps talking to the user while the build runs in the background. For a fresh user request to create, build, generate, research, or present a user-facing deliverable such as a document, file, report, presentation, visual report, frontend, or downloadable artifact, call `start_builder_task` first. Do not call lifecycle tools before a task exists. For lightweight companion/session artifacts, use `emit_artifact` instead.
 
 ### Builder task lifecycle
 
@@ -56,24 +65,36 @@ Status semantics (terminal-status blacklist; default-active for forward-compat):
 
 ### Lifecycle tools (deepagents native)
 
-Once a task is running, the model has four lifecycle tools available:
+Once a task is running, the model has four lifecycle tools available. These tools require a real task_id returned by `start_builder_task` or recovered from `list_async_tasks` in the current trusted session. Never invent task IDs.
 
-- `check_async_task(task_id)` — fetch live status + result. Use only when the user asks "how's it going?" or after a clearly-long-enough wait. Do NOT poll on a timer; statuses cached in conversation history are stale.
-- `update_async_task(task_id, message)` — send new instructions to a running build (e.g. "actually, make it 2 slides not 5"). The thread_id stays the same; the builder picks up the update mid-run.
-- `cancel_async_task(task_id)` — stop a running build at the user's request.
-- `list_async_tasks(status_filter?)` — recall task_ids after context compaction or when the user references "that document we started".
+- `check_async_task(task_id)` — fetch live status + result. Use only with a real tracked task_id, only when the user asks "how's it going?" or after a clearly-long-enough wait. Do NOT poll on a timer; statuses cached in conversation history are stale.
+- `update_async_task(task_id, message)` — send new instructions to a running build (e.g. "actually, make it 2 slides not 5"). Use only with a real tracked task_id. The thread_id stays the same; the builder picks up the update mid-run.
+- `cancel_async_task(task_id)` — stop a running build at the user's request. Use only with a real tracked task_id.
+- `list_async_tasks(status_filter?)` — recall task_ids after context compaction or when the user references "that document we started". Do not use it instead of `start_builder_task` for a new build request.
 
 When `check_async_task` returns `status="success"`, the result is included in the response. The companion presents the deliverable in Sophia's voice using `companion_summary` / `companion_tone_hint` from the artifact metadata produced by `emit_builder_artifact`.
 
 ## Communication Protocol (Companion)
 
-The companion reads `state["async_tasks"]` and the response from `check_async_task` and responds to the user as follows:
+The companion reads `state["async_tasks"]` and the response from `check_async_task` and responds to the user using the intent → tool → acknowledgement matrix below. Every lifecycle-tool call on a turn MUST be followed by exactly one `emit_artifact` whose `next_step` / `takeaway` carries the acknowledgement, then the turn ends. NEVER chain two lifecycle tools on the same turn.
 
-- **build still running** (status not in the terminal set): a build is in flight in this thread. Acknowledge progress briefly and stay present. Do not call `start_builder_task` again — the wrapper rejects duplicate launches; trust that and stay with the user.
-- **build succeeded** (`status="success"`): present the deliverable naturally. Use `companion_summary` from the builder's artifact as the basis for what you say, shaped by `companion_tone_hint`. If `user_next_action` is populated, weave it in.
-- **build errored / cancelled** (`status="error"`, `"failed"`, `"cancelled"`, `"timeout"`): say plainly that building failed; quote the short reason if it is user-meaningful (otherwise paraphrase). Offer alternatives — a tighter brief, a different `task_type`, or stopping. Do NOT call `start_builder_task` again on your own initiative; wait for the user.
+### Intent → tool → acknowledgement matrix
 
-The companion must not preemptively refuse a buildable request. If the user asks for a PDF, slides, chart, or report, attempt delegation first and only relay limitations after the builder reports them.
+- **First build of session, no active task** → `start_builder_task(description, task_type)`. Ack like: "Starting the build now — I'll have it back to you shortly."
+- **Modification cues** ("add X", "also include", "make it shorter/longer", "change to N", "wait, do Y instead") while a build is **ACTIVE** (status not in terminal set) → `update_async_task(task_id, message)` with the user's delta paraphrased as builder instructions. Ack like: "Got it, updating the build to include X." Do NOT call `start_builder_task` — the wrapper rejects duplicates.
+- **Modification cues on a TERMINAL build** (status in `{success, completed, error, failed, cancelled, timeout, timed_out}`) → `start_builder_task(description, task_type)` with a brief that references the prior artifact inline (e.g. "Building on the prior recursive_llms_research.md, add a section on X..."). Ack like: "Got it — kicking off a fresh build that adds X to the previous version." NEVER call `update_async_task` on a terminal build — the wrapper rejects it because the underlying SDK call would create a new run on a thread whose history is already complete, causing the builder to loop on dangling tool calls.
+- **Status cues** ("how's it going?", "status?", "any update?", "is it done?") → `check_async_task(task_id)`. Statuses cached in conversation history are ALWAYS stale; always call this rather than quoting an earlier reply. Ack like: "Checking on it now — still running."
+- **Stop cues** ("stop", "cancel", "nevermind", "abort", "don't bother") → `cancel_async_task(task_id)`. Only on EXPLICIT stop — never on weak hedges like "hmm" or "actually". Ack like: "Got it, cancelling the build now."
+- **Recall cues** ("that doc we started", "what's running?", "all my builds") → `list_async_tasks(status_filter?)`. Ack like: "Pulling up your in-flight builds."
+- **Build succeeded** (`status="success"`): present the deliverable naturally. Use `companion_summary` from the builder's artifact as the basis for what you say, shaped by `companion_tone_hint`. If `user_next_action` is populated, weave it in.
+- **Build errored / cancelled** (`status="error"`, `"failed"`, `"cancelled"`, `"timeout"`): say plainly that building failed; quote the short reason if it is user-meaningful (otherwise paraphrase). Offer alternatives — a tighter brief, a different `task_type`, or stopping. Do NOT call `start_builder_task` again on your own initiative; wait for the user.
+
+### Cross-cutting rules (load-bearing)
+
+- Always use the FULL `task_id` verbatim — never truncate or abbreviate.
+- Do NOT poll on a timer. Call `check_async_task` only when the user asks.
+- If `update_async_task` returns an error (validation / network / SDK failure), acknowledge plainly and STOP — do NOT call `start_builder_task` as a workaround.
+- The companion must not preemptively refuse a buildable request. If the user asks for a PDF, slides, chart, or report, attempt delegation first and only relay limitations after the builder reports them.
 
 ## Builder Obligations
 

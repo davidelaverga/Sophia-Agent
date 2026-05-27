@@ -3,6 +3,8 @@
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # Sample extraction response from Claude Haiku
 _SAMPLE_EXTRACTION = [
     {
@@ -291,6 +293,355 @@ class TestExtractSessionMemories:
 
         assert result == []
         mock_add_memories.assert_not_called()
+
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_explicit_preferred_name_statement_creates_pending_review_candidate(
+        self,
+        mock_anthropic_mod,
+        mock_add_memories,
+    ):
+        """Explicit user name corrections create deterministic review candidates."""
+        from deerflow.sophia.extraction import extract_session_memories
+
+        messages = [
+            {
+                "role": "user",
+                "content": "Actually, my name is Mira, no Daniel. Could you please remember that?",
+            },
+            {"role": "assistant", "content": "Got it."},
+        ]
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response("[]")
+        mock_add_memories.return_value = [{"id": "mem_name"}]
+
+        result = extract_session_memories(
+            user_id="user1",
+            session_id="sess_name",
+            messages=messages,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert len(result) == 1
+        assert result[0]["content"] == "Preferred name: Mira. Explicit user statement."
+        assert result[0]["category"] == "fact"
+        assert result[0]["importance"] == "structural"
+        mock_add_memories.assert_called_once()
+        call_kwargs = mock_add_memories.call_args[1]
+        assert call_kwargs["messages"] == [
+            {"role": "user", "content": "Preferred name: Mira. Explicit user statement."}
+        ]
+        meta = call_kwargs["metadata"]
+        assert meta["category"] == "fact"
+        assert meta["importance"] == "structural"
+        assert meta["importance_score"] == 0.95
+        assert meta["confidence"] == 0.98
+        assert meta["status"] == "pending_review"
+        assert meta["preferred_name_source"] == "explicit_user_statement"
+        assert meta["tags"] == ["preferred_name", "explicit_user_statement"]
+
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_ambiguous_name_like_phrases_do_not_create_preferred_name_candidate(
+        self,
+        mock_anthropic_mod,
+        mock_add_memories,
+    ):
+        """Ambiguous phrases such as task references should not update identity."""
+        from deerflow.sophia.extraction import extract_session_memories
+
+        messages = [
+            {"role": "user", "content": "My name is on the list."},
+            {"role": "user", "content": "Call me tomorrow about the launch."},
+        ]
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response("[]")
+
+        result = extract_session_memories(
+            user_id="user1",
+            session_id="sess_ambiguous_name",
+            messages=messages,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert result == []
+        mock_add_memories.assert_not_called()
+
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_explicit_preferred_name_candidate_survives_llm_failure(
+        self,
+        mock_anthropic_mod,
+        mock_add_memories,
+    ):
+        """The deterministic explicit-name path does not depend on the LLM extraction response."""
+        from deerflow.sophia.extraction import extract_session_memories
+
+        messages = [{"role": "user", "content": "Please call me Mira from now on."}]
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.side_effect = Exception("API rate limit")
+        mock_add_memories.return_value = [{"id": "mem_name"}]
+
+        result = extract_session_memories(
+            user_id="user1",
+            session_id="sess_name_fallback",
+            messages=messages,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert len(result) == 1
+        assert result[0]["content"] == "Preferred name: Mira. Explicit user statement."
+        mock_add_memories.assert_called_once()
+
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_explicit_remember_durable_preference_creates_pending_candidate(
+        self,
+        mock_anthropic_mod,
+        mock_add_memories,
+    ):
+        from deerflow.sophia.extraction import extract_session_memories
+
+        messages = [
+            {
+                "role": "user",
+                "content": "Please remember that my preferred evening tea is chamomile tea because it helps me wind down.",
+                "sequence": 9,
+                "message_id": "m-9",
+            },
+            {
+                "role": "assistant",
+                "content": "Got it - chamomile tea for your evening tea preference.",
+                "sequence": 10,
+                "message_id": "m-10",
+            },
+        ]
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response("[]")
+        mock_add_memories.return_value = [{"id": "mem_tea"}]
+
+        result = extract_session_memories(
+            user_id="user1",
+            session_id="sess_explicit_pref",
+            messages=messages,
+            session_metadata={
+                **_SESSION_METADATA,
+                "sequence_start": 7,
+                "sequence_end": 10,
+                "source_message_ids": ["m-7", "m-8", "m-9", "m-10"],
+            },
+        )
+
+        assert len(result) == 1
+        assert result[0]["content"] == (
+            "User's preferred evening tea is chamomile tea because it helps them wind down."
+        )
+        assert result[0]["category"] == "preference"
+        mock_add_memories.assert_called_once()
+        call_kwargs = mock_add_memories.call_args[1]
+        assert call_kwargs["messages"] == [
+            {
+                "role": "user",
+                "content": (
+                    "User's preferred evening tea is chamomile tea because it helps them wind down."
+                ),
+            }
+        ]
+        meta = call_kwargs["metadata"]
+        assert meta["status"] == "pending_review"
+        assert meta["category"] == "preference"
+        assert meta["importance"] == "structural"
+        assert meta["sequence_start"] == 9
+        assert meta["sequence_end"] == 10
+        assert meta["source_message_ids"] == ["m-9", "m-10"]
+        assert meta["explicit_remember_source"] == "deterministic_preference"
+        assert meta["tags"] == ["explicit_user_statement", "explicit_remember", "preference"]
+
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_explicit_remember_test_preference_is_candidate_with_test_marker(
+        self,
+        mock_anthropic_mod,
+        mock_add_memories,
+    ):
+        from deerflow.sophia.extraction import extract_session_memories
+
+        messages = [
+            {
+                "role": "user",
+                "content": "Please remember that my second segment test preference is chamomile tea.",
+                "sequence": 9,
+                "message_id": "m-9",
+            },
+            {"role": "assistant", "content": "Got it.", "sequence": 10, "message_id": "m-10"},
+        ]
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response("[]")
+        mock_add_memories.return_value = [{"id": "mem_test_pref"}]
+
+        result = extract_session_memories(
+            user_id="user1",
+            session_id="sess_test_pref",
+            messages=messages,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert len(result) == 1
+        assert result[0]["content"] == "User's second segment test preference is chamomile tea."
+        meta = mock_add_memories.call_args[1]["metadata"]
+        assert meta["importance"] == "potential"
+        assert meta["confidence"] == 0.72
+        assert meta["tags"] == [
+            "explicit_user_statement",
+            "explicit_remember",
+            "preference",
+            "test_marker",
+        ]
+
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_explicit_remember_preference_suppresses_near_duplicate_llm_candidate(
+        self,
+        mock_anthropic_mod,
+        mock_add_memories,
+    ):
+        from deerflow.sophia.extraction import extract_session_memories
+
+        messages = [
+            {
+                "role": "user",
+                "content": "Please remember that my preferred evening tea is chamomile tea because it helps me wind down.",
+            }
+        ]
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(json.dumps([
+            {
+                "content": "User prefers chamomile tea in the evening because it helps them wind down.",
+                "category": "preference",
+                "importance": 0.8,
+                "confidence": 0.86,
+                "metadata": {},
+            }
+        ]))
+        mock_add_memories.return_value = [{"id": "mem_tea"}]
+
+        result = extract_session_memories(
+            user_id="user1",
+            session_id="sess_no_dup_pref",
+            messages=messages,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert len(result) == 1
+        assert result[0]["content"] == (
+            "User's preferred evening tea is chamomile tea because it helps them wind down."
+        )
+        mock_add_memories.assert_called_once()
+
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_explicit_remember_temporary_security_token_is_rejected(
+        self,
+        mock_anthropic_mod,
+        mock_add_memories,
+    ):
+        from deerflow.sophia.extraction import analyze_explicit_remember_messages, extract_session_memories
+
+        messages = [
+            {
+                "role": "user",
+                "content": "Please remember this temporary security token is red rabbit seven.",
+                "sequence": 3,
+                "message_id": "m-3",
+            }
+        ]
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response("[]")
+
+        result = extract_session_memories(
+            user_id="user1",
+            session_id="sess_secret",
+            messages=messages,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert result == []
+        mock_add_memories.assert_not_called()
+        diagnostics = analyze_explicit_remember_messages(messages)
+        assert diagnostics["entries"] == []
+        assert diagnostics["rejections"] == [
+            {"reason": "credential_like", "sequence_start": 3, "sequence_end": 3, "source_message_ids": ["m-3"]}
+        ]
+        assert "red rabbit" not in json.dumps(diagnostics)
+
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_credential_like_llm_candidate_is_policy_filtered(
+        self,
+        mock_anthropic_mod,
+        mock_add_memories,
+    ):
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(json.dumps([
+            {
+                "content": "User's temporary password is red rabbit seven.",
+                "category": "fact",
+                "importance": 0.9,
+                "confidence": 0.9,
+                "metadata": {},
+            }
+        ]))
+
+        result = extract_session_memories(
+            user_id="user1",
+            session_id="sess_policy_filter",
+            messages=[{"role": "user", "content": "I need to remember something."}],
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert result == []
+        mock_add_memories.assert_not_called()
+
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_require_memory_write_raises_when_candidate_write_returns_empty(
+        self,
+        mock_anthropic_mod,
+        mock_add_memories,
+    ):
+        from deerflow.sophia.extraction import MemoryWriteError, extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(json.dumps([
+            {
+                "content": "User prefers directness.",
+                "category": "preference",
+                "importance": 0.82,
+                "confidence": 0.9,
+                "metadata": {},
+            }
+        ]))
+        mock_add_memories.return_value = []
+
+        with pytest.raises(MemoryWriteError):
+            extract_session_memories(
+                user_id="user1",
+                session_id="sess_write_fail",
+                messages=[{"role": "user", "content": "Please be direct with me."}],
+                session_metadata=_SESSION_METADATA,
+                require_memory_write=True,
+            )
 
     def test_messages_with_no_user_content_skips(self):
         """Messages with only system roles -> no transcript -> skip."""

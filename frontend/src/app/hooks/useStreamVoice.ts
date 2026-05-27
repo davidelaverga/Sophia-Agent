@@ -56,6 +56,8 @@ function bindRemoteAudio(call: Call): () => void {
 }
 
 export type StreamVoiceCredentials = {
+  runtime?: "legacy_cascade"
+  voiceRuntime?: "legacy_cascade"
   apiKey: string
   token: string
   callType: string

@@ -10,15 +10,21 @@ import {
   Clock3,
   Download,
   Ear,
+  Eye,
   Gauge,
   GripVertical,
   Mic,
   Radio,
   RotateCcw,
   Sparkles,
+  X,
 } from "lucide-react"
-import { startTransition, useEffect, useMemo, useRef, useState } from "react"
+import { startTransition, useEffect, useId, useMemo, useRef, useState } from "react"
 
+import {
+  buildLastSessionTelemetrySnapshot,
+  persistLastSessionTelemetrySnapshot,
+} from "../../lib/recap-telemetry-report"
 import { registerSophiaCaptureBridge } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
 import {
@@ -27,6 +33,7 @@ import {
   type VoiceDeveloperMetrics,
   type VoiceRegressionMarker,
 } from "../../lib/voice-runtime-metrics"
+import { buildVoiceTelemetryReport } from "../../lib/voice-telemetry-report"
 import type { VoiceStateProps } from "../../lib/voice-types"
 import { useUiStore } from "../../stores/ui-store"
 
@@ -37,8 +44,6 @@ type VoiceMetricsPanelProps = {
 }
 
 type FloatingPanelBounds = {
-  left: number
-  top: number
   width: number
   height: number
 }
@@ -46,32 +51,37 @@ type FloatingPanelBounds = {
 type PointerInteraction = {
   pointerId: number
   startX: number
-  startY: number
   origin: FloatingPanelBounds
 }
 
-const FLOATING_PANEL_STORAGE_KEY = "sophia.voiceTelemetryPanel.layout.v1"
-const FLOATING_PANEL_MIN_WIDTH = 320
-const FLOATING_PANEL_MAX_WIDTH = 720
-const FLOATING_PANEL_MIN_HEIGHT = 260
+type SummaryMetricCard = {
+  label: string
+  value: string
+  hint: string
+  icon: typeof Activity
+  tone: "good" | "warn" | "bad" | "neutral"
+  thresholdKey?: keyof VoiceDeveloperMetrics["thresholds"]
+  emphasize?: boolean
+}
+
+const FLOATING_PANEL_STORAGE_KEY = "sophia.voiceTelemetryPanel.layout.v2"
+const FLOATING_PANEL_MOBILE_BREAKPOINT = 768
+const FLOATING_PANEL_MIN_WIDTH = 360
+const FLOATING_PANEL_DEFAULT_MAX_WIDTH = 620
+const FLOATING_PANEL_MAX_WIDTH = 760
+const FLOATING_PANEL_MIN_HEIGHT = 360
 const FLOATING_PANEL_MAX_HEIGHT = 760
-const FLOATING_PANEL_EDGE_PADDING = 12
-const FLOATING_PANEL_TOP_PADDING = 76
-const FLOATING_PANEL_HEADER_OFFSET = 164
+const FLOATING_PANEL_EDGE_PADDING = 16
+const FLOATING_PANEL_TOP_PADDING = 96
+const FLOATING_PANEL_BOTTOM_PADDING = 16
 
 function getDefaultFloatingBounds(viewportWidth: number, viewportHeight: number): FloatingPanelBounds {
-  const width = viewportWidth < 640
-    ? Math.max(FLOATING_PANEL_MIN_WIDTH, viewportWidth - 24)
-    : Math.min(460, Math.max(360, Math.round(viewportWidth * 0.3)))
-  const height = viewportHeight < 760
-    ? Math.max(FLOATING_PANEL_MIN_HEIGHT + 40, viewportHeight - 140)
-    : 560
-
   return clampFloatingBounds({
-    left: viewportWidth - width - 24,
-    top: viewportWidth < 640 ? FLOATING_PANEL_TOP_PADDING : 88,
-    width,
-    height,
+    width: Math.min(
+      FLOATING_PANEL_DEFAULT_MAX_WIDTH,
+      Math.max(FLOATING_PANEL_MIN_WIDTH, Math.round(viewportWidth * 0.38)),
+    ),
+    height: Math.max(FLOATING_PANEL_MIN_HEIGHT, Math.round(viewportHeight * 0.78)),
   }, viewportWidth, viewportHeight)
 }
 
@@ -80,16 +90,21 @@ function clampFloatingBounds(
   viewportWidth: number,
   viewportHeight: number,
 ): FloatingPanelBounds {
-  const maxWidth = Math.max(FLOATING_PANEL_MIN_WIDTH, Math.min(FLOATING_PANEL_MAX_WIDTH, viewportWidth - (FLOATING_PANEL_EDGE_PADDING * 2)))
-  const maxHeight = Math.max(FLOATING_PANEL_MIN_HEIGHT, Math.min(FLOATING_PANEL_MAX_HEIGHT, viewportHeight - FLOATING_PANEL_TOP_PADDING - FLOATING_PANEL_EDGE_PADDING))
+  const maxWidth = Math.max(
+    FLOATING_PANEL_MIN_WIDTH,
+    Math.min(FLOATING_PANEL_MAX_WIDTH, viewportWidth - (FLOATING_PANEL_EDGE_PADDING * 2)),
+  )
+  const maxHeight = Math.max(
+    FLOATING_PANEL_MIN_HEIGHT,
+    Math.min(
+      FLOATING_PANEL_MAX_HEIGHT,
+      viewportHeight - FLOATING_PANEL_TOP_PADDING - FLOATING_PANEL_BOTTOM_PADDING,
+    ),
+  )
   const width = Math.min(Math.max(bounds.width, FLOATING_PANEL_MIN_WIDTH), maxWidth)
   const height = Math.min(Math.max(bounds.height, FLOATING_PANEL_MIN_HEIGHT), maxHeight)
-  const maxLeft = Math.max(FLOATING_PANEL_EDGE_PADDING, viewportWidth - width - FLOATING_PANEL_EDGE_PADDING)
-  const maxTop = Math.max(FLOATING_PANEL_TOP_PADDING, viewportHeight - 120)
 
   return {
-    left: Math.min(Math.max(bounds.left, FLOATING_PANEL_EDGE_PADDING), maxLeft),
-    top: Math.min(Math.max(bounds.top, FLOATING_PANEL_TOP_PADDING), maxTop),
     width,
     height,
   }
@@ -104,9 +119,7 @@ function readPersistedFloatingBounds(defaultExpanded: boolean): { bounds: Floati
 
     const parsed = JSON.parse(raw) as Partial<FloatingPanelBounds> & { expanded?: boolean }
     if (
-      typeof parsed.left !== "number"
-      || typeof parsed.top !== "number"
-      || typeof parsed.width !== "number"
+      typeof parsed.width !== "number"
       || typeof parsed.height !== "number"
     ) {
       return null
@@ -114,8 +127,6 @@ function readPersistedFloatingBounds(defaultExpanded: boolean): { bounds: Floati
 
     return {
       bounds: {
-        left: parsed.left,
-        top: parsed.top,
         width: parsed.width,
         height: parsed.height,
       },
@@ -131,18 +142,18 @@ export function VoiceMetricsPanel({
   defaultExpanded = true,
   layout = "inline",
 }: VoiceMetricsPanelProps) {
+  const panelId = useId()
+  const panelHeadingId = `${panelId}-heading`
   const showToast = useUiStore((state) => state.showToast)
   const [expanded, setExpanded] = useState(defaultExpanded)
+  const [isPanelOpen, setIsPanelOpen] = useState(layout !== "floating")
   const [floatingBounds, setFloatingBounds] = useState<FloatingPanelBounds>({
-    left: 24,
-    top: 88,
     width: 420,
     height: 560,
   })
   const [hasHydratedFloatingState, setHasHydratedFloatingState] = useState(layout !== "floating")
-  const [isDragging, setIsDragging] = useState(false)
+  const [isCompactViewport, setIsCompactViewport] = useState(false)
   const [isResizing, setIsResizing] = useState(false)
-  const dragRef = useRef<PointerInteraction | null>(null)
   const resizeRef = useRef<PointerInteraction | null>(null)
   const [metrics, setMetrics] = useState<VoiceDeveloperMetrics>(() =>
     buildVoiceDeveloperMetrics({
@@ -150,6 +161,7 @@ export function VoiceMetricsPanel({
       events: [],
       snapshot: null,
       runtimeError: voiceState.error,
+      runtimeTelemetry: voiceState.runtimeTelemetry ?? null,
     }),
   )
 
@@ -164,16 +176,24 @@ export function VoiceMetricsPanel({
 
       const snapshot = capture?.snapshot() ?? null
       const events = capture?.getEvents() ?? []
+      const nextMetrics = buildVoiceDeveloperMetrics({
+        stage: voiceState.stage,
+        events,
+        snapshot,
+        runtimeError: voiceState.error,
+        runtimeTelemetry: voiceState.runtimeTelemetry ?? null,
+      })
+
+      persistLastSessionTelemetrySnapshot(
+        buildLastSessionTelemetrySnapshot({
+          captureSnapshot: snapshot,
+          metrics: nextMetrics,
+          summary: buildVoiceTelemetrySummary(nextMetrics),
+        }),
+      )
 
       startTransition(() => {
-        setMetrics(
-          buildVoiceDeveloperMetrics({
-            stage: voiceState.stage,
-            events,
-            snapshot,
-            runtimeError: voiceState.error,
-          }),
-        )
+        setMetrics(nextMetrics)
       })
     }
 
@@ -183,7 +203,10 @@ export function VoiceMetricsPanel({
     return () => {
       window.clearInterval(intervalId)
     }
-  }, [voiceState.error, voiceState.stage])
+  }, [voiceState.error, voiceState.runtimeTelemetry, voiceState.stage])
+
+  const isGeminiRuntime = metrics.sessionTelemetry.runtime === "gemini_live"
+  const geminiHeaderTelemetry = metrics.sessionTelemetry.gemini
 
   const panelTone = useMemo(() => {
     if (metrics.regressions.some((marker) => marker.level === "bad")) {
@@ -197,71 +220,171 @@ export function VoiceMetricsPanel({
     return metrics.health.level
   }, [metrics.health.level, metrics.regressions])
 
-  const summaryCards = useMemo(
-    () => [
+  const summaryCards = useMemo<SummaryMetricCard[]>(
+    () => {
+      if (metrics.sessionTelemetry.runtime === "gemini_live") {
+        const gemini = metrics.sessionTelemetry.gemini
+        return [
+          {
+            label: "Session ready",
+            value: formatMs(metrics.timings.sessionReadyMs),
+            hint: "start -> Gemini setup complete",
+            icon: Sparkles,
+            tone: metrics.thresholds.sessionReady.status,
+            thresholdKey: "sessionReady",
+          },
+          {
+            label: "Public SSE",
+            value: formatStatus(gemini.publicSseState),
+            hint: "normalized sophia.* event stream",
+            icon: Radio,
+            tone: statusTone(gemini.publicSseState),
+          },
+          {
+            label: "Gemini WebSocket",
+            value: formatStatus(gemini.websocketState),
+            hint: "browser Live websocket state",
+            icon: Activity,
+            tone: statusTone(gemini.websocketState),
+          },
+          {
+            label: "Relay",
+            value: formatStatus(gemini.relayStatus),
+            hint: "provider event relay status",
+            icon: Gauge,
+            tone: relayTone(gemini.relayStatus, gemini.consecutiveRelayFailures),
+          },
+          {
+            label: "Provider events",
+            value: String(gemini.providerEventCount),
+            hint: "Gemini server messages observed",
+            icon: AudioLines,
+            tone: gemini.providerEventCount > 0 ? "good" : "neutral",
+          },
+          {
+            label: "Coreview frames",
+            value: String(metrics.coreview.visual.frameSentCount),
+            hint: "artifact still frames sent",
+            icon: Eye,
+            tone: metrics.coreview.visual.frameSendFailureCount > 0 ? "warn" : metrics.coreview.visual.frameSentCount > 0 ? "good" : "neutral",
+          },
+          {
+            label: "Artifacts",
+            value: String(gemini.artifactCount),
+            hint: "public companion artifacts",
+            icon: Sparkles,
+            tone: gemini.artifactCount > 0 ? "good" : "neutral",
+          },
+          {
+            label: "Tool calls",
+            value: String(gemini.toolCallCount),
+            hint: "Gemini tool-loop handoffs",
+            icon: Clipboard,
+            tone: gemini.toolRejectionCount > 0 ? "warn" : "neutral",
+          },
+          {
+            label: "Last event",
+            value: formatMs(gemini.lastEventAgeMs),
+            hint: "age of most recent captured event",
+            icon: Clock3,
+            tone: gemini.lastEventAgeMs !== null && gemini.lastEventAgeMs > 10_000 ? "warn" : "neutral",
+          },
+        ]
+      }
+
+      return [
       {
         label: "Session ready",
-        value: metrics.timings.sessionReadyMs,
+        value: formatMs(metrics.timings.sessionReadyMs),
         hint: "start -> Sophia ready",
         icon: Sparkles,
         tone: metrics.thresholds.sessionReady.status,
+        thresholdKey: "sessionReady",
       },
       {
         label: "Join latency",
-        value: metrics.timings.joinLatencyMs,
+        value: formatMs(metrics.timings.joinLatencyMs),
         hint: "credentials -> joined",
         icon: Radio,
         tone: metrics.thresholds.joinLatency.status,
+        thresholdKey: "joinLatency",
       },
       {
         label: "Committed response",
-        value: metrics.pipeline.committedTurnCloseMs ?? metrics.pipeline.userEndedToFirstTextMs ?? metrics.pipeline.userEndedToAgentStartMs,
+        value: formatMs(metrics.pipeline.committedTurnCloseMs ?? metrics.pipeline.userEndedToFirstTextMs ?? metrics.pipeline.userEndedToAgentStartMs),
         hint: metrics.pipeline.committedTurnCloseMs !== null
           ? "committed transcript -> agent start"
           : "public turn -> first visible response",
         icon: Clock3,
         tone: metrics.thresholds.committedResponse.status,
+        thresholdKey: "committedResponse",
       },
       {
         label: "Raw first text",
-        value: metrics.lastTurn.firstTextMs,
+        value: formatMs(metrics.lastTurn.firstTextMs),
         hint: "diagnostic raw speech end -> first text",
         icon: AudioLines,
         tone: metrics.thresholds.firstText.status,
+        thresholdKey: "firstText",
       },
       {
         label: "Raw first audio",
-        value: metrics.lastTurn.firstAudioMs,
+        value: formatMs(metrics.lastTurn.firstAudioMs),
         hint: "diagnostic raw speech end -> first audio",
         icon: AudioLines,
         tone: metrics.thresholds.firstAudio.status,
+        thresholdKey: "firstAudio",
       },
       {
         label: "Raw backend done",
-        value: metrics.lastTurn.backendCompleteMs,
+        value: formatMs(metrics.lastTurn.backendCompleteMs),
         hint: "diagnostic raw speech end -> backend complete",
         icon: Gauge,
         tone: metrics.thresholds.backendComplete.status,
+        thresholdKey: "backendComplete",
       },
       {
         label: metrics.thresholds.responseWindow.label,
-        value: metrics.stage === "thinking"
+        value: formatMs(metrics.stage === "thinking"
           ? metrics.timings.currentThinkingMs
-          : metrics.lastTurn.responseDurationMs,
+          : metrics.lastTurn.responseDurationMs),
         hint: metrics.stage === "thinking" ? "live thinking timer" : "agent started -> ended",
         icon: Activity,
         tone: metrics.thresholds.responseWindow.status,
+        thresholdKey: "responseWindow",
       },
-    ],
+    ]
+    },
     [metrics],
   )
 
   const compactSummaryCards = useMemo(
-    () => summaryCards.filter((card) => ["Session ready", "Committed response", "Raw first text"].includes(card.label)),
-    [summaryCards],
+    () => summaryCards.filter((card) => (
+      isGeminiRuntime
+        ? ["Session ready", "Gemini WebSocket", "Relay"].includes(card.label)
+        : ["Session ready", "Committed response", "Raw first text"].includes(card.label)
+    )),
+    [isGeminiRuntime, summaryCards],
   )
 
   const displayedSummaryCards = layout === "floating" && !expanded ? compactSummaryCards : summaryCards
+
+  const closeFloatingPanel = () => {
+    resizeRef.current = null
+    setIsResizing(false)
+    setIsPanelOpen(false)
+  }
+
+  const toggleFloatingPanel = () => {
+    if (layout !== "floating") return
+
+    if (isPanelOpen) {
+      closeFloatingPanel()
+      return
+    }
+
+    setIsPanelOpen(true)
+  }
 
   useEffect(() => {
     if (layout !== "floating" || typeof window === "undefined") return
@@ -275,6 +398,21 @@ export function VoiceMetricsPanel({
     setExpanded(persisted?.expanded ?? defaultExpanded)
     setHasHydratedFloatingState(true)
   }, [defaultExpanded, layout])
+
+  useEffect(() => {
+    if (layout !== "floating" || typeof window === "undefined") return
+
+    const mediaQuery = window.matchMedia(`(max-width: ${FLOATING_PANEL_MOBILE_BREAKPOINT - 1}px)`)
+    const syncViewport = (matches: boolean) => {
+      setIsCompactViewport(matches)
+    }
+
+    syncViewport(mediaQuery.matches)
+    const handleChange = (event: MediaQueryListEvent) => syncViewport(event.matches)
+
+    mediaQuery.addEventListener("change", handleChange)
+    return () => mediaQuery.removeEventListener("change", handleChange)
+  }, [layout])
 
   useEffect(() => {
     if (layout !== "floating" || typeof window === "undefined" || !hasHydratedFloatingState) return
@@ -297,41 +435,22 @@ export function VoiceMetricsPanel({
   }, [layout])
 
   useEffect(() => {
-    if (layout !== "floating") return
+    if (layout !== "floating" || isCompactViewport || !isPanelOpen) return
 
     const handlePointerMove = (event: PointerEvent) => {
-      const dragState = dragRef.current
-      if (event.pointerId === dragState?.pointerId) {
-        const { origin, startX, startY } = dragState
-        setFloatingBounds(
-          clampFloatingBounds({
-            ...origin,
-            left: origin.left + (event.clientX - startX),
-            top: origin.top + (event.clientY - startY),
-          }, window.innerWidth, window.innerHeight),
-        )
-        return
-      }
-
       const resizeState = resizeRef.current
       if (event.pointerId === resizeState?.pointerId) {
-        const { origin, startX, startY } = resizeState
+        const { origin, startX } = resizeState
         setFloatingBounds(
           clampFloatingBounds({
             ...origin,
-            width: origin.width + (event.clientX - startX),
-            height: origin.height + (event.clientY - startY),
+            width: origin.width - (event.clientX - startX),
           }, window.innerWidth, window.innerHeight),
         )
       }
     }
 
     const stopInteraction = (event: PointerEvent) => {
-      if (event.pointerId === dragRef.current?.pointerId) {
-        dragRef.current = null
-        setIsDragging(false)
-      }
-
       if (event.pointerId === resizeRef.current?.pointerId) {
         resizeRef.current = null
         setIsResizing(false)
@@ -347,7 +466,21 @@ export function VoiceMetricsPanel({
       window.removeEventListener("pointerup", stopInteraction)
       window.removeEventListener("pointercancel", stopInteraction)
     }
-  }, [layout])
+  }, [isCompactViewport, isPanelOpen, layout])
+
+  useEffect(() => {
+    if (layout !== "floating" || !isPanelOpen || typeof window === "undefined") return
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return
+
+      event.preventDefault()
+      closeFloatingPanel()
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [isPanelOpen, layout])
 
   const serializeSessionJson = () => {
     if (typeof window === "undefined") {
@@ -360,15 +493,12 @@ export function VoiceMetricsPanel({
     }
 
     return JSON.stringify(
-      {
-        reportType: "voice-telemetry-report",
-        version: 1,
-        source: "session-ui",
+      buildVoiceTelemetryReport({
         exportedAt: new Date().toISOString(),
         summary: buildVoiceTelemetrySummary(metrics),
         metrics,
         captureBundle: capture.export(),
-      },
+      }),
       null,
       2,
     )
@@ -412,27 +542,13 @@ export function VoiceMetricsPanel({
     }
   }
 
-  const beginDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
-    if (layout !== "floating") return
-
-    event.preventDefault()
-    dragRef.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      origin: floatingBounds,
-    }
-    setIsDragging(true)
-  }
-
   const beginResize = (event: React.PointerEvent<HTMLButtonElement>) => {
-    if (layout !== "floating") return
+    if (layout !== "floating" || isCompactViewport || !isPanelOpen) return
 
     event.preventDefault()
     resizeRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
-      startY: event.clientY,
       origin: floatingBounds,
     }
     setIsResizing(true)
@@ -446,15 +562,25 @@ export function VoiceMetricsPanel({
   }
 
   const floatingContainerStyle = layout === "floating"
+    && !isCompactViewport
     ? {
-        left: floatingBounds.left,
-        top: floatingBounds.top,
         width: floatingBounds.width,
       }
     : undefined
 
-  const panelStyle = layout === "floating" && expanded
-    ? { height: floatingBounds.height }
+  const panelStyle = layout === "floating"
+    ? isCompactViewport
+      ? expanded
+        ? { maxHeight: "80vh" }
+        : undefined
+      : expanded
+        ? {
+            height: floatingBounds.height,
+            maxHeight: `calc(100vh - ${FLOATING_PANEL_TOP_PADDING + FLOATING_PANEL_BOTTOM_PADDING}px)`,
+          }
+        : {
+            maxHeight: `calc(100vh - ${FLOATING_PANEL_TOP_PADDING + FLOATING_PANEL_BOTTOM_PADDING}px)`,
+          }
     : undefined
 
   const latestFalseEndsDisplay = Math.max((metrics.lastTurn.falseUserEndedCount ?? 1) - 1, 0)
@@ -467,45 +593,53 @@ export function VoiceMetricsPanel({
         : metrics.builder.phase === "running"
           ? "neutral"
           : "neutral"
+  const showFloatingControls = layout === "inline" || isPanelOpen
+  const floatingActionButtonClass = "inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.06] px-3 py-2 text-[11px] font-medium tracking-[0.02em] text-sophia-text2 transition-all duration-200 hover:border-sophia-purple/25 hover:bg-white/[0.1] hover:text-sophia-text motion-reduce:transition-none"
+  const floatingIconButtonClass = "inline-flex h-9 w-9 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.06] text-sophia-text2 transition-all duration-200 hover:border-sophia-purple/25 hover:bg-white/[0.1] hover:text-sophia-text motion-reduce:transition-none"
 
   const panel = (
-    <section className={cn(
-      "relative overflow-hidden rounded-[28px] border text-sophia-text shadow-soft transition-colors duration-300",
-      panelToneClass(panelTone),
-      layout === "floating" && "flex max-h-[calc(100vh-88px)] flex-col backdrop-blur-md",
-      isDragging && "select-none",
-      isResizing && "select-none",
-    )} style={panelStyle}>
+    <section
+      id={panelId}
+      data-testid="voice-metrics-panel"
+      aria-labelledby={panelHeadingId}
+      className={cn(
+        "relative overflow-hidden rounded-[30px] border text-sophia-text shadow-[0_26px_80px_rgba(10,7,25,0.52)] transition-colors duration-300 motion-reduce:transition-none",
+        panelToneClass(panelTone),
+        layout === "floating" && "flex w-full flex-col backdrop-blur-2xl",
+        layout === "floating" && !isCompactViewport && "max-h-[calc(100vh-7rem)] min-h-[22rem] max-w-[calc(100vw-2rem)]",
+        layout === "floating" && isCompactViewport && "max-h-[80vh] w-[calc(100vw-1rem)] max-w-full rounded-[28px]",
+        isResizing && "select-none",
+      )}
+      style={panelStyle}
+    >
       <div className="flex flex-col gap-4 border-b border-white/8 px-5 py-5 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex min-w-0 flex-1 gap-3">
-          {layout === "floating" && (
-            <button
-              type="button"
-              onPointerDown={beginDrag}
-              title="Drag telemetry panel"
-              className={cn(
-                "mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-sophia-text2 transition-colors hover:bg-white/10 hover:text-sophia-text",
-                isDragging && "cursor-grabbing bg-white/10 text-sophia-text",
-                !isDragging && "cursor-grab",
-              )}
-              style={{ touchAction: "none" }}
-            >
-              <GripVertical className="h-4 w-4" />
-            </button>
-          )}
-
           <div className="min-w-0 space-y-3">
             <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.32em] text-sophia-text2/70">
               <Activity className="h-3.5 w-3.5" />
-              Voice runtime telemetry
+              <h2 id={panelHeadingId}>Voice Runtime Telemetry</h2>
             </div>
             <div className="flex flex-wrap items-center gap-2">
+              <ToneBadge label={`Runtime: ${metrics.sessionTelemetry.runtimeLabel}`} tone={isGeminiRuntime ? "good" : "neutral"} />
               <ToneBadge label={metrics.health.title} tone={metrics.health.level} />
               <ToneBadge label={`Stage: ${metrics.stage}`} tone="neutral" />
-              <ToneBadge
-                label={`Transport: ${metrics.transport.activeSource.toUpperCase()}`}
-                tone={metrics.transport.activeSource === "custom" ? "warn" : "good"}
-              />
+              {isGeminiRuntime ? (
+                <>
+                  <ToneBadge
+                    label={`Gemini WSS: ${formatStatus(geminiHeaderTelemetry?.websocketState ?? null)}`}
+                    tone={statusTone(geminiHeaderTelemetry?.websocketState ?? null)}
+                  />
+                  <ToneBadge
+                    label={`Relay: ${formatStatus(geminiHeaderTelemetry?.relayStatus ?? null)}`}
+                    tone={relayTone(geminiHeaderTelemetry?.relayStatus ?? null, geminiHeaderTelemetry?.consecutiveRelayFailures ?? 0)}
+                  />
+                </>
+              ) : (
+                <ToneBadge
+                  label={`Transport: ${metrics.transport.activeSource.toUpperCase()}`}
+                  tone={metrics.transport.activeSource === "custom" ? "warn" : "good"}
+                />
+              )}
               <ToneBadge
                 label={metrics.microphone.detectedAudio ? "Mic signal detected" : "No mic signal yet"}
                 tone={metrics.microphone.detectedAudio ? "good" : "warn"}
@@ -533,14 +667,14 @@ export function VoiceMetricsPanel({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 self-start">
-          {(layout === "inline" || expanded) && (
+          {showFloatingControls && (
             <>
               <button
                 type="button"
                 onClick={() => {
                   void copySessionJson()
                 }}
-                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-sophia-text2 transition-colors hover:bg-white/10 hover:text-sophia-text"
+                className={floatingActionButtonClass}
               >
                 <Clipboard className="h-3.5 w-3.5" />
                 Copy JSON
@@ -548,7 +682,7 @@ export function VoiceMetricsPanel({
               <button
                 type="button"
                 onClick={exportSessionJson}
-                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-sophia-text2 transition-colors hover:bg-white/10 hover:text-sophia-text"
+                className={floatingActionButtonClass}
               >
                 <Download className="h-3.5 w-3.5" />
                 Export JSON
@@ -559,8 +693,8 @@ export function VoiceMetricsPanel({
             <button
               type="button"
               onClick={resetFloatingPanel}
-              title="Reset panel position and size"
-              className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-sophia-text2 transition-colors hover:bg-white/10 hover:text-sophia-text"
+              title="Reset telemetry drawer size"
+              className={floatingActionButtonClass}
             >
               <RotateCcw className="h-3.5 w-3.5" />
               Reset
@@ -569,19 +703,28 @@ export function VoiceMetricsPanel({
           <button
             type="button"
             onClick={() => setExpanded((value) => !value)}
-            className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-sophia-text2 transition-colors hover:bg-white/10 hover:text-sophia-text"
+            className={floatingActionButtonClass}
           >
             {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-            {expanded ? "Collapse metrics" : layout === "floating" ? "Expand panel" : "Expand metrics"}
+            {expanded ? "Collapse metrics" : "Expand metrics"}
           </button>
+          {layout === "floating" && (
+            <button
+              type="button"
+              aria-label="Close telemetry panel"
+              onClick={closeFloatingPanel}
+              className={floatingIconButtonClass}
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
         </div>
       </div>
 
       <div
         className={cn(
-          layout === "floating" && expanded && "min-h-0 overflow-y-auto pr-1",
+          layout === "floating" && expanded && "min-h-0 flex-1 overflow-y-auto pr-1",
         )}
-        style={layout === "floating" && expanded ? { maxHeight: floatingBounds.height - FLOATING_PANEL_HEADER_OFFSET } : undefined}
       >
         <div className={cn(
           "grid gap-3 px-5 py-5",
@@ -594,16 +737,18 @@ export function VoiceMetricsPanel({
               key={card.label}
               icon={card.icon}
               label={card.label}
-              hint={withThresholdHint(card.hint, metrics.thresholds[thresholdKeyForLabel(card.label)])}
-              value={formatMs(card.value)}
+              hint={card.thresholdKey ? withThresholdHint(card.hint, metrics.thresholds[card.thresholdKey]) : card.hint}
+              value={card.value}
               tone={card.tone}
-              emphasize={card.label === "Current wait" && metrics.timings.currentThinkingMs !== null && metrics.timings.currentThinkingMs > 4000}
+              emphasize={card.emphasize ?? (card.label === "Current wait" && metrics.timings.currentThinkingMs !== null && metrics.timings.currentThinkingMs > 4000)}
               compact={layout === "floating" && !expanded}
             />
           ))}
         </div>
 
-        {expanded && (
+        {expanded && (isGeminiRuntime ? (
+          <GeminiRuntimeDetails metrics={metrics} builderTone={builderTone} />
+        ) : (
           <>
             <div className="grid gap-4 border-t border-white/8 px-5 py-5 lg:grid-cols-[1.1fr_0.9fr]">
               <BottleneckCard metrics={metrics} />
@@ -830,33 +975,76 @@ export function VoiceMetricsPanel({
               </div>
             </div>
           </>
-        )}
+        ))}
       </div>
 
-      {layout === "floating" && expanded && (
+      {layout === "floating" && expanded && !isCompactViewport && (
         <button
           type="button"
+          data-testid="voice-metrics-resize-handle"
           aria-label="Resize telemetry panel"
           onPointerDown={beginResize}
           className={cn(
-            "absolute bottom-3 right-3 h-6 w-6 cursor-se-resize rounded-sm border-r-2 border-b-2 border-white/35 opacity-80 transition-opacity hover:opacity-100",
+            "absolute inset-y-0 left-1 flex w-4 cursor-ew-resize items-center justify-center opacity-80 transition-opacity hover:opacity-100",
             isResizing && "opacity-100",
           )}
           style={{ touchAction: "none" }}
-        />
+        >
+          <span className="flex h-16 w-3 items-center justify-center rounded-full border border-white/10 bg-black/20 text-sophia-text2/80 shadow-[0_12px_28px_rgba(7,8,14,0.28)]">
+            <GripVertical className="h-4 w-4" />
+          </span>
+        </button>
       )}
     </section>
   )
 
   if (layout === "floating") {
-    if (!hasHydratedFloatingState) {
-      return null
-    }
-
     return (
-      <div className="pointer-events-auto fixed z-40" style={floatingContainerStyle}>
-        {panel}
-      </div>
+      <>
+        <button
+          type="button"
+          data-testid="voice-metrics-toggle"
+          title={isPanelOpen ? "Hide telemetry panel" : "Show telemetry panel"}
+          aria-expanded={isPanelOpen}
+          aria-controls={panelId}
+          onClick={toggleFloatingPanel}
+          className={cn(
+            "fixed right-4 bottom-[calc(env(safe-area-inset-bottom,0px)+7rem)] z-[60] inline-flex items-center gap-2 rounded-full border px-3.5 py-2.5 text-sm font-medium shadow-[0_18px_56px_rgba(12,7,30,0.45)] backdrop-blur-xl transition-all duration-200 motion-reduce:transition-none md:right-6 md:bottom-auto md:top-24",
+            "border-white/10 bg-[linear-gradient(135deg,rgba(22,18,40,0.9),rgba(11,13,24,0.82))] text-sophia-text2",
+            "hover:-translate-y-0.5 hover:border-sophia-purple/30 hover:text-sophia-text motion-reduce:transform-none",
+            isPanelOpen && "border-sophia-purple/30 bg-[linear-gradient(135deg,rgba(35,26,58,0.94),rgba(13,15,28,0.9))] text-sophia-text",
+          )}
+        >
+          <span className="relative flex h-8 w-8 items-center justify-center rounded-full bg-white/[0.08]">
+            <Activity className="h-4 w-4" />
+            <span className={toggleIndicatorClass(panelTone)} />
+          </span>
+          <span>Telemetry</span>
+          {isPanelOpen ? <ChevronUp className="h-4 w-4 text-sophia-text2/80" /> : <ChevronDown className="h-4 w-4 text-sophia-text2/80" />}
+        </button>
+
+        {isPanelOpen && isCompactViewport && (
+          <div
+            aria-hidden="true"
+            className="fixed inset-0 z-[65] bg-[radial-gradient(circle_at_top,rgba(124,58,237,0.14),transparent_55%),rgba(7,8,14,0.46)] backdrop-blur-sm motion-reduce:backdrop-blur-none"
+            onClick={closeFloatingPanel}
+          />
+        )}
+
+        {isPanelOpen && (
+          <div
+            data-testid="voice-metrics-floating-container"
+            className={cn(
+              "pointer-events-none fixed inset-x-2 bottom-[calc(env(safe-area-inset-bottom,0px)+0.75rem)] z-[70] motion-safe:animate-fadeIn md:inset-x-auto md:right-4 md:top-[calc(env(safe-area-inset-top,0px)+6rem)] md:bottom-4",
+            )}
+            style={floatingContainerStyle}
+          >
+            <div className={cn("pointer-events-auto", isCompactViewport && "w-full")}>
+              {panel}
+            </div>
+          </div>
+        )}
+      </>
     )
   }
 
@@ -893,6 +1081,282 @@ function BottleneckCard({ metrics }: { metrics: VoiceDeveloperMetrics }) {
         {metrics.bottleneck.evidence.map((item) => (
           <div key={item} className="rounded-2xl border border-white/8 bg-black/15 px-3 py-2 text-xs text-sophia-text2">
             {item}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function GeminiRuntimeDetails({
+  metrics,
+  builderTone,
+}: {
+  metrics: VoiceDeveloperMetrics
+  builderTone: "good" | "warn" | "bad" | "neutral"
+}) {
+  const gemini = metrics.sessionTelemetry.gemini
+  if (!gemini) return null
+  const coreview = metrics.coreview
+
+  return (
+    <>
+      <div className="grid gap-4 border-t border-white/8 px-5 py-5 lg:grid-cols-[0.85fr_1.15fr]">
+        <InfoCard
+          icon={Sparkles}
+          title="Gemini readiness"
+          rows={[
+            ["request -> credentials", formatMs(metrics.startup.requestToCredentialsMs)],
+            ["start -> setup complete", formatMs(metrics.timings.sessionReadyMs)],
+            ["credentials -> public SSE", formatMs(metrics.timings.sseOpenMs)],
+            ["setup complete", gemini.setupComplete ? "yes" : "pending"],
+            ["last provider event", formatIsoAge(gemini.lastProviderEventAt)],
+            ["last captured event", formatMs(gemini.lastEventAgeMs)],
+          ]}
+          footer="Gemini readiness is measured against browser Live setup completion and the public sophia.* stream, not Stream join latency."
+          tone={metrics.thresholds.sessionReady.status}
+        />
+        <InfoCard
+          icon={Radio}
+          title="Gemini transport + session"
+          rows={[
+            ["Runtime", metrics.sessionTelemetry.runtimeLabel],
+            ["Source", metrics.sessionTelemetry.source],
+            ["Session", gemini.sessionId ?? "pending"],
+            ["Connection", formatStatus(gemini.connectionState)],
+            ["Stage", formatStatus(gemini.stage)],
+            ["Gemini WebSocket", formatStatus(gemini.websocketState)],
+            ["Public SSE", formatStatus(gemini.publicSseState)],
+            ["Relay", formatStatus(gemini.relayStatus)],
+            ["Transport", gemini.transport ?? "pending"],
+            ["Boundary", gemini.publicEventBoundary ? truncate(gemini.publicEventBoundary, 42) : "pending"],
+          ]}
+          footer={gemini.streamUrl
+            ? "The public event stream is the same normalized event boundary consumed by the Session UI."
+            : "Waiting for Gemini bootstrap URLs from /voice/connect."}
+          tone={relayTone(gemini.relayStatus, gemini.consecutiveRelayFailures)}
+        />
+      </div>
+
+      <div className="grid gap-4 border-t border-white/8 px-5 py-5 xl:grid-cols-[1.15fr_0.85fr]">
+        <div className="space-y-4">
+          <div className="grid gap-4 lg:grid-cols-2">
+            <InfoCard
+              icon={Mic}
+              title="Microphone"
+              rows={[
+                ["Gemini mic state", formatStatus(gemini.microphoneState)],
+                ["Streams", String(metrics.microphone.streamCount)],
+                ["Tracks", String(metrics.microphone.audioTrackCount)],
+                ["Detected audio", metrics.microphone.detectedAudio ? "yes" : "no"],
+                ["First audio", formatIsoAge(metrics.microphone.firstAudioAt)],
+                ["Last audio", formatIsoAge(metrics.microphone.lastAudioAt)],
+                ["Peak RMS", formatDecimal(metrics.microphone.maxRms)],
+                ["Sample windows", String(metrics.microphone.totalSampleWindows)],
+                ["Probe errors", String(metrics.microphone.errorCount)],
+              ]}
+              footer={metrics.microphone.lastError ?? "Browser microphone probe remains provider-neutral for both runtime paths."}
+              tone={metrics.microphone.detectedAudio || gemini.microphoneState === "connected" ? "good" : "warn"}
+            />
+            <InfoCard
+              icon={AudioLines}
+              title="Gemini live activity"
+              rows={[
+                ["Provider events", String(gemini.providerEventCount)],
+                ["Last provider type", gemini.lastProviderEventType ?? "pending"],
+                ["Output audio events", String(gemini.outputAudioEventCount)],
+                ["Stale audio dropped", String(gemini.staleAssistantAudioDroppedCount)],
+                ["Stale transcript dropped", String(gemini.staleAssistantTranscriptDroppedCount)],
+                ["Barge-in confirmed", gemini.bargeInConfirmed ? "yes" : "no"],
+                ["Confirmation source", gemini.bargeInConfirmationSource],
+                ["Candidate frames", String(gemini.bargeInCandidateFrameCount)],
+                ["Input-frame false alarms", String(gemini.inputFrameOnlyNotBargeInCount)],
+                ["Candidate frames no intent", String(gemini.candidateFramesDidNotConfirmCount)],
+                ["Candidate expirations", String(gemini.candidateExpiredCount)],
+                ["Suppression blocked", String(gemini.suppressionBlockedBecauseNoIntentCount)],
+                ["Barge-in transcript captured", String(gemini.bargeInTranscriptCapturedCount)],
+                ["Barge-in transcript promoted", String(gemini.bargeInTranscriptPromotedCount)],
+                ["Barge-in transcript ignored", String(gemini.bargeInTranscriptIgnoredCount)],
+                ["Barge-in transcript duplicates", String(gemini.bargeInTranscriptDuplicateSuppressedCount)],
+                ["Barge-in dispatches", String(gemini.bargeInNewTurnDispatchCount)],
+                ["Barge-in dispatch block", gemini.bargeInNewTurnDispatchBlockedReason],
+                ["Barge-in promotion latency", formatMs(gemini.bargeInTranscriptPromotionLatencyMs)],
+                ["Last barge-in transcript", gemini.lastBargeInTranscriptPreview ?? "none"],
+                ["Last audio drop reason", gemini.assistantAudioDropReason ?? "none"],
+                ["Raw mic overlap", formatMs(gemini.maxRawAssistantUserOverlapMs)],
+                ["Confirmed overlap", formatMs(gemini.maxConfirmedAssistantUserOverlapMs)],
+                ["Remote audio", formatStatus(gemini.remoteAudioState)],
+                ["Public turns", String(gemini.publicTurnCount)],
+                ["Artifacts", String(gemini.artifactCount)],
+                ["Artifact public events", String(gemini.artifactPublicEventCount)],
+                ["Artifact runtime ingest", String(gemini.artifactRuntimeIngestCount)],
+                ["Artifact rendered", String(gemini.artifactRenderedCount)],
+                ["Artifact source", gemini.artifactCountSource],
+                ["Public diagnostics", String(gemini.publicDiagnosticCount)],
+                ["Last user transcript", formatIsoAge(gemini.lastUserTranscriptAt)],
+                ["Last Sophia transcript", formatIsoAge(gemini.lastAssistantTranscriptAt)],
+              ]}
+              footer="These are Gemini production-path signals; legacy backend/TTS cascade timings are intentionally not shown here."
+              tone={gemini.providerEventCount > 0 || gemini.publicTurnCount > 0 ? "good" : "neutral"}
+            />
+          </div>
+
+          <InfoCard
+            icon={Gauge}
+            title="Relay + WebSocket diagnostics"
+            rows={[
+              ["Relay status", formatStatus(gemini.relayStatus)],
+              ["Critical relays", String(gemini.relayClassificationCounts.critical?.count ?? 0)],
+              ["Summary/local", String(gemini.relayClassificationCounts.summary?.count ?? 0)],
+              ["Skipped/local", String(gemini.relayClassificationCounts.skip?.count ?? 0)],
+              ["Relay diagnostics", String(gemini.relayDiagnosticCount)],
+              ["Consecutive relay failures", String(gemini.consecutiveRelayFailures)],
+              ["Last relay event", gemini.lastRelayEventType ?? "pending"],
+              ["Last critical relay", formatMs(gemini.lastCriticalRelayDurationMs)],
+              ["Last transcript relay", formatMs(gemini.lastTranscriptionRelayDurationMs)],
+              ["Last tool relay", formatMs(gemini.lastToolCallRelayDurationMs)],
+              ["Max relay", formatMs(gemini.maxRelayDurationMs)],
+              ["Relay queue depth", String(gemini.orderedRelayQueueDepth)],
+              ["Oldest queued relay", formatMs(gemini.oldestQueuedAgeMs)],
+              ["Playback generation", String(gemini.playbackGeneration)],
+              ["Last relay diagnostic", formatIsoAge(gemini.lastRelayDiagnosticAt)],
+              ["WebSocket diagnostics", String(gemini.websocketDiagnosticCount)],
+              ["Last WebSocket diagnostic", formatIsoAge(gemini.lastWebSocketDiagnosticAt)],
+              ["Last WebSocket close", gemini.lastWebSocketCloseCode != null ? `${gemini.lastWebSocketCloseCode}${gemini.lastWebSocketCloseWasClean === false ? " unclean" : ""}` : "none"],
+              ["Last relay error", gemini.lastRelayErrorText ? truncate(gemini.lastRelayErrorText, 52) : "none"],
+              ["Last WebSocket error", gemini.lastWebSocketErrorText ? truncate(gemini.lastWebSocketErrorText, 52) : "none"],
+              ["Last close reason", gemini.lastWebSocketCloseReasonSafe ? truncate(gemini.lastWebSocketCloseReasonSafe, 52) : "none"],
+            ]}
+            footer="Relay degradation is allowed to be visible here without re-labeling it as a legacy Stream or TTS bottleneck."
+            tone={relayTone(gemini.relayStatus, gemini.consecutiveRelayFailures)}
+          />
+        </div>
+
+        <div className="space-y-4">
+          <InfoCard
+            icon={Clipboard}
+            title="Tool loop"
+            rows={[
+              ["Tool calls", String(gemini.toolCallCount)],
+              ["Tool responses", String(gemini.toolResponseCount)],
+              ["Tool rejections", String(gemini.toolRejectionCount)],
+              ["Unresolved tools", String(gemini.unresolvedToolCallCount)],
+              ["Unknown artifact tools", String(gemini.artifactToolCallUnknownCount)],
+              ["Oldest unresolved", formatMs(gemini.oldestUnresolvedToolCallAgeMs)],
+              ["Last tool phase", gemini.lastToolPhase ?? "pending"],
+              ["Last tool", gemini.lastToolName ?? "pending"],
+              ["Last tool event", formatIsoAge(gemini.lastToolAt)],
+            ]}
+            footer="Gemini tool-loop diagnostics are counted from production-safe callback metadata, not raw provider payload display."
+            tone={gemini.toolRejectionCount > 0 ? "warn" : gemini.toolCallCount > 0 ? "good" : "neutral"}
+          />
+
+          <InfoCard
+            icon={Eye}
+            title="Coreview"
+            rows={[
+              ["Frames sent", String(coreview.visual.frameSentCount)],
+              ["Refresh frames", String(coreview.visual.refreshFrameCount)],
+              ["Last frame", formatBytes(coreview.visual.lastFrameBytes)],
+              ["Max send latency", formatMs(coreview.visual.maxFrameSendLatencyMs)],
+              ["Frame failures", String(coreview.visual.frameSendFailureCount)],
+              ["Closed after frame", String(coreview.visual.websocketClosedAfterFrameCount)],
+              ["Provider image count", coreview.visual.providerUsageImageCount === null ? "pending" : String(coreview.visual.providerUsageImageCount)],
+              ["Exact-text calls", String(coreview.exactText.exactTextCallCount)],
+              ["Last text source", coreview.exactText.lastExactTextSource ?? "pending"],
+              ["Last text status", coreview.exactText.lastExactTextStatus ?? "pending"],
+            ]}
+            footer={coreview.visual.lastFrameSendFailureReason ?? "Coreview telemetry excludes raw frames, base64, raw text, and raw queries."}
+            tone={coreview.visual.frameSendFailureCount > 0 || coreview.exactText.exactTextFailureCount > 0
+              ? "warn"
+              : coreview.visual.frameSentCount > 0 || coreview.exactText.exactTextCallCount > 0
+                ? "good"
+                : "neutral"}
+          />
+
+          <InfoCard
+            icon={Activity}
+            title="Event counters"
+            rows={[
+              ["Total events", String(metrics.events.total)],
+              ["voice-sse", String(metrics.events.voiceSse)],
+              ["voice-runtime", String(metrics.events.voiceRuntime)],
+              ["voice-session", String(metrics.events.voiceSession)],
+              ["builder", String(metrics.events.builder)],
+              ["SSE errors", String(metrics.events.sseErrors)],
+              ["Invalid payloads", String(metrics.events.invalidPayloads)],
+              ["Stale connect", String(metrics.events.staleConnectResponses)],
+            ]}
+            footer="The public event contract remains sophia.* even when the selected runtime is Gemini Live."
+            tone={metrics.events.sseErrors > 0 || metrics.events.invalidPayloads > 0 ? "warn" : "neutral"}
+          />
+
+          <InfoCard
+            icon={AlertTriangle}
+            title="Latest public diagnostic"
+            rows={[
+              ["Turn ID", metrics.lastTurn.turnId ?? "pending"],
+              ["Status", metrics.lastTurn.status ?? "pending"],
+              ["Reason", metrics.lastTurn.reason ?? "pending"],
+              ["Last user", metrics.lastTurn.lastUserTranscript ? truncate(metrics.lastTurn.lastUserTranscript, 34) : "pending"],
+              ["Last Sophia", metrics.lastTurn.lastAssistantTranscript ? truncate(metrics.lastTurn.lastAssistantTranscript, 34) : "pending"],
+            ]}
+            footer="Public turn diagnostics are shown without legacy raw backend/audio latency labels for Gemini sessions."
+            tone={metrics.lastTurn.status === "failed" ? "bad" : metrics.lastTurn.reason && metrics.lastTurn.reason !== "completed" ? "warn" : "neutral"}
+          />
+
+          <InfoCard
+            icon={Activity}
+            title="Builder workflow"
+            rows={[
+              ["Phase", metrics.builder.phase ?? "inactive"],
+              ["Progress", formatPercent(metrics.builder.progressPercent)],
+              ["Steps", metrics.builder.totalSteps !== null ? `${metrics.builder.completedSteps ?? 0}/${metrics.builder.totalSteps}` : "pending"],
+              ["Active step", metrics.builder.activeStepTitle ?? "pending"],
+              ["Idle", formatMs(metrics.builder.idleMs)],
+              ["Last update", formatIsoAge(metrics.builder.lastUpdateAt)],
+              ["Last progress", formatIsoAge(metrics.builder.lastProgressAt)],
+            ]}
+            footer={metrics.builder.stuckReason
+              ?? metrics.builder.detail
+              ?? (metrics.builder.phase === "running"
+                ? "Builder heartbeats and todo completion are recorded here while the deliverable is assembled."
+                : "Builder telemetry appears once a companion turn delegates to the builder.")}
+            tone={builderTone}
+          />
+
+          <TimelineCard metrics={metrics} />
+        </div>
+      </div>
+    </>
+  )
+}
+
+function TimelineCard({ metrics }: { metrics: VoiceDeveloperMetrics }) {
+  return (
+    <div className="rounded-3xl border border-white/8 bg-white/4 p-4">
+      <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-sophia-text">
+        <Sparkles className="h-4 w-4 text-sophia-text2/80" />
+        Recent timeline
+      </div>
+      <div className="space-y-2.5">
+        {metrics.timeline.length === 0 && (
+          <p className="text-sm text-sophia-text2">
+            Waiting for capture events from the current voice turn.
+          </p>
+        )}
+        {metrics.timeline.map((item) => (
+          <div key={item.id} className="rounded-2xl border border-white/6 bg-black/15 px-3 py-2.5">
+            <div className="flex items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2 text-sophia-text">
+                <span className={timelineToneClass(item.tone)} />
+                <span className="font-medium">{item.label}</span>
+              </div>
+              <span className="text-sophia-text2/70">{item.sinceStartMs === null ? "--" : `+${formatMsCompact(item.sinceStartMs)}`}</span>
+            </div>
+            <p className="mt-1 text-xs leading-relaxed text-sophia-text2">
+              {item.detail}
+            </p>
           </div>
         ))}
       </div>
@@ -1069,6 +1533,17 @@ function formatMs(value: number | null): string {
   return `${(value / 1000).toFixed(2)} s`
 }
 
+function formatBytes(value: number | null): string {
+  if (value === null) return "--"
+  if (value < 1024) return `${Math.round(value)} B`
+  return `${(value / 1024).toFixed(1)} KB`
+}
+
+function formatStatus(value: string | null): string {
+  if (!value) return "pending"
+  return value.replace(/_/g, " ")
+}
+
 function formatIsoAge(value: string | null): string {
   if (!value) return "--"
 
@@ -1092,30 +1567,39 @@ function formatPercent(value: number | null): string {
   return value === null ? "--" : `${value}%`
 }
 
-function thresholdKeyForLabel(label: string): keyof VoiceDeveloperMetrics["thresholds"] {
-  switch (label) {
-    case "Session ready":
-      return "sessionReady"
-    case "Join latency":
-      return "joinLatency"
-    case "Committed response":
-      return "committedResponse"
-    case "Raw first text":
-      return "firstText"
-    case "Raw first audio":
-      return "firstAudio"
-    case "Raw backend done":
-      return "backendComplete"
-    default:
-      return "responseWindow"
-  }
-}
-
 function withThresholdHint(
   hint: string,
   threshold: VoiceDeveloperMetrics["thresholds"][keyof VoiceDeveloperMetrics["thresholds"]],
 ): string {
   return `${hint} | warn ${formatMsCompact(threshold.warnAtMs)} | bad ${formatMsCompact(threshold.badAtMs)}`
+}
+
+function statusTone(value: string | null): "good" | "warn" | "bad" | "neutral" {
+  switch (value) {
+    case "active":
+    case "connected":
+    case "setup_complete":
+    case "granted":
+      return "good"
+    case "connecting":
+    case "setup_pending":
+    case "waiting":
+    case "expected":
+    case "degraded":
+      return "warn"
+    case "error":
+    case "terminal_error":
+      return "bad"
+    default:
+      return "neutral"
+  }
+}
+
+function relayTone(status: string | null, consecutiveFailures: number): "good" | "warn" | "bad" | "neutral" {
+  if (status === "terminal_error") return "bad"
+  if (status === "degraded" || consecutiveFailures > 0) return "warn"
+  if (status === "active") return "good"
+  return statusTone(status)
 }
 
 function truncate(value: string, maxLength: number): string {
@@ -1157,13 +1641,24 @@ function metricCardToneClass(
 function panelToneClass(tone: "good" | "warn" | "bad" | "neutral"): string {
   switch (tone) {
     case "good":
-      return "border-emerald-300/20 bg-[radial-gradient(circle_at_top_left,rgba(16,185,129,0.18),transparent_35%),linear-gradient(135deg,rgba(17,24,24,0.98),rgba(10,15,20,0.92))]"
+      return "border-[rgba(196,181,253,0.22)] bg-[radial-gradient(circle_at_top_right,rgba(196,181,253,0.16),transparent_38%),radial-gradient(circle_at_bottom_left,rgba(110,231,183,0.08),transparent_32%),linear-gradient(145deg,rgba(18,20,34,0.96),rgba(11,13,24,0.88))]"
     case "warn":
-      return "border-amber-300/20 bg-[radial-gradient(circle_at_top_left,rgba(251,191,36,0.18),transparent_35%),linear-gradient(135deg,rgba(26,21,17,0.98),rgba(16,13,10,0.92))]"
+      return "border-[rgba(196,181,253,0.2)] bg-[radial-gradient(circle_at_top_right,rgba(196,181,253,0.16),transparent_38%),radial-gradient(circle_at_top_left,rgba(251,191,36,0.1),transparent_30%),linear-gradient(145deg,rgba(18,20,34,0.96),rgba(11,13,24,0.88))]"
     case "bad":
-      return "border-rose-300/20 bg-[radial-gradient(circle_at_top_left,rgba(251,113,133,0.18),transparent_35%),linear-gradient(135deg,rgba(28,18,20,0.98),rgba(18,12,14,0.92))]"
+      return "border-[rgba(196,181,253,0.2)] bg-[radial-gradient(circle_at_top_right,rgba(196,181,253,0.16),transparent_38%),radial-gradient(circle_at_top_left,rgba(251,113,133,0.12),transparent_30%),linear-gradient(145deg,rgba(18,20,34,0.96),rgba(11,13,24,0.88))]"
     default:
-      return "border-sophia-surface-border/70 bg-[radial-gradient(circle_at_top_left,rgba(151,118,255,0.14),transparent_35%),linear-gradient(135deg,rgba(21,24,34,0.98),rgba(13,15,24,0.92))]"
+      return "border-sophia-surface-border/70 bg-[radial-gradient(circle_at_top_right,rgba(196,181,253,0.16),transparent_38%),radial-gradient(circle_at_bottom_left,rgba(124,58,237,0.09),transparent_34%),linear-gradient(145deg,rgba(18,20,34,0.96),rgba(11,13,24,0.88))]"
+  }
+}
+
+function toggleIndicatorClass(tone: "good" | "warn" | "bad" | "neutral"): string {
+  switch (tone) {
+    case "warn":
+      return "absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border border-[#100d1b] bg-amber-300 shadow-[0_0_14px_rgba(252,211,77,0.75)]"
+    case "bad":
+      return "absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border border-[#100d1b] bg-rose-300 shadow-[0_0_14px_rgba(253,164,175,0.75)]"
+    default:
+      return "absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border border-[#100d1b] bg-sophia-purple/85 shadow-[0_0_14px_rgba(167,139,250,0.7)]"
   }
 }
 
