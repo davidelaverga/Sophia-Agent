@@ -44,6 +44,7 @@ _TERMINAL_CANVAS_STATUSES = {"completed", "failed", "cancelled"}
 def _langgraph_url() -> str:
     return (
         os.getenv("SOPHIA_LANGGRAPH_BASE_URL")
+        or os.getenv("LANGGRAPH_URL")
         or os.getenv("SOPHIA_BACKEND_BASE_URL")
         or "http://127.0.0.1:2024"
     ).strip().rstrip("/")
@@ -111,6 +112,115 @@ def _map_native_status(status: str | None) -> str:
         "interrupted": "cancelled",
         "cancelled": "cancelled",
     }.get(str(status or "").lower(), "running")
+
+
+def _completion_status(status: str) -> str | None:
+    return {
+        "completed": "success",
+        "failed": "error",
+        "cancelled": "cancelled",
+    }.get(status)
+
+
+def _canonical_artifact_path(path: Any) -> str | None:
+    if not isinstance(path, str):
+        return None
+    cleaned = path.strip().replace("\\", "/")
+    if cleaned.startswith("file://"):
+        cleaned = cleaned[len("file://") :]
+    if not cleaned:
+        return None
+    if cleaned.startswith("/mnt/user-data/outputs/"):
+        return cleaned[1:]
+    if cleaned.startswith("mnt/user-data/outputs/"):
+        return cleaned
+    user_data_index = cleaned.find("/user-data/outputs/")
+    if user_data_index >= 0:
+        return f"mnt{cleaned[user_data_index:]}"
+    if cleaned.startswith("/user-data/outputs/"):
+        return f"mnt{cleaned}"
+    if cleaned.startswith("user-data/outputs/"):
+        return f"mnt/{cleaned}"
+    if cleaned.startswith("/outputs/"):
+        return f"mnt/user-data{cleaned}"
+    if cleaned.startswith("outputs/"):
+        return f"mnt/user-data/{cleaned}"
+    return cleaned.lstrip("/")
+
+
+def _relative_output_artifact_path(path: str | None) -> str | None:
+    prefix = "mnt/user-data/outputs/"
+    if not path or not path.startswith(prefix):
+        return None
+    relative = path[len(prefix):].strip("/")
+    return relative or None
+
+
+def _signed_artifact_url(thread_id: str, artifact_path: str | None) -> str | None:
+    storage_path = _relative_output_artifact_path(artifact_path) or artifact_path
+    if not storage_path:
+        return None
+    try:
+        from deerflow.sophia.storage.supabase_artifact_store import create_signed_url
+
+        return create_signed_url(thread_id=thread_id, filename=storage_path)
+    except Exception:
+        return None
+
+
+def _artifact_payload_from_task(task: dict[str, Any]) -> dict[str, Any]:
+    builder_result = task.get("builder_result")
+    if isinstance(builder_result, dict):
+        return builder_result
+    artifact = task.get("artifact")
+    if isinstance(artifact, dict):
+        return artifact
+    return task
+
+
+def _completion_from_terminal_task(
+    parent_thread_id: str,
+    task: dict[str, Any],
+    *,
+    status: str,
+    task_id: str,
+    run_id: str,
+) -> dict[str, Any] | None:
+    completion_status = _completion_status(status)
+    if completion_status is None:
+        return None
+    artifact = _artifact_payload_from_task(task)
+    artifact_path = _canonical_artifact_path(artifact.get("artifact_path"))
+    artifact_url = artifact.get("artifact_url")
+    if not isinstance(artifact_url, str) or not artifact_url.strip():
+        artifact_url = _signed_artifact_url(parent_thread_id, artifact_path)
+    artifact_filename = artifact_path.rsplit("/", 1)[-1] if artifact_path else None
+    completed_at = (
+        task.get("completed_at")
+        or task.get("last_updated_at")
+        or task.get("updated_at")
+        or task.get("created_at")
+    )
+    return {
+        "thread_id": parent_thread_id,
+        "task_id": task_id,
+        "run_id": run_id,
+        "trace_id": task.get("trace_id"),
+        "agent_name": "sophia_builder",
+        "status": completion_status,
+        "task_type": task.get("task_type") or artifact.get("artifact_type"),
+        "task_brief": task.get("description") or task.get("task_brief"),
+        "artifact_path": artifact_path,
+        "artifact_url": artifact_url,
+        "artifact_title": artifact.get("artifact_title"),
+        "artifact_type": artifact.get("artifact_type"),
+        "artifact_filename": artifact_filename,
+        "summary": artifact.get("companion_summary") or artifact.get("summary"),
+        "user_next_action": artifact.get("user_next_action"),
+        "error_message": task.get("error_message") or task.get("error"),
+        "completed_at": completed_at if isinstance(completed_at, str) else None,
+        "source": "builder_canvas_snapshot",
+    }
 
 
 async def _read_native_run_status_for_client(client: Any, task_id: str, run_id: str) -> str | None:
@@ -223,6 +333,15 @@ async def builder_canvas_snapshot(
         "status": status,
         **({"latest_activity": latest_activity} if latest_activity else {}),
     }
+    completion = _completion_from_terminal_task(
+        parent_thread_id,
+        task,
+        status=status,
+        task_id=task_id,
+        run_id=run_id,
+    )
+    if completion is not None:
+        active_task["completion"] = completion
     return BuilderCanvasSnapshot(active_task=active_task, recent_events=recent_events)
 
 

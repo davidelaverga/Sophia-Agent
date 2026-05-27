@@ -111,6 +111,14 @@ def test_thread_owner_validation_uses_direct_thread_lookup(monkeypatch) -> None:
     builder_canvas._require_thread_owner("user-1", "older-parent-thread")
 
 
+def test_langgraph_url_honors_deployed_env(monkeypatch) -> None:
+    monkeypatch.delenv("SOPHIA_LANGGRAPH_BASE_URL", raising=False)
+    monkeypatch.delenv("SOPHIA_BACKEND_BASE_URL", raising=False)
+    monkeypatch.setenv("LANGGRAPH_URL", "https://langgraph.render.internal/")
+
+    assert builder_canvas._langgraph_url() == "https://langgraph.render.internal"
+
+
 @pytest.fixture
 def app(tmp_path, monkeypatch) -> FastAPI:
     store = SessionStore(tmp_path / "users")
@@ -188,6 +196,53 @@ async def test_snapshot_selects_latest_task_by_last_updated_at(app: FastAPI, mon
     assert response.status_code == 200
     assert response.json()["active_task"]["task_id"] == "task-new"
     assert response.json()["active_task"]["run_id"] == "run-new"
+
+
+@pytest.mark.anyio
+async def test_snapshot_includes_terminal_completion_artifact_data(app: FastAPI, monkeypatch) -> None:
+    async def tasks(_parent: str):
+        return [
+            {
+                "agent_name": "sophia_builder",
+                "task_id": "task-1",
+                "run_id": "run-1",
+                "status": "success",
+                "trace_id": "trace-1",
+                "task_type": "document",
+                "last_updated_at": "2026-05-27T10:00:00Z",
+                "builder_result": {
+                    "artifact_path": "/mnt/user-data/outputs/report.md",
+                    "artifact_title": "Report",
+                    "artifact_type": "document",
+                    "companion_summary": "Report is ready.",
+                    "user_next_action": "Open it.",
+                },
+            }
+        ]
+
+    async def status(_task: str, _run: str, _fallback: str | None):
+        return "completed"
+
+    monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", tasks)
+    monkeypatch.setattr(builder_canvas, "_native_run_status", status)
+    monkeypatch.setattr(
+        builder_canvas,
+        "_signed_artifact_url",
+        lambda thread_id, artifact_path: f"https://signed.example/{thread_id}/{artifact_path}",
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/sophia/user-1/threads/parent-1/builder-canvas/snapshot")
+
+    assert response.status_code == 200
+    completion = response.json()["active_task"]["completion"]
+    assert completion["status"] == "success"
+    assert completion["artifact_path"] == "mnt/user-data/outputs/report.md"
+    assert completion["artifact_url"] == "https://signed.example/parent-1/mnt/user-data/outputs/report.md"
+    assert completion["artifact_filename"] == "report.md"
+    assert completion["artifact_title"] == "Report"
+    assert completion["summary"] == "Report is ready."
+    assert completion["completed_at"] == "2026-05-27T10:00:00Z"
 
 
 @pytest.mark.anyio
