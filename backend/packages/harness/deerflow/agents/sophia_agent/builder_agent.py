@@ -26,12 +26,14 @@ from langchain_core.runnables import RunnableConfig
 from deerflow.agents.sophia_agent.builder_middlewares import build_builder_middleware_chain
 from deerflow.agents.sophia_agent.state import SophiaState
 from deerflow.agents.sophia_agent.utils import validate_user_id
+from deerflow.agents.sophia_agent.vision_gate import supports_vision
 from deerflow.config.app_config import get_app_config
 from deerflow.sandbox.tools import bash_tool, ls_tool, read_file_tool, str_replace_tool, write_file_tool
 from deerflow.sophia.tools.builder_web_fetch import builder_web_fetch
 from deerflow.sophia.tools.builder_web_search import builder_web_search
 from deerflow.sophia.tools.emit_builder_artifact import emit_builder_artifact
 from deerflow.sophia.tools.render_markdown_to_pdf import render_markdown_to_pdf
+from deerflow.tools.builtins.view_image_tool import view_image_tool
 
 logger = logging.getLogger(__name__)
 DEFAULT_BUILDER_MODEL = "claude-sonnet-4-6"
@@ -117,7 +119,11 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         max_retries=1,
     )
 
-    middlewares = build_builder_middleware_chain(user_id=user_id)
+    vision_enabled = supports_vision(resolved_model)
+    middlewares = build_builder_middleware_chain(
+        user_id=user_id,
+        vision_enabled=vision_enabled,
+    )
 
     # Guarded builder tools: sandbox/file ops + web research + artifact tools.
     # ``render_markdown_to_pdf`` (Phase B) replaces the model writing
@@ -152,6 +158,13 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         render_markdown_to_pdf,
         emit_builder_artifact,
     ]
+    # Vision is gated by the same `supports_vision` decision that governs
+    # ViewImageMiddleware inclusion — keeping the tool list and the
+    # middleware chain in lock-step. The model can only call view_image
+    # when the middleware that injects the resulting image content blocks
+    # back into the next turn is also in the chain.
+    if vision_enabled:
+        tools.append(view_image_tool)
 
     # D7 / C2 recursion guard (Phase-3 Stage 1 spec):
     # Builder must NEVER spawn AsyncSubAgents (no `start_async_task`) and

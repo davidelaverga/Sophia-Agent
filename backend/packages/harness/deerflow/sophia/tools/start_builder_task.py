@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import shutil
 import uuid
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -115,6 +116,20 @@ _TASK_TYPE_PREFIXES: dict[str, str] = {
     "frontend": "[frontend]",
     "visual_report": "[visual_report]",
 }
+
+# File extensions copied from the parent (companion) thread's uploads
+# into the builder's sandbox at dispatch time. Each LangGraph thread gets
+# its own sandbox via ``ThreadDataMiddleware``, so the builder cannot
+# read the companion's filesystem directly — we copy images across so
+# ``view_image_tool`` can inspect them by virtual path. Kept narrow:
+# documents go through ``read_user_document`` on the companion side; the
+# builder typically generates its own text deliverables and doesn't need
+# the user's text files copied over (and shipping a 50 MB PDF across is
+# wasteful when the companion already extracted what it needed).
+_BUILDER_COPY_IMAGE_EXTENSIONS: frozenset[str] = frozenset(
+    {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+)
+
 
 # Demo-prompt detection. Mirrors ``switch_to_builder``'s heuristic so users
 # who say "test builder, make anything" continue to get the deterministic
@@ -450,6 +465,77 @@ def _build_delegation_context(
     }
 
 
+def _copy_parent_uploaded_images(
+    *,
+    parent_thread_id: str | None,
+    builder_thread_id: str,
+) -> list[str]:
+    """Copy image uploads from the parent thread's sandbox into the builder's.
+
+    Returns the list of virtual paths the builder will see (e.g.
+    ``["/mnt/user-data/uploads/photo.png"]``). Returns an empty list
+    when there's no parent thread, the parent sandbox is empty, or the
+    parent uploads dir doesn't exist yet (no uploads happened).
+
+    Best-effort: a copy failure for one file is logged but doesn't
+    abort the dispatch — the build proceeds without that image.
+    """
+    if not parent_thread_id:
+        return []
+
+    from deerflow.config.paths import get_paths
+
+    paths = get_paths()
+    parent_uploads = paths.sandbox_uploads_dir(parent_thread_id)
+    if not parent_uploads.is_dir():
+        return []
+
+    image_files = sorted(
+        f
+        for f in parent_uploads.iterdir()
+        if f.is_file()
+        and not f.name.startswith(".")
+        and f.suffix.lower() in _BUILDER_COPY_IMAGE_EXTENSIONS
+    )
+    if not image_files:
+        return []
+
+    builder_uploads = paths.sandbox_uploads_dir(builder_thread_id)
+    try:
+        builder_uploads.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.warning(
+            "[Builder] failed to create builder uploads dir %s; skipping image copy",
+            builder_uploads,
+            exc_info=True,
+        )
+        return []
+
+    virtual_paths: list[str] = []
+    for src in image_files:
+        dst = builder_uploads / src.name
+        try:
+            shutil.copy2(src, dst)
+        except OSError:
+            logger.warning(
+                "[Builder] failed to copy uploaded image %s -> %s",
+                src,
+                dst,
+                exc_info=True,
+            )
+            continue
+        virtual_paths.append(f"/mnt/user-data/uploads/{src.name}")
+
+    if virtual_paths:
+        logger.info(
+            "[Builder] copied %d uploaded image(s) from parent thread %s to builder thread %s",
+            len(virtual_paths),
+            parent_thread_id,
+            builder_thread_id,
+        )
+    return virtual_paths
+
+
 def _has_active_builder_task(state: SophiaState) -> str | None:
     """Return the task_id of any non-terminal builder task in state, else None.
 
@@ -490,6 +576,15 @@ async def _dispatch_via_asgi(
     thread = await client.threads.create()
     thread_id = thread["thread_id"]
 
+    # Copy any image uploads from the parent (companion) thread into the
+    # builder's freshly-allocated sandbox so ``view_image_tool`` can read
+    # them by virtual path. Each LangGraph thread has its own sandbox —
+    # the builder cannot read the companion's filesystem directly.
+    uploaded_image_paths = _copy_parent_uploaded_images(
+        parent_thread_id=parent_thread_id,
+        builder_thread_id=thread_id,
+    )
+
     # ``parent_thread_id`` and ``parent_user_id`` are also embedded in
     # ``delegation_context`` (state) because langgraph-api 0.8.1 forwards
     # only a subset of ``configurable`` keys to the running graph's
@@ -502,6 +597,7 @@ async def _dispatch_via_asgi(
         **delegation_context,
         "parent_thread_id": parent_thread_id,
         "parent_user_id": user_id,
+        "uploaded_image_paths": uploaded_image_paths,
     }
 
     run_input: dict[str, Any] = {

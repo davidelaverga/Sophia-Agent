@@ -284,6 +284,25 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         # Task type
         sections.append(f"<task_type>{task_type}</task_type>")
 
+        # Uploaded images carried across from the parent (companion)
+        # thread. ``start_builder_task`` copies image files into this
+        # builder's sandbox at dispatch time so ``view_image_tool`` can
+        # read them by virtual path. Surface them here so the model
+        # actually knows they exist instead of having to discover them
+        # via ls/read.
+        uploaded_image_paths = delegation_context.get("uploaded_image_paths") or []
+        if isinstance(uploaded_image_paths, list) and uploaded_image_paths:
+            path_lines = "\n".join(f"- {p}" for p in uploaded_image_paths)
+            sections.append(
+                "<uploaded_images>\n"
+                "The user uploaded these images. They are available in this sandbox at the paths below.\n"
+                "Use `view_image_tool(image_path=...)` to inspect any image you need to reference, "
+                "describe, or QA in your deliverable. View only the images that are actually relevant — "
+                "each view costs context tokens.\n"
+                f"{path_lines}\n"
+                "</uploaded_images>"
+            )
+
         # Pre-flight gate: when this build will need image-generation but the
         # required API key isn't configured, tell the model to STOP rather
         # than burning 30 turns on a doomed loop. Spec-aligned per

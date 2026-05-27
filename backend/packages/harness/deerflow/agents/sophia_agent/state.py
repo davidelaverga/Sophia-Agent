@@ -2,6 +2,8 @@ from typing import Annotated, NotRequired
 
 from langchain.agents import AgentState
 
+from deerflow.agents.thread_state import ViewedImageData, merge_viewed_images
+
 
 def merge_async_tasks(
     existing: dict[str, dict] | None,
@@ -185,3 +187,10 @@ class SophiaState(AgentState):
 
     # Title
     title: NotRequired[str | None]
+
+    # Vision — image_path -> {base64, mime_type}. Written by view_image_tool
+    # (builder) and view_user_image (companion); consumed by ViewImageMiddleware
+    # to inject image content blocks into the next model turn. The reducer
+    # merges parallel writes and supports {} to clear after processing — both
+    # behaviours come from upstream's ThreadState definition.
+    viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]

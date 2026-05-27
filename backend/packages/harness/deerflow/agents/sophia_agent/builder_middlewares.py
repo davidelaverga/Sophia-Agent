@@ -38,6 +38,7 @@ from langchain.agents.middleware import AgentMiddleware
 from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
+from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_progress import BuilderProgressMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_research_policy import BuilderResearchPolicyMiddleware
@@ -83,7 +84,11 @@ def _create_builder_todo_middleware() -> TodoMiddleware:
     )
 
 
-def build_builder_middleware_chain(user_id: str) -> list[AgentMiddleware]:
+def build_builder_middleware_chain(
+    user_id: str,
+    *,
+    vision_enabled: bool = False,
+) -> list[AgentMiddleware]:
     """Return the canonical builder middleware chain (order is load-bearing).
 
     The chain assembled here is identical to what ``builder_agent.py``
@@ -113,6 +118,13 @@ def build_builder_middleware_chain(user_id: str) -> list[AgentMiddleware]:
     8. ``_create_builder_todo_middleware()`` — always-on planning.
     9. ``BuilderArtifactMiddleware`` — captures emit_builder_artifact
        and uploads to Supabase under the parent thread_id.
+    9a. ``ViewImageMiddleware`` (conditional on ``vision_enabled``) —
+        injects base64 image content blocks into the next model turn
+        when ``view_image_tool`` calls have completed. Sits AFTER
+        BuilderArtifactMiddleware (so artifact emission isn't shadowed
+        by mid-stream image injection) and BEFORE PromptAssembly /
+        DanglingToolCall so the injected HumanMessage participates in
+        prompt finalization and tool-call patching.
     10. ``PromptAssemblyMiddleware`` — concatenates system_prompt_blocks
         into the system message.
     11. ``DanglingToolCallMiddleware`` — patches dangling AIMessage
@@ -120,31 +132,36 @@ def build_builder_middleware_chain(user_id: str) -> list[AgentMiddleware]:
         message list reaches the model.
     """
     middlewares = build_subagent_runtime_middlewares(lazy_init=True)
-    middlewares.extend(
+    chain_tail: list[AgentMiddleware] = [
+        FileInjectionMiddleware(
+            (SKILLS_PATH / "soul.md", False),
+            (SKILLS_PATH / "AGENTS.md", False),
+        ),
+        UserIdentityMiddleware(user_id),
+        BuilderMem0RetrievalMiddleware(),
+        BuilderTaskMiddleware(),
+        BuilderResearchPolicyMiddleware(),
+        # Phase 4G — emits ``custom``-mode phase events
+        # (``starting`` / ``researching`` / ``drafting`` /
+        # ``finalizing`` / ``done``) into the langgraph stream so
+        # ``BuilderProgressSubscriber`` (gateway-side) renders the
+        # live UX the user described: phase headers + emoji-prefixed
+        # tool-call activity lines inside the Telegram placeholder.
+        # Position: after research-policy (so brief is built before
+        # we emit ``starting``), before todo + artifact (so the
+        # tool-call inspection in ``after_model`` runs against the
+        # raw model output before artifact rewrites it).
+        BuilderProgressMiddleware(),
+        _create_builder_todo_middleware(),
+        BuilderArtifactMiddleware(),
+    ]
+    if vision_enabled:
+        chain_tail.append(ViewImageMiddleware())
+    chain_tail.extend(
         [
-            FileInjectionMiddleware(
-                (SKILLS_PATH / "soul.md", False),
-                (SKILLS_PATH / "AGENTS.md", False),
-            ),
-            UserIdentityMiddleware(user_id),
-            BuilderMem0RetrievalMiddleware(),
-            BuilderTaskMiddleware(),
-            BuilderResearchPolicyMiddleware(),
-            # Phase 4G — emits ``custom``-mode phase events
-            # (``starting`` / ``researching`` / ``drafting`` /
-            # ``finalizing`` / ``done``) into the langgraph stream so
-            # ``BuilderProgressSubscriber`` (gateway-side) renders the
-            # live UX the user described: phase headers + emoji-prefixed
-            # tool-call activity lines inside the Telegram placeholder.
-            # Position: after research-policy (so brief is built before
-            # we emit ``starting``), before todo + artifact (so the
-            # tool-call inspection in ``after_model`` runs against the
-            # raw model output before artifact rewrites it).
-            BuilderProgressMiddleware(),
-            _create_builder_todo_middleware(),
-            BuilderArtifactMiddleware(),
             PromptAssemblyMiddleware(),
             DanglingToolCallMiddleware(),
         ]
     )
+    middlewares.extend(chain_tail)
     return middlewares
