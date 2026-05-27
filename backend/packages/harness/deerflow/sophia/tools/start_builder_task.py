@@ -490,6 +490,88 @@ def _build_delegation_context(
     }
 
 
+def _select_copyable_images(
+    parent_uploads: Path,
+    max_bytes: int,
+    parent_thread_id: str,
+) -> list[Path]:
+    """Pick image files in ``parent_uploads`` eligible for builder copy.
+
+    Filters to image extensions, drops hidden files and unreadable
+    entries, and skips anything over ``max_bytes`` (the companion-side
+    vision cap — matches what the builder's upstream view_image_tool
+    can actually handle). Oversized skips are logged once each so an
+    operator can grep "why didn't the builder see my image".
+
+    Extracted from ``_copy_parent_uploaded_images`` so that function's
+    cyclomatic complexity stays under Sentrux's CC ≥ 16 gate after the
+    Codex P2 oversize guard was added (PR #132).
+    """
+    eligible: list[Path] = []
+    for f in sorted(parent_uploads.iterdir()):
+        if not f.is_file() or f.name.startswith("."):
+            continue
+        if f.suffix.lower() not in _BUILDER_COPY_IMAGE_EXTENSIONS:
+            continue
+        try:
+            size = f.stat().st_size
+        except OSError:
+            # Treat stat failures as "skip" — copying a file whose size
+            # we can't validate would risk tripping the builder's
+            # vision tool on the next turn.
+            continue
+        if size > max_bytes:
+            logger.warning(
+                "[Builder] skipping oversized image %s (%d bytes > %d cap) "
+                "from parent thread %s — the builder's vision tool would "
+                "trip Anthropic's request-size limit.",
+                f.name,
+                size,
+                max_bytes,
+                parent_thread_id,
+            )
+            continue
+        eligible.append(f)
+    return eligible
+
+
+def _copy_files_to_builder_sandbox(
+    sources: list[Path],
+    builder_uploads: Path,
+) -> list[str]:
+    """Copy each ``sources`` entry into ``builder_uploads``; return virtual paths.
+
+    Ensures the destination dir exists. Per-file copy failures are
+    logged and dropped from the returned list so one bad file doesn't
+    abort the rest of the dispatch.
+    """
+    try:
+        builder_uploads.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.warning(
+            "[Builder] failed to create builder uploads dir %s; skipping image copy",
+            builder_uploads,
+            exc_info=True,
+        )
+        return []
+
+    virtual_paths: list[str] = []
+    for src in sources:
+        dst = builder_uploads / src.name
+        try:
+            shutil.copy2(src, dst)
+        except OSError:
+            logger.warning(
+                "[Builder] failed to copy uploaded image %s -> %s",
+                src,
+                dst,
+                exc_info=True,
+            )
+            continue
+        virtual_paths.append(f"/mnt/user-data/uploads/{src.name}")
+    return virtual_paths
+
+
 def _copy_parent_uploaded_images(
     *,
     parent_thread_id: str | None,
@@ -515,71 +597,16 @@ def _copy_parent_uploaded_images(
     if not parent_uploads.is_dir():
         return []
 
-    max_bytes = _max_builder_image_bytes()
-    image_files: list[Path] = []
-    oversized: list[tuple[str, int]] = []
-    for f in sorted(parent_uploads.iterdir()):
-        if not f.is_file() or f.name.startswith("."):
-            continue
-        if f.suffix.lower() not in _BUILDER_COPY_IMAGE_EXTENSIONS:
-            continue
-        try:
-            size = f.stat().st_size
-        except OSError:
-            # Treat stat failures as "skip" rather than copying a file
-            # whose size we can't validate — same conservative stance
-            # the companion's view_user_image takes.
-            continue
-        if size > max_bytes:
-            oversized.append((f.name, size))
-            continue
-        image_files.append(f)
-
-    if oversized:
-        # Surface the skip explicitly so an operator debugging "why
-        # didn't the builder see my image" has a single log line to
-        # grep. The companion-side view_user_image returns a clean tool
-        # error in the same situation; on the builder side the file
-        # simply isn't surfaced in the briefing.
-        for name, size in oversized:
-            logger.warning(
-                "[Builder] skipping oversized image %s (%d bytes > %d cap) "
-                "from parent thread %s — the builder's vision tool would "
-                "trip Anthropic's request-size limit.",
-                name,
-                size,
-                max_bytes,
-                parent_thread_id,
-            )
-
-    if not image_files:
+    eligible = _select_copyable_images(
+        parent_uploads,
+        _max_builder_image_bytes(),
+        parent_thread_id,
+    )
+    if not eligible:
         return []
 
     builder_uploads = paths.sandbox_uploads_dir(builder_thread_id)
-    try:
-        builder_uploads.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        logger.warning(
-            "[Builder] failed to create builder uploads dir %s; skipping image copy",
-            builder_uploads,
-            exc_info=True,
-        )
-        return []
-
-    virtual_paths: list[str] = []
-    for src in image_files:
-        dst = builder_uploads / src.name
-        try:
-            shutil.copy2(src, dst)
-        except OSError:
-            logger.warning(
-                "[Builder] failed to copy uploaded image %s -> %s",
-                src,
-                dst,
-                exc_info=True,
-            )
-            continue
-        virtual_paths.append(f"/mnt/user-data/uploads/{src.name}")
+    virtual_paths = _copy_files_to_builder_sandbox(eligible, builder_uploads)
 
     if virtual_paths:
         logger.info(

@@ -8,7 +8,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -586,7 +586,7 @@ def _is_gemini_production_runtime_selected() -> bool:
 
 
 def _utc_iso_from_epoch(epoch_seconds: float) -> str:
-    return datetime.fromtimestamp(epoch_seconds, timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.fromtimestamp(epoch_seconds, UTC).isoformat().replace("+00:00", "Z")
 
 
 async def _start_gemini_production_voice_session(

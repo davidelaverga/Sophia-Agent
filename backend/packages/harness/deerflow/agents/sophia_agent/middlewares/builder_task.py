@@ -146,6 +146,43 @@ def _list_outputs_for_prompt(state: BuilderTaskState) -> list[dict[str, Any]]:
     return listing
 
 
+def _uploaded_images_sections(raw: Any) -> list[str]:
+    """Return zero or one briefing section(s) for the uploaded images.
+
+    Returns a list (empty when there are no uploads, single-element
+    when there are) so ``before_agent`` can ``sections.extend(...)``
+    without an extra ``if`` check at the call site — keeps that
+    function's cyclomatic complexity below the Sentrux gate.
+
+    The companion-side ``start_builder_task`` copies parent-thread
+    image uploads into the builder's sandbox at dispatch time and
+    seeds ``delegation_context.uploaded_image_paths`` with their
+    virtual paths. Surface those here so the builder model doesn't
+    have to ls the uploads dir to discover what's available.
+
+    IMPORTANT: the prompt names the registered LLM-facing tool
+    (``view_image``), NOT the Python identifier (``view_image_tool``).
+    Upstream decorates the tool with ``@tool("view_image", ...)`` —
+    the model only sees the decorator's first argument. If the prompt
+    said ``view_image_tool(...)`` and the model echoed it literally,
+    the LangGraph tool router would reject the call with "tool not
+    found". Codex P2 on PR #132. Regression:
+    ``test_builder_task_middleware_uploads_block_uses_registered_tool_name``.
+    """
+    if not isinstance(raw, list) or not raw:
+        return []
+    path_lines = "\n".join(f"- {p}" for p in raw)
+    return [
+        "<uploaded_images>\n"
+        "The user uploaded these images. They are available in this sandbox at the paths below.\n"
+        "Use `view_image(image_path=...)` to inspect any image you need to reference, "
+        "describe, or QA in your deliverable. View only the images that are actually relevant — "
+        "each view costs context tokens.\n"
+        f"{path_lines}\n"
+        "</uploaded_images>"
+    ]
+
+
 def _format_size(num_bytes: int) -> str:
     """Format a byte count for the prompt — concise but readable."""
     if num_bytes < 1024:
@@ -284,34 +321,9 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         # Task type
         sections.append(f"<task_type>{task_type}</task_type>")
 
-        # Uploaded images carried across from the parent (companion)
-        # thread. ``start_builder_task`` copies image files into this
-        # builder's sandbox at dispatch time so the vision tool can read
-        # them by virtual path. Surface them here so the model actually
-        # knows they exist instead of having to discover them via
-        # ls/read.
-        #
-        # IMPORTANT: prompt with the registered LLM-facing tool name
-        # (``view_image``), NOT the Python identifier
-        # (``view_image_tool``). Upstream decorates the tool with
-        # ``@tool("view_image", ...)`` — the model only sees the
-        # decorator's first argument. If the prompt says
-        # ``view_image_tool(...)`` and the model echoes it literally,
-        # the LangGraph tool router rejects the call with "tool not
-        # found". Codex P2 on PR #132. Regression:
-        # ``test_builder_task_middleware_uploads_block_uses_registered_tool_name``.
-        uploaded_image_paths = delegation_context.get("uploaded_image_paths") or []
-        if isinstance(uploaded_image_paths, list) and uploaded_image_paths:
-            path_lines = "\n".join(f"- {p}" for p in uploaded_image_paths)
-            sections.append(
-                "<uploaded_images>\n"
-                "The user uploaded these images. They are available in this sandbox at the paths below.\n"
-                "Use `view_image(image_path=...)` to inspect any image you need to reference, "
-                "describe, or QA in your deliverable. View only the images that are actually relevant — "
-                "each view costs context tokens.\n"
-                f"{path_lines}\n"
-                "</uploaded_images>"
-            )
+        sections.extend(
+            _uploaded_images_sections(delegation_context.get("uploaded_image_paths"))
+        )
 
         # Pre-flight gate: when this build will need image-generation but the
         # required API key isn't configured, tell the model to STOP rather
