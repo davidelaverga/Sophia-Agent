@@ -46,7 +46,7 @@ function makeRequest(
 
 /**
  * Default fetch mock for proxy tests that need both:
- *   1. The ownership-lookup call (GET /api/sessions/open)
+ *   1. The ownership-lookup call (GET /api/v1/sessions/open)
  *   2. The upload-forward call (POST /api/threads/{id}/uploads)
  *
  * Returns the ownership response from the first call and the upload
@@ -139,7 +139,7 @@ describe('/api/threads/[threadId]/uploads proxy', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
     const [ownershipUrl, ownershipInit] = fetchMock.mock.calls[0];
-    expect(ownershipUrl).toBe('https://gateway.example/api/sessions/open?user_id=user_test');
+    expect(ownershipUrl).toBe('https://gateway.example/api/v1/sessions/open?user_id=user_test');
     expect((ownershipInit as RequestInit | undefined)?.method).toBe('GET');
 
     const [uploadUrl, uploadInit] = fetchMock.mock.calls[1] as [string, RequestInit | undefined];
@@ -200,7 +200,41 @@ describe('/api/threads/[threadId]/uploads proxy', () => {
     // at the ownership check.
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [ownershipUrl] = fetchMock.mock.calls[0];
-    expect(ownershipUrl).toBe('https://gateway.example/api/sessions/open?user_id=user_test');
+    expect(ownershipUrl).toBe('https://gateway.example/api/v1/sessions/open?user_id=user_test');
+  });
+
+  it('hits the /api/v1/ sessions prefix the gateway actually mounts — Codex P1', async () => {
+    // Regression: the gateway mounts the sessions router with
+    // ``prefix="/api/v1/sessions"`` (backend/app/gateway/routers/sessions.py).
+    // Hitting ``/api/sessions/open`` (no v1) returns 404 against the
+    // gateway, which fails the ownership check closed and 403s every
+    // upload in production. This test pins the path explicitly so a
+    // future "drop v1" refactor here breaks loudly.
+    const fetchMock = vi.spyOn(global, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ sessions: [{ thread_id: 'thread-abc' }], count: 1 }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ success: true, files: [{ filename: 'x.png', size: '1' }] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      );
+
+    const fd = new FormData();
+    fd.append('files', new File([new Uint8Array([1])], 'x.png', { type: 'image/png' }));
+    const res = await POST(makeRequest(fd), {
+      params: Promise.resolve({ threadId: 'thread-abc' }),
+    });
+
+    expect(res.status).toBe(200);
+    const [ownershipUrl] = fetchMock.mock.calls[0] as [string, RequestInit | undefined];
+    // Explicit "/api/v1/" anchored guard — also catches "/api/sessions"
+    // (no v1) and "/api/v2/sessions" if the gateway ever moves.
+    expect(ownershipUrl).toMatch(/\/api\/v1\/sessions\/open\?/);
   });
 
   it('verifies ownership against /open (unbounded), not /list (capped at 100) — Codex P2', async () => {
@@ -231,7 +265,7 @@ describe('/api/threads/[threadId]/uploads proxy', () => {
 
     expect(res.status).toBe(200);
     const [ownershipUrl] = fetchMock.mock.calls[0] as [string, RequestInit | undefined];
-    expect(ownershipUrl).toBe('https://gateway.example/api/sessions/open?user_id=user_test');
+    expect(ownershipUrl).toBe('https://gateway.example/api/v1/sessions/open?user_id=user_test');
     // Explicit guard: do NOT regress to /list with a limit.
     expect(ownershipUrl).not.toMatch(/\/list\?/);
     expect(ownershipUrl).not.toMatch(/[?&]limit=/);
