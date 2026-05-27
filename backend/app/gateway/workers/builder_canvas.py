@@ -191,11 +191,11 @@ class BuilderCanvasWorker:
         active = self._active.get(parent_thread_id)
         if self._is_retired_run_locked(parent_thread_id, task_id, run_id):
             return True
-        return (
-            active is not None
-            and active != (task_id, run_id)
-            and key in self._histories
-        )
+        if active is None or active == (task_id, run_id):
+            return False
+        if event["kind"] == "terminal":
+            return True
+        return key in self._histories
 
     def _is_duplicate_terminal_locked(self, event: dict[str, Any], key: tuple[str, str, str]) -> bool:
         if event["kind"] != "terminal":
@@ -204,8 +204,8 @@ class BuilderCanvasWorker:
 
     def _drop_reason_locked(self, event: dict[str, Any], key: tuple[str, str, str]) -> str | None:
         if self._is_replaced_run_locked(event, key):
-            # Once a newer task/run is visible, delayed deliveries from a
-            # previously seen task/run cannot reclaim the active canvas seed.
+            # Once another task/run is visible, delayed terminal deliveries
+            # and previously seen runs cannot reclaim the active canvas seed.
             return "replaced_run"
         if key in self._terminal_at and event["kind"] != "terminal":
             return "run_already_terminal"
