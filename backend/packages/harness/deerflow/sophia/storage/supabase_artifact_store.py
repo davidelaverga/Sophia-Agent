@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BUCKET = "sophia_builder"
 _REQUEST_TIMEOUT_SECONDS = 15.0
+_MAX_LIST_DEPTH = 8
 
 
 @dataclass(frozen=True)
@@ -109,13 +110,49 @@ def _coerce_modified_at(value: Any) -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _info_from_list_record(prefix: str, record: Any) -> SupabaseArtifactInfo | None:
+def _is_folder_record(record: dict[str, Any]) -> bool:
+    if record.get("id") is not None:
+        return False
+    metadata = record.get("metadata")
+    if isinstance(metadata, dict) and metadata:
+        return False
+    return _metadata_value(record, "size", "contentLength", "content_length") is None
+
+
+def _relative_list_name(root_prefix: str, current_prefix: str, raw_name: str) -> str:
+    if raw_name.startswith(root_prefix):
+        return raw_name[len(root_prefix) :]
+    if raw_name.startswith(current_prefix):
+        return raw_name[len(root_prefix) :]
+    current_relative = current_prefix[len(root_prefix) :] if current_prefix.startswith(root_prefix) else ""
+    return f"{current_relative}{raw_name}"
+
+
+def _folder_prefix_from_list_record(root_prefix: str, current_prefix: str, record: dict[str, Any]) -> str | None:
+    raw_name = record.get("name")
+    if not isinstance(raw_name, str) or not raw_name.strip():
+        return None
+    relative = _relative_list_name(root_prefix, current_prefix, raw_name).strip().strip("/")
+    if not relative:
+        return None
+    return f"{root_prefix}{relative}/"
+
+
+def _info_from_list_record(
+    root_prefix: str,
+    record: Any,
+    *,
+    current_prefix: str | None = None,
+) -> SupabaseArtifactInfo | None:
     if not isinstance(record, dict):
         return None
     raw_name = record.get("name")
     if not isinstance(raw_name, str) or not raw_name:
         return None
-    filename = raw_name[len(prefix) :] if raw_name.startswith(prefix) else raw_name
+    current = current_prefix or root_prefix
+    if _is_folder_record(record):
+        return None
+    filename = _relative_list_name(root_prefix, current, raw_name)
     filename = filename.strip().lstrip("/")
     if not filename or filename.endswith("/"):
         return None
@@ -207,7 +244,10 @@ def list_artifacts(
 
     owns_client = client is None
     http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
-    try:
+    def list_prefix(current_prefix: str, *, depth: int, visited: set[str]) -> list[SupabaseArtifactInfo]:
+        if current_prefix in visited or depth > _MAX_LIST_DEPTH:
+            return []
+        visited.add(current_prefix)
         offset = 0
         artifacts: list[SupabaseArtifactInfo] = []
         while True:
@@ -215,7 +255,7 @@ def list_artifacts(
                 url,
                 headers=headers,
                 json={
-                    "prefix": prefix,
+                    "prefix": current_prefix,
                     "limit": page_size,
                     "offset": offset,
                     "sortBy": {"column": "updated_at", "order": "desc"},
@@ -225,18 +265,24 @@ def list_artifacts(
             data = response.json()
             if not isinstance(data, list):
                 logger.warning(
-                    "Supabase artifact list returned non-list payload for thread_id=%s",
+                    "Supabase artifact list returned non-list payload for thread_id=%s prefix=%s",
                     thread_id,
+                    current_prefix,
                 )
                 return artifacts
-            page = [
-                info for item in data
-                if (info := _info_from_list_record(prefix, item)) is not None
-            ]
-            artifacts.extend(page)
+            for item in data:
+                if isinstance(item, dict) and _is_folder_record(item):
+                    if child_prefix := _folder_prefix_from_list_record(prefix, current_prefix, item):
+                        artifacts.extend(list_prefix(child_prefix, depth=depth + 1, visited=visited))
+                    continue
+                if info := _info_from_list_record(prefix, item, current_prefix=current_prefix):
+                    artifacts.append(info)
             if len(data) < page_size:
                 return artifacts
             offset += page_size
+
+    try:
+        return list_prefix(prefix, depth=0, visited=set())
     finally:
         if owns_client:
             http.close()

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -163,6 +165,46 @@ def test_signed_url_request_encodes_object_path_segments(monkeypatch) -> None:
         "https://example.supabase.co/storage/v1/object/sign/"
         "sophia_builder/thread-1/report%20%231%3F.pdf"
     )
+
+
+def test_list_artifacts_recurses_into_supabase_folder_records(monkeypatch) -> None:
+    _configure(monkeypatch)
+    prefixes: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode())
+        prefixes.append(payload["prefix"])
+        if payload["prefix"] == "thread-1/":
+            return httpx.Response(200, json=[
+                {"name": "assets", "id": None, "metadata": None},
+                {
+                    "name": "root.md",
+                    "id": "file-root",
+                    "metadata": {"size": 12, "mimetype": "text/markdown"},
+                    "updated_at": "2026-05-27T20:00:00Z",
+                },
+            ])
+        if payload["prefix"] == "thread-1/assets/":
+            return httpx.Response(200, json=[
+                {
+                    "name": "style.css",
+                    "id": "file-style",
+                    "metadata": {"size": 34, "mimetype": "text/css"},
+                    "updated_at": "2026-05-27T20:01:00Z",
+                },
+            ])
+        return httpx.Response(200, json=[])
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    artifacts = supabase_artifact_store.list_artifacts(thread_id="thread-1", client=client)
+
+    assert prefixes == ["thread-1/", "thread-1/assets/"]
+    assert [(artifact.filename, artifact.size_bytes, artifact.content_type) for artifact in artifacts] == [
+        ("assets/style.css", 34, "text/css"),
+        ("root.md", 12, "text/markdown"),
+    ]
+    assert "assets" not in {artifact.filename for artifact in artifacts}
 
 
 def test_upload_rejects_blank_thread_or_filename(monkeypatch) -> None:
