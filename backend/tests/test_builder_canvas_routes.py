@@ -315,6 +315,52 @@ async def test_snapshot_downgrades_native_success_without_deliverable(app: FastA
 
 
 @pytest.mark.anyio
+async def test_snapshot_preserves_retained_successful_terminal_with_artifact(app: FastAPI, monkeypatch) -> None:
+    async def tasks(_parent: str):
+        return [
+            {
+                "agent_name": "sophia_builder",
+                "task_id": "task-1",
+                "run_id": "run-1",
+                "status": "success",
+                "last_updated_at": "2026-05-27T10:00:00Z",
+            }
+        ]
+
+    async def status(_task: str, _run: str, _fallback: str | None):
+        return "completed"
+
+    monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", tasks)
+    monkeypatch.setattr(builder_canvas, "_native_run_status", status)
+    await app.state._builder_canvas_worker.publish_progress({
+        "parent_thread_id": "parent-1",
+        "task_id": "task-1",
+        "run_id": "run-1",
+        "sequence": 1,
+        "event_name": "custom",
+        "data": {"name": "phase", "phase": "finalizing"},
+    })
+    await app.state._builder_canvas_worker.publish_completion({
+        "thread_id": "parent-1",
+        "task_id": "task-1",
+        "run_id": "run-1",
+        "status": "success",
+        "artifact_path": "mnt/user-data/outputs/report.html",
+        "artifact_filename": "report.html",
+    })
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/sophia/user-1/threads/parent-1/builder-canvas/snapshot")
+
+    assert response.status_code == 200
+    active_task = response.json()["active_task"]
+    assert active_task["status"] == "completed"
+    assert active_task["completion"]["status"] == "success"
+    assert active_task["completion"]["artifact_path"] == "mnt/user-data/outputs/report.html"
+    assert active_task["completion"]["artifact_filename"] == "report.html"
+
+
+@pytest.mark.anyio
 async def test_snapshot_prefers_retained_failed_terminal_over_native_success(app: FastAPI, monkeypatch) -> None:
     async def tasks(_parent: str):
         return [

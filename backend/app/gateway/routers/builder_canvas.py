@@ -239,6 +239,26 @@ def _retained_terminal_for_run(
     return None
 
 
+def _completion_has_deliverable(completion: dict[str, Any] | None) -> bool:
+    if not isinstance(completion, dict):
+        return False
+    for key in ("artifact_path", "artifact_url"):
+        value = completion.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
+
+
+def _retained_completion_for_run(
+    recent_events: list[dict[str, Any]],
+    task_id: str,
+    run_id: str,
+) -> dict[str, Any] | None:
+    terminal = _retained_terminal_for_run(recent_events, task_id, run_id)
+    completion = terminal.get("completion") if isinstance(terminal, dict) else None
+    return completion if isinstance(completion, dict) else None
+
+
 def _effective_snapshot_status(
     parent_thread_id: str,
     task: dict[str, Any],
@@ -250,8 +270,10 @@ def _effective_snapshot_status(
 ) -> tuple[str, str | None]:
     retained_terminal = _retained_terminal_for_run(recent_events, task_id, run_id)
     retained_status = retained_terminal.get("status") if isinstance(retained_terminal, dict) else None
+    completion = retained_terminal.get("completion") if isinstance(retained_terminal, dict) else None
+    if retained_status == "completed" and _completion_has_deliverable(completion if isinstance(completion, dict) else None):
+        return "completed", None
     if retained_status in {"failed", "timed_out", "cancelled"}:
-        completion = retained_terminal.get("completion")
         error_message = completion.get("error_message") if isinstance(completion, dict) else None
         return str(retained_status), error_message if isinstance(error_message, str) else None
     if native_status == "completed" and not _task_has_deliverable(parent_thread_id, task):
@@ -448,14 +470,18 @@ async def builder_canvas_snapshot(
         "status": status,
         **({"latest_activity": latest_activity} if latest_activity else {}),
     }
-    completion = _completion_from_terminal_task(
-        parent_thread_id,
-        task,
-        status=status,
-        task_id=task_id,
-        run_id=run_id,
-        error_message_override=error_message_override,
-    )
+    retained_completion = _retained_completion_for_run(recent_events, task_id, run_id)
+    if status == "completed" and _completion_has_deliverable(retained_completion):
+        completion = retained_completion
+    else:
+        completion = _completion_from_terminal_task(
+            parent_thread_id,
+            task,
+            status=status,
+            task_id=task_id,
+            run_id=run_id,
+            error_message_override=error_message_override,
+        )
     if completion is not None:
         active_task["completion"] = completion
     logger.info(
