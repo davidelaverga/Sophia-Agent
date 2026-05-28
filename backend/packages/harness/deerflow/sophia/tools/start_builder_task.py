@@ -53,7 +53,6 @@ from langgraph.typing import ContextT
 from deerflow.sophia.builder_web_policy import (
     extract_explicit_user_urls,
     make_builder_web_budget,
-    normalize_builder_task_type,
     should_allow_builder_web_research,
 )
 
@@ -992,8 +991,6 @@ async def _start_builder_task_impl(
     # Demo-prompt normalization preserves the deterministic small-deliverable
     # path users rely on for "test builder, make anything" smoke tests.
     description, task_type, demo_mode = _normalize_request(description, task_type, companion_artifact)
-    original_task_type = task_type
-    task_type, normalization_reason = normalize_builder_task_type(task_type, description)
 
     allow_web_research = should_allow_builder_web_research(task_type, description)
     explicit_user_urls = extract_explicit_user_urls(description)
@@ -1026,18 +1023,10 @@ async def _start_builder_task_impl(
         builder_web_budget=builder_web_budget,
         handoff_resolution=handoff_resolution,
     )
-    delegation_context["task_type_diagnostics"] = {
-        "original_task_type": original_task_type,
-        "normalized_task_type": task_type,
-        "reason": normalization_reason,
-        "allow_web_research": allow_web_research,
-    }
 
     logger.info(
-        "[Builder] start_builder_task dispatching: original_task_type=%s task_type=%s normalization_reason=%s allow_web_research=%s demo=%s tone=%s ritual=%s parent_thread=%s parent_model=%s user_id=%s user_id_source=%s artifact_source=%s",
-        original_task_type,
+        "[Builder] start_builder_task dispatching: task_type=%s allow_web_research=%s demo=%s tone=%s ritual=%s parent_thread=%s parent_model=%s user_id=%s user_id_source=%s artifact_source=%s",
         task_type,
-        normalization_reason,
         allow_web_research,
         demo_mode,
         companion_artifact.get("tone_estimate"),
