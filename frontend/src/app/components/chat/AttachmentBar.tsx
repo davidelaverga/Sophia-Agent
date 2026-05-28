@@ -285,6 +285,40 @@ function buildRegistration(
  * back to in-store-only behavior. Better than blocking the user's
  * pick when the gateway is briefly slow.
  */
+/**
+ * Build the set of filenames the uniquifier should treat as already
+ * claimed for ``threadId``. Two sources are merged (Codex P2 PR
+ * #132 latest iteration):
+ *
+ * 1. Non-error chips already in the local store for this thread —
+ *    covers within-batch and still-on-screen collisions. Error
+ *    chips are excluded; they hold no file on disk.
+ * 2. Server-side filenames in
+ *    ``backend/.deer-flow/threads/{threadId}/user-data/uploads/`` —
+ *    covers files that outlived their chip (chip cleared by the
+ *    outbound-send hook after a turn sends, bytes remain on disk).
+ *
+ * The server lookup is done ONCE per file-selection batch (not per
+ * file). Failure returns an empty set so a transient gateway error
+ * degrades gracefully to in-store-only uniquification rather than
+ * blocking the user's pick.
+ *
+ * Extracted out of ``handleFileSelection`` so that callback stays
+ * below the Sentrux complex-function threshold (CC < 16).
+ */
+async function buildClaimedFilenameSet(
+  threadId: string,
+  currentItems: PendingAttachment[],
+): Promise<Set<string>> {
+  const claimed = new Set<string>()
+  for (const item of currentItems) {
+    if (item.status !== "error") claimed.add(item.filename)
+  }
+  const serverNames = await fetchExistingUploadFilenames(threadId)
+  for (const name of serverNames) claimed.add(name)
+  return claimed
+}
+
 async function fetchExistingUploadFilenames(threadId: string): Promise<Set<string>> {
   try {
     const res = await fetch(
@@ -541,31 +575,12 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
       const existingCounted = currentItems.filter((i) => i.status !== "error").length
       let remainingSlots = Math.max(MAX_ATTACHED_FILES_PER_TURN - existingCounted, 0)
 
-      // Seed the claimed-names set from two sources (Codex P2 PR
-      // #132 later iteration):
-      //
-      // 1. Non-error chips already on this thread — within-batch
-      //    + still-on-screen collisions. Error chips are excluded
-      //    because they hold no file on disk.
-      // 2. Server-side files that outlived their chip — after a
-      //    turn sends, the outbound-send hook clears chips but the
-      //    bytes remain in
-      //    ``backend/.deer-flow/threads/{threadId}/user-data/uploads/``.
-      //    Without checking server truth, a later pick of the same
-      //    name would silently overwrite the earlier upload, and
-      //    ``view_user_image`` / ``read_user_document`` references
-      //    to the old filename would unknowingly read the new bytes.
-      //
-      // The server lookup is done ONCE per file-selection batch
-      // (not per file) so users picking 5 files only eat one
-      // round-trip. On failure it returns an empty set — graceful
-      // degradation back to in-store-only uniquification.
-      const claimed = new Set<string>()
-      for (const item of currentItems) {
-        if (item.status !== "error") claimed.add(item.filename)
-      }
-      const serverNames = await fetchExistingUploadFilenames(threadId)
-      for (const name of serverNames) claimed.add(name)
+      // ``buildClaimedFilenameSet`` merges in-store + server-side
+      // names so the uniquifier accounts for files that outlived
+      // their chip (Codex P2 PR #132 latest iteration). Extracted
+      // out so this callback stays under the Sentrux complex-function
+      // threshold.
+      const claimed = await buildClaimedFilenameSet(threadId, currentItems)
 
       const registrations: Registration[] = []
       for (const file of Array.from(filesList)) {
