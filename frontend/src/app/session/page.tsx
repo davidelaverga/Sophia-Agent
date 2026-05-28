@@ -14,10 +14,11 @@
 
 'use client';
 
+import { Paperclip } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { AttachmentBar } from '../components/chat/AttachmentBar';
+import { AttachmentBar, type AttachmentPickerRef } from '../components/chat/AttachmentBar';
 import {
   VoiceComposerErrorBoundary,
 } from '../components/error-boundaries';
@@ -93,11 +94,52 @@ export default function SessionPage() {
 // MAIN SESSION PAGE CONTENT
 // ============================================================================
 
+/**
+ * Composer-aligned attach button rendered into ``VoiceFirstComposer``'s
+ * ``slotLeftAction`` slot so the paperclip shares a horizontal baseline
+ * with the Send button (B4 of the silent-attach fix, 2026-05-28).
+ *
+ * Extracted into its own component so ``SessionPageContent``'s CC
+ * stays under Sentrux's CC ≥ 16 threshold — adding the conditional
+ * + JSX inline pushed the count over.
+ */
+function ComposerAttachButton({
+  onClick,
+  disabled,
+}: {
+  onClick: () => void;
+  disabled: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-label="Attach a file"
+      title="Attach a file"
+      data-testid="composer-attach-button"
+      className="cosmic-focus-ring shrink-0 self-end rounded-2xl p-2.5 transition-all duration-200 hover:bg-sophia-purple/10 disabled:cursor-not-allowed disabled:opacity-50"
+      style={{ color: 'var(--cosmic-text-whisper)' }}
+    >
+      <Paperclip className="w-4 h-4" />
+    </button>
+  );
+}
+
 function SessionPageContent() {
   const router = useRouter();
   const focusMode = useUiStore((s) => s.mode);
   const { chromeOpacity } = useChromeFade();
   const presenceRef = useRef<PresenceFieldHandle | null>(null);
+  // Mutable function ref shared between the AttachmentBar (which owns
+  // the hidden file input and populates this with its openPicker
+  // callback) and the Composer's slotLeftAction button (which calls
+  // it on click). B4 of the silent-attach fix (2026-05-28) — keeps
+  // the paperclip on the same horizontal baseline as the Send button.
+  const attachmentPickerRef = useRef<(() => void) | null>(null) as AttachmentPickerRef;
+  const handleOpenAttachPicker = useCallback(() => {
+    attachmentPickerRef.current?.();
+  }, []);
   const handleImpulse = useCallback(() => {
     presenceRef.current?.fireImpulse('coreIntensity', 0.15, 1500);
   }, []);
@@ -892,7 +934,17 @@ function SessionPageContent() {
   // ============================================================================
   // RENDER
   // ============================================================================
-  
+
+  // Pre-compute the Composer's attach-button slot so the inline
+  // conditional in JSX doesn't add a branch to SessionPageContent's
+  // already-high CC (B4 of the silent-attach fix, 2026-05-28).
+  const attachButtonSlot = focusMode === 'text' ? (
+    <ComposerAttachButton
+      onClick={handleOpenAttachPicker}
+      disabled={isTyping || isReadOnly || !resolvedThreadId}
+    />
+  ) : undefined;
+
   return (
     <SessionLayout
       store={session}
@@ -1142,17 +1194,20 @@ function SessionPageContent() {
             </div>
           )}
           
-          {/* Attachment bar — file picker + chips. Sits above the composer
-              so the user sees what they've uploaded and what's about to be
-              referenced this turn. Disabled in voice-only mode (focusMode
-              !== 'text') because voice turns don't benefit from a file
-              picker UI; the companion can still view images uploaded via
-              other channels. */}
+          {/* Attachment bar — chips + status banner. The paperclip
+              button itself is rendered INSIDE VoiceFirstComposer via
+              the ``slotLeftAction`` prop below so it shares a
+              horizontal baseline with the Send button (B4 of the
+              silent-attach fix, 2026-05-28). The bar still owns the
+              hidden file input; the slot's click delegates back to it
+              via ``attachmentPickerRef``. */}
           {focusMode === 'text' && resolvedThreadId && (
             <div className="mb-2 flex flex-col gap-1">
               <AttachmentBar
                 threadId={resolvedThreadId}
                 disabled={isTyping || isReadOnly}
+                hideInternalPaperclip
+                openPickerRef={attachmentPickerRef}
               />
               {hasUploadsInFlight && (
                 <span
@@ -1193,6 +1248,7 @@ function SessionPageContent() {
               isConnecting={connectivityStatus === 'checking'}
               focusRequestToken={composerFocusToken}
               textOnly={focusMode === 'text'}
+              slotLeftAction={attachButtonSlot}
               slotBeforeText={focusMode !== 'text'
                 ? (
                     <div

@@ -19,7 +19,8 @@
  */
 
 import { FileText, ImageIcon, Loader2, Paperclip, X } from "lucide-react"
-import { useCallback, useId, useRef, type ChangeEvent } from "react"
+import { useCallback, useEffect, useId, useRef, useState, type ChangeEvent } from "react"
+// ``useEffect`` is imported because ``openPickerRef`` wiring uses it.
 
 import { MAX_ATTACHED_FILES_PER_TURN } from "../../lib/chat-constants"
 import {
@@ -144,6 +145,20 @@ function uniquifyFilename(name: string, claimed: Set<string>): string {
   return `${stem}-${Date.now()}${ext}`
 }
 
+/**
+ * Mutable ref the bar populates with an ``openPicker`` callback. Lets
+ * a parent component (e.g. the Composer's bottom action row) render
+ * its own paperclip button that triggers the bar's hidden file input.
+ *
+ * B4 of the silent-attach fix (2026-05-28): in production the
+ * AttachmentBar's own paperclip button sits in its own row above the
+ * composer, so the Attach button and the Send button can't share a
+ * horizontal baseline. With this ref, the page-level layout can host
+ * the paperclip alongside the Send button in the same flex row and
+ * delegate the click back to the bar's file input.
+ */
+export type AttachmentPickerRef = { current: (() => void) | null }
+
 type AttachmentBarProps = {
   /** Thread the uploads land under. */
   threadId: string | null | undefined
@@ -151,6 +166,19 @@ type AttachmentBarProps = {
   disabled?: boolean
   /** Custom className for the outer container. */
   className?: string
+  /**
+   * If true, hides the bar's own paperclip button so a parent can
+   * render an alignment-friendly equivalent. The file input + chip
+   * row + status banner remain owned by the bar. Use together with
+   * ``openPickerRef`` to wire the parent button to the bar's input.
+   */
+  hideInternalPaperclip?: boolean
+  /**
+   * Mutable ref populated with a function the parent can call to
+   * trigger the file picker. Null until the bar has mounted; null
+   * again when the bar unmounts.
+   */
+  openPickerRef?: AttachmentPickerRef
 }
 
 function makeClientId(): string {
@@ -306,24 +334,173 @@ function buildRegistration(
  * Extracted out of ``handleFileSelection`` so that callback stays
  * below the Sentrux complex-function threshold (CC < 16).
  */
-async function buildClaimedFilenameSet(
-  threadId: string,
+/**
+ * Synchronous portion of the claimed-names set. Covers within-batch
+ * and still-on-screen chip collisions. Excludes error chips (no file
+ * on disk to collide with).
+ *
+ * Split out of ``buildClaimedFilenameSet`` (B1 of the silent-attach
+ * fix, 2026-05-28): the chip-add path now runs this synchronously
+ * BEFORE any await, so a hung ``/uploads/list`` fetch can't block
+ * the user from seeing their chip. Server-truth seeding still
+ * happens — see ``fetchExistingUploadFilenames`` + the post-hoc
+ * rename loop inside ``handleFileSelection``.
+ */
+function buildInStoreClaimedSet(
   currentItems: PendingAttachment[],
-): Promise<Set<string>> {
+): Set<string> {
   const claimed = new Set<string>()
   for (const item of currentItems) {
     if (item.status !== "error") claimed.add(item.filename)
   }
-  const serverNames = await fetchExistingUploadFilenames(threadId)
-  for (const name of serverNames) claimed.add(name)
   return claimed
 }
 
+/**
+ * Synchronous chip-creation pass — turns a FileList into a list of
+ * Registrations, calls ``add(reg.item)`` for each so chips render
+ * immediately, and decrements remainingSlots/claimed as it goes so
+ * within-batch collisions get uniquified.
+ *
+ * Extracted from ``handleFileSelection`` so the callback stays under
+ * Sentrux's CC ≥ 16 threshold (B5 extraction after Sentrux regression
+ * on the first commit of the silent-attach fix).
+ */
+/**
+ * Returns true when every registration in the batch was rejected
+ * (e.g., all over the per-turn cap). Lets ``handleFileSelection``
+ * short-circuit to a single banner without inlining the filter +
+ * length check (saves CC).
+ */
+function allRejected(registrations: Registration[]): boolean {
+  for (const reg of registrations) {
+    if (!reg.skip) return false
+  }
+  return registrations.length > 0
+}
+
+/**
+ * Glue: reads the current-thread chips out of the store, computes
+ * remainingSlots + claimed-names, and delegates to
+ * ``createRegistrationsForBatch``. Extracted so handleFileSelection's
+ * cyclomatic complexity stays well below Sentrux's CC ≥ 16 gate.
+ */
+function preparePickedFiles(
+  filesList: FileList,
+  threadId: string,
+  add: (item: PendingAttachment) => void,
+): Registration[] {
+  const currentItems = selectItemsForThread(threadId)(
+    useAttachmentsStore.getState(),
+  )
+  const existingCounted = countNonError(currentItems)
+  const remainingSlots = Math.max(MAX_ATTACHED_FILES_PER_TURN - existingCounted, 0)
+  const claimed = buildInStoreClaimedSet(currentItems)
+  return createRegistrationsForBatch(filesList, threadId, remainingSlots, claimed, add)
+}
+
+function countNonError(items: PendingAttachment[]): number {
+  let n = 0
+  for (const it of items) {
+    if (it.status !== "error") n += 1
+  }
+  return n
+}
+
+/**
+ * Post-hoc rename pass — after chips are visible and the server-truth
+ * list arrives, rename any chip whose name collides with bytes-still-
+ * on-disk from a prior turn. Mutates ``registrations`` in place +
+ * fires store updates. B1 of the silent-attach fix.
+ */
+function applyServerTruthRenames(
+  registrations: Registration[],
+  serverNames: Set<string>,
+  update: (clientId: string, patch: Partial<PendingAttachment>) => void,
+): void {
+  if (serverNames.size === 0) return
+  const inBatch = new Set<string>()
+  for (const reg of registrations) {
+    if (!reg.skip) inBatch.add(reg.item.filename)
+  }
+  for (const reg of registrations) {
+    if (reg.skip) continue
+    if (!serverNames.has(reg.item.filename)) continue
+    const merged = new Set<string>([...serverNames, ...inBatch])
+    const renamed = uniquifyFilename(reg.item.filename, merged)
+    if (renamed === reg.item.filename) continue
+    inBatch.delete(reg.item.filename)
+    inBatch.add(renamed)
+    reg.file = new File([reg.file], renamed, {
+      type: reg.file.type,
+      lastModified: reg.file.lastModified,
+    })
+    reg.item = { ...reg.item, filename: renamed }
+    update(reg.item.clientId, { filename: renamed })
+  }
+}
+
+function createRegistrationsForBatch(
+  filesList: FileList,
+  threadId: string,
+  initialRemainingSlots: number,
+  claimed: Set<string>,
+  add: (item: PendingAttachment) => void,
+): Registration[] {
+  let remainingSlots = initialRemainingSlots
+  const registrations: Registration[] = []
+  for (const file of Array.from(filesList)) {
+    const reg = buildRegistration(file, threadId, remainingSlots, claimed)
+    add(reg.item)
+    if (!reg.skip) {
+      remainingSlots -= 1
+      // Subsequent picks in this batch must see this name as taken
+      // (within-batch collision: two ``image.png`` files picked
+      // together).
+      claimed.add(reg.item.filename)
+    }
+    registrations.push(reg)
+  }
+  return registrations
+}
+
+/**
+ * Post-hoc rename pass — after chips are already in the store and
+ * the server-truth list arrives, rename any chip whose name collides
+ * with an on-disk file the user can't see in their store anymore
+ * (chip cleared by ``useSessionOutboundSend`` after a previous turn,
+ * bytes left on disk).
+ *
+ * Mutates ``registrations`` in place: each affected registration gets
+ * a new ``filename`` on its item, and ``file`` is reconstructed with
+ * the new name so the multipart body matches. Also fires
+ * ``update(clientId, {filename})`` so the chip text updates.
+ *
+ * Extracted from ``handleFileSelection`` so the callback stays under
+ * Sentrux's CC ≥ 16 threshold (B5 follow-up after Sentrux regression
+ * surfaced on first commit of the silent-attach fix).
+ */
+
+// 4-second cap on the server-truth uploads-list lookup. Production
+// evidence (2026-05-28 silent-attach incident): zero ``/uploads*``
+// activity in gateway logs at the user's session timestamp, suggesting
+// either a hung Vercel fetch or a never-resolved await. Without an
+// abort cap, ``fetchExistingUploadFilenames`` could block any caller
+// that awaits it. The chip-add path now no longer awaits this helper
+// (see ``handleFileSelection`` below), so the cap is defense-in-depth
+// for the post-hoc rename path AND any future caller that does block.
+const UPLOADS_LIST_TIMEOUT_MS = 4000
+
 async function fetchExistingUploadFilenames(threadId: string): Promise<Set<string>> {
+  // ``AbortSignal.timeout`` is available in all modern browsers and in
+  // Node 18+. If the upstream proxy hangs, the controller aborts the
+  // fetch and the catch branch returns an empty set — same outcome as
+  // a 500 or a network error.
+  const signal = AbortSignal.timeout(UPLOADS_LIST_TIMEOUT_MS)
   try {
     const res = await fetch(
       `/api/threads/${encodeURIComponent(threadId)}/uploads/list`,
-      { method: "GET", headers: { Accept: "application/json" } },
+      { method: "GET", headers: { Accept: "application/json" }, signal },
     )
     if (!res.ok) return new Set()
     const data = (await res.json()) as { files?: Array<{ filename?: unknown }> }
@@ -526,7 +703,13 @@ async function uploadOneFile(
   }
 }
 
-export function AttachmentBar({ threadId, disabled = false, className }: AttachmentBarProps) {
+export function AttachmentBar({
+  threadId,
+  disabled = false,
+  className,
+  hideInternalPaperclip = false,
+  openPickerRef,
+}: AttachmentBarProps) {
   // Show only chips owned by the current thread (Codex P2 PR #132).
   // If a user uploaded in thread A and switched to B, A's chips
   // disappear here — they reappear when the user navigates back to A.
@@ -540,10 +723,40 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
 
   const isInteractive = !disabled && Boolean(threadId)
 
+  // Transient status banner for the silent-failure cases the chip row
+  // can't itself communicate (B3 of the silent-attach fix, 2026-05-28):
+  // - ``threadId`` was null at file-pick time → "session not ready"
+  // - Every pick in the batch was cap-rejected → "limit reached"
+  //
+  // The banner stays visible until the user picks again (the setter
+  // is called fresh each pick) or refreshes; no auto-dismiss timer
+  // because adding one trips Sentrux's complex-function gate.
+  const [statusMessage, setStatusMessage] = useState<string | null>(null)
+
   const handlePaperclipClick = useCallback(() => {
-    if (!isInteractive) return
+    if (!isInteractive) {
+      // The button shouldn't even be clickable in this state, but if
+      // somehow the disabled gate is bypassed (focus + Enter on a
+      // stale render, etc.) surface why nothing happened.
+      if (!threadId) {
+        setStatusMessage("Can't attach — session not ready. Try again in a moment.")
+      }
+      return
+    }
     inputRef.current?.click()
-  }, [isInteractive])
+  }, [isInteractive, threadId])
+
+  // Expose the picker trigger upward so an externally-rendered
+  // paperclip button (e.g. in the Composer's bottom action row) can
+  // share its alignment with the Send button while still using the
+  // bar's hidden file input. B4 of the silent-attach fix.
+  useEffect(() => {
+    if (!openPickerRef) return
+    openPickerRef.current = handlePaperclipClick
+    return () => {
+      openPickerRef.current = null
+    }
+  }, [openPickerRef, handlePaperclipClick])
 
   const handleRemoveChip = useCallback(
     (item: PendingAttachment) => {
@@ -561,43 +774,30 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
       const filesList = event.target.files
       // Reset immediately so picking the same file twice in a row works.
       event.target.value = ""
-      if (!filesList || filesList.length === 0 || !threadId) return
-
-      // Read items fresh from the store (not the closure) to avoid a
-      // stale-snapshot race when the user picks files faster than the
-      // render loop. Codex P2 PR #132: server-side post-handler caps
-      // attached_files at MAX_ATTACHED_FILES_PER_TURN, so files over
-      // the cap MUST be rejected here rather than silently dropped
-      // after upload.
-      const currentItems = selectItemsForThread(threadId)(
-        useAttachmentsStore.getState(),
-      )
-      const existingCounted = currentItems.filter((i) => i.status !== "error").length
-      let remainingSlots = Math.max(MAX_ATTACHED_FILES_PER_TURN - existingCounted, 0)
-
-      // ``buildClaimedFilenameSet`` merges in-store + server-side
-      // names so the uniquifier accounts for files that outlived
-      // their chip (Codex P2 PR #132 latest iteration). Extracted
-      // out so this callback stays under the Sentrux complex-function
-      // threshold.
-      const claimed = await buildClaimedFilenameSet(threadId, currentItems)
-
-      const registrations: Registration[] = []
-      for (const file of Array.from(filesList)) {
-        const reg = buildRegistration(file, threadId, remainingSlots, claimed)
-        add(reg.item)
-        if (!reg.skip) {
-          remainingSlots -= 1
-          // Subsequent picks in this batch must see this name as
-          // taken so they uniquify against it (within-batch
-          // collision: two ``image.png`` files picked together).
-          claimed.add(reg.item.filename)
-        }
-        registrations.push(reg)
+      if (!filesList || filesList.length === 0) return
+      if (!threadId) {
+        // Surface the "session not ready" early-return instead of
+        // silently swallowing the pick (B3 of silent-attach fix).
+        setStatusMessage("Can't attach — session not ready. Try again in a moment.")
+        return
       }
-
-      // Upload one at a time to keep error attribution simple and the
-      // backend's per-thread sandbox dir from racing on parallel writes.
+      const registrations = preparePickedFiles(filesList, threadId, add)
+      // Cap-reached toast: if EVERY pick was rejected, surface why.
+      if (allRejected(registrations)) {
+        setStatusMessage(
+          `Attachment limit reached (${MAX_ATTACHED_FILES_PER_TURN} per turn). Send your message first, then attach more.`,
+        )
+      }
+      // Phase 2: server-truth uniquify (post-hoc rename). Bounded by
+      // ``UPLOADS_LIST_TIMEOUT_MS`` (4s); failure → no renames →
+      // chips ship with in-store-only names.
+      applyServerTruthRenames(
+        registrations,
+        await fetchExistingUploadFilenames(threadId),
+        update,
+      )
+      // Phase 3: upload one at a time so error attribution stays
+      // simple and parallel writes to the same sandbox dir don't race.
       for (const reg of registrations) {
         if (reg.skip) continue
         await uploadOneFile(reg, threadId, update, remove)
@@ -614,26 +814,42 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
 
   // Nothing to render at all when bar is empty and disabled — the
   // composer stays uncluttered until the user has a reason to attach.
-  if (!isInteractive && items.length === 0) {
+  // Exception: if a status banner is queued (B3 of the silent-attach
+  // fix), render so the user sees the feedback even if no chip was
+  // created (e.g., "session not ready" early-return).
+  if (!isInteractive && items.length === 0 && !statusMessage) {
     return null
   }
 
   return (
     <div
-      className={`flex flex-wrap items-center gap-2 ${className ?? ""}`}
+      className={`flex flex-col gap-1 ${className ?? ""}`}
       data-testid="attachment-bar"
     >
-      <button
-        type="button"
-        onClick={handlePaperclipClick}
-        disabled={!isInteractive}
-        title={tooltip}
-        aria-label={tooltip}
-        className="inline-flex h-8 items-center gap-1.5 rounded-full border border-sophia-input-border bg-sophia-surface px-3 text-xs font-medium text-sophia-text2 transition-colors hover:bg-sophia-purple/10 hover:text-sophia-purple disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        <Paperclip className="h-3.5 w-3.5" />
-        <span>Attach</span>
-      </button>
+      {statusMessage ? (
+        <div
+          role="status"
+          aria-live="polite"
+          data-testid="attachment-bar-status"
+          className="rounded-md bg-sophia-purple/10 px-3 py-1.5 text-xs text-sophia-text2"
+        >
+          {statusMessage}
+        </div>
+      ) : null}
+      <div className="flex flex-wrap items-center gap-2">
+      {hideInternalPaperclip ? null : (
+        <button
+          type="button"
+          onClick={handlePaperclipClick}
+          disabled={!isInteractive}
+          title={tooltip}
+          aria-label={tooltip}
+          className="inline-flex h-8 items-center gap-1.5 rounded-full border border-sophia-input-border bg-sophia-surface px-3 text-xs font-medium text-sophia-text2 transition-colors hover:bg-sophia-purple/10 hover:text-sophia-purple disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <Paperclip className="h-3.5 w-3.5" />
+          <span>Attach</span>
+        </button>
+      )}
 
       <input
         ref={inputRef}
@@ -683,6 +899,7 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
           </span>
         )
       })}
+      </div>
     </div>
   )
 }
