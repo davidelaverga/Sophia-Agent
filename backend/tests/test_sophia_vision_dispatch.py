@@ -21,8 +21,16 @@ from deerflow.sophia.tools import start_builder_task as sbt
 
 
 def test_copy_skips_when_parent_thread_id_missing() -> None:
-    assert sbt._copy_parent_uploaded_images(parent_thread_id=None, builder_thread_id="b1") == []
-    assert sbt._copy_parent_uploaded_images(parent_thread_id="", builder_thread_id="b1") == []
+    assert sbt._copy_parent_uploaded_images(
+        parent_thread_id=None,
+        builder_thread_id="b1",
+        current_turn_attachments=None,
+    ) == []
+    assert sbt._copy_parent_uploaded_images(
+        parent_thread_id="",
+        builder_thread_id="b1",
+        current_turn_attachments=None,
+    ) == []
 
 
 def test_copy_returns_empty_when_parent_uploads_dir_absent(tmp_path: Path, monkeypatch) -> None:
@@ -31,7 +39,11 @@ def test_copy_returns_empty_when_parent_uploads_dir_absent(tmp_path: Path, monke
         sandbox_uploads_dir=lambda _tid: tmp_path / "missing-uploads",
     )
     monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: fake_paths)
-    assert sbt._copy_parent_uploaded_images(parent_thread_id="p1", builder_thread_id="b1") == []
+    assert sbt._copy_parent_uploaded_images(
+        parent_thread_id="p1",
+        builder_thread_id="b1",
+        current_turn_attachments=None,
+    ) == []
 
 
 def test_copy_filters_to_image_extensions(tmp_path: Path, monkeypatch) -> None:
@@ -63,7 +75,11 @@ def test_copy_filters_to_image_extensions(tmp_path: Path, monkeypatch) -> None:
     fake_paths = SimpleNamespace(sandbox_uploads_dir=_resolve_dir)
     monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: fake_paths)
 
-    virtual_paths = sbt._copy_parent_uploaded_images(parent_thread_id="p1", builder_thread_id="b1")
+    virtual_paths = sbt._copy_parent_uploaded_images(
+        parent_thread_id="p1",
+        builder_thread_id="b1",
+        current_turn_attachments=None,
+    )
 
     assert sorted(virtual_paths) == [
         "/mnt/user-data/uploads/art.webp",
@@ -126,6 +142,7 @@ def test_copy_skips_filenames_with_unsafe_characters(tmp_path: Path, monkeypatch
         virtual_paths = sbt._copy_parent_uploaded_images(
             parent_thread_id="p1",
             builder_thread_id="b1",
+            current_turn_attachments=None,
         )
 
     assert virtual_paths == ["/mnt/user-data/uploads/ok.png"]
@@ -186,6 +203,7 @@ def test_copy_skips_oversized_images(tmp_path: Path, monkeypatch, caplog) -> Non
         virtual_paths = sbt._copy_parent_uploaded_images(
             parent_thread_id="p1",
             builder_thread_id="b1",
+            current_turn_attachments=None,
         )
 
     assert virtual_paths == ["/mnt/user-data/uploads/small.png"]
@@ -235,6 +253,165 @@ def test_copy_extensions_subset_of_view_image_tool_accepted_set() -> None:
         "Copying those across would make the builder briefing list paths "
         "that view_image_tool will refuse to read."
     )
+
+
+# ─── Codex P1 PR #132 (latest iteration): current-turn scoping ────
+
+
+def test_copy_scopes_to_current_turn_attachments_only(tmp_path: Path, monkeypatch) -> None:
+    """Codex P1 PR #132 (latest iteration): only files the user attached
+    on THIS turn may be copied. Without this scoping, every leftover
+    image from prior turns in the parent uploads dir would leak into
+    each new builder run — encouraging the builder to inspect or
+    include stale/private images in unrelated tasks.
+
+    Setup: parent has cat.png (turn 1) and report.png (turn 5).
+    User just attached report.png and asked for a build. Only
+    report.png must be copied — cat.png MUST stay private.
+    """
+    from types import SimpleNamespace as _NS
+
+    parent_uploads = tmp_path / "parent" / "uploads"
+    parent_uploads.mkdir(parents=True)
+    builder_uploads = tmp_path / "builder" / "uploads"
+
+    (parent_uploads / "cat.png").write_bytes(b"\x89PNG\r\n\x1a\n")        # turn 1
+    (parent_uploads / "report.png").write_bytes(b"\x89PNG\r\n\x1a\n")     # turn 5
+
+    def _resolve_dir(tid: str) -> Path:
+        return parent_uploads if tid == "p1" else builder_uploads
+
+    fake_paths = _NS(sandbox_uploads_dir=_resolve_dir)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: fake_paths)
+
+    virtual_paths = sbt._copy_parent_uploaded_images(
+        parent_thread_id="p1",
+        builder_thread_id="b1",
+        current_turn_attachments=frozenset({"report.png"}),
+    )
+
+    assert virtual_paths == ["/mnt/user-data/uploads/report.png"]
+    assert (builder_uploads / "report.png").is_file()
+    assert not (builder_uploads / "cat.png").exists(), (
+        "Stale upload from a previous turn must NOT leak into the "
+        "builder sandbox when the current turn's attached_files doesn't "
+        "include it. Codex P1 PR #132 regression."
+    )
+
+
+def test_copy_returns_empty_when_no_current_turn_attachments(tmp_path: Path, monkeypatch) -> None:
+    """Empty whitelist = "user attached nothing this turn" → copy
+    nothing. The dir walk is short-circuited entirely (no copies, no
+    log noise) even when prior-turn images exist on disk."""
+    from types import SimpleNamespace as _NS
+
+    parent_uploads = tmp_path / "parent" / "uploads"
+    parent_uploads.mkdir(parents=True)
+    builder_uploads = tmp_path / "builder" / "uploads"
+
+    (parent_uploads / "stale.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    def _resolve_dir(tid: str) -> Path:
+        return parent_uploads if tid == "p1" else builder_uploads
+
+    fake_paths = _NS(sandbox_uploads_dir=_resolve_dir)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: fake_paths)
+
+    virtual_paths = sbt._copy_parent_uploaded_images(
+        parent_thread_id="p1",
+        builder_thread_id="b1",
+        current_turn_attachments=frozenset(),
+    )
+
+    assert virtual_paths == []
+    assert not builder_uploads.exists() or not list(builder_uploads.iterdir()), (
+        "Empty whitelist must produce zero copies, even when the parent "
+        "uploads dir contains images from earlier turns."
+    )
+
+
+def test_extract_current_turn_attachments_finds_safe_filenames() -> None:
+    """The extractor must parse the synthesized buildAttachmentPrompt
+    block in the latest HumanMessage and return the bullet filenames.
+
+    Mirrors the exact format produced by
+    ``frontend/src/app/stores/attachment-prompt.ts::buildAttachmentPrompt``
+    so a wording drift on either side breaks loudly here.
+    """
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    block = (
+        "[The user has uploaded 2 file(s) for this turn.\n"
+        "Use view_user_image(image_filename) for images or "
+        "read_user_document(document_filename) for documents — "
+        "passing just the bare filename, no path. Only inspect the "
+        "file(s) actually relevant to their question.\n"
+        "- report.png\n"
+        "- spec.pdf]\n\n"
+        "summarize report.png and spec.pdf for me"
+    )
+    messages = [
+        HumanMessage(content="hello"),
+        AIMessage(content="hi!"),
+        HumanMessage(content=block),
+    ]
+    extracted = sbt._extract_current_turn_attachment_filenames(messages)
+    assert extracted == frozenset({"report.png", "spec.pdf"})
+
+
+def test_extract_current_turn_attachments_empty_when_no_block() -> None:
+    """No synthesized block → empty set (so copy_parent_uploaded_images
+    will short-circuit and surface no stale uploads)."""
+    from langchain_core.messages import HumanMessage
+
+    messages = [HumanMessage(content="hey, can you make me a report?")]
+    assert sbt._extract_current_turn_attachment_filenames(messages) == frozenset()
+
+
+def test_extract_current_turn_attachments_ignores_bullets_outside_block() -> None:
+    """Bullets in the user's own message must NOT be parsed as
+    attachments — only the bracketed synthesized block counts.
+
+    Without scoping to the block, a user message like
+    "compare these:\\n- a.png\\n- b.png" would let the model trick
+    the dispatch into copying arbitrary filenames from the parent
+    uploads dir.
+    """
+    from langchain_core.messages import HumanMessage
+
+    msg = HumanMessage(content=(
+        "Please compare:\n"
+        "- a.png\n"
+        "- b.png\n"
+        "and tell me which is sharper."
+    ))
+    extracted = sbt._extract_current_turn_attachment_filenames([msg])
+    assert extracted == frozenset(), (
+        "Bullets outside the [The user has uploaded ...] block must "
+        "never be treated as current-turn attachments — that would "
+        "let the user (or a prompt-injection in the message) re-expose "
+        "arbitrary stale uploads."
+    )
+
+
+def test_extract_current_turn_attachments_strips_unsafe_names() -> None:
+    """Defense in depth: the renderer already filters through the
+    same allow-list, but the extractor re-applies it so a future
+    sanitizer regression doesn't leak unsafe bullet content."""
+    from langchain_core.messages import HumanMessage
+
+    # safe.png matches the allow-list; the spaces / tag-breakout
+    # bullets do NOT match ^- [A-Za-z0-9._-]+$ so they're dropped.
+    block = (
+        "[The user has uploaded 3 file(s) for this turn.\n"
+        "- safe.png\n"
+        "- tag<break>.png\n"
+        "- space here.png]"
+    )
+    extracted = sbt._extract_current_turn_attachment_filenames([
+        HumanMessage(content=block),
+    ])
+    assert extracted == frozenset({"safe.png"})
 
 
 def test_builder_task_middleware_injects_uploads_block_when_present(monkeypatch) -> None:

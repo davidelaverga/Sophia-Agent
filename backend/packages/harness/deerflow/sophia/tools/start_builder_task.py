@@ -53,6 +53,7 @@ from langgraph.typing import ContextT
 from deerflow.sophia.builder_web_policy import (
     extract_explicit_user_urls,
     make_builder_web_budget,
+    normalize_builder_task_type,
     should_allow_builder_web_research,
 )
 
@@ -503,10 +504,99 @@ def _build_delegation_context(
     }
 
 
+# Sentinel + bullet pattern for the synthesized buildAttachmentPrompt
+# block the frontend post-handler prepends to the user message when
+# ``attached_files`` is non-empty (see
+# ``frontend/src/app/stores/attachment-prompt.ts``):
+#
+#     [The user has uploaded N file(s) for this turn.
+#     Use view_user_image(...) ...
+#     - foo.png
+#     - bar.pdf]
+#
+# Codex P1 PR #132 (latest iteration): server-side extraction of this
+# block's filenames is what scopes the builder's image-copy to "this
+# turn's attachments" — without it, every prior-turn upload leaks.
+_ATTACHMENT_PROMPT_OPENER = "[The user has uploaded "
+_ATTACHMENT_LINE_RE = re.compile(r"^- ([A-Za-z0-9._-]+)$", re.MULTILINE)
+
+
+def _latest_human_message_text(messages: list[Any]) -> str | None:
+    """Return the text content of the latest HumanMessage, or None.
+
+    Walks the list in reverse. Accepts both LangChain ``BaseMessage``
+    objects (``msg.type == "human"``) and JSON-serialized dict shapes
+    (``msg.get("type") == "human"``). Multimodal list-of-blocks
+    content is flattened to its text chunks (the attachment-prompt
+    block always lives in a text block).
+    """
+    for msg in reversed(messages):
+        if isinstance(msg, dict):
+            msg_type = msg.get("type") or msg.get("role")
+            content = msg.get("content")
+        else:
+            msg_type = getattr(msg, "type", None)
+            content = getattr(msg, "content", None)
+        if msg_type != "human":
+            continue
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "\n".join(parts) if parts else None
+        return None
+    return None
+
+
+def _extract_current_turn_attachment_filenames(
+    messages: list[Any],
+) -> frozenset[str]:
+    """Parse the latest HumanMessage for the synthesized attachment block.
+
+    Returns the set of filenames the user attached on THIS turn.
+    Returns an empty frozenset when no attachment block is present —
+    meaning the user attached nothing, so ``_copy_parent_uploaded_images``
+    MUST NOT surface any leftover files from earlier turns to the
+    builder.
+
+    Codex P1 on PR #132 (latest iteration). Without this scoping, a
+    later unrelated builder request would re-expose private images
+    from previous turns to the builder, encouraging it to inspect or
+    include them.
+
+    Defense-in-depth filename validation: even though the renderer
+    already filters through ``SAFE_PROMPT_FILENAME``, the regex here
+    applies the same allow-list so anything that slips past (e.g.
+    via a future refactor) gets dropped.
+    """
+    text = _latest_human_message_text(messages)
+    if not text or _ATTACHMENT_PROMPT_OPENER not in text:
+        return frozenset()
+
+    # Scope to the bracketed block — bullet lines anywhere else in the
+    # user message must not be parsed as attachments. Note: the slice
+    # EXCLUDES the closing ``]`` so the renderer's last-bullet shape
+    # ``- spec.pdf]`` (no trailing newline before the close bracket)
+    # parses cleanly under the ``^- name$`` regex.
+    opener_idx = text.find(_ATTACHMENT_PROMPT_OPENER)
+    close_idx = text.find("]", opener_idx)
+    block_text = (
+        text[opener_idx:close_idx] if close_idx > opener_idx else text[opener_idx:]
+    )
+
+    return frozenset(_ATTACHMENT_LINE_RE.findall(block_text))
+
+
 def _select_copyable_images(
     parent_uploads: Path,
     max_bytes: int,
     parent_thread_id: str,
+    allowed_names: frozenset[str] | None,
 ) -> list[Path]:
     """Pick image files in ``parent_uploads`` eligible for builder copy.
 
@@ -515,6 +605,17 @@ def _select_copyable_images(
     vision cap — matches what the builder's upstream view_image_tool
     can actually handle). Oversized skips are logged once each so an
     operator can grep "why didn't the builder see my image".
+
+    ``allowed_names`` (Codex P1 PR #132 latest iteration): when non-None,
+    only filenames in this set are kept. The set is the intersection of
+    "files the user attached on the current turn" (parsed from the
+    synthesized ``buildAttachmentPrompt`` block in the latest
+    HumanMessage). Without this scoping, every leftover image from
+    prior turns in the parent uploads dir would be copied into each
+    new builder run, exposing stale/private images to the builder and
+    encouraging it to inspect or include them in unrelated tasks. An
+    empty frozenset means "user attached nothing this turn" → copy
+    nothing. ``None`` means "skip scoping" (legacy callers; tests).
 
     Extracted from ``_copy_parent_uploaded_images`` so that function's
     cyclomatic complexity stays under Sentrux's CC ≥ 16 gate after the
@@ -534,6 +635,12 @@ def _select_copyable_images(
                 f.name,
                 parent_thread_id,
             )
+            continue
+        if allowed_names is not None and f.name not in allowed_names:
+            # Codex P1: this file existed in the parent uploads dir but
+            # the user did NOT attach it on THIS turn. Skip silently
+            # (no warning — this is the expected, common case for any
+            # multi-turn session with prior uploads).
             continue
         try:
             size = f.stat().st_size
@@ -598,6 +705,7 @@ def _copy_parent_uploaded_images(
     *,
     parent_thread_id: str | None,
     builder_thread_id: str,
+    current_turn_attachments: frozenset[str] | None,
 ) -> list[str]:
     """Copy image uploads from the parent thread's sandbox into the builder's.
 
@@ -605,6 +713,16 @@ def _copy_parent_uploaded_images(
     ``["/mnt/user-data/uploads/photo.png"]``). Returns an empty list
     when there's no parent thread, the parent sandbox is empty, or the
     parent uploads dir doesn't exist yet (no uploads happened).
+
+    ``current_turn_attachments`` (Codex P1 PR #132 latest iteration):
+    the whitelist of filenames the user attached on THIS turn (parsed
+    server-side from the synthesized ``buildAttachmentPrompt`` block in
+    the latest HumanMessage). ``None`` skips the scoping entirely
+    (legacy callers and tests); empty frozenset means "user attached
+    nothing this turn" → copy nothing. The bug this closes: previously
+    the loop copied EVERY image in the parent uploads dir, so a builder
+    request that had nothing to do with prior uploads would still see
+    (and be encouraged to inspect) cat.png from three turns ago.
 
     Best-effort: a copy failure for one file is logged but doesn't
     abort the dispatch — the build proceeds without that image.
@@ -619,10 +737,17 @@ def _copy_parent_uploaded_images(
     if not parent_uploads.is_dir():
         return []
 
+    # Short-circuit: an explicit empty whitelist means "user attached
+    # nothing on this turn" — there's nothing to copy. Skip the dir
+    # walk entirely.
+    if current_turn_attachments is not None and not current_turn_attachments:
+        return []
+
     eligible = _select_copyable_images(
         parent_uploads,
         _max_builder_image_bytes(),
         parent_thread_id,
+        current_turn_attachments,
     )
     if not eligible:
         return []
@@ -668,6 +793,7 @@ async def _dispatch_via_asgi(
     user_id: str,
     parent_thread_id: str | None,
     parent_model: str | None,
+    current_turn_attachments: frozenset[str],
 ) -> tuple[str, str]:
     """Create a builder thread + run via LangGraph SDK ASGI in-process.
 
@@ -687,6 +813,7 @@ async def _dispatch_via_asgi(
     uploaded_image_paths = _copy_parent_uploaded_images(
         parent_thread_id=parent_thread_id,
         builder_thread_id=thread_id,
+        current_turn_attachments=current_turn_attachments,
     )
 
     # ``parent_thread_id`` and ``parent_user_id`` are also embedded in
@@ -865,6 +992,8 @@ async def _start_builder_task_impl(
     # Demo-prompt normalization preserves the deterministic small-deliverable
     # path users rely on for "test builder, make anything" smoke tests.
     description, task_type, demo_mode = _normalize_request(description, task_type, companion_artifact)
+    original_task_type = task_type
+    task_type, normalization_reason = normalize_builder_task_type(task_type, description)
 
     allow_web_research = should_allow_builder_web_research(task_type, description)
     explicit_user_urls = extract_explicit_user_urls(description)
@@ -897,10 +1026,19 @@ async def _start_builder_task_impl(
         builder_web_budget=builder_web_budget,
         handoff_resolution=handoff_resolution,
     )
+    delegation_context["task_type_diagnostics"] = {
+        "original_task_type": original_task_type,
+        "normalized_task_type": task_type,
+        "reason": normalization_reason,
+        "allow_web_research": allow_web_research,
+    }
 
     logger.info(
-        "[Builder] start_builder_task dispatching: task_type=%s demo=%s tone=%s ritual=%s parent_thread=%s parent_model=%s user_id=%s user_id_source=%s artifact_source=%s",
+        "[Builder] start_builder_task dispatching: original_task_type=%s task_type=%s normalization_reason=%s allow_web_research=%s demo=%s tone=%s ritual=%s parent_thread=%s parent_model=%s user_id=%s user_id_source=%s artifact_source=%s",
+        original_task_type,
         task_type,
+        normalization_reason,
+        allow_web_research,
         demo_mode,
         companion_artifact.get("tone_estimate"),
         active_ritual,
@@ -909,6 +1047,15 @@ async def _start_builder_task_impl(
         user_id,
         user_id_source,
         artifact_source,
+    )
+
+    # Codex P1 PR #132 (latest iteration): extract the filenames the
+    # user attached on THIS turn from the synthesized prompt block.
+    # Only those filenames may be copied into the builder sandbox —
+    # without this scoping, every leftover image from prior turns in
+    # the parent uploads dir would leak into the builder briefing.
+    current_turn_attachments = _extract_current_turn_attachment_filenames(
+        state.get("messages", []) or []
     )
 
     try:
@@ -921,6 +1068,7 @@ async def _start_builder_task_impl(
             user_id=user_id,
             parent_thread_id=parent_thread_id,
             parent_model=parent_model,
+            current_turn_attachments=current_turn_attachments,
         )
     except Exception as exc:  # noqa: BLE001 — LangGraph SDK raises untyped errors
         logger.warning("[Builder] ASGI dispatch failed: %s (trace=%s)", exc, trace_id)
