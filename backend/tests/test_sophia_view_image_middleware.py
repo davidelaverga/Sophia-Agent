@@ -78,3 +78,132 @@ def test_sophia_subclass_injects_image_blocks_when_companion_tool_completed() ->
     image_blocks = [b for b in content if isinstance(b, dict) and b.get("type") == "image_url"]
     assert len(image_blocks) == 1
     assert image_blocks[0]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+# ─── Codex P2 PR #132 (later iteration) — clear stale on failure ──
+
+
+def test_sophia_subclass_skips_injection_when_viewed_images_empty() -> None:
+    """Codex P2 on PR #132 (later iteration). When ``view_user_image``
+    fails (filename not found, oversize, unsupported format), the tool
+    clears ``viewed_images: {}`` via the ``merge_viewed_images``
+    sentinel. The middleware MUST then skip injection — otherwise
+    upstream's ``_create_image_details_message`` synthesizes a
+    misleading "No images have been viewed." HumanMessage into the
+    next turn.
+
+    Without this skip, the cleared-on-failure state would still
+    trigger an injection (upstream's ``_should_inject_image_message``
+    only checks for tool calls + completion, not for image presence)
+    and Sophia would see a confusing "no images" injection right
+    after the error ToolMessage.
+    """
+    mw = SophiaViewImageMiddleware()
+
+    # AIMessage has a view_user_image call, ToolMessage with the error
+    # is present, viewed_images is EMPTY (tool-side fix cleared it).
+    state = {
+        "messages": [
+            HumanMessage(content="describe nonexistent.png"),
+            _ai_with_tool("view_user_image", tool_call_id="tc-fail"),
+            ToolMessage(
+                content="Error: image 'nonexistent.png' not found in this thread.",
+                tool_call_id="tc-fail",
+            ),
+        ],
+        "viewed_images": {},
+    }
+
+    update = mw.before_model(state, runtime=None)
+    assert update is None, (
+        "Empty viewed_images must NOT trigger the upstream 'No images "
+        "have been viewed.' HumanMessage injection. Tool clears on "
+        "failure; middleware must respect the cleared state."
+    )
+
+
+def test_sophia_subclass_skips_injection_when_viewed_images_absent_entirely() -> None:
+    """The state-key-missing case (vs explicit empty dict). Defense
+    in depth: even on first-ever turn with no view_user_image calls
+    yet AND no viewed_images key in state, the middleware shouldn't
+    inject anything.
+    """
+    mw = SophiaViewImageMiddleware()
+    state = {
+        "messages": [
+            HumanMessage(content="describe nonexistent.png"),
+            _ai_with_tool("view_user_image", tool_call_id="tc-fail"),
+            ToolMessage(
+                content="Error: image 'nonexistent.png' not found.",
+                tool_call_id="tc-fail",
+            ),
+        ],
+        # viewed_images key omitted entirely.
+    }
+    assert mw.before_model(state, runtime=None) is None
+
+
+def test_view_user_image_failure_clears_viewed_images() -> None:
+    """Tool-side regression: every failure path returns
+    ``viewed_images: {}`` to clear the per-session image registry.
+    Without this, a prior successful view would re-inject into the
+    next turn — leaving Sophia answering about the wrong image.
+
+    Asserts the failure Command's update dict contains the clear
+    sentinel for each documented failure path.
+    """
+    from langchain_core.messages import ToolMessage as _ToolMessage
+
+    from deerflow.sophia.tools.view_user_image import _failure_update
+
+    update = _failure_update(_ToolMessage(content="anything", tool_call_id="tc-1"))
+    assert update.get("viewed_images") == {}, (
+        "_failure_update must include 'viewed_images': {} so the "
+        "merge_viewed_images reducer wipes any prior successful load. "
+        "Without it, SophiaViewImageMiddleware re-injects the stale "
+        "image and Sophia answers about the wrong file."
+    )
+    # And the error ToolMessage is still surfaced.
+    assert len(update.get("messages", [])) == 1
+
+
+def test_full_round_trip_failure_then_next_turn_does_not_re_inject() -> None:
+    """End-to-end: success turn loads image1, failure turn clears,
+    middleware on the next opportunity skips injection. Pins the full
+    pipeline contract (Codex P2 PR #132 later iteration).
+    """
+    mw = SophiaViewImageMiddleware()
+
+    # Simulate state after a successful view_user_image(image1.png)
+    # in turn 1, then a failed view_user_image(nonexistent.png) in
+    # turn 2 that cleared viewed_images via _failure_update.
+    state = {
+        "messages": [
+            HumanMessage(content="describe image1.png"),
+            _ai_with_tool("view_user_image", tool_call_id="tc-success"),
+            ToolMessage(content="Loaded image1.png", tool_call_id="tc-success"),
+            # The middleware injected the image-details HumanMessage
+            # in turn 1; mirror that here so the 'already-injected'
+            # check is realistic.
+            HumanMessage(content="Here are the images you've viewed: [image1]"),
+            # AI response in turn 1 (no tool calls — just description).
+            AIMessage(content="That's a sunset."),
+            # Turn 2: user asks about nonexistent.
+            HumanMessage(content="now describe nonexistent.png"),
+            _ai_with_tool("view_user_image", tool_call_id="tc-fail"),
+            ToolMessage(
+                content="Error: image 'nonexistent.png' not found",
+                tool_call_id="tc-fail",
+            ),
+        ],
+        # Tool's _failure_update cleared the prior image1 entry.
+        "viewed_images": {},
+    }
+
+    update = mw.before_model(state, runtime=None)
+    assert update is None, (
+        "After a failed view_user_image call clears viewed_images, "
+        "the middleware must not re-inject the prior image. Otherwise "
+        "Sophia sees image1 + 'describe nonexistent.png' and answers "
+        "about the wrong file."
+    )
