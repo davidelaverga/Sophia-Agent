@@ -286,6 +286,7 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
    - `present_files` - Make output files visible to user (only `/mnt/user-data/outputs`)
    - `ask_clarification` - Request clarification (intercepted by ClarificationMiddleware → interrupts)
    - `view_image` - Read image as base64 (added only if model supports vision)
+   - Sophia companion-only: `view_user_image`, `read_user_document` (thread-scoped wrappers — see Sophia Vision Port below)
 4. **Subagent tool** (if enabled):
    - `task` - Delegate to subagent (description, prompt, subagent_type, max_turns)
 
@@ -628,6 +629,49 @@ For models with `supports_vision: true`:
 - `ViewImageMiddleware` processes images in conversation
 - `view_image_tool` added to agent's toolset
 - Images automatically converted to base64 and injected into state
+
+### Sophia Vision Port (PR #132)
+
+The companion and builder both see images in-process. Same `viewed_images` channel as upstream, wrapped in narrow thread-scoped tools so the companion can't address other threads' filesystems.
+
+**Capability gate** (`deerflow.agents.sophia_agent.vision_gate.supports_vision`):
+- Default-on for `claude-sonnet-4-6` and `claude-haiku-4-5-20251001`.
+- Operators can override per-model via `app_config.models[*].supports_vision`.
+- Vision tools, middlewares, and uploaded-image briefing ALL gate on this — vision-off runs never advertise a tool they can't call.
+
+**Companion tools** ([packages/harness/deerflow/sophia/tools/](packages/harness/deerflow/sophia/tools)):
+- `view_user_image(image_filename)` — Whitelists current thread's `uploads/` + `outputs/`. Bare filename, no paths. Rejects `.gif`. Hard cap at `MAX_VIEWABLE_IMAGE_BYTES = 10 MiB` raw (base64 expansion → Anthropic 32 MB envelope risk).
+- `read_user_document(document_filename)` — text PDFs / DOCX / PPTX / XLSX / MD / TXT via `markitdown`. No size cap. Routing rule: vision tool for images only; documents always go through this path so the model doesn't hallucinate fine print.
+- Both tools resolve `thread_id` from `runtime.context` and look in `backend/.deer-flow/threads/{thread_id}/user-data/{uploads,outputs}/`. Path resolution reuses `replace_virtual_path` from sandbox tools.
+
+**`SophiaViewImageMiddleware`** ([agents/sophia_agent/middlewares/view_image.py](packages/harness/deerflow/agents/sophia_agent/middlewares/view_image.py)):
+- Subclasses upstream `ViewImageMiddleware`.
+- Recognizes BOTH `view_image` (builder uses upstream tool directly) and `view_user_image` (companion uses the narrow wrapper).
+- Overrides `_should_inject_image_message` to skip when `state["viewed_images"]` is empty. Pairs with the tool's clear-on-failure: every failure path in `view_user_image` returns `{"viewed_images": {}}` (the `merge_viewed_images` reducer's "clear all" sentinel) so a previously-loaded image from this session doesn't get re-injected after a failed lookup. Without the middleware skip, upstream's `_create_image_details_message` would synthesize a misleading "No images have been viewed." HumanMessage into the cleared state.
+
+**Builder uploads briefing** (`BuilderTaskMiddleware`):
+- Surfaces images attached to the dispatching companion turn at `/mnt/user-data/uploads/{name}` inside a `<uploaded_images>` block.
+- Two rendering branches: vision-on tells the model to call `view_image(image_path=...)`; vision-off acknowledges the upload but instructs the model NOT to call view_image. Branch selection is `BuilderTaskMiddleware(vision_enabled=...)`, plumbed through `build_builder_middleware_chain(user_id, vision_enabled=...)`.
+
+**Cross-thread image copy** ([sophia/tools/start_builder_task.py](packages/harness/deerflow/sophia/tools/start_builder_task.py)):
+- Each LangGraph thread has its own sandbox via `ThreadDataMiddleware`. The builder cannot read the companion's filesystem directly, so `_copy_parent_uploaded_images` copies eligible images into the builder's fresh sandbox at dispatch time.
+- **Scoped to current-turn attachments only** (Codex P1 PR #132 latest iteration). `_extract_current_turn_attachment_filenames(messages)` parses the synthesized `[The user has uploaded N file(s) ...]` block from the latest HumanMessage (format produced by `frontend/src/app/stores/attachment-prompt.ts::buildAttachmentPrompt`). Only filenames in that block are copied. Previously the loop enumerated EVERY image in the parent uploads dir, so an unrelated later builder request would re-expose private images from earlier turns. Defense-in-depth: bullets outside the bracketed block are ignored; names are re-filtered through `[A-Za-z0-9._-]+`.
+- Other safety filters (extension allow-list, hidden-file skip, oversize log+skip, prompt-injection allow-list) all stay.
+
+**Frontend integration** (Codex P1/P2 iteration on PR #132):
+- `POST /api/threads/{thread_id}/uploads` — multipart proxy with `userOwnsThread` gate (two-pass `/api/v1/sessions/open` → `/list?limit=100` fallback).
+- `GET /api/threads/{thread_id}/uploads/list` — list proxy used by the frontend AttachmentBar to seed its uniquifier against on-disk state (so a re-pick of `image.png` after chips were cleared by `useSessionOutboundSend` doesn't silently overwrite the earlier upload).
+- `DELETE /api/threads/{thread_id}/uploads/{filename}` — DELETE proxy so chip × actually clears bytes.
+- `/api/chat` post-handler runs the same `userOwnsThread` gate on ANY existing-thread send (not just attachment-bearing ones — a foreign thread_id with no attachments can still trigger `view_user_image` via prompt injection). Mock-mode (`USE_MOCK_STREAMING=true`) short-circuits BEFORE the ownership gate so offline-dev sessions don't fail closed.
+
+**Regression command**:
+
+```bash
+PYTHONPATH=. uv run pytest \
+  tests/test_sophia_vision_dispatch.py \
+  tests/test_sophia_vision_tools.py \
+  tests/test_sophia_view_image_middleware.py -v
+```
 
 ## Code Style
 
