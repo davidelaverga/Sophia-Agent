@@ -47,7 +47,7 @@ def _short_id(value: str | None) -> str | None:
 def _require_thread_owner(authenticated_user_id: str | None, thread_id: str) -> None:
     if not isinstance(authenticated_user_id, str) or not authenticated_user_id:
         return
-    if _session_store.find_session_by_thread_id(authenticated_user_id, thread_id) is not None:
+    if _is_thread_owner(authenticated_user_id, thread_id):
         return
     logger.warning(
         "Artifact route ownership rejected user_id=%s thread_id=%s",
@@ -55,6 +55,12 @@ def _require_thread_owner(authenticated_user_id: str | None, thread_id: str) -> 
         _short_id(thread_id),
     )
     raise HTTPException(status_code=404, detail="Thread not found")
+
+
+def _is_thread_owner(authenticated_user_id: str | None, thread_id: str) -> bool:
+    if not isinstance(authenticated_user_id, str) or not authenticated_user_id:
+        return True
+    return _session_store.find_session_by_thread_id(authenticated_user_id, thread_id) is not None
 
 
 def is_text_file_by_content(path: Path, sample_size: int = 8192) -> bool:
@@ -210,7 +216,6 @@ async def list_artifacts(
     thread_id: str,
     authenticated_user_id: str | None = Depends(require_authenticated_user),
 ) -> ThreadArtifactListResponse:
-    _require_thread_owner(authenticated_user_id, thread_id)
     outputs_path = resolve_thread_virtual_path(thread_id, _OUTPUTS_VIRTUAL_PATH)
 
     artifacts_by_path: dict[str, ThreadArtifactListItem] = {}
@@ -239,16 +244,28 @@ async def list_artifacts(
             )
 
     supabase_count = 0
-    try:
-        supabase_artifacts = supabase_artifact_store.list_artifacts(thread_id=thread_id)
-    except Exception as exc:  # noqa: BLE001 — listing is best-effort.
-        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    if _is_thread_owner(authenticated_user_id, thread_id):
+        try:
+            supabase_artifacts = supabase_artifact_store.list_artifacts(thread_id=thread_id)
+        except Exception as exc:  # noqa: BLE001 — listing is best-effort.
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            logger.warning(
+                "Supabase artifact list failed: thread_id=%s error_type=%s status=%s",
+                thread_id,
+                exc.__class__.__name__,
+                status_code,
+            )
+            supabase_artifacts = []
+    elif artifacts_by_path:
         logger.warning(
-            "Supabase artifact list failed: thread_id=%s error_type=%s status=%s",
-            thread_id,
-            exc.__class__.__name__,
-            status_code,
+            "Skipping Supabase artifact list for non-Sophia thread: user_id=%s thread_id=%s local_count=%d",
+            _short_id(authenticated_user_id),
+            _short_id(thread_id),
+            local_count,
         )
+        supabase_artifacts = []
+    else:
+        _require_thread_owner(authenticated_user_id, thread_id)
         supabase_artifacts = []
 
     for artifact in supabase_artifacts:
@@ -324,7 +341,6 @@ async def get_artifact(
         - Get HTML file: `/api/threads/abc123/artifacts/mnt/user-data/outputs/index.html`
         - Download file: `/api/threads/abc123/artifacts/mnt/user-data/outputs/data.csv?download=true`
     """
-    _require_thread_owner(authenticated_user_id, thread_id)
     # Check if this is a request for a file inside a .skill archive (e.g., xxx.skill/SKILL.md)
     if ".skill/" in path:
         # Split the path at ".skill/" to get the ZIP file path and internal path
@@ -364,6 +380,7 @@ async def get_artifact(
     logger.info(f"Resolving artifact path: thread_id={thread_id}, requested_path={path}, actual_path={actual_path}")
 
     if not actual_path.exists():
+        _require_thread_owner(authenticated_user_id, thread_id)
         supabase_response = _try_serve_from_supabase(thread_id, path, request)
         if supabase_response is not None:
             return supabase_response

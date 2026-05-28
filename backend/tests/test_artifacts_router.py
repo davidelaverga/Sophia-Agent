@@ -175,6 +175,35 @@ def test_list_artifacts_requires_thread_owner_before_supabase_listing(tmp_path, 
     assert supabase_calls == []
 
 
+def test_list_artifacts_preserves_local_non_sophia_outputs_without_supabase_lookup(tmp_path, monkeypatch) -> None:
+    outputs_dir = tmp_path / "outputs"
+    outputs_dir.mkdir()
+    local_file = outputs_dir / "legacy-report.md"
+    local_file.write_text("legacy", encoding="utf-8")
+    supabase_calls: list[str] = []
+
+    class FakeSessionStore:
+        def find_session_by_thread_id(self, user_id: str, thread_id: str):
+            assert user_id == "user-1"
+            assert thread_id == "legacy-thread"
+            return None
+
+    monkeypatch.setattr(artifacts_router, "_session_store", FakeSessionStore())
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: outputs_dir)
+    monkeypatch.setattr(
+        artifacts_router.supabase_artifact_store,
+        "list_artifacts",
+        lambda *, thread_id: supabase_calls.append(thread_id) or [],
+    )
+
+    response = asyncio.run(
+        artifacts_router.list_artifacts("legacy-thread", authenticated_user_id="user-1")
+    )
+
+    assert [item.path for item in response.artifacts] == ["mnt/user-data/outputs/legacy-report.md"]
+    assert supabase_calls == []
+
+
 def test_list_artifacts_route_requires_authentication(monkeypatch) -> None:
     monkeypatch.delenv("SOPHIA_AUTH_BYPASS", raising=False)
     app = FastAPI()
@@ -230,6 +259,34 @@ def test_get_artifact_requires_thread_owner_before_supabase_download(tmp_path, m
     else:
         raise AssertionError("Expected 404 for non-owned thread")
     assert download_calls == []
+
+
+def test_get_artifact_preserves_local_non_sophia_upload_url(tmp_path, monkeypatch) -> None:
+    upload_path = tmp_path / "uploads" / "notes.txt"
+    upload_path.parent.mkdir(parents=True)
+    upload_path.write_text("uploaded note", encoding="utf-8")
+
+    class FakeSessionStore:
+        def find_session_by_thread_id(self, user_id: str, thread_id: str):
+            assert user_id == "user-1"
+            assert thread_id == "legacy-thread"
+            return None
+
+    monkeypatch.setattr(artifacts_router, "_session_store", FakeSessionStore())
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: upload_path)
+
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""})
+    response = asyncio.run(
+        artifacts_router.get_artifact(
+            "legacy-thread",
+            "mnt/user-data/uploads/notes.txt",
+            request,
+            authenticated_user_id="user-1",
+        )
+    )
+
+    assert bytes(response.body).decode("utf-8") == "uploaded note"
+    assert response.media_type == "text/plain"
 
 
 def test_get_artifact_falls_back_to_workspace_outputs_when_primary_output_is_missing(tmp_path, monkeypatch) -> None:
