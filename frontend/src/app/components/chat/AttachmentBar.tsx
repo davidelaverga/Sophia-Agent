@@ -108,6 +108,42 @@ function toPromptSafeFilename(name: string): string {
   return stem === "file" ? "file.bin" : stem
 }
 
+/**
+ * Make ``name`` unique against ``claimed`` by appending ``-1`` /
+ * ``-2`` / ... to the stem until a free slot is found.
+ *
+ * Codex P2 PR #132 (later iteration). The gateway upload route stores
+ * each file under its bare filename in
+ * ``backend/.deer-flow/threads/{thread_id}/user-data/uploads/``, and
+ * the chat post-handler's ``parseAndValidateChatPayload`` deduplicates
+ * ``attached_files`` by exact-match string. So two picked files that
+ * normalize to the same ``safeName`` (e.g. ``a b.png`` and ``a?b.png``,
+ * or two ``image.png`` files from different folders) would silently
+ * collapse to one file on disk and one entry in ``attached_files``,
+ * leaving the user with multiple chips but only one file Sophia can
+ * actually read.
+ *
+ * ``claimed`` is seeded with the safeNames of non-error chips already
+ * in this thread's store, then each successful chip's safeName is
+ * added after creation — so collisions within a single multi-select
+ * batch AND collisions against pre-existing chips both get resolved.
+ *
+ * Safety hatch: if 1000 sequential candidates all collide (truly
+ * pathological) fall back to a timestamp suffix. This keeps the loop
+ * bounded under adversarial input.
+ */
+function uniquifyFilename(name: string, claimed: Set<string>): string {
+  if (!claimed.has(name)) return name
+  const dot = name.lastIndexOf(".")
+  const stem = dot > 0 ? name.slice(0, dot) : name
+  const ext = dot > 0 ? name.slice(dot) : ""
+  for (let n = 1; n < 1000; n += 1) {
+    const candidate = `${stem}-${n}${ext}`
+    if (!claimed.has(candidate)) return candidate
+  }
+  return `${stem}-${Date.now()}${ext}`
+}
+
 type AttachmentBarProps = {
   /** Thread the uploads land under. */
   threadId: string | null | undefined
@@ -161,6 +197,7 @@ function buildRegistration(
   file: File,
   threadId: string,
   remainingSlots: number,
+  claimed: Set<string>,
 ): Registration {
   // Normalize the picked filename to the allow-list shape
   // ``sanitizeAttachedFilename`` (server-side) accepts. Without
@@ -168,7 +205,14 @@ function buildRegistration(
   // upload succeeds, but the chat post-handler strips the filename
   // from ``attached_files`` → chip shows uploaded → Sophia never
   // hears about the file. Codex P2 PR #132.
-  const safeName = toPromptSafeFilename(file.name)
+  //
+  // Uniquify after normalization (Codex P2 PR #132 later iteration)
+  // so two picks that collide on safeName (or against an existing
+  // chip in this thread) don't overwrite each other on disk +
+  // dedupe in ``attached_files``. The caller adds the chosen name
+  // to ``claimed`` after registration so subsequent picks in the
+  // same batch see the new occupant.
+  const safeName = uniquifyFilename(toPromptSafeFilename(file.name), claimed)
   const fileForUpload =
     safeName === file.name
       ? file
@@ -455,11 +499,27 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
       const existingCounted = currentItems.filter((i) => i.status !== "error").length
       let remainingSlots = Math.max(MAX_ATTACHED_FILES_PER_TURN - existingCounted, 0)
 
+      // Seed the claimed-names set with non-error chips already on
+      // this thread so a freshly-picked file that normalizes to the
+      // same safeName as an existing chip gets uniquified (Codex P2
+      // PR #132 later iteration). Error chips are excluded — they
+      // hold no file on disk so their name is not really claimed.
+      const claimed = new Set<string>()
+      for (const item of currentItems) {
+        if (item.status !== "error") claimed.add(item.filename)
+      }
+
       const registrations: Registration[] = []
       for (const file of Array.from(filesList)) {
-        const reg = buildRegistration(file, threadId, remainingSlots)
+        const reg = buildRegistration(file, threadId, remainingSlots, claimed)
         add(reg.item)
-        if (!reg.skip) remainingSlots -= 1
+        if (!reg.skip) {
+          remainingSlots -= 1
+          // Subsequent picks in this batch must see this name as
+          // taken so they uniquify against it (within-batch
+          // collision: two ``image.png`` files picked together).
+          claimed.add(reg.item.filename)
+        }
         registrations.push(reg)
       }
 

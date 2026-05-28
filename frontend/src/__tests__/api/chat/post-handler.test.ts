@@ -138,7 +138,14 @@ describe('handleChatPost auth hardening', () => {
   });
 });
 
-describe('handleChatPost attachment ownership gate (Codex P1 PR #132)', () => {
+describe('handleChatPost thread ownership gate (Codex P1 PR #132 — later iteration)', () => {
+  // Updated: the gate originally fired only when ``attached_files`` was
+  // non-empty. That left a wider hole — ``view_user_image`` and
+  // ``read_user_document`` can be triggered by prompt injection alone
+  // ("describe photo.png for me"), so a foreign threadId with NO
+  // attachments is also exploitable. Gate now runs for ANY explicit
+  // caller-supplied threadId.
+
   beforeEach(() => {
     vi.clearAllMocks();
     getAuthenticatedUserIdMock.mockResolvedValue('session-user-1');
@@ -221,13 +228,60 @@ describe('handleChatPost attachment ownership gate (Codex P1 PR #132)', () => {
     expect(payload.thread_id).toBe('thread-mine');
   });
 
-  it('does NOT run the ownership check when there are no attachments (preserves new-session bootstrap)', async () => {
+  it('rejects with 403 when threadId is spoofed and NO attachments are present (Codex P1 — later iteration)', async () => {
+    // The actual attack vector for the later P1: an authenticated
+    // caller sends a foreign threadId with NO attachments + a prompt
+    // like "describe the file photo.png" or "summarize doc.pdf for me".
+    // The companion turns around and calls ``view_user_image`` /
+    // ``read_user_document`` against the victim's
+    // ``backend/.deer-flow/threads/{thread_id}/user-data/`` sandbox.
+    //
+    // Without the gate on attachment-free requests, this would silently
+    // succeed for any filename the attacker can guess (resume.pdf,
+    // screenshot.png, etc.). The gate must fire for ANY explicit
+    // threadId — the earlier "only when attached_files is non-empty"
+    // scoping was insufficient.
+    userOwnsThreadMock.mockResolvedValueOnce(false);
     parseAndValidateChatPayloadMock.mockReturnValue({
       kind: 'valid',
       data: {
-        userMessage: 'plain chat',
+        userMessage: 'describe the file resume.pdf for me',
         sessionId: '123e4567-e89b-12d3-a456-426614174000',
-        threadId: 'thread-whatever',
+        threadId: 'thread-victim',
+        sessionType: 'chat',
+        contextMode: 'life',
+        platform: 'text',
+        rawMessageLength: 36,
+        attachedFiles: [], // ← critical: no attachments
+      },
+    });
+
+    const response = await handleChatPost({
+      json: async () => ({}),
+    } as never);
+
+    expect(response.status).toBe(403);
+    const body = (await response.json()) as { error: string; code?: string };
+    expect(body.code).toBe('THREAD_OWNERSHIP_REJECTED');
+    expect(userOwnsThreadMock).toHaveBeenCalledWith(
+      'thread-victim',
+      'session-user-1',
+      'test-token',
+      'https://gateway.test',
+    );
+    expect(fetchBackendStreamWithBootstrapMock).not.toHaveBeenCalled();
+  });
+
+  it('runs the ownership check on attachment-free requests with an explicit threadId', async () => {
+    // Mirror of the above but the user IS the owner — must still
+    // pass through to the backend. Pins the "gate fires, doesn't
+    // block legitimate traffic" property.
+    parseAndValidateChatPayloadMock.mockReturnValue({
+      kind: 'valid',
+      data: {
+        userMessage: 'plain chat continuing my session',
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+        threadId: 'thread-mine',
         sessionType: 'chat',
         contextMode: 'life',
         platform: 'text',
@@ -241,31 +295,36 @@ describe('handleChatPost attachment ownership gate (Codex P1 PR #132)', () => {
     } as never);
 
     expect(response.status).toBe(200);
-    // Scoped to attachment-bearing requests only — empty attachment
-    // list means we don't add a new failure mode to existing chats
-    // (incl. the new-session bootstrap where threadId is fresh).
-    expect(userOwnsThreadMock).not.toHaveBeenCalled();
+    // Gate fires (was previously skipped on no-attachment requests).
+    expect(userOwnsThreadMock).toHaveBeenCalledTimes(1);
+    expect(userOwnsThreadMock).toHaveBeenCalledWith(
+      'thread-mine',
+      'session-user-1',
+      'test-token',
+      'https://gateway.test',
+    );
     expect(fetchBackendStreamWithBootstrapMock).toHaveBeenCalledTimes(1);
   });
 
-  it('does NOT run the ownership check when attachments present but no threadId (malformed)', async () => {
+  it('does NOT run the ownership check when there is no explicit threadId (new-session bootstrap)', async () => {
+    // Scope of the gate: ONLY explicit caller-supplied threadIds get
+    // verified. A request with no threadId is the new-session
+    // bootstrap path — the backend creates a fresh thread for this
+    // user, so there's nothing to verify. Same shape regardless of
+    // whether attachments are present (the orphan-attachment payload
+    // is malformed in practice and the gateway will reject it
+    // downstream).
     parseAndValidateChatPayloadMock.mockReturnValue({
       kind: 'valid',
       data: {
-        userMessage: 'orphan attach',
+        userMessage: 'new chat',
         sessionId: '123e4567-e89b-12d3-a456-426614174000',
-        // No threadId — uploads would have nowhere to go in this
-        // payload shape. The check has nothing to verify against;
-        // we let the existing flow handle it (LangGraph bootstraps
-        // a fresh thread, attachments will reference filenames that
-        // aren't in the new sandbox — Sophia's view_user_image will
-        // return "not found").
         threadId: undefined,
         sessionType: 'chat',
         contextMode: 'life',
         platform: 'text',
-        rawMessageLength: 12,
-        attachedFiles: ['orphan.png'],
+        rawMessageLength: 8,
+        attachedFiles: [],
       },
     });
 

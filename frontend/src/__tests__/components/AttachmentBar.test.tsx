@@ -469,6 +469,162 @@ describe('AttachmentBar — Codex P2 per-turn cap', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  // ── Codex P2 PR #132 (later iteration): collision uniquifier ──
+
+  it('uniquifies two picks that normalize to the same safeName within one batch', async () => {
+    // Two files with different originals that collapse to the same
+    // safeName ("a_b.png"). Without uniquifying, the backend would
+    // overwrite + the chat post-handler would dedupe attached_files
+    // → user sees two chips but Sophia gets one file.
+    const fetchMock = vi.spyOn(global, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ success: true, files: [{ filename: 'a_b.png', size: '1024' }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ success: true, files: [{ filename: 'a_b-1.png', size: '1024' }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+
+    render(<AttachmentBar threadId="thread-U" />);
+    const input = screen.getByTestId('attachment-bar-file-input') as HTMLInputElement;
+    dispatchFilesOnto(input, [makeFile('a b.png'), makeFile('a?b.png')]);
+
+    const filenames = useAttachmentsStore.getState().items.map((i) => i.filename);
+    expect(filenames).toEqual(['a_b.png', 'a_b-1.png']);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Each multipart body must carry the UNIQUE renamed file —
+    // otherwise the gateway would overwrite on disk.
+    const [, firstInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [, secondInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const first = (firstInit.body as FormData).get('files') as File;
+    const second = (secondInit.body as FormData).get('files') as File;
+    expect(first.name).toBe('a_b.png');
+    expect(second.name).toBe('a_b-1.png');
+  });
+
+  it('uniquifies two same-name picks (image.png + image.png from different folders)', async () => {
+    // The classic collision: user selects two ``image.png`` files
+    // from different folders in one multi-pick. Both safeNames match
+    // exactly → the second must become ``image-1.png``.
+    const fetchMock = vi.spyOn(global, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ success: true, files: [{ filename: 'image.png', size: '1024' }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ success: true, files: [{ filename: 'image-1.png', size: '1024' }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+
+    render(<AttachmentBar threadId="thread-U" />);
+    const input = screen.getByTestId('attachment-bar-file-input') as HTMLInputElement;
+    dispatchFilesOnto(input, [makeFile('image.png'), makeFile('image.png')]);
+
+    const filenames = useAttachmentsStore.getState().items.map((i) => i.filename);
+    expect(filenames).toEqual(['image.png', 'image-1.png']);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('uniquifies against existing chips already on the same thread', async () => {
+    // Pre-seed the store with an ``image.png`` chip on thread-U.
+    // A subsequent pick of ``image.png`` from a different selection
+    // batch must become ``image-1.png`` so it doesn't overwrite.
+    useAttachmentsStore.getState().add({
+      clientId: 'pre-1',
+      filename: 'image.png',
+      size: 1024,
+      status: 'uploaded',
+      hasMarkdownConversion: false,
+      threadId: 'thread-U',
+    });
+    const fetchMock = vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true, files: [{ filename: 'image-1.png', size: '1024' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    render(<AttachmentBar threadId="thread-U" />);
+    const input = screen.getByTestId('attachment-bar-file-input') as HTMLInputElement;
+    dispatchFilesOnto(input, [makeFile('image.png')]);
+
+    const items = useAttachmentsStore.getState().items;
+    expect(items).toHaveLength(2);
+    const newOne = items.find((i) => i.clientId !== 'pre-1');
+    expect(newOne?.filename).toBe('image-1.png');
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const uploaded = (init.body as FormData).get('files') as File;
+    expect(uploaded.name).toBe('image-1.png');
+  });
+
+  it('does NOT uniquify against an error-status chip (no file on disk to collide with)', async () => {
+    // Error chips never reached the backend — their name isn't
+    // actually claimed on disk. A new pick of the same name should
+    // get the original name, not a uniquified one.
+    useAttachmentsStore.getState().add({
+      clientId: 'pre-err',
+      filename: 'bigfile.png',
+      size: 999999,
+      status: 'error',
+      error: 'too big',
+      hasMarkdownConversion: false,
+      threadId: 'thread-U',
+    });
+    vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true, files: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    render(<AttachmentBar threadId="thread-U" />);
+    const input = screen.getByTestId('attachment-bar-file-input') as HTMLInputElement;
+    dispatchFilesOnto(input, [makeFile('bigfile.png')]);
+
+    const newOne = useAttachmentsStore.getState().items.find((i) => i.clientId !== 'pre-err');
+    expect(newOne?.filename).toBe('bigfile.png'); // NOT uniquified
+  });
+
+  it('uniquifies three same-name picks ascending: image.png, image-1.png, image-2.png', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ success: true, files: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    render(<AttachmentBar threadId="thread-U" />);
+    const input = screen.getByTestId('attachment-bar-file-input') as HTMLInputElement;
+    dispatchFilesOnto(input, [
+      makeFile('image.png'),
+      makeFile('image.png'),
+      makeFile('image.png'),
+    ]);
+
+    const filenames = useAttachmentsStore.getState().items.map((i) => i.filename);
+    expect(filenames).toEqual(['image.png', 'image-1.png', 'image-2.png']);
+  });
+
   it('leaves an already-safe filename untouched (no needless File reconstruction)', async () => {
     // When the filename already passes the allow-list, the File object
     // reaching the gateway must be the exact original — no rename, no

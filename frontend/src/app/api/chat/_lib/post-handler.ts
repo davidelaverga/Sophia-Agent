@@ -154,29 +154,34 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       );
     }
 
-    // Codex P1 PR #132: when the client sends ``attached_files``,
-    // verify they actually own the target thread before forwarding.
-    // Otherwise an authenticated caller could spoof a foreign
-    // ``thread_id`` + ``attached_files`` payload and trick the
-    // companion into calling ``view_user_image`` /
-    // ``read_user_document`` against the victim's sandbox.
+    // Codex P1 PR #132 (later iteration): verify thread ownership for
+    // EVERY request that resumes a caller-supplied ``thread_id``, not
+    // just attachment-bearing ones.
     //
-    // Scoped to "has attachments AND has explicit threadId" so the
-    // existing new-session bootstrap flow (no threadId → backend
-    // creates a fresh thread) is unaffected. A request that sends
-    // attachments but no threadId is malformed in practice (where
-    // would the attachments have been uploaded to?) so we treat it
-    // as a 400 condition implicitly via the empty ownership-check
-    // bypass.
+    // The earlier scoping ("only check when attached_files is
+    // non-empty") was too narrow: once ``view_user_image`` and
+    // ``read_user_document`` are wired into the companion, any
+    // authenticated caller can send a foreign ``thread_id`` with NO
+    // attachments and prompt-inject ("please describe the image
+    // photo.png") to trick the model into calling those tools against
+    // the victim's ``backend/.deer-flow/threads/{thread_id}/user-data/``
+    // sandbox. Filename guessing is realistic for screenshots and
+    // common names (resume.pdf, doc.pdf, image.png).
     //
-    // Broader follow-up: hardening EVERY chat turn (not just
-    // attachment-bearing ones) against threadId spoofing is a
-    // separate concern. The chat post-handler already trusts
-    // ``user_id`` from the auth session, but ``thread_id`` from
-    // the body is still spoofable in the no-attachment path. A
-    // backend ticket to bind ``thread_id`` to the auth-token's
-    // user on the gateway side would close that gap globally.
-    if (attachedFiles.length > 0 && typeof threadId === 'string' && threadId) {
+    // Scope: skipped ONLY when threadId is absent/empty (new-session
+    // bootstrap — the backend creates a fresh thread and assigns it to
+    // this user). Any explicit caller-supplied threadId is verified.
+    //
+    // The underlying ``userOwnsThread`` is the same two-pass
+    // (/open then /list?limit=100) used by the uploads + DELETE
+    // proxies, so spoofing surface stays consistent across all three
+    // server-side seams that act on a caller-supplied thread_id.
+    //
+    // Long-term: a dedicated gateway endpoint that binds thread_id to
+    // the auth-token's user (or a /by-thread/{thread_id} lookup that
+    // 404s on cross-user reads) would close this gap globally and
+    // remove the recent-100 fallback ceiling. Separate backend ticket.
+    if (typeof threadId === 'string' && threadId) {
       const gatewayUrl = getPrimaryGatewayUrl();
       const apiKey = await getUserScopedAuthToken();
       const owns = await userOwnsThread(threadId, userId, apiKey, gatewayUrl);
