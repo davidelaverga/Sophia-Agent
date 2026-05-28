@@ -219,6 +219,13 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       context_mode: contextMode,
       platform,
       language: 'en' as const,
+      // Server-trusted out-of-band attachment list (Codex P2 PR #132
+      // latest iteration). Passed through to LangGraph
+      // ``input.current_turn_attached_files`` so
+      // ``start_builder_task`` doesn't have to parse the synthesized
+      // prompt block (which a user can spoof by typing the marker
+      // into their own message).
+      attached_files: attachedFiles,
     };
 
     const backendUrl = `${BACKEND_URL}${BACKEND_CHAT_ENDPOINT}`;

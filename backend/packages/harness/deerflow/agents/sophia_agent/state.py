@@ -153,6 +153,17 @@ class SophiaState(AgentState):
     injected_memories: NotRequired[list[str]]
     injected_memory_contents: NotRequired[list[str]]
 
+    # Current-turn attachments (Codex P2 PR #132 latest iteration).
+    # Filenames the user attached on THIS turn, written into LangGraph
+    # ``input`` by the frontend chat post-handler (server-trusted —
+    # NOT parsed from message text, which a user can spoof). Consumed
+    # by ``start_builder_task._copy_parent_uploaded_images`` to scope
+    # the cross-thread image copy to current-turn attachments only.
+    # Defaults to ``[]`` when the input doesn't include it (e.g. a
+    # turn with no attachments, or a non-frontend client like the
+    # LangGraph SDK creating a run directly).
+    current_turn_attached_files: NotRequired[list[str]]
+
     # Builder
     builder_task: NotRequired[dict | None]
     builder_result: NotRequired[dict | None]

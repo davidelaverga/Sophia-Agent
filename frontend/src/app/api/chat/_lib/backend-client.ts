@@ -12,6 +12,15 @@ export interface BackendStreamPayload {
   context_mode?: string;
   platform?: string;
   language: 'en';
+  /**
+   * Filenames the user attached on THIS turn. Always send (use ``[]``
+   * when empty) so the backend's ``current_turn_attached_files`` state
+   * field overwrites stale values from prior turns. Codex P2 PR #132
+   * latest iteration: this is the server-trusted attachment list,
+   * NOT a parse of the synthesized prompt block (which a user can
+   * spoof by typing the marker into their own message).
+   */
+  attached_files?: string[];
 }
 
 export type BackendFetchResult = {
@@ -265,6 +274,14 @@ export async function fetchBackendStreamWithBootstrap(
             ...preludeMessages,
             { role: 'user', content: backendPayload.message },
           ],
+          // Server-trusted attachment list (Codex P2 PR #132 latest
+          // iteration). Always sent — empty array when no attachments
+          // — so the backend's ``current_turn_attached_files`` state
+          // field overwrites whatever was there from prior turns.
+          // ``start_builder_task`` reads from state instead of
+          // parsing the synthesized prompt block (which a user can
+          // spoof by typing the marker into their own message).
+          current_turn_attached_files: backendPayload.attached_files ?? [],
         },
         config: {
           recursion_limit: 150,

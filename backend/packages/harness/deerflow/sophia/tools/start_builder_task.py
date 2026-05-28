@@ -42,6 +42,7 @@ import logging
 import re
 import shutil
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -503,92 +504,58 @@ def _build_delegation_context(
     }
 
 
-# Sentinel + bullet pattern for the synthesized buildAttachmentPrompt
-# block the frontend post-handler prepends to the user message when
-# ``attached_files`` is non-empty (see
-# ``frontend/src/app/stores/attachment-prompt.ts``):
-#
-#     [The user has uploaded N file(s) for this turn.
-#     Use view_user_image(...) ...
-#     - foo.png
-#     - bar.pdf]
-#
-# Codex P1 PR #132 (latest iteration): server-side extraction of this
-# block's filenames is what scopes the builder's image-copy to "this
-# turn's attachments" — without it, every prior-turn upload leaks.
-_ATTACHMENT_PROMPT_OPENER = "[The user has uploaded "
-_ATTACHMENT_LINE_RE = re.compile(r"^- ([A-Za-z0-9._-]+)$", re.MULTILINE)
-
-
-def _latest_human_message_text(messages: list[Any]) -> str | None:
-    """Return the text content of the latest HumanMessage, or None.
-
-    Walks the list in reverse. Accepts both LangChain ``BaseMessage``
-    objects (``msg.type == "human"``) and JSON-serialized dict shapes
-    (``msg.get("type") == "human"``). Multimodal list-of-blocks
-    content is flattened to its text chunks (the attachment-prompt
-    block always lives in a text block).
-    """
-    for msg in reversed(messages):
-        if isinstance(msg, dict):
-            msg_type = msg.get("type") or msg.get("role")
-            content = msg.get("content")
-        else:
-            msg_type = getattr(msg, "type", None)
-            content = getattr(msg, "content", None)
-        if msg_type != "human":
-            continue
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts: list[str] = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text = block.get("text")
-                    if isinstance(text, str):
-                        parts.append(text)
-            return "\n".join(parts) if parts else None
-        return None
-    return None
+# Server-trusted filename allow-list for current-turn attachments.
+# Codex P2 PR #132 latest iteration: the attached filenames come from
+# state["current_turn_attached_files"] — written by the frontend chat
+# post-handler into LangGraph ``input`` out-of-band. Each name is
+# re-validated through this regex before we touch the filesystem so a
+# compromised input source (e.g. a future caller that doesn't sanitize)
+# can't slip path traversal or prompt-injection characters through to
+# ``_copy_parent_uploaded_images``.
+_TRUSTED_ATTACHMENT_FILENAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def _extract_current_turn_attachment_filenames(
-    messages: list[Any],
+    state: Mapping[str, Any],
 ) -> frozenset[str]:
-    """Parse the latest HumanMessage for the synthesized attachment block.
+    """Return the filenames the user attached on THIS turn.
 
-    Returns the set of filenames the user attached on THIS turn.
-    Returns an empty frozenset when no attachment block is present —
-    meaning the user attached nothing, so ``_copy_parent_uploaded_images``
-    MUST NOT surface any leftover files from earlier turns to the
-    builder.
+    Reads from ``state["current_turn_attached_files"]``, which the
+    frontend chat post-handler writes into LangGraph ``input`` every
+    turn (an empty list when no attachments). This is the
+    **server-trusted** attachment list — NOT a parse of the user
+    message body, which a user could spoof by typing the synthesized
+    prompt marker into their own text.
 
-    Codex P1 on PR #132 (latest iteration). Without this scoping, a
-    later unrelated builder request would re-expose private images
-    from previous turns to the builder, encouraging it to inspect or
-    include them.
+    History: the prior implementation parsed the latest HumanMessage
+    for the ``[The user has uploaded ...]`` sentinel + bullet
+    filenames. Codex P2 PR #132 (later iteration) flagged that as
+    spoofable — a user pasting that exact marker + bullets into a
+    plain chat message could trick this function into reporting
+    arbitrary filenames, which ``_copy_parent_uploaded_images`` would
+    then copy from the parent thread's stale uploads dir into the
+    builder sandbox. Switching to an OOB state field closes that gap.
 
-    Defense-in-depth filename validation: even though the renderer
-    already filters through ``SAFE_PROMPT_FILENAME``, the regex here
-    applies the same allow-list so anything that slips past (e.g.
-    via a future refactor) gets dropped.
+    Defense in depth: each name is re-validated against
+    ``_TRUSTED_ATTACHMENT_FILENAME`` (the same allow-list the frontend
+    + the builder-side renderer use) so a misbehaving upstream can't
+    introduce path-traversal or prompt-injection characters.
+
+    Returns empty frozenset when:
+    - the input didn't include ``current_turn_attached_files`` (e.g. a
+      non-frontend client like the LangGraph SDK creating a run
+      directly)
+    - the value isn't a list of strings
+    - every entry fails the allow-list
     """
-    text = _latest_human_message_text(messages)
-    if not text or _ATTACHMENT_PROMPT_OPENER not in text:
+    raw = state.get("current_turn_attached_files")
+    if not isinstance(raw, list):
         return frozenset()
-
-    # Scope to the bracketed block — bullet lines anywhere else in the
-    # user message must not be parsed as attachments. Note: the slice
-    # EXCLUDES the closing ``]`` so the renderer's last-bullet shape
-    # ``- spec.pdf]`` (no trailing newline before the close bracket)
-    # parses cleanly under the ``^- name$`` regex.
-    opener_idx = text.find(_ATTACHMENT_PROMPT_OPENER)
-    close_idx = text.find("]", opener_idx)
-    block_text = (
-        text[opener_idx:close_idx] if close_idx > opener_idx else text[opener_idx:]
-    )
-
-    return frozenset(_ATTACHMENT_LINE_RE.findall(block_text))
+    safe: set[str] = set()
+    for entry in raw:
+        if isinstance(entry, str) and _TRUSTED_ATTACHMENT_FILENAME.match(entry):
+            safe.add(entry)
+    return frozenset(safe)
 
 
 def _select_copyable_images(
@@ -1040,12 +1007,13 @@ async def _start_builder_task_impl(
 
     # Codex P1 PR #132 (latest iteration): extract the filenames the
     # user attached on THIS turn from the synthesized prompt block.
-    # Only those filenames may be copied into the builder sandbox —
-    # without this scoping, every leftover image from prior turns in
-    # the parent uploads dir would leak into the builder briefing.
-    current_turn_attachments = _extract_current_turn_attachment_filenames(
-        state.get("messages", []) or []
-    )
+    # Reads from ``state["current_turn_attached_files"]`` — the
+    # server-trusted OOB attachment list written by the frontend chat
+    # post-handler. Codex P2 PR #132 latest iteration: parsing the
+    # user message body is spoofable (a user can paste the
+    # ``[The user has uploaded ...]`` marker + bullets into their own
+    # text), so the trust boundary moved to LangGraph state.
+    current_turn_attachments = _extract_current_turn_attachment_filenames(state)
 
     try:
         task_id, run_id = await _dispatch_via_asgi(
