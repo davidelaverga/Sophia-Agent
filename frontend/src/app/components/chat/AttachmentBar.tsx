@@ -265,6 +265,48 @@ function buildRegistration(
 }
 
 /**
+ * Fetch the list of filenames already on disk for ``threadId`` so
+ * the uniquifier can seed its claimed-names set with files that
+ * outlived their chip.
+ *
+ * Codex P2 PR #132 (later iteration). After a turn sends, the
+ * outbound-send hook clears the attachment chips from the Zustand
+ * store, but the bytes remain in
+ * ``backend/.deer-flow/threads/{threadId}/user-data/uploads/``. A
+ * later pick of the same name in the same thread would see an empty
+ * store, skip the uniquifier, and silently overwrite the earlier
+ * upload. ``view_user_image`` / ``read_user_document`` calls that
+ * reference filenames mentioned earlier in the conversation would
+ * then read the NEW bytes while the model thinks it's inspecting
+ * the OLD ones.
+ *
+ * Returns an empty set on any error path. Graceful degradation —
+ * worst case the uniquifier loses server-truth coverage and falls
+ * back to in-store-only behavior. Better than blocking the user's
+ * pick when the gateway is briefly slow.
+ */
+async function fetchExistingUploadFilenames(threadId: string): Promise<Set<string>> {
+  try {
+    const res = await fetch(
+      `/api/threads/${encodeURIComponent(threadId)}/uploads/list`,
+      { method: "GET", headers: { Accept: "application/json" } },
+    )
+    if (!res.ok) return new Set()
+    const data = (await res.json()) as { files?: Array<{ filename?: unknown }> }
+    if (!Array.isArray(data.files)) return new Set()
+    const names = new Set<string>()
+    for (const entry of data.files) {
+      if (entry && typeof entry.filename === "string") {
+        names.add(entry.filename)
+      }
+    }
+    return names
+  } catch {
+    return new Set()
+  }
+}
+
+/**
  * Fire ``DELETE`` against the backend uploads directory for a
  * specific filename in a thread. Returns ``true`` on 2xx; ``false``
  * on any failure. Doesn't touch the store — caller decides what
@@ -499,15 +541,31 @@ export function AttachmentBar({ threadId, disabled = false, className }: Attachm
       const existingCounted = currentItems.filter((i) => i.status !== "error").length
       let remainingSlots = Math.max(MAX_ATTACHED_FILES_PER_TURN - existingCounted, 0)
 
-      // Seed the claimed-names set with non-error chips already on
-      // this thread so a freshly-picked file that normalizes to the
-      // same safeName as an existing chip gets uniquified (Codex P2
-      // PR #132 later iteration). Error chips are excluded — they
-      // hold no file on disk so their name is not really claimed.
+      // Seed the claimed-names set from two sources (Codex P2 PR
+      // #132 later iteration):
+      //
+      // 1. Non-error chips already on this thread — within-batch
+      //    + still-on-screen collisions. Error chips are excluded
+      //    because they hold no file on disk.
+      // 2. Server-side files that outlived their chip — after a
+      //    turn sends, the outbound-send hook clears chips but the
+      //    bytes remain in
+      //    ``backend/.deer-flow/threads/{threadId}/user-data/uploads/``.
+      //    Without checking server truth, a later pick of the same
+      //    name would silently overwrite the earlier upload, and
+      //    ``view_user_image`` / ``read_user_document`` references
+      //    to the old filename would unknowingly read the new bytes.
+      //
+      // The server lookup is done ONCE per file-selection batch
+      // (not per file) so users picking 5 files only eat one
+      // round-trip. On failure it returns an empty set — graceful
+      // degradation back to in-store-only uniquification.
       const claimed = new Set<string>()
       for (const item of currentItems) {
         if (item.status !== "error") claimed.add(item.filename)
       }
+      const serverNames = await fetchExistingUploadFilenames(threadId)
+      for (const name of serverNames) claimed.add(name)
 
       const registrations: Registration[] = []
       for (const file of Array.from(filesList)) {
