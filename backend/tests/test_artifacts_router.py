@@ -261,6 +261,39 @@ def test_get_artifact_requires_thread_owner_before_supabase_download(tmp_path, m
     assert download_calls == []
 
 
+def test_get_artifact_requires_thread_owner_before_local_output(tmp_path, monkeypatch) -> None:
+    local_output = tmp_path / "outputs" / "report.md"
+    local_output.parent.mkdir(parents=True)
+    local_output.write_text("private report", encoding="utf-8")
+
+    class FakeSessionStore:
+        def find_session_by_thread_id(self, user_id: str, thread_id: str):
+            assert user_id == "user-1"
+            assert thread_id == "thread-1"
+            return None
+
+    monkeypatch.setattr(artifacts_router, "_session_store", FakeSessionStore())
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: local_output)
+
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""})
+
+    import fastapi
+
+    try:
+        asyncio.run(
+            artifacts_router.get_artifact(
+                "thread-1",
+                "mnt/user-data/outputs/report.md",
+                request,
+                authenticated_user_id="user-1",
+            )
+        )
+    except fastapi.HTTPException as exc:
+        assert exc.status_code == 404
+    else:
+        raise AssertionError("Expected 404 for non-owned local output")
+
+
 def test_get_artifact_preserves_local_non_sophia_upload_url(tmp_path, monkeypatch) -> None:
     upload_path = tmp_path / "uploads" / "notes.txt"
     upload_path.parent.mkdir(parents=True)

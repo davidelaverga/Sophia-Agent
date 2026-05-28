@@ -116,6 +116,16 @@ def _relative_output_artifact_path(path: str) -> str | None:
     return None
 
 
+def _requires_thread_owner_for_artifact(path: str) -> bool:
+    normalized = path.lstrip("/")
+    return (
+        normalized == _OUTPUTS_VIRTUAL_PATH
+        or normalized.startswith(_OUTPUTS_VIRTUAL_PATH + "/")
+        or normalized == _WORKSPACE_OUTPUTS_VIRTUAL_PATH
+        or normalized.startswith(_WORKSPACE_OUTPUTS_VIRTUAL_PATH + "/")
+    )
+
+
 def _resolve_artifact_path(thread_id: str, path: str) -> Path:
     actual_path = resolve_thread_virtual_path(thread_id, path)
     if actual_path.exists():
@@ -341,6 +351,9 @@ async def get_artifact(
         - Get HTML file: `/api/threads/abc123/artifacts/mnt/user-data/outputs/index.html`
         - Download file: `/api/threads/abc123/artifacts/mnt/user-data/outputs/data.csv?download=true`
     """
+    if _requires_thread_owner_for_artifact(path):
+        _require_thread_owner(authenticated_user_id, thread_id)
+
     # Check if this is a request for a file inside a .skill archive (e.g., xxx.skill/SKILL.md)
     if ".skill/" in path:
         # Split the path at ".skill/" to get the ZIP file path and internal path
@@ -380,7 +393,6 @@ async def get_artifact(
     logger.info(f"Resolving artifact path: thread_id={thread_id}, requested_path={path}, actual_path={actual_path}")
 
     if not actual_path.exists():
-        _require_thread_owner(authenticated_user_id, thread_id)
         supabase_response = _try_serve_from_supabase(thread_id, path, request)
         if supabase_response is not None:
             return supabase_response

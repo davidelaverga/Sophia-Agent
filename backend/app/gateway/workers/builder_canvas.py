@@ -264,6 +264,7 @@ class BuilderCanvasWorker:
         self._terminal_at: dict[tuple[str, str, str], float] = {}
         self._last_sequence: dict[tuple[str, str, str], int] = {}
         self._plan_seen: set[tuple[str, str, str]] = set()
+        self._dropped_progress_runs: set[tuple[str, str, str]] = set()
         self._lock = asyncio.Lock()
 
     def _expire_locked(self) -> None:
@@ -285,6 +286,7 @@ class BuilderCanvasWorker:
         self._histories.pop(key, None)
         self._last_sequence.pop(key, None)
         self._plan_seen.discard(key)
+        self._dropped_progress_runs.discard(key)
 
     def _observe_run_locked(self, parent_thread_id: str, task_id: str, run_id: str) -> None:
         run_key = (task_id, run_id)
@@ -320,6 +322,8 @@ class BuilderCanvasWorker:
             return True
         if active is None or active == (task_id, run_id):
             return False
+        if key in self._dropped_progress_runs:
+            return True
         run_orders = self._run_order.get(parent_thread_id, {})
         active_order = run_orders.get(active)
         event_order = run_orders.get((task_id, run_id))
@@ -438,7 +442,6 @@ class BuilderCanvasWorker:
                 event["run_id"],
             )
             event = {**event, "_run_observed_before_publish": observed_before_publish}
-            self._observe_run_locked(parent_thread_id, event["task_id"], event["run_id"])
             sequence = self._event_sequence_locked(event, key)
             if sequence is None:
                 self._log_event_decision("dropped", event, reason="stale_sequence")
@@ -447,6 +450,7 @@ class BuilderCanvasWorker:
             if drop_reason is not None:
                 self._log_event_decision("dropped", event, reason=drop_reason)
                 return 0
+            self._observe_run_locked(parent_thread_id, event["task_id"], event["run_id"])
             self._log_event_decision("accepted", event)
             event = dict(event)
             event.pop("_source_event_name", None)
@@ -479,10 +483,12 @@ class BuilderCanvasWorker:
             return 0
         async with self._lock:
             self._expire_locked()
-            self._observe_run_locked(parent, task_id, run_id)
             plan_seen = (parent, task_id, run_id) in self._plan_seen
         activity = _project_activity(str(payload.get("event_name") or ""), payload.get("data"), plan_seen=plan_seen)
         if activity is None:
+            async with self._lock:
+                self._expire_locked()
+                self._dropped_progress_runs.add((parent, task_id, run_id))
             logger.info(
                 "Builder canvas: progress dropped reason=no_public_activity parent_thread_id=%s task_id=%s run_id=%s sequence=%s event_name=%s",
                 parent,
