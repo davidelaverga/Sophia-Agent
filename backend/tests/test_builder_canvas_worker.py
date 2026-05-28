@@ -91,7 +91,13 @@ async def test_terminal_closes_run_and_replay_starts_after_event_id() -> None:
         }
     )
     await worker.publish_completion(
-        {"thread_id": "parent-1", "task_id": "task-1", "run_id": "run-1", "status": "success"}
+        {
+            "thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "status": "success",
+            "artifact_path": "mnt/user-data/outputs/report.md",
+        }
     )
     await worker.publish_progress(
         {
@@ -107,6 +113,31 @@ async def test_terminal_closes_run_and_replay_starts_after_event_id() -> None:
     assert len(replay) == 1
     assert replay[0]["kind"] == "terminal"
     assert replay[0]["status"] == "completed"
+
+
+@pytest.mark.anyio
+async def test_success_completion_without_deliverable_is_coerced_to_failure() -> None:
+    worker = BuilderCanvasWorker()
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "finalizing"},
+        }
+    )
+
+    await worker.publish_completion(
+        {"thread_id": "parent-1", "task_id": "task-1", "run_id": "run-1", "status": "success"}
+    )
+
+    events = await worker.recent_events("parent-1")
+    assert events[-1]["kind"] == "terminal"
+    assert events[-1]["status"] == "failed"
+    assert events[-1]["completion"]["status"] == "error"
+    assert events[-1]["completion"]["error_message"] == "Builder finished without a deliverable artifact."
 
 
 @pytest.mark.anyio

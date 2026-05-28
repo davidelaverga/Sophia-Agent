@@ -43,7 +43,7 @@ class BuilderResearchPolicyMiddleware(AgentMiddleware[BuilderResearchPolicyState
             return None
 
         task_type = str(delegation_context.get("task_type", "unknown"))
-        allow_web_research = bool(delegation_context.get("allow_web_research", False))
+        allow_web_research = True
         explicit_user_urls = [
             str(url).strip()
             for url in (delegation_context.get("explicit_user_urls") or [])
@@ -76,38 +76,32 @@ class BuilderResearchPolicyMiddleware(AgentMiddleware[BuilderResearchPolicyState
         allowed_urls.update(explicit_user_urls)
 
         blocks = list(state.get("system_prompt_blocks", []))
-        if allow_web_research:
-            block = (
-                "<builder_research_policy>\n"
-                "Autonomous web research is enabled for this delegated builder task.\n"
-                f"- Search budget: {budget.get('search_limit', 0)} calls total.\n"
-                f"- Fetch budget: {budget.get('fetch_limit', 0)} calls total.\n"
-                "- Prefer authoritative, primary, or directly relevant sources.\n"
-                "- Use builder_web_search for discovery and builder_web_fetch only on exact approved URLs.\n"
-                "- If web tools fail or return weak results, continue the task without browsing instead of stopping.\n"
-                "- If you use external sources, emit_builder_artifact.sources_used MUST contain structured {title, url} items drawn from the sources you actually relied on.\n"
+        block = (
+            "<builder_research_policy>\n"
+            "Autonomous web research is available for every delegated builder task. Task type never disables browsing tools.\n"
+            f"- Search budget: {budget.get('search_limit', 0)} calls total.\n"
+            f"- Fetch budget: {budget.get('fetch_limit', 0)} calls total.\n"
+            "- Prefer authoritative, primary, or directly relevant sources.\n"
+            "- Use builder_web_search for discovery and builder_web_fetch only on exact approved URLs.\n"
+            "- If the deliverable depends on external facts, named projects, papers, frameworks, companies, markets, "
+            "recent topics, public entities, or explicit user URLs, call builder_web_search or builder_web_fetch "
+            "before the first substantive write_file/create_file/edit_file.\n"
+            "- If web tools fail or return weak results, continue the task without browsing instead of stopping.\n"
+            "- If you use external sources, emit_builder_artifact.sources_used MUST contain structured {title, url} items drawn from the sources you actually relied on.\n"
+        )
+        if task_type == "research":
+            block += (
+                "- Research reports must include inline [citation:Title](URL) citations after factual claims and end with a Sources section.\n"
             )
-            if task_type == "research":
-                block += (
-                    "- Research reports must include inline [citation:Title](URL) citations after factual claims and end with a Sources section.\n"
-                )
-            else:
-                block += (
-                    "- Non-report deliverables that use external sources must include a concise Sources appendix or a sidecar markdown file.\n"
-                )
-            if explicit_user_urls:
-                block += "- Explicit user URLs are approved fetch targets for this task.\n"
-            if tracked_sources:
-                block += f"- Tracked sources so far: {len(tracked_sources)}.\n"
-            block += "</builder_research_policy>"
         else:
-            block = (
-                "<builder_research_policy>\n"
-                "External browsing is disabled for this delegated builder task.\n"
-                "- Do not use builder_web_search or builder_web_fetch unless a later delegated brief explicitly enables browsing.\n"
-                "- Complete the task from the provided brief, files, and sandbox tools only.\n"
-                "</builder_research_policy>"
+            block += (
+                "- Non-report deliverables that use external sources must include a concise Sources appendix or a sidecar markdown file.\n"
             )
+        if explicit_user_urls:
+            block += "- Explicit user URLs are approved fetch targets for this task; fetch them before editing the deliverable when they are newly supplied.\n"
+        if tracked_sources:
+            block += f"- Tracked sources so far: {len(tracked_sources)}.\n"
+        block += "</builder_research_policy>"
 
         blocks.append(block)
         log_middleware(

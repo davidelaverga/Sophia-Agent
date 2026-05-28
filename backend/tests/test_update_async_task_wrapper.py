@@ -587,6 +587,8 @@ def test_augment_preserves_html_document_output_format():
     assert "/mnt/user-data/outputs/" in augmented
     assert "build-an-html-document-about-karpathy-au.html" in augmented
     assert source_url in augmented
+    assert "approved fetch targets" in augmented
+    assert "use builder_web_fetch on the exact new URL" in augmented
     assert "add recursive MAS section" in augmented
 
 

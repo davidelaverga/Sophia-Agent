@@ -48,6 +48,7 @@ from langchain_core.tools import StructuredTool
 from langchain_core.tools.base import ToolException
 from langgraph.types import Command
 
+from deerflow.sophia.builder_web_policy import extract_explicit_user_urls
 from deerflow.sophia.tools.start_builder_task import _TERMINAL_TASK_STATUSES
 
 # NOTE: this module deliberately does NOT use `from __future__ import
@@ -484,13 +485,25 @@ def _augment_update_message(
     target_path = _resolve_target_path(tracked, delegation_context)
     task_type = _resolve_effective_task_type(tracked, delegation_context)
     target_block = _file_target_directive_block(target_path, task_type)
+    explicit_update_urls = extract_explicit_user_urls(message)
+    if explicit_update_urls:
+        research_block = (
+            "This update contains explicit URL(s). They are approved fetch "
+            "targets. Before editing the deliverable, use builder_web_fetch "
+            "on the exact new URL(s), or builder_web_search if fetch is "
+            "unavailable, then incorporate the findings.\n"
+        )
+    else:
+        research_block = (
+            "Your prior research is in the message history above — TRUST it. "
+            "Do not re-run web_search / web_fetch on the same topic unless "
+            "this update adds new external facts or URLs.\n"
+        )
 
     directive = (
         f"{_FILE_TARGET_HINT_MARKER}\n"
         f"You are RESUMING (not restarting) a build that was interrupted by "
-        f"this update message. Your prior research is in the message history "
-        f"above — TRUST it and DO NOT re-run web_search / web_fetch on the "
-        f"same topic.\n"
+        f"this update message. {research_block}"
         f"\n"
         f"{target_block}\n"
         f"\n"

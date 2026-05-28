@@ -543,6 +543,28 @@ def test_start_builder_task_normalizes_demo_request(monkeypatch):
     assert response.update["async_tasks"][task_id]["demo_mode"] is True
 
 
+def test_start_builder_task_keeps_web_research_available_for_frontend(monkeypatch):
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+    fake_client, captured = _make_fake_sdk_client()
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+
+    response = asyncio.run(
+        module.start_builder_task.coroutine(
+            description="Build an HTML document about the Meta Harness framework.",
+            task_type="frontend",
+            runtime=_make_runtime({"user_id": "alice"}),
+        )
+    )
+
+    assert isinstance(response, Command)
+    run_input = captured["run_kwargs"]["input"]
+    delegation = run_input["delegation_context"]
+    assert delegation["task_type"] == "frontend"
+    assert delegation["allow_web_research"] is True
+    assert run_input["allow_web_research"] is True
+    assert isinstance(run_input["builder_web_budget"], dict)
+
+
 # ---------- user_id resolution ----------------------------------------------
 
 

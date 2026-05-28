@@ -51,6 +51,7 @@ _TERMINAL_TASK_STATUSES = {
     "interrupted",
     "cancelled",
 }
+_MISSING_DELIVERABLE_ERROR = "Builder finished without a deliverable artifact."
 
 
 def _short_id(value: str | None) -> str | None:
@@ -211,6 +212,59 @@ def _artifact_payload_from_task(task: dict[str, Any]) -> dict[str, Any]:
     return task
 
 
+def _task_has_deliverable(parent_thread_id: str, task: dict[str, Any]) -> bool:
+    artifact = _artifact_payload_from_task(task)
+    artifact_path = _canonical_artifact_path(artifact.get("artifact_path"))
+    artifact_url = artifact.get("artifact_url")
+    if isinstance(artifact_url, str) and artifact_url.strip():
+        return True
+    if artifact_path:
+        return True
+    return False
+
+
+def _retained_terminal_for_run(
+    recent_events: list[dict[str, Any]],
+    task_id: str,
+    run_id: str,
+) -> dict[str, Any] | None:
+    for event in reversed(recent_events):
+        if (
+            isinstance(event, dict)
+            and event.get("kind") == "terminal"
+            and event.get("task_id") == task_id
+            and event.get("run_id") == run_id
+        ):
+            return event
+    return None
+
+
+def _effective_snapshot_status(
+    parent_thread_id: str,
+    task: dict[str, Any],
+    *,
+    native_status: str,
+    task_id: str,
+    run_id: str,
+    recent_events: list[dict[str, Any]],
+) -> tuple[str, str | None]:
+    retained_terminal = _retained_terminal_for_run(recent_events, task_id, run_id)
+    retained_status = retained_terminal.get("status") if isinstance(retained_terminal, dict) else None
+    if retained_status in {"failed", "timed_out", "cancelled"}:
+        completion = retained_terminal.get("completion")
+        error_message = completion.get("error_message") if isinstance(completion, dict) else None
+        return str(retained_status), error_message if isinstance(error_message, str) else None
+    if native_status == "completed" and not _task_has_deliverable(parent_thread_id, task):
+        logger.warning(
+            "Builder canvas snapshot: native success coerced to failed reason=missing_deliverable parent_thread_id=%s task_id=%s run_id=%s",
+            _short_id(parent_thread_id),
+            _short_id(task_id),
+            _short_id(run_id),
+        )
+        return "failed", _MISSING_DELIVERABLE_ERROR
+    return native_status, None
+
+
 def _completion_from_terminal_task(
     parent_thread_id: str,
     task: dict[str, Any],
@@ -218,6 +272,7 @@ def _completion_from_terminal_task(
     status: str,
     task_id: str,
     run_id: str,
+    error_message_override: str | None = None,
 ) -> dict[str, Any] | None:
     completion_status = _completion_status(status)
     if completion_status is None:
@@ -250,7 +305,7 @@ def _completion_from_terminal_task(
         "artifact_filename": artifact_filename,
         "summary": artifact.get("companion_summary") or artifact.get("summary"),
         "user_next_action": artifact.get("user_next_action"),
-        "error_message": task.get("error_message") or task.get("error"),
+        "error_message": error_message_override or task.get("error_message") or task.get("error"),
         "completed_at": completed_at if isinstance(completed_at, str) else None,
         "source": "builder_canvas_snapshot",
     }
@@ -376,7 +431,15 @@ async def builder_canvas_snapshot(
             worker_summary.get("subscriber_count"),
         )
         return BuilderCanvasSnapshot(recent_events=recent_events)
-    status = await _native_run_status(task_id, run_id, task.get("status"))
+    native_status = await _native_run_status(task_id, run_id, task.get("status"))
+    status, error_message_override = _effective_snapshot_status(
+        parent_thread_id,
+        task,
+        native_status=native_status,
+        task_id=task_id,
+        run_id=run_id,
+        recent_events=recent_events,
+    )
     latest_activity = await worker.latest_activity(parent_thread_id, task_id, run_id)
     active_task = {
         "parent_thread_id": parent_thread_id,
@@ -391,6 +454,7 @@ async def builder_canvas_snapshot(
         status=status,
         task_id=task_id,
         run_id=run_id,
+        error_message_override=error_message_override,
     )
     if completion is not None:
         active_task["completion"] = completion

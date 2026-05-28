@@ -33,6 +33,7 @@ _PHASE_LABELS = {
     "done": "Success",
 }
 _CHECK_COMMAND_PREFIXES = ("test", "pytest", "pnpm", "npm", "yarn", "uv", "ruff", "mypy", "tsc")
+_MISSING_DELIVERABLE_ERROR = "Builder finished without a deliverable artifact."
 
 
 def _now_iso() -> str:
@@ -239,6 +240,27 @@ def _positive_sequence(payload: dict[str, Any]) -> int | None:
 def _completion_has(completion: dict[str, Any] | None, key: str) -> bool:
     value = completion.get(key) if isinstance(completion, dict) else None
     return isinstance(value, str) and bool(value.strip())
+
+
+def _completion_has_deliverable(completion: dict[str, Any]) -> bool:
+    return _completion_has(completion, "artifact_path") or _completion_has(completion, "artifact_url")
+
+
+def _normalize_completion_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    status = str(payload.get("status") or "").lower()
+    if status in {"success", "completed"} and not _completion_has_deliverable(payload):
+        logger.warning(
+            "Builder canvas: terminal success coerced to failed reason=missing_deliverable parent_thread_id=%s task_id=%s run_id=%s",
+            payload.get("thread_id"),
+            payload.get("task_id"),
+            payload.get("run_id"),
+        )
+        return {
+            **payload,
+            "status": "error",
+            "error_message": payload.get("error_message") or _MISSING_DELIVERABLE_ERROR,
+        }
+    return payload
 
 
 class BuilderCanvasWorker:
@@ -539,8 +561,8 @@ class BuilderCanvasWorker:
                     _completion_has(payload, "artifact_path"),
                 )
                 return 0
-        completion = {**payload, "run_id": run_id}
-        status = _public_terminal_status(payload.get("status"))
+        completion = _normalize_completion_payload({**payload, "run_id": run_id})
+        status = _public_terminal_status(completion.get("status"))
         terminal_activity = {
             "completed": _activity(action="success", category="finalize", label="Success", kind="phase"),
             "failed": _activity(action="failed", category="finalize", label="Failed", kind="phase"),

@@ -742,6 +742,60 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
         return True
 
+    @classmethod
+    def _missing_artifact_recovery_hint(
+        cls,
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+    ) -> str:
+        primary = artifact_args.get("artifact_path")
+        thread_data = state.get("thread_data") or {}
+        outputs_host_path = (
+            thread_data.get("outputs_path")
+            if isinstance(thread_data, dict)
+            else None
+        )
+        if not isinstance(primary, str) or not primary.strip() or not outputs_host_path:
+            return ""
+        try:
+            outputs_root = Path(outputs_host_path)
+            if not outputs_root.is_dir():
+                return ""
+            requested_suffix = Path(primary).suffix.lower()
+            started_ms = state.get("builder_task_started_at_ms")
+            min_mtime = None
+            if isinstance(started_ms, (int, float)) and started_ms > 0:
+                min_mtime = (float(started_ms) / 1000.0) - 5.0
+            candidates: list[Path] = []
+            for entry in outputs_root.rglob("*"):
+                if not entry.is_file() or entry.name.startswith((".", "_")):
+                    continue
+                if requested_suffix and entry.suffix.lower() != requested_suffix:
+                    continue
+                if min_mtime is not None and entry.stat().st_mtime < min_mtime:
+                    continue
+                candidates.append(entry)
+        except OSError:
+            logger.debug(
+                "BuilderArtifact: missing-path recovery scan failed outputs_path=%s",
+                outputs_host_path,
+                exc_info=True,
+            )
+            return ""
+        logger.info(
+            "BuilderArtifact: emit_path_missing recovery_candidate_count=%s recovery_accepted=%s",
+            len(candidates),
+            len(candidates) == 1,
+        )
+        if len(candidates) != 1:
+            return ""
+        recovered = candidates[0].relative_to(outputs_root).as_posix()
+        return (
+            " I found exactly one plausible output candidate in the artifact "
+            f"directory: `{_OUTPUTS_VIRTUAL_PREFIX}{recovered}`. If that is the "
+            "intended deliverable, call emit_builder_artifact again with that exact path."
+        )
+
     def _force_choice_for_state(
         self,
         state: BuilderArtifactState,
@@ -1042,6 +1096,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "artifact_path %s not found. Routing back to model for retry.",
             args.get("artifact_path"),
         )
+        recovery_hint = self._missing_artifact_recovery_hint(args, request.state)
         return Command(
             update={
                 "messages": [
@@ -1051,6 +1106,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             f"artifact file ({args.get('artifact_path')}) does not exist "
                             "on disk or in remote storage. Please write the file first, "
                             "then call emit_builder_artifact again."
+                            f"{recovery_hint}"
                         ),
                         tool_call_id=tool_call_id,
                         name="emit_builder_artifact",
@@ -1081,6 +1137,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "artifact_path %s not found. Routing back to model for retry.",
             args.get("artifact_path"),
         )
+        recovery_hint = self._missing_artifact_recovery_hint(args, request.state)
         return Command(
             update={
                 "messages": [
@@ -1090,6 +1147,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             f"artifact file ({args.get('artifact_path')}) does not exist "
                             "on disk or in remote storage. Please write the file first, "
                             "then call emit_builder_artifact again."
+                            f"{recovery_hint}"
                         ),
                         tool_call_id=tool_call_id,
                         name="emit_builder_artifact",

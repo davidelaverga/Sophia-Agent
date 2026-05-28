@@ -79,7 +79,7 @@ function StatusGlyph({ icon, accentVar, compact }: { icon: StatusMeta['icon']; a
 
 function deriveTitle(event: BuilderCompletionEventV1): string {
   if (event.status === 'success') {
-    return event.artifact_title || event.artifact_filename || 'Your file is ready.';
+    return event.artifact_title || event.artifact_filename || (event.artifact_path || event.artifact_url ? 'Your file is ready.' : 'Artifact delivery is pending.');
   }
   if (event.status === 'timeout') {
     return 'Build timed out';

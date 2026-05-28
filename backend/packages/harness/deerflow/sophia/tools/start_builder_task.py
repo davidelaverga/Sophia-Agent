@@ -699,7 +699,9 @@ async def _start_builder_task_impl(
     )
 
     logger.info(
-        "[Builder] start_builder_task dispatching: task_type=%s demo=%s tone=%s ritual=%s parent_thread=%s parent_model=%s user_id=%s user_id_source=%s artifact_source=%s",
+        "[Builder] start_builder_task dispatching: task_type=%s demo=%s tone=%s ritual=%s "
+        "parent_thread=%s parent_model=%s user_id=%s user_id_source=%s artifact_source=%s "
+        "allow_web_research=%s explicit_url_count=%s search_limit=%s fetch_limit=%s",
         task_type,
         demo_mode,
         companion_artifact.get("tone_estimate"),
@@ -709,6 +711,10 @@ async def _start_builder_task_impl(
         user_id,
         user_id_source,
         artifact_source,
+        allow_web_research,
+        len(explicit_user_urls),
+        builder_web_budget.get("search_limit"),
+        builder_web_budget.get("fetch_limit"),
     )
 
     try:
@@ -745,10 +751,14 @@ async def _start_builder_task_impl(
     }
 
     logger.info(
-        "[Builder] start_builder_task launched: task_id=%s run_id=%s trace=%s",
+        "[Builder] start_builder_task launched: task_id=%s run_id=%s trace=%s allow_web_research=%s explicit_url_count=%s search_limit=%s fetch_limit=%s",
         task_id,
         run_id,
         trace_id,
+        allow_web_research,
+        len(explicit_user_urls),
+        builder_web_budget.get("search_limit"),
+        builder_web_budget.get("fetch_limit"),
     )
 
     return Command(

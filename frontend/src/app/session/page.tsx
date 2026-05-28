@@ -77,6 +77,9 @@ import { useSessionUiInteractions } from './useSessionUiInteractions';
 import { useSessionValidationState } from './useSessionValidationState';
 import { useSessionVoiceCommandSystem } from './useSessionVoiceCommandSystem';
 
+const MISSING_BUILDER_DELIVERABLE_MESSAGE =
+  'Builder finished without a deliverable artifact. Please try again.';
+
 // ============================================================================
 // PROTECTED SESSION PAGE WRAPPER
 // ============================================================================
@@ -648,16 +651,42 @@ function SessionPageContent() {
       return null;
     }
     const hasActionPath = Boolean(builderCompletion.artifact_path || builderCompletion.artifact_url);
-    if (hasActionPath || builderCompletion.status !== 'success' || !builderPrimaryFile?.path) {
+    const isMissingDeliverableError = (
+      builderCompletion.status === 'error'
+      && builderCompletion.error_message === MISSING_BUILDER_DELIVERABLE_MESSAGE
+    );
+    if (hasActionPath) {
+      return builderCompletion;
+    }
+    if (!builderPrimaryFile?.path) {
+      if (builderCompletion.status === 'success') {
+        console.warn('[builder-artifacts] success completion downgraded because no action is available', {
+          thread_id: (builderCompletion.thread_id || resolvedThreadId || '').slice(0, 12),
+          task_id: builderCompletion.task_id.slice(0, 12),
+          run_id: builderCompletion.run_id?.slice(0, 12) ?? null,
+        });
+        return {
+          ...builderCompletion,
+          thread_id: builderCompletion.thread_id || resolvedThreadId || '',
+          status: 'error',
+          error_message: builderCompletion.error_message ?? MISSING_BUILDER_DELIVERABLE_MESSAGE,
+          source: builderCompletion.source ?? 'artifact_missing_reclassified',
+        };
+      }
+      return builderCompletion;
+    }
+    if (builderCompletion.status !== 'success' && !isMissingDeliverableError) {
       return builderCompletion;
     }
     const recovered: BuilderCompletionEventV1 = {
       ...builderCompletion,
       thread_id: builderCompletion.thread_id || resolvedThreadId || '',
+      status: 'success',
       artifact_path: builderPrimaryFile.path,
       artifact_filename: builderCompletion.artifact_filename ?? builderPrimaryFile.name,
       artifact_title: builderCompletion.artifact_title ?? builderReadyTitle,
-      source: builderCompletion.source ?? 'artifact_library_recovery',
+      error_message: null,
+      source: 'artifact_library_recovery',
     };
     console.warn('[builder-artifacts] completion action recovered from library', {
       thread_id: resolvedThreadId?.slice(0, 12) ?? null,

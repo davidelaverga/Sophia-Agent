@@ -131,6 +131,20 @@ describe("BuilderCompletionCard — success variant", () => {
     expect(screen.getByText(/keep checking the library/i)).toBeTruthy()
   })
 
+  it("does not claim a file is ready when success has no title or action", () => {
+    const event: BuilderCompletionEventV1 = {
+      ...SUCCESS_EVENT,
+      artifact_path: undefined,
+      artifact_url: undefined,
+      artifact_title: undefined,
+      artifact_filename: undefined,
+    }
+
+    render(<BuilderCompletionCard event={event} />)
+    expect(screen.queryByText("Your file is ready.")).toBeNull()
+    expect(screen.getByText("Artifact delivery is pending.")).toBeTruthy()
+  })
+
   it("invokes onDownload when the Download link is clicked", () => {
     const onDownload = vi.fn()
     render(<BuilderCompletionCard event={SUCCESS_EVENT} onDownload={onDownload} />)
