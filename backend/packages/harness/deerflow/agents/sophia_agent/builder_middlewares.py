@@ -139,7 +139,15 @@ def build_builder_middleware_chain(
         ),
         UserIdentityMiddleware(user_id),
         BuilderMem0RetrievalMiddleware(),
-        BuilderTaskMiddleware(),
+        # Pass ``vision_enabled`` through so the uploaded-images briefing
+        # only mentions ``view_image`` when the tool is actually wired in.
+        # Codex P2 PR #132: when vision is gated off (e.g. an operator
+        # disabled it for a build), telling the model to call a tool that
+        # doesn't exist would either error or burn tool-call budget on
+        # nothing. The middleware renders a different prompt block in that
+        # case (acknowledges the uploads, instructs the model NOT to try
+        # ``view_image``).
+        BuilderTaskMiddleware(vision_enabled=vision_enabled),
         BuilderResearchPolicyMiddleware(),
         # Phase 4G — emits ``custom``-mode phase events
         # (``starting`` / ``researching`` / ``drafting`` /

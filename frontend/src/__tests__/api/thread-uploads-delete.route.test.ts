@@ -115,7 +115,10 @@ describe('DELETE /api/threads/[threadId]/uploads/[filename] proxy', () => {
   });
 
   it('rejects DELETE on a thread the user does not own (403) — same gate as POST', async () => {
-    vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+    // Both /open and /list fallback (Codex P2 PR #132 later iteration)
+    // miss the target thread → 403. mockResolvedValue (not Once) so
+    // any number of ownership fetches return the same non-matching set.
+    vi.spyOn(global, 'fetch').mockResolvedValue(
       new Response(
         JSON.stringify({ sessions: [{ thread_id: 'thread-owned' }], count: 1 }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -125,6 +128,45 @@ describe('DELETE /api/threads/[threadId]/uploads/[filename] proxy', () => {
       params: Promise.resolve({ threadId: 'thread-victim', filename: 'x.png' }),
     });
     expect(res.status).toBe(403);
+  });
+
+  it('accepts DELETE when /open misses but /list contains the thread (ended-but-restored)', async () => {
+    // Codex P2 PR #132 (later iteration) — symmetric to the upload
+    // route. Without the /list fallback, a user whose session has been
+    // restored locally but not yet reopened on the backend cannot
+    // delete in-flight uploads → poor UX. The fallback closes that gap.
+    const fetchMock = vi.spyOn(global, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ sessions: [{ thread_id: 'other' }], count: 1 }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            sessions: [{ thread_id: 'other' }, { thread_id: 'thread-restored' }],
+            total: 2,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ success: true }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+
+    const res = await DELETE(makeRequest(), {
+      params: Promise.resolve({ threadId: 'thread-restored', filename: 'x.png' }),
+    });
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const [openUrl] = fetchMock.mock.calls[0] as [string, RequestInit | undefined];
+    const [listUrl] = fetchMock.mock.calls[1] as [string, RequestInit | undefined];
+    expect(openUrl).toMatch(/\/api\/v1\/sessions\/open\?/);
+    expect(listUrl).toMatch(/\/api\/v1\/sessions\/list\?user_id=user_test&limit=\d+$/);
   });
 
   it('forwards a valid DELETE to the gateway with the Bearer token + the right URL', async () => {

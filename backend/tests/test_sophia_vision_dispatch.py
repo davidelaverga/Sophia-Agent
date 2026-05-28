@@ -299,7 +299,11 @@ def test_builder_task_middleware_uploads_block_uses_registered_tool_name() -> No
         },
         "system_prompt_blocks": [],
     }
-    mw = bt_mod.BuilderTaskMiddleware()
+    # Vision must be enabled for the briefing to instruct the model to
+    # call ``view_image(...)``. When vision is gated off the renderer
+    # emits a "vision tool is NOT available" block instead — covered by
+    # ``test_builder_task_middleware_renders_vision_disabled_block``.
+    mw = bt_mod.BuilderTaskMiddleware(vision_enabled=True)
     update = mw.before_agent(state, runtime=None)
     briefing = update["system_prompt_blocks"][-1]
 
@@ -423,3 +427,125 @@ def test_builder_task_middleware_omits_uploads_block_when_absent(monkeypatch) ->
     assert update is not None
     briefing = "\n".join(update["system_prompt_blocks"])
     assert "<uploaded_images>" not in briefing
+
+
+def test_builder_task_middleware_renders_vision_disabled_block() -> None:
+    """Codex P2 on PR #132 — vision-off branch must render an honest
+    "vision tool is NOT available" block instead of pointing the model
+    at a non-existent ``view_image`` tool.
+
+    Why: the builder's tool list is built conditionally on
+    ``supports_vision(resolved_model)``. If an operator disables vision
+    (or runs a non-vision model), the registered tool list will NOT
+    include ``view_image``. Telling the model to call it anyway would
+    either get rejected by LangGraph's tool router or burn turns on
+    nothing. Render a block that:
+
+    - Names the uploaded paths (so the model can still acknowledge the
+      attachment in conversation with the user)
+    - Explicitly says ``view_image`` is NOT available in this run
+    - Tells the model what to do instead (ask the user to describe /
+      attach text)
+
+    Regression target for the wiring in ``builder_middlewares.py`` —
+    the chain factory must pass ``vision_enabled=False`` (its default)
+    through to ``BuilderTaskMiddleware``.
+    """
+    from deerflow.agents.sophia_agent.middlewares import builder_task as bt_mod
+
+    state = {
+        "messages": [],
+        "delegation_context": {
+            "companion_artifact": {},
+            "task_type": "research",
+            "uploaded_image_paths": [
+                "/mnt/user-data/uploads/diagram.png",
+                "/mnt/user-data/uploads/screenshot.jpg",
+            ],
+        },
+        "system_prompt_blocks": [],
+    }
+    mw = bt_mod.BuilderTaskMiddleware(vision_enabled=False)
+    update = mw.before_agent(state, runtime=None)
+    assert update is not None
+    briefing = update["system_prompt_blocks"][-1]
+
+    # The uploaded paths are still surfaced — the model needs to know
+    # the user attached files even if it can't open them.
+    assert "<uploaded_images>" in briefing
+    assert "/mnt/user-data/uploads/diagram.png" in briefing
+    assert "/mnt/user-data/uploads/screenshot.jpg" in briefing
+
+    # Explicit "vision tool NOT available" guidance MUST be present.
+    assert "NOT available" in briefing
+    # The vision-on call-shape MUST be absent — we don't want the
+    # model echoing a tool name LangGraph will reject.
+    assert "view_image(image_path=" not in briefing
+    # And the "describe what's in them" escape hatch is there so the
+    # model has a path forward.
+    assert "describe" in briefing.lower()
+
+
+def test_builder_task_middleware_default_vision_enabled_is_false() -> None:
+    """Default constructor must be vision-off so omitting the flag
+    can't accidentally teach the model to call a tool that may not be
+    wired up. Codex P2 on PR #132 — the gated wiring in
+    ``build_builder_middleware_chain`` only kicks in when
+    ``vision_enabled=True`` is passed through; the default must be the
+    safe choice."""
+    from deerflow.agents.sophia_agent.middlewares import builder_task as bt_mod
+
+    state = {
+        "messages": [],
+        "delegation_context": {
+            "companion_artifact": {},
+            "task_type": "research",
+            "uploaded_image_paths": ["/mnt/user-data/uploads/x.png"],
+        },
+        "system_prompt_blocks": [],
+    }
+    mw = bt_mod.BuilderTaskMiddleware()  # no kwarg → must default to OFF
+    update = mw.before_agent(state, runtime=None)
+    assert update is not None
+    briefing = update["system_prompt_blocks"][-1]
+
+    assert "NOT available" in briefing, (
+        "BuilderTaskMiddleware default must render the vision-off "
+        "(safe) branch. If you flip the default to True, audit every "
+        "caller to confirm vision_enabled is what they actually want."
+    )
+
+
+def test_build_builder_middleware_chain_passes_vision_flag_through() -> None:
+    """Wiring regression — the chain factory MUST construct
+    ``BuilderTaskMiddleware`` with the same ``vision_enabled`` flag the
+    caller passed in. Without this wire, gating ``ViewImageMiddleware``
+    on vision would still leave the uploads briefing telling the model
+    to call ``view_image`` (the original Codex P2 bug)."""
+    from deerflow.agents.sophia_agent.builder_middlewares import (
+        build_builder_middleware_chain,
+    )
+    from deerflow.agents.sophia_agent.middlewares.builder_task import (
+        BuilderTaskMiddleware,
+    )
+
+    # vision_enabled=True path
+    chain_on = build_builder_middleware_chain("user-1", vision_enabled=True)
+    task_on = next(
+        m for m in chain_on if isinstance(m, BuilderTaskMiddleware)
+    )
+    assert task_on._vision_enabled is True
+
+    # vision_enabled=False path
+    chain_off = build_builder_middleware_chain("user-1", vision_enabled=False)
+    task_off = next(
+        m for m in chain_off if isinstance(m, BuilderTaskMiddleware)
+    )
+    assert task_off._vision_enabled is False
+
+    # Default path — must be off (safe).
+    chain_default = build_builder_middleware_chain("user-1")
+    task_default = next(
+        m for m in chain_default if isinstance(m, BuilderTaskMiddleware)
+    )
+    assert task_default._vision_enabled is False

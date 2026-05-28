@@ -174,16 +174,19 @@ describe('/api/threads/[threadId]/uploads proxy', () => {
 
   it('rejects uploads to a threadId the user does not own (403)', async () => {
     // Ownership lookup returns sessions OWNED BY user_test but none
-    // matching the requested thread-victim.
-    const fetchMock = vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+    // matching the requested thread-victim. Both passes (/open and
+    // /list fallback for ended-but-restored sessions) must miss.
+    const missingResponse = () =>
       new Response(
         JSON.stringify({
           sessions: [{ thread_id: 'thread-owned-1', session_id: 's1' }],
           total: 1,
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
-      ),
-    );
+      );
+    const fetchMock = vi.spyOn(global, 'fetch')
+      .mockResolvedValueOnce(missingResponse())   // /open miss
+      .mockResolvedValueOnce(missingResponse());  // /list miss
 
     const fd = new FormData();
     fd.append('files', new File([new Uint8Array([1])], 'evil.png', { type: 'image/png' }));
@@ -196,11 +199,13 @@ describe('/api/threads/[threadId]/uploads proxy', () => {
     const body = (await res.json()) as { error: string };
     expect(body.error).toMatch(/not owned/i);
 
-    // Must NOT have called the upload endpoint — short-circuited
-    // at the ownership check.
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [ownershipUrl] = fetchMock.mock.calls[0];
-    expect(ownershipUrl).toBe('https://gateway.example/api/v1/sessions/open?user_id=user_test');
+    // Two ownership lookups (open then list), then short-circuit —
+    // upload endpoint never called.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [openUrl] = fetchMock.mock.calls[0];
+    expect(openUrl).toBe('https://gateway.example/api/v1/sessions/open?user_id=user_test');
+    const [listUrl] = fetchMock.mock.calls[1];
+    expect(listUrl).toMatch(/\/api\/v1\/sessions\/list\?user_id=user_test&limit=\d+$/);
   });
 
   it('hits the /api/v1/ sessions prefix the gateway actually mounts — Codex P1', async () => {
@@ -237,20 +242,31 @@ describe('/api/threads/[threadId]/uploads proxy', () => {
     expect(ownershipUrl).toMatch(/\/api\/v1\/sessions\/open\?/);
   });
 
-  it('verifies ownership against /open (unbounded), not /list (capped at 100) — Codex P2', async () => {
-    // Regression: /list caps at 100 entries, so a power user with
-    // >100 sessions whose target thread is older than the most recent
-    // 100 would get falsely 403'd. /open returns ALL resumable
-    // sessions with no limit, which is the right set for uploads
-    // (uploads only happen on active sessions).
+  it('tries /open first, falls back to /list when the session ended-but-restored — Codex P2', async () => {
+    // Updated for Codex P2 (later iteration): /open returns ONLY active
+    // and paused sessions; ``restoreOpenSession`` flips an ended session
+    // to interactive locally BEFORE the backend touch reopens it, so
+    // there is a window where the user CAN send/upload to a thread that
+    // /open still considers ended → 403. /list includes ended sessions
+    // and closes that gap. Two-pass: try /open first (cheap, unbounded
+    // for active), fall back to /list?limit=100 only if /open missed.
     const fetchMock = vi.spyOn(global, 'fetch')
       .mockResolvedValueOnce(
+        // /open: thread NOT in the open set (ended-but-restored).
         new Response(
-          JSON.stringify({ sessions: [{ thread_id: 'thread-abc' }], count: 1 }),
+          JSON.stringify({ sessions: [{ thread_id: 'other-thread' }], count: 1 }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         ),
       )
       .mockResolvedValueOnce(
+        // /list fallback: thread present (it's in the recent 100 ended).
+        new Response(
+          JSON.stringify({ sessions: [{ thread_id: 'thread-abc' }], total: 1 }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        // Upload forward.
         new Response(
           JSON.stringify({ success: true, files: [{ filename: 'x.png', size: '1' }] }),
           { status: 200, headers: { 'content-type': 'application/json' } },
@@ -264,15 +280,23 @@ describe('/api/threads/[threadId]/uploads proxy', () => {
     });
 
     expect(res.status).toBe(200);
-    const [ownershipUrl] = fetchMock.mock.calls[0] as [string, RequestInit | undefined];
-    expect(ownershipUrl).toBe('https://gateway.example/api/v1/sessions/open?user_id=user_test');
-    // Explicit guard: do NOT regress to /list with a limit.
-    expect(ownershipUrl).not.toMatch(/\/list\?/);
-    expect(ownershipUrl).not.toMatch(/[?&]limit=/);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    const [openUrl] = fetchMock.mock.calls[0] as [string, RequestInit | undefined];
+    expect(openUrl).toBe('https://gateway.example/api/v1/sessions/open?user_id=user_test');
+
+    const [listUrl] = fetchMock.mock.calls[1] as [string, RequestInit | undefined];
+    // /list with the fallback limit cap. The cap is intentional —
+    // long-term fix is a dedicated /by-thread endpoint (separate
+    // backend ticket); sessions older than the most recent 100 still 403.
+    expect(listUrl).toMatch(/\/api\/v1\/sessions\/list\?user_id=user_test&limit=\d+$/);
   });
 
-  it('fails closed when the ownership lookup itself errors (403)', async () => {
-    vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+  it('fails closed when the ownership lookup itself errors on BOTH passes (403)', async () => {
+    // Both /open and /list fallback return 5xx → both yield null →
+    // ownership returns false → 403. mockResolvedValue (not Once) so
+    // any number of fetches return the same error.
+    vi.spyOn(global, 'fetch').mockResolvedValue(
       new Response('upstream down', { status: 500 }),
     );
 
@@ -284,8 +308,8 @@ describe('/api/threads/[threadId]/uploads proxy', () => {
     expect(res.status).toBe(403);
   });
 
-  it('fails closed when the ownership lookup throws (403)', async () => {
-    vi.spyOn(global, 'fetch').mockRejectedValueOnce(new Error('network reset'));
+  it('fails closed when the ownership lookup throws on BOTH passes (403)', async () => {
+    vi.spyOn(global, 'fetch').mockRejectedValue(new Error('network reset'));
 
     const fd = new FormData();
     fd.append('files', new File([new Uint8Array([1])], 'x.png', { type: 'image/png' }));
@@ -295,8 +319,8 @@ describe('/api/threads/[threadId]/uploads proxy', () => {
     expect(res.status).toBe(403);
   });
 
-  it('fails closed when the ownership lookup returns malformed JSON', async () => {
-    vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+  it('fails closed when BOTH ownership passes return malformed JSON', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ unexpected: 'shape' }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
@@ -424,7 +448,8 @@ describe('/api/threads/[threadId]/uploads proxy', () => {
     // must reject BEFORE calling request.formData() so a malicious
     // authenticated user can't make the Next.js process buffer
     // arbitrary multipart bytes just to be rejected post-parse.
-    vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+    // Both /open and /list miss → ownership false → 403 BEFORE body parse.
+    vi.spyOn(global, 'fetch').mockResolvedValue(
       new Response(
         JSON.stringify({ sessions: [], total: 0 }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -440,5 +465,94 @@ describe('/api/threads/[threadId]/uploads proxy', () => {
     );
     expect(res.status).toBe(403);
     expect(formDataMock).not.toHaveBeenCalled();
+  });
+
+  // ─── Codex P2 PR #132 (later iteration) — /list fallback wiring ──
+
+  it('accepts uploads when /open misses but /list contains the thread (ended-but-restored)', async () => {
+    // The actual happy path for the fallback. /open returns sessions
+    // that don't include the target (ended-but-restored mid-window),
+    // but the user IS the owner per /list. Upload proceeds.
+    const fetchMock = vi.spyOn(global, 'fetch')
+      .mockResolvedValueOnce(
+        // /open: other sessions only — the target thread is "ended" so
+        // it's not in the open set.
+        new Response(
+          JSON.stringify({
+            sessions: [
+              { thread_id: 'open-1' },
+              { thread_id: 'open-2' },
+            ],
+            count: 2,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        // /list: includes both open + ended, target thread present.
+        new Response(
+          JSON.stringify({
+            sessions: [
+              { thread_id: 'open-1' },
+              { thread_id: 'open-2' },
+              { thread_id: 'thread-restored', session_id: 's-restored' },
+            ],
+            total: 3,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ success: true, files: [{ filename: 'late.png', size: '7' }] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      );
+
+    const fd = new FormData();
+    fd.append('files', new File([new Uint8Array([1])], 'late.png', { type: 'image/png' }));
+    const res = await POST(makeRequest(fd), {
+      params: Promise.resolve({ threadId: 'thread-restored' }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const [openUrl] = fetchMock.mock.calls[0] as [string, RequestInit | undefined];
+    const [listUrl] = fetchMock.mock.calls[1] as [string, RequestInit | undefined];
+    const [uploadUrl] = fetchMock.mock.calls[2] as [string, RequestInit | undefined];
+    expect(openUrl).toBe('https://gateway.example/api/v1/sessions/open?user_id=user_test');
+    expect(listUrl).toMatch(/\/api\/v1\/sessions\/list\?user_id=user_test&limit=\d+$/);
+    expect(uploadUrl).toBe('https://gateway.example/api/threads/thread-restored/uploads');
+  });
+
+  it('skips the /list fallback when /open already confirms ownership (no wasted fetch)', async () => {
+    // Two-pass is opportunistic — when /open already proves ownership,
+    // /list is NEVER called. Keeps the latency tax to one round-trip
+    // for the common path (active session uploads).
+    const fetchMock = vi.spyOn(global, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ sessions: [{ thread_id: 'thread-abc' }], count: 1 }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ success: true, files: [{ filename: 'x.png', size: '1' }] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      );
+
+    const fd = new FormData();
+    fd.append('files', new File([new Uint8Array([1])], 'x.png', { type: 'image/png' }));
+    const res = await POST(makeRequest(fd), {
+      params: Promise.resolve({ threadId: 'thread-abc' }),
+    });
+    expect(res.status).toBe(200);
+
+    // Exactly two fetches: ownership(/open) + upload. NO /list call.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const callUrls = fetchMock.mock.calls.map((args) => args[0] as string);
+    expect(callUrls.some((url) => url.includes('/api/v1/sessions/list'))).toBe(false);
   });
 });

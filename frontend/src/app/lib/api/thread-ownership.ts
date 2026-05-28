@@ -37,18 +37,18 @@
  *   backend ticket so the proxy isn't the only line of defense.
  */
 
-/**
- * Confirm that ``threadId`` belongs to ``userId`` by listing the
- * user's open (resumable) sessions via the gateway. Returns
- * ``true`` only on an explicit match; any error path fails closed.
- */
-export async function userOwnsThread(
-  threadId: string,
-  userId: string,
+// How many entries to pull from ``/list`` on the fallback lookup.
+// 100 is the gateway's documented ceiling. Sessions older than the
+// most recent 100 still 403; that's an acceptable edge case for
+// power users and the right long-term fix is a dedicated
+// ``/api/v1/sessions/by-thread/{thread_id}`` lookup (separate
+// backend ticket).
+const OWNERSHIP_FALLBACK_LIMIT = 100;
+
+async function fetchSessionsThreadIds(
+  url: string,
   apiKey: string | null,
-  gatewayUrl: string,
-): Promise<boolean> {
-  const url = `${gatewayUrl}/api/v1/sessions/open?user_id=${encodeURIComponent(userId)}`;
+): Promise<string[] | null> {
   const headers: Record<string, string> = { Accept: "application/json" };
   if (apiKey) {
     headers.Authorization = `Bearer ${apiKey}`;
@@ -56,14 +56,68 @@ export async function userOwnsThread(
   try {
     const res = await fetch(url, { method: "GET", headers });
     if (!res.ok) {
-      return false;
+      return null;
     }
     const data = (await res.json()) as { sessions?: Array<{ thread_id?: unknown }> };
     if (!Array.isArray(data.sessions)) {
-      return false;
+      return null;
     }
-    return data.sessions.some((session) => session?.thread_id === threadId);
+    const ids: string[] = [];
+    for (const session of data.sessions) {
+      if (typeof session?.thread_id === "string") {
+        ids.push(session.thread_id);
+      }
+    }
+    return ids;
   } catch {
-    return false;
+    return null;
   }
+}
+
+/**
+ * Confirm that ``threadId`` belongs to ``userId``. Returns ``true``
+ * only on an explicit match; any error path fails closed.
+ *
+ * **Two-pass lookup** (Codex P2 PR #132):
+ *
+ * 1. ``/api/v1/sessions/open`` — primary path. Unbounded list of
+ *    resumable sessions. Covers the common case (user uploading
+ *    in an active or paused session).
+ * 2. ``/api/v1/sessions/list?limit=100`` — fallback. Necessary for
+ *    ended-but-restored sessions: ``restoreOpenSession`` marks an
+ *    ended session as interactive locally BEFORE the backend
+ *    touch reopens it, and ``/open`` excludes ended records. In
+ *    that window, an upload/DELETE without the fallback would 403
+ *    until the user sent a non-attachment message that reactivates
+ *    the session. ``/list`` includes ended sessions.
+ *
+ * Sessions outside the recent 100 in ``/list`` still 403. Long-term
+ * fix is a dedicated ``/by-thread/{thread_id}`` endpoint on the
+ * gateway; that's a separate backend ticket.
+ */
+export async function userOwnsThread(
+  threadId: string,
+  userId: string,
+  apiKey: string | null,
+  gatewayUrl: string,
+): Promise<boolean> {
+  const encodedUser = encodeURIComponent(userId);
+
+  const openIds = await fetchSessionsThreadIds(
+    `${gatewayUrl}/api/v1/sessions/open?user_id=${encodedUser}`,
+    apiKey,
+  );
+  if (openIds?.includes(threadId)) {
+    return true;
+  }
+
+  const listIds = await fetchSessionsThreadIds(
+    `${gatewayUrl}/api/v1/sessions/list?user_id=${encodedUser}&limit=${OWNERSHIP_FALLBACK_LIMIT}`,
+    apiKey,
+  );
+  if (listIds?.includes(threadId)) {
+    return true;
+  }
+
+  return false;
 }

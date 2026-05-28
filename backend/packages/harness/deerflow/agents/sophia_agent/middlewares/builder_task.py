@@ -164,7 +164,7 @@ _SAFE_UPLOADED_IMAGE_PATH = re.compile(
 )
 
 
-def _uploaded_images_sections(raw: Any) -> list[str]:
+def _uploaded_images_sections(raw: Any, vision_enabled: bool) -> list[str]:
     """Return zero or one briefing section(s) for the uploaded images.
 
     Returns a list (empty when there are no uploads, single-element
@@ -185,6 +185,17 @@ def _uploaded_images_sections(raw: Any) -> list[str]:
     can still discover such files via ``ls``, and silently skipping
     them is safer than rendering a sanitized-but-uncertain string
     into the model context.
+
+    Vision-availability gate (Codex P2 on PR #132): when
+    ``vision_enabled`` is False the builder has no ``view_image``
+    tool in its registered tool list (see ``builder_agent.py``).
+    Telling the model to call ``view_image(...)`` anyway would
+    teach it to emit a tool name LangGraph rejects. We render a
+    different, honest block in that case: the model still hears
+    that files were uploaded (so it can acknowledge to the user
+    "I can see you uploaded X but my vision tool isn't available
+    in this build context") but isn't pointed at a non-existent
+    tool.
 
     IMPORTANT: the prompt names the registered LLM-facing tool
     (``view_image``), NOT the Python identifier (``view_image_tool``).
@@ -216,6 +227,17 @@ def _uploaded_images_sections(raw: Any) -> list[str]:
         return []
 
     path_lines = "\n".join(f"- {p}" for p in safe_paths)
+    if not vision_enabled:
+        return [
+            "<uploaded_images>\n"
+            "The user uploaded these images, but the vision tool is NOT available "
+            "in this build context. Do NOT attempt to call view_image — that tool is "
+            "not in your tool list this run. If your deliverable needs to reference "
+            "the images, acknowledge that you can't visually inspect them and ask the "
+            "user to either describe what's in them or to attach a text equivalent.\n"
+            f"{path_lines}\n"
+            "</uploaded_images>"
+        ]
     return [
         "<uploaded_images>\n"
         "The user uploaded these images. They are available in this sandbox at the paths below.\n"
@@ -268,9 +290,20 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
     ``delegation_context`` is present the middleware no-ops — the legacy
     Builder-as-Main synthesis branch was deleted in Phase 4C of the v3
     migration. Builder is always-a-subagent now.
+
+    The ``vision_enabled`` constructor arg lets the builder agent
+    factory (``builder_agent._create_builder_agent``) pass through
+    the same ``supports_vision(resolved_model)`` decision that
+    governs whether ``view_image_tool`` is in the tool list. The
+    uploaded-images briefing block branches on this flag so we
+    never tell the model to call a tool it doesn't have.
     """
 
     state_schema = BuilderTaskState
+
+    def __init__(self, *, vision_enabled: bool = False) -> None:
+        super().__init__()
+        self._vision_enabled = vision_enabled
 
     @override
     def before_agent(self, state: BuilderTaskState, runtime: Runtime) -> dict | None:
@@ -366,7 +399,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         sections.append(f"<task_type>{task_type}</task_type>")
 
         sections.extend(
-            _uploaded_images_sections(delegation_context.get("uploaded_image_paths"))
+            _uploaded_images_sections(
+                delegation_context.get("uploaded_image_paths"),
+                vision_enabled=self._vision_enabled,
+            )
         )
 
         # Pre-flight gate: when this build will need image-generation but the

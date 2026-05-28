@@ -59,6 +59,55 @@ function maxBytesFor(filename: string): number {
   return isImage(filename) ? MAX_IMAGE_BYTES : MAX_DOCUMENT_BYTES
 }
 
+// Mirrors the server-side ``SAFE_PROMPT_FILENAME`` allow-list used by
+// ``chat-request.ts::sanitizeAttachedFilename`` and the renderer in
+// ``attachment-prompt.ts``. Filenames outside this set are stripped
+// from ``attached_files`` server-side, so we normalize HERE on the
+// client to keep the upload and the prompt in sync (Codex P2 PR #132).
+//
+// Without normalization a user who picks
+// ``Screenshot 2026-05-27 at 10.00.png`` (spaces) sees an
+// ``uploaded`` chip but Sophia never gets the synthesized hint
+// (server drops the unsafe filename), so the file appears attached
+// but is silently ignored. Auto-renaming on upload keeps the chip,
+// the on-disk filename, and the ``attached_files`` entry all in
+// agreement.
+const PROMPT_SAFE_FILENAME_PATTERN = /^[A-Za-z0-9._-]+$/
+
+/**
+ * Normalize a picked filename into the allow-list shape the chat
+ * post-handler's ``SAFE_PROMPT_FILENAME`` accepts. Replaces unsafe
+ * characters with ``_``, collapses runs, strips leading dots, and
+ * falls back to ``file<ext>`` when the result would be empty.
+ */
+function toPromptSafeFilename(name: string): string {
+  if (PROMPT_SAFE_FILENAME_PATTERN.test(name)) return name
+
+  // Split off the extension FIRST so a pathological basename (only
+  // parens / spaces / etc.) doesn't end up eating ".png" in the
+  // leading-dot strip below. Without this, ``(( )).png`` would
+  // collapse all the way to ``png`` (no dot) and the upload wouldn't
+  // be recognized as an image.
+  const lastDot = name.lastIndexOf(".")
+  const hasExt = lastDot > 0 && lastDot < name.length - 1
+  const rawStem = hasExt ? name.slice(0, lastDot) : name
+  const rawExt = hasExt ? name.slice(lastDot + 1) : ""
+
+  const safeStem = rawStem
+    .replace(/[^A-Za-z0-9._-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^[._]+/, "") // hidden-file leader is dropped by the sanitizer
+    .replace(/_+$/g, "")
+
+  const safeExt = rawExt.replace(/[^A-Za-z0-9]+/g, "")
+
+  const stem = safeStem || "file"
+  if (safeExt) return `${stem}.${safeExt}`
+  // Original had no extension (or the extension was all unsafe chars):
+  // keep the stem, ``.bin`` only when even the stem fell back to "file".
+  return stem === "file" ? "file.bin" : stem
+}
+
 type AttachmentBarProps = {
   /** Thread the uploads land under. */
   threadId: string | null | undefined
@@ -113,15 +162,27 @@ function buildRegistration(
   threadId: string,
   remainingSlots: number,
 ): Registration {
-  const cap = maxBytesFor(file.name)
+  // Normalize the picked filename to the allow-list shape
+  // ``sanitizeAttachedFilename`` (server-side) accepts. Without
+  // this the user picks ``Screenshot 2026-05-27 at 10.00.png``, the
+  // upload succeeds, but the chat post-handler strips the filename
+  // from ``attached_files`` → chip shows uploaded → Sophia never
+  // hears about the file. Codex P2 PR #132.
+  const safeName = toPromptSafeFilename(file.name)
+  const fileForUpload =
+    safeName === file.name
+      ? file
+      : new File([file], safeName, { type: file.type, lastModified: file.lastModified })
+
+  const cap = maxBytesFor(safeName)
   if (file.size > cap) {
-    const kind = isImage(file.name) ? "image" : "document"
+    const kind = isImage(safeName) ? "image" : "document"
     return {
-      file,
+      file: fileForUpload,
       skip: true,
       item: {
         clientId: makeClientId(),
-        filename: file.name,
+        filename: safeName,
         size: file.size,
         status: "error",
         error: `${kind === "image" ? "Image" : "File"} too large (${formatBytes(file.size)}). Max ${formatBytes(cap)} for ${kind}s.`,
@@ -132,11 +193,11 @@ function buildRegistration(
   }
   if (remainingSlots <= 0) {
     return {
-      file,
+      file: fileForUpload,
       skip: true,
       item: {
         clientId: makeClientId(),
-        filename: file.name,
+        filename: safeName,
         size: file.size,
         status: "error",
         error: `Max ${MAX_ATTACHED_FILES_PER_TURN} attachments per message. Remove some before adding more.`,
@@ -146,11 +207,11 @@ function buildRegistration(
     }
   }
   return {
-    file,
+    file: fileForUpload,
     skip: false,
     item: {
       clientId: makeClientId(),
-      filename: file.name,
+      filename: safeName,
       size: file.size,
       status: "uploading",
       hasMarkdownConversion: false,
