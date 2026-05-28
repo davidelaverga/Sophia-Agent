@@ -173,9 +173,22 @@ def test_view_user_image_rejects_oversized_image_before_base64(tmp_path: Path, m
     )
 
     assert isinstance(result, Command)
-    # MUST NOT have written viewed_images — otherwise the middleware
-    # would still inject the (truncated/empty) image on the next turn.
-    assert "viewed_images" not in result.update
+    # Codex P2 PR #132 (later iteration): every failure path now
+    # actively CLEARS the per-session viewed_images registry by
+    # returning ``viewed_images: {}`` (the merge reducer's "clear all"
+    # sentinel — see ``merge_viewed_images`` in ``thread_state.py``).
+    # The original concern — "don't inject the oversized image into
+    # the next turn" — is still satisfied (we never base64-encoded
+    # it), and we ALSO prevent the separate bug where a previously-
+    # loaded image would persist into the next injection and mislead
+    # Sophia. Defense in depth: ``SophiaViewImageMiddleware`` skips
+    # injection entirely when ``viewed_images`` is empty.
+    assert result.update.get("viewed_images") == {}, (
+        "Oversized image must clear viewed_images via the empty-dict "
+        "sentinel — otherwise a prior successful view persists into "
+        "the next turn's injection. See _failure_update in "
+        "view_user_image.py."
+    )
     body = _content(result).lower()
     assert "above the" in body and "vision cap" in body
     assert "read_user_document" in body, (
