@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const getAuthenticatedUserIdMock = vi.fn();
 const getUserScopedAuthTokenMock = vi.fn<() => Promise<string | null>>(async () => 'test-token');
@@ -6,6 +6,13 @@ const fetchBackendStreamWithBootstrapMock = vi.fn();
 const parseAndValidateChatPayloadMock = vi.fn();
 const userOwnsThreadMock = vi.fn<(threadId: string, userId: string, apiKey: string | null, gatewayUrl: string) => Promise<boolean>>(async () => true);
 const getPrimaryGatewayUrlMock = vi.fn(() => 'https://gateway.test');
+
+// Hoisted so the ``USE_MOCK`` mock can read its current value via a
+// getter. ``vi.mock`` factories are evaluated once at module load,
+// so without a getter the flag stays whatever it was at hoist time.
+// Codex P2 PR #132 later iteration: tests need to flip this per case
+// to exercise the mock-mode bypass of the ownership gate.
+const configMockState = vi.hoisted(() => ({ useMock: false }));
 
 vi.mock('../../../app/lib/auth/server-auth', () => ({
   getAuthenticatedUserId: () => getAuthenticatedUserIdMock(),
@@ -47,7 +54,11 @@ vi.mock('../../../app/api/chat/_lib/config', () => ({
   BACKEND_CHAT_ENDPOINT: '/threads',
   BACKEND_URL: 'http://backend.test',
   IS_PRODUCTION: false,
-  USE_MOCK: false,
+  // Getter so tests can flip ``configMockState.useMock`` per case
+  // (Codex P2 PR #132 later iteration mock-mode bypass coverage).
+  get USE_MOCK() {
+    return configMockState.useMock;
+  },
   secureLog: vi.fn(),
 }));
 
@@ -324,6 +335,85 @@ describe('handleChatPost thread ownership gate (Codex P1 PR #132 — later itera
         contextMode: 'life',
         platform: 'text',
         rawMessageLength: 8,
+        attachedFiles: [],
+      },
+    });
+
+    const response = await handleChatPost({
+      json: async () => ({}),
+    } as never);
+
+    expect(response.status).toBe(200);
+    expect(userOwnsThreadMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('handleChatPost mock-mode bypass (Codex P2 PR #132 later iteration)', () => {
+  // Why this exists: when USE_MOCK_STREAMING=true the dev runs
+  // entirely offline — there's no LangGraph, there's no gateway, so
+  // ``userOwnsThread`` would fail closed (network error → false → 403)
+  // and every existing-session send would 403 even though the dev
+  // explicitly opted into mock mode. The post-handler must take the
+  // ``USE_MOCK`` branch BEFORE the ownership check to preserve the
+  // offline-dev contract.
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    configMockState.useMock = true;
+    getAuthenticatedUserIdMock.mockResolvedValue('session-user-1');
+    getUserScopedAuthTokenMock.mockResolvedValue('test-token');
+    getPrimaryGatewayUrlMock.mockReturnValue('https://gateway.test');
+    parseAndValidateChatPayloadMock.mockReturnValue({
+      kind: 'valid',
+      data: {
+        userMessage: 'mock turn',
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+        threadId: 'thread-mock',
+        sessionType: 'chat',
+        contextMode: 'life',
+        platform: 'text',
+        rawMessageLength: 10,
+        attachedFiles: [],
+      },
+    });
+  });
+
+  afterEach(() => {
+    configMockState.useMock = false;
+  });
+
+  it('skips the ownership gate in mock mode (no gateway round-trip)', async () => {
+    // Simulate the offline-dev environment: ``userOwnsThread`` would
+    // throw if the gateway isn't reachable. The test mocks it to
+    // assert that it's NOT called at all in mock mode — proving the
+    // mock-mode short-circuit lands BEFORE the ownership check.
+    userOwnsThreadMock.mockRejectedValue(new Error('gateway unreachable in offline dev'));
+
+    const response = await handleChatPost({
+      json: async () => ({}),
+    } as never);
+
+    // Mock streaming response — 200, not 403.
+    expect(response.status).toBe(200);
+    // Critical: the gateway lookup must NOT have been attempted.
+    expect(userOwnsThreadMock).not.toHaveBeenCalled();
+    // And the real backend stream must NOT have been hit either.
+    expect(fetchBackendStreamWithBootstrapMock).not.toHaveBeenCalled();
+  });
+
+  it('still skips the ownership gate in mock mode even with no threadId', async () => {
+    // The new-session bootstrap path was already gate-free; the mock
+    // bypass must preserve that too (no regression on the easier case).
+    parseAndValidateChatPayloadMock.mockReturnValue({
+      kind: 'valid',
+      data: {
+        userMessage: 'mock new chat',
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+        threadId: undefined,
+        sessionType: 'chat',
+        contextMode: 'life',
+        platform: 'text',
+        rawMessageLength: 12,
         attachedFiles: [],
       },
     });

@@ -154,6 +154,20 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       );
     }
 
+    // Mock-streaming short-circuit (Codex P2 PR #132 later
+    // iteration): the ``USE_MOCK_STREAMING=true`` flag is the
+    // offline-dev contract — no backend gateway, no LangGraph. The
+    // ownership gate below calls ``userOwnsThread`` which hits the
+    // gateway's ``/api/v1/sessions/open|list``; in mock mode that
+    // gateway isn't running, the fetch fails closed, and every
+    // existing-session send 403s. So mock mode must take precedence
+    // over the ownership check — there's no backend thread to verify
+    // against in the first place.
+    if (USE_MOCK) {
+      secureLog('[/api/chat] Using mock streaming response');
+      return mockResponse(sessionId, sessionType || undefined);
+    }
+
     // Codex P1 PR #132 (later iteration): verify thread ownership for
     // EVERY request that resumes a caller-supplied ``thread_id``, not
     // just attachment-bearing ones.
@@ -194,11 +208,6 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
           { status: 403, headers: { 'Content-Type': 'application/json' } },
         );
       }
-    }
-
-    if (USE_MOCK) {
-      secureLog('[/api/chat] Using mock streaming response');
-      return mockResponse(sessionId, sessionType || undefined);
     }
 
     const backendPayload = {
