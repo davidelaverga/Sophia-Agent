@@ -49,6 +49,7 @@ const ACTION_VISUALS: Record<string, ActivityVisual> = {
   packaging_artifact: { icon: PackageCheck, color: 'var(--cosmic-teal)', background: 'var(--cosmic-teal)' },
   success: { icon: CheckCircle2, color: 'var(--cosmic-teal)', background: 'var(--cosmic-teal)' },
   failed: { icon: XCircle, color: 'var(--sophia-error, #f87171)', background: 'var(--sophia-error, #f87171)' },
+  timed_out: { icon: XCircle, color: 'var(--cosmic-amber)', background: 'var(--cosmic-amber)' },
   cancelled: { icon: XCircle, color: 'var(--cosmic-text-faint)', background: 'var(--cosmic-text-faint)' },
 };
 

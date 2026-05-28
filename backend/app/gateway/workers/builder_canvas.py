@@ -24,7 +24,7 @@ DEFAULT_TERMINAL_TTL_SECONDS = 15 * 60
 DEFAULT_HISTORY_SIZE = 64
 DEFAULT_RETIRED_RUNS_SIZE = 128
 _SUBSCRIBER_QUEUE_MAXSIZE = 128
-_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+_TERMINAL_STATUSES = {"completed", "failed", "timed_out", "cancelled"}
 _PHASE_LABELS = {
     "starting": "Creating plan",
     "researching": "Researching",
@@ -45,8 +45,8 @@ def _public_terminal_status(status: str | None) -> str:
         "completed": "completed",
         "error": "failed",
         "failed": "failed",
-        "timeout": "failed",
-        "timed_out": "failed",
+        "timeout": "timed_out",
+        "timed_out": "timed_out",
         "cancelled": "cancelled",
         "interrupted": "cancelled",
     }.get(str(status or "").lower(), "failed")
@@ -544,6 +544,7 @@ class BuilderCanvasWorker:
         terminal_activity = {
             "completed": _activity(action="success", category="finalize", label="Success", kind="phase"),
             "failed": _activity(action="failed", category="finalize", label="Failed", kind="phase"),
+            "timed_out": _activity(action="timed_out", category="finalize", label="Timed out", kind="phase"),
             "cancelled": _activity(action="cancelled", category="finalize", label="Cancelled", kind="phase"),
         }[status]
         event = {

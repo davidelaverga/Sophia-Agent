@@ -110,6 +110,32 @@ async def test_terminal_closes_run_and_replay_starts_after_event_id() -> None:
 
 
 @pytest.mark.anyio
+async def test_timeout_completion_preserves_timed_out_canvas_status() -> None:
+    worker = BuilderCanvasWorker()
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "finalizing"},
+        }
+    )
+
+    await worker.publish_completion(
+        {"thread_id": "parent-1", "task_id": "task-1", "run_id": "run-1", "status": "timeout"}
+    )
+
+    events = await worker.recent_events("parent-1")
+    assert events[-1]["kind"] == "terminal"
+    assert events[-1]["status"] == "timed_out"
+    assert events[-1]["activity"]["action"] == "timed_out"
+    assert events[-1]["activity"]["label"] == "Timed out"
+    assert events[-1]["completion"]["status"] == "timeout"
+
+
+@pytest.mark.anyio
 async def test_completion_without_run_id_uses_active_same_task_run() -> None:
     worker = BuilderCanvasWorker()
     await worker.publish_progress(

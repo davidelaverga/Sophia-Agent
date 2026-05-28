@@ -29,7 +29,12 @@ const EMPTY_STATE: BuilderCanvasState = {
   nextRunOrder: 0,
 };
 const SNAPSHOT_RECONCILE_MS = 30_000;
-const TERMINAL_STATUSES = new Set<BuilderCanvasTaskSnapshotV1['status']>(['completed', 'failed', 'cancelled']);
+const TERMINAL_STATUSES = new Set<BuilderCanvasTaskSnapshotV1['status']>([
+  'completed',
+  'failed',
+  'timed_out',
+  'cancelled',
+]);
 
 function shortId(value: string | null | undefined): string | null {
   return value ? value.slice(0, 12) : null;

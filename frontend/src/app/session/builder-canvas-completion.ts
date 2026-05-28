@@ -8,6 +8,7 @@ function completionStatusFromCanvasStatus(
 ): BuilderCompletionEventV1['status'] | null {
   if (status === 'completed') return 'success';
   if (status === 'failed') return 'error';
+  if (status === 'timed_out') return 'timeout';
   if (status === 'cancelled') return 'cancelled';
   return null;
 }

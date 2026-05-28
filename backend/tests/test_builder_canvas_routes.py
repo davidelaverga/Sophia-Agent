@@ -286,6 +286,37 @@ async def test_snapshot_includes_terminal_completion_artifact_data(app: FastAPI,
 
 
 @pytest.mark.anyio
+async def test_snapshot_preserves_timed_out_status_and_completion(app: FastAPI, monkeypatch) -> None:
+    async def tasks(_parent: str):
+        return [
+            {
+                "agent_name": "sophia_builder",
+                "task_id": "task-timeout",
+                "run_id": "run-timeout",
+                "status": "timed_out",
+                "last_updated_at": "2026-05-27T10:00:00Z",
+                "error_message": "Builder timed out before the artifact was ready.",
+            }
+        ]
+
+    async def status(_task: str, _run: str, _fallback: str | None):
+        return "timed_out"
+
+    monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", tasks)
+    monkeypatch.setattr(builder_canvas, "_native_run_status", status)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/sophia/user-1/threads/parent-1/builder-canvas/snapshot")
+
+    assert response.status_code == 200
+    active_task = response.json()["active_task"]
+    assert active_task["status"] == "timed_out"
+    assert active_task["completion"]["status"] == "timeout"
+    assert active_task["completion"]["error_message"] == "Builder timed out before the artifact was ready."
+    assert active_task["completion"]["completed_at"] == "2026-05-27T10:00:00Z"
+
+
+@pytest.mark.anyio
 async def test_snapshot_rejects_thread_not_owned_by_user(app: FastAPI) -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/sophia/user-1/threads/other-parent/builder-canvas/snapshot")

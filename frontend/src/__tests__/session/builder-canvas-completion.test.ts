@@ -67,4 +67,19 @@ describe('completionFromTerminalCanvasTask', () => {
 
     expect(completion).toBeNull();
   });
+
+  it('synthesizes timeout completion from timed-out terminal snapshot state', () => {
+    const completion = completionFromTerminalCanvasTask({
+      ...terminalTask,
+      status: 'timed_out',
+    }, null, 'thread-1');
+
+    expect(completion).toEqual(expect.objectContaining({
+      thread_id: 'thread-1',
+      task_id: 'task-1',
+      run_id: 'run-1',
+      status: 'timeout',
+      source: 'builder_canvas_snapshot',
+    }));
+  });
 });

@@ -1,6 +1,6 @@
 import type { BuilderCompletionEventV1 } from './builder-completion';
 
-export type BuilderCanvasStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+export type BuilderCanvasStatus = 'running' | 'completed' | 'failed' | 'timed_out' | 'cancelled';
 
 export type BuilderCanvasActivity =
   | {
@@ -45,6 +45,7 @@ export type BuilderCanvasActivityAction =
   | 'packaging_artifact'
   | 'success'
   | 'failed'
+  | 'timed_out'
   | 'cancelled';
 
 export type BuilderCanvasEventV1 = {

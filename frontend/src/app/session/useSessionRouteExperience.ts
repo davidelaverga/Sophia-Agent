@@ -199,9 +199,11 @@ export function useSessionRouteExperience({
       ? 'completed'
       : active.status === 'failed'
         ? 'failed'
-        : active.status === 'cancelled'
-          ? 'cancelled'
-          : 'running';
+        : active.status === 'timed_out'
+          ? 'timed_out'
+          : active.status === 'cancelled'
+            ? 'cancelled'
+            : 'running';
     const activityLog = builderCanvas.recentEvents
       .filter((event) => event.task_id === active.task_id && event.run_id === active.run_id && event.activity)
       .map((event) => ({
@@ -295,14 +297,18 @@ export function useSessionRouteExperience({
       const responseRunId = response.run_id ?? runId;
       const requestRunKey = builderRunKey(builderTask.taskId, runId);
       const responseRunKey = builderRunKey(response.task_id ?? builderTask.taskId, responseRunId);
-      if (response.status === 'completed' || response.status === 'failed') {
+      if (response.status === 'completed' || response.status === 'failed' || response.status === 'timed_out') {
         setBuilderTask((current) => {
           if (!current || builderRunKey(current.taskId, current.runId) !== requestRunKey) {
             return current;
           }
           return {
             ...current,
-            phase: response.status === 'completed' ? 'completed' : 'failed',
+            phase: response.status === 'completed'
+              ? 'completed'
+              : response.status === 'timed_out'
+                ? 'timed_out'
+                : 'failed',
             runId: responseRunId ?? current.runId,
             detail: response.detail ?? current?.detail,
           };

@@ -40,7 +40,7 @@ class BuilderCanvasCancelResponse(BaseModel):
     detail: str
 
 
-_TERMINAL_CANVAS_STATUSES = {"completed", "failed", "cancelled"}
+_TERMINAL_CANVAS_STATUSES = {"completed", "failed", "timed_out", "cancelled"}
 _TERMINAL_TASK_STATUSES = {
     "success",
     "completed",
@@ -139,8 +139,8 @@ def _map_native_status(status: str | None) -> str:
         "completed": "completed",
         "error": "failed",
         "failed": "failed",
-        "timeout": "failed",
-        "timed_out": "failed",
+        "timeout": "timed_out",
+        "timed_out": "timed_out",
         "interrupted": "cancelled",
         "cancelled": "cancelled",
     }.get(str(status or "").lower(), "running")
@@ -150,6 +150,7 @@ def _completion_status(status: str) -> str | None:
     return {
         "completed": "success",
         "failed": "error",
+        "timed_out": "timeout",
         "cancelled": "cancelled",
     }.get(status)
 
@@ -280,6 +281,7 @@ def _cancel_detail_for_status(status: str) -> str:
     return {
         "completed": "Builder already finished before cancellation could be applied.",
         "failed": "Builder already stopped with an error before cancellation could be applied.",
+        "timed_out": "Builder already timed out before cancellation could be applied.",
         "cancelled": "Builder was already cancelled.",
         "running": "Builder cancellation was requested.",
     }.get(status, "Builder was cancelled before finishing the deliverable.")
