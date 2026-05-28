@@ -277,6 +277,11 @@ _TASK_TYPE_EXTENSIONS = {
     "visual_report": "pdf",
 }
 
+_HTML_OUTPUT_RE = re.compile(
+    r"\bhtml\b|\bhtml\s+(?:document|file|report|summary|brief|article|explainer)\b",
+    re.IGNORECASE,
+)
+
 _FALLBACK_TASK_SLUG = "build"
 _MAX_SLUG_SOURCE_CHARS = 60
 
@@ -310,6 +315,8 @@ def _suggest_artifact_filename(
     ``build.md`` when both inputs are missing.
     """
     ext = _TASK_TYPE_EXTENSIONS.get(task_type or "", "md")
+    if task_type in {"document", "research"} and description and _HTML_OUTPUT_RE.search(description):
+        ext = "html"
     slug = _slugify_for_filename(description or _FALLBACK_TASK_SLUG)
     return f"{slug}.{ext}"
 

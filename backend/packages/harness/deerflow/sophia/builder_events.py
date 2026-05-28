@@ -230,7 +230,7 @@ def _is_phantom_success(
     - status maps to 'success' (i.e., subagent reported COMPLETED)
     - artifact_url is missing (signed-URL mint failed because the file
       doesn't exist on Supabase) AND artifact_path is missing/empty
-    - confidence is below the phantom threshold
+    - confidence is at or below the phantom threshold
 
     The confidence check matters because a deliberately-text-only artifact
     (no path, but high confidence) is legitimate — only the low-confidence
@@ -250,7 +250,7 @@ def _is_phantom_success(
         # Missing confidence + missing path/url is itself suspicious; treat
         # as phantom so the user gets the failure card with retry.
         return True
-    return confidence_value < _PHANTOM_SUCCESS_CONFIDENCE_THRESHOLD
+    return confidence_value <= _PHANTOM_SUCCESS_CONFIDENCE_THRESHOLD
 
 
 def _post_webhook(payload: dict[str, Any]) -> None:

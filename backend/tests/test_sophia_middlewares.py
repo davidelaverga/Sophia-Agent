@@ -2606,8 +2606,17 @@ class TestBuilderArtifactMiddleware:
 
         assert captured["thread_id"] == "builder-ephemeral-thread"
 
-    def test_fallback_on_no_tool_call(self):
+    def test_fallback_on_no_tool_call(self, monkeypatch):
+        from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba_module
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(
+            ba_module,
+            "fire_completion_webhook_from_artifact",
+            lambda **kwargs: captured.update(kwargs) or True,
+        )
+
         mw = BuilderArtifactMiddleware()
         msg = MagicMock()
         msg.type = "ai"
@@ -2616,6 +2625,9 @@ class TestBuilderArtifactMiddleware:
         result = mw.after_model(state, _make_runtime())
         assert result is not None
         assert result["builder_result"]["confidence"] == 0.3  # fallback
+        assert captured["status"] == "failed"
+        assert captured["artifact"]["artifact_path"] is None
+        assert "deliverable" in captured["error_message"]
 
     def test_ignores_non_builder_tool_calls(self):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware

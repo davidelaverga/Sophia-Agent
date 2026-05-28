@@ -286,6 +286,36 @@ def test_phantom_success_coerces_to_error():
     assert "try again" in payload["error_message"].lower()
 
 
+def test_phantom_success_threshold_includes_point_three_confidence():
+    runtime = _make_runtime()
+    state = _make_state()
+    artifact = _phantom_artifact()
+    artifact["confidence"] = 0.3
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=artifact, status="completed"
+        )
+
+    assert payload["status"] == "error"
+    assert payload["error_message"] is not None
+
+
+def test_phantom_success_missing_confidence_coerces_to_error():
+    runtime = _make_runtime()
+    state = _make_state()
+    artifact = _phantom_artifact()
+    artifact.pop("confidence", None)
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=artifact, status="completed"
+        )
+
+    assert payload["status"] == "error"
+    assert payload["error_message"] is not None
+
+
 def test_failed_status_passes_through():
     runtime = _make_runtime()
     state = _make_state()

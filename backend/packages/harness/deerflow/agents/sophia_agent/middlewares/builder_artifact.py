@@ -1417,14 +1417,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 },
             )
             log_middleware("BuilderArtifact", "no builder artifact tool call, using fallback", _t0)
-            # Fire the gateway webhook (phantom-success guard will likely
-            # coerce this to an error card since the fallback has no
-            # artifact_path and confidence=0.3).
+            # Fire an explicit failure webhook: this fallback has no real
+            # deliverable, so it must not surface as a ready/completed card.
             fire_completion_webhook_from_artifact(
                 state=state,
                 runtime=runtime,
                 artifact=fallback,
-                status="completed",
+                status="failed",
+                error_message=(
+                    "Builder finished without producing a deliverable. "
+                    "Want me to try again?"
+                ),
             )
             return {
                 "builder_result": fallback,

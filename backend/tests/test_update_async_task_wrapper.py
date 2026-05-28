@@ -569,6 +569,27 @@ def test_augment_extension_matches_task_type():
         )
 
 
+def test_augment_preserves_html_document_output_format():
+    """Static HTML document builds are document-style tasks, but the resumed
+    concrete file target must still keep the requested .html output format."""
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    source_url = "https://github.com/RecursiveMAS/RecursiveMAS"
+    augmented = _augment_update_message(
+        message=f"add recursive MAS section from {source_url}",
+        tracked={"task_id": "t1", "task_type": "document"},
+        delegation_context={
+            "task": "Build an HTML document about Karpathy autoresearch",
+            "task_type": "document",
+        },
+    )
+
+    assert "/mnt/user-data/outputs/" in augmented
+    assert "build-an-html-document-about-karpathy-au.html" in augmented
+    assert source_url in augmented
+    assert "add recursive MAS section" in augmented
+
+
 def test_augment_prefer_prior_artifact_path_over_suggested_filename():
     """If the prior builder already produced an artifact_path, use that
     exact path instead of a derived suggestion. The model should continue
