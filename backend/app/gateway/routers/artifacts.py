@@ -2,7 +2,7 @@ import logging
 import mimetypes
 import zipfile
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -131,6 +131,21 @@ def _requires_thread_owner_for_artifact(path: str) -> bool:
         or normalized == _WORKSPACE_OUTPUTS_VIRTUAL_PATH
         or normalized.startswith(_WORKSPACE_OUTPUTS_VIRTUAL_PATH + "/")
     )
+
+
+def _normalize_artifact_virtual_path(path: str) -> str:
+    """Collapse safe dot segments before authorization and resolution."""
+    parts: list[str] = []
+    for part in PurePosixPath(path.replace("\\", "/")).parts:
+        if part in {"", "/", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                raise HTTPException(status_code=403, detail="Path traversal detected")
+            parts.pop()
+            continue
+        parts.append(part)
+    return "/".join(parts)
 
 
 def _resolve_artifact_path(thread_id: str, path: str) -> Path:
@@ -362,6 +377,7 @@ async def get_artifact(
         - Get HTML file: `/api/threads/abc123/artifacts/mnt/user-data/outputs/index.html`
         - Download file: `/api/threads/abc123/artifacts/mnt/user-data/outputs/data.csv?download=true`
     """
+    path = _normalize_artifact_virtual_path(path)
     if _requires_thread_owner_for_artifact(path):
         _require_thread_owner(authenticated_user_id, thread_id)
 
