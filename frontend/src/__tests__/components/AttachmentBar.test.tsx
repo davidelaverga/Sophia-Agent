@@ -1015,6 +1015,48 @@ describe('AttachmentBar — Codex P2 per-turn cap', () => {
     expect(chip?.filename).toBe('notes.md');
   });
 
+  it('post-hoc rename of a convertible avoids its derived .md colliding with a literal .md (Codex P2 PR #132)', async () => {
+    // Server already has report.pdf + report.md (a prior conversion).
+    // User picks report.pdf (collides on server) + report-1.md
+    // (literal). The PDF must NOT be renamed to report-1.pdf — its
+    // conversion output report-1.md would clobber the user's literal
+    // report-1.md. The convertible-aware post-hoc uniquify must skip
+    // to report-2.pdf (conversion → report-2.md, free).
+    const serverList = new Response(
+      JSON.stringify({ files: [{ filename: 'report.pdf' }, { filename: 'report.md' }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+    const fetchMock = vi.spyOn(global, 'fetch')
+      .mockResolvedValueOnce(serverList) // /uploads/list
+      .mockResolvedValue(
+        new Response(JSON.stringify({ success: true, files: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+
+    render(<AttachmentBar threadId="thread-conv" />);
+    const input = screen.getByTestId('attachment-bar-file-input') as HTMLInputElement;
+    dispatchFilesOnto(input, [
+      makeFile('report.pdf', 1024, 'application/pdf'),
+      makeFile('report-1.md', 1024, 'text/markdown'),
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const filenames = useAttachmentsStore.getState().items.map((i) => i.filename).sort();
+    // PDF bumped to report-2.pdf (NOT report-1.pdf, whose .md would
+    // collide with the literal report-1.md). Literal report-1.md kept.
+    expect(filenames).toEqual(['report-1.md', 'report-2.pdf']);
+    // The PDF's upload body carries the report-2.pdf name.
+    const pdfUpload = fetchMock.mock.calls
+      .map((c) => (c[1] as RequestInit | undefined)?.body)
+      .filter((b): b is FormData => b instanceof FormData)
+      .map((b) => (b.get('files') as File).name);
+    expect(pdfUpload).toContain('report-2.pdf');
+    expect(pdfUpload).not.toContain('report-1.pdf');
+  });
+
   it('clears a stale cap-reached banner on a later valid pick (Codex P3 PR #132)', async () => {
     // First selection fills the per-turn cap → "limit reached" banner.
     for (let i = 0; i < 12; i += 1) {

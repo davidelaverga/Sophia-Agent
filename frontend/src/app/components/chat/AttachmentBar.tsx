@@ -146,6 +146,39 @@ function uniquifyFilename(name: string, claimed: Set<string>): string {
 }
 
 /**
+ * Convertible-aware uniquifier (Codex P2 PR #132). For a convertible
+ * upload the gateway ALSO writes ``<stem>.md``, so a candidate name
+ * is only truly free when BOTH the candidate AND its derived markdown
+ * sibling are absent from ``claimed``. Used by the post-hoc
+ * server-truth rename pass: when a convertible upload collides on the
+ * server and we have to rename it, the new name's eventual ``.md``
+ * conversion output must not clobber a literal ``.md`` the user also
+ * uploaded (or vice versa).
+ *
+ * For non-convertible names (``deriveMarkdownSibling`` returns null)
+ * this behaves exactly like ``uniquifyFilename``.
+ */
+function uniquifyFilenameAvoidingMdSibling(
+  name: string,
+  claimed: Set<string>,
+): string {
+  const isFree = (candidate: string): boolean => {
+    if (claimed.has(candidate)) return false
+    const md = deriveMarkdownSibling(candidate)
+    return md === null || !claimed.has(md)
+  }
+  if (isFree(name)) return name
+  const dot = name.lastIndexOf(".")
+  const stem = dot > 0 ? name.slice(0, dot) : name
+  const ext = dot > 0 ? name.slice(dot) : ""
+  for (let n = 1; n < 1000; n += 1) {
+    const candidate = `${stem}-${n}${ext}`
+    if (isFree(candidate)) return candidate
+  }
+  return `${stem}-${Date.now()}${ext}`
+}
+
+/**
  * Mutable ref the bar populates with an ``openPicker`` callback. Lets
  * a parent component (e.g. the Composer's bottom action row) render
  * its own paperclip button that triggers the bar's hidden file input.
@@ -427,10 +460,19 @@ function applyServerTruthRenames(
     if (reg.skip) continue
     if (!serverNames.has(reg.item.filename)) continue
     const merged = new Set<string>([...serverNames, ...inBatch])
-    const renamed = uniquifyFilename(reg.item.filename, merged)
+    // Convertible-aware (Codex P2 PR #132): if this is a convertible
+    // upload, the new name's eventual ``<stem>.md`` conversion output
+    // must also be free, so it can't clobber a literal ``.md`` the
+    // user uploaded in this batch (or an existing one on the server).
+    const renamed = uniquifyFilenameAvoidingMdSibling(reg.item.filename, merged)
     if (renamed === reg.item.filename) continue
     inBatch.delete(reg.item.filename)
     inBatch.add(renamed)
+    // Reserve the renamed file's derived ``.md`` so a LATER rename in
+    // this same pass doesn't pick a name whose conversion output
+    // collides with this one's.
+    const renamedMd = deriveMarkdownSibling(renamed)
+    if (renamedMd) inBatch.add(renamedMd)
     reg.file = new File([reg.file], renamed, {
       type: reg.file.type,
       lastModified: reg.file.lastModified,
