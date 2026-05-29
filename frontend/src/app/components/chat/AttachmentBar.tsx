@@ -783,11 +783,16 @@ export function AttachmentBar({
       }
       const registrations = preparePickedFiles(filesList, threadId, add)
       // Cap-reached toast: if EVERY pick was rejected, surface why.
-      if (allRejected(registrations)) {
-        setStatusMessage(
-          `Attachment limit reached (${MAX_ATTACHED_FILES_PER_TURN} per turn). Send your message first, then attach more.`,
-        )
-      }
+      // Otherwise CLEAR any stale banner (Codex P3 PR #132) — a prior
+      // pick may have left a "limit reached" / "session not ready"
+      // message up, and showing it next to a freshly-uploading chip
+      // is misleading. A pick that produces ≥1 accepted registration
+      // resets the banner to null.
+      setStatusMessage(
+        allRejected(registrations)
+          ? `Attachment limit reached (${MAX_ATTACHED_FILES_PER_TURN} per turn). Send your message first, then attach more.`
+          : null,
+      )
       // Phase 2: server-truth uniquify (post-hoc rename). Bounded by
       // ``UPLOADS_LIST_TIMEOUT_MS`` (4s); failure → no renames →
       // chips ship with in-store-only names.

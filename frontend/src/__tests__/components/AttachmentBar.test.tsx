@@ -943,4 +943,44 @@ describe('AttachmentBar — Codex P2 per-turn cap', () => {
     const banner = await screen.findByTestId('attachment-bar-status');
     expect(banner.textContent).toMatch(/Attachment limit reached/i);
   });
+
+  it('clears a stale cap-reached banner on a later valid pick (Codex P3 PR #132)', async () => {
+    // First selection fills the per-turn cap → "limit reached" banner.
+    for (let i = 0; i < 12; i += 1) {
+      useAttachmentsStore.getState().add({
+        clientId: `pre-${i}`,
+        filename: `seeded${i}.png`,
+        size: 1024,
+        status: 'uploaded',
+        hasMarkdownConversion: false,
+        threadId: 'thread-clear',
+      });
+    }
+    expectListThenMock();
+
+    render(<AttachmentBar threadId="thread-clear" />);
+    const input = screen.getByTestId('attachment-bar-file-input') as HTMLInputElement;
+    dispatchFilesOnto(input, [makeFile('overflow.png')]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      (await screen.findByTestId('attachment-bar-status')).textContent,
+    ).toMatch(/Attachment limit reached/i);
+
+    // Free up a slot by removing two seeded chips, then pick a valid
+    // file. The successful pick MUST clear the stale banner.
+    useAttachmentsStore.getState().remove('pre-0');
+    useAttachmentsStore.getState().remove('pre-1');
+    expectListThenMock();
+    dispatchFilesOnto(input, [makeFile('fresh.png')]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Banner is gone — a valid pick resets statusMessage to null.
+    expect(screen.queryByTestId('attachment-bar-status')).not.toBeInTheDocument();
+    // And the fresh chip is present + accepted.
+    const fresh = useAttachmentsStore
+      .getState()
+      .items.find((i) => i.filename === 'fresh.png');
+    expect(fresh).toBeDefined();
+    expect(fresh?.status).not.toBe('error');
+  });
 });
