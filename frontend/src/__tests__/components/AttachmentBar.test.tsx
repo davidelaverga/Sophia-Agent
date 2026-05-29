@@ -1057,6 +1057,50 @@ describe('AttachmentBar — Codex P2 per-turn cap', () => {
     expect(pdfUpload).not.toContain('report-1.pdf');
   });
 
+  it('renames report.pdf when the server already holds its derived report.md (Codex P2 PR #132 follow-up)', async () => {
+    // The server has report.md but NOT report.pdf — e.g. a prior
+    // literal report.md upload, or a prior report.pdf whose .pdf was
+    // deleted while the conversion output lingered. The user now
+    // attaches report.pdf. The old guard checked only the primary
+    // filename: serverNames lacks report.pdf, so it skipped the rename
+    // — then the gateway's with_suffix(".md") conversion would
+    // OVERWRITE the existing report.md, corrupting an attachment still
+    // referenced in chat history. The fix triggers a rename when the
+    // derived .md sibling collides too, bumping the PDF to report-1.pdf
+    // (conversion → report-1.md, free) so the server's report.md
+    // survives untouched.
+    const serverList = new Response(
+      JSON.stringify({ files: [{ filename: 'report.md' }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+    const fetchMock = vi.spyOn(global, 'fetch')
+      .mockResolvedValueOnce(serverList) // /uploads/list
+      .mockResolvedValue(
+        new Response(JSON.stringify({ success: true, files: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+
+    render(<AttachmentBar threadId="thread-md-sibling" />);
+    const input = screen.getByTestId('attachment-bar-file-input') as HTMLInputElement;
+    dispatchFilesOnto(input, [makeFile('report.pdf', 1024, 'application/pdf')]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const filenames = useAttachmentsStore.getState().items.map((i) => i.filename);
+    // PDF bumped to report-1.pdf so its conversion output (report-1.md)
+    // can't clobber the server's existing report.md.
+    expect(filenames).toEqual(['report-1.pdf']);
+    // The upload body carries the bumped name (not the colliding one).
+    const pdfUpload = fetchMock.mock.calls
+      .map((c) => (c[1] as RequestInit | undefined)?.body)
+      .filter((b): b is FormData => b instanceof FormData)
+      .map((b) => (b.get('files') as File).name);
+    expect(pdfUpload).toContain('report-1.pdf');
+    expect(pdfUpload).not.toContain('report.pdf');
+  });
+
   it('clears a stale cap-reached banner on a later valid pick (Codex P3 PR #132)', async () => {
     // First selection fills the per-turn cap → "limit reached" banner.
     for (let i = 0; i < 12; i += 1) {

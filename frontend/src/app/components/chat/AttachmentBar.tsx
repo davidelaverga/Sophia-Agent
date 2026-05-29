@@ -458,12 +458,29 @@ function applyServerTruthRenames(
   }
   for (const reg of registrations) {
     if (reg.skip) continue
-    if (!serverNames.has(reg.item.filename)) continue
+    // Rename when the primary name collides on the server OR — for a
+    // convertible upload — when its derived ``<stem>.md`` conversion
+    // output would clobber an existing server file (Codex P2 PR #132
+    // follow-up). Checking only the primary name missed the case where
+    // the server holds ``report.md`` (a prior literal ``.md`` upload,
+    // or the conversion output of a prior ``report.pdf``) and the user
+    // now attaches ``report.pdf``: ``serverNames`` lacks ``report.pdf``,
+    // so the old guard skipped the rename — then the gateway's
+    // ``with_suffix(".md")`` write overwrote the earlier ``report.md``,
+    // silently corrupting an attachment still referenced in chat
+    // history.
+    const mdSibling = deriveMarkdownSibling(reg.item.filename)
+    const primaryCollides = serverNames.has(reg.item.filename)
+    const mdSiblingCollides = mdSibling !== null && serverNames.has(mdSibling)
+    if (!primaryCollides && !mdSiblingCollides) continue
     const merged = new Set<string>([...serverNames, ...inBatch])
     // Convertible-aware (Codex P2 PR #132): if this is a convertible
     // upload, the new name's eventual ``<stem>.md`` conversion output
     // must also be free, so it can't clobber a literal ``.md`` the
     // user uploaded in this batch (or an existing one on the server).
+    // ``uniquifyFilenameAvoidingMdSibling`` already treats a candidate
+    // as taken when its derived ``.md`` is in ``merged``, so the
+    // ``mdSiblingCollides`` entry point above resolves to a free name.
     const renamed = uniquifyFilenameAvoidingMdSibling(reg.item.filename, merged)
     if (renamed === reg.item.filename) continue
     inBatch.delete(reg.item.filename)
