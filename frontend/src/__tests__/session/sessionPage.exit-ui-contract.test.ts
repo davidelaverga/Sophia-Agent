@@ -46,4 +46,12 @@ describe('session page exit UI contract', () => {
     expect(source).toContain('!isBuilderActivelyRunning ? builderArtifactLibrary[0] : null');
     expect(source).not.toContain('!builderTask ? builderArtifactLibrary[0] : null');
   });
+
+  it('matches backend missing-deliverable text before artifact-library recovery', () => {
+    const source = readAppFile('app/session/page.tsx');
+
+    expect(source).toContain("const MISSING_BUILDER_DELIVERABLE_ERROR = 'Builder finished without a deliverable artifact.';");
+    expect(source).toContain('builderCompletion.error_message === MISSING_BUILDER_DELIVERABLE_ERROR');
+    expect(source).toContain('MISSING_BUILDER_DELIVERABLE_RETRY_MESSAGE');
+  });
 });

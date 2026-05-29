@@ -77,8 +77,8 @@ import { useSessionUiInteractions } from './useSessionUiInteractions';
 import { useSessionValidationState } from './useSessionValidationState';
 import { useSessionVoiceCommandSystem } from './useSessionVoiceCommandSystem';
 
-const MISSING_BUILDER_DELIVERABLE_MESSAGE =
-  'Builder finished without a deliverable artifact. Please try again.';
+const MISSING_BUILDER_DELIVERABLE_ERROR = 'Builder finished without a deliverable artifact.';
+const MISSING_BUILDER_DELIVERABLE_RETRY_MESSAGE = `${MISSING_BUILDER_DELIVERABLE_ERROR} Please try again.`;
 
 // ============================================================================
 // PROTECTED SESSION PAGE WRAPPER
@@ -653,7 +653,7 @@ function SessionPageContent() {
     const hasActionPath = Boolean(builderCompletion.artifact_path || builderCompletion.artifact_url);
     const isMissingDeliverableError = (
       builderCompletion.status === 'error'
-      && builderCompletion.error_message === MISSING_BUILDER_DELIVERABLE_MESSAGE
+      && builderCompletion.error_message === MISSING_BUILDER_DELIVERABLE_ERROR
     );
     if (hasActionPath) {
       return builderCompletion;
@@ -669,7 +669,7 @@ function SessionPageContent() {
           ...builderCompletion,
           thread_id: builderCompletion.thread_id || resolvedThreadId || '',
           status: 'error',
-          error_message: builderCompletion.error_message ?? MISSING_BUILDER_DELIVERABLE_MESSAGE,
+          error_message: builderCompletion.error_message ?? MISSING_BUILDER_DELIVERABLE_RETRY_MESSAGE,
           source: builderCompletion.source ?? 'artifact_missing_reclassified',
         };
       }
