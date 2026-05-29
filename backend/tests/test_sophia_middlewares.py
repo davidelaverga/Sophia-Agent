@@ -2439,7 +2439,7 @@ class TestBuilderResearchPolicyMiddleware:
         assert result["builder_allowed_urls"] == ["https://example.com/source"]
         assert "Autonomous web research is enabled" in result["system_prompt_blocks"][-1]
 
-    def test_disables_web_policy_for_non_browsing_task(self):
+    def test_enables_web_policy_even_when_delegation_is_stale_false(self):
         from deerflow.agents.sophia_agent.middlewares.builder_research_policy import BuilderResearchPolicyMiddleware
 
         mw = BuilderResearchPolicyMiddleware()
@@ -2454,8 +2454,8 @@ class TestBuilderResearchPolicyMiddleware:
 
         result = mw.before_agent(state, _make_runtime())
         assert result is not None
-        assert result["allow_web_research"] is False
-        assert "External browsing is disabled" in result["system_prompt_blocks"][-1]
+        assert result["allow_web_research"] is True
+        assert "Autonomous web research is enabled" in result["system_prompt_blocks"][-1]
 
 
 # --- BuilderArtifactMiddleware ---

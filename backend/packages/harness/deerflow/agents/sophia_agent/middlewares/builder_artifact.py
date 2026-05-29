@@ -12,6 +12,7 @@ of completing with a phantom artifact.
 """
 
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
@@ -78,6 +79,21 @@ def _emit_skill_usage_logs(tool_calls: list[dict[str, Any]]) -> None:
 
 
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
+_BUILDER_WRITE_TOOL_NAMES = {"write_file", "write_file_tool"}
+_BUILDER_RESEARCH_TOOL_NAMES = {"builder_web_search", "builder_web_fetch"}
+_BUILDER_SUBSTANTIVE_TOOL_NAMES = {
+    "write_file",
+    "write_file_tool",
+    "str_replace",
+    "str_replace_tool",
+    "emit_builder_artifact",
+}
+_SAFE_BASH_COMMAND_RE = re.compile(
+    r"^\s*(?:pwd|ls|find|cat|sed|head|tail|grep|rg|wc|file|du|stat|jq)\b"
+)
+_BASH_WRITE_MARKER_RE = re.compile(
+    r"(?:^|\s)(?:python|node|perl|ruby)\b|[>|]\s*|(?:^|\s)tee\s+|<<"
+)
 
 
 def _extract_output_relative_path(artifact_path: str | None) -> str | None:
@@ -136,11 +152,141 @@ def _upload_builder_outputs_to_supabase(
         maybe_mirror_file(str(host_file), thread_id, outputs_host_path)
 
 
+def _outputs_host_path_from_state(state: dict[str, Any]) -> str | None:
+    thread_data = state.get("thread_data") or {}
+    return thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
+
+
+def _builder_started_min_mtime(state: dict[str, Any]) -> float | None:
+    started_ms = state.get("builder_task_started_at_ms")
+    if isinstance(started_ms, (int, float)) and started_ms > 0:
+        return (float(started_ms) / 1000.0) - 5.0
+    return None
+
+
+def _is_recovery_candidate(entry: Path, *, requested_suffix: str, min_mtime: float | None) -> bool:
+    if not entry.is_file() or entry.name.startswith((".", "_")):
+        return False
+    if requested_suffix and entry.suffix.lower() != requested_suffix:
+        return False
+    return min_mtime is None or entry.stat().st_mtime >= min_mtime
+
+
+def _recovery_hint(outputs_root: Path, candidates: list[Path]) -> str:
+    logger.info(
+        "BuilderArtifact: emit_path_missing recovery_candidate_count=%s recovery_accepted=%s",
+        len(candidates),
+        len(candidates) == 1,
+    )
+    if len(candidates) != 1:
+        return ""
+    recovered = candidates[0].relative_to(outputs_root).as_posix()
+    return (
+        " I found exactly one plausible output candidate in the artifact "
+        f"directory: `{_OUTPUTS_VIRTUAL_PREFIX}{recovered}`. If that is the "
+        "intended deliverable, call emit_builder_artifact again with that exact path."
+    )
+
+
+def _first_research_tool_index(tool_names: list[str]) -> int:
+    indexes = [
+        index
+        for index, name in enumerate(tool_names)
+        if name in _BUILDER_RESEARCH_TOOL_NAMES
+    ]
+    return indexes[0] if indexes else len(tool_names) + 1
+
+
+def _first_write_tool_index(tool_names: list[str]) -> int:
+    indexes = [
+        index
+        for index, name in enumerate(tool_names)
+        if name in _BUILDER_WRITE_TOOL_NAMES
+    ]
+    return indexes[0] if indexes else len(tool_names) + 1
+
+
+def _diagnostic_int(diagnostics: dict[str, Any], key: str) -> int:
+    return int(diagnostics.get(key, 0) or 0)
+
+
+def _diagnostic_counts(diagnostics: dict[str, Any]) -> tuple[int, int, int]:
+    return (
+        _diagnostic_int(diagnostics, "builder_web_search_count"),
+        _diagnostic_int(diagnostics, "builder_web_fetch_count"),
+        _diagnostic_int(diagnostics, "write_file_count"),
+    )
+
+
+def _is_safe_pre_research_bash(command: Any) -> bool:
+    """Return whether a bash command is read-only inspection."""
+    if not isinstance(command, str) or not command.strip():
+        return False
+    if _BASH_WRITE_MARKER_RE.search(command):
+        return False
+    return bool(_SAFE_BASH_COMMAND_RE.search(command))
+
+
+def _should_warn_missing_web_tools(
+    *,
+    phase: str,
+    allow_web_research: bool,
+    search_count: int,
+    fetch_count: int,
+    write_file_count: int,
+) -> bool:
+    return (
+        allow_web_research
+        and (phase == "completion" or write_file_count > 0)
+        and search_count + fetch_count == 0
+    )
+
+
+def _write_tool_names(tool_names: list[str]) -> list[str]:
+    return [name for name in tool_names if name in _BUILDER_WRITE_TOOL_NAMES]
+
+
+def _builder_web_attempt_count(state: dict[str, Any]) -> int:
+    budget = state.get("builder_web_budget") or {}
+    if not isinstance(budget, dict):
+        return 0
+    return int(budget.get("search_calls", 0) or 0) + int(budget.get("fetch_calls", 0) or 0)
+
+
+def _has_builder_search_source(state: dict[str, Any]) -> bool:
+    sources = state.get("builder_search_sources") or []
+    return any(isinstance(source, dict) and source.get("url") for source in sources)
+
+
+def _force_reason(turn_force: bool, clock_force: bool) -> str:
+    if turn_force and clock_force:
+        return "turns+wall_clock"
+    if clock_force:
+        return "wall_clock"
+    return "turns"
+
+
+def _wrote_before_research(
+    *,
+    previous: dict[str, Any],
+    search_count: int,
+    fetch_count: int,
+    write_names: list[str],
+    tool_names: list[str],
+) -> bool:
+    if previous.get("wrote_before_research", False):
+        return True
+    if not write_names or search_count + fetch_count > 0:
+        return False
+    return _first_research_tool_index(tool_names) > _first_write_tool_index(tool_names)
+
+
 class BuilderArtifactState(AgentState):
     builder_result: NotRequired[dict | None]
     builder_non_artifact_turns: NotRequired[int]
     builder_last_tool_names: NotRequired[list[str]]
     builder_tool_turn_summaries: NotRequired[list[dict]]
+    builder_research_diagnostics: NotRequired[dict]
     # PR #94: count consecutive emit attempts rejected for empty/missing
     # ``artifact_path``. When this reaches ``_REJECTION_SHORT_CIRCUIT_AT``
     # we route directly to the hard-ceiling fallback instead of letting
@@ -171,6 +317,114 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         history = list(state.get("builder_tool_turn_summaries", []) or [])
         history.append(summary)
         return history[-12:]
+
+    @staticmethod
+    def _allow_web_research(state: BuilderArtifactState) -> bool:
+        delegation = state.get("delegation_context")
+        if "allow_web_research" in state or isinstance(delegation, dict):
+            return True
+        return False
+
+    @staticmethod
+    def _research_attempted(state: BuilderArtifactState) -> bool:
+        return _builder_web_attempt_count(state) > 0 or _has_builder_search_source(state)
+
+    @staticmethod
+    def _planning_completed(state: BuilderArtifactState) -> bool:
+        summaries = state.get("builder_tool_turn_summaries") or []
+        if any(
+            "write_todos" in (summary.get("tool_names") or [])
+            for summary in summaries
+            if isinstance(summary, dict)
+        ):
+            return True
+        return int(state.get("builder_non_artifact_turns", 0) or 0) > 0
+
+    @classmethod
+    def _should_force_research_tool(cls, state: BuilderArtifactState) -> bool:
+        return (
+            cls._allow_web_research(state)
+            and cls._planning_completed(state)
+            and not cls._research_attempted(state)
+        )
+
+    @classmethod
+    def _is_substantive_before_research_tool(cls, state: BuilderArtifactState, tool_call: dict[str, Any]) -> bool:
+        if not cls._allow_web_research(state) or cls._research_attempted(state):
+            return False
+        name = tool_call.get("name")
+        if name in _BUILDER_SUBSTANTIVE_TOOL_NAMES:
+            return True
+        if name in {"bash", "bash_tool"}:
+            args = tool_call.get("args") or {}
+            command = args.get("command") if isinstance(args, dict) else None
+            return not _is_safe_pre_research_bash(command)
+        return False
+
+    @staticmethod
+    def _update_research_diagnostics(
+        state: BuilderArtifactState,
+        tool_names: list[str],
+    ) -> dict[str, Any]:
+        previous = dict(state.get("builder_research_diagnostics") or {})
+        search_count, fetch_count, write_file_count = _diagnostic_counts(previous)
+        first_content_tool = previous.get("first_content_tool")
+        write_names = _write_tool_names(tool_names)
+        wrote_before_research = _wrote_before_research(
+            previous=previous,
+            search_count=search_count,
+            fetch_count=fetch_count,
+            write_names=write_names,
+            tool_names=tool_names,
+        )
+        search_count += tool_names.count("builder_web_search")
+        fetch_count += tool_names.count("builder_web_fetch")
+        write_file_count += len(write_names)
+        first_content_tool = first_content_tool or (write_names[0] if write_names else None)
+
+        return {
+            "builder_web_search_count": search_count,
+            "builder_web_fetch_count": fetch_count,
+            "write_file_count": write_file_count,
+            "first_content_tool": first_content_tool,
+            "wrote_before_research": wrote_before_research,
+        }
+
+    @staticmethod
+    def _log_research_diagnostics(
+        *,
+        phase: str,
+        diagnostics: dict[str, Any],
+        allow_web_research: bool,
+        sources_used: Any = None,
+    ) -> None:
+        sources_empty = isinstance(sources_used, list) and len(sources_used) == 0
+        search_count, fetch_count, write_file_count = _diagnostic_counts(diagnostics)
+        logger.info(
+            "[BuilderResearchDiagnostics] phase=%s allow_web_research=%s builder_web_search_count=%d builder_web_fetch_count=%d write_file_count=%d first_content_tool=%s wrote_before_research=%s sources_used_empty=%s",
+            phase,
+            allow_web_research,
+            search_count,
+            fetch_count,
+            write_file_count,
+            diagnostics.get("first_content_tool"),
+            bool(diagnostics.get("wrote_before_research", False)),
+            sources_empty,
+        )
+        if _should_warn_missing_web_tools(
+            phase=phase,
+            allow_web_research=allow_web_research,
+            search_count=search_count,
+            fetch_count=fetch_count,
+            write_file_count=write_file_count,
+        ):
+            logger.warning(
+                "[BuilderResearchDiagnostics] reason=research_enabled_no_web_tools first_content_tool=%s write_file_count=%d",
+                diagnostics.get("first_content_tool"),
+                write_file_count,
+            )
+        if allow_web_research and sources_empty:
+            logger.warning("[BuilderResearchDiagnostics] reason=research_enabled_empty_sources_used")
 
     # Ceiling enforcement — MUST stay in sync with _HARD_CEILING in after_model
     # and with builder_task.py's _HARD_CEILING. When the model is within this
@@ -275,6 +529,80 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         one chance to land a file before tool_choice locks to emit.
         """
         return {"type": "tool", "name": "write_file"}
+
+    @staticmethod
+    def _forced_search_tool_choice() -> dict[str, Any]:
+        """Anthropic tool_choice payload that forces builder_web_search."""
+        return {"type": "tool", "name": "builder_web_search"}
+
+    @staticmethod
+    def _forced_fetch_tool_choice() -> dict[str, Any]:
+        """Anthropic tool_choice payload that forces builder_web_fetch."""
+        return {"type": "tool", "name": "builder_web_fetch"}
+
+    def _research_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not self._should_force_research_tool(state):
+            return None
+        explicit_urls = [
+            url for url in (state.get("explicit_user_urls") or []) if str(url).strip()
+        ]
+        if explicit_urls:
+            logger.warning(
+                "BuilderArtifact: forcing tool_choice=builder_web_fetch "
+                "before artifact writing (explicit_urls=%d)",
+                len(explicit_urls),
+            )
+            return self._forced_fetch_tool_choice()
+        logger.warning(
+            "BuilderArtifact: forcing tool_choice=builder_web_search "
+            "before artifact writing"
+        )
+        return self._forced_search_tool_choice()
+
+    def _completion_tool_choice_for_state(
+        self,
+        state: BuilderArtifactState,
+        runtime: Runtime | None = None,
+    ) -> dict[str, Any] | None:
+        turn_force = self._should_force_emit(state)
+        clock_force = self._should_force_emit_by_clock(state, runtime)
+        if not (turn_force or clock_force):
+            return None
+        force_reason = _force_reason(turn_force, clock_force)
+        non_artifact_turns = state.get("builder_non_artifact_turns")
+
+        if self._has_output_file(state):
+            logger.warning(
+                "BuilderArtifact: forcing tool_choice=emit_builder_artifact "
+                "(non_artifact_turns=%s, ceiling=%s, reason=%s)",
+                non_artifact_turns,
+                self._CEILING_FOR_FORCE,
+                force_reason,
+            )
+            return self._forced_tool_choice()
+
+        if self._has_generator_script(state):
+            logger.warning(
+                "BuilderArtifact: forcing tool_choice=bash before emit "
+                "(non_artifact_turns=%s, ceiling=%s, reason=%s, generator "
+                "script on disk but no binary — three-stage force gives the "
+                "model a chance to RUN the generator instead of writing yet "
+                "another one)",
+                non_artifact_turns,
+                self._CEILING_FOR_FORCE,
+                force_reason,
+            )
+            return self._forced_bash_tool_choice()
+
+        logger.warning(
+            "BuilderArtifact: forcing tool_choice=write_file before emit "
+            "(non_artifact_turns=%s, ceiling=%s, reason=%s, no output file yet — "
+            "force prevents phantom-emit loop)",
+            non_artifact_turns,
+            self._CEILING_FOR_FORCE,
+            force_reason,
+        )
+        return self._forced_write_tool_choice()
 
     @staticmethod
     def _forced_bash_tool_choice() -> dict[str, Any]:
@@ -749,12 +1077,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         state: BuilderArtifactState,
     ) -> str:
         primary = artifact_args.get("artifact_path")
-        thread_data = state.get("thread_data") or {}
-        outputs_host_path = (
-            thread_data.get("outputs_path")
-            if isinstance(thread_data, dict)
-            else None
-        )
+        outputs_host_path = _outputs_host_path_from_state(state)
         if not isinstance(primary, str) or not primary.strip() or not outputs_host_path:
             return ""
         try:
@@ -762,19 +1085,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             if not outputs_root.is_dir():
                 return ""
             requested_suffix = Path(primary).suffix.lower()
-            started_ms = state.get("builder_task_started_at_ms")
-            min_mtime = None
-            if isinstance(started_ms, (int, float)) and started_ms > 0:
-                min_mtime = (float(started_ms) / 1000.0) - 5.0
-            candidates: list[Path] = []
-            for entry in outputs_root.rglob("*"):
-                if not entry.is_file() or entry.name.startswith((".", "_")):
-                    continue
-                if requested_suffix and entry.suffix.lower() != requested_suffix:
-                    continue
-                if min_mtime is not None and entry.stat().st_mtime < min_mtime:
-                    continue
-                candidates.append(entry)
+            min_mtime = _builder_started_min_mtime(state)
+            candidates = [
+                entry for entry in outputs_root.rglob("*")
+                if _is_recovery_candidate(entry, requested_suffix=requested_suffix, min_mtime=min_mtime)
+            ]
         except OSError:
             logger.debug(
                 "BuilderArtifact: missing-path recovery scan failed outputs_path=%s",
@@ -782,19 +1097,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 exc_info=True,
             )
             return ""
-        logger.info(
-            "BuilderArtifact: emit_path_missing recovery_candidate_count=%s recovery_accepted=%s",
-            len(candidates),
-            len(candidates) == 1,
-        )
-        if len(candidates) != 1:
-            return ""
-        recovered = candidates[0].relative_to(outputs_root).as_posix()
-        return (
-            " I found exactly one plausible output candidate in the artifact "
-            f"directory: `{_OUTPUTS_VIRTUAL_PREFIX}{recovered}`. If that is the "
-            "intended deliverable, call emit_builder_artifact again with that exact path."
-        )
+        return _recovery_hint(outputs_root, candidates)
 
     def _force_choice_for_state(
         self,
@@ -825,52 +1128,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
           nor a generator exists — the model has produced nothing on disk
           and needs to land at least one file before emit is forced.
         """
-        turn_force = self._should_force_emit(state)
-        clock_force = self._should_force_emit_by_clock(state, runtime)
-        if not (turn_force or clock_force):
-            return None
-        force_reason = "turns" if turn_force and not clock_force else (
-            "wall_clock" if clock_force and not turn_force else "turns+wall_clock"
+        return (
+            self._research_tool_choice_for_state(state)
+            or self._completion_tool_choice_for_state(state, runtime)
         )
-        non_artifact_turns = state.get("builder_non_artifact_turns")
-
-        # Stage 1: a real user-facing binary is on disk → force emit.
-        if self._has_output_file(state):
-            logger.warning(
-                "BuilderArtifact: forcing tool_choice=emit_builder_artifact "
-                "(non_artifact_turns=%s, ceiling=%s, reason=%s)",
-                non_artifact_turns,
-                self._CEILING_FOR_FORCE,
-                force_reason,
-            )
-            return self._forced_tool_choice()
-
-        # Stage 2 (PR-B): a generator script exists but no binary yet →
-        # force bash so the model runs what it has, instead of writing
-        # another generator that gets filtered out by _has_output_file.
-        if self._has_generator_script(state):
-            logger.warning(
-                "BuilderArtifact: forcing tool_choice=bash before emit "
-                "(non_artifact_turns=%s, ceiling=%s, reason=%s, generator "
-                "script on disk but no binary — three-stage force gives the "
-                "model a chance to RUN the generator instead of writing yet "
-                "another one)",
-                non_artifact_turns,
-                self._CEILING_FOR_FORCE,
-                force_reason,
-            )
-            return self._forced_bash_tool_choice()
-
-        # Stage 3: nothing on disk at all → force write_file (PR-A).
-        logger.warning(
-            "BuilderArtifact: forcing tool_choice=write_file before emit "
-            "(non_artifact_turns=%s, ceiling=%s, reason=%s, no output file yet — "
-            "force prevents phantom-emit loop)",
-            non_artifact_turns,
-            self._CEILING_FOR_FORCE,
-            force_reason,
-        )
-        return self._forced_write_tool_choice()
 
     # Phase 2F.3: after N consecutive write_file_tool errors, inject a
     # corrective HumanMessage so the model breaks out of the loop and
@@ -1070,6 +1331,41 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             request = request.override(tool_choice=choice)
         return await handler(request)
 
+    def _block_substantive_tool_before_research(
+        self,
+        request: ToolCallRequest,
+    ) -> Command | None:
+        if not self._is_substantive_before_research_tool(request.state, request.tool_call):
+            return None
+
+        tool_name = request.tool_call.get("name") or "unknown"
+        tool_call_id = request.tool_call.get("id", "")
+        logger.warning(
+            "[BuilderResearchEnforcement] blocked_content_tool_before_research "
+            "tool=%s",
+            tool_name,
+        )
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=(
+                            "Error: research-before-write enforcement blocked this tool call. "
+                            "You may keep your plan, but before writing, editing, running "
+                            "artifact-generating bash, or emitting the artifact, call "
+                            "builder_web_search or builder_web_fetch at least once. If the "
+                            "web tool fails or returns weak results, continue afterward with "
+                            "the best available context."
+                        ),
+                        tool_call_id=tool_call_id,
+                        name=str(tool_name),
+                        status="error",
+                    ),
+                ],
+            },
+            goto="model",
+        )
+
     @override
     def wrap_tool_call(
         self,
@@ -1083,6 +1379,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         builder graph) and instead return a ``Command(goto=\"model\")`` with an
         error ToolMessage. This lets the model see the rejection and retry.
         """
+        research_block = self._block_substantive_tool_before_research(request)
+        if research_block is not None:
+            return research_block
+
         if request.tool_call.get("name") != "emit_builder_artifact":
             return handler(request)
 
@@ -1124,6 +1424,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
         """Async variant — same logic as wrap_tool_call."""
+        research_block = self._block_substantive_tool_before_research(request)
+        if research_block is not None:
+            return research_block
+
         if request.tool_call.get("name") != "emit_builder_artifact":
             return await handler(request)
 
@@ -1188,6 +1492,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 _emit_skill_usage_logs(tool_calls)
                 artifact_calls = [tc for tc in tool_calls if tc.get("name") == "emit_builder_artifact"]
                 tool_names = self._tool_names(tool_calls)
+                research_diagnostics = self._update_research_diagnostics(state, tool_names)
+                allow_web_research = self._allow_web_research(state)
 
                 if artifact_calls and len(artifact_calls) == len(tool_calls):
                     args = artifact_calls[-1].get("args", {})
@@ -1278,6 +1584,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 "builder_non_artifact_turns": 0,
                                 "builder_last_tool_names": tool_names,
                                 "builder_tool_turn_summaries": history,
+                                "builder_research_diagnostics": research_diagnostics,
                                 "builder_task_started_at_ms": 0,
                                 "builder_consecutive_empty_emit_rejections": 0,
                                 "jump_to": "end",
@@ -1287,6 +1594,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "builder_non_artifact_turns": non_artifact_turns,
                             "builder_last_tool_names": tool_names,
                             "builder_tool_turn_summaries": history,
+                            "builder_research_diagnostics": research_diagnostics,
                             "builder_consecutive_empty_emit_rejections": consecutive_rejections,
                         }
 
@@ -1334,6 +1642,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         outputs_host_path=outputs_host_path,
                         artifact_args=args,
                     )
+                    self._log_research_diagnostics(
+                        phase="completion",
+                        diagnostics=research_diagnostics,
+                        allow_web_research=allow_web_research,
+                        sources_used=args.get("sources_used"),
+                    )
                     log_middleware(
                         "BuilderArtifact",
                         f"builder artifact captured: type={args.get('artifact_type')}, "
@@ -1355,6 +1669,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "builder_non_artifact_turns": 0,
                         "builder_last_tool_names": tool_names,
                         "builder_tool_turn_summaries": history,
+                        "builder_research_diagnostics": research_diagnostics,
                         "builder_task_started_at_ms": 0,
                         "builder_consecutive_empty_emit_rejections": 0,
                         "jump_to": "end",
@@ -1432,6 +1747,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "builder_non_artifact_turns": 0,
                         "builder_last_tool_names": tool_names,
                         "builder_tool_turn_summaries": history,
+                        "builder_research_diagnostics": research_diagnostics,
                         "builder_task_started_at_ms": 0,
                         "builder_consecutive_empty_emit_rejections": 0,
                         "jump_to": "end",
@@ -1442,10 +1758,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     f"tool calls present but no builder artifact: turn={non_artifact_turns}, tools={joined_names}",
                     _t0,
                 )
+                self._log_research_diagnostics(
+                    phase="progress",
+                    diagnostics=research_diagnostics,
+                    allow_web_research=allow_web_research,
+                )
                 return {
                     "builder_non_artifact_turns": non_artifact_turns,
                     "builder_last_tool_names": tool_names,
                     "builder_tool_turn_summaries": history,
+                    "builder_research_diagnostics": research_diagnostics,
                     "builder_task_started_at_ms": builder_task_started_at_ms,
                     # PR #94: any non-emit turn breaks the empty-rejection
                     # streak. Reset so the short-circuit only fires on

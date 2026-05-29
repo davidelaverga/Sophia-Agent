@@ -37,6 +37,84 @@ function normalizeBuilderArtifactLibrary(
     }));
 }
 
+async function fetchBuilderArtifactLibrary(
+  requestedThreadId: string,
+  signal?: AbortSignal,
+): Promise<BuilderArtifactLibraryResponse | null> {
+  const response = await fetch(`/api/threads/${encodeURIComponent(requestedThreadId)}/artifacts`, {
+    method: 'GET',
+    cache: 'no-store',
+    signal,
+  });
+  if (!response.ok) {
+    return null;
+  }
+  const payload = await response.json() as BuilderArtifactLibraryResponse;
+  return typeof payload.thread_id === 'string' && payload.thread_id !== requestedThreadId
+    ? null
+    : payload;
+}
+
+function useClearLibraryWhenThreadMissing(
+  threadId: string | undefined,
+  reset: () => void,
+) {
+  useEffect(() => {
+    if (threadId) return;
+    reset();
+  }, [reset, threadId]);
+}
+
+function useLoadLibraryOnThreadChange(
+  threadId: string | undefined,
+  refreshToken: string | undefined,
+  load: (signal?: AbortSignal) => void,
+) {
+  useEffect(() => {
+    if (!threadId) return;
+    const controller = new AbortController();
+    load(controller.signal);
+    return () => {
+      controller.abort();
+    };
+  }, [load, refreshToken, threadId]);
+}
+
+function usePollLibrary(
+  threadId: string | undefined,
+  pollIntervalMs: number | null | undefined,
+  load: () => void,
+) {
+  useEffect(() => {
+    if (!threadId || !pollIntervalMs || pollIntervalMs <= 0) return;
+    const interval = window.setInterval(load, pollIntervalMs);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [load, pollIntervalMs, threadId]);
+}
+
+function useRefreshLibraryOnFocus(
+  threadId: string | undefined,
+  refreshOnFocus: boolean,
+  load: () => void,
+) {
+  useEffect(() => {
+    if (!threadId || !refreshOnFocus || typeof window === 'undefined') return;
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') {
+        load();
+      }
+    };
+    window.addEventListener('focus', load);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      window.removeEventListener('focus', load);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
+  }, [load, refreshOnFocus, threadId]);
+}
+
 export function useSessionBuilderArtifactLibrary({
   threadId,
   refreshToken,
@@ -73,23 +151,7 @@ export function useSessionBuilderArtifactLibrary({
 
     setIsLoading(true);
     try {
-      const response = await fetch(`/api/threads/${encodeURIComponent(requestedThreadId)}/artifacts`, {
-        method: 'GET',
-        cache: 'no-store',
-        signal,
-      });
-
-      if (!response.ok) {
-        if (isCurrentRequest()) {
-          setItems([]);
-        }
-        return;
-      }
-
-      const payload = await response.json() as BuilderArtifactLibraryResponse;
-      if (typeof payload.thread_id === 'string' && payload.thread_id !== requestedThreadId) {
-        return;
-      }
+      const payload = await fetchBuilderArtifactLibrary(requestedThreadId, signal);
       if (isCurrentRequest()) {
         setItems(normalizeBuilderArtifactLibrary(payload));
       }
@@ -104,48 +166,21 @@ export function useSessionBuilderArtifactLibrary({
     }
   }, [threadId]);
 
-  useEffect(() => {
-    if (threadId) return;
+  const reset = useCallback(() => {
     setItems([]);
     setIsLoading(false);
-  }, [threadId]);
+  }, []);
+  const loadWithSignal = useCallback((signal?: AbortSignal) => {
+    void load(signal);
+  }, [load]);
+  const loadWithoutSignal = useCallback(() => {
+    void load();
+  }, [load]);
 
-  useEffect(() => {
-    if (!threadId) return;
-    const controller = new AbortController();
-    void load(controller.signal);
-    return () => {
-      controller.abort();
-    };
-  }, [load, refreshToken, threadId]);
-
-  useEffect(() => {
-    if (!threadId || !pollIntervalMs || pollIntervalMs <= 0) return;
-    const interval = window.setInterval(() => {
-      void load();
-    }, pollIntervalMs);
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, [load, pollIntervalMs, threadId]);
-
-  useEffect(() => {
-    if (!threadId || !refreshOnFocus || typeof window === 'undefined') return;
-    const refresh = () => {
-      void load();
-    };
-    const refreshWhenVisible = () => {
-      if (document.visibilityState === 'visible') {
-        void load();
-      }
-    };
-    window.addEventListener('focus', refresh);
-    document.addEventListener('visibilitychange', refreshWhenVisible);
-    return () => {
-      window.removeEventListener('focus', refresh);
-      document.removeEventListener('visibilitychange', refreshWhenVisible);
-    };
-  }, [load, refreshOnFocus, threadId]);
+  useClearLibraryWhenThreadMissing(threadId, reset);
+  useLoadLibraryOnThreadChange(threadId, refreshToken, loadWithSignal);
+  usePollLibrary(threadId, pollIntervalMs, loadWithoutSignal);
+  useRefreshLibraryOnFocus(threadId, refreshOnFocus, loadWithoutSignal);
 
   return {
     items,

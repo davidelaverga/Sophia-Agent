@@ -530,6 +530,20 @@ def test_augment_prefix_carries_slug_derived_filename_from_delegation_context():
     )
 
 
+def test_augment_prefix_preserves_research_but_requires_new_url_fetch():
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    augmented = _augment_update_message(
+        message="also include https://github.com/RecursiveMAS/RecursiveMAS",
+        tracked={"task_id": "t1", "task_type": "research"},
+        delegation_context={"task": "Build a report", "task_type": "research"},
+    )
+
+    assert "DO NOT re-run web_search" not in augmented
+    assert "builder_web_search" in augmented or "builder_web_fetch" in augmented
+    assert "Before editing the deliverable" in augmented
+
+
 def test_augment_prefix_includes_resume_not_restart_language():
     """The directive must explicitly tell the model it is RESUMING, not
     re-running from scratch. Without this language the model re-runs

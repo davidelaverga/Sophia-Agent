@@ -156,6 +156,16 @@ def _completion_status(status: str) -> str | None:
     }.get(status)
 
 
+_ARTIFACT_PATH_PREFIXES = (
+    ("/mnt/user-data/outputs/", lambda value: value[1:]),
+    ("mnt/user-data/outputs/", lambda value: value),
+    ("/user-data/outputs/", lambda value: f"mnt{value}"),
+    ("user-data/outputs/", lambda value: f"mnt/{value}"),
+    ("/outputs/", lambda value: f"mnt/user-data{value}"),
+    ("outputs/", lambda value: f"mnt/user-data/{value}"),
+)
+
+
 def _canonical_artifact_path(path: Any) -> str | None:
     if not isinstance(path, str):
         return None
@@ -164,21 +174,12 @@ def _canonical_artifact_path(path: Any) -> str | None:
         cleaned = cleaned[len("file://") :]
     if not cleaned:
         return None
-    if cleaned.startswith("/mnt/user-data/outputs/"):
-        return cleaned[1:]
-    if cleaned.startswith("mnt/user-data/outputs/"):
-        return cleaned
+    for prefix, canonicalize in _ARTIFACT_PATH_PREFIXES:
+        if cleaned.startswith(prefix):
+            return canonicalize(cleaned)
     user_data_index = cleaned.find("/user-data/outputs/")
     if user_data_index >= 0:
         return f"mnt{cleaned[user_data_index:]}"
-    if cleaned.startswith("/user-data/outputs/"):
-        return f"mnt{cleaned}"
-    if cleaned.startswith("user-data/outputs/"):
-        return f"mnt/{cleaned}"
-    if cleaned.startswith("/outputs/"):
-        return f"mnt/user-data{cleaned}"
-    if cleaned.startswith("outputs/"):
-        return f"mnt/user-data/{cleaned}"
     return cleaned.lstrip("/")
 
 
@@ -259,6 +260,40 @@ def _retained_completion_for_run(
     return completion if isinstance(completion, dict) else None
 
 
+def _retained_status_and_completion(
+    recent_events: list[dict[str, Any]],
+    task_id: str,
+    run_id: str,
+) -> tuple[Any, dict[str, Any] | None]:
+    retained_terminal = _retained_terminal_for_run(recent_events, task_id, run_id)
+    retained_status = retained_terminal.get("status") if isinstance(retained_terminal, dict) else None
+    completion = retained_terminal.get("completion") if isinstance(retained_terminal, dict) else None
+    return retained_status, completion if isinstance(completion, dict) else None
+
+
+def _retained_terminal_status(retained_status: Any, completion: dict[str, Any] | None) -> tuple[str, str | None] | None:
+    if retained_status == "completed" and _completion_has_deliverable(completion):
+        return "completed", None
+    if retained_status in {"failed", "timed_out", "cancelled"}:
+        error_message = completion.get("error_message") if isinstance(completion, dict) else None
+        return str(retained_status), error_message if isinstance(error_message, str) else None
+    return None
+
+
+def _missing_deliverable_snapshot_status(
+    parent_thread_id: str,
+    task_id: str,
+    run_id: str,
+) -> tuple[str, str]:
+    logger.warning(
+        "Builder canvas snapshot: native success coerced to failed reason=missing_deliverable parent_thread_id=%s task_id=%s run_id=%s",
+        _short_id(parent_thread_id),
+        _short_id(task_id),
+        _short_id(run_id),
+    )
+    return "failed", _MISSING_DELIVERABLE_ERROR
+
+
 def _effective_snapshot_status(
     parent_thread_id: str,
     task: dict[str, Any],
@@ -268,23 +303,32 @@ def _effective_snapshot_status(
     run_id: str,
     recent_events: list[dict[str, Any]],
 ) -> tuple[str, str | None]:
-    retained_terminal = _retained_terminal_for_run(recent_events, task_id, run_id)
-    retained_status = retained_terminal.get("status") if isinstance(retained_terminal, dict) else None
-    completion = retained_terminal.get("completion") if isinstance(retained_terminal, dict) else None
-    if retained_status == "completed" and _completion_has_deliverable(completion if isinstance(completion, dict) else None):
-        return "completed", None
-    if retained_status in {"failed", "timed_out", "cancelled"}:
-        error_message = completion.get("error_message") if isinstance(completion, dict) else None
-        return str(retained_status), error_message if isinstance(error_message, str) else None
+    retained_status, completion = _retained_status_and_completion(recent_events, task_id, run_id)
+    terminal_status = _retained_terminal_status(retained_status, completion)
+    if terminal_status is not None:
+        return terminal_status
     if native_status == "completed" and not _task_has_deliverable(parent_thread_id, task):
-        logger.warning(
-            "Builder canvas snapshot: native success coerced to failed reason=missing_deliverable parent_thread_id=%s task_id=%s run_id=%s",
-            _short_id(parent_thread_id),
-            _short_id(task_id),
-            _short_id(run_id),
-        )
-        return "failed", _MISSING_DELIVERABLE_ERROR
+        return _missing_deliverable_snapshot_status(parent_thread_id, task_id, run_id)
     return native_status, None
+
+
+def _completion_artifact_url(parent_thread_id: str, artifact_path: str | None, artifact: dict[str, Any]) -> str | None:
+    artifact_url = artifact.get("artifact_url")
+    if isinstance(artifact_url, str) and artifact_url.strip():
+        return artifact_url
+    return _signed_artifact_url(parent_thread_id, artifact_path)
+
+
+def _completion_completed_at(task: dict[str, Any]) -> str | None:
+    completed_at = next(
+        (
+            task.get(key)
+            for key in ("completed_at", "last_updated_at", "updated_at", "created_at")
+            if task.get(key)
+        ),
+        None,
+    )
+    return completed_at if isinstance(completed_at, str) else None
 
 
 def _completion_from_terminal_task(
@@ -301,16 +345,8 @@ def _completion_from_terminal_task(
         return None
     artifact = _artifact_payload_from_task(task)
     artifact_path = _canonical_artifact_path(artifact.get("artifact_path"))
-    artifact_url = artifact.get("artifact_url")
-    if not isinstance(artifact_url, str) or not artifact_url.strip():
-        artifact_url = _signed_artifact_url(parent_thread_id, artifact_path)
+    artifact_url = _completion_artifact_url(parent_thread_id, artifact_path, artifact)
     artifact_filename = artifact_path.rsplit("/", 1)[-1] if artifact_path else None
-    completed_at = (
-        task.get("completed_at")
-        or task.get("last_updated_at")
-        or task.get("updated_at")
-        or task.get("created_at")
-    )
     return {
         "thread_id": parent_thread_id,
         "task_id": task_id,
@@ -328,7 +364,7 @@ def _completion_from_terminal_task(
         "summary": artifact.get("companion_summary") or artifact.get("summary"),
         "user_next_action": artifact.get("user_next_action"),
         "error_message": error_message_override or task.get("error_message") or task.get("error"),
-        "completed_at": completed_at if isinstance(completed_at, str) else None,
+        "completed_at": _completion_completed_at(task),
         "source": "builder_canvas_snapshot",
     }
 

@@ -138,6 +138,22 @@ def _folder_prefix_from_list_record(root_prefix: str, current_prefix: str, recor
     return f"{root_prefix}{relative}/"
 
 
+def _record_name(record: Any) -> str | None:
+    raw_name = record.get("name") if isinstance(record, dict) else None
+    return raw_name if isinstance(raw_name, str) and raw_name else None
+
+
+def _record_content_type(record: dict[str, Any]) -> str | None:
+    content_type = _metadata_value(record, "mimetype", "mimeType", "contentType", "content_type")
+    return content_type if isinstance(content_type, str) and content_type else None
+
+
+def _record_modified_at(record: dict[str, Any]) -> str:
+    return _coerce_modified_at(
+        record.get("updated_at") or record.get("created_at") or record.get("last_accessed_at")
+    )
+
+
 def _info_from_list_record(
     root_prefix: str,
     record: Any,
@@ -146,8 +162,8 @@ def _info_from_list_record(
 ) -> SupabaseArtifactInfo | None:
     if not isinstance(record, dict):
         return None
-    raw_name = record.get("name")
-    if not isinstance(raw_name, str) or not raw_name:
+    raw_name = _record_name(record)
+    if raw_name is None:
         return None
     current = current_prefix or root_prefix
     if _is_folder_record(record):
@@ -157,14 +173,11 @@ def _info_from_list_record(
     if not filename or filename.endswith("/"):
         return None
     size = _coerce_size(_metadata_value(record, "size", "contentLength", "content_length"))
-    content_type = _metadata_value(record, "mimetype", "mimeType", "contentType", "content_type")
     return SupabaseArtifactInfo(
         filename=filename,
         size_bytes=size,
-        modified_at=_coerce_modified_at(
-            record.get("updated_at") or record.get("created_at") or record.get("last_accessed_at")
-        ),
-        content_type=content_type if isinstance(content_type, str) and content_type else None,
+        modified_at=_record_modified_at(record),
+        content_type=_record_content_type(record),
     )
 
 
@@ -217,6 +230,103 @@ def upload_artifact(
     return object_path
 
 
+def _list_page(
+    http: httpx.Client,
+    *,
+    url: str,
+    headers: dict[str, str],
+    prefix: str,
+    page_size: int,
+    offset: int,
+) -> list[Any] | None:
+    response = http.post(
+        url,
+        headers=headers,
+        json={
+            "prefix": prefix,
+            "limit": page_size,
+            "offset": offset,
+            "sortBy": {"column": "updated_at", "order": "desc"},
+        },
+    )
+    response.raise_for_status()
+    data = response.json()
+    return data if isinstance(data, list) else None
+
+
+def _extend_artifact_list(
+    artifacts: list[SupabaseArtifactInfo],
+    item: Any,
+    *,
+    root_prefix: str,
+    current_prefix: str,
+) -> str | None:
+    if isinstance(item, dict) and _is_folder_record(item):
+        return _folder_prefix_from_list_record(root_prefix, current_prefix, item)
+    if info := _info_from_list_record(root_prefix, item, current_prefix=current_prefix):
+        artifacts.append(info)
+    return None
+
+
+def _list_prefix_artifacts(
+    http: httpx.Client,
+    *,
+    url: str,
+    headers: dict[str, str],
+    root_prefix: str,
+    current_prefix: str,
+    page_size: int,
+    thread_id: str,
+    depth: int,
+    visited: set[str],
+) -> list[SupabaseArtifactInfo]:
+    if current_prefix in visited or depth > _MAX_LIST_DEPTH:
+        return []
+    visited.add(current_prefix)
+    offset = 0
+    artifacts: list[SupabaseArtifactInfo] = []
+    while True:
+        data = _list_page(
+            http,
+            url=url,
+            headers=headers,
+            prefix=current_prefix,
+            page_size=page_size,
+            offset=offset,
+        )
+        if data is None:
+            logger.warning(
+                "Supabase artifact list returned non-list payload for thread_id=%s prefix=%s",
+                thread_id,
+                current_prefix,
+            )
+            return artifacts
+        for item in data:
+            child_prefix = _extend_artifact_list(
+                artifacts,
+                item,
+                root_prefix=root_prefix,
+                current_prefix=current_prefix,
+            )
+            if child_prefix:
+                artifacts.extend(
+                    _list_prefix_artifacts(
+                        http,
+                        url=url,
+                        headers=headers,
+                        root_prefix=root_prefix,
+                        current_prefix=child_prefix,
+                        page_size=page_size,
+                        thread_id=thread_id,
+                        depth=depth + 1,
+                        visited=visited,
+                    )
+                )
+        if len(data) < page_size:
+            return artifacts
+        offset += page_size
+
+
 def list_artifacts(
     thread_id: str,
     *,
@@ -244,45 +354,19 @@ def list_artifacts(
 
     owns_client = client is None
     http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
-    def list_prefix(current_prefix: str, *, depth: int, visited: set[str]) -> list[SupabaseArtifactInfo]:
-        if current_prefix in visited or depth > _MAX_LIST_DEPTH:
-            return []
-        visited.add(current_prefix)
-        offset = 0
-        artifacts: list[SupabaseArtifactInfo] = []
-        while True:
-            response = http.post(
-                url,
-                headers=headers,
-                json={
-                    "prefix": current_prefix,
-                    "limit": page_size,
-                    "offset": offset,
-                    "sortBy": {"column": "updated_at", "order": "desc"},
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-            if not isinstance(data, list):
-                logger.warning(
-                    "Supabase artifact list returned non-list payload for thread_id=%s prefix=%s",
-                    thread_id,
-                    current_prefix,
-                )
-                return artifacts
-            for item in data:
-                if isinstance(item, dict) and _is_folder_record(item):
-                    if child_prefix := _folder_prefix_from_list_record(prefix, current_prefix, item):
-                        artifacts.extend(list_prefix(child_prefix, depth=depth + 1, visited=visited))
-                    continue
-                if info := _info_from_list_record(prefix, item, current_prefix=current_prefix):
-                    artifacts.append(info)
-            if len(data) < page_size:
-                return artifacts
-            offset += page_size
 
     try:
-        return list_prefix(prefix, depth=0, visited=set())
+        return _list_prefix_artifacts(
+            http,
+            url=url,
+            headers=headers,
+            root_prefix=prefix,
+            current_prefix=prefix,
+            page_size=page_size,
+            thread_id=thread_id,
+            depth=0,
+            visited=set(),
+        )
     finally:
         if owns_client:
             http.close()

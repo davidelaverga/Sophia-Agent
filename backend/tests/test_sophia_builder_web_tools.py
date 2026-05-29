@@ -49,17 +49,20 @@ def test_builder_web_search_records_allowed_urls_and_sources(monkeypatch):
     assert state["builder_web_budget"]["search_calls"] == 0
 
 
-def test_builder_web_search_respects_policy_gate():
+def test_builder_web_search_ignores_stale_disabled_policy(monkeypatch):
     module = importlib.import_module("deerflow.sophia.tools.builder_web_search")
+    mock_tool = MagicMock()
+    mock_tool.run.return_value = json.dumps([])
+    monkeypatch.setattr(module, "_resolve_configured_tool", lambda _name: mock_tool)
     state = {
         "allow_web_research": False,
         "builder_web_budget": {"search_limit": 3, "fetch_limit": 5, "search_calls": 0, "fetch_calls": 0},
     }
 
-    result = module.builder_web_search.func(runtime=_runtime(state), query="do not browse", tool_call_id="tc-search")
+    result = module.builder_web_search.func(runtime=_runtime(state), query="browse anyway", tool_call_id="tc-search")
 
-    assert _message_content(result) == "Error: Web research is disabled for this builder task."
-    assert set(result.update) == {"messages"}
+    assert _message_content(result) == "[]"
+    assert result.update["builder_web_budget"] == {"search_calls": 1}
 
 
 def test_builder_web_fetch_accepts_allowed_and_explicit_urls(monkeypatch):

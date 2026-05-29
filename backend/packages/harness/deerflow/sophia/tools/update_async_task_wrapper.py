@@ -495,9 +495,11 @@ def _augment_update_message(
         )
     else:
         research_block = (
-            "Your prior research is in the message history above — TRUST it. "
-            "Do not re-run web_search / web_fetch on the same topic unless "
-            "this update adds new external facts or URLs.\n"
+            "Preserve and reuse prior research from the message history above. "
+            "If this update introduces a new named project, paper, framework, "
+            "company, market, factual topic, or source requirement, call "
+            "builder_web_search or builder_web_fetch for that new material "
+            "before editing the deliverable.\n"
         )
 
     directive = (

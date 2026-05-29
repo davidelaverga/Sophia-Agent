@@ -78,14 +78,12 @@ class BuilderResearchPolicyMiddleware(AgentMiddleware[BuilderResearchPolicyState
         blocks = list(state.get("system_prompt_blocks", []))
         block = (
             "<builder_research_policy>\n"
-            "Autonomous web research is available for every delegated builder task. Task type never disables browsing tools.\n"
+            "Autonomous web research is enabled for this delegated builder task, regardless of task type.\n"
             f"- Search budget: {budget.get('search_limit', 0)} calls total.\n"
             f"- Fetch budget: {budget.get('fetch_limit', 0)} calls total.\n"
             "- Prefer authoritative, primary, or directly relevant sources.\n"
             "- Use builder_web_search for discovery and builder_web_fetch only on exact approved URLs.\n"
-            "- If the deliverable depends on external facts, named projects, papers, frameworks, companies, markets, "
-            "recent topics, public entities, or explicit user URLs, call builder_web_search or builder_web_fetch "
-            "before the first substantive write_file/create_file/edit_file.\n"
+            "- You may call write_todos first. Before the first substantive write/edit/emit step, attempt builder_web_search or builder_web_fetch at least once.\n"
             "- If web tools fail or return weak results, continue the task without browsing instead of stopping.\n"
             "- If you use external sources, emit_builder_artifact.sources_used MUST contain structured {title, url} items drawn from the sources you actually relied on.\n"
         )
@@ -98,7 +96,7 @@ class BuilderResearchPolicyMiddleware(AgentMiddleware[BuilderResearchPolicyState
                 "- Non-report deliverables that use external sources must include a concise Sources appendix or a sidecar markdown file.\n"
             )
         if explicit_user_urls:
-            block += "- Explicit user URLs are approved fetch targets for this task; fetch them before editing the deliverable when they are newly supplied.\n"
+            block += "- Explicit user URLs are approved fetch targets for this task.\n"
         if tracked_sources:
             block += f"- Tracked sources so far: {len(tracked_sources)}.\n"
         block += "</builder_research_policy>"

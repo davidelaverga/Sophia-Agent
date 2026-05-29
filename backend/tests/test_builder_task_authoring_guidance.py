@@ -148,3 +148,24 @@ class TestBashAuthoringProhibition:
         # Sanity: the generator-script section (which uses bash legitimately)
         # is unchanged downstream.
         assert "generator script" in briefing
+
+
+class TestBuilderResearchGuidance:
+    def test_briefing_requires_research_before_substantive_write(self) -> None:
+        result = BuilderTaskMiddleware().before_agent(_make_state("frontend"), _make_runtime())
+        briefing = _briefing(result)
+
+        assert "Web research is available for every builder task type" in briefing
+        assert "write_todos for planning" in briefing
+        assert "builder_web_search or builder_web_fetch at least once" in briefing
+        assert "write_file, str_replace, artifact-generating bash" in briefing
+
+    def test_briefing_does_not_disable_research_for_frontend(self) -> None:
+        state = _make_state("frontend")
+        state["delegation_context"]["allow_web_research"] = False
+
+        result = BuilderTaskMiddleware().before_agent(state, _make_runtime())
+        briefing = _briefing(result)
+
+        assert "Web research is available for every builder task type" in briefing
+        assert "External browsing is disabled" not in briefing

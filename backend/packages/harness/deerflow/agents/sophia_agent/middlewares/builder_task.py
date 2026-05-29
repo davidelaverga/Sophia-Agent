@@ -209,9 +209,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         relevant_memories: list[str] = delegation_context.get("relevant_memories") or []
         active_ritual: str | None = delegation_context.get("active_ritual")
         ritual_phase: str | None = delegation_context.get("ritual_phase")
-        allow_web_research = bool(
-            state.get("allow_web_research", delegation_context.get("allow_web_research", False))
-        )
+        allow_web_research = True
         tracked_sources = [
             source for source in (state.get("builder_search_sources") or []) if isinstance(source, dict)
         ]
@@ -346,21 +344,25 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "</preinstalled_libraries>"
         )
 
-        if task_type == "research":
-            sections.append(
-                "<research_output_requirements>\n"
-                "- For factual claims from external sources, use inline citations in the format [citation:Title](URL).\n"
-                "- End the report with a Sources section using [Title](URL) - note format.\n"
-                "- emit_builder_artifact.sources_used must include structured {title, url} entries for the sources you actually used.\n"
-                "</research_output_requirements>"
-            )
-        elif allow_web_research:
-            sections.append(
+        if allow_web_research:
+            source_requirements = (
                 "<source_output_requirements>\n"
+                "- Web research is available for every builder task type, including frontend builds.\n"
+                "- Turn 1 may be write_todos for planning and UI progress. After that, before any substantive "
+                "write/edit/emit step, you MUST attempt builder_web_search or builder_web_fetch at least once.\n"
+                "- Substantive write/edit/emit steps include write_file, str_replace, artifact-generating bash, "
+                "and emit_builder_artifact. Safe inspection tools such as ls, read_file, and simple read-only "
+                "bash commands may run before research.\n"
+                "- If web tools fail or return weak results, continue the task using the best available context "
+                "instead of stopping.\n"
                 "- If you use external sources, include a concise Sources appendix in the deliverable or create a small sidecar markdown file.\n"
                 "- emit_builder_artifact.sources_used must include structured {title, url} entries for the sources you actually used.\n"
-                "</source_output_requirements>"
             )
+            if task_type == "research":
+                source_requirements += (
+                    "- Research reports must include inline [citation:Title](URL) citations after factual claims and end with a Sources section.\n"
+                )
+            sections.append(source_requirements + "</source_output_requirements>")
 
         if tracked_sources:
             source_lines = [

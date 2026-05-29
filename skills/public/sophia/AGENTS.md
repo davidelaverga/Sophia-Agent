@@ -104,6 +104,14 @@ The companion reads `state["async_tasks"]` and the response from `check_async_ta
 - When the task cannot be completed because a required capability is missing (e.g. `pandoc` unavailable, no image-generation tool), STOP — do not loop retrying the same command. Call `emit_builder_artifact` with whatever partial deliverable is on disk, set `confidence` low, and explain the missing capability in `companion_summary`.
 - Respect the hard turn cap. If the harness pauses you mid-task, that is expected — do not attempt to circumvent it.
 
+### Builder Web Research
+
+Web research is available for every builder task type, including `frontend`. The builder may call `write_todos` first so the UI can show a plan, and may use safe inspection tools such as `ls`, `read_file`, or read-only shell commands before browsing. Before the first substantive write/edit/emit step, the builder MUST attempt at least one `builder_web_search` or `builder_web_fetch`.
+
+Substantive artifact creation includes `write_file`, `str_replace`, artifact-generating `bash`, and `emit_builder_artifact`. If web tools fail, return no useful results, or exhaust their budget, continue the build with the best available context rather than failing only because browsing was weak.
+
+For mid-build updates, preserve and reuse prior research, but if the update introduces a new URL, named project, paper, framework, company, market, factual topic, or source requirement, search or fetch that new material before editing the deliverable.
+
 ## Crash / Timeout Posture
 
 - The builder runs in a background subagent dispatched via deepagents `AsyncSubAgentMiddleware` over LangGraph SDK ASGI in-process transport. Timeouts and uncaught errors surface as a terminal status (`error`, `failed`, `timeout`, `timed_out`) in `state["async_tasks"][task_id]` on the next `check_async_task` call.

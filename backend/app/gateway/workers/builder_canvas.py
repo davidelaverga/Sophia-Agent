@@ -34,6 +34,15 @@ _PHASE_LABELS = {
 }
 _CHECK_COMMAND_PREFIXES = ("test", "pytest", "pnpm", "npm", "yarn", "uv", "ruff", "mypy", "tsc")
 _MISSING_DELIVERABLE_ERROR = "Builder finished without a deliverable artifact."
+_TOOL_ACTIVITY_RULES = (
+    (("search", "scrape", "tavily", "firecrawl"), "searching_web", "research", "Searching web", False),
+    (("fetch", "browse", "jina"), "reading_source", "research", "Reading source", True),
+    (("write_file", "create_file"), "writing_file", "draft", "Writing file", False),
+    (("read_file",), "reading_file", "draft", "Reading file", False),
+    (("str_replace", "edit_file"), "editing_file", "draft", "Editing file", False),
+    (("render",), "creating_artifact", "render", "Creating artifact", False),
+    (("emit_artifact", "emit_builder_artifact", "package"), "packaging_artifact", "package", "Packaging artifact", False),
+)
 
 
 def _now_iso() -> str:
@@ -118,44 +127,45 @@ def _activity(
     }
 
 
+def _rule_activity(name: str, args: Any) -> dict[str, str] | None:
+    for tokens, action, category, label, include_source in _TOOL_ACTIVITY_RULES:
+        if any(token in name for token in tokens):
+            return _activity(
+                action=action,
+                category=category,
+                label=label,
+                **(_source_details(args) if include_source else {}),
+            )
+    return None
+
+
+def _plan_activity(*, plan_seen: bool) -> dict[str, str]:
+    return _activity(
+        action="updating_plan" if plan_seen else "creating_plan",
+        category="plan",
+        label="Updating plan" if plan_seen else "Creating plan",
+    )
+
+
+def _bash_activity(args: Any) -> dict[str, str]:
+    if _is_check_command(args):
+        return _activity(action="running_check", category="finalize", label="Running check")
+    return _activity(action="creating_artifact", category="draft", label="Creating artifact")
+
+
 def _tool_activity(call: dict[str, Any], *, plan_seen: bool) -> dict[str, str]:
     tool_name = str(call.get("name") or "").lower()
     args = call.get("args")
     name = tool_name.lower()
-    if any(token in name for token in ("search", "scrape", "tavily", "firecrawl")):
-        return _activity(
-            action="searching_web",
-            category="research",
-            label="Searching web",
-        )
-    if any(token in name for token in ("fetch", "browse", "jina")):
-        return _activity(
-            action="reading_source",
-            category="research",
-            label="Reading source",
-            **_source_details(args),
-        )
     if name in {"write_todos", "todo_write"}:
-        return _activity(
-            action="updating_plan" if plan_seen else "creating_plan",
-            category="plan",
-            label="Updating plan" if plan_seen else "Creating plan",
-        )
-    if any(token in name for token in ("write_file", "create_file")):
-        return _activity(action="writing_file", category="draft", label="Writing file")
-    if "read_file" in name:
-        return _activity(action="reading_file", category="draft", label="Reading file")
-    if any(token in name for token in ("str_replace", "edit_file")):
-        return _activity(action="editing_file", category="draft", label="Editing file")
+        return _plan_activity(plan_seen=plan_seen)
     if name in {"bash", "shell"}:
-        if _is_check_command(args):
-            return _activity(action="running_check", category="finalize", label="Running check")
-        return _activity(action="creating_artifact", category="draft", label="Creating artifact")
-    if "render" in name:
-        return _activity(action="creating_artifact", category="render", label="Creating artifact")
-    if any(token in name for token in ("emit_artifact", "emit_builder_artifact", "package")):
-        return _activity(action="packaging_artifact", category="package", label="Packaging artifact")
-    return _activity(action="creating_artifact", category="draft", label="Creating artifact")
+        return _bash_activity(args)
+    return _rule_activity(name, args) or _activity(
+        action="creating_artifact",
+        category="draft",
+        label="Creating artifact",
+    )
 
 
 def _phase_activity(data: Any) -> dict[str, str] | None:

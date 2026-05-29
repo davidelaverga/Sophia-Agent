@@ -171,6 +171,16 @@ def _signed_artifact_url(thread_id: str | None, artifact_path: str | None) -> st
         return None
 
 
+_ARTIFACT_PATH_PREFIXES = (
+    ("/mnt/user-data/outputs/", lambda value: value[1:]),
+    ("mnt/user-data/outputs/", lambda value: value),
+    ("/user-data/outputs/", lambda value: f"mnt{value}"),
+    ("user-data/outputs/", lambda value: f"mnt/{value}"),
+    ("/outputs/", lambda value: f"mnt/user-data{value}"),
+    ("outputs/", lambda value: f"mnt/user-data/{value}"),
+)
+
+
 def _canonical_artifact_path(path: Any) -> str | None:
     if not isinstance(path, str):
         return None
@@ -179,21 +189,12 @@ def _canonical_artifact_path(path: Any) -> str | None:
         cleaned = cleaned[len("file://") :]
     if not cleaned:
         return None
-    if cleaned.startswith("/mnt/user-data/outputs/"):
-        return cleaned[1:]
-    if cleaned.startswith("mnt/user-data/outputs/"):
-        return cleaned
+    for prefix, canonicalize in _ARTIFACT_PATH_PREFIXES:
+        if cleaned.startswith(prefix):
+            return canonicalize(cleaned)
     user_data_index = cleaned.find("/user-data/outputs/")
     if user_data_index >= 0:
         return f"mnt{cleaned[user_data_index:]}"
-    if cleaned.startswith("/user-data/outputs/"):
-        return f"mnt{cleaned}"
-    if cleaned.startswith("user-data/outputs/"):
-        return f"mnt/{cleaned}"
-    if cleaned.startswith("/outputs/"):
-        return f"mnt/user-data{cleaned}"
-    if cleaned.startswith("outputs/"):
-        return f"mnt/user-data/{cleaned}"
     return cleaned.lstrip("/")
 
 
