@@ -38,7 +38,6 @@ from langchain.agents.middleware import AgentMiddleware
 from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
-from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_progress import BuilderProgressMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_research_policy import BuilderResearchPolicyMiddleware
@@ -47,6 +46,9 @@ from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectio
 from deerflow.agents.sophia_agent.middlewares.mem0_retrieval import BuilderMem0RetrievalMiddleware
 from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
 from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
+from deerflow.agents.sophia_agent.middlewares.view_image import (
+    ClearOnInjectViewImageMiddleware,
+)
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 
 __all__ = ["build_builder_middleware_chain"]
@@ -118,9 +120,14 @@ def build_builder_middleware_chain(
     8. ``_create_builder_todo_middleware()`` — always-on planning.
     9. ``BuilderArtifactMiddleware`` — captures emit_builder_artifact
        and uploads to Supabase under the parent thread_id.
-    9a. ``ViewImageMiddleware`` (conditional on ``vision_enabled``) —
-        injects base64 image content blocks into the next model turn
-        when ``view_image_tool`` calls have completed. Sits AFTER
+    9a. ``ClearOnInjectViewImageMiddleware`` (conditional on
+        ``vision_enabled``) — injects base64 image content blocks into
+        the next model turn when ``view_image_tool`` calls have
+        completed, AND clears ``state["viewed_images"]`` after
+        injection so subsequent view-image calls REPLACE rather than
+        accumulate (Codex P2 PR #132 latest iteration — without this
+        clear, viewing multiple ~10 MiB images in a build would
+        exceed Anthropic's 32 MB request envelope). Sits AFTER
         BuilderArtifactMiddleware (so artifact emission isn't shadowed
         by mid-stream image injection) and BEFORE PromptAssembly /
         DanglingToolCall so the injected HumanMessage participates in
@@ -164,7 +171,7 @@ def build_builder_middleware_chain(
         BuilderArtifactMiddleware(),
     ]
     if vision_enabled:
-        chain_tail.append(ViewImageMiddleware())
+        chain_tail.append(ClearOnInjectViewImageMiddleware())
     chain_tail.extend(
         [
             PromptAssemblyMiddleware(),

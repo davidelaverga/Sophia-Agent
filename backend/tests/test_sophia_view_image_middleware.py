@@ -254,6 +254,80 @@ def test_sophia_subclass_clears_viewed_images_after_injection() -> None:
     )
 
 
+def test_builder_chain_uses_clear_on_inject_view_image_middleware() -> None:
+    """Codex P2 PR #132 (latest iteration). The builder uses upstream
+    ``ViewImageMiddleware`` directly (not the Sophia subclass) because
+    it calls the upstream-named ``view_image`` tool. But upstream's
+    injector doesn't clear ``viewed_images`` after injection — so on
+    multi-image builds the base64 payload accumulates until the
+    next request exceeds Anthropic's 32 MB envelope.
+
+    Fix: builder chain uses ``ClearOnInjectViewImageMiddleware`` (a
+    thin subclass that inherits all of upstream's behaviour PLUS the
+    clear-after-inject pass). This regression test pins the wiring so
+    a future refactor that reverts to plain ``ViewImageMiddleware``
+    breaks loudly.
+    """
+    from deerflow.agents.middlewares.view_image_middleware import (
+        ViewImageMiddleware as UpstreamViewImageMiddleware,
+    )
+    from deerflow.agents.sophia_agent.builder_middlewares import (
+        build_builder_middleware_chain,
+    )
+    from deerflow.agents.sophia_agent.middlewares.view_image import (
+        ClearOnInjectViewImageMiddleware,
+    )
+
+    chain = build_builder_middleware_chain("user-1", vision_enabled=True)
+    matches = [m for m in chain if isinstance(m, UpstreamViewImageMiddleware)]
+    assert len(matches) == 1, (
+        f"Expected exactly one view-image middleware in the builder "
+        f"chain; got {len(matches)}."
+    )
+    mw = matches[0]
+    assert isinstance(mw, ClearOnInjectViewImageMiddleware), (
+        "Builder chain must use ``ClearOnInjectViewImageMiddleware``, "
+        "not bare upstream ``ViewImageMiddleware``. The bare upstream "
+        "class leaves ``viewed_images`` populated after injection, so "
+        "multi-image builds accumulate base64 until the Anthropic "
+        "32 MB request envelope is exceeded. See Codex P2 PR #132."
+    )
+
+
+def test_clear_on_inject_middleware_emits_clear_alongside_human_message() -> None:
+    """Direct unit test on the shared base class — both the builder
+    chain and the SophiaViewImageMiddleware companion inherit this
+    behaviour. Ensures the clear-after-inject pass is wired at the
+    class boundary, not just in the Sophia override.
+    """
+    from deerflow.agents.sophia_agent.middlewares.view_image import (
+        ClearOnInjectViewImageMiddleware,
+    )
+
+    mw = ClearOnInjectViewImageMiddleware()
+    state = {
+        "messages": [
+            HumanMessage(content="look at this"),
+            _ai_with_tool("view_image", tool_call_id="tc-1"),
+            ToolMessage(content="Loaded build.png", tool_call_id="tc-1"),
+        ],
+        "viewed_images": {
+            "/mnt/user-data/uploads/build.png": {
+                "base64": "Ynl0ZXM=",
+                "mime_type": "image/png",
+            },
+        },
+    }
+    update = mw.before_model(state, runtime=None)
+    assert update is not None
+    assert len(update["messages"]) == 1  # injected HumanMessage
+    assert update.get("viewed_images") == {}, (
+        "ClearOnInjectViewImageMiddleware must return "
+        "``viewed_images: {}`` alongside the injected HumanMessage so "
+        "subsequent view-image calls REPLACE rather than accumulate."
+    )
+
+
 def test_sophia_subclass_does_not_emit_clear_when_no_injection() -> None:
     """When the middleware decides NOT to inject (e.g. viewed_images
     is empty, or no view_user_image tool call), it must NOT emit a
