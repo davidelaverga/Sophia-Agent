@@ -207,3 +207,81 @@ def test_full_round_trip_failure_then_next_turn_does_not_re_inject() -> None:
         "Sophia sees image1 + 'describe nonexistent.png' and answers "
         "about the wrong file."
     )
+
+
+# ─── Codex P2 PR #132 (latest iteration) — accumulation guard ──
+
+
+def test_sophia_subclass_clears_viewed_images_after_injection() -> None:
+    """The middleware must clear ``state["viewed_images"]`` after
+    injecting the image-details HumanMessage, so subsequent
+    ``view_user_image`` calls REPLACE the registry rather than
+    accumulate base64.
+
+    Without this clear, viewing multiple ~10 MiB images across a
+    session would compound the per-request payload until it exceeds
+    Anthropic's 32 MB envelope. The model also doesn't need stale
+    images re-injected once they're already in conversation history
+    (the just-injected HumanMessage carries the base64 blocks).
+    """
+    mw = SophiaViewImageMiddleware()
+    state = {
+        "messages": [
+            HumanMessage(content="look at this"),
+            _ai_with_tool("view_user_image", tool_call_id="tc-1"),
+            ToolMessage(content="Loaded a.png", tool_call_id="tc-1"),
+        ],
+        "viewed_images": {
+            "/mnt/user-data/uploads/a.png": {
+                "base64": "aGVsbG8=",
+                "mime_type": "image/png",
+            },
+        },
+    }
+    update = mw.before_model(state, runtime=None)
+    assert update is not None
+    # The HumanMessage with image blocks gets injected (the model
+    # sees the image this turn via conversation history).
+    assert len(update["messages"]) == 1
+    # AND viewed_images is reset via the merge_viewed_images empty-
+    # dict sentinel so the NEXT view_user_image call's update
+    # replaces rather than accumulates.
+    assert update.get("viewed_images") == {}, (
+        "Middleware must clear viewed_images after injection so "
+        "subsequent view_user_image calls don't compound base64 "
+        "across turns. See merge_viewed_images reducer in "
+        "thread_state.py."
+    )
+
+
+def test_sophia_subclass_does_not_emit_clear_when_no_injection() -> None:
+    """When the middleware decides NOT to inject (e.g. viewed_images
+    is empty, or no view_user_image tool call), it must NOT emit a
+    ``viewed_images: {}`` clear. Returning ``None`` is the only
+    correct outcome — otherwise a no-op call would still wipe state.
+    """
+    mw = SophiaViewImageMiddleware()
+    # Case 1: viewed_images empty → returns None.
+    state_empty = {
+        "messages": [
+            HumanMessage(content="hello"),
+            _ai_with_tool("view_user_image", tool_call_id="tc-1"),
+            ToolMessage(content="Error: not found", tool_call_id="tc-1"),
+        ],
+        "viewed_images": {},
+    }
+    assert mw.before_model(state_empty, runtime=None) is None
+    # Case 2: no view-image tool call at all → returns None.
+    state_no_tool = {
+        "messages": [
+            HumanMessage(content="hello"),
+            AIMessage(content="just talking"),
+        ],
+        "viewed_images": {
+            "/mnt/user-data/uploads/leftover.png": {
+                "base64": "xxx",
+                "mime_type": "image/png",
+            },
+        },
+    }
+    assert mw.before_model(state_no_tool, runtime=None) is None

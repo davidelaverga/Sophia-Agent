@@ -76,3 +76,34 @@ class SophiaViewImageMiddleware(ViewImageMiddleware):
         if not viewed_images:
             return False
         return super()._should_inject_image_message(state)
+
+    @override
+    def _inject_image_message(
+        self, state: ViewImageMiddlewareState
+    ) -> dict | None:
+        # Codex P2 PR #132 (latest iteration) — accumulation guard.
+        #
+        # The upstream injector returns ``{"messages": [human_msg]}``
+        # but leaves ``viewed_images`` populated, so the next
+        # ``view_user_image`` call's update MERGES (via
+        # ``merge_viewed_images``) into the prior entries. Three or
+        # four near-10 MiB images later, the model request would
+        # exceed Anthropic's 32 MB envelope AND Sophia would re-
+        # reason over stale images that aren't relevant to the
+        # current turn.
+        #
+        # Fix: after injecting the HumanMessage with image blocks,
+        # clear ``viewed_images`` via the reducer's empty-dict
+        # sentinel. The just-injected base64 lives in conversation
+        # history (the HumanMessage), so the model can still see it
+        # this turn. Subsequent ``view_user_image`` calls write into
+        # the cleared dict → REPLACE semantics, no accumulation.
+        #
+        # Trade-off: if the model wants to reference the SAME image
+        # again many turns later, it has to re-call
+        # ``view_user_image``. That's cheap — the file is still on
+        # disk, and only one base64 round-trip per re-view.
+        update = super()._inject_image_message(state)
+        if update is None:
+            return None
+        return {**update, "viewed_images": {}}
