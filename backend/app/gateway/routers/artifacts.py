@@ -63,6 +63,13 @@ def _is_thread_owner(authenticated_user_id: str | None, thread_id: str) -> bool:
     return _session_store.find_session_by_thread_id(authenticated_user_id, thread_id) is not None
 
 
+def _has_sophia_session(thread_id: str) -> bool:
+    finder = getattr(_session_store, "find_any_session_by_thread_id", None)
+    if not callable(finder):
+        return False
+    return finder(thread_id) is not None
+
+
 def is_text_file_by_content(path: Path, sample_size: int = 8192) -> bool:
     """Check if file is text by examining content for null bytes."""
     try:
@@ -254,7 +261,8 @@ async def list_artifacts(
             )
 
     supabase_count = 0
-    if _is_thread_owner(authenticated_user_id, thread_id):
+    owns_thread = _is_thread_owner(authenticated_user_id, thread_id)
+    if owns_thread:
         try:
             supabase_artifacts = supabase_artifact_store.list_artifacts(thread_id=thread_id)
         except Exception as exc:  # noqa: BLE001 — listing is best-effort.
@@ -266,6 +274,9 @@ async def list_artifacts(
                 status_code,
             )
             supabase_artifacts = []
+    elif _has_sophia_session(thread_id):
+        _require_thread_owner(authenticated_user_id, thread_id)
+        supabase_artifacts = []
     elif artifacts_by_path:
         logger.warning(
             "Skipping Supabase artifact list for non-Sophia thread: user_id=%s thread_id=%s local_count=%d",

@@ -114,6 +114,8 @@ class SessionTranscriptStore(Protocol):
 
     def find_session_by_thread_id(self, user_id: str, thread_id: str) -> SessionRecord | None: ...
 
+    def find_any_session_by_thread_id(self, thread_id: str) -> SessionRecord | None: ...
+
     def list_sessions(self, user_id: str) -> list[SessionRecord]: ...
 
     def append_or_upsert_messages(
@@ -452,6 +454,15 @@ class FilesystemSessionTranscriptStore:
     def find_session_by_thread_id(self, user_id: str, thread_id: str) -> SessionRecord | None:
         for record in self._list_all(user_id):
             if record.thread_id == thread_id:
+                return record
+        return None
+
+    def find_any_session_by_thread_id(self, thread_id: str) -> SessionRecord | None:
+        if not self._base.is_dir():
+            return None
+        for session_path in self._base.glob("*/sessions/*.json"):
+            record = self._read(session_path)
+            if record is not None and record.thread_id == thread_id:
                 return record
         return None
 
@@ -923,6 +934,21 @@ class SupabaseSessionTranscriptStore:
                 "select": "*",
                 "thread_id": f"eq.{thread_id}",
                 "user_id": f"eq.{user_id}",
+                "limit": "1",
+            },
+        )
+        rows = result if isinstance(result, list) else []
+        if not rows:
+            return None
+        return self._record_from_session_row(rows[0])
+
+    def find_any_session_by_thread_id(self, thread_id: str) -> SessionRecord | None:
+        result = self._request(
+            "GET",
+            self._config.sessions_table,
+            params={
+                "select": "*",
+                "thread_id": f"eq.{thread_id}",
                 "limit": "1",
             },
         )

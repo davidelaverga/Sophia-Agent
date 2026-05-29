@@ -204,6 +204,41 @@ def test_list_artifacts_preserves_local_non_sophia_outputs_without_supabase_look
     assert supabase_calls == []
 
 
+def test_list_artifacts_rejects_local_outputs_for_non_owner_sophia_thread(tmp_path, monkeypatch) -> None:
+    outputs_dir = tmp_path / "outputs"
+    outputs_dir.mkdir()
+    (outputs_dir / "private-report.md").write_text("private", encoding="utf-8")
+    supabase_calls: list[str] = []
+
+    class FakeSessionStore:
+        def find_session_by_thread_id(self, user_id: str, thread_id: str):
+            assert user_id == "user-1"
+            assert thread_id == "thread-1"
+            return None
+
+        def find_any_session_by_thread_id(self, thread_id: str):
+            assert thread_id == "thread-1"
+            return object()
+
+    monkeypatch.setattr(artifacts_router, "_session_store", FakeSessionStore())
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: outputs_dir)
+    monkeypatch.setattr(
+        artifacts_router.supabase_artifact_store,
+        "list_artifacts",
+        lambda *, thread_id: supabase_calls.append(thread_id) or [],
+    )
+
+    import fastapi
+
+    try:
+        asyncio.run(artifacts_router.list_artifacts("thread-1", authenticated_user_id="user-1"))
+    except fastapi.HTTPException as exc:
+        assert exc.status_code == 404
+    else:
+        raise AssertionError("Expected 404 for non-owned Sophia thread")
+    assert supabase_calls == []
+
+
 def test_list_artifacts_route_requires_authentication(monkeypatch) -> None:
     monkeypatch.delenv("SOPHIA_AUTH_BYPASS", raising=False)
     app = FastAPI()
