@@ -944,6 +944,77 @@ describe('AttachmentBar — Codex P2 per-turn cap', () => {
     expect(banner.textContent).toMatch(/Attachment limit reached/i);
   });
 
+  it('reserves the derived .md name so report.pdf + report.md do not collide (Codex P2 PR #132)', async () => {
+    // The gateway converts report.pdf and writes a sibling report.md.
+    // If the user picks report.pdf AND report.md in the same batch,
+    // the conversion output and the uploaded .md would overwrite each
+    // other. The uniquifier must reserve the derived report.md so the
+    // literal .md pick is bumped to report-1.md.
+    vi.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ files: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    render(<AttachmentBar threadId="thread-md" />);
+    const input = screen.getByTestId('attachment-bar-file-input') as HTMLInputElement;
+    dispatchFilesOnto(input, [
+      makeFile('report.pdf', 1024, 'application/pdf'),
+      makeFile('report.md', 1024, 'text/markdown'),
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const filenames = useAttachmentsStore.getState().items.map((i) => i.filename);
+    // PDF keeps its name; the literal .md is bumped away from the
+    // PDF's conversion output (report.md).
+    expect(filenames).toEqual(['report.pdf', 'report-1.md']);
+  });
+
+  it('reserves the derived .md regardless of pick order (md before pdf)', async () => {
+    // Order-independence: the pre-pass reserves derived names before
+    // registering any file, so report.md picked FIRST still gets
+    // bumped when report.pdf is also in the batch.
+    vi.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ files: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    render(<AttachmentBar threadId="thread-md" />);
+    const input = screen.getByTestId('attachment-bar-file-input') as HTMLInputElement;
+    dispatchFilesOnto(input, [
+      makeFile('report.md', 1024, 'text/markdown'),
+      makeFile('report.pdf', 1024, 'application/pdf'),
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const filenames = useAttachmentsStore.getState().items.map((i) => i.filename);
+    // The literal .md (picked first) is still bumped because the
+    // pre-pass reserved report.md before any registration.
+    expect(filenames).toEqual(['report-1.md', 'report.pdf']);
+  });
+
+  it('does NOT bump a lone .md upload (no convertible sibling in batch)', async () => {
+    // A .md picked alone keeps its name — there's no convertible
+    // sibling whose conversion would collide with it.
+    vi.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ files: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    render(<AttachmentBar threadId="thread-md" />);
+    const input = screen.getByTestId('attachment-bar-file-input') as HTMLInputElement;
+    dispatchFilesOnto(input, [makeFile('notes.md', 1024, 'text/markdown')]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const chip = useAttachmentsStore.getState().items[0];
+    expect(chip?.filename).toBe('notes.md');
+  });
+
   it('clears a stale cap-reached banner on a later valid pick (Codex P3 PR #132)', async () => {
     // First selection fills the per-turn cap → "limit reached" banner.
     for (let i = 0; i < 12; i += 1) {

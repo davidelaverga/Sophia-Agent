@@ -263,6 +263,14 @@ export async function fetchBackendStreamWithBootstrap(
   const runStream = async (
     threadId: string,
     preludeMessages: LangGraphInputMessage[] = [],
+    // Codex P2 PR #132: explicit per-call attachment list. The normal
+    // path passes ``backendPayload.attached_files``; the stale-thread
+    // recovery path passes ``[]`` because the uploaded bytes live in
+    // the OLD thread's sandbox, not the freshly-created one — telling
+    // Sophia to ``view_user_image`` files that don't exist in the new
+    // sandbox would make attachments fail exactly on the recovery
+    // path this client otherwise supports.
+    attachedFiles: string[] = backendPayload.attached_files ?? [],
   ): Promise<Response> => {
     return fetch(`${activeBackendUrl}/${threadId}/runs/stream`, {
       method: 'POST',
@@ -281,7 +289,7 @@ export async function fetchBackendStreamWithBootstrap(
           // ``start_builder_task`` reads from state instead of
           // parsing the synthesized prompt block (which a user can
           // spoof by typing the marker into their own message).
-          current_turn_attached_files: backendPayload.attached_files ?? [],
+          current_turn_attached_files: attachedFiles,
         },
         config: {
           recursion_limit: 150,
@@ -313,12 +321,13 @@ export async function fetchBackendStreamWithBootstrap(
   const runStreamWithFallback = async (
     threadId: string,
     preludeMessages: LangGraphInputMessage[] = [],
+    attachedFiles: string[] = backendPayload.attached_files ?? [],
   ): Promise<Response> => {
     try {
-      let response = await runStream(threadId, preludeMessages);
+      let response = await runStream(threadId, preludeMessages, attachedFiles);
 
       if (!response.ok && shouldRetryWithDirectLangGraphResponse(response, activeBackendUrl) && switchToDirectLangGraph(`stream returned ${response.status}`)) {
-        response = await runStream(threadId, preludeMessages);
+        response = await runStream(threadId, preludeMessages, attachedFiles);
       }
 
       return response;
@@ -327,7 +336,7 @@ export async function fetchBackendStreamWithBootstrap(
         throw error;
       }
 
-      return runStream(threadId, preludeMessages);
+      return runStream(threadId, preludeMessages, attachedFiles);
     }
   };
 
@@ -346,7 +355,16 @@ export async function fetchBackendStreamWithBootstrap(
     newThreadId = threadId;
     recoveredFromTranscript = reseedMessages.length > 0;
     checkpointerResume = false;
-    upstream = await runStreamWithFallback(threadId, reseedMessages);
+    // Codex P2 PR #132: the user's uploaded files live in the OLD
+    // (stale) thread's sandbox. The fresh thread has an empty uploads
+    // dir, so pass ``[]`` for attached_files — otherwise Sophia would
+    // be prompted to ``view_user_image`` / ``read_user_document`` for
+    // filenames that don't exist in the new sandbox, failing exactly
+    // on the recovery path. Migrating the bytes across sandboxes would
+    // need a gateway copy endpoint (separate ticket); for now we drop
+    // the attachment hint so the turn degrades to text-only instead of
+    // hallucinating tool calls on missing files.
+    upstream = await runStreamWithFallback(threadId, reseedMessages, []);
 
     if (!IS_PRODUCTION) {
       secureLog('[/api/chat] stale DeerFlow thread detected, retried with fresh thread', {

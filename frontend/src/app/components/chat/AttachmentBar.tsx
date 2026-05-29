@@ -440,6 +440,33 @@ function applyServerTruthRenames(
   }
 }
 
+// Upload extensions the gateway converts to markdown. Must mirror
+// ``deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS``. For each
+// such upload the gateway ALSO writes a sibling ``<stem>.md``, so the
+// uniquifier must reserve that derived name too (Codex P2 PR #132).
+const CONVERTIBLE_UPLOAD_EXTENSIONS = new Set([
+  ".pdf",
+  ".ppt",
+  ".pptx",
+  ".xls",
+  ".xlsx",
+  ".doc",
+  ".docx",
+])
+
+/**
+ * For a convertible upload filename, return the sibling markdown
+ * name the gateway will generate (``report.pdf`` → ``report.md``).
+ * Returns null for non-convertible files. Codex P2 PR #132.
+ */
+function deriveMarkdownSibling(filename: string): string | null {
+  const dot = filename.lastIndexOf(".")
+  if (dot <= 0) return null
+  const ext = filename.slice(dot).toLowerCase()
+  if (!CONVERTIBLE_UPLOAD_EXTENSIONS.has(ext)) return null
+  return `${filename.slice(0, dot)}.md`
+}
+
 function createRegistrationsForBatch(
   filesList: FileList,
   threadId: string,
@@ -447,9 +474,23 @@ function createRegistrationsForBatch(
   claimed: Set<string>,
   add: (item: PendingAttachment) => void,
 ): Registration[] {
+  const files = Array.from(filesList)
+  // Pre-pass (Codex P2 PR #132): reserve the derived ``<stem>.md``
+  // name for every convertible upload BEFORE registering any file.
+  // The gateway writes that sibling markdown during conversion, so a
+  // literal ``<stem>.md`` picked in the SAME batch (in either order)
+  // must uniquify away from it — otherwise the conversion output and
+  // the uploaded ``.md`` overwrite each other and one attachment's
+  // content is lost. Pre-pass (vs per-registration) makes the
+  // reservation order-independent: the ``.md`` pick gets bumped
+  // whether it appears before or after its ``.pdf`` sibling.
+  for (const file of files) {
+    const md = deriveMarkdownSibling(toPromptSafeFilename(file.name))
+    if (md) claimed.add(md)
+  }
   let remainingSlots = initialRemainingSlots
   const registrations: Registration[] = []
-  for (const file of Array.from(filesList)) {
+  for (const file of files) {
     const reg = buildRegistration(file, threadId, remainingSlots, claimed)
     add(reg.item)
     if (!reg.skip) {
