@@ -277,18 +277,31 @@ describe('fetchBackendStreamWithBootstrap', () => {
       {
         ...basePayload,
         thread_id: 'thread-with-uploads',
+        // ``message`` carries the synthesized attachment block (as the
+        // post-handler would have prefixed it); ``raw_message`` is the
+        // user's original text.
+        message:
+          '[The user has uploaded 2 file(s) for this turn.\n- report.png\n- spec.pdf]\n\nwhat is in these?',
+        raw_message: 'what is in these?',
         attached_files: ['report.png', 'spec.pdf'],
       },
     );
 
-    // The FIRST (stale-thread) run carried the real attachment list.
+    // The FIRST (stale-thread) run carried the real attachment list
+    // AND the prefixed message (so the model knows to view them).
     const staleRunBody = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body));
     expect(staleRunBody.input.current_turn_attached_files).toEqual(['report.png', 'spec.pdf']);
+    expect(staleRunBody.input.messages.at(-1).content).toContain('The user has uploaded');
 
-    // The FRESH-thread recovery run (4th fetch) drops them — the
-    // bytes aren't in the new sandbox.
+    // The FRESH-thread recovery run (4th fetch) drops the attachment
+    // list AND uses the RAW message (no attachment block) — the bytes
+    // aren't in the new sandbox, so the model must not be told to
+    // view_user_image / read_user_document them.
     const freshRunBody = JSON.parse(String((fetchMock.mock.calls[3][1] as RequestInit).body));
     expect(freshRunBody.input.current_turn_attached_files).toEqual([]);
+    const freshLastMsg = freshRunBody.input.messages.at(-1);
+    expect(freshLastMsg.content).toBe('what is in these?');
+    expect(freshLastMsg.content).not.toContain('The user has uploaded');
   });
 
   it('sends attached_files on the normal (non-recovery) run', async () => {

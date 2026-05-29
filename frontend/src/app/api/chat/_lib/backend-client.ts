@@ -21,6 +21,17 @@ export interface BackendStreamPayload {
    * spoof by typing the marker into their own message).
    */
   attached_files?: string[];
+  /**
+   * The user's message BEFORE the post-handler prefixed it with the
+   * synthesized ``[The user has uploaded ...]`` attachment block.
+   * Codex P2 PR #132: on the stale-thread recovery path the bytes
+   * live in the OLD sandbox, so the fresh-thread run must use this
+   * raw message (no attachment block) — otherwise the model is still
+   * told to call ``view_user_image`` / ``read_user_document`` for
+   * files absent from the new sandbox. When there were no
+   * attachments this equals ``message``.
+   */
+  raw_message?: string;
 }
 
 export type BackendFetchResult = {
@@ -272,6 +283,18 @@ export async function fetchBackendStreamWithBootstrap(
     // path this client otherwise supports.
     attachedFiles: string[] = backendPayload.attached_files ?? [],
   ): Promise<Response> => {
+    // Codex P2 PR #132: when this run carries attachments, use the
+    // post-handler's prefixed message (it names the uploaded files so
+    // the model knows to call view_user_image / read_user_document).
+    // When it does NOT (no attachments, OR the stale-thread recovery
+    // path that forces attachedFiles=[]), use the RAW message so the
+    // model isn't told to read files that aren't in this sandbox.
+    // ``raw_message`` equals ``message`` when there were no
+    // attachments, so the no-attachment path is unaffected.
+    const messageContent =
+      attachedFiles.length > 0
+        ? backendPayload.message
+        : (backendPayload.raw_message ?? backendPayload.message);
     return fetch(`${activeBackendUrl}/${threadId}/runs/stream`, {
       method: 'POST',
       headers,
@@ -280,7 +303,7 @@ export async function fetchBackendStreamWithBootstrap(
         input: {
           messages: [
             ...preludeMessages,
-            { role: 'user', content: backendPayload.message },
+            { role: 'user', content: messageContent },
           ],
           // Server-trusted attachment list (Codex P2 PR #132 latest
           // iteration). Always sent — empty array when no attachments

@@ -226,6 +226,13 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       // prompt block (which a user can spoof by typing the marker
       // into their own message).
       attached_files: attachedFiles,
+      // The pre-prefix message. ``userMessage`` carries the
+      // synthesized ``[The user has uploaded ...]`` block when there
+      // are attachments; ``rawUserMessage`` does not. The backend
+      // client uses this on the stale-thread recovery path so the
+      // fresh-thread retry doesn't tell the model to read files
+      // absent from the new sandbox (Codex P2 PR #132).
+      raw_message: rawUserMessage,
     };
 
     const backendUrl = `${BACKEND_URL}${BACKEND_CHAT_ENDPOINT}`;
