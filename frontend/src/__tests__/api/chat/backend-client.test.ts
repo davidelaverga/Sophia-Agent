@@ -290,7 +290,11 @@ describe('fetchBackendStreamWithBootstrap', () => {
     // The FIRST (stale-thread) run carried the real attachment list
     // AND the prefixed message (so the model knows to view them).
     const staleRunBody = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body));
-    expect(staleRunBody.input.current_turn_attached_files).toEqual(['report.png', 'spec.pdf']);
+    // Per-run channel (Codex P2 PR #132 latest): rides config.configurable,
+    // NOT input — input is persisted into thread state and would leak a
+    // prior turn's list into a later attachment-free turn.
+    expect(staleRunBody.config.configurable.current_turn_attached_files).toEqual(['report.png', 'spec.pdf']);
+    expect(staleRunBody.input.current_turn_attached_files).toBeUndefined();
     expect(staleRunBody.input.messages.at(-1).content).toContain('The user has uploaded');
 
     // The FRESH-thread recovery run (4th fetch) drops the attachment
@@ -298,7 +302,8 @@ describe('fetchBackendStreamWithBootstrap', () => {
     // aren't in the new sandbox, so the model must not be told to
     // view_user_image / read_user_document them.
     const freshRunBody = JSON.parse(String((fetchMock.mock.calls[3][1] as RequestInit).body));
-    expect(freshRunBody.input.current_turn_attached_files).toEqual([]);
+    expect(freshRunBody.config.configurable.current_turn_attached_files).toEqual([]);
+    expect(freshRunBody.input.current_turn_attached_files).toBeUndefined();
     const freshLastMsg = freshRunBody.input.messages.at(-1);
     expect(freshLastMsg.content).toBe('what is in these?');
     expect(freshLastMsg.content).not.toContain('The user has uploaded');
@@ -325,7 +330,9 @@ describe('fetchBackendStreamWithBootstrap', () => {
     );
 
     const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body));
-    expect(body.input.current_turn_attached_files).toEqual(['photo.png']);
+    // Per-run channel: config.configurable, not input (Codex P2 PR #132).
+    expect(body.config.configurable.current_turn_attached_files).toEqual(['photo.png']);
+    expect(body.input.current_turn_attached_files).toBeUndefined();
   });
 
   it('accepts production auth provider user_id shapes', () => {

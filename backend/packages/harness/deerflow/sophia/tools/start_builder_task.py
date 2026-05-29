@@ -42,7 +42,6 @@ import logging
 import re
 import shutil
 import uuid
-from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -506,35 +505,75 @@ def _build_delegation_context(
 
 # Server-trusted filename allow-list for current-turn attachments.
 # Codex P2 PR #132 latest iteration: the attached filenames come from
-# state["current_turn_attached_files"] — written by the frontend chat
-# post-handler into LangGraph ``input`` out-of-band. Each name is
-# re-validated through this regex before we touch the filesystem so a
-# compromised input source (e.g. a future caller that doesn't sanitize)
-# can't slip path traversal or prompt-injection characters through to
-# ``_copy_parent_uploaded_images``.
+# the frontend chat post-handler. Each name is re-validated through this
+# regex before we touch the filesystem so a compromised input source
+# (e.g. a future caller that doesn't sanitize) can't slip path traversal
+# or prompt-injection characters through to ``_copy_parent_uploaded_images``.
 _TRUSTED_ATTACHMENT_FILENAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
+def _read_current_turn_attached_files(
+    runtime: ToolRuntime[ContextT, SophiaState] | None,
+) -> Any:
+    """Read the raw per-run attachment list from runtime config/context.
+
+    Codex P2 PR #132 (latest iteration): this field MUST be sourced
+    from ``runtime.config["configurable"]`` (the frontend chat client
+    writes it there) — a **per-run** channel that LangGraph does NOT
+    persist into thread state. The earlier implementation read
+    ``state["current_turn_attached_files"]`` from the ``input`` channel,
+    which IS persisted under the field's LAST_VALUE reducer. The
+    consequence: a later turn that omitted attachments (no
+    ``current_turn_attached_files`` in its input) did not clear the
+    field — the prior turn's list survived in state, and
+    ``_copy_parent_uploaded_images`` re-copied private images from an
+    earlier turn into a brand-new builder sandbox. Relying on "omitted
+    fields disappear from state" is wrong: omitted fields are simply
+    not updated, so the stale value persists.
+
+    ``config.configurable`` (and ``context``) are scoped to a single
+    run and never written back to state, so a run that omits the field
+    reads a clean empty value — exactly the per-run reset semantics the
+    review asked for, with no extra reducer/sentinel plumbing.
+
+    Checks ``config.configurable`` first (where the frontend puts it),
+    then ``context`` as a fallback (langgraph-api copies ``context`` →
+    ``configurable`` server-side, but a direct ``context``-only caller
+    is still honoured).
+    """
+    if runtime is None:
+        return None
+    if runtime.config:
+        configurable = runtime.config.get("configurable", {}) or {}
+        if "current_turn_attached_files" in configurable:
+            return configurable.get("current_turn_attached_files")
+    if runtime.context:
+        candidate = runtime.context.get("current_turn_attached_files")
+        if candidate is not None:
+            return candidate
+    return None
+
+
 def _extract_current_turn_attachment_filenames(
-    state: Mapping[str, Any],
+    runtime: ToolRuntime[ContextT, SophiaState] | None,
 ) -> frozenset[str]:
     """Return the filenames the user attached on THIS turn.
 
-    Reads from ``state["current_turn_attached_files"]``, which the
-    frontend chat post-handler writes into LangGraph ``input`` every
-    turn (an empty list when no attachments). This is the
-    **server-trusted** attachment list — NOT a parse of the user
-    message body, which a user could spoof by typing the synthesized
-    prompt marker into their own text.
+    Sources the list from ``runtime.config["configurable"]`` via
+    ``_read_current_turn_attached_files`` — a per-run channel the
+    frontend chat client populates (empty list when no attachments).
+    This is the **server-trusted** attachment list — NOT a parse of the
+    user message body, which a user could spoof by typing the
+    synthesized prompt marker into their own text.
 
-    History: the prior implementation parsed the latest HumanMessage
+    History: the original implementation parsed the latest HumanMessage
     for the ``[The user has uploaded ...]`` sentinel + bullet
-    filenames. Codex P2 PR #132 (later iteration) flagged that as
-    spoofable — a user pasting that exact marker + bullets into a
-    plain chat message could trick this function into reporting
-    arbitrary filenames, which ``_copy_parent_uploaded_images`` would
-    then copy from the parent thread's stale uploads dir into the
-    builder sandbox. Switching to an OOB state field closes that gap.
+    filenames; Codex P2 flagged that as spoofable, so the trust
+    boundary moved to an OOB field. A follow-up Codex P2 flagged that
+    routing the field through LangGraph ``input`` (persisted state) left
+    it stale across turns that omit attachments — so it now travels on
+    the per-run ``config.configurable`` channel instead (see
+    ``_read_current_turn_attached_files``).
 
     Defense in depth: each name is re-validated against
     ``_TRUSTED_ATTACHMENT_FILENAME`` (the same allow-list the frontend
@@ -542,13 +581,13 @@ def _extract_current_turn_attachment_filenames(
     introduce path-traversal or prompt-injection characters.
 
     Returns empty frozenset when:
-    - the input didn't include ``current_turn_attached_files`` (e.g. a
+    - the run didn't include ``current_turn_attached_files`` (e.g. a
       non-frontend client like the LangGraph SDK creating a run
-      directly)
+      directly, or any turn with no attachments)
     - the value isn't a list of strings
     - every entry fails the allow-list
     """
-    raw = state.get("current_turn_attached_files")
+    raw = _read_current_turn_attached_files(runtime)
     if not isinstance(raw, list):
         return frozenset()
     safe: set[str] = set()
@@ -1005,15 +1044,14 @@ async def _start_builder_task_impl(
         artifact_source,
     )
 
-    # Codex P1 PR #132 (latest iteration): extract the filenames the
-    # user attached on THIS turn from the synthesized prompt block.
-    # Reads from ``state["current_turn_attached_files"]`` — the
-    # server-trusted OOB attachment list written by the frontend chat
-    # post-handler. Codex P2 PR #132 latest iteration: parsing the
-    # user message body is spoofable (a user can paste the
-    # ``[The user has uploaded ...]`` marker + bullets into their own
-    # text), so the trust boundary moved to LangGraph state.
-    current_turn_attachments = _extract_current_turn_attachment_filenames(state)
+    # Codex P1/P2 PR #132 (latest iteration): the filenames the user
+    # attached on THIS turn. Sourced from the per-run
+    # ``runtime.config["configurable"]["current_turn_attached_files"]``
+    # channel the frontend chat client populates — server-trusted (not a
+    # spoofable parse of the message body) AND per-run (so a turn that
+    # omits attachments reads empty instead of inheriting the prior
+    # turn's persisted state). See ``_read_current_turn_attached_files``.
+    current_turn_attachments = _extract_current_turn_attachment_filenames(runtime)
 
     try:
         task_id, run_id = await _dispatch_via_asgi(

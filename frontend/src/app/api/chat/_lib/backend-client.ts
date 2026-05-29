@@ -14,11 +14,13 @@ export interface BackendStreamPayload {
   language: 'en';
   /**
    * Filenames the user attached on THIS turn. Always send (use ``[]``
-   * when empty) so the backend's ``current_turn_attached_files`` state
-   * field overwrites stale values from prior turns. Codex P2 PR #132
-   * latest iteration: this is the server-trusted attachment list,
-   * NOT a parse of the synthesized prompt block (which a user can
-   * spoof by typing the marker into their own message).
+   * when empty). Routed on the PER-RUN ``config.configurable
+   * .current_turn_attached_files`` channel — NOT LangGraph ``input``
+   * (which is persisted into thread state under a LAST_VALUE reducer,
+   * so an attachment-free turn would inherit the prior turn's list).
+   * Codex P2 PR #132 latest iteration: this is the server-trusted
+   * attachment list, NOT a parse of the synthesized prompt block
+   * (which a user can spoof by typing the marker into their message).
    */
   attached_files?: string[];
   /**
@@ -305,14 +307,6 @@ export async function fetchBackendStreamWithBootstrap(
             ...preludeMessages,
             { role: 'user', content: messageContent },
           ],
-          // Server-trusted attachment list (Codex P2 PR #132 latest
-          // iteration). Always sent — empty array when no attachments
-          // — so the backend's ``current_turn_attached_files`` state
-          // field overwrites whatever was there from prior turns.
-          // ``start_builder_task`` reads from state instead of
-          // parsing the synthesized prompt block (which a user can
-          // spoof by typing the marker into their own message).
-          current_turn_attached_files: attachedFiles,
         },
         config: {
           recursion_limit: 150,
@@ -322,6 +316,21 @@ export async function fetchBackendStreamWithBootstrap(
             ritual,
             context_mode: backendPayload.context_mode || 'life',
             thread_id: threadId,
+            // Server-trusted attachment list (Codex P2 PR #132 latest
+            // iteration). Always sent — empty array when no attachments.
+            // It rides ``config.configurable`` (a PER-RUN channel),
+            // NOT ``input`` (which LangGraph persists into thread state
+            // under a LAST_VALUE reducer). Routing it through state
+            // meant a later turn that omitted attachments inherited the
+            // prior turn's list — start_builder_task then re-copied
+            // private images from an earlier turn into a new builder
+            // sandbox. config.configurable is never persisted, so each
+            // run reads exactly what THIS turn sent (empty = none).
+            // start_builder_task reads it via
+            // runtime.config.configurable instead of parsing the
+            // synthesized prompt block (which a user can spoof by
+            // typing the marker into their own message).
+            current_turn_attached_files: attachedFiles,
           },
         },
         stream_mode: ['messages-tuple', 'values'],

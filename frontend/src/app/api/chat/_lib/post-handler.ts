@@ -220,11 +220,14 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       platform,
       language: 'en' as const,
       // Server-trusted out-of-band attachment list (Codex P2 PR #132
-      // latest iteration). Passed through to LangGraph
-      // ``input.current_turn_attached_files`` so
-      // ``start_builder_task`` doesn't have to parse the synthesized
-      // prompt block (which a user can spoof by typing the marker
-      // into their own message).
+      // latest iteration). The backend client routes this on the
+      // PER-RUN ``config.configurable.current_turn_attached_files``
+      // channel (not LangGraph ``input``, which persists into thread
+      // state and would leak a prior turn's list into an
+      // attachment-free turn). ``start_builder_task`` reads it from
+      // ``runtime.config.configurable`` so it doesn't have to parse the
+      // synthesized prompt block (which a user can spoof by typing the
+      // marker into their own message).
       attached_files: attachedFiles,
       // The pre-prefix message. ``userMessage`` carries the
       // synthesized ``[The user has uploaded ...]`` block when there

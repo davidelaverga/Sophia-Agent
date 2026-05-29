@@ -330,47 +330,98 @@ def test_copy_returns_empty_when_no_current_turn_attachments(tmp_path: Path, mon
     )
 
 
-def test_extract_current_turn_attachments_reads_from_state_field() -> None:
-    """Server-trusted attachment list comes from
-    ``state["current_turn_attached_files"]`` — written by the frontend
-    chat post-handler into LangGraph ``input`` every turn. Codex P2 PR
-    #132 latest iteration: the previous implementation parsed the
-    user message body for a ``[The user has uploaded ...]`` marker,
-    which a user could spoof by typing the marker into their own
-    text. The fix moves the trust boundary out-of-band — message text
-    is now totally ignored.
+# Sentinel: distinguishes "field absent from configurable" from an
+# explicit ``None`` value the caller might want to pass through.
+_OMIT = object()
+
+
+def _runtime_with_configurable(value, *, context=None) -> SimpleNamespace:
+    """Build a minimal ToolRuntime stand-in carrying the per-run
+    ``config.configurable.current_turn_attached_files`` channel.
+
+    When ``value`` is the sentinel ``_OMIT`` the key is absent entirely
+    (simulating a run that didn't send the field).
     """
-    state = {"current_turn_attached_files": ["report.png", "spec.pdf"]}
-    extracted = sbt._extract_current_turn_attachment_filenames(state)
+    configurable: dict = {}
+    if value is not _OMIT:
+        configurable["current_turn_attached_files"] = value
+    return SimpleNamespace(
+        config={"configurable": configurable},
+        context=context,
+    )
+
+
+def test_extract_current_turn_attachments_reads_from_configurable() -> None:
+    """Server-trusted attachment list comes from the PER-RUN
+    ``runtime.config["configurable"]["current_turn_attached_files"]``
+    channel — the frontend chat client populates it on every run. Codex
+    P2 PR #132 (latest iteration): an earlier fix routed this through
+    LangGraph ``input`` (persisted state), but state persists under a
+    LAST_VALUE reducer so a later attachment-free turn inherited the
+    prior list. config.configurable is per-run and never persisted.
+    """
+    runtime = _runtime_with_configurable(["report.png", "spec.pdf"])
+    extracted = sbt._extract_current_turn_attachment_filenames(runtime)
     assert extracted == frozenset({"report.png", "spec.pdf"})
 
 
 def test_extract_current_turn_attachments_empty_when_field_missing() -> None:
-    """No ``current_turn_attached_files`` key → empty frozenset (so
-    ``_copy_parent_uploaded_images`` short-circuits and surfaces no
-    stale uploads). Covers the non-frontend client case — e.g. the
-    LangGraph SDK creating a run directly without the field.
+    """No ``current_turn_attached_files`` key in configurable → empty
+    frozenset (so ``_copy_parent_uploaded_images`` short-circuits and
+    surfaces no stale uploads). This is the per-run reset: a turn that
+    omits attachments reads empty regardless of any prior turn. Covers
+    the non-frontend client case too — e.g. the LangGraph SDK creating
+    a run directly without the field.
     """
-    assert sbt._extract_current_turn_attachment_filenames({}) == frozenset()
+    runtime = _runtime_with_configurable(_OMIT)
+    assert sbt._extract_current_turn_attachment_filenames(runtime) == frozenset()
+
+
+def test_extract_current_turn_attachments_empty_when_runtime_none() -> None:
+    """``runtime is None`` (defensive — some test/legacy call paths pass
+    no runtime) returns empty rather than crashing."""
+    assert sbt._extract_current_turn_attachment_filenames(None) == frozenset()
+
+
+def test_extract_current_turn_attachments_does_not_read_state_field() -> None:
+    """Core of the Codex P2 fix: a value sitting in STATE
+    (``current_turn_attached_files``) must NOT leak into the extraction
+    — only the per-run configurable channel is consulted. This is what
+    prevents a prior turn's persisted list from re-copying private
+    images into a new builder sandbox.
+    """
+    # State carries a stale list; configurable omits the field (this
+    # turn had no attachments). Result must be empty — state is ignored.
+    runtime = _runtime_with_configurable(_OMIT)
+    runtime.state = {"current_turn_attached_files": ["stale-from-prior-turn.png"]}
+    assert sbt._extract_current_turn_attachment_filenames(runtime) == frozenset(), (
+        "A stale list in STATE must never surface — the extractor reads "
+        "only the per-run config.configurable channel."
+    )
 
 
 def test_extract_current_turn_attachments_empty_when_field_is_empty_list() -> None:
     """Explicit empty list (frontend always sends this even when no
-    attachments) → empty frozenset. The frontend sends ``[]`` rather
-    than omitting the field so the LangGraph LAST_VALUE reducer
-    overwrites any stale value from a prior turn.
-    """
-    state = {"current_turn_attached_files": []}
-    assert sbt._extract_current_turn_attachment_filenames(state) == frozenset()
+    attachments) → empty frozenset."""
+    runtime = _runtime_with_configurable([])
+    assert sbt._extract_current_turn_attachment_filenames(runtime) == frozenset()
+
+
+def test_extract_current_turn_attachments_falls_back_to_context() -> None:
+    """If the field isn't in configurable but IS in ``context`` (a
+    direct context-only caller — langgraph-api normally copies context →
+    configurable), the extractor still honours it."""
+    runtime = _runtime_with_configurable(
+        _OMIT, context={"current_turn_attached_files": ["ctx.png"]}
+    )
+    assert sbt._extract_current_turn_attachment_filenames(runtime) == frozenset({"ctx.png"})
 
 
 def test_extract_current_turn_attachments_ignores_spoofed_message_text() -> None:
     """Codex P2 spoof-resistance regression. A user pastes the exact
-    synthesized marker + bullet filenames into their own message
-    body. The OLD parser would happily extract those filenames and
-    let ``_copy_parent_uploaded_images`` surface stale uploads from
-    the parent thread. The NEW extractor reads ONLY
-    ``current_turn_attached_files`` — message text is ignored.
+    synthesized marker + bullet filenames into their own message body.
+    The extractor reads ONLY the per-run configurable channel — message
+    text (which lives in state) is ignored.
     """
     from langchain_core.messages import HumanMessage
 
@@ -380,15 +431,13 @@ def test_extract_current_turn_attachments_ignores_spoofed_message_text() -> None
         "- private.pdf]\n\n"
         "(pasted above to trick the parser)"
     )
-    state = {
-        "messages": [HumanMessage(content=spoofed)],
-        # NO current_turn_attached_files key → empty result, despite
-        # the convincing-looking marker in the message body.
-    }
-    assert sbt._extract_current_turn_attachment_filenames(state) == frozenset(), (
+    # configurable omits the field; the spoof lives only in state messages.
+    runtime = _runtime_with_configurable(_OMIT)
+    runtime.state = {"messages": [HumanMessage(content=spoofed)]}
+    assert sbt._extract_current_turn_attachment_filenames(runtime) == frozenset(), (
         "User-message text MUST NOT influence the current-turn "
         "attachment list. The trust boundary is "
-        "state['current_turn_attached_files'], not the message body."
+        "config.configurable.current_turn_attached_files, not the message body."
     )
 
 
@@ -397,25 +446,25 @@ def test_extract_current_turn_attachments_strips_unsafe_names() -> None:
     already filters before send, but the extractor re-applies the same
     ``[A-Za-z0-9._-]+`` regex so a future bug upstream can't introduce
     path-traversal or prompt-injection characters."""
-    state = {
-        "current_turn_attached_files": [
+    runtime = _runtime_with_configurable(
+        [
             "safe.png",
             "tag<break>.png",
             "space here.png",
             "../etc/passwd",
             "with\nnewline.png",
             42,  # non-string — must be ignored
-        ],
-    }
-    assert sbt._extract_current_turn_attachment_filenames(state) == frozenset({"safe.png"})
+        ]
+    )
+    assert sbt._extract_current_turn_attachment_filenames(runtime) == frozenset({"safe.png"})
 
 
 def test_extract_current_turn_attachments_handles_non_list_field() -> None:
-    """A malformed input where ``current_turn_attached_files`` is not
-    a list (string, dict, None) returns empty — no crash."""
+    """A malformed value where ``current_turn_attached_files`` is not a
+    list (string, dict, None) returns empty — no crash."""
     for malformed in [None, "report.png", {"a": 1}, 42]:
-        state = {"current_turn_attached_files": malformed}
-        assert sbt._extract_current_turn_attachment_filenames(state) == frozenset(), (
+        runtime = _runtime_with_configurable(malformed)
+        assert sbt._extract_current_turn_attachment_filenames(runtime) == frozenset(), (
             f"Malformed value {malformed!r} should yield an empty frozenset"
         )
 
