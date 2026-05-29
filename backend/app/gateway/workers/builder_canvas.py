@@ -242,6 +242,15 @@ def _completion_has(completion: dict[str, Any] | None, key: str) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _timestamp(value: Any) -> float | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
 def _completion_has_deliverable(completion: dict[str, Any]) -> bool:
     return _completion_has(completion, "artifact_path") or _completion_has(completion, "artifact_url")
 
@@ -337,6 +346,25 @@ class BuilderCanvasWorker:
     def _is_retired_run_locked(self, parent_thread_id: str, task_id: str, run_id: str) -> bool:
         return (task_id, run_id) in self._retired_run_keys.get(parent_thread_id, set())
 
+    def _terminal_is_newer_than_active_locked(self, event: dict[str, Any], active: tuple[str, str]) -> bool:
+        if not event.get("_explicit_occurred_at"):
+            return False
+        parent_thread_id = event["parent_thread_id"]
+        active_history = self._histories.get((parent_thread_id, active[0], active[1]), ())
+        active_times = [
+            parsed
+            for item in active_history
+            if (parsed := _timestamp(item.get("occurred_at"))) is not None
+        ]
+        active_latest = max(
+            active_times,
+            default=None,
+        )
+        event_time = _timestamp(event.get("occurred_at"))
+        if event_time is None or active_latest is None:
+            return False
+        return event_time >= active_latest
+
     def _is_replaced_run_locked(self, event: dict[str, Any], key: tuple[str, str, str]) -> bool:
         parent_thread_id, task_id, run_id = key
         active = self._active.get(parent_thread_id)
@@ -353,7 +381,7 @@ class BuilderCanvasWorker:
             return True
         if event["kind"] == "terminal":
             if active[0] == task_id and not event.get("_run_observed_before_publish"):
-                return True
+                return not self._terminal_is_newer_than_active_locked(event, active)
             return False
         return key in self._histories
 
@@ -478,6 +506,7 @@ class BuilderCanvasWorker:
             event.pop("_source_event_name", None)
             event.pop("_run_observed_before_publish", None)
             event.pop("_allocate_sequence", None)
+            event.pop("_explicit_occurred_at", None)
             self._record_event_locked(event, key, sequence)
             queues = list(self._subscribers.get(parent_thread_id, []))
         for queue in queues:
@@ -569,18 +598,20 @@ class BuilderCanvasWorker:
             "timed_out": _activity(action="timed_out", category="finalize", label="Timed out", kind="phase"),
             "cancelled": _activity(action="cancelled", category="finalize", label="Cancelled", kind="phase"),
         }[status]
+        completed_at = payload.get("completed_at")
         event = {
             "version": 1,
             "parent_thread_id": parent,
             "task_id": task_id,
             "run_id": run_id,
-            "occurred_at": payload.get("completed_at") or _now_iso(),
+            "occurred_at": completed_at or _now_iso(),
             "kind": "terminal",
             "status": status,
             "activity": terminal_activity,
             "completion": completion,
             "_source_event_name": "builder_completion",
             "_allocate_sequence": True,
+            "_explicit_occurred_at": isinstance(completed_at, str) and bool(completed_at.strip()),
         }
         return await self._publish_event(event)
 

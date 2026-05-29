@@ -570,6 +570,74 @@ async def test_unobserved_terminal_for_same_active_task_does_not_replace_current
 
 
 @pytest.mark.anyio
+async def test_terminal_only_updated_run_replaces_prior_same_task_when_newer() -> None:
+    worker = BuilderCanvasWorker()
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-old",
+            "sequence": 1,
+            "occurred_at": "2026-05-28T20:00:00+00:00",
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "drafting"},
+        }
+    )
+
+    delivered = await worker.publish_completion(
+        {
+            "thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-new",
+            "status": "success",
+            "completed_at": "2026-05-28T20:05:00+00:00",
+            "artifact_path": "mnt/user-data/outputs/updated.html",
+        }
+    )
+
+    assert delivered == 0
+    events = await worker.recent_events("parent-1")
+    assert len(events) == 1
+    assert events[0]["kind"] == "terminal"
+    assert events[0]["run_id"] == "run-new"
+    assert events[0]["status"] == "completed"
+    assert events[0]["completion"]["artifact_path"] == "mnt/user-data/outputs/updated.html"
+
+
+@pytest.mark.anyio
+async def test_older_terminal_only_same_task_run_does_not_replace_active_run() -> None:
+    worker = BuilderCanvasWorker()
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-new",
+            "sequence": 1,
+            "occurred_at": "2026-05-28T20:05:00+00:00",
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "drafting"},
+        }
+    )
+
+    delivered = await worker.publish_completion(
+        {
+            "thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-old",
+            "status": "success",
+            "completed_at": "2026-05-28T20:00:00+00:00",
+            "artifact_path": "mnt/user-data/outputs/old.html",
+        }
+    )
+
+    assert delivered == 0
+    events = await worker.recent_events("parent-1")
+    assert len(events) == 1
+    assert events[0]["kind"] == "progress"
+    assert events[0]["run_id"] == "run-new"
+
+
+@pytest.mark.anyio
 async def test_unprojectable_old_run_terminal_does_not_replace_current_same_task() -> None:
     worker = BuilderCanvasWorker()
     await worker.publish_progress(
