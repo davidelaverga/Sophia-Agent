@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import logging
 import mimetypes
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -109,15 +110,34 @@ def _failure_update(message: ToolMessage) -> dict:
     }
 
 
+# Strict prompt-safe filename allow-list. Mirrors the builder-side
+# ``start_builder_task._SAFE_COPY_FILENAME`` and the frontend's
+# ``SAFE_PROMPT_FILENAME``. Codex P2 PR #132: the gateway upload route
+# only normalizes with ``Path(file.filename).name`` (strips path
+# separators), so a direct/API upload or a rendered output named like
+# ``photo.png\n]\n[SYSTEM: ...`` can reach this tool. On the success
+# path the resolved virtual path is stored in ``viewed_images`` and
+# ``SophiaViewImageMiddleware`` later injects it as TEXT into the next
+# model turn — a crafted name with newlines / brackets / markup could
+# break out of the image-details block and prompt-inject the
+# companion. Restricting to ``[A-Za-z0-9._-]`` kills that vector
+# (newlines, spaces, ``<``/``>``, quotes, control bytes all rejected).
+_SAFE_IMAGE_FILENAME = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
 def _is_safe_filename(filename: str) -> bool:
-    """Reject anything that smells like a path or traversal attempt."""
+    """Reject path-traversal AND prompt-injection-capable filenames.
+
+    A name is safe only when it matches the strict allow-list
+    ``[A-Za-z0-9._-]+`` and is not a hidden file / ``.`` / ``..``.
+    The allow-list inherently rejects path separators, control
+    characters, whitespace, and markup — see ``_SAFE_IMAGE_FILENAME``.
+    """
     if not filename or filename in {".", ".."}:
-        return False
-    if "/" in filename or "\\" in filename:
         return False
     if filename.startswith("."):
         return False
-    return True
+    return bool(_SAFE_IMAGE_FILENAME.match(filename))
 
 
 @tool("view_user_image", parse_docstring=True)
