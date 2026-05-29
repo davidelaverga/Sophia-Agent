@@ -39,7 +39,9 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from langchain.tools import ToolRuntime, tool
@@ -116,6 +118,20 @@ _TASK_TYPE_PREFIXES: dict[str, str] = {
     "visual_report": "[visual_report]",
 }
 
+_HTML_OUTPUT_RE = re.compile(
+    r"\bhtml\b|\bhtml\s+(?:document|file|report|summary|brief|article|explainer)\b",
+    re.IGNORECASE,
+)
+_TASK_TYPE_EXTENSIONS = {
+    "document": "md",
+    "research": "md",
+    "presentation": "pptx",
+    "frontend": "html",
+    "visual_report": "pdf",
+}
+_FALLBACK_TASK_SLUG = "build"
+_MAX_SLUG_SOURCE_CHARS = 60
+
 # Demo-prompt detection. Mirrors ``switch_to_builder``'s heuristic so users
 # who say "test builder, make anything" continue to get the deterministic
 # small-deliverable flow instead of an open-ended research loop.
@@ -149,6 +165,28 @@ _BUILDER_GENERIC_DEMO_MARKERS = (
 
 def _utcnow_iso() -> str:
     return dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _slugify_for_filename(text: str, max_len: int = 40) -> str:
+    if not isinstance(text, str):
+        return _FALLBACK_TASK_SLUG
+    head = text.strip()[:_MAX_SLUG_SOURCE_CHARS]
+    cleaned = re.sub(r"[^a-zA-Z0-9]+", "-", head).strip("-").lower()
+    if not cleaned:
+        return _FALLBACK_TASK_SLUG
+    return cleaned[:max_len].rstrip("-") or _FALLBACK_TASK_SLUG
+
+
+def _suggest_artifact_filename(task_type: str | None, description: str | None) -> str:
+    ext = _TASK_TYPE_EXTENSIONS.get(task_type or "", "md")
+    if task_type in {"document", "research"} and description and _HTML_OUTPUT_RE.search(description):
+        ext = "html"
+    slug = _slugify_for_filename(description or _FALLBACK_TASK_SLUG)
+    return f"{slug}.{ext}"
+
+
+def _suggest_artifact_target_path(task_type: str | None, description: str | None) -> str:
+    return f"/mnt/user-data/outputs/{_suggest_artifact_filename(task_type, description)}"
 
 
 def _resolve_thread_id(runtime: ToolRuntime[ContextT, SophiaState] | None) -> str | None:
@@ -420,6 +458,7 @@ def _build_delegation_context(
     *,
     description: str,
     task_type: str,
+    artifact_target_path: str,
     companion_artifact: dict[str, Any],
     memory_snippets: list[str],
     active_ritual: str | None,
@@ -437,6 +476,7 @@ def _build_delegation_context(
     return {
         "task": description,
         "task_type": task_type,
+        "artifact_target_path": artifact_target_path,
         "companion_artifact": companion_artifact,
         "user_identity": None,  # populated by builder's UserIdentityMiddleware
         "relevant_memories": memory_snippets[:5],
@@ -510,6 +550,7 @@ async def _dispatch_via_asgi(
         "allow_web_research": allow_web_research,
         "explicit_user_urls": explicit_user_urls,
         "builder_web_budget": builder_web_budget,
+        "builder_artifact_target_path": delegation_context.get("artifact_target_path"),
     }
 
     # ``thread_id`` MUST be in configurable so the builder's
@@ -669,6 +710,7 @@ async def _start_builder_task_impl(
     allow_web_research = should_allow_builder_web_research(task_type, description)
     explicit_user_urls = extract_explicit_user_urls(description)
     builder_web_budget = make_builder_web_budget(task_type)
+    artifact_target_path = _suggest_artifact_target_path(task_type, description)
 
     parent_thread_id = _resolve_thread_id(runtime)
     parent_model = None
@@ -688,6 +730,7 @@ async def _start_builder_task_impl(
     delegation_context = _build_delegation_context(
         description=description,
         task_type=task_type,
+        artifact_target_path=artifact_target_path,
         companion_artifact=companion_artifact,
         memory_snippets=memory_snippets,
         active_ritual=active_ritual,
@@ -701,7 +744,7 @@ async def _start_builder_task_impl(
     logger.info(
         "[Builder] start_builder_task dispatching: task_type=%s demo=%s tone=%s ritual=%s "
         "parent_thread=%s parent_model=%s user_id=%s user_id_source=%s artifact_source=%s "
-        "allow_web_research=%s explicit_url_count=%s search_limit=%s fetch_limit=%s",
+        "allow_web_research=%s explicit_url_count=%s search_limit=%s fetch_limit=%s target_ext=%s",
         task_type,
         demo_mode,
         companion_artifact.get("tone_estimate"),
@@ -715,6 +758,7 @@ async def _start_builder_task_impl(
         len(explicit_user_urls),
         builder_web_budget.get("search_limit"),
         builder_web_budget.get("fetch_limit"),
+        Path(artifact_target_path).suffix.lower().lstrip("."),
     )
 
     try:
@@ -748,10 +792,11 @@ async def _start_builder_task_impl(
         "trace_id": trace_id,
         "task_type": task_type,
         "demo_mode": demo_mode,
+        "artifact_target_path": artifact_target_path,
     }
 
     logger.info(
-        "[Builder] start_builder_task launched: task_id=%s run_id=%s trace=%s allow_web_research=%s explicit_url_count=%s search_limit=%s fetch_limit=%s",
+        "[Builder] start_builder_task launched: task_id=%s run_id=%s trace=%s allow_web_research=%s explicit_url_count=%s search_limit=%s fetch_limit=%s target_ext=%s",
         task_id,
         run_id,
         trace_id,
@@ -759,6 +804,7 @@ async def _start_builder_task_impl(
         len(explicit_user_urls),
         builder_web_budget.get("search_limit"),
         builder_web_budget.get("fetch_limit"),
+        Path(artifact_target_path).suffix.lower().lstrip("."),
     )
 
     return Command(

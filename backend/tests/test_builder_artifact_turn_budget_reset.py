@@ -60,6 +60,38 @@ def test_reset_fires_when_new_human_msg_follows_ai_with_tool_calls():
     assert result == {"builder_non_artifact_turns": 0}
 
 
+def test_post_interrupt_update_extracts_target_and_urls_from_directive():
+    middleware = BuilderArtifactMiddleware()
+    update_url = "https://github.com/RecursiveMAS/RecursiveMAS"
+    state = {
+        "messages": [
+            HumanMessage(content="Build an HTML document"),
+            _ai_with_tool_calls(),
+            ToolMessage(content="search results...", tool_call_id="tc-1"),
+            HumanMessage(
+                content=(
+                    "[Sophia/post-interrupt build directive]\n"
+                    "Concrete file target: `/mnt/user-data/outputs/canonical.html`.\n"
+                    f"User's update message:\nplease include {update_url}"
+                )
+            ),
+        ],
+        "builder_non_artifact_turns": 4,
+        "builder_update_epoch": 2,
+    }
+
+    result = middleware.before_model(state)
+
+    assert result == {
+        "builder_non_artifact_turns": 0,
+        "builder_update_epoch": 3,
+        "builder_artifact_target_path": "/mnt/user-data/outputs/canonical.html",
+        "explicit_user_urls": [update_url],
+        "builder_allowed_urls": [update_url],
+        "builder_update_required_urls": [update_url],
+    }
+
+
 def test_reset_fires_with_minimal_history():
     """Even a 2-message history (ai(tool_calls) + new human) triggers the
     reset — the AIMessage proves work was done before the new instruction."""

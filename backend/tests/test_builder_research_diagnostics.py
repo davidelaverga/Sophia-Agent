@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from types import SimpleNamespace
 
+from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -176,3 +177,45 @@ def test_force_choice_fetches_explicit_url_after_planning():
     choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
 
     assert choice == {"type": "tool", "name": "builder_web_fetch"}
+
+
+def test_write_result_command_records_safe_success_metadata():
+    mw = BuilderArtifactMiddleware()
+    request = _tool_request(
+        "write_file",
+        {"allow_web_research": True, "builder_web_budget": {"search_calls": 1}},
+        {"path": "report.html", "content": "<html />"},
+    )
+    result = mw._write_result_command(
+        request,
+        ToolMessage(content="OK", tool_call_id="tc-write_file", name="write_file"),
+    )
+
+    assert isinstance(result, Command)
+    diagnostics = result.update["builder_write_diagnostics"]
+    assert diagnostics["success_count"] == 1
+    assert diagnostics["error_count"] == 0
+    assert diagnostics["last_ext"] == "html"
+    assert diagnostics["last_under_outputs"] is True
+    assert diagnostics["successful_output_paths"] == ["/mnt/user-data/outputs/report.html"]
+
+
+def test_recover_emit_args_requires_exactly_one_successful_output(tmp_path):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "report.html").write_text("<html />")
+    state = {
+        "thread_data": {"outputs_path": str(outputs)},
+        "builder_write_diagnostics": {
+            "successful_output_paths": ["/mnt/user-data/outputs/report.html"],
+        },
+    }
+    runtime = SimpleNamespace(context={"thread_id": "thread-1"})
+    recovered = BuilderArtifactMiddleware._recover_emit_args_from_last_write(
+        {"artifact_path": "/mnt/user-data/outputs/build.html"},
+        state,
+        runtime,
+    )
+
+    assert recovered is not None
+    assert recovered["artifact_path"] == "/mnt/user-data/outputs/report.html"

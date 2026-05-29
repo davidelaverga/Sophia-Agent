@@ -203,11 +203,8 @@ describe('useSessionRouteExperience', () => {
       })
     );
 
-    // PR-B (B5): the route experience now wraps sendMessage with a
-    // cancel-on-restart guard so a new prompt cancels any in-flight builder
-    // task before submitting. The voice runtime receives the WRAPPED
-    // function (a stable callback), not the raw mock return value — but
-    // the wrapped function delegates to it for the actual send.
+    // The route experience wraps sendMessage with freshness checks. The voice
+    // runtime receives the wrapped function, which delegates to the raw sender.
     expect(useCompanionVoiceRuntimeMock).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionId: 'session-1',
@@ -232,6 +229,55 @@ describe('useSessionRouteExperience', () => {
     });
 
     expect(result.current.builderTask).toEqual({ phase: 'running', detail: 'Drafting the brief.' });
+  });
+
+  it('does not auto-cancel a running builder when sending a normal message', async () => {
+    const rawSendMessage = vi.fn(async () => undefined);
+    useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+
+    const { result } = renderHook(() =>
+      useSessionRouteExperience({
+        sessionId: 'session-1',
+        activeSessionId: 'session-1',
+        activeThreadId: 'thread-1',
+        chatRequestBody: { session_id: 'session-1' },
+        hasValidBackendSessionId: true,
+        backendSessionId: 'session-1',
+        userId: 'user-1',
+        artifacts: null,
+        storedBuilderArtifact: null,
+        storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
+        updateSession: vi.fn(),
+        showUsageLimitModal: vi.fn(),
+        recordConnectivityFailure: vi.fn(),
+        showToast: vi.fn(),
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        greetingAnchorId: 'greeting-1',
+        markOffline: vi.fn(),
+      })
+    );
+
+    const streamContractCall = useCompanionStreamContractMock.mock.calls[0][0] as {
+      setBuilderTask: (task: { phase: string; taskId?: string; runId?: string; detail?: string }) => void;
+    };
+
+    act(() => {
+      streamContractCall.setBuilderTask({
+        phase: 'running',
+        taskId: 'task-builder-1',
+        runId: 'run-builder-1',
+        detail: 'Drafting the brief.',
+      });
+    });
+
+    await act(async () => {
+      await result.current.sendMessage({ text: 'also add Recursive MAS' });
+    });
+
+    expect(rawSendMessage).toHaveBeenCalledWith({ text: 'also add Recursive MAS' });
+    expect(cancelBuilderTaskMock).not.toHaveBeenCalled();
   });
 
   it('passes active stream state through to voice runtime retry handling', () => {

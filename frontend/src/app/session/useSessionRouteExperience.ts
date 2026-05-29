@@ -369,22 +369,6 @@ export function useSessionRouteExperience({
     showToast,
   });
 
-  /**
-   * PR-B (B5): cancel-on-restart guard.
-   *
-   * If the user submits a new prompt while a previous builder task is
-   * still running, fire the cancellation first so the prior subagent
-   * doesn't keep burning budget in parallel — this is the failure mode
-   * we saw on thread ``019dd00c``: the user typed "Sophia please can
-   * cel the task" (chat text, not a button click) and Sophia couldn't
-   * actually trigger the cancel API; the next "build it again" message
-   * spawned a SECOND concurrent subagent.
-   *
-   * Fires fire-and-forget — we don't block the new send on the cancel
-   * round-trip; the executor's Future.cancel + cooperative cancel_event
-   * will catch up within a few hundred ms. The user gets a snappy
-   * response instead of a 1–2s freeze waiting on the cancel HTTP.
-   */
   const sendMessage: typeof rawSendMessage = useCallback(
     async (...args) => {
       const appVersionFresh = await checkAppVersionFreshness({
@@ -394,16 +378,9 @@ export function useSessionRouteExperience({
       if (!appVersionFresh) {
         return;
       }
-      if (
-        builderTask?.taskId &&
-        builderTask.phase === 'running' &&
-        !isCancellingBuilderTask
-      ) {
-        void cancelBuilderTask();
-      }
       return rawSendMessage(...args);
     },
-    [builderTask, cancelBuilderTask, checkAppVersionFreshness, isCancellingBuilderTask, rawSendMessage],
+    [checkAppVersionFreshness, rawSendMessage],
   );
 
   const { appendVoiceUserMessage, appendVoiceAssistantMessage } = useSessionVoiceMessages({

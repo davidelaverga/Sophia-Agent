@@ -13,6 +13,25 @@ from deerflow.agents.sophia_agent.utils import log_middleware
 from deerflow.sophia.builder_web_policy import make_builder_web_budget
 
 
+def _merged_explicit_user_urls(
+    state: dict[str, Any], delegation_context: dict[str, Any]
+) -> list[str]:
+    explicit_user_urls: list[str] = []
+    seen_explicit_urls: set[str] = set()
+    for source in (
+        delegation_context.get("explicit_user_urls") or [],
+        state.get("explicit_user_urls") or [],
+        state.get("builder_update_required_urls") or [],
+    ):
+        values = source if isinstance(source, list) else []
+        for url in values:
+            normalized = str(url).strip()
+            if normalized and normalized not in seen_explicit_urls:
+                seen_explicit_urls.add(normalized)
+                explicit_user_urls.append(normalized)
+    return explicit_user_urls
+
+
 class BuilderResearchPolicyState(AgentState):
     system_prompt_blocks: NotRequired[list[str]]
     delegation_context: NotRequired[dict | None]
@@ -44,11 +63,7 @@ class BuilderResearchPolicyMiddleware(AgentMiddleware[BuilderResearchPolicyState
 
         task_type = str(delegation_context.get("task_type", "unknown"))
         allow_web_research = True
-        explicit_user_urls = [
-            str(url).strip()
-            for url in (delegation_context.get("explicit_user_urls") or [])
-            if str(url).strip()
-        ]
+        explicit_user_urls = _merged_explicit_user_urls(state, delegation_context)
 
         # `_merge_builder_web_budget` SUMS *_calls keys (delta semantics) so
         # the middleware MUST be init-once for this field — re-writing the

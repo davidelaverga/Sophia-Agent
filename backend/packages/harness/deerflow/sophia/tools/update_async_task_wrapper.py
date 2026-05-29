@@ -400,12 +400,21 @@ def _resolve_target_path(
     Priority:
       1. ``tracked["artifact_path"]`` — the prior run delivered something
          on disk; continue editing exactly that.
-      2. Derived ``/mnt/user-data/outputs/<slug>.<ext>`` from the
+      2. ``tracked["artifact_target_path"]`` or
+         ``delegation_context["artifact_target_path"]`` — the canonical
+         target selected at initial launch before any deliverable existed.
+      3. Derived ``/mnt/user-data/outputs/<slug>.<ext>`` from the
          delegation_context's original task brief + task_type.
     """
     prior_path = _extract_str(tracked, "artifact_path")
     if prior_path:
         return prior_path
+    tracked_target = _extract_str(tracked, "artifact_target_path")
+    if tracked_target:
+        return tracked_target
+    delegated_target = _extract_str(delegation_context, "artifact_target_path")
+    if delegated_target:
+        return delegated_target
     task_type = _resolve_effective_task_type(tracked, delegation_context)
     description = _extract_str(delegation_context, "task")
     suggested = _suggest_artifact_filename(task_type, description)

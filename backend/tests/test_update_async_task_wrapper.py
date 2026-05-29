@@ -625,6 +625,44 @@ def test_augment_prefer_prior_artifact_path_over_suggested_filename():
     assert "/mnt/user-data/outputs/already-written.md" in augmented
 
 
+def test_augment_reuses_tracked_artifact_target_path_before_artifact_exists():
+    """Mid-build updates should keep the canonical launch target even before
+    the builder has emitted a real artifact_path."""
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    augmented = _augment_update_message(
+        message="also include the new framework",
+        tracked={
+            "task_id": "t1",
+            "task_type": "document",
+            "artifact_target_path": "/mnt/user-data/outputs/canonical.html",
+        },
+        delegation_context={
+            "task": "Build an HTML document about the original topic",
+            "task_type": "document",
+        },
+    )
+
+    assert "Concrete file target: `/mnt/user-data/outputs/canonical.html`" in augmented
+    assert "build-an-html-document" not in augmented
+
+
+def test_augment_uses_delegated_artifact_target_path_when_tracking_missing():
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    augmented = _augment_update_message(
+        message="also include the new framework",
+        tracked={"task_id": "t1", "task_type": "document"},
+        delegation_context={
+            "task": "Build an HTML document about the original topic",
+            "task_type": "document",
+            "artifact_target_path": "/mnt/user-data/outputs/original.html",
+        },
+    )
+
+    assert "Concrete file target: `/mnt/user-data/outputs/original.html`" in augmented
+
+
 def test_augment_falls_back_to_build_slug_when_description_missing():
     """If delegation_context is missing or has no 'task', fall back to a
     safe default slug (``build.{ext}``) rather than crashing."""

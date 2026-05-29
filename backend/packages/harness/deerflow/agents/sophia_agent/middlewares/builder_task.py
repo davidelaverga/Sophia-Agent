@@ -169,6 +169,7 @@ class BuilderTaskState(AgentState):
     delegation_context: NotRequired[dict | None]
     builder_non_artifact_turns: NotRequired[int]
     builder_last_tool_names: NotRequired[list[str]]
+    builder_artifact_target_path: NotRequired[str]
     # NOTE: builder_search_sources is NOT redeclared here. SophiaState already
     # declares it with the `_merge_search_sources` reducer; redeclaring it as
     # plain `NotRequired[list[dict]]` would shadow that reducer via
@@ -210,6 +211,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         active_ritual: str | None = delegation_context.get("active_ritual")
         ritual_phase: str | None = delegation_context.get("ritual_phase")
         allow_web_research = True
+        artifact_target_path = (
+            state.get("builder_artifact_target_path")
+            or delegation_context.get("artifact_target_path")
+        )
         tracked_sources = [
             source for source in (state.get("builder_search_sources") or []) if isinstance(source, dict)
         ]
@@ -317,6 +322,14 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "- When you call emit_builder_artifact, artifact_path and supporting_files must use the same /mnt/user-data/outputs/... absolute paths.\n"
             "</output_contract>"
         )
+        if isinstance(artifact_target_path, str) and artifact_target_path.startswith("/mnt/user-data/outputs/"):
+            sections.append(
+                "<artifact_target>\n"
+                f"- Canonical target path for this build: `{html.escape(artifact_target_path, quote=True)}`.\n"
+                "- Reuse this path across update/resume runs unless you have already written exactly one stronger deliverable candidate under /mnt/user-data/outputs/.\n"
+                "- emit_builder_artifact.artifact_path should point to this target or that single verified candidate, never to an unwritten placeholder.\n"
+                "</artifact_target>"
+            )
 
         # PR Phase B (2026-04-29): inject the skills inventory so the
         # builder knows the pre-tested generation workflows

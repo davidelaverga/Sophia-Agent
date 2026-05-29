@@ -16,7 +16,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
-from typing import Any, NotRequired, override
+from typing import Annotated, Any, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -28,6 +28,7 @@ from langgraph.types import Command
 
 from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
 from deerflow.agents.sophia_agent.utils import log_middleware
+from deerflow.sophia.builder_web_policy import extract_explicit_user_urls
 from deerflow.sophia.builder_events import fire_completion_webhook_from_artifact
 from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.sophia.storage.supabase_mirror import maybe_mirror_file
@@ -94,6 +95,43 @@ _SAFE_BASH_COMMAND_RE = re.compile(
 _BASH_WRITE_MARKER_RE = re.compile(
     r"(?:^|\s)(?:python|node|perl|ruby)\b|[>|]\s*|(?:^|\s)tee\s+|<<"
 )
+_FILE_TARGET_HINT_MARKER = "[Sophia/post-interrupt build directive]"
+_CONCRETE_FILE_TARGET_RE = re.compile(r"Concrete file target:\s*`([^`]+)`")
+
+
+def _merge_builder_write_diagnostics(
+    current: dict | None, update: dict | None
+) -> dict:
+    if current is None and update is None:
+        return {}
+    if current is None:
+        return dict(update or {})
+    if update is None:
+        return dict(current)
+    merged = dict(current)
+    for key, value in update.items():
+        _merge_builder_write_diagnostic_value(merged, key, value)
+    return merged
+
+
+def _merge_builder_write_diagnostic_value(
+    merged: dict, key: str, value: object
+) -> None:
+    if key in {"success_count", "error_count"} and isinstance(value, int):
+        merged[key] = int(merged.get(key, 0) or 0) + value
+        return
+    if key == "successful_output_paths" and isinstance(value, list):
+        merged[key] = _merge_string_list(merged.get(key), value)
+        return
+    merged[key] = value
+
+
+def _merge_string_list(current: object, update: list) -> list[str]:
+    seen = {str(item): None for item in current if isinstance(item, str)} if isinstance(current, list) else {}
+    for item in update:
+        if isinstance(item, str):
+            seen[item] = None
+    return list(seen)
 
 
 def _extract_output_relative_path(artifact_path: str | None) -> str | None:
@@ -287,6 +325,11 @@ class BuilderArtifactState(AgentState):
     builder_last_tool_names: NotRequired[list[str]]
     builder_tool_turn_summaries: NotRequired[list[dict]]
     builder_research_diagnostics: NotRequired[dict]
+    builder_update_epoch: NotRequired[int]
+    builder_update_required_urls: NotRequired[list[str]]
+    builder_artifact_target_path: NotRequired[str]
+    builder_last_successful_output_path: NotRequired[str | None]
+    builder_write_diagnostics: NotRequired[Annotated[dict, _merge_builder_write_diagnostics]]
     # PR #94: count consecutive emit attempts rejected for empty/missing
     # ``artifact_path``. When this reaches ``_REJECTION_SHORT_CIRCUIT_AT``
     # we route directly to the hard-ceiling fallback instead of letting
@@ -1099,6 +1142,49 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return ""
         return _recovery_hint(outputs_root, candidates)
 
+    @classmethod
+    def _recover_emit_args_from_last_write(
+        cls,
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> dict[str, Any] | None:
+        successful_paths = cls._successful_output_paths(state)
+        if len(successful_paths) != 1:
+            return None
+        recovered_path = successful_paths[0]
+        recovered_args = dict(artifact_args)
+        recovered_args["artifact_path"] = recovered_path
+        if not cls._artifact_files_exist(recovered_args, state, runtime):
+            return None
+        logger.warning(
+            "BuilderArtifact: emit_path_missing recovered_from_last_successful_write ext=%s",
+            Path(recovered_path).suffix.lower().lstrip(".") or None,
+        )
+        return recovered_args
+
+    @staticmethod
+    def _successful_output_paths(state: BuilderArtifactState) -> list[str]:
+        diagnostics = state.get("builder_write_diagnostics") or {}
+        if not isinstance(diagnostics, dict):
+            return []
+        return [
+            path
+            for path in (diagnostics.get("successful_output_paths") or [])
+            if isinstance(path, str) and _extract_output_relative_path(path) is not None
+        ]
+
+    @classmethod
+    def _recover_missing_emit_args_if_possible(
+        cls,
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> dict[str, Any]:
+        if cls._artifact_files_exist(artifact_args, state, runtime):
+            return artifact_args
+        return cls._recover_emit_args_from_last_write(artifact_args, state, runtime) or artifact_args
+
     def _force_choice_for_state(
         self,
         state: BuilderArtifactState,
@@ -1255,6 +1341,47 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     return True
         return False
 
+    @staticmethod
+    def _latest_human_content(messages: list) -> str:
+        if not messages or not isinstance(messages[-1], HumanMessage):
+            return ""
+        content = messages[-1].content
+        return content if isinstance(content, str) else str(content or "")
+
+    @staticmethod
+    def _extract_update_target_path(content: str) -> str | None:
+        match = _CONCRETE_FILE_TARGET_RE.search(content or "")
+        if not match:
+            return None
+        target = match.group(1).strip()
+        if not target.startswith(_OUTPUTS_VIRTUAL_PREFIX):
+            return None
+        if _extract_output_relative_path(target) is None:
+            return None
+        return target
+
+    def _post_interrupt_state_hints(
+        self, state: BuilderArtifactState, messages: list
+    ) -> dict[str, Any]:
+        content = self._latest_human_content(messages)
+        update: dict[str, Any] = {}
+        urls = extract_explicit_user_urls(content)
+        if urls:
+            update["explicit_user_urls"] = urls
+            update["builder_allowed_urls"] = urls
+            update["builder_update_required_urls"] = urls
+        target_path = self._extract_update_target_path(content)
+        if target_path:
+            update["builder_artifact_target_path"] = target_path
+        if _FILE_TARGET_HINT_MARKER in content:
+            update["builder_update_epoch"] = int(state.get("builder_update_epoch", 0) or 0) + 1
+            logger.info(
+                "[BuilderArtifact] post-interrupt update hints: explicit_url_count=%d target_ext=%s",
+                len(urls),
+                Path(target_path).suffix.lower().lstrip(".") if target_path else None,
+            )
+        return update
+
     def _maybe_reset_turn_budget(
         self, state: BuilderArtifactState
     ) -> dict[str, Any] | None:
@@ -1269,14 +1396,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if not self._is_post_interrupt_update(messages):
             return None
         current = int(state.get("builder_non_artifact_turns", 0) or 0)
-        if current <= 0:
-            return None  # Nothing to reset — fresh run.
-        logger.info(
-            "[BuilderArtifact] post-interrupt update detected — resetting "
-            "builder_non_artifact_turns: %d → 0 (fresh budget for the update)",
-            current,
-        )
-        return {"builder_non_artifact_turns": 0}
+        update = self._post_interrupt_state_hints(state, messages)
+        if current > 0:
+            logger.info(
+                "[BuilderArtifact] post-interrupt update detected — resetting "
+                "builder_non_artifact_turns: %d -> 0 (fresh budget for the update)",
+                current,
+            )
+            update["builder_non_artifact_turns"] = 0
+        return update or None
 
     def _combined_before_model_updates(
         self, state: BuilderArtifactState
@@ -1366,6 +1494,81 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             goto="model",
         )
 
+    @staticmethod
+    def _normalized_write_path(tool_call: dict[str, Any]) -> str | None:
+        args = tool_call.get("args") or {}
+        if not isinstance(args, dict):
+            return None
+        raw_path = args.get("path") or args.get("file_path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return None
+        return BuilderArtifactMiddleware._normalize_requested_write_path(raw_path.strip())
+
+    @staticmethod
+    def _normalize_requested_write_path(path: str) -> str:
+        if path.startswith(_OUTPUTS_VIRTUAL_PREFIX):
+            return path
+        if "/" not in path and "\\" not in path:
+            return _OUTPUTS_VIRTUAL_PREFIX + path
+        return path
+
+    @staticmethod
+    def _tool_message_text(result: ToolMessage) -> str:
+        content = result.content
+        if isinstance(content, str):
+            return content
+        return str(content or "")
+
+    def _write_result_delta(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage,
+    ) -> dict[str, Any]:
+        success = self._tool_message_text(result).strip().startswith("OK")
+        path = self._normalized_write_path(request.tool_call)
+        ext, under_outputs = self._write_path_metadata(path)
+        delta: dict[str, Any] = {
+            "success_count": 1 if success else 0,
+            "error_count": 0 if success else 1,
+            "last_ext": ext,
+            "last_under_outputs": under_outputs,
+            "last_status": "success" if success else "error",
+        }
+        if success and under_outputs and path:
+            delta["last_successful_output_path"] = path
+            delta["successful_output_paths"] = [path]
+        return delta
+
+    @staticmethod
+    def _write_path_metadata(path: str | None) -> tuple[str, bool]:
+        if not path:
+            return "", False
+        return Path(path).suffix.lower().lstrip("."), _extract_output_relative_path(path) is not None
+
+    def _write_result_command(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage | Command,
+    ) -> ToolMessage | Command:
+        tool_name = request.tool_call.get("name")
+        if tool_name not in _BUILDER_WRITE_TOOL_NAMES or not isinstance(result, ToolMessage):
+            return result
+
+        delta = self._write_result_delta(request, result)
+        logger.info(
+            "[BuilderWriteDiagnostics] tool=%s status=%s path_under_outputs=%s ext=%s",
+            tool_name,
+            delta["last_status"],
+            delta["last_under_outputs"],
+            delta["last_ext"] or None,
+        )
+        return Command(
+            update={
+                "messages": [result],
+                "builder_write_diagnostics": delta,
+            }
+        )
+
     @override
     def wrap_tool_call(
         self,
@@ -1384,10 +1587,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return research_block
 
         if request.tool_call.get("name") != "emit_builder_artifact":
-            return handler(request)
+            return self._write_result_command(request, handler(request))
 
         args = request.tool_call.get("args", {})
         if self._artifact_files_exist(args, request.state, request.runtime):
+            return handler(request)
+        recovered_args = self._recover_emit_args_from_last_write(args, request.state, request.runtime)
+        if recovered_args is not None:
+            request.tool_call["args"] = recovered_args
             return handler(request)
 
         tool_call_id = request.tool_call.get("id", "")
@@ -1429,10 +1636,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return research_block
 
         if request.tool_call.get("name") != "emit_builder_artifact":
-            return await handler(request)
+            return self._write_result_command(request, await handler(request))
 
         args = request.tool_call.get("args", {})
         if self._artifact_files_exist(args, request.state, request.runtime):
+            return await handler(request)
+        recovered_args = self._recover_emit_args_from_last_write(args, request.state, request.runtime)
+        if recovered_args is not None:
+            request.tool_call["args"] = recovered_args
             return await handler(request)
 
         tool_call_id = request.tool_call.get("id", "")
@@ -1510,6 +1721,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     # emit is rejected → tool_choice forces emit again → loop.
                     # Incrementing lets the hard ceiling (10) trigger after a few
                     # retries and terminate the run instead of spinning forever.
+                    args = self._recover_missing_emit_args_if_possible(args, state, runtime)
+
                     if not self._artifact_files_exist(args, state, runtime):
                         logger.warning(
                             "BuilderArtifact: emit rejected in after_model — "
@@ -1548,6 +1761,36 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 "empty_artifact_path": is_empty_path_rejection,
                             },
                         )
+                        write_diagnostics = state.get("builder_write_diagnostics") or {}
+                        write_success_count = int(write_diagnostics.get("success_count", 0) or 0)
+                        write_error_count = int(write_diagnostics.get("error_count", 0) or 0)
+                        if write_success_count == 0 and write_error_count >= 3:
+                            logger.warning(
+                                "BuilderArtifact: stopping after repeated write failures "
+                                "with no successful output write (write_errors=%d)",
+                                write_error_count,
+                            )
+                            fallback = self._build_ceiling_fallback(
+                                state,
+                                steps_completed=non_artifact_turns,
+                                reason="repeated_write_failures_no_output",
+                            )
+                            self._upload_fallback_and_fire(
+                                state=state,
+                                runtime=runtime,
+                                fallback=fallback,
+                                status="failed" if not fallback.get("artifact_path") else "completed",
+                            )
+                            return {
+                                "builder_result": fallback,
+                                "builder_non_artifact_turns": 0,
+                                "builder_last_tool_names": tool_names,
+                                "builder_tool_turn_summaries": history,
+                                "builder_research_diagnostics": research_diagnostics,
+                                "builder_task_started_at_ms": 0,
+                                "builder_consecutive_empty_emit_rejections": 0,
+                                "jump_to": "end",
+                            }
 
                         if (
                             is_empty_path_rejection
