@@ -180,6 +180,50 @@ def test_view_user_image_falls_through_to_outputs(tmp_path: Path, monkeypatch) -
     assert "/mnt/user-data/outputs/chart.png" in viewed
 
 
+def test_view_user_image_materializes_from_supabase_on_local_miss(tmp_path: Path, monkeypatch) -> None:
+    """Cross-service fallback (PR #132): a PNG that exists only in Supabase
+    (gateway wrote it to its own disk; this tool runs in langgraph) is
+    downloaded into the uploads dir and loaded into viewed_images."""
+    from deerflow.sandbox import tools as sandbox_tools_mod
+    from deerflow.sophia.tools import view_user_image as view_mod
+
+    png_bytes = bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
+        "890000000d49444154789c63000100000005000100c92e1bd80000000049454e"
+        "44ae426082"
+    )
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    # File is NOT on local disk — only in mocked Supabase.
+
+    def _fake_replace(virtual: str, _td):
+        return str(uploads / virtual.rsplit("/", 1)[-1])
+
+    monkeypatch.setattr(sandbox_tools_mod, "replace_virtual_path", _fake_replace)
+    monkeypatch.setattr(sandbox_tools_mod, "get_thread_data", lambda _r: {})
+
+    from deerflow.sophia.storage import supabase_artifact_store as store
+    monkeypatch.setattr(store, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        store,
+        "download_artifact",
+        lambda _tid, _fn, **_kw: (png_bytes, "image/png"),
+    )
+
+    runtime = _make_runtime("t1", {})
+    result = view_mod.view_user_image.func(
+        runtime=runtime,
+        image_filename="remote.png",
+        tool_call_id="tc-1",
+    )
+
+    viewed = result.update["viewed_images"]
+    assert "/mnt/user-data/uploads/remote.png" in viewed
+    assert base64.b64decode(viewed["/mnt/user-data/uploads/remote.png"]["base64"]) == png_bytes
+    # Materialized locally too.
+    assert (uploads / "remote.png").is_file()
+
+
 def test_view_user_image_rejects_oversized_image_before_base64(tmp_path: Path, monkeypatch) -> None:
     """Codex P2 on PR #132 — files above MAX_VIEWABLE_IMAGE_BYTES must
     be rejected before we read + base64-encode them, otherwise the
@@ -287,6 +331,78 @@ def test_view_user_image_reports_not_found(tmp_path: Path, monkeypatch) -> None:
 
 
 # ─── read_user_document ──────────────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_read_user_document_materializes_from_supabase_on_local_miss(tmp_path: Path, monkeypatch) -> None:
+    """Cross-service fallback (PR #132): when the file is NOT on the local
+    langgraph disk (gateway wrote it to its own container disk + Supabase),
+    the tool downloads it from Supabase into the uploads dir and reads it.
+
+    This is the production root cause: uploads land on the gateway container,
+    the read tool runs in the langgraph container, and the two have separate
+    ephemeral disks — so without the Supabase bridge the doc is invisible.
+    """
+    from deerflow.sophia.tools import read_user_document as rud_mod
+
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    # NOTE: the file is intentionally NOT written locally — it only exists
+    # in (mocked) Supabase, exactly like the cross-container production case.
+
+    fake_paths = SimpleNamespace(
+        sandbox_uploads_dir=lambda _tid: uploads,
+        sandbox_outputs_dir=lambda _tid: tmp_path / "outputs",
+    )
+    monkeypatch.setattr(rud_mod, "get_paths", lambda: fake_paths)
+
+    # Mock the Supabase store: configured + returns the doc bytes.
+    from deerflow.sophia.storage import supabase_artifact_store as store
+    monkeypatch.setattr(store, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        store,
+        "download_artifact",
+        lambda _tid, _fn, **_kw: (b"# Remote\n\nfrom supabase.", "text/markdown"),
+    )
+
+    runtime = _make_runtime("t1", {})
+    result = await rud_mod.read_user_document.coroutine(
+        runtime=runtime,
+        document_filename="remote.md",
+        tool_call_id="tc-1",
+    )
+    body = _content(result)
+    assert "# Remote" in body
+    assert "from supabase." in body
+    # And it should have been materialized to the local uploads dir.
+    assert (uploads / "remote.md").is_file()
+
+
+@pytest.mark.anyio
+async def test_read_user_document_supabase_miss_returns_not_found(tmp_path: Path, monkeypatch) -> None:
+    """If the file is neither local nor in Supabase (download returns None),
+    the tool still returns the clean 'not found' message — no crash."""
+    from deerflow.sophia.tools import read_user_document as rud_mod
+
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    fake_paths = SimpleNamespace(
+        sandbox_uploads_dir=lambda _tid: uploads,
+        sandbox_outputs_dir=lambda _tid: tmp_path / "outputs",
+    )
+    monkeypatch.setattr(rud_mod, "get_paths", lambda: fake_paths)
+
+    from deerflow.sophia.storage import supabase_artifact_store as store
+    monkeypatch.setattr(store, "is_configured", lambda: True)
+    monkeypatch.setattr(store, "download_artifact", lambda _tid, _fn, **_kw: None)
+
+    runtime = _make_runtime("t1", {})
+    result = await rud_mod.read_user_document.coroutine(
+        runtime=runtime,
+        document_filename="ghost.md",
+        tool_call_id="tc-1",
+    )
+    assert "not found" in _content(result).lower()
 
 
 @pytest.mark.anyio

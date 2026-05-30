@@ -115,6 +115,55 @@ def _resolve_document_path(thread_id: str, filename: str) -> Path | None:
     return None
 
 
+def _materialize_from_supabase(thread_id: str, filename: str) -> Path | None:
+    """Download a thread upload from Supabase into the local uploads dir.
+
+    Cross-service bridge (PR #132): the gateway upload route mirrors every
+    uploaded file to Supabase Storage under ``{thread_id}/{filename}``
+    because the gateway and this langgraph runtime are separate containers
+    with separate disks. When the local lookup misses, fetch the bytes here
+    and write them to ``sandbox_uploads_dir(thread_id)`` so the rest of the
+    tool (text read / markitdown conversion) proceeds unchanged.
+
+    Returns the local path on success, ``None`` when Supabase is not
+    configured, the object is missing, or any error occurs (best-effort —
+    the caller degrades to the normal "not found" tool message).
+
+    ``filename`` is already validated by ``_is_safe_filename`` before this
+    is reached, so it is a bare ``[A-Za-z0-9._-]+`` name — safe to join.
+    """
+    try:
+        from deerflow.sophia.storage import supabase_artifact_store
+    except Exception:  # noqa: BLE001 — storage module optional
+        return None
+
+    if not supabase_artifact_store.is_configured():
+        return None
+
+    try:
+        result = supabase_artifact_store.download_artifact(thread_id, filename)
+    except Exception as exc:  # noqa: BLE001 — best-effort cross-service fetch
+        logger.warning("Supabase download failed for %s/%s: %s", thread_id, filename, exc)
+        return None
+    if result is None:
+        return None
+    content, _content_type = result
+
+    try:
+        uploads_dir = get_paths().sandbox_uploads_dir(thread_id)
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        dest = uploads_dir / filename
+        # Explicit open() rather than Path.write_bytes — equivalent, and
+        # avoids a pathlib/temp-dir interaction seen under the test harness.
+        with open(str(dest), "wb") as fh:
+            fh.write(content)
+    except OSError as exc:
+        logger.warning("Could not materialize %s from Supabase: %s", filename, exc)
+        return None
+    logger.info("Materialized %s (%d bytes) from Supabase for thread %s", filename, len(content), thread_id)
+    return dest
+
+
 def _truncate_for_context(text: str) -> str:
     encoded = text.encode("utf-8")
     if len(encoded) <= _MAX_BYTES_RETURNED:
@@ -173,6 +222,14 @@ async def read_user_document(
         )
 
     path = _resolve_document_path(thread_id, document_filename)
+    if path is None:
+        # Cross-service fallback (PR #132): the gateway wrote this upload to
+        # ITS container disk and mirrored it to Supabase; this tool runs in
+        # the langgraph container (separate disk), so the local lookup misses.
+        # Pull the bytes from Supabase into this thread's uploads dir, then
+        # re-resolve. Best-effort: any miss falls through to the clean
+        # "not found" message below.
+        path = _materialize_from_supabase(thread_id, document_filename)
     if path is None:
         return Command(
             update={

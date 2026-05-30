@@ -140,6 +140,83 @@ def _is_safe_filename(filename: str) -> bool:
     return bool(_SAFE_IMAGE_FILENAME.match(filename))
 
 
+def _resolve_thread_id(runtime) -> str | None:  # noqa: ANN001 — ToolRuntime, kept loose to avoid import cycle
+    """Resolve thread_id from runtime context then configurable.
+
+    Mirrors ``read_user_document._resolve_thread_id`` /
+    ``start_builder_task._resolve_thread_id`` so the Supabase cross-service
+    fallback can key downloads by thread.
+    """
+    if runtime is None:
+        return None
+    ctx = getattr(runtime, "context", None)
+    if ctx:
+        candidate = ctx.get("thread_id")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    cfg = getattr(runtime, "config", None)
+    if cfg:
+        candidate = (cfg.get("configurable", {}) or {}).get("thread_id")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return None
+
+
+def _materialize_image_from_supabase(
+    runtime,  # noqa: ANN001 — ToolRuntime
+    image_filename: str,
+    thread_data,  # noqa: ANN001 — opaque sandbox thread-data handle
+    replace_virtual_path,  # noqa: ANN001 — injected to avoid a second import
+) -> tuple[str, Path] | None:
+    """Download an image upload from Supabase into the uploads dir.
+
+    Cross-service bridge (PR #132): the gateway mirrors every upload to
+    Supabase under ``{thread_id}/{filename}`` because gateway and langgraph
+    run in separate containers with separate disks. On a local miss we fetch
+    the bytes and write them to the thread's uploads dir, returning the
+    (virtual_path, actual_path) pair so the caller proceeds unchanged.
+
+    Returns ``None`` when thread_id can't be resolved, Supabase isn't
+    configured, the object is missing, or any error occurs (best-effort —
+    the caller degrades to the normal "not found" message). ``image_filename``
+    is already validated by ``_is_safe_filename`` before this is reached.
+    """
+    thread_id = _resolve_thread_id(runtime)
+    if not thread_id:
+        return None
+
+    try:
+        from deerflow.sophia.storage import supabase_artifact_store
+    except Exception:  # noqa: BLE001 — storage module optional
+        return None
+    if not supabase_artifact_store.is_configured():
+        return None
+
+    try:
+        result = supabase_artifact_store.download_artifact(thread_id, image_filename)
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.warning("Supabase image download failed for %s/%s: %s", thread_id, image_filename, exc)
+        return None
+    if result is None:
+        return None
+    content, _content_type = result
+
+    candidate_virtual = f"/mnt/user-data/uploads/{image_filename}"
+    try:
+        dest = Path(replace_virtual_path(candidate_virtual, thread_data))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # Use an explicit open() rather than Path.write_bytes — equivalent,
+        # and avoids a pathlib/temp-dir interaction that surfaced under the
+        # test harness.
+        with open(str(dest), "wb") as fh:
+            fh.write(content)
+    except OSError as exc:
+        logger.warning("Could not materialize image %s from Supabase: %s", image_filename, exc)
+        return None
+    logger.info("Materialized image %s (%d bytes) from Supabase for thread %s", image_filename, len(content), thread_id)
+    return candidate_virtual, dest
+
+
 @tool("view_user_image", parse_docstring=True)
 def view_user_image(
     runtime: ToolRuntime[ContextT, ThreadState],
@@ -198,6 +275,19 @@ def view_user_image(
             resolved_virtual = candidate_virtual
             resolved_actual = candidate_actual
             break
+
+    if resolved_actual is None or resolved_virtual is None:
+        # Cross-service fallback (PR #132): the gateway saved this upload to
+        # ITS container disk and mirrored it to Supabase; this tool runs in
+        # the langgraph container (separate disk), so the local lookup
+        # misses. Pull the bytes from Supabase into the uploads dir and
+        # resolve to that path. Best-effort — a miss falls through to the
+        # normal "not found" message.
+        materialized = _materialize_image_from_supabase(
+            runtime, image_filename, thread_data, replace_virtual_path
+        )
+        if materialized is not None:
+            resolved_virtual, resolved_actual = materialized
 
     if resolved_actual is None or resolved_virtual is None:
         searched = ", ".join(_SEARCH_ROOTS)

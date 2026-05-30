@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,31 @@ def get_uploads_dir(thread_id: str) -> Path:
     base_dir = get_paths().sandbox_uploads_dir(thread_id)
     base_dir.mkdir(parents=True, exist_ok=True)
     return base_dir
+
+
+def _mirror_upload_to_supabase(thread_id: str, filename: str, content: bytes) -> None:
+    """Best-effort mirror of an uploaded file to Supabase Storage.
+
+    See the call site for the full rationale: the gateway and the langgraph
+    runtime are separate Render containers with separate disks, so the
+    companion's read tools (which run in langgraph) can't see a file written
+    only to the gateway's disk. We push every upload to Supabase under
+    ``{thread_id}/{filename}`` and the read tools download on a local miss.
+
+    Never raises — a Supabase outage / missing config must not fail the
+    upload (local/dev without Supabase keeps working).
+    """
+    if not supabase_artifact_store.is_configured():
+        return
+    try:
+        supabase_artifact_store.upload_artifact(thread_id, filename, content)
+    except Exception as exc:  # noqa: BLE001 — best-effort mirror, never block upload
+        logger.warning(
+            "Supabase upload mirror failed (continuing) thread_id=%s filename=%s error=%s",
+            thread_id,
+            filename,
+            exc,
+        )
 
 
 @router.post("", response_model=UploadResponse)
@@ -80,6 +106,18 @@ async def upload_files(
             file_path = uploads_dir / safe_filename
             file_path.write_bytes(content)
 
+            # Cross-service mirror (PR #132): the gateway and the langgraph
+            # runtime are SEPARATE Render containers with SEPARATE ephemeral
+            # disks (render.yaml declares no shared/persistent disk). The
+            # companion's view_user_image / read_user_document tools run in
+            # the langgraph container and read sandbox_uploads_dir(thread_id)
+            # on THAT disk — so a file written here on the gateway disk is
+            # invisible to them. Mirror every upload to Supabase Storage under
+            # {thread_id}/{filename}; the read tools fall back to downloading
+            # from there on a local miss. Best-effort: a Supabase failure must
+            # not fail the upload (local/dev with no Supabase keeps working).
+            _mirror_upload_to_supabase(thread_id, safe_filename, content)
+
             # Build relative path from backend root
             relative_path = str(paths.sandbox_uploads_dir(thread_id) / safe_filename)
             virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{safe_filename}"
@@ -106,6 +144,15 @@ async def upload_files(
                 if md_path:
                     md_relative_path = str(paths.sandbox_uploads_dir(thread_id) / md_path.name)
                     md_virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{md_path.name}"
+
+                    # Mirror the conversion sibling too — read_user_document
+                    # reads the <stem>.md for PDFs/DOCX/etc., and it lives on
+                    # the gateway disk just like the original. Without this the
+                    # converted text is also invisible to the langgraph tools.
+                    try:
+                        _mirror_upload_to_supabase(thread_id, md_path.name, md_path.read_bytes())
+                    except OSError as mirror_exc:
+                        logger.warning("Could not read converted md for Supabase mirror: %s", mirror_exc)
 
                     if sandbox_id != "local":
                         sandbox.update_file(md_virtual_path, md_path.read_bytes())
