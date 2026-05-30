@@ -28,8 +28,8 @@ from langgraph.types import Command
 
 from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
 from deerflow.agents.sophia_agent.utils import log_middleware
-from deerflow.sophia.builder_web_policy import extract_explicit_user_urls
 from deerflow.sophia.builder_events import fire_completion_webhook_from_artifact
+from deerflow.sophia.builder_web_policy import extract_explicit_user_urls
 from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.sophia.storage.supabase_mirror import maybe_mirror_file
 
@@ -97,6 +97,32 @@ _BASH_WRITE_MARKER_RE = re.compile(
 )
 _FILE_TARGET_HINT_MARKER = "[Sophia/post-interrupt build directive]"
 _CONCRETE_FILE_TARGET_RE = re.compile(r"Concrete file target:\s*`([^`]+)`")
+_PATH_CORRECTABLE_WRITE_ERROR_CLASSES = {
+    "path_is_directory",
+    "path_not_outputs",
+    "path_traversal",
+    "permission_denied",
+    "write_tool_error",
+}
+_RUNTIME_WRITE_ERROR_CLASSES = {
+    "missing_thread_data",
+    "missing_thread_id",
+    "sandbox_not_found",
+    "sandbox_runtime",
+    "unexpected_write_error",
+    "write_os_error",
+}
+_WRITE_ERROR_CLASS_MARKERS = (
+    ("missing_thread_id", ("thread id not available", "nonetype' object has no attribute 'get")),
+    ("missing_thread_data", ("thread data not available", "no allowed local sandbox directories")),
+    ("sandbox_not_found", ("sandbox with id", "sandbox not found")),
+    ("sandbox_runtime", ("sandbox",)),
+    ("path_traversal", ("path traversal", "access denied")),
+    ("permission_denied", ("permission denied",)),
+    ("path_is_directory", ("path is a directory",)),
+    ("write_os_error", ("failed to write file",)),
+    ("unexpected_write_error", ("unexpected error writing file",)),
+)
 
 
 def _merge_builder_write_diagnostics(
@@ -1257,8 +1283,103 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 return count
         return count
 
+    @classmethod
+    def _trailing_write_file_error_classes(
+        cls,
+        messages: list,
+        lookback: int,
+    ) -> list[str]:
+        classes: list[str] = []
+        scanned = 0
+        for msg in reversed(messages):
+            scanned += 1
+            if scanned > lookback:
+                break
+            if not isinstance(msg, ToolMessage):
+                continue
+            name = getattr(msg, "name", None) or ""
+            if name not in ("write_file", "write_file_tool"):
+                return classes
+            text = cls._tool_message_text(msg)
+            if text.startswith("Error"):
+                classes.append(cls._classify_write_error(text, under_outputs=None))
+            else:
+                return classes
+        return classes
+
+    @staticmethod
+    def _tool_message_content_shape(result: ToolMessage) -> str:
+        content = result.content
+        if isinstance(content, str):
+            return "text"
+        if isinstance(content, list):
+            return "list"
+        if isinstance(content, dict):
+            return "dict"
+        if content is None:
+            return "none"
+        return type(content).__name__
+
+    @staticmethod
+    def _classify_write_error(text: str, under_outputs: bool | None) -> str:
+        if not text.startswith("Error"):
+            return ""
+        lowered = text.lower()
+        for error_class, markers in _WRITE_ERROR_CLASS_MARKERS:
+            if any(marker in lowered for marker in markers):
+                return error_class
+        if under_outputs is False:
+            return "path_not_outputs"
+        return "write_tool_error"
+
+    @staticmethod
+    def _is_runtime_write_failure(error_class: str | None) -> bool:
+        return bool(error_class and error_class in _RUNTIME_WRITE_ERROR_CLASSES)
+
+    @staticmethod
+    def _is_path_correctable_write_failure(error_class: str | None) -> bool:
+        return not error_class or error_class in _PATH_CORRECTABLE_WRITE_ERROR_CLASSES
+
+    def _write_runtime_failure_update(
+        self,
+        state: BuilderArtifactState,
+        runtime: Runtime | None,
+        *,
+        count: int,
+        error_class: str,
+    ) -> dict[str, Any]:
+        logger.error(
+            "[BuilderArtifact] %d consecutive write_file_tool runtime errors "
+            "detected; stopping build instead of path-correcting error_class=%s",
+            count,
+            error_class,
+        )
+        fallback = self._build_ceiling_fallback(
+            state,
+            steps_completed=int(state.get("builder_non_artifact_turns", 0) or 0),
+            reason=f"runtime_write_failure:{error_class}",
+        )
+        status = "failed" if not fallback.get("artifact_path") else "completed"
+        if runtime is not None:
+            self._upload_fallback_and_fire(
+                state=state,
+                runtime=runtime,
+                fallback=fallback,
+                status=status,
+            )
+        return {
+            "builder_result": fallback,
+            "builder_non_artifact_turns": 0,
+            "builder_task_started_at_ms": 0,
+            "builder_consecutive_empty_emit_rejections": 0,
+            "builder_runtime_write_failure_emitted": True,
+            "jump_to": "end",
+        }
+
     def _maybe_inject_path_correction(
-        self, state: BuilderArtifactState
+        self,
+        state: BuilderArtifactState,
+        runtime: Runtime | None = None,
     ) -> dict[str, Any] | None:
         """Phase 2F.3: detect ``write_file_tool`` error loops and inject a
         single corrective HumanMessage so the model recovers.
@@ -1283,10 +1404,35 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
         if count < self._PATH_CORRECTION_ERROR_THRESHOLD:
             return None
+        diagnostics = state.get("builder_write_diagnostics") or {}
+        error_class = (
+            diagnostics.get("last_error_class")
+            if isinstance(diagnostics, dict)
+            else None
+        )
+        if not isinstance(error_class, str) or not error_class:
+            classes = self._trailing_write_file_error_classes(
+                messages,
+                self._PATH_CORRECTION_LOOKBACK,
+            )
+            error_class = classes[0] if classes else "write_tool_error"
+        if self._is_runtime_write_failure(error_class):
+            if state.get("builder_runtime_write_failure_emitted"):
+                return None
+            return self._write_runtime_failure_update(
+                state,
+                runtime,
+                count=count,
+                error_class=error_class,
+            )
+        if not self._is_path_correctable_write_failure(error_class):
+            return None
         logger.warning(
             "[BuilderArtifact] %d consecutive write_file_tool errors detected "
-            "— injecting path-correction directive (Phase 2F.3 escape hatch).",
+            "— injecting path-correction directive (Phase 2F.3 escape hatch). "
+            "error_class=%s",
             count,
+            error_class,
         )
         correction = HumanMessage(
             content=(
@@ -1407,7 +1553,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return update or None
 
     def _combined_before_model_updates(
-        self, state: BuilderArtifactState
+        self,
+        state: BuilderArtifactState,
+        runtime: Runtime | None = None,
     ) -> dict | None:
         """Run all before_model state-update probes (Phase 2E.1 turn-budget
         reset + Phase 2F.3 path-correction injection) and merge their
@@ -1416,24 +1564,26 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         reset = self._maybe_reset_turn_budget(state)
         if isinstance(reset, dict):
             update.update(reset)
-        correction = self._maybe_inject_path_correction(state)
+        correction = self._maybe_inject_path_correction(state, runtime)
         if isinstance(correction, dict):
             # Merge: ``messages`` reducer concatenates, scalar flags overwrite.
             for key, value in correction.items():
                 update[key] = value
         return update or None
 
+    @hook_config(can_jump_to=["end"])
     @override
     def before_model(
         self, state: BuilderArtifactState, runtime: Runtime | None = None
     ) -> dict | None:
-        return self._combined_before_model_updates(state)
+        return self._combined_before_model_updates(state, runtime)
 
+    @hook_config(can_jump_to=["end"])
     @override
     async def abefore_model(
         self, state: BuilderArtifactState, runtime: Runtime | None = None
     ) -> dict | None:
-        return self._combined_before_model_updates(state)
+        return self._combined_before_model_updates(state, runtime)
 
     @override
     def wrap_model_call(
@@ -1524,16 +1674,20 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         request: ToolCallRequest,
         result: ToolMessage,
     ) -> dict[str, Any]:
-        success = self._tool_message_text(result).strip().startswith("OK")
+        text = self._tool_message_text(result).strip()
+        success = text.startswith("OK")
         path = self._normalized_write_path(request.tool_call)
         ext, under_outputs = self._write_path_metadata(path)
         delta: dict[str, Any] = {
             "success_count": 1 if success else 0,
             "error_count": 0 if success else 1,
+            "last_content_shape": self._tool_message_content_shape(result),
             "last_ext": ext,
             "last_under_outputs": under_outputs,
             "last_status": "success" if success else "error",
         }
+        if not success:
+            delta["last_error_class"] = self._classify_write_error(text, under_outputs)
         if success and under_outputs and path:
             delta["last_successful_output_path"] = path
             delta["successful_output_paths"] = [path]
@@ -1556,11 +1710,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
         delta = self._write_result_delta(request, result)
         logger.info(
-            "[BuilderWriteDiagnostics] tool=%s status=%s path_under_outputs=%s ext=%s",
+            "[BuilderWriteDiagnostics] tool=%s status=%s path_under_outputs=%s "
+            "ext=%s error_class=%s content_shape=%s",
             tool_name,
             delta["last_status"],
             delta["last_under_outputs"],
             delta["last_ext"] or None,
+            delta.get("last_error_class"),
+            delta.get("last_content_shape"),
         )
         return Command(
             update={

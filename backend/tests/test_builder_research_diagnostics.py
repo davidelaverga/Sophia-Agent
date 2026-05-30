@@ -197,7 +197,32 @@ def test_write_result_command_records_safe_success_metadata():
     assert diagnostics["error_count"] == 0
     assert diagnostics["last_ext"] == "html"
     assert diagnostics["last_under_outputs"] is True
+    assert diagnostics["last_content_shape"] == "text"
     assert diagnostics["successful_output_paths"] == ["/mnt/user-data/outputs/report.html"]
+
+
+def test_write_result_command_records_safe_error_class():
+    mw = BuilderArtifactMiddleware()
+    request = _tool_request(
+        "write_file",
+        {"allow_web_research": True, "builder_web_budget": {"search_calls": 1}},
+        {"path": "/mnt/user-data/outputs/report.md", "content": "# Report"},
+    )
+    result = mw._write_result_command(
+        request,
+        ToolMessage(
+            content="Error: Thread ID not available in runtime context",
+            tool_call_id="tc-write_file",
+            name="write_file",
+        ),
+    )
+
+    assert isinstance(result, Command)
+    diagnostics = result.update["builder_write_diagnostics"]
+    assert diagnostics["success_count"] == 0
+    assert diagnostics["error_count"] == 1
+    assert diagnostics["last_error_class"] == "missing_thread_id"
+    assert diagnostics["last_content_shape"] == "text"
 
 
 def test_recover_emit_args_requires_exactly_one_successful_output(tmp_path):

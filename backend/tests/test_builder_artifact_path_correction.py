@@ -111,6 +111,30 @@ def test_correction_injected_after_three_errors():
     assert "/mnt/user-data/outputs/" in msg.content
 
 
+def test_runtime_write_errors_fail_fast_instead_of_path_correction():
+    mw = BuilderArtifactMiddleware()
+    state = {
+        "messages": [
+            HumanMessage(content="brief"),
+            _ai(), _wf_error("Error: Thread ID not available in runtime context"),
+            _ai(), _wf_error("Error: Thread ID not available in runtime context"),
+            _ai(), _wf_error("Error: Thread ID not available in runtime context"),
+        ],
+        "builder_write_diagnostics": {
+            "error_count": 3,
+            "last_error_class": "missing_thread_id",
+        },
+    }
+
+    result = mw.before_model(state, runtime=None)
+
+    assert result is not None
+    assert result["jump_to"] == "end"
+    assert result["builder_runtime_write_failure_emitted"] is True
+    assert result["builder_result"]["artifact_path"] is None
+    assert "messages" not in result
+
+
 def test_no_correction_below_threshold():
     mw = BuilderArtifactMiddleware()
     state = {
