@@ -142,16 +142,13 @@ def _artifact_container_path(path: str) -> str:
 
 
 def _normalize_artifact_virtual_path(path: str) -> str:
-    """Collapse safe dot segments before authorization and resolution."""
+    """Normalize separators while rejecting traversal before authorization."""
     parts: list[str] = []
     for part in PurePosixPath(path.replace("\\", "/")).parts:
         if part in {"", "/", "."}:
             continue
         if part == "..":
-            if not parts:
-                raise HTTPException(status_code=403, detail="Path traversal detected")
-            parts.pop()
-            continue
+            raise HTTPException(status_code=403, detail="Path traversal detected")
         parts.append(part)
     return "/".join(parts)
 

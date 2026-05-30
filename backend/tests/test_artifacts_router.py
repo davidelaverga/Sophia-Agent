@@ -382,7 +382,7 @@ def test_get_artifact_requires_thread_owner_before_local_output(tmp_path, monkey
         raise AssertionError("Expected 404 for non-owned local output")
 
 
-def test_get_artifact_normalizes_dot_segments_before_owner_check(tmp_path, monkeypatch) -> None:
+def test_get_artifact_rejects_dot_segments_before_owner_check(tmp_path, monkeypatch) -> None:
     local_output = tmp_path / "outputs" / "report.md"
     local_output.parent.mkdir(parents=True)
     local_output.write_text("private report", encoding="utf-8")
@@ -421,9 +421,41 @@ def test_get_artifact_normalizes_dot_segments_before_owner_check(tmp_path, monke
             )
         )
     except fastapi.HTTPException as exc:
-        assert exc.status_code == 404
+        assert exc.status_code == 403
     else:
-        raise AssertionError("Expected 404 for non-owned normalized output")
+        raise AssertionError("Expected 403 for artifact path traversal")
+    assert resolve_calls == []
+
+
+def test_get_artifact_rejects_traversal_out_of_protected_outputs(tmp_path, monkeypatch) -> None:
+    upload_path = tmp_path / "uploads" / "notes.txt"
+    upload_path.parent.mkdir(parents=True)
+    upload_path.write_text("uploaded note", encoding="utf-8")
+    resolve_calls: list[str] = []
+
+    def resolve_path(_thread_id: str, virtual_path: str) -> Path:
+        resolve_calls.append(virtual_path)
+        return upload_path
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", resolve_path)
+
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""})
+
+    import fastapi
+
+    try:
+        asyncio.run(
+            artifacts_router.get_artifact(
+                "legacy-thread",
+                "mnt/user-data/outputs/../uploads/notes.txt",
+                request,
+                authenticated_user_id="user-1",
+            )
+        )
+    except fastapi.HTTPException as exc:
+        assert exc.status_code == 403
+    else:
+        raise AssertionError("Expected 403 for traversal out of protected outputs")
     assert resolve_calls == []
 
 
