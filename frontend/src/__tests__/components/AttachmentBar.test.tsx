@@ -104,6 +104,45 @@ function dispatchFilesOnto(input: HTMLInputElement, files: File[]) {
   fireEvent.change(input);
 }
 
+/**
+ * Like ``dispatchFilesOnto`` but simulates Chrome's REAL ``HTMLInputElement``
+ * semantics: ``input.files`` is a *live* FileList, and setting
+ * ``input.value = ""`` EMPTIES it. ``input.files`` returns the same live
+ * object on every access (so a captured reference reflects the reset).
+ *
+ * This reproduces the production silent-attach bug: ``handleFileSelection``
+ * captured ``event.target.files`` and then reset ``event.target.value``
+ * BEFORE reading ``.length`` — so the captured live list read back as
+ * empty and the handler bailed (no chip, no upload, no error). The plain
+ * ``dispatchFilesOnto`` mock can't catch this because its FileList isn't
+ * emptied by a value reset. The fix snapshots files into an array before
+ * the reset; this helper guards against regressing it.
+ */
+function dispatchLiveFilesOnto(input: HTMLInputElement, files: File[]) {
+  let current: File[] = [...files];
+  // Stable live FileList-like object: SAME reference each access, length
+  // tracks ``current``, iterable for ``Array.from``.
+  const liveList = {
+    get length() { return current.length; },
+    item: (i: number) => current[i] ?? null,
+    [Symbol.iterator]: function* () { yield* current; },
+  };
+  Object.defineProperty(input, 'files', {
+    configurable: true,
+    get: () => liveList as unknown as FileList,
+  });
+  let _value = '';
+  Object.defineProperty(input, 'value', {
+    configurable: true,
+    get: () => _value,
+    set: (v: string) => {
+      _value = v;
+      if (v === '') current = []; // Chrome empties the live list on reset
+    },
+  });
+  fireEvent.change(input);
+}
+
 describe('AttachmentBar — Codex P2 per-turn cap', () => {
   beforeEach(() => {
     useAttachmentsStore.getState().clear();
@@ -864,6 +903,42 @@ describe('AttachmentBar — Codex P2 per-turn cap', () => {
 
     // Clean up the pending promise so the test runner doesn't warn.
     resolveList!(new Response(JSON.stringify({ files: [] }), { status: 200 }));
+  });
+
+  it('still adds the chip + uploads when a value reset empties the live FileList (prod silent-attach root cause)', async () => {
+    // THE production bug, reproduced. On the live site the console showed
+    // "✅ CHANGE FIRED — files: ['…spec.md']" yet the Network tab had ZERO
+    // /uploads requests and no chip ever appeared. Cause: in Chrome
+    // ``input.files`` is a LIVE FileList and ``input.value = ""`` empties
+    // it, so the old handler — which reset the value BEFORE reading
+    // ``.length`` — saw 0 files and bailed. The fix snapshots the files
+    // into an array first. ``dispatchLiveFilesOnto`` emulates the
+    // live-FileList reset semantics that the plain mock can't.
+    const fetchMock = expectListThenMock();
+    render(<AttachmentBar threadId="thread-live" />);
+    const input = screen.getByTestId('attachment-bar-file-input') as HTMLInputElement;
+    dispatchLiveFilesOnto(input, [
+      makeFile('sophia_async_migration_telegram_diagnostic_spec.md', 1024, 'text/markdown'),
+    ]);
+
+    // Chip is added synchronously (pre-fix the store stayed empty because
+    // the handler read the post-reset empty live list and returned).
+    const chips = useAttachmentsStore.getState().items;
+    expect(chips).toHaveLength(1);
+    expect(chips[0]?.filename).toBe('sophia_async_migration_telegram_diagnostic_spec.md');
+
+    // Drain microtasks so the list-fetch + upload POST fire.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The upload POST must actually reach the network (it never did pre-fix).
+    const posted = fetchMock.mock.calls.some(
+      (c) =>
+        (c[1] as RequestInit | undefined)?.method === 'POST' &&
+        String(c[0]).includes('/uploads'),
+    );
+    expect(posted).toBe(true);
   });
 
   // ── B2: AbortController caps the list-fetch at 4 seconds ───────

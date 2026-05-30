@@ -419,7 +419,7 @@ function allRejected(registrations: Registration[]): boolean {
  * cyclomatic complexity stays well below Sentrux's CC ≥ 16 gate.
  */
 function preparePickedFiles(
-  filesList: FileList,
+  files: File[],
   threadId: string,
   add: (item: PendingAttachment) => void,
 ): Registration[] {
@@ -429,7 +429,7 @@ function preparePickedFiles(
   const existingCounted = countNonError(currentItems)
   const remainingSlots = Math.max(MAX_ATTACHED_FILES_PER_TURN - existingCounted, 0)
   const claimed = buildInStoreClaimedSet(currentItems)
-  return createRegistrationsForBatch(filesList, threadId, remainingSlots, claimed, add)
+  return createRegistrationsForBatch(files, threadId, remainingSlots, claimed, add)
 }
 
 function countNonError(items: PendingAttachment[]): number {
@@ -527,13 +527,12 @@ function deriveMarkdownSibling(filename: string): string | null {
 }
 
 function createRegistrationsForBatch(
-  filesList: FileList,
+  files: File[],
   threadId: string,
   initialRemainingSlots: number,
   claimed: Set<string>,
   add: (item: PendingAttachment) => void,
 ): Registration[] {
-  const files = Array.from(filesList)
   // Pre-pass (Codex P2 PR #132): reserve the derived ``<stem>.md``
   // name for every convertible upload BEFORE registering any file.
   // The gateway writes that sibling markdown during conversion, so a
@@ -871,17 +870,28 @@ export function AttachmentBar({
 
   const handleFileSelection = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
-      const filesList = event.target.files
-      // Reset immediately so picking the same file twice in a row works.
-      event.target.value = ""
-      if (!filesList || filesList.length === 0) return
+      const inputEl = event.target
+      // CRITICAL: snapshot the picked files into a plain array BEFORE
+      // resetting the input value. ``input.files`` is a *live*
+      // ``FileList`` — in Chrome, ``input.value = ""`` empties that very
+      // list, so reading ``filesList.length`` AFTER the reset sees 0 and
+      // the handler silently bails (no chip, no upload, no error). That
+      // was the production silent-attach bug: the ``change`` event fired
+      // with the file, but the reset wiped it before the length check.
+      // Copying first preserves the selection; the reset still lets the
+      // user re-pick the same file (it fires a fresh ``change``).
+      // Unit tests didn't catch it because a mocked FileList isn't a live
+      // list and isn't emptied by a value reset.
+      const files: File[] = inputEl.files ? Array.from(inputEl.files) : []
+      inputEl.value = ""
+      if (files.length === 0) return
       if (!threadId) {
         // Surface the "session not ready" early-return instead of
         // silently swallowing the pick (B3 of silent-attach fix).
         setStatusMessage("Can't attach — session not ready. Try again in a moment.")
         return
       }
-      const registrations = preparePickedFiles(filesList, threadId, add)
+      const registrations = preparePickedFiles(files, threadId, add)
       // Cap-reached toast: if EVERY pick was rejected, surface why.
       // Otherwise CLEAR any stale banner (Codex P3 PR #132) — a prior
       // pick may have left a "limit reached" / "session not ready"
