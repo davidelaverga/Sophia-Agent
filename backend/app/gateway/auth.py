@@ -24,6 +24,43 @@ def _get_bypass_user_id() -> str:
     return (os.getenv("SOPHIA_USER_ID") or "local-dev-user").strip()
 
 
+def is_gateway_auth_enabled() -> bool:
+    """Feature flag for enforcing auth on thread-scoped gateway routes.
+
+    Routes like ``/api/threads/{thread_id}/uploads`` have no ``{user_id}``
+    path param, so they can't use ``require_authorized_user_scope`` (which
+    reads ``path_params['user_id']``). They instead resolve the bearer
+    token to a user via ``resolve_bearer_user_id`` and check thread
+    ownership — but ONLY when this flag is on.
+
+    Default OFF: existing deployments (where the legacy ``/api/v1/auth/me``
+    bridge may not be reachable from the gateway container) keep working,
+    and the frontend proxy remains the ownership gate. Operators set
+    ``SOPHIA_GATEWAY_AUTH_ENABLED=1`` to make the gateway self-protecting
+    once the auth bridge is verified.
+    """
+    return os.getenv("SOPHIA_GATEWAY_AUTH_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+async def resolve_bearer_user_id(request: Request) -> str:
+    """Resolve the authenticated ``user_id`` from the request bearer token.
+
+    For routes NOT scoped by a ``{user_id}`` path param (e.g. the
+    thread-scoped upload routes). Honors ``SOPHIA_AUTH_BYPASS`` (returns
+    the configured bypass user without a token). Otherwise extracts the
+    bearer token and resolves it via the legacy ``/api/v1/auth/me`` bridge.
+
+    Raises ``HTTPException`` 401 (missing/invalid token) or 503 (auth
+    bridge unavailable) — same semantics as ``require_authorized_user_scope``,
+    minus the path-param scope comparison.
+    """
+    if _is_explicit_bypass_enabled():
+        return _get_bypass_user_id()
+    token = _extract_bearer_token(request)
+    authenticated_user = await _get_authenticated_user(token)
+    return authenticated_user["id"].strip()
+
+
 def _get_legacy_auth_base_url() -> str:
     return (
         os.getenv("SOPHIA_AUTH_BACKEND_URL")

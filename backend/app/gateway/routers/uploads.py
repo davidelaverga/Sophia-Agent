@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
-from app.gateway.auth import is_gateway_auth_enabled, require_authorized_user_scope
+from app.gateway.auth import is_gateway_auth_enabled, resolve_bearer_user_id
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sophia.session_store import SessionStore
@@ -26,17 +26,19 @@ logger = logging.getLogger(__name__)
 # under another user's thread (and mutate the Supabase mirror), which the
 # victim's view_user_image / builder flow would later consume.
 #
-# We bring the upload routes to parity with the other protected gateway
-# routers (voice, telegram_link) by requiring ``require_authorized_user_scope``
-# AND additionally verifying the authenticated user owns the thread.
+# We add an authenticated thread-ownership check. The upload routes are
+# scoped by ``{thread_id}`` (no ``{user_id}`` path param), so they can't use
+# ``require_authorized_user_scope`` (which reads ``path_params['user_id']``).
+# Instead we resolve the bearer token to a user via ``resolve_bearer_user_id``
+# (async; honors ``SOPHIA_AUTH_BYPASS``) and verify that user owns the thread.
 #
-# Ownership is gated on ``is_gateway_auth_enabled()`` because when auth is
-# OFF (the current default — see app/gateway/auth.py) the dependency returns
-# the dev user, so enforcing ownership would compare against the wrong
-# identity and break every upload. With the flag ON (the intended production
-# posture), the gateway is fully self-protecting and no longer depends on the
-# frontend proxy. Operators close the hole by setting
-# ``SOPHIA_GATEWAY_AUTH_ENABLED=1`` (same flag voice/telegram_link gate on).
+# Enforcement is gated on ``is_gateway_auth_enabled()`` (env
+# ``SOPHIA_GATEWAY_AUTH_ENABLED``). Default OFF: the dependency is a no-op so
+# existing deployments — where the legacy ``/api/v1/auth/me`` bridge may not
+# be reachable from the gateway container — keep working and the frontend
+# proxy remains the ownership gate. With the flag ON (intended production
+# posture, once the auth bridge is verified) the gateway is fully
+# self-protecting and no longer depends on the proxy.
 # ---------------------------------------------------------------------------
 
 _ownership_store: SessionStore | None = None
@@ -58,29 +60,33 @@ def _user_owns_thread(user_id: str, thread_id: str) -> bool:
     """Return True iff one of ``user_id``'s sessions maps to ``thread_id``.
 
     Mirrors the frontend proxy's ``userOwnsThread`` (which lists the user's
-    sessions and matches the thread). Fails CLOSED on any error — a lookup
-    failure must never grant access.
+    sessions and matches the thread). Checks BOTH open and recent sessions
+    via the real ``SessionStore`` API (``list_open`` / ``list_recent`` — the
+    same methods the sessions router uses; there is no ``list_all_for_user``).
+    Fails CLOSED on any error — a lookup failure must never grant access.
     """
     try:
-        records = _get_ownership_store().list_all_for_user(user_id)
+        store = _get_ownership_store()
+        records = list(store.list_open(user_id)) + list(store.list_recent(user_id, limit=100))
     except Exception as exc:  # noqa: BLE001 — fail closed on any store error
         logger.warning("Thread-ownership lookup failed user_id=%s thread_id=%s error=%s", user_id, thread_id, exc)
         return False
     return any(getattr(r, "thread_id", None) == thread_id for r in records)
 
 
-def verify_thread_access(thread_id: str, request: Request) -> str:
+async def verify_thread_access(thread_id: str, request: Request) -> str | None:
     """FastAPI dependency: authenticate the caller and enforce thread ownership.
 
-    Returns the authenticated ``user_id``. Raises 401 when auth is enabled
-    and the token is missing/invalid; 403 when the authenticated user does
-    not own ``thread_id``. When auth is disabled (default), this is a no-op
-    that returns the dev user — the frontend proxy remains the gate in that
-    mode (existing-deployment compatibility).
+    When auth is enabled, resolves the bearer token to a user (401 on a
+    missing/invalid token, 503 if the auth bridge is down) and raises 403
+    unless that user owns ``thread_id``. When auth is disabled (default),
+    this is a no-op (returns ``None``) — the frontend proxy remains the gate
+    (existing-deployment compatibility). Router-level dependencies ignore the
+    return value; it's returned only for direct unit testing.
     """
-    user_id = require_authorized_user_scope(request)
     if not is_gateway_auth_enabled():
-        return user_id
+        return None
+    user_id = await resolve_bearer_user_id(request)
     if not _user_owns_thread(user_id, thread_id):
         raise HTTPException(status_code=403, detail="Thread not owned by current user")
     return user_id

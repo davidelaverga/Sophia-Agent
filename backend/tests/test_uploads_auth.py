@@ -5,10 +5,16 @@ service + nginx proxy), so the upload routes must enforce auth and
 thread ownership themselves rather than trusting the Next.js proxy.
 ``verify_thread_access`` is the router-level dependency that does this.
 
+The upload routes are scoped by ``{thread_id}`` (no ``{user_id}`` path
+param), so they can't reuse ``require_authorized_user_scope``. Instead
+``verify_thread_access`` resolves the bearer token via the async
+``resolve_bearer_user_id`` and checks ownership against the real
+``SessionStore`` (``list_open`` / ``list_recent``).
+
 Behaviour:
-- auth OFF (default): no-op, returns the dev user (frontend proxy is the
+- auth OFF (default): no-op, returns ``None`` (frontend proxy is the
   gate; existing deployments keep working).
-- auth ON: 401 on missing/invalid token (via require_authorized_user_scope),
+- auth ON: 401 on missing/invalid token (via resolve_bearer_user_id),
   403 when the authenticated user does not own the thread, pass-through
   when they do.
 """
@@ -26,74 +32,84 @@ def _request_with_bearer(token: str | None) -> SimpleNamespace:
     return SimpleNamespace(headers=headers)
 
 
-def test_verify_thread_access_noop_when_auth_disabled(monkeypatch) -> None:
-    """Auth OFF (default): dependency returns the dev user and never
-    consults the ownership store — existing deployments keep working."""
+@pytest.mark.anyio
+async def test_verify_thread_access_noop_when_auth_disabled(monkeypatch) -> None:
+    """Auth OFF (default): dependency returns None and never resolves a
+    token or consults the ownership store — existing deployments keep
+    working with the frontend proxy as the gate."""
     from app.gateway.routers import uploads as up
 
     monkeypatch.setattr(up, "is_gateway_auth_enabled", lambda: False)
 
-    def _should_not_run(*_a, **_k):
-        raise AssertionError("ownership store must not be consulted when auth is off")
+    async def _should_not_resolve(*_a, **_k):
+        raise AssertionError("token must not be resolved when auth is off")
 
-    monkeypatch.setattr(up, "_user_owns_thread", _should_not_run)
+    monkeypatch.setattr(up, "resolve_bearer_user_id", _should_not_resolve)
 
-    result = up.verify_thread_access("thread-1", _request_with_bearer(None))
-    assert isinstance(result, str)  # dev user
+    result = await up.verify_thread_access("thread-1", _request_with_bearer(None))
+    assert result is None
 
 
-def test_verify_thread_access_allows_owner_when_auth_enabled(monkeypatch) -> None:
+@pytest.mark.anyio
+async def test_verify_thread_access_allows_owner_when_auth_enabled(monkeypatch) -> None:
     from app.gateway.routers import uploads as up
 
+    async def _resolve(_req):
+        return "user-A"
+
     monkeypatch.setattr(up, "is_gateway_auth_enabled", lambda: True)
-    monkeypatch.setattr(up, "require_authorized_user_scope", lambda _req: "user-A")
+    monkeypatch.setattr(up, "resolve_bearer_user_id", _resolve)
     monkeypatch.setattr(up, "_user_owns_thread", lambda uid, tid: uid == "user-A" and tid == "thread-A")
 
-    result = up.verify_thread_access("thread-A", _request_with_bearer("tok"))
+    result = await up.verify_thread_access("thread-A", _request_with_bearer("tok"))
     assert result == "user-A"
 
 
-def test_verify_thread_access_rejects_non_owner_with_403(monkeypatch) -> None:
+@pytest.mark.anyio
+async def test_verify_thread_access_rejects_non_owner_with_403(monkeypatch) -> None:
     from app.gateway.routers import uploads as up
 
+    async def _resolve(_req):
+        return "attacker"
+
     monkeypatch.setattr(up, "is_gateway_auth_enabled", lambda: True)
-    monkeypatch.setattr(up, "require_authorized_user_scope", lambda _req: "attacker")
+    monkeypatch.setattr(up, "resolve_bearer_user_id", _resolve)
     monkeypatch.setattr(up, "_user_owns_thread", lambda _uid, _tid: False)
 
     with pytest.raises(HTTPException) as exc_info:
-        up.verify_thread_access("victim-thread", _request_with_bearer("tok"))
+        await up.verify_thread_access("victim-thread", _request_with_bearer("tok"))
     assert exc_info.value.status_code == 403
 
 
-def test_verify_thread_access_propagates_401_from_token_check(monkeypatch) -> None:
-    """When the underlying token check raises 401, the dependency surfaces
-    it unchanged (missing/invalid token on an auth-enabled gateway)."""
+@pytest.mark.anyio
+async def test_verify_thread_access_propagates_401_from_token_check(monkeypatch) -> None:
+    """When the token resolver raises 401 (missing/invalid token on an
+    auth-enabled gateway), the dependency surfaces it unchanged."""
     from app.gateway.routers import uploads as up
 
+    async def _raise_401(_req):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+
     monkeypatch.setattr(up, "is_gateway_auth_enabled", lambda: True)
-
-    def _raise_401(_req):
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-    monkeypatch.setattr(up, "require_authorized_user_scope", _raise_401)
+    monkeypatch.setattr(up, "resolve_bearer_user_id", _raise_401)
 
     with pytest.raises(HTTPException) as exc_info:
-        up.verify_thread_access("thread-A", _request_with_bearer("bad"))
+        await up.verify_thread_access("thread-A", _request_with_bearer("bad"))
     assert exc_info.value.status_code == 401
 
 
 def test_user_owns_thread_matches_only_owned_thread(monkeypatch) -> None:
+    """Uses the REAL store API: list_open + list_recent (no list_all_for_user)."""
     from app.gateway.routers import uploads as up
 
     fake_store = SimpleNamespace(
-        list_all_for_user=lambda uid: [
-            SimpleNamespace(thread_id="t-owned"),
-            SimpleNamespace(thread_id="t-other"),
-        ]
+        list_open=lambda uid: [SimpleNamespace(thread_id="t-open")],
+        list_recent=lambda uid, limit=100: [SimpleNamespace(thread_id="t-recent")],
     )
     monkeypatch.setattr(up, "_get_ownership_store", lambda: fake_store)
 
-    assert up._user_owns_thread("user-A", "t-owned") is True
+    assert up._user_owns_thread("user-A", "t-open") is True       # found via list_open
+    assert up._user_owns_thread("user-A", "t-recent") is True     # found via list_recent
     assert up._user_owns_thread("user-A", "t-not-mine") is False
 
 
