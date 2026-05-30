@@ -305,7 +305,7 @@ class BuilderCanvasWorker:
         self._terminal_at: dict[tuple[str, str, str], float] = {}
         self._last_sequence: dict[tuple[str, str, str], int] = {}
         self._plan_seen: set[tuple[str, str, str]] = set()
-        self._dropped_progress_runs: set[tuple[str, str, str]] = set()
+        self._dropped_progress_runs: dict[tuple[str, str, str], tuple[str, str] | None] = {}
         self._lock = asyncio.Lock()
 
     def _expire_locked(self) -> None:
@@ -327,7 +327,7 @@ class BuilderCanvasWorker:
         self._histories.pop(key, None)
         self._last_sequence.pop(key, None)
         self._plan_seen.discard(key)
-        self._dropped_progress_runs.discard(key)
+        self._dropped_progress_runs.pop(key, None)
 
     def _observe_run_locked(self, parent_thread_id: str, task_id: str, run_id: str) -> None:
         run_key = (task_id, run_id)
@@ -382,8 +382,13 @@ class BuilderCanvasWorker:
             return True
         if active is None or active == (task_id, run_id):
             return False
+        dropped_active = self._dropped_progress_runs.get(key)
         if key in self._dropped_progress_runs:
-            return True
+            if event["kind"] != "terminal":
+                return True
+            if dropped_active is not None and dropped_active == active:
+                return False
+            return not self._terminal_is_newer_than_active_locked(event, active)
         run_orders = self._run_order.get(parent_thread_id, {})
         active_order = run_orders.get(active)
         event_order = run_orders.get((task_id, run_id))
@@ -549,7 +554,7 @@ class BuilderCanvasWorker:
         if activity is None:
             async with self._lock:
                 self._expire_locked()
-                self._dropped_progress_runs.add((parent, task_id, run_id))
+                self._dropped_progress_runs[(parent, task_id, run_id)] = self._active.get(parent)
             logger.info(
                 "Builder canvas: progress dropped reason=no_public_activity parent_thread_id=%s task_id=%s run_id=%s sequence=%s event_name=%s",
                 parent,

@@ -545,6 +545,50 @@ async def test_terminal_only_new_task_replaces_prior_active_task() -> None:
 
 
 @pytest.mark.anyio
+async def test_terminal_after_unprojectable_new_run_progress_replaces_prior_active_run() -> None:
+    worker = BuilderCanvasWorker()
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-old",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "drafting"},
+        }
+    )
+
+    dropped = await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-new",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "unprojectable"},
+        }
+    )
+    delivered = await worker.publish_completion(
+        {
+            "thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-new",
+            "status": "success",
+            "artifact_path": "mnt/user-data/outputs/updated.html",
+        }
+    )
+
+    assert dropped == 0
+    assert delivered == 0
+    events = await worker.recent_events("parent-1")
+    assert len(events) == 1
+    assert events[0]["kind"] == "terminal"
+    assert events[0]["run_id"] == "run-new"
+    assert events[0]["status"] == "completed"
+    assert events[0]["completion"]["artifact_path"] == "mnt/user-data/outputs/updated.html"
+
+
+@pytest.mark.anyio
 async def test_unobserved_terminal_for_same_active_task_does_not_replace_current_run() -> None:
     worker = BuilderCanvasWorker()
     await worker.publish_progress(
