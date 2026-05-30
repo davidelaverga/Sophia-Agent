@@ -14,6 +14,7 @@ quoted, or reasoned about, the companion reads the text directly.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -52,14 +53,33 @@ _MAX_BYTES_RETURNED = 64_000
 _SEARCH_ROOT_NAMES: tuple[str, ...] = ("uploads", "outputs")
 
 
+# Strict prompt-safe / path-safe filename allow-list. Mirrors
+# ``view_user_image._SAFE_IMAGE_FILENAME`` and the builder-side
+# ``start_builder_task._TRUSTED_ATTACHMENT_FILENAME``. Codex P2 PR #132:
+# the loose guard (separators + dotfiles only) let an embedded NUL or
+# other control char through (e.g. the model copies ``report<NUL>.pdf``
+# from user text). ``_resolve_document_path`` then calls
+# ``candidate.is_file()``, and Python raises ``ValueError: embedded null
+# byte`` — an uncaught exception that aborts the whole turn instead of
+# returning a clean tool error. Restricting to ``[A-Za-z0-9._-]`` rejects
+# NUL, control bytes, whitespace, separators, and markup before any Path
+# is constructed.
+_SAFE_DOCUMENT_FILENAME = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
 def _is_safe_filename(filename: str) -> bool:
+    """Reject path-traversal, control-character, and markup filenames.
+
+    A name is safe only when it matches the strict allow-list
+    ``[A-Za-z0-9._-]+`` and is not a hidden file / ``.`` / ``..``. The
+    allow-list inherently rejects path separators, NUL / control bytes,
+    whitespace, and markup — see ``_SAFE_DOCUMENT_FILENAME``.
+    """
     if not filename or filename in {".", ".."}:
-        return False
-    if "/" in filename or "\\" in filename:
         return False
     if filename.startswith("."):
         return False
-    return True
+    return bool(_SAFE_DOCUMENT_FILENAME.match(filename))
 
 
 def _resolve_thread_id(runtime: ToolRuntime[ContextT, ThreadState] | None) -> str | None:

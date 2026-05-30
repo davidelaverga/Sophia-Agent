@@ -403,3 +403,50 @@ async def test_read_user_document_rejects_paths(tmp_path: Path, monkeypatch) -> 
         tool_call_id="tc-1",
     )
     assert "invalid filename" in _content(result).lower()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "evil_name",
+    [
+        "report\x00.pdf",  # embedded NUL — Path(...).is_file() raises ValueError
+        "report\x07.pdf",  # BEL control byte
+        "report\n.pdf",  # newline
+        "report .pdf",  # whitespace
+        "re<port>.pdf",  # markup angle brackets
+        'rep"ort".pdf',  # quotes
+        "café.pdf",  # non-ASCII
+    ],
+)
+async def test_read_user_document_rejects_control_and_unsafe_names(
+    tmp_path: Path, monkeypatch, evil_name: str
+) -> None:
+    """Codex P2 on PR #132 — a filename with an embedded NUL / control
+    char must be rejected by the validator BEFORE any Path is built.
+    Otherwise ``_resolve_document_path`` calls ``candidate.is_file()``
+    and Python raises ``ValueError: embedded null byte``, an uncaught
+    exception that aborts the whole turn instead of returning a clean
+    tool error. The strict ``[A-Za-z0-9._-]+`` allow-list (mirroring the
+    image tool + builder copy path) closes the gap.
+    """
+    from deerflow.sophia.tools import read_user_document as rud_mod
+
+    # If resolution were reached with a NUL name it would raise; assert
+    # we never get there by NOT stubbing get_paths to fail — the
+    # validator must short-circuit first.
+    fake_paths = SimpleNamespace(
+        sandbox_uploads_dir=lambda _tid: tmp_path,
+        sandbox_outputs_dir=lambda _tid: tmp_path,
+    )
+    monkeypatch.setattr(rud_mod, "get_paths", lambda: fake_paths)
+
+    runtime = _make_runtime("t1", {})
+    result = await rud_mod.read_user_document.coroutine(
+        runtime=runtime,
+        document_filename=evil_name,
+        tool_call_id="tc-1",
+    )
+    assert "invalid filename" in _content(result).lower(), (
+        f"unsafe document name {evil_name!r} must be rejected by the allow-list "
+        f"before Path construction (no ValueError leak)"
+    )
