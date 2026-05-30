@@ -3,17 +3,94 @@
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
+from app.gateway.auth import is_gateway_auth_enabled, require_authorized_user_scope
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.sophia.session_store import SessionStore
 from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/threads/{thread_id}/uploads", tags=["uploads"])
+
+# ---------------------------------------------------------------------------
+# Auth: authenticated, thread-ownership-scoped access (Codex P1 PR #132).
+#
+# The gateway is independently reachable (it's the public ``sophia-gateway``
+# Render web service, and nginx also proxies ``/api/threads/.../uploads`` to
+# it), so these routes must NOT rely on the Next.js proxy's ownership check —
+# a caller who knows a thread id could otherwise POST / list / DELETE files
+# under another user's thread (and mutate the Supabase mirror), which the
+# victim's view_user_image / builder flow would later consume.
+#
+# We bring the upload routes to parity with the other protected gateway
+# routers (voice, telegram_link) by requiring ``require_authorized_user_scope``
+# AND additionally verifying the authenticated user owns the thread.
+#
+# Ownership is gated on ``is_gateway_auth_enabled()`` because when auth is
+# OFF (the current default — see app/gateway/auth.py) the dependency returns
+# the dev user, so enforcing ownership would compare against the wrong
+# identity and break every upload. With the flag ON (the intended production
+# posture), the gateway is fully self-protecting and no longer depends on the
+# frontend proxy. Operators close the hole by setting
+# ``SOPHIA_GATEWAY_AUTH_ENABLED=1`` (same flag voice/telegram_link gate on).
+# ---------------------------------------------------------------------------
+
+_ownership_store: SessionStore | None = None
+
+
+def _get_ownership_store() -> SessionStore:
+    """Lazily build the SessionStore used for thread-ownership lookups.
+
+    Lazy so importing this module never triggers store construction at
+    import time (keeps test collection + cold starts cheap).
+    """
+    global _ownership_store
+    if _ownership_store is None:
+        _ownership_store = SessionStore()
+    return _ownership_store
+
+
+def _user_owns_thread(user_id: str, thread_id: str) -> bool:
+    """Return True iff one of ``user_id``'s sessions maps to ``thread_id``.
+
+    Mirrors the frontend proxy's ``userOwnsThread`` (which lists the user's
+    sessions and matches the thread). Fails CLOSED on any error — a lookup
+    failure must never grant access.
+    """
+    try:
+        records = _get_ownership_store().list_all_for_user(user_id)
+    except Exception as exc:  # noqa: BLE001 — fail closed on any store error
+        logger.warning("Thread-ownership lookup failed user_id=%s thread_id=%s error=%s", user_id, thread_id, exc)
+        return False
+    return any(getattr(r, "thread_id", None) == thread_id for r in records)
+
+
+def verify_thread_access(thread_id: str, request: Request) -> str:
+    """FastAPI dependency: authenticate the caller and enforce thread ownership.
+
+    Returns the authenticated ``user_id``. Raises 401 when auth is enabled
+    and the token is missing/invalid; 403 when the authenticated user does
+    not own ``thread_id``. When auth is disabled (default), this is a no-op
+    that returns the dev user — the frontend proxy remains the gate in that
+    mode (existing-deployment compatibility).
+    """
+    user_id = require_authorized_user_scope(request)
+    if not is_gateway_auth_enabled():
+        return user_id
+    if not _user_owns_thread(user_id, thread_id):
+        raise HTTPException(status_code=403, detail="Thread not owned by current user")
+    return user_id
+
+
+router = APIRouter(
+    prefix="/api/threads/{thread_id}/uploads",
+    tags=["uploads"],
+    dependencies=[Depends(verify_thread_access)],
+)
 
 
 class UploadResponse(BaseModel):
