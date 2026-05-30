@@ -41,11 +41,17 @@ logger = logging.getLogger(__name__)
 # self-protecting and no longer depends on the proxy.
 # ---------------------------------------------------------------------------
 
-_ownership_store: SessionStore | None = None
+# NOTE: ``SessionStore`` is a FACTORY FUNCTION (returns a
+# SophiaSupabaseSessionStore / filesystem store instance), NOT a class —
+# so it must not be used as a type annotation (``SessionStore | None``
+# would evaluate ``function | None`` at import time and raise TypeError,
+# since this module has no ``from __future__ import annotations``). Hold
+# the lazily-built instance without a union annotation.
+_ownership_store = None  # built lazily by _get_ownership_store()
 
 
-def _get_ownership_store() -> SessionStore:
-    """Lazily build the SessionStore used for thread-ownership lookups.
+def _get_ownership_store():
+    """Lazily build the session store used for thread-ownership lookups.
 
     Lazy so importing this module never triggers store construction at
     import time (keeps test collection + cold starts cheap).
