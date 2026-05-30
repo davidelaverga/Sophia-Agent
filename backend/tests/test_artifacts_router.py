@@ -204,6 +204,55 @@ def test_list_artifacts_preserves_local_non_sophia_outputs_without_supabase_look
     assert supabase_calls == []
 
 
+def test_get_artifact_preserves_listed_local_non_sophia_output(tmp_path, monkeypatch) -> None:
+    outputs_dir = tmp_path / "outputs"
+    workspace_outputs_dir = tmp_path / "workspace" / "outputs"
+    outputs_dir.mkdir()
+    local_file = outputs_dir / "legacy-report.md"
+    local_file.write_text("legacy", encoding="utf-8")
+
+    class FakeSessionStore:
+        def find_session_by_thread_id(self, user_id: str, thread_id: str):
+            assert user_id == "user-1"
+            assert thread_id == "legacy-thread"
+            return None
+
+    def resolve_path(_thread_id: str, virtual_path: str) -> Path:
+        if virtual_path == "mnt/user-data/outputs":
+            return outputs_dir
+        if virtual_path == "mnt/user-data/outputs/legacy-report.md":
+            return local_file
+        if virtual_path == "mnt/user-data/workspace/outputs/legacy-report.md":
+            return workspace_outputs_dir / "legacy-report.md"
+        raise AssertionError(f"Unexpected virtual path: {virtual_path}")
+
+    monkeypatch.setattr(artifacts_router, "_session_store", FakeSessionStore())
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", resolve_path)
+    monkeypatch.setattr(
+        artifacts_router.supabase_artifact_store,
+        "list_artifacts",
+        lambda *, thread_id: [],
+    )
+
+    listed = asyncio.run(
+        artifacts_router.list_artifacts("legacy-thread", authenticated_user_id="user-1")
+    )
+    assert [item.path for item in listed.artifacts] == ["mnt/user-data/outputs/legacy-report.md"]
+
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""})
+    response = asyncio.run(
+        artifacts_router.get_artifact(
+            "legacy-thread",
+            "mnt/user-data/outputs/legacy-report.md",
+            request,
+            authenticated_user_id="user-1",
+        )
+    )
+
+    assert bytes(response.body).decode("utf-8") == "legacy"
+    assert response.media_type == "text/markdown"
+
+
 def test_list_artifacts_rejects_local_outputs_for_non_owner_sophia_thread(tmp_path, monkeypatch) -> None:
     outputs_dir = tmp_path / "outputs"
     outputs_dir.mkdir()
@@ -307,6 +356,10 @@ def test_get_artifact_requires_thread_owner_before_local_output(tmp_path, monkey
             assert thread_id == "thread-1"
             return None
 
+        def find_any_session_by_thread_id(self, thread_id: str):
+            assert thread_id == "thread-1"
+            return object()
+
     monkeypatch.setattr(artifacts_router, "_session_store", FakeSessionStore())
     monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: local_output)
 
@@ -340,6 +393,10 @@ def test_get_artifact_normalizes_dot_segments_before_owner_check(tmp_path, monke
             assert user_id == "user-1"
             assert thread_id == "thread-1"
             return None
+
+        def find_any_session_by_thread_id(self, thread_id: str):
+            assert thread_id == "thread-1"
+            return object()
 
     def resolve_path(_thread_id: str, virtual_path: str) -> Path:
         resolve_calls.append(virtual_path)

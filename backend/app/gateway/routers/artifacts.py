@@ -133,6 +133,14 @@ def _requires_thread_owner_for_artifact(path: str) -> bool:
     )
 
 
+def _artifact_container_path(path: str) -> str:
+    skill_marker = ".skill/"
+    marker_pos = path.find(skill_marker)
+    if marker_pos == -1:
+        return path
+    return path[: marker_pos + len(".skill")]
+
+
 def _normalize_artifact_virtual_path(path: str) -> str:
     """Collapse safe dot segments before authorization and resolution."""
     parts: list[str] = []
@@ -172,6 +180,29 @@ def _resolve_artifact_path(thread_id: str, path: str) -> Path:
         return fallback_path
 
     return actual_path
+
+
+def _can_serve_local_non_sophia_artifact(thread_id: str, path: str) -> bool:
+    if _has_sophia_session(thread_id):
+        return False
+    actual_path = _resolve_artifact_path(thread_id, path)
+    return actual_path.exists() and actual_path.is_file()
+
+
+def _enforce_artifact_owner(authenticated_user_id: str | None, thread_id: str, path: str) -> None:
+    container_path = _artifact_container_path(path)
+    if not _requires_thread_owner_for_artifact(container_path):
+        return
+    if _is_thread_owner(authenticated_user_id, thread_id):
+        return
+    if _can_serve_local_non_sophia_artifact(thread_id, container_path):
+        logger.warning(
+            "Serving protected local artifact for non-Sophia thread: user_id=%s thread_id=%s",
+            _short_id(authenticated_user_id),
+            _short_id(thread_id),
+        )
+        return
+    _require_thread_owner(authenticated_user_id, thread_id)
 
 
 def _try_serve_from_supabase(thread_id: str, path: str, request: Request) -> Response | None:
@@ -378,8 +409,7 @@ async def get_artifact(
         - Download file: `/api/threads/abc123/artifacts/mnt/user-data/outputs/data.csv?download=true`
     """
     path = _normalize_artifact_virtual_path(path)
-    if _requires_thread_owner_for_artifact(path):
-        _require_thread_owner(authenticated_user_id, thread_id)
+    _enforce_artifact_owner(authenticated_user_id, thread_id, path)
 
     # Check if this is a request for a file inside a .skill archive (e.g., xxx.skill/SKILL.md)
     if ".skill/" in path:
