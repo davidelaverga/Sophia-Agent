@@ -135,6 +135,30 @@ def test_runtime_write_errors_fail_fast_instead_of_path_correction():
     assert "messages" not in result
 
 
+def test_missing_required_tool_arg_gets_argument_correction_not_path_correction():
+    mw = BuilderArtifactMiddleware()
+    missing_content = "Error: 1 validation error for write_file\ncontent\n  Field required [type=missing]"
+    state = {
+        "messages": [
+            HumanMessage(content="brief"),
+            _ai(), _wf_error(missing_content),
+            _ai(), _wf_error(missing_content),
+            _ai(), _wf_error(missing_content),
+        ],
+        "builder_write_diagnostics": {
+            "error_count": 3,
+            "last_error_class": "missing_required_tool_arg",
+        },
+    }
+
+    result = mw.before_model(state, runtime=None)
+
+    assert result is not None
+    assert result.get("builder_tool_argument_correction_emitted") is True
+    assert result.get("builder_path_correction_emitted") is not True
+    assert "[Sophia/tool-argument correction]" in result["messages"][0].content
+
+
 def test_no_correction_below_threshold():
     mw = BuilderArtifactMiddleware()
     state = {

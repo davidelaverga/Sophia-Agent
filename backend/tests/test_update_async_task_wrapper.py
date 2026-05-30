@@ -494,6 +494,47 @@ def test_directive_unknown_task_type_defaults_to_text_branch():
     assert "BINARY" not in augmented
 
 
+def test_directive_visual_report_html_target_uses_text_writer():
+    """A visual_report can still be an HTML document. The concrete target
+    extension, not task_type, must choose the authoring workflow."""
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    augmented = _augment_update_message(
+        message="add one chart",
+        tracked={
+            "task_id": "t1",
+            "task_type": "visual_report",
+            "artifact_target_path": "/mnt/user-data/outputs/report.html",
+        },
+        delegation_context={
+            "task": "Build an HTML document with charts and diagrams",
+            "task_type": "visual_report",
+        },
+    )
+
+    assert "Concrete file target: `/mnt/user-data/outputs/report.html`" in augmented
+    assert "write_file_tool" in augmented
+    assert "BINARY" not in augmented
+    assert "generator script" not in augmented.lower()
+
+
+def test_directive_visual_report_pdf_target_keeps_binary_guidance():
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    augmented = _augment_update_message(
+        message="add one chart",
+        tracked={
+            "task_id": "t1",
+            "task_type": "visual_report",
+            "artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+        },
+        delegation_context={"task": "Build a visual report", "task_type": "visual_report"},
+    )
+
+    assert "BINARY" in augmented
+    assert "generator script" in augmented.lower()
+
+
 # ---- F.1: slug-derived filename + resume-not-restart directive ------------
 
 
@@ -604,6 +645,23 @@ def test_augment_preserves_html_document_output_format():
     assert "approved fetch targets" in augmented
     assert "use builder_web_fetch on the exact new URL" in augmented
     assert "add recursive MAS section" in augmented
+
+
+def test_augment_preserves_html_output_for_visual_report_task_type():
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    augmented = _augment_update_message(
+        message="also include the Recursive MAS framework",
+        tracked={"task_id": "t1", "task_type": "visual_report"},
+        delegation_context={
+            "task": "Build a concise HTML file document with charts and diagrams about GEPA SkillOpt",
+            "task_type": "visual_report",
+        },
+    )
+
+    assert "build-a-concise-html-file-document-with.html" in augmented
+    assert "write_file_tool" in augmented
+    assert "BINARY" not in augmented
 
 
 def test_augment_prefer_prior_artifact_path_over_suggested_filename():

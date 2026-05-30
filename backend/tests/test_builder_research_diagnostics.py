@@ -199,6 +199,7 @@ def test_write_result_command_records_safe_success_metadata():
     assert diagnostics["last_under_outputs"] is True
     assert diagnostics["last_content_shape"] == "text"
     assert diagnostics["successful_output_paths"] == ["/mnt/user-data/outputs/report.html"]
+    assert diagnostics["successful_deliverable_output_paths"] == ["/mnt/user-data/outputs/report.html"]
 
 
 def test_write_result_command_records_safe_error_class():
@@ -225,7 +226,7 @@ def test_write_result_command_records_safe_error_class():
     assert diagnostics["last_content_shape"] == "text"
 
 
-def test_recover_emit_args_requires_exactly_one_successful_output(tmp_path):
+def test_recover_emit_args_uses_single_successful_deliverable(tmp_path):
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     (outputs / "report.html").write_text("<html />")
@@ -244,3 +245,68 @@ def test_recover_emit_args_requires_exactly_one_successful_output(tmp_path):
 
     assert recovered is not None
     assert recovered["artifact_path"] == "/mnt/user-data/outputs/report.html"
+
+
+def test_recover_emit_args_ignores_internal_helper_script(tmp_path):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "_gen_report.py").write_text("print('helper')")
+    (outputs / "report.html").write_text("<html />")
+    state = {
+        "thread_data": {"outputs_path": str(outputs)},
+        "builder_write_diagnostics": {
+            "successful_output_paths": [
+                "/mnt/user-data/outputs/_gen_report.py",
+                "/mnt/user-data/outputs/report.html",
+            ],
+            "last_successful_output_path": "/mnt/user-data/outputs/report.html",
+        },
+    }
+    runtime = SimpleNamespace(context={"thread_id": "thread-1"})
+
+    recovered = BuilderArtifactMiddleware._recover_emit_args_from_last_write(
+        {"artifact_path": "/mnt/user-data/outputs/build.html"},
+        state,
+        runtime,
+    )
+
+    assert recovered is not None
+    assert recovered["artifact_path"] == "/mnt/user-data/outputs/report.html"
+
+
+def test_recovered_deliverable_promotes_successful_write_after_errors(tmp_path, monkeypatch):
+    from deerflow.agents.sophia_agent.middlewares import builder_artifact as mod
+
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "report.html").write_text("<html />")
+    captured: dict = {}
+    monkeypatch.setattr(mod, "_upload_builder_outputs_to_supabase", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        mod,
+        "fire_completion_webhook_from_artifact",
+        lambda **kwargs: captured.update(kwargs),
+    )
+
+    state = {
+        "thread_data": {"outputs_path": str(outputs)},
+        "delegation_context": {"parent_thread_id": "parent-1"},
+        "builder_write_diagnostics": {
+            "success_count": 1,
+            "error_count": 3,
+            "last_status": "success",
+            "successful_output_paths": [
+                "/mnt/user-data/outputs/_gen_report.py",
+                "/mnt/user-data/outputs/report.html",
+            ],
+            "last_successful_output_path": "/mnt/user-data/outputs/report.html",
+        },
+    }
+    runtime = SimpleNamespace(context={"thread_id": "builder-1"})
+
+    result = BuilderArtifactMiddleware().before_model(state, runtime)
+
+    assert result is not None
+    assert result["jump_to"] == "end"
+    assert result["builder_result"]["artifact_path"] == "/mnt/user-data/outputs/report.html"
+    assert captured["status"] == "completed"

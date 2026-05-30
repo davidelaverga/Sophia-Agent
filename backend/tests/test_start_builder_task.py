@@ -166,6 +166,28 @@ def test_dispatch_sets_stream_resumable_true(monkeypatch):
     )
 
 
+def test_visual_report_html_request_targets_html_file():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "visual_report",
+        "Build a concise HTML document with charts and diagrams about GEPA SkillOpt.",
+    )
+
+    assert target.endswith(".html")
+
+
+def test_visual_report_without_html_request_still_targets_pdf():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "visual_report",
+        "Build a concise visual report with charts and diagrams about GEPA SkillOpt.",
+    )
+
+    assert target.endswith(".pdf")
+
+
 # ---------- duplicate protection --------------------------------------------
 
 

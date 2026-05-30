@@ -122,6 +122,16 @@ _HTML_OUTPUT_RE = re.compile(
     r"\bhtml\b|\bhtml\s+(?:document|file|report|summary|brief|article|explainer)\b",
     re.IGNORECASE,
 )
+_REQUESTED_OUTPUT_EXTENSION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("html", _HTML_OUTPUT_RE),
+    ("md", re.compile(r"\b(?:markdown|md)\b", re.IGNORECASE)),
+    ("pdf", re.compile(r"\bpdf\b", re.IGNORECASE)),
+    ("pptx", re.compile(r"\b(?:pptx|powerpoint|slide\s+deck|slides?)\b", re.IGNORECASE)),
+    ("docx", re.compile(r"\b(?:docx|word\s+document)\b", re.IGNORECASE)),
+    ("xlsx", re.compile(r"\b(?:xlsx|spreadsheet|excel)\b", re.IGNORECASE)),
+    ("csv", re.compile(r"\bcsv\b", re.IGNORECASE)),
+    ("json", re.compile(r"\bjson\b", re.IGNORECASE)),
+)
 _TASK_TYPE_EXTENSIONS = {
     "document": "md",
     "research": "md",
@@ -177,10 +187,17 @@ def _slugify_for_filename(text: str, max_len: int = 40) -> str:
     return cleaned[:max_len].rstrip("-") or _FALLBACK_TASK_SLUG
 
 
+def _requested_output_extension(description: str | None) -> str | None:
+    if not isinstance(description, str) or not description.strip():
+        return None
+    for ext, pattern in _REQUESTED_OUTPUT_EXTENSION_PATTERNS:
+        if pattern.search(description):
+            return ext
+    return None
+
+
 def _suggest_artifact_filename(task_type: str | None, description: str | None) -> str:
-    ext = _TASK_TYPE_EXTENSIONS.get(task_type or "", "md")
-    if task_type in {"document", "research"} and description and _HTML_OUTPUT_RE.search(description):
-        ext = "html"
+    ext = _requested_output_extension(description) or _TASK_TYPE_EXTENSIONS.get(task_type or "", "md")
     slug = _slugify_for_filename(description or _FALLBACK_TASK_SLUG)
     return f"{slug}.{ext}"
 

@@ -40,6 +40,7 @@ model's tool-selection from PR #129 remains valid.
 
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 from langchain.tools import ToolRuntime
@@ -282,6 +283,16 @@ _HTML_OUTPUT_RE = re.compile(
     r"\bhtml\b|\bhtml\s+(?:document|file|report|summary|brief|article|explainer)\b",
     re.IGNORECASE,
 )
+_REQUESTED_OUTPUT_EXTENSION_PATTERNS = (
+    ("html", _HTML_OUTPUT_RE),
+    ("md", re.compile(r"\b(?:markdown|md)\b", re.IGNORECASE)),
+    ("pdf", re.compile(r"\bpdf\b", re.IGNORECASE)),
+    ("pptx", re.compile(r"\b(?:pptx|powerpoint|slide\s+deck|slides?)\b", re.IGNORECASE)),
+    ("docx", re.compile(r"\b(?:docx|word\s+document)\b", re.IGNORECASE)),
+    ("xlsx", re.compile(r"\b(?:xlsx|spreadsheet|excel)\b", re.IGNORECASE)),
+    ("csv", re.compile(r"\bcsv\b", re.IGNORECASE)),
+    ("json", re.compile(r"\bjson\b", re.IGNORECASE)),
+)
 
 _FALLBACK_TASK_SLUG = "build"
 _MAX_SLUG_SOURCE_CHARS = 60
@@ -306,6 +317,15 @@ def _slugify_for_filename(text: str, max_len: int = 40) -> str:
     return cleaned[:max_len].rstrip("-") or _FALLBACK_TASK_SLUG
 
 
+def _requested_output_extension(description: str | None) -> str | None:
+    if not isinstance(description, str) or not description.strip():
+        return None
+    for ext, pattern in _REQUESTED_OUTPUT_EXTENSION_PATTERNS:
+        if pattern.search(description):
+            return ext
+    return None
+
+
 def _suggest_artifact_filename(
     task_type: str | None, description: str | None
 ) -> str:
@@ -315,9 +335,7 @@ def _suggest_artifact_filename(
     the model can converge on the same target across retries. Falls back to
     ``build.md`` when both inputs are missing.
     """
-    ext = _TASK_TYPE_EXTENSIONS.get(task_type or "", "md")
-    if task_type in {"document", "research"} and description and _HTML_OUTPUT_RE.search(description):
-        ext = "html"
+    ext = _requested_output_extension(description) or _TASK_TYPE_EXTENSIONS.get(task_type or "", "md")
     slug = _slugify_for_filename(description or _FALLBACK_TASK_SLUG)
     return f"{slug}.{ext}"
 
@@ -332,10 +350,33 @@ def _extract_str(d: dict[str, Any] | None, key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-# Codex P1 review 2026-05-22: gate write_file_tool prescription by
-# task_type so binary deliverables (.pptx / .pdf) don't get told to
-# use write_file_tool — they need a generator script run via bash.
+# Codex P1 review 2026-05-22: binary deliverables (.pptx / .pdf) don't get
+# told to use write_file_tool — they need a generator script run via bash.
+# 2026-05-30 update: branch on the concrete target extension, not task_type,
+# because visual_report can still be an HTML deliverable.
 _BINARY_OUTPUT_TASK_TYPES = frozenset({"presentation", "visual_report"})
+_TEXT_TARGET_EXTENSIONS = frozenset({
+    "html",
+    "htm",
+    "md",
+    "txt",
+    "json",
+    "csv",
+    "yaml",
+    "yml",
+    "js",
+    "ts",
+    "css",
+})
+_BINARY_TARGET_EXTENSIONS = frozenset({
+    "pdf",
+    "pptx",
+    "docx",
+    "xlsx",
+    "png",
+    "jpg",
+    "jpeg",
+})
 
 # Canonical task_type values accepted by ``start_builder_task``'s
 # ``StartBuilderTaskInput`` schema. The terminal-redirect prose must
@@ -421,21 +462,32 @@ def _resolve_target_path(
     return f"/mnt/user-data/outputs/{suggested}"
 
 
+def _target_extension(target_path: str | None) -> str:
+    return Path(target_path or "").suffix.lower().lstrip(".")
+
+
+def _target_uses_text_writer(target_path: str, task_type: str | None) -> bool:
+    ext = _target_extension(target_path)
+    if ext in _TEXT_TARGET_EXTENSIONS:
+        return True
+    if ext in _BINARY_TARGET_EXTENSIONS:
+        return False
+    return task_type not in _BINARY_OUTPUT_TASK_TYPES
+
+
 def _file_target_directive_block(target_path: str, task_type: str | None) -> str:
-    """Build the "Concrete file target" + HARD rules block, branched by
-    task_type. Binary deliverables (.pptx via presentation, .pdf via
-    visual_report) cannot be authored by ``write_file_tool`` directly
-    (it writes text bytes only) — the model must produce a generator
-    script and invoke it via ``bash_tool``. Text deliverables get the
-    canonical write_file_tool guidance.
+    """Build the "Concrete file target" + HARD rules block, branched by the
+    concrete target extension. Binary deliverables (.pptx/.pdf) cannot be
+    authored by ``write_file_tool`` directly (it writes text bytes only), while
+    HTML reports remain text deliverables even when task_type is visual_report.
 
     Codex P1 review 2026-05-22: the prior universal "MUST use
     write_file_tool" rule was incompatible with binary task_types.
     """
-    if task_type in _BINARY_OUTPUT_TASK_TYPES:
+    if not _target_uses_text_writer(target_path, task_type):
         return (
             f"Concrete file target: `{target_path}`. The deliverable for "
-            f"`{task_type}` is a BINARY file — author a generator script "
+            f"`{task_type or 'this task'}` is a BINARY file — author a generator script "
             f"(e.g. Python with python-pptx, reportlab, weasyprint, or the "
             f"chart-visualization / ppt-generation skill scripts) and run "
             f"it via `bash_tool`. The script may live anywhere; only the "
@@ -456,6 +508,10 @@ def _file_target_directive_block(target_path: str, task_type: str | None) -> str
         f"that exact path (or, for very long documents, open with "
         f"`write_file_tool(path, content, append=False)` and extend via "
         f"`append=True` chunks — same path each time).\n"
+        f"\n"
+        f"If the target is HTML, charts and diagrams should be embedded or "
+        f"linked from supporting files, but the final artifact is still the "
+        f"HTML file named above.\n"
         f"\n"
         f"HARD rules:\n"
         f"  - All `write_file_tool` paths MUST start with "

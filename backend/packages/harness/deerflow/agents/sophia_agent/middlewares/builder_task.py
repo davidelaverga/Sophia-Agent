@@ -326,6 +326,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             sections.append(
                 "<artifact_target>\n"
                 f"- Canonical target path for this build: `{html.escape(artifact_target_path, quote=True)}`.\n"
+                "- The target file extension is authoritative for the final output format. If this path ends in .html, deliver an HTML file even if the task type is visual_report.\n"
                 "- Reuse this path across update/resume runs unless you have already written exactly one stronger deliverable candidate under /mnt/user-data/outputs/.\n"
                 "- emit_builder_artifact.artifact_path should point to this target or that single verified candidate, never to an unwritten placeholder.\n"
                 "</artifact_target>"

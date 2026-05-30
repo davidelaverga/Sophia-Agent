@@ -112,6 +112,28 @@ _RUNTIME_WRITE_ERROR_CLASSES = {
     "unexpected_write_error",
     "write_os_error",
 }
+_PROMOTABLE_DELIVERABLE_EXTENSIONS = frozenset({
+    ".pdf",
+    ".pptx",
+    ".docx",
+    ".xlsx",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".svg",
+    ".html",
+    ".htm",
+    ".zip",
+    ".md",
+    ".txt",
+    ".csv",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".js",
+    ".ts",
+    ".css",
+})
 _WRITE_ERROR_CLASS_MARKERS = (
     ("missing_thread_id", ("thread id not available", "nonetype' object has no attribute 'get")),
     ("missing_thread_data", ("thread data not available", "no allowed local sandbox directories")),
@@ -146,7 +168,7 @@ def _merge_builder_write_diagnostic_value(
     if key in {"success_count", "error_count"} and isinstance(value, int):
         merged[key] = int(merged.get(key, 0) or 0) + value
         return
-    if key == "successful_output_paths" and isinstance(value, list):
+    if key in {"successful_output_paths", "successful_deliverable_output_paths"} and isinstance(value, list):
         merged[key] = _merge_string_list(merged.get(key), value)
         return
     merged[key] = value
@@ -234,6 +256,16 @@ def _is_recovery_candidate(entry: Path, *, requested_suffix: str, min_mtime: flo
     if requested_suffix and entry.suffix.lower() != requested_suffix:
         return False
     return min_mtime is None or entry.stat().st_mtime >= min_mtime
+
+
+def _is_user_facing_output_path(artifact_path: str | None) -> bool:
+    relative = _extract_output_relative_path(artifact_path)
+    if relative is None:
+        return False
+    name = PurePosixPath(relative).name
+    if not name or name.startswith((".", "_")):
+        return False
+    return PurePosixPath(relative).suffix.lower() in _PROMOTABLE_DELIVERABLE_EXTENSIONS
 
 
 def _recovery_hint(outputs_root: Path, candidates: list[Path]) -> str:
@@ -365,6 +397,8 @@ class BuilderArtifactState(AgentState):
     # correction HumanMessage after N consecutive write_file_tool errors,
     # so we don't repeat the correction on every subsequent before_model.
     builder_path_correction_emitted: NotRequired[bool]
+    builder_tool_argument_correction_emitted: NotRequired[bool]
+    builder_recovered_deliverable_emitted: NotRequired[bool]
 
 
 class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
@@ -802,20 +836,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     # ceiling fallback scanned outputs/ but found nothing
                     # promotable, and the run coerced to error instead of
                     # delivering the markdown the builder had written.
-                    _PROMOTE_EXTS = (
-                        # Binary deliverables — high signal, listed first.
-                        ".pdf", ".pptx", ".docx", ".xlsx",
-                        ".png", ".jpg", ".jpeg", ".svg",
-                        ".html", ".zip",
-                        # Text deliverables — markdown deep dives, JSON/CSV
-                        # data reports, YAML specs.
-                        ".md", ".txt", ".csv", ".json", ".yaml", ".yml",
-                    )
                     candidates = [
                         p for p in outputs_root_local.rglob("*")
                         if p.is_file()
                         and not p.name.startswith("_")
-                        and p.suffix.lower() in _PROMOTE_EXTS
+                        and p.suffix.lower() in _PROMOTABLE_DELIVERABLE_EXTENSIONS
                     ]
                     if builder_task_started_at_ms:
                         min_mtime = (builder_task_started_at_ms / 1000.0) - 5.0
@@ -1175,10 +1200,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         state: BuilderArtifactState,
         runtime: Runtime,
     ) -> dict[str, Any] | None:
-        successful_paths = cls._successful_output_paths(state)
-        if len(successful_paths) != 1:
+        recovered_path = cls._preferred_successful_deliverable_path(state, runtime)
+        if not recovered_path:
             return None
-        recovered_path = successful_paths[0]
         recovered_args = dict(artifact_args)
         recovered_args["artifact_path"] = recovered_path
         if not cls._artifact_files_exist(recovered_args, state, runtime):
@@ -1199,6 +1223,101 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             for path in (diagnostics.get("successful_output_paths") or [])
             if isinstance(path, str) and _extract_output_relative_path(path) is not None
         ]
+
+    @staticmethod
+    def _successful_deliverable_output_paths(state: BuilderArtifactState) -> list[str]:
+        diagnostics = state.get("builder_write_diagnostics") or {}
+        if not isinstance(diagnostics, dict):
+            return []
+        explicit = [
+            path
+            for path in (diagnostics.get("successful_deliverable_output_paths") or [])
+            if isinstance(path, str) and _is_user_facing_output_path(path)
+        ]
+        if explicit:
+            return explicit
+        return [
+            path
+            for path in BuilderArtifactMiddleware._successful_output_paths(state)
+            if _is_user_facing_output_path(path)
+        ]
+
+    @staticmethod
+    def _target_artifact_path(state: BuilderArtifactState) -> str | None:
+        target = state.get("builder_artifact_target_path")
+        if isinstance(target, str) and _extract_output_relative_path(target) is not None:
+            return target
+        delegation = state.get("delegation_context")
+        if isinstance(delegation, dict):
+            delegated = delegation.get("artifact_target_path")
+            if isinstance(delegated, str) and _extract_output_relative_path(delegated) is not None:
+                return delegated
+        return None
+
+    @classmethod
+    def _preferred_successful_deliverable_path(
+        cls,
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> str | None:
+        paths = cls._successful_deliverable_output_paths(state)
+        diagnostics = state.get("builder_write_diagnostics") or {}
+        target_path = cls._target_artifact_path(state)
+        if target_path and _is_user_facing_output_path(target_path):
+            target_args = {"artifact_path": target_path}
+            if target_path in paths or cls._artifact_files_exist(target_args, state, runtime):
+                return target_path
+
+        target_suffix = Path(target_path or "").suffix.lower()
+        matching = [
+            path for path in paths
+            if not target_suffix or Path(path).suffix.lower() == target_suffix
+        ]
+        if len(matching) == 1:
+            return matching[0]
+
+        last_successful = (
+            diagnostics.get("last_successful_deliverable_output_path")
+            if isinstance(diagnostics, dict)
+            else None
+        )
+        if isinstance(last_successful, str):
+            if last_successful in matching:
+                return last_successful
+            if not matching and last_successful in paths:
+                return last_successful
+
+        if len(paths) == 1:
+            return paths[0]
+        return None
+
+    @staticmethod
+    def _build_recovered_artifact_result(
+        artifact_path: str,
+        *,
+        steps_completed: int,
+        reason: str,
+    ) -> dict[str, Any]:
+        artifact_type = Path(artifact_path).suffix.lower().lstrip(".") or "unknown"
+        logger.warning(
+            "BuilderArtifact: promoting recovered deliverable reason=%s ext=%s",
+            reason,
+            artifact_type or None,
+        )
+        return {
+            "artifact_path": artifact_path,
+            "artifact_type": artifact_type,
+            "artifact_title": "Build task completed (recovered)",
+            "steps_completed": steps_completed,
+            "decisions_made": [],
+            "companion_summary": (
+                "The builder wrote a deliverable but did not emit it cleanly, "
+                "so I recovered the completed file from the output directory."
+            ),
+            "companion_tone_hint": "Reassuring — deliverable recovered despite rough run.",
+            "user_next_action": "Open the file and let me know if it lands.",
+            "confidence": 0.55,
+        }
 
     @classmethod
     def _recover_missing_emit_args_if_possible(
@@ -1325,6 +1444,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if not text.startswith("Error"):
             return ""
         lowered = text.lower()
+        if "field required" in lowered and ("content" in lowered or "command" in lowered):
+            return "missing_required_tool_arg"
         for error_class, markers in _WRITE_ERROR_CLASS_MARKERS:
             if any(marker in lowered for marker in markers):
                 return error_class
@@ -1376,6 +1497,145 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "jump_to": "end",
         }
 
+    def _recovered_deliverable_update(
+        self,
+        state: BuilderArtifactState,
+        runtime: Runtime | None,
+        *,
+        artifact_path: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        fallback = self._build_recovered_artifact_result(
+            artifact_path,
+            steps_completed=int(state.get("builder_non_artifact_turns", 0) or 0),
+            reason=reason,
+        )
+        if runtime is not None:
+            self._upload_fallback_and_fire(
+                state=state,
+                runtime=runtime,
+                fallback=fallback,
+                status="completed",
+            )
+        return {
+            "builder_result": fallback,
+            "builder_non_artifact_turns": 0,
+            "builder_task_started_at_ms": 0,
+            "builder_consecutive_empty_emit_rejections": 0,
+            "builder_recovered_deliverable_emitted": True,
+            "jump_to": "end",
+        }
+
+    def _maybe_promote_recovered_deliverable(
+        self,
+        state: BuilderArtifactState,
+        runtime: Runtime | None,
+        *,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        if state.get("builder_recovered_deliverable_emitted") or runtime is None:
+            return None
+        diagnostics = state.get("builder_write_diagnostics") or {}
+        if not isinstance(diagnostics, dict):
+            return None
+        if diagnostics.get("last_status") != "success":
+            return None
+        error_count = int(diagnostics.get("error_count", 0) or 0)
+        had_correction = bool(
+            state.get("builder_path_correction_emitted")
+            or state.get("builder_tool_argument_correction_emitted")
+        )
+        if error_count < self._PATH_CORRECTION_ERROR_THRESHOLD and not had_correction:
+            return None
+        candidate = self._preferred_successful_deliverable_path(state, runtime)
+        if not candidate:
+            return None
+        if not self._artifact_files_exist({"artifact_path": candidate}, state, runtime):
+            return None
+        return self._recovered_deliverable_update(
+            state,
+            runtime,
+            artifact_path=candidate,
+            reason=reason,
+        )
+
+    def _write_tool_argument_failure_update(
+        self,
+        state: BuilderArtifactState,
+        runtime: Runtime | None,
+        *,
+        count: int,
+        error_class: str,
+    ) -> dict[str, Any] | None:
+        candidate = (
+            self._preferred_successful_deliverable_path(state, runtime)
+            if runtime is not None
+            else None
+        )
+        if candidate and self._artifact_files_exist({"artifact_path": candidate}, state, runtime):
+            return self._recovered_deliverable_update(
+                state,
+                runtime,
+                artifact_path=candidate,
+                reason=error_class,
+            )
+
+        if state.get("builder_tool_argument_correction_emitted"):
+            logger.error(
+                "[BuilderArtifact] repeated missing required tool arguments "
+                "after correction; stopping build count=%d error_class=%s",
+                count,
+                error_class,
+            )
+            fallback = self._build_ceiling_fallback(
+                state,
+                steps_completed=int(state.get("builder_non_artifact_turns", 0) or 0),
+                reason=f"repeated_{error_class}",
+            )
+            status = "failed" if not fallback.get("artifact_path") else "completed"
+            if runtime is not None:
+                self._upload_fallback_and_fire(
+                    state=state,
+                    runtime=runtime,
+                    fallback=fallback,
+                    status=status,
+                )
+            return {
+                "builder_result": fallback,
+                "builder_non_artifact_turns": 0,
+                "builder_task_started_at_ms": 0,
+                "builder_consecutive_empty_emit_rejections": 0,
+                "builder_tool_argument_correction_emitted": True,
+                "jump_to": "end",
+            }
+
+        logger.warning(
+            "[BuilderArtifact] %d consecutive write_file_tool missing-argument "
+            "errors detected — injecting tool-argument correction instead of "
+            "path correction. error_class=%s",
+            count,
+            error_class,
+        )
+        correction = HumanMessage(
+            content=(
+                "[Sophia/tool-argument correction]\n"
+                "Your recent tool call was missing required arguments. "
+                "Do not retry the same incomplete call.\n\n"
+                "For text deliverables, call `write_file_tool` with BOTH "
+                "`path` and `content` arguments, for example "
+                "`write_file_tool(path='/mnt/user-data/outputs/report.html', "
+                "content='<html>...</html>', append=False)`. For shell work, "
+                "call `bash_tool` with a non-empty `command` argument.\n\n"
+                "If you have already written the final file under "
+                "`/mnt/user-data/outputs/`, call `emit_builder_artifact` with "
+                "that exact path and stop."
+            )
+        )
+        return {
+            "messages": [correction],
+            "builder_tool_argument_correction_emitted": True,
+        }
+
     def _maybe_inject_path_correction(
         self,
         state: BuilderArtifactState,
@@ -1420,6 +1680,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             if state.get("builder_runtime_write_failure_emitted"):
                 return None
             return self._write_runtime_failure_update(
+                state,
+                runtime,
+                count=count,
+                error_class=error_class,
+            )
+        if error_class == "missing_required_tool_arg":
+            return self._write_tool_argument_failure_update(
                 state,
                 runtime,
                 count=count,
@@ -1564,6 +1831,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         reset = self._maybe_reset_turn_budget(state)
         if isinstance(reset, dict):
             update.update(reset)
+        promotion = self._maybe_promote_recovered_deliverable(
+            state,
+            runtime,
+            reason="successful_write_after_correction",
+        )
+        if isinstance(promotion, dict):
+            update.update(promotion)
+            return update
         correction = self._maybe_inject_path_correction(state, runtime)
         if isinstance(correction, dict):
             # Merge: ``messages`` reducer concatenates, scalar flags overwrite.
@@ -1691,6 +1966,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if success and under_outputs and path:
             delta["last_successful_output_path"] = path
             delta["successful_output_paths"] = [path]
+            if _is_user_facing_output_path(path):
+                delta["last_successful_deliverable_output_path"] = path
+                delta["successful_deliverable_output_paths"] = [path]
         return delta
 
     @staticmethod
@@ -2097,6 +2375,18 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     },
                 )
                 joined_names = ", ".join(tool_names) if tool_names else "none"
+                recovered = self._maybe_promote_recovered_deliverable(
+                    state,
+                    runtime,
+                    reason="non_emit_after_successful_deliverable_write",
+                )
+                if recovered is not None:
+                    recovered.update({
+                        "builder_last_tool_names": tool_names,
+                        "builder_tool_turn_summaries": history,
+                        "builder_research_diagnostics": research_diagnostics,
+                    })
+                    return recovered
 
                 # PR-C F6 (2026-04-24): soft-warn halfway so the model sees
                 # an early wrap-up signal in logs (and future trace events).
