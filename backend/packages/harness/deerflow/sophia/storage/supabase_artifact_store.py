@@ -235,6 +235,72 @@ def create_signed_url(
             http.close()
 
 
+def delete_artifact(
+    thread_id: str,
+    filename: str,
+    *,
+    client: httpx.Client | None = None,
+) -> bool:
+    """Delete the mirrored object at ``{bucket}/{thread_id}/{filename}``.
+
+    Returns ``True`` when the object was deleted OR was already absent
+    (404 — idempotent delete), ``False`` when Supabase is not configured
+    or the delete failed. Best-effort: transport errors are logged and
+    swallowed (returns ``False``) so a delete-endpoint call never 500s on
+    a Supabase hiccup — the local file is the primary copy.
+
+    PR #132: the upload route mirrors every upload to Supabase so the
+    companion's read tools (which run in a separate container) can fetch
+    it. The DELETE endpoint must therefore ALSO remove the mirror, or a
+    discarded file would re-materialize from Supabase on the next
+    view_user_image / read_user_document local miss.
+    """
+    config = _load_config()
+    if config is None:
+        return False
+
+    object_path = _object_path(thread_id, filename)
+    url = _object_url(config, object_path)
+    headers = {
+        "Authorization": f"Bearer {config.service_role_key}",
+        "apikey": config.service_role_key,
+    }
+
+    owns_client = client is None
+    http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
+    try:
+        response = http.delete(url, headers=headers)
+        if response.status_code == 404:
+            return True  # already gone — idempotent
+        if not response.is_success:
+            logger.warning(
+                "Supabase delete failed thread_id=%s filename=%s status=%s body=%s",
+                thread_id,
+                filename,
+                response.status_code,
+                response.text[:200],
+            )
+            return False
+        logger.info(
+            "Deleted mirrored artifact from Supabase: bucket=%s thread_id=%s filename=%s",
+            config.bucket,
+            thread_id,
+            filename,
+        )
+        return True
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "Supabase delete error thread_id=%s filename=%s error=%s",
+            thread_id,
+            filename,
+            exc,
+        )
+        return False
+    finally:
+        if owns_client:
+            http.close()
+
+
 def download_artifact(
     thread_id: str,
     filename: str,

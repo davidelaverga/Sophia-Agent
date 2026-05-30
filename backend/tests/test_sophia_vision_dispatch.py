@@ -330,6 +330,73 @@ def test_copy_returns_empty_when_no_current_turn_attachments(tmp_path: Path, mon
     )
 
 
+def test_copy_materializes_current_turn_image_from_supabase_on_local_miss(tmp_path: Path, monkeypatch) -> None:
+    """Codex P1 follow-up (PR #132): in the split gateway/langgraph
+    deployment a freshly attached image lives only on the gateway disk +
+    Supabase. If the user asks for a builder deliverable BEFORE the
+    companion materializes it locally, the builder copy must fetch the
+    whitelisted current-turn image from the Supabase mirror first — else
+    the local uploads dir is empty/absent and the builder never sees it."""
+    parent_uploads = tmp_path / "parent" / "uploads"  # intentionally NOT created
+    builder_uploads = tmp_path / "builder" / "uploads"
+
+    def _resolve_dir(tid: str) -> Path:
+        return parent_uploads if tid == "p1" else builder_uploads
+
+    fake_paths = SimpleNamespace(sandbox_uploads_dir=_resolve_dir)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: fake_paths)
+
+    png = b"\x89PNG from-supabase"
+    from deerflow.sophia.storage import supabase_artifact_store as store
+    monkeypatch.setattr(store, "is_configured", lambda: True)
+    monkeypatch.setattr(store, "download_artifact", lambda _tid, _fn, **_kw: (png, "image/png"))
+
+    virtual_paths = sbt._copy_parent_uploaded_images(
+        parent_thread_id="p1",
+        builder_thread_id="b1",
+        current_turn_attachments=frozenset({"photo.png"}),
+    )
+
+    assert virtual_paths == ["/mnt/user-data/uploads/photo.png"]
+    # Materialized into the (previously absent) parent uploads dir...
+    assert (parent_uploads / "photo.png").read_bytes() == png
+    # ...and copied into the builder sandbox.
+    assert (builder_uploads / "photo.png").read_bytes() == png
+
+
+def test_copy_does_not_fetch_non_image_attachments_from_supabase(tmp_path: Path, monkeypatch) -> None:
+    """Only image-extension current-turn attachments are pulled from the
+    Supabase mirror — documents are read_user_document's job, not the
+    builder image copy. A whitelist of only a .pdf must trigger no
+    download and copy nothing."""
+    parent_uploads = tmp_path / "parent" / "uploads"
+    builder_uploads = tmp_path / "builder" / "uploads"
+
+    def _resolve_dir(tid: str) -> Path:
+        return parent_uploads if tid == "p1" else builder_uploads
+
+    fake_paths = SimpleNamespace(sandbox_uploads_dir=_resolve_dir)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: fake_paths)
+
+    calls: list[tuple[str, str]] = []
+    from deerflow.sophia.storage import supabase_artifact_store as store
+    monkeypatch.setattr(store, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        store,
+        "download_artifact",
+        lambda tid, fn, **_kw: calls.append((tid, fn)) or None,
+    )
+
+    virtual_paths = sbt._copy_parent_uploaded_images(
+        parent_thread_id="p1",
+        builder_thread_id="b1",
+        current_turn_attachments=frozenset({"report.pdf"}),
+    )
+
+    assert virtual_paths == []
+    assert calls == [], "a .pdf attachment must not be fetched as a builder image"
+
+
 # Sentinel: distinguishes "field absent from configurable" from an
 # explicit ``None`` value the caller might want to pass through.
 _OMIT = object()

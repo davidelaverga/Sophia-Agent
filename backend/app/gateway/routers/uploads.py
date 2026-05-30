@@ -63,6 +63,28 @@ def _mirror_upload_to_supabase(thread_id: str, filename: str, content: bytes) ->
         )
 
 
+def _delete_supabase_mirror(thread_id: str, filename: str) -> None:
+    """Best-effort removal of a mirrored upload from Supabase Storage.
+
+    Counterpart to ``_mirror_upload_to_supabase`` (PR #132): without this,
+    a file the user discards stays in Supabase and the companion's read
+    tools would re-materialize the "deleted" content from the mirror on
+    the next local miss. Never raises — the local delete is the primary
+    operation.
+    """
+    if not supabase_artifact_store.is_configured():
+        return
+    try:
+        supabase_artifact_store.delete_artifact(thread_id, filename)
+    except Exception as exc:  # noqa: BLE001 — best-effort, never block delete
+        logger.warning(
+            "Supabase delete mirror failed (continuing) thread_id=%s filename=%s error=%s",
+            thread_id,
+            filename,
+            exc,
+        )
+
+
 @router.post("", response_model=UploadResponse)
 async def upload_files(
     thread_id: str,
@@ -237,7 +259,16 @@ async def delete_uploaded_file(thread_id: str, filename: str) -> dict:
         if file_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
             companion_markdown = file_path.with_suffix(".md")
             companion_markdown.unlink(missing_ok=True)
+            # Mirror removal (PR #132): drop the converted .md from Supabase
+            # too, or read_user_document (separate container) would
+            # re-materialize the discarded conversion on the next local miss.
+            _delete_supabase_mirror(thread_id, companion_markdown.name)
         file_path.unlink(missing_ok=True)
+        # Remove the Supabase mirror of the original (PR #132). Without this,
+        # view_user_image / read_user_document (which run in a separate
+        # container) would re-download the discarded file on the next local
+        # miss and surface it to the companion / builder again.
+        _delete_supabase_mirror(thread_id, filename)
         logger.info(f"Deleted file: {filename}")
         return {"success": True, "message": f"Deleted {filename}"}
     except Exception as e:

@@ -706,6 +706,72 @@ def _copy_files_to_builder_sandbox(
     return virtual_paths
 
 
+def _materialize_current_turn_images_from_supabase(
+    parent_thread_id: str,
+    parent_uploads: Path,
+    current_turn_attachments: frozenset[str],
+) -> None:
+    """Fetch whitelisted current-turn IMAGE uploads from the Supabase mirror.
+
+    Cross-service bridge (Codex P1 PR #132 follow-up): in the split
+    gateway/langgraph deployment, a freshly attached image exists only on
+    the gateway disk + Supabase until the companion calls
+    ``view_user_image`` (which materializes it locally). If the user
+    instead asks immediately for a builder deliverable, ``start_builder_task``
+    runs here in the langgraph container with an empty / missing parent
+    uploads dir, so ``_select_copyable_images`` would find nothing and the
+    builder would never be told about the image. We pull the whitelisted
+    current-turn images into ``parent_uploads`` first so the copy proceeds.
+
+    Best-effort: any failure is logged and skipped. Only image-extension
+    names that pass ``_SAFE_COPY_FILENAME`` are fetched (documents are the
+    job of ``read_user_document``, not the builder image copy). Files
+    already present locally are left untouched.
+    """
+    from deerflow.sophia.storage import supabase_artifact_store
+
+    if not supabase_artifact_store.is_configured():
+        return
+    try:
+        parent_uploads.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+
+    for name in current_turn_attachments:
+        if not _SAFE_COPY_FILENAME.match(name):
+            continue
+        if Path(name).suffix.lower() not in _BUILDER_COPY_IMAGE_EXTENSIONS:
+            continue
+        dest = parent_uploads / name
+        if dest.exists():
+            continue
+        try:
+            result = supabase_artifact_store.download_artifact(parent_thread_id, name)
+        except Exception as exc:  # noqa: BLE001 — best-effort cross-service fetch
+            logger.warning(
+                "[Builder] Supabase fetch failed for current-turn image %s/%s: %s",
+                parent_thread_id,
+                name,
+                exc,
+            )
+            continue
+        if result is None:
+            continue
+        content, _content_type = result
+        try:
+            with open(str(dest), "wb") as fh:
+                fh.write(content)
+        except OSError as exc:
+            logger.warning("[Builder] could not materialize %s from Supabase: %s", name, exc)
+            continue
+        logger.info(
+            "[Builder] materialized current-turn image %s (%d bytes) from Supabase for parent thread %s",
+            name,
+            len(content),
+            parent_thread_id,
+        )
+
+
 def _copy_parent_uploaded_images(
     *,
     parent_thread_id: str | None,
@@ -735,17 +801,30 @@ def _copy_parent_uploaded_images(
     if not parent_thread_id:
         return []
 
+    # Short-circuit: an explicit empty whitelist means "user attached
+    # nothing on this turn" — there's nothing to copy. Checked BEFORE any
+    # filesystem work.
+    if current_turn_attachments is not None and not current_turn_attachments:
+        return []
+
     from deerflow.config.paths import get_paths
 
     paths = get_paths()
     parent_uploads = paths.sandbox_uploads_dir(parent_thread_id)
-    if not parent_uploads.is_dir():
-        return []
 
-    # Short-circuit: an explicit empty whitelist means "user attached
-    # nothing on this turn" — there's nothing to copy. Skip the dir
-    # walk entirely.
-    if current_turn_attachments is not None and not current_turn_attachments:
+    # Cross-service bridge (Codex P1 PR #132 follow-up): when the user
+    # attached images on THIS turn but they only exist on the gateway disk
+    # + Supabase (the companion hasn't materialized them locally yet), pull
+    # them into the parent uploads dir FIRST so the copy below sees them.
+    # Must run BEFORE the is_dir() check — in the split deployment the dir
+    # may not exist yet on this container. Scoped to the current-turn
+    # whitelist; ``None`` (legacy callers / tests) skips the fetch.
+    if current_turn_attachments:
+        _materialize_current_turn_images_from_supabase(
+            parent_thread_id, parent_uploads, current_turn_attachments
+        )
+
+    if not parent_uploads.is_dir():
         return []
 
     eligible = _select_copyable_images(
