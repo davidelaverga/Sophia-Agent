@@ -301,8 +301,12 @@ async def test_snapshot_downgrades_native_success_without_deliverable(app: FastA
     async def status(_task: str, _run: str, _fallback: str | None):
         return "completed"
 
+    async def no_payload(_task: dict):
+        return None
+
     monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", tasks)
     monkeypatch.setattr(builder_canvas, "_native_run_status", status)
+    monkeypatch.setattr(builder_canvas, "_builder_thread_artifact_payload", no_payload)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/sophia/user-1/threads/parent-1/builder-canvas/snapshot")
@@ -312,6 +316,59 @@ async def test_snapshot_downgrades_native_success_without_deliverable(app: FastA
     assert active_task["status"] == "failed"
     assert active_task["completion"]["status"] == "error"
     assert active_task["completion"]["error_message"] == "Builder finished without a deliverable artifact."
+
+
+@pytest.mark.anyio
+async def test_snapshot_hydrates_completed_deliverable_from_builder_thread_state(
+    app: FastAPI,
+    monkeypatch,
+) -> None:
+    async def tasks(_parent: str):
+        return [
+            {
+                "agent_name": "sophia_builder",
+                "task_id": "task-1",
+                "thread_id": "task-1",
+                "run_id": "run-1",
+                "status": "success",
+                "task_type": "visual_report",
+                "artifact_target_path": "/mnt/user-data/outputs/build.html",
+                "last_updated_at": "2026-05-27T10:00:00Z",
+            }
+        ]
+
+    async def status(_task: str, _run: str, _fallback: str | None):
+        return "completed"
+
+    async def builder_payload(task: dict):
+        assert task["thread_id"] == "task-1"
+        return {
+            "artifact_path": "/mnt/user-data/outputs/report.html",
+            "artifact_title": "Recovered HTML report",
+            "artifact_type": "html",
+            "companion_summary": "Report is ready.",
+        }
+
+    monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", tasks)
+    monkeypatch.setattr(builder_canvas, "_native_run_status", status)
+    monkeypatch.setattr(builder_canvas, "_builder_thread_artifact_payload", builder_payload)
+    monkeypatch.setattr(
+        builder_canvas,
+        "_signed_artifact_url",
+        lambda thread_id, artifact_path: f"https://signed.example/{thread_id}/{artifact_path}",
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/sophia/user-1/threads/parent-1/builder-canvas/snapshot")
+
+    assert response.status_code == 200
+    active_task = response.json()["active_task"]
+    assert active_task["status"] == "completed"
+    assert active_task["completion"]["status"] == "success"
+    assert active_task["completion"]["artifact_path"] == "mnt/user-data/outputs/report.html"
+    assert active_task["completion"]["artifact_url"] == "https://signed.example/parent-1/mnt/user-data/outputs/report.html"
+    assert active_task["completion"]["artifact_title"] == "Recovered HTML report"
+    assert active_task["completion"]["summary"] == "Report is ready."
 
 
 @pytest.mark.anyio

@@ -213,8 +213,7 @@ def _artifact_payload_from_task(task: dict[str, Any]) -> dict[str, Any]:
     return task
 
 
-def _task_has_deliverable(parent_thread_id: str, task: dict[str, Any]) -> bool:
-    artifact = _artifact_payload_from_task(task)
+def _artifact_payload_has_deliverable(artifact: dict[str, Any]) -> bool:
     artifact_path = _canonical_artifact_path(artifact.get("artifact_path"))
     artifact_url = artifact.get("artifact_url")
     if isinstance(artifact_url, str) and artifact_url.strip():
@@ -222,6 +221,107 @@ def _task_has_deliverable(parent_thread_id: str, task: dict[str, Any]) -> bool:
     if artifact_path:
         return True
     return False
+
+
+def _task_has_deliverable(parent_thread_id: str, task: dict[str, Any]) -> bool:
+    return _artifact_payload_has_deliverable(_artifact_payload_from_task(task))
+
+
+def _thread_id_for_builder_task(task: dict[str, Any]) -> str | None:
+    for key in ("thread_id", "task_id"):
+        value = task.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _artifact_payload_from_builder_values(values: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("builder_result", "artifact"):
+        payload = values.get(key)
+        if isinstance(payload, dict) and payload:
+            return payload
+    return None
+
+
+async def _builder_thread_artifact_payload(task: dict[str, Any]) -> dict[str, Any] | None:
+    builder_thread_id = _thread_id_for_builder_task(task)
+    if not builder_thread_id:
+        return None
+    client = get_client(url=_langgraph_url())
+    try:
+        state = await client.threads.get_state(builder_thread_id)
+    except Exception:
+        logger.info(
+            "Builder canvas snapshot: builder-thread artifact hydration unavailable task_id=%s run_id=%s",
+            _short_id(str(task.get("task_id") or "")),
+            _short_id(str(task.get("run_id") or "")),
+            exc_info=True,
+        )
+        return None
+    values = state.get("values", {}) if isinstance(state, dict) else {}
+    if not isinstance(values, dict):
+        return None
+    return _artifact_payload_from_builder_values(values)
+
+
+def _target_artifact_payload_if_exists(parent_thread_id: str, task: dict[str, Any]) -> dict[str, Any] | None:
+    artifact_path = _canonical_artifact_path(task.get("artifact_target_path"))
+    relative_path = _relative_output_artifact_path(artifact_path)
+    if not artifact_path or not relative_path:
+        return None
+    try:
+        from deerflow.sophia.storage.supabase_artifact_store import check_artifact_exists
+
+        exists = check_artifact_exists(parent_thread_id, relative_path)
+    except Exception:
+        exists = False
+    if not exists:
+        return None
+    return {
+        "artifact_path": artifact_path,
+        "artifact_type": artifact_path.rsplit(".", 1)[-1] if "." in artifact_path else None,
+        "artifact_title": task.get("description") or task.get("task_brief") or "Builder artifact",
+    }
+
+
+async def _hydrate_completed_task_deliverable(
+    parent_thread_id: str,
+    task: dict[str, Any],
+    *,
+    native_status: str,
+    task_id: str,
+    run_id: str,
+    recent_events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    retained_status, retained_completion = _retained_status_and_completion(recent_events, task_id, run_id)
+    if (
+        native_status != "completed"
+        or _task_has_deliverable(parent_thread_id, task)
+        or _retained_terminal_status(retained_status, retained_completion) is not None
+    ):
+        return task
+
+    builder_payload = await _builder_thread_artifact_payload(task)
+    if isinstance(builder_payload, dict) and _artifact_payload_has_deliverable(builder_payload):
+        logger.info(
+            "Builder canvas snapshot: hydrated deliverable from builder thread state parent_thread_id=%s task_id=%s run_id=%s",
+            _short_id(parent_thread_id),
+            _short_id(task_id),
+            _short_id(run_id),
+        )
+        return {**task, "builder_result": builder_payload}
+
+    target_payload = _target_artifact_payload_if_exists(parent_thread_id, task)
+    if isinstance(target_payload, dict):
+        logger.info(
+            "Builder canvas snapshot: hydrated deliverable from persisted artifact target parent_thread_id=%s task_id=%s run_id=%s",
+            _short_id(parent_thread_id),
+            _short_id(task_id),
+            _short_id(run_id),
+        )
+        return {**task, "builder_result": target_payload}
+
+    return task
 
 
 def _retained_terminal_for_run(
@@ -490,6 +590,14 @@ async def builder_canvas_snapshot(
         )
         return BuilderCanvasSnapshot(recent_events=recent_events)
     native_status = await _native_run_status(task_id, run_id, task.get("status"))
+    task = await _hydrate_completed_task_deliverable(
+        parent_thread_id,
+        task,
+        native_status=native_status,
+        task_id=task_id,
+        run_id=run_id,
+        recent_events=recent_events,
+    )
     status, error_message_override = _effective_snapshot_status(
         parent_thread_id,
         task,
