@@ -193,7 +193,11 @@ def _materialize_image_from_supabase(
         return None
 
     try:
-        result = supabase_artifact_store.download_artifact(thread_id, image_filename)
+        # Uploads live under the {thread_id}/uploads/ keyspace (Codex P1
+        # PR #132) — distinct from builder outputs — so address it with the
+        # shared prefix helper the gateway mirror uses.
+        object_name = supabase_artifact_store.uploads_object_name(image_filename)
+        result = supabase_artifact_store.download_artifact(thread_id, object_name)
     except Exception as exc:  # noqa: BLE001 — best-effort
         logger.warning("Supabase image download failed for %s/%s: %s", thread_id, image_filename, exc)
         return None

@@ -60,6 +60,31 @@ def _object_path(thread_id: str, filename: str) -> str:
     return f"{safe_thread}/{safe_name}"
 
 
+# Keyspace separation (Codex P1 PR #132). User UPLOADS mirror under
+# ``{thread_id}/uploads/{name}``; builder OUTPUTS mirror under
+# ``{thread_id}/{output_relative_path}`` (see ``supabase_mirror.py``).
+# Without this prefix a user upload and a builder artifact with the same
+# basename (e.g. ``report.pdf``) would overwrite each other in the same
+# bucket folder — whichever ran last would win, and a later local miss in
+# view_user_image / read_user_document could materialize the wrong bytes
+# (or a completion-card signed URL could point at an upload instead of the
+# builder deliverable). ``uploads_object_name`` is the SINGLE source of
+# truth for the upload prefix, shared by the gateway upload mirror AND the
+# companion read tools so both address the exact same object.
+UPLOADS_PREFIX = "uploads/"
+
+
+def uploads_object_name(filename: str) -> str:
+    """Map a bare upload filename to its prefixed Supabase object name.
+
+    ``report.pdf`` -> ``uploads/report.pdf``. The ``{thread_id}/`` folder is
+    prepended by ``_object_path`` at call time, yielding the full key
+    ``{thread_id}/uploads/report.pdf`` — distinct from the builder-output
+    keyspace ``{thread_id}/report.pdf``.
+    """
+    return f"{UPLOADS_PREFIX}{filename.strip().lstrip('/')}"
+
+
 def upload_artifact(
     thread_id: str,
     filename: str,

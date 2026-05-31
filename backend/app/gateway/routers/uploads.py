@@ -137,8 +137,10 @@ def _mirror_upload_to_supabase(thread_id: str, filename: str, content: bytes) ->
     See the call site for the full rationale: the gateway and the langgraph
     runtime are separate Render containers with separate disks, so the
     companion's read tools (which run in langgraph) can't see a file written
-    only to the gateway's disk. We push every upload to Supabase under
-    ``{thread_id}/{filename}`` and the read tools download on a local miss.
+    only to the gateway's disk. We push every upload to Supabase under the
+    UPLOADS keyspace ``{thread_id}/uploads/{filename}`` (separate from the
+    builder-output keyspace ``{thread_id}/{name}`` so same-named files don't
+    collide — Codex P1 PR #132) and the read tools download on a local miss.
 
     Never raises — a Supabase outage / missing config must not fail the
     upload (local/dev without Supabase keeps working).
@@ -146,7 +148,8 @@ def _mirror_upload_to_supabase(thread_id: str, filename: str, content: bytes) ->
     if not supabase_artifact_store.is_configured():
         return
     try:
-        supabase_artifact_store.upload_artifact(thread_id, filename, content)
+        object_name = supabase_artifact_store.uploads_object_name(filename)
+        supabase_artifact_store.upload_artifact(thread_id, object_name, content)
     except Exception as exc:  # noqa: BLE001 — best-effort mirror, never block upload
         logger.warning(
             "Supabase upload mirror failed (continuing) thread_id=%s filename=%s error=%s",
@@ -168,7 +171,8 @@ def _delete_supabase_mirror(thread_id: str, filename: str) -> None:
     if not supabase_artifact_store.is_configured():
         return
     try:
-        supabase_artifact_store.delete_artifact(thread_id, filename)
+        object_name = supabase_artifact_store.uploads_object_name(filename)
+        supabase_artifact_store.delete_artifact(thread_id, object_name)
     except Exception as exc:  # noqa: BLE001 — best-effort, never block delete
         logger.warning(
             "Supabase delete mirror failed (continuing) thread_id=%s filename=%s error=%s",

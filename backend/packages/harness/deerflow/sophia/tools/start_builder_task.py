@@ -746,7 +746,11 @@ def _materialize_current_turn_images_from_supabase(
         if dest.exists():
             continue
         try:
-            result = supabase_artifact_store.download_artifact(parent_thread_id, name)
+            # Uploads live under the {thread_id}/uploads/ keyspace (Codex P1
+            # PR #132) — distinct from builder outputs — so address it with
+            # the shared prefix helper the gateway mirror uses.
+            object_name = supabase_artifact_store.uploads_object_name(name)
+            result = supabase_artifact_store.download_artifact(parent_thread_id, object_name)
         except Exception as exc:  # noqa: BLE001 — best-effort cross-service fetch
             logger.warning(
                 "[Builder] Supabase fetch failed for current-turn image %s/%s: %s",

@@ -30,7 +30,10 @@ def test_mirror_calls_upload_artifact_when_configured(monkeypatch) -> None:
 
     up._mirror_upload_to_supabase("thread-1", "report.pdf", b"%PDF-1.4 data")
 
-    assert calls == [("thread-1", "report.pdf", b"%PDF-1.4 data")]
+    # Uploads keyspace is prefixed (Codex P1 PR #132): the mirror object is
+    # ``{thread_id}/uploads/report.pdf``, NOT ``{thread_id}/report.pdf``
+    # (which is the builder-output keyspace — collision otherwise).
+    assert calls == [("thread-1", "uploads/report.pdf", b"%PDF-1.4 data")]
 
 
 def test_mirror_noop_when_not_configured(monkeypatch) -> None:
@@ -81,7 +84,8 @@ def test_delete_endpoint_helper_removes_supabase_mirror(monkeypatch) -> None:
 
     up._delete_supabase_mirror("thread-1", "report.pdf")
 
-    assert deletes == [("thread-1", "report.pdf")]
+    # Prefixed uploads keyspace (Codex P1 PR #132).
+    assert deletes == [("thread-1", "uploads/report.pdf")]
 
 
 def test_delete_mirror_noop_when_not_configured(monkeypatch) -> None:
