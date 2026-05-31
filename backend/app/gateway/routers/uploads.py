@@ -327,25 +327,51 @@ async def list_uploaded_files(thread_id: str) -> dict:
     """
     uploads_dir = get_uploads_dir(thread_id)
 
-    if not uploads_dir.exists():
-        return {"files": [], "count": 0}
-
     files = []
-    for file_path in sorted(uploads_dir.iterdir()):
-        if file_path.is_file():
-            stat = file_path.stat()
-            relative_path = str(get_paths().sandbox_uploads_dir(thread_id) / file_path.name)
-            files.append(
-                {
-                    "filename": file_path.name,
-                    "size": stat.st_size,
-                    "path": relative_path,  # Actual filesystem path
-                    "virtual_path": f"{VIRTUAL_PATH_PREFIX}/uploads/{file_path.name}",  # Path for Agent in sandbox
-                    "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{file_path.name}",  # HTTP URL
-                    "extension": file_path.suffix,
-                    "modified": stat.st_mtime,
-                }
-            )
+    seen: set[str] = set()
+    if uploads_dir.exists():
+        for file_path in sorted(uploads_dir.iterdir()):
+            if file_path.is_file():
+                stat = file_path.stat()
+                relative_path = str(get_paths().sandbox_uploads_dir(thread_id) / file_path.name)
+                files.append(
+                    {
+                        "filename": file_path.name,
+                        "size": stat.st_size,
+                        "path": relative_path,  # Actual filesystem path
+                        "virtual_path": f"{VIRTUAL_PATH_PREFIX}/uploads/{file_path.name}",  # Path for Agent in sandbox
+                        "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{file_path.name}",  # HTTP URL
+                        "extension": file_path.suffix,
+                        "modified": stat.st_mtime,
+                    }
+                )
+                seen.add(file_path.name)
+
+    # Union the Supabase mirror (Codex P2 PR #132). In the split
+    # gateway/langgraph deployment the local uploads dir is ephemeral — after
+    # a Render restart, or when this request lands on a different instance, it
+    # can be empty while the mirror still holds prior uploads. The frontend
+    # AttachmentBar seeds its uniquifier from this list; without the mirror
+    # names it would let the user re-attach ``image.png`` and the new upload
+    # (x-upsert) would overwrite the mirrored ``uploads/image.png`` that
+    # earlier chat turns reference. Best-effort: [] if Supabase is
+    # unconfigured / unreachable, leaving the local listing intact.
+    for name in _list_supabase_upload_filenames(thread_id):
+        if name in seen:
+            continue
+        seen.add(name)
+        files.append(
+            {
+                "filename": name,
+                "size": 0,  # unknown without a HEAD; the uniquifier only needs the name
+                "path": str(get_paths().sandbox_uploads_dir(thread_id) / name),
+                "virtual_path": f"{VIRTUAL_PATH_PREFIX}/uploads/{name}",
+                "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{name}",
+                "extension": Path(name).suffix,
+                "modified": 0,
+                "source": "supabase-mirror",
+            }
+        )
 
     return {"files": files, "count": len(files)}
 
