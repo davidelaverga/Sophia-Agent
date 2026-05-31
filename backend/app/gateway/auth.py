@@ -24,22 +24,16 @@ def _get_bypass_user_id() -> str:
     return (os.getenv("SOPHIA_USER_ID") or "local-dev-user").strip()
 
 
-def is_gateway_auth_enabled() -> bool:
-    """Feature flag for enforcing auth on thread-scoped gateway routes.
+def is_auth_bypass_enabled() -> bool:
+    """Public accessor for the explicit dev auth-bypass flag.
 
-    Routes like ``/api/threads/{thread_id}/uploads`` have no ``{user_id}``
-    path param, so they can't use ``require_authorized_user_scope`` (which
-    reads ``path_params['user_id']``). They instead resolve the bearer
-    token to a user via ``resolve_bearer_user_id`` and check thread
-    ownership — but ONLY when this flag is on.
-
-    Default OFF: existing deployments (where the legacy ``/api/v1/auth/me``
-    bridge may not be reachable from the gateway container) keep working,
-    and the frontend proxy remains the ownership gate. Operators set
-    ``SOPHIA_GATEWAY_AUTH_ENABLED=1`` to make the gateway self-protecting
-    once the auth bridge is verified.
+    True only when ``SOPHIA_AUTH_BYPASS=true`` (local dev / tests). In
+    bypass mode, token resolution returns the configured dev user without
+    a real token, and thread-scoped routes skip ownership enforcement —
+    the same dev escape hatch ``require_authorized_user_scope`` already
+    honors for the ``{user_id}``-scoped routers. NEVER set in production.
     """
-    return os.getenv("SOPHIA_GATEWAY_AUTH_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+    return _is_explicit_bypass_enabled()
 
 
 async def resolve_bearer_user_id(request: Request) -> str:

@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
-from app.gateway.auth import is_gateway_auth_enabled, resolve_bearer_user_id
+from app.gateway.auth import is_auth_bypass_enabled, resolve_bearer_user_id
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sophia.session_store import SessionStore
@@ -26,19 +26,22 @@ logger = logging.getLogger(__name__)
 # under another user's thread (and mutate the Supabase mirror), which the
 # victim's view_user_image / builder flow would later consume.
 #
-# We add an authenticated thread-ownership check. The upload routes are
-# scoped by ``{thread_id}`` (no ``{user_id}`` path param), so they can't use
-# ``require_authorized_user_scope`` (which reads ``path_params['user_id']``).
-# Instead we resolve the bearer token to a user via ``resolve_bearer_user_id``
-# (async; honors ``SOPHIA_AUTH_BYPASS``) and verify that user owns the thread.
+# Enforcement is UNCONDITIONAL — same posture as the other protected
+# gateway routers (voice, telegram_link), which always require auth. We do
+# NOT gate on a feature flag: a default-off flag (the earlier approach) left
+# the routes open in any deployment that didn't set it — exactly the
+# production hole Codex flagged (render.yaml never set it). The upload routes
+# are scoped by ``{thread_id}`` (no ``{user_id}`` path param), so they can't
+# use ``require_authorized_user_scope`` (which reads
+# ``path_params['user_id']``); instead we resolve the bearer token to a user
+# via the async ``resolve_bearer_user_id`` and verify that user owns the
+# thread. The frontend proxy already forwards the user-scoped Bearer token,
+# and ``resolve_bearer_user_id`` reuses the SAME ``/api/v1/auth/me`` bridge
+# voice.py uses in production — so this works with the existing deployment.
 #
-# Enforcement is gated on ``is_gateway_auth_enabled()`` (env
-# ``SOPHIA_GATEWAY_AUTH_ENABLED``). Default OFF: the dependency is a no-op so
-# existing deployments — where the legacy ``/api/v1/auth/me`` bridge may not
-# be reachable from the gateway container — keep working and the frontend
-# proxy remains the ownership gate. With the flag ON (intended production
-# posture, once the auth bridge is verified) the gateway is fully
-# self-protecting and no longer depends on the proxy.
+# Local dev / tests set ``SOPHIA_AUTH_BYPASS=true``: token resolution then
+# returns the dev user and ownership is skipped (the same escape hatch the
+# other routers honor). Bypass must NEVER be set in production.
 # ---------------------------------------------------------------------------
 
 # NOTE: ``SessionStore`` is a FACTORY FUNCTION (returns a
@@ -80,19 +83,20 @@ def _user_owns_thread(user_id: str, thread_id: str) -> bool:
     return any(getattr(r, "thread_id", None) == thread_id for r in records)
 
 
-async def verify_thread_access(thread_id: str, request: Request) -> str | None:
+async def verify_thread_access(thread_id: str, request: Request) -> str:
     """FastAPI dependency: authenticate the caller and enforce thread ownership.
 
-    When auth is enabled, resolves the bearer token to a user (401 on a
-    missing/invalid token, 503 if the auth bridge is down) and raises 403
-    unless that user owns ``thread_id``. When auth is disabled (default),
-    this is a no-op (returns ``None``) — the frontend proxy remains the gate
-    (existing-deployment compatibility). Router-level dependencies ignore the
-    return value; it's returned only for direct unit testing.
+    Unconditional. Resolves the bearer token to a user (401 on a
+    missing/invalid token, 503 if the auth bridge is down), then raises 403
+    unless that user owns ``thread_id``. In explicit dev-bypass mode
+    (``SOPHIA_AUTH_BYPASS=true``) the resolver returns the dev user and the
+    ownership check is skipped — local dev / tests only; never production.
+    Router-level dependencies ignore the return value; it's returned for
+    direct unit testing.
     """
-    if not is_gateway_auth_enabled():
-        return None
     user_id = await resolve_bearer_user_id(request)
+    if is_auth_bypass_enabled():
+        return user_id
     if not _user_owns_thread(user_id, thread_id):
         raise HTTPException(status_code=403, detail="Thread not owned by current user")
     return user_id

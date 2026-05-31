@@ -1,22 +1,23 @@
 """Gateway upload-route auth + thread-ownership (Codex P1 PR #132).
 
 The gateway is independently reachable (public ``sophia-gateway`` web
-service + nginx proxy), so the upload routes must enforce auth and
-thread ownership themselves rather than trusting the Next.js proxy.
+service + nginx proxy), so the upload routes enforce auth and thread
+ownership themselves rather than trusting the Next.js proxy.
 ``verify_thread_access`` is the router-level dependency that does this.
 
-The upload routes are scoped by ``{thread_id}`` (no ``{user_id}`` path
-param), so they can't reuse ``require_authorized_user_scope``. Instead
-``verify_thread_access`` resolves the bearer token via the async
+Enforcement is UNCONDITIONAL — same posture as the voice / telegram_link
+routers (the earlier feature-flag approach left the routes open in any
+deployment that didn't set the flag, which render.yaml never did). The
+upload routes are scoped by ``{thread_id}`` (no ``{user_id}`` path param),
+so ``verify_thread_access`` resolves the bearer token via the async
 ``resolve_bearer_user_id`` and checks ownership against the real
 ``SessionStore`` (``list_open`` / ``list_recent``).
 
 Behaviour:
-- auth OFF (default): no-op, returns ``None`` (frontend proxy is the
-  gate; existing deployments keep working).
-- auth ON: 401 on missing/invalid token (via resolve_bearer_user_id),
-  403 when the authenticated user does not own the thread, pass-through
-  when they do.
+- normal (prod): 401 on missing/invalid token; 403 when the authenticated
+  user does not own the thread; pass-through when they do.
+- dev bypass (``SOPHIA_AUTH_BYPASS=true``): resolver returns the dev user
+  and ownership is skipped — local dev / tests only.
 """
 
 from __future__ import annotations
@@ -33,31 +34,14 @@ def _request_with_bearer(token: str | None) -> SimpleNamespace:
 
 
 @pytest.mark.anyio
-async def test_verify_thread_access_noop_when_auth_disabled(monkeypatch) -> None:
-    """Auth OFF (default): dependency returns None and never resolves a
-    token or consults the ownership store — existing deployments keep
-    working with the frontend proxy as the gate."""
-    from app.gateway.routers import uploads as up
-
-    monkeypatch.setattr(up, "is_gateway_auth_enabled", lambda: False)
-
-    async def _should_not_resolve(*_a, **_k):
-        raise AssertionError("token must not be resolved when auth is off")
-
-    monkeypatch.setattr(up, "resolve_bearer_user_id", _should_not_resolve)
-
-    result = await up.verify_thread_access("thread-1", _request_with_bearer(None))
-    assert result is None
-
-
-@pytest.mark.anyio
-async def test_verify_thread_access_allows_owner_when_auth_enabled(monkeypatch) -> None:
+async def test_verify_thread_access_allows_owner(monkeypatch) -> None:
+    """Authenticated user who owns the thread is allowed through."""
     from app.gateway.routers import uploads as up
 
     async def _resolve(_req):
         return "user-A"
 
-    monkeypatch.setattr(up, "is_gateway_auth_enabled", lambda: True)
+    monkeypatch.setattr(up, "is_auth_bypass_enabled", lambda: False)
     monkeypatch.setattr(up, "resolve_bearer_user_id", _resolve)
     monkeypatch.setattr(up, "_user_owns_thread", lambda uid, tid: uid == "user-A" and tid == "thread-A")
 
@@ -67,12 +51,14 @@ async def test_verify_thread_access_allows_owner_when_auth_enabled(monkeypatch) 
 
 @pytest.mark.anyio
 async def test_verify_thread_access_rejects_non_owner_with_403(monkeypatch) -> None:
+    """Authenticated user who does NOT own the thread is rejected — this is
+    the core fix: a caller who knows a foreign thread id can't touch it."""
     from app.gateway.routers import uploads as up
 
     async def _resolve(_req):
         return "attacker"
 
-    monkeypatch.setattr(up, "is_gateway_auth_enabled", lambda: True)
+    monkeypatch.setattr(up, "is_auth_bypass_enabled", lambda: False)
     monkeypatch.setattr(up, "resolve_bearer_user_id", _resolve)
     monkeypatch.setattr(up, "_user_owns_thread", lambda _uid, _tid: False)
 
@@ -83,19 +69,40 @@ async def test_verify_thread_access_rejects_non_owner_with_403(monkeypatch) -> N
 
 @pytest.mark.anyio
 async def test_verify_thread_access_propagates_401_from_token_check(monkeypatch) -> None:
-    """When the token resolver raises 401 (missing/invalid token on an
-    auth-enabled gateway), the dependency surfaces it unchanged."""
+    """A missing/invalid token (resolver raises 401) is surfaced unchanged —
+    unauthenticated direct gateway access is rejected, not allowed."""
     from app.gateway.routers import uploads as up
 
     async def _raise_401(_req):
         raise HTTPException(status_code=401, detail="Missing bearer token")
 
-    monkeypatch.setattr(up, "is_gateway_auth_enabled", lambda: True)
+    monkeypatch.setattr(up, "is_auth_bypass_enabled", lambda: False)
     monkeypatch.setattr(up, "resolve_bearer_user_id", _raise_401)
 
     with pytest.raises(HTTPException) as exc_info:
-        await up.verify_thread_access("thread-A", _request_with_bearer("bad"))
+        await up.verify_thread_access("thread-A", _request_with_bearer(None))
     assert exc_info.value.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_verify_thread_access_bypass_skips_ownership(monkeypatch) -> None:
+    """Dev bypass: resolver returns the dev user and ownership is skipped
+    (so local dev / tests work without the auth bridge or real sessions).
+    Ownership must NOT be consulted in this mode."""
+    from app.gateway.routers import uploads as up
+
+    async def _resolve(_req):
+        return "local-dev-user"
+
+    monkeypatch.setattr(up, "is_auth_bypass_enabled", lambda: True)
+    monkeypatch.setattr(up, "resolve_bearer_user_id", _resolve)
+    monkeypatch.setattr(
+        up, "_user_owns_thread",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("ownership must not be checked in bypass mode")),
+    )
+
+    result = await up.verify_thread_access("any-thread", _request_with_bearer(None))
+    assert result == "local-dev-user"
 
 
 def test_user_owns_thread_matches_only_owned_thread(monkeypatch) -> None:
