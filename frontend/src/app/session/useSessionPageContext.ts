@@ -6,6 +6,8 @@ import { authBypassEnabled, authBypassUserId } from '../lib/auth/dev-bypass';
 import { logger } from '../lib/error-logger';
 import { getSessionGreetingMessage } from '../lib/time-greetings';
 import { isUuid } from '../lib/utils';
+import { selectHasUploadsInFlight, selectUploadedFilenamesForThread } from '../stores/attachments-store';
+import { useAttachmentsStore } from '../stores/attachments-store';
 import { useChatStore } from '../stores/chat-store';
 import { useMessageMetadataStore } from '../stores/message-metadata-store';
 import { useSessionStore, selectSession, selectArtifacts, selectBuilderArtifact, selectMessages } from '../stores/session-store';
@@ -66,6 +68,30 @@ export function useSessionPageContext({
   const greetingMessageId = session?.greetingMessageId || 'greeting-1';
   const greetingAnchorId = session?.greetingMessageId || bootstrapMessageId || null;
   const memoryHighlights = session?.memoryHighlights ?? bootstrapMemoryHighlights;
+
+  // Subscribe to pending attachments for THIS thread. The transport
+  // memoizes on chatRequestBody identity — when the user adds/removes
+  // a file, the body identity changes and the next POST picks it up.
+  //
+  // Thread-scope (Codex P2 PR #132): a user could upload in thread A,
+  // switch to thread B, and submit. Without the per-thread filter,
+  // A's filenames would leak into B's request — view_user_image would
+  // then fail to find the bytes (they're in A's sandbox, not B's).
+  // The selectors filter by ``resolvedThreadId`` so only this
+  // session's uploaded filenames appear in attached_files.
+  const attachedFiles = useAttachmentsStore(
+    selectUploadedFilenamesForThread(resolvedThreadId),
+  );
+  // Surface "is anything still uploading?" so the session page can
+  // disable submit and avoid the orphan-upload race: if the user
+  // hits send mid-upload, the in-flight file is filtered out of
+  // attached_files, then post-dispatch clearForThread() wipes the
+  // store — when the upload eventually completes, the chip is gone
+  // and Sophia never learned the filename. Codex P2 PR #132.
+  const hasUploadsInFlight = useAttachmentsStore(
+    selectHasUploadsInFlight(resolvedThreadId),
+  );
+
   const chatRequestBody = safeSessionId
     ? {
         session_id: safeSessionId,
@@ -74,6 +100,7 @@ export function useSessionPageContext({
         session_type: sessionPresetType,
         context_mode: sessionContextMode,
         platform,
+        attached_files: attachedFiles,
       }
     : undefined;
 
@@ -179,5 +206,6 @@ export function useSessionPageContext({
     greetingAnchorId,
     memoryHighlights,
     chatRequestBody,
+    hasUploadsInFlight,
   };
 }

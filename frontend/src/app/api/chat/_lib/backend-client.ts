@@ -12,6 +12,28 @@ export interface BackendStreamPayload {
   context_mode?: string;
   platform?: string;
   language: 'en';
+  /**
+   * Filenames the user attached on THIS turn. Always send (use ``[]``
+   * when empty). Routed on the PER-RUN ``config.configurable
+   * .current_turn_attached_files`` channel — NOT LangGraph ``input``
+   * (which is persisted into thread state under a LAST_VALUE reducer,
+   * so an attachment-free turn would inherit the prior turn's list).
+   * Codex P2 PR #132 latest iteration: this is the server-trusted
+   * attachment list, NOT a parse of the synthesized prompt block
+   * (which a user can spoof by typing the marker into their message).
+   */
+  attached_files?: string[];
+  /**
+   * The user's message BEFORE the post-handler prefixed it with the
+   * synthesized ``[The user has uploaded ...]`` attachment block.
+   * Codex P2 PR #132: on the stale-thread recovery path the bytes
+   * live in the OLD sandbox, so the fresh-thread run must use this
+   * raw message (no attachment block) — otherwise the model is still
+   * told to call ``view_user_image`` / ``read_user_document`` for
+   * files absent from the new sandbox. When there were no
+   * attachments this equals ``message``.
+   */
+  raw_message?: string;
 }
 
 export type BackendFetchResult = {
@@ -254,7 +276,27 @@ export async function fetchBackendStreamWithBootstrap(
   const runStream = async (
     threadId: string,
     preludeMessages: LangGraphInputMessage[] = [],
+    // Codex P2 PR #132: explicit per-call attachment list. The normal
+    // path passes ``backendPayload.attached_files``; the stale-thread
+    // recovery path passes ``[]`` because the uploaded bytes live in
+    // the OLD thread's sandbox, not the freshly-created one — telling
+    // Sophia to ``view_user_image`` files that don't exist in the new
+    // sandbox would make attachments fail exactly on the recovery
+    // path this client otherwise supports.
+    attachedFiles: string[] = backendPayload.attached_files ?? [],
   ): Promise<Response> => {
+    // Codex P2 PR #132: when this run carries attachments, use the
+    // post-handler's prefixed message (it names the uploaded files so
+    // the model knows to call view_user_image / read_user_document).
+    // When it does NOT (no attachments, OR the stale-thread recovery
+    // path that forces attachedFiles=[]), use the RAW message so the
+    // model isn't told to read files that aren't in this sandbox.
+    // ``raw_message`` equals ``message`` when there were no
+    // attachments, so the no-attachment path is unaffected.
+    const messageContent =
+      attachedFiles.length > 0
+        ? backendPayload.message
+        : (backendPayload.raw_message ?? backendPayload.message);
     return fetch(`${activeBackendUrl}/${threadId}/runs/stream`, {
       method: 'POST',
       headers,
@@ -263,7 +305,7 @@ export async function fetchBackendStreamWithBootstrap(
         input: {
           messages: [
             ...preludeMessages,
-            { role: 'user', content: backendPayload.message },
+            { role: 'user', content: messageContent },
           ],
         },
         config: {
@@ -274,6 +316,21 @@ export async function fetchBackendStreamWithBootstrap(
             ritual,
             context_mode: backendPayload.context_mode || 'life',
             thread_id: threadId,
+            // Server-trusted attachment list (Codex P2 PR #132 latest
+            // iteration). Always sent — empty array when no attachments.
+            // It rides ``config.configurable`` (a PER-RUN channel),
+            // NOT ``input`` (which LangGraph persists into thread state
+            // under a LAST_VALUE reducer). Routing it through state
+            // meant a later turn that omitted attachments inherited the
+            // prior turn's list — start_builder_task then re-copied
+            // private images from an earlier turn into a new builder
+            // sandbox. config.configurable is never persisted, so each
+            // run reads exactly what THIS turn sent (empty = none).
+            // start_builder_task reads it via
+            // runtime.config.configurable instead of parsing the
+            // synthesized prompt block (which a user can spoof by
+            // typing the marker into their own message).
+            current_turn_attached_files: attachedFiles,
           },
         },
         stream_mode: ['messages-tuple', 'values'],
@@ -296,12 +353,13 @@ export async function fetchBackendStreamWithBootstrap(
   const runStreamWithFallback = async (
     threadId: string,
     preludeMessages: LangGraphInputMessage[] = [],
+    attachedFiles: string[] = backendPayload.attached_files ?? [],
   ): Promise<Response> => {
     try {
-      let response = await runStream(threadId, preludeMessages);
+      let response = await runStream(threadId, preludeMessages, attachedFiles);
 
       if (!response.ok && shouldRetryWithDirectLangGraphResponse(response, activeBackendUrl) && switchToDirectLangGraph(`stream returned ${response.status}`)) {
-        response = await runStream(threadId, preludeMessages);
+        response = await runStream(threadId, preludeMessages, attachedFiles);
       }
 
       return response;
@@ -310,7 +368,7 @@ export async function fetchBackendStreamWithBootstrap(
         throw error;
       }
 
-      return runStream(threadId, preludeMessages);
+      return runStream(threadId, preludeMessages, attachedFiles);
     }
   };
 
@@ -329,7 +387,16 @@ export async function fetchBackendStreamWithBootstrap(
     newThreadId = threadId;
     recoveredFromTranscript = reseedMessages.length > 0;
     checkpointerResume = false;
-    upstream = await runStreamWithFallback(threadId, reseedMessages);
+    // Codex P2 PR #132: the user's uploaded files live in the OLD
+    // (stale) thread's sandbox. The fresh thread has an empty uploads
+    // dir, so pass ``[]`` for attached_files — otherwise Sophia would
+    // be prompted to ``view_user_image`` / ``read_user_document`` for
+    // filenames that don't exist in the new sandbox, failing exactly
+    // on the recovery path. Migrating the bytes across sandboxes would
+    // need a gateway copy endpoint (separate ticket); for now we drop
+    // the attachment hint so the turn degrades to text-only instead of
+    // hallucinating tool calls on missing files.
+    upstream = await runStreamWithFallback(threadId, reseedMessages, []);
 
     if (!IS_PRODUCTION) {
       secureLog('[/api/chat] stale DeerFlow thread detected, retried with fresh thread', {

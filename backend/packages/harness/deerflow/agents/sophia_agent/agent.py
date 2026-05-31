@@ -40,16 +40,20 @@ from deerflow.agents.sophia_agent.middlewares.title import SophiaTitleMiddleware
 from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
 from deerflow.agents.sophia_agent.middlewares.turn_count import TurnCountMiddleware
 from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
+from deerflow.agents.sophia_agent.middlewares.view_image import SophiaViewImageMiddleware
 from deerflow.agents.sophia_agent.middlewares.web_research import WebResearchGuidanceMiddleware
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.state import SophiaState
 from deerflow.agents.sophia_agent.tooling import load_sophia_web_tools
 from deerflow.agents.sophia_agent.utils import validate_user_id
+from deerflow.agents.sophia_agent.vision_gate import supports_vision
 from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
 from deerflow.sophia.tools.emit_artifact import emit_artifact
+from deerflow.sophia.tools.read_user_document import read_user_document
 from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
 from deerflow.sophia.tools.start_builder_task import make_start_builder_task_tool
+from deerflow.sophia.tools.view_user_image import view_user_image
 
 logger = logging.getLogger(__name__)
 
@@ -346,6 +350,22 @@ def make_sophia_agent(config: RunnableConfig):
         LifecycleToolObserverMiddleware(),
         # 14. Artifact system
         ArtifactMiddleware(SKILLS_PATH / "artifact_instructions.md"),
+        # 14b. Vision — injects base64 image content blocks into the next
+        # turn when view_user_image (or upstream view_image) calls have
+        # completed. Conditional on the companion model supporting vision;
+        # gating mirrors the builder so the tool list and middleware chain
+        # stay in lock-step (see vision_enabled use below in tool list).
+        # SophiaViewImageMiddleware recognizes both tool names since the
+        # companion uses the narrow view_user_image wrapper rather than
+        # upstream view_image_tool directly. Sits after Artifact so
+        # artifact emission isn't shadowed by mid-stream image injection,
+        # and before PromptAssembly so the injected HumanMessage
+        # participates in prompt finalization.
+        *(
+            [SophiaViewImageMiddleware()]
+            if (vision_enabled := supports_vision("claude-haiku-4-5-20251001"))
+            else []
+        ),
         # 15. Deterministic Builder command routing for explicit document requests
         BuilderCommandMiddleware(),
     ]
@@ -403,7 +423,22 @@ def make_sophia_agent(config: RunnableConfig):
 
     retrieve_memories = make_retrieve_memories_tool(user_id)
     start_builder_task = make_start_builder_task_tool(user_id)
-    tools = [emit_artifact, start_builder_task, retrieve_memories, *web_tools]
+    tools = [
+        emit_artifact,
+        start_builder_task,
+        retrieve_memories,
+        # view_user_image is gated on the same `vision_enabled` decision
+        # that governs SophiaViewImageMiddleware. Without the middleware,
+        # the tool would write to state["viewed_images"] but the image
+        # content blocks would never reach the model — so the companion
+        # would report success on a tool call it can't actually fulfill.
+        # Hiding the tool when vision is off keeps the model's apparent
+        # capabilities honest. read_user_document stays unconditional
+        # since it returns text and doesn't depend on vision.
+        *([view_user_image] if vision_enabled else []),
+        read_user_document,
+        *web_tools,
+    ]
 
     agent = create_agent(
         model=model,

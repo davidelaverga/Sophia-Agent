@@ -107,6 +107,34 @@ def test_delete_uploaded_file_removes_generated_markdown_companion(tmp_path):
     with patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir):
         result = asyncio.run(uploads.delete_uploaded_file("thread-aio", "report.pdf"))
 
-    assert result == {"success": True, "message": "Deleted report.pdf"}
+    assert result["success"] is True
+    assert result["message"] == "Deleted report.pdf"
+    # The convertible's .md sibling is reported as also deleted (Codex P1 PR #132).
+    assert set(result["deleted"]) == {"report.pdf", "report.md"}
     assert not (thread_uploads_dir / "report.pdf").exists()
     assert not (thread_uploads_dir / "report.md").exists()
+
+
+def test_delete_uploaded_file_idempotent_on_local_miss_still_clears_mirror(tmp_path):
+    """Codex P1 PR #132: in the split gateway/langgraph deployment the gateway
+    disk is ephemeral — the file may be absent locally while the Supabase
+    mirror is still the live copy. DELETE must NOT 404 on a local miss; it must
+    still remove the mirror (original + .md sibling) and report success, or a
+    discarded file stays readable from Supabase on the next read-tool miss."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    # Nothing on local disk — mimics the ephemeral / cross-instance case.
+
+    mirror_deletes: list[str] = []
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "_delete_supabase_mirror", side_effect=lambda tid, name: mirror_deletes.append(name)),
+    ):
+        result = asyncio.run(uploads.delete_uploaded_file("thread-aio", "report.pdf"))
+
+    # Idempotent success (not 404) ...
+    assert result["success"] is True
+    # ... and the mirror cleanup ran for BOTH the original and the .md sibling
+    # even though neither existed locally.
+    assert set(mirror_deletes) == {"report.pdf", "report.md"}

@@ -245,6 +245,8 @@ tools = [
     emit_artifact,        # REQUIRED every turn — carries TTS emotion + session continuity
     start_builder_task,   # delegates to sophia_builder via deepagents AsyncSubAgentMiddleware
     retrieve_memories,    # targeted deep retrieval (reflect flow, specific queries)
+    view_user_image,      # vision: see an uploaded/rendered image by bare filename (gated on supports_vision)
+    read_user_document,   # vision: read text from an uploaded PDF/DOCX/etc. by bare filename
 ]
 # Plus the four lifecycle tools native to deepagents AsyncSubAgentMiddleware:
 # check_async_task / update_async_task / cancel_async_task / list_async_tasks.
@@ -263,6 +265,12 @@ Voice speeds → Cartesia values: slow=0.8, gentle=0.9, normal=1.0, engaged=1.05
 Artifact arrives **after** the text stream completes. It updates the emotion for the **next** TTS call.
 ### start_builder_task
 Companion asks all clarifying questions first, then calls `start_builder_task(description, task_type)` with a complete brief. The wrapper (in `deerflow.sophia.tools.start_builder_task`) enriches the description with live session context (memories, emotional state, ritual, explicit URLs) before dispatching to the `sophia_builder` graph via LangGraph SDK ASGI in-process transport. It writes a row to `state["async_tasks"]` keyed by builder thread_id and returns immediately. Lifecycle (check / update / cancel / list) is owned by deepagents' native `AsyncSubAgentMiddleware`. Builder artifacts are uploaded to Supabase under the **parent (companion) thread_id** so the channel adapter's bytes-download path stays aligned with the upload path; `BuildAwarenessMiddleware` (companion side) refreshes `async_tasks` status from the SDK on companion turns and injects a short prompt block so Sophia answers "how's the build going?" naturally without polling.
+
+### Vision & attachments (PR #132)
+
+The companion and builder can both see images and read documents in-process via the upstream `view_image` stack, gated on `vision_gate.supports_vision(model_name)` (default-on for Sonnet 4.6 + Haiku 4.5). Companion narrow tools `view_user_image(image_filename)` / `read_user_document(document_filename)` are thread-scoped (bare filename, current thread's `uploads/` + `outputs/` only). Web users attach via the Next.js AttachmentBar → `POST /api/threads/{id}/uploads` (auth + thread-ownership gated). Full implementation details + the production-hardening wave (cross-service Supabase bridge, keyspace separation, idempotent delete, base64 accumulation guards, the live-FileList silent-attach fix) live in **`backend/CLAUDE.md` → "Sophia Vision Port (PR #132)"**.
+
+**Deployment fact that is load-bearing:** on Render, `sophia-gateway` and `sophia-langgraph` are **separate web services with separate ephemeral disks** (no shared/persistent disk). Uploads land on the gateway disk but the companion read tools run in langgraph — so every upload is **mirrored to Supabase Storage** under `{thread_id}/uploads/{name}` and the read tools download from the mirror on a local miss. Any change to upload/read/delete paths must keep the gateway mirror and the langgraph fallback in sync, and **both services must redeploy together**.
 
 ### Builder progress streaming (webhook relay)
 

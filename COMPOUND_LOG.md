@@ -2057,3 +2057,95 @@ Continues to be true. Anyio plugin is what's installed; `@pytest.mark.asyncio` s
 
 ### GEPA Log Entry
 - `builder_brief_classification.md` is a per-request agent prompt, not a target for GEPA optimization. Tone delta not applicable (Builder doesn't speak; classifier output is structured tool-call). No trace pair needed; behavior is deterministic given the same user_brief input.
+
+---
+
+## 2026-05-28 · [sophia-vision-port] · PR #132
+**Author:** Claude (assisted) · **Track:** backend | frontend · **Spec:** `/Users/davidelaverga/Downloads/sophia_vision_port_builder_companion_spec.md` v1.0
+
+### What Changed
+- Ported DeerFlow's native `view_image` stack into both Sophia agents in-process. `viewed_images` channel added to `SophiaState`; reuses upstream `merge_viewed_images` reducer.
+- Added capability gate `deerflow.agents.sophia_agent.vision_gate.supports_vision(model_name)` consulted by every vision-using seam — vision tools, middlewares, and uploaded-image briefing all skip when the gate is off. Defaults: Sonnet 4.6 + Haiku 4.5; operators can override per-model via `app_config.models[*].supports_vision`.
+- Companion tools (in `packages/harness/deerflow/sophia/tools/`): `view_user_image(image_filename)` whitelists current thread's uploads/outputs, rejects `.gif`, caps at `MAX_VIEWABLE_IMAGE_BYTES = 10 MiB` raw; `read_user_document(document_filename)` routes text PDFs/DOCX/PPTX/XLSX/MD/TXT through `markitdown` (no size cap).
+- `SophiaViewImageMiddleware` subclasses upstream `ViewImageMiddleware` to (a) recognize both `view_image` and `view_user_image` tool names, (b) skip injection when `viewed_images` is empty (defense in depth against the tool-side clear-on-failure).
+- Builder gets `view_image_tool` registered when vision is on. `BuilderTaskMiddleware` surfaces uploaded images at `/mnt/user-data/uploads/{name}` in a `<uploaded_images>` briefing block with two branches (vision-on `view_image(...)` instruction vs vision-off "tool NOT available" acknowledgement), threaded through `build_builder_middleware_chain(user_id, vision_enabled=...)`.
+- Cross-thread copy at dispatch (`start_builder_task._copy_parent_uploaded_images`): copies eligible images from the companion's sandbox into the builder's fresh sandbox so `view_image_tool` can read by virtual path. Each LangGraph thread has its own sandbox via `ThreadDataMiddleware`.
+- **Scoped copy to current-turn attachments only** (Codex P1 latest iteration): `_extract_current_turn_attachment_filenames(messages)` parses the synthesized `[The user has uploaded N file(s) ...]` block from the latest HumanMessage and intersects with copy candidates so stale uploads from prior turns don't leak into unrelated builder runs.
+- Frontend: AttachmentBar (multi-file picker, per-turn cap=12, paperclip + chip UX) writing to a Zustand store, with cross-thread auto-clear semantics. `POST /api/threads/{id}/uploads`, `GET /api/threads/{id}/uploads/list`, `DELETE /api/threads/{id}/uploads/{filename}` proxies with `userOwnsThread` ownership gate (two-pass `/api/v1/sessions/open` → `/list?limit=100` fallback) — same gate also runs in `/api/chat` for every existing-thread send. `USE_MOCK_STREAMING` bypasses the gate (offline dev contract).
+
+### What We Learned
+
+#### Codex feedback loop is the dominant cost driver of this kind of PR
+This single port turned into ~12 commits over a couple days because every iteration of the Codex bot review surfaced a new edge: filename auto-rename before upload (P2), thread-ownership covering ended-but-restored sessions via `/list` fallback (P2), builder uploads briefing gated on vision_enabled (P2), chat ownership check broadened past attachments-only (P1), filename uniquifier on collision + server-truth seeding (P2), stale viewed_images cleared on failure (P2), current-turn scoping for cross-thread copy (P1), preserved mock streaming bypass (P2). Each one solo would be a sub-hour fix; the compound rhythm taught us to budget for review-cycle turns at PR-merge planning time, not just initial implementation.
+
+#### Selective `git add` can sweep working-tree imports you didn't stage
+Burned by this on commit `e2a6f56b`: my fix for current-turn scoping picked up an unrelated `normalize_builder_task_type` import from the working tree that referenced a function only present in another uncommitted change. Local imports worked because the working tree had the function; CI would have ImportError'd because the committed `builder_web_policy.py` didn't. Caught by Codex P1, fixed by removing the accidental dependency entirely (kept the fix scope-disciplined). Lesson: when staging individual files from a working tree that has unrelated parallel changes, diff the staged blob against `git show HEAD:` for the same file BEFORE committing.
+
+#### Sentrux CC threshold (CC ≥ 16) bites every "add one more check" commit
+`handleFileSelection` in AttachmentBar.tsx tripped the gate after adding the server-truth seeding (two new loops + an if). Fixed by extracting `buildClaimedFilenameSet(threadId, currentItems)` into its own helper — byte-identical behavior, callback drops back under 16. Pattern to keep handy: when adding logic to a callback that's already meaty, extract first, test second.
+
+#### LangGraph reducer's empty-dict sentinel = the "clear all" idiom
+`merge_viewed_images` special-cases `{}` as "wipe everything". Used this to fix the stale-image bug: every failure path in `view_user_image` now returns `{"viewed_images": {}, "messages": [error_tool_msg]}`. Pairs with the middleware skip — without it, upstream's `_create_image_details_message` synthesizes "No images have been viewed." which would be misleading right after the error tool message. Trade-off accepted: a hypothetical multi-call AIMessage where some calls succeed and others fail wipes the successes too. Rare; recoverable by re-calling the tool.
+
+#### The `[The user has uploaded ...]` synthesized block is the trust boundary
+Server-side parsing of that exact format scopes the cross-thread copy. Bullets in the user's own prose are ignored; only the bracketed block counts. This is the right trust model — the frontend `buildAttachmentPrompt` is the only source allowed to widen the model's permission to inspect a file. A prompt-injection that puts `- evil.png` in the user's message body cannot trick the dispatch into copying arbitrary files.
+
+#### Vitest's `vi.spyOn(global, 'fetch')` setup interacts subtly with the test-file-level `setup.ts` global mock
+The setup file does `global.fetch = vi.fn()`. Tests doing `vi.spyOn(global, 'fetch').mockResolvedValueOnce(...)` queue responses on that same mock. Adding a "first call is a pre-existing list fetch" to the bar's selection handler broke a dozen tests because each test's mock chain now had its first response consumed by the list call. Fixed via a small helper that prepends the empty-list response and chains a default `mockImplementation` that echoes the posted filename so chips flip to `uploaded` correctly without per-test upload mocks.
+
+#### Codex catches what design intent reviews miss
+The single highest-leverage finding in this entire cycle was Codex P1 on the cross-thread copy: "later unrelated builder request can expose stale/private images from previous turns." Easy to miss as the implementor (works as designed), easy to spot as a reviewer scanning the diff cold. The lesson isn't "trust the bot" — it's that copy-everything-eligible is a safe-default antipattern in any system that surfaces filesystems to an LLM. Always intersect with "what's relevant to THIS turn."
+
+### CLAUDE.md Updates
+- `backend/CLAUDE.md`: added "Sophia Vision Port (PR #132)" subsection covering capability gate, companion tools (`view_user_image` / `read_user_document` with rules), `SophiaViewImageMiddleware`, builder uploads briefing branches, cross-thread copy + current-turn scoping, frontend integration (proxies, ownership gate, mock-mode bypass). Extended the existing "Built-in tools" bullet to reference the Sophia companion-only tools.
+- `backend/README.md`: added "Sophia Vision Port (PR #132)" section mirroring the same content + table of companion tools with use-when guidance. Added the new GET/DELETE `/api/threads/{id}/uploads/*` proxy rows to the Gateway API table.
+
+### Skills Created / Modified
+- None. Vision support is wired entirely at the tool + middleware + state-channel level; no skill files added.
+
+### GEPA Log Entry
+- N/A — no prompt files changed.
+
+---
+
+## 2026-05-31 · [sophia-vision-port] · PR #132 (production-hardening wave)
+**Author:** Claude (assisted) · **Track:** backend | frontend · **Spec reference:** `docs/specs/` + Codex review thread on PR #132
+
+### What Changed
+The initial port (2026-05-28 entry) worked locally but failed in the split Render deployment. This wave made attachments actually work in production (verified live on sophia-ei.com) and closed a string of Codex P1/P2 reviews. The single most important architectural fact discovered: **`sophia-gateway` and `sophia-langgraph` are separate Render web services with separate ephemeral disks** (`render.yaml` declares no shared/persistent disk).
+
+- **Cross-service Supabase bridge (the core production fix).** Uploads land on the gateway disk; the companion read tools (`view_user_image` / `read_user_document`) run in the langgraph container and read *its* disk → the file is invisible. Fix: the gateway upload route mirrors every saved file + its converted `<stem>.md` to Supabase Storage; the read tools download from the mirror on a local miss. Builder copy (`start_builder_task`) also fetches whitelisted current-turn images from the mirror before its local `is_dir()` check. Helpers in `supabase_artifact_store`: `upload_artifact` / `download_artifact` / `delete_artifact` / `list_upload_filenames` / `uploads_object_name`. All best-effort.
+- **Separate Supabase keyspace.** Uploads → `{thread_id}/uploads/{name}`; builder outputs → `{thread_id}/{name}`. `uploads_object_name()` is the single source of truth, applied at all 5 upload sites. Without it a user `report.pdf` and a builder `report.pdf` overwrote each other (`x-upsert`).
+- **Idempotent DELETE.** No 404 on local miss; always removes the Supabase mirror (original + `.md`). On the ephemeral disk the local file may be gone while the mirror is live.
+- **`/uploads/list` unions local + mirror** so the AttachmentBar uniquifier reserves mirrored names after a restart.
+- **Gateway upload routes enforce auth unconditionally** (`verify_thread_access` router dep: bearer → user via `resolve_bearer_user_id`, 403 unless `SessionStore` shows the user owns the thread). A flag-gated version was rejected because `render.yaml` never set the flag.
+- **Base64 accumulation guard.** `ClearOnInjectViewImageMiddleware` now also prunes prior injected image messages from the persistent `messages` channel via `RemoveMessage` (stamped marker + stable id), not just clearing `viewed_images`. Otherwise multiple ~10 MiB views blow Anthropic's 32 MB envelope.
+- **Frontend silent-attach fixes.** Snapshot the live `FileList` before `input.value = ""` (the prod root cause — Chrome empties the live list on reset). Reserve the derived `.md` of renamed convertibles. Bail out of `uploadOneFile` when the chip was discarded before the upload loop started.
+- **NUL/control-char filename rejection** in `read_user_document` (mirrors `view_user_image`), preventing `ValueError: embedded null byte` from aborting the turn.
+
+### What We Learned
+
+#### The prod bug was a topology mismatch, invisible to local tests and to design review
+Everything passed locally (single process, single disk) and in code review (the upload writes the file, the tool reads the file — looks correct). It only failed in the 2-container Render split. The diagnostic that found it: Render gateway logs showed the upload succeeded (`Saved file: …`), langgraph logs showed the read tool ran but found nothing, and `render.yaml` showed no shared disk. **Lesson: when a feature spans two services, the deployment topology is part of the design — assume separate disks/instances until proven otherwise, and trace the bytes across the service boundary, not just within one process.**
+
+#### Driving production in Chrome DevTools beat every other diagnostic for the silent-attach bug
+The chip-not-appearing bug survived multiple "fixes" because it's invisible in server logs (the upload never fired) and invisible in unit tests (mocked FileLists don't behave like Chrome's live one). The fix only came from a console probe on the live site that showed `✅ CHANGE FIRED — files: ['…']` while the Network tab showed zero `/uploads` requests — proving the handler ran and dropped the file. **Lesson: for "works in tests, broken in prod" UI bugs, instrument the real browser before theorizing.**
+
+#### A default-off security flag is not a security control
+The first gateway-auth fix gated enforcement on `SOPHIA_GATEWAY_AUTH_ENABLED`, default off. Codex correctly flagged that `render.yaml` never sets it, so prod stayed open. Replaced with unconditional enforcement (+ an explicit `SOPHIA_AUTH_BYPASS` dev escape hatch). **Lesson: if the secure state requires an opt-in that the deployment doesn't set, the default is the real behavior — make the secure path the default.**
+
+#### Codex's highest-value findings were the second-order consequences of the bridge
+Once the Supabase mirror existed, it created new edges Codex caught one by one: keyspace collision with builder outputs, DELETE not clearing the mirror, `/uploads/list` not seeing the mirror, the read tools materializing a deleted file. Each is obvious in hindsight and easy to miss as the implementer. **Lesson: when you add a new persistence layer, audit every existing path that touches the old layer (write/read/delete/list) for parity — a partial mirror is worse than none because it silently diverges.**
+
+#### Long-session reliability degraded — verify before claiming done (and `git add -A` is a footgun)
+Late in this wave, several commits landed over a red suite or with edits that silently failed to apply (wrong anchor), and PR comments cited unverified shas/test-counts. Worse, when a scoped `git add` got cancelled mid-batch, a fallback `git add -A` swept 14 unrelated working-tree files (incl. `node_modules` cache) into the docs commit — caught only by re-inspecting `git show --stat` before merge, then fixed with `reset --soft` + a stage-allowlist guard that refuses to commit unless the staged set is exactly the intended files. **Lesson (process): after every edit, run the verifying command and read its real output before committing; stage files by explicit path and assert the staged set equals the intended set before `git commit`; never `git add -A` in a tree with unrelated WIP. This matters more as a session gets long.**
+
+### CLAUDE.md Updates
+- `backend/CLAUDE.md` → "Sophia Vision Port (PR #132)": added "Production hardening wave" + "Frontend AttachmentBar robustness" subsections (cross-service bridge, keyspace separation, idempotent delete, list union, unconditional gateway auth, base64 prune, live-FileList snapshot, convertible `.md` reservation, discard-before-upload race). Extended the regression command with the uploads test files and a deploy-both-services note.
+- Root `CLAUDE.md`: added `view_user_image` / `read_user_document` to the companion tool list, and a "Vision & attachments (PR #132)" subsection flagging the separate-disks Render topology + Supabase-mirror requirement as a load-bearing deployment fact.
+
+### Skills Created / Modified
+- None. All changes are tool / middleware / gateway-route / frontend level.
+
+### GEPA Log Entry
+- N/A — no prompt files changed.

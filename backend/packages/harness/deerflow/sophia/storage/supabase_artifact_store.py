@@ -60,6 +60,31 @@ def _object_path(thread_id: str, filename: str) -> str:
     return f"{safe_thread}/{safe_name}"
 
 
+# Keyspace separation (Codex P1 PR #132). User UPLOADS mirror under
+# ``{thread_id}/uploads/{name}``; builder OUTPUTS mirror under
+# ``{thread_id}/{output_relative_path}`` (see ``supabase_mirror.py``).
+# Without this prefix a user upload and a builder artifact with the same
+# basename (e.g. ``report.pdf``) would overwrite each other in the same
+# bucket folder — whichever ran last would win, and a later local miss in
+# view_user_image / read_user_document could materialize the wrong bytes
+# (or a completion-card signed URL could point at an upload instead of the
+# builder deliverable). ``uploads_object_name`` is the SINGLE source of
+# truth for the upload prefix, shared by the gateway upload mirror AND the
+# companion read tools so both address the exact same object.
+UPLOADS_PREFIX = "uploads/"
+
+
+def uploads_object_name(filename: str) -> str:
+    """Map a bare upload filename to its prefixed Supabase object name.
+
+    ``report.pdf`` -> ``uploads/report.pdf``. The ``{thread_id}/`` folder is
+    prepended by ``_object_path`` at call time, yielding the full key
+    ``{thread_id}/uploads/report.pdf`` — distinct from the builder-output
+    keyspace ``{thread_id}/report.pdf``.
+    """
+    return f"{UPLOADS_PREFIX}{filename.strip().lstrip('/')}"
+
+
 def upload_artifact(
     thread_id: str,
     filename: str,
@@ -235,6 +260,72 @@ def create_signed_url(
             http.close()
 
 
+def delete_artifact(
+    thread_id: str,
+    filename: str,
+    *,
+    client: httpx.Client | None = None,
+) -> bool:
+    """Delete the mirrored object at ``{bucket}/{thread_id}/{filename}``.
+
+    Returns ``True`` when the object was deleted OR was already absent
+    (404 — idempotent delete), ``False`` when Supabase is not configured
+    or the delete failed. Best-effort: transport errors are logged and
+    swallowed (returns ``False``) so a delete-endpoint call never 500s on
+    a Supabase hiccup — the local file is the primary copy.
+
+    PR #132: the upload route mirrors every upload to Supabase so the
+    companion's read tools (which run in a separate container) can fetch
+    it. The DELETE endpoint must therefore ALSO remove the mirror, or a
+    discarded file would re-materialize from Supabase on the next
+    view_user_image / read_user_document local miss.
+    """
+    config = _load_config()
+    if config is None:
+        return False
+
+    object_path = _object_path(thread_id, filename)
+    url = _object_url(config, object_path)
+    headers = {
+        "Authorization": f"Bearer {config.service_role_key}",
+        "apikey": config.service_role_key,
+    }
+
+    owns_client = client is None
+    http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
+    try:
+        response = http.delete(url, headers=headers)
+        if response.status_code == 404:
+            return True  # already gone — idempotent
+        if not response.is_success:
+            logger.warning(
+                "Supabase delete failed thread_id=%s filename=%s status=%s body=%s",
+                thread_id,
+                filename,
+                response.status_code,
+                response.text[:200],
+            )
+            return False
+        logger.info(
+            "Deleted mirrored artifact from Supabase: bucket=%s thread_id=%s filename=%s",
+            config.bucket,
+            thread_id,
+            filename,
+        )
+        return True
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "Supabase delete error thread_id=%s filename=%s error=%s",
+            thread_id,
+            filename,
+            exc,
+        )
+        return False
+    finally:
+        if owns_client:
+            http.close()
+
+
 def download_artifact(
     thread_id: str,
     filename: str,
@@ -273,3 +364,77 @@ def download_artifact(
     finally:
         if owns_client:
             http.close()
+
+
+def list_upload_filenames(
+    thread_id: str,
+    *,
+    client: httpx.Client | None = None,
+) -> list[str]:
+    """List the bare filenames mirrored under the thread's UPLOADS keyspace.
+
+    Returns the names beneath ``{thread_id}/uploads/`` (the ``uploads/``
+    prefix stripped, so callers get bare ``report.pdf`` etc.) so the
+    frontend AttachmentBar uniquifier can reserve mirrored names even when
+    the gateway's local disk is empty (Render restart / different instance).
+    Without this, the list endpoint only sees the ephemeral local dir and a
+    user could re-attach ``image.png``, overwriting the mirrored
+    ``uploads/image.png`` (x-upsert) that earlier chat turns reference.
+
+    Best-effort: returns ``[]`` when Supabase is not configured or on any
+    transport error (the caller still has the local listing). Codex P2
+    PR #132.
+    """
+    config = _load_config()
+    if config is None:
+        return []
+
+    safe_thread = thread_id.strip().strip("/")
+    if not safe_thread:
+        return []
+
+    list_url = f"{config.url}/storage/v1/object/list/{config.bucket}"
+    headers = {
+        "Authorization": f"Bearer {config.service_role_key}",
+        "apikey": config.service_role_key,
+        "Content-Type": "application/json",
+    }
+    # The Storage list API treats ``prefix`` as a folder path and returns
+    # entries relative to it, so ``name`` comes back as the bare filename.
+    body = {
+        "prefix": f"{safe_thread}/{UPLOADS_PREFIX}",
+        "limit": 1000,
+        "offset": 0,
+    }
+
+    owns_client = client is None
+    http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
+    try:
+        response = http.post(list_url, json=body, headers=headers)
+        if not response.is_success:
+            logger.warning(
+                "Supabase uploads list failed thread_id=%s status=%s; returning empty",
+                thread_id,
+                response.status_code,
+            )
+            return []
+        data = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("Supabase uploads list error thread_id=%s error=%s; returning empty", thread_id, exc)
+        return []
+    finally:
+        if owns_client:
+            http.close()
+
+    if not isinstance(data, list):
+        return []
+    names: list[str] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        # Supabase returns a placeholder row (id=None) for empty folders; skip
+        # anything without a real object id, and any nested-folder rows.
+        if isinstance(name, str) and name and "/" not in name and entry.get("id") is not None:
+            names.append(name)
+    return names

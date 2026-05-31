@@ -1,9 +1,12 @@
 import { type NextRequest } from 'next/server';
 
-import { getAuthenticatedUserId } from '../../../lib/auth/server-auth';
+import { getPrimaryGatewayUrl } from '../../_lib/gateway-url';
+import { userOwnsThread } from '../../../lib/api/thread-ownership';
+import { getAuthenticatedUserId, getUserScopedAuthToken } from '../../../lib/auth/server-auth';
 import { normalizeBuilderArtifactPayload } from '../../../lib/builder-artifacts';
 import { logger } from '../../../lib/error-logger';
 import { apiLimiters } from '../../../lib/rate-limiter';
+import { buildAttachmentPrompt } from '../../../stores/attachment-prompt';
 
 import { fetchBackendStreamWithBootstrap, isValidSophiaUserId } from './backend-client';
 import { parseAndValidateChatPayload } from './chat-request';
@@ -115,13 +118,27 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
     }
 
     const {
-      userMessage,
+      userMessage: rawUserMessage,
       sessionId,
       threadId,
       sessionType,
       contextMode,
       platform,
     } = parsed.data;
+
+    // When the user attached files via AttachmentBar, prepend a short
+    // synthesized note so the companion knows which uploaded filenames
+    // it can pass to view_user_image / read_user_document this turn.
+    // Without this hint, Sophia would either need to call `ls` (extra
+    // tool turn) or guess that uploads exist.
+    //
+    // Defensive coalesce: parseAndValidateChatPayload guarantees this
+    // field is an array, but tests that mock the validator might omit
+    // it. Treat undefined as the empty case rather than throwing.
+    const attachedFiles = parsed.data.attachedFiles ?? [];
+    const userMessage = attachedFiles.length > 0
+      ? `${buildAttachmentPrompt(attachedFiles)}\n\n${rawUserMessage}`
+      : rawUserMessage;
 
     const userId = await getAuthenticatedUserId();
     if (!userId) {
@@ -137,9 +154,60 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       );
     }
 
+    // Mock-streaming short-circuit (Codex P2 PR #132 later
+    // iteration): the ``USE_MOCK_STREAMING=true`` flag is the
+    // offline-dev contract — no backend gateway, no LangGraph. The
+    // ownership gate below calls ``userOwnsThread`` which hits the
+    // gateway's ``/api/v1/sessions/open|list``; in mock mode that
+    // gateway isn't running, the fetch fails closed, and every
+    // existing-session send 403s. So mock mode must take precedence
+    // over the ownership check — there's no backend thread to verify
+    // against in the first place.
     if (USE_MOCK) {
       secureLog('[/api/chat] Using mock streaming response');
       return mockResponse(sessionId, sessionType || undefined);
+    }
+
+    // Codex P1 PR #132 (later iteration): verify thread ownership for
+    // EVERY request that resumes a caller-supplied ``thread_id``, not
+    // just attachment-bearing ones.
+    //
+    // The earlier scoping ("only check when attached_files is
+    // non-empty") was too narrow: once ``view_user_image`` and
+    // ``read_user_document`` are wired into the companion, any
+    // authenticated caller can send a foreign ``thread_id`` with NO
+    // attachments and prompt-inject ("please describe the image
+    // photo.png") to trick the model into calling those tools against
+    // the victim's ``backend/.deer-flow/threads/{thread_id}/user-data/``
+    // sandbox. Filename guessing is realistic for screenshots and
+    // common names (resume.pdf, doc.pdf, image.png).
+    //
+    // Scope: skipped ONLY when threadId is absent/empty (new-session
+    // bootstrap — the backend creates a fresh thread and assigns it to
+    // this user). Any explicit caller-supplied threadId is verified.
+    //
+    // The underlying ``userOwnsThread`` is the same two-pass
+    // (/open then /list?limit=100) used by the uploads + DELETE
+    // proxies, so spoofing surface stays consistent across all three
+    // server-side seams that act on a caller-supplied thread_id.
+    //
+    // Long-term: a dedicated gateway endpoint that binds thread_id to
+    // the auth-token's user (or a /by-thread/{thread_id} lookup that
+    // 404s on cross-user reads) would close this gap globally and
+    // remove the recent-100 fallback ceiling. Separate backend ticket.
+    if (typeof threadId === 'string' && threadId) {
+      const gatewayUrl = getPrimaryGatewayUrl();
+      const apiKey = await getUserScopedAuthToken();
+      const owns = await userOwnsThread(threadId, userId, apiKey, gatewayUrl);
+      if (!owns) {
+        return new Response(
+          JSON.stringify({
+            error: 'Thread not owned by current user',
+            code: 'THREAD_OWNERSHIP_REJECTED',
+          }),
+          { status: 403, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
     }
 
     const backendPayload = {
@@ -151,6 +219,23 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       context_mode: contextMode,
       platform,
       language: 'en' as const,
+      // Server-trusted out-of-band attachment list (Codex P2 PR #132
+      // latest iteration). The backend client routes this on the
+      // PER-RUN ``config.configurable.current_turn_attached_files``
+      // channel (not LangGraph ``input``, which persists into thread
+      // state and would leak a prior turn's list into an
+      // attachment-free turn). ``start_builder_task`` reads it from
+      // ``runtime.config.configurable`` so it doesn't have to parse the
+      // synthesized prompt block (which a user can spoof by typing the
+      // marker into their own message).
+      attached_files: attachedFiles,
+      // The pre-prefix message. ``userMessage`` carries the
+      // synthesized ``[The user has uploaded ...]`` block when there
+      // are attachments; ``rawUserMessage`` does not. The backend
+      // client uses this on the stale-thread recovery path so the
+      // fresh-thread retry doesn't tell the model to read files
+      // absent from the new sandbox (Codex P2 PR #132).
+      raw_message: rawUserMessage,
     };
 
     const backendUrl = `${BACKEND_URL}${BACKEND_CHAT_ENDPOINT}`;

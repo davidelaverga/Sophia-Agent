@@ -2,6 +2,8 @@ from typing import Annotated, NotRequired
 
 from langchain.agents import AgentState
 
+from deerflow.agents.thread_state import ViewedImageData, merge_viewed_images
+
 
 def merge_async_tasks(
     existing: dict[str, dict] | None,
@@ -151,6 +153,16 @@ class SophiaState(AgentState):
     injected_memories: NotRequired[list[str]]
     injected_memory_contents: NotRequired[list[str]]
 
+    # NOTE: current-turn attachments are intentionally NOT a state
+    # field. They travel on the per-run ``config.configurable`` channel
+    # (``current_turn_attached_files``), read by
+    # ``start_builder_task._read_current_turn_attached_files``. Codex P2
+    # PR #132 (latest iteration): a state channel persists under its
+    # LAST_VALUE reducer, so a turn that omitted attachments inherited
+    # the prior turn's list and re-copied private images into a new
+    # builder sandbox. ``config.configurable`` is per-run and never
+    # persisted, giving clean per-run reset semantics for free.
+
     # Builder
     builder_task: NotRequired[dict | None]
     builder_result: NotRequired[dict | None]
@@ -185,3 +197,10 @@ class SophiaState(AgentState):
 
     # Title
     title: NotRequired[str | None]
+
+    # Vision — image_path -> {base64, mime_type}. Written by view_image_tool
+    # (builder) and view_user_image (companion); consumed by ViewImageMiddleware
+    # to inject image content blocks into the next model turn. The reducer
+    # merges parallel writes and supports {} to clear after processing — both
+    # behaviours come from upstream's ThreadState definition.
+    viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]
