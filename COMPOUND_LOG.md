@@ -2105,3 +2105,47 @@ The single highest-leverage finding in this entire cycle was Codex P1 on the cro
 
 ### GEPA Log Entry
 - N/A — no prompt files changed.
+
+---
+
+## 2026-05-31 · [sophia-vision-port] · PR #132 (production-hardening wave)
+**Author:** Claude (assisted) · **Track:** backend | frontend · **Spec reference:** `docs/specs/` + Codex review thread on PR #132
+
+### What Changed
+The initial port (2026-05-28 entry) worked locally but failed in the split Render deployment. This wave made attachments actually work in production (verified live on sophia-ei.com) and closed a string of Codex P1/P2 reviews. The single most important architectural fact discovered: **`sophia-gateway` and `sophia-langgraph` are separate Render web services with separate ephemeral disks** (`render.yaml` declares no shared/persistent disk).
+
+- **Cross-service Supabase bridge (the core production fix).** Uploads land on the gateway disk; the companion read tools (`view_user_image` / `read_user_document`) run in the langgraph container and read *its* disk → the file is invisible. Fix: the gateway upload route mirrors every saved file + its converted `<stem>.md` to Supabase Storage; the read tools download from the mirror on a local miss. Builder copy (`start_builder_task`) also fetches whitelisted current-turn images from the mirror before its local `is_dir()` check. Helpers in `supabase_artifact_store`: `upload_artifact` / `download_artifact` / `delete_artifact` / `list_upload_filenames` / `uploads_object_name`. All best-effort.
+- **Separate Supabase keyspace.** Uploads → `{thread_id}/uploads/{name}`; builder outputs → `{thread_id}/{name}`. `uploads_object_name()` is the single source of truth, applied at all 5 upload sites. Without it a user `report.pdf` and a builder `report.pdf` overwrote each other (`x-upsert`).
+- **Idempotent DELETE.** No 404 on local miss; always removes the Supabase mirror (original + `.md`). On the ephemeral disk the local file may be gone while the mirror is live.
+- **`/uploads/list` unions local + mirror** so the AttachmentBar uniquifier reserves mirrored names after a restart.
+- **Gateway upload routes enforce auth unconditionally** (`verify_thread_access` router dep: bearer → user via `resolve_bearer_user_id`, 403 unless `SessionStore` shows the user owns the thread). A flag-gated version was rejected because `render.yaml` never set the flag.
+- **Base64 accumulation guard.** `ClearOnInjectViewImageMiddleware` now also prunes prior injected image messages from the persistent `messages` channel via `RemoveMessage` (stamped marker + stable id), not just clearing `viewed_images`. Otherwise multiple ~10 MiB views blow Anthropic's 32 MB envelope.
+- **Frontend silent-attach fixes.** Snapshot the live `FileList` before `input.value = ""` (the prod root cause — Chrome empties the live list on reset). Reserve the derived `.md` of renamed convertibles. Bail out of `uploadOneFile` when the chip was discarded before the upload loop started.
+- **NUL/control-char filename rejection** in `read_user_document` (mirrors `view_user_image`), preventing `ValueError: embedded null byte` from aborting the turn.
+
+### What We Learned
+
+#### The prod bug was a topology mismatch, invisible to local tests and to design review
+Everything passed locally (single process, single disk) and in code review (the upload writes the file, the tool reads the file — looks correct). It only failed in the 2-container Render split. The diagnostic that found it: Render gateway logs showed the upload succeeded (`Saved file: …`), langgraph logs showed the read tool ran but found nothing, and `render.yaml` showed no shared disk. **Lesson: when a feature spans two services, the deployment topology is part of the design — assume separate disks/instances until proven otherwise, and trace the bytes across the service boundary, not just within one process.**
+
+#### Driving production in Chrome DevTools beat every other diagnostic for the silent-attach bug
+The chip-not-appearing bug survived multiple "fixes" because it's invisible in server logs (the upload never fired) and invisible in unit tests (mocked FileLists don't behave like Chrome's live one). The fix only came from a console probe on the live site that showed `✅ CHANGE FIRED — files: ['…']` while the Network tab showed zero `/uploads` requests — proving the handler ran and dropped the file. **Lesson: for "works in tests, broken in prod" UI bugs, instrument the real browser before theorizing.**
+
+#### A default-off security flag is not a security control
+The first gateway-auth fix gated enforcement on `SOPHIA_GATEWAY_AUTH_ENABLED`, default off. Codex correctly flagged that `render.yaml` never sets it, so prod stayed open. Replaced with unconditional enforcement (+ an explicit `SOPHIA_AUTH_BYPASS` dev escape hatch). **Lesson: if the secure state requires an opt-in that the deployment doesn't set, the default is the real behavior — make the secure path the default.**
+
+#### Codex's highest-value findings were the second-order consequences of the bridge
+Once the Supabase mirror existed, it created new edges Codex caught one by one: keyspace collision with builder outputs, DELETE not clearing the mirror, `/uploads/list` not seeing the mirror, the read tools materializing a deleted file. Each is obvious in hindsight and easy to miss as the implementer. **Lesson: when you add a new persistence layer, audit every existing path that touches the old layer (write/read/delete/list) for parity — a partial mirror is worse than none because it silently diverges.**
+
+#### Long-session reliability degraded — verify before claiming done (and `git add -A` is a footgun)
+Late in this wave, several commits landed over a red suite or with edits that silently failed to apply (wrong anchor), and PR comments cited unverified shas/test-counts. Worse, when a scoped `git add` got cancelled mid-batch, a fallback `git add -A` swept 14 unrelated working-tree files (incl. `node_modules` cache) into the docs commit — caught only by re-inspecting `git show --stat` before merge, then fixed with `reset --soft` + a stage-allowlist guard that refuses to commit unless the staged set is exactly the intended files. **Lesson (process): after every edit, run the verifying command and read its real output before committing; stage files by explicit path and assert the staged set equals the intended set before `git commit`; never `git add -A` in a tree with unrelated WIP. This matters more as a session gets long.**
+
+### CLAUDE.md Updates
+- `backend/CLAUDE.md` → "Sophia Vision Port (PR #132)": added "Production hardening wave" + "Frontend AttachmentBar robustness" subsections (cross-service bridge, keyspace separation, idempotent delete, list union, unconditional gateway auth, base64 prune, live-FileList snapshot, convertible `.md` reservation, discard-before-upload race). Extended the regression command with the uploads test files and a deploy-both-services note.
+- Root `CLAUDE.md`: added `view_user_image` / `read_user_document` to the companion tool list, and a "Vision & attachments (PR #132)" subsection flagging the separate-disks Render topology + Supabase-mirror requirement as a load-bearing deployment fact.
+
+### Skills Created / Modified
+- None. All changes are tool / middleware / gateway-route / frontend level.
+
+### GEPA Log Entry
+- N/A — no prompt files changed.
