@@ -1071,6 +1071,40 @@ describe('AttachmentBar — Codex P2 per-turn cap', () => {
     expect(filenames).toEqual(['report-1.md', 'report.pdf']);
   });
 
+  it('reserves the derived .md of a RENAMED convertible (Codex P2 PR #132)', async () => {
+    // Codex P2: when a convertible is renamed during registration, its NEW
+    // name's derived .md must also be reserved. Pick report.pdf, a second
+    // report.pdf, and a literal report-1.md in one batch:
+    //   - pre-pass reserves "report.md" (derived from the originals)
+    //   - file 1 report.pdf -> kept as report.pdf
+    //   - file 2 report.pdf -> bumped to report-1.pdf; its conversion output
+    //     will be report-1.md, which MUST be reserved now
+    //   - file 3 literal report-1.md -> must bump to report-1-1.md, else it
+    //     collides with file 2's gateway conversion output and one
+    //     attachment's content is lost.
+    vi.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ files: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    render(<AttachmentBar threadId="thread-md" />);
+    const input = screen.getByTestId('attachment-bar-file-input') as HTMLInputElement;
+    dispatchFilesOnto(input, [
+      makeFile('report.pdf', 1024, 'application/pdf'),
+      makeFile('report.pdf', 1024, 'application/pdf'),
+      makeFile('report-1.md', 1024, 'text/markdown'),
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const filenames = useAttachmentsStore.getState().items.map((i) => i.filename);
+    // The literal report-1.md is bumped to report-1-1.md because the renamed
+    // convertible (report-1.pdf) reserved report-1.md. Pre-fix this stayed
+    // 'report-1.md' and collided with report-1.pdf's conversion output.
+    expect(filenames).toEqual(['report.pdf', 'report-1.pdf', 'report-1-1.md']);
+  });
+
   it('does NOT bump a lone .md upload (no convertible sibling in batch)', async () => {
     // A .md picked alone keeps its name — there's no convertible
     // sibling whose conversion would collide with it.

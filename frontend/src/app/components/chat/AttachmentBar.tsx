@@ -557,6 +557,15 @@ function createRegistrationsForBatch(
       // (within-batch collision: two ``image.png`` files picked
       // together).
       claimed.add(reg.item.filename)
+      // Codex P2 PR #132: if buildRegistration RENAMED a convertible
+      // (e.g. report.pdf -> report-1.pdf because report.pdf was already
+      // claimed), the pre-pass above only reserved the ORIGINAL name's
+      // derived .md — not the renamed one's. Reserve the accepted name's
+      // derived <stem>.md now so a later literal .md pick in this same
+      // batch (e.g. report-1.md) can't collide with this convertible's
+      // gateway conversion output. No-op for non-convertibles.
+      const renamedMd = deriveMarkdownSibling(reg.item.filename)
+      if (renamedMd) claimed.add(renamedMd)
     }
     registrations.push(reg)
   }
