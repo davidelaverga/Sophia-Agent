@@ -395,7 +395,7 @@ class BuilderCanvasWorker:
         if active_order is not None and event_order is not None and event_order < active_order:
             return True
         if event["kind"] == "terminal":
-            if active[0] == task_id and not event.get("_run_observed_before_publish"):
+            if not event.get("_run_observed_before_publish"):
                 return not self._terminal_is_newer_than_active_locked(event, active)
             return False
         return key in self._histories
