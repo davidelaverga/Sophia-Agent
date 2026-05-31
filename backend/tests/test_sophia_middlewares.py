@@ -2933,6 +2933,22 @@ class TestBuilderArtifactMiddleware:
         choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
         assert choice == {"type": "tool", "name": "bash"}
 
+    def test_force_choice_pdf_target_does_not_run_generator_script(self, tmp_path):
+        """PDF targets use render_markdown_to_pdf, not ad-hoc generator scripts."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "_generate_pdf.py").write_text("# generator")
+
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+            "builder_non_artifact_turns": 27,
+        }
+        choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
+        assert choice == {"type": "tool", "name": "write_file"}
+
     def test_force_choice_prefers_emit_over_bash_when_binary_exists(self, tmp_path):
         """If a real binary AND a generator both exist, stage 1 (emit)
         wins — we don't waste a turn re-running the generator.
@@ -3069,6 +3085,68 @@ class TestBuilderArtifactMiddleware:
         assert builder_result["artifact_path"] == "/mnt/user-data/outputs/diagrams.pdf"
         assert builder_result["artifact_type"] == "pdf"
         assert builder_result["confidence"] == 0.5
+
+    def test_hard_ceiling_pdf_target_prefers_pdf_over_markdown(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.pdf").write_bytes(b"%PDF-1.4")
+        (outputs_dir / "report.md").write_text("# Report")
+        (outputs_dir / "_generate_pdf.py").write_text("# generator")
+
+        result = BuilderArtifactMiddleware._build_ceiling_fallback(
+            {
+                "thread_data": {"outputs_path": str(outputs_dir)},
+                "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+            },
+            steps_completed=30,
+            reason="test",
+        )
+
+        assert result["artifact_path"] == "/mnt/user-data/outputs/report.pdf"
+        assert result["artifact_type"] == "pdf"
+
+    def test_hard_ceiling_pdf_target_falls_back_to_markdown_not_generator(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.md").write_text("# Report")
+        (outputs_dir / "_generate_pdf.py").write_text("# generator")
+
+        result = BuilderArtifactMiddleware._build_ceiling_fallback(
+            {
+                "thread_data": {"outputs_path": str(outputs_dir)},
+                "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+            },
+            steps_completed=30,
+            reason="test",
+        )
+
+        assert result["artifact_path"] == "/mnt/user-data/outputs/report.md"
+        assert result["artifact_type"] == "md"
+        assert result["confidence"] == 0.5
+
+    def test_hard_ceiling_pdf_target_refuses_generator_only_success(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "_generate_pdf.py").write_text("# generator")
+
+        result = BuilderArtifactMiddleware._build_ceiling_fallback(
+            {
+                "thread_data": {"outputs_path": str(outputs_dir)},
+                "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+            },
+            steps_completed=30,
+            reason="test",
+        )
+
+        assert result["artifact_path"] is None
+        assert result["artifact_type"] == "pdf"
+        assert result["confidence"] == 0.2
 
     def test_hard_ceiling_apology_when_no_binary_or_generator(self, tmp_path):
         """If neither a binary nor a generator script nor a text deliverable

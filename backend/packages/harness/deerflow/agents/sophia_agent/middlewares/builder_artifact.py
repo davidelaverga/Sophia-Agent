@@ -268,6 +268,20 @@ def _is_user_facing_output_path(artifact_path: str | None) -> bool:
     return PurePosixPath(relative).suffix.lower() in _PROMOTABLE_DELIVERABLE_EXTENSIONS
 
 
+def _requested_target_suffix(state: dict[str, Any]) -> str:
+    target = state.get("builder_artifact_target_path")
+    if not isinstance(target, str):
+        delegation = state.get("delegation_context")
+        target = delegation.get("artifact_target_path") if isinstance(delegation, dict) else None
+    if not isinstance(target, str):
+        return ""
+    return PurePosixPath(target.strip()).suffix.lower()
+
+
+def _requested_pdf_artifact(state: dict[str, Any]) -> bool:
+    return _requested_target_suffix(state) == ".pdf"
+
+
 def _recovery_hint(outputs_root: Path, candidates: list[Path]) -> str:
     logger.info(
         "BuilderArtifact: emit_path_missing recovery_candidate_count=%s recovery_accepted=%s",
@@ -685,17 +699,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return self._forced_tool_choice()
 
         if self._has_generator_script(state):
-            logger.warning(
-                "BuilderArtifact: forcing tool_choice=bash before emit "
-                "(non_artifact_turns=%s, ceiling=%s, reason=%s, generator "
-                "script on disk but no binary — three-stage force gives the "
-                "model a chance to RUN the generator instead of writing yet "
-                "another one)",
-                non_artifact_turns,
-                self._CEILING_FOR_FORCE,
-                force_reason,
-            )
-            return self._forced_bash_tool_choice()
+            return self._generator_recovery_tool_choice(state, non_artifact_turns, force_reason)
 
         logger.warning(
             "BuilderArtifact: forcing tool_choice=write_file before emit "
@@ -706,6 +710,34 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             force_reason,
         )
         return self._forced_write_tool_choice()
+
+    def _generator_recovery_tool_choice(
+        self,
+        state: BuilderArtifactState,
+        non_artifact_turns: object,
+        force_reason: str,
+    ) -> dict[str, Any]:
+        if _requested_pdf_artifact(state):
+            logger.warning(
+                "BuilderArtifact: PDF target has generator script but no deliverable; "
+                "forcing write_file to create a Markdown source/fallback instead "
+                "(non_artifact_turns=%s, ceiling=%s, reason=%s)",
+                non_artifact_turns,
+                self._CEILING_FOR_FORCE,
+                force_reason,
+            )
+            return self._forced_write_tool_choice()
+        logger.warning(
+            "BuilderArtifact: forcing tool_choice=bash before emit "
+            "(non_artifact_turns=%s, ceiling=%s, reason=%s, generator "
+            "script on disk but no binary — three-stage force gives the "
+            "model a chance to RUN the generator instead of writing yet "
+            "another one)",
+            non_artifact_turns,
+            self._CEILING_FOR_FORCE,
+            force_reason,
+        )
+        return self._forced_bash_tool_choice()
 
     @staticmethod
     def _forced_bash_tool_choice() -> dict[str, Any]:
@@ -785,6 +817,212 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return False
 
     @staticmethod
+    def _promotable_output_candidates(
+        state: BuilderArtifactState,
+        *,
+        requested_pdf: bool,
+    ) -> list[Path]:
+        outputs_host_path = _outputs_host_path_from_state(state)
+        if not outputs_host_path:
+            return []
+        outputs_root = Path(outputs_host_path)
+        if not outputs_root.is_dir():
+            return []
+
+        min_mtime = _builder_started_min_mtime(state)
+        candidates = [
+            p for p in outputs_root.rglob("*")
+            if p.is_file()
+            and not p.name.startswith("_")
+            and p.suffix.lower() in _PROMOTABLE_DELIVERABLE_EXTENSIONS
+            and (min_mtime is None or p.stat().st_mtime >= min_mtime)
+        ]
+        if requested_pdf:
+            pdf_candidates = [p for p in candidates if p.suffix.lower() == ".pdf"]
+            md_candidates = [p for p in candidates if p.suffix.lower() == ".md"]
+            candidates = pdf_candidates or md_candidates
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return candidates
+
+    @staticmethod
+    def _generator_output_candidates(state: BuilderArtifactState) -> list[Path]:
+        outputs_host_path = _outputs_host_path_from_state(state)
+        if not outputs_host_path:
+            return []
+        outputs_root = Path(outputs_host_path)
+        if not outputs_root.is_dir():
+            return []
+
+        min_mtime = _builder_started_min_mtime(state)
+        candidates = [
+            p for p in outputs_root.rglob("*")
+            if p.is_file()
+            and p.name.startswith("_generate_")
+            and p.suffix.lower() == ".py"
+            and (min_mtime is None or p.stat().st_mtime >= min_mtime)
+        ]
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return candidates
+
+    @staticmethod
+    def _virtual_output_path(path: Path, state: BuilderArtifactState) -> str:
+        outputs_host_path = _outputs_host_path_from_state(state)
+        outputs_root = Path(outputs_host_path or "")
+        return f"/mnt/user-data/outputs/{path.relative_to(outputs_root).as_posix()}"
+
+    @staticmethod
+    def _promoted_deliverable_from_outputs(
+        state: BuilderArtifactState,
+        *,
+        requested_pdf: bool,
+        reason: str,
+    ) -> tuple[str | None, str]:
+        try:
+            candidates = BuilderArtifactMiddleware._promotable_output_candidates(
+                state,
+                requested_pdf=requested_pdf,
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort only
+            logger.warning(
+                "BuilderArtifact: ceiling fallback scan failed reason=%s error=%s",
+                reason,
+                exc,
+            )
+            return None, "unknown"
+        if not candidates:
+            return None, "unknown"
+        best = candidates[0]
+        return (
+            BuilderArtifactMiddleware._virtual_output_path(best, state),
+            best.suffix.lower().lstrip(".") or "unknown",
+        )
+
+    @staticmethod
+    def _promoted_generator_from_outputs(
+        state: BuilderArtifactState,
+        *,
+        requested_pdf: bool,
+        reason: str,
+    ) -> str | None:
+        try:
+            gen_candidates = BuilderArtifactMiddleware._generator_output_candidates(state)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "BuilderArtifact: generator-script fallback scan failed reason=%s error=%s",
+                reason,
+                exc,
+            )
+            return None
+        if not gen_candidates:
+            return None
+        promoted_path = BuilderArtifactMiddleware._virtual_output_path(
+            gen_candidates[0],
+            state,
+        )
+        if requested_pdf:
+            logger.warning(
+                "BuilderArtifact: PDF fallback refusing generator script %s "
+                "(reason=%s, no pdf_or_markdown deliverable found)",
+                promoted_path,
+                reason,
+            )
+            return None
+        logger.warning(
+            "BuilderArtifact: fallback promoting generator script %s "
+            "(reason=%s, no binary deliverable found)",
+            promoted_path,
+            reason,
+        )
+        return promoted_path
+
+    @staticmethod
+    def _recovered_deliverable_fallback(
+        promoted_path: str,
+        promoted_type: str,
+        *,
+        steps_completed: int,
+    ) -> dict[str, Any]:
+        return {
+            "artifact_path": promoted_path,
+            "artifact_type": promoted_type,
+            "artifact_title": "Build task completed (recovered)",
+            "steps_completed": steps_completed,
+            "decisions_made": [],
+            "companion_summary": (
+                "The builder ran long and didn't call emit cleanly, "
+                "but the deliverable is on disk — I'm surfacing it now."
+            ),
+            "companion_tone_hint": "Reassuring — deliverable recovered despite rough run.",
+            "user_next_action": "Open the file and let me know if it lands.",
+            "confidence": 0.5,
+        }
+
+    @staticmethod
+    def _generator_script_fallback(
+        promoted_generator_path: str,
+        *,
+        steps_completed: int,
+    ) -> dict[str, Any]:
+        return {
+            "artifact_path": promoted_generator_path,
+            "artifact_type": "code",
+            "artifact_title": "Build task partial (generator script only)",
+            "steps_completed": steps_completed,
+            "decisions_made": [],
+            "companion_summary": (
+                "I built the generator script but couldn't produce the final "
+                "binary cleanly — sharing the script so you have something to "
+                "work with."
+            ),
+            "companion_tone_hint": (
+                "Honest and constructive — partial deliverable; offer to debug "
+                "if the user shares the error from running it."
+            ),
+            "user_next_action": (
+                "Try running `python <path>` yourself, or send me the error "
+                "and I'll fix it."
+            ),
+            "confidence": 0.4,
+        }
+
+    @staticmethod
+    def _pdf_no_deliverable_fallback(*, steps_completed: int) -> dict[str, Any]:
+        return {
+            "artifact_path": None,
+            "artifact_type": "pdf",
+            "artifact_title": "PDF build did not complete",
+            "steps_completed": steps_completed,
+            "decisions_made": [],
+            "companion_summary": (
+                "The builder could not produce a PDF or Markdown fallback. "
+                "I did not surface the generator script as a completed PDF."
+            ),
+            "companion_tone_hint": (
+                "Apologetic and direct — PDF rendering did not produce a "
+                "deliverable; offer to retry."
+            ),
+            "user_next_action": "Ask me to retry the PDF build.",
+            "confidence": 0.2,
+        }
+
+    @staticmethod
+    def _generic_no_deliverable_fallback(*, steps_completed: int) -> dict[str, Any]:
+        return {
+            "artifact_path": None,
+            "artifact_type": "unknown",
+            "artifact_title": "Build task force-stopped",
+            "steps_completed": steps_completed,
+            "decisions_made": [],
+            "companion_summary": (
+                f"The builder made {steps_completed} edits but didn't finish cleanly. "
+                "No final deliverable was produced."
+            ),
+            "companion_tone_hint": "Apologetic — builder ran out of budget.",
+            "user_next_action": "Tell me what to try differently and I'll run it again.",
+            "confidence": 0.2,
+        }
+
+    @staticmethod
     def _build_ceiling_fallback(
         state: BuilderArtifactState,
         *,
@@ -810,153 +1048,41 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
         ``reason`` is included in log lines so traces can distinguish ceiling
         terminations from rejection short-circuits.
+
+        PDF requests are stricter than generic binary fallbacks: a
+        ``_generate_*.py`` file is never a successful PDF artifact. If
+        ``render_markdown_to_pdf`` cannot produce a PDF, the only acceptable
+        degraded deliverable is the Markdown source; otherwise fail truthfully.
         """
-        builder_task_started_at_ms = state.get("builder_task_started_at_ms") or 0
-
-        promoted_path: str | None = None
-        promoted_type = "unknown"
-        try:
-            thread_data_local = state.get("thread_data") or {}
-            outputs_host_path_local = (
-                thread_data_local.get("outputs_path")
-                if isinstance(thread_data_local, dict)
-                else None
-            )
-            if outputs_host_path_local:
-                outputs_root_local = Path(outputs_host_path_local)
-                if outputs_root_local.is_dir():
-                    # Promotion priority is left-to-right; the mtime sort
-                    # below then picks the most-recently-written file
-                    # within the set, so a fresh ``.pdf`` will still win
-                    # over an older ``.md``. The text extensions were
-                    # added in PR #126 Phase 4F after a production
-                    # markdown-deep-dive failed because ``.md`` wasn't in
-                    # the list — the model emitted ``artifact_path=None``
-                    # under force-emit, the short-circuit kicked in, the
-                    # ceiling fallback scanned outputs/ but found nothing
-                    # promotable, and the run coerced to error instead of
-                    # delivering the markdown the builder had written.
-                    candidates = [
-                        p for p in outputs_root_local.rglob("*")
-                        if p.is_file()
-                        and not p.name.startswith("_")
-                        and p.suffix.lower() in _PROMOTABLE_DELIVERABLE_EXTENSIONS
-                    ]
-                    if builder_task_started_at_ms:
-                        min_mtime = (builder_task_started_at_ms / 1000.0) - 5.0
-                        candidates = [
-                            p for p in candidates
-                            if p.stat().st_mtime >= min_mtime
-                        ]
-                    if candidates:
-                        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                        best = candidates[0]
-                        rel = best.relative_to(outputs_root_local).as_posix()
-                        promoted_path = f"/mnt/user-data/outputs/{rel}"
-                        ext = best.suffix.lower().lstrip(".")
-                        promoted_type = ext or "unknown"
-        except Exception as exc:  # noqa: BLE001 — best-effort only
-            logger.warning(
-                "BuilderArtifact: ceiling fallback scan failed reason=%s error=%s",
-                reason,
-                exc,
-            )
-
-        promoted_generator_path: str | None = None
-        if promoted_path is None:
-            try:
-                thread_data_local = state.get("thread_data") or {}
-                outputs_host_path_local = (
-                    thread_data_local.get("outputs_path")
-                    if isinstance(thread_data_local, dict)
-                    else None
-                )
-                if outputs_host_path_local:
-                    outputs_root_local = Path(outputs_host_path_local)
-                    if outputs_root_local.is_dir():
-                        gen_candidates = [
-                            p for p in outputs_root_local.rglob("*")
-                            if p.is_file()
-                            and p.name.startswith("_generate_")
-                            and p.suffix.lower() == ".py"
-                        ]
-                        if builder_task_started_at_ms:
-                            min_mtime = (builder_task_started_at_ms / 1000.0) - 5.0
-                            gen_candidates = [
-                                p for p in gen_candidates
-                                if p.stat().st_mtime >= min_mtime
-                            ]
-                        if gen_candidates:
-                            gen_candidates.sort(
-                                key=lambda p: p.stat().st_mtime, reverse=True
-                            )
-                            best = gen_candidates[0]
-                            rel = best.relative_to(outputs_root_local).as_posix()
-                            promoted_generator_path = f"/mnt/user-data/outputs/{rel}"
-                            logger.warning(
-                                "BuilderArtifact: fallback promoting generator script %s "
-                                "(reason=%s, no binary deliverable found)",
-                                promoted_generator_path,
-                                reason,
-                            )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "BuilderArtifact: generator-script fallback scan failed reason=%s error=%s",
-                    reason,
-                    exc,
-                )
-
+        requested_pdf = _requested_pdf_artifact(state)
+        promoted_path, promoted_type = BuilderArtifactMiddleware._promoted_deliverable_from_outputs(
+            state,
+            requested_pdf=requested_pdf,
+            reason=reason,
+        )
         if promoted_path:
-            return {
-                "artifact_path": promoted_path,
-                "artifact_type": promoted_type,
-                "artifact_title": "Build task completed (recovered)",
-                "steps_completed": steps_completed,
-                "decisions_made": [],
-                "companion_summary": (
-                    "The builder ran long and didn't call emit cleanly, "
-                    "but the deliverable is on disk — I'm surfacing it now."
-                ),
-                "companion_tone_hint": "Reassuring — deliverable recovered despite rough run.",
-                "user_next_action": "Open the file and let me know if it lands.",
-                "confidence": 0.5,
-            }
+            return BuilderArtifactMiddleware._recovered_deliverable_fallback(
+                promoted_path,
+                promoted_type,
+                steps_completed=steps_completed,
+            )
+        promoted_generator_path = BuilderArtifactMiddleware._promoted_generator_from_outputs(
+            state,
+            requested_pdf=requested_pdf,
+            reason=reason,
+        )
         if promoted_generator_path:
-            return {
-                "artifact_path": promoted_generator_path,
-                "artifact_type": "code",
-                "artifact_title": "Build task partial (generator script only)",
-                "steps_completed": steps_completed,
-                "decisions_made": [],
-                "companion_summary": (
-                    "I built the generator script but couldn't produce the final "
-                    "binary cleanly — sharing the script so you have something to "
-                    "work with."
-                ),
-                "companion_tone_hint": (
-                    "Honest and constructive — partial deliverable; offer to debug "
-                    "if the user shares the error from running it."
-                ),
-                "user_next_action": (
-                    "Try running `python <path>` yourself, or send me the error "
-                    "and I'll fix it."
-                ),
-                "confidence": 0.4,
-            }
-        return {
-            "artifact_path": None,
-            "artifact_type": "unknown",
-            "artifact_title": "Build task force-stopped",
-            "steps_completed": steps_completed,
-            "decisions_made": [],
-            "companion_summary": (
-                f"The builder made {steps_completed} edits but didn't finish cleanly. "
-                "No final deliverable was produced."
-            ),
-            "companion_tone_hint": "Apologetic — builder ran out of budget.",
-            "user_next_action": "Tell me what to try differently and I'll run it again.",
-            "confidence": 0.2,
-        }
+            return BuilderArtifactMiddleware._generator_script_fallback(
+                promoted_generator_path,
+                steps_completed=steps_completed,
+            )
+        if requested_pdf:
+            return BuilderArtifactMiddleware._pdf_no_deliverable_fallback(
+                steps_completed=steps_completed,
+            )
+        return BuilderArtifactMiddleware._generic_no_deliverable_fallback(
+            steps_completed=steps_completed,
+        )
 
     @staticmethod
     def _upload_fallback_and_fire(

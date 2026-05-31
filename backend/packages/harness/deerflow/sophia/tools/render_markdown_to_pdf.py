@@ -164,6 +164,14 @@ def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
     # ---- Pandoc availability --------------------------------------------
     pandoc_bin = shutil.which("pandoc")
     if pandoc_bin is None:
+        logger.warning(
+            "render_markdown_to_pdf: capability_check pandoc_available=false "
+            "xelatex_available=%s lualatex_available=%s wkhtmltopdf_available=%s "
+            "error_type=pandoc_missing",
+            shutil.which("xelatex") is not None,
+            shutil.which("lualatex") is not None,
+            shutil.which("wkhtmltopdf") is not None,
+        )
         return _result(
             success=False,
             error=(
@@ -179,7 +187,16 @@ def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
         )
 
     engine, engine_msg = _resolve_pdf_engine(pdf_engine)
-    logger.info("render_markdown_to_pdf: %s", engine_msg)
+    logger.info(
+        "render_markdown_to_pdf: capability_check pandoc_available=true "
+        "xelatex_available=%s lualatex_available=%s wkhtmltopdf_available=%s "
+        "selected_engine=%s message=%s",
+        shutil.which("xelatex") is not None,
+        shutil.which("lualatex") is not None,
+        shutil.which("wkhtmltopdf") is not None,
+        engine or "pandoc_default",
+        engine_msg,
+    )
 
     pdf_file = Path(pdf_path)
     pdf_file.parent.mkdir(parents=True, exist_ok=True)
@@ -223,6 +240,12 @@ def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
         )
 
     if completed.returncode != 0:
+        logger.warning(
+            "render_markdown_to_pdf: render_failed error_type=pandoc_error "
+            "selected_engine=%s returncode=%s",
+            engine or "pandoc_default",
+            completed.returncode,
+        )
         # Pandoc errors are usually about LaTeX issues (missing
         # packages, unicode chars without xelatex, broken image paths).
         # Return stderr so the model can decide whether to retry with a
@@ -254,6 +277,13 @@ def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
     except OSError:
         size_bytes = -1
 
+    logger.info(
+        "render_markdown_to_pdf: render_success selected_engine=%s "
+        "final_artifact_ext=%s size_bytes=%s",
+        engine or "pandoc_default",
+        pdf_file.suffix.lower().lstrip(".") or "unknown",
+        size_bytes,
+    )
     return _result(
         success=True,
         pdf_path=str(pdf_file),

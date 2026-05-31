@@ -164,6 +164,47 @@ def _format_age(now_s: float, mtime: float) -> str:
     return f"{int(delta / 3600)}h ago"
 
 
+def _artifact_target_extension(artifact_target_path: object) -> str:
+    if not isinstance(artifact_target_path, str):
+        return ""
+    return Path(artifact_target_path).suffix.lower()
+
+
+def _critical_emit_guidance(artifact_target_ext: str) -> str:
+    if artifact_target_ext == ".pdf":
+        return (
+            "for this PDF target, prefer the .pdf if it exists, otherwise emit "
+            "the Markdown source with confidence<=0.5. Do NOT emit a generator "
+            ".py as a PDF fallback.\n"
+        )
+    return (
+        "if only a generator .py exists, emit that with confidence<=0.4 and "
+        "explain in companion_tone_hint.\n"
+    )
+
+
+def _critical_pick_guidance(artifact_target_ext: str) -> str:
+    if artifact_target_ext == ".pdf":
+        return (
+            "first file marked 'deliverable'. If only generator files exist, "
+            "accept the force-stop fallback.\n"
+        )
+    return "first file marked 'deliverable' (or 'generator' if no deliverable exists) "
+
+
+def _generator_listing_tag(
+    *,
+    artifact_target_ext: str,
+    has_deliverable: bool,
+    has_generator: bool,
+) -> tuple[str, bool]:
+    if artifact_target_ext == ".pdf":
+        return "(generator script — do NOT emit for PDF; use .pdf or .md instead)", has_generator
+    if not has_deliverable and has_generator:
+        return "(generator script — emit with confidence<=0.4 if no deliverable works)", False
+    return "(generator script)", has_generator
+
+
 class BuilderTaskState(AgentState):
     system_prompt_blocks: NotRequired[list[str]]
     delegation_context: NotRequired[dict | None]
@@ -215,6 +256,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             state.get("builder_artifact_target_path")
             or delegation_context.get("artifact_target_path")
         )
+        artifact_target_ext = _artifact_target_extension(artifact_target_path)
         tracked_sources = [
             source for source in (state.get("builder_search_sources") or []) if isinstance(source, dict)
         ]
@@ -454,6 +496,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "      If render_markdown_to_pdf returns success=false with error_type='pandoc_missing' or "
             "      'pandoc_error', SHIP THE MARKDOWN as the artifact instead (artifact_type='document', "
             "      artifact_path = the .md file) with confidence<=0.5 and explain in companion_tone_hint.\n"
+            "      Never emit a _generate_*.py script as the final artifact for a requested PDF.\n"
             "    * **PPTX / presentation**: use the ppt-generation skill (read its SKILL.md). The skill "
             "      orchestrates image-generation per slide and composes them into a PPTX. Do not write your own "
             "      python-pptx code.\n"
@@ -475,8 +518,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "the user sees the progress bar advance — skipping these updates leaves the UI stuck.\n"
             "- Make targeted edits only if critical fixes are needed.\n"
             "- Final turn: Call ONLY emit_builder_artifact pointing artifact_path at the FINAL DELIVERABLE "
-            "(the .pdf, .pptx, .png, .md, etc. — never a generator .py unless that is the explicit fallback "
-            "above). Do NOT pair emit_builder_artifact with any other tool call on the same turn — not "
+            "(the .pdf, .pptx, .png, .md, etc. — never a generator .py for PDFs, and only a generator .py "
+            "for non-PDF formats when that is the explicit fallback above). Do NOT pair emit_builder_artifact with any other tool call on the same turn — not "
             "write_todos, not bash, not write_file, not anything. The artifact card surfaces the file to "
             "the user automatically once emit_builder_artifact is captured; you do not need to flag the "
             "file separately. emit_builder_artifact alone is MANDATORY — without it your work is lost.\n"
@@ -518,11 +561,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                     "write_file, bash_tool, or any other tool on this turn. "
                     "Ship what you have NOW, even if partial. "
                     "Use artifact_path pointing to the best file that exists on disk; "
-                    "if only a generator .py exists, emit that with confidence<=0.4 and "
-                    "explain in companion_tone_hint.\n"
-                    "Do NOT emit with artifact_path=null. If you cannot decide, pick the "
-                    "first file marked 'deliverable' (or 'generator' if no deliverable exists) "
-                    "from the list below.\n"
+                    + _critical_emit_guidance(artifact_target_ext)
+                    + "Do NOT emit with artifact_path=null. If you cannot decide, pick the "
+                    + _critical_pick_guidance(artifact_target_ext)
+                    + "from the list below.\n"
                 )
                 # PR #94: enumerate actual files in outputs/ so the model
                 # can pick a real path under tool_choice pressure instead
@@ -552,11 +594,11 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                             else:
                                 tag = "(another deliverable)"
                         elif item["category"] == "generator":
-                            if not has_deliverable and has_generator:
-                                tag = "(generator script — emit with confidence<=0.4 if no deliverable works)"
-                                has_generator = False
-                            else:
-                                tag = "(generator script)"
+                            tag, has_generator = _generator_listing_tag(
+                                artifact_target_ext=artifact_target_ext,
+                                has_deliverable=has_deliverable,
+                                has_generator=has_generator,
+                            )
                         else:
                             tag = "(intermediate — do NOT emit as final)"
                         file_lines.append(
