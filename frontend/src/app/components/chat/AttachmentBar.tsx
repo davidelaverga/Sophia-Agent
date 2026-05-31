@@ -739,6 +739,21 @@ async function uploadOneFile(
   update: (clientId: string, patch: Partial<PendingAttachment>) => void,
   remove: (clientId: string) => void,
 ): Promise<void> {
+  // Codex P2 PR #132: the user can click × BEFORE the upload loop reaches
+  // this registration (e.g. while the /uploads/list lookup is still
+  // resolving). handleChipDiscard then flips the chip to "deleting" without
+  // removing it (so selectHasUploadsInFlight stays honest). If we POST
+  // anyway, a file the user already discarded lands in the thread's uploads
+  // dir, and the post-success cleanup DELETE might fail or never run (tab
+  // closed) — leaving it for the attachment tools to surface later. So bail
+  // BEFORE creating/sending the request when the chip is already "deleting":
+  // drop the chip and never upload. (The post-fetch checks below still cover
+  // the genuine mid-flight race — discard AFTER the POST started.)
+  if (readChipStatus(reg.item.clientId) === "deleting") {
+    remove(reg.item.clientId)
+    return
+  }
+
   const fd = new FormData()
   fd.append("files", reg.file, reg.file.name)
   try {
