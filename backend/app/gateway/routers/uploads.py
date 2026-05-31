@@ -343,31 +343,46 @@ async def delete_uploaded_file(thread_id: str, filename: str) -> dict:
     uploads_dir = get_uploads_dir(thread_id)
     file_path = uploads_dir / filename
 
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
-
-    # Security check: ensure the path is within the uploads directory
+    # Security check FIRST — must run regardless of local existence and before
+    # any mutation. ``resolve()`` is non-strict (Python 3.12), so it works on a
+    # path that doesn't exist locally; a traversal filename collapses outside
+    # uploads_dir and trips ``relative_to`` -> 403.
     try:
         file_path.resolve().relative_to(uploads_dir.resolve())
     except ValueError:
         raise HTTPException(status_code=403, detail="Access denied")
 
+    # IMPORTANT (Codex P1 PR #132): do NOT 404 on a local miss. In the split
+    # gateway/langgraph deployment the gateway disk is ephemeral and the file
+    # may be absent on this instance (restart, or the request landed on a
+    # different instance) while the Supabase mirror is still the live copy the
+    # read tools materialize from. Treat the whole delete as idempotent:
+    # best-effort local unlink + ALWAYS remove the Supabase mirror (original +
+    # converted .md sibling), then report success. Otherwise a discarded file
+    # stays readable from Supabase forever via the next view_user_image /
+    # read_user_document local miss. ``delete_artifact`` is 404-idempotent.
     try:
+        deleted_files = [filename]
+        # Derive the convertible .md sibling from the REQUESTED filename's
+        # suffix (no dependency on the original being present locally).
+        md_sibling_name: str | None = None
         if file_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
-            companion_markdown = file_path.with_suffix(".md")
-            companion_markdown.unlink(missing_ok=True)
-            # Mirror removal (PR #132): drop the converted .md from Supabase
-            # too, or read_user_document (separate container) would
-            # re-materialize the discarded conversion on the next local miss.
-            _delete_supabase_mirror(thread_id, companion_markdown.name)
+            md_sibling = file_path.with_suffix(".md")
+            md_sibling.unlink(missing_ok=True)
+            md_sibling_name = md_sibling.name
+            deleted_files.append(md_sibling_name)
+
         file_path.unlink(missing_ok=True)
-        # Remove the Supabase mirror of the original (PR #132). Without this,
-        # view_user_image / read_user_document (which run in a separate
-        # container) would re-download the discarded file on the next local
-        # miss and surface it to the companion / builder again.
+
+        # Mirror cleanup — unconditional (runs even when nothing existed
+        # locally). Drops both the original and the converted .md from the
+        # Supabase uploads keyspace.
         _delete_supabase_mirror(thread_id, filename)
-        logger.info(f"Deleted file: {filename}")
-        return {"success": True, "message": f"Deleted {filename}"}
+        if md_sibling_name is not None:
+            _delete_supabase_mirror(thread_id, md_sibling_name)
+
+        logger.info("Deleted upload (local + mirror): thread_id=%s filename=%s", thread_id, filename)
+        return {"success": True, "message": f"Deleted {filename}", "deleted": deleted_files}
     except Exception as e:
         logger.error(f"Failed to delete {filename}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete {filename}: {str(e)}")

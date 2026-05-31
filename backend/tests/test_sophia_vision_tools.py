@@ -356,14 +356,17 @@ async def test_read_user_document_materializes_from_supabase_on_local_miss(tmp_p
     )
     monkeypatch.setattr(rud_mod, "get_paths", lambda: fake_paths)
 
-    # Mock the Supabase store: configured + returns the doc bytes.
+    # Mock the Supabase store: configured + returns the doc bytes, and capture
+    # the requested object name so we can assert the uploads keyspace prefix.
     from deerflow.sophia.storage import supabase_artifact_store as store
+    requested: list[tuple[str, str]] = []
     monkeypatch.setattr(store, "is_configured", lambda: True)
-    monkeypatch.setattr(
-        store,
-        "download_artifact",
-        lambda _tid, _fn, **_kw: (b"# Remote\n\nfrom supabase.", "text/markdown"),
-    )
+
+    def _fake_download(tid, fn, **_kw):
+        requested.append((tid, fn))
+        return (b"# Remote\n\nfrom supabase.", "text/markdown")
+
+    monkeypatch.setattr(store, "download_artifact", _fake_download)
 
     runtime = _make_runtime("t1", {})
     result = await rud_mod.read_user_document.coroutine(
@@ -376,6 +379,9 @@ async def test_read_user_document_materializes_from_supabase_on_local_miss(tmp_p
     assert "from supabase." in body
     # And it should have been materialized to the local uploads dir.
     assert (uploads / "remote.md").is_file()
+    # It must address the PREFIXED uploads keyspace (Codex P1 PR #132), not the
+    # bare builder-output keyspace — else uploads and builder outputs collide.
+    assert requested == [("t1", "uploads/remote.md")]
 
 
 @pytest.mark.anyio
