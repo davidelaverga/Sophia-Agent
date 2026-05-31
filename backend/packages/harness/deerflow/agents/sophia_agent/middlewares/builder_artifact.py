@@ -134,6 +134,21 @@ _PROMOTABLE_DELIVERABLE_EXTENSIONS = frozenset({
     ".ts",
     ".css",
 })
+_PDF_FALLBACK_EXTENSIONS = frozenset({".md", ".html"})
+_PDF_VISUAL_FALLBACK_MARKERS = (
+    "chart",
+    "charts",
+    "diagram",
+    "diagrams",
+    "visual",
+    "visuals",
+    "visualization",
+    "visualisation",
+    "infographic",
+    "layout",
+    "image",
+    "images",
+)
 _WRITE_ERROR_CLASS_MARKERS = (
     ("missing_thread_id", ("thread id not available", "nonetype' object has no attribute 'get")),
     ("missing_thread_data", ("thread data not available", "no allowed local sandbox directories")),
@@ -243,6 +258,14 @@ def _outputs_host_path_from_state(state: dict[str, Any]) -> str | None:
     return thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
 
 
+def _outputs_root_from_state(state: dict[str, Any]) -> Path | None:
+    outputs_host_path = _outputs_host_path_from_state(state)
+    if not outputs_host_path:
+        return None
+    outputs_root = Path(outputs_host_path)
+    return outputs_root if outputs_root.is_dir() else None
+
+
 def _builder_started_min_mtime(state: dict[str, Any]) -> float | None:
     started_ms = state.get("builder_task_started_at_ms")
     if isinstance(started_ms, (int, float)) and started_ms > 0:
@@ -256,6 +279,56 @@ def _is_recovery_candidate(entry: Path, *, requested_suffix: str, min_mtime: flo
     if requested_suffix and entry.suffix.lower() != requested_suffix:
         return False
     return min_mtime is None or entry.stat().st_mtime >= min_mtime
+
+
+def _is_fresh_pdf_output(entry: Path, min_mtime: float | None) -> bool:
+    if not _is_public_output_file(entry):
+        return False
+    if entry.suffix.lower() != ".pdf":
+        return False
+    return min_mtime is None or entry.stat().st_mtime >= min_mtime
+
+
+def _is_public_output_file(entry: Path) -> bool:
+    if not entry.is_file():
+        return False
+    return not entry.name.startswith((".", "_"))
+
+
+def _output_tree_has_fresh_pdf(outputs_root: Path, min_mtime: float | None) -> bool:
+    for entry in outputs_root.rglob("*"):
+        if _is_fresh_pdf_output(entry, min_mtime):
+            return True
+    return False
+
+
+def _output_tree_has_completion_candidate(
+    outputs_root: Path,
+    state: dict[str, Any],
+    min_mtime: float | None,
+) -> bool:
+    for entry in outputs_root.rglob("*"):
+        if _is_completion_output_candidate(entry, state, min_mtime):
+            return True
+    return False
+
+
+def _is_completion_output_candidate(
+    entry: Path,
+    state: dict[str, Any],
+    min_mtime: float | None,
+) -> bool:
+    if not _is_public_output_file(entry):
+        return False
+    if min_mtime is not None and entry.stat().st_mtime < min_mtime:
+        return False
+    return _output_suffix_allowed_for_request(entry.suffix.lower(), state)
+
+
+def _output_suffix_allowed_for_request(suffix: str, state: dict[str, Any]) -> bool:
+    if _requested_pdf_artifact(state):
+        return suffix in _allowed_pdf_artifact_suffixes(state)
+    return True
 
 
 def _is_user_facing_output_path(artifact_path: str | None) -> bool:
@@ -280,6 +353,107 @@ def _requested_target_suffix(state: dict[str, Any]) -> str:
 
 def _requested_pdf_artifact(state: dict[str, Any]) -> bool:
     return _requested_target_suffix(state) == ".pdf"
+
+
+def _requested_task_text(state: dict[str, Any]) -> str:
+    parts = _delegation_task_text_parts(state) + _state_task_text_parts(state)
+    return "\n".join(parts).lower()
+
+
+def _delegation_task_text_parts(state: dict[str, Any]) -> list[str]:
+    delegation = state.get("delegation_context")
+    if not isinstance(delegation, dict):
+        return []
+    keys = ("task", "task_description", "description", "original_task", "task_type")
+    return [value for key in keys if isinstance((value := delegation.get(key)), str)]
+
+
+def _state_task_text_parts(state: dict[str, Any]) -> list[str]:
+    keys = ("task", "task_description", "builder_task_description")
+    return [value for key in keys if isinstance((value := state.get(key)), str)]
+
+
+def _pdf_fallback_suffix(state: dict[str, Any]) -> str:
+    task_text = _requested_task_text(state)
+    if any(marker in task_text for marker in _PDF_VISUAL_FALLBACK_MARKERS):
+        return ".html"
+    return ".md"
+
+
+def _allowed_pdf_artifact_suffixes(state: dict[str, Any]) -> frozenset[str]:
+    return frozenset({".pdf", _pdf_fallback_suffix(state)})
+
+
+def _render_markdown_to_pdf_attempted(state: dict[str, Any]) -> bool:
+    summaries = state.get("builder_tool_turn_summaries") or []
+    return any(
+        "render_markdown_to_pdf" in (summary.get("tool_names") or [])
+        for summary in summaries
+        if isinstance(summary, dict)
+    )
+
+
+def _canonical_outputs_artifact_path(path: Any) -> str | None:
+    candidate = _stripped_artifact_path(path)
+    if candidate is None:
+        return None
+    if candidate.startswith(_OUTPUTS_VIRTUAL_PREFIX):
+        return _valid_prefixed_output_path(candidate)
+    return _plain_output_artifact_path(candidate)
+
+
+def _stripped_artifact_path(path: Any) -> str | None:
+    if not isinstance(path, str) or not path.strip():
+        return None
+    return path.strip()
+
+
+def _valid_prefixed_output_path(candidate: str) -> str | None:
+    return candidate if _extract_output_relative_path(candidate) is not None else None
+
+
+def _plain_output_artifact_path(candidate: str) -> str | None:
+    return f"{_OUTPUTS_VIRTUAL_PREFIX}{candidate}" if _is_plain_output_filename(candidate) else None
+
+
+def _is_plain_output_filename(candidate: str) -> bool:
+    pure = PurePosixPath(candidate)
+    return (
+        not pure.is_absolute()
+        and ".." not in pure.parts
+        and "/" not in candidate
+        and "\\" not in candidate
+    )
+
+
+def _pdf_artifact_path_rejection_reason(path: Any, state: dict[str, Any]) -> str | None:
+    canonical = _canonical_outputs_artifact_path(path)
+    if canonical is None:
+        return "pdf_artifact_path_not_under_outputs"
+    return _pdf_artifact_suffix_rejection_reason(canonical, state)
+
+
+def _pdf_artifact_suffix_rejection_reason(canonical: str, state: dict[str, Any]) -> str | None:
+    suffix = PurePosixPath(canonical).suffix.lower()
+    if suffix not in _allowed_pdf_artifact_suffixes(state):
+        return f"pdf_invalid_artifact_extension:{suffix or 'none'}"
+    return _pdf_fallback_rejection_reason(suffix, state)
+
+
+def _pdf_fallback_rejection_reason(suffix: str, state: dict[str, Any]) -> str | None:
+    if suffix in _PDF_FALLBACK_EXTENSIONS and not _render_markdown_to_pdf_attempted(state):
+        return "pdf_fallback_before_render_attempt"
+    return None
+
+
+def _pdf_render_attempt_missing(state: dict[str, Any]) -> bool:
+    if not _requested_pdf_artifact(state):
+        return False
+    return not _render_markdown_to_pdf_attempted(state)
+
+
+def _artifact_path_suffix_label(path: object) -> str | None:
+    return PurePosixPath(str(path or "")).suffix.lower().lstrip(".") or None
 
 
 def _recovery_hint(outputs_root: Path, candidates: list[Path]) -> str:
@@ -657,6 +831,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         """Anthropic tool_choice payload that forces builder_web_fetch."""
         return {"type": "tool", "name": "builder_web_fetch"}
 
+    @staticmethod
+    def _forced_pdf_render_tool_choice() -> dict[str, Any]:
+        """Anthropic tool_choice payload that forces the PDF renderer."""
+        return {"type": "tool", "name": "render_markdown_to_pdf"}
+
     def _research_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
         if not self._should_force_research_tool(state):
             return None
@@ -689,14 +868,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         non_artifact_turns = state.get("builder_non_artifact_turns")
 
         if self._has_output_file(state):
-            logger.warning(
-                "BuilderArtifact: forcing tool_choice=emit_builder_artifact "
-                "(non_artifact_turns=%s, ceiling=%s, reason=%s)",
-                non_artifact_turns,
-                self._CEILING_FOR_FORCE,
-                force_reason,
-            )
-            return self._forced_tool_choice()
+            return self._output_file_completion_tool_choice(state, non_artifact_turns, force_reason)
 
         if self._has_generator_script(state):
             return self._generator_recovery_tool_choice(state, non_artifact_turns, force_reason)
@@ -710,6 +882,39 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             force_reason,
         )
         return self._forced_write_tool_choice()
+
+    def _output_file_completion_tool_choice(
+        self,
+        state: BuilderArtifactState,
+        non_artifact_turns: object,
+        force_reason: str,
+    ) -> dict[str, Any]:
+        if self._should_force_pdf_render_before_emit(state):
+            logger.warning(
+                "BuilderArtifact: forcing tool_choice=render_markdown_to_pdf "
+                "before PDF fallback emit (non_artifact_turns=%s, "
+                "ceiling=%s, reason=%s)",
+                non_artifact_turns,
+                self._CEILING_FOR_FORCE,
+                force_reason,
+            )
+            return self._forced_pdf_render_tool_choice()
+        logger.warning(
+            "BuilderArtifact: forcing tool_choice=emit_builder_artifact "
+            "(non_artifact_turns=%s, ceiling=%s, reason=%s)",
+            non_artifact_turns,
+            self._CEILING_FOR_FORCE,
+            force_reason,
+        )
+        return self._forced_tool_choice()
+
+    @classmethod
+    def _should_force_pdf_render_before_emit(cls, state: BuilderArtifactState) -> bool:
+        if not _requested_pdf_artifact(state):
+            return False
+        if cls._has_requested_pdf_binary(state):
+            return False
+        return not _render_markdown_to_pdf_attempted(state)
 
     def _generator_recovery_tool_choice(
         self,
@@ -771,37 +976,20 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         ``_generate_foo.py``) or ``.`` (hidden files) are excluded — those
         aren't user-facing deliverables.
         """
-        thread_data = state.get("thread_data") or {}
-        outputs_host_path = (
-            thread_data.get("outputs_path")
-            if isinstance(thread_data, dict)
-            else None
-        )
-        if not isinstance(outputs_host_path, str) or not outputs_host_path:
+        outputs_host_path = _outputs_host_path_from_state(state)
+        outputs_root = _outputs_root_from_state(state)
+        if outputs_root is None:
             # No outputs dir configured — assume the model hasn't written
             # anything. Returning False routes through the safer path
             # (force write_file first) instead of forcing a phantom emit.
             return False
 
-        builder_task_started_at_ms = state.get("builder_task_started_at_ms")
-        min_mtime: float | None = None
-        if isinstance(builder_task_started_at_ms, (int, float)) and builder_task_started_at_ms > 0:
-            # Ignore stale artifacts from prior builder tasks in the same thread.
-            # Keep the same 5s grace used by hard-ceiling promotion.
-            min_mtime = (float(builder_task_started_at_ms) / 1000.0) - 5.0
+        # Ignore stale artifacts from prior builder tasks in the same thread.
+        # Keep the same 5s grace used by hard-ceiling promotion.
+        min_mtime = _builder_started_min_mtime(state)
 
         try:
-            outputs_root = Path(outputs_host_path)
-            if not outputs_root.is_dir():
-                return False
-            for entry in outputs_root.rglob("*"):
-                if not entry.is_file():
-                    continue
-                if entry.name.startswith("_") or entry.name.startswith("."):
-                    continue
-                if min_mtime is not None and entry.stat().st_mtime < min_mtime:
-                    continue
-                return True
+            return _output_tree_has_completion_candidate(outputs_root, state, min_mtime)
         except OSError:
             # Filesystem error (permissions, race) — fall through to True
             # so the existing forced-emit path proceeds. Better to risk one
@@ -815,6 +1003,22 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             )
             return True
         return False
+
+    @staticmethod
+    def _has_requested_pdf_binary(state: BuilderArtifactState) -> bool:
+        outputs_root = _outputs_root_from_state(state)
+        if outputs_root is None:
+            return False
+        min_mtime = _builder_started_min_mtime(state)
+        try:
+            return _output_tree_has_fresh_pdf(outputs_root, min_mtime)
+        except OSError:
+            logger.debug(
+                "BuilderArtifact._has_requested_pdf_binary: scan failed for outputs_path=%s",
+                _outputs_host_path_from_state(state),
+                exc_info=True,
+            )
+            return False
 
     @staticmethod
     def _promotable_output_candidates(
@@ -839,8 +1043,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         ]
         if requested_pdf:
             pdf_candidates = [p for p in candidates if p.suffix.lower() == ".pdf"]
-            md_candidates = [p for p in candidates if p.suffix.lower() == ".md"]
-            candidates = pdf_candidates or md_candidates
+            fallback_suffix = _pdf_fallback_suffix(state)
+            fallback_candidates = [
+                p for p in candidates if p.suffix.lower() == fallback_suffix
+            ]
+            candidates = pdf_candidates or fallback_candidates
         candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return candidates
 
@@ -1021,6 +1228,24 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "user_next_action": "Tell me what to try differently and I'll run it again.",
             "confidence": 0.2,
         }
+
+    @staticmethod
+    def _fallback_completion_status(fallback: dict[str, Any]) -> str:
+        return "completed" if fallback.get("artifact_path") else "failed"
+
+    @staticmethod
+    def _log_missing_pdf_render_attempt_if_needed(
+        state: BuilderArtifactState,
+        artifact_args: dict[str, Any],
+    ) -> None:
+        if not _pdf_render_attempt_missing(state):
+            return
+        logger.warning(
+            "BuilderArtifact: requested_ext=pdf render_tool_attempted=false "
+            "fallback_ext=%s rejected_ext=%s reason=pdf_render_tool_not_attempted",
+            _pdf_fallback_suffix(state).lstrip("."),
+            _artifact_path_suffix_label(artifact_args.get("artifact_path")),
+        )
 
     @staticmethod
     def _build_ceiling_fallback(
@@ -1214,6 +1439,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         Outside the forced-emit window the old behaviour applies — text-only
         / conceptual artifacts are still accepted.
         """
+        if _requested_pdf_artifact(state) and not cls._pdf_artifact_args_valid(artifact_args, state):
+            return False
         candidates: list[str] = []
         primary = artifact_args.get("artifact_path")
         if isinstance(primary, str) and primary.strip():
@@ -1290,6 +1517,51 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
         return True
 
+    @staticmethod
+    def _pdf_artifact_args_valid(
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+    ) -> bool:
+        primary = artifact_args.get("artifact_path")
+        rejection_reason = _pdf_artifact_path_rejection_reason(primary, state)
+        if rejection_reason is not None:
+            BuilderArtifactMiddleware._log_pdf_artifact_rejection(primary, rejection_reason, state)
+            return False
+        return BuilderArtifactMiddleware._canonicalize_pdf_artifact_path(artifact_args, primary)
+
+    @staticmethod
+    def _log_pdf_artifact_rejection(
+        primary: object,
+        rejection_reason: str,
+        state: BuilderArtifactState,
+    ) -> None:
+        rejected_ext = PurePosixPath(str(primary or "")).suffix.lower().lstrip(".") or None
+        logger.warning(
+            "BuilderArtifact: rejecting PDF artifact path reason=%s "
+            "requested_ext=pdf render_tool_attempted=%s fallback_ext=%s "
+            "rejected_ext=%s",
+            rejection_reason,
+            _render_markdown_to_pdf_attempted(state),
+            _pdf_fallback_suffix(state).lstrip("."),
+            rejected_ext,
+        )
+        if not _render_markdown_to_pdf_attempted(state):
+            BuilderArtifactMiddleware._log_missing_pdf_render_attempt_if_needed(
+                state,
+                {"artifact_path": primary},
+            )
+
+    @staticmethod
+    def _canonicalize_pdf_artifact_path(
+        artifact_args: dict[str, Any],
+        primary: object,
+    ) -> bool:
+        canonical_primary = _canonical_outputs_artifact_path(primary)
+        if canonical_primary is None:
+            return False
+        artifact_args["artifact_path"] = canonical_primary
+        return True
+
     @classmethod
     def _missing_artifact_recovery_hint(
         cls,
@@ -1318,6 +1590,40 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             )
             return ""
         return _recovery_hint(outputs_root, candidates)
+
+    @classmethod
+    def _emit_rejection_message(
+        cls,
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+    ) -> str:
+        if _requested_pdf_artifact(state):
+            primary = artifact_args.get("artifact_path")
+            reason = _pdf_artifact_path_rejection_reason(primary, state)
+            if reason is not None:
+                fallback_ext = _pdf_fallback_suffix(state)
+                if reason == "pdf_fallback_before_render_attempt":
+                    return (
+                        "Error: emit_builder_artifact rejected — this is a PDF request, "
+                        "so you must attempt render_markdown_to_pdf before emitting a "
+                        f"{fallback_ext} fallback. If rendering fails, emit the "
+                        f"{fallback_ext} fallback from /mnt/user-data/outputs/."
+                    )
+                return (
+                    "Error: emit_builder_artifact rejected — this is a PDF request. "
+                    "The final artifact must be a real .pdf, or the approved "
+                    f"{fallback_ext} fallback after a render_markdown_to_pdf attempt. "
+                    "Do not emit Python files, generator scripts, bare paths, or "
+                    "files outside /mnt/user-data/outputs/ as the user-ready artifact."
+                )
+        recovery_hint = cls._missing_artifact_recovery_hint(artifact_args, state)
+        return (
+            "Error: emit_builder_artifact rejected — the referenced "
+            f"artifact file ({artifact_args.get('artifact_path')}) does not exist "
+            "on disk or in remote storage. Please write the file first, "
+            "then call emit_builder_artifact again."
+            f"{recovery_hint}"
+        )
 
     @classmethod
     def _recover_emit_args_from_last_write(
@@ -1387,6 +1693,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         runtime: Runtime,
     ) -> str | None:
         paths = cls._successful_deliverable_output_paths(state)
+        if _requested_pdf_artifact(state):
+            allowed = _allowed_pdf_artifact_suffixes(state)
+            paths = [path for path in paths if PurePosixPath(path).suffix.lower() in allowed]
         diagnostics = state.get("builder_write_diagnostics") or {}
         target_path = cls._target_artifact_path(state)
         if target_path and _is_user_facing_output_path(target_path):
@@ -2164,18 +2473,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "artifact_path %s not found. Routing back to model for retry.",
             args.get("artifact_path"),
         )
-        recovery_hint = self._missing_artifact_recovery_hint(args, request.state)
         return Command(
             update={
                 "messages": [
                     ToolMessage(
-                        content=(
-                            "Error: emit_builder_artifact rejected — the referenced "
-                            f"artifact file ({args.get('artifact_path')}) does not exist "
-                            "on disk or in remote storage. Please write the file first, "
-                            "then call emit_builder_artifact again."
-                            f"{recovery_hint}"
-                        ),
+                        content=self._emit_rejection_message(args, request.state),
                         tool_call_id=tool_call_id,
                         name="emit_builder_artifact",
                         status="error",
@@ -2213,18 +2515,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "artifact_path %s not found. Routing back to model for retry.",
             args.get("artifact_path"),
         )
-        recovery_hint = self._missing_artifact_recovery_hint(args, request.state)
         return Command(
             update={
                 "messages": [
                     ToolMessage(
-                        content=(
-                            "Error: emit_builder_artifact rejected — the referenced "
-                            f"artifact file ({args.get('artifact_path')}) does not exist "
-                            "on disk or in remote storage. Please write the file first, "
-                            "then call emit_builder_artifact again."
-                            f"{recovery_hint}"
-                        ),
+                        content=self._emit_rejection_message(args, request.state),
                         tool_call_id=tool_call_id,
                         name="emit_builder_artifact",
                         status="error",
@@ -2340,7 +2635,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 state=state,
                                 runtime=runtime,
                                 fallback=fallback,
-                                status="failed" if not fallback.get("artifact_path") else "completed",
+                                status=self._fallback_completion_status(fallback),
                             )
                             return {
                                 "builder_result": fallback,
@@ -2381,7 +2676,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 state=state,
                                 runtime=runtime,
                                 fallback=fallback,
-                                status="completed",
+                                status="failed" if not fallback.get("artifact_path") else "completed",
                             )
                             return {
                                 "builder_result": fallback,
@@ -2446,6 +2741,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         outputs_host_path=outputs_host_path,
                         artifact_args=args,
                     )
+                    self._log_missing_pdf_render_attempt_if_needed(state, args)
                     self._log_research_diagnostics(
                         phase="completion",
                         diagnostics=research_diagnostics,
@@ -2556,7 +2852,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         state=state,
                         runtime=runtime,
                         fallback=fallback,
-                        status="completed",
+                        status=self._fallback_completion_status(fallback),
                     )
                     return {
                         "builder_result": fallback,

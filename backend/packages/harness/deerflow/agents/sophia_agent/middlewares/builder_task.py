@@ -174,8 +174,9 @@ def _critical_emit_guidance(artifact_target_ext: str) -> str:
     if artifact_target_ext == ".pdf":
         return (
             "for this PDF target, prefer the .pdf if it exists, otherwise emit "
-            "the Markdown source with confidence<=0.5. Do NOT emit a generator "
-            ".py as a PDF fallback.\n"
+            "the approved Markdown fallback for mostly-text documents or HTML "
+            "fallback for visual/chart/diagram documents with confidence<=0.5. "
+            "Do NOT emit a generator .py as a PDF fallback.\n"
         )
     return (
         "if only a generator .py exists, emit that with confidence<=0.4 and "
@@ -199,7 +200,7 @@ def _generator_listing_tag(
     has_generator: bool,
 ) -> tuple[str, bool]:
     if artifact_target_ext == ".pdf":
-        return "(generator script — do NOT emit for PDF; use .pdf or .md instead)", has_generator
+        return "(generator script — do NOT emit for PDF; use .pdf or approved .md/.html fallback instead)", has_generator
     if not has_deliverable and has_generator:
         return "(generator script — emit with confidence<=0.4 if no deliverable works)", False
     return "(generator script)", has_generator
@@ -494,9 +495,12 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "         This tool wraps pandoc and handles fonts/unicode/embedding correctly.\n"
             "      4. emit_builder_artifact.artifact_path = the .pdf path.\n"
             "      If render_markdown_to_pdf returns success=false with error_type='pandoc_missing' or "
-            "      'pandoc_error', SHIP THE MARKDOWN as the artifact instead (artifact_type='document', "
-            "      artifact_path = the .md file) with confidence<=0.5 and explain in companion_tone_hint.\n"
-            "      Never emit a _generate_*.py script as the final artifact for a requested PDF.\n"
+            "      'pandoc_error'/'pandoc_timeout': for mostly text documents, SHIP THE MARKDOWN as the artifact "
+            "      instead (artifact_type='document', artifact_path = the .md file); for visual/chart/diagram "
+            "      documents, write and ship an HTML fallback that embeds the visuals. Use confidence<=0.5 and "
+            "      explain the PDF renderer limitation in companion_tone_hint.\n"
+            "      Never emit a _generate_*.py script, test_write.py, or any Python/code file as the final "
+            "      artifact for a requested PDF.\n"
             "    * **PPTX / presentation**: use the ppt-generation skill (read its SKILL.md). The skill "
             "      orchestrates image-generation per slide and composes them into a PPTX. Do not write your own "
             "      python-pptx code.\n"
