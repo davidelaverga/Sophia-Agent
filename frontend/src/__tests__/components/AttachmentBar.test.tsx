@@ -905,6 +905,62 @@ describe('AttachmentBar — Codex P2 per-turn cap', () => {
     resolveList!(new Response(JSON.stringify({ files: [] }), { status: 200 }));
   });
 
+  it('does NOT upload a chip discarded before the upload loop starts (Codex P2 PR #132)', async () => {
+    // Race: the user clicks × while /uploads/list is still resolving.
+    // handleChipDiscard flips the chip to "deleting" (without removing it, so
+    // selectHasUploadsInFlight stays honest). When the list resolves and the
+    // upload loop reaches this registration, uploadOneFile must bail BEFORE
+    // the POST — otherwise a file the user already discarded lands in the
+    // thread uploads dir and a later cleanup DELETE might fail / never run.
+    let resolveList: ((value: Response) => void) | null = null;
+    const pendingList = new Promise<Response>((resolve) => {
+      resolveList = resolve;
+    });
+    const fetchMock = vi.spyOn(global, 'fetch').mockImplementation((input) => {
+      const url = String(input);
+      if (url.includes('/uploads/list')) return pendingList;
+      // Any non-list call (i.e. an upload POST) resolves OK so we can detect
+      // if it was wrongly sent.
+      return Promise.resolve(
+        new Response(JSON.stringify({ success: true, files: [{ filename: 'doomed.png', size: '1024' }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    });
+
+    render(<AttachmentBar threadId="thread-race" />);
+    const input = screen.getByTestId('attachment-bar-file-input') as HTMLInputElement;
+    dispatchFilesOnto(input, [makeFile('doomed.png')]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Chip is "uploading" while the list await blocks Phase 3.
+    const chip = useAttachmentsStore.getState().items[0];
+    expect(chip?.status).toBe('uploading');
+
+    // User clicks × → handleChipDiscard flips it to "deleting" (in-flight
+    // path keeps the chip so the gate stays on).
+    useAttachmentsStore.getState().update(chip!.clientId, { status: 'deleting' });
+
+    // Now let the list resolve so the upload loop runs.
+    resolveList!(new Response(JSON.stringify({ files: [] }), { status: 200 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The upload POST must NEVER have fired for the discarded chip.
+    const postedUpload = fetchMock.mock.calls.some(([url, init]) => {
+      const u = String(url);
+      const method = (init as RequestInit | undefined)?.method;
+      return u.endsWith('/uploads') && method === 'POST';
+    });
+    expect(postedUpload).toBe(false);
+    // And the discarded chip is dropped from the store.
+    expect(
+      useAttachmentsStore.getState().items.find((i) => i.clientId === chip!.clientId),
+    ).toBeUndefined();
+  });
+
   it('still adds the chip + uploads when a value reset empties the live FileList (prod silent-attach root cause)', async () => {
     // THE production bug, reproduced. On the live site the console showed
     // "✅ CHANGE FIRED — files: ['…spec.md']" yet the Network tab had ZERO
