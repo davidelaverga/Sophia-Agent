@@ -11,7 +11,7 @@ back to the upstream class" or renames the recognized set breaks the build.
 
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.sophia_agent.middlewares.view_image import SophiaViewImageMiddleware
@@ -359,3 +359,125 @@ def test_sophia_subclass_does_not_emit_clear_when_no_injection() -> None:
         },
     }
     assert mw.before_model(state_no_tool, runtime=None) is None
+
+
+# ─── Codex P2 PR #132 (persistent-channel guard) — prune old base64 ──
+
+
+def _injected_image_messages(update: dict) -> list:
+    """The non-removal messages in an injection update."""
+    return [m for m in update["messages"] if not isinstance(m, RemoveMessage)]
+
+
+def _img_state(messages: list, viewed: dict | None = None) -> dict:
+    return {
+        "messages": messages,
+        "viewed_images": viewed
+        if viewed is not None
+        else {
+            "/mnt/user-data/uploads/a.png": {"base64": "aGVsbG8=", "mime_type": "image/png"},
+        },
+    }
+
+
+def test_injected_image_message_is_tagged_and_has_id() -> None:
+    """Each injected image HumanMessage gets the marker + a stable id so a
+    later turn can prune it (Codex P2 PR #132 persistent-channel guard)."""
+    mw = SophiaViewImageMiddleware()
+    state = _img_state(
+        [
+            HumanMessage(content="look"),
+            _ai_with_tool("view_user_image", tool_call_id="tc-1"),
+            ToolMessage(content="Loaded a.png", tool_call_id="tc-1"),
+        ]
+    )
+    update = mw.before_model(state, runtime=None)
+    assert update is not None
+    injected = _injected_image_messages(update)
+    assert len(injected) == 1
+    msg = injected[0]
+    assert msg.id, "injected image message must carry a stable id for later RemoveMessage"
+    assert msg.additional_kwargs.get("sophia_injected_image") is True
+
+
+def test_inject_prunes_prior_injected_image_message() -> None:
+    """A NEW injection emits RemoveMessage for the PRIOR injected image
+    message, so old base64 doesn't accumulate in the persistent messages
+    channel across turns (the core accumulation fix)."""
+    mw = SophiaViewImageMiddleware()
+
+    # Turn 1: inject img1, capture the tagged message it produced.
+    first = mw.before_model(
+        _img_state(
+            [
+                HumanMessage(content="look at a.png"),
+                _ai_with_tool("view_user_image", tool_call_id="tc-1"),
+                ToolMessage(content="Loaded a.png", tool_call_id="tc-1"),
+            ]
+        ),
+        runtime=None,
+    )
+    assert first is not None
+    prior_msg = _injected_image_messages(first)[0]
+    assert prior_msg.id
+
+    # Turn 2: history carries the prior injected image message + a fresh
+    # completed view-tool call; viewed_images holds the NEW image (b.png).
+    second = mw.before_model(
+        _img_state(
+            [
+                prior_msg,
+                _ai_with_tool("view_user_image", tool_call_id="tc-2"),
+                ToolMessage(content="Loaded b.png", tool_call_id="tc-2"),
+            ],
+            viewed={"/mnt/user-data/uploads/b.png": {"base64": "Ynl0ZQ==", "mime_type": "image/png"}},
+        ),
+        runtime=None,
+    )
+    assert second is not None
+    removals = [m for m in second["messages"] if isinstance(m, RemoveMessage)]
+    injected = _injected_image_messages(second)
+    # Exactly the prior message is removed ...
+    assert [r.id for r in removals] == [prior_msg.id]
+    # ... and a fresh image message is appended with a different id.
+    assert len(injected) == 1
+    assert injected[0].id != prior_msg.id
+
+
+def test_inject_does_not_prune_unrelated_messages() -> None:
+    """Only marker-stamped messages are pruned — ordinary user text is
+    never removed."""
+    mw = SophiaViewImageMiddleware()
+    user_msg = HumanMessage(content="hello, look at this", id="user-1")
+    update = mw.before_model(
+        _img_state(
+            [
+                user_msg,
+                _ai_with_tool("view_user_image", tool_call_id="tc-1"),
+                ToolMessage(content="Loaded a.png", tool_call_id="tc-1"),
+            ]
+        ),
+        runtime=None,
+    )
+    assert update is not None
+    removals = [m for m in update["messages"] if isinstance(m, RemoveMessage)]
+    assert removals == [], "must not remove a plain user message"
+
+
+def test_first_injection_emits_no_removals() -> None:
+    """With no prior injected image in history, the update appends only the
+    new image message (no spurious RemoveMessage)."""
+    mw = SophiaViewImageMiddleware()
+    update = mw.before_model(
+        _img_state(
+            [
+                HumanMessage(content="look"),
+                _ai_with_tool("view_user_image", tool_call_id="tc-1"),
+                ToolMessage(content="Loaded a.png", tool_call_id="tc-1"),
+            ]
+        ),
+        runtime=None,
+    )
+    assert update is not None
+    removals = [m for m in update["messages"] if isinstance(m, RemoveMessage)]
+    assert removals == []

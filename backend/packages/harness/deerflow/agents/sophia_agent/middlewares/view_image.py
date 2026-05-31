@@ -23,14 +23,20 @@ exposes ``view_image_tool`` under its native name — see
 
 from __future__ import annotations
 
+import uuid
 from typing import override
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, RemoveMessage
 
 from deerflow.agents.middlewares.view_image_middleware import (
     ViewImageMiddleware,
     ViewImageMiddlewareState,
 )
+
+# Marker stamped into ``additional_kwargs`` of every image HumanMessage this
+# middleware injects, so a later turn can find and prune the prior ones.
+# Codex P2 PR #132 (accumulation guard, persistent-channel half).
+_INJECTED_IMAGE_MARKER = "sophia_injected_image"
 
 
 class ClearOnInjectViewImageMiddleware(ViewImageMiddleware):
@@ -46,16 +52,32 @@ class ClearOnInjectViewImageMiddleware(ViewImageMiddleware):
     32 MB envelope; even before that, the model re-reasons over
     stale images not relevant to the current turn.
 
-    Fix: after injecting the HumanMessage with image blocks, clear
-    ``viewed_images`` via the reducer's empty-dict sentinel. The
-    just-injected base64 lives in conversation history (the
-    HumanMessage), so the model still sees the image this turn.
-    Subsequent view-image calls write into the cleared dict →
-    REPLACE semantics, no accumulation.
+    Fix has TWO halves:
 
-    Trade-off: if the model wants to reference the SAME image many
-    turns later it has to re-call the tool. That's cheap — the file
-    is still on disk, one base64 round-trip per re-view.
+    1. ``viewed_images`` clear — after injecting the HumanMessage with
+       image blocks, clear ``viewed_images`` via the reducer's
+       empty-dict sentinel. Subsequent view-image calls write into the
+       cleared dict → REPLACE semantics for the state channel.
+
+    2. Persistent-channel prune (Codex P2 PR #132, later iteration) —
+       clearing ``viewed_images`` alone is NOT enough: the base64
+       HumanMessage that ``super()._inject_image_message`` appends lives
+       in the persistent ``messages`` channel (``add_messages`` reducer),
+       so it survives into every later model call. Two or three
+       near-10 MiB views would still blow Anthropic's 32 MB request
+       envelope despite the intended REPLACE semantics. So we ALSO stamp
+       each injected image message with a marker + stable id and, on each
+       new injection, emit ``RemoveMessage(id=...)`` for every PRIOR
+       injected image message in history. The reducer drops the old
+       base64-bearing messages while appending the fresh one — only the
+       current turn's images ever live in context.
+
+    The just-injected base64 still lives in this turn's history (the new
+    HumanMessage), so the model sees the image this turn.
+
+    Trade-off: if the model wants to reference the SAME image many turns
+    later it has to re-call the tool. That's cheap — the file is still on
+    disk, one base64 round-trip per re-view.
 
     Used directly by the BUILDER chain (which calls the upstream
     ``view_image`` tool) and extended by ``SophiaViewImageMiddleware``
@@ -70,7 +92,53 @@ class ClearOnInjectViewImageMiddleware(ViewImageMiddleware):
         update = super()._inject_image_message(state)
         if update is None:
             return None
-        return {**update, "viewed_images": {}}
+
+        # Stamp the freshly-injected image message(s) with the marker +
+        # a stable id so a future turn can prune them.
+        injected = update.get("messages") or []
+        for msg in injected:
+            try:
+                if not getattr(msg, "id", None):
+                    msg.id = f"sophia-img-{uuid.uuid4().hex}"
+                msg.additional_kwargs[_INJECTED_IMAGE_MARKER] = True
+            except (AttributeError, TypeError):
+                # Defensive: if the message shape is unexpected, skip
+                # tagging — the viewed_images clear below still applies.
+                continue
+
+        # Prune every PRIOR injected image message from the persistent
+        # ``messages`` channel so accumulated base64 can't pile up across
+        # turns. RemoveMessage(id=...) is honored by the ``add_messages``
+        # reducer. We never prune the ones we just added (different ids).
+        new_ids = {getattr(m, "id", None) for m in injected}
+        removals = [
+            RemoveMessage(id=mid)
+            for mid in self._prior_injected_image_ids(state)
+            if mid not in new_ids
+        ]
+
+        return {
+            **update,
+            "messages": [*removals, *injected],
+            "viewed_images": {},
+        }
+
+    def _prior_injected_image_ids(
+        self, state: ViewImageMiddlewareState
+    ) -> list[str]:
+        """Return ids of image messages this middleware injected earlier.
+
+        Identified by the ``_INJECTED_IMAGE_MARKER`` stamp in
+        ``additional_kwargs`` (plus a non-empty id, required for
+        ``RemoveMessage``). Messages without the marker — ordinary user
+        text, tool results, AI turns — are never touched.
+        """
+        ids: list[str] = []
+        for msg in state.get("messages", []) or []:
+            kwargs = getattr(msg, "additional_kwargs", None) or {}
+            if kwargs.get(_INJECTED_IMAGE_MARKER) and getattr(msg, "id", None):
+                ids.append(msg.id)
+        return ids
 
 
 class SophiaViewImageMiddleware(ClearOnInjectViewImageMiddleware):
