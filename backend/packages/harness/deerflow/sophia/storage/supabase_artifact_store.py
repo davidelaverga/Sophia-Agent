@@ -364,3 +364,77 @@ def download_artifact(
     finally:
         if owns_client:
             http.close()
+
+
+def list_upload_filenames(
+    thread_id: str,
+    *,
+    client: httpx.Client | None = None,
+) -> list[str]:
+    """List the bare filenames mirrored under the thread's UPLOADS keyspace.
+
+    Returns the names beneath ``{thread_id}/uploads/`` (the ``uploads/``
+    prefix stripped, so callers get bare ``report.pdf`` etc.) so the
+    frontend AttachmentBar uniquifier can reserve mirrored names even when
+    the gateway's local disk is empty (Render restart / different instance).
+    Without this, the list endpoint only sees the ephemeral local dir and a
+    user could re-attach ``image.png``, overwriting the mirrored
+    ``uploads/image.png`` (x-upsert) that earlier chat turns reference.
+
+    Best-effort: returns ``[]`` when Supabase is not configured or on any
+    transport error (the caller still has the local listing). Codex P2
+    PR #132.
+    """
+    config = _load_config()
+    if config is None:
+        return []
+
+    safe_thread = thread_id.strip().strip("/")
+    if not safe_thread:
+        return []
+
+    list_url = f"{config.url}/storage/v1/object/list/{config.bucket}"
+    headers = {
+        "Authorization": f"Bearer {config.service_role_key}",
+        "apikey": config.service_role_key,
+        "Content-Type": "application/json",
+    }
+    # The Storage list API treats ``prefix`` as a folder path and returns
+    # entries relative to it, so ``name`` comes back as the bare filename.
+    body = {
+        "prefix": f"{safe_thread}/{UPLOADS_PREFIX}",
+        "limit": 1000,
+        "offset": 0,
+    }
+
+    owns_client = client is None
+    http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
+    try:
+        response = http.post(list_url, json=body, headers=headers)
+        if not response.is_success:
+            logger.warning(
+                "Supabase uploads list failed thread_id=%s status=%s; returning empty",
+                thread_id,
+                response.status_code,
+            )
+            return []
+        data = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("Supabase uploads list error thread_id=%s error=%s; returning empty", thread_id, exc)
+        return []
+    finally:
+        if owns_client:
+            http.close()
+
+    if not isinstance(data, list):
+        return []
+    names: list[str] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        # Supabase returns a placeholder row (id=None) for empty folders; skip
+        # anything without a real object id, and any nested-folder rows.
+        if isinstance(name, str) and name and "/" not in name and entry.get("id") is not None:
+            names.append(name)
+    return names
