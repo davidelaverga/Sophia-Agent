@@ -182,6 +182,27 @@ def _delete_supabase_mirror(thread_id: str, filename: str) -> None:
         )
 
 
+def _list_supabase_upload_filenames(thread_id: str) -> list[str]:
+    """Best-effort list of bare filenames mirrored under the thread's uploads.
+
+    Returns ``[]`` when Supabase is unconfigured or any error occurs — the
+    list endpoint still returns whatever it found on the local disk. See the
+    call site for why the mirror must be unioned into the listing (Codex P2
+    PR #132).
+    """
+    if not supabase_artifact_store.is_configured():
+        return []
+    try:
+        return supabase_artifact_store.list_upload_filenames(thread_id)
+    except Exception as exc:  # noqa: BLE001 — best-effort, never block list
+        logger.warning(
+            "Supabase uploads list failed (continuing with local only) thread_id=%s error=%s",
+            thread_id,
+            exc,
+        )
+        return []
+
+
 @router.post("", response_model=UploadResponse)
 async def upload_files(
     thread_id: str,
