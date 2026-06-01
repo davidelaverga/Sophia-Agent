@@ -532,6 +532,44 @@ async def test_snapshot_does_not_resurrect_stale_terminal_task(app: FastAPI, mon
 
 
 @pytest.mark.anyio
+async def test_snapshot_does_not_resurrect_stale_cached_running_task_after_native_completion(
+    app: FastAPI,
+    monkeypatch,
+) -> None:
+    native_status_calls: list[tuple[str, str]] = []
+
+    async def tasks(_parent: str):
+        return [
+            {
+                "agent_name": "sophia_builder",
+                "task_id": "task-stale",
+                "run_id": "run-stale",
+                "status": "running",
+                "last_updated_at": "2026-01-01T10:00:00Z",
+                "builder_result": {
+                    "artifact_path": "/mnt/user-data/outputs/stale-report.md",
+                    "artifact_title": "Stale Report",
+                },
+            }
+        ]
+
+    async def status(task_id: str, run_id: str, _fallback: str | None):
+        native_status_calls.append((task_id, run_id))
+        return "completed"
+
+    monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", tasks)
+    monkeypatch.setattr(builder_canvas, "_native_run_status", status)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/sophia/user-1/threads/parent-1/builder-canvas/snapshot")
+
+    assert response.status_code == 200
+    assert native_status_calls == [("task-stale", "run-stale")]
+    assert response.json()["active_task"] is None
+    assert response.json()["recent_events"] == []
+
+
+@pytest.mark.anyio
 async def test_snapshot_rejects_thread_not_owned_by_user(app: FastAPI) -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/sophia/user-1/threads/other-parent/builder-canvas/snapshot")

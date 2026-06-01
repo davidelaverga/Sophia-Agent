@@ -142,6 +142,21 @@ def _latest_builder_task(tasks: list[dict[str, Any]]) -> dict[str, Any] | None:
     return max(recent_terminal_tasks, key=_task_updated_at)
 
 
+def _should_hide_stale_terminal_snapshot(
+    task: dict[str, Any],
+    *,
+    native_status: str,
+    recent_events: list[dict[str, Any]],
+    task_id: str,
+    run_id: str,
+) -> bool:
+    if native_status not in _TERMINAL_CANVAS_STATUSES:
+        return False
+    if _terminal_task_within_snapshot_ttl(task):
+        return False
+    return _retained_terminal_for_run(recent_events, task_id, run_id) is None
+
+
 async def _authorized_task(parent_thread_id: str, task_id: str, run_id: str) -> dict[str, Any]:
     for task in await _parent_builder_tasks(parent_thread_id):
         if task.get("task_id") == task_id and task.get("run_id") == run_id:
@@ -618,6 +633,24 @@ async def builder_canvas_snapshot(
         )
         return BuilderCanvasSnapshot(recent_events=recent_events)
     native_status = await _native_run_status(task_id, run_id, task.get("status"))
+    if _should_hide_stale_terminal_snapshot(
+        task,
+        native_status=native_status,
+        recent_events=recent_events,
+        task_id=task_id,
+        run_id=run_id,
+    ):
+        logger.info(
+            "Builder canvas snapshot suppressed stale terminal task user_id=%s parent_thread_id=%s task_id=%s run_id=%s native_status=%s recent_events=%s worker_subscribers=%s",
+            _short_id(authenticated_user_id),
+            _short_id(parent_thread_id),
+            _short_id(task_id),
+            _short_id(run_id),
+            native_status,
+            len(recent_events),
+            worker_summary.get("subscriber_count"),
+        )
+        return BuilderCanvasSnapshot(recent_events=recent_events)
     task = await _hydrate_completed_task_deliverable(
         parent_thread_id,
         task,
