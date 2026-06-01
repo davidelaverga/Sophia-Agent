@@ -493,6 +493,18 @@ class BuilderCanvasWorker:
         active = self._active.get(parent_thread_id)
         if active is not None and active[0] == task_id:
             return active[1]
+        task_run_ids = {
+            observed_run_id
+            for observed_task_id, observed_run_id in self._run_order.get(parent_thread_id, {})
+            if observed_task_id == task_id
+        }
+        task_run_ids.update(
+            history_run_id
+            for history_parent_id, history_task_id, history_run_id in self._histories
+            if history_parent_id == parent_thread_id and history_task_id == task_id
+        )
+        if len(task_run_ids) == 1:
+            return next(iter(task_run_ids))
         return None
 
     async def _publish_event(self, event: dict[str, Any]) -> int:

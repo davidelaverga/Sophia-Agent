@@ -216,6 +216,98 @@ async def test_completion_without_run_id_does_not_close_different_active_task() 
 
 
 @pytest.mark.anyio
+async def test_completion_without_run_id_uses_unambiguous_retained_task_run() -> None:
+    worker = BuilderCanvasWorker()
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-active",
+            "run_id": "run-active",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "starting"},
+        }
+    )
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-legacy",
+            "run_id": "run-legacy",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "drafting"},
+        }
+    )
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-active",
+            "run_id": "run-active",
+            "sequence": 2,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "researching"},
+        }
+    )
+
+    delivered = await worker.publish_completion(
+        {
+            "thread_id": "parent-1",
+            "task_id": "task-legacy",
+            "status": "success",
+            "artifact_path": "mnt/user-data/outputs/legacy.md",
+        }
+    )
+
+    events = await worker.recent_events("parent-1")
+    assert delivered == 0
+    assert events[-1]["kind"] == "terminal"
+    assert events[-1]["task_id"] == "task-legacy"
+    assert events[-1]["run_id"] == "run-legacy"
+    assert events[-1]["completion"]["run_id"] == "run-legacy"
+
+
+@pytest.mark.anyio
+async def test_completion_without_run_id_drops_ambiguous_retained_task_runs() -> None:
+    worker = BuilderCanvasWorker()
+    for run_id, sequence in (("run-1", 1), ("run-2", 1)):
+        await worker.publish_progress(
+            {
+                "parent_thread_id": "parent-1",
+                "task_id": "task-legacy",
+                "run_id": run_id,
+                "sequence": sequence,
+                "event_name": "custom",
+                "data": {"name": "phase", "phase": "drafting"},
+            }
+        )
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-active",
+            "run_id": "run-active",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "researching"},
+        }
+    )
+
+    delivered = await worker.publish_completion(
+        {
+            "thread_id": "parent-1",
+            "task_id": "task-legacy",
+            "status": "success",
+            "artifact_path": "mnt/user-data/outputs/legacy.md",
+        }
+    )
+
+    events = await worker.recent_events("parent-1")
+    assert delivered == 0
+    assert len(events) == 1
+    assert events[0]["task_id"] == "task-active"
+    assert events[0]["run_id"] == "run-active"
+
+
+@pytest.mark.anyio
 async def test_done_phase_is_projected_to_browser_activity() -> None:
     worker = BuilderCanvasWorker()
     await worker.publish_progress(
