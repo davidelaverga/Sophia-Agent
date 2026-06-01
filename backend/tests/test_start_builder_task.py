@@ -177,6 +177,28 @@ def test_visual_report_html_request_targets_html_file():
     assert target.endswith(".html")
 
 
+def test_pdf_request_with_html_charts_still_targets_pdf():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "visual_report",
+        "Make a PDF report with HTML charts about GEPA SkillOpt.",
+    )
+
+    assert target.endswith(".pdf")
+
+
+def test_incidental_html_charts_do_not_override_visual_report_pdf_default():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "visual_report",
+        "Build a concise visual report with HTML charts and diagrams about GEPA SkillOpt.",
+    )
+
+    assert target.endswith(".pdf")
+
+
 def test_visual_report_without_html_request_still_targets_pdf():
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
 

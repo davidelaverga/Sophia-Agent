@@ -120,16 +120,19 @@ _TASK_TYPE_PREFIXES: dict[str, str] = {
 }
 
 _HTML_OUTPUT_RE = re.compile(
-    r"\bhtml\b|\bhtml\s+(?:document|file|report|summary|brief|article|explainer)\b",
+    r"\b(?:html\s+(?:document|file|report|summary|brief|article|explainer|page|site|website)"
+    r"|(?:document|file|report|summary|brief|article|explainer|page|site|website)\s+(?:as|in)\s+html"
+    r"|(?:build|create|make|generate|produce|write)\s+(?:an?\s+)?html\b"
+    r"|\.html\b)",
     re.IGNORECASE,
 )
 _REQUESTED_OUTPUT_EXTENSION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("html", _HTML_OUTPUT_RE),
-    ("md", re.compile(r"\b(?:markdown|md)\b", re.IGNORECASE)),
     ("pdf", re.compile(r"\bpdf\b", re.IGNORECASE)),
     ("pptx", re.compile(r"\b(?:pptx|powerpoint|slide\s+deck|slides?)\b", re.IGNORECASE)),
     ("docx", re.compile(r"\b(?:docx|word\s+document)\b", re.IGNORECASE)),
     ("xlsx", re.compile(r"\b(?:xlsx|spreadsheet|excel)\b", re.IGNORECASE)),
+    ("html", _HTML_OUTPUT_RE),
+    ("md", re.compile(r"\b(?:markdown|md)\b", re.IGNORECASE)),
     ("csv", re.compile(r"\bcsv\b", re.IGNORECASE)),
     ("json", re.compile(r"\bjson\b", re.IGNORECASE)),
 )
