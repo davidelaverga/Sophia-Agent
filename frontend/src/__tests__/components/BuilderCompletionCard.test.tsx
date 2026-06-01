@@ -153,6 +153,26 @@ describe("BuilderCompletionCard — success variant", () => {
     expect(onDownload).toHaveBeenCalledWith(SUCCESS_EVENT)
   })
 
+  it("treats PowerPoint artifacts as download-first", () => {
+    const event: BuilderCompletionEventV1 = {
+      ...SUCCESS_EVENT,
+      artifact_path: "mnt/user-data/outputs/research_deck.pptx",
+      artifact_url: "https://example.com/research_deck.pptx",
+      artifact_filename: "research_deck.pptx",
+      artifact_type: "presentation",
+    }
+
+    render(<BuilderCompletionCard event={event} />)
+
+    expect(screen.queryByRole("button", { name: /open/i })).toBeNull()
+    const link = screen.getByRole("link", { name: /download/i })
+    expect(link).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/research_deck.pptx?download=true",
+    )
+    expect(link).toHaveAttribute("download", "research_deck.pptx")
+  })
+
   it("does NOT render Download on error/timeout/cancelled states", () => {
     const errorEvent = {
       ...SUCCESS_EVENT,

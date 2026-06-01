@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import time
+import zipfile
 from pathlib import Path
 from typing import get_type_hints
 from unittest.mock import MagicMock
@@ -159,6 +160,15 @@ def _make_runtime(**context_kwargs):
     runtime = MagicMock()
     runtime.context = context_kwargs
     return runtime
+
+
+def _write_minimal_pptx(path: Path) -> None:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types></Types>")
+        archive.writestr("_rels/.rels", "<Relationships></Relationships>")
+        archive.writestr("ppt/presentation.xml", "<p:presentation></p:presentation>")
+        archive.writestr("ppt/slides/slide1.xml", "<p:sld></p:sld>")
+        archive.writestr("ppt/slideLayouts/slideLayout1.xml", "x" * 2048)
 
 
 def _make_runtime_with_builder_timeout(*, thread_id: str | None = None, timeout_s: int):
@@ -3582,6 +3592,68 @@ class TestBuilderArtifactMiddleware:
         }
         text_only_args = {"artifact_path": "/mnt/user-data/outputs/report.html"}
         assert BuilderArtifactMiddleware._artifact_files_exist(text_only_args, text_only_state, runtime) is False
+
+    def test_pptx_artifact_files_exist_rejects_tiny_placeholder(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "deck.pptx").write_bytes(b"hello")
+        runtime = _make_runtime(thread_id="thread-x")
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        }
+        args = {"artifact_path": "/mnt/user-data/outputs/deck.pptx"}
+
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
+
+    def test_pptx_artifact_files_exist_accepts_valid_powerpoint_package(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        _write_minimal_pptx(outputs_dir / "deck.pptx")
+        runtime = _make_runtime(thread_id="thread-x")
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        }
+        args = {"artifact_path": "deck.pptx"}
+
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
+        assert args["artifact_path"] == "/mnt/user-data/outputs/deck.pptx"
+
+    def test_pptx_artifact_files_exist_rejects_missing_required_office_entries(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        with zipfile.ZipFile(outputs_dir / "deck.pptx", "w") as archive:
+            archive.writestr("[Content_Types].xml", "x" * 2048)
+        runtime = _make_runtime(thread_id="thread-x")
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        }
+        args = {"artifact_path": "/mnt/user-data/outputs/deck.pptx"}
+
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
+
+    def test_pptx_artifact_files_exist_accepts_markdown_fallback(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "deck.md").write_text("# Deck outline")
+        runtime = _make_runtime(thread_id="thread-x")
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        }
+        args = {"artifact_path": "/mnt/user-data/outputs/deck.md"}
+
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
 
     # ---------------------------------------------------------------------
     # Wall-clock-aware force-emit (companion-to-builder timeout fix)

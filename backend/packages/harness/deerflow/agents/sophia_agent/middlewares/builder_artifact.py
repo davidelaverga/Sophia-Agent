@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import time
+import zipfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, NotRequired, override
@@ -98,6 +99,14 @@ _BASH_WRITE_MARKER_RE = re.compile(
 )
 _FILE_TARGET_HINT_MARKER = "[Sophia/post-interrupt build directive]"
 _CONCRETE_FILE_TARGET_RE = re.compile(r"Concrete file target:\s*`([^`]+)`")
+_PPTX_SKILL_PATH_MARKERS = (
+    "/skills/public/ppt-generation/SKILL.md",
+    "/mnt/skills/public/ppt-generation/SKILL.md",
+)
+_PPTX_GENERATOR_PATH_MARKERS = (
+    "/skills/public/ppt-generation/scripts/generate.py",
+    "/mnt/skills/public/ppt-generation/scripts/generate.py",
+)
 _PATH_CORRECTABLE_WRITE_ERROR_CLASSES = {
     "path_is_directory",
     "path_not_outputs",
@@ -136,6 +145,13 @@ _PROMOTABLE_DELIVERABLE_EXTENSIONS = frozenset({
     ".css",
 })
 _PDF_FALLBACK_EXTENSIONS = frozenset({".md", ".html"})
+_PPTX_FALLBACK_EXTENSIONS = frozenset({".md", ".html"})
+_PPTX_REQUIRED_ZIP_ENTRIES = frozenset({
+    "[Content_Types].xml",
+    "_rels/.rels",
+    "ppt/presentation.xml",
+})
+_PPTX_MIN_BYTES = 1024
 _PDF_VISUAL_FALLBACK_MARKERS = (
     "chart",
     "charts",
@@ -323,12 +339,24 @@ def _is_completion_output_candidate(
         return False
     if min_mtime is not None and entry.stat().st_mtime < min_mtime:
         return False
+    if entry.suffix.lower() == ".pptx":
+        reason = _pptx_integrity_error_for_file(entry)
+        if reason is not None:
+            logger.warning(
+                "BuilderArtifact: artifact_integrity ext=pptx valid=false "
+                "reason=%s bytes=%s source=outputs_scan",
+                reason,
+                entry.stat().st_size,
+            )
+            return False
     return _output_suffix_allowed_for_request(entry.suffix.lower(), state)
 
 
 def _output_suffix_allowed_for_request(suffix: str, state: dict[str, Any]) -> bool:
     if _requested_pdf_artifact(state):
         return suffix in _allowed_pdf_artifact_suffixes(state)
+    if _requested_pptx_artifact(state):
+        return suffix in _allowed_pptx_artifact_suffixes(state)
     return True
 
 
@@ -354,6 +382,14 @@ def _requested_target_suffix(state: dict[str, Any]) -> str:
 
 def _requested_pdf_artifact(state: dict[str, Any]) -> bool:
     return _requested_target_suffix(state) == ".pdf"
+
+
+def _requested_pptx_artifact(state: dict[str, Any]) -> bool:
+    return _requested_target_suffix(state) == ".pptx"
+
+
+def _requested_office_artifact(state: dict[str, Any]) -> bool:
+    return _requested_target_suffix(state) in {".pptx", ".docx", ".xlsx"}
 
 
 def _requested_task_text(state: dict[str, Any]) -> str:
@@ -383,6 +419,96 @@ def _pdf_fallback_suffix(state: dict[str, Any]) -> str:
 
 def _allowed_pdf_artifact_suffixes(state: dict[str, Any]) -> frozenset[str]:
     return frozenset({".pdf", _pdf_fallback_suffix(state)})
+
+
+def _pptx_fallback_suffix(state: dict[str, Any]) -> str:
+    task_text = _requested_task_text(state)
+    if any(marker in task_text for marker in _PDF_VISUAL_FALLBACK_MARKERS):
+        return ".html"
+    return ".md"
+
+
+def _allowed_pptx_artifact_suffixes(state: dict[str, Any]) -> frozenset[str]:
+    return frozenset({".pptx", _pptx_fallback_suffix(state)})
+
+
+def _pptx_integrity_error_for_bytes(content: bytes) -> str | None:
+    if len(content) < _PPTX_MIN_BYTES:
+        return "pptx_too_small"
+    try:
+        from io import BytesIO
+
+        with zipfile.ZipFile(BytesIO(content)) as archive:
+            entries = set(archive.namelist())
+    except zipfile.BadZipFile:
+        return "pptx_not_zip"
+    missing = sorted(_PPTX_REQUIRED_ZIP_ENTRIES - entries)
+    if missing:
+        return f"pptx_missing_entries:{','.join(missing)}"
+    return None
+
+
+def _pptx_integrity_error_for_file(path: Path) -> str | None:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return "pptx_stat_failed"
+    if size < _PPTX_MIN_BYTES:
+        return "pptx_too_small"
+    try:
+        with zipfile.ZipFile(path) as archive:
+            entries = set(archive.namelist())
+    except zipfile.BadZipFile:
+        return "pptx_not_zip"
+    except OSError:
+        return "pptx_read_failed"
+    missing = sorted(_PPTX_REQUIRED_ZIP_ENTRIES - entries)
+    if missing:
+        return f"pptx_missing_entries:{','.join(missing)}"
+    return None
+
+
+def _pptx_artifact_path_rejection_reason(path: Any, state: dict[str, Any]) -> str | None:
+    canonical = _canonical_outputs_artifact_path(path)
+    if canonical is None:
+        return "pptx_artifact_path_not_under_outputs"
+    suffix = PurePosixPath(canonical).suffix.lower()
+    if suffix not in _allowed_pptx_artifact_suffixes(state):
+        return f"pptx_invalid_artifact_extension:{suffix or 'none'}"
+    return None
+
+
+def _pptx_path_integrity_rejection_reason(
+    canonical: str,
+    state: dict[str, Any],
+    runtime: Runtime,
+) -> str | None:
+    suffix = PurePosixPath(canonical).suffix.lower()
+    if suffix != ".pptx":
+        return None
+    relative = _extract_output_relative_path(canonical)
+    if relative is None:
+        return "pptx_artifact_path_not_under_outputs"
+    thread_data = state.get("thread_data") or {}
+    outputs_host_path = thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
+    if outputs_host_path:
+        host_file = Path(outputs_host_path) / relative
+        if host_file.is_file():
+            return _pptx_integrity_error_for_file(host_file)
+    thread_id = runtime.context.get("thread_id") if getattr(runtime, "context", None) else None
+    if thread_id:
+        try:
+            result = supabase_artifact_store.download_artifact(thread_id, relative)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "BuilderArtifact: pptx remote integrity check failed error_type=%s",
+                exc.__class__.__name__,
+            )
+            return "pptx_remote_check_failed"
+        if result is not None:
+            content, _mime = result
+            return _pptx_integrity_error_for_bytes(content)
+    return None
 
 
 def _render_markdown_to_pdf_attempted(state: dict[str, Any]) -> bool:
@@ -630,6 +756,44 @@ def _needs_fetch_before_write(state: dict[str, Any]) -> bool:
     return _builder_web_call_count(state, "search") > 0 and _has_fetchable_builder_source(state)
 
 
+def _pptx_skill_read_seen(state: dict[str, Any]) -> bool:
+    summaries = state.get("builder_tool_turn_summaries") or []
+    return any(
+        bool(summary.get("pptx_skill_read"))
+        for summary in summaries
+        if isinstance(summary, dict)
+    )
+
+
+def _pptx_generator_invoked_seen(state: dict[str, Any]) -> bool:
+    summaries = state.get("builder_tool_turn_summaries") or []
+    return any(
+        bool(summary.get("pptx_generator_invoked"))
+        for summary in summaries
+        if isinstance(summary, dict)
+    )
+
+
+def _pptx_skill_flags_from_tool_calls(tool_calls: list[dict[str, Any]]) -> dict[str, bool]:
+    skill_read = False
+    generator_invoked = False
+    for call in tool_calls:
+        name = call.get("name")
+        args = call.get("args") or {}
+        if not isinstance(args, dict):
+            continue
+        if name in ("read_file", "read_file_tool"):
+            path = str(args.get("path") or args.get("file_path") or "")
+            skill_read = skill_read or any(marker in path for marker in _PPTX_SKILL_PATH_MARKERS)
+        if name in ("bash", "bash_tool"):
+            command = str(args.get("command") or "")
+            generator_invoked = generator_invoked or any(marker in command for marker in _PPTX_GENERATOR_PATH_MARKERS)
+    return {
+        "pptx_skill_read": skill_read,
+        "pptx_generator_invoked": generator_invoked,
+    }
+
+
 def _force_reason(turn_force: bool, clock_force: bool) -> str:
     if turn_force and clock_force:
         return "turns+wall_clock"
@@ -678,6 +842,7 @@ class BuilderArtifactState(AgentState):
     builder_pdf_render_result: NotRequired[dict | None]
     builder_pdf_layout_repair_attempts: NotRequired[int]
     builder_pdf_layout_repair_requested: NotRequired[bool]
+    builder_pptx_skill_correction_emitted: NotRequired[bool]
 
 
 class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
@@ -1132,6 +1297,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         state: BuilderArtifactState,
         *,
         requested_pdf: bool,
+        requested_pptx: bool,
     ) -> list[Path]:
         outputs_host_path = _outputs_host_path_from_state(state)
         if not outputs_host_path:
@@ -1147,6 +1313,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             and not p.name.startswith("_")
             and p.suffix.lower() in _PROMOTABLE_DELIVERABLE_EXTENSIONS
             and (min_mtime is None or p.stat().st_mtime >= min_mtime)
+            and (p.suffix.lower() != ".pptx" or _pptx_integrity_error_for_file(p) is None)
         ]
         if requested_pdf:
             pdf_candidates = [] if _pdf_render_unusable_after_repair(state) else [
@@ -1157,6 +1324,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 p for p in candidates if p.suffix.lower() == fallback_suffix
             ]
             candidates = pdf_candidates or fallback_candidates
+        elif requested_pptx:
+            pptx_candidates = [
+                p for p in candidates if p.suffix.lower() == ".pptx"
+            ]
+            fallback_suffix = _pptx_fallback_suffix(state)
+            fallback_candidates = [
+                p for p in candidates if p.suffix.lower() == fallback_suffix
+            ]
+            candidates = pptx_candidates or fallback_candidates
         candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return candidates
 
@@ -1191,12 +1367,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         state: BuilderArtifactState,
         *,
         requested_pdf: bool,
+        requested_pptx: bool,
         reason: str,
     ) -> tuple[str | None, str]:
         try:
             candidates = BuilderArtifactMiddleware._promotable_output_candidates(
                 state,
                 requested_pdf=requested_pdf,
+                requested_pptx=requested_pptx,
             )
         except Exception as exc:  # noqa: BLE001 — best-effort only
             logger.warning(
@@ -1218,6 +1396,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         state: BuilderArtifactState,
         *,
         requested_pdf: bool,
+        requested_pptx: bool,
         reason: str,
     ) -> str | None:
         try:
@@ -1239,6 +1418,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             logger.warning(
                 "BuilderArtifact: PDF fallback refusing generator script %s "
                 "(reason=%s, no pdf_or_markdown deliverable found)",
+                promoted_path,
+                reason,
+            )
+            return None
+        if requested_pptx:
+            logger.warning(
+                "BuilderArtifact: PPTX fallback refusing generator script %s "
+                "(reason=%s, no valid deck_or_fallback deliverable found)",
                 promoted_path,
                 reason,
             )
@@ -1322,6 +1509,27 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         }
 
     @staticmethod
+    def _pptx_no_deliverable_fallback(*, steps_completed: int) -> dict[str, Any]:
+        return {
+            "artifact_path": None,
+            "artifact_type": "presentation",
+            "artifact_title": "Slide deck did not complete",
+            "steps_completed": steps_completed,
+            "decisions_made": [],
+            "companion_summary": (
+                "The builder could not produce a valid PowerPoint deck or "
+                "a usable markdown/html fallback. I did not surface a broken "
+                "PPTX as completed."
+            ),
+            "companion_tone_hint": (
+                "Apologetic and direct — deck generation did not produce a "
+                "valid deliverable; offer to retry."
+            ),
+            "user_next_action": "Ask me to retry the slide deck build.",
+            "confidence": 0.2,
+        }
+
+    @staticmethod
     def _generic_no_deliverable_fallback(*, steps_completed: int) -> dict[str, Any]:
         return {
             "artifact_path": None,
@@ -1389,9 +1597,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         degraded deliverable is the Markdown source; otherwise fail truthfully.
         """
         requested_pdf = _requested_pdf_artifact(state)
+        requested_pptx = _requested_pptx_artifact(state)
         promoted_path, promoted_type = BuilderArtifactMiddleware._promoted_deliverable_from_outputs(
             state,
             requested_pdf=requested_pdf,
+            requested_pptx=requested_pptx,
             reason=reason,
         )
         if promoted_path:
@@ -1403,6 +1613,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         promoted_generator_path = BuilderArtifactMiddleware._promoted_generator_from_outputs(
             state,
             requested_pdf=requested_pdf,
+            requested_pptx=requested_pptx,
             reason=reason,
         )
         if promoted_generator_path:
@@ -1412,6 +1623,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             )
         if requested_pdf:
             return BuilderArtifactMiddleware._pdf_no_deliverable_fallback(
+                steps_completed=steps_completed,
+            )
+        if requested_pptx:
+            return BuilderArtifactMiddleware._pptx_no_deliverable_fallback(
                 steps_completed=steps_completed,
             )
         return BuilderArtifactMiddleware._generic_no_deliverable_fallback(
@@ -1550,6 +1765,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         """
         if _requested_pdf_artifact(state) and not cls._pdf_artifact_args_valid(artifact_args, state):
             return False
+        if _requested_pptx_artifact(state) and not cls._pptx_artifact_args_valid(artifact_args, state, runtime):
+            return False
         candidates: list[str] = []
         primary = artifact_args.get("artifact_path")
         if isinstance(primary, str) and primary.strip():
@@ -1608,11 +1825,53 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             if outputs_host_path:
                 host_file = Path(outputs_host_path) / relative
                 if host_file.is_file():
+                    if PurePosixPath(candidate).suffix.lower() == ".pptx":
+                        reason = _pptx_integrity_error_for_file(host_file)
+                        if reason is not None:
+                            logger.warning(
+                                "BuilderArtifact: artifact_integrity ext=pptx "
+                                "valid=false reason=%s bytes=%s source=local",
+                                reason,
+                                host_file.stat().st_size,
+                            )
+                            return False
+                        logger.info(
+                            "BuilderArtifact: artifact_integrity ext=pptx "
+                            "valid=true bytes=%s source=local",
+                            host_file.stat().st_size,
+                        )
                     continue
 
             # 2. Check Supabase
-            if thread_id and supabase_artifact_store.check_artifact_exists(thread_id, relative):
-                continue
+            if thread_id:
+                if PurePosixPath(candidate).suffix.lower() == ".pptx":
+                    try:
+                        result = supabase_artifact_store.download_artifact(thread_id, relative)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "BuilderArtifact: pptx remote integrity check failed error_type=%s",
+                            exc.__class__.__name__,
+                        )
+                        return False
+                    if result is not None:
+                        content, _mime = result
+                        reason = _pptx_integrity_error_for_bytes(content)
+                        if reason is not None:
+                            logger.warning(
+                                "BuilderArtifact: artifact_integrity ext=pptx "
+                                "valid=false reason=%s bytes=%s source=supabase",
+                                reason,
+                                len(content),
+                            )
+                            return False
+                        logger.info(
+                            "BuilderArtifact: artifact_integrity ext=pptx "
+                            "valid=true bytes=%s source=supabase",
+                            len(content),
+                        )
+                        continue
+                elif supabase_artifact_store.check_artifact_exists(thread_id, relative):
+                    continue
 
             # Neither local nor remote — missing.
             logger.warning(
@@ -1625,6 +1884,37 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return False
 
         return True
+
+    @staticmethod
+    def _pptx_artifact_args_valid(
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> bool:
+        primary = artifact_args.get("artifact_path")
+        rejection_reason = _pptx_artifact_path_rejection_reason(primary, state)
+        if rejection_reason is not None:
+            BuilderArtifactMiddleware._log_pptx_artifact_rejection(primary, rejection_reason)
+            return False
+        canonical_primary = _canonical_outputs_artifact_path(primary)
+        if canonical_primary is None:
+            return False
+        integrity_rejection = _pptx_path_integrity_rejection_reason(canonical_primary, state, runtime)
+        if integrity_rejection is not None:
+            BuilderArtifactMiddleware._log_pptx_artifact_rejection(primary, integrity_rejection)
+            return False
+        artifact_args["artifact_path"] = canonical_primary
+        return True
+
+    @staticmethod
+    def _log_pptx_artifact_rejection(primary: object, rejection_reason: str) -> None:
+        rejected_ext = PurePosixPath(str(primary or "")).suffix.lower().lstrip(".") or None
+        logger.warning(
+            "BuilderArtifact: rejecting PPTX artifact path reason=%s "
+            "requested_ext=pptx rejected_ext=%s",
+            rejection_reason,
+            rejected_ext,
+        )
 
     @staticmethod
     def _pdf_artifact_args_valid(
@@ -1725,6 +2015,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     "Do not emit Python files, generator scripts, bare paths, or "
                     "files outside /mnt/user-data/outputs/ as the user-ready artifact."
                 )
+        if _requested_pptx_artifact(state):
+            fallback_ext = _pptx_fallback_suffix(state)
+            return (
+                "Error: emit_builder_artifact rejected — this is a slide-deck "
+                "request. The final artifact must be a structurally valid .pptx "
+                "PowerPoint package under /mnt/user-data/outputs/, or a real "
+                f"{fallback_ext} fallback if deck generation cannot complete. "
+                "Use the ppt-generation skill workflow, then emit only the valid "
+                "deck or fallback. Do not emit Python files, placeholder decks, "
+                "tiny/corrupt .pptx files, bare paths, or files outside outputs."
+            )
         recovery_hint = cls._missing_artifact_recovery_hint(artifact_args, state)
         return (
             "Error: emit_builder_artifact rejected — the referenced "
@@ -2417,6 +2718,54 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "builder_pdf_layout_repair_attempts": _pdf_layout_repair_attempts(state) + 1,
         }
 
+    def _maybe_inject_pptx_skill_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _requested_pptx_artifact(state):
+            return None
+        if state.get("builder_pptx_skill_correction_emitted"):
+            return None
+        if _pptx_skill_read_seen(state) or _pptx_generator_invoked_seen(state):
+            return None
+        non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0)
+        if non_artifact_turns < 3:
+            return None
+        summaries = state.get("builder_tool_turn_summaries") or []
+        recent_tool_names = [
+            name
+            for summary in summaries[-4:]
+            if isinstance(summary, dict)
+            for name in (summary.get("tool_names") or [])
+            if isinstance(name, str)
+        ]
+        drifted = any(name in {"write_file", "write_file_tool", "bash", "bash_tool", "str_replace", "str_replace_tool"} for name in recent_tool_names)
+        if not drifted:
+            return None
+        logger.warning(
+            "BuilderArtifact: presentation target drifting without ppt-generation skill; "
+            "injecting corrective directive turn=%d recent_tools=%s",
+            non_artifact_turns,
+            ",".join(recent_tool_names[-6:]),
+        )
+        return {
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "[Sophia/presentation-skill correction]\n"
+                        "This is a PPTX slide-deck build. Stop ad hoc deck generation. "
+                        "Your next steps must follow the bundled ppt-generation workflow:\n"
+                        "1. read_file_tool('/mnt/skills/public/ppt-generation/SKILL.md')\n"
+                        "2. create the presentation plan and slide image prompts under /mnt/user-data/workspace/\n"
+                        "3. use /mnt/skills/public/image-generation/scripts/generate.py for slide images\n"
+                        "4. run /mnt/skills/public/ppt-generation/scripts/generate.py to compose the PPTX\n"
+                        "5. emit_builder_artifact only after the .pptx is a valid PowerPoint package.\n\n"
+                        "Do not emit placeholder/tiny/corrupt .pptx files, Python scripts, or test files. "
+                        "If image/deck generation cannot complete, write a real markdown/html fallback under "
+                        "/mnt/user-data/outputs/ and emit that as a degraded artifact."
+                    )
+                )
+            ],
+            "builder_pptx_skill_correction_emitted": True,
+        }
+
     def _combined_before_model_updates(
         self,
         state: BuilderArtifactState,
@@ -2440,6 +2789,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         pdf_repair = self._maybe_inject_pdf_layout_repair(state)
         if isinstance(pdf_repair, dict):
             update.update(pdf_repair)
+            return update
+        pptx_correction = self._maybe_inject_pptx_skill_correction(state)
+        if isinstance(pptx_correction, dict):
+            update.update(pptx_correction)
             return update
         correction = self._maybe_inject_path_correction(state, runtime)
         if isinstance(correction, dict):
@@ -2764,6 +3117,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 _emit_skill_usage_logs(tool_calls)
                 artifact_calls = [tc for tc in tool_calls if tc.get("name") == "emit_builder_artifact"]
                 tool_names = self._tool_names(tool_calls)
+                pptx_skill_flags = _pptx_skill_flags_from_tool_calls(tool_calls)
                 research_diagnostics = self._update_research_diagnostics(state, tool_names)
                 allow_web_research = self._allow_web_research(state)
 
@@ -2820,6 +3174,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 "has_emit_builder_artifact": True,
                                 "emit_rejected": True,
                                 "empty_artifact_path": is_empty_path_rejection,
+                                **pptx_skill_flags,
                             },
                         )
                         write_diagnostics = state.get("builder_write_diagnostics") or {}
@@ -2908,6 +3263,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "turn": int(state.get("builder_non_artifact_turns", 0) or 0) + 1,
                             "tool_names": tool_names,
                             "has_emit_builder_artifact": True,
+                            **pptx_skill_flags,
                         },
                     )
                     thread_data = state.get("thread_data") or {}
@@ -2999,6 +3355,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "turn": non_artifact_turns,
                         "tool_names": tool_names,
                         "has_emit_builder_artifact": False,
+                        **pptx_skill_flags,
                     },
                 )
                 joined_names = ", ".join(tool_names) if tool_names else "none"

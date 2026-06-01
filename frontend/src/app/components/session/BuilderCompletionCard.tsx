@@ -25,6 +25,7 @@ const FAILURE_BODY =
 const TIMEOUT_BODY =
   'The build took longer than expected and was cut short. Want me to try again?';
 const CANCELLED_BODY = 'Build was cancelled. Let me know when you want to pick it up again.';
+const DOWNLOAD_FIRST_EXTENSIONS = new Set(['pptx', 'ppt', 'docx', 'xlsx']);
 
 type BuilderCompletionCardProps = {
   event: BuilderCompletionEventV1;
@@ -103,6 +104,17 @@ function deriveBody(event: BuilderCompletionEventV1): string | null {
   return CANCELLED_BODY;
 }
 
+function artifactExtension(event: BuilderCompletionEventV1): string {
+  const candidate = event.artifact_filename || event.artifact_path || event.artifact_url || '';
+  const clean = candidate.split('?')[0]?.split('#')[0] ?? '';
+  const ext = clean.split('.').pop();
+  return ext && ext !== clean ? ext.toLowerCase() : '';
+}
+
+function isDownloadFirstArtifact(event: BuilderCompletionEventV1): boolean {
+  return DOWNLOAD_FIRST_EXTENSIONS.has(artifactExtension(event));
+}
+
 export function BuilderCompletionCard({
   event,
   onOpen,
@@ -125,8 +137,9 @@ export function BuilderCompletionCard({
   );
   const openHref = artifactProxyHref || event.artifact_url || null;
   const downloadHref = artifactProxyDownloadHref || event.artifact_url || null;
+  const downloadFirst = isDownloadFirstArtifact(event);
 
-  const showOpen = event.status === 'success' && Boolean(openHref);
+  const showOpen = event.status === 'success' && Boolean(openHref) && !downloadFirst;
   const showDownload = event.status === 'success' && Boolean(downloadHref);
   const showMissingActionHint = event.status === 'success' && !showOpen && !showDownload;
   const showRetry = event.status === 'error' || event.status === 'timeout';

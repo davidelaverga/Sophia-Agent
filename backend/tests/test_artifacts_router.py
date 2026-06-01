@@ -30,6 +30,49 @@ def test_get_artifact_reads_utf8_text_file_on_windows_locale(tmp_path, monkeypat
     assert response.media_type == "text/plain"
 
 
+def test_get_artifact_serves_local_pptx_as_attachment(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "deck.pptx"
+    artifact_path.write_bytes(b"pptx-bytes")
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: artifact_path)
+
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""})
+    response = asyncio.run(
+        artifacts_router.get_artifact("thread-1", "mnt/user-data/outputs/deck.pptx", request)
+    )
+
+    assert response.headers["content-disposition"].startswith("attachment;")
+    assert "deck.pptx" in response.headers["content-disposition"]
+
+
+def test_get_artifact_serves_supabase_pptx_as_attachment(tmp_path, monkeypatch) -> None:
+    outputs_dir = tmp_path / "outputs"
+    workspace_outputs_dir = tmp_path / "workspace" / "outputs"
+
+    def resolve_path(_thread_id: str, virtual_path: str) -> Path:
+        if virtual_path == "mnt/user-data/outputs/deck.pptx":
+            return outputs_dir / "deck.pptx"
+        if virtual_path == "mnt/user-data/workspace/outputs/deck.pptx":
+            return workspace_outputs_dir / "deck.pptx"
+        raise AssertionError(f"Unexpected virtual path: {virtual_path}")
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", resolve_path)
+    monkeypatch.setattr(
+        artifacts_router.supabase_artifact_store,
+        "download_artifact",
+        lambda *, thread_id, filename: (b"pptx-bytes", "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+    )
+
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""})
+    response = asyncio.run(
+        artifacts_router.get_artifact("thread-1", "mnt/user-data/outputs/deck.pptx", request)
+    )
+
+    assert bytes(response.body) == b"pptx-bytes"
+    assert response.headers["content-disposition"].startswith("attachment;")
+    assert "deck.pptx" in response.headers["content-disposition"]
+
+
 def test_list_artifacts_returns_output_files_sorted_by_modified_time(tmp_path, monkeypatch) -> None:
     outputs_dir = tmp_path / "outputs"
     nested_dir = outputs_dir / "nested"

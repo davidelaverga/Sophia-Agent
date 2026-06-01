@@ -216,7 +216,7 @@ Config values starting with `$` are resolved as environment variables (e.g., `$O
 
 **Required environment variables by deliverable type**:
 - Text / markdown / PDF research deliverables: only the LLM key (`ANTHROPIC_API_KEY` etc.) is required.
-- **Visual deliverables (.pptx, generated images, infographics)**: `OPENAI_API_KEY` is required. The `image-generation` skill calls OpenAI's `gpt-image-2`, and `ppt-generation` orchestrates that skill. Without the key set, the script exits 2 immediately so the builder doesn't loop — see [skills/public/image-generation/scripts/generate.py](../skills/public/image-generation/scripts/generate.py).
+- **Visual deliverables (.pptx, generated images, infographics)**: `OPENAI_API_KEY` is required on the `sophia-langgraph` service because builder skills execute there. The `image-generation` skill calls OpenAI's `gpt-image-2`, and `ppt-generation` orchestrates that skill. Without the key set on LangGraph, the script exits 2 immediately so the builder doesn't loop — see [skills/public/image-generation/scripts/generate.py](../skills/public/image-generation/scripts/generate.py).
 - Charts (`chart-visualization` skill): currently shells out to a Node.js script and the upstream Alipay-hosted GPT-Vis service; ensure Node.js ≥18 is on the container if you expect the model to use that path.
 
 **Extensions Configuration** (`extensions_config.json`):

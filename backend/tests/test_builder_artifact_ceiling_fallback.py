@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import time
+import zipfile
 from pathlib import Path
 
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
@@ -32,6 +33,15 @@ def _write_file(path: Path, content: str = "x", *, mtime_offset_s: float = 0.0) 
     if mtime_offset_s:
         new_mtime = time.time() + mtime_offset_s
         os.utime(path, (new_mtime, new_mtime))
+
+
+def _write_minimal_pptx(path: Path) -> None:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types></Types>")
+        archive.writestr("_rels/.rels", "<Relationships></Relationships>")
+        archive.writestr("ppt/presentation.xml", "<p:presentation></p:presentation>")
+        archive.writestr("ppt/slides/slide1.xml", "<p:sld></p:sld>")
+        archive.writestr("ppt/slideLayouts/slideLayout1.xml", "x" * 2048)
 
 
 def test_ceiling_fallback_promotes_markdown(tmp_path: Path) -> None:
@@ -126,6 +136,59 @@ def test_ceiling_fallback_apology_when_no_deliverables(tmp_path: Path) -> None:
         state, steps_completed=20, reason="hard_ceiling"
     )
     assert fallback["artifact_path"] is None
+    assert fallback["confidence"] == 0.2
+
+
+def test_ceiling_fallback_pptx_promotes_valid_powerpoint(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    _write_minimal_pptx(outputs / "deck.pptx")
+
+    started_ms = int((time.time() - 10) * 1000)
+    state = _state_with_outputs(outputs, started_ms=started_ms)
+    state["builder_artifact_target_path"] = "/mnt/user-data/outputs/deck.pptx"
+
+    fallback = BuilderArtifactMiddleware._build_ceiling_fallback(
+        state, steps_completed=12, reason="hard_ceiling"
+    )
+
+    assert fallback["artifact_path"] == "/mnt/user-data/outputs/deck.pptx"
+    assert fallback["artifact_type"] == "pptx"
+
+
+def test_ceiling_fallback_pptx_rejects_tiny_deck_and_promotes_markdown_fallback(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "deck.pptx").write_bytes(b"hello")
+    _write_file(outputs / "deck.md", "# Slide outline\n\nA real degraded fallback.")
+
+    started_ms = int((time.time() - 10) * 1000)
+    state = _state_with_outputs(outputs, started_ms=started_ms)
+    state["builder_artifact_target_path"] = "/mnt/user-data/outputs/deck.pptx"
+
+    fallback = BuilderArtifactMiddleware._build_ceiling_fallback(
+        state, steps_completed=12, reason="hard_ceiling"
+    )
+
+    assert fallback["artifact_path"] == "/mnt/user-data/outputs/deck.md"
+    assert fallback["artifact_type"] == "md"
+
+
+def test_ceiling_fallback_pptx_refuses_generator_script(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    _write_file(outputs / "_generate_deck.py", "print('deck')")
+
+    started_ms = int((time.time() - 10) * 1000)
+    state = _state_with_outputs(outputs, started_ms=started_ms)
+    state["builder_artifact_target_path"] = "/mnt/user-data/outputs/deck.pptx"
+
+    fallback = BuilderArtifactMiddleware._build_ceiling_fallback(
+        state, steps_completed=12, reason="hard_ceiling"
+    )
+
+    assert fallback["artifact_path"] is None
+    assert fallback["artifact_type"] == "presentation"
     assert fallback["confidence"] == 0.2
 
 

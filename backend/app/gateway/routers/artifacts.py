@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["artifacts"])
 _OUTPUTS_VIRTUAL_PATH = "mnt/user-data/outputs"
 _WORKSPACE_OUTPUTS_VIRTUAL_PATH = "mnt/user-data/workspace/outputs"
+_OFFICE_DOWNLOAD_EXTENSIONS = frozenset({".pptx", ".ppt", ".docx", ".xlsx"})
 _session_store = SessionStore()
 
 
@@ -38,6 +39,10 @@ class ThreadArtifactListResponse(BaseModel):
 def _is_builder_internal(name: str) -> bool:
     # Builder generator/helper scripts are byproducts, not deliverables.
     return name.startswith("_") and name.endswith(".py")
+
+
+def _is_office_download(filename: str | Path) -> bool:
+    return Path(filename).suffix.lower() in _OFFICE_DOWNLOAD_EXTENSIONS
 
 
 def _short_id(value: str | None) -> str | None:
@@ -238,7 +243,14 @@ def _try_serve_from_supabase(thread_id: str, path: str, request: Request) -> Res
         len(content),
     )
 
-    if request.query_params.get("download"):
+    if request.query_params.get("download") or _is_office_download(filename):
+        logger.info(
+            "Serving artifact with attachment disposition: thread_id=%s ext=%s source=supabase download=%s bytes=%d",
+            thread_id,
+            Path(filename).suffix.lower().lstrip(".") or None,
+            bool(request.query_params.get("download")),
+            len(content),
+        )
         return Response(
             content=content,
             media_type=mime_type or "application/octet-stream",
@@ -460,8 +472,17 @@ async def get_artifact(
     # Encode filename for Content-Disposition header (RFC 5987)
     encoded_filename = quote(actual_path.name)
 
-    # if `download` query parameter is true, return the file as a download
-    if request.query_params.get("download"):
+    # if `download` query parameter is true, return the file as a download.
+    # Office binaries are also attachment-first because browsers cannot
+    # preview authenticated PPTX/DOCX/XLSX files reliably.
+    if request.query_params.get("download") or _is_office_download(actual_path):
+        logger.info(
+            "Serving artifact with attachment disposition: thread_id=%s ext=%s source=local download=%s bytes=%d",
+            thread_id,
+            actual_path.suffix.lower().lstrip(".") or None,
+            bool(request.query_params.get("download")),
+            actual_path.stat().st_size,
+        )
         return FileResponse(path=actual_path, filename=actual_path.name, media_type=mime_type, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"})
 
     if mime_type and mime_type == "text/html":
