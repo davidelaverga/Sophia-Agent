@@ -39,8 +39,8 @@ import {
   FeedbackToast,
 } from '../components/session';
 import { BuilderCompletionCard } from '../components/session/BuilderCompletionCard';
-import { CoreviewFixtureLauncher } from '../components/session/CoreviewFixtureLauncher';
 import { BuilderTaskNotice } from '../components/session/BuilderTaskNotice';
+import { CoreviewFixtureLauncher } from '../components/session/CoreviewFixtureLauncher';
 import { SessionLayout } from '../components/SessionLayout';
 import { SessionExpiredModal, MultiTabModal } from '../components/ui';
 import { UsageLimitModal } from '../components/UsageLimitModal';
@@ -683,6 +683,14 @@ function SessionPageContent() {
         }
       : null
   );
+  const builderCompletionRecoveryFile = recoveredBuilderLibraryItem
+    ? {
+        path: recoveredBuilderLibraryItem.path,
+        name: recoveredBuilderLibraryItem.name,
+        label: recoveredBuilderLibraryItem.name,
+        isPrimary: true,
+      }
+    : null;
   const hasRecoveredBuilderArtifact = Boolean(recoveredBuilderLibraryItem);
   const showBuilderTaskNotice = Boolean(builderTask) && !hasRecoveredBuilderArtifact;
   const builderReadyTitle = builderArtifact?.artifactTitle ?? builderPrimaryFile?.name ?? 'Builder deliverable';
@@ -702,7 +710,7 @@ function SessionPageContent() {
     if (hasActionPath) {
       return builderCompletion;
     }
-    if (!builderPrimaryFile?.path) {
+    if (!builderCompletionRecoveryFile?.path) {
       if (builderCompletion.status === 'success') {
         console.warn('[builder-artifacts] success completion downgraded because no action is available', {
           thread_id: (builderCompletion.thread_id || resolvedThreadId || '').slice(0, 12),
@@ -726,8 +734,8 @@ function SessionPageContent() {
       ...builderCompletion,
       thread_id: builderCompletion.thread_id || resolvedThreadId || '',
       status: 'success',
-      artifact_path: builderPrimaryFile.path,
-      artifact_filename: builderCompletion.artifact_filename ?? builderPrimaryFile.name,
+      artifact_path: builderCompletionRecoveryFile.path,
+      artifact_filename: builderCompletion.artifact_filename ?? builderCompletionRecoveryFile.name,
       artifact_title: builderCompletion.artifact_title ?? builderReadyTitle,
       error_message: null,
       source: 'artifact_library_recovery',
@@ -739,10 +747,10 @@ function SessionPageContent() {
       artifact_path_present: true,
     });
     return recovered;
-  }, [builderCompletion, builderPrimaryFile?.name, builderPrimaryFile?.path, builderReadyTitle, resolvedThreadId]);
+  }, [builderCompletion, builderCompletionRecoveryFile?.name, builderCompletionRecoveryFile?.path, builderReadyTitle, resolvedThreadId]);
 
   useEffect(() => {
-    if (!builderCompletionForDisplay || builderCompletionForDisplay.status !== 'success') return;
+    if (builderCompletionForDisplay?.status !== 'success') return;
     if (builderCompletionForDisplay.artifact_path || builderCompletionForDisplay.artifact_url) return;
     console.warn('[builder-artifacts] terminal completion has no action href', {
       thread_id: builderCompletionForDisplay.thread_id.slice(0, 12),

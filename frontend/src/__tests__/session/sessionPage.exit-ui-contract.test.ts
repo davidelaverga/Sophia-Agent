@@ -54,4 +54,13 @@ describe('session page exit UI contract', () => {
     expect(source).toContain('builderCompletion.error_message === MISSING_BUILDER_DELIVERABLE_ERROR');
     expect(source).toContain('MISSING_BUILDER_DELIVERABLE_RETRY_MESSAGE');
   });
+
+  it('does not recover a failed completion from stale persisted builder artifacts', () => {
+    const source = readAppFile('app/session/page.tsx');
+
+    expect(source).toContain('const builderCompletionRecoveryFile = recoveredBuilderLibraryItem');
+    expect(source).toContain('if (!builderCompletionRecoveryFile?.path)');
+    expect(source).toContain('artifact_path: builderCompletionRecoveryFile.path');
+    expect(source).not.toContain('artifact_path: builderPrimaryFile.path');
+  });
 });
