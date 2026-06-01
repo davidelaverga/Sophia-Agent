@@ -40,6 +40,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import re
+import shutil
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -141,6 +142,56 @@ _TASK_TYPE_EXTENSIONS = {
 }
 _FALLBACK_TASK_SLUG = "build"
 _MAX_SLUG_SOURCE_CHARS = 60
+
+# File extensions copied from the parent (companion) thread's uploads
+# into the builder's sandbox at dispatch time. Each LangGraph thread gets
+# its own sandbox via ``ThreadDataMiddleware``, so the builder cannot
+# read the companion's filesystem directly — we copy images across so
+# ``view_image_tool`` can inspect them by virtual path. Kept narrow:
+# documents go through ``read_user_document`` on the companion side; the
+# builder typically generates its own text deliverables and doesn't need
+# the user's text files copied over (and shipping a 50 MB PDF across is
+# wasteful when the companion already extracted what it needed).
+#
+# MUST stay a subset of the extensions ``view_image_tool`` actually
+# accepts. Upstream rejects ``.gif`` (see
+# ``deerflow.tools.builtins.view_image_tool``'s ``valid_extensions``
+# check), so copying GIFs across and surfacing them in the builder
+# briefing would teach the model to make a guaranteed-failing
+# ``view_image_tool(image_path="...gif")`` call. If upstream ever adds
+# GIF support, add it here AND verify the builder briefing wording in
+# ``BuilderTaskMiddleware`` still matches.
+_BUILDER_COPY_IMAGE_EXTENSIONS: frozenset[str] = frozenset(
+    {".jpg", ".jpeg", ".png", ".webp"}
+)
+
+
+# Strict allow-list for filenames that may be copied into the builder's
+# sandbox and later named in its briefing block. Codex P2 on PR #132:
+# the gateway upload sanitizer rejects path separators but not
+# newlines, angle brackets, or other characters that could break out
+# of the ``<uploaded_images>`` prompt tag. Filtering at this boundary
+# keeps dangerous names out of ``delegation_context`` entirely, so
+# even if the briefing renderer's own allow-list
+# (``builder_task._SAFE_UPLOADED_IMAGE_PATH``) were ever bypassed,
+# the underlying filesystem entries are already safe.
+_SAFE_COPY_FILENAME = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _max_builder_image_bytes() -> int:
+    """Per-image size cap for builder-side vision copy.
+
+    Read lazily from ``view_user_image.MAX_VIEWABLE_IMAGE_BYTES`` so the
+    companion and builder share a single source of truth — bumping the
+    cap there flows through here automatically. Lazy because
+    ``view_user_image`` lazy-imports its sandbox helpers (see that
+    module's TYPE_CHECKING dance), and we'd rather not invert the
+    dependency at module-load time.
+    """
+    from deerflow.sophia.tools.view_user_image import MAX_VIEWABLE_IMAGE_BYTES
+
+    return MAX_VIEWABLE_IMAGE_BYTES
+
 
 # Demo-prompt detection. Mirrors ``switch_to_builder``'s heuristic so users
 # who say "test builder, make anything" continue to get the deterministic
@@ -507,6 +558,356 @@ def _build_delegation_context(
     }
 
 
+# Server-trusted filename allow-list for current-turn attachments.
+# Codex P2 PR #132 latest iteration: the attached filenames come from
+# the frontend chat post-handler. Each name is re-validated through this
+# regex before we touch the filesystem so a compromised input source
+# (e.g. a future caller that doesn't sanitize) can't slip path traversal
+# or prompt-injection characters through to ``_copy_parent_uploaded_images``.
+_TRUSTED_ATTACHMENT_FILENAME = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _read_current_turn_attached_files(
+    runtime: ToolRuntime[ContextT, SophiaState] | None,
+) -> Any:
+    """Read the raw per-run attachment list from runtime config/context.
+
+    Codex P2 PR #132 (latest iteration): this field MUST be sourced
+    from ``runtime.config["configurable"]`` (the frontend chat client
+    writes it there) — a **per-run** channel that LangGraph does NOT
+    persist into thread state. The earlier implementation read
+    ``state["current_turn_attached_files"]`` from the ``input`` channel,
+    which IS persisted under the field's LAST_VALUE reducer. The
+    consequence: a later turn that omitted attachments (no
+    ``current_turn_attached_files`` in its input) did not clear the
+    field — the prior turn's list survived in state, and
+    ``_copy_parent_uploaded_images`` re-copied private images from an
+    earlier turn into a brand-new builder sandbox. Relying on "omitted
+    fields disappear from state" is wrong: omitted fields are simply
+    not updated, so the stale value persists.
+
+    ``config.configurable`` (and ``context``) are scoped to a single
+    run and never written back to state, so a run that omits the field
+    reads a clean empty value — exactly the per-run reset semantics the
+    review asked for, with no extra reducer/sentinel plumbing.
+
+    Checks ``config.configurable`` first (where the frontend puts it),
+    then ``context`` as a fallback (langgraph-api copies ``context`` →
+    ``configurable`` server-side, but a direct ``context``-only caller
+    is still honoured).
+    """
+    if runtime is None:
+        return None
+    if runtime.config:
+        configurable = runtime.config.get("configurable", {}) or {}
+        if "current_turn_attached_files" in configurable:
+            return configurable.get("current_turn_attached_files")
+    if runtime.context:
+        candidate = runtime.context.get("current_turn_attached_files")
+        if candidate is not None:
+            return candidate
+    return None
+
+
+def _extract_current_turn_attachment_filenames(
+    runtime: ToolRuntime[ContextT, SophiaState] | None,
+) -> frozenset[str]:
+    """Return the filenames the user attached on THIS turn.
+
+    Sources the list from ``runtime.config["configurable"]`` via
+    ``_read_current_turn_attached_files`` — a per-run channel the
+    frontend chat client populates (empty list when no attachments).
+    This is the **server-trusted** attachment list — NOT a parse of the
+    user message body, which a user could spoof by typing the
+    synthesized prompt marker into their own text.
+
+    History: the original implementation parsed the latest HumanMessage
+    for the ``[The user has uploaded ...]`` sentinel + bullet
+    filenames; Codex P2 flagged that as spoofable, so the trust
+    boundary moved to an OOB field. A follow-up Codex P2 flagged that
+    routing the field through LangGraph ``input`` (persisted state) left
+    it stale across turns that omit attachments — so it now travels on
+    the per-run ``config.configurable`` channel instead (see
+    ``_read_current_turn_attached_files``).
+
+    Defense in depth: each name is re-validated against
+    ``_TRUSTED_ATTACHMENT_FILENAME`` (the same allow-list the frontend
+    + the builder-side renderer use) so a misbehaving upstream can't
+    introduce path-traversal or prompt-injection characters.
+
+    Returns empty frozenset when:
+    - the run didn't include ``current_turn_attached_files`` (e.g. a
+      non-frontend client like the LangGraph SDK creating a run
+      directly, or any turn with no attachments)
+    - the value isn't a list of strings
+    - every entry fails the allow-list
+    """
+    raw = _read_current_turn_attached_files(runtime)
+    if not isinstance(raw, list):
+        return frozenset()
+    safe: set[str] = set()
+    for entry in raw:
+        if isinstance(entry, str) and _TRUSTED_ATTACHMENT_FILENAME.match(entry):
+            safe.add(entry)
+    return frozenset(safe)
+
+
+def _select_copyable_images(
+    parent_uploads: Path,
+    max_bytes: int,
+    parent_thread_id: str,
+    allowed_names: frozenset[str] | None,
+) -> list[Path]:
+    """Pick image files in ``parent_uploads`` eligible for builder copy.
+
+    Filters to image extensions, drops hidden files and unreadable
+    entries, and skips anything over ``max_bytes`` (the companion-side
+    vision cap — matches what the builder's upstream view_image_tool
+    can actually handle). Oversized skips are logged once each so an
+    operator can grep "why didn't the builder see my image".
+
+    ``allowed_names`` (Codex P1 PR #132 latest iteration): when non-None,
+    only filenames in this set are kept. The set is the intersection of
+    "files the user attached on the current turn" (parsed from the
+    synthesized ``buildAttachmentPrompt`` block in the latest
+    HumanMessage). Without this scoping, every leftover image from
+    prior turns in the parent uploads dir would be copied into each
+    new builder run, exposing stale/private images to the builder and
+    encouraging it to inspect or include them in unrelated tasks. An
+    empty frozenset means "user attached nothing this turn" → copy
+    nothing. ``None`` means "skip scoping" (legacy callers; tests).
+
+    Extracted from ``_copy_parent_uploaded_images`` so that function's
+    cyclomatic complexity stays under Sentrux's CC ≥ 16 gate after the
+    Codex P2 oversize guard was added (PR #132).
+    """
+    eligible: list[Path] = []
+    for f in sorted(parent_uploads.iterdir()):
+        if not f.is_file() or f.name.startswith("."):
+            continue
+        if f.suffix.lower() not in _BUILDER_COPY_IMAGE_EXTENSIONS:
+            continue
+        if not _SAFE_COPY_FILENAME.match(f.name):
+            logger.warning(
+                "[Builder] skipping image with unsafe filename %r from parent thread %s — "
+                "name contains characters outside the [A-Za-z0-9._-] allow-list "
+                "(prompt-injection guard).",
+                f.name,
+                parent_thread_id,
+            )
+            continue
+        if allowed_names is not None and f.name not in allowed_names:
+            # Codex P1: this file existed in the parent uploads dir but
+            # the user did NOT attach it on THIS turn. Skip silently
+            # (no warning — this is the expected, common case for any
+            # multi-turn session with prior uploads).
+            continue
+        try:
+            size = f.stat().st_size
+        except OSError:
+            # Treat stat failures as "skip" — copying a file whose size
+            # we can't validate would risk tripping the builder's
+            # vision tool on the next turn.
+            continue
+        if size > max_bytes:
+            logger.warning(
+                "[Builder] skipping oversized image %s (%d bytes > %d cap) "
+                "from parent thread %s — the builder's vision tool would "
+                "trip Anthropic's request-size limit.",
+                f.name,
+                size,
+                max_bytes,
+                parent_thread_id,
+            )
+            continue
+        eligible.append(f)
+    return eligible
+
+
+def _copy_files_to_builder_sandbox(
+    sources: list[Path],
+    builder_uploads: Path,
+) -> list[str]:
+    """Copy each ``sources`` entry into ``builder_uploads``; return virtual paths.
+
+    Ensures the destination dir exists. Per-file copy failures are
+    logged and dropped from the returned list so one bad file doesn't
+    abort the rest of the dispatch.
+    """
+    try:
+        builder_uploads.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.warning(
+            "[Builder] failed to create builder uploads dir %s; skipping image copy",
+            builder_uploads,
+            exc_info=True,
+        )
+        return []
+
+    virtual_paths: list[str] = []
+    for src in sources:
+        dst = builder_uploads / src.name
+        try:
+            shutil.copy2(src, dst)
+        except OSError:
+            logger.warning(
+                "[Builder] failed to copy uploaded image %s -> %s",
+                src,
+                dst,
+                exc_info=True,
+            )
+            continue
+        virtual_paths.append(f"/mnt/user-data/uploads/{src.name}")
+    return virtual_paths
+
+
+def _materialize_current_turn_images_from_supabase(
+    parent_thread_id: str,
+    parent_uploads: Path,
+    current_turn_attachments: frozenset[str],
+) -> None:
+    """Fetch whitelisted current-turn IMAGE uploads from the Supabase mirror.
+
+    Cross-service bridge (Codex P1 PR #132 follow-up): in the split
+    gateway/langgraph deployment, a freshly attached image exists only on
+    the gateway disk + Supabase until the companion calls
+    ``view_user_image`` (which materializes it locally). If the user
+    instead asks immediately for a builder deliverable, ``start_builder_task``
+    runs here in the langgraph container with an empty / missing parent
+    uploads dir, so ``_select_copyable_images`` would find nothing and the
+    builder would never be told about the image. We pull the whitelisted
+    current-turn images into ``parent_uploads`` first so the copy proceeds.
+
+    Best-effort: any failure is logged and skipped. Only image-extension
+    names that pass ``_SAFE_COPY_FILENAME`` are fetched (documents are the
+    job of ``read_user_document``, not the builder image copy). Files
+    already present locally are left untouched.
+    """
+    from deerflow.sophia.storage import supabase_artifact_store
+
+    if not supabase_artifact_store.is_configured():
+        return
+    try:
+        parent_uploads.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+
+    for name in current_turn_attachments:
+        if not _SAFE_COPY_FILENAME.match(name):
+            continue
+        if Path(name).suffix.lower() not in _BUILDER_COPY_IMAGE_EXTENSIONS:
+            continue
+        dest = parent_uploads / name
+        if dest.exists():
+            continue
+        try:
+            # Uploads live under the {thread_id}/uploads/ keyspace (Codex P1
+            # PR #132) — distinct from builder outputs — so address it with
+            # the shared prefix helper the gateway mirror uses.
+            object_name = supabase_artifact_store.uploads_object_name(name)
+            result = supabase_artifact_store.download_artifact(parent_thread_id, object_name)
+        except Exception as exc:  # noqa: BLE001 — best-effort cross-service fetch
+            logger.warning(
+                "[Builder] Supabase fetch failed for current-turn image %s/%s: %s",
+                parent_thread_id,
+                name,
+                exc,
+            )
+            continue
+        if result is None:
+            continue
+        content, _content_type = result
+        try:
+            with open(str(dest), "wb") as fh:
+                fh.write(content)
+        except OSError as exc:
+            logger.warning("[Builder] could not materialize %s from Supabase: %s", name, exc)
+            continue
+        logger.info(
+            "[Builder] materialized current-turn image %s (%d bytes) from Supabase for parent thread %s",
+            name,
+            len(content),
+            parent_thread_id,
+        )
+
+
+def _copy_parent_uploaded_images(
+    *,
+    parent_thread_id: str | None,
+    builder_thread_id: str,
+    current_turn_attachments: frozenset[str] | None,
+) -> list[str]:
+    """Copy image uploads from the parent thread's sandbox into the builder's.
+
+    Returns the list of virtual paths the builder will see (e.g.
+    ``["/mnt/user-data/uploads/photo.png"]``). Returns an empty list
+    when there's no parent thread, the parent sandbox is empty, or the
+    parent uploads dir doesn't exist yet (no uploads happened).
+
+    ``current_turn_attachments`` (Codex P1 PR #132 latest iteration):
+    the whitelist of filenames the user attached on THIS turn (parsed
+    server-side from the synthesized ``buildAttachmentPrompt`` block in
+    the latest HumanMessage). ``None`` skips the scoping entirely
+    (legacy callers and tests); empty frozenset means "user attached
+    nothing this turn" → copy nothing. The bug this closes: previously
+    the loop copied EVERY image in the parent uploads dir, so a builder
+    request that had nothing to do with prior uploads would still see
+    (and be encouraged to inspect) cat.png from three turns ago.
+
+    Best-effort: a copy failure for one file is logged but doesn't
+    abort the dispatch — the build proceeds without that image.
+    """
+    if not parent_thread_id:
+        return []
+
+    # Short-circuit: an explicit empty whitelist means "user attached
+    # nothing on this turn" — there's nothing to copy. Checked BEFORE any
+    # filesystem work.
+    if current_turn_attachments is not None and not current_turn_attachments:
+        return []
+
+    from deerflow.config.paths import get_paths
+
+    paths = get_paths()
+    parent_uploads = paths.sandbox_uploads_dir(parent_thread_id)
+
+    # Cross-service bridge (Codex P1 PR #132 follow-up): when the user
+    # attached images on THIS turn but they only exist on the gateway disk
+    # + Supabase (the companion hasn't materialized them locally yet), pull
+    # them into the parent uploads dir FIRST so the copy below sees them.
+    # Must run BEFORE the is_dir() check — in the split deployment the dir
+    # may not exist yet on this container. Scoped to the current-turn
+    # whitelist; ``None`` (legacy callers / tests) skips the fetch.
+    if current_turn_attachments:
+        _materialize_current_turn_images_from_supabase(
+            parent_thread_id, parent_uploads, current_turn_attachments
+        )
+
+    if not parent_uploads.is_dir():
+        return []
+
+    eligible = _select_copyable_images(
+        parent_uploads,
+        _max_builder_image_bytes(),
+        parent_thread_id,
+        current_turn_attachments,
+    )
+    if not eligible:
+        return []
+
+    builder_uploads = paths.sandbox_uploads_dir(builder_thread_id)
+    virtual_paths = _copy_files_to_builder_sandbox(eligible, builder_uploads)
+
+    if virtual_paths:
+        logger.info(
+            "[Builder] copied %d uploaded image(s) from parent thread %s to builder thread %s",
+            len(virtual_paths),
+            parent_thread_id,
+            builder_thread_id,
+        )
+    return virtual_paths
+
+
 def _has_active_builder_task(state: SophiaState) -> str | None:
     """Return the task_id of any non-terminal builder task in state, else None.
 
@@ -535,6 +936,7 @@ async def _dispatch_via_asgi(
     user_id: str,
     parent_thread_id: str | None,
     parent_model: str | None,
+    current_turn_attachments: frozenset[str],
 ) -> tuple[str, str]:
     """Create a builder thread + run via LangGraph SDK ASGI in-process.
 
@@ -546,6 +948,16 @@ async def _dispatch_via_asgi(
     client = get_client(url=None)  # ASGI in-process via langgraph.json
     thread = await client.threads.create()
     thread_id = thread["thread_id"]
+
+    # Copy any image uploads from the parent (companion) thread into the
+    # builder's freshly-allocated sandbox so ``view_image_tool`` can read
+    # them by virtual path. Each LangGraph thread has its own sandbox —
+    # the builder cannot read the companion's filesystem directly.
+    uploaded_image_paths = _copy_parent_uploaded_images(
+        parent_thread_id=parent_thread_id,
+        builder_thread_id=thread_id,
+        current_turn_attachments=current_turn_attachments,
+    )
 
     # ``parent_thread_id`` and ``parent_user_id`` are also embedded in
     # ``delegation_context`` (state) because langgraph-api 0.8.1 forwards
@@ -559,6 +971,7 @@ async def _dispatch_via_asgi(
         **delegation_context,
         "parent_thread_id": parent_thread_id,
         "parent_user_id": user_id,
+        "uploaded_image_paths": uploaded_image_paths,
     }
 
     run_input: dict[str, Any] = {
@@ -759,10 +1172,12 @@ async def _start_builder_task_impl(
     )
 
     logger.info(
-        "[Builder] start_builder_task dispatching: task_type=%s demo=%s tone=%s ritual=%s "
-        "parent_thread=%s parent_model=%s user_id=%s user_id_source=%s artifact_source=%s "
-        "allow_web_research=%s explicit_url_count=%s search_limit=%s fetch_limit=%s target_ext=%s",
+        "[Builder] start_builder_task dispatching: task_type=%s allow_web_research=%s "
+        "demo=%s tone=%s ritual=%s parent_thread=%s parent_model=%s user_id=%s "
+        "user_id_source=%s artifact_source=%s explicit_url_count=%s search_limit=%s "
+        "fetch_limit=%s target_ext=%s",
         task_type,
+        allow_web_research,
         demo_mode,
         companion_artifact.get("tone_estimate"),
         active_ritual,
@@ -771,12 +1186,20 @@ async def _start_builder_task_impl(
         user_id,
         user_id_source,
         artifact_source,
-        allow_web_research,
         len(explicit_user_urls),
         builder_web_budget.get("search_limit"),
         builder_web_budget.get("fetch_limit"),
         Path(artifact_target_path).suffix.lower().lstrip("."),
     )
+
+    # Codex P1/P2 PR #132 (latest iteration): the filenames the user
+    # attached on THIS turn. Sourced from the per-run
+    # ``runtime.config["configurable"]["current_turn_attached_files"]``
+    # channel the frontend chat client populates — server-trusted (not a
+    # spoofable parse of the message body) AND per-run (so a turn that
+    # omits attachments reads empty instead of inheriting the prior
+    # turn's persisted state). See ``_read_current_turn_attached_files``.
+    current_turn_attachments = _extract_current_turn_attachment_filenames(runtime)
 
     try:
         task_id, run_id = await _dispatch_via_asgi(
@@ -788,6 +1211,7 @@ async def _start_builder_task_impl(
             user_id=user_id,
             parent_thread_id=parent_thread_id,
             parent_model=parent_model,
+            current_turn_attachments=current_turn_attachments,
         )
     except Exception as exc:  # noqa: BLE001 — LangGraph SDK raises untyped errors
         logger.warning("[Builder] ASGI dispatch failed: %s (trace=%s)", exc, trace_id)

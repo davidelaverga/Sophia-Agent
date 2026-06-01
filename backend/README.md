@@ -76,6 +76,40 @@ Regression command for this flow:
 PYTHONPATH=. uv run pytest tests/test_sophia_builder_flow.py -v
 ```
 
+### Sophia Vision Port (PR #132)
+
+The companion and builder can both see images in-process — same `viewed_images` state channel that DeerFlow's lead_agent uses upstream, wrapped in narrow thread-scoped tools so the companion can't address other threads' filesystems.
+
+**Capability gate**: `deerflow.agents.sophia_agent.vision_gate.supports_vision(model_name)` returns True for `claude-sonnet-4-6` and `claude-haiku-4-5-20251001` by default; operators can override per-model via `app_config.models[*].supports_vision`. Vision tools, middlewares, and uploaded-image briefing are all gated on this signal — a vision-off run never advertises a tool it can't call.
+
+**Companion tools** (in `packages/harness/deerflow/sophia/tools/`):
+
+| Tool | Use when | Notes |
+|------|----------|-------|
+| `view_user_image(image_filename)` | User shares an image (photo, screenshot, chart) and Sophia needs to see it. | Whitelists current thread's `uploads/` + `outputs/`; bare filename only (no paths). Rejects `.gif` (Anthropic flags as low-quality input). Caps at `MAX_VIEWABLE_IMAGE_BYTES = 10 MiB` raw — base64 expands ~33% and Anthropic's request envelope is 32 MB, so the cap returns a clean tool-side error instead of a provider 400. |
+| `read_user_document(document_filename)` | Text PDFs, DOCX, PPTX, XLSX, MD, TXT — anything where vision would hallucinate fine print. Always prefer this over `view_user_image` for documents. | Converts to markdown via `markitdown` (no size cap). |
+
+**`SophiaViewImageMiddleware`** (subclass of upstream `ViewImageMiddleware`):
+- Recognizes both `view_image` (builder) and `view_user_image` (companion) tool names.
+- **Skips injection when `viewed_images` is empty** (Codex P2 PR #132 later iteration). The tool's failure paths clear the registry to `{}` (via `merge_viewed_images` reducer's empty-dict sentinel) so a previously-loaded image from this session doesn't get re-injected after a failed lookup — without this, Sophia would answer about the OLD image while the user is asking about the missing one. The middleware skip prevents upstream's "No images have been viewed." HumanMessage from being synthesized into the cleared state.
+
+**Builder uploads briefing** (`BuilderTaskMiddleware`):
+- Surfaces images the user attached to the dispatching companion turn at `/mnt/user-data/uploads/{name}` in a `<uploaded_images>` block.
+- Two rendering branches: vision-on says `Use view_image(image_path=...)`; vision-off says "the vision tool is NOT available in this build context — acknowledge the upload but don't call view_image". Picks the right branch from `BuilderTaskMiddleware(vision_enabled=...)` plumbed through `build_builder_middleware_chain`.
+
+**Cross-thread image copy** (`start_builder_task._copy_parent_uploaded_images`):
+- Each LangGraph thread has its own sandbox via `ThreadDataMiddleware`; the builder cannot read the companion's filesystem directly. At dispatch time, the wrapper copies eligible images from the companion's `user-data/uploads/` into the builder's freshly-allocated sandbox.
+- Scoped to **current-turn attachments only** (Codex P1 PR #132 latest iteration). `_extract_current_turn_attachment_filenames(messages)` parses the synthesized `[The user has uploaded N file(s) ...]` block from the latest HumanMessage (the format produced by `frontend/src/app/stores/attachment-prompt.ts::buildAttachmentPrompt`). Only filenames in the block are copied — previously the loop enumerated EVERY image in the parent uploads dir, so an unrelated later builder request would re-expose private images from earlier turns. Defense-in-depth: bullets outside the bracketed block are ignored; filenames are re-filtered through `[A-Za-z0-9._-]+`.
+
+Regression target for the vision port:
+
+```bash
+PYTHONPATH=. uv run pytest \
+  tests/test_sophia_vision_dispatch.py \
+  tests/test_sophia_vision_tools.py \
+  tests/test_sophia_view_image_middleware.py -v
+```
+
 ### Middleware Chain
 
 Middlewares execute in strict order, each handling a specific concern:
@@ -128,6 +162,7 @@ LLM-powered persistent context retention across conversations:
 |----------|-------|
 | **Sandbox** | `bash`, `ls`, `read_file`, `write_file`, `str_replace` |
 | **Built-in** | `present_files`, `ask_clarification`, `view_image`, `task` (subagent) |
+| **Sophia companion** | `view_user_image`, `read_user_document` (thread-scoped wrappers — see Vision Port below) |
 | **Community** | Tavily (web search), Jina AI (web fetch), Firecrawl (scraping), DuckDuckGo (image search) |
 | **MCP** | Any Model Context Protocol server (stdio, SSE, HTTP transports) |
 | **Skills** | Domain-specific workflows injected via system prompt |
@@ -147,7 +182,8 @@ FastAPI application providing REST endpoints for frontend integration:
 | `GET /api/memory/config` | Memory configuration |
 | `GET /api/memory/status` | Combined config + data |
 | `POST /api/threads/{id}/uploads` | Upload files (auto-converts PDF/PPT/Excel/Word to Markdown, rejects directory paths) |
-| `GET /api/threads/{id}/uploads/list` | List uploaded files |
+| `GET /api/threads/{id}/uploads/list` | List uploaded files (also proxied by frontend at `/api/threads/{id}/uploads/list` to seed the AttachmentBar uniquifier against on-disk state — Codex P2 PR #132) |
+| `DELETE /api/threads/{id}/uploads/{filename}` | Remove an uploaded file from disk (proxied by frontend so chip × actually clears bytes — Codex P2 PR #132) |
 | `GET /api/threads/{id}/artifacts/{path}` | Serve generated artifacts |
 
 ### IM Channels

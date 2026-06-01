@@ -286,6 +286,7 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
    - `present_files` - Make output files visible to user (only `/mnt/user-data/outputs`)
    - `ask_clarification` - Request clarification (intercepted by ClarificationMiddleware → interrupts)
    - `view_image` - Read image as base64 (added only if model supports vision)
+   - Sophia companion-only: `view_user_image`, `read_user_document` (thread-scoped wrappers — see Sophia Vision Port below)
 4. **Subagent tool** (if enabled):
    - `task` - Delegate to subagent (description, prompt, subagent_type, max_turns)
 
@@ -621,6 +622,74 @@ For models with `supports_vision: true`:
 - `ViewImageMiddleware` processes images in conversation
 - `view_image_tool` added to agent's toolset
 - Images automatically converted to base64 and injected into state
+
+### Sophia Vision Port (PR #132)
+
+The companion and builder both see images in-process. Same `viewed_images` channel as upstream, wrapped in narrow thread-scoped tools so the companion can't address other threads' filesystems.
+
+**Capability gate** (`deerflow.agents.sophia_agent.vision_gate.supports_vision`):
+- Default-on for `claude-sonnet-4-6` and `claude-haiku-4-5-20251001`.
+- Operators can override per-model via `app_config.models[*].supports_vision`.
+- Vision tools, middlewares, and uploaded-image briefing ALL gate on this — vision-off runs never advertise a tool they can't call.
+
+**Companion tools** ([packages/harness/deerflow/sophia/tools/](packages/harness/deerflow/sophia/tools)):
+- `view_user_image(image_filename)` — Whitelists current thread's `uploads/` + `outputs/`. Bare filename, no paths. Rejects `.gif`. Hard cap at `MAX_VIEWABLE_IMAGE_BYTES = 10 MiB` raw (base64 expansion → Anthropic 32 MB envelope risk).
+- `read_user_document(document_filename)` — text PDFs / DOCX / PPTX / XLSX / MD / TXT via `markitdown`. No size cap. Routing rule: vision tool for images only; documents always go through this path so the model doesn't hallucinate fine print.
+- Both tools resolve `thread_id` from `runtime.context` and look in `backend/.deer-flow/threads/{thread_id}/user-data/{uploads,outputs}/`. Path resolution reuses `replace_virtual_path` from sandbox tools.
+
+**`SophiaViewImageMiddleware`** ([agents/sophia_agent/middlewares/view_image.py](packages/harness/deerflow/agents/sophia_agent/middlewares/view_image.py)):
+- Subclasses upstream `ViewImageMiddleware`.
+- Recognizes BOTH `view_image` (builder uses upstream tool directly) and `view_user_image` (companion uses the narrow wrapper).
+- Overrides `_should_inject_image_message` to skip when `state["viewed_images"]` is empty. Pairs with the tool's clear-on-failure: every failure path in `view_user_image` returns `{"viewed_images": {}}` (the `merge_viewed_images` reducer's "clear all" sentinel) so a previously-loaded image from this session doesn't get re-injected after a failed lookup. Without the middleware skip, upstream's `_create_image_details_message` would synthesize a misleading "No images have been viewed." HumanMessage into the cleared state.
+
+**Builder uploads briefing** (`BuilderTaskMiddleware`):
+- Surfaces images attached to the dispatching companion turn at `/mnt/user-data/uploads/{name}` inside a `<uploaded_images>` block.
+- Two rendering branches: vision-on tells the model to call `view_image(image_path=...)`; vision-off acknowledges the upload but instructs the model NOT to call view_image. Branch selection is `BuilderTaskMiddleware(vision_enabled=...)`, plumbed through `build_builder_middleware_chain(user_id, vision_enabled=...)`.
+
+**Cross-thread image copy** ([sophia/tools/start_builder_task.py](packages/harness/deerflow/sophia/tools/start_builder_task.py)):
+- Each LangGraph thread has its own sandbox via `ThreadDataMiddleware`. The builder cannot read the companion's filesystem directly, so `_copy_parent_uploaded_images` copies eligible images into the builder's fresh sandbox at dispatch time.
+- **Scoped to current-turn attachments only** (Codex P1 PR #132 latest iteration). `_extract_current_turn_attachment_filenames(messages)` parses the synthesized `[The user has uploaded N file(s) ...]` block from the latest HumanMessage (format produced by `frontend/src/app/stores/attachment-prompt.ts::buildAttachmentPrompt`). Only filenames in that block are copied. Previously the loop enumerated EVERY image in the parent uploads dir, so an unrelated later builder request would re-expose private images from earlier turns. Defense-in-depth: bullets outside the bracketed block are ignored; names are re-filtered through `[A-Za-z0-9._-]+`.
+- Other safety filters (extension allow-list, hidden-file skip, oversize log+skip, prompt-injection allow-list) all stay.
+
+**Frontend integration** (Codex P1/P2 iteration on PR #132):
+- `POST /api/threads/{thread_id}/uploads` — multipart proxy with `userOwnsThread` gate (two-pass `/api/v1/sessions/open` → `/list?limit=100` fallback).
+- `GET /api/threads/{thread_id}/uploads/list` — list proxy used by the frontend AttachmentBar to seed its uniquifier against on-disk state (so a re-pick of `image.png` after chips were cleared by `useSessionOutboundSend` doesn't silently overwrite the earlier upload).
+- `DELETE /api/threads/{thread_id}/uploads/{filename}` — DELETE proxy so chip × actually clears bytes.
+- `/api/chat` post-handler runs the same `userOwnsThread` gate on ANY existing-thread send (not just attachment-bearing ones — a foreign thread_id with no attachments can still trigger `view_user_image` via prompt injection). Mock-mode (`USE_MOCK_STREAMING=true`) short-circuits BEFORE the ownership gate so offline-dev sessions don't fail closed.
+
+#### Production hardening wave (PR #132, post-initial-port — verified live on sophia-ei.com)
+
+The initial port worked locally but broke in the split Render deployment (gateway and langgraph are **separate web services with separate ephemeral disks** — `render.yaml` declares no shared/persistent disk). The fixes below make uploads survive that topology. Most were Codex-review-driven; the diagnosis that found them used Render + Vercel logs + driving production in Chrome DevTools.
+
+- **Cross-service Supabase bridge — the core fix.** The gateway writes uploads to *its* disk; the companion's read tools run in the *langgraph* container and read *its* disk → the file is invisible. Fix: the gateway upload route mirrors every saved file (and its converted `<stem>.md`) to Supabase Storage; the read tools download from the mirror on a local miss.
+  - Mirror helpers live in `app/gateway/routers/uploads.py` (`_mirror_upload_to_supabase`, `_delete_supabase_mirror`, `_list_supabase_upload_filenames`) and delegate to `deerflow.sophia.storage.supabase_artifact_store`.
+  - Read-tool fallback: `read_user_document._materialize_from_supabase`, `view_user_image._materialize_image_from_supabase`, and `start_builder_task._materialize_current_turn_images_from_supabase` (the builder copy fetches whitelisted current-turn **images** from the mirror before the local `is_dir()` check, so an immediate "build a deck from this image" works even before the companion materialized it locally).
+  - All best-effort: any Supabase miss/failure degrades to the existing "not found" / local-only behavior; nothing fails the turn. Local/dev with no Supabase keeps working unchanged.
+- **Separate Supabase keyspace for uploads.** Uploads mirror under `{thread_id}/uploads/{name}`; builder OUTPUTS mirror under `{thread_id}/{name}` (`supabase_mirror.py`). `supabase_artifact_store.uploads_object_name()` is the SINGLE source of truth for the `uploads/` prefix, used by all five upload sites (mirror upload + delete + the three read-tool downloads). Without the split, a user `report.pdf` and a builder `report.pdf` would overwrite each other (`x-upsert`).
+- **Idempotent DELETE.** `delete_uploaded_file` runs the path-traversal check first, then does NOT 404 on a local miss — it best-effort-unlinks locally AND always removes the Supabase mirror (original + `.md` sibling). On the ephemeral disk the local file may be gone while the mirror is live; a discarded file must not re-materialize. `supabase_artifact_store.delete_artifact` is 404-idempotent.
+- **`/uploads/list` unions local + mirror.** The endpoint no longer early-returns when the local dir is absent; it unions the local listing with `list_upload_filenames(thread_id)` (deduped by filename, local wins, mirror-only entries tagged `source: "supabase-mirror"`). The frontend AttachmentBar seeds its uniquifier from this list, so after a restart the mirrored names still reserve against re-attach-overwrite.
+- **Gateway upload routes enforce auth unconditionally.** The gateway is independently reachable, so the routes can't rely on the Next.js proxy's ownership check. `uploads.py::verify_thread_access` (router-level `Depends`) resolves the bearer token via `auth.resolve_bearer_user_id` (async, path-param-free; honors `SOPHIA_AUTH_BYPASS` for local/tests) and 403s unless the user owns the thread (checked against `SessionStore.list_open` + `list_recent`). Enforcement is **unconditional** — an earlier flag-gated version (`SOPHIA_GATEWAY_AUTH_ENABLED`) was rejected because `render.yaml` never set the flag, leaving the routes open.
+- **Base64 accumulation guards.** `ClearOnInjectViewImageMiddleware` clears `viewed_images` after injection AND prunes prior injected image messages from the persistent `messages` channel: each injected image `HumanMessage` is stamped with `additional_kwargs["sophia_injected_image"]` + a stable id; a new injection emits `RemoveMessage(id=...)` for prior ones. Without the prune, multiple ~10 MiB views accumulate in history and blow Anthropic's 32 MB request envelope despite the state-channel clear.
+
+#### Frontend AttachmentBar robustness (PR #132, prod silent-attach wave)
+
+- **Live `FileList` snapshot.** `handleFileSelection` copies `event.target.files` into an array BEFORE resetting `input.value`. In Chrome `input.value = ""` empties the live `FileList`, so reading `.length` after the reset saw 0 and the handler silently bailed (no chip, no upload, no error) — the production silent-attach root cause. Unit mocks didn't catch it (a mocked FileList isn't emptied by a value reset; `dispatchLiveFilesOnto` in the test now emulates the live semantics).
+- **Convertible `.md`-sibling reservation.** The pre-pass reserves `deriveMarkdownSibling()` for original picks; the registration loop ALSO reserves the derived `.md` of any **renamed** convertible (`report.pdf` → `report-1.pdf` must reserve `report-1.md`); the post-hoc server-truth rename uses `uniquifyFilenameAvoidingMdSibling` so a convertible's conversion output can't clobber a literal `.md` already on the server.
+- **Discard-before-upload race.** `uploadOneFile` checks `readChipStatus()` at the top and bails (drops the chip, no POST) when the user clicked × (status `deleting`) before the upload loop reached it — otherwise a discarded file lands on disk and the post-success cleanup DELETE might never run.
+
+**Regression command**:
+
+```bash
+PYTHONPATH=. uv run pytest \
+  tests/test_sophia_vision_dispatch.py \
+  tests/test_sophia_vision_tools.py \
+  tests/test_sophia_view_image_middleware.py \
+  tests/test_uploads_router.py \
+  tests/test_uploads_supabase_mirror.py \
+  tests/test_uploads_auth.py -v
+```
+
+**Deploy requirement:** the cross-service bridge means BOTH `sophia-gateway` AND `sophia-langgraph` must redeploy together — the gateway needs the mirror/delete/list code, langgraph needs the download-fallback + builder-materialize code. The Supabase bucket (`SUPABASE_BUILDER_BUCKET`, default `sophia_builder`) must exist; both services already have `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`.
 
 ## Code Style
 

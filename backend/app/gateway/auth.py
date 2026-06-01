@@ -24,6 +24,37 @@ def _get_bypass_user_id() -> str:
     return (os.getenv("SOPHIA_USER_ID") or "local-dev-user").strip()
 
 
+def is_auth_bypass_enabled() -> bool:
+    """Public accessor for the explicit dev auth-bypass flag.
+
+    True only when ``SOPHIA_AUTH_BYPASS=true`` (local dev / tests). In
+    bypass mode, token resolution returns the configured dev user without
+    a real token, and thread-scoped routes skip ownership enforcement —
+    the same dev escape hatch ``require_authorized_user_scope`` already
+    honors for the ``{user_id}``-scoped routers. NEVER set in production.
+    """
+    return _is_explicit_bypass_enabled()
+
+
+async def resolve_bearer_user_id(request: Request) -> str:
+    """Resolve the authenticated ``user_id`` from the request bearer token.
+
+    For routes NOT scoped by a ``{user_id}`` path param (e.g. the
+    thread-scoped upload routes). Honors ``SOPHIA_AUTH_BYPASS`` (returns
+    the configured bypass user without a token). Otherwise extracts the
+    bearer token and resolves it via the legacy ``/api/v1/auth/me`` bridge.
+
+    Raises ``HTTPException`` 401 (missing/invalid token) or 503 (auth
+    bridge unavailable) — same semantics as ``require_authorized_user_scope``,
+    minus the path-param scope comparison.
+    """
+    if _is_explicit_bypass_enabled():
+        return _get_bypass_user_id()
+    token = _extract_bearer_token(request)
+    authenticated_user = await _get_authenticated_user(token)
+    return authenticated_user["id"].strip()
+
+
 def _get_legacy_auth_base_url() -> str:
     return (
         os.getenv("SOPHIA_AUTH_BACKEND_URL")

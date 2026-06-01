@@ -46,6 +46,14 @@ interface VoiceFirstComposerProps {
   textOnly?: boolean;
   /** Slot rendered between mic button and text area — used for ModeToggle in voice mode */
   slotBeforeText?: React.ReactNode;
+  /**
+   * Slot rendered as a left-aligned action button inside the expanded
+   * text-input row (sibling of the close button / textarea / send
+   * button). Used for the attach paperclip in text mode so it shares
+   * a horizontal baseline with the Send button — B4 of the silent-
+   * attach fix (2026-05-28). Caller is responsible for sizing/styling.
+   */
+  slotLeftAction?: React.ReactNode;
 }
 
 const VOICE_STATUS_LABELS: Record<VoiceStatus, string> = {
@@ -78,6 +86,7 @@ export function VoiceFirstComposer({
   micOnboardingId,
   textOnly = false,
   slotBeforeText,
+  slotLeftAction,
 }: VoiceFirstComposerProps) {
   const [isTextExpanded, setIsTextExpanded] = useState(false);
   const [isPTT, setIsPTT] = useState(false);
@@ -343,7 +352,12 @@ export function VoiceFirstComposer({
             ) : (
               // Expanded text input
               <div className="animate-fadeIn space-y-2" onTouchStart={textOnly ? undefined : handleTouchStart} onTouchEnd={textOnly ? undefined : handleTouchEnd}>
-                <div className="flex gap-2">
+                <div className="flex items-end gap-2">
+                  {/* Left-aligned action slot — used for the attach
+                      paperclip in text mode (B4 of the silent-attach
+                      fix, 2026-05-28) so it shares a horizontal
+                      baseline with the Send button on the right. */}
+                  {slotLeftAction}
                   {/* Close button — hidden in text-only mode */}
                   {!textOnly && (
                   <button
