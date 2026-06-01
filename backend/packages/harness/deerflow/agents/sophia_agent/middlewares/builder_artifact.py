@@ -11,6 +11,7 @@ Command(goto="model") so the builder gets another turn to retry instead
 of completing with a phantom artifact.
 """
 
+import json
 import logging
 import re
 import time
@@ -393,6 +394,62 @@ def _render_markdown_to_pdf_attempted(state: dict[str, Any]) -> bool:
     )
 
 
+def _successful_pdf_render_result(state: dict[str, Any]) -> dict[str, Any] | None:
+    result = state.get("builder_pdf_render_result")
+    if not isinstance(result, dict) or result.get("success") is not True:
+        return None
+    pdf_path = result.get("pdf_path")
+    if not isinstance(pdf_path, str) or not pdf_path.strip():
+        return None
+    return result
+
+
+def _pdf_render_layout_quality(state: dict[str, Any]) -> str:
+    result = _successful_pdf_render_result(state) or {}
+    return str(result.get("layout_quality") or "unknown")
+
+
+def _pdf_layout_repair_attempts(state: dict[str, Any]) -> int:
+    return int(state.get("builder_pdf_layout_repair_attempts", 0) or 0)
+
+
+def _pdf_layout_repair_needed(state: dict[str, Any]) -> bool:
+    quality = _pdf_render_layout_quality(state)
+    return quality in {"warning", "unusable"} and _pdf_layout_repair_attempts(state) < 1
+
+
+def _pdf_render_unusable_after_repair(state: dict[str, Any]) -> bool:
+    return _pdf_render_layout_quality(state) == "unusable" and _pdf_layout_repair_attempts(state) >= 1
+
+
+def _successful_pdf_ready_to_emit(state: dict[str, Any]) -> bool:
+    result = _successful_pdf_render_result(state)
+    if result is None:
+        return False
+    if _pdf_layout_repair_needed(state):
+        return False
+    if _pdf_render_unusable_after_repair(state):
+        return False
+    return _canonical_outputs_artifact_path(result.get("pdf_path")) is not None
+
+
+def _pdf_layout_repair_message(result: dict[str, Any]) -> str:
+    page_count = result.get("page_count")
+    blank_count = result.get("blank_page_count")
+    short_count = result.get("short_page_count")
+    warning = result.get("layout_warning") or "layout_quality_warning"
+    return (
+        "[Sophia/PDF layout repair]\n"
+        "The PDF rendered successfully, but the layout quality check found a sparse document. "
+        f"Metrics: page_count={page_count}, blank_page_count={blank_count}, "
+        f"short_page_count={short_count}, warning={warning}. Target length is 10-15 pages "
+        "when the user did not ask for a longer PDF.\n\n"
+        "Revise the Markdown source once: compact sparse tables or continuation pages, remove "
+        "unnecessary page breaks, combine thin sections, then call render_markdown_to_pdf again. "
+        "After this single repair pass, emit the best PDF rather than looping."
+    )
+
+
 def _canonical_outputs_artifact_path(path: Any) -> str | None:
     candidate = _stripped_artifact_path(path)
     if candidate is None:
@@ -537,9 +594,40 @@ def _builder_web_attempt_count(state: dict[str, Any]) -> int:
     return int(budget.get("search_calls", 0) or 0) + int(budget.get("fetch_calls", 0) or 0)
 
 
+def _builder_web_call_count(state: dict[str, Any], key: str) -> int:
+    budget = state.get("builder_web_budget") or {}
+    if not isinstance(budget, dict):
+        return 0
+    return int(budget.get(f"{key}_calls", 0) or 0)
+
+
 def _has_builder_search_source(state: dict[str, Any]) -> bool:
     sources = state.get("builder_search_sources") or []
     return any(isinstance(source, dict) and source.get("url") for source in sources)
+
+
+def _has_fetchable_builder_source(state: dict[str, Any]) -> bool:
+    allowed = state.get("builder_allowed_urls") or []
+    sources = state.get("builder_search_sources") or []
+    return any(str(url).strip() for url in allowed) or any(
+        isinstance(source, dict) and source.get("url") for source in sources
+    )
+
+
+def _builder_task_needs_fetch(state: dict[str, Any]) -> bool:
+    if _requested_pdf_artifact(state):
+        return True
+    delegation = state.get("delegation_context")
+    task_type = delegation.get("task_type") if isinstance(delegation, dict) else None
+    return str(task_type or "").lower() in {"document", "research", "visual_report"}
+
+
+def _needs_fetch_before_write(state: dict[str, Any]) -> bool:
+    if not _builder_task_needs_fetch(state):
+        return False
+    if _builder_web_call_count(state, "fetch") > 0:
+        return False
+    return _builder_web_call_count(state, "search") > 0 and _has_fetchable_builder_source(state)
 
 
 def _force_reason(turn_force: bool, clock_force: bool) -> str:
@@ -587,6 +675,9 @@ class BuilderArtifactState(AgentState):
     builder_path_correction_emitted: NotRequired[bool]
     builder_tool_argument_correction_emitted: NotRequired[bool]
     builder_recovered_deliverable_emitted: NotRequired[bool]
+    builder_pdf_render_result: NotRequired[dict | None]
+    builder_pdf_layout_repair_attempts: NotRequired[int]
+    builder_pdf_layout_repair_requested: NotRequired[bool]
 
 
 class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
@@ -640,8 +731,18 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
 
     @classmethod
+    def _should_force_fetch_tool(cls, state: BuilderArtifactState) -> bool:
+        return (
+            cls._allow_web_research(state)
+            and cls._planning_completed(state)
+            and _needs_fetch_before_write(state)
+        )
+
+    @classmethod
     def _is_substantive_before_research_tool(cls, state: BuilderArtifactState, tool_call: dict[str, Any]) -> bool:
-        if not cls._allow_web_research(state) or cls._research_attempted(state):
+        if not cls._allow_web_research(state):
+            return False
+        if cls._research_attempted(state) and not cls._should_force_fetch_tool(state):
             return False
         name = tool_call.get("name")
         if name in _BUILDER_SUBSTANTIVE_TOOL_NAMES:
@@ -837,6 +938,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return {"type": "tool", "name": "render_markdown_to_pdf"}
 
     def _research_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if self._should_force_fetch_tool(state):
+            logger.warning(
+                "BuilderArtifact: forcing tool_choice=builder_web_fetch "
+                "after search before factual artifact writing"
+            )
+            return self._forced_fetch_tool_choice()
         if not self._should_force_research_tool(state):
             return None
         explicit_urls = [
@@ -1042,7 +1149,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             and (min_mtime is None or p.stat().st_mtime >= min_mtime)
         ]
         if requested_pdf:
-            pdf_candidates = [p for p in candidates if p.suffix.lower() == ".pdf"]
+            pdf_candidates = [] if _pdf_render_unusable_after_repair(state) else [
+                p for p in candidates if p.suffix.lower() == ".pdf"
+            ]
             fallback_suffix = _pdf_fallback_suffix(state)
             fallback_candidates = [
                 p for p in candidates if p.suffix.lower() == fallback_suffix
@@ -1632,7 +1741,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         state: BuilderArtifactState,
         runtime: Runtime,
     ) -> dict[str, Any] | None:
-        recovered_path = cls._preferred_successful_deliverable_path(state, runtime)
+        recovered_path = (
+            cls._preferred_successful_pdf_render_path(state, runtime)
+            or cls._preferred_successful_deliverable_path(state, runtime)
+        )
         if not recovered_path:
             return None
         recovered_args = dict(artifact_args)
@@ -1644,6 +1756,24 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             Path(recovered_path).suffix.lower().lstrip(".") or None,
         )
         return recovered_args
+
+    @classmethod
+    def _preferred_successful_pdf_render_path(
+        cls,
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> str | None:
+        if not _requested_pdf_artifact(state) or not _successful_pdf_ready_to_emit(state):
+            return None
+        result = _successful_pdf_render_result(state)
+        if result is None:
+            return None
+        pdf_path = _canonical_outputs_artifact_path(result.get("pdf_path"))
+        if pdf_path is None:
+            return None
+        if cls._artifact_files_exist({"artifact_path": pdf_path}, state, runtime):
+            return pdf_path
+        return None
 
     @staticmethod
     def _successful_output_paths(state: BuilderArtifactState) -> list[str]:
@@ -1795,9 +1925,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
           and needs to land at least one file before emit is forced.
         """
         return (
-            self._research_tool_choice_for_state(state)
+            self._pdf_terminal_tool_choice_for_state(state)
+            or self._research_tool_choice_for_state(state)
             or self._completion_tool_choice_for_state(state, runtime)
         )
+
+    def _pdf_terminal_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _requested_pdf_artifact(state) or not _successful_pdf_ready_to_emit(state):
+            return None
+        logger.warning(
+            "BuilderArtifact: forcing tool_choice=emit_builder_artifact after "
+            "successful PDF render (layout_quality=%s repair_attempts=%d)",
+            _pdf_render_layout_quality(state),
+            _pdf_layout_repair_attempts(state),
+        )
+        return self._forced_tool_choice()
 
     # Phase 2F.3: after N consecutive write_file_tool errors, inject a
     # corrective HumanMessage so the model breaks out of the loop and
@@ -2254,6 +2396,27 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             update["builder_non_artifact_turns"] = 0
         return update or None
 
+    def _maybe_inject_pdf_layout_repair(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _requested_pdf_artifact(state) or state.get("builder_pdf_layout_repair_requested"):
+            return None
+        result = _successful_pdf_render_result(state)
+        if result is None or not _pdf_layout_repair_needed(state):
+            return None
+        logger.warning(
+            "BuilderArtifact: requesting one PDF layout repair page_count=%s "
+            "blank_page_count=%s short_page_count=%s layout_quality=%s",
+            result.get("page_count"),
+            result.get("blank_page_count"),
+            result.get("short_page_count"),
+            result.get("layout_quality"),
+        )
+        return {
+            "messages": [HumanMessage(content=_pdf_layout_repair_message(result))],
+            "builder_pdf_render_result": None,
+            "builder_pdf_layout_repair_requested": True,
+            "builder_pdf_layout_repair_attempts": _pdf_layout_repair_attempts(state) + 1,
+        }
+
     def _combined_before_model_updates(
         self,
         state: BuilderArtifactState,
@@ -2273,6 +2436,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
         if isinstance(promotion, dict):
             update.update(promotion)
+            return update
+        pdf_repair = self._maybe_inject_pdf_layout_repair(state)
+        if isinstance(pdf_repair, dict):
+            update.update(pdf_repair)
             return update
         correction = self._maybe_inject_path_correction(state, runtime)
         if isinstance(correction, dict):
@@ -2341,9 +2508,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "Error: research-before-write enforcement blocked this tool call. "
                             "You may keep your plan, but before writing, editing, running "
                             "artifact-generating bash, or emitting the artifact, call "
-                            "builder_web_search or builder_web_fetch at least once. If the "
-                            "web tool fails or returns weak results, continue afterward with "
-                            "the best available context."
+                            "builder_web_search first, then builder_web_fetch on one approved "
+                            "result URL for factual document/PDF work. If the web tool fails "
+                            "or returns weak results, continue afterward with the best "
+                            "available context."
                         ),
                         tool_call_id=tool_call_id,
                         name=str(tool_name),
@@ -2439,6 +2607,43 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             }
         )
 
+    @staticmethod
+    def _render_pdf_result_delta(result: ToolMessage) -> dict[str, Any] | None:
+        if not isinstance(result.content, str):
+            return None
+        try:
+            payload = json.loads(result.content)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        logger.info(
+            "[BuilderPdfDiagnostics] render_success=%s page_count=%s "
+            "blank_page_count=%s short_page_count=%s layout_quality=%s "
+            "layout_warning=%s",
+            payload.get("success"),
+            payload.get("page_count"),
+            payload.get("blank_page_count"),
+            payload.get("short_page_count"),
+            payload.get("layout_quality"),
+            payload.get("layout_warning"),
+        )
+        return {"builder_pdf_render_result": payload}
+
+    def _tool_result_command(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage | Command,
+    ) -> ToolMessage | Command:
+        tool_name = request.tool_call.get("name")
+        if tool_name in _BUILDER_WRITE_TOOL_NAMES:
+            return self._write_result_command(request, result)
+        if tool_name == "render_markdown_to_pdf" and isinstance(result, ToolMessage):
+            delta = self._render_pdf_result_delta(result)
+            if delta is not None:
+                return Command(update={"messages": [result], **delta})
+        return result
+
     @override
     def wrap_tool_call(
         self,
@@ -2457,7 +2662,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return research_block
 
         if request.tool_call.get("name") != "emit_builder_artifact":
-            return self._write_result_command(request, handler(request))
+            return self._tool_result_command(request, handler(request))
 
         args = request.tool_call.get("args", {})
         if self._artifact_files_exist(args, request.state, request.runtime):
@@ -2499,7 +2704,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return research_block
 
         if request.tool_call.get("name") != "emit_builder_artifact":
-            return self._write_result_command(request, await handler(request))
+            return self._tool_result_command(request, await handler(request))
 
         args = request.tool_call.get("args", {})
         if self._artifact_files_exist(args, request.state, request.runtime):

@@ -30,6 +30,7 @@ from pathlib import Path
 # Use the underlying ``_impl`` rather than the ``@tool``-wrapped variant.
 # The wrapper's args_schema validation is exercised by langchain itself;
 # our tests focus on the behavior of the implementation.
+import deerflow.sophia.tools.render_markdown_to_pdf as render_pdf
 from deerflow.sophia.tools.render_markdown_to_pdf import _impl
 
 _OUTPUTS_PREFIX = "/mnt/user-data/outputs/"
@@ -249,6 +250,107 @@ def test_invokes_pandoc_with_correct_command_shape(tmp_path, monkeypatch):
     # Subprocess invariants.
     assert captured["kwargs"]["timeout"] > 0
     assert captured["kwargs"]["check"] is False
+
+
+def test_success_payload_includes_pdf_layout_metrics(tmp_path, monkeypatch):
+    md = _stage_for_subprocess_test(tmp_path, monkeypatch)
+    pdf_path = tmp_path / "mnt" / "user-data" / "outputs" / "out.pdf"
+
+    monkeypatch.setattr(
+        "deerflow.sophia.tools.render_markdown_to_pdf.shutil.which",
+        lambda binary: f"/fake/{binary}",
+    )
+
+    def fake_run(cmd, **kwargs):
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        class _Completed:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
+        return _Completed()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(
+        render_pdf,
+        "_inspect_pdf_layout",
+        lambda _path: {
+            "page_count": 12,
+            "blank_page_count": 0,
+            "short_page_count": 1,
+            "layout_quality": "ok",
+            "layout_warning": None,
+        },
+    )
+
+    result = _parse(_impl(
+        markdown_path=str(md),
+        pdf_path=str(pdf_path),
+        pdf_engine=None,
+    ))
+
+    assert result["success"] is True
+    assert result["page_count"] == 12
+    assert result["blank_page_count"] == 0
+    assert result["short_page_count"] == 1
+    assert result["layout_quality"] == "ok"
+
+
+def test_pdf_layout_inspection_flags_sparse_long_documents(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "sparse.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 fake")
+
+    class _Page:
+        def __init__(self, text: str):
+            self._text = text
+
+        def extract_text(self):
+            return self._text
+
+    class _Reader:
+        def __init__(self, _path: str):
+            self.pages = [
+                _Page("normal " * 120),
+                _Page("11"),
+                *[_Page("short " * 20) for _ in range(16)],
+            ]
+
+    monkeypatch.setattr(render_pdf, "PdfReader", _Reader)
+
+    result = render_pdf._inspect_pdf_layout(pdf_path)
+
+    assert result["page_count"] == 18
+    assert result["blank_page_count"] == 1
+    assert result["short_page_count"] == 16
+    assert result["layout_quality"] == "warning"
+    assert result["layout_warning"] == "blank_pages_detected"
+
+
+def test_pdf_layout_inspection_flags_sparse_long_pdf_without_blank_pages(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "thin.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 fake")
+
+    class _Page:
+        def __init__(self, text: str):
+            self._text = text
+
+        def extract_text(self):
+            return self._text
+
+    class _Reader:
+        def __init__(self, _path: str):
+            self.pages = [_Page("short " * 20) for _ in range(16)]
+
+    monkeypatch.setattr(render_pdf, "PdfReader", _Reader)
+
+    result = render_pdf._inspect_pdf_layout(pdf_path)
+
+    assert result["page_count"] == 16
+    assert result["blank_page_count"] == 0
+    assert result["short_page_count"] == 16
+    assert result["layout_quality"] == "warning"
+    assert result["layout_warning"] == "sparse_long_pdf"
 
 
 def test_explicit_pdf_engine_overrides_default(tmp_path, monkeypatch):

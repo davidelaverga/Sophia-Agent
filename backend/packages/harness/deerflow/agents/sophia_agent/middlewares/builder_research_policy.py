@@ -99,6 +99,7 @@ class BuilderResearchPolicyMiddleware(AgentMiddleware[BuilderResearchPolicyState
             "- Prefer authoritative, primary, or directly relevant sources.\n"
             "- Use builder_web_search for discovery and builder_web_fetch only on exact approved URLs.\n"
             "- You may call write_todos first. Before the first substantive write/edit/emit step, attempt builder_web_search or builder_web_fetch at least once.\n"
+            "- For factual documents and PDFs, if builder_web_search returns useful results, fetch at least one approved result URL before final source writing.\n"
             "- If web tools fail or return weak results, continue the task without browsing instead of stopping.\n"
             "- If you use external sources, emit_builder_artifact.sources_used MUST contain structured {title, url} items drawn from the sources you actually relied on.\n"
         )

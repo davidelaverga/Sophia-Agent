@@ -2999,6 +2999,133 @@ class TestBuilderArtifactMiddleware:
         choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
         assert choice == {"type": "tool", "name": "emit_builder_artifact"}
 
+    def test_force_choice_pdf_target_forces_fetch_after_search_before_writing(self):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        state = {
+            "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+            "allow_web_research": True,
+            "builder_research_policy": {"allow_web_research": True},
+            "builder_tool_turn_summaries": [
+                {"tool_names": ["write_todos"]},
+                {"tool_names": ["builder_web_search"]},
+            ],
+            "builder_web_budget": {
+                "search_calls": 1,
+                "fetch_calls": 0,
+            },
+            "builder_search_sources": [
+                {"title": "Primary source", "url": "https://example.com/source"},
+            ],
+        }
+        choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
+        assert choice == {"type": "tool", "name": "builder_web_fetch"}
+
+    def test_force_choice_pdf_target_emits_after_clean_render(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.pdf").write_bytes(b"%PDF-1.4 fake")
+
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+            "builder_pdf_render_result": {
+                "success": True,
+                "pdf_path": "/mnt/user-data/outputs/report.pdf",
+                "layout_quality": "ok",
+                "page_count": 12,
+                "blank_page_count": 0,
+                "short_page_count": 0,
+            },
+        }
+        choice = BuilderArtifactMiddleware()._force_choice_for_state(state, _make_runtime(thread_id="thread-x"))
+        assert choice == {"type": "tool", "name": "emit_builder_artifact"}
+
+    def test_pdf_layout_warning_injects_one_repair_before_emit(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.pdf").write_bytes(b"%PDF-1.4 fake")
+
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+            "builder_pdf_render_result": {
+                "success": True,
+                "pdf_path": "/mnt/user-data/outputs/report.pdf",
+                "layout_quality": "warning",
+                "layout_warning": "sparse_long_pdf",
+                "page_count": 23,
+                "blank_page_count": 1,
+                "short_page_count": 6,
+            },
+        }
+        mw = BuilderArtifactMiddleware()
+        update = mw._combined_before_model_updates(state, _make_runtime(thread_id="thread-x"))
+
+        assert update is not None
+        assert update["builder_pdf_render_result"] is None
+        assert update["builder_pdf_layout_repair_attempts"] == 1
+        assert "page_count=23" in update["messages"][0].content
+
+        # The cleared render result prevents the same stale PDF from being
+        # force-emitted before the model has a chance to repair and re-render.
+        repaired_state = {**state, **update}
+        assert mw._force_choice_for_state(repaired_state, _make_runtime(thread_id="thread-x")) is None
+
+    def test_pdf_warning_after_one_repair_forces_emit_best_pdf(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.pdf").write_bytes(b"%PDF-1.4 fake")
+
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+            "builder_pdf_layout_repair_attempts": 1,
+            "builder_pdf_layout_repair_requested": True,
+            "builder_pdf_render_result": {
+                "success": True,
+                "pdf_path": "/mnt/user-data/outputs/report.pdf",
+                "layout_quality": "warning",
+                "layout_warning": "sparse_long_pdf",
+                "page_count": 18,
+                "blank_page_count": 0,
+                "short_page_count": 2,
+            },
+        }
+        choice = BuilderArtifactMiddleware()._force_choice_for_state(state, _make_runtime(thread_id="thread-x"))
+        assert choice == {"type": "tool", "name": "emit_builder_artifact"}
+
+    def test_recover_emit_args_prefers_successful_pdf_render(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.pdf").write_bytes(b"%PDF-1.4 fake")
+
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+            "builder_pdf_render_result": {
+                "success": True,
+                "pdf_path": "/mnt/user-data/outputs/report.pdf",
+                "layout_quality": "ok",
+            },
+        }
+        args = {"artifact_path": "/mnt/user-data/outputs/missing.pdf"}
+        recovered = BuilderArtifactMiddleware._recover_emit_args_from_last_write(
+            args,
+            state,
+            _make_runtime(thread_id="thread-x"),
+        )
+        assert recovered is not None
+        assert recovered["artifact_path"] == "/mnt/user-data/outputs/report.pdf"
+
     def test_force_choice_prefers_emit_over_bash_when_binary_exists(self, tmp_path):
         """If a real binary AND a generator both exist, stage 1 (emit)
         wins — we don't waste a turn re-running the generator.

@@ -36,9 +36,15 @@ import logging
 import shutil
 import subprocess  # noqa: S404 — invoking pandoc by absolute path
 from pathlib import Path
+from typing import Any
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
+
+try:  # pragma: no cover - import availability varies by runtime image
+    from pypdf import PdfReader
+except Exception:  # noqa: BLE001
+    PdfReader = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +59,8 @@ _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 # (font cache warmup). 90s is generous; the per-turn timeout in
 # ``SubagentExecutor`` (300s) gives further headroom.
 _PANDOC_TIMEOUT_SECONDS = 90
+_SHORT_PAGE_WORD_THRESHOLD = 80
+_DEFAULT_MAX_PAGES = 15
 
 
 class RenderMarkdownToPdfInput(BaseModel):
@@ -137,6 +145,57 @@ def _resolve_pdf_engine(explicit: str | None) -> tuple[str | None, str]:
         if shutil.which(candidate) is not None:
             return candidate, f"auto-selected pdf_engine={candidate}"
     return None, "no preferred PDF engine on PATH; using pandoc's default"
+
+
+def _page_word_count(page: Any) -> int:
+    text = page.extract_text() or ""
+    return len([word for word in text.split() if word.strip()])
+
+
+def _layout_quality(page_count: int, blank_count: int, short_count: int) -> tuple[str, str | None]:
+    if page_count <= 0:
+        return "unknown", "pdf_layout_unreadable"
+    if blank_count >= page_count:
+        return "unusable", "all_pages_blank"
+    if blank_count > 0:
+        return "warning", "blank_pages_detected"
+    if page_count > _DEFAULT_MAX_PAGES and short_count > 0:
+        return "warning", "sparse_long_pdf"
+    return "ok", None
+
+
+def _inspect_pdf_layout(pdf_file: Path) -> dict[str, int | str | None]:
+    if PdfReader is None:
+        return {
+            "page_count": 0,
+            "blank_page_count": 0,
+            "short_page_count": 0,
+            "layout_quality": "unknown",
+            "layout_warning": "pypdf_unavailable",
+        }
+    try:
+        reader = PdfReader(str(pdf_file))
+        counts = [_page_word_count(page) for page in reader.pages]
+    except Exception:  # noqa: BLE001
+        logger.warning("render_markdown_to_pdf: layout_inspection_failed", exc_info=True)
+        return {
+            "page_count": 0,
+            "blank_page_count": 0,
+            "short_page_count": 0,
+            "layout_quality": "unknown",
+            "layout_warning": "pdf_layout_unreadable",
+        }
+    page_count = len(counts)
+    blank_count = sum(1 for count in counts if count <= 1)
+    short_count = sum(1 for count in counts if 1 < count < _SHORT_PAGE_WORD_THRESHOLD)
+    quality, warning = _layout_quality(page_count, blank_count, short_count)
+    return {
+        "page_count": page_count,
+        "blank_page_count": blank_count,
+        "short_page_count": short_count,
+        "layout_quality": quality,
+        "layout_warning": warning,
+    }
 
 
 def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
@@ -276,13 +335,21 @@ def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
         size_bytes = pdf_file.stat().st_size
     except OSError:
         size_bytes = -1
+    layout = _inspect_pdf_layout(pdf_file)
 
     logger.info(
         "render_markdown_to_pdf: render_success selected_engine=%s "
-        "final_artifact_ext=%s size_bytes=%s",
+        "final_artifact_ext=%s size_bytes=%s page_count=%s "
+        "blank_page_count=%s short_page_count=%s layout_quality=%s "
+        "layout_warning=%s",
         engine or "pandoc_default",
         pdf_file.suffix.lower().lstrip(".") or "unknown",
         size_bytes,
+        layout.get("page_count"),
+        layout.get("blank_page_count"),
+        layout.get("short_page_count"),
+        layout.get("layout_quality"),
+        layout.get("layout_warning"),
     )
     return _result(
         success=True,
@@ -290,6 +357,7 @@ def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
         size_bytes=size_bytes,
         engine=engine or "default",
         engine_message=engine_msg,
+        **layout,
     )
 
 
@@ -307,9 +375,11 @@ def render_markdown_to_pdf(markdown_path: str, pdf_path: str, pdf_engine: str | 
     reportlab to produce a PDF. That pattern is unreliable. This tool
     encapsulates a known-working pipeline.
 
-    On success, returns a JSON object with ``success: true`` and the
-    PDF path. After success, call emit_builder_artifact with
-    ``artifact_path`` set to the PDF path.
+    On success, returns a JSON object with ``success: true``, the PDF path,
+    and safe layout metrics (page_count, blank_page_count,
+    short_page_count, layout_quality). After success, call
+    emit_builder_artifact with ``artifact_path`` set to the PDF path unless
+    Sophia injects a one-time layout repair instruction.
 
     On failure, returns ``success: false`` with a descriptive error
     type (``pandoc_missing``, ``pandoc_error``, ``pandoc_timeout``,
