@@ -207,6 +207,48 @@ def test_list_artifacts_recurses_into_supabase_folder_records(monkeypatch) -> No
     assert "assets" not in {artifact.filename for artifact in artifacts}
 
 
+def test_list_artifacts_excludes_mirrored_uploads(monkeypatch) -> None:
+    _configure(monkeypatch)
+    prefixes: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode())
+        prefixes.append(payload["prefix"])
+        if payload["prefix"] == "thread-1/":
+            return httpx.Response(200, json=[
+                {"name": "uploads", "id": None, "metadata": None},
+                {
+                    "name": "uploads/leaked-input.pdf",
+                    "id": "file-upload-direct",
+                    "metadata": {"size": 99, "mimetype": "application/pdf"},
+                    "updated_at": "2026-05-27T20:02:00Z",
+                },
+                {
+                    "name": "builder-output.md",
+                    "id": "file-output",
+                    "metadata": {"size": 12, "mimetype": "text/markdown"},
+                    "updated_at": "2026-05-27T20:00:00Z",
+                },
+            ])
+        if payload["prefix"] == "thread-1/uploads/":
+            return httpx.Response(200, json=[
+                {
+                    "name": "photo.png",
+                    "id": "file-upload",
+                    "metadata": {"size": 34, "mimetype": "image/png"},
+                    "updated_at": "2026-05-27T20:01:00Z",
+                },
+            ])
+        return httpx.Response(200, json=[])
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    artifacts = supabase_artifact_store.list_artifacts(thread_id="thread-1", client=client)
+
+    assert prefixes == ["thread-1/"]
+    assert [artifact.filename for artifact in artifacts] == ["builder-output.md"]
+
+
 def test_upload_rejects_blank_thread_or_filename(monkeypatch) -> None:
     _configure(monkeypatch)
     with pytest.raises(ValueError):

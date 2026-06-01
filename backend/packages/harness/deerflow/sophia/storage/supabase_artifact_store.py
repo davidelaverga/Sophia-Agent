@@ -27,6 +27,19 @@ DEFAULT_BUCKET = "sophia_builder"
 _REQUEST_TIMEOUT_SECONDS = 15.0
 _MAX_LIST_DEPTH = 8
 
+# Keyspace separation (Codex P1 PR #132). User UPLOADS mirror under
+# ``{thread_id}/uploads/{name}``; builder OUTPUTS mirror under
+# ``{thread_id}/{output_relative_path}`` (see ``supabase_mirror.py``).
+# Without this prefix a user upload and a builder artifact with the same
+# basename (e.g. ``report.pdf``) would overwrite each other in the same
+# bucket folder — whichever ran last would win, and a later local miss in
+# view_user_image / read_user_document could materialize the wrong bytes
+# (or a completion-card signed URL could point at an upload instead of the
+# builder deliverable). ``uploads_object_name`` is the SINGLE source of
+# truth for the upload prefix, shared by the gateway upload mirror AND the
+# companion read tools so both address the exact same object.
+UPLOADS_PREFIX = "uploads/"
+
 
 @dataclass(frozen=True)
 class SupabaseConfig:
@@ -135,7 +148,14 @@ def _folder_prefix_from_list_record(root_prefix: str, current_prefix: str, recor
     relative = _relative_list_name(root_prefix, current_prefix, raw_name).strip().strip("/")
     if not relative:
         return None
+    if _is_uploads_relative_name(relative):
+        return None
     return f"{root_prefix}{relative}/"
+
+
+def _is_uploads_relative_name(filename: str) -> bool:
+    normalized = filename.strip().lstrip("/")
+    return normalized == UPLOADS_PREFIX.rstrip("/") or normalized.startswith(UPLOADS_PREFIX)
 
 
 def _record_name(record: Any) -> str | None:
@@ -172,6 +192,8 @@ def _info_from_list_record(
     filename = filename.strip().lstrip("/")
     if not filename or filename.endswith("/"):
         return None
+    if _is_uploads_relative_name(filename):
+        return None
     size = _coerce_size(_metadata_value(record, "size", "contentLength", "content_length"))
     return SupabaseArtifactInfo(
         filename=filename,
@@ -179,20 +201,6 @@ def _info_from_list_record(
         modified_at=_record_modified_at(record),
         content_type=_record_content_type(record),
     )
-
-
-# Keyspace separation (Codex P1 PR #132). User UPLOADS mirror under
-# ``{thread_id}/uploads/{name}``; builder OUTPUTS mirror under
-# ``{thread_id}/{output_relative_path}`` (see ``supabase_mirror.py``).
-# Without this prefix a user upload and a builder artifact with the same
-# basename (e.g. ``report.pdf``) would overwrite each other in the same
-# bucket folder — whichever ran last would win, and a later local miss in
-# view_user_image / read_user_document could materialize the wrong bytes
-# (or a completion-card signed URL could point at an upload instead of the
-# builder deliverable). ``uploads_object_name`` is the SINGLE source of
-# truth for the upload prefix, shared by the gateway upload mirror AND the
-# companion read tools so both address the exact same object.
-UPLOADS_PREFIX = "uploads/"
 
 
 def uploads_object_name(filename: str) -> str:
