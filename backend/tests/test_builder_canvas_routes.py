@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,13 @@ from app.gateway.auth import require_authorized_user_scope
 from app.gateway.routers import builder_canvas
 from app.gateway.workers.builder_canvas import install_builder_canvas_worker
 from deerflow.sophia.session_store import SessionRecord, SessionStore
+
+
+def _recent_timestamp() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+RECENT_TASK_TIMESTAMP = _recent_timestamp()
 
 
 class _RunningThenInterruptedRuns:
@@ -249,7 +257,7 @@ async def test_snapshot_includes_terminal_completion_artifact_data(app: FastAPI,
                 "status": "success",
                 "trace_id": "trace-1",
                 "task_type": "document",
-                "last_updated_at": "2026-05-27T10:00:00Z",
+                "last_updated_at": RECENT_TASK_TIMESTAMP,
                 "builder_result": {
                     "artifact_path": "/mnt/user-data/outputs/report.md",
                     "artifact_title": "Report",
@@ -282,7 +290,7 @@ async def test_snapshot_includes_terminal_completion_artifact_data(app: FastAPI,
     assert completion["artifact_filename"] == "report.md"
     assert completion["artifact_title"] == "Report"
     assert completion["summary"] == "Report is ready."
-    assert completion["completed_at"] == "2026-05-27T10:00:00Z"
+    assert completion["completed_at"] == RECENT_TASK_TIMESTAMP
 
 
 @pytest.mark.anyio
@@ -294,7 +302,7 @@ async def test_snapshot_downgrades_native_success_without_deliverable(app: FastA
                 "task_id": "task-1",
                 "run_id": "run-1",
                 "status": "success",
-                "last_updated_at": "2026-05-27T10:00:00Z",
+                "last_updated_at": RECENT_TASK_TIMESTAMP,
             }
         ]
 
@@ -333,7 +341,7 @@ async def test_snapshot_hydrates_completed_deliverable_from_builder_thread_state
                 "status": "success",
                 "task_type": "visual_report",
                 "artifact_target_path": "/mnt/user-data/outputs/build.html",
-                "last_updated_at": "2026-05-27T10:00:00Z",
+                "last_updated_at": RECENT_TASK_TIMESTAMP,
             }
         ]
 
@@ -380,7 +388,7 @@ async def test_snapshot_preserves_retained_successful_terminal_with_artifact(app
                 "task_id": "task-1",
                 "run_id": "run-1",
                 "status": "success",
-                "last_updated_at": "2026-05-27T10:00:00Z",
+                "last_updated_at": RECENT_TASK_TIMESTAMP,
             }
         ]
 
@@ -426,7 +434,7 @@ async def test_snapshot_prefers_retained_failed_terminal_over_native_success(app
                 "task_id": "task-1",
                 "run_id": "run-1",
                 "status": "success",
-                "last_updated_at": "2026-05-27T10:00:00Z",
+                "last_updated_at": RECENT_TASK_TIMESTAMP,
             }
         ]
 
@@ -470,7 +478,7 @@ async def test_snapshot_preserves_timed_out_status_and_completion(app: FastAPI, 
                 "task_id": "task-timeout",
                 "run_id": "run-timeout",
                 "status": "timed_out",
-                "last_updated_at": "2026-05-27T10:00:00Z",
+                "last_updated_at": RECENT_TASK_TIMESTAMP,
                 "error_message": "Builder timed out before the artifact was ready.",
             }
         ]
@@ -489,7 +497,38 @@ async def test_snapshot_preserves_timed_out_status_and_completion(app: FastAPI, 
     assert active_task["status"] == "timed_out"
     assert active_task["completion"]["status"] == "timeout"
     assert active_task["completion"]["error_message"] == "Builder timed out before the artifact was ready."
-    assert active_task["completion"]["completed_at"] == "2026-05-27T10:00:00Z"
+    assert active_task["completion"]["completed_at"] == RECENT_TASK_TIMESTAMP
+
+
+@pytest.mark.anyio
+async def test_snapshot_does_not_resurrect_stale_terminal_task(app: FastAPI, monkeypatch) -> None:
+    async def tasks(_parent: str):
+        return [
+            {
+                "agent_name": "sophia_builder",
+                "task_id": "task-old",
+                "run_id": "run-old",
+                "status": "success",
+                "last_updated_at": "2026-01-01T10:00:00Z",
+                "builder_result": {
+                    "artifact_path": "/mnt/user-data/outputs/old-report.md",
+                    "artifact_title": "Old Report",
+                },
+            }
+        ]
+
+    async def status(_task: str, _run: str, _fallback: str | None):  # pragma: no cover
+        raise AssertionError("stale terminal tasks should not be hydrated")
+
+    monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", tasks)
+    monkeypatch.setattr(builder_canvas, "_native_run_status", status)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/sophia/user-1/threads/parent-1/builder-canvas/snapshot")
+
+    assert response.status_code == 200
+    assert response.json()["active_task"] is None
+    assert response.json()["recent_events"] == []
 
 
 @pytest.mark.anyio

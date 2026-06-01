@@ -15,7 +15,7 @@ from langgraph_sdk import get_client
 from pydantic import BaseModel, Field
 
 from app.gateway.auth import require_authorized_user_scope
-from app.gateway.workers.builder_canvas import get_builder_canvas_worker
+from app.gateway.workers.builder_canvas import DEFAULT_TERMINAL_TTL_SECONDS, get_builder_canvas_worker
 from deerflow.sophia.session_store import SessionStore
 
 router = APIRouter(
@@ -103,15 +103,43 @@ def _task_updated_at(task: dict[str, Any]) -> str:
     return str(task.get("last_updated_at") or task.get("updated_at") or task.get("created_at") or "")
 
 
+def _task_updated_datetime(task: dict[str, Any]) -> datetime | None:
+    raw = _task_updated_at(task)
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 def _is_terminal_task(task: dict[str, Any]) -> bool:
     return str(task.get("status") or "").lower() in _TERMINAL_TASK_STATUSES
+
+
+def _terminal_task_within_snapshot_ttl(task: dict[str, Any]) -> bool:
+    updated_at = _task_updated_datetime(task)
+    if updated_at is None:
+        return False
+    return (datetime.now(UTC) - updated_at).total_seconds() <= DEFAULT_TERMINAL_TTL_SECONDS
 
 
 def _latest_builder_task(tasks: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not tasks:
         return None
     active_tasks = [task for task in tasks if not _is_terminal_task(task)]
-    return max(active_tasks or tasks, key=_task_updated_at)
+    if active_tasks:
+        return max(active_tasks, key=_task_updated_at)
+    recent_terminal_tasks = [
+        task for task in tasks
+        if _terminal_task_within_snapshot_ttl(task)
+    ]
+    if not recent_terminal_tasks:
+        return None
+    return max(recent_terminal_tasks, key=_task_updated_at)
 
 
 async def _authorized_task(parent_thread_id: str, task_id: str, run_id: str) -> dict[str, Any]:
