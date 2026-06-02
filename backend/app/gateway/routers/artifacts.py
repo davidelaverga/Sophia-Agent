@@ -1,9 +1,12 @@
 import logging
 import mimetypes
+import os
 import zipfile
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from urllib.parse import quote
+from typing import Any
+from urllib.parse import quote, unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
@@ -20,7 +23,19 @@ router = APIRouter(prefix="/api", tags=["artifacts"])
 _OUTPUTS_VIRTUAL_PATH = "mnt/user-data/outputs"
 _WORKSPACE_OUTPUTS_VIRTUAL_PATH = "mnt/user-data/workspace/outputs"
 _OFFICE_DOWNLOAD_EXTENSIONS = frozenset({".pptx", ".ppt", ".docx", ".xlsx"})
+_BUILDER_ARTIFACT_TASK_STATUSES = frozenset({"success", "completed"})
 _session_store = SessionStore()
+
+
+@dataclass(frozen=True)
+class ArtifactPathResolution:
+    actual_path: Path
+    requested_thread_id: str
+    requested_path: str
+    normalized_path: str
+    resolution_scope: str
+    resolved_task_thread_id: str | None = None
+    checked_builder_task_thread_ids: tuple[str, ...] = ()
 
 
 class ThreadArtifactListItem(BaseModel):
@@ -146,16 +161,43 @@ def _artifact_container_path(path: str) -> str:
     return path[: marker_pos + len(".skill")]
 
 
+def _decode_artifact_virtual_path(path: str) -> str:
+    decoded = path
+    for _ in range(3):
+        next_decoded = unquote(decoded)
+        if next_decoded == decoded:
+            break
+        decoded = next_decoded
+    return decoded
+
+
+def _canonicalize_output_virtual_path(path: str) -> str:
+    if path == "outputs":
+        return _OUTPUTS_VIRTUAL_PATH
+    if path.startswith("outputs/"):
+        return f"{_OUTPUTS_VIRTUAL_PATH}/{path[len('outputs/'):]}"
+    if path == "user-data/outputs":
+        return _OUTPUTS_VIRTUAL_PATH
+    if path.startswith("user-data/outputs/"):
+        return f"mnt/{path}"
+    return path
+
+
 def _normalize_artifact_virtual_path(path: str) -> str:
     """Normalize separators while rejecting traversal before authorization."""
+    decoded = _decode_artifact_virtual_path(path).strip()
+    if decoded.startswith("file://"):
+        decoded = decoded[len("file://") :]
+    if decoded.startswith(("//", "\\\\")) or (len(decoded) >= 2 and decoded[1] == ":"):
+        raise HTTPException(status_code=403, detail="Unsafe artifact path")
     parts: list[str] = []
-    for part in PurePosixPath(path.replace("\\", "/")).parts:
+    for part in PurePosixPath(decoded.replace("\\", "/")).parts:
         if part in {"", "/", "."}:
             continue
         if part == "..":
             raise HTTPException(status_code=403, detail="Path traversal detected")
         parts.append(part)
-    return "/".join(parts)
+    return _canonicalize_output_virtual_path("/".join(parts))
 
 
 def _resolve_artifact_path(thread_id: str, path: str) -> Path:
@@ -182,6 +224,206 @@ def _resolve_artifact_path(thread_id: str, path: str) -> Path:
         return fallback_path
 
     return actual_path
+
+
+def _langgraph_url() -> str:
+    return (
+        os.getenv("SOPHIA_LANGGRAPH_BASE_URL")
+        or os.getenv("LANGGRAPH_URL")
+        or os.getenv("SOPHIA_BACKEND_BASE_URL")
+        or "http://127.0.0.1:2024"
+    ).strip().rstrip("/")
+
+
+def _builder_task_thread_id(task: dict[str, Any]) -> str | None:
+    for key in ("thread_id", "task_id"):
+        value = task.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _builder_task_parent_id(task: dict[str, Any]) -> str | None:
+    value = task.get("parent_thread_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    delegation_context = task.get("delegation_context")
+    if isinstance(delegation_context, dict):
+        value = delegation_context.get("parent_thread_id")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _is_completed_builder_task_for_parent(parent_thread_id: str, task: dict[str, Any]) -> bool:
+    if task.get("agent_name") != "sophia_builder":
+        return False
+    status = str(task.get("status") or "").lower()
+    if status not in _BUILDER_ARTIFACT_TASK_STATUSES:
+        return False
+    explicit_parent_id = _builder_task_parent_id(task)
+    return explicit_parent_id is None or explicit_parent_id == parent_thread_id
+
+
+async def _associated_builder_task_thread_ids(parent_thread_id: str) -> tuple[str, ...]:
+    """Return completed builder task thread ids associated with a parent thread.
+
+    Association comes from the parent thread's trusted ``async_tasks`` state.
+    The returned ids are only used as alternate thread roots for the same
+    normalized output-relative artifact path.
+    """
+    try:
+        from langgraph_sdk import get_client
+
+        client = get_client(url=_langgraph_url())
+        state = await client.threads.get_state(parent_thread_id)
+    except Exception:  # noqa: BLE001 - artifact listing must degrade gracefully.
+        logger.info(
+            "Builder task artifact association unavailable: parent_thread_id=%s",
+            _short_id(parent_thread_id),
+            exc_info=True,
+        )
+        return ()
+
+    values = state.get("values", {}) if isinstance(state, dict) else {}
+    tasks = values.get("async_tasks", {}) if isinstance(values, dict) else {}
+    if not isinstance(tasks, dict):
+        return ()
+
+    task_thread_ids: list[str] = []
+    seen: set[str] = set()
+    for task in tasks.values():
+        if not isinstance(task, dict) or not _is_completed_builder_task_for_parent(parent_thread_id, task):
+            continue
+        task_thread_id = _builder_task_thread_id(task)
+        if not task_thread_id or task_thread_id == parent_thread_id or task_thread_id in seen:
+            continue
+        seen.add(task_thread_id)
+        task_thread_ids.append(task_thread_id)
+    return tuple(task_thread_ids)
+
+
+async def _builder_task_thread_ids_to_check(parent_thread_id: str) -> tuple[str, ...]:
+    if not _has_sophia_session(parent_thread_id):
+        return ()
+    return await _associated_builder_task_thread_ids(parent_thread_id)
+
+
+async def _resolve_artifact_path_for_request(thread_id: str, path: str) -> ArtifactPathResolution:
+    parent_path = _resolve_artifact_path(thread_id, path)
+    if parent_path.exists():
+        resolution = ArtifactPathResolution(
+            actual_path=parent_path,
+            requested_thread_id=thread_id,
+            requested_path=path,
+            normalized_path=path,
+            resolution_scope="parent_thread",
+        )
+        _log_artifact_resolution(resolution, artifact_exists=True)
+        return resolution
+
+    relative_output_path = _relative_output_artifact_path(path)
+    checked_task_thread_ids: tuple[str, ...] = ()
+    if relative_output_path is not None:
+        checked_task_thread_ids = await _builder_task_thread_ids_to_check(thread_id)
+        for task_thread_id in checked_task_thread_ids:
+            try:
+                task_path = _resolve_artifact_path(task_thread_id, path)
+            except HTTPException:
+                logger.warning(
+                    "Builder task artifact path resolution skipped: requested_thread_id=%s task_thread_id=%s requested_path=%s",
+                    _short_id(thread_id),
+                    _short_id(task_thread_id),
+                    path,
+                )
+                continue
+            if task_path.exists():
+                resolution = ArtifactPathResolution(
+                    actual_path=task_path,
+                    requested_thread_id=thread_id,
+                    requested_path=path,
+                    normalized_path=path,
+                    resolution_scope="builder_task_thread",
+                    resolved_task_thread_id=task_thread_id,
+                    checked_builder_task_thread_ids=checked_task_thread_ids,
+                )
+                _log_artifact_resolution(resolution, artifact_exists=True)
+                return resolution
+
+    resolution = ArtifactPathResolution(
+        actual_path=parent_path,
+        requested_thread_id=thread_id,
+        requested_path=path,
+        normalized_path=path,
+        resolution_scope="parent_thread",
+        checked_builder_task_thread_ids=checked_task_thread_ids,
+    )
+    _log_artifact_resolution(resolution, artifact_exists=False, failure_reason="not_found")
+    return resolution
+
+
+def _log_artifact_resolution(
+    resolution: ArtifactPathResolution,
+    *,
+    artifact_exists: bool,
+    failure_reason: str | None = None,
+) -> None:
+    logger.info(
+        "Artifact resolution: requested_path=%s normalized_path=%s resolution_scope=%s "
+        "requested_thread_id=%s resolved_task_thread_id=%s checked_builder_task_count=%d "
+        "artifact_exists=%s failure_reason=%s actual_path=%s",
+        resolution.requested_path,
+        resolution.normalized_path,
+        resolution.resolution_scope,
+        resolution.requested_thread_id,
+        resolution.resolved_task_thread_id,
+        len(resolution.checked_builder_task_thread_ids),
+        artifact_exists,
+        failure_reason,
+        resolution.actual_path,
+    )
+
+
+def _artifact_not_found_detail(thread_id: str, path: str, resolution: ArtifactPathResolution) -> dict[str, Any]:
+    checked_builder_task_outputs = bool(resolution.checked_builder_task_thread_ids)
+    return {
+        "message": "Artifact not found",
+        "requested_path": path,
+        "normalized_path": resolution.normalized_path,
+        "checked_parent_thread": thread_id,
+        "checked_builder_task_outputs": checked_builder_task_outputs,
+        "checked_builder_task_thread_ids": list(resolution.checked_builder_task_thread_ids),
+        "failure_reason": (
+            "not_found_in_parent_or_associated_builder_tasks"
+            if checked_builder_task_outputs
+            else "not_found_in_parent_thread"
+        ),
+    }
+
+
+def _add_output_artifacts_from_dir(
+    artifacts_by_path: dict[str, ThreadArtifactListItem],
+    outputs_path: Path,
+) -> int:
+    files_with_stat = [
+        (candidate, candidate.stat())
+        for candidate in outputs_path.rglob("*")
+        if candidate.is_file() and not _is_builder_internal(candidate.name)
+    ]
+    for file_path, stat_result in files_with_stat:
+        relative_path = file_path.relative_to(outputs_path).as_posix()
+        mime_type, _ = mimetypes.guess_type(file_path.name)
+        path = f"{_OUTPUTS_VIRTUAL_PATH}/{relative_path}"
+        if path in artifacts_by_path:
+            continue
+        artifacts_by_path[path] = ThreadArtifactListItem(
+            path=path,
+            name=file_path.name,
+            size_bytes=stat_result.st_size,
+            modified_at=datetime.fromtimestamp(stat_result.st_mtime, tz=UTC).isoformat(),
+            mime_type=mime_type,
+        )
+    return len(files_with_stat)
 
 
 def _can_serve_local_non_sophia_artifact(thread_id: str, path: str) -> bool:
@@ -297,26 +539,34 @@ async def list_artifacts(
         raise HTTPException(status_code=400, detail=f"Path is not a directory: {_OUTPUTS_VIRTUAL_PATH}")
 
     if outputs_path.exists():
-        files_with_stat = [
-            (candidate, candidate.stat())
-            for candidate in outputs_path.rglob("*")
-            if candidate.is_file() and not _is_builder_internal(candidate.name)
-        ]
-        local_count = len(files_with_stat)
-        for file_path, stat_result in files_with_stat:
-            relative_path = file_path.relative_to(outputs_path).as_posix()
-            mime_type, _ = mimetypes.guess_type(file_path.name)
-            path = f"{_OUTPUTS_VIRTUAL_PATH}/{relative_path}"
-            artifacts_by_path[path] = ThreadArtifactListItem(
-                path=path,
-                name=file_path.name,
-                size_bytes=stat_result.st_size,
-                modified_at=datetime.fromtimestamp(stat_result.st_mtime, tz=UTC).isoformat(),
-                mime_type=mime_type,
-            )
+        local_count = _add_output_artifacts_from_dir(artifacts_by_path, outputs_path)
 
     supabase_count = 0
     owns_thread = _is_thread_owner(authenticated_user_id, thread_id)
+    builder_task_local_count = 0
+    checked_builder_task_thread_ids: tuple[str, ...] = ()
+    if owns_thread:
+        checked_builder_task_thread_ids = await _builder_task_thread_ids_to_check(thread_id)
+        for task_thread_id in checked_builder_task_thread_ids:
+            try:
+                task_outputs_path = resolve_thread_virtual_path(task_thread_id, _OUTPUTS_VIRTUAL_PATH)
+            except HTTPException:
+                logger.warning(
+                    "Builder task artifact list skipped invalid task output root: parent_thread_id=%s task_thread_id=%s",
+                    _short_id(thread_id),
+                    _short_id(task_thread_id),
+                )
+                continue
+            if task_outputs_path.exists() and not task_outputs_path.is_dir():
+                logger.warning(
+                    "Builder task artifact list skipped non-directory output root: parent_thread_id=%s task_thread_id=%s",
+                    _short_id(thread_id),
+                    _short_id(task_thread_id),
+                )
+                continue
+            if task_outputs_path.exists():
+                builder_task_local_count += _add_output_artifacts_from_dir(artifacts_by_path, task_outputs_path)
+
     if owns_thread:
         try:
             supabase_artifacts = supabase_artifact_store.list_artifacts(thread_id=thread_id)
@@ -367,9 +617,12 @@ async def list_artifacts(
     )
 
     logger.info(
-        "Artifact list resolved: thread_id=%s local_count=%d supabase_count=%d merged_count=%d",
+        "Artifact list resolved: thread_id=%s local_count=%d builder_task_local_count=%d "
+        "builder_task_thread_count=%d supabase_count=%d merged_count=%d",
         thread_id,
         local_count,
+        builder_task_local_count,
+        len(checked_builder_task_thread_ids),
         supabase_count,
         len(artifacts),
     )
@@ -454,15 +707,14 @@ async def get_artifact(
         except UnicodeDecodeError:
             return Response(content=content, media_type=mime_type or "application/octet-stream", headers=cache_headers)
 
-    actual_path = _resolve_artifact_path(thread_id, path)
-
-    logger.info(f"Resolving artifact path: thread_id={thread_id}, requested_path={path}, actual_path={actual_path}")
+    resolution = await _resolve_artifact_path_for_request(thread_id, path)
+    actual_path = resolution.actual_path
 
     if not actual_path.exists():
         supabase_response = _try_serve_from_supabase(thread_id, path, request)
         if supabase_response is not None:
             return supabase_response
-        raise HTTPException(status_code=404, detail=f"Artifact not found: {path}")
+        raise HTTPException(status_code=404, detail=_artifact_not_found_detail(thread_id, path, resolution))
 
     if not actual_path.is_file():
         raise HTTPException(status_code=400, detail=f"Path is not a file: {path}")
