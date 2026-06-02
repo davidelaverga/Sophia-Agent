@@ -188,6 +188,28 @@ def test_pdf_request_with_html_charts_still_targets_pdf():
     assert target.endswith(".pdf")
 
 
+def test_pdf_source_mentions_do_not_force_pdf_output():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "document",
+        "Summarize these PDFs into a concise research brief with recommendations.",
+    )
+
+    assert target.endswith(".md")
+
+
+def test_pdf_source_material_with_markdown_request_targets_markdown():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "research",
+        "Read the attached PDF source material and write the final brief in markdown.",
+    )
+
+    assert target.endswith(".md")
+
+
 def test_incidental_html_charts_do_not_override_visual_report_pdf_default():
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
 

@@ -126,8 +126,19 @@ _HTML_OUTPUT_RE = re.compile(
     r"|\.html\b)",
     re.IGNORECASE,
 )
+_PDF_OUTPUT_RE = re.compile(
+    r"\b(?:"
+    r"pdf\s+(?:document|file|report|summary|brief|article|explainer|deliverable|artifact|output)"
+    r"|(?:document|file|report|summary|brief|article|explainer|deliverable|artifact|output|final|export)"
+    r"\s+(?:as|in|to)\s+(?:an?\s+)?pdf"
+    r"|(?:build|create|make|generate|produce|write|render|export)\s+(?:an?\s+)?pdf\b"
+    r"|(?:build|create|make|generate|produce|write|render|export)\s+[^.?!\n]{0,80}?\s+as\s+(?:an?\s+)?pdf\b"
+    r"|\.pdf\b"
+    r")",
+    re.IGNORECASE,
+)
 _REQUESTED_OUTPUT_EXTENSION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("pdf", re.compile(r"\bpdf\b", re.IGNORECASE)),
+    ("pdf", _PDF_OUTPUT_RE),
     ("pptx", re.compile(r"\b(?:pptx|powerpoint|slide\s+deck|slides?)\b", re.IGNORECASE)),
     ("docx", re.compile(r"\b(?:docx|word\s+document)\b", re.IGNORECASE)),
     ("xlsx", re.compile(r"\b(?:xlsx|spreadsheet|excel)\b", re.IGNORECASE)),
