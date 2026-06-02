@@ -25,12 +25,12 @@ COREVIEW_FIXTURE_EXACT_TEXT = "\n".join(
 )
 
 _GEMINI_COREVIEW_PROMPT_OVERLAY = """<gemini_coreview_artifact_policy>
-Artifact co-review is a separate, explicitly entered mode. Apply these rules only while Review Together is active.
+Artifact co-review is a separate, explicitly entered mode. Apply these rules only while Review with Sophia is active.
 
 - Visual input is limited to the artifact region selected by the app. Never ask for or imply whole-screen, whole-tab, desktop, or browser chrome access.
 - The user must see a persistent looking indicator while visual input is active.
 - Stop Looking ends visual input. After it stops, return to normal voice behavior.
-- Still-frame co-review is single-frame or low-rate artifact-canvas input, not continuous video.
+- Still-frame co-review is one artifact-canvas frame at user request, not low-rate video or continuous watching.
 - Use visual input only for layout, composition, color, spacing, rough structure, and other visual qualities.
 - Exact words, numbers, table values, labels, citations, and data must come from read_artifact_text or another trusted artifact text sideband, not from vision.
 - When the user asks what a heading says, asks for a number/table value/label, or asks you to read fine print, call read_artifact_text with the active artifact_id before answering.
@@ -44,7 +44,6 @@ Artifact co-review is a separate, explicitly entered mode. Apply these rules onl
 class CoreviewMediaSupportReport:
     transport_kind: str
     media_capable_session_possible: Literal["yes", "no", "unknown"]
-    continuous_video_supported: bool
     still_frames_supported: bool
     tools_supported_in_normal_voice: bool
     tools_supported_in_coreview_media: Literal["yes", "no", "unknown"]
@@ -87,7 +86,6 @@ def detect_gemini_coreview_media_support(*, coreview_enabled: bool | None = None
     return CoreviewMediaSupportReport(
         transport_kind="gemini_live_audio_websocket_current_path",
         media_capable_session_possible="unknown",
-        continuous_video_supported=False,
         still_frames_supported=still_frame_enabled,
         tools_supported_in_normal_voice=True,
         tools_supported_in_coreview_media="unknown",
@@ -105,16 +103,20 @@ def detect_gemini_coreview_media_support(*, coreview_enabled: bool | None = None
             "No repo code exposes RTCPeerConnection/addTrack/replaceTrack for Gemini visual input.",
             "Still-frame WebSocket mediaChunks send is experimental and not provider-ack verified.",
             "Installed Vision Agents package exposes generic video-track helpers, not a wired Gemini media session.",
-            "Artifact panel is DOM-first; artifact-scoped visual input needs a canvas renderer or safe still-frame path.",
+            "Artifact-scoped visual input requires a registered canvas renderer and trusted text sideband.",
         ),
         recommended_next_step=(
             "Keep normal voice untouched. Manually smoke-test one feature-flagged artifact-canvas still frame "
-            "before attempting low-rate stills or continuous co-review."
+            "before adding any broader visual mode."
         ),
         safe_telemetry_fields=(
+            "coreviewEnabled",
+            "coreviewSessionActive",
+            "coreviewArtifactId",
             "normalVoiceSessionId",
             "coReviewSessionId",
             "transportKind",
+            "visualSourceKind",
             "visualTransportSupported",
             "toolsSupportedInCoReview",
             "coReviewStartLatencyMs",
@@ -125,9 +127,14 @@ def detect_gemini_coreview_media_support(*, coreview_enabled: bool | None = None
             "videoOrFrameMode",
             "frameSentCount",
             "initialFrameSent",
+            "visualFresh",
+            "visualFreshForTurn",
+            "exactTextAvailable",
             "refreshFrameCount",
             "frameBytes",
             "frameDimensions",
+            "lastFrameBytes",
+            "lastFrameDimensions",
             "totalFrameBytes",
             "frameSendLatencyMs",
             "maxFrameSendLatencyMs",
@@ -145,10 +152,14 @@ def detect_gemini_coreview_media_support(*, coreview_enabled: bool | None = None
             "exactTextCallCount",
             "exactTextSuccessCount",
             "exactTextFailureCount",
+            "readArtifactTextCallCount",
             "lastExactTextSource",
             "lastExactTextStatus",
             "lastExactTextCharCount",
             "lastExactTextLatencyMs",
+            "rawFrameExcluded",
+            "rawProviderPayloadExcluded",
+            "rawArtifactTextExcluded",
         ),
     )
 

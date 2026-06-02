@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  clearCoreviewArtifactTextRegistryForTests,
+  registerCoreviewArtifactText,
+} from '../app/lib/coreview-artifact-text';
+import {
   buildGeminiArtifactFrameRealtimeInput,
   buildGeminiArtifactTextReaderHint,
   buildGeminiLiveWebSocketUrl,
@@ -27,10 +31,6 @@ import {
   type GeminiBargeInTranscriptHandoffDiagnostic,
   type GeminiBrowserLiveDogfoodToolLoopDiagnostic,
 } from '../app/lib/gemini-browser-live-websocket-dogfood';
-import {
-  clearCoreviewArtifactTextRegistryForTests,
-  registerCoreviewArtifactText,
-} from '../app/lib/coreview-artifact-text';
 
 const emitArtifactArgs = {
   session_goal: 'Probe Gemini artifacts.',
@@ -209,6 +209,8 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       },
     });
     expect(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'))).toContain('artifact-1');
+    expect(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'))).toContain('Do not answer this setup message');
+    expect(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'))).toContain('Do not call emit_artifact');
     expect(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'))).not.toContain('base64-frame');
   });
 

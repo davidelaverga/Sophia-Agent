@@ -36,6 +36,7 @@ export type VoiceTelemetryReport = {
     geminiRelayBackend: Record<string, unknown> | null;
     geminiRelayThroughput: Record<string, unknown> | null;
     geminiStaleOutput: Record<string, unknown> | null;
+    coreviewStillFrame: Record<string, unknown>;
   };
   turnCaptureDiagnostics: TurnCaptureDiagnostics;
   captureBundle: VoiceTelemetryCaptureBundle;
@@ -114,7 +115,7 @@ export function buildVoiceTelemetryReport({
     summary: sanitizeTelemetryValue(summary) as VoiceTelemetrySummary,
     coreview: sanitizeTelemetryValue(reconciledMetrics.coreview) as CoreviewUsageTelemetry,
     metrics: sanitizedMetrics,
-    diagnosticsSummary: buildDiagnosticsSummary(captureBundle, selected),
+    diagnosticsSummary: buildDiagnosticsSummary(captureBundle, selected, reconciledMetrics.coreview),
     turnCaptureDiagnostics: sanitizeTelemetryValue(
       buildTurnCaptureDiagnostics(selected.events, reconciledMetrics),
     ) as TurnCaptureDiagnostics,
@@ -751,12 +752,39 @@ function findLastIndex<T>(values: T[], predicate: (value: T) => boolean): number
 
 function buildDiagnosticsSummary(
   captureBundle: SophiaCaptureBundle,
-  selected = selectCurrentRunEvents(captureBundle.events, captureBundle.snapshot),
+  selected: ReturnType<typeof selectCurrentRunEvents>,
+  coreview: CoreviewUsageTelemetry,
 ): VoiceTelemetryReport['diagnosticsSummary'] {
   return {
     geminiRelayBackend: buildGeminiRelayBackendDiagnosticsSummary(selected.events),
     geminiRelayThroughput: buildGeminiRelayThroughputSummary(selected.events),
     geminiStaleOutput: buildGeminiStaleOutputDiagnosticsSummary(selected.events),
+    coreviewStillFrame: buildCoreviewStillFrameDiagnosticsSummary(coreview),
+  };
+}
+
+function buildCoreviewStillFrameDiagnosticsSummary(coreview: CoreviewUsageTelemetry): Record<string, unknown> {
+  return {
+    schema: 'coreview_still_frame_summary_v1',
+    coreviewEnabled: coreview.visual.coreviewEnabled,
+    coreviewSessionActive: coreview.visual.coreviewSessionActive,
+    coreviewArtifactId: coreview.visual.coreviewArtifactId,
+    visualSourceKind: coreview.visual.visualSourceKind,
+    frameSentCount: coreview.visual.frameSentCount,
+    initialFrameSent: coreview.visual.initialFrameSent,
+    frameSendFailureCount: coreview.visual.frameSendFailureCount,
+    lastFrameSendFailureReason: coreview.visual.lastFrameSendFailureReason,
+    lastFrameDimensions: coreview.visual.lastFrameDimensions,
+    lastFrameBytes: coreview.visual.lastFrameBytes,
+    visualFresh: coreview.visual.visualFresh,
+    visualFreshForTurn: coreview.visual.visualFreshForTurn,
+    exactTextAvailable: coreview.visual.exactTextAvailable,
+    exactTextCallCount: coreview.exactText.exactTextCallCount,
+    exactTextSuccessCount: coreview.exactText.exactTextSuccessCount,
+    readArtifactTextCallCount: coreview.exactText.readArtifactTextCallCount,
+    rawFrameExcluded: coreview.visual.rawFrameExcluded,
+    rawProviderPayloadExcluded: coreview.visual.rawProviderPayloadExcluded,
+    rawArtifactTextExcluded: coreview.exactText.rawArtifactTextExcluded,
   };
 }
 

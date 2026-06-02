@@ -1705,6 +1705,9 @@ describe('buildVoiceDeveloperMetrics', () => {
       coreviewEnabled: true,
       frameSentCount: 2,
       initialFrameSent: true,
+      visualFresh: true,
+      visualFreshForTurn: true,
+      exactTextAvailable: true,
       refreshFrameCount: 1,
       lastFrameBytes: 2048,
       lastFrameDimensions: { width: 800, height: 450 },
@@ -1716,9 +1719,11 @@ describe('buildVoiceDeveloperMetrics', () => {
       visualResponseObserved: true,
       toolCallAfterFrameObserved: true,
       rawFrameExcluded: true,
+      rawProviderPayloadExcluded: true,
     });
     expect(metrics.coreview.exactText).toMatchObject({
       exactTextCallCount: 1,
+      readArtifactTextCallCount: 1,
       exactTextSuccessCount: 1,
       exactTextFailureCount: 0,
       exactTextSources: expect.objectContaining({ builder_metadata: 1 }),
@@ -1799,6 +1804,7 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.coreview.visual.lastFrameSendFailureReason).toBe('frame_send_closed_gemini_websocket');
     expect(metrics.coreview.visual.websocketClosedAfterFrameCount).toBe(1);
     expect(metrics.coreview.exactText.exactTextFailureCount).toBe(1);
+    expect(metrics.coreview.exactText.readArtifactTextCallCount).toBe(1);
     expect(metrics.coreview.exactText.exactTextSources.unsupported).toBe(1);
     expect(metrics.coreview.exactText.lastExactTextStatus).toBe('forbidden');
     expect(serialized).not.toContain('base64');

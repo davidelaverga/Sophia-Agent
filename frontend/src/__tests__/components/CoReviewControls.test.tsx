@@ -9,9 +9,9 @@ import {
   type CoReviewSessionState,
 } from "../../app/lib/co-review-transport"
 
-const transportStatus = new AudioWebSocketUnsupportedTransport().status()
+const unsupportedTransportStatus = new AudioWebSocketUnsupportedTransport().status()
 const liveStillFrameTransportStatus = {
-  ...transportStatus,
+  ...unsupportedTransportStatus,
   visualTransportSupported: true,
   toolsSupportedInCoReview: true,
   stillFramesSupported: true,
@@ -21,145 +21,79 @@ const liveStillFrameTransportStatus = {
 function renderControls(
   state: Partial<CoReviewSessionState> = {},
   featureEnabled = true,
-  options: {
-    canRefresh?: boolean
-    transportStatusOverride?: typeof transportStatus
-  } = {},
+  transportStatusOverride = unsupportedTransportStatus,
 ) {
   const onStart = vi.fn()
   const onStop = vi.fn()
-  const onRefresh = vi.fn()
-  const currentTransportStatus = options.transportStatusOverride ?? transportStatus
   render(
     <CoReviewControls
-      state={{ ...initialCoReviewState(currentTransportStatus.kind), ...state }}
-      transportStatus={currentTransportStatus}
+      state={{ ...initialCoReviewState(transportStatusOverride.kind), ...state }}
+      transportStatus={transportStatusOverride}
       onStart={onStart}
       onStop={onStop}
-      onRefresh={onRefresh}
-      canRefresh={options.canRefresh ?? false}
+      canStart={transportStatusOverride.visualTransportSupported && transportStatusOverride.stillFramesSupported}
       featureEnabled={featureEnabled}
     />,
   )
-  return { onStart, onStop, onRefresh }
+  return { onStart, onStop }
 }
 
 describe("CoReviewControls", () => {
   it("hides the co-review entry when the feature flag is off", () => {
     renderControls({}, false)
 
-    expect(screen.queryByRole("button", { name: /review together/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /review with sophia/i })).not.toBeInTheDocument()
   })
 
-  it("shows Review Together with unsupported transport status before entry", async () => {
+  it("shows Review with Sophia and Not Looking before entry", async () => {
     const user = userEvent.setup()
-    const { onStart } = renderControls()
+    const { onStart } = renderControls({}, true, liveStillFrameTransportStatus)
 
-    await user.click(screen.getByRole("button", { name: /review together/i }))
+    expect(screen.getByRole("status", { name: /not looking/i })).toBeInTheDocument()
+    expect(screen.getByText("Visual missing")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: /review with sophia/i }))
 
     expect(onStart).toHaveBeenCalledTimes(1)
-    expect(screen.getByText("continuous unsupported")).toBeInTheDocument()
   })
 
-  it("shows the looking indicator only during live co-review", () => {
-    renderControls({ state: "co_review_starting" })
-    expect(screen.queryByRole("status", { name: /looking at this artifact/i })).not.toBeInTheDocument()
+  it("shows Frame unavailable for unsupported still-frame transport", () => {
+    renderControls()
 
-    renderControls({
-      state: "co_review_live",
-      visualInputStatus: "live",
-      videoOrFrameMode: "still_frame",
-    })
-    expect(screen.getByRole("status", { name: /looking at this artifact/i })).toBeInTheDocument()
-    expect(screen.getByText("still-frame mode")).toBeInTheDocument()
+    expect(screen.getByText("Frame unavailable")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /review with sophia/i })).toBeDisabled()
   })
 
-  it("keeps Refresh View hidden until co-review is live", () => {
-    renderControls({ state: "normal_voice" })
+  it("shows Looking, Frame sent, Exact text available, and visual staleness after a still frame is sent", () => {
+    renderControls(
+      {
+        state: "co_review_live",
+        visualInputStatus: "live",
+        videoOrFrameMode: "still_frame",
+        frameSentCount: 1,
+        initialFrameSent: true,
+        exactTextAvailable: true,
+        visualFresh: true,
+        visualFreshForTurn: true,
+      },
+      true,
+      liveStillFrameTransportStatus,
+    )
 
+    expect(screen.getByRole("status", { name: /looking/i })).toBeInTheDocument()
+    expect(screen.getByText("Frame sent")).toBeInTheDocument()
+    expect(screen.getByText("Exact text available")).toBeInTheDocument()
+    expect(screen.getByText("Visual may be stale")).toBeInTheDocument()
     expect(screen.queryByRole("button", { name: /refresh view/i })).not.toBeInTheDocument()
-  })
-
-  it("shows Refresh View while live and dispatches through the provided handler", async () => {
-    const user = userEvent.setup()
-    const { onRefresh } = renderControls(
-      {
-        state: "co_review_live",
-        visualInputStatus: "live",
-        videoOrFrameMode: "still_frame",
-      },
-      true,
-      {
-        canRefresh: true,
-        transportStatusOverride: liveStillFrameTransportStatus,
-      },
-    )
-
-    await user.click(screen.getByRole("button", { name: /refresh view/i }))
-
-    expect(onRefresh).toHaveBeenCalledTimes(1)
-  })
-
-  it("disables Refresh View when the websocket is not open", () => {
-    renderControls(
-      {
-        state: "co_review_live",
-        visualInputStatus: "live",
-        videoOrFrameMode: "still_frame",
-      },
-      true,
-      {
-        canRefresh: true,
-        transportStatusOverride: {
-          ...liveStillFrameTransportStatus,
-          visualTransportSupported: false,
-          statusText: "still-frame unavailable: gemini_live_websocket_not_open",
-        },
-      },
-    )
-
-    expect(screen.getByRole("button", { name: /refresh view/i })).toBeDisabled()
-  })
-
-  it("shows safe Refresh View status text", () => {
-    renderControls(
-      {
-        state: "co_review_live",
-        visualInputStatus: "live",
-        refreshFrameInProgress: true,
-        refreshFrameResult: "refreshing",
-      },
-      true,
-      {
-        transportStatusOverride: liveStillFrameTransportStatus,
-      },
-    )
-    expect(screen.getByText("Refreshing…")).toBeInTheDocument()
-
-    renderControls(
-      {
-        state: "co_review_live",
-        visualInputStatus: "live",
-        refreshFrameResult: "success",
-      },
-      true,
-      {
-        transportStatusOverride: liveStillFrameTransportStatus,
-      },
-    )
-    expect(screen.getByText("Last refreshed just now")).toBeInTheDocument()
-
-    renderControls({
-      state: "co_review_error",
-      refreshFrameResult: "error",
-      refreshErrorSafeReason: "frame_send_closed_gemini_websocket",
-    })
-    expect(screen.getByText("Refresh failed: frame_send_closed_gemini_websocket")).toBeInTheDocument()
   })
 
   it("Stop Looking exits through the provided handler", async () => {
     const user = userEvent.setup()
-    const { onStop } = renderControls({ state: "co_review_live", visualInputStatus: "live" })
+    const { onStop } = renderControls(
+      { state: "co_review_live", visualInputStatus: "live" },
+      true,
+      liveStillFrameTransportStatus,
+    )
 
     await user.click(screen.getByRole("button", { name: /stop looking/i }))
 
@@ -167,14 +101,19 @@ describe("CoReviewControls", () => {
   })
 
   it("reports a visible safe reason for transport errors", () => {
-    renderControls({ state: "co_review_error", error: "unsupported" })
+    renderControls({
+      state: "co_review_error",
+      error: "frame_send_closed_gemini_websocket",
+      frameSendFailureCount: 1,
+    })
 
-    expect(screen.getByText("still-frame unavailable: unsupported")).toBeInTheDocument()
+    expect(screen.getByText("Frame unavailable")).toBeInTheDocument()
+    expect(screen.getByText("still-frame unavailable: frame_send_closed_gemini_websocket")).toBeInTheDocument()
   })
 
-  it("surfaces guarded DOM-only failures verbatim", () => {
-    renderControls({ state: "co_review_error", error: "dom_artifact_requires_safe_renderer" })
+  it("surfaces missing artifact canvas as Visual missing before a failed start", () => {
+    renderControls({}, true, liveStillFrameTransportStatus)
 
-    expect(screen.getByText("still-frame unavailable: dom_artifact_requires_safe_renderer")).toBeInTheDocument()
+    expect(screen.getByText("Visual missing")).toBeInTheDocument()
   })
 })

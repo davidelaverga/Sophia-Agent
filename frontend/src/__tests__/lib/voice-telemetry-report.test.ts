@@ -258,6 +258,9 @@ function buildMetrics(): VoiceDeveloperMetrics {
         visualSourceKind: 'canvas_element',
         frameSentCount: 1,
         initialFrameSent: true,
+        visualFresh: true,
+        visualFreshForTurn: true,
+        exactTextAvailable: true,
         refreshFrameCount: 0,
         lastFrameBytes: 1024,
         lastFrameDimensions: { width: 640, height: 360 },
@@ -273,9 +276,11 @@ function buildMetrics(): VoiceDeveloperMetrics {
         visualResponseObserved: true,
         toolCallAfterFrameObserved: true,
         rawFrameExcluded: true,
+        rawProviderPayloadExcluded: true,
       },
       exactText: {
         exactTextCallCount: 1,
+        readArtifactTextCallCount: 1,
         exactTextSuccessCount: 1,
         exactTextFailureCount: 0,
         exactTextSources: {
@@ -432,6 +437,24 @@ describe('buildVoiceTelemetryReport', () => {
       transcriptPartialsDropped: 0,
       transcriptCoalescingDisabledReason: 'provider_output_transcription_is_delta_like',
       p95TranscriptRelayLatencyMs: 220,
+    });
+    expect(report.diagnosticsSummary.coreviewStillFrame).toMatchObject({
+      schema: 'coreview_still_frame_summary_v1',
+      coreviewEnabled: true,
+      coreviewSessionActive: true,
+      coreviewArtifactId: 'artifact-1',
+      visualSourceKind: 'canvas_element',
+      frameSentCount: 1,
+      initialFrameSent: true,
+      visualFresh: true,
+      visualFreshForTurn: true,
+      exactTextAvailable: true,
+      exactTextCallCount: 1,
+      exactTextSuccessCount: 1,
+      readArtifactTextCallCount: 1,
+      rawFrameExcluded: true,
+      rawProviderPayloadExcluded: true,
+      rawArtifactTextExcluded: true,
     });
     const relayTrace = report.captureBundle.events.find((event) => event.name === 'gemini-relay-trace')?.payload as { trace?: { backendDiagnostics?: Record<string, unknown> } };
     expect(relayTrace?.trace?.backendDiagnostics).toMatchObject({
@@ -1228,8 +1251,13 @@ describe('buildVoiceTelemetryReport', () => {
     const serialized = JSON.stringify(report);
 
     expect(report.coreview.visual.frameSentCount).toBe(1);
+    expect(report.coreview.visual.initialFrameSent).toBe(true);
+    expect(report.coreview.visual.rawProviderPayloadExcluded).toBe(true);
     expect(report.coreview.exactText.exactTextSuccessCount).toBe(1);
+    expect(report.coreview.exactText.readArtifactTextCallCount).toBe(1);
     expect(report.coreview.exactText.lastExactTextSource).toBe('builder_metadata');
+    expect(report.diagnosticsSummary.coreviewStillFrame.rawProviderPayloadExcluded).toBe(true);
+    expect(report.diagnosticsSummary.coreviewStillFrame.rawArtifactTextExcluded).toBe(true);
     expect(serialized).not.toContain('base64-raw-frame');
     expect(serialized).not.toContain('raw-frame-bytes');
     expect(serialized).not.toContain('raw artifact body');

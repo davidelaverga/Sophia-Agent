@@ -475,7 +475,7 @@ export interface GeminiArtifactFramePayload {
 }
 
 export interface GeminiArtifactFrameSendContext {
-  coreviewSendStage?: 'start' | 'refresh' | 'repeated_probe' | null;
+  coreviewSendStage?: 'start' | 'refresh' | null;
 }
 
 export interface GeminiUsageMetadataTelemetry {
@@ -498,7 +498,7 @@ export interface GeminiArtifactFrameTransportStatusSnapshot {
 }
 
 export interface GeminiArtifactFrameSendResult {
-  coreviewSendStage: 'start' | 'refresh' | 'repeated_probe' | null;
+  coreviewSendStage: 'start' | 'refresh' | null;
   artifactId: string | null;
   ok: boolean;
   supported: boolean;
@@ -1911,6 +1911,9 @@ export function buildGeminiArtifactTextReaderHint(artifactId: string): Record<st
   return {
     realtimeInput: {
       text: [
+        'This is app context for the current artifact review. Do not answer this setup message.',
+        "If you speak at all, say only: I'm looking at it now.",
+        'Do not call emit_artifact because of this setup message.',
         `Coreview active artifact_id: ${artifactId}.`,
         'For exact words, numbers, table values, labels, or fine print, call read_artifact_text with this artifact_id before answering.',
         'Use the visual frame only for layout, composition, color, and spatial structure.',

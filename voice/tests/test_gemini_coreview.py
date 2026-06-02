@@ -136,7 +136,6 @@ def test_media_transport_support_detection_reports_unsupported_safely(monkeypatc
     report = detect_gemini_coreview_media_support()
 
     assert report.transport_kind == "gemini_live_audio_websocket_current_path"
-    assert report.continuous_video_supported is False
     assert report.still_frames_supported is False
     assert report.tools_supported_in_normal_voice is True
     assert report.tools_supported_in_coreview_media == "unknown"
@@ -153,11 +152,24 @@ def test_still_frame_support_detection_is_separately_feature_flagged(monkeypatch
     report = detect_gemini_coreview_media_support()
 
     assert report.still_frames_supported is True
+    assert "coreviewEnabled" in report.safe_telemetry_fields
+    assert "coreviewSessionActive" in report.safe_telemetry_fields
+    assert "coreviewArtifactId" in report.safe_telemetry_fields
+    assert "visualSourceKind" in report.safe_telemetry_fields
     assert "frameBytes" in report.safe_telemetry_fields
+    assert "lastFrameBytes" in report.safe_telemetry_fields
+    assert "lastFrameDimensions" in report.safe_telemetry_fields
+    assert "visualFresh" in report.safe_telemetry_fields
+    assert "visualFreshForTurn" in report.safe_telemetry_fields
+    assert "exactTextAvailable" in report.safe_telemetry_fields
     assert "refreshFrameCount" in report.safe_telemetry_fields
     assert "providerUsageImageCount" in report.safe_telemetry_fields
     assert "exactTextCallCount" in report.safe_telemetry_fields
+    assert "readArtifactTextCallCount" in report.safe_telemetry_fields
     assert "providerAcceptedFrame" in report.safe_telemetry_fields
+    assert "rawFrameExcluded" in report.safe_telemetry_fields
+    assert "rawProviderPayloadExcluded" in report.safe_telemetry_fields
+    assert "rawArtifactTextExcluded" in report.safe_telemetry_fields
 
 
 def test_tool_parity_status_is_reported(monkeypatch) -> None:

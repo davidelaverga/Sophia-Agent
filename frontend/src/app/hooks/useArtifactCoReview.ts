@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { resolveArtifactVisualSource } from "../lib/co-review-capture"
-import { isCoReviewEnabled } from "../lib/co-review-flags"
+import { isCoreviewStillFrameReviewEnabled } from "../lib/co-review-flags"
 import {
   AudioWebSocketUnsupportedTransport,
   CoReviewSessionMachine,
@@ -20,6 +20,7 @@ export interface UseArtifactCoReviewOptions {
   normalSessionId?: string | null
   artifactId: string | null
   artifactRoot?: ParentNode | null
+  exactTextAvailable?: boolean
   featureEnabled?: boolean
   transport?: CoReviewMediaTransport
   missingCanvasReason?: string
@@ -31,13 +32,13 @@ export function useArtifactCoReview({
   normalSessionId = null,
   artifactId,
   artifactRoot = null,
-  featureEnabled = isCoReviewEnabled(),
+  exactTextAvailable = false,
+  featureEnabled = isCoreviewStillFrameReviewEnabled(),
   transport,
   missingCanvasReason,
 }: UseArtifactCoReviewOptions) {
   const transportRef = useRef<CoReviewMediaTransport>(transport ?? new AudioWebSocketUnsupportedTransport())
   const [state, setState] = useState<CoReviewSessionState>(() => initialCoReviewState(transportRef.current.kind))
-  const [refreshSourceReady, setRefreshSourceReady] = useState(false)
   const machineRef = useRef<CoReviewSessionMachine | null>(null)
 
   if (!machineRef.current) {
@@ -53,7 +54,7 @@ export function useArtifactCoReview({
       hasSessionId: Boolean(sessionId),
       hasThreadId: Boolean(threadId),
       transportKind: transportRef.current.kind,
-      requestedMode: transportRef.current.supportsStillFrames() ? "still_frame" : "stream",
+      requestedMode: "still_frame",
     })
 
     if (!featureEnabled || !sessionId || !threadId || !artifactId) {
@@ -67,11 +68,10 @@ export function useArtifactCoReview({
       return state
     }
 
-    const requestedMode = transportRef.current.supportsStillFrames() ? "still_frame" : "stream"
     const visualSource = resolveArtifactVisualSource({
       root: artifactRoot,
       artifactId,
-      mode: requestedMode,
+      mode: "still_frame",
       missingCanvasReason,
     })
 
@@ -79,7 +79,7 @@ export function useArtifactCoReview({
       found: visualSource.status === "ready",
       artifactId,
       sourceKind: visualSource.kind,
-      mode: requestedMode,
+      mode: "still_frame",
       reason: visualSource.reason,
     })
 
@@ -89,6 +89,7 @@ export function useArtifactCoReview({
       threadId,
       artifactId,
       visualSource,
+      exactTextAvailable,
     })
 
     if (nextState.state === "co_review_error") {
@@ -101,7 +102,7 @@ export function useArtifactCoReview({
     logCoreviewBreadcrumb("coReviewStateAfterStart", safeCoReviewTelemetryFromState(nextState))
     recordCoreviewTelemetry("start", nextState, { featureEnabled })
     return nextState
-  }, [artifactId, artifactRoot, featureEnabled, missingCanvasReason, normalSessionId, sessionId, state, threadId])
+  }, [artifactId, artifactRoot, exactTextAvailable, featureEnabled, missingCanvasReason, normalSessionId, sessionId, state, threadId])
 
   const stopReview = useCallback(async () => {
     const nextState = await machineRef.current.stopCoReview()
@@ -171,42 +172,9 @@ export function useArtifactCoReview({
     && sessionId
     && threadId
     && artifactId
-    && transportStatus.visualTransportSupported,
-  )
-  const canRefresh = Boolean(
-    featureEnabled
-    && sessionId
-    && threadId
-    && artifactId
-    && state.state === "co_review_live"
-    && state.visualInputStatus === "live"
-    && !state.refreshFrameInProgress
-    && refreshSourceReady
     && transportStatus.visualTransportSupported
+    && transportStatus.stillFramesSupported,
   )
-
-  useEffect(() => {
-    if (!featureEnabled || state.state !== "co_review_live" || !artifactId) {
-      setRefreshSourceReady(false)
-      return
-    }
-
-    const visualSource = resolveArtifactVisualSource({
-      root: artifactRoot,
-      artifactId,
-      mode: "still_frame",
-      missingCanvasReason,
-    })
-    setRefreshSourceReady(visualSource.status === "ready")
-  }, [
-    artifactId,
-    artifactRoot,
-    featureEnabled,
-    missingCanvasReason,
-    state.frameSentCount,
-    state.refreshFrameResult,
-    state.state,
-  ])
 
   useEffect(() => {
     if (
@@ -235,7 +203,7 @@ export function useArtifactCoReview({
     telemetry,
     transportStatus,
     canStart,
-    canRefresh,
+    canRefresh: false,
     startReview,
     stopReview,
     refreshReview,

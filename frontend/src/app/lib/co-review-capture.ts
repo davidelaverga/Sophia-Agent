@@ -1,22 +1,19 @@
-export type ArtifactVisualSourceKind = "canvas_element" | "canvas_stream" | "offscreen_render" | "unsupported"
+export type ArtifactVisualSourceKind = "canvas_element" | "offscreen_render" | "unsupported"
 
 export type ArtifactVisualSourceStatus = "ready" | "unsupported"
-export type ArtifactVisualSourceMode = "stream" | "still_frame"
+export type ArtifactVisualSourceMode = "still_frame"
 
 export interface ArtifactVisualSource {
   kind: ArtifactVisualSourceKind
   status: ArtifactVisualSourceStatus
   artifactId: string | null
   element: HTMLCanvasElement | null
-  stream: MediaStream | null
   reason: string | null
-  frameRate: number | null
 }
 
 export interface ResolveArtifactVisualSourceOptions {
   root?: ParentNode | null
   artifactId?: string | null
-  frameRate?: number
   mode?: ArtifactVisualSourceMode
   missingCanvasReason?: string
 }
@@ -31,8 +28,7 @@ const ARTIFACT_CANVAS_SELECTORS = [
 export function resolveArtifactVisualSource({
   root,
   artifactId = null,
-  frameRate = 1,
-  mode = "stream",
+  mode = "still_frame",
   missingCanvasReason = "artifact_canvas_not_found",
 }: ResolveArtifactVisualSourceOptions = {}): ArtifactVisualSource {
   const searchRoot = root ?? (typeof document === "undefined" ? null : document)
@@ -46,35 +42,14 @@ export function resolveArtifactVisualSource({
   }
 
   const sourceKind = readArtifactCanvasKind(canvas)
-
-  if (mode === "still_frame") {
-    return {
-      kind: sourceKind,
-      status: "ready",
-      artifactId,
-      element: canvas,
-      stream: null,
-      reason: null,
-      frameRate: null,
-    }
-  }
-
-  const captureStream = canvas.captureStream
-  if (typeof captureStream !== "function") {
-    return {
-      ...unsupportedArtifactVisualSource("canvas_capture_stream_unavailable", artifactId),
-      element: canvas,
-    }
-  }
+  void mode
 
   return {
-    kind: "canvas_stream",
+    kind: sourceKind,
     status: "ready",
     artifactId,
     element: canvas,
-    stream: captureStream.call(canvas, frameRate),
     reason: null,
-    frameRate,
   }
 }
 
@@ -86,7 +61,7 @@ function readArtifactCanvasKind(canvas: HTMLCanvasElement): ArtifactVisualSource
 }
 
 export function stopArtifactVisualSource(source: ArtifactVisualSource | null | undefined): void {
-  source?.stream?.getTracks().forEach((track) => track.stop())
+  void source
 }
 
 export function findArtifactCanvas(
@@ -115,9 +90,7 @@ function unsupportedArtifactVisualSource(reason: string, artifactId: string | nu
     status: "unsupported",
     artifactId,
     element: null,
-    stream: null,
     reason,
-    frameRate: null,
   }
 }
 

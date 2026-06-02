@@ -40,7 +40,6 @@ import {
 } from '../components/session';
 import { BuilderCompletionCard } from '../components/session/BuilderCompletionCard';
 import { BuilderTaskNotice } from '../components/session/BuilderTaskNotice';
-import { CoreviewFixtureLauncher } from '../components/session/CoreviewFixtureLauncher';
 import { SessionLayout } from '../components/SessionLayout';
 import { SessionExpiredModal, MultiTabModal } from '../components/ui';
 import { UsageLimitModal } from '../components/UsageLimitModal';
@@ -50,7 +49,6 @@ import { useIdleTimeout } from '../hooks/useIdleTimeout';
 import { useSessionBootstrap } from '../hooks/useSessionBootstrap';
 import { useSessionPersistence } from '../hooks/useSessionPersistence';
 import { buildThreadArtifactHref, getBuilderArtifactFiles } from '../lib/builder-artifacts';
-import { isCoReviewFixtureEnabled } from '../lib/co-review-flags';
 import { GeminiStillFrameTransport } from '../lib/co-review-still-frame-transport';
 import { debugLog } from '../lib/debug-logger';
 import { errorCopy } from '../lib/error-copy';
@@ -520,9 +518,8 @@ function SessionPageContent() {
   });
 
   const hasBuilderArtifactLibrary = builderArtifactLibrary.length > 0;
-  const coReviewFixtureEnabled = isCoReviewFixtureEnabled();
-  const coReviewSessionId = backendSessionId || safeSessionId || sessionId || (coReviewFixtureEnabled ? 'local-coreview-fixture-session' : null);
-  const artifactPanelThreadId = resolvedThreadId || (coReviewFixtureEnabled ? coReviewSessionId ?? 'local-coreview-fixture-thread' : undefined);
+  const coReviewSessionId = backendSessionId || safeSessionId || sessionId || null;
+  const artifactPanelThreadId = resolvedThreadId || undefined;
   const coReviewTransport = useMemo(
     () => new GeminiStillFrameTransport({
       sendArtifactFrame: voiceState.sendArtifactFrame,
@@ -593,7 +590,6 @@ function SessionPageContent() {
     artifacts,
     builderArtifact,
     hasBuilderArtifactLibrary,
-    hasCoReviewFixture: coReviewFixtureEnabled,
     isBuilderRunning: builderTask?.phase === 'running',
     isStreaming,
     isReflectionVoiceFlowActive,
@@ -615,14 +611,14 @@ function SessionPageContent() {
     const hasTakeaway = Boolean(artifacts?.takeaway?.trim());
     const hasReflection = Boolean(artifacts?.reflection_candidate?.prompt?.trim());
     const memoryCount = artifacts?.memory_candidates?.length ?? 0;
-    return (hasBuilderArtifact ? 1 : 0) + (coReviewFixtureEnabled ? 1 : 0) + (hasTakeaway ? 1 : 0) + (hasReflection ? 1 : 0) + Math.min(1, memoryCount);
-  }, [artifacts, builderArtifact, hasBuilderArtifactLibrary, coReviewFixtureEnabled]);
+    return (hasBuilderArtifact ? 1 : 0) + (hasTakeaway ? 1 : 0) + (hasReflection ? 1 : 0) + Math.min(1, memoryCount);
+  }, [artifacts, builderArtifact, hasBuilderArtifactLibrary]);
 
   const readyArtifactCount = useMemo(() => {
     return [artifactStatus.takeaway, artifactStatus.reflection, artifactStatus.memories].filter(
       (status) => status === 'ready'
-    ).length + ((builderArtifact || hasBuilderArtifactLibrary) ? 1 : 0) + (coReviewFixtureEnabled ? 1 : 0);
-  }, [artifactStatus, builderArtifact, hasBuilderArtifactLibrary, coReviewFixtureEnabled]);
+    ).length + ((builderArtifact || hasBuilderArtifactLibrary) ? 1 : 0);
+  }, [artifactStatus, builderArtifact, hasBuilderArtifactLibrary]);
 
   const waitingArtifactCount = useMemo(() => {
     return [artifactStatus.takeaway, artifactStatus.reflection, artifactStatus.memories].filter(
@@ -653,10 +649,9 @@ function SessionPageContent() {
       .filter((memory) => memory.length > 0)
       .join('|');
     const library = builderArtifactLibrary.map((item) => item.path).join('|');
-    const fixture = coReviewFixtureEnabled ? 'coreview-fixture-q3-launch-review' : '';
 
-    return `${builder}::${library}::${fixture}::${takeaway}::${reflection}::${memories}`;
-  }, [artifacts, builderArtifact, builderArtifactLibrary, coReviewFixtureEnabled]);
+    return `${builder}::${library}::${takeaway}::${reflection}::${memories}`;
+  }, [artifacts, builderArtifact, builderArtifactLibrary]);
 
   const hasDesktopStyleBadge = hasPendingArtifacts || waitingArtifactCount > 0;
   const recoveredBuilderLibraryItem = useMemo(() => {
@@ -1119,14 +1114,6 @@ function SessionPageContent() {
       isReadOnly={isReadOnly}
       presenceRef={presenceRef}
     >
-      <CoreviewFixtureLauncher
-        isVisible={coReviewFixtureEnabled}
-        sessionId={coReviewSessionId}
-        normalSessionId={coReviewSessionId}
-        threadId={artifactPanelThreadId}
-        coReviewTransport={coReviewTransport}
-      />
-
       <div className="relative flex h-full animate-fadeIn">
         {/* Main Chat Area */}
         <div className="relative z-10 flex-1 flex flex-col min-w-0 overflow-hidden">
@@ -1234,7 +1221,6 @@ function SessionPageContent() {
               isVisible={showArtifacts && showArtifactsUi}
               onDismiss={handleCloseArtifactsPanel}
               isVoiceMode={false}
-              showCoReviewFixture={coReviewFixtureEnabled}
               coReviewTransport={coReviewTransport}
               onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
               onMemoryApprove={handleMemoryApprove}
@@ -1446,7 +1432,6 @@ function SessionPageContent() {
             isVisible={showArtifacts && showArtifactsUi}
             onDismiss={handleCloseArtifactsPanel}
             isVoiceMode={true}
-            showCoReviewFixture={coReviewFixtureEnabled}
             coReviewTransport={coReviewTransport}
             onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
             onMemoryApprove={handleMemoryApprove}

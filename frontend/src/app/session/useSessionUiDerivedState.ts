@@ -12,7 +12,6 @@ interface UseSessionUiDerivedStateParams {
   artifacts: RitualArtifacts | null;
   builderArtifact?: BuilderArtifactV1 | null;
   hasBuilderArtifactLibrary?: boolean;
-  hasCoReviewFixture?: boolean;
   isBuilderRunning?: boolean;
   isStreaming: boolean;
   isReflectionVoiceFlowActive: boolean;
@@ -29,7 +28,6 @@ export function useSessionUiDerivedState({
   artifacts,
   builderArtifact,
   hasBuilderArtifactLibrary = false,
-  hasCoReviewFixture = false,
   isBuilderRunning = false,
   isStreaming,
   isReflectionVoiceFlowActive,
@@ -44,8 +42,8 @@ export function useSessionUiDerivedState({
     const takeaway = artifacts?.takeaway?.trim();
     const reflection = artifacts?.reflection_candidate?.prompt?.trim();
     const memoriesCount = artifacts?.memory_candidates?.length ?? 0;
-    return Boolean(builderArtifact || hasBuilderArtifactLibrary || hasCoReviewFixture || takeaway || reflection || memoriesCount > 0);
-  }, [artifacts, builderArtifact, hasBuilderArtifactLibrary, hasCoReviewFixture]);
+    return Boolean(builderArtifact || hasBuilderArtifactLibrary || takeaway || reflection || memoriesCount > 0);
+  }, [artifacts, builderArtifact, hasBuilderArtifactLibrary]);
 
   const isVoiceThinking = voiceStatus === 'thinking';
   const showThinkingIndicator = (isTyping || isVoiceThinking) && !isReflectionTtsActive;

@@ -1256,17 +1256,19 @@ function GeminiRuntimeDetails({
             title="Coreview"
             rows={[
               ["Frames sent", String(coreview.visual.frameSentCount)],
-              ["Refresh frames", String(coreview.visual.refreshFrameCount)],
+              ["Initial frame", coreview.visual.initialFrameSent ? "sent" : "pending"],
+              ["Visual fresh", coreview.visual.visualFresh ? "yes" : "no"],
+              ["Exact text", coreview.visual.exactTextAvailable ? "available" : "pending"],
               ["Last frame", formatBytes(coreview.visual.lastFrameBytes)],
               ["Max send latency", formatMs(coreview.visual.maxFrameSendLatencyMs)],
               ["Frame failures", String(coreview.visual.frameSendFailureCount)],
               ["Closed after frame", String(coreview.visual.websocketClosedAfterFrameCount)],
               ["Provider image count", coreview.visual.providerUsageImageCount === null ? "pending" : String(coreview.visual.providerUsageImageCount)],
-              ["Exact-text calls", String(coreview.exactText.exactTextCallCount)],
+              ["Exact-text calls", String(coreview.exactText.readArtifactTextCallCount)],
               ["Last text source", coreview.exactText.lastExactTextSource ?? "pending"],
               ["Last text status", coreview.exactText.lastExactTextStatus ?? "pending"],
             ]}
-            footer={coreview.visual.lastFrameSendFailureReason ?? "Coreview telemetry excludes raw frames, base64, raw text, and raw queries."}
+            footer={coreview.visual.lastFrameSendFailureReason ?? "Coreview telemetry excludes raw frames, raw provider payloads, raw text, and raw queries."}
             tone={coreview.visual.frameSendFailureCount > 0 || coreview.exactText.exactTextFailureCount > 0
               ? "warn"
               : coreview.visual.frameSentCount > 0 || coreview.exactText.exactTextCallCount > 0

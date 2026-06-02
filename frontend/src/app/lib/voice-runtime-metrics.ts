@@ -38,6 +38,9 @@ export type CoreviewVisualTelemetry = {
   visualSourceKind: string | null
   frameSentCount: number
   initialFrameSent: boolean
+  visualFresh: boolean
+  visualFreshForTurn: boolean
+  exactTextAvailable: boolean
   refreshFrameCount: number
   lastFrameBytes: number | null
   lastFrameDimensions: { width: number; height: number } | null
@@ -53,10 +56,12 @@ export type CoreviewVisualTelemetry = {
   visualResponseObserved: boolean
   toolCallAfterFrameObserved: boolean
   rawFrameExcluded: true
+  rawProviderPayloadExcluded: true
 }
 
 export type CoreviewExactTextTelemetry = {
   exactTextCallCount: number
+  readArtifactTextCallCount: number
   exactTextSuccessCount: number
   exactTextFailureCount: number
   exactTextSources: Record<CoreviewExactTextSource, number>
@@ -782,6 +787,9 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       visualSourceKind: null,
       frameSentCount: 0,
       initialFrameSent: false,
+      visualFresh: false,
+      visualFreshForTurn: false,
+      exactTextAvailable: false,
       refreshFrameCount: 0,
       lastFrameBytes: null,
       lastFrameDimensions: null,
@@ -797,9 +805,11 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       visualResponseObserved: false,
       toolCallAfterFrameObserved: false,
       rawFrameExcluded: true,
+      rawProviderPayloadExcluded: true,
     },
     exactText: {
       exactTextCallCount: 0,
+      readArtifactTextCallCount: 0,
       exactTextSuccessCount: 0,
       exactTextFailureCount: 0,
       exactTextSources: defaultExactTextSources(),
@@ -815,9 +825,15 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
 }
 
 function buildCoreviewUsageTelemetry(activeEvents: NormalizedVoiceCaptureEvent[]): CoreviewUsageTelemetry {
+  const visual = buildCoreviewVisualTelemetry(activeEvents)
+  const exactText = buildCoreviewExactTextTelemetry(activeEvents)
+  visual.exactTextAvailable = visual.exactTextAvailable
+    || exactText.exactTextCallCount > 0
+    || exactText.exactTextSuccessCount > 0
+
   return {
-    visual: buildCoreviewVisualTelemetry(activeEvents),
-    exactText: buildCoreviewExactTextTelemetry(activeEvents),
+    visual,
+    exactText,
   }
 }
 
@@ -838,6 +854,9 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.coreviewSessionActive = asBoolean(latestState?.coreviewSessionActive) ?? false
   visual.coreviewArtifactId = asString(latestState?.coreviewArtifactId)
   visual.visualSourceKind = asString(latestState?.visualSourceKind)
+  visual.visualFresh = asBoolean(latestState?.visualFresh) ?? false
+  visual.visualFreshForTurn = asBoolean(latestState?.visualFreshForTurn) ?? false
+  visual.exactTextAvailable = asBoolean(latestState?.exactTextAvailable) ?? false
   const stateFrameSentCount = numberFromKeys(latestState, ["frameSentCount"]) ?? 0
   const stateRefreshFrameCount = numberFromKeys(latestState, ["refreshFrameCount"]) ?? 0
   const stateTotalFrameBytes = numberFromKeys(latestState, ["totalFrameBytes"]) ?? 0
@@ -873,6 +892,8 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
       visual.totalFrameBytes += bytes ?? 0
       visual.lastFrameBytes = bytes ?? visual.lastFrameBytes
       visual.lastFrameDimensions = asFrameDimensions(result.frameDimensions) ?? visual.lastFrameDimensions
+      visual.visualFresh = true
+      visual.visualFreshForTurn = true
       if (stage === "refresh") {
         visual.refreshFrameCount += 1
       } else if (stage === "start") {
@@ -923,6 +944,8 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.frameSendFailureCount = Math.max(visual.frameSendFailureCount, stateFrameSendFailureCount)
   visual.websocketClosedAfterFrameCount = Math.max(visual.websocketClosedAfterFrameCount, stateWebsocketClosedAfterFrameCount)
   visual.initialFrameSent = visual.initialFrameSent || (visual.frameSentCount > 0 && visual.refreshFrameCount < visual.frameSentCount)
+  visual.visualFresh = visual.visualFresh || visual.frameSentCount > 0
+  visual.visualFreshForTurn = visual.visualFreshForTurn || visual.initialFrameSent
   return visual
 }
 
@@ -968,6 +991,7 @@ function buildCoreviewExactTextTelemetry(activeEvents: NormalizedVoiceCaptureEve
     exactText.exactTextCallCount,
     exactText.exactTextSuccessCount + exactText.exactTextFailureCount,
   )
+  exactText.readArtifactTextCallCount = exactText.exactTextCallCount
 
   return exactText
 }
