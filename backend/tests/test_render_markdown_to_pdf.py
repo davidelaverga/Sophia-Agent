@@ -252,6 +252,52 @@ def test_invokes_pandoc_with_correct_command_shape(tmp_path, monkeypatch):
     assert captured["kwargs"]["check"] is False
 
 
+def test_resolves_virtual_output_paths_with_thread_data(tmp_path, monkeypatch):
+    outputs = tmp_path / "thread" / "outputs"
+    outputs.mkdir(parents=True)
+    (outputs / "report.md").write_text("# Report\n")
+    virtual_md = f"{_OUTPUTS_PREFIX}report.md"
+    virtual_pdf = f"{_OUTPUTS_PREFIX}report.pdf"
+    thread_data = {
+        "workspace_path": str(tmp_path / "thread" / "workspace"),
+        "uploads_path": str(tmp_path / "thread" / "uploads"),
+        "outputs_path": str(outputs),
+    }
+
+    monkeypatch.setattr(
+        "deerflow.sophia.tools.render_markdown_to_pdf.shutil.which",
+        lambda binary: f"/fake/{binary}",
+    )
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF-1.4 fake")
+
+        class _Completed:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
+        return _Completed()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = _parse(_impl(
+        markdown_path=virtual_md,
+        pdf_path=virtual_pdf,
+        pdf_engine=None,
+        thread_data=thread_data,
+    ))
+
+    assert result["success"] is True
+    assert result["pdf_path"] == virtual_pdf
+    assert str(outputs / "report.md") in captured["cmd"]
+    assert str(outputs / "report.pdf") in captured["cmd"]
+    assert (outputs / "report.pdf").is_file()
+
+
 def test_success_payload_includes_pdf_layout_metrics(tmp_path, monkeypatch):
     md = _stage_for_subprocess_test(tmp_path, monkeypatch)
     pdf_path = tmp_path / "mnt" / "user-data" / "outputs" / "out.pdf"

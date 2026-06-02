@@ -38,8 +38,9 @@ import subprocess  # noqa: S404 — invoking pandoc by absolute path
 from pathlib import Path
 from typing import Any
 
-from langchain_core.tools import tool
-from pydantic import BaseModel, Field
+from langchain.tools import ToolRuntime, tool
+
+from deerflow.sandbox.tools import get_thread_data, mask_local_paths_in_output, replace_virtual_path
 
 try:  # pragma: no cover - import availability varies by runtime image
     from pypdf import PdfReader
@@ -61,31 +62,6 @@ _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 _PANDOC_TIMEOUT_SECONDS = 90
 _SHORT_PAGE_WORD_THRESHOLD = 80
 _DEFAULT_MAX_PAGES = 15
-
-
-class RenderMarkdownToPdfInput(BaseModel):
-    markdown_path: str = Field(
-        description=(
-            "Absolute path to the Markdown source file (must exist and be readable). "
-            "Prefer paths under /mnt/user-data/outputs/ for visibility in the artifact pipeline."
-        ),
-    )
-    pdf_path: str = Field(
-        description=(
-            "Absolute path where the PDF should be written. MUST start with "
-            "/mnt/user-data/outputs/ — files outside that prefix won't be "
-            "delivered to the user. The builder should pass the same path "
-            "to ``emit_builder_artifact.artifact_path`` after this tool succeeds."
-        ),
-    )
-    pdf_engine: str | None = Field(
-        default=None,
-        description=(
-            "Optional pandoc PDF engine override (e.g. 'xelatex', 'lualatex', "
-            "'wkhtmltopdf'). Default is xelatex when available, else pandoc's "
-            "auto-select. Most users should leave this unset."
-        ),
-    )
 
 
 def _ensure_relative_to_outputs(label: str, path: str) -> str | None:
@@ -121,6 +97,16 @@ def _result(*, success: bool, **fields) -> str:
     """
     payload = {"success": success, **fields}
     return json.dumps(payload)
+
+
+def _host_path_for_virtual_output(path: str, thread_data: dict[str, Any] | None) -> Path:
+    if thread_data is None:
+        return Path(path)
+    return Path(replace_virtual_path(path, thread_data))
+
+
+def _mask_local_output(text: str, thread_data: dict[str, Any] | None) -> str:
+    return mask_local_paths_in_output(text, thread_data) if thread_data is not None else text
 
 
 def _resolve_pdf_engine(explicit: str | None) -> tuple[str | None, str]:
@@ -198,7 +184,12 @@ def _inspect_pdf_layout(pdf_file: Path) -> dict[str, int | str | None]:
     }
 
 
-def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
+def _impl(
+    markdown_path: str,
+    pdf_path: str,
+    pdf_engine: str | None,
+    thread_data: dict[str, Any] | None = None,
+) -> str:
     """Concrete pandoc invocation. Tested independently of the @tool wrapper."""
     # ---- Path validation -----------------------------------------------
     md_check = _ensure_relative_to_outputs("markdown_path", markdown_path)
@@ -212,7 +203,7 @@ def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
     if pdf_check is not None:
         return _result(success=False, error=pdf_check, error_type="invalid_input")
 
-    md_file = Path(markdown_path)
+    md_file = _host_path_for_virtual_output(markdown_path, thread_data)
     if not md_file.is_file():
         return _result(
             success=False,
@@ -257,7 +248,7 @@ def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
         engine_msg,
     )
 
-    pdf_file = Path(pdf_path)
+    pdf_file = _host_path_for_virtual_output(pdf_path, thread_data)
     pdf_file.parent.mkdir(parents=True, exist_ok=True)
 
     # ---- Invocation -----------------------------------------------------
@@ -269,8 +260,16 @@ def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
         "-o",
         str(pdf_file),
     ]
+    public_cmd: list[str] = [
+        "--standalone",
+        "--from=markdown+smart+yaml_metadata_block",
+        markdown_path,
+        "-o",
+        pdf_path,
+    ]
     if engine is not None:
         cmd.append(f"--pdf-engine={engine}")
+        public_cmd.append(f"--pdf-engine={engine}")
 
     try:
         completed = subprocess.run(  # noqa: S603 — pandoc binary path is from shutil.which
@@ -313,11 +312,11 @@ def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
             success=False,
             error=(
                 f"pandoc exited with code {completed.returncode}. "
-                f"stderr: {completed.stderr.strip()[:1500]}"
+                f"stderr: {_mask_local_output(completed.stderr.strip(), thread_data)[:1500]}"
             ),
             error_type="pandoc_error",
             engine=engine or "default",
-            command=" ".join(cmd[1:]),  # omit the binary path itself
+            command=" ".join(public_cmd),
         )
 
     if not pdf_file.is_file():
@@ -353,7 +352,7 @@ def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
     )
     return _result(
         success=True,
-        pdf_path=str(pdf_file),
+        pdf_path=pdf_path,
         size_bytes=size_bytes,
         engine=engine or "default",
         engine_message=engine_msg,
@@ -361,8 +360,13 @@ def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
     )
 
 
-@tool(args_schema=RenderMarkdownToPdfInput)
-def render_markdown_to_pdf(markdown_path: str, pdf_path: str, pdf_engine: str | None = None) -> str:
+@tool("render_markdown_to_pdf", parse_docstring=True)
+def render_markdown_to_pdf(
+    runtime: ToolRuntime,
+    markdown_path: str,
+    pdf_path: str,
+    pdf_engine: str | None = None,
+) -> str:
     """Convert a Markdown file to a PDF using pandoc.
 
     Use this for any PDF deliverable. Compose your Markdown source first
@@ -388,5 +392,18 @@ def render_markdown_to_pdf(markdown_path: str, pdf_path: str, pdf_engine: str | 
     (``artifact_type='document'``, ``artifact_path`` to the .md file)
     with confidence<=0.5 and explain the limitation in
     ``companion_tone_hint``.
+
+    Args:
+        markdown_path: Absolute path to the Markdown source file under
+            /mnt/user-data/outputs/.
+        pdf_path: Absolute path where the PDF should be written. Must be
+            under /mnt/user-data/outputs/.
+        pdf_engine: Optional pandoc PDF engine override, such as xelatex,
+            lualatex, or wkhtmltopdf.
     """
-    return _impl(markdown_path=markdown_path, pdf_path=pdf_path, pdf_engine=pdf_engine)
+    return _impl(
+        markdown_path=markdown_path,
+        pdf_path=pdf_path,
+        pdf_engine=pdf_engine,
+        thread_data=get_thread_data(runtime),
+    )
