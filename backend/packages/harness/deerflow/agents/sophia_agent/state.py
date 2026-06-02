@@ -143,7 +143,7 @@ def _merge_builder_write_diagnostic_value(
     if key in {"success_count", "error_count"} and isinstance(value, int):
         merged[key] = int(merged.get(key, 0) or 0) + value
         return
-    if key == "successful_output_paths" and isinstance(value, list):
+    if key in {"successful_output_paths", "successful_deliverable_output_paths"} and isinstance(value, list):
         merged[key] = _merge_string_list(merged.get(key), value)
         return
     merged[key] = value
