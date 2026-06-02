@@ -48,7 +48,7 @@ import { haptic } from '../hooks/useHaptics';
 import { useIdleTimeout } from '../hooks/useIdleTimeout';
 import { useSessionBootstrap } from '../hooks/useSessionBootstrap';
 import { useSessionPersistence } from '../hooks/useSessionPersistence';
-import { buildThreadArtifactHref, getBuilderArtifactFiles } from '../lib/builder-artifacts';
+import { buildThreadArtifactHref, getBuilderArtifactFiles, normalizeBuilderArtifactPath } from '../lib/builder-artifacts';
 import { GeminiStillFrameTransport } from '../lib/co-review-still-frame-transport';
 import { debugLog } from '../lib/debug-logger';
 import { errorCopy } from '../lib/error-copy';
@@ -495,6 +495,7 @@ function SessionPageContent() {
   const [artifactLibraryRefreshNonce, setArtifactLibraryRefreshNonce] = useState(0);
   const [builderLibraryBaseline, setBuilderLibraryBaseline] = useState<Set<string> | null>(null);
   const [dismissedBuilderLibraryPath, setDismissedBuilderLibraryPath] = useState<string | null>(null);
+  const [selectedBuilderArtifactPath, setSelectedBuilderArtifactPath] = useState<string | null>(null);
 
   const builderArtifactRefreshToken = useMemo(() => [
     builderArtifact?.artifactTitle ?? '',
@@ -756,6 +757,25 @@ function SessionPageContent() {
   const builderReadyDismissed = Boolean(
     builderPrimaryFile?.path && dismissedBuilderLibraryPath === builderPrimaryFile.path,
   );
+  const handleSelectBuilderArtifactPath = useCallback((path: string | null) => {
+    setSelectedBuilderArtifactPath(normalizeBuilderArtifactPath(path));
+  }, []);
+
+  useEffect(() => {
+    if (!selectedBuilderArtifactPath) {
+      return;
+    }
+
+    const knownPaths = new Set([
+      ...getBuilderArtifactFiles(builderArtifact).map((file) => file.path),
+      ...builderArtifactLibrary.map((item) => item.path),
+    ]);
+
+    if (!knownPaths.has(selectedBuilderArtifactPath)) {
+      setSelectedBuilderArtifactPath(null);
+    }
+  }, [builderArtifact, builderArtifactLibrary, selectedBuilderArtifactPath]);
+
   const dismissVisibleBuilderArtifact = useCallback(() => {
     if (builderPrimaryFile?.path) {
       setDismissedBuilderLibraryPath(builderPrimaryFile.path);
@@ -983,6 +1003,15 @@ function SessionPageContent() {
     triggerLightHaptic: () => haptic('light'),
     onBaseMicClick: baseHandleMicClick,
   });
+
+  const handleViewBuilderArtifactInCanvas = useCallback(() => {
+    handleSelectBuilderArtifactPath(builderPrimaryFile?.path ?? null);
+    handleOpenArtifactsPanel();
+  }, [builderPrimaryFile?.path, handleOpenArtifactsPanel, handleSelectBuilderArtifactPath]);
+  const handleBuilderCompletionPreview = useCallback((event: BuilderCompletionEventV1) => {
+    handleSelectBuilderArtifactPath(event.artifact_path ?? builderPrimaryFile?.path ?? null);
+    handleOpenArtifactsPanel();
+  }, [builderPrimaryFile?.path, handleOpenArtifactsPanel, handleSelectBuilderArtifactPath]);
   
   const { shouldShowLoading, navigateHome } = useSessionPageGuards({
     hasSession: !!session,
@@ -1215,6 +1244,8 @@ function SessionPageContent() {
               artifacts={artifacts}
               builderArtifact={builderArtifact}
               builderArtifactLibrary={builderArtifactLibrary}
+              selectedBuilderArtifactPath={selectedBuilderArtifactPath}
+              onSelectedBuilderArtifactPathChange={handleSelectBuilderArtifactPath}
               sessionId={coReviewSessionId}
               normalSessionId={coReviewSessionId}
               threadId={artifactPanelThreadId}
@@ -1238,6 +1269,7 @@ function SessionPageContent() {
           {focusMode === 'text' && builderCompletionForDisplay && (
             <BuilderCompletionCard
               event={builderCompletionForDisplay}
+              onOpen={handleBuilderCompletionPreview}
               onRetry={handleBuilderRetry}
               onDismiss={handleBuilderCompletionDismiss}
               onDownload={() => haptic('medium')}
@@ -1250,7 +1282,7 @@ function SessionPageContent() {
             <BuilderTaskNotice
               task={builderTask}
               artifactTitle={builderArtifact?.artifactTitle}
-              onOpenArtifact={builderArtifact ? handleOpenArtifactsPanel : undefined}
+              onOpenArtifact={builderArtifact ? handleViewBuilderArtifactInCanvas : undefined}
               downloadHref={builderArtifact ? builderDownloadHref : undefined}
               onDownload={builderArtifact ? () => { haptic('medium'); setTimeout(clearBuilderTask, 1500); } : undefined}
               onDismiss={clearBuilderTask}
@@ -1264,7 +1296,7 @@ function SessionPageContent() {
             <div className="mb-2 flex justify-center">
               <BuilderReadyPill
                 title={builderReadyTitle}
-                onOpen={handleOpenArtifactsPanel}
+                onOpen={handleViewBuilderArtifactInCanvas}
                 downloadHref={builderDownloadHref}
                 onDownload={() => haptic('medium')}
                 onDismiss={dismissVisibleBuilderArtifact}
@@ -1282,7 +1314,7 @@ function SessionPageContent() {
             >
               <BuilderReadyPill
                 title={builderReadyTitle}
-                onOpen={handleOpenArtifactsPanel}
+                onOpen={handleViewBuilderArtifactInCanvas}
                 downloadHref={builderDownloadHref}
                 onDownload={() => haptic('medium')}
                 onDismiss={dismissVisibleBuilderArtifact}
@@ -1301,6 +1333,7 @@ function SessionPageContent() {
             >
               <BuilderCompletionCard
                 event={builderCompletionForDisplay}
+                onOpen={handleBuilderCompletionPreview}
                 onRetry={handleBuilderRetry}
                 onDismiss={handleBuilderCompletionDismiss}
                 onDownload={() => haptic('medium')}
@@ -1319,7 +1352,7 @@ function SessionPageContent() {
               <BuilderTaskNotice
                 task={builderTask}
                 artifactTitle={builderArtifact?.artifactTitle}
-                onOpenArtifact={builderArtifact ? handleOpenArtifactsPanel : undefined}
+                onOpenArtifact={builderArtifact ? handleViewBuilderArtifactInCanvas : undefined}
                 downloadHref={builderArtifact ? builderDownloadHref : undefined}
                 onDownload={builderArtifact ? () => { haptic('medium'); setTimeout(clearBuilderTask, 1500); } : undefined}
                 compact={false}
@@ -1426,6 +1459,8 @@ function SessionPageContent() {
             artifacts={artifacts}
             builderArtifact={builderArtifact}
             builderArtifactLibrary={builderArtifactLibrary}
+            selectedBuilderArtifactPath={selectedBuilderArtifactPath}
+            onSelectedBuilderArtifactPathChange={handleSelectBuilderArtifactPath}
             sessionId={coReviewSessionId}
             normalSessionId={coReviewSessionId}
             threadId={artifactPanelThreadId}

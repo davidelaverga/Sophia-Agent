@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { useArtifactCoReview } from "../../hooks/useArtifactCoReview"
 import { haptic } from "../../hooks/useHaptics"
@@ -25,6 +25,8 @@ interface PresenceArtifactPanelProps {
   artifacts: RitualArtifacts | null | undefined
   builderArtifact?: BuilderArtifactV1 | null
   builderArtifactLibrary?: BuilderArtifactLibraryItemV1[]
+  selectedBuilderArtifactPath?: string | null
+  onSelectedBuilderArtifactPathChange?: (path: string | null) => void
   sessionId?: string | null
   normalSessionId?: string | null
   threadId?: string
@@ -35,6 +37,103 @@ interface PresenceArtifactPanelProps {
   onReflectionTap?: (reflection: { prompt: string; why?: string }) => void
   onMemoryApprove?: (index: number) => void
   onMemoryReject?: (index: number) => void
+}
+
+function getPathFilename(path: string | undefined): string {
+  return path?.split('/').filter(Boolean).pop() || 'Builder deliverable'
+}
+
+function inferArtifactType(item: BuilderArtifactLibraryItemV1): BuilderArtifactV1["artifactType"] {
+  const mimeType = item.mimeType?.toLowerCase().split(';')[0]?.trim() ?? ''
+  const extension = item.name.split('.').pop()?.toLowerCase() ?? ''
+
+  if (mimeType.includes('presentation') || extension === 'ppt' || extension === 'pptx') {
+    return 'presentation'
+  }
+  if (mimeType.includes('html') || extension === 'html' || extension === 'htm') {
+    return 'webpage'
+  }
+  if (
+    mimeType.includes('json')
+    || mimeType.includes('csv')
+    || ['csv', 'json', 'xlsx', 'xls'].includes(extension)
+  ) {
+    return 'data_analysis'
+  }
+  if (mimeType.includes('image') || extension === 'svg') {
+    return 'visual_report'
+  }
+
+  return 'document'
+}
+
+function buildLibraryArtifact(item: BuilderArtifactLibraryItemV1): BuilderArtifactV1 {
+  return {
+    artifactPath: item.path,
+    artifactTitle: item.name || getPathFilename(item.path),
+    artifactType: inferArtifactType(item),
+    decisionsMade: [],
+    companionSummary: 'Ready to preview in the artifact canvas.',
+    userNextAction: 'Review it with Sophia when you are ready.',
+  }
+}
+
+function buildSelectedArtifactFromExisting(builderArtifact: BuilderArtifactV1, path: string): BuilderArtifactV1 | null {
+  const files = getBuilderArtifactFiles(builderArtifact)
+  const selectedFile = files.find((file) => file.path === path)
+
+  if (!selectedFile) {
+    return null
+  }
+
+  return {
+    ...builderArtifact,
+    artifactPath: selectedFile.path,
+    artifactTitle: selectedFile.isPrimary ? builderArtifact.artifactTitle : selectedFile.label,
+    supportingFiles: files
+      .filter((file) => file.path !== selectedFile.path)
+      .map((file) => file.path),
+  }
+}
+
+function buildStageBuilderArtifact({
+  builderArtifact,
+  selectedBuilderArtifactPath,
+  selectedLibraryItem,
+  latestLibraryItem,
+}: {
+  builderArtifact?: BuilderArtifactV1 | null
+  selectedBuilderArtifactPath?: string | null
+  selectedLibraryItem?: BuilderArtifactLibraryItemV1 | null
+  latestLibraryItem?: BuilderArtifactLibraryItemV1 | null
+}): BuilderArtifactV1 | null {
+  if (selectedBuilderArtifactPath) {
+    const selectedExistingArtifact = builderArtifact
+      ? buildSelectedArtifactFromExisting(builderArtifact, selectedBuilderArtifactPath)
+      : null
+
+    if (selectedExistingArtifact) {
+      return selectedExistingArtifact
+    }
+
+    if (selectedLibraryItem) {
+      return buildLibraryArtifact(selectedLibraryItem)
+    }
+  }
+
+  if (latestLibraryItem) {
+    const latestExistingArtifact = builderArtifact
+      ? buildSelectedArtifactFromExisting(builderArtifact, latestLibraryItem.path)
+      : null
+
+    return latestExistingArtifact ?? buildLibraryArtifact(latestLibraryItem)
+  }
+
+  if (builderArtifact) {
+    return builderArtifact
+  }
+
+  return null
 }
 
 /**
@@ -52,6 +151,8 @@ export function PresenceArtifactPanel({
   artifacts,
   builderArtifact,
   builderArtifactLibrary = [],
+  selectedBuilderArtifactPath,
+  onSelectedBuilderArtifactPathChange,
   sessionId,
   normalSessionId,
   threadId,
@@ -72,16 +173,29 @@ export function PresenceArtifactPanel({
   const [domArtifactRoot, setDomArtifactRoot] = useState<HTMLDivElement | null>(null)
   const status = usePresenceStore((s) => s.status)
   const hasBuilderLibrary = builderArtifactLibrary.length > 0
+  const selectedBuilderLibraryItem = useMemo(
+    () => builderArtifactLibrary.find((file) => file.path === selectedBuilderArtifactPath) ?? null,
+    [builderArtifactLibrary, selectedBuilderArtifactPath],
+  )
+  const stageBuilderArtifact = useMemo(
+    () => buildStageBuilderArtifact({
+      builderArtifact,
+      selectedBuilderArtifactPath,
+      selectedLibraryItem: selectedBuilderLibraryItem,
+      latestLibraryItem: builderArtifactLibrary[0] ?? null,
+    }),
+    [builderArtifact, builderArtifactLibrary, selectedBuilderArtifactPath, selectedBuilderLibraryItem],
+  )
   const takeaway = artifacts?.takeaway
   const reflection_candidate = artifacts?.reflection_candidate
   const memory_candidates = artifacts?.memory_candidates
-  const hasBuilder = !!builderArtifact
+  const hasBuilder = !!stageBuilderArtifact
   const hasReflection = isRealReflection(reflection_candidate?.prompt)
   const hasMemories = memory_candidates && memory_candidates.length > 0
   const hasTakeaway = !!takeaway?.trim()
   const coreviewReviewEnabled = isCoreviewStillFrameReviewEnabled()
-  const builderArtifactId = builderArtifact && coreviewReviewEnabled
-    ? buildCoreviewRealArtifactId(builderArtifact)
+  const builderArtifactId = stageBuilderArtifact && coreviewReviewEnabled
+    ? buildCoreviewRealArtifactId(stageBuilderArtifact)
     : null
   const showDomArtifactCoReview = Boolean(
     coreviewReviewEnabled
@@ -113,7 +227,7 @@ export function PresenceArtifactPanel({
 
   // Phase lifecycle
   useEffect(() => {
-    if (isVisible && (artifacts || builderArtifact || hasBuilderLibrary)) {
+    if (isVisible && (artifacts || stageBuilderArtifact || hasBuilderLibrary)) {
       setPhase("entering")
       setRevealStep(0)
       setReflectionTapped(false)
@@ -124,7 +238,7 @@ export function PresenceArtifactPanel({
       return () => clearTimeout(t)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isVisible, artifacts, builderArtifact, hasBuilderLibrary])
+  }, [isVisible, artifacts, stageBuilderArtifact, hasBuilderLibrary])
 
   // Staggered reveal — each piece fades in like a star brightening
   useEffect(() => {
@@ -150,7 +264,7 @@ export function PresenceArtifactPanel({
       clearTimeout(autoCollapseRef.current)
       autoCollapseRef.current = null
     }
-    if (phase === "visible" && isVoiceMode && !builderArtifact && !hasBuilderLibrary && !showDomArtifactCoReview) {
+    if (phase === "visible" && isVoiceMode && !stageBuilderArtifact && !hasBuilderLibrary && !showDomArtifactCoReview) {
       autoCollapseRef.current = setTimeout(() => {
         autoCollapseRef.current = null
         onDismiss()
@@ -159,7 +273,7 @@ export function PresenceArtifactPanel({
     return () => {
       if (autoCollapseRef.current) clearTimeout(autoCollapseRef.current)
     }
-  }, [phase, isVoiceMode, onDismiss, builderArtifact, hasBuilderLibrary, showDomArtifactCoReview])
+  }, [phase, isVoiceMode, onDismiss, stageBuilderArtifact, hasBuilderLibrary, showDomArtifactCoReview])
 
   const handleDismiss = useCallback(() => {
     haptic("light")
@@ -176,9 +290,9 @@ export function PresenceArtifactPanel({
     })
   }, [artifacts?.reflection_candidate, reflectionTapped, onReflectionTap])
 
-  if ((!artifacts && !builderArtifact && !hasBuilderLibrary) || phase === "hidden") return null
+  if ((!artifacts && !stageBuilderArtifact && !hasBuilderLibrary) || phase === "hidden") return null
 
-  const builderFiles = getBuilderArtifactFiles(builderArtifact)
+  const builderFiles = getBuilderArtifactFiles(stageBuilderArtifact)
   const hasContent = hasBuilder || hasBuilderLibrary || hasTakeaway || hasReflection || hasMemories
 
   if (!hasContent) return null
@@ -252,7 +366,7 @@ export function PresenceArtifactPanel({
           </svg>
         </button>
 
-        {hasBuilder && builderArtifact && (
+        {hasBuilder && stageBuilderArtifact && (
           <div
             ref={setBuilderArtifactRoot}
             className={cn(
@@ -263,7 +377,7 @@ export function PresenceArtifactPanel({
             {builderArtifactId && (
               <CoreviewRealArtifactCanvas
                 artifactId={builderArtifactId}
-                builderArtifact={builderArtifact}
+                builderArtifact={stageBuilderArtifact}
                 sessionId={sessionId}
                 normalSessionId={normalSessionId}
                 threadId={threadId}
@@ -273,7 +387,7 @@ export function PresenceArtifactPanel({
             {!isVoiceMode ? (
               <div onClick={(e) => e.stopPropagation()}>
                 <ArtifactStage
-                  builderArtifact={builderArtifact}
+                  builderArtifact={stageBuilderArtifact}
                   builderArtifactLibrary={builderArtifactLibrary}
                   threadId={threadId}
                   artifactId={builderArtifactId}
@@ -300,7 +414,7 @@ export function PresenceArtifactPanel({
                       background: 'color-mix(in srgb, var(--sophia-purple) 6%, transparent)',
                     }}
                   >
-                    ✦ {builderArtifact.artifactType?.replace(/_/g, ' ') ?? 'deliverable'}
+                    ✦ {stageBuilderArtifact.artifactType?.replace(/_/g, ' ') ?? 'deliverable'}
                   </span>
                 </div>
 
@@ -314,26 +428,26 @@ export function PresenceArtifactPanel({
                       : 'none',
                   }}
                 >
-                  {builderArtifact.artifactTitle}
+                  {stageBuilderArtifact.artifactTitle}
                 </p>
 
                 {/* Summary */}
-                {builderArtifact.companionSummary && (
+                {stageBuilderArtifact.companionSummary && (
                   <p
                     className="mt-2 font-cormorant text-[14px] leading-[1.65] font-light text-center"
                     style={{ color: 'var(--cosmic-text-whisper)' }}
                   >
-                    {builderArtifact.companionSummary}
+                    {stageBuilderArtifact.companionSummary}
                   </p>
                 )}
 
                 {/* Next action */}
-                {builderArtifact.userNextAction && (
+                {stageBuilderArtifact.userNextAction && (
                   <p
                     className="mt-2.5 text-center text-[10px] tracking-[0.06em]"
                     style={{ color: 'var(--cosmic-text-faint)' }}
                   >
-                    Next → {builderArtifact.userNextAction}
+                    Next → {stageBuilderArtifact.userNextAction}
                   </p>
                 )}
 
@@ -343,6 +457,7 @@ export function PresenceArtifactPanel({
                     {builderFiles.map((file) => {
                       const downloadHref = buildThreadArtifactHref(threadId, file.path, { download: true })
                       const openHref = buildThreadArtifactHref(threadId, file.path)
+                      const isSelected = stageBuilderArtifact.artifactPath === file.path
 
                       return (
                         <div
@@ -354,12 +469,33 @@ export function PresenceArtifactPanel({
                             {file.label}
                           </span>
                           <div className="flex gap-1.5">
+                            {onSelectedBuilderArtifactPathChange && (
+                              <button
+                                type="button"
+                                aria-label={`View ${file.label} in canvas`}
+                                aria-pressed={isSelected}
+                                className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
+                                style={{
+                                  borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
+                                  color: 'var(--sophia-purple)',
+                                  background: isSelected
+                                    ? 'color-mix(in srgb, var(--sophia-purple) 12%, transparent)'
+                                    : 'transparent',
+                                }}
+                                onClick={() => {
+                                  haptic('light')
+                                  onSelectedBuilderArtifactPathChange(file.path)
+                                }}
+                              >
+                                View in canvas
+                              </button>
+                            )}
                             {openHref && (
                               <a
                                 href={openHref}
                                 target="_blank"
                                 rel="noreferrer"
-                                aria-label={`Open ${file.label}`}
+                                aria-label={`Open ${file.label} in new tab`}
                                 className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
                                 style={{
                                   borderColor: 'var(--cosmic-border-soft)',
@@ -367,7 +503,7 @@ export function PresenceArtifactPanel({
                                 }}
                                 onClick={() => haptic('light')}
                               >
-                                open
+                                Open in new tab
                               </a>
                             )}
                             {downloadHref && (
@@ -382,7 +518,7 @@ export function PresenceArtifactPanel({
                                 }}
                                 onClick={() => haptic('medium')}
                               >
-                                download
+                                Download
                               </a>
                             )}
                           </div>
@@ -428,6 +564,7 @@ export function PresenceArtifactPanel({
               {builderArtifactLibrary.map((file) => {
                 const downloadHref = buildThreadArtifactHref(threadId, file.path, { download: true })
                 const openHref = buildThreadArtifactHref(threadId, file.path)
+                const isSelected = stageBuilderArtifact?.artifactPath === file.path
                 const meta = [formatBuilderArtifactFileSize(file.sizeBytes), file.mimeType]
                   .filter(Boolean)
                   .join(' • ')
@@ -449,12 +586,33 @@ export function PresenceArtifactPanel({
                       )}
                     </div>
                     <div className="flex gap-1.5">
+                      {onSelectedBuilderArtifactPathChange && (
+                        <button
+                          type="button"
+                          aria-label={`View ${file.name} in canvas`}
+                          aria-pressed={isSelected}
+                          className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
+                          style={{
+                            borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
+                            color: 'var(--sophia-purple)',
+                            background: isSelected
+                              ? 'color-mix(in srgb, var(--sophia-purple) 12%, transparent)'
+                              : 'transparent',
+                          }}
+                          onClick={() => {
+                            haptic('light')
+                            onSelectedBuilderArtifactPathChange(file.path)
+                          }}
+                        >
+                          View in canvas
+                        </button>
+                      )}
                       {openHref && (
                         <a
                           href={openHref}
                           target="_blank"
                           rel="noreferrer"
-                          aria-label={`Open ${file.name}`}
+                          aria-label={`Open ${file.name} in new tab`}
                           className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
                           style={{
                             borderColor: 'var(--cosmic-border-soft)',
@@ -462,7 +620,7 @@ export function PresenceArtifactPanel({
                           }}
                           onClick={() => haptic('light')}
                         >
-                          open
+                          Open in new tab
                         </a>
                       )}
                       {downloadHref && (
@@ -477,7 +635,7 @@ export function PresenceArtifactPanel({
                           }}
                           onClick={() => haptic('medium')}
                         >
-                          download
+                          Download
                         </a>
                       )}
                     </div>

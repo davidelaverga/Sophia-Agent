@@ -1,6 +1,6 @@
 'use client';
 
-import { ArrowUpRight, Download, X } from 'lucide-react';
+import { Download, Eye, X } from 'lucide-react';
 import type { MouseEvent, MouseEventHandler } from 'react';
 
 import { haptic } from '../../hooks/useHaptics';
@@ -160,8 +160,9 @@ export function BuilderReadyPill({
           <button
             type="button"
             onClick={handleOpenClick}
+            aria-label={`View ${title} in canvas`}
             className={cn(
-              'inline-flex items-center gap-1 rounded-full border tracking-[0.08em] lowercase transition-opacity hover:opacity-100',
+              'inline-flex items-center gap-1 rounded-full border tracking-[0.08em] transition-opacity hover:opacity-100',
               compact ? 'px-2 py-0.5 text-[9px]' : 'px-2.5 py-1 text-[10px]',
             )}
             style={{
@@ -170,8 +171,8 @@ export function BuilderReadyPill({
               background: 'color-mix(in srgb, var(--cosmic-panel-soft) 72%, transparent)',
             }}
           >
-            <ArrowUpRight className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
-            open
+            <Eye className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+            View in canvas
           </button>
 
           {downloadHref && (
@@ -179,7 +180,7 @@ export function BuilderReadyPill({
               href={downloadHref}
               onClick={handleDownloadClick}
               className={cn(
-                'inline-flex items-center gap-1 rounded-full border tracking-[0.08em] lowercase transition-opacity hover:opacity-100',
+                'inline-flex items-center gap-1 rounded-full border tracking-[0.08em] transition-opacity hover:opacity-100',
                 compact ? 'px-2 py-0.5 text-[9px]' : 'px-2.5 py-1 text-[10px]',
               )}
               style={{
@@ -189,7 +190,7 @@ export function BuilderReadyPill({
               }}
             >
               <Download className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
-              download
+              Download
             </a>
           )}
 

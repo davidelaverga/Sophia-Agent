@@ -54,31 +54,36 @@ describe("BuilderCompletionCard — success variant", () => {
     expect(screen.getByText("ready")).toBeTruthy()
   })
 
-  it("prefers the same-origin artifact proxy when 'open' is clicked", () => {
+  it("selects the artifact for in-session preview when View in canvas is clicked", () => {
     const onOpen = vi.fn()
     render(<BuilderCompletionCard event={SUCCESS_EVENT} onOpen={onOpen} />)
-    const button = screen.getByRole("button", { name: /open/i })
+    const button = screen.getByRole("button", { name: /view in canvas/i })
     fireEvent.click(button)
-    expect(window.open).toHaveBeenCalledWith(
-      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/llm_time_series.md",
-      "_blank",
-      "noopener,noreferrer",
-    )
+    expect(window.open).not.toHaveBeenCalled()
     expect(onOpen).toHaveBeenCalledWith(SUCCESS_EVENT)
   })
 
-  it("falls back to the signed URL when artifact_path is missing", () => {
+  it("keeps Open in new tab as a secondary same-origin action", () => {
+    render(<BuilderCompletionCard event={SUCCESS_EVENT} onOpen={vi.fn()} />)
+    const link = screen.getByRole("link", { name: /open artifact in new tab/i })
+    expect(link).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/llm_time_series.md",
+    )
+    expect(link).toHaveAttribute("target", "_blank")
+  })
+
+  it("uses the signed URL as Open in new tab when artifact_path is missing", () => {
     const event: BuilderCompletionEventV1 = {
       ...SUCCESS_EVENT,
       artifact_path: undefined,
     }
 
-    render(<BuilderCompletionCard event={event} />)
-    fireEvent.click(screen.getByRole("button", { name: /open/i }))
-    expect(window.open).toHaveBeenCalledWith(
+    render(<BuilderCompletionCard event={event} onOpen={vi.fn()} />)
+    expect(screen.queryByRole("button", { name: /view in canvas/i })).toBeNull()
+    expect(screen.getByRole("link", { name: /open artifact in new tab/i })).toHaveAttribute(
+      "href",
       "https://example.com/llm_time_series.md",
-      "_blank",
-      "noopener,noreferrer",
     )
   })
 
@@ -105,12 +110,11 @@ describe("BuilderCompletionCard — success variant", () => {
       artifact_url: undefined,
     }
 
-    render(<BuilderCompletionCard event={event} />)
-    fireEvent.click(screen.getByRole("button", { name: /open/i }))
-    expect(window.open).toHaveBeenCalledWith(
+    render(<BuilderCompletionCard event={event} onOpen={vi.fn()} />)
+    expect(screen.getByRole("button", { name: /view in canvas/i })).toBeInTheDocument()
+    expect(screen.getByRole("link", { name: /open artifact in new tab/i })).toHaveAttribute(
+      "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/llm_time_series.md",
-      "_blank",
-      "noopener,noreferrer",
     )
     expect(screen.getByRole("link", { name: /download/i })).toHaveAttribute(
       "href",
@@ -126,7 +130,8 @@ describe("BuilderCompletionCard — success variant", () => {
     }
 
     render(<BuilderCompletionCard event={event} />)
-    expect(screen.queryByRole("button", { name: /open/i })).toBeNull()
+    expect(screen.queryByRole("button", { name: /view in canvas/i })).toBeNull()
+    expect(screen.queryByRole("link", { name: /open artifact in new tab/i })).toBeNull()
     expect(screen.queryByRole("link", { name: /download/i })).toBeNull()
     expect(screen.getByText(/keep checking the library/i)).toBeTruthy()
   })
@@ -164,7 +169,8 @@ describe("BuilderCompletionCard — success variant", () => {
 
     render(<BuilderCompletionCard event={event} />)
 
-    expect(screen.queryByRole("button", { name: /open/i })).toBeNull()
+    expect(screen.queryByRole("button", { name: /view in canvas/i })).toBeNull()
+    expect(screen.queryByRole("link", { name: /open artifact in new tab/i })).toBeNull()
     const link = screen.getByRole("link", { name: /download/i })
     expect(link).toHaveAttribute(
       "href",
@@ -205,7 +211,8 @@ describe("BuilderCompletionCard — error variant", () => {
 
   it("does NOT show open on error (no artifact_url)", () => {
     render(<BuilderCompletionCard event={ERROR_EVENT} />)
-    expect(screen.queryByRole("button", { name: /open/i })).toBeNull()
+    expect(screen.queryByRole("button", { name: /view in canvas/i })).toBeNull()
+    expect(screen.queryByRole("link", { name: /open artifact in new tab/i })).toBeNull()
   })
 
   it("surfaces a custom error_message when provided", () => {

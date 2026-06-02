@@ -115,7 +115,7 @@ describe("ArtifactStage", () => {
     expect(screen.getAllByText("Launch brief overview")).toHaveLength(2)
     expect(screen.getByText("Document")).toBeInTheDocument()
     expect(screen.getByText("launch-brief.pdf")).toBeInTheDocument()
-    expect(screen.getByLabelText("Open Launch brief overview")).toHaveAttribute(
+    expect(screen.getByLabelText("Open Launch brief overview in new tab")).toHaveAttribute(
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.pdf",
     )
@@ -281,7 +281,7 @@ describe("ArtifactStage", () => {
     renderStage({ artifact: markdownBuilderArtifact })
 
     expect(await screen.findByText("Preview unavailable")).toBeInTheDocument()
-    expect(screen.getByLabelText("Open Launch brief overview")).toHaveAttribute(
+    expect(screen.getByLabelText("Open Launch brief overview in new tab")).toHaveAttribute(
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md",
     )

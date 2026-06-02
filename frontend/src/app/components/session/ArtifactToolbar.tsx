@@ -47,12 +47,12 @@ export function ArtifactToolbar({
             href={openHref}
             target="_blank"
             rel="noreferrer"
-            aria-label={`Open ${title}`}
+            aria-label={`Open ${title} in new tab`}
             className="cosmic-focus-ring inline-flex h-8 items-center gap-1.5 rounded-md border border-[color:var(--cosmic-border-soft)] px-2.5 text-[11px] font-medium text-[color:var(--cosmic-text)] transition hover:bg-[color:var(--cosmic-panel-soft)]"
             onClick={() => haptic("light")}
           >
             <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Open</span>
+            <span>Open in new tab</span>
           </a>
         ) : null}
         {downloadHref ? (

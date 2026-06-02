@@ -23,7 +23,7 @@ describe('BuilderReadyPill', () => {
     expect(screen.getByText('deliverable complete')).toBeInTheDocument();
     expect(screen.getByText('Launch brief final')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /open/i }));
+    fireEvent.click(screen.getByRole('button', { name: /view launch brief final in canvas/i }));
     expect(onOpen).toHaveBeenCalledTimes(1);
 
     const downloadLink = screen.getByRole('link', { name: /download/i });

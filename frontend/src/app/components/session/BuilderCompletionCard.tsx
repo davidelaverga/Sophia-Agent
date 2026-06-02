@@ -1,6 +1,6 @@
 'use client';
 
-import { ArrowUpRight, Download } from 'lucide-react';
+import { Download, ExternalLink, Eye } from 'lucide-react';
 import { useMemo, type MouseEventHandler } from 'react';
 
 import { buildThreadArtifactHref } from '../../lib/builder-artifacts';
@@ -139,17 +139,15 @@ export function BuilderCompletionCard({
   const downloadHref = artifactProxyDownloadHref || event.artifact_url || null;
   const downloadFirst = isDownloadFirstArtifact(event);
 
-  const showOpen = event.status === 'success' && Boolean(openHref) && !downloadFirst;
+  const showPreview = event.status === 'success' && Boolean(artifactProxyHref) && !downloadFirst && Boolean(onOpen);
+  const showOpenInNewTab = event.status === 'success' && Boolean(openHref) && !downloadFirst;
   const showDownload = event.status === 'success' && Boolean(downloadHref);
-  const showMissingActionHint = event.status === 'success' && !showOpen && !showDownload;
+  const showMissingActionHint = event.status === 'success' && !showPreview && !showOpenInNewTab && !showDownload;
   const showRetry = event.status === 'error' || event.status === 'timeout';
   const showDismiss = Boolean(onDismiss);
 
-  const handleOpen: MouseEventHandler<HTMLButtonElement> = (e) => {
+  const handlePreview: MouseEventHandler<HTMLButtonElement> = (e) => {
     e.preventDefault();
-    if (openHref) {
-      window.open(openHref, '_blank', 'noopener,noreferrer');
-    }
     onOpen?.(event);
   };
 
@@ -251,12 +249,12 @@ export function BuilderCompletionCard({
       </div>
 
       <div className={cn('flex items-center justify-end gap-2', compact ? 'mt-2' : 'mt-2.5')}>
-        {showOpen && (
+        {showPreview && (
           <button
             type="button"
-            onClick={handleOpen}
+            onClick={handlePreview}
             className={cn(
-              'rounded-full border tracking-[0.08em] lowercase transition-all duration-300',
+              'rounded-full border tracking-[0.08em] transition-all duration-300',
               compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1 text-[10px]',
             )}
             style={{
@@ -266,10 +264,34 @@ export function BuilderCompletionCard({
             }}
           >
             <span className="inline-flex items-center gap-1">
-              <ArrowUpRight className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
-              open
+              <Eye className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+              View in canvas
             </span>
           </button>
+        )}
+
+        {showOpenInNewTab && openHref && (
+          <a
+            href={openHref}
+            target="_blank"
+            rel="noreferrer"
+            className={cn(
+              'rounded-full border tracking-[0.08em] transition-all duration-300',
+              compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1 text-[10px]',
+            )}
+            style={{
+              borderColor: `color-mix(in srgb, ${meta.accentVar} 24%, transparent)`,
+              background: 'transparent',
+              color: 'var(--cosmic-text-faint)',
+              textDecoration: 'none',
+            }}
+            aria-label="Open artifact in new tab"
+          >
+            <span className="inline-flex items-center gap-1">
+              <ExternalLink className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+              Open in new tab
+            </span>
+          </a>
         )}
 
         {showDownload && downloadHref && (
@@ -278,7 +300,7 @@ export function BuilderCompletionCard({
             download={event.artifact_filename || true}
             onClick={handleDownload}
             className={cn(
-              'rounded-full border tracking-[0.08em] lowercase transition-all duration-300',
+              'rounded-full border tracking-[0.08em] transition-all duration-300',
               compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1 text-[10px]',
             )}
             style={{
@@ -291,7 +313,7 @@ export function BuilderCompletionCard({
           >
             <span className="inline-flex items-center gap-1">
               <Download className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
-              download
+              Download
             </span>
           </a>
         )}
