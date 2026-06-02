@@ -13,6 +13,7 @@ import { usePresenceStore } from "../../stores/presence-store"
 import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 import type { RitualArtifacts } from "../../types/session"
 
+import { ArtifactStage } from "./ArtifactStage"
 import {
   COREVIEW_COMPANION_ARTIFACT_ID,
   CoreviewCompanionArtifactCanvas,
@@ -199,7 +200,10 @@ export function PresenceArtifactPanel({
         "transition-all duration-[1200ms] ease-[cubic-bezier(0.22,1,0.36,1)]",
         isVoiceMode
           ? "fixed left-1/2 -translate-x-1/2 bottom-[155px] z-25 w-full max-w-[440px] px-6"
-          : "relative z-10 w-full max-w-2xl mx-auto px-6 mb-3",
+          : cn(
+              "relative z-10 w-full mx-auto px-6 mb-3",
+              hasBuilder ? "max-w-4xl" : "max-w-2xl",
+            ),
         isActive ? "opacity-100 translate-y-0" : "opacity-0 translate-y-3"
       )}
       role="complementary"
@@ -266,120 +270,139 @@ export function PresenceArtifactPanel({
               />
             )}
 
-            {/* Type badge — centered */}
-            <div className="text-center mb-3">
-              <span
-                className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[9px] tracking-[0.14em] uppercase"
-                style={{
-                  borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
-                  color: 'var(--sophia-purple)',
-                  background: 'color-mix(in srgb, var(--sophia-purple) 6%, transparent)',
-                }}
-              >
-                ✦ {builderArtifact.artifactType?.replace(/_/g, ' ') ?? 'deliverable'}
-              </span>
-            </div>
-
-            {/* Title */}
-            <p
-              className="font-cormorant text-[20px] leading-[1.35] font-light text-center"
-              style={{
-                color: 'var(--cosmic-text-strong)',
-                textShadow: isActive
-                  ? `0 0 20px color-mix(in srgb, ${bloomColor} 18%, transparent)`
-                  : 'none',
-              }}
-            >
-              {builderArtifact.artifactTitle}
-            </p>
-
-            {/* Summary */}
-            {builderArtifact.companionSummary && (
-              <p
-                className="mt-2 font-cormorant text-[14px] leading-[1.65] font-light text-center"
-                style={{ color: 'var(--cosmic-text-whisper)' }}
-              >
-                {builderArtifact.companionSummary}
-              </p>
-            )}
-
-            {/* Next action */}
-            {builderArtifact.userNextAction && (
-              <p
-                className="mt-2.5 text-center text-[10px] tracking-[0.06em]"
-                style={{ color: 'var(--cosmic-text-faint)' }}
-              >
-                Next → {builderArtifact.userNextAction}
-              </p>
-            )}
-
-            {/* File actions — pill buttons with proper tap targets */}
-            {builderFiles.length > 0 && (
-              <div className="mt-4 flex flex-col items-center gap-2">
-                {builderFiles.map((file) => {
-                  const downloadHref = buildThreadArtifactHref(threadId, file.path, { download: true })
-                  const openHref = buildThreadArtifactHref(threadId, file.path)
-
-                  return (
-                    <div
-                      key={file.path}
-                      className="flex items-center gap-2"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <span className="text-[10px]" style={{ color: 'var(--cosmic-text-whisper)' }}>
-                        {file.label}
-                      </span>
-                      <div className="flex gap-1.5">
-                        {openHref && (
-                          <a
-                            href={openHref}
-                            target="_blank"
-                            rel="noreferrer"
-                            aria-label={`Open ${file.label}`}
-                            className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
-                            style={{
-                              borderColor: 'var(--cosmic-border-soft)',
-                              color: 'var(--cosmic-text-whisper)',
-                            }}
-                            onClick={() => haptic('light')}
-                          >
-                            open
-                          </a>
-                        )}
-                        {downloadHref && (
-                          <a
-                            href={downloadHref}
-                            aria-label={`Download ${file.label}`}
-                            className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
-                            style={{
-                              borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
-                              color: 'var(--sophia-purple)',
-                              background: 'color-mix(in srgb, var(--sophia-purple) 8%, transparent)',
-                            }}
-                            onClick={() => haptic('medium')}
-                          >
-                            download
-                          </a>
-                        )}
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-
-            {builderArtifactId && (
-              <div className="mt-4" onClick={(e) => e.stopPropagation()}>
-                <CoReviewControls
-                  state={builderArtifactCoReview.state}
+            {!isVoiceMode ? (
+              <div onClick={(e) => e.stopPropagation()}>
+                <ArtifactStage
+                  builderArtifact={builderArtifact}
+                  builderArtifactLibrary={builderArtifactLibrary}
+                  threadId={threadId}
+                  reviewState={builderArtifactCoReview.state}
                   transportStatus={builderArtifactCoReview.transportStatus}
-                  onStart={() => { void builderArtifactCoReview.startReview() }}
-                  onStop={() => { void builderArtifactCoReview.stopReview() }}
-                  canStart={builderArtifactCoReview.canStart}
-                  featureEnabled={builderArtifactCoReview.enabled}
-                  className="justify-center"
+                  exactTextAvailable={Boolean(builderArtifactId)}
+                  canStartReview={builderArtifactCoReview.canStart}
+                  reviewEnabled={builderArtifactCoReview.enabled}
+                  onStartReview={() => { void builderArtifactCoReview.startReview() }}
+                  onStopReview={() => { void builderArtifactCoReview.stopReview() }}
                 />
               </div>
+            ) : (
+              <>
+                {/* Type badge — centered */}
+                <div className="text-center mb-3">
+                  <span
+                    className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[9px] tracking-[0.14em] uppercase"
+                    style={{
+                      borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
+                      color: 'var(--sophia-purple)',
+                      background: 'color-mix(in srgb, var(--sophia-purple) 6%, transparent)',
+                    }}
+                  >
+                    ✦ {builderArtifact.artifactType?.replace(/_/g, ' ') ?? 'deliverable'}
+                  </span>
+                </div>
+
+                {/* Title */}
+                <p
+                  className="font-cormorant text-[20px] leading-[1.35] font-light text-center"
+                  style={{
+                    color: 'var(--cosmic-text-strong)',
+                    textShadow: isActive
+                      ? `0 0 20px color-mix(in srgb, ${bloomColor} 18%, transparent)`
+                      : 'none',
+                  }}
+                >
+                  {builderArtifact.artifactTitle}
+                </p>
+
+                {/* Summary */}
+                {builderArtifact.companionSummary && (
+                  <p
+                    className="mt-2 font-cormorant text-[14px] leading-[1.65] font-light text-center"
+                    style={{ color: 'var(--cosmic-text-whisper)' }}
+                  >
+                    {builderArtifact.companionSummary}
+                  </p>
+                )}
+
+                {/* Next action */}
+                {builderArtifact.userNextAction && (
+                  <p
+                    className="mt-2.5 text-center text-[10px] tracking-[0.06em]"
+                    style={{ color: 'var(--cosmic-text-faint)' }}
+                  >
+                    Next → {builderArtifact.userNextAction}
+                  </p>
+                )}
+
+                {/* File actions — pill buttons with proper tap targets */}
+                {builderFiles.length > 0 && (
+                  <div className="mt-4 flex flex-col items-center gap-2">
+                    {builderFiles.map((file) => {
+                      const downloadHref = buildThreadArtifactHref(threadId, file.path, { download: true })
+                      const openHref = buildThreadArtifactHref(threadId, file.path)
+
+                      return (
+                        <div
+                          key={file.path}
+                          className="flex items-center gap-2"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <span className="text-[10px]" style={{ color: 'var(--cosmic-text-whisper)' }}>
+                            {file.label}
+                          </span>
+                          <div className="flex gap-1.5">
+                            {openHref && (
+                              <a
+                                href={openHref}
+                                target="_blank"
+                                rel="noreferrer"
+                                aria-label={`Open ${file.label}`}
+                                className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
+                                style={{
+                                  borderColor: 'var(--cosmic-border-soft)',
+                                  color: 'var(--cosmic-text-whisper)',
+                                }}
+                                onClick={() => haptic('light')}
+                              >
+                                open
+                              </a>
+                            )}
+                            {downloadHref && (
+                              <a
+                                href={downloadHref}
+                                aria-label={`Download ${file.label}`}
+                                className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
+                                style={{
+                                  borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
+                                  color: 'var(--sophia-purple)',
+                                  background: 'color-mix(in srgb, var(--sophia-purple) 8%, transparent)',
+                                }}
+                                onClick={() => haptic('medium')}
+                              >
+                                download
+                              </a>
+                            )}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+
+                {builderArtifactId && (
+                  <div className="mt-4" onClick={(e) => e.stopPropagation()}>
+                    <CoReviewControls
+                      state={builderArtifactCoReview.state}
+                      transportStatus={builderArtifactCoReview.transportStatus}
+                      onStart={() => { void builderArtifactCoReview.startReview() }}
+                      onStop={() => { void builderArtifactCoReview.stopReview() }}
+                      canStart={builderArtifactCoReview.canStart}
+                      featureEnabled={builderArtifactCoReview.enabled}
+                      className="justify-center"
+                    />
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}
