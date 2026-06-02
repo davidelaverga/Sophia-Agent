@@ -276,6 +276,9 @@ export function PresenceArtifactPanel({
                   builderArtifact={builderArtifact}
                   builderArtifactLibrary={builderArtifactLibrary}
                   threadId={threadId}
+                  artifactId={builderArtifactId}
+                  sessionId={sessionId}
+                  normalSessionId={normalSessionId}
                   reviewState={builderArtifactCoReview.state}
                   transportStatus={builderArtifactCoReview.transportStatus}
                   exactTextAvailable={Boolean(builderArtifactId)}

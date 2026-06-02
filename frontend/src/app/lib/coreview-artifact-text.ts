@@ -109,7 +109,7 @@ export function readCoreviewArtifactTextSideband({
     );
   }
 
-  const matchingEntry = entries.find((entry) => registrationMatches(entry, { sessionId, threadId }));
+  const matchingEntry = [...entries].reverse().find((entry) => registrationMatches(entry, { sessionId, threadId }));
   if (!matchingEntry) {
     return failure(
       normalizedArtifactId,

@@ -29,7 +29,7 @@ export type VoiceArtifactTelemetryCounts = {
   artifactCountMismatch: boolean
 }
 
-export type CoreviewExactTextSource = "fixture" | "builder_metadata" | "artifact_store" | "unsupported"
+export type CoreviewExactTextSource = "fixture" | "builder_metadata" | "builder_file" | "artifact_store" | "unsupported"
 
 export type CoreviewVisualTelemetry = {
   coreviewEnabled: boolean
@@ -532,6 +532,7 @@ const GEMINI_BUILDER_TOOL_NAMES = new Set([
 const COREVIEW_EXACT_TEXT_SOURCES: CoreviewExactTextSource[] = [
   "fixture",
   "builder_metadata",
+  "builder_file",
   "artifact_store",
   "unsupported",
 ]
@@ -1021,7 +1022,7 @@ function normalizeCoreviewExactTextSource(
   success: boolean,
 ): CoreviewExactTextSource {
   if (!success) return "unsupported"
-  if (source === "fixture" || source === "builder_metadata" || source === "artifact_store") {
+  if (source === "fixture" || source === "builder_metadata" || source === "builder_file" || source === "artifact_store") {
     return source
   }
   return "unsupported"

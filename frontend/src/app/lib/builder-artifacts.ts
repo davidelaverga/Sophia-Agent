@@ -191,6 +191,29 @@ export function buildThreadArtifactHref(
   return options?.download ? `${baseHref}?download=true` : baseHref;
 }
 
+export function isMarkdownArtifactFile(
+  file: {
+    path?: string | null;
+    name?: string | null;
+    mimeType?: string | null;
+  } | null | undefined,
+): boolean {
+  if (!file) {
+    return false;
+  }
+
+  const mimeType = file.mimeType?.toLowerCase().split(';')[0]?.trim() ?? '';
+  if (mimeType === 'text/markdown' || mimeType === 'text/x-markdown') {
+    return true;
+  }
+
+  const hasMarkdownExtension = (value: string | null | undefined) => (
+    typeof value === 'string' && /\.(md|markdown)(?:$|[?#])/u.test(value.toLowerCase())
+  );
+
+  return hasMarkdownExtension(file.name) || hasMarkdownExtension(file.path);
+}
+
 export function formatBuilderArtifactFileSize(bytes: number | null | undefined): string {
   if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) {
     return '';

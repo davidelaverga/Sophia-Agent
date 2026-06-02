@@ -1,5 +1,7 @@
 "use client"
 
+import { useMemo } from "react"
+
 import {
   buildThreadArtifactHref,
   formatBuilderArtifactTypeLabel,
@@ -24,6 +26,9 @@ interface ArtifactStageProps {
   builderArtifact: BuilderArtifactV1
   builderArtifactLibrary?: BuilderArtifactLibraryItemV1[]
   threadId?: string | null
+  artifactId?: string | null
+  sessionId?: string | null
+  normalSessionId?: string | null
   reviewState?: CoReviewSessionState | null
   transportStatus?: CoReviewTransportStatus | null
   exactTextAvailable?: boolean
@@ -38,6 +43,9 @@ export function ArtifactStage({
   builderArtifact,
   builderArtifactLibrary = [],
   threadId,
+  artifactId,
+  sessionId,
+  normalSessionId,
   reviewState,
   transportStatus,
   exactTextAvailable = false,
@@ -47,11 +55,38 @@ export function ArtifactStage({
   onStopReview,
   className,
 }: ArtifactStageProps) {
-  const files = getBuilderArtifactFiles(builderArtifact)
+  const files = useMemo(() => {
+    const libraryByPath = new Map(builderArtifactLibrary.map((item) => [item.path, item]))
+    return getBuilderArtifactFiles(builderArtifact).map((file) => {
+      const libraryItem = libraryByPath.get(file.path)
+      return {
+        ...file,
+        ...(libraryItem?.mimeType ? { mimeType: libraryItem.mimeType } : {}),
+        ...(typeof libraryItem?.sizeBytes === "number" ? { sizeBytes: libraryItem.sizeBytes } : {}),
+      }
+    })
+  }, [builderArtifact, builderArtifactLibrary])
   const primaryFile = files.find((file) => file.isPrimary) ?? files[0] ?? builderArtifactLibrary[0]
   const openHref = buildThreadArtifactHref(threadId, primaryFile?.path)
   const downloadHref = buildThreadArtifactHref(threadId, primaryFile?.path, { download: true })
   const typeLabel = formatBuilderArtifactTypeLabel(builderArtifact.artifactType)
+  const viewportPrimaryFile = primaryFile
+    ? {
+        path: primaryFile.path,
+        name: primaryFile.name,
+        label: "label" in primaryFile ? primaryFile.label : primaryFile.name,
+        isPrimary: "isPrimary" in primaryFile ? primaryFile.isPrimary : true,
+        ...("mimeType" in primaryFile && primaryFile.mimeType ? { mimeType: primaryFile.mimeType } : {}),
+        ...("sizeBytes" in primaryFile && typeof primaryFile.sizeBytes === "number" ? { sizeBytes: primaryFile.sizeBytes } : {}),
+      }
+    : null
+  const artifactTextRegistration = useMemo(() => (
+    artifactId ? {
+      artifactId,
+      sessionIds: [sessionId, normalSessionId],
+      threadId,
+    } : null
+  ), [artifactId, normalSessionId, sessionId, threadId])
 
   return (
     <section
@@ -69,7 +104,14 @@ export function ArtifactStage({
         downloadName={primaryFile?.name}
       />
 
-      <ArtifactCanvasViewport artifact={builderArtifact} files={files} typeLabel={typeLabel} />
+      <ArtifactCanvasViewport
+        artifact={builderArtifact}
+        files={files}
+        typeLabel={typeLabel}
+        previewFile={viewportPrimaryFile}
+        previewHref={openHref}
+        artifactTextRegistration={artifactTextRegistration}
+      />
 
       {reviewEnabled ? (
         <div className="flex flex-col gap-3 border-t border-[color:var(--cosmic-border-soft)] px-4 py-4 sm:flex-row sm:items-center sm:justify-between">

@@ -1,6 +1,6 @@
 import { render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { ArtifactStage } from "../../../app/components/session/ArtifactStage"
 import {
@@ -8,6 +8,10 @@ import {
   initialCoReviewState,
   type CoReviewSessionState,
 } from "../../../app/lib/co-review-transport"
+import {
+  clearCoreviewArtifactTextRegistryForTests,
+  readCoreviewArtifactTextSideband,
+} from "../../../app/lib/coreview-artifact-text"
 
 vi.mock("../../../app/hooks/useHaptics", () => ({
   haptic: vi.fn(),
@@ -35,13 +39,36 @@ const builderArtifact = {
   userNextAction: "Open the PDF for the full deliverable.",
 }
 
+const markdownBuilderArtifact = {
+  ...builderArtifact,
+  artifactPath: "mnt/user-data/outputs/launch-brief.md",
+  supportingFiles: [],
+  userNextAction: "Review the rendered brief.",
+}
+
 function renderStage({
+  artifact = builderArtifact,
+  artifactLibrary = [],
+  artifactId,
+  sessionId,
+  normalSessionId,
   state = {},
   exactTextAvailable = true,
   canStartReview = true,
   reviewEnabled = true,
   transportStatus = supportedTransportStatus,
 }: {
+  artifact?: typeof builderArtifact
+  artifactLibrary?: Array<{
+    path: string
+    name: string
+    sizeBytes?: number
+    mimeType?: string
+    modifiedAt?: string
+  }>
+  artifactId?: string | null
+  sessionId?: string | null
+  normalSessionId?: string | null
   state?: Partial<CoReviewSessionState>
   exactTextAvailable?: boolean
   canStartReview?: boolean
@@ -53,8 +80,12 @@ function renderStage({
 
   const view = render(
     <ArtifactStage
-      builderArtifact={builderArtifact}
+      builderArtifact={artifact}
+      builderArtifactLibrary={artifactLibrary}
       threadId="thread-1"
+      artifactId={artifactId}
+      sessionId={sessionId}
+      normalSessionId={normalSessionId}
       reviewState={{
         ...initialCoReviewState(transportStatus.kind),
         ...state,
@@ -70,6 +101,11 @@ function renderStage({
 
   return { ...view, onStartReview, onStopReview }
 }
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  clearCoreviewArtifactTextRegistryForTests()
+})
 
 describe("ArtifactStage", () => {
   it("renders a native artifact shell with open and download actions", () => {
@@ -168,5 +204,146 @@ describe("ArtifactStage", () => {
 
     expect(screen.queryByRole("button", { name: /review with sophia/i })).not.toBeInTheDocument()
     expect(screen.queryByText(/exact text/i)).not.toBeInTheDocument()
+  })
+
+  it("fetches and renders a markdown artifact as a document preview", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("# Launch Brief\n\nThe artifact is **ready** for review.", {
+        status: 200,
+        headers: { "Content-Type": "text/markdown; charset=utf-8" },
+      }),
+    )
+
+    renderStage({ artifact: markdownBuilderArtifact })
+
+    expect(await screen.findByRole("heading", { name: "Launch Brief" })).toBeInTheDocument()
+    expect(screen.getByText(/The artifact is/i)).toBeInTheDocument()
+    expect(screen.getByText("ready")).toBeInTheDocument()
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md",
+      expect.objectContaining({
+        cache: "no-store",
+        method: "GET",
+      }),
+    )
+  })
+
+  it("renders markdown from content type metadata even when the extension is not enough", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("## Metadata Preview\n\nA markdown response from the artifact route.", {
+        status: 200,
+        headers: { "Content-Type": "text/markdown" },
+      }),
+    )
+
+    renderStage({
+      artifact: {
+        ...builderArtifact,
+        artifactPath: "mnt/user-data/outputs/launch-brief",
+      },
+      artifactLibrary: [{
+        path: "mnt/user-data/outputs/launch-brief",
+        name: "launch-brief",
+        mimeType: "text/markdown",
+      }],
+    })
+
+    expect(await screen.findByRole("heading", { name: "Metadata Preview" })).toBeInTheDocument()
+  })
+
+  it("escapes markdown HTML instead of mounting untrusted elements", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("# Safe\n\n<script>alert(\"x\")</script>", {
+        status: 200,
+        headers: { "Content-Type": "text/markdown" },
+      }),
+    )
+    const { container } = renderStage({ artifact: markdownBuilderArtifact })
+
+    expect(await screen.findByRole("heading", { name: "Safe" })).toBeInTheDocument()
+    expect(screen.getByText("<script>alert(\"x\")</script>")).toBeInTheDocument()
+    expect(container.querySelector("script")).toBeNull()
+  })
+
+  it("shows a loading state while markdown preview content is being fetched", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementationOnce(
+      () => new Promise<Response>(() => undefined),
+    )
+
+    renderStage({ artifact: markdownBuilderArtifact })
+
+    expect(await screen.findByText("Loading preview")).toBeInTheDocument()
+  })
+
+  it("shows preview unavailable on fetch failure while keeping Open and Download available", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response("missing", { status: 404 }))
+
+    renderStage({ artifact: markdownBuilderArtifact })
+
+    expect(await screen.findByText("Preview unavailable")).toBeInTheDocument()
+    expect(screen.getByLabelText("Open Launch brief overview")).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md",
+    )
+    expect(screen.getByLabelText("Download Launch brief overview")).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md?download=true",
+    )
+  })
+
+  it("keeps Review with Sophia visible for markdown previews without debug terminology", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("# Launch Brief\n\nA clean document preview.", {
+        status: 200,
+        headers: { "Content-Type": "text/markdown" },
+      }),
+    )
+
+    const { container } = renderStage({ artifact: markdownBuilderArtifact })
+
+    expect(await screen.findByRole("heading", { name: "Launch Brief" })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /review with sophia/i })).toBeInTheDocument()
+    expect(container.textContent?.toLowerCase()).not.toMatch(
+      /coreview|gemini|websocket|transport|liveframes|fixture/,
+    )
+  })
+
+  it("registers fetched markdown as trusted builder file text when an artifact id is present", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("# Exact Title\n\nBudget delta: 17.4%", {
+        status: 200,
+        headers: { "Content-Type": "text/markdown" },
+      }),
+    )
+
+    renderStage({
+      artifact: markdownBuilderArtifact,
+      artifactId: "coreview-real-artifact-launch-brief",
+      sessionId: "session-1",
+      normalSessionId: "normal-1",
+    })
+
+    expect(await screen.findByRole("heading", { name: "Exact Title" })).toBeInTheDocument()
+    const response = readCoreviewArtifactTextSideband({
+      artifactId: "coreview-real-artifact-launch-brief",
+      sessionId: "session-1",
+      threadId: "thread-1",
+    })
+
+    expect(response).toMatchObject({
+      ok: true,
+      source: "builder_file",
+      text: "# Exact Title\n\nBudget delta: 17.4%",
+    })
+  })
+
+  it("does not fetch non-markdown artifacts and keeps the existing shell fallback", () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+
+    renderStage()
+
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(screen.getByText("Primary file")).toBeInTheDocument()
+    expect(screen.getByText("launch-brief.pdf")).toBeInTheDocument()
   })
 })
