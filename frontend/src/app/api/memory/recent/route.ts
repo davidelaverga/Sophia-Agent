@@ -143,7 +143,11 @@ function normalizeGatewayMemory(memory: GatewayMemory): NormalizedMemory | null 
   };
 }
 
-async function fetchMemoryList(userId: string, status?: string | null, sessionId?: string | null): Promise<Response> {
+async function fetchMemoryList(
+  userId: string,
+  status?: string | null,
+  sessionId?: string | null,
+): Promise<Response> {
   const params = new URLSearchParams();
   if (status) {
     params.set('status', status);
@@ -388,6 +392,7 @@ export async function GET(request: NextRequest) {
         }),
       });
     }
+
 
     const unfilteredResponse = await fetchMemoryList(userId, null, sessionId);
     const unfilteredText = await unfilteredResponse.text();

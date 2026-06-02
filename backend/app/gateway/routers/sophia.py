@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, ValidationError
 
 from app.gateway.auth import require_authorized_user_scope
@@ -48,10 +50,55 @@ router = APIRouter(
 )
 internal_router = APIRouter(prefix="/internal/sophia-realtime", tags=["sophia-realtime-internal"])
 
+# HTTP-bridge endpoint for the per-turn retrieval middleware running on the
+# langgraph service to read the gateway's local review_metadata overlay.
+# See ``review_metadata_store.py`` module docstring for the full rationale
+# (gateway + langgraph have separate Render disks; gateway is the sole
+# writer; this endpoint lets langgraph see those writes).
+overlay_internal_router = APIRouter(prefix="/internal/sophia-overlay", tags=["sophia-overlay-internal"])
+
+
+@overlay_internal_router.get(
+    "/{user_id}",
+    summary="Internal: return raw review_metadata overlay for HTTP-bridge readers",
+)
+async def get_review_overlay(user_id: str) -> dict[str, Any]:
+    """Return the gateway's local overlay store for ``user_id``.
+
+    Mounted on the internal prefix with no public-facing auth — relies on
+    Render's private network isolation (only services in the same project
+    can reach internal endpoints). Used exclusively by the langgraph
+    service's ``Mem0RetrievalMiddleware`` so per-turn retrieval can see
+    memories written by the gateway-side ``create_memory`` endpoint and
+    the offline pipeline.
+    """
+    from deerflow.sophia.review_metadata_store import _load_store_from_disk
+
+    try:
+        return _load_store_from_disk(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user_id")
+    except Exception:
+        logger.warning("Overlay HTTP-bridge read failed for %s", user_id, exc_info=True)
+        raise HTTPException(status_code=503, detail="Overlay unavailable")
+
 # Strong references to background tasks to prevent GC cancellation
 _background_tasks: set = set()
 _session_store = SessionStore()
 _LEGACY_SESSION_USER_ID = "dev-user"
+_MEM0_GET_ALL_PAGE_SIZE = 100
+# Default upper bound on pages walked by ``_get_all_paginated``. At
+# ``page_size=100`` this caps a single request at 2000 memories.
+#
+# Codex P2 review on PR #130 R15: R20 removed the prior 5-page cap because
+# users with >500 memories had pending_review records hidden past page 5.
+# But ``max_pages=None`` made worst-case latency scale linearly with total
+# stored memories — a single UI request could walk the entire user history.
+# 20 pages (2000 memories) is the happy medium: 4x the prior cap (covers
+# heavy users), but bounded enough to keep request latency predictable.
+# Callers that genuinely need unbounded traversal (e.g. a future
+# reconciliation worker) can pass ``max_pages=None`` explicitly.
+_MEM0_GET_ALL_DEFAULT_MAX_PAGES = 20
 
 
 # ---------------------------------------------------------------------------
@@ -462,13 +509,43 @@ def _has_memory_status(mem: dict) -> bool:
 
 
 def _memory_session_id(memory: dict) -> str | None:
-    session_id = memory.get("session_id") if isinstance(memory, dict) else None
+    if not isinstance(memory, dict):
+        return None
+
+    session_id = memory.get("session_id")
     if isinstance(session_id, str) and session_id:
         return session_id
 
-    metadata = memory.get("metadata") if isinstance(memory, dict) else None
-    metadata_session_id = metadata.get("session_id") if isinstance(metadata, dict) else None
-    return metadata_session_id if isinstance(metadata_session_id, str) and metadata_session_id else None
+    metadata = memory.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("session_id", "source_session_id"):
+            metadata_session_id = metadata.get(key)
+            if isinstance(metadata_session_id, str) and metadata_session_id:
+                return metadata_session_id
+
+    return None
+
+
+def _filter_memories_for_review(
+    memories: list[dict],
+    *,
+    status: str | None = None,
+    session_id: str | None = None,
+) -> list[dict]:
+    return [
+        memory
+        for memory in memories
+        if (
+            (
+                not status
+                or (
+                    isinstance(memory.get("metadata"), dict)
+                    and memory["metadata"].get("status") == status
+                )
+            )
+            and (not session_id or _memory_session_id(memory) == session_id)
+        )
+    ]
 
 
 def _hydrate_memories_for_review(
@@ -571,6 +648,163 @@ def _hydrate_memories_for_review(
     }
 
 
+def _is_memory_record(item: dict) -> bool:
+    """Return True if ``item`` is a resolved Mem0 memory dict, not an event wrapper."""
+    if not isinstance(item, dict):
+        return False
+    if item.get("status") or item.get("event_status"):
+        return False
+    if isinstance(item.get("memory"), dict):
+        return False
+    # Event wrappers carry event_id and lack memory/content.
+    # Memory records have either memory, content, or metadata with category.
+    if item.get("event_id") and not item.get("memory") and not item.get("content"):
+        return False
+    if item.get("id"):
+        return True
+    if not item.get("memory") and not item.get("content") and not item.get("metadata"):
+        return False
+    return True
+
+
+def _no_extraction_memory_item(content: str, metadata: dict) -> MemoryItem:
+    """Synthesize a 200-OK MemoryItem for the completed-empty case.
+
+    Codex P2 review on PR #130 R10: Mem0 can legitimately succeed without
+    extracting any memory (low-signal content like definitions or single
+    words). The endpoint previously returned 503 here, forcing clients to
+    retry a guaranteed-to-fail-again request. Returning a deterministic
+    application-level result with ``mem0_sync_state="no_extraction"`` lets
+    callers render a "we processed this but didn't save anything" message
+    without polling.
+
+    The ID is intentionally not registered in review_metadata — it's a
+    transient response shape, not a persisted record. Clients should treat
+    ``metadata.mem0_sync_state == "no_extraction"`` as "do not retry; do
+    not display as a real memory".
+
+    ID stability (Codex P2 review on PR #130 R11): the helper passes a
+    fixed ``"noext"`` discriminator to ``_local_memory_id_for_content``
+    so identical retries of the same content collide on the SAME
+    deterministic ID. The unsalted ``_local_memory_id_for_content(content)``
+    call would fall back to ``time.time_ns()``, giving every retry a fresh
+    ID and breaking client-side dedup / reconciliation.
+    """
+    response_metadata = dict(metadata or {})
+    response_metadata["mem0_sync_state"] = "no_extraction"
+    # Deterministic placeholder ID — same (content, "noext") always hashes
+    # to the same local handle. Clearly marked non-persistent via the
+    # ``local:noext:`` prefix so clients don't confuse it with a real ID.
+    salted = _local_memory_id_for_content(content, discriminator="noext")
+    if salted and salted.startswith("local:"):
+        local_id = "local:noext:" + salted.split(":", 1)[1]
+    else:
+        local_id = "local:noext"
+    return MemoryItem(
+        id=local_id,
+        content=content,
+        category=response_metadata.get("category"),
+        session_id="manual-create",
+        metadata=response_metadata,
+    )
+
+
+def _pending_memory_item_from_add_result(
+    item: dict,
+    *,
+    content: str,
+    metadata: dict,
+    session_id: str,
+) -> MemoryItem | None:
+    if not isinstance(item, dict):
+        return None
+    event_id = item.get("event_id") or item.get("id")
+    if not event_id:
+        return None
+    # Salt the local ID with the Mem0 event_id so two pending creates with
+    # identical text (e.g. duplicate API calls) get distinct local handles
+    # and don't overwrite each other's review_metadata.
+    local_memory_id = _local_memory_id_for_content(
+        content,
+        discriminator=str(event_id),
+    )
+    if not local_memory_id:
+        return None
+
+    pending_metadata = dict(metadata)
+    pending_metadata["mem0_event_id"] = str(event_id)
+    pending_metadata["mem0_sync_state"] = "pending"
+
+    return MemoryItem(
+        id=local_memory_id,
+        content=content,
+        category=pending_metadata.get("category"),
+        session_id=session_id,
+        metadata=pending_metadata,
+    )
+
+
+def _get_all_paginated(
+    client,
+    filters: dict,
+    page_size: int = _MEM0_GET_ALL_PAGE_SIZE,
+    max_pages: int | None = _MEM0_GET_ALL_DEFAULT_MAX_PAGES,
+    max_results: int | None = None,
+) -> list[dict]:
+    """Fetch pages from Mem0 v3 get_all and return a flat list.
+
+    ``max_pages`` defaults to ``_MEM0_GET_ALL_DEFAULT_MAX_PAGES`` (=20)
+    so a single UI request can't walk an entire heavy user's history
+    unbounded — see Codex P2 review on PR #130 R15. Callers that need
+    unbounded traversal (e.g. a future reconciliation worker) can pass
+    ``max_pages=None`` explicitly; callers that need tighter caps for
+    specific endpoints can pass a smaller integer.
+    """
+    all_results: list[dict] = []
+    page_size = max(1, min(page_size, _MEM0_GET_ALL_PAGE_SIZE))
+    if max_pages is not None:
+        max_pages = max(1, max_pages)
+    if max_results is not None:
+        max_results = max(1, max_results)
+    page = 1
+    page_count = 0
+    while True:
+        if max_pages is not None and page_count >= max_pages:
+            break
+        if max_results is not None and len(all_results) >= max_results:
+            break
+        result = client.get_all(filters=filters, page=page, page_size=page_size)
+        page_count += 1
+        if isinstance(result, dict):
+            results = result.get("results", [])
+            if isinstance(results, list):
+                if max_results is None:
+                    all_results.extend(results)
+                else:
+                    all_results.extend(results[: max_results - len(all_results)])
+            elif results:
+                all_results.append(results)
+            if not result.get("next"):
+                break
+            page += 1
+        elif isinstance(result, list):
+            if max_results is None:
+                all_results.extend(result)
+            else:
+                all_results.extend(result[: max_results - len(all_results)])
+            break
+        else:
+            break
+    logger.debug(
+        "get_all paginated | pages=%d | total=%d | max_pages=%s | max_results=%s",
+        page_count,
+        len(all_results),
+        max_pages,
+        max_results,
+    )
+    return all_results
+
+
 def _get_session_recap_path(user_id: str, session_id: str) -> Path:
     return safe_user_path(USERS_DIR, user_id, "recaps", f"{session_id}.json")
 
@@ -604,6 +838,35 @@ def _local_content_hash_from_memory_id(memory_id: str) -> str | None:
     if isinstance(memory_id, str) and memory_id.startswith("local:"):
         return memory_id.split(":", 1)[1] or None
     return None
+
+
+def _local_memory_id_for_content(
+    content: str,
+    *,
+    discriminator: str | None = None,
+) -> str | None:
+    """Build a stable but per-write-unique local placeholder ID.
+
+    Two queued ``add_memories`` calls with identical text would otherwise
+    collide on the same ``local:{sha256(content)}`` ID and overwrite each
+    other's review_metadata + ``mem0_event_id`` linkage. Passing the Mem0
+    ``event_id`` (or any per-write unique value) as ``discriminator`` salts
+    the hash so each pending write gets a distinct local ID. The same call
+    with the same ``(content, discriminator)`` is still deterministic, so
+    the ID acts as a stable handle for follow-up update/discard calls.
+
+    When no discriminator is provided, fall back to a nanosecond-precision
+    timestamp so callers without a known event_id still avoid collisions
+    (the only realistic same-nanosecond collision would be two coroutines
+    racing inside the same event loop tick with identical content — vanishingly
+    rare and still safer than the bare content hash).
+    """
+    normalized = (content or "").strip()
+    if not normalized:
+        return None
+    disc = discriminator if discriminator else f"ts:{time.time_ns()}"
+    composite = f"{normalized}|{disc}".encode()
+    return f"local:{hashlib.sha256(composite).hexdigest()}"
 
 
 def _compute_duration_minutes(started_at: str | None, ended_at: str | None) -> int:
@@ -813,17 +1076,25 @@ def _build_debrief_prompt(body: SessionEndRequest, recap_artifacts: dict | None,
     return "Want a quick debrief before you go?"
 
 
-def _queue_offline_pipeline(user_id: str, session_id: str, thread_id: str, thread_state: dict | None) -> None:
+def _queue_offline_pipeline(
+    user_id: str,
+    session_id: str,
+    thread_id: str,
+    thread_state: dict | None,
+    *,
+    force_reprocess: bool = False,
+) -> None:
     from deerflow.sophia.offline_pipeline import run_offline_pipeline
 
     logger.info(
-        "session.finalization queue_pipeline user_id=%s session_id=%s thread_id=%s has_thread_state=%s message_count=%s artifact_count=%s",
+        "session.finalization queue_pipeline user_id=%s session_id=%s thread_id=%s has_thread_state=%s message_count=%s artifact_count=%s force_reprocess=%s",
         user_id,
         session_id,
         thread_id,
         thread_state is not None,
         len(thread_state.get("messages", [])) if isinstance(thread_state, dict) else 0,
         len(thread_state.get("artifacts", [])) if isinstance(thread_state, dict) and isinstance(thread_state.get("artifacts"), list) else 0,
+        force_reprocess,
     )
 
     task = asyncio.create_task(
@@ -833,6 +1104,7 @@ def _queue_offline_pipeline(user_id: str, session_id: str, thread_id: str, threa
             session_id,
             thread_id,
             thread_state,
+            force_reprocess=force_reprocess,
         )
     )
     _background_tasks.add(task)
@@ -952,7 +1224,7 @@ async def retrieve_realtime_memories_internal(
 async def list_memories(
     user_id: str,
     status: str | None = Query(default=None, description="Filter by status (e.g. pending_review)"),
-    session_id: str | None = Query(default=None, description="Optional diagnostic source session identifier"),
+    session_id: str | None = Query(default=None, description="Filter by source session identifier"),
 ) -> MemoryListResponse:
     _validate_user(user_id)
     client = _get_mem0_client()
@@ -965,8 +1237,54 @@ async def list_memories(
             bool(session_id),
             trace_id,
         )
-        result = client.get_all(filters={"user_id": user_id})
-        memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+        # Fast-path: session-scoped status filter (typically the recap flow)
+        # can resolve entirely from the local review_metadata overlay when
+        # the offline pipeline has already written candidates for this
+        # session. Skip the full Mem0 ``get_all`` scan in that case so a
+        # cold recap doesn't pay for a multi-page pagination just to throw
+        # most of it away.
+        if session_id and status:
+            overlay_only_memories = apply_review_metadata_overlays(
+                user_id,
+                [],
+                session_id=session_id if status == "pending_review" else None,
+            )
+            local_overlay_total = sum(
+                1
+                for memory in overlay_only_memories
+                if isinstance(memory, dict)
+                and isinstance(memory.get("id"), str)
+                and memory["id"].startswith("local:")
+            )
+            local_review_memories = _filter_memories_for_review(
+                overlay_only_memories,
+                status=status,
+                session_id=session_id,
+            )
+            if local_review_memories:
+                local_review_memories = _dedupe_memories_by_id(local_review_memories)
+                items = [_to_memory_item(m) for m in local_review_memories]
+                logger.info(
+                    "session.finalization list_memories_result user_id=%s status=%s session_id=%s count=%s source=local_review_overlay trace_id=%s",
+                    user_id,
+                    status,
+                    session_id,
+                    len(items),
+                    trace_id,
+                )
+                return MemoryListResponse(
+                    memories=items,
+                    count=len(items),
+                    source="local_review_overlay",
+                    candidate_count=len(items),
+                    session_id_received=True,
+                    local_overlay_count=local_overlay_total or len(items),
+                    skipped_mem0_hydration_for_session_scope=True,
+                    empty_reason=None,
+                    trace_id=trace_id,
+                )
+
+        memories_raw = _get_all_paginated(client, {"user_id": user_id})
         memories_raw, diagnostics = _hydrate_memories_for_review(
             user_id,
             client,
@@ -977,9 +1295,10 @@ async def list_memories(
         memories_raw = _dedupe_memories_by_id(memories_raw)
         items = [_to_memory_item(m) for m in memories_raw]
         logger.info(
-            "session.finalization list_memories_result user_id=%s status=%s count=%s source=%s trace_id=%s",
+            "session.finalization list_memories_result user_id=%s status=%s session_id=%s count=%s source=%s trace_id=%s",
             user_id,
             status or "<none>",
+            session_id or "<none>",
             len(items),
             diagnostics.get("source"),
             trace_id,
@@ -1011,39 +1330,70 @@ async def list_memories(
     response_model=MemoryItem,
     summary="Create a memory",
 )
-async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
+async def create_memory(user_id: str, body: MemoryCreateRequest, response: Response) -> MemoryItem:
     _validate_user(user_id)
-    client = _get_mem0_client()
+    logger.info(
+        "[GwCreate] user_id=%s text_len=%d category=%s metadata_keys=%s",
+        user_id,
+        len(body.text or ""),
+        body.category or "-",
+        sorted((body.metadata or {}).keys()),
+    )
     try:
+        from deerflow.sophia.mem0_client import add_memories_with_outcome
+
         memory_metadata = dict(body.metadata or {})
         if body.category and "category" not in memory_metadata:
             memory_metadata["category"] = body.category
 
-        add_kwargs = {
-            "messages": [{"role": "user", "content": body.text}],
-            "user_id": user_id,
-        }
-        if memory_metadata:
-            add_kwargs["metadata"] = memory_metadata
+        # ``add_memories_with_outcome`` is synchronous and can block up to
+        # ~30s while it polls Mem0 events to wait for terminal status (see
+        # ``wait_for_pending_events`` in mem0_client). Run it in a worker
+        # thread so the async route doesn't stall the event loop for any
+        # other concurrent requests on this worker. The outcome string
+        # (Codex P2 R10) lets us distinguish "Mem0 succeeded but extracted
+        # nothing" (200 no-op) from "Mem0 unavailable / failed" (503).
+        created, outcome = await asyncio.to_thread(
+            add_memories_with_outcome,
+            user_id=user_id,
+            messages=[{"role": "user", "content": body.text}],
+            session_id="manual-create",
+            metadata=memory_metadata or None,
+        )
 
-        try:
-            result = client.add(**add_kwargs)
-        except TypeError:
-            add_kwargs.pop("metadata", None)
-            result = client.add(**add_kwargs)
+        if outcome in ("unavailable", "failed"):
+            logger.warning(
+                "Mem0 add did not persist for user %s — outcome=%s", user_id, outcome
+            )
+            raise HTTPException(status_code=503, detail="Memory service unavailable")
 
-        from deerflow.sophia.mem0_client import invalidate_user_cache
-        invalidate_user_cache(user_id)
+        if outcome == "completed_empty":
+            # Mem0 processed the input but extracted no memories — a valid
+            # outcome for low-signal text (definitions, single words, etc.).
+            # Return 200 with a synthesized no-op MemoryItem so the client
+            # sees a deterministic application-level result and doesn't
+            # retry. (Codex P2 review on PR #130 R10.)
+            logger.info(
+                "Mem0 create_memory completed empty for user %s — "
+                "no extraction (text_len=%d)",
+                user_id,
+                len(body.text or ""),
+            )
+            return _no_extraction_memory_item(body.text, memory_metadata)
 
-        if isinstance(result, dict):
-            created = result.get("results", [result])
-        elif isinstance(result, list):
-            created = result
-        else:
-            created = [result] if result else []
+        if not created:
+            # Defensive: outcome was "resolved"/"queued" but the list is
+            # empty. Should be unreachable given the contract, but treat
+            # as service error rather than silently 200-ing.
+            logger.warning(
+                "Mem0 add returned empty list with outcome=%s for user %s",
+                outcome,
+                user_id,
+            )
+            raise HTTPException(status_code=503, detail="Memory service unavailable")
 
-        first = created[0] if created else None
-        if isinstance(first, dict) and first.get("id"):
+        first = created[0]
+        if isinstance(first, dict) and _is_memory_record(first) and first.get("id"):
             if memory_metadata:
                 upsert_review_metadata(
                     user_id,
@@ -1055,22 +1405,38 @@ async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
                 )
             return _to_memory_item(first)
 
-        if memory_metadata:
+        pending_item = _pending_memory_item_from_add_result(
+            first,
+            content=body.text,
+            metadata=memory_metadata,
+            session_id="manual-create",
+        )
+        if pending_item is not None:
+            response.status_code = 202
             upsert_review_metadata(
                 user_id,
-                memory_id=first.get("id") if isinstance(first, dict) else None,
                 content=body.text,
-                metadata=memory_metadata,
+                content_hash=_local_content_hash_from_memory_id(pending_item.id),
+                metadata=pending_item.metadata,
                 session_id="manual-create",
-                sync_state="manual",
+                sync_state="pending",
             )
+            logger.info(
+                "Mem0 create_memory queued async add for user %s event_id=%s",
+                user_id,
+                pending_item.metadata.get("mem0_event_id") if pending_item.metadata else None,
+            )
+            return pending_item
 
-        return MemoryItem(
-            id=str(first.get("id", "")) if isinstance(first, dict) else "",
-            content=body.text,
-            category=body.category or memory_metadata.get("category"),
-            metadata=memory_metadata or None,
+        # add_memories returned neither a resolved memory nor a queued event.
+        logger.warning(
+            "Mem0 create_memory returned non-memory for user %s: %s",
+            user_id,
+            first,
         )
+        raise HTTPException(status_code=503, detail="Memory service unavailable")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.warning("Failed to create memory for %s: %s", user_id, e)
         raise HTTPException(status_code=503, detail="Memory service unavailable")
@@ -1265,8 +1631,7 @@ async def journal(
                 filters: dict = {"user_id": user_id}
                 if selected_category:
                     filters["categories"] = selected_category
-                result = client.get_all(filters=filters)
-                memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+                memories_raw = _get_all_paginated(client, filters)
                 memories_raw, _ = _hydrate_memories_for_review(user_id, client, memories_raw, status)
                 memories_raw = [
                     memory
@@ -1283,8 +1648,7 @@ async def journal(
             filters = {"user_id": user_id}
             if selected_category:
                 filters["categories"] = selected_category
-            result = client.get_all(filters=filters)
-            memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+            memories_raw = _get_all_paginated(client, filters)
             memories_raw, _ = _hydrate_memories_for_review(user_id, client, memories_raw, status)
 
         memories_raw = _sort_memories_desc(memories_raw)
@@ -1394,8 +1758,7 @@ async def visual_decisions(user_id: str) -> CategoryMemoryResponse:
     _validate_user(user_id)
     client = _get_mem0_client()
     try:
-        result = client.get_all(filters={"user_id": user_id, "categories": "decision"})
-        memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+        memories_raw = _get_all_paginated(client, {"user_id": user_id, "categories": "decision"})
         items = [_to_memory_item(m) for m in memories_raw]
         return CategoryMemoryResponse(memories=items, count=len(items))
     except Exception as e:
@@ -1412,8 +1775,7 @@ async def visual_commitments(user_id: str) -> CategoryMemoryResponse:
     _validate_user(user_id)
     client = _get_mem0_client()
     try:
-        result = client.get_all(filters={"user_id": user_id, "categories": "commitment"})
-        memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+        memories_raw = _get_all_paginated(client, {"user_id": user_id, "categories": "commitment"})
         items = [_to_memory_item(m) for m in memories_raw]
         return CategoryMemoryResponse(memories=items, count=len(items))
     except Exception as e:
@@ -2045,11 +2407,17 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
         pass
 
     try:
+        # force_reprocess=True so an explicit "End Session" click always
+        # re-runs the pipeline, even if an earlier inactivity_watcher fire
+        # processed a thinner version of the same session. The two-stage
+        # idempotency in run_offline_pipeline serializes concurrent calls
+        # via `_in_flight_sessions` so this is safe.
         _queue_offline_pipeline(
             user_id,
             body.session_id,
             body.thread_id,
             _build_thread_state_from_end_request(body),
+            force_reprocess=True,
         )
         logger.info(
             "session.finalization end_session_queued user_id=%s session_id=%s thread_id=%s recapPipelineQueued=%s",

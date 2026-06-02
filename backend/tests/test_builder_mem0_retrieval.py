@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import pytest
 
+pytest.importorskip("langgraph", reason="langgraph required for builder middleware tests")
+
 from deerflow.agents.sophia_agent.middlewares.mem0_retrieval import (
     _MAX_SNIPPET_CHARS,
     BuilderMem0RetrievalMiddleware,
@@ -31,18 +33,16 @@ def _patch_search(monkeypatch: pytest.MonkeyPatch, behaviour) -> dict:
     """
     captured: dict = {"calls": []}
 
-    def fake(user_id, query, categories=None, context_mode=None, limit=10):
+    def fake(user_id, query, *, limit=25):
         captured["calls"].append(
             {
                 "user_id": user_id,
                 "query": query,
-                "categories": categories,
-                "context_mode": context_mode,
                 "limit": limit,
             }
         )
         if callable(behaviour):
-            return behaviour(user_id, query, categories, context_mode, limit)
+            return behaviour(user_id, query, limit=limit)
         return behaviour
 
     monkeypatch.setattr(

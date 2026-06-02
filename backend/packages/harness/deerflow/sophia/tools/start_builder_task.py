@@ -233,6 +233,12 @@ def _resolve_memory_snippets(state: SophiaState) -> list[str]:
     snippets_raw = state.get("injected_memory_contents") or []
     snippets = [str(item).strip() for item in snippets_raw if str(item).strip()]
     if snippets:
+        logger.info(
+            "[BuilderMemory] user_id=%s resolved_count=%d source=snippets sample=%r",
+            state.get("user_id", "-"),
+            len(snippets),
+            snippets[0][:80],
+        )
         return snippets
 
     fallbacks: list[str] = []
@@ -242,6 +248,13 @@ def _resolve_memory_snippets(state: SophiaState) -> list[str]:
             continue
         if text:
             fallbacks.append(text)
+    logger.info(
+        "[BuilderMemory] user_id=%s resolved_count=%d source=%s sample=%r",
+        state.get("user_id", "-"),
+        len(fallbacks),
+        "fallbacks" if fallbacks else "none",
+        (fallbacks[0][:80] if fallbacks else ""),
+    )
     return fallbacks
 
 

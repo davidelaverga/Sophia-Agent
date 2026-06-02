@@ -11,12 +11,26 @@ import re
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from pathlib import Path
+from typing import Any
 
 import anthropic
 
 from deerflow.sophia.mem0_client import add_memories
+from deerflow.sophia.review_metadata_store import upsert_review_metadata
 
 logger = logging.getLogger(__name__)
+
+
+class ExtractionParseError(RuntimeError):
+    """Raised when Claude's extraction response cannot be parsed as a JSON list.
+
+    Caught by ``run_offline_pipeline`` so the session is NOT promoted to the
+    ``_processed_sessions`` idempotency set — letting the next pipeline trigger
+    retry extraction. Empty-but-valid responses (LLM legitimately said no
+    candidates) are NOT raised: those return ``[]`` cleanly and the session is
+    marked processed (no point retrying when the LLM said nothing).
+    """
+
 
 # Path to the extraction prompt template
 _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
@@ -549,6 +563,225 @@ def _candidate_policy_rejection_reason(content: str) -> str | None:
     return None
 
 
+def _emit_deterministic_fallback(
+    user_id: str,
+    session_id: str,
+    deterministic_entries: list[dict],
+    metadata: dict,
+    *,
+    require_memory_write: bool = False,
+) -> list[dict]:
+    """Write deterministic-only entries (or return []) when the LLM path failed.
+
+    Used by the FileNotFoundError + Anthropic-call-failed branches of
+    ``extract_session_memories``. Extracting this dedupes those two branches
+    and keeps the orchestrator below the sentrux CC ≥ 16 cap.
+    """
+    if not deterministic_entries:
+        return []
+    return _write_extracted_memories(
+        user_id=user_id,
+        session_id=session_id,
+        extracted=deterministic_entries,
+        metadata=metadata,
+        require_memory_write=require_memory_write,
+    )
+
+
+def _parse_extraction_with_deterministic_fallback(
+    *,
+    response_text: str,
+    session_id: str,
+    user_id: str,
+    deterministic_entries: list[dict],
+    require_memory_write: bool = False,
+) -> list | None:
+    """Parse the LLM extraction response, falling back to deterministic entries.
+
+    Returns:
+      - ``None`` when the LLM legitimately returned no candidates (empty
+        after fence-strip). Caller short-circuits with ``return []``.
+      - A list (possibly the deterministic_entries fallback) on success.
+
+    Raises:
+      ``ExtractionParseError`` when neither the LLM nor deterministic
+      extraction produced a usable list — preserves the H.1 retry contract
+      so the offline pipeline leaves the session unprocessed for retry
+      on the next trigger.
+
+    Three outcomes the orchestrator used to handle inline (now extracted
+    to bring ``extract_session_memories`` below the sentrux CC cap):
+
+      1. Empty after fence-strip → return ``None`` (no candidates)
+      2. JSON parse error or non-list → deterministic fallback if any,
+         else raise ``ExtractionParseError``
+      3. Successful list parse → merge with deterministic_entries and return
+    """
+    cleaned = _strip_markdown_fences(response_text)
+    if not cleaned:
+        logger.info(
+            "[Extraction] empty response — LLM returned no candidates "
+            "(user_id=%s session_id=%s)",
+            user_id, session_id,
+        )
+        return None
+
+    try:
+        extracted = json.loads(cleaned)
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.error(
+            "Failed to parse extraction response for session %s: %s",
+            session_id,
+            response_text[:200] if response_text else "(empty)",
+        )
+        # Merge resolution: prefer deterministic fallback (user-stated
+        # preferred name is a critical UX signal we can extract without
+        # the LLM), but preserve H.1 retry semantics when NO fallback
+        # exists — raise so the pipeline doesn't lock the session in
+        # ``_processed_sessions``.
+        if not deterministic_entries:
+            raise ExtractionParseError(
+                f"Extraction JSON parse failed for session {session_id}"
+            ) from exc
+        extracted = list(deterministic_entries)
+
+    if not isinstance(extracted, list):
+        logger.error(
+            "Extraction response is not a list for session %s (got %s)",
+            session_id, type(extracted).__name__,
+        )
+        if not deterministic_entries:
+            raise ExtractionParseError(
+                f"Extraction response is not a list for session {session_id}"
+            )
+        extracted = list(deterministic_entries)
+
+    # Return the parsed list. The caller in ``extract_session_memories``
+    # applies ``_filter_policy_rejected_entries`` and
+    # ``_merge_deterministic_entries`` (which dedupes against the LLM result
+    # AND folds in any deterministic candidates the LLM didn't surface).
+    return extracted
+
+
+def _importance_label(score: float) -> str:
+    """Map an importance score [0..1] to its three-tier label."""
+    if score >= 0.8:
+        return "structural"
+    if score >= 0.4:
+        return "potential"
+    return "contextual"
+
+
+def _build_mem0_metadata_for_entry(
+    entry: dict, *, platform: str, context_mode: str
+) -> tuple[dict, str, float]:
+    """Build the per-candidate Mem0 metadata dict + return (metadata, label, score).
+
+    Includes R13's ``review_status`` mirror and all optional metadata fields
+    (tone_estimate, ritual_phase, target_date, tags, preferred_name_source).
+    """
+    importance_score = entry.get("importance", 0.5)
+    importance_label = _importance_label(importance_score)
+
+    mem0_metadata: dict[str, Any] = {
+        "category": entry.get("category", "fact"),
+        "importance": importance_label,
+        "importance_score": importance_score,
+        "confidence": entry.get("confidence", 0.5),
+        "status": "pending_review",
+        "review_status": "pending_review",  # R13 mirror — gateway filter uses either field
+        "platform": platform,
+        "context_mode": context_mode,
+    }
+
+    entry_meta = entry.get("metadata", {})
+    if not isinstance(entry_meta, dict):
+        entry_meta = {}
+
+    if entry_meta.get("tone_estimate") is not None:
+        mem0_metadata["tone_estimate"] = entry_meta["tone_estimate"]
+    if entry_meta.get("ritual_phase"):
+        mem0_metadata["ritual_phase"] = entry_meta["ritual_phase"]
+    if entry.get("target_date"):
+        mem0_metadata["target_date"] = entry["target_date"]
+    if entry_meta.get("tags"):
+        mem0_metadata["tags"] = entry_meta["tags"]
+    if entry_meta.get("preferred_name_source"):
+        mem0_metadata["preferred_name_source"] = entry_meta["preferred_name_source"]
+
+    return mem0_metadata, importance_label, importance_score
+
+
+def _resolve_tracking_handles(result: Any) -> tuple[str | None, str | None]:
+    """Extract (memory_id, event_id) from an ``add_memories`` result.
+
+    R14 contract: returns ``(None, None)`` when no handle is available —
+    caller MUST skip the overlay write to avoid ghost candidates.
+    """
+    if not isinstance(result, list) or not result:
+        return None, None
+    first = result[0] if isinstance(result[0], dict) else None
+    if not first:
+        return None, None
+    resolved_memory_id: str | None = None
+    resolved_event_id: str | None = None
+    candidate_id = first.get("id")
+    if isinstance(candidate_id, str) and candidate_id and not candidate_id.startswith("local:"):
+        resolved_memory_id = candidate_id
+    event_candidate = first.get("event_id")
+    if isinstance(event_candidate, str) and event_candidate:
+        resolved_event_id = event_candidate
+    return resolved_memory_id, resolved_event_id
+
+
+def _write_overlay_for_extracted_entry(
+    *,
+    user_id: str,
+    session_id: str,
+    entry: dict,
+    mem0_metadata: dict,
+    result: Any,
+) -> None:
+    """Write the local review_metadata overlay with R14 tracking-id guard.
+
+    Skips silently (with a grep-friendly warning) when Mem0 returned neither
+    a memory_id nor an event_id — see ``_resolve_tracking_handles``.
+    """
+    resolved_memory_id, resolved_event_id = _resolve_tracking_handles(result)
+    if not resolved_memory_id and not resolved_event_id:
+        logger.warning(
+            "session.finalization extraction_overlay_skipped user_id=%s "
+            "session_id=%s reason=no_tracking_id category=%s — Mem0 write "
+            "produced no memory_id or event_id; overlay would be unreconciliable",
+            user_id, session_id, entry.get("category", "fact"),
+        )
+        return
+
+    overlay_metadata = dict(mem0_metadata)
+    if resolved_event_id and not resolved_memory_id:
+        # Stash event_id so a future ``reconcile_review_metadata_entries``
+        # worker can backfill the resolved memory_id once events resolve.
+        overlay_metadata["mem0_event_id"] = resolved_event_id
+
+    try:
+        upsert_review_metadata(
+            user_id,
+            memory_id=resolved_memory_id,
+            content=entry["content"],
+            metadata=overlay_metadata,
+            session_id=session_id,
+            sync_state="extraction" if resolved_memory_id else "pending",
+        )
+    except Exception:
+        # A corrupted local store must NEVER take down the extraction loop —
+        # we already wrote to Mem0, the data is durable; the overlay is
+        # best-effort UX scaffolding.
+        logger.warning(
+            "session.finalization extraction_overlay_write_failed user_id=%s session_id=%s",
+            user_id, session_id, exc_info=True,
+        )
+
+
 def _write_extracted_memories(
     *,
     user_id: str,
@@ -557,36 +790,65 @@ def _write_extracted_memories(
     metadata: dict,
     require_memory_write: bool = False,
 ) -> list[dict]:
-    """Write vetted extraction candidates to Mem0 with standard review metadata."""
+    """Write vetted extraction candidates to Mem0 with standard review metadata.
+
+    Merge of main's helper extraction with PR #130's recap-pipeline work:
+
+    - **R8 / R10 session_start_unix anchoring**: pass ``timestamp`` so Mem0 v3
+      temporal reasoning anchors correctly. Do NOT fall back to ``now()`` —
+      that would re-date historical turns and break relative-time queries.
+    - **R13 review_status mirror**: write BOTH ``status`` and ``review_status``.
+    - **infer=True (Mem0's default)**: the May 26 prod-test originally flipped
+      this to ``False`` to bypass Mem0's double-extraction, but a follow-up
+      probe revealed ``infer=False`` writes are invisible to
+      ``client.search()`` / ``client.get_all()`` for users with existing
+      extracted memories (fetchable only by ID). With ``infer=True``, some
+      memories get dedup-linked to existing canonical entries (losing
+      custom metadata), but the surviving canonicals ARE searchable. The
+      local-overlay retrieval path in ``Mem0RetrievalMiddleware`` is now the
+      canonical source of truth for ``status`` / ``category`` / custom
+      metadata, so Mem0's stripping no longer breaks per-turn retrieval.
+    - **R14 overlay write with tracking-id guard**: writes to the local
+      overlay BEFORE relying on Mem0's response, so the recap UI shows
+      pending_review candidates and the per-turn retrieval middleware can
+      surface them even when Mem0 deduplicates or drops the new content.
+
+    Sub-concerns are extracted into helpers (``_build_mem0_metadata_for_entry``,
+    ``_resolve_tracking_handles``, ``_write_overlay_for_extracted_entry``) to
+    keep this function below the sentrux CC threshold.
+    """
     written_memories: list[dict] = []
     platform = metadata.get("platform", "text")
     context_mode = metadata.get("context_mode", "life")
+
+    # R8 / R10: anchor to the session start time if available; warn on miss
+    # so a relative-time regression is grep-able in production logs.
+    session_start_unix = metadata.get("session_start_unix")
+    if session_start_unix is None:
+        logger.warning(
+            "session.finalization extraction_no_session_anchor user_id=%s session_id=%s "
+            "— Mem0 will fall back to ingestion-time for these memories; "
+            "relative-time queries may incorrectly date them",
+            user_id, session_id,
+        )
 
     for entry in extracted:
         if not isinstance(entry, dict) or not entry.get("content"):
             continue
 
-        importance_score = entry.get("importance", 0.5)
-        if importance_score >= 0.8:
-            importance_label = "structural"
-        elif importance_score >= 0.4:
-            importance_label = "potential"
-        else:
-            importance_label = "contextual"
+        mem0_metadata, importance_label, importance_score = _build_mem0_metadata_for_entry(
+            entry, platform=platform, context_mode=context_mode,
+        )
 
+        # Graft origin/main's source-range / extraction-run / thread-id
+        # metadata onto our helper-built dict. These come from either the
+        # per-entry ``metadata`` (deterministic explicit-remember entries
+        # carry their own ``sequence_start`` / ``source_message_ids``) or
+        # from the pipeline-level ``metadata`` argument (LLM-extracted
+        # candidates inherit the resumed-range bounds).
         entry_meta = entry.get("metadata", {})
         if not isinstance(entry_meta, dict):
             entry_meta = {}
-
-        mem0_metadata = {
-            "category": entry.get("category", "fact"),
-            "importance": importance_label,
-            "importance_score": importance_score,
-            "confidence": entry.get("confidence", 0.5),
-            "status": "pending_review",
-            "platform": platform,
-            "context_mode": context_mode,
-        }
         for metadata_key in (
             "thread_id",
             "sequence_start",
@@ -599,35 +861,29 @@ def _write_extracted_memories(
                 source_value = metadata.get(metadata_key)
             if source_value is not None:
                 mem0_metadata[metadata_key] = source_value
-
-        # Include tone_estimate if present in the entry metadata
-        if entry_meta.get("tone_estimate") is not None:
-            mem0_metadata["tone_estimate"] = entry_meta["tone_estimate"]
-
-        # Include ritual_phase if present
-        if entry_meta.get("ritual_phase"):
-            mem0_metadata["ritual_phase"] = entry_meta["ritual_phase"]
-
-        # Include target_date if present
-        if entry.get("target_date"):
-            mem0_metadata["target_date"] = entry["target_date"]
-
-        # Include tags if present
-        if entry_meta.get("tags"):
-            mem0_metadata["tags"] = entry_meta["tags"]
-
-        # Include safe source marker for deterministic preferred-name candidates.
-        if entry_meta.get("preferred_name_source"):
-            mem0_metadata["preferred_name_source"] = entry_meta["preferred_name_source"]
-
         if entry_meta.get("explicit_remember_source"):
             mem0_metadata["explicit_remember_source"] = entry_meta["explicit_remember_source"]
 
+        # Use Mem0's default infer=True so the resulting canonical memories
+        # are searchable. Mem0 may dedup-link this content to an existing
+        # canonical entry (stripping our custom metadata in that case), but
+        # the local overlay write below preserves the metadata for retrieval
+        # via Mem0RetrievalMiddleware._augment_with_local_overlay. See
+        # _write_extracted_memories docstring for the full rationale.
         result = add_memories(
             user_id=user_id,
             messages=[{"role": "user", "content": entry["content"]}],
             session_id=session_id,
             metadata=mem0_metadata,
+            timestamp=session_start_unix,
+        )
+
+        _write_overlay_for_extracted_entry(
+            user_id=user_id,
+            session_id=session_id,
+            entry=entry,
+            mem0_metadata=mem0_metadata,
+            result=result,
         )
         if require_memory_write and not result:
             raise MemoryWriteError("mem0_write_failed")
@@ -643,10 +899,7 @@ def _write_extracted_memories(
 
         logger.info(
             "session.finalization extraction_memory_written user_id=%s session_id=%s category=%s importance=%s",
-            user_id,
-            session_id,
-            entry.get("category", "fact"),
-            importance_label,
+            user_id, session_id, entry.get("category", "fact"), importance_label,
         )
 
     return written_memories
@@ -725,11 +978,11 @@ def extract_session_memories(
             if require_memory_write:
                 raise MemoryWriteError("extraction_template_missing")
             return []
-        return _write_extracted_memories(
-            user_id=user_id,
-            session_id=session_id,
-            extracted=deterministic_entries,
-            metadata=metadata,
+        return _emit_deterministic_fallback(
+            user_id,
+            session_id,
+            deterministic_entries,
+            metadata,
             require_memory_write=require_memory_write,
         )
 
@@ -765,39 +1018,29 @@ def extract_session_memories(
             if require_memory_write:
                 raise MemoryWriteError("extractor_failed")
             return []
-        return _write_extracted_memories(
-            user_id=user_id,
-            session_id=session_id,
-            extracted=deterministic_entries,
-            metadata=metadata,
+        return _emit_deterministic_fallback(
+            user_id,
+            session_id,
+            deterministic_entries,
+            metadata,
             require_memory_write=require_memory_write,
         )
 
-    # Parse JSON response
-    try:
-        cleaned = _strip_markdown_fences(response_text)
-        extracted = json.loads(cleaned)
-    except (json.JSONDecodeError, TypeError):
-        logger.error(
-            "Failed to parse extraction response for session %s: %s",
-            session_id,
-            response_text[:200] if response_text else "(empty)",
-        )
-        if not deterministic_entries:
-            if require_memory_write:
-                raise MemoryWriteError("extractor_invalid_response")
-            return []
-        extracted = deterministic_entries
-
-    if not isinstance(extracted, list):
-        logger.error("Extraction response is not a list for session %s", session_id)
-        if not deterministic_entries:
-            if require_memory_write:
-                raise MemoryWriteError("extractor_invalid_response")
-            return []
-        extracted = deterministic_entries
-
-    extracted = _filter_policy_rejected_entries(extracted)
+    # Parse JSON response + apply deterministic fallback in a helper to keep
+    # this orchestrator below the sentrux CC ≥ 16 gate. The helper raises
+    # ``ExtractionParseError`` when neither the LLM nor the deterministic
+    # extractor produced usable output (H.1 retry contract); the empty-but-
+    # valid case returns ``None`` so we short-circuit cleanly.
+    parsed = _parse_extraction_with_deterministic_fallback(
+        response_text=response_text,
+        session_id=session_id,
+        user_id=user_id,
+        deterministic_entries=deterministic_entries,
+        require_memory_write=require_memory_write,
+    )
+    if parsed is None:
+        return []
+    extracted = _filter_policy_rejected_entries(parsed)
     extracted = _merge_deterministic_entries(extracted, deterministic_entries)
 
     logger.info(
@@ -807,7 +1050,26 @@ def extract_session_memories(
         len(extracted),
     )
 
-    # Write each extracted memory to Mem0
+    candidate_breakdown: dict[str, int] = {}
+    for _e in extracted:
+        if isinstance(_e, dict):
+            _cat = (_e.get("category") or "unknown")
+            candidate_breakdown[_cat] = candidate_breakdown.get(_cat, 0) + 1
+    _breakdown_str = ",".join(f"{k}:{v}" for k, v in sorted(candidate_breakdown.items()))
+
+    logger.info(
+        "[Extraction] user_id=%s session_id=%s candidate_count=%d categories=[%s] first_content=%r",
+        user_id,
+        session_id,
+        len(extracted),
+        _breakdown_str,
+        (extracted[0].get("content", "")[:80] if extracted and isinstance(extracted[0], dict) else ""),
+    )
+
+    # Write each extracted memory to Mem0 via the shared helper. All R13/R14
+    # logic (anchor timestamp, review_status mirror, wait_for_events=False,
+    # local overlay write with tracking-id guard) lives inside
+    # ``_write_extracted_memories``.
     written_memories = _write_extracted_memories(
         user_id=user_id,
         session_id=session_id,

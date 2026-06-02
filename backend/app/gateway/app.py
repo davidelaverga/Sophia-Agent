@@ -271,6 +271,7 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     from app.gateway.routers import sophia
     app.include_router(sophia.router)
     app.include_router(sophia.internal_router)
+    app.include_router(sophia.overlay_internal_router)
 
     # Builder events: internal POST + public SSE for completion cards
     app.include_router(builder_events.internal_router)

@@ -1753,198 +1753,16 @@ class TestRetrieveMemoriesTool:
             assert result == "Memory retrieval temporarily unavailable."
 
 
-# --- Mem0 category selection ---
-
-class TestMem0CategorySelection:
-    def test_default_categories(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories(None, None, [])
-        assert "fact" in cats
-        assert "preference" in cats
-
-    def test_vent_ritual_adds_feeling_relationship(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories("vent", None, [])
-        assert "feeling" in cats
-        assert "relationship" in cats
-
-    def test_debrief_adds_commitment_decision(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories("debrief", None, [])
-        assert "commitment" in cats
-        assert "decision" in cats
-
-    def test_challenging_growth_adds_pattern_lesson(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories(None, "challenging_growth", [])
-        assert "pattern" in cats
-        assert "lesson" in cats
-
-    def test_ritual_adds_ritual_context(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories("prepare", None, [])
-        assert "ritual_context" in cats
-
-    def test_work_context_adds_work_categories(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories(None, None, [], context_mode="work")
-        assert "project" in cats
-        assert "colleague" in cats
-        assert "career" in cats
-        assert "deadline" in cats
-
-    def test_gaming_context_adds_gaming_categories(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories(None, None, [], context_mode="gaming")
-        assert "game" in cats
-        assert "achievement" in cats
-        assert "gaming_team" in cats
-        assert "strategy" in cats
-
-    def test_life_context_adds_life_categories(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories(None, None, [], context_mode="life")
-        assert "family" in cats
-        assert "health" in cats
-        assert "personal_goal" in cats
-        assert "life_event" in cats
-
-    def test_no_context_mode_only_base_categories(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories(None, None, [])
-        assert "project" not in cats
-        assert "game" not in cats
-        assert "family" not in cats
-
-    def test_context_plus_ritual_combines_categories(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories("debrief", None, [], context_mode="work")
-        assert "project" in cats  # from work context
-        assert "commitment" in cats  # from debrief ritual
-        assert "decision" in cats  # from debrief ritual
-        assert "fact" in cats  # always present
-
-    def test_work_context_sorts_work_memories_first(self):
-        from unittest.mock import patch
-
-        from deerflow.sophia.mem0_client import _cache, search_memories
-
-        _cache.clear()
-
-        mock_client = MagicMock()
-        mock_client.search.return_value = {
-            "results": [
-                {"id": "m1", "memory": "Loves RPGs", "metadata": {"category": "game"}},
-                {"id": "m2", "memory": "Project deadline Friday", "metadata": {"category": "deadline"}},
-                {"id": "m3", "memory": "Sister birthday next week", "metadata": {"category": "family"}},
-                {"id": "m4", "memory": "Works with Alice", "metadata": {"category": "colleague"}},
-                {"id": "m5", "memory": "Prefers morning calls", "metadata": {"category": "preference"}},
-            ],
-        }
-
-        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
-            results = search_memories("user1", "test query", context_mode="work")
-
-        # Work categories (deadline, colleague) must appear before non-work (game, family, preference)
-        work_cats = {"project", "colleague", "career", "deadline", "commitment", "decision"}
-        first_non_work_idx = None
-        for i, m in enumerate(results):
-            if m["category"] not in work_cats and first_non_work_idx is None:
-                first_non_work_idx = i
-            if m["category"] in work_cats and first_non_work_idx is not None:
-                pytest.fail(f"Work memory '{m['content']}' at index {i} appeared after non-work memory at index {first_non_work_idx}")
-
-    def test_gaming_context_sorts_gaming_memories_first(self):
-        from unittest.mock import patch
-
-        from deerflow.sophia.mem0_client import _cache, search_memories
-
-        _cache.clear()
-
-        mock_client = MagicMock()
-        mock_client.search.return_value = {
-            "results": [
-                {"id": "m1", "memory": "Project deadline Friday", "metadata": {"category": "deadline"}},
-                {"id": "m2", "memory": "Beat final boss", "metadata": {"category": "achievement"}},
-                {"id": "m3", "memory": "Plays with TeamX", "metadata": {"category": "gaming_team"}},
-                {"id": "m4", "memory": "Sister birthday", "metadata": {"category": "family"}},
-                {"id": "m5", "memory": "Likes strategy games", "metadata": {"category": "strategy"}},
-            ],
-        }
-
-        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
-            results = search_memories("user1", "test query", context_mode="gaming")
-
-        gaming_cats = {"game", "achievement", "gaming_team", "strategy"}
-        first_non_gaming_idx = None
-        for i, m in enumerate(results):
-            if m["category"] not in gaming_cats and first_non_gaming_idx is None:
-                first_non_gaming_idx = i
-            if m["category"] in gaming_cats and first_non_gaming_idx is not None:
-                pytest.fail(f"Gaming memory '{m['content']}' at index {i} appeared after non-gaming memory at index {first_non_gaming_idx}")
-
-    def test_no_context_mode_preserves_original_order(self):
-        from unittest.mock import patch
-
-        from deerflow.sophia.mem0_client import _cache, search_memories
-
-        _cache.clear()
-
-        mock_client = MagicMock()
-        mock_client.search.return_value = {
-            "results": [
-                {"id": "m1", "memory": "Loves RPGs", "metadata": {"category": "game"}},
-                {"id": "m2", "memory": "Project deadline Friday", "metadata": {"category": "deadline"}},
-                {"id": "m3", "memory": "Sister birthday", "metadata": {"category": "family"}},
-            ],
-        }
-
-        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
-            results = search_memories("user1", "test query no ctx")
-
-        # Without context_mode, original order should be preserved
-        assert results[0]["id"] == "m1"
-        assert results[1]["id"] == "m2"
-        assert results[2]["id"] == "m3"
-
-    def test_cross_context_memories_still_returned(self):
-        from unittest.mock import patch
-
-        from deerflow.sophia.mem0_client import _cache, search_memories
-
-        _cache.clear()
-
-        mock_client = MagicMock()
-        mock_client.search.return_value = {
-            "results": [
-                {"id": "m1", "memory": "Loves RPGs", "metadata": {"category": "game"}},
-                {"id": "m2", "memory": "Project deadline Friday", "metadata": {"category": "deadline"}},
-                {"id": "m3", "memory": "Sister birthday", "metadata": {"category": "family"}},
-            ],
-        }
-
-        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
-            results = search_memories("user1", "cross ctx query", context_mode="work")
-
-        # All memories should still be present (not excluded)
-        result_ids = [m["id"] for m in results]
-        assert "m1" in result_ids  # gaming memory still present in work context
-        assert "m2" in result_ids  # work memory present
-        assert "m3" in result_ids  # life memory still present in work context
-        # But work memory should be first
-        assert results[0]["category"] == "deadline"
-
-
 class TestMem0MemoryMiddleware:
     @pytest.fixture(autouse=True)
     def _reset_voice_fastcache(self):
         """Clear the module-level voice fastcache between tests so one test's
         stored entries don't leak into the next."""
-        from deerflow.agents.sophia_agent.middlewares import mem0_memory
+        from deerflow.agents.sophia_agent.middlewares import mem0_prefetch
 
-        mem0_memory._VOICE_FASTCACHE.clear()
+        mem0_prefetch._VOICE_FASTCACHE.clear()
         yield
-        mem0_memory._VOICE_FASTCACHE.clear()
+        mem0_prefetch._VOICE_FASTCACHE.clear()
 
     def test_voice_uses_smaller_limit(self):
         from unittest.mock import patch
@@ -1953,7 +1771,7 @@ class TestMem0MemoryMiddleware:
 
         mw = Mem0MemoryMiddleware("user-1")
         with patch(
-            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
             return_value=[],
         ) as mock_search:
             mw.before_agent(
@@ -1967,6 +1785,48 @@ class TestMem0MemoryMiddleware:
 
         assert mock_search.call_args.kwargs["limit"] == 4
 
+    def test_reference_date_passed_to_search(self):
+        """The retrieval middleware must pass ``reference_date=now()`` so Mem0
+        v3 temporal reasoning can anchor relative-time queries.
+
+        Without this, queries like "what did I tell you yesterday?" fall back
+        to default behavior and stale memories outrank time-relevant ones.
+        Codex P1 review on PR #130 flagged this as the missing wire.
+        """
+        from datetime import UTC, datetime
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
+
+        mw = Mem0MemoryMiddleware("user-1")
+        before = datetime.now(UTC)
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
+            return_value=[],
+        ) as mock_search:
+            mw.before_agent(
+                {
+                    "messages": [_make_message("what did we discuss last week?")],
+                    "platform": "text",
+                    "context_mode": "life",
+                },
+                _make_runtime(thread_id="thread-rd", platform="text"),
+            )
+        after = datetime.now(UTC)
+
+        kwargs = mock_search.call_args.kwargs
+        assert "reference_date" in kwargs, (
+            "Mem0 retrieval middleware MUST pass reference_date so v3 temporal "
+            "reasoning can anchor relative-time queries"
+        )
+        ref = kwargs["reference_date"]
+        assert isinstance(ref, datetime)
+        assert ref.tzinfo is not None, "reference_date must be timezone-aware (UTC)"
+        assert before <= ref <= after, (
+            f"reference_date {ref!r} should be roughly 'now' "
+            f"(between {before!r} and {after!r})"
+        )
+
     def test_voice_reuses_recent_similar_results(self):
         from unittest.mock import patch
 
@@ -1977,7 +1837,7 @@ class TestMem0MemoryMiddleware:
         runtime = _make_runtime(thread_id="thread-1", platform="voice")
 
         with patch(
-            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
             return_value=results,
         ) as mock_search:
             first = mw.before_agent(
@@ -2012,7 +1872,7 @@ class TestMem0MemoryMiddleware:
         runtime = _make_runtime(thread_id="thread-1", platform="voice")
 
         with patch(
-            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
             return_value=results,
         ) as mock_search:
             mw.before_agent(
@@ -2048,7 +1908,7 @@ class TestMem0MemoryMiddleware:
         runtime = _make_runtime(thread_id="thread-1", platform="voice")
 
         with patch(
-            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
             return_value=results,
         ) as mock_search:
             mw.before_agent(
@@ -2077,7 +1937,7 @@ class TestMem0MemoryMiddleware:
 
         mw = Mem0MemoryMiddleware("user-1")
         with patch(
-            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
             return_value=[],
         ) as mock_search:
             result = mw.before_agent(
@@ -2099,7 +1959,7 @@ class TestMem0MemoryMiddleware:
 
         mw = Mem0MemoryMiddleware("user-1")
         with patch(
-            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
             return_value=[],
         ) as mock_search:
             result = mw.before_agent(
@@ -2122,7 +1982,7 @@ class TestMem0MemoryMiddleware:
 
         mw = Mem0MemoryMiddleware("__voice_warmup__")
         with patch(
-            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
             return_value=[],
         ) as mock_search:
             result = mw.before_agent(
@@ -2136,6 +1996,221 @@ class TestMem0MemoryMiddleware:
 
         assert result is None
         mock_search.assert_not_called()
+
+
+# --- Local review_metadata overlay augmentation (Mem0RetrievalMiddleware) ---
+
+
+class TestMem0RetrievalOverlayAugmentation:
+    """The retrieval middleware must surface local-overlay entries when Mem0
+    search misses them (Mem0 v3 pending_review + dedup-linking quirks)."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_voice_fastcache(self):
+        from deerflow.agents.sophia_agent.middlewares import mem0_prefetch
+
+        mem0_prefetch._VOICE_FASTCACHE.clear()
+        yield
+        mem0_prefetch._VOICE_FASTCACHE.clear()
+
+    def test_local_only_surfaced_when_mem0_empty_and_query_overlaps(self):
+        """If Mem0 returns 0 hits but a local overlay entry shares content
+        tokens with the query, that local entry should be returned."""
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_prefetch import Mem0RetrievalMiddleware
+
+        local_only = [
+            {
+                "id": "local:abc",
+                "memory": "Davide is preparing the investor pitch for Thursday",
+                "category": "commitment",
+                "metadata": {"status": "pending_review", "category": "commitment"},
+            }
+        ]
+        mw = Mem0RetrievalMiddleware("user-1")
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
+            return_value=[],
+        ), patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.apply_review_metadata_overlays",
+            return_value=local_only,
+        ):
+            result = mw.before_agent(
+                {
+                    "messages": [_make_message("how is the investor pitch coming along?")],
+                    "platform": "text",
+                    "context_mode": "work",
+                },
+                _make_runtime(thread_id="thread-x", platform="text"),
+            )
+
+        assert result is not None
+        prefetched = result["prefetched_memories"]
+        assert len(prefetched) == 1
+        assert prefetched[0]["id"] == "local:abc"
+        # MemoryInjectionMiddleware reads `content`, not `memory`; the overlay
+        # helper must normalize so the downstream injection sees the text.
+        assert prefetched[0]["content"] == "Davide is preparing the investor pitch for Thursday"
+
+    def test_local_only_skipped_when_no_token_overlap(self):
+        """A local-only entry that shares no content tokens with the query
+        should not be surfaced (avoid dumping unrelated entries)."""
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_prefetch import Mem0RetrievalMiddleware
+
+        local_only = [
+            {
+                "id": "local:xyz",
+                "memory": "Davide enjoys hiking weekends",
+                "category": "preference",
+                "metadata": {"status": "approved"},
+            }
+        ]
+        mw = Mem0RetrievalMiddleware("user-1")
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
+            return_value=[],
+        ), patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.apply_review_metadata_overlays",
+            return_value=local_only,
+        ):
+            result = mw.before_agent(
+                {
+                    "messages": [_make_message("schedule calendar meeting tomorrow morning")],
+                    "platform": "text",
+                    "context_mode": "work",
+                },
+                _make_runtime(thread_id="thread-x", platform="text"),
+            )
+
+        assert result is not None
+        # No token overlap between memory ("davide/enjoys/hiking/weekends") and
+        # query ("schedule/calendar/meeting/tomorrow/morning") → local-only
+        # entry is suppressed.
+        assert result["prefetched_memories"] == []
+
+    def test_mem0_results_and_local_dedup_by_id(self):
+        """A local entry already matched to a Mem0 hit (same id) must not be
+        double-counted."""
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_prefetch import Mem0RetrievalMiddleware
+
+        mem0_hit = {
+            "id": "mem_real_1",
+            "content": "Davide ships the report by Friday",
+            "category": "commitment",
+        }
+        # Overlay returns the same Mem0 entry (enriched) + a new local-only one.
+        overlaid = [
+            mem0_hit,
+            {
+                "id": "local:new_one",
+                "memory": "Davide commits to shipping the prototype this Friday",
+                "category": "commitment",
+                "metadata": {"status": "pending_review"},
+            },
+        ]
+        mw = Mem0RetrievalMiddleware("user-1")
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
+            return_value=[mem0_hit],
+        ), patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.apply_review_metadata_overlays",
+            return_value=overlaid,
+        ):
+            result = mw.before_agent(
+                {
+                    "messages": [_make_message("what did I commit to ship Friday?")],
+                    "platform": "text",
+                    "context_mode": "work",
+                },
+                _make_runtime(thread_id="thread-x", platform="text"),
+            )
+
+        assert result is not None
+        prefetched = result["prefetched_memories"]
+        ids = [m.get("id") for m in prefetched]
+        # Mem0 hit appears first (semantic ranking), local-only appended after,
+        # no duplicate of mem_real_1.
+        assert ids == ["mem_real_1", "local:new_one"]
+
+    def test_local_overlay_surfaces_when_mem0_search_raises(self):
+        """When Mem0 search raises (quota exhaustion, 429, network failure),
+        the middleware must STILL consult the local overlay so the user's
+        just-created memories surface. This is the Sophia "lifeline" during
+        a Mem0 outage — verified production failure mode on 2026-05-26 where
+        Mem0 SEARCH quota was exhausted and per-turn retrieval was dead
+        until the overlay path was wired through this except branch.
+        """
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_prefetch import Mem0RetrievalMiddleware
+
+        local_only = [
+            {
+                "id": "local:lifeline",
+                "memory": "Davide wants to ship the prototype by Friday",
+                "category": "commitment",
+                "metadata": {"status": "pending_review"},
+            }
+        ]
+        mw = Mem0RetrievalMiddleware("user-1")
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
+            side_effect=RuntimeError("Mem0 429 quota exceeded"),
+        ), patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.apply_review_metadata_overlays",
+            return_value=local_only,
+        ):
+            result = mw.before_agent(
+                {
+                    "messages": [_make_message("anything happening on the dog walk schedule?")],
+                    "platform": "text",
+                    "context_mode": "life",
+                },
+                _make_runtime(thread_id="thread-x", platform="text"),
+            )
+
+        # Even though query tokens have ZERO overlap with the memory and
+        # Mem0 search itself raised, the user MUST still get their local
+        # memories back during the outage (graceful degradation).
+        assert result is not None
+        prefetched = result["prefetched_memories"]
+        assert len(prefetched) == 1
+        assert prefetched[0]["id"] == "local:lifeline"
+
+    def test_overlay_failure_falls_back_to_mem0_results(self):
+        """If the overlay raises, the middleware must still return the Mem0
+        results rather than dropping retrieval entirely."""
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_prefetch import Mem0RetrievalMiddleware
+
+        mem0_results = [
+            {"id": "mem_1", "content": "Davide likes early mornings", "category": "preference"},
+        ]
+        mw = Mem0RetrievalMiddleware("user-1")
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
+            return_value=mem0_results,
+        ), patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.apply_review_metadata_overlays",
+            side_effect=RuntimeError("overlay store corrupted"),
+        ):
+            result = mw.before_agent(
+                {
+                    "messages": [_make_message("what time does Davide like to wake up?")],
+                    "platform": "text",
+                    "context_mode": "life",
+                },
+                _make_runtime(thread_id="thread-x", platform="text"),
+            )
+
+        assert result is not None
+        assert [m["id"] for m in result["prefetched_memories"]] == ["mem_1"]
 
 
 # --- SophiaTitleMiddleware ---

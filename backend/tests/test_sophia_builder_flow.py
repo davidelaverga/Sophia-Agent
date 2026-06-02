@@ -88,6 +88,17 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     companion_types = [type(mw).__name__ for mw in captured_companion["middleware"]]
     assert "MessageCoercionMiddleware" in companion_types
     assert companion_types.index("MessageCoercionMiddleware") < companion_types.index("CrisisCheckMiddleware")
+    assert (
+        companion_types.index("ContextAdaptationMiddleware")
+        < companion_types.index("Mem0RetrievalMiddleware")
+        < companion_types.index("RitualMiddleware")
+        < companion_types.index("SkillRouterMiddleware")
+    )
+    assert (
+        companion_types.index("BuildAwarenessMiddleware")
+        < companion_types.index("MemoryInjectionMiddleware")
+        < companion_types.index("ArtifactMiddleware")
+    )
     # PR-C: BuilderSessionMiddleware deleted; AsyncSubAgentMiddleware owns
     # builder lifecycle now via the native ``async_tasks`` channel.
     assert "AsyncSubAgentMiddleware" in companion_types

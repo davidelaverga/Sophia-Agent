@@ -108,9 +108,15 @@ class TestExtractSessionMemories:
 
     @patch("deerflow.sophia.extraction.add_memories")
     @patch("deerflow.sophia.extraction.anthropic")
-    def test_malformed_json_returns_empty(self, mock_anthropic_mod, mock_add_memories):
-        """Malformed JSON response -> graceful fallback, return empty list."""
-        from deerflow.sophia.extraction import extract_session_memories
+    def test_malformed_json_raises_extraction_parse_error(self, mock_anthropic_mod, mock_add_memories):
+        """Malformed JSON response -> raise ExtractionParseError so caller can retry.
+
+        Contract change (H.1): previously this returned `[]` and was indistinguishable
+        from a legitimate empty result, causing the offline pipeline's idempotency
+        guard to lock the session permanently. Now the pipeline catches this and
+        leaves the session unprocessed for a future retry.
+        """
+        from deerflow.sophia.extraction import ExtractionParseError, extract_session_memories
 
         mock_client = MagicMock()
         mock_anthropic_mod.Anthropic.return_value = mock_client
@@ -118,14 +124,14 @@ class TestExtractSessionMemories:
             "This is not valid JSON at all {{{}"
         )
 
-        result = extract_session_memories(
-            user_id="user1",
-            session_id="sess_002",
-            messages=_SAMPLE_MESSAGES,
-            session_metadata=_SESSION_METADATA,
-        )
+        with pytest.raises(ExtractionParseError):
+            extract_session_memories(
+                user_id="user1",
+                session_id="sess_002",
+                messages=_SAMPLE_MESSAGES,
+                session_metadata=_SESSION_METADATA,
+            )
 
-        assert result == []
         mock_add_memories.assert_not_called()
 
     def test_empty_transcript_skips_extraction(self):
@@ -189,9 +195,15 @@ class TestExtractSessionMemories:
 
         assert call_kwargs["user_id"] == "user1"
         assert call_kwargs["session_id"] == "sess_005"
+        # extraction.py no longer pins infer explicitly — it relies on
+        # add_memories' default of infer=True (Mem0's documented default).
+        # The infer=False approach made writes invisible to client.search()
+        # for users with existing extracted memories. The retrieval gap is
+        # closed by Mem0RetrievalMiddleware._augment_with_local_overlay.
+        assert "infer" not in call_kwargs
 
         meta = call_kwargs["metadata"]
-        assert meta["status"] == "pending_review"
+        assert meta["review_status"] == "pending_review"
         assert meta["platform"] == "voice"
         assert meta["context_mode"] == "work"
         assert meta["importance"] == "potential"  # 0.6 -> potential
@@ -660,9 +672,13 @@ class TestExtractSessionMemories:
 
     @patch("deerflow.sophia.extraction.add_memories")
     @patch("deerflow.sophia.extraction.anthropic")
-    def test_non_list_response_returns_empty(self, mock_anthropic_mod, mock_add_memories):
-        """Response that parses as JSON but is not a list -> return empty."""
-        from deerflow.sophia.extraction import extract_session_memories
+    def test_non_list_response_raises_extraction_parse_error(self, mock_anthropic_mod, mock_add_memories):
+        """Response that parses as JSON but is not a list -> raise ExtractionParseError.
+
+        Contract change (H.1): a JSON object instead of an array is a malformed
+        extraction response — retryable like other parse errors.
+        """
+        from deerflow.sophia.extraction import ExtractionParseError, extract_session_memories
 
         mock_client = MagicMock()
         mock_anthropic_mod.Anthropic.return_value = mock_client
@@ -670,14 +686,40 @@ class TestExtractSessionMemories:
             '{"error": "unexpected format"}'
         )
 
-        result = extract_session_memories(
-            user_id="user1",
-            session_id="sess_011",
-            messages=_SAMPLE_MESSAGES,
-        )
+        with pytest.raises(ExtractionParseError):
+            extract_session_memories(
+                user_id="user1",
+                session_id="sess_011",
+                messages=_SAMPLE_MESSAGES,
+            )
 
-        assert result == []
         mock_add_memories.assert_not_called()
+
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_bare_markdown_fence_returns_empty_not_raises(self, mock_anthropic_mod, mock_add_memories):
+        """Bare fence (LLM returned no body) -> return [] cleanly, not ExtractionParseError.
+
+        H.1 short-circuit: when ``_strip_markdown_fences("```json")`` produces an empty
+        string, treat it as "LLM legitimately said nothing" rather than a parse error.
+        Retrying wouldn't help — Claude already declined to extract anything.
+        """
+        from deerflow.sophia.extraction import extract_session_memories
+
+        for bare_fence in ("```json", "```json\n", "```json\n\n```", "```\n```", "   ```json   "):
+            mock_client = MagicMock()
+            mock_anthropic_mod.Anthropic.return_value = mock_client
+            mock_client.messages.create.return_value = _make_anthropic_response(bare_fence)
+
+            result = extract_session_memories(
+                user_id="user1",
+                session_id="sess_bare_fence",
+                messages=_SAMPLE_MESSAGES,
+                session_metadata=_SESSION_METADATA,
+            )
+
+            assert result == [], f"Bare fence {bare_fence!r} should return [] cleanly"
+            mock_add_memories.assert_not_called()
 
     @patch("deerflow.sophia.extraction.add_memories")
     @patch("deerflow.sophia.extraction.anthropic")
@@ -702,7 +744,7 @@ class TestExtractSessionMemories:
         meta = mock_add_memories.call_args[1]["metadata"]
         assert meta["platform"] == "text"  # default
         assert meta["context_mode"] == "life"  # default
-        assert meta["status"] == "pending_review"
+        assert meta["review_status"] == "pending_review"
 
     @patch("deerflow.sophia.extraction.add_memories")
     @patch("deerflow.sophia.extraction.anthropic")
@@ -786,3 +828,491 @@ class TestStripMarkdownFences:
 
         result = _strip_markdown_fences('  ```json\n{"a": 1}\n```  ')
         assert result == '{"a": 1}'
+
+
+class TestSessionStartUnixAnchor:
+    """Regression tests for the Upgrade A timestamp anchoring contract."""
+
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_missing_session_start_unix_passes_none_not_now(self, mock_anthropic_mod, mock_add_memories):
+        """When session_start_unix is missing, add_memories MUST receive None.
+
+        Codex P1 review on PR #130: the old behavior fell back to
+        ``datetime.now(UTC).timestamp()``, which re-dated historical turns
+        to ingestion time and broke Mem0 v3 temporal reasoning. Now we pass
+        None so Mem0 uses its server-side default rather than us actively
+        writing a wrong anchor.
+        """
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps([_SAMPLE_EXTRACTION[0]])
+        )
+        mock_add_memories.return_value = [{"id": "mem_1"}]
+
+        # session_metadata WITHOUT session_start_unix
+        metadata_no_anchor = {
+            "session_date": "2026-03-27",
+            "context_mode": "work",
+            "platform": "text",
+        }
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_no_anchor",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=metadata_no_anchor,
+        )
+
+        assert mock_add_memories.call_count == 1
+        kwargs = mock_add_memories.call_args.kwargs
+        assert kwargs["timestamp"] is None, (
+            "Missing session_start_unix MUST result in timestamp=None, "
+            "NOT datetime.now() — falling back to now would re-date historical "
+            "turns to ingestion time and break temporal queries"
+        )
+
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_present_session_start_unix_is_propagated(self, mock_anthropic_mod, mock_add_memories):
+        """When session_start_unix is present, it MUST be passed as the timestamp."""
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps([_SAMPLE_EXTRACTION[0]])
+        )
+        mock_add_memories.return_value = [{"id": "mem_1"}]
+
+        # A specific historical timestamp — Mar 27 2026 12:00 UTC
+        historical_anchor = 1774785600
+        metadata_with_anchor = {
+            "session_date": "2026-03-27",
+            "context_mode": "work",
+            "platform": "text",
+            "session_start_unix": historical_anchor,
+        }
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_with_anchor",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=metadata_with_anchor,
+        )
+
+        kwargs = mock_add_memories.call_args.kwargs
+        assert kwargs["timestamp"] == historical_anchor, (
+            "Present session_start_unix MUST flow through unchanged "
+            "(this is the Upgrade A anchor)"
+        )
+
+
+# ======================================================================
+# Local review_metadata overlay write (PR #130 §I.1 — recap pipeline fix)
+# ======================================================================
+
+
+class TestReviewMetadataOverlayWrite:
+    """Pin the contract that ``extract_session_memories`` writes to the local
+    review_metadata overlay AFTER each successful Mem0 add.
+
+    Recap pipeline fix on PR #130 §I.1: Mem0 v3 does NOT propagate
+    event-level ``metadata.status`` onto the persisted memory record. Without
+    the local-overlay write, every newly-extracted candidate has
+    ``status=None`` when queried back via ``get_all``, so the gateway's
+    ``_hydrate_memories_for_review`` strict ``status==pending_review`` filter
+    drops them and the recap UI shows empty state.
+    """
+
+    @patch("deerflow.sophia.extraction.upsert_review_metadata")
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_extraction_writes_review_overlay_with_resolved_memory_id(
+        self, mock_anthropic_mod, mock_add_memories, mock_upsert
+    ):
+        """Happy path: Mem0 returned a resolved memory_id (sync path or
+        successful event resolution). The overlay write MUST receive that
+        memory_id so subsequent ``apply_review_metadata_overlays`` joins
+        cleanly with the Mem0 record."""
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps([_SAMPLE_EXTRACTION[0]])  # one "fact" candidate
+        )
+        # Mem0 returned a resolved memory_id — the wait_for_pending_events
+        # succeeded (or sync path with no event_id at all).
+        mock_add_memories.return_value = [
+            {"id": "mem_resolved_abc", "memory": "User works as a PM"}
+        ]
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_overlay_1",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert mock_upsert.call_count == 1, (
+            "Overlay MUST be written exactly once per successful candidate"
+        )
+        call_kwargs = mock_upsert.call_args.kwargs
+        assert call_kwargs["memory_id"] == "mem_resolved_abc", (
+            "Resolved memory_id MUST be passed through so the overlay joins "
+            "with the Mem0 record (review_metadata_store._select_entry "
+            "matches on memory_id first)"
+        )
+        assert call_kwargs["content"] == _SAMPLE_EXTRACTION[0]["content"]
+        assert call_kwargs["session_id"] == "sess_overlay_1"
+        assert call_kwargs["sync_state"] == "extraction"
+        assert call_kwargs["metadata"]["status"] == "pending_review", (
+            "status=pending_review MUST land in the overlay metadata so "
+            "_hydrate_memories_for_review's strict filter accepts it"
+        )
+        assert call_kwargs["metadata"]["review_status"] == "pending_review"
+        # No mem0_event_id when we have a real memory_id — only the timeout
+        # case needs the event_id for future reconciliation.
+        assert "mem0_event_id" not in call_kwargs["metadata"]
+
+    @patch("deerflow.sophia.extraction.upsert_review_metadata")
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_extraction_writes_overlay_with_event_id_when_memory_id_missing(
+        self, mock_anthropic_mod, mock_add_memories, mock_upsert
+    ):
+        """Bug A (wait_for_pending_events timeout) shape: ``add_memories``
+        returns raw event-wrapper list ``[{"event_id": "evt_1", "memory": None}]``
+        when the wait timed out. The overlay MUST still be written with
+        ``memory_id=None`` (content_hash carries the entry) AND
+        ``mem0_event_id`` stashed in metadata so a future reconciliation
+        worker can backfill the real memory_id once events resolve."""
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps([_SAMPLE_EXTRACTION[1]])  # "feeling" candidate
+        )
+        mock_add_memories.return_value = [
+            {"event_id": "evt_pending_xyz", "memory": None}
+        ]
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_overlay_timeout",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert mock_upsert.call_count == 1
+        call_kwargs = mock_upsert.call_args.kwargs
+        assert call_kwargs["memory_id"] is None, (
+            "Bug-A timeout case: memory_id is unknown — overlay relies on "
+            "content_hash keying (review_metadata_store handles None)"
+        )
+        assert call_kwargs["content"] == _SAMPLE_EXTRACTION[1]["content"]
+        assert call_kwargs["sync_state"] == "pending", (
+            "sync_state=pending signals reconcile_review_metadata_entries "
+            "should backfill memory_id when the event eventually resolves"
+        )
+        assert call_kwargs["metadata"]["mem0_event_id"] == "evt_pending_xyz", (
+            "event_id MUST be stashed in metadata so a future reconciler "
+            "can match the timed-out event to its eventual memory_id"
+        )
+        assert call_kwargs["metadata"]["status"] == "pending_review"
+
+    @patch("deerflow.sophia.extraction.upsert_review_metadata")
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_extraction_writes_event_overlay_when_only_event_id_returned(
+        self, mock_anthropic_mod, mock_add_memories, mock_upsert
+    ):
+        """Defensive — when Mem0 returns an event_id without an id (e.g. a
+        future SDK version reverts to async-by-default, or some edge path
+        produces an event handle only), the overlay MUST be keyed by
+        content_hash with ``mem0_event_id`` stashed in metadata so a
+        reconciler can backfill later.
+
+        Note: with Mem0's default ``infer=True``, async event resolution can
+        produce a resolved ``id`` once polling completes — this test forces
+        the legacy event-only shape (e.g. a polling timeout) to verify the
+        overlay still surfaces correctly via content_hash keying.
+        """
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps([_SAMPLE_EXTRACTION[1]])
+        )
+        mock_add_memories.return_value = [
+            {"event_id": "evt_no_wait_123", "memory": None}
+        ]
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_overlay_no_wait",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        # extraction.py no longer pins infer — it relies on add_memories'
+        # default of infer=True (Mem0's documented default). Pinned by the
+        # separate test_extraction_does_not_pin_infer_to_add_memories test.
+        assert "infer" not in mock_add_memories.call_args.kwargs
+        assert mock_upsert.call_count == 1
+        call_kwargs = mock_upsert.call_args.kwargs
+        assert call_kwargs["memory_id"] is None
+        assert call_kwargs["session_id"] == "sess_overlay_no_wait"
+        assert call_kwargs["sync_state"] == "pending"
+        assert call_kwargs["metadata"]["mem0_event_id"] == "evt_no_wait_123"
+        assert call_kwargs["metadata"]["status"] == "pending_review"
+
+    @patch("deerflow.sophia.extraction.upsert_review_metadata")
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_extraction_writes_overlay_for_dedupe_only_event_result(
+        self, mock_anthropic_mod, mock_add_memories, mock_upsert
+    ):
+        """Mem0 v3 may resolve an ADD by linking older memories only.
+
+        In that shape there is no new memory id, but the provider normalizer
+        must preserve event_id so recap still gets a review overlay for this
+        session's extracted candidate.
+        """
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps([_SAMPLE_EXTRACTION[1]])
+        )
+        mock_add_memories.return_value = [
+            {"event_id": "evt_dedupe_123", "linked_memory_ids": ["mem_existing"]}
+        ]
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_overlay_dedupe",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert mock_upsert.call_count == 1
+        call_kwargs = mock_upsert.call_args.kwargs
+        assert call_kwargs["memory_id"] is None
+        assert call_kwargs["sync_state"] == "pending"
+        assert call_kwargs["metadata"]["mem0_event_id"] == "evt_dedupe_123"
+        assert call_kwargs["metadata"]["status"] == "pending_review"
+
+    @patch("deerflow.sophia.extraction.upsert_review_metadata")
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_extraction_overlay_failure_does_not_block_subsequent_writes(
+        self, mock_anthropic_mod, mock_add_memories, mock_upsert
+    ):
+        """A corrupted local store MUST NOT take down the extraction loop.
+        The Mem0 write is the durable record; the overlay is best-effort
+        UX scaffolding. If upsert_review_metadata raises on candidate 1,
+        candidate 2's Mem0 write must still happen."""
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        # Two candidates — make upsert raise on the FIRST one only.
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps(_SAMPLE_EXTRACTION[:2])
+        )
+        mock_add_memories.return_value = [{"id": "mem_x"}]
+        mock_upsert.side_effect = [
+            RuntimeError("local store IO error"),  # first candidate
+            None,                                    # second candidate
+        ]
+
+        result = extract_session_memories(
+            user_id="user1",
+            session_id="sess_overlay_resilient",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        # Both Mem0 writes happened — extraction loop continued past the
+        # overlay failure.
+        assert mock_add_memories.call_count == 2, (
+            f"Mem0 writes MUST continue past local-overlay failures; "
+            f"got {mock_add_memories.call_count} calls"
+        )
+        # Both candidates landed in the returned written_memories.
+        assert len(result) == 2
+        # Both overlay writes were attempted.
+        assert mock_upsert.call_count == 2
+
+    @patch("deerflow.sophia.extraction.upsert_review_metadata")
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_extraction_skips_overlay_when_mem0_returns_empty(
+        self, mock_anthropic_mod, mock_add_memories, mock_upsert
+    ):
+        """Codex P1 R14: when ``add_memories`` returns an empty list (Mem0
+        client unavailable, ``client.add()`` raised, or
+        ``Mem0EventFailedError`` was caught), the overlay write MUST be
+        SKIPPED — not written with ``memory_id=None`` and no
+        ``mem0_event_id``.
+
+        Without this guard the overlay store accumulates "ghost"
+        pending_review candidates with no tracking handle. They surface
+        in /memories/recent (via the synthetic ``local:<hash>`` path)
+        but were never persisted remotely and can never be reconciled
+        with a real Mem0 memory, polluting the review UI with permanent
+        false positives.
+        """
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps([_SAMPLE_EXTRACTION[0]])
+        )
+        # Mem0 unavailable / failed → returns [] (per add_memories contract
+        # for unavailable / failed outcomes).
+        mock_add_memories.return_value = []
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_overlay_no_handle",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert mock_upsert.call_count == 0, (
+            f"Overlay MUST NOT be written when Mem0 returned no tracking "
+            f"handle (memory_id or event_id). Got {mock_upsert.call_count} "
+            f"upsert calls — these would create unreconciliable ghost "
+            f"candidates in the review UI."
+        )
+
+    @patch("deerflow.sophia.extraction.upsert_review_metadata")
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_extraction_skips_overlay_when_result_has_no_id_or_event_id(
+        self, mock_anthropic_mod, mock_add_memories, mock_upsert
+    ):
+        """Defensive: even when ``add_memories`` returns a non-empty list,
+        if the entries have neither a real ``id`` nor an ``event_id``
+        (e.g. a malformed Mem0 response shape we don't recognise), the
+        overlay write MUST still skip — same orphan-candidate reasoning."""
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps([_SAMPLE_EXTRACTION[0]])
+        )
+        # Result has SOME shape but no id and no event_id (e.g. malformed
+        # response, or a synthetic ``local:`` placeholder which our
+        # resolved_memory_id check explicitly filters out).
+        mock_add_memories.return_value = [{"memory": "just text, no ids"}]
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_overlay_no_handle_v2",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert mock_upsert.call_count == 0, (
+            "Overlay MUST skip when neither id nor event_id is present, "
+            "regardless of whether the result list is empty or just lacks "
+            "tracking handles."
+        )
+
+    @patch("deerflow.sophia.extraction.upsert_review_metadata")
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_extraction_writes_overlay_when_some_candidates_succeed_and_others_fail(
+        self, mock_anthropic_mod, mock_add_memories, mock_upsert
+    ):
+        """Partial failure: candidate 1's Mem0 write succeeds (memory_id
+        present), candidate 2's fails (empty list). Overlay MUST be
+        written only for candidate 1; candidate 2 is skipped cleanly."""
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        # Two candidates this time.
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps(_SAMPLE_EXTRACTION[:2])
+        )
+        # First add succeeds with a real memory_id; second fails (returns []).
+        mock_add_memories.side_effect = [
+            [{"id": "mem_succeeded", "memory": "ok"}],
+            [],  # Mem0 outage / failed event between writes
+        ]
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_overlay_partial",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        # Only ONE overlay write — the successful one. The failed
+        # candidate is correctly skipped.
+        assert mock_upsert.call_count == 1, (
+            f"Partial-failure case: expected exactly 1 overlay write "
+            f"(for the successful candidate); got {mock_upsert.call_count}"
+        )
+        assert mock_upsert.call_args.kwargs["memory_id"] == "mem_succeeded"
+
+    @patch("deerflow.sophia.extraction.upsert_review_metadata")
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_extraction_does_not_pin_infer_to_add_memories(
+        self, mock_anthropic_mod, mock_add_memories, mock_upsert
+    ):
+        """extraction.py MUST NOT pin ``infer`` when calling ``add_memories``
+        — let it fall through to the default (``infer=True``, Mem0's
+        documented default).
+
+        Historical context: PR #130 originally pinned ``infer=False`` here to
+        bypass Mem0's double-extraction on our pre-extracted candidates. A
+        follow-up live probe on 2026-05-26 revealed ``infer=False`` writes
+        are invisible to ``client.search()`` / ``client.get_all()`` for
+        users with existing extracted memories (fetchable only by ID). The
+        per-turn retrieval middleware now closes the resulting gap via
+        ``Mem0RetrievalMiddleware._augment_with_local_overlay``, which
+        queries the local ``review_metadata`` store alongside Mem0 and
+        surfaces any local-only entries the user has just created/approved.
+
+        This test pins the contract so a future refactor can't silently
+        re-introduce ``infer=False`` here.
+        """
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps([_SAMPLE_EXTRACTION[2]])  # "decision" candidate
+        )
+        mock_add_memories.return_value = [{"id": "mem_canonical", "memory": "ok"}]
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_infer_default",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert mock_add_memories.call_count == 1
+        call_kwargs = mock_add_memories.call_args.kwargs
+        assert "infer" not in call_kwargs, (
+            f"extraction.py MUST NOT pin infer when calling add_memories — "
+            f"let it default to Mem0's infer=True. infer=False makes writes "
+            f"invisible to client.search() for users with existing memories. "
+            f"Got infer={call_kwargs.get('infer')!r}."
+        )
