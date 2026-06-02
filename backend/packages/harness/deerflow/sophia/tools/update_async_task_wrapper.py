@@ -484,6 +484,27 @@ def _file_target_directive_block(target_path: str, task_type: str | None) -> str
     Codex P1 review 2026-05-22: the prior universal "MUST use
     write_file_tool" rule was incompatible with binary task_types.
     """
+    target_ext = _target_extension(target_path)
+    if target_ext == "pptx":
+        return (
+            f"Concrete file target: `{target_path}`. This is a PPTX slide-deck "
+            "update. The deliverable must come from the bundled presentation "
+            "skill workflow, not ad hoc python-pptx/write_file loops.\n"
+            "\n"
+            "HARD rules:\n"
+            "  - Read `/mnt/skills/public/ppt-generation/SKILL.md` if needed, "
+            "then generate slide images with "
+            "`/mnt/skills/public/image-generation/scripts/generate.py` and "
+            "compose the deck with "
+            "`/mnt/skills/public/ppt-generation/scripts/generate.py`.\n"
+            "  - Do NOT call `write_file` to author the PPTX binary and do NOT "
+            "create Python deck scripts as the user-ready artifact.\n"
+            "  - Emit only after a valid `.pptx` exists under "
+            "`/mnt/user-data/outputs/`. If the skill cannot complete after one "
+            "correction, write a real Markdown or HTML fallback with "
+            "`write_file(description=..., path=..., content=..., append=False)` "
+            "and emit that degraded file."
+        )
     if not _target_uses_text_writer(target_path, task_type):
         return (
             f"Concrete file target: `{target_path}`. The deliverable for "
@@ -496,7 +517,7 @@ def _file_target_directive_block(target_path: str, task_type: str | None) -> str
             f"HARD rules:\n"
             f"  - The final deliverable path MUST be under "
             f"`/mnt/user-data/outputs/`.\n"
-            f"  - DO NOT call `write_file_tool` to author the binary "
+            f"  - DO NOT call `write_file` to author the binary "
             f"content directly — that tool writes text bytes only. Use it "
             f"for the generator SCRIPT, not the binary output.\n"
             f"  - After the binary file is on disk under "
@@ -506,7 +527,7 @@ def _file_target_directive_block(target_path: str, task_type: str | None) -> str
     return (
         f"Concrete file target: `{target_path}`. Write the final document to "
         f"that exact path (or, for very long documents, open with "
-        f"`write_file_tool(path, content, append=False)` and extend via "
+        f"`write_file(description=..., path=..., content=..., append=False)` and extend via "
         f"`append=True` chunks — same path each time).\n"
         f"\n"
         f"If the target is HTML, charts and diagrams should be embedded or "
@@ -514,7 +535,7 @@ def _file_target_directive_block(target_path: str, task_type: str | None) -> str
         f"HTML file named above.\n"
         f"\n"
         f"HARD rules:\n"
-        f"  - All `write_file_tool` paths MUST start with "
+        f"  - All `write_file` paths MUST start with "
         f"`/mnt/user-data/outputs/`.\n"
         f"  - DO NOT create `test.md`, `test2.md`, or any scratch filename.\n"
         f"  - After the file is complete, call `emit_builder_artifact` with "

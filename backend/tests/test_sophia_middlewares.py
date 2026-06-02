@@ -3655,6 +3655,97 @@ class TestBuilderArtifactMiddleware:
 
         assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
 
+    def test_pptx_artifact_files_exist_checks_parent_thread_supabase_namespace(self, tmp_path, monkeypatch):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+        from deerflow.sophia.storage import supabase_artifact_store
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        pptx_path = tmp_path / "valid.pptx"
+        _write_minimal_pptx(pptx_path)
+        valid_bytes = pptx_path.read_bytes()
+        calls: list[str] = []
+
+        def fake_download(thread_id: str, relative: str):
+            calls.append(thread_id)
+            assert relative == "deck.pptx"
+            if thread_id == "parent-thread":
+                return valid_bytes, "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            return None
+
+        monkeypatch.setattr(supabase_artifact_store, "download_artifact", fake_download)
+        runtime = _make_runtime(thread_id="builder-thread")
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            "delegation_context": {"parent_thread_id": "parent-thread"},
+        }
+        args = {"artifact_path": "/mnt/user-data/outputs/deck.pptx"}
+
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
+        assert calls[0] == "parent-thread"
+        assert "builder-thread" not in calls
+
+    def test_pptx_skill_read_alone_still_gets_generator_correction(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        mw = BuilderArtifactMiddleware()
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            "builder_non_artifact_turns": 1,
+            "builder_tool_turn_summaries": [
+                {"tool_names": ["read_file"], "pptx_skill_read": True},
+                {"tool_names": ["write_file"]},
+            ],
+        }
+
+        result = mw.before_model(state, _make_runtime(thread_id="thread-x"))
+
+        assert result is not None
+        assert result["builder_pptx_skill_correction_emitted"] is True
+        content = result["messages"][0].content
+        assert "Reading SKILL.md is useful, but it is not completion" in content
+        assert "/mnt/skills/public/ppt-generation/scripts/generate.py" in content
+        assert "write_file(description=" in content
+
+    def test_pptx_generator_invocation_suppresses_skill_correction(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        mw = BuilderArtifactMiddleware()
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            "builder_non_artifact_turns": 4,
+            "builder_tool_turn_summaries": [
+                {"tool_names": ["bash"], "pptx_generator_invoked": True},
+                {"tool_names": ["write_file"]},
+            ],
+        }
+
+        assert mw.before_model(state, _make_runtime(thread_id="thread-x")) is None
+
+    def test_force_choice_pptx_no_output_waits_for_skill_correction(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        runtime = _make_runtime_with_builder_timeout(thread_id="thread-x", timeout_s=1800)
+        started_ms = int((time.time() - 1300) * 1000)
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            "builder_non_artifact_turns": 8,
+            "builder_task_started_at_ms": started_ms,
+            "builder_timeout_seconds": 1800,
+        }
+
+        assert BuilderArtifactMiddleware()._force_choice_for_state(state, runtime) is None
+
     # ---------------------------------------------------------------------
     # Wall-clock-aware force-emit (companion-to-builder timeout fix)
     # ---------------------------------------------------------------------

@@ -156,7 +156,10 @@ def test_missing_required_tool_arg_gets_argument_correction_not_path_correction(
     assert result is not None
     assert result.get("builder_tool_argument_correction_emitted") is True
     assert result.get("builder_path_correction_emitted") is not True
-    assert "[Sophia/tool-argument correction]" in result["messages"][0].content
+    content = result["messages"][0].content
+    assert "[Sophia/tool-argument correction]" in content
+    assert "`description`, `path`, and `content`" in content
+    assert "write_file(description=" in content
 
 
 def test_no_correction_below_threshold():

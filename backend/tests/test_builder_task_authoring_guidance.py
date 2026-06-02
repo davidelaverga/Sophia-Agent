@@ -73,6 +73,15 @@ class TestWriteFileAppendGuidance:
             "back to bash heredocs for long documents"
         )
 
+    def test_briefing_uses_actual_write_file_schema(self) -> None:
+        result = BuilderTaskMiddleware().before_agent(_make_state(), _make_runtime())
+        briefing = _briefing(result)
+
+        assert "write_file(description=" in briefing
+        assert "path='/mnt/user-data/outputs/name.ext'" in briefing
+        assert "content='...'" in briefing
+        assert "write_file_tool(path, content)" not in briefing
+
     def test_briefing_permits_multiple_write_file_calls(self) -> None:
         """The previous (broken) version said: "Do NOT split the same file
         across multiple write_file_tool calls". This test locks that we

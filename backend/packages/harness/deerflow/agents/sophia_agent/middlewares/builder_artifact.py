@@ -38,6 +38,27 @@ from deerflow.sophia.storage.supabase_mirror import maybe_mirror_file
 logger = logging.getLogger(__name__)
 
 
+def _skill_name_from_path(path: str) -> str | None:
+    for marker in ("/skills/public/", "/mnt/skills/public/", "/skills/", "/mnt/skills/"):
+        if marker in path:
+            tail = path.split(marker, 1)[1]
+            skill = tail.split("/", 1)[0]
+            return skill or None
+    return None
+
+
+def _command_references_skill(command: str, skill_name: str) -> bool:
+    return any(
+        marker in command
+        for marker in (
+            f"/skills/{skill_name}/",
+            f"/mnt/skills/{skill_name}/",
+            f"/skills/public/{skill_name}/",
+            f"/mnt/skills/public/{skill_name}/",
+        )
+    )
+
+
 def _emit_skill_usage_logs(tool_calls: list[dict[str, Any]]) -> None:
     """Log builder skill discovery / invocation as INFO breadcrumbs.
 
@@ -61,8 +82,7 @@ def _emit_skill_usage_logs(tool_calls: list[dict[str, Any]]) -> None:
         if name in ("read_file", "read_file_tool"):
             path = args.get("path") or args.get("file_path") or ""
             if isinstance(path, str) and "/skills/" in path and path.endswith("/SKILL.md"):
-                # Extract the skill folder name: ``…/skills/<name>/SKILL.md``.
-                segment = path.split("/skills/", 1)[1].split("/", 1)[0]
+                segment = _skill_name_from_path(path)
                 if segment in relevant:
                     logger.info("[BuilderSkill] manifest_read: skill=%s", segment)
         elif name == "bash":
@@ -73,10 +93,7 @@ def _emit_skill_usage_logs(tool_calls: list[dict[str, Any]]) -> None:
                 # Match both the host (``skills/<name>/``) and container
                 # (``/mnt/skills/<name>/``) layouts so this works in
                 # local-sandbox and aio-sandbox modes alike.
-                if (
-                    f"/skills/{skill_name}/" in cmd
-                    or f"/mnt/skills/{skill_name}/" in cmd
-                ):
+                if _command_references_skill(cmd, skill_name):
                     logger.info("[BuilderSkill] script_invoked: skill=%s", skill_name)
                     break
 
@@ -102,10 +119,20 @@ _CONCRETE_FILE_TARGET_RE = re.compile(r"Concrete file target:\s*`([^`]+)`")
 _PPTX_SKILL_PATH_MARKERS = (
     "/skills/public/ppt-generation/SKILL.md",
     "/mnt/skills/public/ppt-generation/SKILL.md",
+    "/skills/ppt-generation/SKILL.md",
+    "/mnt/skills/ppt-generation/SKILL.md",
 )
 _PPTX_GENERATOR_PATH_MARKERS = (
     "/skills/public/ppt-generation/scripts/generate.py",
     "/mnt/skills/public/ppt-generation/scripts/generate.py",
+    "/skills/ppt-generation/scripts/generate.py",
+    "/mnt/skills/ppt-generation/scripts/generate.py",
+)
+_IMAGE_GENERATION_PATH_MARKERS = (
+    "/skills/public/image-generation/scripts/generate.py",
+    "/mnt/skills/public/image-generation/scripts/generate.py",
+    "/skills/image-generation/scripts/generate.py",
+    "/mnt/skills/image-generation/scripts/generate.py",
 )
 _PATH_CORRECTABLE_WRITE_ERROR_CLASSES = {
     "path_is_directory",
@@ -432,6 +459,34 @@ def _allowed_pptx_artifact_suffixes(state: dict[str, Any]) -> frozenset[str]:
     return frozenset({".pptx", _pptx_fallback_suffix(state)})
 
 
+def _runtime_thread_id(runtime: Runtime | None) -> str | None:
+    context = getattr(runtime, "context", None)
+    if isinstance(context, dict) and isinstance(context.get("thread_id"), str):
+        return context["thread_id"]
+    config = getattr(runtime, "config", None)
+    configurable = config.get("configurable") if isinstance(config, dict) else None
+    if isinstance(configurable, dict) and isinstance(configurable.get("thread_id"), str):
+        return configurable["thread_id"]
+    return None
+
+
+def _artifact_remote_thread_ids(state: dict[str, Any], runtime: Runtime | None) -> list[str]:
+    ids: list[str] = []
+    delegation = state.get("delegation_context")
+    if isinstance(delegation, dict):
+        parent = delegation.get("parent_thread_id")
+        if isinstance(parent, str) and parent:
+            ids.append(parent)
+    runtime_thread_id = _runtime_thread_id(runtime)
+    if runtime_thread_id:
+        ids.append(runtime_thread_id)
+    deduped: list[str] = []
+    for thread_id in ids:
+        if thread_id not in deduped:
+            deduped.append(thread_id)
+    return deduped
+
+
 def _pptx_integrity_error_for_bytes(content: bytes) -> str | None:
     if len(content) < _PPTX_MIN_BYTES:
         return "pptx_too_small"
@@ -495,8 +550,7 @@ def _pptx_path_integrity_rejection_reason(
         host_file = Path(outputs_host_path) / relative
         if host_file.is_file():
             return _pptx_integrity_error_for_file(host_file)
-    thread_id = runtime.context.get("thread_id") if getattr(runtime, "context", None) else None
-    if thread_id:
+    for thread_id in _artifact_remote_thread_ids(state, runtime):
         try:
             result = supabase_artifact_store.download_artifact(thread_id, relative)
         except Exception as exc:  # noqa: BLE001
@@ -504,7 +558,7 @@ def _pptx_path_integrity_rejection_reason(
                 "BuilderArtifact: pptx remote integrity check failed error_type=%s",
                 exc.__class__.__name__,
             )
-            return "pptx_remote_check_failed"
+            continue
         if result is not None:
             content, _mime = result
             return _pptx_integrity_error_for_bytes(content)
@@ -774,9 +828,19 @@ def _pptx_generator_invoked_seen(state: dict[str, Any]) -> bool:
     )
 
 
+def _image_generation_invoked_seen(state: dict[str, Any]) -> bool:
+    summaries = state.get("builder_tool_turn_summaries") or []
+    return any(
+        bool(summary.get("image_generation_invoked"))
+        for summary in summaries
+        if isinstance(summary, dict)
+    )
+
+
 def _pptx_skill_flags_from_tool_calls(tool_calls: list[dict[str, Any]]) -> dict[str, bool]:
     skill_read = False
     generator_invoked = False
+    image_generation_invoked = False
     for call in tool_calls:
         name = call.get("name")
         args = call.get("args") or {}
@@ -788,10 +852,47 @@ def _pptx_skill_flags_from_tool_calls(tool_calls: list[dict[str, Any]]) -> dict[
         if name in ("bash", "bash_tool"):
             command = str(args.get("command") or "")
             generator_invoked = generator_invoked or any(marker in command for marker in _PPTX_GENERATOR_PATH_MARKERS)
+            image_generation_invoked = image_generation_invoked or any(
+                marker in command for marker in _IMAGE_GENERATION_PATH_MARKERS
+            )
     return {
         "pptx_skill_read": skill_read,
         "pptx_generator_invoked": generator_invoked,
+        "image_generation_invoked": image_generation_invoked,
     }
+
+
+def _log_pptx_diagnostics(
+    *,
+    phase: str,
+    state: dict[str, Any],
+    artifact_path: object = None,
+    integrity_reason: str | None = None,
+) -> None:
+    if not _requested_pptx_artifact(state):
+        return
+    diagnostics = state.get("builder_write_diagnostics") or {}
+    write_arg_errors = (
+        int(diagnostics.get("error_count", 0) or 0)
+        if isinstance(diagnostics, dict)
+        and diagnostics.get("last_error_class") == "missing_required_tool_arg"
+        else 0
+    )
+    logger.info(
+        "[BuilderPptxDiagnostics] phase=%s pptx_skill_read_seen=%s "
+        "pptx_generator_invoked=%s image_generation_invoked=%s "
+        "valid_pptx_seen=%s pptx_integrity_reason=%s fallback_ext=%s "
+        "write_file_missing_arg_count=%d final_artifact_ext=%s",
+        phase,
+        _pptx_skill_read_seen(state),
+        _pptx_generator_invoked_seen(state),
+        _image_generation_invoked_seen(state),
+        BuilderArtifactMiddleware._has_valid_pptx_output(state),
+        integrity_reason,
+        _pptx_fallback_suffix(state).lstrip("."),
+        write_arg_errors,
+        _artifact_path_suffix_label(artifact_path),
+    )
 
 
 def _force_reason(turn_force: bool, clock_force: bool) -> str:
@@ -1145,6 +1246,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if self._has_generator_script(state):
             return self._generator_recovery_tool_choice(state, non_artifact_turns, force_reason)
 
+        if _requested_pptx_artifact(state) and not state.get("builder_pptx_skill_correction_emitted"):
+            logger.warning(
+                "BuilderArtifact: PPTX target has no valid deck/fallback and no "
+                "skill correction yet; withholding generic write_file force so "
+                "the presentation-skill correction can steer the next turn "
+                "(non_artifact_turns=%s, reason=%s)",
+                non_artifact_turns,
+                force_reason,
+            )
+            return None
+
         logger.warning(
             "BuilderArtifact: forcing tool_choice=write_file before emit "
             "(non_artifact_turns=%s, ceiling=%s, reason=%s, no output file yet — "
@@ -1201,6 +1313,26 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "(non_artifact_turns=%s, ceiling=%s, reason=%s)",
                 non_artifact_turns,
                 self._CEILING_FOR_FORCE,
+                force_reason,
+            )
+            return self._forced_write_tool_choice()
+        if _requested_pptx_artifact(state):
+            if not state.get("builder_pptx_skill_correction_emitted"):
+                logger.warning(
+                    "BuilderArtifact: PPTX target has ad hoc generator script but "
+                    "no valid deck/fallback; withholding bash force until the "
+                    "ppt-generation skill correction runs (non_artifact_turns=%s, "
+                    "reason=%s)",
+                    non_artifact_turns,
+                    force_reason,
+                )
+                return None
+            logger.warning(
+                "BuilderArtifact: PPTX target still has no valid deck after skill "
+                "correction; forcing write_file only to create a Markdown/HTML "
+                "fallback, never a Python deck script (non_artifact_turns=%s, "
+                "reason=%s)",
+                non_artifact_turns,
                 force_reason,
             )
             return self._forced_write_tool_choice()
@@ -1291,6 +1423,28 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 exc_info=True,
             )
             return False
+
+    @staticmethod
+    def _has_valid_pptx_output(state: BuilderArtifactState) -> bool:
+        outputs_root = _outputs_root_from_state(state)
+        if outputs_root is None:
+            return False
+        min_mtime = _builder_started_min_mtime(state)
+        try:
+            for entry in outputs_root.rglob("*.pptx"):
+                if not _is_public_output_file(entry):
+                    continue
+                if min_mtime is not None and entry.stat().st_mtime < min_mtime:
+                    continue
+                if _pptx_integrity_error_for_file(entry) is None:
+                    return True
+        except OSError:
+            logger.debug(
+                "BuilderArtifact._has_valid_pptx_output: scan failed for outputs_path=%s",
+                _outputs_host_path_from_state(state),
+                exc_info=True,
+            )
+        return False
 
     @staticmethod
     def _promotable_output_candidates(
@@ -1804,7 +1958,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             if isinstance(thread_data, dict)
             else None
         )
-        thread_id = runtime.context.get("thread_id") if runtime.context else None
+        remote_thread_ids = _artifact_remote_thread_ids(state, runtime)
 
         for candidate in candidates:
             relative = _extract_output_relative_path(candidate)
@@ -1843,17 +1997,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     continue
 
             # 2. Check Supabase
-            if thread_id:
+            if remote_thread_ids:
                 if PurePosixPath(candidate).suffix.lower() == ".pptx":
-                    try:
-                        result = supabase_artifact_store.download_artifact(thread_id, relative)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            "BuilderArtifact: pptx remote integrity check failed error_type=%s",
-                            exc.__class__.__name__,
-                        )
-                        return False
-                    if result is not None:
+                    for thread_id in remote_thread_ids:
+                        try:
+                            result = supabase_artifact_store.download_artifact(thread_id, relative)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "BuilderArtifact: pptx remote integrity check failed "
+                                "error_type=%s thread_role=%s",
+                                exc.__class__.__name__,
+                                "parent" if thread_id == remote_thread_ids[0] else "fallback",
+                            )
+                            continue
+                        if result is None:
+                            continue
                         content, _mime = result
                         reason = _pptx_integrity_error_for_bytes(content)
                         if reason is not None:
@@ -1869,8 +2027,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "valid=true bytes=%s source=supabase",
                             len(content),
                         )
+                        break
+                    else:
+                        result = None
+                    if result is not None:
                         continue
-                elif supabase_artifact_store.check_artifact_exists(thread_id, relative):
+                elif any(
+                    supabase_artifact_store.check_artifact_exists(thread_id, relative)
+                    for thread_id in remote_thread_ids
+                ):
                     continue
 
             # Neither local nor remote — missing.
@@ -1879,7 +2044,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "path=%s local=%s supabase=%s",
                 candidate,
                 bool(outputs_host_path and (Path(outputs_host_path) / relative).is_file()),
-                bool(thread_id and supabase_artifact_store.check_artifact_exists(thread_id, relative)),
+                bool(
+                    any(
+                        supabase_artifact_store.check_artifact_exists(thread_id, relative)
+                        for thread_id in remote_thread_ids
+                    )
+                ),
             )
             return False
 
@@ -1894,6 +2064,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         primary = artifact_args.get("artifact_path")
         rejection_reason = _pptx_artifact_path_rejection_reason(primary, state)
         if rejection_reason is not None:
+            _log_pptx_diagnostics(
+                phase="emit_rejected",
+                state=state,
+                artifact_path=primary,
+                integrity_reason=rejection_reason,
+            )
             BuilderArtifactMiddleware._log_pptx_artifact_rejection(primary, rejection_reason)
             return False
         canonical_primary = _canonical_outputs_artifact_path(primary)
@@ -1901,6 +2077,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return False
         integrity_rejection = _pptx_path_integrity_rejection_reason(canonical_primary, state, runtime)
         if integrity_rejection is not None:
+            _log_pptx_diagnostics(
+                phase="emit_rejected",
+                state=state,
+                artifact_path=primary,
+                integrity_reason=integrity_rejection,
+            )
             BuilderArtifactMiddleware._log_pptx_artifact_rejection(primary, integrity_rejection)
             return False
         artifact_args["artifact_path"] = canonical_primary
@@ -2322,7 +2504,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if not text.startswith("Error"):
             return ""
         lowered = text.lower()
-        if "field required" in lowered and ("content" in lowered or "command" in lowered):
+        if "field required" in lowered and any(
+            field in lowered for field in ("description", "path", "content", "command")
+        ):
             return "missing_required_tool_arg"
         for error_class, markers in _WRITE_ERROR_CLASS_MARKERS:
             if any(marker in lowered for marker in markers):
@@ -2499,9 +2683,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "[Sophia/tool-argument correction]\n"
                 "Your recent tool call was missing required arguments. "
                 "Do not retry the same incomplete call.\n\n"
-                "For text deliverables, call `write_file_tool` with BOTH "
-                "`path` and `content` arguments, for example "
-                "`write_file_tool(path='/mnt/user-data/outputs/report.html', "
+                "For text deliverables, call the exposed `write_file` tool with "
+                "`description`, `path`, and `content` arguments, for example "
+                "`write_file(description='write the final report', "
+                "path='/mnt/user-data/outputs/report.html', "
                 "content='<html>...</html>', append=False)`. For shell work, "
                 "call `bash_tool` with a non-empty `command` argument.\n\n"
                 "If you have already written the final file under "
@@ -2582,13 +2767,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         correction = HumanMessage(
             content=(
                 "[Sophia/path-correction directive]\n"
-                f"Your last {count} write_file_tool calls all failed with "
+                f"Your last {count} write_file calls all failed with "
                 "errors. This usually means the path you used is not under "
                 "/mnt/user-data/outputs/.\n\n"
                 "STOP retrying with the same kind of path. Your NEXT "
-                "write_file_tool call MUST use an absolute path starting "
-                "with `/mnt/user-data/outputs/`, e.g. "
-                "`/mnt/user-data/outputs/my-document.md`. If you only had a "
+                "`write_file` call MUST include `description`, `path`, and "
+                "`content`, and the path MUST start with "
+                "`/mnt/user-data/outputs/`, e.g. "
+                "`write_file(description='write final document', "
+                "path='/mnt/user-data/outputs/my-document.md', content='...', "
+                "append=False)`. If you only had a "
                 "bare filename like `report.md`, prepend "
                 "`/mnt/user-data/outputs/` to it.\n\n"
                 "After the file is on disk under /mnt/user-data/outputs/, "
@@ -2723,11 +2911,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return None
         if state.get("builder_pptx_skill_correction_emitted"):
             return None
-        if _pptx_skill_read_seen(state) or _pptx_generator_invoked_seen(state):
+        valid_pptx_seen = self._has_valid_pptx_output(state)
+        skill_read_seen = _pptx_skill_read_seen(state)
+        generator_invoked_seen = _pptx_generator_invoked_seen(state)
+        image_invoked_seen = _image_generation_invoked_seen(state)
+        if valid_pptx_seen or generator_invoked_seen:
             return None
         non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0)
-        if non_artifact_turns < 3:
-            return None
         summaries = state.get("builder_tool_turn_summaries") or []
         recent_tool_names = [
             name
@@ -2736,30 +2926,62 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             for name in (summary.get("tool_names") or [])
             if isinstance(name, str)
         ]
-        drifted = any(name in {"write_file", "write_file_tool", "bash", "bash_tool", "str_replace", "str_replace_tool"} for name in recent_tool_names)
-        if not drifted:
+        drifted = any(
+            name in {
+                "write_file",
+                "write_file_tool",
+                "bash",
+                "bash_tool",
+                "str_replace",
+                "str_replace_tool",
+                "emit_builder_artifact",
+            }
+            for name in recent_tool_names
+        )
+        if not drifted and non_artifact_turns < 3:
             return None
         logger.warning(
-            "BuilderArtifact: presentation target drifting without ppt-generation skill; "
-            "injecting corrective directive turn=%d recent_tools=%s",
+            "BuilderArtifact: presentation target needs ppt-generation correction "
+            "turn=%d recent_tools=%s pptx_skill_read_seen=%s "
+            "pptx_generator_invoked=%s image_generation_invoked=%s "
+            "valid_pptx_seen=%s fallback_ext=%s write_file_missing_arg_count=%s",
             non_artifact_turns,
             ",".join(recent_tool_names[-6:]),
+            skill_read_seen,
+            generator_invoked_seen,
+            image_invoked_seen,
+            valid_pptx_seen,
+            _pptx_fallback_suffix(state).lstrip("."),
+            int(
+                (state.get("builder_write_diagnostics") or {}).get("error_count", 0)
+                if isinstance(state.get("builder_write_diagnostics"), dict)
+                else 0
+            ),
         )
         return {
             "messages": [
                 HumanMessage(
                     content=(
                         "[Sophia/presentation-skill correction]\n"
-                        "This is a PPTX slide-deck build. Stop ad hoc deck generation. "
-                        "Your next steps must follow the bundled ppt-generation workflow:\n"
-                        "1. read_file_tool('/mnt/skills/public/ppt-generation/SKILL.md')\n"
-                        "2. create the presentation plan and slide image prompts under /mnt/user-data/workspace/\n"
-                        "3. use /mnt/skills/public/image-generation/scripts/generate.py for slide images\n"
-                        "4. run /mnt/skills/public/ppt-generation/scripts/generate.py to compose the PPTX\n"
-                        "5. emit_builder_artifact only after the .pptx is a valid PowerPoint package.\n\n"
-                        "Do not emit placeholder/tiny/corrupt .pptx files, Python scripts, or test files. "
-                        "If image/deck generation cannot complete, write a real markdown/html fallback under "
-                        "/mnt/user-data/outputs/ and emit that as a degraded artifact."
+                        "This is a PPTX slide-deck build. Reading SKILL.md is useful, "
+                        "but it is not completion. Stop ad hoc deck generation, "
+                        "python-pptx scripts, `.py` files, and generic write_file loops.\n\n"
+                        "Your next safe workflow is:\n"
+                        "1. If you have not already done so, call "
+                        "`read_file(path='/mnt/skills/public/ppt-generation/SKILL.md')`.\n"
+                        "2. Create the slide plan/assets the skill expects under "
+                        "`/mnt/user-data/workspace/`.\n"
+                        "3. Generate slide images with "
+                        "`/mnt/skills/public/image-generation/scripts/generate.py`.\n"
+                        "4. Compose the deck by running "
+                        "`/mnt/skills/public/ppt-generation/scripts/generate.py`.\n"
+                        "5. Emit only after the `.pptx` exists and is a valid PowerPoint package.\n\n"
+                        "If image/deck generation cannot complete after this correction, create a real "
+                        f"{_pptx_fallback_suffix(state)} fallback under `/mnt/user-data/outputs/` with "
+                        "`write_file(description='fallback deck outline', path='/mnt/user-data/outputs/deck"
+                        f"{_pptx_fallback_suffix(state)}', content='...', append=False)`, then emit that "
+                        "fallback. Do not emit placeholder/tiny/corrupt `.pptx` files, Python scripts, "
+                        "or test files."
                     )
                 )
             ],
@@ -3265,6 +3487,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "has_emit_builder_artifact": True,
                             **pptx_skill_flags,
                         },
+                    )
+                    _log_pptx_diagnostics(
+                        phase="emit_accepted",
+                        state={**state, "builder_tool_turn_summaries": history},
+                        artifact_path=args.get("artifact_path"),
                     )
                     thread_data = state.get("thread_data") or {}
                     outputs_host_path = (

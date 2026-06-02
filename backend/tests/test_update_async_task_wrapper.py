@@ -417,15 +417,15 @@ def test_terminal_redirect_successful_keeps_artifact_delivered_claim(successful_
     assert "/mnt/user-data/outputs/recursive_llms.md" in response
 
 
-# ---- Codex P1: directive gates write_file_tool prescription by task_type --
+# ---- Codex P1: directive gates write_file prescription by target type --
 
 
-@pytest.mark.parametrize("binary_task_type", ["presentation", "visual_report"])
-def test_directive_binary_task_type_does_not_prescribe_write_file_tool(binary_task_type):
+@pytest.mark.parametrize("binary_task_type", ["visual_report"])
+def test_directive_binary_task_type_does_not_prescribe_write_file_for_binary(binary_task_type):
     """Codex P1 review 2026-05-22: binary deliverables (.pptx /.pdf)
-    cannot be authored by write_file_tool — they need a generator
+    cannot be authored by write_file — they need a generator
     script run via bash_tool. The directive must NOT tell the model
-    "MUST use write_file_tool" for these task_types."""
+    "MUST use write_file" for these task_types."""
     from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
 
     augmented = _augment_update_message(
@@ -433,8 +433,8 @@ def test_directive_binary_task_type_does_not_prescribe_write_file_tool(binary_ta
         tracked={"task_id": "t1", "task_type": binary_task_type},
         delegation_context={"task": "build the deck", "task_type": binary_task_type},
     )
-    # Anti-pattern guard: must NOT say "write_file_tool" can author the binary.
-    assert "MUST use write_file_tool" not in augmented
+    # Anti-pattern guard: must NOT say "write_file" can author the binary.
+    assert "MUST use write_file" not in augmented
     assert "extend via `append=True` chunks" not in augmented
     # Must instruct the script + bash approach.
     assert "BINARY" in augmented
@@ -444,10 +444,26 @@ def test_directive_binary_task_type_does_not_prescribe_write_file_tool(binary_ta
     assert "/mnt/user-data/outputs/" in augmented
 
 
+def test_directive_pptx_target_requires_presentation_skill_workflow():
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    augmented = _augment_update_message(
+        message="add a section on X",
+        tracked={"task_id": "t1", "task_type": "presentation"},
+        delegation_context={"task": "build the deck", "task_type": "presentation"},
+    )
+
+    assert "PPTX slide-deck update" in augmented
+    assert "/mnt/skills/public/ppt-generation/SKILL.md" in augmented
+    assert "/mnt/skills/public/image-generation/scripts/generate.py" in augmented
+    assert "/mnt/skills/public/ppt-generation/scripts/generate.py" in augmented
+    assert "write_file(description=..." in augmented
+
+
 @pytest.mark.parametrize("text_task_type", ["document", "research", "frontend"])
-def test_directive_text_task_type_keeps_write_file_tool_prescription(text_task_type):
+def test_directive_text_task_type_keeps_write_file_prescription(text_task_type):
     """Text deliverables (markdown, html, plain text) DO use
-    write_file_tool. The directive must keep the canonical write_file_tool
+    write_file. The directive must keep the canonical write_file
     guidance for those task_types."""
     from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
 
@@ -456,8 +472,10 @@ def test_directive_text_task_type_keeps_write_file_tool_prescription(text_task_t
         tracked={"task_id": "t1", "task_type": text_task_type},
         delegation_context={"task": "build the doc", "task_type": text_task_type},
     )
-    # Canonical write_file_tool prescription is present.
-    assert "write_file_tool" in augmented
+    # Canonical write_file prescription is present.
+    assert "write_file(description=" in augmented
+    assert "path=..." in augmented
+    assert "content=..." in augmented
     assert "append=True" in augmented
     # Binary-only prose is NOT mixed in.
     assert "BINARY" not in augmented
@@ -466,7 +484,7 @@ def test_directive_text_task_type_keeps_write_file_tool_prescription(text_task_t
 
 def test_directive_missing_task_type_defaults_to_text_branch():
     """When task_type is missing entirely, default to the text-output
-    branch (write_file_tool) so we don't accidentally tell a typical
+    branch (write_file) so we don't accidentally tell a typical
     markdown build to use a generator script."""
     from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
 
@@ -475,7 +493,7 @@ def test_directive_missing_task_type_defaults_to_text_branch():
         tracked={"task_id": "t1"},  # no task_type
         delegation_context={"task": "the brief"},  # no task_type
     )
-    assert "write_file_tool" in augmented
+    assert "write_file(description=" in augmented
     assert "append=True" in augmented
     assert "BINARY" not in augmented
 
@@ -490,7 +508,7 @@ def test_directive_unknown_task_type_defaults_to_text_branch():
         tracked={"task_id": "t1", "task_type": "exotic_unknown"},
         delegation_context={"task": "the brief", "task_type": "exotic_unknown"},
     )
-    assert "write_file_tool" in augmented
+    assert "write_file(description=" in augmented
     assert "BINARY" not in augmented
 
 
@@ -513,7 +531,7 @@ def test_directive_visual_report_html_target_uses_text_writer():
     )
 
     assert "Concrete file target: `/mnt/user-data/outputs/report.html`" in augmented
-    assert "write_file_tool" in augmented
+    assert "write_file(description=" in augmented
     assert "BINARY" not in augmented
     assert "generator script" not in augmented.lower()
 
@@ -660,7 +678,7 @@ def test_augment_preserves_html_output_for_visual_report_task_type():
     )
 
     assert "build-a-concise-html-file-document-with.html" in augmented
-    assert "write_file_tool" in augmented
+    assert "write_file(description=" in augmented
     assert "BINARY" not in augmented
 
 
