@@ -76,7 +76,6 @@ export function ArtifactCanvasViewport({
   reviewSurfaceState = "idle",
   rendererKind,
   pageIndex = 0,
-  pageCount = 1,
   zoom = 1,
   fitMode = "custom",
   onPageIndexChange,
@@ -220,7 +219,7 @@ export function ArtifactCanvasViewport({
       <div
         data-testid="artifact-canvas-bed"
         className={cn(
-          "relative isolate flex min-h-0 w-full flex-1 overflow-hidden bg-[color:color-mix(in_srgb,var(--cosmic-panel)_94%,var(--bg))]",
+          "relative isolate flex min-h-0 min-w-0 w-full flex-1 overflow-hidden bg-[color:color-mix(in_srgb,var(--cosmic-panel)_94%,var(--bg))]",
           reviewSurfaceState === "active"
             ? "shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--sophia-purple)_26%,transparent),inset_0_0_44px_color-mix(in_srgb,var(--sophia-purple)_10%,transparent)]"
             : reviewSurfaceState === "preparing"
@@ -235,20 +234,13 @@ export function ArtifactCanvasViewport({
               "linear-gradient(180deg, color-mix(in srgb, var(--cosmic-panel) 28%, transparent), transparent 26%), radial-gradient(circle at 18% 5%, color-mix(in srgb, var(--sophia-purple) 8%, transparent), transparent 32%), radial-gradient(circle at 84% 10%, color-mix(in srgb, var(--cosmic-teal) 5%, transparent), transparent 34%)",
           }}
         />
-        {canPreviewPdf && pageCount > 1 ? (
-          <ArtifactPageRail
-            pageCount={pageCount}
-            pageIndex={pageIndex}
-            onPageIndexChange={onPageIndexChange}
-          />
-        ) : null}
         <div
           ref={scrollAreaRef}
           data-testid="artifact-canvas-scroll-area"
           className={cn(
-            "relative z-10 flex min-h-0 w-full flex-1 overscroll-contain px-4 py-6 [-webkit-overflow-scrolling:touch] [scrollbar-gutter:stable] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--cosmic-border)] [&::-webkit-scrollbar-track]:bg-transparent sm:px-7 sm:py-7 lg:px-10",
+            "relative z-10 flex min-h-0 min-w-0 w-full flex-1 overscroll-contain px-4 py-6 [-webkit-overflow-scrolling:touch] [scrollbar-gutter:stable] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--cosmic-border)] [&::-webkit-scrollbar-track]:bg-transparent sm:px-7 sm:py-7 lg:px-10",
             canPreviewPdf
-              ? "items-start overflow-auto"
+              ? "items-stretch overflow-hidden"
               : "flex-col items-stretch overflow-y-auto",
           )}
           style={{ scrollbarColor: "var(--cosmic-border) transparent" }}
@@ -271,6 +263,7 @@ export function ArtifactCanvasViewport({
               fitMode={fitMode}
               fitBounds={canvasBedBounds}
               typeLabel={typeLabel}
+              onPageIndexChange={onPageIndexChange}
               onPageCountChange={onPageCountChange}
               onRenderStatusChange={handlePdfCaptureStatusChange}
             />
@@ -295,51 +288,6 @@ export function ArtifactCanvasViewport({
         />
       ) : null}
     </div>
-  )
-}
-
-function ArtifactPageRail({
-  pageCount,
-  pageIndex,
-  onPageIndexChange,
-}: {
-  pageCount: number
-  pageIndex: number
-  onPageIndexChange?: (pageIndex: number) => void
-}) {
-  const pages = Array.from({ length: Math.min(80, Math.max(0, pageCount)) }, (_, index) => index)
-
-  if (pages.length <= 1) {
-    return null
-  }
-
-  return (
-    <aside
-      data-testid="artifact-page-rail"
-      aria-label="PDF pages"
-      className="relative z-10 hidden w-16 shrink-0 flex-col gap-2 overflow-y-auto border-r border-[color:var(--cosmic-border-soft)] bg-[color:color-mix(in_srgb,var(--cosmic-panel)_92%,var(--bg))] px-2 py-4 [scrollbar-gutter:stable] sm:flex"
-    >
-      {pages.map((index) => {
-        const selected = index === pageIndex
-        return (
-          <button
-            key={index}
-            type="button"
-            aria-label={`Page ${index + 1}`}
-            aria-current={selected ? "page" : undefined}
-            onClick={() => onPageIndexChange?.(index)}
-            className={cn(
-              "cosmic-focus-ring flex h-9 w-full items-center justify-center rounded-md border text-xs font-medium transition",
-              selected
-                ? "border-[color:color-mix(in_srgb,var(--sophia-purple)_50%,var(--cosmic-border-soft))] bg-[color:color-mix(in_srgb,var(--sophia-purple)_16%,transparent)] text-[color:var(--sophia-purple)]"
-                : "border-[color:var(--cosmic-border-soft)] bg-[color:color-mix(in_srgb,var(--cosmic-panel-soft)_82%,transparent)] text-[color:var(--cosmic-text-muted)] hover:text-[color:var(--cosmic-text)]",
-            )}
-          >
-            {index + 1}
-          </button>
-        )
-      })}
-    </aside>
   )
 }
 

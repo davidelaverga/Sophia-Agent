@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import type { ComponentProps } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -61,12 +61,25 @@ function immediateRenderTask() {
   }
 }
 
+type MockPdfRenderParams = {
+  canvas?: HTMLCanvasElement
+}
+
+type MockPdfRenderTask = {
+  promise: Promise<void>
+  cancel: ReturnType<typeof vi.fn>
+}
+
+function isThumbnailRender(params: unknown): boolean {
+  return (params as MockPdfRenderParams).canvas?.dataset.artifactPdfThumbnail === "true"
+}
+
 function mockPdfDocument({
   pageCount = 3,
   renderTaskForPage = () => immediateRenderTask(),
 }: {
   pageCount?: number
-  renderTaskForPage?: (pageNumber: number) => { promise: Promise<void>; cancel: ReturnType<typeof vi.fn> }
+  renderTaskForPage?: (pageNumber: number, params: unknown) => MockPdfRenderTask
 } = {}) {
   const fetchPdf = vi.spyOn(globalThis, "fetch").mockResolvedValue(
     new Response(pdfBytes.slice(), {
@@ -79,13 +92,14 @@ function mockPdfDocument({
     height: 800 * scale,
     scale,
   }))
-  const render = vi.fn((pageNumber: number, _params: unknown) => renderTaskForPage(pageNumber))
+  const render = vi.fn((pageNumber: number, params: unknown) => renderTaskForPage(pageNumber, params))
   const getPage = vi.fn(async (pageNumber: number) => ({
     getViewport,
     render: (params: unknown) => render(pageNumber, params),
   }))
   const pdfDocument = {
     numPages: pageCount,
+    fingerprints: [`mock-pdf-${pageCount}`],
     getPage,
   }
   const getDocument = vi.fn(() => ({
@@ -168,7 +182,95 @@ describe("ArtifactPdfPreview", () => {
     expect(canvas).toHaveAttribute("height", "1000")
     expect(canvas.style.width).toBe("750px")
     expect(canvas.style.height).toBe("1000px")
-    expect(pdf.render).toHaveBeenLastCalledWith(1, expect.objectContaining({ canvas }))
+    expect(pdf.render).toHaveBeenCalledWith(1, expect.objectContaining({ canvas }))
+  })
+
+  it("keeps the zoomed PDF page inside an internal pan layer", async () => {
+    mockPdfDocument({ pageCount: 2 })
+    renderPreview({
+      fitMode: "custom",
+      zoom: 1.8,
+      fitBounds: { width: 760, height: 620 },
+    })
+
+    const canvas = await screen.findByLabelText("PDF page 1")
+    await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-pdf-scale", "1.8"))
+
+    const documentPage = screen.getByTestId("artifact-document-page")
+    const panLayer = screen.getByTestId("artifact-pdf-pan-layer")
+    const scrollContent = screen.getByTestId("artifact-pdf-scroll-content")
+    const pageFrame = screen.getByTestId("artifact-pdf-page-frame")
+    const rail = screen.getByTestId("artifact-page-rail")
+
+    expect(documentPage.className).toContain("overflow-hidden")
+    expect(documentPage.className).not.toContain("overflow-visible")
+    expect(panLayer.className).toContain("overflow-auto")
+    expect(panLayer.style.scrollbarColor).toBe("var(--cosmic-border) transparent")
+    expect(scrollContent.className).toContain("w-max")
+    expect(pageFrame.style.width).toBe("1080px")
+    expect(pageFrame.style.height).toBe("1440px")
+    expect(documentPage).toContainElement(rail)
+    expect(panLayer).not.toContainElement(rail)
+  })
+
+  it("renders PDF page thumbnails and selects pages from the rail", async () => {
+    const onPageIndexChange = vi.fn()
+    const pdf = mockPdfDocument({ pageCount: 2 })
+    const { rerenderPreview } = renderPreview({ onPageIndexChange })
+
+    const rail = await screen.findByTestId("artifact-page-rail")
+    await waitFor(() => {
+      expect(within(rail).getAllByTestId("artifact-pdf-thumbnail-canvas")).toHaveLength(2)
+      expect(
+        within(rail)
+          .getAllByTestId("artifact-pdf-thumbnail-canvas")
+          .map((canvas) => canvas.getAttribute("data-artifact-pdf-thumbnail-page-number")),
+      ).toEqual(["1", "2"])
+    })
+    expect(pdf.render).toHaveBeenCalledWith(
+      2,
+      expect.objectContaining({
+        canvas: expect.objectContaining({
+          dataset: expect.objectContaining({
+            artifactPdfThumbnail: "true",
+            artifactPdfThumbnailPageNumber: "2",
+          }),
+        }),
+      }),
+    )
+
+    const pageOneButton = within(rail).getByLabelText("Page 1")
+    const pageTwoButton = within(rail).getByLabelText("Page 2")
+    expect(pageOneButton).toHaveAttribute("aria-current", "page")
+    expect(pageOneButton.className).toContain("ring-2")
+
+    fireEvent.click(pageTwoButton)
+    expect(onPageIndexChange).toHaveBeenCalledWith(1)
+
+    rerenderPreview({ pageIndex: 1, onPageIndexChange })
+    await waitFor(() => expect(pdf.getPage).toHaveBeenCalledWith(2))
+    expect(await screen.findByLabelText("PDF page 2")).toHaveAttribute("data-artifact-page-number", "2")
+    expect(within(rail).getByLabelText("Page 2")).toHaveAttribute("aria-current", "page")
+  })
+
+  it("falls back to numbered page buttons when thumbnail rendering fails", async () => {
+    mockPdfDocument({
+      pageCount: 2,
+      renderTaskForPage: (_pageNumber, params) => (
+        isThumbnailRender(params)
+          ? { promise: Promise.reject(new Error("thumbnail failed")), cancel: vi.fn() }
+          : immediateRenderTask()
+      ),
+    })
+
+    renderPreview()
+
+    const rail = await screen.findByTestId("artifact-page-rail")
+    await waitFor(() => {
+      expect(within(rail).getAllByTestId("artifact-pdf-thumbnail-fallback")).toHaveLength(2)
+    })
+    expect(within(rail).getByLabelText("Page 1")).toHaveAttribute("aria-current", "page")
+    expect(within(rail).getByLabelText("Page 2")).toBeInTheDocument()
   })
 
   it("renders next and previous pages without stale cancellation blanking the current canvas", async () => {
@@ -177,7 +279,11 @@ describe("ArtifactPdfPreview", () => {
     let firstPageRenderCount = 0
     const firstCancel = vi.fn(() => firstRender.reject(pdfCancelError()))
     const pdf = mockPdfDocument({
-      renderTaskForPage: (pageNumber) => {
+      renderTaskForPage: (pageNumber, params) => {
+        if (isThumbnailRender(params)) {
+          return immediateRenderTask()
+        }
+
         if (pageNumber === 1) {
           firstPageRenderCount += 1
           return firstPageRenderCount === 1

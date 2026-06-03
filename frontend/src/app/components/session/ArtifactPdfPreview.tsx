@@ -10,6 +10,7 @@ import { cn } from "../../lib/utils"
 import type { BuilderArtifactFileV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 
 import type { ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
+import { ArtifactPdfPageRail } from "./ArtifactPdfPageRail"
 
 interface ArtifactPdfPreviewProps {
   artifact: BuilderArtifactV1
@@ -21,6 +22,7 @@ interface ArtifactPdfPreviewProps {
   zoom: number
   fitMode: ArtifactFitMode
   fitBounds?: { width: number; height: number }
+  onPageIndexChange?: (pageIndex: number) => void
   onPageCountChange?: (pageCount: number) => void
   onRenderStatusChange?: (status: ArtifactVisualCaptureStatus) => void
 }
@@ -58,6 +60,7 @@ export function ArtifactPdfPreview({
   zoom,
   fitMode,
   fitBounds,
+  onPageIndexChange,
   onPageCountChange,
   onRenderStatusChange,
 }: ArtifactPdfPreviewProps) {
@@ -305,11 +308,11 @@ export function ArtifactPdfPreview({
     <div
       data-testid="artifact-document-page"
       data-renderer-kind="pdf"
-      className="mx-auto flex min-h-full w-full min-w-[min(100%,320px)] max-w-none flex-col overflow-visible rounded-lg border bg-[color:color-mix(in_srgb,var(--card-bg)_96%,var(--cosmic-panel-soft))] shadow-[0_18px_54px_color-mix(in_srgb,var(--bg)_34%,transparent),0_1px_0_color-mix(in_srgb,white_26%,transparent)_inset]"
+      className="mx-auto flex h-full min-h-[320px] w-full min-w-0 max-w-none flex-col overflow-hidden rounded-lg border bg-[color:color-mix(in_srgb,var(--card-bg)_96%,var(--cosmic-panel-soft))] shadow-[0_18px_54px_color-mix(in_srgb,var(--bg)_34%,transparent),0_1px_0_color-mix(in_srgb,white_26%,transparent)_inset]"
       style={{ borderColor: "var(--cosmic-border-soft)" }}
       aria-label="Artifact PDF preview"
     >
-      <div className="flex items-center justify-between gap-4 border-b border-[color:var(--cosmic-border-soft)] px-5 py-4 sm:px-6">
+      <div className="flex shrink-0 items-center justify-between gap-4 border-b border-[color:var(--cosmic-border-soft)] px-5 py-4 sm:px-6">
         <div className="min-w-0">
           <span className="inline-flex items-center gap-1.5 rounded-full border border-[color:var(--cosmic-border-soft)] px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-[color:var(--cosmic-text-muted)]">
             <Layers className="h-3.5 w-3.5" aria-hidden="true" />
@@ -322,47 +325,64 @@ export function ArtifactPdfPreview({
         <FileText className="h-7 w-7 shrink-0 text-[color:var(--cosmic-text-faint)]" aria-hidden="true" />
       </div>
 
-      <div
-        ref={pageHostRef}
-        className="relative flex min-h-[320px] flex-1 items-start justify-center overflow-visible bg-[#ebe7f0] px-4 py-5 sm:px-7 sm:py-7"
-      >
-        {documentState.status === "loading" || pageRenderState === "loading" ? (
-          <PdfPreviewState title="Preparing PDF view" body="You can still open or download the artifact." />
-        ) : null}
-
-        {documentState.status === "failed" || pageRenderState === "failed" ? (
-          <PdfPreviewState title="Preview unavailable" body="Open or download the artifact to view the PDF." />
-        ) : null}
-
-        <div
-          data-testid="artifact-pdf-page-frame"
-          className={cn(
-            "relative shrink-0 overflow-hidden rounded-sm bg-white shadow-[0_18px_50px_rgba(25,19,35,0.28)]",
-            showCanvas ? "block" : "hidden",
-            pageRenderState !== "ready" && "opacity-35",
-          )}
-          style={{
-            minWidth: pageSize ? `${pageSize.width}px` : undefined,
-            height: pageSize ? `${pageSize.height}px` : undefined,
-          }}
-        >
-          <canvas
-            ref={canvasRef}
-            data-testid="artifact-pdf-page-canvas"
-            data-artifact-region="true"
-            data-coreview-artifact-region="true"
-            data-artifact-id={artifactId ?? undefined}
-            data-coreview-artifact-id={artifactId ?? undefined}
-            data-artifact-canvas={artifactId ? "true" : undefined}
-            data-coreview-artifact-canvas={artifactId ? "true" : undefined}
-            data-artifact-canvas-source="selected-pdf-page"
-            data-artifact-page-index={String(pageIndex)}
-            data-artifact-page-number={String(pageNumber)}
-            data-artifact-fit-mode={fitMode}
-            data-artifact-zoom={String(clampArtifactZoom(zoom))}
-            aria-label={`PDF page ${pageNumber}`}
-            className="block bg-white"
+      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+        {documentState.status === "ready" ? (
+          <ArtifactPdfPageRail
+            document={documentState.document}
+            pageCount={documentState.document.numPages}
+            pageIndex={pageIndex}
+            onPageIndexChange={onPageIndexChange}
           />
+        ) : null}
+        <div
+          ref={pageHostRef}
+          data-testid="artifact-pdf-pan-layer"
+          className="relative min-h-0 min-w-0 flex-1 overflow-auto bg-[#ebe7f0] [scrollbar-gutter:stable] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--cosmic-border)] [&::-webkit-scrollbar-track]:bg-transparent"
+          style={{ scrollbarColor: "var(--cosmic-border) transparent" }}
+        >
+          {documentState.status === "loading" || pageRenderState === "loading" ? (
+            <PdfPreviewState title="Preparing PDF view" body="You can still open or download the artifact." />
+          ) : null}
+
+          {documentState.status === "failed" || pageRenderState === "failed" ? (
+            <PdfPreviewState title="Preview unavailable" body="Open or download the artifact to view the PDF." />
+          ) : null}
+
+          <div
+            data-testid="artifact-pdf-scroll-content"
+            className="relative z-0 flex min-h-full min-w-full w-max items-start justify-center px-4 py-5 sm:px-7 sm:py-7"
+          >
+            <div
+              data-testid="artifact-pdf-page-frame"
+              className={cn(
+                "relative shrink-0 overflow-hidden rounded-sm bg-white shadow-[0_18px_50px_rgba(25,19,35,0.28)]",
+                showCanvas ? "block" : "hidden",
+                pageRenderState !== "ready" && "opacity-35",
+              )}
+              style={{
+                width: pageSize ? `${pageSize.width}px` : undefined,
+                height: pageSize ? `${pageSize.height}px` : undefined,
+              }}
+            >
+              <canvas
+                ref={canvasRef}
+                data-testid="artifact-pdf-page-canvas"
+                data-artifact-region="true"
+                data-coreview-artifact-region="true"
+                data-artifact-id={artifactId ?? undefined}
+                data-coreview-artifact-id={artifactId ?? undefined}
+                data-artifact-canvas={artifactId ? "true" : undefined}
+                data-coreview-artifact-canvas={artifactId ? "true" : undefined}
+                data-artifact-canvas-source="selected-pdf-page"
+                data-artifact-page-index={String(pageIndex)}
+                data-artifact-page-number={String(pageNumber)}
+                data-artifact-fit-mode={fitMode}
+                data-artifact-zoom={String(clampArtifactZoom(zoom))}
+                aria-label={`PDF page ${pageNumber}`}
+                className="block bg-white"
+              />
+            </div>
+          </div>
         </div>
       </div>
     </div>

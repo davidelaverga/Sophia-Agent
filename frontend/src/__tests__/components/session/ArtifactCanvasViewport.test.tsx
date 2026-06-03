@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react"
+import { render, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { ArtifactCanvasViewport } from "../../../app/components/session/ArtifactCanvasViewport"
@@ -29,6 +29,50 @@ const markdownArtifact = {
   artifactPath: "mnt/user-data/outputs/launch-brief.md",
 } satisfies BuilderArtifactV1
 const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46])
+
+function mockCanvasApis() {
+  const context = {
+    clearRect: vi.fn(),
+  } as unknown as CanvasRenderingContext2D
+
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(context)
+}
+
+function mockPdfDocument({ pageCount = 2 }: { pageCount?: number } = {}) {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(pdfBytes.slice(), {
+      status: 200,
+      headers: { "Content-Type": "application/pdf" },
+    }),
+  )
+  const getViewport = vi.fn(({ scale }: { scale: number }) => ({
+    width: 600 * scale,
+    height: 800 * scale,
+    scale,
+  }))
+  const render = vi.fn(() => ({
+    promise: Promise.resolve(),
+    cancel: vi.fn(),
+  }))
+  const getPage = vi.fn(async () => ({
+    getViewport,
+    render,
+  }))
+  const getDocument = vi.fn(() => ({
+    promise: Promise.resolve({
+      numPages: pageCount,
+      fingerprints: [`viewport-pdf-${pageCount}`],
+      getPage,
+    }),
+    destroy: vi.fn(),
+  }))
+
+  vi.mocked(loadPdfJs).mockResolvedValue({
+    getDocument,
+  } as unknown as Awaited<ReturnType<typeof loadPdfJs>>)
+
+  return { getDocument, getPage, getViewport, render }
+}
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -101,6 +145,49 @@ describe("ArtifactCanvasViewport", () => {
     expect(canvasBed).toContainElement(screen.getByTestId("artifact-preview-state"))
     expect(within(previewRegion).getByText("Preparing PDF view")).toBeInTheDocument()
     expect(screen.getByTestId("artifact-preview-state").className).not.toMatch(/\bfixed\b|\binset-0\b/)
+  })
+
+  it("keeps the PDF rail fixed while the PDF pan layer owns zoom overflow", async () => {
+    mockCanvasApis()
+    const pdf = mockPdfDocument({ pageCount: 2 })
+
+    render(
+      <ArtifactCanvasViewport
+        artifact={pdfArtifact}
+        files={[{
+          path: "mnt/user-data/outputs/launch-brief.pdf",
+          name: "launch-brief.pdf",
+          label: "launch-brief.pdf",
+          isPrimary: true,
+          mimeType: "application/pdf",
+        }]}
+        typeLabel="Document"
+        previewHref="/artifact.pdf"
+        pageIndex={0}
+        pageCount={2}
+        zoom={1.6}
+        fitMode="custom"
+      />,
+    )
+
+    const canvas = await screen.findByLabelText("PDF page 1")
+    await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-pdf-scale", "1.6"))
+
+    const canvasBed = screen.getByTestId("artifact-canvas-bed")
+    const scrollArea = screen.getByTestId("artifact-canvas-scroll-area")
+    const documentPage = screen.getByTestId("artifact-document-page")
+    const panLayer = screen.getByTestId("artifact-pdf-pan-layer")
+    const rail = screen.getByTestId("artifact-page-rail")
+
+    expect(canvasBed.className).toContain("overflow-hidden")
+    expect(scrollArea.className).toContain("overflow-hidden")
+    expect(scrollArea.className).toContain("min-w-0")
+    expect(documentPage.className).toContain("overflow-hidden")
+    expect(panLayer.className).toContain("overflow-auto")
+    expect(documentPage).toContainElement(rail)
+    expect(panLayer).not.toContainElement(rail)
+    expect(within(rail).getAllByTestId("artifact-pdf-thumbnail-canvas")).toHaveLength(2)
+    await waitFor(() => expect(pdf.getPage).toHaveBeenCalledWith(2))
   })
 
   it("keeps markdown loading state inside the canvas bed", async () => {

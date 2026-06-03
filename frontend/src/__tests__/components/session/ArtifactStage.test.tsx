@@ -108,6 +108,7 @@ function mockPdfDocument({
   }))
   const pdfDocument = {
     numPages: pageCount,
+    fingerprints: [`stage-pdf-${pageCount}`],
     getPage,
   }
   const getDocument = vi.fn(() => ({
@@ -311,7 +312,11 @@ describe("ArtifactStage", () => {
     await waitFor(() => expect(pdf.getPage).toHaveBeenCalledWith(1))
     expect(screen.getByLabelText("Previous page")).toBeDisabled()
     expect(screen.getByLabelText("Next page")).toBeEnabled()
-    expect(screen.getByTestId("artifact-page-rail")).toBeInTheDocument()
+    const pageRail = screen.getByTestId("artifact-page-rail")
+    expect(pageRail).toBeInTheDocument()
+    await waitFor(() => {
+      expect(within(pageRail).getAllByTestId("artifact-pdf-thumbnail-canvas")).toHaveLength(3)
+    })
 
     await user.click(screen.getByLabelText("Next page"))
     expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument()
@@ -337,8 +342,17 @@ describe("ArtifactStage", () => {
 
     const stage = screen.getByRole("region", { name: /generated artifact/i })
     const canvas = await screen.findByLabelText("PDF page 1")
+    const canvasBed = screen.getByTestId("artifact-canvas-bed")
+    const scrollArea = screen.getByTestId("artifact-canvas-scroll-area")
+    const panLayer = screen.getByTestId("artifact-pdf-pan-layer")
+    const pageRail = screen.getByTestId("artifact-page-rail")
+
     expect(await screen.findByText("Fit page")).toBeInTheDocument()
     await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-pdf-scale", "0.72"))
+    expect(canvasBed.className).toContain("overflow-hidden")
+    expect(scrollArea.className).toContain("overflow-hidden")
+    expect(panLayer.className).toContain("overflow-auto")
+    expect(panLayer).not.toContainElement(pageRail)
     expect(stage).toHaveAttribute("data-artifact-view-signature", expect.stringContaining("fit:page"))
     await user.click(screen.getByLabelText("Zoom in"))
     expect(await screen.findByText("120%")).toBeInTheDocument()
@@ -352,6 +366,8 @@ describe("ArtifactStage", () => {
     expect(await screen.findByText("Fit width")).toBeInTheDocument()
     await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-fit-mode", "width"))
     await waitFor(() => expect(Number(canvas.getAttribute("data-artifact-pdf-scale"))).toBeCloseTo(1.35, 2))
+    expect(screen.getByTestId("artifact-pdf-page-frame").style.width).not.toBe("")
+    expect(screen.getByTestId("artifact-pdf-page-frame").style.height).not.toBe("")
     await user.click(screen.getByLabelText("Fit page"))
     expect(await screen.findByText("Fit page")).toBeInTheDocument()
     await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-pdf-scale", "0.72"))
@@ -695,6 +711,8 @@ describe("ArtifactStage", () => {
     expect(canvasBed.className).toContain("flex-1")
     expect(scrollArea.className).toContain("overflow-y-auto")
     expect(documentPage.className).toContain("max-w-[1120px]")
+    expect(screen.queryByTestId("artifact-page-rail")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("artifact-pdf-thumbnail-canvas")).not.toBeInTheDocument()
     expect(toolbar).not.toBe(scrollArea)
     expect(scrollArea).not.toContainElement(toolbar)
     expect(screen.getByRole("button", { name: /review with sophia/i })).toBeInTheDocument()
