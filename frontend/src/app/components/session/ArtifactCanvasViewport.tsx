@@ -147,14 +147,14 @@ export function ArtifactCanvasViewport({
     <div
       data-testid="artifact-canvas-viewport"
       className={cn(
-        "relative z-10 flex min-h-[360px] max-h-full flex-col overflow-hidden bg-[color:color-mix(in_srgb,var(--cosmic-panel-soft)_72%,var(--bg))]",
+        "relative z-10 flex min-h-[360px] max-h-full flex-col overflow-hidden bg-[color:color-mix(in_srgb,var(--cosmic-panel)_96%,var(--bg))]",
         className,
       )}
     >
       <div
         data-testid="artifact-canvas-bed"
         className={cn(
-          "relative flex min-h-0 w-full flex-1 overflow-hidden bg-[color:color-mix(in_srgb,var(--cosmic-panel-soft)_78%,var(--bg))]",
+          "relative isolate flex min-h-0 w-full flex-1 overflow-hidden bg-[color:color-mix(in_srgb,var(--cosmic-panel)_94%,var(--bg))]",
           reviewSurfaceState === "active"
             ? "shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--sophia-purple)_26%,transparent),inset_0_0_44px_color-mix(in_srgb,var(--sophia-purple)_10%,transparent)]"
             : reviewSurfaceState === "preparing"
@@ -171,7 +171,7 @@ export function ArtifactCanvasViewport({
         />
         <div
           data-testid="artifact-canvas-scroll-area"
-          className="scrollbar-thin relative z-10 flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-5 sm:px-6 sm:py-6 lg:px-8"
+          className="scrollbar-thin relative z-10 flex min-h-0 w-full flex-1 flex-col items-stretch overflow-y-auto overscroll-contain px-4 py-6 sm:px-7 sm:py-7 lg:px-10"
         >
           {canPreviewMarkdown ? (
             <MarkdownDocumentPage
@@ -294,7 +294,7 @@ function MarkdownDocumentPage({
   return (
     <div
       data-testid="artifact-document-page"
-      className="mx-auto flex min-h-full w-full max-w-[980px] flex-col rounded-lg border bg-[color:color-mix(in_srgb,var(--card-bg)_94%,var(--cosmic-panel-soft))] shadow-[0_18px_54px_color-mix(in_srgb,var(--bg)_34%,transparent)]"
+      className="mx-auto flex min-h-full w-full max-w-[1120px] flex-col overflow-hidden rounded-lg border bg-[color:color-mix(in_srgb,var(--card-bg)_96%,var(--cosmic-panel-soft))] shadow-[0_18px_54px_color-mix(in_srgb,var(--bg)_34%,transparent),0_1px_0_color-mix(in_srgb,white_26%,transparent)_inset]"
       style={{ borderColor: "var(--cosmic-border-soft)" }}
       aria-label="Artifact document preview"
     >
@@ -706,7 +706,7 @@ function ArtifactMetadataPage({
   return (
     <div
       data-testid="artifact-document-page"
-      className="mx-auto flex min-h-full w-full max-w-[860px] flex-col rounded-lg border bg-[color:color-mix(in_srgb,var(--card-bg)_92%,var(--cosmic-panel-soft))] px-5 py-6 shadow-[0_18px_54px_color-mix(in_srgb,var(--bg)_34%,transparent)] sm:px-7 sm:py-7"
+      className="mx-auto flex min-h-full w-full max-w-[960px] flex-col rounded-lg border bg-[color:color-mix(in_srgb,var(--card-bg)_94%,var(--cosmic-panel-soft))] px-5 py-6 shadow-[0_18px_54px_color-mix(in_srgb,var(--bg)_34%,transparent),0_1px_0_color-mix(in_srgb,white_24%,transparent)_inset] sm:px-7 sm:py-7"
       style={{ borderColor: "var(--cosmic-border-soft)" }}
       aria-label="Artifact document preview"
     >
@@ -792,7 +792,7 @@ function PreviewStateCard({
       role="status"
       aria-live="polite"
       data-testid="artifact-preview-state"
-      className="flex min-h-[220px] flex-1 flex-col items-center justify-center rounded-lg border border-[color:var(--cosmic-border-soft)] bg-[color:color-mix(in_srgb,var(--cosmic-panel-soft)_68%,transparent)] px-6 text-center"
+      className="flex min-h-[260px] flex-1 flex-col items-center justify-center px-6 text-center"
     >
       <p className="text-sm font-medium text-[color:var(--cosmic-text-strong)]">{title}</p>
       <p className="mt-2 max-w-[320px] text-sm leading-relaxed text-[color:var(--cosmic-text-muted)]">

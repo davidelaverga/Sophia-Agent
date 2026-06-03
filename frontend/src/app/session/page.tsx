@@ -1166,6 +1166,10 @@ function SessionPageContent() {
     && showArtifacts
     && showArtifactsUi
     && (Boolean(builderArtifact) || hasBuilderArtifactLibrary);
+  const showVoiceArtifactStage = focusMode !== 'text'
+    && showArtifacts
+    && showArtifactsUi
+    && (Boolean(builderArtifact) || hasBuilderArtifactLibrary);
   const showInlineTextArtifactsPanel = focusMode === 'text'
     && showArtifacts
     && showArtifactsUi
@@ -1320,7 +1324,7 @@ function SessionPageContent() {
             with the original task brief inline. We only fall through to the
             running BuilderTaskNotice while the task is still in flight.
           */}
-          {focusMode === 'text' && builderCompletionForDisplay && (
+          {focusMode === 'text' && !showTextArtifactStage && builderCompletionForDisplay && (
             <BuilderCompletionCard
               event={builderCompletionForDisplay}
               onOpen={handleBuilderCompletionPreview}
@@ -1330,6 +1334,7 @@ function SessionPageContent() {
             />
           )}
           {focusMode === 'text'
+            && !showTextArtifactStage
             && !builderCompletionForDisplay
             && showBuilderTaskNotice
             && builderTask && (
@@ -1383,7 +1388,7 @@ function SessionPageContent() {
           )}
 
           {/* PR-B: voice-mode equivalent of the completion card. */}
-          {focusMode !== 'text' && builderCompletionForDisplay && (
+          {focusMode !== 'text' && !showVoiceArtifactStage && builderCompletionForDisplay && (
             <div
               className="fixed left-1/2 -translate-x-1/2 z-40"
               style={{ bottom: '180px', opacity: voiceBuilderChromeOpacity, transition: 'opacity 0.6s ease' }}
@@ -1399,6 +1404,7 @@ function SessionPageContent() {
             </div>
           )}
           {focusMode !== 'text'
+            && !showVoiceArtifactStage
             && !builderCompletionForDisplay
             && showBuilderTaskNotice
             && builderTask && (

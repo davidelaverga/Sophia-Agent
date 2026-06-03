@@ -49,7 +49,7 @@ describe("ArtifactCanvasViewport", () => {
     expect(scrollArea).toContainElement(documentPage)
     expect(canvasBed.className).toContain("sophia-purple")
     expect(documentPage.className).toContain("min-h-full")
-    expect(documentPage.className).toContain("max-w-[860px]")
+    expect(documentPage.className).toContain("max-w-[960px]")
   })
 
   it("keeps markdown loading state inside the canvas bed", async () => {

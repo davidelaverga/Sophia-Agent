@@ -238,7 +238,30 @@ describe("Coreview artifact still-frame review", () => {
     expect(artifactRegion.className).toContain("w-full")
     expect(artifactRegion.className).toContain("flex-1")
     expect(within(artifactRegion).getByTestId("artifact-canvas-bed").className).toContain("flex-1")
-    expect(within(artifactRegion).getByTestId("artifact-document-page").className).toContain("max-w-[860px]")
+    expect(within(artifactRegion).getByTestId("artifact-document-page").className).toContain("max-w-[960px]")
+  })
+
+  it("isolates a selected builder artifact from companion copy and secondary file rows", async () => {
+    renderPanel({
+      artifacts: COMPANION_ARTIFACTS,
+      builderArtifact: BUILDER_ARTIFACT,
+      builderArtifactLibrary: [{
+        path: "mnt/user-data/outputs/launch-brief.pdf",
+        name: "launch-brief.pdf",
+        mimeType: "application/pdf",
+      }],
+      selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.pdf",
+    })
+
+    const artifactRegion = await screen.findByRole("region", { name: /generated artifact/i })
+
+    expect(artifactRegion).toBeInTheDocument()
+    expect(screen.queryByText("Focus on the big picture first.")).not.toBeInTheDocument()
+    expect(screen.queryByText("What changed after you named the constraint?")).not.toBeInTheDocument()
+    expect(screen.queryByText("The user notices when planning becomes avoidance.")).not.toBeInTheDocument()
+    expect(screen.queryByText("Session files")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("coreview-companion-artifact-canvas")).not.toBeInTheDocument()
+    expect(screen.getAllByRole("region", { name: /generated artifact/i })).toHaveLength(1)
   })
 
   it("records selected builder stage identity with Coreview off without activating companion review", async () => {

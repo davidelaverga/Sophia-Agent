@@ -496,6 +496,8 @@ export function PresenceArtifactPanel({
 
   const isActive = phase === "visible"
   const isTextModeBuilderStage = !isVoiceMode && hasBuilder
+  const builderStageActive = hasBuilder && Boolean(stageBuilderArtifact)
+  const showSecondaryArtifactSurfaces = !builderStageActive
 
   // Presence-reactive bloom color
   const bloomColor =
@@ -651,7 +653,7 @@ export function PresenceArtifactPanel({
           </div>
         )}
 
-        {hasBuilderLibrary && !(isVoiceMode && hasBuilder) && (
+        {hasBuilderLibrary && showSecondaryArtifactSurfaces && (
           <div
             className={cn(
               cn(stageBuilderArtifact ? "mt-4" : ""),
@@ -752,6 +754,7 @@ export function PresenceArtifactPanel({
           </div>
         )}
 
+        {showSecondaryArtifactSurfaces ? (
         <div ref={setDomArtifactRoot}>
           {showDomArtifactCoReview && artifacts ? (
             <CoreviewCompanionArtifactCanvas
@@ -924,6 +927,7 @@ export function PresenceArtifactPanel({
             </div>
           )}
         </div>
+        ) : null}
       </div>
     </div>
   )

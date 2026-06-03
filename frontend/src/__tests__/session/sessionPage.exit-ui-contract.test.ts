@@ -74,14 +74,18 @@ describe('session page exit UI contract', () => {
     expect(source).toContain('session-text-split-workspace');
     expect(source).toContain('session-conversation-area');
     expect(source).toContain('session-artifact-stage-area');
-    expect(source).toContain('lg:grid-cols-[minmax(420px,0.42fr)_minmax(620px,1fr)]');
+    expect(source).toContain('lg:grid-cols-[minmax(360px,0.38fr)_minmax(0,1fr)]');
+    expect(source).toContain('xl:grid-cols-[minmax(420px,0.34fr)_minmax(720px,1fr)]');
   });
 
   it('keeps text-mode builder preview to one artifact surface while voice mode uses the same source props', () => {
     const source = readAppFile('app/session/page.tsx');
 
     expect(source).toContain('const showInlineTextArtifactsPanel = focusMode === \'text\'');
+    expect(source).toContain('const showVoiceArtifactStage = focusMode !== \'text\'');
     expect(source).toContain('&& !showTextArtifactStage');
+    expect(source).toContain('focusMode === \'text\' && !showTextArtifactStage && builderCompletionForDisplay');
+    expect(source).toContain('focusMode !== \'text\' && !showVoiceArtifactStage && builderCompletionForDisplay');
     expect(source).toContain('{showTextArtifactStage && (');
     expect(source).toContain("{focusMode !== 'text' && (");
     expect(source).toContain('<VoiceFirstComposer');
