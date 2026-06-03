@@ -27,6 +27,7 @@ const pdfFile = {
   isPrimary: true,
   mimeType: "application/pdf",
 }
+const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37])
 
 function mockCanvasApis() {
   const context = {
@@ -67,6 +68,12 @@ function mockPdfDocument({
   pageCount?: number
   renderTaskForPage?: (pageNumber: number) => { promise: Promise<void>; cancel: ReturnType<typeof vi.fn> }
 } = {}) {
+  const fetchPdf = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(pdfBytes.slice(), {
+      status: 200,
+      headers: { "Content-Type": "application/pdf" },
+    }),
+  )
   const getViewport = vi.fn(({ scale }: { scale: number }) => ({
     width: 600 * scale,
     height: 800 * scale,
@@ -90,7 +97,7 @@ function mockPdfDocument({
     getDocument,
   } as unknown as Awaited<ReturnType<typeof loadPdfJs>>)
 
-  return { getDocument, getPage, getViewport, render }
+  return { fetchPdf, getDocument, getPage, getViewport, render }
 }
 
 function renderPreview(
@@ -129,11 +136,31 @@ afterEach(() => {
 })
 
 describe("ArtifactPdfPreview", () => {
+  it("shows preview unavailable when the artifact fetch fails", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response("missing", { status: 404 }))
+
+    renderPreview()
+
+    expect(await screen.findByText("Preview unavailable")).toBeInTheDocument()
+    expect(vi.mocked(loadPdfJs)).not.toHaveBeenCalled()
+  })
+
   it("loads page 1 and sizes the canvas from the PDF.js viewport", async () => {
     const pdf = mockPdfDocument()
     renderPreview({ zoom: 1.25 })
 
     const canvas = await screen.findByLabelText("PDF page 1")
+    expect(pdf.fetchPdf).toHaveBeenCalledWith(
+      "/artifact.pdf",
+      expect.objectContaining({
+        cache: "no-store",
+        credentials: "same-origin",
+        method: "GET",
+      }),
+    )
+    expect(pdf.getDocument).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.any(Uint8Array),
+    }))
     await waitFor(() => expect(pdf.getPage).toHaveBeenCalledWith(1))
     await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-pdf-scale", "1.25"))
 

@@ -11,7 +11,12 @@ import {
   safeArtifactViewTelemetry,
   type ArtifactViewState,
 } from "../../lib/artifact-renderers"
-import { buildThreadArtifactHref, formatBuilderArtifactFileSize, getBuilderArtifactFiles } from "../../lib/builder-artifacts"
+import {
+  buildThreadArtifactHref,
+  formatBuilderArtifactFileSize,
+  getBuilderArtifactFiles,
+  normalizeBuilderArtifactPath,
+} from "../../lib/builder-artifacts"
 import { coreviewFlagDiagnostics, isCoreviewStillFrameReviewEnabled } from "../../lib/co-review-flags"
 import type { CoReviewMediaTransport } from "../../lib/co-review-transport"
 import { recordSophiaCaptureEvent } from "../../lib/session-capture"
@@ -56,9 +61,12 @@ function getPathFilename(path: string | undefined): string {
   return path?.split('/').filter(Boolean).pop() || 'Builder deliverable'
 }
 
-function inferArtifactType(item: BuilderArtifactLibraryItemV1): BuilderArtifactV1["artifactType"] {
-  const mimeType = item.mimeType?.toLowerCase().split(';')[0]?.trim() ?? ''
-  const extension = item.name.split('.').pop()?.toLowerCase() ?? ''
+function inferArtifactTypeFromMetadata(
+  name: string | undefined,
+  mimeTypeValue?: string,
+): BuilderArtifactV1["artifactType"] {
+  const mimeType = mimeTypeValue?.toLowerCase().split(';')[0]?.trim() ?? ''
+  const extension = name?.split('.').pop()?.toLowerCase() ?? ''
 
   if (mimeType.includes('presentation') || extension === 'ppt' || extension === 'pptx') {
     return 'presentation'
@@ -80,6 +88,10 @@ function inferArtifactType(item: BuilderArtifactLibraryItemV1): BuilderArtifactV
   return 'document'
 }
 
+function inferArtifactType(item: BuilderArtifactLibraryItemV1): BuilderArtifactV1["artifactType"] {
+  return inferArtifactTypeFromMetadata(item.name, item.mimeType)
+}
+
 function buildLibraryArtifact(item: BuilderArtifactLibraryItemV1): BuilderArtifactV1 {
   return {
     artifactPath: item.path,
@@ -88,6 +100,23 @@ function buildLibraryArtifact(item: BuilderArtifactLibraryItemV1): BuilderArtifa
     decisionsMade: [],
     companionSummary: 'Ready to preview in the artifact canvas.',
     userNextAction: 'Review it with Sophia when you are ready.',
+  }
+}
+
+function buildSelectedPathArtifact(path: string): BuilderArtifactV1 | null {
+  const normalizedPath = normalizeBuilderArtifactPath(path)
+  if (!normalizedPath) {
+    return null
+  }
+
+  const name = getPathFilename(normalizedPath)
+  return {
+    artifactPath: normalizedPath,
+    artifactTitle: name,
+    artifactType: inferArtifactTypeFromMetadata(name),
+    decisionsMade: [],
+    supportingFiles: [],
+    userNextAction: 'Open or download the artifact if the in-canvas preview is unavailable.',
   }
 }
 
@@ -129,9 +158,11 @@ function buildStageBuilderArtifact({
   selectedLibraryItem?: BuilderArtifactLibraryItemV1 | null
   latestLibraryItem?: BuilderArtifactLibraryItemV1 | null
 }): BuilderArtifactV1 | null {
-  if (selectedBuilderArtifactPath) {
+  const normalizedSelectedPath = normalizeBuilderArtifactPath(selectedBuilderArtifactPath)
+
+  if (normalizedSelectedPath) {
     const selectedExistingArtifact = builderArtifact
-      ? buildSelectedArtifactFromExisting(builderArtifact, selectedBuilderArtifactPath)
+      ? buildSelectedArtifactFromExisting(builderArtifact, normalizedSelectedPath)
       : null
 
     if (selectedExistingArtifact) {
@@ -141,6 +172,8 @@ function buildStageBuilderArtifact({
     if (selectedLibraryItem) {
       return buildLibraryArtifact(selectedLibraryItem)
     }
+
+    return buildSelectedPathArtifact(normalizedSelectedPath)
   }
 
   if (latestLibraryItem) {
@@ -203,18 +236,22 @@ export function PresenceArtifactPanel({
   const [reportedBuilderArtifactViewState, setReportedBuilderArtifactViewState] = useState<ArtifactViewState | null>(null)
   const status = usePresenceStore((s) => s.status)
   const hasBuilderLibrary = builderArtifactLibrary.length > 0
+  const normalizedSelectedBuilderArtifactPath = useMemo(
+    () => normalizeBuilderArtifactPath(selectedBuilderArtifactPath),
+    [selectedBuilderArtifactPath],
+  )
   const selectedBuilderLibraryItem = useMemo(
-    () => builderArtifactLibrary.find((file) => file.path === selectedBuilderArtifactPath) ?? null,
-    [builderArtifactLibrary, selectedBuilderArtifactPath],
+    () => builderArtifactLibrary.find((file) => file.path === normalizedSelectedBuilderArtifactPath) ?? null,
+    [builderArtifactLibrary, normalizedSelectedBuilderArtifactPath],
   )
   const stageBuilderArtifact = useMemo(
     () => buildStageBuilderArtifact({
       builderArtifact,
-      selectedBuilderArtifactPath,
+      selectedBuilderArtifactPath: normalizedSelectedBuilderArtifactPath,
       selectedLibraryItem: selectedBuilderLibraryItem,
       latestLibraryItem: builderArtifactLibrary[0] ?? null,
     }),
-    [builderArtifact, builderArtifactLibrary, selectedBuilderArtifactPath, selectedBuilderLibraryItem],
+    [builderArtifact, builderArtifactLibrary, normalizedSelectedBuilderArtifactPath, selectedBuilderLibraryItem],
   )
   const takeaway = artifacts?.takeaway
   const reflection_candidate = artifacts?.reflection_candidate
@@ -378,8 +415,8 @@ export function PresenceArtifactPanel({
         artifactTitle: stageBuilderArtifact.artifactTitle,
         artifactType: stageBuilderArtifact.artifactType,
         artifactKind: "builder_file",
-        selectedBuilderArtifactPath: selectedBuilderArtifactPath ?? null,
-        source: selectedBuilderArtifactPath ? "selected_builder_artifact" : "latest_builder_artifact",
+        selectedBuilderArtifactPath: normalizedSelectedBuilderArtifactPath ?? null,
+        source: normalizedSelectedBuilderArtifactPath ? "selected_builder_artifact" : "latest_builder_artifact",
         reviewFeatureEnabled: coreviewReviewEnabled,
         ...coreviewDiagnostics,
         exactTextSource: stageUsesMarkdownPreview
@@ -414,7 +451,7 @@ export function PresenceArtifactPanel({
     effectiveBuilderVisualCaptureStatus.source,
     isVisible,
     normalSessionId,
-    selectedBuilderArtifactPath,
+    normalizedSelectedBuilderArtifactPath,
     sessionId,
     stageBuilderArtifact,
     stagePrimaryFile?.path,

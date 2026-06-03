@@ -28,6 +28,7 @@ const markdownArtifact = {
   ...builderArtifact,
   artifactPath: "mnt/user-data/outputs/launch-brief.md",
 } satisfies BuilderArtifactV1
+const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46])
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -66,6 +67,12 @@ describe("ArtifactCanvasViewport", () => {
   })
 
   it("keeps PDF loading state inside the canvas bed", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(pdfBytes.slice(), {
+        status: 200,
+        headers: { "Content-Type": "application/pdf" },
+      }),
+    )
     vi.mocked(loadPdfJs).mockResolvedValue({
       getDocument: vi.fn(() => ({
         promise: new Promise(() => undefined),

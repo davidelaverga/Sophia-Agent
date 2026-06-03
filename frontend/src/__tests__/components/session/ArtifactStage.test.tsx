@@ -51,6 +51,7 @@ const pdfBuilderArtifact = {
   supportingFiles: [],
   userNextAction: "Review the PDF in the canvas.",
 }
+const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37])
 
 const markdownBuilderArtifact = {
   ...builderArtifact,
@@ -86,6 +87,12 @@ function mockPdfDocument({
   rejectLoad?: boolean
   neverLoad?: boolean
 } = {}) {
+  const fetchPdf = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(pdfBytes.slice(), {
+      status: 200,
+      headers: { "Content-Type": "application/pdf" },
+    }),
+  )
   const getViewport = vi.fn(({ scale }: { scale: number }) => ({
     width: 600 * scale,
     height: 800 * scale,
@@ -116,7 +123,7 @@ function mockPdfDocument({
     getDocument,
   } as unknown as Awaited<ReturnType<typeof loadPdfJs>>)
 
-  return { getDocument, getPage, getViewport, render }
+  return { fetchPdf, getDocument, getPage, getViewport, render }
 }
 
 function renderStage({
@@ -247,12 +254,23 @@ describe("ArtifactStage", () => {
   })
 
   it("detects and loads a PDF artifact inside the canvas bed", async () => {
-    mockPdfDocument({ pageCount: 3 })
+    const pdf = mockPdfDocument({ pageCount: 3 })
     renderStage({ artifact: pdfBuilderArtifact, exactTextAvailable: false, fillAvailable: true })
 
     const canvasBed = screen.getByTestId("artifact-canvas-bed")
     expect(canvasBed).toContainElement(await screen.findByLabelText("Artifact PDF preview"))
     expect(await screen.findByLabelText("PDF page 1")).toBeInTheDocument()
+    expect(pdf.fetchPdf).toHaveBeenCalledWith(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.pdf",
+      expect.objectContaining({
+        cache: "no-store",
+        credentials: "same-origin",
+        method: "GET",
+      }),
+    )
+    expect(pdf.getDocument).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.any(Uint8Array),
+    }))
     expect(screen.getByText("Page 1 of 3")).toBeInTheDocument()
     expect(screen.getByText("Fit page")).toBeInTheDocument()
     expect(screen.getByLabelText("Open Launch brief overview in new tab")).toHaveAttribute(

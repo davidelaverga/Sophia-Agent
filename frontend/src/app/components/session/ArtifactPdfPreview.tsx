@@ -65,6 +65,8 @@ export function ArtifactPdfPreview({
   const pageHostRef = useRef<HTMLDivElement | null>(null)
   const renderTokenRef = useRef(0)
   const activeRenderRef = useRef<ActivePdfRender | null>(null)
+  const onPageCountChangeRef = useRef(onPageCountChange)
+  const onRenderStatusChangeRef = useRef(onRenderStatusChange)
   const [documentState, setDocumentState] = useState<PdfDocumentState>({
     status: "idle",
     document: null,
@@ -80,58 +82,91 @@ export function ArtifactPdfPreview({
   ), [fitBounds, measuredPageHostBounds])
 
   useEffect(() => {
+    onPageCountChangeRef.current = onPageCountChange
+  }, [onPageCountChange])
+
+  useEffect(() => {
+    onRenderStatusChangeRef.current = onRenderStatusChange
+  }, [onRenderStatusChange])
+
+  useEffect(() => {
     if (!href) {
       setDocumentState({ status: "failed", document: null, error: "missing_pdf_href" })
-      onPageCountChange?.(1)
+      onPageCountChangeRef.current?.(1)
+      setPageRenderState("failed")
+      onRenderStatusChangeRef.current?.(unavailablePdfCaptureStatus("capture_failed"))
       return
     }
 
-    let cancelled = false
+    const controller = new AbortController()
     let loadingTask: { promise: Promise<PdfDocumentProxy>; destroy?: () => Promise<void> } | null = null
     setDocumentState({ status: "loading", document: null, error: null })
     setPageRenderState("idle")
-    onRenderStatusChange?.(unavailablePdfCaptureStatus("preview_not_ready"))
+    onRenderStatusChangeRef.current?.(unavailablePdfCaptureStatus("preview_not_ready"))
 
-    loadPdfJs()
-      .then((pdfjs) => {
-        if (cancelled) {
-          return null
-        }
-
-        loadingTask = pdfjs.getDocument({
-          url: href,
-          withCredentials: true,
-        }) as { promise: Promise<PdfDocumentProxy>; destroy?: () => Promise<void> }
-        return loadingTask.promise
+    void (async () => {
+      const response = await fetch(href, {
+        method: "GET",
+        cache: "no-store",
+        credentials: "same-origin",
+        signal: controller.signal,
       })
-      .then((pdfDocument) => {
-        if (!pdfDocument || cancelled) {
-          return
-        }
 
-        setDocumentState({ status: "ready", document: pdfDocument, error: null })
-        onPageCountChange?.(Math.max(1, pdfDocument.numPages))
-      })
-      .catch((error: unknown) => {
-        if (cancelled) {
-          return
-        }
+      if (!response.ok) {
+        throw new Error("pdf_fetch_failed")
+      }
 
-        setDocumentState({
-          status: "failed",
-          document: null,
-          error: error instanceof Error ? error.message : "pdf_load_failed",
-        })
-        setPageRenderState("failed")
-        onPageCountChange?.(1)
-        onRenderStatusChange?.(unavailablePdfCaptureStatus("capture_failed"))
+      const arrayBuffer = await response.arrayBuffer()
+      if (controller.signal.aborted) {
+        return
+      }
+
+      const pdfjs = await loadPdfJs()
+      if (controller.signal.aborted) {
+        return
+      }
+
+      loadingTask = pdfjs.getDocument({
+        data: new Uint8Array(arrayBuffer),
+      }) as { promise: Promise<PdfDocumentProxy>; destroy?: () => Promise<void> }
+
+      const pdfDocument = await loadingTask.promise
+      if (controller.signal.aborted) {
+        return
+      }
+
+      setDocumentState({ status: "ready", document: pdfDocument, error: null })
+      onPageCountChangeRef.current?.(Math.max(1, pdfDocument.numPages))
+    })().catch((error: unknown) => {
+      if (controller.signal.aborted) {
+        return
+      }
+
+      setDocumentState({
+        status: "failed",
+        document: null,
+        error: error instanceof Error ? error.message : "pdf_load_failed",
       })
+      setPageRenderState("failed")
+      onPageCountChangeRef.current?.(1)
+      onRenderStatusChangeRef.current?.(unavailablePdfCaptureStatus("capture_failed"))
+    })
 
     return () => {
-      cancelled = true
+      controller.abort()
       void loadingTask?.destroy?.()
     }
-  }, [href, onPageCountChange, onRenderStatusChange])
+  }, [href])
+
+  useEffect(() => {
+    return () => {
+      const activeRender = activeRenderRef.current
+      if (activeRender) {
+        cancelActivePdfRender(activeRender)
+        activeRenderRef.current = null
+      }
+    }
+  }, [])
 
   const pageNumber = documentState.status === "ready"
     ? clampPdfPageNumber(pageIndex + 1, documentState.document.numPages)
@@ -146,21 +181,19 @@ export function ArtifactPdfPreview({
     const token = renderTokenRef.current + 1
     renderTokenRef.current = token
     const canvas = canvasRef.current
-    const previousRender = activeRenderRef.current
 
-    cancelActivePdfRender(previousRender)
     setPageRenderState("loading")
-    onRenderStatusChange?.(unavailablePdfCaptureStatus("preview_not_ready"))
+    onRenderStatusChangeRef.current?.(unavailablePdfCaptureStatus("preview_not_ready"))
 
     if (!canvas) {
       setPageRenderState("failed")
-      onRenderStatusChange?.(unavailablePdfCaptureStatus("capture_target_missing"))
+      onRenderStatusChangeRef.current?.(unavailablePdfCaptureStatus("capture_target_missing"))
       return
     }
 
-    clearPdfCanvas(canvas)
-
     void (async () => {
+      const previousRender = activeRenderRef.current
+      cancelActivePdfRender(previousRender)
       if (previousRender) {
         await previousRender.settled
         if (activeRenderRef.current?.token === previousRender.token) {
@@ -230,7 +263,7 @@ export function ArtifactPdfPreview({
       }
 
       setPageRenderState("ready")
-      onRenderStatusChange?.({
+      onRenderStatusChangeRef.current?.({
         ready: true,
         reason: null,
         source: "pdf_page_canvas",
@@ -245,7 +278,7 @@ export function ArtifactPdfPreview({
         activeRenderRef.current = null
       }
       setPageRenderState("failed")
-      onRenderStatusChange?.(unavailablePdfCaptureStatus("capture_failed"))
+      onRenderStatusChangeRef.current?.(unavailablePdfCaptureStatus("capture_failed"))
     })
 
     return () => {
@@ -258,7 +291,6 @@ export function ArtifactPdfPreview({
     bounds,
     documentState,
     fitMode,
-    onRenderStatusChange,
     pageNumber,
     zoom,
   ])

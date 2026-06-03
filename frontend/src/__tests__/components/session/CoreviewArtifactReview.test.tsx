@@ -15,6 +15,7 @@ import {
   clearCoreviewArtifactTextRegistryForTests,
   readCoreviewArtifactTextSideband,
 } from "../../../app/lib/coreview-artifact-text"
+import { loadPdfJs } from "../../../app/lib/pdfjs-loader"
 import {
   exportSophiaCaptureBundle,
   registerSophiaCaptureBridge,
@@ -24,12 +25,17 @@ vi.mock("../../../app/hooks/useHaptics", () => ({
   haptic: vi.fn(),
 }))
 
+vi.mock("../../../app/lib/pdfjs-loader", () => ({
+  loadPdfJs: vi.fn(),
+}))
+
 const originalToBlob = HTMLCanvasElement.prototype.toBlob
 const originalMediaDevices = Object.getOwnPropertyDescriptor(navigator, "mediaDevices")
 const originalCoreviewFlag = process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_ENABLED
 const originalStillFrameFlag = process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_STILL_FRAME_ENABLED
 
 let getContextSpy: ReturnType<typeof vi.spyOn> | null = null
+let fetchSpy: ReturnType<typeof vi.spyOn> | null = null
 let getDisplayMedia: ReturnType<typeof vi.fn>
 
 const BUILDER_ARTIFACT = {
@@ -60,6 +66,8 @@ const MARKDOWN_LIBRARY = [
     mimeType: "text/markdown",
   },
 ]
+const PDF_SELECTED_PATH = "mnt/user-data/outputs/launch-brief.pdf"
+const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46])
 
 const SELECTED_MARKDOWN_ARTIFACT = {
   ...MARKDOWN_BUILDER_ARTIFACT,
@@ -185,6 +193,24 @@ function mockCanvasApis() {
   })
 }
 
+function mockPdfPreviewLoading() {
+  fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(pdfBytes.slice(), {
+      status: 200,
+      headers: { "Content-Type": "application/pdf" },
+    }),
+  )
+  const getDocument = vi.fn(() => ({
+    promise: new Promise(() => undefined),
+    destroy: vi.fn(),
+  }))
+  vi.mocked(loadPdfJs).mockResolvedValue({
+    getDocument,
+  } as unknown as Awaited<ReturnType<typeof loadPdfJs>>)
+
+  return { getDocument }
+}
+
 function setCoreviewFlags(enabled: boolean) {
   process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_ENABLED = enabled ? "true" : "false"
   process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_STILL_FRAME_ENABLED = enabled ? "true" : "false"
@@ -205,6 +231,9 @@ describe("Coreview artifact still-frame review", () => {
     window.__sophiaCapture?.disable()
     window.__sophiaCapture?.clear()
     clearCoreviewArtifactTextRegistryForTests()
+    fetchSpy?.mockRestore()
+    fetchSpy = null
+    vi.mocked(loadPdfJs).mockReset()
     getContextSpy?.mockRestore()
     getContextSpy = null
     Object.defineProperty(HTMLCanvasElement.prototype, "toBlob", {
@@ -262,6 +291,30 @@ describe("Coreview artifact still-frame review", () => {
     expect(screen.queryByText("Session files")).not.toBeInTheDocument()
     expect(screen.queryByTestId("coreview-companion-artifact-canvas")).not.toBeInTheDocument()
     expect(screen.getAllByRole("region", { name: /generated artifact/i })).toHaveLength(1)
+  })
+
+  it("keeps a selected PDF artifact active while library metadata hydrates", async () => {
+    const pdf = mockPdfPreviewLoading()
+
+    renderPanel({
+      artifacts: COMPANION_ARTIFACTS,
+      selectedBuilderArtifactPath: PDF_SELECTED_PATH,
+    })
+
+    const artifactRegion = await screen.findByRole("region", { name: /generated artifact/i })
+
+    expect(artifactRegion).toHaveAttribute("data-artifact-renderer-kind", "pdf")
+    expect(await within(artifactRegion).findByText("Preparing PDF view")).toBeInTheDocument()
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.pdf",
+      expect.objectContaining({ cache: "no-store", credentials: "same-origin", method: "GET" }),
+    )
+    expect(pdf.getDocument).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.any(Uint8Array),
+    }))
+    expect(screen.queryByText("Focus on the big picture first.")).not.toBeInTheDocument()
+    expect(screen.queryByText("What changed after you named the constraint?")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("coreview-companion-artifact-canvas")).not.toBeInTheDocument()
   })
 
   it("records selected builder stage identity with Coreview off without activating companion review", async () => {

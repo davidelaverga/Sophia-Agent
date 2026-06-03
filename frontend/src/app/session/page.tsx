@@ -522,6 +522,7 @@ function SessionPageContent() {
   });
 
   const hasBuilderArtifactLibrary = builderArtifactLibrary.length > 0;
+  const hasSelectedBuilderArtifactPath = Boolean(selectedBuilderArtifactPath);
   const coReviewSessionId = backendSessionId || safeSessionId || sessionId || null;
   const artifactPanelThreadId = resolvedThreadId || undefined;
   const coReviewTransport = useMemo(
@@ -593,7 +594,7 @@ function SessionPageContent() {
     messages,
     artifacts,
     builderArtifact,
-    hasBuilderArtifactLibrary,
+    hasBuilderArtifactLibrary: hasBuilderArtifactLibrary || hasSelectedBuilderArtifactPath,
     isBuilderRunning: builderTask?.phase === 'running',
     isStreaming,
     isReflectionVoiceFlowActive,
@@ -611,18 +612,18 @@ function SessionPageContent() {
   const previousArtifactSignatureRef = useRef('');
 
   const artifactContentCount = useMemo(() => {
-    const hasBuilderArtifact = Boolean(builderArtifact) || hasBuilderArtifactLibrary;
+    const hasBuilderArtifact = Boolean(builderArtifact) || hasBuilderArtifactLibrary || hasSelectedBuilderArtifactPath;
     const hasTakeaway = Boolean(artifacts?.takeaway?.trim());
     const hasReflection = Boolean(artifacts?.reflection_candidate?.prompt?.trim());
     const memoryCount = artifacts?.memory_candidates?.length ?? 0;
     return (hasBuilderArtifact ? 1 : 0) + (hasTakeaway ? 1 : 0) + (hasReflection ? 1 : 0) + Math.min(1, memoryCount);
-  }, [artifacts, builderArtifact, hasBuilderArtifactLibrary]);
+  }, [artifacts, builderArtifact, hasBuilderArtifactLibrary, hasSelectedBuilderArtifactPath]);
 
   const readyArtifactCount = useMemo(() => {
     return [artifactStatus.takeaway, artifactStatus.reflection, artifactStatus.memories].filter(
       (status) => status === 'ready'
-    ).length + ((builderArtifact || hasBuilderArtifactLibrary) ? 1 : 0);
-  }, [artifactStatus, builderArtifact, hasBuilderArtifactLibrary]);
+    ).length + ((builderArtifact || hasBuilderArtifactLibrary || hasSelectedBuilderArtifactPath) ? 1 : 0);
+  }, [artifactStatus, builderArtifact, hasBuilderArtifactLibrary, hasSelectedBuilderArtifactPath]);
 
   const waitingArtifactCount = useMemo(() => {
     return [artifactStatus.takeaway, artifactStatus.reflection, artifactStatus.memories].filter(
@@ -654,8 +655,8 @@ function SessionPageContent() {
       .join('|');
     const library = builderArtifactLibrary.map((item) => item.path).join('|');
 
-    return `${builder}::${library}::${takeaway}::${reflection}::${memories}`;
-  }, [artifacts, builderArtifact, builderArtifactLibrary]);
+    return `${builder}::${library}::${selectedBuilderArtifactPath ?? ''}::${takeaway}::${reflection}::${memories}`;
+  }, [artifacts, builderArtifact, builderArtifactLibrary, selectedBuilderArtifactPath]);
 
   const hasDesktopStyleBadge = hasPendingArtifacts || waitingArtifactCount > 0;
   const recoveredBuilderLibraryItem = useMemo(() => {
@@ -769,21 +770,6 @@ function SessionPageContent() {
   }, []);
 
   useEffect(() => {
-    if (!selectedBuilderArtifactPath) {
-      return;
-    }
-
-    const knownPaths = new Set([
-      ...getBuilderArtifactFiles(builderArtifact).map((file) => file.path),
-      ...builderArtifactLibrary.map((item) => item.path),
-    ]);
-
-    if (!knownPaths.has(selectedBuilderArtifactPath)) {
-      setSelectedBuilderArtifactPath(null);
-    }
-  }, [builderArtifact, builderArtifactLibrary, selectedBuilderArtifactPath]);
-
-  useEffect(() => {
     if (!showArtifacts || !showArtifactsUi) {
       setPendingBuilderArtifactReview(false);
     }
@@ -796,6 +782,7 @@ function SessionPageContent() {
     if (hasRecoveredBuilderArtifact) {
       clearBuilderTask();
     }
+    setSelectedBuilderArtifactPath(null);
     clearBuilderArtifact();
   }, [builderPrimaryFile?.path, clearBuilderArtifact, clearBuilderTask, hasRecoveredBuilderArtifact]);
   const voiceBuilderChromeOpacity = Math.max(chromeOpacity, 0.94);
@@ -1165,11 +1152,11 @@ function SessionPageContent() {
   const showTextArtifactStage = focusMode === 'text'
     && showArtifacts
     && showArtifactsUi
-    && (Boolean(builderArtifact) || hasBuilderArtifactLibrary);
+    && (Boolean(builderArtifact) || hasBuilderArtifactLibrary || hasSelectedBuilderArtifactPath);
   const showVoiceArtifactStage = focusMode !== 'text'
     && showArtifacts
     && showArtifactsUi
-    && (Boolean(builderArtifact) || hasBuilderArtifactLibrary);
+    && (Boolean(builderArtifact) || hasBuilderArtifactLibrary || hasSelectedBuilderArtifactPath);
   const showInlineTextArtifactsPanel = focusMode === 'text'
     && showArtifacts
     && showArtifactsUi
