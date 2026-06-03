@@ -131,6 +131,71 @@ function stateFromSnapshot(snapshot: BuilderCanvasSnapshotV1): BuilderCanvasStat
   };
 }
 
+function retainNoTaskSnapshotState(
+  current: BuilderCanvasState,
+  snapshotState: BuilderCanvasState,
+): BuilderCanvasState {
+  return {
+    ...snapshotState,
+    retiredRuns: current.retiredRuns,
+    runOrder: current.runOrder,
+    nextRunOrder: current.nextRunOrder,
+  };
+}
+
+function shouldKeepCurrentForUnseenSnapshot(
+  current: BuilderCanvasState,
+  currentTask: BuilderCanvasTaskSnapshotV1,
+  snapshotOrder: number | undefined,
+): boolean {
+  if (snapshotOrder !== undefined || isTerminalStatus(currentTask.status)) {
+    return false;
+  }
+  const currentOrder = current.runOrder.get(taskRunKey(currentTask));
+  if (currentOrder === undefined) {
+    return false;
+  }
+  return current.recentEvents.some((event) => eventMatchesTask(event, currentTask));
+}
+
+function shouldKeepCurrentForKnownOlderSnapshot(
+  current: BuilderCanvasState,
+  currentTask: BuilderCanvasTaskSnapshotV1,
+  snapshotOrder: number | undefined,
+): boolean {
+  const currentOrder = current.runOrder.get(taskRunKey(currentTask));
+  return currentOrder !== undefined && snapshotOrder !== undefined && snapshotOrder <= currentOrder;
+}
+
+function reconcileDifferentRunSnapshot(
+  current: BuilderCanvasState,
+  snapshotState: BuilderCanvasState,
+  snapshotTask: BuilderCanvasTaskSnapshotV1,
+): BuilderCanvasState {
+  const retiredRuns = new Set(current.retiredRuns);
+  const snapshotKey = taskRunKey(snapshotTask);
+  const snapshotOrder = current.runOrder.get(snapshotKey);
+  const currentTask = current.activeTask;
+
+  if (currentTask && shouldKeepCurrentForUnseenSnapshot(current, currentTask, snapshotOrder)) {
+    return { ...current, reconnecting: false, retiredRuns };
+  }
+  if (currentTask && shouldKeepCurrentForKnownOlderSnapshot(current, currentTask, snapshotOrder)) {
+    return { ...current, reconnecting: false, retiredRuns };
+  }
+  if (currentTask) {
+    retiredRuns.add(taskRunKey(currentTask));
+  }
+
+  const observed = observeRun(current.runOrder, current.nextRunOrder, snapshotKey);
+  return {
+    ...snapshotState,
+    retiredRuns,
+    runOrder: observed.runOrder,
+    nextRunOrder: observed.nextRunOrder,
+  };
+}
+
 function applySnapshot(current: BuilderCanvasState, snapshot: BuilderCanvasSnapshotV1): BuilderCanvasState {
   const snapshotState = stateFromSnapshot(snapshot);
   const snapshotTask = snapshotState.activeTask;
@@ -140,38 +205,11 @@ function applySnapshot(current: BuilderCanvasState, snapshot: BuilderCanvasSnaps
     : false;
 
   if (!snapshotTask) {
-    return {
-      ...snapshotState,
-      retiredRuns: current.retiredRuns,
-      runOrder: current.runOrder,
-      nextRunOrder: current.nextRunOrder,
-    };
+    return retainNoTaskSnapshotState(current, snapshotState);
   }
 
   if (!sameRun) {
-    const retiredRuns = new Set(current.retiredRuns);
-    let runOrder = current.runOrder;
-    let nextRunOrder = current.nextRunOrder;
-    const observed = observeRun(runOrder, nextRunOrder, taskRunKey(snapshotTask));
-    runOrder = observed.runOrder;
-    nextRunOrder = observed.nextRunOrder;
-    const snapshotOrder = observed.order;
-    if (currentTask) {
-      const currentOrder = runOrder.get(taskRunKey(currentTask));
-      if (currentOrder !== undefined && snapshotOrder <= currentOrder) {
-        return {
-          ...current,
-          reconnecting: false,
-          retiredRuns,
-          runOrder,
-          nextRunOrder,
-        };
-      }
-      if (currentOrder === undefined || snapshotOrder > currentOrder) {
-        retiredRuns.add(taskRunKey(currentTask));
-      }
-    }
-    return { ...snapshotState, retiredRuns, runOrder, nextRunOrder };
+    return reconcileDifferentRunSnapshot(current, snapshotState, snapshotTask);
   }
 
   const currentRunEvents = current.recentEvents.filter((event) => eventMatchesTask(event, snapshotTask));
