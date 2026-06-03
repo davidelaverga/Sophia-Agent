@@ -171,7 +171,8 @@ export function ArtifactCanvasViewport({
         />
         <div
           data-testid="artifact-canvas-scroll-area"
-          className="scrollbar-thin relative z-10 flex min-h-0 w-full flex-1 flex-col items-stretch overflow-y-auto overscroll-contain px-4 py-6 sm:px-7 sm:py-7 lg:px-10"
+          className="relative z-10 flex min-h-0 w-full flex-1 flex-col items-stretch overflow-y-auto overscroll-contain px-4 py-6 [-webkit-overflow-scrolling:touch] [scrollbar-gutter:stable] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--cosmic-border)] [&::-webkit-scrollbar-track]:bg-transparent sm:px-7 sm:py-7 lg:px-10"
+          style={{ scrollbarColor: "var(--cosmic-border) transparent" }}
         >
           {canPreviewMarkdown ? (
             <MarkdownDocumentPage

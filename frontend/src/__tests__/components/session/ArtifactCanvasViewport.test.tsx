@@ -48,6 +48,8 @@ describe("ArtifactCanvasViewport", () => {
     expect(canvasBed).toContainElement(scrollArea)
     expect(scrollArea).toContainElement(documentPage)
     expect(canvasBed.className).toContain("sophia-purple")
+    expect(scrollArea.className).toContain("[scrollbar-gutter:stable]")
+    expect(scrollArea.style.scrollbarColor).toBe("var(--cosmic-border) transparent")
     expect(documentPage.className).toContain("min-h-full")
     expect(documentPage.className).toContain("max-w-[960px]")
   })
