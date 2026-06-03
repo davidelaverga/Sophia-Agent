@@ -1,9 +1,9 @@
-import { render, screen, waitFor, within } from "@testing-library/react"
+import { act, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import type { ComponentProps } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { ArtifactStage } from "../../../app/components/session/ArtifactStage"
+import { ArtifactStage, type ArtifactReviewVoiceCommandTarget } from "../../../app/components/session/ArtifactStage"
 import {
   AudioWebSocketUnsupportedTransport,
   initialCoReviewState,
@@ -141,6 +141,7 @@ function renderStage({
   reviewStale = false,
   canRefreshReview = false,
   onVisualCaptureStatusChange,
+  onVoiceCommandTargetChange,
   onRefreshReview,
   visualReviewRequiresVoice = false,
   pendingStartVoiceReview = false,
@@ -167,6 +168,7 @@ function renderStage({
   reviewStale?: ComponentProps<typeof ArtifactStage>["reviewStale"]
   canRefreshReview?: ComponentProps<typeof ArtifactStage>["canRefreshReview"]
   onVisualCaptureStatusChange?: ComponentProps<typeof ArtifactStage>["onVisualCaptureStatusChange"]
+  onVoiceCommandTargetChange?: ComponentProps<typeof ArtifactStage>["onVoiceCommandTargetChange"]
   onRefreshReview?: ComponentProps<typeof ArtifactStage>["onRefreshReview"]
   visualReviewRequiresVoice?: ComponentProps<typeof ArtifactStage>["visualReviewRequiresVoice"]
   pendingStartVoiceReview?: ComponentProps<typeof ArtifactStage>["pendingStartVoiceReview"]
@@ -199,6 +201,7 @@ function renderStage({
       reviewStale={reviewStale}
       canRefreshReview={canRefreshReview}
       onVisualCaptureStatusChange={onVisualCaptureStatusChange}
+      onVoiceCommandTargetChange={onVoiceCommandTargetChange}
       onStartVoiceReview={onStartVoiceReview}
       onStartReview={onStartReview}
       onStopReview={onStopReview}
@@ -335,6 +338,111 @@ describe("ArtifactStage", () => {
     await waitFor(() => expect(pdf.getPage).toHaveBeenLastCalledWith(2))
   })
 
+  it("applies PDF page voice commands through the registered stage target", async () => {
+    let voiceTarget: ArtifactReviewVoiceCommandTarget | null = null
+    mockPdfDocument({ pageCount: 3 })
+    renderStage({
+      artifact: pdfBuilderArtifact,
+      artifactId: "artifact-1",
+      exactTextAvailable: false,
+      onVoiceCommandTargetChange: (target) => {
+        voiceTarget = target
+      },
+    })
+
+    expect(await screen.findByText("Page 1 of 3")).toBeInTheDocument()
+    await waitFor(() => expect(voiceTarget?.pageCount).toBe(3))
+
+    let result: ReturnType<ArtifactReviewVoiceCommandTarget["applyCommand"]> | null = null
+    act(() => {
+      result = voiceTarget?.applyCommand({ kind: "go_to_page", pageTarget: 2 }) ?? null
+    })
+    expect(result).toMatchObject({
+      applied: true,
+      changed: true,
+      shouldRefresh: true,
+      blockedReason: null,
+      artifactCurrentPageIndex: 1,
+      artifactCurrentPageCount: 3,
+    })
+    expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument()
+    await waitFor(() => expect(voiceTarget?.pageIndex).toBe(1))
+
+    act(() => {
+      result = voiceTarget?.applyCommand({ kind: "next_page" }) ?? null
+    })
+    expect(result).toMatchObject({ applied: true, artifactCurrentPageIndex: 2 })
+    expect(await screen.findByText("Page 3 of 3")).toBeInTheDocument()
+    await waitFor(() => expect(voiceTarget?.pageIndex).toBe(2))
+
+    act(() => {
+      result = voiceTarget?.applyCommand({ kind: "previous_page" }) ?? null
+    })
+    expect(result).toMatchObject({ applied: true, artifactCurrentPageIndex: 1 })
+    expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument()
+    await waitFor(() => expect(voiceTarget?.pageIndex).toBe(1))
+
+    act(() => {
+      result = voiceTarget?.applyCommand({ kind: "first_page" }) ?? null
+    })
+    expect(result).toMatchObject({ applied: true, artifactCurrentPageIndex: 0 })
+    expect(await screen.findByText("Page 1 of 3")).toBeInTheDocument()
+    await waitFor(() => expect(voiceTarget?.pageIndex).toBe(0))
+
+    act(() => {
+      result = voiceTarget?.applyCommand({ kind: "last_page" }) ?? null
+    })
+    expect(result).toMatchObject({ applied: true, artifactCurrentPageIndex: 2 })
+    expect(await screen.findByText("Page 3 of 3")).toBeInTheDocument()
+  })
+
+  it("blocks out-of-bounds and non-multipage voice page commands safely", async () => {
+    let pdfVoiceTarget: ArtifactReviewVoiceCommandTarget | null = null
+    mockPdfDocument({ pageCount: 2 })
+    renderStage({
+      artifact: pdfBuilderArtifact,
+      artifactId: "artifact-1",
+      exactTextAvailable: false,
+      onVoiceCommandTargetChange: (target) => {
+        pdfVoiceTarget = target
+      },
+    })
+
+    expect(await screen.findByText("Page 1 of 2")).toBeInTheDocument()
+    await waitFor(() => expect(pdfVoiceTarget?.pageCount).toBe(2))
+
+    let result: ReturnType<ArtifactReviewVoiceCommandTarget["applyCommand"]> | null = null
+    act(() => {
+      result = pdfVoiceTarget?.applyCommand({ kind: "go_to_page", pageTarget: 5 }) ?? null
+    })
+    expect(result).toMatchObject({
+      applied: false,
+      blockedReason: "requested_page_out_of_bounds",
+      artifactCurrentPageIndex: 0,
+      artifactCurrentPageCount: 2,
+    })
+    expect(screen.getByText("Page 1 of 2")).toBeInTheDocument()
+
+    let metadataVoiceTarget: ArtifactReviewVoiceCommandTarget | null = null
+    renderStage({
+      artifact: builderArtifact,
+      artifactId: "artifact-2",
+      exactTextAvailable: false,
+      onVoiceCommandTargetChange: (target) => {
+        metadataVoiceTarget = target
+      },
+    })
+
+    await waitFor(() => expect(metadataVoiceTarget).not.toBeNull())
+    act(() => {
+      result = metadataVoiceTarget?.applyCommand({ kind: "next_page" }) ?? null
+    })
+    expect(result).toMatchObject({
+      applied: false,
+      blockedReason: "no_multipage_artifact_selected",
+    })
+  })
+
   it("applies PDF zoom and fit controls to view state", async () => {
     const user = userEvent.setup()
     mockPdfDocument({ pageCount: 2 })
@@ -375,6 +483,52 @@ describe("ArtifactStage", () => {
     expect(await screen.findByText("100%")).toBeInTheDocument()
     await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-fit-mode", "custom"))
     await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-pdf-scale", "1"))
+  })
+
+  it("applies PDF zoom voice commands through the registered stage target", async () => {
+    let voiceTarget: ArtifactReviewVoiceCommandTarget | null = null
+    mockPdfDocument({ pageCount: 2 })
+    renderStage({
+      artifact: pdfBuilderArtifact,
+      artifactId: "artifact-1",
+      exactTextAvailable: false,
+      onVoiceCommandTargetChange: (target) => {
+        voiceTarget = target
+      },
+    })
+
+    const canvas = await screen.findByLabelText("PDF page 1")
+    await waitFor(() => expect(voiceTarget?.pageCount).toBe(2))
+
+    act(() => {
+      voiceTarget?.applyCommand({ kind: "zoom_in" })
+    })
+    expect(await screen.findByText("120%")).toBeInTheDocument()
+    await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-zoom", "1.2"))
+    await waitFor(() => expect(voiceTarget?.fitMode).toBe("custom"))
+
+    act(() => {
+      voiceTarget?.applyCommand({ kind: "zoom_out" })
+    })
+    expect(await screen.findByText("100%")).toBeInTheDocument()
+
+    act(() => {
+      voiceTarget?.applyCommand({ kind: "fit_width" })
+    })
+    expect(await screen.findByText("Fit width")).toBeInTheDocument()
+    await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-fit-mode", "width"))
+
+    act(() => {
+      voiceTarget?.applyCommand({ kind: "fit_page" })
+    })
+    expect(await screen.findByText("Fit page")).toBeInTheDocument()
+    await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-fit-mode", "page"))
+
+    act(() => {
+      voiceTarget?.applyCommand({ kind: "reset_zoom" })
+    })
+    expect(await screen.findByText("100%")).toBeInTheDocument()
+    await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-fit-mode", "custom"))
   })
 
   it("reports page and zoom changes through the artifact view state callback", async () => {

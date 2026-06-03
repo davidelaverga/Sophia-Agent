@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 
+import type { ArtifactReviewVoiceCommandRouter } from '../lib/artifact-review-voice-commands';
 import { logger } from '../lib/error-logger';
 import type { InterruptPayload } from '../lib/session-types';
 
@@ -19,6 +20,7 @@ interface UseSessionVoiceCommandSystemParams {
   handleReflectionTap: (reflection: { prompt: string; why?: string }, source: 'tap' | 'voice-command') => void;
   canDownloadBuilderArtifact?: boolean;
   handleDownloadBuilderArtifact?: () => boolean;
+  routeArtifactReviewCommand?: ArtifactReviewVoiceCommandRouter;
 
   pendingInterrupt: InterruptPayload | null;
   isResuming: boolean;
@@ -42,6 +44,7 @@ export function useSessionVoiceCommandSystem({
   handleReflectionTap,
   canDownloadBuilderArtifact = false,
   handleDownloadBuilderArtifact,
+  routeArtifactReviewCommand,
   pendingInterrupt,
   isResuming,
   handleInterruptSelectWithRetry,
@@ -394,14 +397,44 @@ export function useSessionVoiceCommandSystem({
     showToast,
   ]);
 
+  const routeArtifactReviewCommandIfAvailable = useCallback((text: string) => {
+    const result = routeArtifactReviewCommand?.(text);
+    if (!result?.handled) {
+      return false;
+    }
+
+    interceptVoiceAssistant(15000, 'artifact review voice command', { hard: true });
+
+    if (result.userMessage) {
+      showToast({
+        message: result.userMessage,
+        variant: result.applied && !result.blockedReason ? 'info' : 'warning',
+        durationMs: result.triggeredRefresh ? 2800 : 2600,
+      });
+    }
+
+    return true;
+  }, [
+    interceptVoiceAssistant,
+    routeArtifactReviewCommand,
+    showToast,
+  ]);
+
   const routeVoiceCommand = useCallback((text: string) => {
     return (
       routeSessionCommand(text) ||
+      routeArtifactReviewCommandIfAvailable(text) ||
       routeDownloadCommand(text) ||
       routeInterruptCommand(text) ||
       routeReflectionCommand(text)
     );
-  }, [routeSessionCommand, routeDownloadCommand, routeInterruptCommand, routeReflectionCommand]);
+  }, [
+    routeSessionCommand,
+    routeArtifactReviewCommandIfAvailable,
+    routeDownloadCommand,
+    routeInterruptCommand,
+    routeReflectionCommand,
+  ]);
 
   const handleVoiceTranscript = useCallback((text: string) => {
     if (routeVoiceCommand(text)) {

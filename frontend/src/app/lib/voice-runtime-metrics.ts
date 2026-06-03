@@ -950,7 +950,6 @@ function buildCoreviewUsageTelemetry(activeEvents: NormalizedVoiceCaptureEvent[]
   const visual = buildCoreviewVisualTelemetry(activeEvents)
   const exactText = buildCoreviewExactTextTelemetry(activeEvents)
   visual.exactTextAvailable = visual.exactTextAvailable
-    || exactText.exactTextCallCount > 0
     || exactText.exactTextSuccessCount > 0
 
   return {

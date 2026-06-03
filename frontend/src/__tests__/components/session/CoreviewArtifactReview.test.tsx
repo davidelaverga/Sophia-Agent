@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react"
+import { act, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { type ComponentProps } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -75,6 +75,14 @@ const SELECTED_MARKDOWN_ARTIFACT = {
   artifactPath: "mnt/user-data/outputs/launch-brief.md",
   supportingFiles: ["mnt/user-data/outputs/launch-brief.docx"],
 }
+const SELECTED_PDF_ARTIFACT = {
+  artifactPath: PDF_SELECTED_PATH,
+  artifactTitle: "launch-brief.pdf",
+  artifactType: "document",
+  decisionsMade: [],
+  supportingFiles: [],
+  userNextAction: "Open or download the artifact if the in-canvas preview is unavailable.",
+}
 
 const COMPANION_ARTIFACTS: NonNullable<ComponentProps<typeof PresenceArtifactPanel>["artifacts"]> = {
   takeaway: "Focus on the big picture first.",
@@ -100,6 +108,7 @@ function renderPanel({
   pendingBuilderArtifactReview = false,
   onStartVoiceBuilderArtifactReview,
   onPendingBuilderArtifactReviewConsumed,
+  onArtifactReviewVoiceCommandRouteChange,
   transport = new GeminiStillFrameTransport({
     sendArtifactFrame: vi.fn((frame) => ({
       ok: true,
@@ -123,6 +132,7 @@ function renderPanel({
   pendingBuilderArtifactReview?: ComponentProps<typeof PresenceArtifactPanel>["pendingBuilderArtifactReview"]
   onStartVoiceBuilderArtifactReview?: ComponentProps<typeof PresenceArtifactPanel>["onStartVoiceBuilderArtifactReview"]
   onPendingBuilderArtifactReviewConsumed?: ComponentProps<typeof PresenceArtifactPanel>["onPendingBuilderArtifactReviewConsumed"]
+  onArtifactReviewVoiceCommandRouteChange?: ComponentProps<typeof PresenceArtifactPanel>["onArtifactReviewVoiceCommandRouteChange"]
   transport?: GeminiStillFrameTransport
 }) {
   render(
@@ -141,6 +151,7 @@ function renderPanel({
       pendingBuilderArtifactReview={pendingBuilderArtifactReview}
       onStartVoiceBuilderArtifactReview={onStartVoiceBuilderArtifactReview}
       onPendingBuilderArtifactReviewConsumed={onPendingBuilderArtifactReviewConsumed}
+      onArtifactReviewVoiceCommandRouteChange={onArtifactReviewVoiceCommandRouteChange}
     />,
   )
 }
@@ -209,6 +220,42 @@ function mockPdfPreviewLoading() {
   } as unknown as Awaited<ReturnType<typeof loadPdfJs>>)
 
   return { getDocument }
+}
+
+function mockPdfPreviewReady({ pageCount = 3 }: { pageCount?: number } = {}) {
+  fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(pdfBytes.slice(), {
+      status: 200,
+      headers: { "Content-Type": "application/pdf" },
+    }),
+  )
+  const getViewport = vi.fn(({ scale }: { scale: number }) => ({
+    width: 600 * scale,
+    height: 800 * scale,
+    scale,
+  }))
+  const render = vi.fn(() => ({
+    promise: Promise.resolve(),
+    cancel: vi.fn(),
+  }))
+  const getPage = vi.fn(async () => ({
+    getViewport,
+    render,
+  }))
+  const pdfDocument = {
+    numPages: pageCount,
+    fingerprints: [`coreview-pdf-${pageCount}`],
+    getPage,
+  }
+  const getDocument = vi.fn(() => ({
+    promise: Promise.resolve(pdfDocument),
+    destroy: vi.fn(),
+  }))
+  vi.mocked(loadPdfJs).mockResolvedValue({
+    getDocument,
+  } as unknown as Awaited<ReturnType<typeof loadPdfJs>>)
+
+  return { getDocument, getPage, render }
 }
 
 function setCoreviewFlags(enabled: boolean) {
@@ -315,6 +362,138 @@ describe("Coreview artifact still-frame review", () => {
     expect(screen.queryByText("Focus on the big picture first.")).not.toBeInTheDocument()
     expect(screen.queryByText("What changed after you named the constraint?")).not.toBeInTheDocument()
     expect(screen.queryByTestId("coreview-companion-artifact-canvas")).not.toBeInTheDocument()
+  })
+
+  it("keeps PDF exact text unavailable without registered extraction", async () => {
+    setCoreviewFlags(true)
+    mockPdfPreviewReady({ pageCount: 2 })
+
+    renderPanel({
+      selectedBuilderArtifactPath: PDF_SELECTED_PATH,
+    })
+
+    expect(await screen.findByText("Page 1 of 2")).toBeInTheDocument()
+    expect(screen.getByText("Exact text unavailable")).toBeInTheDocument()
+
+    const response = readCoreviewArtifactTextSideband({
+      artifactId: buildCoreviewRealArtifactId(SELECTED_PDF_ARTIFACT),
+      sessionId: "session-1",
+      threadId: "thread-1",
+    })
+    expect(response).toMatchObject({
+      ok: false,
+      status: "not_found",
+    })
+  })
+
+  it("routes a PDF voice page command, marks the view stale, and refreshes the current frame", async () => {
+    setCoreviewFlags(true)
+    registerSophiaCaptureBridge()
+    window.__sophiaCapture?.clear()
+    window.__sophiaCapture?.enable()
+    const user = userEvent.setup()
+    mockPdfPreviewReady({ pageCount: 3 })
+    const sendArtifactFrame = vi.fn<ArtifactFrameSender["sendArtifactFrame"]>((frame) => ({
+      ok: true,
+      supported: true,
+      providerAcceptedFrame: true,
+      websocketSendAccepted: true,
+      frameBytes: frame.byteLength,
+      frameDimensions: frame.dimensions,
+      frameSendLatencyMs: 6,
+      estimatedVisualCost: null,
+      error: null,
+      rawFrameExcluded: true as const,
+    }))
+    const transport = new GeminiStillFrameTransport({ sendArtifactFrame })
+    let routeArtifactCommand: Parameters<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onArtifactReviewVoiceCommandRouteChange"]>>[0] = null
+
+    renderPanel({
+      selectedBuilderArtifactPath: PDF_SELECTED_PATH,
+      transport,
+      onArtifactReviewVoiceCommandRouteChange: (handler) => {
+        routeArtifactCommand = handler
+      },
+    })
+
+    expect(await screen.findByText("Page 1 of 3")).toBeInTheDocument()
+    await waitFor(() => expect(routeArtifactCommand).not.toBeNull())
+    await user.click(screen.getByRole("button", { name: /review with sophia/i }))
+    await waitFor(() => expect(sendArtifactFrame).toHaveBeenCalledTimes(1))
+
+    let commandResult: ReturnType<NonNullable<typeof routeArtifactCommand>> | null = null
+    act(() => {
+      commandResult = routeArtifactCommand?.("Go to page two in your analysis. What do you notice?") ?? null
+    })
+
+    expect(commandResult).toMatchObject({
+      handled: true,
+      applied: true,
+      triggeredRefresh: true,
+      refreshResult: "pending",
+      userMessage: "Switched to page 2. Refreshing Sophia's view...",
+    })
+    expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument()
+    expect(screen.getByText("View may be stale")).toBeInTheDocument()
+
+    await waitFor(() => expect(sendArtifactFrame).toHaveBeenCalledTimes(2))
+    expect(sendArtifactFrame.mock.calls[1]?.[0]).toMatchObject({
+      artifactId: buildCoreviewRealArtifactId(SELECTED_PDF_ARTIFACT),
+      visualSourceKind: "canvas_element",
+      rawFrameExcluded: true,
+    })
+    expect(sendArtifactFrame.mock.calls[1]?.[1]).toEqual({ coreviewSendStage: "refresh" })
+
+    await waitFor(() => {
+      const commandEvents = exportSophiaCaptureBundle().events.filter((event) => event.name === "artifact-review-voice-command")
+      expect(commandEvents.some((event) => {
+        const payload = event.payload as Record<string, unknown> | undefined
+        return (
+          payload?.reviewVoiceCommandKind === "go_to_page"
+          && payload?.reviewVoiceCommandPageTarget === 2
+          && payload?.reviewVoiceCommandApplied === true
+          && payload?.reviewVoiceCommandTriggeredRefresh === true
+          && payload?.artifactCurrentPageIndex === 1
+          && payload?.artifactCurrentPageCount === 3
+        )
+      })).toBe(true)
+      expect(JSON.stringify(commandEvents)).not.toContain("Go to page two")
+    })
+  })
+
+  it("routes a PDF voice page command without faking a frame when visual refresh is unavailable", async () => {
+    setCoreviewFlags(true)
+    mockPdfPreviewReady({ pageCount: 3 })
+    const sendArtifactFrame = vi.fn()
+    let routeArtifactCommand: Parameters<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onArtifactReviewVoiceCommandRouteChange"]>>[0] = null
+
+    renderPanel({
+      selectedBuilderArtifactPath: PDF_SELECTED_PATH,
+      transport: closedVoiceFrameTransport(sendArtifactFrame),
+      onArtifactReviewVoiceCommandRouteChange: (handler) => {
+        routeArtifactCommand = handler
+      },
+    })
+
+    expect(await screen.findByText("Page 1 of 3")).toBeInTheDocument()
+    await waitFor(() => expect(routeArtifactCommand).not.toBeNull())
+
+    let commandResult: ReturnType<NonNullable<typeof routeArtifactCommand>> | null = null
+    act(() => {
+      commandResult = routeArtifactCommand?.("go to page 2") ?? null
+    })
+
+    expect(commandResult).toMatchObject({
+      handled: true,
+      applied: true,
+      triggeredRefresh: false,
+      refreshResult: "not_active",
+      userMessage: "Page changed. Start voice review to refresh Sophia's view.",
+    })
+    expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument()
+    expect(screen.getByRole("region", { name: /generated artifact/i })).toHaveAttribute("data-review-state", "unavailable")
+    expect(screen.queryByText("Frame sent")).not.toBeInTheDocument()
+    expect(sendArtifactFrame).not.toHaveBeenCalled()
   })
 
   it("records selected builder stage identity with Coreview off without activating companion review", async () => {

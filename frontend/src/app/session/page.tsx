@@ -48,6 +48,7 @@ import { haptic } from '../hooks/useHaptics';
 import { useIdleTimeout } from '../hooks/useIdleTimeout';
 import { useSessionBootstrap } from '../hooks/useSessionBootstrap';
 import { useSessionPersistence } from '../hooks/useSessionPersistence';
+import type { ArtifactReviewVoiceCommandRouter } from '../lib/artifact-review-voice-commands';
 import { buildThreadArtifactHref, getBuilderArtifactFiles, normalizeBuilderArtifactPath } from '../lib/builder-artifacts';
 import { GeminiStillFrameTransport } from '../lib/co-review-still-frame-transport';
 import { debugLog } from '../lib/debug-logger';
@@ -532,6 +533,13 @@ function SessionPageContent() {
     }),
     [voiceState.getArtifactFrameTransportStatus, voiceState.sendArtifactFrame],
   );
+  const artifactReviewVoiceCommandRouterRef = useRef<ArtifactReviewVoiceCommandRouter | null>(null);
+  const handleArtifactReviewVoiceCommandRouteChange = useCallback((handler: ArtifactReviewVoiceCommandRouter | null) => {
+    artifactReviewVoiceCommandRouterRef.current = handler;
+  }, []);
+  const routeArtifactReviewVoiceCommand = useCallback<ArtifactReviewVoiceCommandRouter>((text) => (
+    artifactReviewVoiceCommandRouterRef.current?.(text) ?? { handled: false }
+  ), []);
   const builderArtifactLibraryRef = useRef(builderArtifactLibrary);
 
   useEffect(() => {
@@ -992,6 +1000,7 @@ function SessionPageContent() {
     handleVoiceEndSession,
     voiceState,
     showToast,
+    routeArtifactReviewCommand: routeArtifactReviewVoiceCommand,
     setOnUserTranscriptHandler,
     setAssistantResponseSuppressedChecker,
   });
@@ -1313,6 +1322,7 @@ function SessionPageContent() {
               pendingBuilderArtifactReview={pendingBuilderArtifactReview}
               onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}
               onPendingBuilderArtifactReviewConsumed={handlePendingBuilderArtifactReviewConsumed}
+              onArtifactReviewVoiceCommandRouteChange={handleArtifactReviewVoiceCommandRouteChange}
               onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
               onMemoryApprove={handleMemoryApprove}
               onMemoryReject={handleMemoryReject}
@@ -1541,6 +1551,7 @@ function SessionPageContent() {
               pendingBuilderArtifactReview={pendingBuilderArtifactReview}
               onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}
               onPendingBuilderArtifactReviewConsumed={handlePendingBuilderArtifactReviewConsumed}
+              onArtifactReviewVoiceCommandRouteChange={handleArtifactReviewVoiceCommandRouteChange}
               onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
               onMemoryApprove={handleMemoryApprove}
               onMemoryReject={handleMemoryReject}
@@ -1566,6 +1577,7 @@ function SessionPageContent() {
             pendingBuilderArtifactReview={pendingBuilderArtifactReview}
             onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}
             onPendingBuilderArtifactReviewConsumed={handlePendingBuilderArtifactReviewConsumed}
+            onArtifactReviewVoiceCommandRouteChange={handleArtifactReviewVoiceCommandRouteChange}
             onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
             onMemoryApprove={handleMemoryApprove}
             onMemoryReject={handleMemoryReject}

@@ -2183,6 +2183,7 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.coreview.visual.frameSendFailureCount).toBe(1);
     expect(metrics.coreview.visual.lastFrameSendFailureReason).toBe('frame_send_closed_gemini_websocket');
     expect(metrics.coreview.visual.websocketClosedAfterFrameCount).toBe(1);
+    expect(metrics.coreview.visual.exactTextAvailable).toBe(false);
     expect(metrics.coreview.exactText.exactTextFailureCount).toBe(1);
     expect(metrics.coreview.exactText.readArtifactTextCallCount).toBe(1);
     expect(metrics.coreview.exactText.exactTextSources.unsupported).toBe(1);

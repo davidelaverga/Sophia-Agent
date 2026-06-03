@@ -12,6 +12,13 @@ import {
   type ArtifactViewState,
 } from "../../lib/artifact-renderers"
 import {
+  parseArtifactReviewVoiceCommand,
+  type ArtifactReviewVoiceCommand,
+  type ArtifactReviewVoiceCommandRefreshResult,
+  type ArtifactReviewVoiceCommandRouteResult,
+  type ArtifactReviewVoiceCommandRouter,
+} from "../../lib/artifact-review-voice-commands"
+import {
   buildThreadArtifactHref,
   formatBuilderArtifactFileSize,
   getBuilderArtifactFiles,
@@ -27,7 +34,7 @@ import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../type
 import type { RitualArtifacts } from "../../types/session"
 
 import type { ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
-import { ArtifactStage } from "./ArtifactStage"
+import { ArtifactStage, type ArtifactReviewVoiceCommandTarget } from "./ArtifactStage"
 import {
   COREVIEW_COMPANION_ARTIFACT_ID,
   CoreviewCompanionArtifactCanvas,
@@ -52,9 +59,17 @@ interface PresenceArtifactPanelProps {
   pendingBuilderArtifactReview?: boolean
   onStartVoiceBuilderArtifactReview?: () => void
   onPendingBuilderArtifactReviewConsumed?: () => void
+  onArtifactReviewVoiceCommandRouteChange?: (handler: ArtifactReviewVoiceCommandRouter | null) => void
   onReflectionTap?: (reflection: { prompt: string; why?: string }) => void
   onMemoryApprove?: (index: number) => void
   onMemoryReject?: (index: number) => void
+}
+
+type PendingArtifactReviewVoiceCommandRefresh = {
+  requestId: string
+  command: ArtifactReviewVoiceCommand
+  artifactCurrentPageIndex: number
+  artifactCurrentPageCount: number
 }
 
 function getPathFilename(path: string | undefined): string {
@@ -127,6 +142,84 @@ function unavailableCaptureStatus(reason: ArtifactVisualCaptureStatus["reason"])
     source: "none",
     exactTextAvailable: false,
   }
+}
+
+function nextVoiceCommandRefreshRequestId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+function buildAppliedVoiceCommandMessage(
+  command: ArtifactReviewVoiceCommand,
+  pageIndex: number,
+  refreshing: boolean,
+): string {
+  const suffix = refreshing ? " Refreshing Sophia's view..." : ""
+  switch (command.kind) {
+    case "go_to_page":
+    case "next_page":
+    case "previous_page":
+    case "first_page":
+    case "last_page":
+      return `Switched to page ${pageIndex + 1}.${suffix}`
+    case "zoom_in":
+    case "zoom_out":
+    case "fit_width":
+    case "fit_page":
+    case "reset_zoom":
+      return `Updated the PDF view.${suffix}`
+    case "refresh_view":
+      return refreshing ? "Refreshing Sophia's view..." : "Refresh requested."
+    default:
+      return "Updated the artifact view."
+  }
+}
+
+function isPageNavigationVoiceCommand(command: ArtifactReviewVoiceCommand): boolean {
+  return (
+    command.kind === "go_to_page"
+    || command.kind === "next_page"
+    || command.kind === "previous_page"
+    || command.kind === "first_page"
+    || command.kind === "last_page"
+  )
+}
+
+function buildRefreshUnavailableVoiceCommandMessage(
+  command: ArtifactReviewVoiceCommand,
+  shouldStartVoiceReview: boolean,
+): string {
+  if (shouldStartVoiceReview) {
+    if (command.kind === "refresh_view") {
+      return "Start voice review to refresh Sophia's view."
+    }
+
+    return isPageNavigationVoiceCommand(command)
+      ? "Page changed. Start voice review to refresh Sophia's view."
+      : "PDF view updated. Start voice review to refresh Sophia's view."
+  }
+
+  if (command.kind === "refresh_view") {
+    return "Visual refresh is not active."
+  }
+
+  return isPageNavigationVoiceCommand(command)
+    ? "Page changed. Visual refresh is not active."
+    : "PDF view updated. Visual refresh is not active."
+}
+
+function buildBlockedVoiceCommandMessage(
+  command: ArtifactReviewVoiceCommand,
+  pageCount: number,
+): string {
+  if (command.kind === "go_to_page" && command.pageTarget && command.pageTarget > Math.max(1, pageCount)) {
+    return "That page is not available in this PDF."
+  }
+
+  if (command.kind === "go_to_page" && command.pageTarget) {
+    return `I can only review the page you have open. Please switch to page ${command.pageTarget} or use the page controls.`
+  }
+
+  return "I can only review the page you have open. Please use the page controls."
 }
 
 function buildSelectedArtifactFromExisting(builderArtifact: BuilderArtifactV1, path: string): BuilderArtifactV1 | null {
@@ -218,6 +311,7 @@ export function PresenceArtifactPanel({
   pendingBuilderArtifactReview = false,
   onStartVoiceBuilderArtifactReview,
   onPendingBuilderArtifactReviewConsumed,
+  onArtifactReviewVoiceCommandRouteChange,
   onReflectionTap,
   onMemoryApprove,
   onMemoryReject,
@@ -234,6 +328,10 @@ export function PresenceArtifactPanel({
     () => unavailableCaptureStatus("no_selected_artifact"),
   )
   const [reportedBuilderArtifactViewState, setReportedBuilderArtifactViewState] = useState<ArtifactViewState | null>(null)
+  const [builderVoiceCommandTarget, setBuilderVoiceCommandTarget] = useState<ArtifactReviewVoiceCommandTarget | null>(null)
+  const builderVoiceCommandTargetRef = useRef<ArtifactReviewVoiceCommandTarget | null>(null)
+  const [pendingVoiceCommandRefresh, setPendingVoiceCommandRefresh] = useState<PendingArtifactReviewVoiceCommandRefresh | null>(null)
+  const voiceCommandRefreshInFlightRef = useRef<string | null>(null)
   const status = usePresenceStore((s) => s.status)
   const hasBuilderLibrary = builderArtifactLibrary.length > 0
   const normalizedSelectedBuilderArtifactPath = useMemo(
@@ -257,6 +355,7 @@ export function PresenceArtifactPanel({
   const reflection_candidate = artifacts?.reflection_candidate
   const memory_candidates = artifacts?.memory_candidates
   const hasBuilder = !!stageBuilderArtifact
+  const builderStageActive = hasBuilder && Boolean(stageBuilderArtifact)
   const hasReflection = isRealReflection(reflection_candidate?.prompt)
   const hasMemories = memory_candidates && memory_candidates.length > 0
   const hasTakeaway = !!takeaway?.trim()
@@ -324,6 +423,10 @@ export function PresenceArtifactPanel({
   const builderExactTextAvailable = Boolean(
     builderArtifactId && effectiveBuilderVisualCaptureStatus.exactTextAvailable,
   )
+  const handleBuilderVoiceCommandTargetChange = useCallback((target: ArtifactReviewVoiceCommandTarget | null) => {
+    builderVoiceCommandTargetRef.current = target
+    setBuilderVoiceCommandTarget(target)
+  }, [])
 
   useEffect(() => {
     setReportedBuilderArtifactViewState(null)
@@ -378,6 +481,228 @@ export function PresenceArtifactPanel({
     transportNeedsVoice
     && isVoiceMode
   )
+
+  const recordReviewVoiceCommandTelemetry = useCallback((details: {
+    command: ArtifactReviewVoiceCommand
+    applied: boolean
+    blockedReason: ArtifactReviewVoiceCommandRouteResult["blockedReason"]
+    triggeredRefresh: boolean
+    refreshResult: ArtifactReviewVoiceCommandRefreshResult
+    artifactCurrentPageIndex: number
+    artifactCurrentPageCount: number
+  }) => {
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "artifact-review-voice-command",
+      payload: {
+        sessionId: sessionId ?? null,
+        normalSessionId: normalSessionId ?? null,
+        threadId: threadId ?? null,
+        artifactId: builderArtifactId,
+        coreviewArtifactId: builderArtifactId,
+        reviewVoiceCommandDetected: true,
+        reviewVoiceCommandKind: details.command.kind,
+        reviewVoiceCommandPageTarget: details.command.pageTarget ?? null,
+        reviewVoiceCommandApplied: details.applied,
+        reviewVoiceCommandBlockedReason: details.blockedReason ?? null,
+        reviewVoiceCommandTriggeredRefresh: details.triggeredRefresh,
+        reviewVoiceCommandRefreshResult: details.refreshResult,
+        artifactCurrentPageIndex: details.artifactCurrentPageIndex,
+        artifactCurrentPageCount: details.artifactCurrentPageCount,
+        artifactRendererKind: builderArtifactViewState.rendererKind,
+        artifactFitMode: builderArtifactViewState.fitMode,
+        rawTranscriptExcluded: true,
+        rawFrameExcluded: true,
+      },
+    })
+  }, [
+    builderArtifactId,
+    builderArtifactViewState.fitMode,
+    builderArtifactViewState.rendererKind,
+    normalSessionId,
+    sessionId,
+    threadId,
+  ])
+
+  const routeArtifactReviewVoiceCommand = useCallback((transcript: string): ArtifactReviewVoiceCommandRouteResult => {
+    if (!isVisible || !builderStageActive) {
+      return { handled: false }
+    }
+
+    const command = parseArtifactReviewVoiceCommand(transcript)
+    if (!command) {
+      return { handled: false }
+    }
+
+    const voiceCommandTarget = builderVoiceCommandTargetRef.current ?? builderVoiceCommandTarget
+    const currentPageIndex = voiceCommandTarget?.pageIndex ?? builderArtifactViewState.pageIndex
+    const currentPageCount = voiceCommandTarget?.pageCount ?? builderArtifactViewState.pageCount
+
+    if (!builderArtifactId || !voiceCommandTarget) {
+      recordReviewVoiceCommandTelemetry({
+        command,
+        applied: false,
+        blockedReason: "no_artifact_selected",
+        triggeredRefresh: false,
+        refreshResult: "not_requested",
+        artifactCurrentPageIndex: currentPageIndex,
+        artifactCurrentPageCount: currentPageCount,
+      })
+      return {
+        handled: true,
+        command,
+        applied: false,
+        blockedReason: "no_artifact_selected",
+        triggeredRefresh: false,
+        refreshResult: "not_requested",
+        userMessage: buildBlockedVoiceCommandMessage(command, currentPageCount),
+      }
+    }
+
+    const applyResult = voiceCommandTarget.applyCommand(command)
+    let triggeredRefresh = false
+    let refreshResult: ArtifactReviewVoiceCommandRefreshResult = "not_requested"
+    let userMessage: string | null = null
+
+    if (!applyResult.applied) {
+      recordReviewVoiceCommandTelemetry({
+        command,
+        applied: false,
+        blockedReason: applyResult.blockedReason,
+        triggeredRefresh: false,
+        refreshResult,
+        artifactCurrentPageIndex: applyResult.artifactCurrentPageIndex,
+        artifactCurrentPageCount: applyResult.artifactCurrentPageCount,
+      })
+      return {
+        handled: true,
+        command,
+        applied: false,
+        blockedReason: applyResult.blockedReason,
+        triggeredRefresh: false,
+        refreshResult,
+        userMessage: buildBlockedVoiceCommandMessage(command, applyResult.artifactCurrentPageCount),
+      }
+    }
+
+    if (applyResult.changed) {
+      setBuilderVisualCaptureStatus(unavailableCaptureStatus("preview_not_ready"))
+    }
+
+    if (applyResult.shouldRefresh) {
+      if (builderArtifactCoReview.canRefresh || builderArtifactCoReview.state.state === "co_review_starting") {
+        triggeredRefresh = true
+        refreshResult = "pending"
+        setPendingVoiceCommandRefresh({
+          requestId: nextVoiceCommandRefreshRequestId(),
+          command,
+          artifactCurrentPageIndex: applyResult.artifactCurrentPageIndex,
+          artifactCurrentPageCount: applyResult.artifactCurrentPageCount,
+        })
+        userMessage = buildAppliedVoiceCommandMessage(command, applyResult.artifactCurrentPageIndex, true)
+      } else {
+        refreshResult = builderArtifactCoReview.transportStatus.stillFramesSupported
+          ? "not_active"
+          : "unavailable"
+        userMessage = buildRefreshUnavailableVoiceCommandMessage(
+          command,
+          builderArtifactCoReview.transportStatus.stillFramesSupported
+            && !builderArtifactCoReview.transportStatus.visualTransportSupported,
+        )
+      }
+    }
+
+    recordReviewVoiceCommandTelemetry({
+      command,
+      applied: true,
+      blockedReason: null,
+      triggeredRefresh,
+      refreshResult,
+      artifactCurrentPageIndex: applyResult.artifactCurrentPageIndex,
+      artifactCurrentPageCount: applyResult.artifactCurrentPageCount,
+    })
+
+    return {
+      handled: true,
+      command,
+      applied: true,
+      blockedReason: null,
+      triggeredRefresh,
+      refreshResult,
+      userMessage: userMessage ?? buildAppliedVoiceCommandMessage(command, applyResult.artifactCurrentPageIndex, false),
+    }
+  }, [
+    builderArtifactCoReview.canRefresh,
+    builderArtifactCoReview.state.state,
+    builderArtifactCoReview.transportStatus.stillFramesSupported,
+    builderArtifactCoReview.transportStatus.visualTransportSupported,
+    builderArtifactId,
+    builderArtifactViewState.pageCount,
+    builderArtifactViewState.pageIndex,
+    builderStageActive,
+    builderVoiceCommandTarget,
+    isVisible,
+    recordReviewVoiceCommandTelemetry,
+  ])
+
+  useEffect(() => {
+    onArtifactReviewVoiceCommandRouteChange?.(routeArtifactReviewVoiceCommand)
+    return () => onArtifactReviewVoiceCommandRouteChange?.(null)
+  }, [onArtifactReviewVoiceCommandRouteChange, routeArtifactReviewVoiceCommand])
+
+  useEffect(() => {
+    const pending = pendingVoiceCommandRefresh
+    if (!pending || voiceCommandRefreshInFlightRef.current === pending.requestId) {
+      return
+    }
+    if (!builderArtifactCoReview.canRefresh || !builderVisualSourceReady) {
+      return
+    }
+    if (builderArtifactViewState.pageIndex !== pending.artifactCurrentPageIndex) {
+      return
+    }
+
+    voiceCommandRefreshInFlightRef.current = pending.requestId
+    void builderArtifactCoReview.refreshReview()
+      .then((nextState) => {
+        const refreshResult: ArtifactReviewVoiceCommandRefreshResult =
+          nextState.refreshFrameResult === "success" && (nextState.frameSentCount ?? 0) > 0
+            ? "success"
+            : "error"
+        recordReviewVoiceCommandTelemetry({
+          command: pending.command,
+          applied: true,
+          blockedReason: null,
+          triggeredRefresh: true,
+          refreshResult,
+          artifactCurrentPageIndex: pending.artifactCurrentPageIndex,
+          artifactCurrentPageCount: pending.artifactCurrentPageCount,
+        })
+      })
+      .catch(() => {
+        recordReviewVoiceCommandTelemetry({
+          command: pending.command,
+          applied: true,
+          blockedReason: null,
+          triggeredRefresh: true,
+          refreshResult: "error",
+          artifactCurrentPageIndex: pending.artifactCurrentPageIndex,
+          artifactCurrentPageCount: pending.artifactCurrentPageCount,
+        })
+      })
+      .finally(() => {
+        voiceCommandRefreshInFlightRef.current = null
+        setPendingVoiceCommandRefresh((current) => (
+          current?.requestId === pending.requestId ? null : current
+        ))
+      })
+  }, [
+    builderArtifactCoReview,
+    builderArtifactViewState.pageIndex,
+    builderVisualSourceReady,
+    pendingVoiceCommandRefresh,
+    recordReviewVoiceCommandTelemetry,
+  ])
 
   useEffect(() => {
     if (!isVisible || !stageBuilderArtifact || !builderArtifactId) {
@@ -579,7 +904,6 @@ export function PresenceArtifactPanel({
 
   const isActive = phase === "visible"
   const isTextModeBuilderStage = !isVoiceMode && hasBuilder
-  const builderStageActive = hasBuilder && Boolean(stageBuilderArtifact)
   const showSecondaryArtifactSurfaces = !builderStageActive
 
   // Presence-reactive bloom color
@@ -708,6 +1032,7 @@ export function PresenceArtifactPanel({
                   canRefreshReview={builderArtifactCoReview.canRefresh}
                   onVisualCaptureStatusChange={setBuilderVisualCaptureStatus}
                   onArtifactViewStateChange={setReportedBuilderArtifactViewState}
+                  onVoiceCommandTargetChange={handleBuilderVoiceCommandTargetChange}
                   onStartReview={() => { void builderArtifactCoReview.startReview() }}
                   onStopReview={() => { void builderArtifactCoReview.stopReview() }}
                   onRefreshReview={() => { void builderArtifactCoReview.refreshReview() }}
@@ -732,6 +1057,7 @@ export function PresenceArtifactPanel({
                   canRefreshReview={builderArtifactCoReview.canRefresh}
                   onVisualCaptureStatusChange={setBuilderVisualCaptureStatus}
                   onArtifactViewStateChange={setReportedBuilderArtifactViewState}
+                  onVoiceCommandTargetChange={handleBuilderVoiceCommandTargetChange}
                   onStartVoiceReview={onStartVoiceBuilderArtifactReview}
                   onStartReview={() => { void builderArtifactCoReview.startReview() }}
                   onStopReview={() => { void builderArtifactCoReview.stopReview() }}

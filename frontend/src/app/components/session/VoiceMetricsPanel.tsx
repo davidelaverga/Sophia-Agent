@@ -1277,7 +1277,7 @@ function GeminiRuntimeDetails({
               ["Frames sent", String(coreview.visual.frameSentCount)],
               ["Initial frame", coreview.visual.initialFrameSent ? "sent" : "pending"],
               ["Visual fresh", coreview.visual.visualFresh ? "yes" : "no"],
-              ["Exact text", coreview.visual.exactTextAvailable ? "available" : "pending"],
+              ["Exact text", coreview.visual.exactTextAvailable ? "available" : "unavailable"],
               ["Last frame", formatBytes(coreview.visual.lastFrameBytes)],
               ["Max send latency", formatMs(coreview.visual.maxFrameSendLatencyMs)],
               ["Frame failures", String(coreview.visual.frameSendFailureCount)],

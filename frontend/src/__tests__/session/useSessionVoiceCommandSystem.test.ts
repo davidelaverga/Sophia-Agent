@@ -1,6 +1,7 @@
 import { act, renderHook } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
+import type { ArtifactReviewVoiceCommandRouteResult } from '../../app/lib/artifact-review-voice-commands';
 import type { InterruptPayload } from '../../app/lib/session-types';
 import { useSessionVoiceCommandSystem } from '../../app/session/useSessionVoiceCommandSystem';
 
@@ -154,6 +155,41 @@ describe('useSessionVoiceCommandSystem', () => {
     expect(softBargeIn).toHaveBeenCalledTimes(1);
     expect(showToast).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Downloading deliverable.', variant: 'success' }),
+    );
+  });
+
+  it('routes artifact review commands without appending them as normal transcripts', () => {
+    const {
+      params,
+      onUserTranscript,
+      showToast,
+      bargeIn,
+    } = buildParams({
+      pendingInterrupt: null,
+      routeArtifactReviewCommand: vi.fn(() => ({
+        handled: true,
+        command: { kind: 'go_to_page', pageTarget: 2 },
+        applied: true,
+        blockedReason: null,
+        triggeredRefresh: true,
+        refreshResult: 'pending',
+        userMessage: "Switched to page 2. Refreshing Sophia's view...",
+      } satisfies ArtifactReviewVoiceCommandRouteResult)),
+    });
+
+    const { result } = renderHook(() => useSessionVoiceCommandSystem(params));
+
+    act(() => {
+      result.current.handleVoiceTranscript('Go to page two in your analysis.');
+    });
+
+    expect(onUserTranscript).not.toHaveBeenCalled();
+    expect(bargeIn).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: "Switched to page 2. Refreshing Sophia's view...",
+        variant: 'info',
+      }),
     );
   });
 
