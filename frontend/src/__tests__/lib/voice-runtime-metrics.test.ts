@@ -1422,7 +1422,7 @@ describe('buildVoiceDeveloperMetrics', () => {
     ];
 
     const metrics = buildVoiceDeveloperMetrics({
-      stage: 'streaming_audio',
+      stage: 'listening',
       events,
       snapshot: buildSnapshot({ detectedAudio: false }),
       nowMs: Date.parse('2026-04-07T12:00:02.000Z'),

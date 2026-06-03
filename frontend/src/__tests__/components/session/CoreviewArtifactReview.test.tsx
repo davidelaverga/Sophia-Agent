@@ -237,6 +237,8 @@ describe("Coreview artifact still-frame review", () => {
     expect(panel.className).not.toMatch(/\bfixed\b|\binset-0\b|\bmax-w-4xl\b/)
     expect(artifactRegion.className).toContain("w-full")
     expect(artifactRegion.className).toContain("flex-1")
+    expect(within(artifactRegion).getByTestId("artifact-canvas-bed").className).toContain("flex-1")
+    expect(within(artifactRegion).getByTestId("artifact-document-page").className).toContain("max-w-[860px]")
   })
 
   it("records selected builder stage identity with Coreview off without activating companion review", async () => {
@@ -486,7 +488,8 @@ describe("Coreview artifact still-frame review", () => {
     expect(voiceStage.className).toContain("overflow-hidden")
     expect(within(voiceStage).getAllByTestId("artifact-canvas-viewport")).toHaveLength(1)
     expect(within(artifactRegion).getByTestId("artifact-canvas-scroll-area")).toBeInTheDocument()
-    expect(within(voiceStage).getAllByText("Page 1 of 1").length).toBeGreaterThanOrEqual(1)
+    expect(within(voiceStage).getAllByText("Page 1 of 1")).toHaveLength(1)
+    expect(within(voiceStage).getAllByTestId("artifact-review-status")).toHaveLength(1)
     expect(within(voiceStage).getByLabelText(/open launch-brief\.md in new tab/i)).toHaveAttribute(
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md",

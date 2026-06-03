@@ -1185,7 +1185,7 @@ function SessionPageContent() {
         className={cn(
           'relative h-full min-h-0 animate-fadeIn',
           showTextArtifactStage
-            ? 'grid w-full grid-cols-1 grid-rows-[minmax(320px,0.56fr)_minmax(360px,0.44fr)] overflow-hidden lg:grid-cols-[minmax(420px,0.42fr)_minmax(620px,1fr)] lg:grid-rows-1 lg:gap-6'
+            ? 'grid w-full grid-cols-1 grid-rows-[minmax(320px,0.52fr)_minmax(380px,0.48fr)] overflow-hidden lg:grid-cols-[minmax(360px,0.38fr)_minmax(0,1fr)] lg:grid-rows-1 lg:gap-6 xl:grid-cols-[minmax(420px,0.34fr)_minmax(720px,1fr)]'
             : 'flex',
         )}
       >
@@ -1514,7 +1514,7 @@ function SessionPageContent() {
         {showTextArtifactStage && (
           <aside
             data-testid="session-artifact-stage-area"
-            className="relative z-10 min-h-0 min-w-0 overflow-hidden px-3 pb-3 lg:pb-6 lg:pr-6 lg:pt-16"
+            className="relative z-10 min-h-0 min-w-0 overflow-hidden px-3 pb-3 lg:pb-6 lg:pl-0 lg:pr-6 lg:pt-16"
             aria-label="Artifact stage area"
           >
             <PresenceArtifactPanel

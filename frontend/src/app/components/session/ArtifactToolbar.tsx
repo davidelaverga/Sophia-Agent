@@ -1,6 +1,6 @@
 "use client"
 
-import { Download, ExternalLink, Maximize2, Minus, Plus } from "lucide-react"
+import { Download, ExternalLink } from "lucide-react"
 
 import { haptic } from "../../hooks/useHaptics"
 import { cn } from "../../lib/utils"
@@ -40,9 +40,6 @@ export function ArtifactToolbar({
       </div>
 
       <div className="flex flex-wrap items-center gap-1.5" onClick={(event) => event.stopPropagation()}>
-        <ToolbarIconButton icon={Minus} label="Zoom out" disabled />
-        <ToolbarIconButton icon={Plus} label="Zoom in" disabled />
-        <ToolbarIconButton icon={Maximize2} label="Fit to view" disabled />
         {openHref ? (
           <a
             href={openHref}
@@ -70,27 +67,5 @@ export function ArtifactToolbar({
         ) : null}
       </div>
     </div>
-  )
-}
-
-function ToolbarIconButton({
-  icon: Icon,
-  label,
-  disabled,
-}: {
-  icon: typeof Minus
-  label: string
-  disabled?: boolean
-}) {
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      aria-label={label}
-      title={label}
-      className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[color:var(--cosmic-border-soft)] text-[color:var(--cosmic-text-faint)] transition disabled:cursor-not-allowed disabled:opacity-45"
-    >
-      <Icon className="h-3.5 w-3.5" aria-hidden="true" />
-    </button>
   )
 }

@@ -30,10 +30,12 @@ export function SophiaLookingChip({ state, frameConfirmed = false, className }: 
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium",
         visualLive
-          ? "border-[color:var(--cosmic-teal-border)] bg-[color:var(--cosmic-teal-bg)] text-[color:var(--cosmic-text-strong)]"
+          ? "border-[color:color-mix(in_srgb,var(--sophia-purple)_48%,var(--cosmic-border-soft))] bg-[color:color-mix(in_srgb,var(--sophia-purple)_14%,transparent)] text-[color:var(--cosmic-text-strong)] shadow-[0_0_18px_color-mix(in_srgb,var(--sophia-purple)_14%,transparent)]"
           : unavailable
             ? "border-[color:var(--cosmic-danger-border)] bg-[color:var(--cosmic-danger-bg)] text-[color:var(--cosmic-danger-text)]"
-            : "border-[color:var(--cosmic-border-soft)] bg-[color:var(--cosmic-panel-soft)] text-[color:var(--cosmic-text-muted)]",
+            : preparing
+              ? "border-[color:color-mix(in_srgb,var(--sophia-purple)_34%,var(--cosmic-border-soft))] bg-[color:color-mix(in_srgb,var(--sophia-purple)_9%,var(--cosmic-panel-soft))] text-[color:var(--cosmic-text)]"
+              : "border-[color:var(--cosmic-border-soft)] bg-[color:var(--cosmic-panel-soft)] text-[color:var(--cosmic-text-muted)]",
         className,
       )}
       role="status"

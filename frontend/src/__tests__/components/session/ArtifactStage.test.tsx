@@ -157,6 +157,14 @@ describe("ArtifactStage", () => {
     expect(artifactRegion.className).toContain("w-full")
     expect(artifactRegion.className).toContain("min-h-0")
     expect(artifactRegion.className).not.toMatch(/\bfixed\b|\binset-0\b/)
+    expect(artifactRegion).toHaveAttribute("data-review-state", "idle")
+    const viewport = screen.getByTestId("artifact-canvas-viewport")
+    const canvasBed = screen.getByTestId("artifact-canvas-bed")
+    const documentPage = screen.getByTestId("artifact-document-page")
+    expect(viewport).toContainElement(canvasBed)
+    expect(canvasBed.className).toContain("flex-1")
+    expect(documentPage.className).toContain("min-h-full")
+    expect(documentPage.className).toContain("max-w-[860px]")
     expect(screen.getAllByText("Launch brief overview")).toHaveLength(2)
     expect(screen.getByText("Document")).toBeInTheDocument()
     expect(screen.getByText("launch-brief.pdf")).toBeInTheDocument()
@@ -168,6 +176,10 @@ describe("ArtifactStage", () => {
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.pdf?download=true",
     )
+    expect(screen.getByText("Page 1 of 1")).toBeInTheDocument()
+    expect(screen.queryByLabelText("Zoom out")).not.toBeInTheDocument()
+    expect(screen.queryByLabelText("Zoom in")).not.toBeInTheDocument()
+    expect(screen.queryByLabelText("Fit to view")).not.toBeInTheDocument()
   })
 
   it("makes Review with Sophia prominent and calls the existing start handler", async () => {
@@ -191,10 +203,17 @@ describe("ArtifactStage", () => {
       },
     })
 
-    expect(screen.getByRole("status", { name: "Sophia is looking at this artifact" })).toBeInTheDocument()
-    expect(screen.getByText("Frame sent")).toBeInTheDocument()
+    const artifactRegion = screen.getByRole("region", { name: /generated artifact/i })
+    expect(artifactRegion).toHaveAttribute("data-review-state", "active")
+    expect(screen.getByTestId("artifact-stage-review-aura").className).toContain("opacity-100")
+    const lookingChip = screen.getByRole("status", { name: "Sophia is looking at this artifact" })
+    expect(lookingChip).toBeInTheDocument()
+    expect(lookingChip.className).toContain("sophia-purple")
+    const frameSent = screen.getByText("Frame sent").parentElement
+    expect(frameSent?.className).toContain("cosmic-teal")
     expect(screen.getByText("View may be stale")).toBeInTheDocument()
-    expect(screen.getByText("Exact text available")).toBeInTheDocument()
+    const exactText = screen.getByText("Exact text available").parentElement
+    expect(exactText?.className).toContain("cosmic-teal")
   })
 
   it("maps starting review state to Preparing view", () => {
@@ -206,6 +225,7 @@ describe("ArtifactStage", () => {
     })
 
     expect(screen.getByRole("status", { name: "Preparing view" })).toBeInTheDocument()
+    expect(screen.getByRole("region", { name: /generated artifact/i })).toHaveAttribute("data-review-state", "preparing")
   })
 
   it("shows Not looking and exact text availability before review", () => {
@@ -411,7 +431,9 @@ describe("ArtifactStage", () => {
     renderStage({ artifact: markdownBuilderArtifact, fillAvailable: true })
 
     const viewport = await screen.findByTestId("artifact-canvas-viewport")
+    const canvasBed = screen.getByTestId("artifact-canvas-bed")
     expect(viewport).toContainElement(screen.getByTestId("artifact-canvas-scroll-area"))
+    expect(canvasBed).toContainElement(screen.getByTestId("artifact-preview-state"))
     const previewRegion = await screen.findByLabelText("Artifact document preview")
     expect(within(previewRegion).getByText("Preparing document view")).toBeInTheDocument()
     expect(screen.queryByText("Loading preview")).not.toBeInTheDocument()
@@ -435,10 +457,14 @@ describe("ArtifactStage", () => {
     expect(await screen.findByRole("heading", { name: "Launch Brief" })).toBeInTheDocument()
     const toolbar = screen.getByTestId("artifact-toolbar")
     const viewport = screen.getByTestId("artifact-canvas-viewport")
+    const canvasBed = screen.getByTestId("artifact-canvas-bed")
     const scrollArea = screen.getByTestId("artifact-canvas-scroll-area")
+    const documentPage = screen.getByTestId("artifact-document-page")
 
     expect(viewport.className).toContain("flex-1")
+    expect(canvasBed.className).toContain("flex-1")
     expect(scrollArea.className).toContain("overflow-y-auto")
+    expect(documentPage.className).toContain("max-w-[980px]")
     expect(toolbar).not.toBe(scrollArea)
     expect(scrollArea).not.toContainElement(toolbar)
     expect(screen.getByRole("button", { name: /review with sophia/i })).toBeInTheDocument()
@@ -452,6 +478,8 @@ describe("ArtifactStage", () => {
     renderStage({ artifact: markdownBuilderArtifact })
 
     const previewRegion = await screen.findByLabelText("Artifact document preview")
+    const canvasBed = screen.getByTestId("artifact-canvas-bed")
+    expect(canvasBed).toContainElement(screen.getByTestId("artifact-preview-state"))
     expect(within(previewRegion).getByText("Preview unavailable")).toBeInTheDocument()
     expect(screen.getByLabelText("Open Launch brief overview in new tab")).toHaveAttribute(
       "href",

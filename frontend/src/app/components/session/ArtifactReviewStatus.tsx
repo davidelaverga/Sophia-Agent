@@ -42,6 +42,7 @@ export function ArtifactReviewStatus({
           "flex flex-wrap items-center gap-2 text-[11px]",
           className,
         )}
+        data-testid="artifact-review-status"
         aria-live="polite"
       >
         <StatusPill icon="alert" label="Visual review disabled locally" tone="danger" />
@@ -52,12 +53,13 @@ export function ArtifactReviewStatus({
 
   const frameSent = hasConfirmedStillFrame(state, transportStatus)
   const stale = Boolean(frameSent && state?.state === "co_review_live")
+  const lookingChipPreparing = Boolean(state?.state === "co_review_starting" || state?.refreshFrameInProgress)
   const hasFrameError = Boolean(
     state?.state === "co_review_error"
     || (state?.frameSendFailureCount ?? 0) > 0
   )
   const waitingForVoice = Boolean(visualReviewRequiresVoice && !frameSent && !hasFrameError)
-  const preparingView = Boolean(visualReviewPreparing && !frameSent && !hasFrameError)
+  const preparingView = Boolean(visualReviewPreparing && !lookingChipPreparing && !frameSent && !hasFrameError)
   const frameUnavailable = Boolean(
     !waitingForVoice
     && !preparingView
@@ -75,6 +77,7 @@ export function ArtifactReviewStatus({
         "flex flex-wrap items-center gap-2 text-[11px]",
         className,
       )}
+      data-testid="artifact-review-status"
       aria-live="polite"
     >
       <SophiaLookingChip state={state} frameConfirmed={frameSent} />
@@ -89,7 +92,7 @@ export function ArtifactReviewStatus({
   )
 }
 
-function hasConfirmedStillFrame(
+export function hasConfirmedStillFrame(
   state: CoReviewSessionState | null | undefined,
   transportStatus: CoReviewTransportStatus | null | undefined,
 ): boolean {

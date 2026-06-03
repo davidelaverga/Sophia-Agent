@@ -41,8 +41,11 @@ interface ArtifactCanvasViewportProps {
     threadId?: string | null
   } | null
   onVisualCaptureStatusChange?: (status: ArtifactVisualCaptureStatus) => void
+  reviewSurfaceState?: ArtifactReviewSurfaceState
   className?: string
 }
+
+export type ArtifactReviewSurfaceState = "idle" | "preparing" | "active" | "unavailable"
 
 const MARKDOWN_CAPTURE_CANVAS_WIDTH = 960
 const MARKDOWN_CAPTURE_CANVAS_HEIGHT = 1240
@@ -56,6 +59,7 @@ export function ArtifactCanvasViewport({
   previewHref,
   artifactTextRegistration,
   onVisualCaptureStatusChange,
+  reviewSurfaceState = "idle",
   className,
 }: ArtifactCanvasViewportProps) {
   const primaryFile = previewFile ?? files.find((file) => file.isPrimary) ?? files[0]
@@ -143,36 +147,48 @@ export function ArtifactCanvasViewport({
     <div
       data-testid="artifact-canvas-viewport"
       className={cn(
-        "relative flex min-h-[360px] max-h-full flex-col overflow-hidden rounded-b-xl bg-[color:color-mix(in_srgb,var(--cosmic-panel-soft)_58%,transparent)]",
+        "relative z-10 flex min-h-[360px] max-h-full flex-col overflow-hidden bg-[color:color-mix(in_srgb,var(--cosmic-panel-soft)_72%,var(--bg))]",
         className,
       )}
     >
       <div
-        className="absolute inset-0 pointer-events-none"
-        style={{
-          background:
-            "radial-gradient(circle at 24% 10%, color-mix(in srgb, var(--sophia-purple) 9%, transparent), transparent 34%), radial-gradient(circle at 78% 18%, color-mix(in srgb, var(--cosmic-teal) 8%, transparent), transparent 36%)",
-        }}
-      />
-      <div
-        data-testid="artifact-canvas-scroll-area"
-        className="scrollbar-thin relative flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain px-4 py-6 sm:px-8 sm:py-8"
-      >
-        {canPreviewMarkdown ? (
-          <MarkdownDocumentPage
-            artifact={artifact}
-            file={primaryFile}
-            preview={preview}
-            typeLabel={typeLabel}
-          />
-        ) : (
-          <ArtifactMetadataPage
-            artifact={artifact}
-            primaryFile={primaryFile}
-            supportingFileCount={supportingFiles.length}
-            typeLabel={typeLabel}
-          />
+        data-testid="artifact-canvas-bed"
+        className={cn(
+          "relative flex min-h-0 w-full flex-1 overflow-hidden bg-[color:color-mix(in_srgb,var(--cosmic-panel-soft)_78%,var(--bg))]",
+          reviewSurfaceState === "active"
+            ? "shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--sophia-purple)_26%,transparent),inset_0_0_44px_color-mix(in_srgb,var(--sophia-purple)_10%,transparent)]"
+            : reviewSurfaceState === "preparing"
+              ? "shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--sophia-purple)_18%,transparent),inset_0_0_38px_color-mix(in_srgb,var(--sophia-purple)_8%,transparent)]"
+              : "shadow-[inset_0_1px_0_color-mix(in_srgb,var(--cosmic-border-soft)_72%,transparent)]",
         )}
+      >
+        <div
+          className="pointer-events-none absolute inset-0"
+          style={{
+            background:
+              "linear-gradient(180deg, color-mix(in srgb, var(--cosmic-panel) 28%, transparent), transparent 26%), radial-gradient(circle at 18% 5%, color-mix(in srgb, var(--sophia-purple) 8%, transparent), transparent 32%), radial-gradient(circle at 84% 10%, color-mix(in srgb, var(--cosmic-teal) 5%, transparent), transparent 34%)",
+          }}
+        />
+        <div
+          data-testid="artifact-canvas-scroll-area"
+          className="scrollbar-thin relative z-10 flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-5 sm:px-6 sm:py-6 lg:px-8"
+        >
+          {canPreviewMarkdown ? (
+            <MarkdownDocumentPage
+              artifact={artifact}
+              file={primaryFile}
+              preview={preview}
+              typeLabel={typeLabel}
+            />
+          ) : (
+            <ArtifactMetadataPage
+              artifact={artifact}
+              primaryFile={primaryFile}
+              supportingFileCount={supportingFiles.length}
+              typeLabel={typeLabel}
+            />
+          )}
+        </div>
       </div>
       {canPreviewMarkdown && captureArtifactId && preview.status === "ready" && preview.markdown.trim() ? (
         <MarkdownArtifactCaptureCanvas
@@ -277,11 +293,12 @@ function MarkdownDocumentPage({
 }) {
   return (
     <div
-      className="mx-auto flex min-h-full w-full max-w-[860px] flex-col rounded-xl border bg-[color:color-mix(in_srgb,var(--card-bg)_90%,transparent)] shadow-[0_24px_70px_color-mix(in_srgb,var(--bg)_34%,transparent)]"
+      data-testid="artifact-document-page"
+      className="mx-auto flex min-h-full w-full max-w-[980px] flex-col rounded-lg border bg-[color:color-mix(in_srgb,var(--card-bg)_94%,var(--cosmic-panel-soft))] shadow-[0_18px_54px_color-mix(in_srgb,var(--bg)_34%,transparent)]"
       style={{ borderColor: "var(--cosmic-border-soft)" }}
       aria-label="Artifact document preview"
     >
-      <div className="flex items-center justify-between gap-4 border-b border-[color:var(--cosmic-border-soft)] px-6 py-4">
+      <div className="flex items-center justify-between gap-4 border-b border-[color:var(--cosmic-border-soft)] px-5 py-4 sm:px-6">
         <div className="min-w-0">
           <span className="inline-flex items-center gap-1.5 rounded-full border border-[color:var(--cosmic-border-soft)] px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-[color:var(--cosmic-text-muted)]">
             <Layers className="h-3.5 w-3.5" aria-hidden="true" />
@@ -294,7 +311,7 @@ function MarkdownDocumentPage({
         <FileText className="h-7 w-7 shrink-0 text-[color:var(--cosmic-text-faint)]" aria-hidden="true" />
       </div>
 
-      <div className="min-h-[300px] px-6 py-7 sm:px-8">
+      <div className="flex min-h-[300px] flex-1 flex-col px-5 py-6 sm:px-8 sm:py-7">
         {preview.status === "loading" ? (
           <PreviewStateCard title="Preparing document view" body="You can still open or download the artifact." />
         ) : preview.status === "failed" || preview.status === "idle" ? (
@@ -688,7 +705,8 @@ function ArtifactMetadataPage({
 }) {
   return (
     <div
-      className="mx-auto flex min-h-full w-full max-w-[680px] flex-col rounded-xl border bg-[color:color-mix(in_srgb,var(--card-bg)_84%,transparent)] px-6 py-7 shadow-[0_24px_70px_color-mix(in_srgb,var(--bg)_34%,transparent)]"
+      data-testid="artifact-document-page"
+      className="mx-auto flex min-h-full w-full max-w-[860px] flex-col rounded-lg border bg-[color:color-mix(in_srgb,var(--card-bg)_92%,var(--cosmic-panel-soft))] px-5 py-6 shadow-[0_18px_54px_color-mix(in_srgb,var(--bg)_34%,transparent)] sm:px-7 sm:py-7"
       style={{ borderColor: "var(--cosmic-border-soft)" }}
       aria-label="Artifact document preview"
     >
@@ -773,7 +791,8 @@ function PreviewStateCard({
     <div
       role="status"
       aria-live="polite"
-      className="flex min-h-[220px] flex-col items-center justify-center rounded-lg border border-[color:var(--cosmic-border-soft)] bg-[color:var(--cosmic-panel-soft)] px-6 text-center"
+      data-testid="artifact-preview-state"
+      className="flex min-h-[220px] flex-1 flex-col items-center justify-center rounded-lg border border-[color:var(--cosmic-border-soft)] bg-[color:color-mix(in_srgb,var(--cosmic-panel-soft)_68%,transparent)] px-6 text-center"
     >
       <p className="text-sm font-medium text-[color:var(--cosmic-text-strong)]">{title}</p>
       <p className="mt-2 max-w-[320px] text-sm leading-relaxed text-[color:var(--cosmic-text-muted)]">

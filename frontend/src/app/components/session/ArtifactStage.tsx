@@ -18,7 +18,7 @@ import type {
 } from "../../types/builder-artifact"
 
 import { ArtifactCanvasViewport, type ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
-import { ArtifactReviewStatus } from "./ArtifactReviewStatus"
+import { ArtifactReviewStatus, hasConfirmedStillFrame } from "./ArtifactReviewStatus"
 import { ArtifactToolbar } from "./ArtifactToolbar"
 import { ReviewWithSophiaButton } from "./ReviewWithSophiaButton"
 
@@ -104,22 +104,48 @@ export function ArtifactStage({
     } : null
   ), [artifactId, normalSessionId, sessionId, threadId])
   const showReviewStatus = showReviewStatusOverride ?? Boolean(reviewEnabled || exactTextAvailable || visualCaptureStatus)
+  const frameConfirmed = hasConfirmedStillFrame(reviewState, transportStatus)
+  const reviewSurfaceState = frameConfirmed
+    ? "active"
+    : visualReviewPreparing || reviewState?.state === "co_review_starting" || reviewState?.refreshFrameInProgress
+      ? "preparing"
+      : visualCaptureStatus?.ready === false || reviewState?.state === "co_review_error"
+        ? "unavailable"
+        : "idle"
 
   return (
     <section
+      data-review-state={reviewSurfaceState}
       className={cn(
-        "flex min-h-0 w-full flex-col overflow-hidden rounded-xl border border-[color:var(--cosmic-border-soft)] bg-[color:var(--cosmic-panel)] shadow-[var(--cosmic-shadow-md)]",
+        "relative flex min-h-0 w-full flex-col overflow-hidden rounded-xl border bg-[color:color-mix(in_srgb,var(--cosmic-panel)_94%,var(--bg))] shadow-[var(--cosmic-shadow-md)] transition-[border-color,box-shadow,background-color] duration-500",
+        reviewSurfaceState === "active"
+          ? "border-[color:color-mix(in_srgb,var(--sophia-purple)_58%,var(--cosmic-border-soft))] shadow-[0_0_0_1px_color-mix(in_srgb,var(--sophia-purple)_18%,transparent),0_26px_88px_color-mix(in_srgb,var(--sophia-purple)_18%,transparent)]"
+          : reviewSurfaceState === "preparing"
+            ? "border-[color:color-mix(in_srgb,var(--sophia-purple)_42%,var(--cosmic-border-soft))] shadow-[0_0_0_1px_color-mix(in_srgb,var(--sophia-purple)_10%,transparent),0_24px_76px_color-mix(in_srgb,var(--sophia-purple)_12%,transparent)]"
+            : "border-[color:var(--cosmic-border-soft)]",
         className,
       )}
       aria-label="Generated artifact"
     >
+      <div
+        data-testid="artifact-stage-review-aura"
+        aria-hidden="true"
+        className={cn(
+          "pointer-events-none absolute inset-0 rounded-xl opacity-0 transition-opacity duration-500",
+          (reviewSurfaceState === "active" || reviewSurfaceState === "preparing") && "opacity-100",
+        )}
+        style={{
+          background:
+            "linear-gradient(180deg, color-mix(in srgb, var(--sophia-purple) 7%, transparent), transparent 32%), radial-gradient(circle at 50% -18%, color-mix(in srgb, var(--sophia-purple) 15%, transparent), transparent 48%)",
+        }}
+      />
       <ArtifactToolbar
         title={builderArtifact.artifactTitle}
         pageLabel="Page 1 of 1"
         openHref={openHref}
         downloadHref={downloadHref}
         downloadName={primaryFile?.name}
-        className="shrink-0"
+        className="relative z-10 shrink-0"
       />
 
       <ArtifactCanvasViewport
@@ -130,11 +156,15 @@ export function ArtifactStage({
         previewHref={openHref}
         artifactTextRegistration={artifactTextRegistration}
         onVisualCaptureStatusChange={onVisualCaptureStatusChange}
+        reviewSurfaceState={reviewSurfaceState}
         className={fillAvailable ? "min-h-0 flex-1" : undefined}
       />
 
       {showReviewStatus ? (
-        <div className="flex shrink-0 flex-col gap-3 border-t border-[color:var(--cosmic-border-soft)] px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+        <div
+          data-testid="artifact-review-chrome"
+          className="relative z-10 flex shrink-0 flex-col gap-3 border-t border-[color:var(--cosmic-border-soft)] bg-[color:color-mix(in_srgb,var(--cosmic-panel)_86%,transparent)] px-4 py-4 sm:flex-row sm:items-center sm:justify-between"
+        >
           <ArtifactReviewStatus
             state={reviewState}
             transportStatus={transportStatus}
