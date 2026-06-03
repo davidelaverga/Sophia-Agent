@@ -62,9 +62,17 @@ _MAX_REQUESTED_PAGES = 40
 
 @dataclass(frozen=True)
 class _PdfPageSpec:
+    number: int
     title: str
     subtitle: str | None
     lines: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _PdfBrief:
+    text: str
+    source: str
+    structure_safe_reason: str | None
 
 
 @dataclass(frozen=True)
@@ -167,40 +175,109 @@ def _clean_bullets(values: list[str] | None, fallback: tuple[str, ...]) -> list[
     return cleaned[:8] or list(fallback)
 
 
-def _task_text_from_state(state: dict[str, Any] | None) -> str:
+_TASK_PREFIX_RE = re.compile(r"^\s*\[(?:document|research|presentation|frontend|visual_report|unknown)\]\s*", re.IGNORECASE)
+_INTERNAL_CONTEXT_PREFIXES = (
+    "Relevant memories from this session",
+    "Current emotional context",
+    "Active ritual",
+    "Explicit URLs the user provided",
+    "Model/system/developer context",
+    "Internal instructions",
+    "Tool schema",
+    "Runtime telemetry",
+)
+_INTERNAL_CONTEXT_TAG_PREFIXES = (
+    "[memory]",
+    "[ritual]",
+    "<builder_briefing",
+    "<tone_guidance",
+    "<ritual_guidance",
+    "<session_context",
+    "<memories",
+    "<task_type",
+    "<completion_instruction",
+    "<builder_endgame",
+)
+
+
+def _combine_safe_reason(*reasons: str | None) -> str | None:
+    for reason in reasons:
+        if reason:
+            return reason
+    return None
+
+
+def _line_starts_internal_context(line: str) -> bool:
+    normalized = line.strip()
+    lowered = normalized.lower()
+    if any(lowered.startswith(prefix.lower()) for prefix in _INTERNAL_CONTEXT_PREFIXES):
+        return True
+    return any(lowered.startswith(prefix.lower()) for prefix in _INTERNAL_CONTEXT_TAG_PREFIXES)
+
+
+def _sanitize_artifact_brief_text(raw_text: str) -> _PdfBrief:
+    lines: list[str] = []
+    safe_reason: str | None = None
+
+    for raw_line in raw_text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        stripped = raw_line.strip()
+        if stripped.startswith("```"):
+            safe_reason = safe_reason or "removed_code_fence"
+            continue
+        if stripped and _line_starts_internal_context(stripped):
+            safe_reason = safe_reason or "trimmed_internal_context"
+            break
+        lines.append(_TASK_PREFIX_RE.sub("", raw_line, count=1))
+
+    return _PdfBrief(
+        text="\n".join(lines).strip(),
+        source="sanitized_text",
+        structure_safe_reason=safe_reason,
+    )
+
+
+def _artifact_brief_from_state(state: dict[str, Any] | None) -> _PdfBrief:
     if not isinstance(state, dict):
-        return ""
+        return _PdfBrief(text="", source="none", structure_safe_reason=None)
 
-    parts: list[str] = []
-    seen: set[str] = set()
-
-    def add(value: Any) -> None:
+    def sanitized(value: Any, source: str) -> _PdfBrief | None:
         if not isinstance(value, str):
-            return
+            return None
         text = value.strip()
-        if text and text not in seen:
-            seen.add(text)
-            parts.append(text)
+        if not text:
+            return None
+        brief = _sanitize_artifact_brief_text(text)
+        return _PdfBrief(
+            text=brief.text,
+            source=source,
+            structure_safe_reason=brief.structure_safe_reason,
+        )
 
     delegation = state.get("delegation_context")
     if isinstance(delegation, dict):
-        for key in ("task", "task_description", "description", "original_task"):
-            add(delegation.get(key))
+        for key in ("artifact_brief", "task", "task_description", "description", "original_task"):
+            brief = sanitized(delegation.get(key), f"delegation_context.{key}")
+            if brief is not None:
+                return brief
 
     for key in ("task", "task_description", "builder_task_description"):
-        add(state.get(key))
+        brief = sanitized(state.get(key), key)
+        if brief is not None:
+            return brief
 
     messages = state.get("messages")
     if isinstance(messages, list):
-        for message in messages[-4:]:
+        for message in reversed(messages[-4:]):
             content = (
                 message.get("content")
                 if isinstance(message, dict)
                 else getattr(message, "content", None)
             )
-            add(content)
+            brief = sanitized(content, "messages")
+            if brief is not None:
+                return brief
 
-    return "\n\n".join(parts)
+    return _PdfBrief(text="", source="none", structure_safe_reason=None)
 
 
 def _clean_page_title(raw_title: str | None, page_number: int) -> str:
@@ -227,6 +304,7 @@ def _parse_page_headings(task_text: str) -> list[_PdfPageSpec]:
             return
         pages.append(
             _PdfPageSpec(
+                number=current_number,
                 title=current_title,
                 subtitle=None,
                 lines=tuple(current_lines),
@@ -276,11 +354,13 @@ def _default_page_specs(
 ) -> list[_PdfPageSpec]:
     return [
         _PdfPageSpec(
+            number=1,
             title=title,
             subtitle=subtitle,
             lines=("Executive Summary", *(f"- {item}" for item in summary_bullets)),
         ),
         _PdfPageSpec(
+            number=2,
             title="Next Improvements",
             subtitle=None,
             lines=tuple(f"- {item}" for item in improvement_bullets),
@@ -309,6 +389,7 @@ def _length_page_specs(
     for page_number in range(2, page_count):
         pages.append(
             _PdfPageSpec(
+                number=page_number,
                 title=f"Page {page_number}",
                 subtitle=None,
                 lines=("No explicit section content was provided for this requested page.",),
@@ -316,6 +397,41 @@ def _length_page_specs(
         )
     pages.append(defaults[-1])
     return pages
+
+
+def _dedupe_page_specs(
+    pages: list[_PdfPageSpec],
+    *,
+    requested_count: int | None,
+) -> tuple[list[_PdfPageSpec], str | None]:
+    kept: list[_PdfPageSpec] = []
+    seen_numbers: set[int] = set()
+    seen_titles: set[str] = set()
+    safe_reason: str | None = None
+
+    for page in pages:
+        if requested_count is not None and len(kept) >= requested_count:
+            safe_reason = "trimmed_to_requested_page_count"
+            break
+
+        title_key = page.title.strip().casefold()
+        if page.number in seen_numbers or title_key in seen_titles:
+            safe_reason = (
+                "trimmed_to_requested_page_count"
+                if requested_count is not None
+                else "deduplicated_repeated_page_blocks"
+            )
+            continue
+
+        kept.append(page)
+        seen_numbers.add(page.number)
+        if title_key:
+            seen_titles.add(title_key)
+
+    if requested_count is not None and len(pages) > len(kept) and safe_reason is None:
+        safe_reason = "trimmed_to_requested_page_count"
+
+    return kept, safe_reason
 
 
 def _infer_page_plan(
@@ -327,10 +443,13 @@ def _infer_page_plan(
     improvement_bullets: list[str],
 ) -> _PdfPagePlan:
     requested_count = _requested_page_count(task_text)
-    explicit_pages = _parse_page_headings(task_text)
+    explicit_pages, dedupe_reason = _dedupe_page_specs(
+        _parse_page_headings(task_text),
+        requested_count=requested_count,
+    )
     if explicit_pages:
         pages = list(explicit_pages)
-        safe_reason = None
+        safe_reason = dedupe_reason
         if requested_count is not None and requested_count > len(pages):
             filler = _length_page_specs(
                 page_count=requested_count,
@@ -341,8 +460,6 @@ def _infer_page_plan(
             )
             pages.extend(filler[len(pages):])
             safe_reason = "page_headings_shorter_than_requested_length"
-        elif requested_count is not None and requested_count < len(pages):
-            safe_reason = "page_headings_exceed_requested_length"
         return _PdfPagePlan(
             pages=tuple(pages),
             structure_source="explicit_page_headings",
@@ -523,12 +640,17 @@ def _impl(
     final_subtitle = (subtitle or _DEFAULT_SUBTITLE).strip() or _DEFAULT_SUBTITLE
     executive_summary = _clean_bullets(summary_bullets, _DEFAULT_SUMMARY_BULLETS)
     next_improvements = _clean_bullets(improvement_bullets, _DEFAULT_IMPROVEMENT_BULLETS)
+    artifact_brief = _artifact_brief_from_state(state)
     page_plan = _infer_page_plan(
-        task_text=_task_text_from_state(state),
+        task_text=artifact_brief.text,
         title=final_title,
         subtitle=final_subtitle,
         summary_bullets=executive_summary,
         improvement_bullets=next_improvements,
+    )
+    structure_safe_reason = _combine_safe_reason(
+        page_plan.structure_safe_reason,
+        artifact_brief.structure_safe_reason,
     )
 
     try:
@@ -567,8 +689,9 @@ def _impl(
         content_type="application/pdf",
         page_count=len(page_plan.pages),
         page_titles=[page.title for page in page_plan.pages],
+        brief_source=artifact_brief.source,
         structure_source=page_plan.structure_source,
-        structure_safe_reason=page_plan.structure_safe_reason,
+        structure_safe_reason=structure_safe_reason,
         blank_page_count=0,
         short_page_count=0,
         layout_quality="ok",

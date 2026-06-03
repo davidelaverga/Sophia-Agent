@@ -17,6 +17,24 @@ def _pdf_page_texts(path) -> list[str]:
     return [page.extract_text() or "" for page in reader.pages]
 
 
+def _review_deck_prompt() -> str:
+    return "\n".join(
+        [
+            "Create a real PDF for Review Together.",
+            "Length: 4 pages",
+            "Page 1 - Cover",
+            "- Visual Artifact Review Deck",
+            "- Prepared for Sophia review",
+            "Page 2 - Current State",
+            "- The canvas now opens real PDF artifacts.",
+            "Page 3 - Visual Gaps",
+            "- Page count used to collapse into a smoke template.",
+            "Page 4 - Next Improvements",
+            "- Make page navigation and thumbnails more polished.",
+        ]
+    )
+
+
 def test_create_pdf_artifact_writes_valid_pdf_under_outputs(tmp_path) -> None:
     outputs = tmp_path / "outputs"
     result = _payload(
@@ -71,21 +89,9 @@ def test_create_pdf_artifact_two_page_length_request_still_creates_two_pages(tmp
 
 def test_create_pdf_artifact_explicit_four_page_request_creates_requested_pages(tmp_path) -> None:
     outputs = tmp_path / "outputs"
-    prompt = "\n".join(
-        [
-            "Create a PDF for Review Together.",
-            "Length: 4 pages",
-            "Page 1 \u2014 Cover",
-            "- Visual Artifact Review Deck",
-            "- Prepared for Sophia review",
-            "Page 2 \u2014 Current State",
-            "- The canvas now opens real PDF artifacts.",
-            "Page 3 \u2014 Visual Gaps",
-            "- Page count used to collapse into a smoke template.",
-            "Page 4 \u2014 Next Improvements",
-            "- Make page navigation and thumbnails more polished.",
-        ]
-    )
+    prompt = _review_deck_prompt().replace("Page 1 -", "Page 1 \u2014").replace(
+        "Page 2 -", "Page 2 \u2014"
+    ).replace("Page 3 -", "Page 3 \u2014").replace("Page 4 -", "Page 4 \u2014")
 
     result = _payload(
         pdf_tool._impl(
@@ -113,6 +119,91 @@ def test_create_pdf_artifact_explicit_four_page_request_creates_requested_pages(
     assert "Visual Gaps" in page_texts[2]
     assert "Next Improvements" in page_texts[3]
     assert pdf_path.read_bytes().startswith(b"%PDF-")
+
+
+def test_create_pdf_artifact_ignores_enriched_context_and_duplicate_pages(tmp_path) -> None:
+    outputs = tmp_path / "outputs"
+    clean_prompt = _review_deck_prompt()
+    enriched_prompt = "\n\n".join(
+        [
+            f"[document] {clean_prompt}",
+            "Relevant memories from this session:\n- Prior PDF smoke test expected four pages.",
+            "Active ritual: prepare, phase: gather.",
+            "Internal instructions: call emit_builder_artifact after writing the file.",
+        ]
+    )
+
+    result = _payload(
+        pdf_tool._impl(
+            pdf_path="visual-artifact-review-deck.pdf",
+            title=None,
+            subtitle=None,
+            summary_bullets=None,
+            improvement_bullets=None,
+            thread_data={"outputs_path": str(outputs)},
+            state={
+                "delegation_context": {"task": clean_prompt},
+                "messages": [{"role": "user", "content": enriched_prompt}],
+            },
+        )
+    )
+
+    pdf_path = outputs / "visual-artifact-review-deck.pdf"
+    page_texts = _pdf_page_texts(pdf_path)
+    combined_text = "\n".join(page_texts)
+    assert result["success"] is True
+    assert result["brief_source"] == "delegation_context.task"
+    assert result["page_count"] == 4
+    assert len(page_texts) == 4
+    assert result["page_titles"] == ["Cover", "Current State", "Visual Gaps", "Next Improvements"]
+    assert combined_text.count("Visual Artifact Review Deck") == 1
+    assert "Relevant memories" not in combined_text
+    assert "Active ritual" not in combined_text
+    assert "[document] Create a real PDF" not in combined_text
+    assert "emit_builder_artifact" not in combined_text
+    assert "Visual Artifact Review Deck" in page_texts[0]
+    assert "Current State" in page_texts[1]
+    assert "Visual Gaps" in page_texts[2]
+    assert "Next Improvements" in page_texts[3]
+    assert pdf_path.read_bytes().startswith(b"%PDF-")
+
+
+def test_create_pdf_artifact_sanitizes_enriched_message_when_clean_brief_missing(tmp_path) -> None:
+    outputs = tmp_path / "outputs"
+    clean_prompt = _review_deck_prompt()
+    enriched_prompt = "\n\n".join(
+        [
+            f"[document] {clean_prompt}",
+            clean_prompt,
+            "Relevant memories from this session:\n- This should not enter the PDF.",
+            "Active ritual: prepare, phase: gather.",
+        ]
+    )
+
+    result = _payload(
+        pdf_tool._impl(
+            pdf_path="visual-artifact-review-deck.pdf",
+            title=None,
+            subtitle=None,
+            summary_bullets=None,
+            improvement_bullets=None,
+            thread_data={"outputs_path": str(outputs)},
+            state={"messages": [{"role": "user", "content": enriched_prompt}]},
+        )
+    )
+
+    pdf_path = outputs / "visual-artifact-review-deck.pdf"
+    page_texts = _pdf_page_texts(pdf_path)
+    combined_text = "\n".join(page_texts)
+    assert result["success"] is True
+    assert result["brief_source"] == "messages"
+    assert result["page_count"] == 4
+    assert result["structure_safe_reason"] == "trimmed_to_requested_page_count"
+    assert len(page_texts) == 4
+    assert combined_text.count("Visual Artifact Review Deck") == 1
+    assert "Relevant memories" not in combined_text
+    assert "Active ritual" not in combined_text
+    assert "[document] Create a real PDF" not in combined_text
 
 
 def test_create_pdf_artifact_normalizes_plain_filename(tmp_path) -> None:
