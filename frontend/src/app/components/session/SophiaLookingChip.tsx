@@ -9,12 +9,13 @@ interface SophiaLookingChipProps {
   state: CoReviewSessionState | null | undefined
   frameConfirmed?: boolean
   stale?: boolean
+  viewPending?: boolean
   className?: string
 }
 
-export function SophiaLookingChip({ state, frameConfirmed = false, stale = false, className }: SophiaLookingChipProps) {
+export function SophiaLookingChip({ state, frameConfirmed = false, stale = false, viewPending = false, className }: SophiaLookingChipProps) {
   const visualLive = Boolean(frameConfirmed && state?.state === "co_review_live" && state.visualInputStatus === "live")
-  const preparing = state?.state === "co_review_starting" || state?.refreshFrameInProgress
+  const preparing = viewPending || state?.state === "co_review_starting" || state?.refreshFrameInProgress
   const unavailable = state?.state === "co_review_error" || ((state?.frameSendFailureCount ?? 0) > 0 && !frameConfirmed)
   const label = unavailable
     ? "Frame unavailable"

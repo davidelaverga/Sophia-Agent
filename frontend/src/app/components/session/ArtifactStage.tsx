@@ -55,8 +55,11 @@ export interface ArtifactStageProps {
   pendingStartVoiceReview?: boolean
   showReviewStatus?: boolean
   visualCaptureStatus?: ArtifactVisualCaptureStatus | null
+  reviewViewPending?: boolean
   reviewStale?: boolean
   canRefreshReview?: boolean
+  voiceCommandStatusText?: string | null
+  voiceCommandStatusTone?: "neutral" | "pending" | "success" | "warn"
   onVisualCaptureStatusChange?: (status: ArtifactVisualCaptureStatus) => void
   onArtifactViewStateChange?: (state: ArtifactViewState) => void
   onVoiceCommandTargetChange?: (target: ArtifactReviewVoiceCommandTarget | null) => void
@@ -98,8 +101,11 @@ export function ArtifactStage({
   pendingStartVoiceReview = false,
   showReviewStatus: showReviewStatusOverride,
   visualCaptureStatus,
+  reviewViewPending = false,
   reviewStale = false,
   canRefreshReview = false,
+  voiceCommandStatusText = null,
+  voiceCommandStatusTone = "neutral",
   onVisualCaptureStatusChange,
   onArtifactViewStateChange,
   onVoiceCommandTargetChange,
@@ -301,8 +307,7 @@ export function ArtifactStage({
           return blocked("no_multipage_artifact_selected")
         }
         const nextZoom = clampArtifactZoom(zoom * 1.2)
-        setFitMode("custom")
-        setZoom(nextZoom)
+        handleZoomIn()
         return applied(currentPageIndex, fitMode !== "custom" || nextZoom !== zoom)
       }
       case "zoom_out": {
@@ -310,32 +315,28 @@ export function ArtifactStage({
           return blocked("no_multipage_artifact_selected")
         }
         const nextZoom = clampArtifactZoom(zoom / 1.2)
-        setFitMode("custom")
-        setZoom(nextZoom)
+        handleZoomOut()
         return applied(currentPageIndex, fitMode !== "custom" || nextZoom !== zoom)
       }
       case "fit_width": {
         if (!canApplyZoomCommand) {
           return blocked("no_multipage_artifact_selected")
         }
-        setFitMode("width")
-        setZoom(1)
+        handleFitWidth()
         return applied(currentPageIndex, fitMode !== "width" || zoom !== 1)
       }
       case "fit_page": {
         if (!canApplyZoomCommand) {
           return blocked("no_multipage_artifact_selected")
         }
-        setFitMode("page")
-        setZoom(1)
+        handleFitPage()
         return applied(currentPageIndex, fitMode !== "page" || zoom !== 1)
       }
       case "reset_zoom": {
         if (!canApplyZoomCommand) {
           return blocked("no_multipage_artifact_selected")
         }
-        setFitMode("custom")
-        setZoom(1)
+        handleResetZoom()
         return applied(currentPageIndex, fitMode !== "custom" || zoom !== 1)
       }
       case "refresh_view": {
@@ -350,6 +351,11 @@ export function ArtifactStage({
   }, [
     artifactId,
     fitMode,
+    handleFitPage,
+    handleFitWidth,
+    handleResetZoom,
+    handleZoomIn,
+    handleZoomOut,
     pageCount,
     pageIndex,
     supportsPagination,
@@ -518,6 +524,28 @@ export function ArtifactStage({
         className="relative z-10 shrink-0"
       />
 
+      {voiceCommandStatusText ? (
+        <div className="relative z-10 border-b border-[color:var(--cosmic-border-soft)] bg-[color:color-mix(in_srgb,var(--cosmic-panel)_96%,var(--bg))] px-4 py-2">
+          <span
+            role="status"
+            aria-live="polite"
+            data-testid="artifact-voice-command-status"
+            className={cn(
+              "inline-flex max-w-full items-center rounded-full border px-2.5 py-1 text-[11px] font-medium",
+              voiceCommandStatusTone === "success"
+                ? "border-[color:var(--cosmic-teal-border)] bg-[color:var(--cosmic-teal-bg)] text-[color:var(--cosmic-text-strong)]"
+                : voiceCommandStatusTone === "warn"
+                  ? "border-[color:color-mix(in_srgb,#fbbf24_36%,var(--cosmic-border-soft))] bg-[color:color-mix(in_srgb,#fbbf24_10%,transparent)] text-[color:var(--cosmic-text)]"
+                  : voiceCommandStatusTone === "pending"
+                    ? "border-[color:color-mix(in_srgb,var(--sophia-purple)_34%,var(--cosmic-border-soft))] bg-[color:color-mix(in_srgb,var(--sophia-purple)_9%,var(--cosmic-panel-soft))] text-[color:var(--cosmic-text)]"
+                    : "border-[color:var(--cosmic-border-soft)] bg-[color:var(--cosmic-panel-soft)] text-[color:var(--cosmic-text-muted)]",
+            )}
+          >
+            <span className="truncate">{voiceCommandStatusText}</span>
+          </span>
+        </div>
+      ) : null}
+
       <ArtifactCanvasViewport
         artifact={builderArtifact}
         files={files}
@@ -552,6 +580,7 @@ export function ArtifactStage({
             visualSourceUnavailableReason={visualCaptureStatus?.ready === false ? visualCaptureStatus.reason : null}
             visualReviewRequiresVoice={visualReviewRequiresVoice}
             visualReviewPreparing={visualReviewPreparing}
+            reviewViewPending={reviewViewPending}
             reviewStale={reviewStale}
             className="min-w-0"
           />

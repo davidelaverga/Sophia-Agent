@@ -74,6 +74,15 @@ type PendingArtifactReviewVoiceCommandRefresh = {
   artifactCurrentPageCount: number
   staleAfterPageChange: boolean
   staleViewSignature: string | null
+  expectedViewSignature: string | null
+  queuedAtMs: number
+  shouldAttemptRefresh: boolean
+  refreshBlockedReason: string | null
+}
+
+type ArtifactVoiceCommandStatus = {
+  text: string
+  tone: "neutral" | "pending" | "success" | "warn"
 }
 
 function getPathFilename(path: string | undefined): string {
@@ -152,29 +161,27 @@ function nextVoiceCommandRefreshRequestId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
-function buildAppliedVoiceCommandMessage(
+function buildAppliedVoiceCommandStatus(
   command: ArtifactReviewVoiceCommand,
   pageIndex: number,
-  refreshing: boolean,
 ): string {
-  const suffix = refreshing ? " Refreshing Sophia's view..." : ""
   switch (command.kind) {
     case "go_to_page":
     case "next_page":
     case "previous_page":
     case "first_page":
     case "last_page":
-      return `Switched to page ${pageIndex + 1}.${suffix}`
+      return `Page ${pageIndex + 1} selected`
     case "zoom_in":
     case "zoom_out":
     case "fit_width":
     case "fit_page":
     case "reset_zoom":
-      return `Updated the PDF view.${suffix}`
+      return "PDF view updated"
     case "refresh_view":
-      return refreshing ? "Refreshing Sophia's view..." : "Refresh requested."
+      return "Refresh requested"
     default:
-      return "Updated the artifact view."
+      return "Artifact view updated"
   }
 }
 
@@ -194,17 +201,15 @@ function buildRefreshUnavailableVoiceCommandMessage(
   staleAfterViewChange = false,
 ): string {
   if (staleAfterViewChange && command.kind !== "refresh_view") {
-    return "View changed. Refresh Sophia's view."
+    return isPageNavigationVoiceCommand(command)
+      ? "Page changed. Sophia's view is stale."
+      : "PDF view updated. Sophia's view is stale."
   }
 
   if (shouldStartVoiceReview) {
-    if (command.kind === "refresh_view") {
-      return "Start voice review to refresh Sophia's view."
-    }
-
     return isPageNavigationVoiceCommand(command)
-      ? "Page changed. Start voice review to refresh Sophia's view."
-      : "PDF view updated. Start voice review to refresh Sophia's view."
+      ? "Page changed. Start Review with Sophia to share this view."
+      : "PDF view updated. Start Review with Sophia to share this view."
   }
 
   if (command.kind === "refresh_view") {
@@ -341,6 +346,7 @@ export function PresenceArtifactPanel({
   const builderVoiceCommandTargetRef = useRef<ArtifactReviewVoiceCommandTarget | null>(null)
   const [pendingVoiceCommandRefresh, setPendingVoiceCommandRefresh] = useState<PendingArtifactReviewVoiceCommandRefresh | null>(null)
   const [voiceCommandStaleViewSignature, setVoiceCommandStaleViewSignature] = useState<string | null>(null)
+  const [voiceCommandStatus, setVoiceCommandStatus] = useState<ArtifactVoiceCommandStatus | null>(null)
   const voiceCommandRefreshInFlightRef = useRef<string | null>(null)
   const status = usePresenceStore((s) => s.status)
   const hasBuilderLibrary = builderArtifactLibrary.length > 0
@@ -467,6 +473,13 @@ export function PresenceArtifactPanel({
       && builderArtifactCoReview.state.state === "co_review_live"
       && (builderArtifactCoReview.state.frameSentCount ?? 0) > 0,
   )
+  const pendingVoiceCommandExpectedViewSignature =
+    pendingVoiceCommandRefresh?.expectedViewSignature ?? null
+  const voiceCommandViewPending = Boolean(
+    pendingVoiceCommandExpectedViewSignature
+      && builderArtifactViewSignature === pendingVoiceCommandExpectedViewSignature
+      && !builderVisualSourceReady,
+  )
   const builderReviewStale = Boolean(builderArtifactCoReview.reviewStale || voiceCommandReviewStale)
   const builderReviewStaleReason = builderArtifactCoReview.reviewStaleReason
     ?? (voiceCommandReviewStale ? "view_changed" : null)
@@ -510,6 +523,11 @@ export function PresenceArtifactPanel({
     artifactCurrentPageIndex: number
     artifactCurrentPageCount: number
     staleAfterPageChange?: boolean
+    waitedForViewReady?: boolean
+    autoRefreshTiming?: string | null
+    autoRefreshBlockedReason?: string | null
+    transportStateBefore?: string | null
+    transportStateAfter?: string | null
   }) => {
     recordSophiaCaptureEvent({
       category: "voice-session",
@@ -527,23 +545,37 @@ export function PresenceArtifactPanel({
         reviewVoiceCommandBlockedReason: details.blockedReason ?? null,
         reviewVoiceCommandTriggeredRefresh: details.triggeredRefresh,
         reviewVoiceCommandRefreshResult: details.refreshResult,
+        reviewVoiceCommandTransportStateBefore: details.transportStateBefore ?? builderArtifactCoReview.transportStatus.statusText,
+        reviewVoiceCommandTransportStateAfter: details.transportStateAfter ?? builderArtifactCoReview.transportStatus.statusText,
+        reviewVoiceCommandDidHardIntercept: false,
+        reviewVoiceCommandWaitedForViewReady: details.waitedForViewReady ?? false,
+        reviewVoiceCommandAutoRefreshTiming: details.autoRefreshTiming ?? null,
+        reviewVoiceCommandAutoRefreshBlockedReason: details.autoRefreshBlockedReason ?? null,
         reviewCommandPreservedMic: true,
         reviewCommandPreservedReview: true,
         reviewCommandAutoRefreshAttempted: details.triggeredRefresh,
         reviewCommandAutoRefreshResult: details.refreshResult,
         reviewCommandStaleAfterPageChange: details.staleAfterPageChange ?? false,
+        reviewCommandStaleAfterViewChange: details.staleAfterPageChange ?? false,
+        lastReviewVoiceCommandKind: details.command.kind,
+        lastReviewVoiceCommandApplied: details.applied,
+        lastReviewVoiceCommandUiMode: isVoiceMode ? "voice" : "text",
         artifactCurrentPageIndex: details.artifactCurrentPageIndex,
         artifactCurrentPageCount: details.artifactCurrentPageCount,
         artifactRendererKind: builderArtifactViewState.rendererKind,
         artifactFitMode: builderArtifactViewState.fitMode,
+        artifactViewSignature: builderArtifactViewSignature,
         rawTranscriptExcluded: true,
         rawFrameExcluded: true,
       },
     })
   }, [
+    builderArtifactCoReview.transportStatus.statusText,
     builderArtifactId,
+    builderArtifactViewSignature,
     builderArtifactViewState.fitMode,
     builderArtifactViewState.rendererKind,
+    isVoiceMode,
     normalSessionId,
     sessionId,
     threadId,
@@ -562,8 +594,13 @@ export function PresenceArtifactPanel({
     const voiceCommandTarget = builderVoiceCommandTargetRef.current ?? builderVoiceCommandTarget
     const currentPageIndex = voiceCommandTarget?.pageIndex ?? builderArtifactViewState.pageIndex
     const currentPageCount = voiceCommandTarget?.pageCount ?? builderArtifactViewState.pageCount
+    const transportStateBefore = builderArtifactCoReview.transportStatus.statusText
 
     if (!builderArtifactId || !voiceCommandTarget) {
+      setVoiceCommandStatus({
+        text: buildBlockedVoiceCommandMessage(command, currentPageCount),
+        tone: "warn",
+      })
       recordReviewVoiceCommandTelemetry({
         command,
         applied: false,
@@ -572,6 +609,9 @@ export function PresenceArtifactPanel({
         refreshResult: "not_requested",
         artifactCurrentPageIndex: currentPageIndex,
         artifactCurrentPageCount: currentPageCount,
+        autoRefreshBlockedReason: "no_artifact_selected",
+        transportStateBefore,
+        transportStateAfter: builderArtifactCoReview.transportStatus.statusText,
       })
       return {
         handled: true,
@@ -580,14 +620,13 @@ export function PresenceArtifactPanel({
         blockedReason: "no_artifact_selected",
         triggeredRefresh: false,
         refreshResult: "not_requested",
-        userMessage: buildBlockedVoiceCommandMessage(command, currentPageCount),
+        userMessage: null,
       }
     }
 
     const applyResult = voiceCommandTarget.applyCommand(command)
     let triggeredRefresh = false
     let refreshResult: ArtifactReviewVoiceCommandRefreshResult = "not_requested"
-    let userMessage: string | null = null
     const reviewLiveOrStarting = (
       builderArtifactCoReview.state.state === "co_review_live"
       || builderArtifactCoReview.state.state === "co_review_starting"
@@ -601,11 +640,16 @@ export function PresenceArtifactPanel({
       && builderArtifactCoReview.transportStatus.visualTransportSupported
     )
     const staleAfterPageChange = Boolean(applyResult.changed && reviewHasConfirmedFrame)
-    const staleViewSignature = staleAfterPageChange
+    const expectedViewSignature = applyResult.changed
       ? buildVoiceCommandTargetViewSignature(builderArtifactViewState, voiceCommandTarget, command, applyResult)
-      : null
+      : builderArtifactViewSignature
+    const staleViewSignature = staleAfterPageChange ? expectedViewSignature : null
 
     if (!applyResult.applied) {
+      setVoiceCommandStatus({
+        text: buildBlockedVoiceCommandMessage(command, applyResult.artifactCurrentPageCount),
+        tone: "warn",
+      })
       recordReviewVoiceCommandTelemetry({
         command,
         applied: false,
@@ -614,6 +658,9 @@ export function PresenceArtifactPanel({
         refreshResult,
         artifactCurrentPageIndex: applyResult.artifactCurrentPageIndex,
         artifactCurrentPageCount: applyResult.artifactCurrentPageCount,
+        autoRefreshBlockedReason: applyResult.blockedReason,
+        transportStateBefore,
+        transportStateAfter: builderArtifactCoReview.transportStatus.statusText,
       })
       return {
         handled: true,
@@ -622,16 +669,17 @@ export function PresenceArtifactPanel({
         blockedReason: applyResult.blockedReason,
         triggeredRefresh: false,
         refreshResult,
-        userMessage: buildBlockedVoiceCommandMessage(command, applyResult.artifactCurrentPageCount),
+        userMessage: null,
       }
     }
 
     if (applyResult.changed) {
       setBuilderVisualCaptureStatus(unavailableCaptureStatus("preview_not_ready"))
-      if (staleViewSignature) {
-        setVoiceCommandStaleViewSignature(staleViewSignature)
-      }
     }
+    setVoiceCommandStatus({
+      text: buildAppliedVoiceCommandStatus(command, applyResult.artifactCurrentPageIndex),
+      tone: "neutral",
+    })
 
     if (applyResult.shouldRefresh) {
       if (frameSenderAvailable && reviewLiveOrStarting) {
@@ -644,18 +692,72 @@ export function PresenceArtifactPanel({
           artifactCurrentPageCount: applyResult.artifactCurrentPageCount,
           staleAfterPageChange,
           staleViewSignature,
+          expectedViewSignature,
+          queuedAtMs: Date.now(),
+          shouldAttemptRefresh: true,
+          refreshBlockedReason: null,
         })
-        userMessage = buildAppliedVoiceCommandMessage(command, applyResult.artifactCurrentPageIndex, true)
       } else {
         refreshResult = frameSenderAvailable
           ? "not_active"
           : "unavailable"
-        userMessage = buildRefreshUnavailableVoiceCommandMessage(
-          command,
-          builderArtifactCoReview.transportStatus.stillFramesSupported
-            && !builderArtifactCoReview.transportStatus.visualTransportSupported,
-          staleAfterPageChange,
+        const refreshBlockedReason = frameSenderAvailable
+          ? "review_not_active"
+          : builderArtifactCoReview.transportStatus.stillFramesSupported
+            ? "visual_transport_unavailable"
+            : "still_frame_transport_unavailable"
+        const shouldStartVoiceReview = command.kind !== "refresh_view" && (
+          !reviewHasConfirmedFrame
+          || (
+            builderArtifactCoReview.transportStatus.stillFramesSupported
+            && !builderArtifactCoReview.transportStatus.visualTransportSupported
+          )
         )
+        if (applyResult.changed && expectedViewSignature) {
+          setPendingVoiceCommandRefresh({
+            requestId: nextVoiceCommandRefreshRequestId(),
+            command,
+            artifactCurrentPageIndex: applyResult.artifactCurrentPageIndex,
+            artifactCurrentPageCount: applyResult.artifactCurrentPageCount,
+            staleAfterPageChange,
+            staleViewSignature,
+            expectedViewSignature,
+            queuedAtMs: Date.now(),
+            shouldAttemptRefresh: false,
+            refreshBlockedReason,
+          })
+        } else {
+          setVoiceCommandStatus({
+            text: buildRefreshUnavailableVoiceCommandMessage(
+              command,
+              shouldStartVoiceReview,
+              staleAfterPageChange,
+            ),
+            tone: "warn",
+          })
+        }
+        recordReviewVoiceCommandTelemetry({
+          command,
+          applied: true,
+          blockedReason: null,
+          triggeredRefresh: false,
+          refreshResult,
+          artifactCurrentPageIndex: applyResult.artifactCurrentPageIndex,
+          artifactCurrentPageCount: applyResult.artifactCurrentPageCount,
+          staleAfterPageChange,
+          autoRefreshBlockedReason: refreshBlockedReason,
+          transportStateBefore,
+          transportStateAfter: builderArtifactCoReview.transportStatus.statusText,
+        })
+        return {
+          handled: true,
+          command,
+          applied: true,
+          blockedReason: null,
+          triggeredRefresh: false,
+          refreshResult,
+          userMessage: null,
+        }
       }
     }
 
@@ -668,6 +770,10 @@ export function PresenceArtifactPanel({
       artifactCurrentPageIndex: applyResult.artifactCurrentPageIndex,
       artifactCurrentPageCount: applyResult.artifactCurrentPageCount,
       staleAfterPageChange,
+      waitedForViewReady: false,
+      autoRefreshTiming: triggeredRefresh ? "queued" : "not_requested",
+      transportStateBefore,
+      transportStateAfter: builderArtifactCoReview.transportStatus.statusText,
     })
 
     return {
@@ -677,14 +783,16 @@ export function PresenceArtifactPanel({
       blockedReason: null,
       triggeredRefresh,
       refreshResult,
-      userMessage: userMessage ?? buildAppliedVoiceCommandMessage(command, applyResult.artifactCurrentPageIndex, false),
+      userMessage: null,
     }
   }, [
     builderArtifactCoReview.state.frameSentCount,
     builderArtifactCoReview.state.state,
+    builderArtifactCoReview.transportStatus.statusText,
     builderArtifactCoReview.transportStatus.stillFramesSupported,
     builderArtifactCoReview.transportStatus.visualTransportSupported,
     builderArtifactId,
+    builderArtifactViewSignature,
     builderArtifactViewState,
     builderStageActive,
     builderVoiceCommandTarget,
@@ -702,13 +810,88 @@ export function PresenceArtifactPanel({
     if (!pending || voiceCommandRefreshInFlightRef.current === pending.requestId) {
       return
     }
-    if (!builderArtifactCoReview.canRefresh || !builderVisualSourceReady) {
+    const viewSignatureReady = !pending.expectedViewSignature || builderArtifactViewSignature === pending.expectedViewSignature
+    if (!viewSignatureReady || !builderVisualSourceReady) {
       return
     }
-    if (builderArtifactViewState.pageIndex !== pending.artifactCurrentPageIndex) {
+    const autoRefreshTiming = `after_view_ready:${Math.max(0, Date.now() - pending.queuedAtMs)}ms`
+
+    if (pending.staleViewSignature) {
+      setVoiceCommandStaleViewSignature(pending.staleViewSignature)
+    }
+
+    if (!pending.shouldAttemptRefresh) {
+      setVoiceCommandStatus({
+        text: buildRefreshUnavailableVoiceCommandMessage(
+          pending.command,
+          !pending.staleAfterPageChange && pending.command.kind !== "refresh_view",
+          pending.staleAfterPageChange,
+        ),
+        tone: "warn",
+      })
+      recordReviewVoiceCommandTelemetry({
+        command: pending.command,
+        applied: true,
+        blockedReason: null,
+        triggeredRefresh: false,
+        refreshResult: pending.refreshBlockedReason === "review_not_active" ? "not_active" : "unavailable",
+        artifactCurrentPageIndex: pending.artifactCurrentPageIndex,
+        artifactCurrentPageCount: pending.artifactCurrentPageCount,
+        staleAfterPageChange: pending.staleAfterPageChange,
+        waitedForViewReady: true,
+        autoRefreshTiming,
+        autoRefreshBlockedReason: pending.refreshBlockedReason,
+      })
+      setPendingVoiceCommandRefresh((current) => (
+        current?.requestId === pending.requestId ? null : current
+      ))
       return
     }
 
+    if (!builderArtifactCoReview.canRefresh) {
+      if (builderArtifactCoReview.state.refreshFrameInProgress) {
+        return
+      }
+      const blockedReason = !builderArtifactCoReview.transportStatus.stillFramesSupported
+        ? "still_frame_transport_unavailable"
+        : !builderArtifactCoReview.transportStatus.visualTransportSupported
+          ? "visual_transport_unavailable"
+          : builderArtifactCoReview.state.state !== "co_review_live"
+            ? "review_not_active"
+            : "refresh_unavailable"
+      const refreshResult: ArtifactReviewVoiceCommandRefreshResult =
+        blockedReason === "review_not_active" ? "not_active" : "unavailable"
+      setVoiceCommandStatus({
+        text: buildRefreshUnavailableVoiceCommandMessage(
+          pending.command,
+          !pending.staleAfterPageChange && pending.command.kind !== "refresh_view",
+          pending.staleAfterPageChange,
+        ),
+        tone: "warn",
+      })
+      recordReviewVoiceCommandTelemetry({
+        command: pending.command,
+        applied: true,
+        blockedReason: null,
+        triggeredRefresh: true,
+        refreshResult,
+        artifactCurrentPageIndex: pending.artifactCurrentPageIndex,
+        artifactCurrentPageCount: pending.artifactCurrentPageCount,
+        staleAfterPageChange: pending.staleAfterPageChange,
+        waitedForViewReady: true,
+        autoRefreshTiming,
+        autoRefreshBlockedReason: blockedReason,
+      })
+      setPendingVoiceCommandRefresh((current) => (
+        current?.requestId === pending.requestId ? null : current
+      ))
+      return
+    }
+
+    setVoiceCommandStatus({
+      text: "Refreshing view...",
+      tone: "pending",
+    })
     voiceCommandRefreshInFlightRef.current = pending.requestId
     void builderArtifactCoReview.refreshReview()
       .then((nextState) => {
@@ -721,6 +904,12 @@ export function PresenceArtifactPanel({
             current === pending.staleViewSignature ? null : current
           ))
         }
+        setVoiceCommandStatus({
+          text: refreshResult === "success"
+            ? "View refreshed"
+            : buildRefreshUnavailableVoiceCommandMessage(pending.command, false, pending.staleAfterPageChange),
+          tone: refreshResult === "success" ? "success" : "warn",
+        })
         recordReviewVoiceCommandTelemetry({
           command: pending.command,
           applied: true,
@@ -730,9 +919,18 @@ export function PresenceArtifactPanel({
           artifactCurrentPageIndex: pending.artifactCurrentPageIndex,
           artifactCurrentPageCount: pending.artifactCurrentPageCount,
           staleAfterPageChange: refreshResult !== "success" && pending.staleAfterPageChange,
+          waitedForViewReady: true,
+          autoRefreshTiming,
+          autoRefreshBlockedReason: refreshResult === "success" ? null : nextState.refreshErrorSafeReason ?? nextState.error,
+          transportStateBefore: nextState.websocketStateBeforeRefresh,
+          transportStateAfter: nextState.websocketStateAfterRefresh,
         })
       })
       .catch(() => {
+        setVoiceCommandStatus({
+          text: buildRefreshUnavailableVoiceCommandMessage(pending.command, false, pending.staleAfterPageChange),
+          tone: "warn",
+        })
         recordReviewVoiceCommandTelemetry({
           command: pending.command,
           applied: true,
@@ -742,6 +940,9 @@ export function PresenceArtifactPanel({
           artifactCurrentPageIndex: pending.artifactCurrentPageIndex,
           artifactCurrentPageCount: pending.artifactCurrentPageCount,
           staleAfterPageChange: pending.staleAfterPageChange,
+          waitedForViewReady: true,
+          autoRefreshTiming,
+          autoRefreshBlockedReason: "refresh_exception",
         })
       })
       .finally(() => {
@@ -752,7 +953,7 @@ export function PresenceArtifactPanel({
       })
   }, [
     builderArtifactCoReview,
-    builderArtifactViewState.pageIndex,
+    builderArtifactViewSignature,
     builderVisualSourceReady,
     pendingVoiceCommandRefresh,
     recordReviewVoiceCommandTelemetry,
@@ -760,6 +961,8 @@ export function PresenceArtifactPanel({
 
   useEffect(() => {
     setVoiceCommandStaleViewSignature(null)
+    setVoiceCommandStatus(null)
+    setPendingVoiceCommandRefresh(null)
   }, [builderArtifactId, stagePrimaryFile?.path, stageRendererKind])
 
   useEffect(() => {
@@ -1124,8 +1327,11 @@ export function PresenceArtifactPanel({
                   visualReviewPreparing={visualReviewPreparing}
                   pendingStartVoiceReview={pendingBuilderArtifactReview}
                   visualCaptureStatus={stageUsesMarkdownPreview || stageUsesPdfPreview ? builderVisualCaptureStatus : null}
+                  reviewViewPending={voiceCommandViewPending}
                   reviewStale={builderReviewStale}
                   canRefreshReview={builderArtifactCoReview.canRefresh}
+                  voiceCommandStatusText={voiceCommandStatus?.text ?? null}
+                  voiceCommandStatusTone={voiceCommandStatus?.tone}
                   onVisualCaptureStatusChange={setBuilderVisualCaptureStatus}
                   onArtifactViewStateChange={setReportedBuilderArtifactViewState}
                   onVoiceCommandTargetChange={handleBuilderVoiceCommandTargetChange}
@@ -1149,8 +1355,11 @@ export function PresenceArtifactPanel({
                   visualReviewRequiresVoice={visualReviewRequiresVoice}
                   pendingStartVoiceReview={pendingBuilderArtifactReview}
                   visualCaptureStatus={stageUsesMarkdownPreview || stageUsesPdfPreview ? builderVisualCaptureStatus : null}
+                  reviewViewPending={voiceCommandViewPending}
                   reviewStale={builderReviewStale}
                   canRefreshReview={builderArtifactCoReview.canRefresh}
+                  voiceCommandStatusText={voiceCommandStatus?.text ?? null}
+                  voiceCommandStatusTone={voiceCommandStatus?.tone}
                   onVisualCaptureStatusChange={setBuilderVisualCaptureStatus}
                   onArtifactViewStateChange={setReportedBuilderArtifactViewState}
                   onVoiceCommandTargetChange={handleBuilderVoiceCommandTargetChange}

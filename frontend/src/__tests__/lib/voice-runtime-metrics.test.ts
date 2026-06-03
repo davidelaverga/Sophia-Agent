@@ -2072,6 +2072,28 @@ describe('buildVoiceDeveloperMetrics', () => {
           },
         },
       }),
+      buildEvent({
+        seq: 6,
+        at: '2026-05-27T12:00:03.250Z',
+        category: 'voice-session',
+        name: 'artifact-review-voice-command',
+        payload: {
+          reviewVoiceCommandKind: 'zoom_in',
+          reviewVoiceCommandApplied: true,
+          reviewVoiceCommandRefreshResult: 'success',
+          reviewVoiceCommandTransportStateBefore: 'ready',
+          reviewVoiceCommandTransportStateAfter: 'ready',
+          reviewVoiceCommandDidHardIntercept: false,
+          reviewVoiceCommandWaitedForViewReady: true,
+          reviewVoiceCommandAutoRefreshTiming: 'after_view_ready:24ms',
+          reviewVoiceCommandAutoRefreshBlockedReason: null,
+          reviewCommandStaleAfterViewChange: false,
+          lastReviewVoiceCommandUiMode: 'voice',
+          artifactCurrentPageIndex: 0,
+          artifactCurrentPageCount: 3,
+          rawTranscriptExcluded: true,
+        },
+      }),
     ];
 
     const metrics = buildVoiceDeveloperMetrics({
@@ -2098,6 +2120,24 @@ describe('buildVoiceDeveloperMetrics', () => {
       providerUsageAudioDurationSeconds: 2,
       visualResponseObserved: true,
       toolCallAfterFrameObserved: true,
+      reviewVoiceCommandTransportStateBefore: 'ready',
+      reviewVoiceCommandTransportStateAfter: 'ready',
+      reviewVoiceCommandDidHardIntercept: false,
+      reviewVoiceCommandWaitedForViewReady: true,
+      reviewVoiceCommandAutoRefreshTiming: 'after_view_ready:24ms',
+      lastReviewVoiceCommandKind: 'zoom_in',
+      lastReviewVoiceCommandApplied: true,
+      lastReviewVoiceCommandUiMode: 'voice',
+      lastReviewVoiceCommands: [
+        expect.objectContaining({
+          kind: 'zoom_in',
+          applied: true,
+          uiMode: 'voice',
+          waitedForViewReady: true,
+          didHardIntercept: false,
+          rawTranscriptExcluded: true,
+        }),
+      ],
       rawFrameExcluded: true,
       rawProviderPayloadExcluded: true,
     });

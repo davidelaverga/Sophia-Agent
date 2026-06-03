@@ -68,6 +68,18 @@ export type CoreviewVisualTelemetry = {
   reviewCommandAutoRefreshAttempted: boolean
   reviewCommandAutoRefreshResult: string | null
   reviewCommandStaleAfterPageChange: boolean
+  reviewCommandStaleAfterViewChange: boolean
+  reviewVoiceCommandTransportStateBefore: string | null
+  reviewVoiceCommandTransportStateAfter: string | null
+  reviewVoiceCommandDidHardIntercept: boolean | null
+  reviewVoiceCommandWaitedForViewReady: boolean | null
+  reviewVoiceCommandAutoRefreshTiming: string | null
+  reviewVoiceCommandAutoRefreshBlockedReason: string | null
+  telemetryExportAfterCommandSucceeded: boolean
+  lastReviewVoiceCommandKind: string | null
+  lastReviewVoiceCommandApplied: boolean | null
+  lastReviewVoiceCommandUiMode: string | null
+  lastReviewVoiceCommands: ReviewVoiceCommandTelemetrySummary[]
   pdfTextExtractionStatus: string | null
   pdfTextExtractionPageCount: number | null
   pdfTextExtractionCharCount: number | null
@@ -76,6 +88,19 @@ export type CoreviewVisualTelemetry = {
   pinchZoomUsed: boolean
   rawFrameExcluded: true
   rawProviderPayloadExcluded: true
+}
+
+export type ReviewVoiceCommandTelemetrySummary = {
+  kind: string | null
+  applied: boolean | null
+  uiMode: string | null
+  refreshResult: string | null
+  autoRefreshBlockedReason: string | null
+  waitedForViewReady: boolean | null
+  didHardIntercept: boolean | null
+  artifactCurrentPageIndex: number | null
+  artifactCurrentPageCount: number | null
+  rawTranscriptExcluded: true
 }
 
 export type CoreviewExactTextTelemetry = {
@@ -943,6 +968,18 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       reviewCommandAutoRefreshAttempted: false,
       reviewCommandAutoRefreshResult: null,
       reviewCommandStaleAfterPageChange: false,
+      reviewCommandStaleAfterViewChange: false,
+      reviewVoiceCommandTransportStateBefore: null,
+      reviewVoiceCommandTransportStateAfter: null,
+      reviewVoiceCommandDidHardIntercept: null,
+      reviewVoiceCommandWaitedForViewReady: null,
+      reviewVoiceCommandAutoRefreshTiming: null,
+      reviewVoiceCommandAutoRefreshBlockedReason: null,
+      telemetryExportAfterCommandSucceeded: false,
+      lastReviewVoiceCommandKind: null,
+      lastReviewVoiceCommandApplied: null,
+      lastReviewVoiceCommandUiMode: null,
+      lastReviewVoiceCommands: [],
       pdfTextExtractionStatus: null,
       pdfTextExtractionPageCount: null,
       pdfTextExtractionCharCount: null,
@@ -994,6 +1031,10 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((value): value is Record<string, unknown> => value !== null)
   const artifactCommandEvents = activeEvents
     .filter((event) => event.name === "artifact-review-voice-command")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const telemetryExportEvents = activeEvents
+    .filter((event) => event.name === "voice-telemetry-export")
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
   const pdfTextExtractionEvents = activeEvents
@@ -1080,6 +1121,22 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.reviewCommandAutoRefreshAttempted = asBoolean(latestArtifactCommand?.reviewCommandAutoRefreshAttempted) ?? false
   visual.reviewCommandAutoRefreshResult = asString(latestArtifactCommand?.reviewCommandAutoRefreshResult)
   visual.reviewCommandStaleAfterPageChange = asBoolean(latestArtifactCommand?.reviewCommandStaleAfterPageChange) ?? false
+  visual.reviewCommandStaleAfterViewChange = asBoolean(latestArtifactCommand?.reviewCommandStaleAfterViewChange)
+    ?? visual.reviewCommandStaleAfterPageChange
+  visual.reviewVoiceCommandTransportStateBefore = asString(latestArtifactCommand?.reviewVoiceCommandTransportStateBefore)
+  visual.reviewVoiceCommandTransportStateAfter = asString(latestArtifactCommand?.reviewVoiceCommandTransportStateAfter)
+  visual.reviewVoiceCommandDidHardIntercept = asBoolean(latestArtifactCommand?.reviewVoiceCommandDidHardIntercept)
+  visual.reviewVoiceCommandWaitedForViewReady = asBoolean(latestArtifactCommand?.reviewVoiceCommandWaitedForViewReady)
+  visual.reviewVoiceCommandAutoRefreshTiming = asString(latestArtifactCommand?.reviewVoiceCommandAutoRefreshTiming)
+  visual.reviewVoiceCommandAutoRefreshBlockedReason = asString(latestArtifactCommand?.reviewVoiceCommandAutoRefreshBlockedReason)
+  visual.telemetryExportAfterCommandSucceeded = telemetryExportEvents.some(
+    (event) => asBoolean(event.telemetryExportAfterCommandSucceeded) === true,
+  )
+  visual.lastReviewVoiceCommands = artifactCommandEvents.slice(-5).map(safeReviewVoiceCommandSummary)
+  const latestReviewVoiceCommand = visual.lastReviewVoiceCommands.at(-1) ?? null
+  visual.lastReviewVoiceCommandKind = latestReviewVoiceCommand?.kind ?? asString(latestArtifactCommand?.lastReviewVoiceCommandKind)
+  visual.lastReviewVoiceCommandApplied = latestReviewVoiceCommand?.applied ?? asBoolean(latestArtifactCommand?.lastReviewVoiceCommandApplied)
+  visual.lastReviewVoiceCommandUiMode = latestReviewVoiceCommand?.uiMode ?? asString(latestArtifactCommand?.lastReviewVoiceCommandUiMode)
   visual.pdfTextExtractionStatus = asString(latestPdfTextExtraction?.pdfTextExtractionStatus)
   visual.pdfTextExtractionPageCount = numberFromKeys(latestPdfTextExtraction, ["pdfTextExtractionPageCount"])
   visual.pdfTextExtractionCharCount = numberFromKeys(latestPdfTextExtraction, ["pdfTextExtractionCharCount"])
@@ -1166,6 +1223,21 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.visualFresh = visual.visualFresh || visual.frameSentCount > 0
   visual.visualFreshForTurn = visual.visualFreshForTurn || visual.initialFrameSent
   return visual
+}
+
+function safeReviewVoiceCommandSummary(record: Record<string, unknown>): ReviewVoiceCommandTelemetrySummary {
+  return {
+    kind: asString(record.reviewVoiceCommandKind) ?? asString(record.lastReviewVoiceCommandKind),
+    applied: asBoolean(record.reviewVoiceCommandApplied) ?? asBoolean(record.lastReviewVoiceCommandApplied),
+    uiMode: asString(record.lastReviewVoiceCommandUiMode),
+    refreshResult: asString(record.reviewVoiceCommandRefreshResult),
+    autoRefreshBlockedReason: asString(record.reviewVoiceCommandAutoRefreshBlockedReason),
+    waitedForViewReady: asBoolean(record.reviewVoiceCommandWaitedForViewReady),
+    didHardIntercept: asBoolean(record.reviewVoiceCommandDidHardIntercept),
+    artifactCurrentPageIndex: numberFromKeys(record, ["artifactCurrentPageIndex"]),
+    artifactCurrentPageCount: numberFromKeys(record, ["artifactCurrentPageCount"]),
+    rawTranscriptExcluded: true,
+  }
 }
 
 function buildCoreviewExactTextTelemetry(activeEvents: NormalizedVoiceCaptureEvent[]): CoreviewExactTextTelemetry {

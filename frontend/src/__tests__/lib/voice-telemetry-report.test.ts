@@ -1331,6 +1331,25 @@ describe('buildVoiceTelemetryReport', () => {
             },
           },
         },
+        {
+          seq: 4,
+          recordedAt: '2026-05-20T12:00:03.000Z',
+          category: 'voice-session',
+          name: 'artifact-review-voice-command',
+          payload: {
+            reviewVoiceCommandKind: 'go_to_page',
+            reviewVoiceCommandPageTarget: 2,
+            reviewVoiceCommandApplied: true,
+            reviewVoiceCommandRefreshResult: 'success',
+            reviewVoiceCommandDidHardIntercept: false,
+            reviewVoiceCommandWaitedForViewReady: true,
+            reviewVoiceCommandAutoRefreshTiming: 'after_view_ready:18ms',
+            lastReviewVoiceCommandUiMode: 'voice',
+            artifactCurrentPageIndex: 1,
+            artifactCurrentPageCount: 3,
+            rawTranscriptExcluded: true,
+          },
+        },
       ]),
     });
     const serialized = JSON.stringify(report);
@@ -1343,6 +1362,21 @@ describe('buildVoiceTelemetryReport', () => {
     expect(report.coreview.exactText.lastExactTextSource).toBe('builder_metadata');
     expect(report.diagnosticsSummary.coreviewStillFrame.rawProviderPayloadExcluded).toBe(true);
     expect(report.diagnosticsSummary.coreviewStillFrame.rawArtifactTextExcluded).toBe(true);
+    expect(report.diagnosticsSummary.coreviewStillFrame).toMatchObject({
+      lastReviewVoiceCommandKind: 'go_to_page',
+      lastReviewVoiceCommandApplied: true,
+      lastReviewVoiceCommandUiMode: 'voice',
+      reviewVoiceCommandDidHardIntercept: false,
+      reviewVoiceCommandWaitedForViewReady: true,
+      reviewVoiceCommandAutoRefreshTiming: 'after_view_ready:18ms',
+      lastReviewVoiceCommands: [
+        expect.objectContaining({
+          kind: 'go_to_page',
+          applied: true,
+          rawTranscriptExcluded: true,
+        }),
+      ],
+    });
     expect(serialized).not.toContain('base64-raw-frame');
     expect(serialized).not.toContain('raw-frame-bytes');
     expect(serialized).not.toContain('raw artifact body');

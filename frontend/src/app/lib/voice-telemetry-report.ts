@@ -147,17 +147,27 @@ function reconcileArtifactTelemetryMetrics(
     artifactCountMismatch: artifactMetrics.artifactCountMismatch,
     artifactCountMismatchReason: artifactMetrics.artifactCountMismatchReason,
   };
+  const coreviewCommandTelemetry = buildCoreviewCommandTelemetryPatch(selectedEvents);
+  const coreview = {
+    ...metrics.coreview,
+    visual: {
+      ...metrics.coreview.visual,
+      ...coreviewCommandTelemetry,
+    },
+  };
 
   if (metrics.sessionTelemetry.runtime !== 'gemini_live') {
     return {
       ...metrics,
       counts,
+      coreview,
     };
   }
 
   return {
     ...metrics,
     counts,
+    coreview,
     sessionTelemetry: {
       ...metrics.sessionTelemetry,
       gemini: {
@@ -172,6 +182,50 @@ function reconcileArtifactTelemetryMetrics(
         artifactCountMismatchReason: artifactMetrics.artifactCountMismatchReason,
       },
     },
+  };
+}
+
+function buildCoreviewCommandTelemetryPatch(
+  events: CaptureEvent[],
+): Partial<CoreviewUsageTelemetry['visual']> {
+  const commandPayloads = events
+    .filter((event) => event.name === 'artifact-review-voice-command')
+    .map((event) => asRecord(event.payload))
+    .filter((value): value is Record<string, unknown> => value !== null);
+  const latest = commandPayloads.at(-1);
+
+  if (!latest) {
+    return {};
+  }
+
+  const lastReviewVoiceCommands = commandPayloads.slice(-5).map((payload) => ({
+    kind: asString(payload.reviewVoiceCommandKind) ?? asString(payload.lastReviewVoiceCommandKind),
+    applied: asBoolean(payload.reviewVoiceCommandApplied) ?? asBoolean(payload.lastReviewVoiceCommandApplied),
+    uiMode: asString(payload.lastReviewVoiceCommandUiMode),
+    refreshResult: asString(payload.reviewVoiceCommandRefreshResult),
+    autoRefreshBlockedReason: asString(payload.reviewVoiceCommandAutoRefreshBlockedReason),
+    waitedForViewReady: asBoolean(payload.reviewVoiceCommandWaitedForViewReady),
+    didHardIntercept: asBoolean(payload.reviewVoiceCommandDidHardIntercept),
+    artifactCurrentPageIndex: asFiniteNumber(payload.artifactCurrentPageIndex),
+    artifactCurrentPageCount: asFiniteNumber(payload.artifactCurrentPageCount),
+    rawTranscriptExcluded: true as const,
+  }));
+  const latestSummary = lastReviewVoiceCommands.at(-1);
+
+  return {
+    reviewCommandStaleAfterViewChange: asBoolean(latest.reviewCommandStaleAfterViewChange)
+      ?? asBoolean(latest.reviewCommandStaleAfterPageChange)
+      ?? false,
+    reviewVoiceCommandTransportStateBefore: asString(latest.reviewVoiceCommandTransportStateBefore),
+    reviewVoiceCommandTransportStateAfter: asString(latest.reviewVoiceCommandTransportStateAfter),
+    reviewVoiceCommandDidHardIntercept: asBoolean(latest.reviewVoiceCommandDidHardIntercept),
+    reviewVoiceCommandWaitedForViewReady: asBoolean(latest.reviewVoiceCommandWaitedForViewReady),
+    reviewVoiceCommandAutoRefreshTiming: asString(latest.reviewVoiceCommandAutoRefreshTiming),
+    reviewVoiceCommandAutoRefreshBlockedReason: asString(latest.reviewVoiceCommandAutoRefreshBlockedReason),
+    lastReviewVoiceCommandKind: latestSummary?.kind ?? null,
+    lastReviewVoiceCommandApplied: latestSummary?.applied ?? null,
+    lastReviewVoiceCommandUiMode: latestSummary?.uiMode ?? null,
+    lastReviewVoiceCommands,
   };
 }
 
@@ -726,6 +780,10 @@ function asFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+function asBoolean(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
 function sumNumericRecord(value: Record<string, unknown> | null): number {
   if (!value) {
     return 0;
@@ -889,6 +947,18 @@ function buildCoreviewStillFrameDiagnosticsSummary(coreview: CoreviewUsageTeleme
     reviewCommandAutoRefreshAttempted: coreview.visual.reviewCommandAutoRefreshAttempted,
     reviewCommandAutoRefreshResult: coreview.visual.reviewCommandAutoRefreshResult,
     reviewCommandStaleAfterPageChange: coreview.visual.reviewCommandStaleAfterPageChange,
+    reviewCommandStaleAfterViewChange: coreview.visual.reviewCommandStaleAfterViewChange,
+    reviewVoiceCommandTransportStateBefore: coreview.visual.reviewVoiceCommandTransportStateBefore,
+    reviewVoiceCommandTransportStateAfter: coreview.visual.reviewVoiceCommandTransportStateAfter,
+    reviewVoiceCommandDidHardIntercept: coreview.visual.reviewVoiceCommandDidHardIntercept,
+    reviewVoiceCommandWaitedForViewReady: coreview.visual.reviewVoiceCommandWaitedForViewReady,
+    reviewVoiceCommandAutoRefreshTiming: coreview.visual.reviewVoiceCommandAutoRefreshTiming,
+    reviewVoiceCommandAutoRefreshBlockedReason: coreview.visual.reviewVoiceCommandAutoRefreshBlockedReason,
+    telemetryExportAfterCommandSucceeded: coreview.visual.telemetryExportAfterCommandSucceeded,
+    lastReviewVoiceCommandKind: coreview.visual.lastReviewVoiceCommandKind,
+    lastReviewVoiceCommandApplied: coreview.visual.lastReviewVoiceCommandApplied,
+    lastReviewVoiceCommandUiMode: coreview.visual.lastReviewVoiceCommandUiMode,
+    lastReviewVoiceCommands: coreview.visual.lastReviewVoiceCommands,
     pdfTextExtractionStatus: coreview.visual.pdfTextExtractionStatus,
     pdfTextExtractionPageCount: coreview.visual.pdfTextExtractionPageCount,
     pdfTextExtractionCharCount: coreview.visual.pdfTextExtractionCharCount,

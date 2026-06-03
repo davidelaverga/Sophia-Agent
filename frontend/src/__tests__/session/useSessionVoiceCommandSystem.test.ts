@@ -174,7 +174,7 @@ describe('useSessionVoiceCommandSystem', () => {
         blockedReason: null,
         triggeredRefresh: true,
         refreshResult: 'pending',
-        userMessage: "Switched to page 2. Refreshing Sophia's view...",
+        userMessage: null,
       } satisfies ArtifactReviewVoiceCommandRouteResult)),
     });
 
@@ -187,12 +187,7 @@ describe('useSessionVoiceCommandSystem', () => {
     expect(onUserTranscript).not.toHaveBeenCalled();
     expect(bargeIn).not.toHaveBeenCalled();
     expect(softBargeIn).toHaveBeenCalledTimes(1);
-    expect(showToast).toHaveBeenCalledWith(
-      expect.objectContaining({
-        message: "Switched to page 2. Refreshing Sophia's view...",
-        variant: 'info',
-      }),
-    );
+    expect(showToast).not.toHaveBeenCalled();
   });
 
   it('warns for wake-word download command when no builder deliverable is ready', () => {

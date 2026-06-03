@@ -70,6 +70,7 @@ export function useArtifactCoReview({
   const transportStatus = machineRef.current.status()
   const frameConfirmed = hasConfirmedStillFrameForReviewState(state, transportStatus)
   const reviewStaleReason = frameConfirmed
+    && visualSourceReady
     && lastFrameViewSignature
     && currentViewSignature
     && lastFrameViewSignature !== currentViewSignature
