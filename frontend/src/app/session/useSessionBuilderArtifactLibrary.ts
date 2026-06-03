@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { normalizeBuilderArtifactPath } from '../lib/builder-artifacts';
 import type { BuilderArtifactLibraryItemV1 } from '../types/builder-artifact';
 
 type BuilderArtifactLibraryResponse = {
@@ -22,19 +23,23 @@ function normalizeBuilderArtifactLibrary(
 
   return payload.artifacts
     .filter((item): item is NonNullable<BuilderArtifactLibraryResponse['artifacts']>[number] => Boolean(item))
-    .filter((item): item is NonNullable<BuilderArtifactLibraryResponse['artifacts']>[number] & { path: string; name: string } => (
-      typeof item.path === 'string'
-      && item.path.trim().length > 0
-      && typeof item.name === 'string'
-      && item.name.trim().length > 0
-    ))
-    .map((item) => ({
-      path: item.path,
-      name: item.name,
-      ...(typeof item.size_bytes === 'number' ? { sizeBytes: item.size_bytes } : {}),
-      ...(typeof item.mime_type === 'string' && item.mime_type ? { mimeType: item.mime_type } : {}),
-      ...(typeof item.modified_at === 'string' && item.modified_at ? { modifiedAt: item.modified_at } : {}),
-    }));
+    .map((item): BuilderArtifactLibraryItemV1 | null => {
+      const path = normalizeBuilderArtifactPath(item.path);
+      const name = typeof item.name === 'string' ? item.name.trim() : '';
+
+      if (!path || !name) {
+        return null;
+      }
+
+      return {
+        path,
+        name,
+        ...(typeof item.size_bytes === 'number' ? { sizeBytes: item.size_bytes } : {}),
+        ...(typeof item.mime_type === 'string' && item.mime_type ? { mimeType: item.mime_type } : {}),
+        ...(typeof item.modified_at === 'string' && item.modified_at ? { modifiedAt: item.modified_at } : {}),
+      };
+    })
+    .filter((item): item is BuilderArtifactLibraryItemV1 => item !== null);
 }
 
 async function fetchBuilderArtifactLibrary(

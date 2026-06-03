@@ -15,6 +15,10 @@ import {
   clearCoreviewArtifactTextRegistryForTests,
   readCoreviewArtifactTextSideband,
 } from "../../../app/lib/coreview-artifact-text"
+import {
+  exportSophiaCaptureBundle,
+  registerSophiaCaptureBridge,
+} from "../../../app/lib/session-capture"
 
 vi.mock("../../../app/hooks/useHaptics", () => ({
   haptic: vi.fn(),
@@ -198,6 +202,8 @@ describe("Coreview artifact still-frame review", () => {
   })
 
   afterEach(() => {
+    window.__sophiaCapture?.disable()
+    window.__sophiaCapture?.clear()
     clearCoreviewArtifactTextRegistryForTests()
     getContextSpy?.mockRestore()
     getContextSpy = null
@@ -231,6 +237,42 @@ describe("Coreview artifact still-frame review", () => {
     expect(panel.className).not.toMatch(/\bfixed\b|\binset-0\b|\bmax-w-4xl\b/)
     expect(artifactRegion.className).toContain("w-full")
     expect(artifactRegion.className).toContain("flex-1")
+  })
+
+  it("records selected builder stage identity with Coreview off without activating companion review", async () => {
+    registerSophiaCaptureBridge()
+    window.__sophiaCapture?.clear()
+    window.__sophiaCapture?.enable()
+
+    renderPanel({
+      artifacts: COMPANION_ARTIFACTS,
+      builderArtifact: BUILDER_ARTIFACT,
+      selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.pdf",
+    })
+
+    expect(await screen.findByRole("region", { name: /generated artifact/i })).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /review with sophia/i })).not.toBeInTheDocument()
+    expect(screen.queryByTestId("coreview-companion-artifact-canvas")).not.toBeInTheDocument()
+
+    const expectedArtifactId = buildCoreviewRealArtifactId(BUILDER_ARTIFACT)
+
+    await waitFor(() => {
+      const selectedStageEvents = exportSophiaCaptureBundle().events.filter(
+        (event) => event.category === "artifacts-runtime" && event.name === "select-stage-artifact",
+      )
+      expect(selectedStageEvents).toHaveLength(1)
+      expect(selectedStageEvents[0]?.payload).toMatchObject({
+        artifactId: expectedArtifactId,
+        coreviewArtifactId: expectedArtifactId,
+        artifactPath: "mnt/user-data/outputs/launch-brief.pdf",
+        artifactKind: "builder_file",
+        selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.pdf",
+        source: "selected_builder_artifact",
+        reviewFeatureEnabled: false,
+        rawArtifactTextExcluded: true,
+        rawFrameExcluded: true,
+      })
+    })
   })
 
   it("renders the guarded builder metadata canvas when still-frame review is enabled", async () => {

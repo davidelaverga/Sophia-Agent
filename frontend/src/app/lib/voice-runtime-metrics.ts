@@ -924,7 +924,12 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((event) => event.name === "coreview-state")
     .map((event) => asRecord(eventData(event)?.coreview))
     .filter((value): value is Record<string, unknown> => value !== null)
+  const selectedStageEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "select-stage-artifact")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
   const latestState = stateEvents.at(-1) ?? null
+  const latestSelectedStage = selectedStageEvents.at(-1) ?? null
   const firstFrameSeq = frameEvents.find((event) => {
     const result = coreviewFrameResult(event)
     return result !== null && frameWasSent(result)
@@ -933,10 +938,14 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.coreviewEnabled = stateEvents.some((entry) => asBoolean(entry.coreviewEnabled) === true) || frameEvents.length > 0
   visual.coreviewSessionActive = asBoolean(latestState?.coreviewSessionActive) ?? false
   visual.coreviewArtifactId = asString(latestState?.coreviewArtifactId)
+    ?? asString(latestSelectedStage?.coreviewArtifactId)
+    ?? asString(latestSelectedStage?.artifactId)
   visual.visualSourceKind = asString(latestState?.visualSourceKind)
   visual.visualFresh = asBoolean(latestState?.visualFresh) ?? false
   visual.visualFreshForTurn = asBoolean(latestState?.visualFreshForTurn) ?? false
-  visual.exactTextAvailable = asBoolean(latestState?.exactTextAvailable) ?? false
+  visual.exactTextAvailable = asBoolean(latestState?.exactTextAvailable)
+    ?? asBoolean(latestSelectedStage?.exactTextAvailable)
+    ?? false
   const stateFrameSentCount = numberFromKeys(latestState, ["frameSentCount"]) ?? 0
   const stateRefreshFrameCount = numberFromKeys(latestState, ["refreshFrameCount"]) ?? 0
   const stateTotalFrameBytes = numberFromKeys(latestState, ["totalFrameBytes"]) ?? 0

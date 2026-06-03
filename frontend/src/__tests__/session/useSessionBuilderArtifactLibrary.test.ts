@@ -41,6 +41,24 @@ afterEach(() => {
 });
 
 describe('useSessionBuilderArtifactLibrary', () => {
+  it('normalizes artifact paths before exposing library items for canvas selection', async () => {
+    globalThis.fetch = vi.fn(async () => artifactResponse('thread-1', '/outputs/brief.md', ' brief.md ')) as typeof fetch;
+
+    const { result } = renderHook(() => useSessionBuilderArtifactLibrary({
+      threadId: 'thread-1',
+      refreshOnFocus: false,
+    }));
+
+    await act(async () => {
+      await flushAsyncState();
+    });
+
+    expect(result.current.items).toEqual([{
+      path: 'mnt/user-data/outputs/brief.md',
+      name: 'brief.md',
+    }]);
+  });
+
   it('ignores stale no-signal artifact loads after switching threads', async () => {
     const oldInitial = deferredResponse();
     const oldPoll = deferredResponse();

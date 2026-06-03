@@ -1033,6 +1033,11 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.counts.artifactCountSource).toBe('selected_stage_artifact');
     expect(metrics.counts.artifactCountMismatchReason).toBe('selected_stage_artifact_not_public_event');
     expect(metrics.sessionTelemetry.gemini?.artifactSelectedStageCount).toBe(1);
+    expect(metrics.coreview.visual.coreviewEnabled).toBe(false);
+    expect(metrics.coreview.visual.coreviewSessionActive).toBe(false);
+    expect(metrics.coreview.visual.coreviewArtifactId).toBe('coreview-real-artifact-launch-brief');
+    expect(metrics.coreview.visual.frameSentCount).toBe(0);
+    expect(metrics.coreview.visual.exactTextAvailable).toBe(true);
   });
 
   it('does not count emit_artifact tool calls as artifacts without validated artifact evidence', () => {

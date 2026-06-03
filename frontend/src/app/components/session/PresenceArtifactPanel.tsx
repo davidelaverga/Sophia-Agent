@@ -216,9 +216,10 @@ export function PresenceArtifactPanel({
   const hasMemories = memory_candidates && memory_candidates.length > 0
   const hasTakeaway = !!takeaway?.trim()
   const coreviewReviewEnabled = isCoreviewStillFrameReviewEnabled()
-  const builderArtifactId = stageBuilderArtifact && coreviewReviewEnabled
+  const builderArtifactId = stageBuilderArtifact
     ? buildCoreviewRealArtifactId(stageBuilderArtifact)
     : null
+  const builderReviewEnabled = Boolean(coreviewReviewEnabled && builderArtifactId)
   const stagePrimaryFile = useMemo(() => {
     const file = getBuilderArtifactFiles(stageBuilderArtifact).find((candidate) => candidate.isPrimary)
       ?? getBuilderArtifactFiles(stageBuilderArtifact)[0]
@@ -234,18 +235,31 @@ export function PresenceArtifactPanel({
     }
   }, [builderArtifactLibrary, stageBuilderArtifact])
   const stageUsesMarkdownPreview = isMarkdownArtifactFile(stagePrimaryFile)
+  const effectiveBuilderVisualCaptureStatus = useMemo<ArtifactVisualCaptureStatus>(() => {
+    if (!builderArtifactId) {
+      return unavailableCaptureStatus("no_selected_artifact")
+    }
+
+    if (!stageUsesMarkdownPreview) {
+      return {
+        ready: true,
+        reason: null,
+        source: "metadata_canvas",
+        exactTextAvailable: true,
+      }
+    }
+
+    return builderVisualCaptureStatus
+  }, [builderArtifactId, builderVisualCaptureStatus, stageUsesMarkdownPreview])
   const builderVisualSourceReady = Boolean(
     builderArtifactId
-    && (!stageUsesMarkdownPreview || builderVisualCaptureStatus.ready),
+    && effectiveBuilderVisualCaptureStatus.ready,
   )
   const builderVisualUnavailableReason = builderArtifactId
-    ? stageUsesMarkdownPreview
-      ? builderVisualCaptureStatus.reason ?? "preview_not_ready"
-      : null
+    ? effectiveBuilderVisualCaptureStatus.reason
     : "no_selected_artifact"
   const builderExactTextAvailable = Boolean(
-    builderArtifactId
-    && (!stageUsesMarkdownPreview || builderVisualCaptureStatus.exactTextAvailable),
+    builderArtifactId && effectiveBuilderVisualCaptureStatus.exactTextAvailable,
   )
   const showDomArtifactCoReview = Boolean(
     coreviewReviewEnabled
@@ -258,7 +272,7 @@ export function PresenceArtifactPanel({
     threadId: threadId ?? null,
     artifactId: builderArtifactId,
     artifactRoot: builderArtifactRoot,
-    featureEnabled: Boolean(builderArtifactId),
+    featureEnabled: builderReviewEnabled,
     exactTextAvailable: builderExactTextAvailable,
     transport: coReviewTransport,
     missingCanvasReason: builderVisualUnavailableReason ?? "capture_target_missing",
@@ -310,7 +324,7 @@ export function PresenceArtifactPanel({
       builderArtifactId,
       stagePrimaryFile?.path ?? stageBuilderArtifact.artifactPath ?? "",
       stageUsesMarkdownPreview ? "markdown" : "metadata",
-      builderVisualCaptureStatus.ready ? "ready" : "not-ready",
+      effectiveBuilderVisualCaptureStatus.ready ? "ready" : "not-ready",
       builderExactTextAvailable ? "exact" : "no-exact",
     ].join("|")
 
@@ -327,16 +341,19 @@ export function PresenceArtifactPanel({
         normalSessionId: normalSessionId ?? null,
         threadId: threadId ?? null,
         artifactId: builderArtifactId,
+        coreviewArtifactId: builderArtifactId,
         artifactPath: stagePrimaryFile?.path ?? stageBuilderArtifact.artifactPath ?? null,
         artifactTitle: stageBuilderArtifact.artifactTitle,
         artifactType: stageBuilderArtifact.artifactType,
+        artifactKind: "builder_file",
         selectedBuilderArtifactPath: selectedBuilderArtifactPath ?? null,
         source: selectedBuilderArtifactPath ? "selected_builder_artifact" : "latest_builder_artifact",
+        reviewFeatureEnabled: coreviewReviewEnabled,
         exactTextSource: stageUsesMarkdownPreview ? "builder_file" : "builder_metadata",
         exactTextAvailable: builderExactTextAvailable,
-        visualCaptureSource: builderVisualCaptureStatus.source,
-        visualCaptureReady: builderVisualCaptureStatus.ready,
-        visualCaptureReason: builderVisualCaptureStatus.reason,
+        visualCaptureSource: effectiveBuilderVisualCaptureStatus.source,
+        visualCaptureReady: effectiveBuilderVisualCaptureStatus.ready,
+        visualCaptureReason: effectiveBuilderVisualCaptureStatus.reason,
         rawArtifactTextExcluded: true,
         rawFrameExcluded: true,
       },
@@ -344,9 +361,10 @@ export function PresenceArtifactPanel({
   }, [
     builderArtifactId,
     builderExactTextAvailable,
-    builderVisualCaptureStatus.reason,
-    builderVisualCaptureStatus.ready,
-    builderVisualCaptureStatus.source,
+    coreviewReviewEnabled,
+    effectiveBuilderVisualCaptureStatus.reason,
+    effectiveBuilderVisualCaptureStatus.ready,
+    effectiveBuilderVisualCaptureStatus.source,
     isVisible,
     normalSessionId,
     selectedBuilderArtifactPath,
