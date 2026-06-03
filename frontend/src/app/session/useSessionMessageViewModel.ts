@@ -16,6 +16,11 @@ type ChatMessageLike = {
   parts: ChatMessagePart[];
 };
 
+type SessionMessageDedupeResult = {
+  messages: UIMessage[];
+  duplicateIds: string[];
+};
+
 interface UseSessionMessageViewModelParams {
   chatMessages: ChatMessageLike[];
   greetingAnchorId: string | null;
@@ -34,6 +39,7 @@ export function useSessionMessageViewModel({
   const messageTimestampsRef = useRef<Map<string, string>>(new Map());
   const detectedOfflineModeRef = useRef(false);
   const memoryHighlightsGateLogRef = useRef<string | null>(null);
+  const duplicateMessageIdsLogRef = useRef<string | null>(null);
 
   const setMessageTimestamp = useCallback((id: string, createdAt: string) => {
     messageTimestampsRef.current.set(id, createdAt);
@@ -61,7 +67,7 @@ export function useSessionMessageViewModel({
     }
   });
 
-  const messages: UIMessage[] = useMemo(() => {
+  const messageModel = useMemo(() => {
     const mapped = chatMessages.map((msg) => {
       if (!messageTimestampsRef.current.has(msg.id)) {
         messageTimestampsRef.current.set(msg.id, new Date().toISOString());
@@ -82,8 +88,9 @@ export function useSessionMessageViewModel({
       };
     });
 
+    const { messages: uniqueMapped, duplicateIds } = dedupeMappedMessagesById(mapped);
     const deduped: UIMessage[] = [];
-    for (const message of mapped) {
+    for (const message of uniqueMapped) {
       const previous = deduped[deduped.length - 1];
       const overlappingVoiceUserTranscript =
         previous?.role === 'user' &&
@@ -117,11 +124,30 @@ export function useSessionMessageViewModel({
       deduped.push(message);
     }
 
-    return deduped.map((message, index) => ({
-      ...message,
-      isNew: index === deduped.length - 1 && message.role === 'assistant',
-    }));
+    return {
+      duplicateIds,
+      messages: deduped.map((message, index) => ({
+        ...message,
+        isNew: index === deduped.length - 1 && message.role === 'assistant',
+      })),
+    };
   }, [chatMessages, getMessageText]);
+  const messages = messageModel.messages;
+
+  useEffect(() => {
+    if (!debugEnabled || messageModel.duplicateIds.length === 0) return;
+
+    const signature = messageModel.duplicateIds.join('|');
+    if (duplicateMessageIdsLogRef.current === signature) return;
+    duplicateMessageIdsLogRef.current = signature;
+
+    debugLog('SessionPage', 'duplicate UI message ids suppressed', {
+      duplicateIdCount: messageModel.duplicateIds.length,
+      duplicateIds: messageModel.duplicateIds.slice(0, 5),
+      rawMessageCount: chatMessages.length,
+      renderedMessageCount: messages.length,
+    });
+  }, [chatMessages.length, debugEnabled, messageModel.duplicateIds, messages.length]);
 
   const hasGreetingAnchorMessage = useMemo(() => {
     if (!greetingAnchorId) return false;
@@ -168,4 +194,59 @@ export function useSessionMessageViewModel({
     latestAssistantMessage,
     setMessageTimestamp,
   };
+}
+
+function dedupeMappedMessagesById(messages: UIMessage[]): SessionMessageDedupeResult {
+  const indexById = new Map<string, number>();
+  const duplicateIds = new Set<string>();
+  const uniqueMessages: UIMessage[] = [];
+
+  for (const message of messages) {
+    const existingIndex = indexById.get(message.id);
+    if (existingIndex === undefined) {
+      indexById.set(message.id, uniqueMessages.length);
+      uniqueMessages.push(message);
+      continue;
+    }
+
+    duplicateIds.add(message.id);
+    uniqueMessages[existingIndex] = preferMoreCompleteMessage(uniqueMessages[existingIndex], message);
+  }
+
+  return {
+    messages: uniqueMessages,
+    duplicateIds: [...duplicateIds],
+  };
+}
+
+function preferMoreCompleteMessage(existing: UIMessage, candidate: UIMessage): UIMessage {
+  if (existing.role !== candidate.role) {
+    return existing;
+  }
+
+  const existingScore = messageCompletenessScore(existing);
+  const candidateScore = messageCompletenessScore(candidate);
+
+  if (candidateScore <= existingScore) {
+    return existing;
+  }
+
+  return {
+    ...candidate,
+    createdAt: existing.createdAt || candidate.createdAt,
+  };
+}
+
+function messageCompletenessScore(message: UIMessage): number {
+  const contentLength = message.content.trim().length;
+  let score = Math.min(contentLength, 100_000);
+
+  if (contentLength > 0) {
+    score += 100_000;
+  }
+  if (message.incomplete !== true) {
+    score += 1_000;
+  }
+
+  return score;
 }

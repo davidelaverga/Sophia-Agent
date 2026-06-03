@@ -212,7 +212,25 @@ describe("ArtifactStage", () => {
     renderStage()
 
     expect(screen.getByRole("status", { name: /not looking/i })).toBeInTheDocument()
-    expect(screen.getByText("Ready for review")).toBeInTheDocument()
+    expect(screen.getByText("Frame not sent yet")).toBeInTheDocument()
+    expect(screen.getByText("Exact text available")).toBeInTheDocument()
+  })
+
+  it("does not claim Sophia is looking when live state has no confirmed sent frame", () => {
+    renderStage({
+      state: {
+        state: "co_review_live",
+        visualInputStatus: "live",
+        videoOrFrameMode: "still_frame",
+        frameSentCount: 0,
+        initialFrameSent: true,
+        exactTextAvailable: true,
+      },
+    })
+
+    expect(screen.getByRole("status", { name: /not looking/i })).toBeInTheDocument()
+    expect(screen.queryByRole("status", { name: "Sophia is looking at this artifact" })).not.toBeInTheDocument()
+    expect(screen.queryByText("Frame sent")).not.toBeInTheDocument()
     expect(screen.getByText("Exact text available")).toBeInTheDocument()
   })
 
@@ -272,7 +290,7 @@ describe("ArtifactStage", () => {
     expect(container.textContent?.toLowerCase()).not.toContain("still-frame")
   })
 
-  it("shows Frame unavailable when the artifact capture target is missing", () => {
+  it("shows inactive visual review when the artifact capture target is missing", () => {
     renderStage({
       canStartReview: false,
       visualCaptureStatus: {
@@ -283,7 +301,7 @@ describe("ArtifactStage", () => {
       },
     })
 
-    expect(screen.getAllByText("Frame unavailable").length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText("Visual review not active")).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /review with sophia/i })).toBeDisabled()
     expect(screen.getByText("Exact text available")).toBeInTheDocument()
   })

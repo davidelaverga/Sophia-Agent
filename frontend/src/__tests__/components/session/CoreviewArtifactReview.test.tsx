@@ -534,7 +534,7 @@ describe("Coreview artifact still-frame review", () => {
     })
 
     expect(await screen.findByRole("heading", { name: "Launch Brief" })).toBeInTheDocument()
-    await waitFor(() => expect(screen.getByText("Frame unavailable")).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText("Visual review not active")).toBeInTheDocument())
     expect(screen.getByRole("button", { name: /review with sophia/i })).toBeDisabled()
     expect(screen.getByText("Exact text available")).toBeInTheDocument()
     expect(screen.queryByText(/coreview|gemini|websocket|transport|liveframes|fixture|direct video|provider ack/i)).not.toBeInTheDocument()
@@ -622,7 +622,7 @@ describe("Coreview artifact still-frame review", () => {
 
     renderPanel({ artifacts: COMPANION_ARTIFACTS, transport })
 
-    expect(await screen.findByText("Frame unavailable")).toBeInTheDocument()
+    expect(await screen.findByText("Visual review not active")).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /review with sophia/i })).toBeDisabled()
     expect(sendArtifactFrame).not.toHaveBeenCalled()
   })

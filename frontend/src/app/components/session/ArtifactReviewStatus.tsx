@@ -37,8 +37,8 @@ export function ArtifactReviewStatus({
   if (!featureEnabled) return null
 
   const exactTextAvailable = Boolean(state?.exactTextAvailable || exactTextAvailableOverride)
-  const frameSent = Boolean((state?.frameSentCount ?? 0) > 0 || state?.initialFrameSent)
-  const stale = Boolean(state?.state === "co_review_live" && (state.frameSentCount ?? 0) > 0)
+  const frameSent = hasConfirmedStillFrame(state, transportStatus)
+  const stale = Boolean(frameSent && state?.state === "co_review_live")
   const hasFrameError = Boolean(
     state?.state === "co_review_error"
     || (state?.frameSendFailureCount ?? 0) > 0
@@ -64,15 +64,29 @@ export function ArtifactReviewStatus({
       )}
       aria-live="polite"
     >
-      <SophiaLookingChip state={state} />
+      <SophiaLookingChip state={state} frameConfirmed={frameSent} />
       {frameSent ? <StatusPill icon="check" label="Frame sent" /> : null}
       {stale ? <StatusPill icon="clock" label="View may be stale" muted /> : null}
       {preparingView ? <StatusPill icon="clock" label="Preparing view" muted /> : null}
       {waitingForVoice ? <StatusPill icon="clock" label="Start voice to review visually" muted /> : null}
-      {frameUnavailable ? <StatusPill icon="alert" label="Frame unavailable" tone="danger" /> : null}
-      {!frameSent && !frameUnavailable && !waitingForVoice && !preparingView && canStart ? <StatusPill icon="clock" label="Ready for review" muted /> : null}
+      {frameUnavailable ? <StatusPill icon="alert" label="Visual review not active" tone="danger" /> : null}
+      {!frameSent && !frameUnavailable && !waitingForVoice && !preparingView && canStart ? <StatusPill icon="clock" label="Frame not sent yet" muted /> : null}
       <ExactTextBadge available={exactTextAvailable} />
     </div>
+  )
+}
+
+function hasConfirmedStillFrame(
+  state: CoReviewSessionState | null | undefined,
+  transportStatus: CoReviewTransportStatus | null | undefined,
+): boolean {
+  return Boolean(
+    state?.state === "co_review_live"
+      && state.visualInputStatus === "live"
+      && state.videoOrFrameMode === "still_frame"
+      && (state.frameSentCount ?? 0) > 0
+      && transportStatus?.stillFramesSupported !== false
+      && transportStatus?.visualTransportSupported !== false,
   )
 }
 

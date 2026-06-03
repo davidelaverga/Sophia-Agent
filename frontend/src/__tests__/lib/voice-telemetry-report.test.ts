@@ -430,6 +430,7 @@ describe('buildVoiceTelemetryReport', () => {
     });
     expect(report.diagnosticsSummary.geminiRelayThroughput).toMatchObject({
       schema: 'gemini_relay_throughput_summary_v1',
+      warnings: [],
       relayTraceCountWithThroughput: 1,
       maxOrderedRelayQueueDepth: 2,
       maxOldestQueuedAgeMs: 180,
@@ -437,6 +438,16 @@ describe('buildVoiceTelemetryReport', () => {
       transcriptPartialsDropped: 0,
       transcriptCoalescingDisabledReason: 'provider_output_transcription_is_delta_like',
       p95TranscriptRelayLatencyMs: 220,
+    });
+    expect(report.diagnosticsSummary.artifactReview).toMatchObject({
+      schema: 'artifact_review_summary_v1',
+      warnings: expect.arrayContaining(['artifact_count_mismatch', 'review_emit_artifact_tool_churn_detected']),
+      artifactCount: 1,
+      artifactRuntimeIngestCount: 0,
+      artifactRenderedCount: 1,
+      artifactCountMismatchReason: 'rendered_state_without_runtime_ingest',
+      emitArtifactToolCallCount: 1,
+      rawArtifactTextExcluded: true,
     });
     expect(report.diagnosticsSummary.coreviewStillFrame).toMatchObject({
       schema: 'coreview_still_frame_summary_v1',
@@ -644,6 +655,15 @@ describe('buildVoiceTelemetryReport', () => {
       unresolvedToolCallCount: 1,
       artifactToolCallUnknownCount: 1,
     });
+    expect(report.diagnosticsSummary.geminiRelayThroughput).toMatchObject({
+      warnings: expect.arrayContaining([
+        'public_transcript_relay_latency_high',
+        'relay_queue_depth_high',
+      ]),
+      maxOrderedRelayQueueDepth: 105,
+      maxTranscriptRelayLatencyMs: 109931,
+      p95TranscriptRelayLatencyMs: 106203,
+    });
   });
 
   it('reconciles rendered artifact state into exported artifact counts', () => {
@@ -678,14 +698,25 @@ describe('buildVoiceTelemetryReport', () => {
     expect(report.metrics.counts.artifacts).toBe(1);
     expect(report.metrics.counts.artifactPublicEventCount).toBe(0);
     expect(report.metrics.counts.artifactRenderedCount).toBe(1);
+    expect(report.metrics.counts.artifactSelectedStageCount).toBe(0);
     expect(report.metrics.counts.artifactCountSource).toBe('rendered_state');
     expect(report.metrics.counts.artifactCountMismatch).toBe(true);
+    expect(report.metrics.counts.artifactCountMismatchReason).toBe('rendered_state_without_runtime_ingest');
     expect(report.metrics.sessionTelemetry.gemini?.artifactCount).toBe(1);
     expect(report.metrics.sessionTelemetry.gemini?.artifactPublicEventCount).toBe(0);
     expect(report.metrics.sessionTelemetry.gemini?.artifactRuntimeIngestCount).toBe(0);
+    expect(report.metrics.sessionTelemetry.gemini?.artifactSelectedStageCount).toBe(0);
     expect(report.metrics.sessionTelemetry.gemini?.artifactRenderedCount).toBe(1);
     expect(report.turnCaptureDiagnostics.summary.finalUiState.artifactCount).toBe(1);
     expect(report.turnCaptureDiagnostics.summary.finalUiState.artifactCountSource).toBe('rendered_state');
+    expect(report.turnCaptureDiagnostics.summary.finalUiState.artifactCountMismatchReason).toBe('rendered_state_without_runtime_ingest');
+    expect(report.diagnosticsSummary.artifactReview).toMatchObject({
+      warnings: expect.arrayContaining([
+        'artifact_rendered_not_runtime_ingested',
+        'artifact_count_mismatch',
+      ]),
+      artifactCountMismatchReason: 'rendered_state_without_runtime_ingest',
+    });
   });
 
   it('redacts auth-bearing transport material while keeping transport diagnostics readable', () => {

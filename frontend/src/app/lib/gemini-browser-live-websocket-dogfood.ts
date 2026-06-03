@@ -18,6 +18,8 @@ export type GeminiBrowserLiveDogfoodRelayStatus = 'disconnected' | 'active' | 'd
 
 export type GeminiTranscriptCoalescingDisabledReason = 'provider_output_transcription_is_delta_like';
 
+export type GeminiArtifactReviewUserIntent = 'unknown' | 'analysis' | 'create_update';
+
 export interface GeminiBrowserLiveDogfoodRelayDiagnostic {
   timestamp: string;
   targetPath: string;
@@ -238,6 +240,17 @@ export interface GeminiProviderReceiveMetadata {
   relayCorrelationId: string;
   providerPrimaryCategory: GeminiProviderEventCategory | 'unknown';
   providerCategories: GeminiProviderEventCategory[];
+}
+
+export interface GeminiArtifactReviewRelayContext {
+  active: true;
+  artifact_id: string | null;
+  source: 'coreview_still_frame';
+  user_intent: GeminiArtifactReviewUserIntent;
+  last_user_intent_at: string | null;
+  expires_at: string | null;
+  raw_transcript_excluded: true;
+  raw_artifact_text_excluded: true;
 }
 
 export type GeminiProviderEventCategoryCounts = Record<GeminiProviderEventCategory, {
@@ -694,6 +707,7 @@ const GEMINI_TRANSCRIPT_COALESCING_DISABLED_REASON: GeminiTranscriptCoalescingDi
 const WEBSOCKET_OPEN = 1;
 const GEMINI_ARTIFACT_FRAME_PAYLOAD_SCHEMA_VERSION = 'realtimeInput.video.v1';
 const ARTIFACT_FRAME_SEND_SETTLE_MS = 125;
+const ARTIFACT_REVIEW_RELAY_CONTEXT_TTL_MS = 10 * 60 * 1000;
 const MAX_SAFE_DIAGNOSTIC_TEXT_CHARS = 180;
 const BARGE_IN_CANDIDATE_DECAY_MS = 650;
 const PROVIDER_INPUT_TRANSCRIPTION_CONFIRMATION_DELAY_MS = 350;
@@ -715,6 +729,7 @@ const RELAYABLE_GEMINI_PROVIDER_EVENT_KEYS = new Set([
   'error',
 ]);
 const ZERO_FIELD_GEMINI_PROVIDER_EVENT_KEYS = new Set(['setupComplete', 'setup_complete']);
+const GEMINI_EMIT_ARTIFACT_TOOL_NAME = 'emit_artifact';
 const GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = 'read_artifact_text';
 const GEMINI_PROVIDER_EVENT_CATEGORIES: GeminiProviderEventCategory[] = [
   'setupComplete',
@@ -821,6 +836,10 @@ export async function connectGeminiBrowserLiveDogfood(
   let bargeInNewTurnDispatchCount = 0;
   let bargeInNewTurnDispatchBlockedReason: GeminiBargeInNewTurnDispatchBlockedReason = 'none';
   const promotedBargeInTranscriptFingerprints: string[] = [];
+  let artifactReviewArtifactId: string | null = null;
+  let artifactReviewExpiresAtMs: number | null = null;
+  let artifactReviewUserIntent: GeminiArtifactReviewUserIntent = 'unknown';
+  let artifactReviewUserIntentAt: string | null = null;
 
   const relayQueueOldestQueuedAgeMs = () => {
     const oldestQueuedAtMs = orderedRelayQueue[0]?.queuedAtMs;
@@ -959,6 +978,42 @@ export async function connectGeminiBrowserLiveDogfood(
       websocketCloseWasClean: lastWebSocketClose?.wasClean ?? null,
       websocketCloseAt: lastWebSocketClose?.at ?? null,
       error: websocketOpen ? null : 'gemini_live_websocket_not_open',
+    };
+  };
+
+  const rememberArtifactReviewUserIntent = (text: string | null | undefined) => {
+    if (!text) {
+      return;
+    }
+    const nextIntent = classifyArtifactReviewUserIntent(text);
+    if (nextIntent === 'unknown') {
+      return;
+    }
+    artifactReviewUserIntent = nextIntent;
+    artifactReviewUserIntentAt = new Date().toISOString();
+  };
+
+  const snapshotArtifactReviewRelayContext = (): GeminiArtifactReviewRelayContext | null => {
+    if (!artifactReviewArtifactId || artifactReviewExpiresAtMs === null) {
+      return null;
+    }
+    if (monotonicNowMs() > artifactReviewExpiresAtMs) {
+      artifactReviewArtifactId = null;
+      artifactReviewExpiresAtMs = null;
+      artifactReviewUserIntent = 'unknown';
+      artifactReviewUserIntentAt = null;
+      return null;
+    }
+
+    return {
+      active: true,
+      artifact_id: artifactReviewArtifactId,
+      source: 'coreview_still_frame',
+      user_intent: artifactReviewUserIntent,
+      last_user_intent_at: artifactReviewUserIntentAt,
+      expires_at: new Date(Date.now() + Math.max(0, artifactReviewExpiresAtMs - monotonicNowMs())).toISOString(),
+      raw_transcript_excluded: true,
+      raw_artifact_text_excluded: true,
     };
   };
 
@@ -1564,6 +1619,7 @@ export async function connectGeminiBrowserLiveDogfood(
         const categories = classification.categories;
         markAssistantOutputStarted(event, categories, receiveMetadata);
         if (categories.includes('inputTranscription')) {
+          rememberArtifactReviewUserIntent(readTranscriptionText(event, 'inputTranscription', 'input_transcription'));
           const confirmation = providerInputTranscriptionConfirmation(event, receiveMetadata);
           promoteBargeInInputTranscription(event, receiveMetadata, confirmation);
         }
@@ -1621,6 +1677,7 @@ export async function connectGeminiBrowserLiveDogfood(
             event,
             relayMetadata,
             browserSession.relayTargetPath ?? RELAY_TARGET_PATH,
+            snapshotArtifactReviewRelayContext(),
           )
           .then((relayResponse) => {
             const relayCompletedAt = new Date().toISOString();
@@ -1833,6 +1890,7 @@ export async function connectGeminiBrowserLiveDogfood(
         if (websocket?.readyState !== WEBSOCKET_OPEN) {
           throw new Error('Gemini Live WebSocket is not open.');
         }
+        rememberArtifactReviewUserIntent(text);
         websocket.send(JSON.stringify({ realtimeInput: { text } }));
       },
       sendArtifactFrame: (
@@ -1845,6 +1903,16 @@ export async function connectGeminiBrowserLiveDogfood(
         enabled: options.coreviewStillFrameEnabled ?? isCoReviewStillFrameEnabled(),
         providerSnapshot: snapshotArtifactFrameProviderState,
         transportSnapshot: snapshotArtifactFrameTransportStatus,
+      }).then((result) => {
+        if (result.ok && result.websocketSendAccepted && result.artifactId) {
+          if (artifactReviewArtifactId !== result.artifactId) {
+            artifactReviewUserIntent = 'unknown';
+            artifactReviewUserIntentAt = null;
+          }
+          artifactReviewArtifactId = result.artifactId;
+          artifactReviewExpiresAtMs = monotonicNowMs() + ARTIFACT_REVIEW_RELAY_CONTEXT_TTL_MS;
+        }
+        return result;
       }),
       getArtifactFrameTransportStatus: snapshotArtifactFrameTransportStatus,
       setMicrophoneMuted: (muted: boolean) => {
@@ -1913,7 +1981,7 @@ export function buildGeminiArtifactTextReaderHint(artifactId: string): Record<st
       text: [
         'This is app context for the current artifact review. Do not answer this setup message.',
         "If you speak at all, say only: I'm looking at it now.",
-        'Do not call emit_artifact because of this setup message.',
+        `During artifact review or analysis, do not call ${GEMINI_EMIT_ARTIFACT_TOOL_NAME} unless the user explicitly asks you to create, update, rewrite, or save an artifact.`,
         `Coreview active artifact_id: ${artifactId}.`,
         'For exact words, numbers, table values, labels, or fine print, call read_artifact_text with this artifact_id before answering.',
         'Use the visual frame only for layout, composition, color, and spatial structure.',
@@ -2588,6 +2656,7 @@ async function relayGeminiProviderEvent(
   event: Record<string, unknown>,
   receiveMetadata: GeminiProviderReceiveMetadata,
   relayTargetPath = RELAY_TARGET_PATH,
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null = null,
 ): Promise<GeminiBrowserLiveDogfoodRelayResponse> {
   const body = JSON.stringify({
     session_id: sessionId,
@@ -2598,6 +2667,7 @@ async function relayGeminiProviderEvent(
     relay_correlation_id: receiveMetadata.relayCorrelationId,
     provider_primary_category: receiveMetadata.providerPrimaryCategory,
     provider_categories: receiveMetadata.providerCategories,
+    ...(artifactReviewContext ? { artifact_review_context: artifactReviewContext } : {}),
   });
   const eventType = describeGeminiProviderEventType(event);
   const requestBodyBytes = textByteLength(body);
@@ -3625,6 +3695,22 @@ function normalizeTranscriptionForIntent(text: string): string {
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim()
     .replace(/\s+/g, ' ');
+}
+
+export function classifyArtifactReviewUserIntent(text: string): GeminiArtifactReviewUserIntent {
+  const normalized = normalizeTranscriptionForIntent(text);
+  if (!normalized) {
+    return 'unknown';
+  }
+
+  const createOrUpdate =
+    /\b(create|make|write|draft|generate|update|edit|revise|rewrite|change|save|add|remove|replace)\b/u.test(normalized)
+    && /\b(artifact|document|doc|summary|brief|report|file|canvas|it|this)\b/u.test(normalized);
+  if (createOrUpdate || /\b(turn this into|save this as|make this into)\b/u.test(normalized)) {
+    return 'create_update';
+  }
+
+  return 'analysis';
 }
 
 function isConfirmableProviderInputTranscription(text: string): boolean {

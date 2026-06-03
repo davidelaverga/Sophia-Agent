@@ -284,6 +284,10 @@ class GeminiBrowserDogfoodRelayRequest(BaseModel):
         default=None,
         description="Browser-classified provider event categories",
     )
+    artifact_review_context: dict[str, object] | None = Field(
+        default=None,
+        description="Browser-safe artifact review context for suppressing review-only artifact churn",
+    )
 
     def voice_relay_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {"event": self.event}
@@ -439,6 +443,156 @@ def _gemini_relay_log_context(
         "provider_relay_sequence": body.provider_relay_sequence,
         "provider_primary_category": body.provider_primary_category,
         "provider_categories": list(body.provider_categories or [])[:6],
+    }
+
+
+GEMINI_EMIT_ARTIFACT_TOOL_NAME = "emit_artifact"
+ARTIFACT_REVIEW_EMIT_SUPPRESSED_REASON = "artifact_review_emit_artifact_suppressed"
+
+
+def _record_from_any_key(value: object, *keys: str) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+
+    for key in keys:
+        candidate = value.get(key)
+        if isinstance(candidate, dict):
+            return candidate
+    return None
+
+
+def _array_from_any_key(value: object, *keys: str) -> list[object]:
+    if not isinstance(value, dict):
+        return []
+
+    for key in keys:
+        candidate = value.get(key)
+        if isinstance(candidate, list):
+            return candidate
+    return []
+
+
+def _read_gemini_function_calls(event: dict[str, object]) -> list[dict[str, object]]:
+    tool_call = _record_from_any_key(event, "toolCall", "tool_call")
+    calls = [
+        call
+        for call in _array_from_any_key(tool_call, "functionCalls", "function_calls")
+        if isinstance(call, dict)
+    ]
+
+    server_content = _record_from_any_key(event, "serverContent", "server_content")
+    model_turn = _record_from_any_key(server_content, "modelTurn", "model_turn")
+    for part in _array_from_any_key(model_turn, "parts"):
+        function_call = _record_from_any_key(part, "functionCall", "function_call")
+        if function_call is not None:
+            calls.append(function_call)
+
+    return calls
+
+
+def _string_from_any_key(value: object, *keys: str) -> str | None:
+    if not isinstance(value, dict):
+        return None
+
+    for key in keys:
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    return None
+
+
+def _artifact_review_context_active(context: dict[str, object] | None) -> bool:
+    return bool(context and context.get("active") is True)
+
+
+def _artifact_review_user_intent(context: dict[str, object] | None) -> str:
+    value = context.get("user_intent") if context else None
+    return value if isinstance(value, str) and value else "unknown"
+
+
+def _suppressed_review_emit_artifact_calls(
+    body: GeminiBrowserDogfoodRelayRequest,
+) -> list[dict[str, object]]:
+    if not _artifact_review_context_active(body.artifact_review_context):
+        return []
+    if _artifact_review_user_intent(body.artifact_review_context) == "create_update":
+        return []
+
+    function_calls = _read_gemini_function_calls(body.event)
+    if not function_calls:
+        return []
+
+    emit_calls = [
+        call
+        for call in function_calls
+        if _string_from_any_key(call, "name") == GEMINI_EMIT_ARTIFACT_TOOL_NAME
+    ]
+    if not emit_calls or len(emit_calls) != len(function_calls):
+        return []
+
+    return emit_calls
+
+
+def _artifact_review_emit_suppression_payload(
+    body: GeminiBrowserDogfoodRelayRequest,
+) -> dict[str, object] | None:
+    emit_calls = _suppressed_review_emit_artifact_calls(body)
+    if not emit_calls:
+        return None
+
+    guidance = (
+        "Artifact review is active. Use read_artifact_text for exact artifact text and answer from the "
+        "existing artifact unless the user explicitly asks to create or update an artifact."
+    )
+    function_responses: list[dict[str, object]] = []
+    tool_diagnostics: list[dict[str, object]] = []
+
+    for index, call in enumerate(emit_calls):
+        tool_call_id = _string_from_any_key(call, "id") or f"artifact-review-emit-{index + 1}"
+        response = {
+            "ok": False,
+            "status": "rejected",
+            "safe_reason": ARTIFACT_REVIEW_EMIT_SUPPRESSED_REASON,
+            "recovery_guidance": guidance,
+            "raw_artifact_text_excluded": True,
+        }
+        function_responses.append({
+            "id": tool_call_id,
+            "name": GEMINI_EMIT_ARTIFACT_TOOL_NAME,
+            "response": response,
+        })
+        tool_diagnostics.append({
+            "id": tool_call_id,
+            "name": GEMINI_EMIT_ARTIFACT_TOOL_NAME,
+            "success": False,
+            "execution_rejected": True,
+            "rejection_reason": ARTIFACT_REVIEW_EMIT_SUPPRESSED_REASON,
+            "recovery_guidance": guidance,
+            "response": response,
+        })
+
+    return {
+        "accepted": True,
+        "client_actions": [
+            {
+                "type": "gemini_tool_response",
+                "payload": {
+                    "toolResponse": {
+                        "functionResponses": function_responses,
+                    },
+                },
+                "result_summary": "Review-only emit_artifact call suppressed.",
+            },
+        ],
+        "tool_diagnostics": tool_diagnostics,
+        "diagnostics": {
+            "schema": "artifact_review_tool_guard_v1",
+            "artifact_review_active": True,
+            "artifact_review_user_intent": _artifact_review_user_intent(body.artifact_review_context),
+            "review_tool_churn_detected": True,
+            "suppressed_tool_count": len(emit_calls),
+            "raw_artifact_text_excluded": True,
+        },
     }
 
 
@@ -1128,6 +1282,11 @@ async def gemini_browser_dogfood_relay(
     body: GeminiBrowserDogfoodRelayRequest,
 ) -> dict[str, object]:
     encoded_session_id = quote(body.session_id, safe="")
+    guard_payload = _artifact_review_emit_suppression_payload(body)
+    if guard_payload is not None:
+        guard_payload["stream_url"] = _build_gemini_dogfood_events_stream_url(user_id, body.session_id)
+        return guard_payload
+
     payload = await _proxy_voice_dogfood_json(
         "POST",
         f"/dogfood/realtime/gemini/browser-sessions/{encoded_session_id}/provider-events",
@@ -1236,6 +1395,15 @@ async def gemini_production_relay(
 ) -> dict[str, object]:
     encoded_session_id = quote(body.session_id, safe="")
     log_context = _gemini_relay_log_context(user_id=user_id, session_id=body.session_id, body=body)
+    guard_payload = _artifact_review_emit_suppression_payload(body)
+    if guard_payload is not None:
+        logger.info(
+            "voice.gemini.relay suppressed review emit_artifact context=%s",
+            log_context,
+        )
+        guard_payload["stream_url"] = _build_gemini_production_events_stream_url(body.session_id)
+        return guard_payload
+
     try:
         payload = await _proxy_voice_runtime_json(
             "POST",

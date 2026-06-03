@@ -50,17 +50,17 @@ describe("CoReviewControls", () => {
     const { onStart } = renderControls({}, true, liveStillFrameTransportStatus)
 
     expect(screen.getByRole("status", { name: /not looking/i })).toBeInTheDocument()
-    expect(screen.getByText("Ready for review")).toBeInTheDocument()
+    expect(screen.getByText("Frame not sent yet")).toBeInTheDocument()
 
     await user.click(screen.getByRole("button", { name: /review with sophia/i }))
 
     expect(onStart).toHaveBeenCalledTimes(1)
   })
 
-  it("shows Frame unavailable for unsupported still-frame transport", () => {
+  it("shows inactive visual review for unsupported still-frame transport", () => {
     renderControls()
 
-    expect(screen.getByText("Frame unavailable")).toBeInTheDocument()
+    expect(screen.getByText("Visual review not active")).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /review with sophia/i })).toBeDisabled()
   })
 
@@ -128,6 +128,6 @@ describe("CoReviewControls", () => {
   it("surfaces a ready state before review when the frame path is available", () => {
     renderControls({}, true, liveStillFrameTransportStatus)
 
-    expect(screen.getByText("Ready for review")).toBeInTheDocument()
+    expect(screen.getByText("Frame not sent yet")).toBeInTheDocument()
   })
 })

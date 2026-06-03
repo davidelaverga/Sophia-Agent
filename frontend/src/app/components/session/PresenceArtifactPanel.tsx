@@ -7,6 +7,7 @@ import { haptic } from "../../hooks/useHaptics"
 import { buildThreadArtifactHref, formatBuilderArtifactFileSize, getBuilderArtifactFiles, isMarkdownArtifactFile } from "../../lib/builder-artifacts"
 import { isCoreviewStillFrameReviewEnabled } from "../../lib/co-review-flags"
 import type { CoReviewMediaTransport } from "../../lib/co-review-transport"
+import { recordSophiaCaptureEvent } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
 import { isRealReflection } from "../../session/artifacts"
 import { usePresenceStore } from "../../stores/presence-store"
@@ -186,6 +187,7 @@ export function PresenceArtifactPanel({
   const [reflectionTapped, setReflectionTapped] = useState(false)
   const autoCollapseRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const staggerRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  const selectedStageCaptureSignatureRef = useRef<string | null>(null)
   const [builderArtifactRoot, setBuilderArtifactRoot] = useState<HTMLDivElement | null>(null)
   const [domArtifactRoot, setDomArtifactRoot] = useState<HTMLDivElement | null>(null)
   const [builderVisualCaptureStatus, setBuilderVisualCaptureStatus] = useState<ArtifactVisualCaptureStatus>(
@@ -294,6 +296,66 @@ export function PresenceArtifactPanel({
     transportNeedsVoice
     && isVoiceMode
   )
+
+  useEffect(() => {
+    if (!isVisible || !stageBuilderArtifact || !builderArtifactId) {
+      selectedStageCaptureSignatureRef.current = null
+      return
+    }
+
+    const signature = [
+      sessionId ?? "",
+      normalSessionId ?? "",
+      threadId ?? "",
+      builderArtifactId,
+      stagePrimaryFile?.path ?? stageBuilderArtifact.artifactPath ?? "",
+      stageUsesMarkdownPreview ? "markdown" : "metadata",
+      builderVisualCaptureStatus.ready ? "ready" : "not-ready",
+      builderExactTextAvailable ? "exact" : "no-exact",
+    ].join("|")
+
+    if (selectedStageCaptureSignatureRef.current === signature) {
+      return
+    }
+    selectedStageCaptureSignatureRef.current = signature
+
+    recordSophiaCaptureEvent({
+      category: "artifacts-runtime",
+      name: "select-stage-artifact",
+      payload: {
+        sessionId: sessionId ?? null,
+        normalSessionId: normalSessionId ?? null,
+        threadId: threadId ?? null,
+        artifactId: builderArtifactId,
+        artifactPath: stagePrimaryFile?.path ?? stageBuilderArtifact.artifactPath ?? null,
+        artifactTitle: stageBuilderArtifact.artifactTitle,
+        artifactType: stageBuilderArtifact.artifactType,
+        selectedBuilderArtifactPath: selectedBuilderArtifactPath ?? null,
+        source: selectedBuilderArtifactPath ? "selected_builder_artifact" : "latest_builder_artifact",
+        exactTextSource: stageUsesMarkdownPreview ? "builder_file" : "builder_metadata",
+        exactTextAvailable: builderExactTextAvailable,
+        visualCaptureSource: builderVisualCaptureStatus.source,
+        visualCaptureReady: builderVisualCaptureStatus.ready,
+        visualCaptureReason: builderVisualCaptureStatus.reason,
+        rawArtifactTextExcluded: true,
+        rawFrameExcluded: true,
+      },
+    })
+  }, [
+    builderArtifactId,
+    builderExactTextAvailable,
+    builderVisualCaptureStatus.reason,
+    builderVisualCaptureStatus.ready,
+    builderVisualCaptureStatus.source,
+    isVisible,
+    normalSessionId,
+    selectedBuilderArtifactPath,
+    sessionId,
+    stageBuilderArtifact,
+    stagePrimaryFile?.path,
+    stageUsesMarkdownPreview,
+    threadId,
+  ])
 
   // Phase lifecycle
   useEffect(() => {

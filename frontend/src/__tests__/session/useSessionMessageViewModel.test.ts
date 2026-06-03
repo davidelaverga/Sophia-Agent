@@ -49,4 +49,28 @@ describe('useSessionMessageViewModel', () => {
       voiceTranscript: true,
     });
   });
+
+  it('suppresses duplicate message ids while preserving the first position with the most complete content', () => {
+    const markOffline = vi.fn();
+
+    const { result } = renderHook(() =>
+      useSessionMessageViewModel({
+        chatMessages: [
+          { id: 'u-1', role: 'user', parts: [{ type: 'text', text: 'hello' }] },
+          { id: 'a-dup', role: 'assistant', parts: [{ type: 'text', text: '' }] },
+          { id: 'u-2', role: 'user', parts: [{ type: 'text', text: 'follow up' }] },
+          { id: 'a-dup', role: 'assistant', parts: [{ type: 'text', text: 'complete assistant reply' }] },
+        ],
+        greetingAnchorId: null,
+        markOffline,
+      })
+    );
+
+    expect(result.current.messages.map((message) => message.id)).toEqual(['u-1', 'a-dup', 'u-2']);
+    expect(result.current.messages[1]).toMatchObject({
+      id: 'a-dup',
+      role: 'assistant',
+      content: 'complete assistant reply',
+    });
+  });
 });

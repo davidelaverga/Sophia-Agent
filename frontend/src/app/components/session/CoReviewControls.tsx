@@ -31,7 +31,7 @@ export function CoReviewControls({
   const isLive = state.state === "co_review_live"
   const isStopping = state.state === "co_review_stopping"
   const statusItems = coReviewStatusItems(state, transportStatus, canStart)
-  const visualLive = isLive && state.visualInputStatus === "live"
+  const visualLive = hasConfirmedCoReviewFrame(state, transportStatus)
 
   return (
     <div className={cn("flex flex-wrap items-center gap-2 text-xs text-white/70", className)}>
@@ -97,8 +97,9 @@ export function coReviewStatusItems(
   canStart = true,
 ): string[] {
   const items: string[] = []
+  const frameSent = hasConfirmedCoReviewFrame(state, transportStatus)
 
-  if (state.frameSentCount > 0 || state.initialFrameSent) {
+  if (frameSent) {
     items.push("Frame sent")
   }
 
@@ -106,7 +107,7 @@ export function coReviewStatusItems(
     items.push("Exact text available")
   }
 
-  if (state.state === "co_review_live" && state.frameSentCount > 0) {
+  if (frameSent) {
     items.push("Visual may be stale")
   }
 
@@ -118,9 +119,9 @@ export function coReviewStatusItems(
     || !transportStatus.stillFramesSupported
     || (!transportStatus.visualTransportSupported && state.frameSentCount === 0)
   ) {
-    items.push("Frame unavailable")
+    items.push("Visual review not active")
   } else if (state.state !== "co_review_live" && state.frameSentCount === 0) {
-    items.push("Ready for review")
+    items.push("Frame not sent yet")
   }
 
   return items
@@ -147,4 +148,18 @@ function coReviewErrorText(error: string | null): string {
   if (error === "artifact_canvas_not_found" || error === "capture_target_missing") return "Artifact view unavailable"
   if (error === "preview_not_ready") return "Artifact view is still preparing"
   return "View could not be prepared"
+}
+
+function hasConfirmedCoReviewFrame(
+  state: CoReviewSessionState,
+  transportStatus: CoReviewTransportStatus,
+): boolean {
+  return Boolean(
+    state.state === "co_review_live"
+      && state.visualInputStatus === "live"
+      && state.videoOrFrameMode === "still_frame"
+      && state.frameSentCount > 0
+      && transportStatus.stillFramesSupported
+      && transportStatus.visualTransportSupported,
+  )
 }

@@ -18,15 +18,17 @@ export type VoiceMetricsHealthLevel = "good" | "warn" | "bad" | "neutral"
 
 export type VoiceTransportSource = "sse" | "custom" | "pending"
 
-export type VoiceArtifactCountSource = "public_event" | "runtime_ingest" | "rendered_state" | "none"
+export type VoiceArtifactCountSource = "public_event" | "runtime_ingest" | "selected_stage_artifact" | "rendered_state" | "none"
 
 export type VoiceArtifactTelemetryCounts = {
   artifactCount: number
   artifactPublicEventCount: number
   artifactRuntimeIngestCount: number
+  artifactSelectedStageCount: number
   artifactRenderedCount: number
   artifactCountSource: VoiceArtifactCountSource
   artifactCountMismatch: boolean
+  artifactCountMismatchReason: string | null
 }
 
 export type CoreviewExactTextSource = "fixture" | "builder_metadata" | "builder_file" | "artifact_store" | "unsupported"
@@ -356,9 +358,11 @@ export type GeminiSessionTelemetry = {
     artifactCount: number
     artifactPublicEventCount: number
     artifactRuntimeIngestCount: number
+    artifactSelectedStageCount: number
     artifactRenderedCount: number
     artifactCountSource: VoiceArtifactCountSource
     artifactCountMismatch: boolean
+    artifactCountMismatchReason: string | null
     publicDiagnosticCount: number
     lastUserTranscriptAt: string | null
     lastAssistantTranscriptAt: string | null
@@ -391,9 +395,11 @@ export type VoiceDeveloperMetrics = {
     artifacts: number
     artifactPublicEventCount: number
     artifactRuntimeIngestCount: number
+    artifactSelectedStageCount: number
     artifactRenderedCount: number
     artifactCountSource: VoiceArtifactCountSource
     artifactCountMismatch: boolean
+    artifactCountMismatchReason: string | null
     diagnostics: number
     builderEvents: number
   }
@@ -626,6 +632,28 @@ function hasArtifactsRuntimeIngestContent(event: NormalizedVoiceCaptureEvent): b
   return hasArtifactContent(payload?.merged) || hasArtifactContent(payload?.incoming)
 }
 
+function selectedStageArtifactKey(event: NormalizedVoiceCaptureEvent): string | null {
+  if (event.category !== "artifacts-runtime" || event.name !== "select-stage-artifact") {
+    return null
+  }
+
+  const payload = event.payloadRecord
+  return asString(payload?.artifactId)
+    ?? asString(payload?.artifactPath)
+    ?? asString(payload?.artifactTitle)
+}
+
+function countSelectedStageArtifacts(events: NormalizedVoiceCaptureEvent[]): number {
+  const keys = new Set<string>()
+  for (const event of events) {
+    const key = selectedStageArtifactKey(event)
+    if (key) {
+      keys.add(key)
+    }
+  }
+  return keys.size
+}
+
 function hasRenderedArtifactSnapshot(snapshot: SophiaCaptureSnapshot | null | undefined): boolean {
   if (!snapshot) return false
   if (hasArtifactContent(snapshot.artifacts.sessionArtifacts)) return true
@@ -640,18 +668,57 @@ function hasRenderedArtifactSnapshot(snapshot: SophiaCaptureSnapshot | null | un
 
 function resolveArtifactCountSource({
   artifactPublicEventCount,
-  artifactRuntimeIngestCount,
+  artifactRuntimeEventCount,
+  artifactSelectedStageCount,
   artifactRenderedCount,
 }: {
   artifactPublicEventCount: number
-  artifactRuntimeIngestCount: number
+  artifactRuntimeEventCount: number
+  artifactSelectedStageCount: number
   artifactRenderedCount: number
 }): VoiceArtifactCountSource {
-  const maxCount = Math.max(artifactPublicEventCount, artifactRuntimeIngestCount, artifactRenderedCount)
+  const maxCount = Math.max(
+    artifactPublicEventCount,
+    artifactRuntimeEventCount,
+    artifactSelectedStageCount,
+    artifactRenderedCount,
+  )
   if (maxCount <= 0) return "none"
   if (artifactPublicEventCount === maxCount) return "public_event"
-  if (artifactRuntimeIngestCount === maxCount) return "runtime_ingest"
+  if (artifactRuntimeEventCount === maxCount) return "runtime_ingest"
+  if (artifactSelectedStageCount === maxCount) return "selected_stage_artifact"
   return "rendered_state"
+}
+
+function resolveArtifactCountMismatchReason({
+  artifactCount,
+  artifactPublicEventCount,
+  artifactRuntimeEventCount,
+  artifactSelectedStageCount,
+  artifactRenderedCount,
+}: {
+  artifactCount: number
+  artifactPublicEventCount: number
+  artifactRuntimeEventCount: number
+  artifactSelectedStageCount: number
+  artifactRenderedCount: number
+}): string | null {
+  if (artifactCount === artifactPublicEventCount) {
+    return null
+  }
+  if (artifactSelectedStageCount > 0 && artifactSelectedStageCount === artifactCount) {
+    return "selected_stage_artifact_not_public_event"
+  }
+  if (artifactRuntimeEventCount > 0 && artifactRuntimeEventCount === artifactCount) {
+    return "runtime_ingest_not_public_event"
+  }
+  if (artifactRenderedCount > 0 && artifactRuntimeEventCount === 0 && artifactSelectedStageCount === 0) {
+    return "rendered_state_without_runtime_ingest"
+  }
+  if (artifactRenderedCount > 0) {
+    return "rendered_state_not_public_event"
+  }
+  return "artifact_count_not_public_event"
 }
 
 function getBuilderDebugDetail(payload: Record<string, unknown> | null | undefined): string | null {
@@ -746,12 +813,22 @@ function buildArtifactTelemetryCountsFromEvents(
   snapshot: SophiaCaptureSnapshot | null | undefined,
 ): VoiceArtifactTelemetryCounts {
   const artifactPublicEventCount = countWhere(activeEvents, (event) => event.name === "sophia.artifact")
-  const artifactRuntimeIngestCount = countWhere(activeEvents, hasArtifactsRuntimeIngestContent)
+  const artifactRuntimeEventCount = countWhere(activeEvents, hasArtifactsRuntimeIngestContent)
+  const artifactSelectedStageCount = countSelectedStageArtifacts(activeEvents)
+  const artifactRuntimeIngestCount = Math.max(artifactRuntimeEventCount, artifactSelectedStageCount)
   const artifactRenderedCount = hasRenderedArtifactSnapshot(snapshot) ? 1 : 0
   const artifactCount = Math.max(artifactPublicEventCount, artifactRuntimeIngestCount, artifactRenderedCount)
   const artifactCountSource = resolveArtifactCountSource({
     artifactPublicEventCount,
-    artifactRuntimeIngestCount,
+    artifactRuntimeEventCount,
+    artifactSelectedStageCount,
+    artifactRenderedCount,
+  })
+  const artifactCountMismatchReason = resolveArtifactCountMismatchReason({
+    artifactCount,
+    artifactPublicEventCount,
+    artifactRuntimeEventCount,
+    artifactSelectedStageCount,
     artifactRenderedCount,
   })
 
@@ -759,9 +836,11 @@ function buildArtifactTelemetryCountsFromEvents(
     artifactCount,
     artifactPublicEventCount,
     artifactRuntimeIngestCount,
+    artifactSelectedStageCount,
     artifactRenderedCount,
     artifactCountSource,
     artifactCountMismatch: artifactCount !== artifactPublicEventCount,
+    artifactCountMismatchReason,
   }
 }
 
@@ -1720,9 +1799,11 @@ function buildSessionTelemetry(params: {
         artifactCount: counts.artifacts,
         artifactPublicEventCount: counts.artifactPublicEventCount,
         artifactRuntimeIngestCount: counts.artifactRuntimeIngestCount,
+        artifactSelectedStageCount: counts.artifactSelectedStageCount,
         artifactRenderedCount: counts.artifactRenderedCount,
         artifactCountSource: counts.artifactCountSource,
         artifactCountMismatch: counts.artifactCountMismatch,
+        artifactCountMismatchReason: counts.artifactCountMismatchReason,
         publicDiagnosticCount: counts.diagnostics,
         lastUserTranscriptAt: lastTurn.lastUserTranscriptAt,
         lastAssistantTranscriptAt: lastTurn.lastAssistantTranscriptAt,
@@ -3410,9 +3491,11 @@ export function buildVoiceDeveloperMetrics({
     artifacts: artifactMetrics.artifactCount,
     artifactPublicEventCount: artifactMetrics.artifactPublicEventCount,
     artifactRuntimeIngestCount: artifactMetrics.artifactRuntimeIngestCount,
+    artifactSelectedStageCount: artifactMetrics.artifactSelectedStageCount,
     artifactRenderedCount: artifactMetrics.artifactRenderedCount,
     artifactCountSource: artifactMetrics.artifactCountSource,
     artifactCountMismatch: artifactMetrics.artifactCountMismatch,
+    artifactCountMismatchReason: artifactMetrics.artifactCountMismatchReason,
     diagnostics: diagnosticCount,
     builderEvents,
   }

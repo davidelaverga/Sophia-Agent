@@ -666,7 +666,7 @@ export function safeCoReviewTelemetryFromState(
   return {
     normalVoiceSessionId: state.normalSessionId,
     coReviewSessionId: state.coReviewSessionId,
-    coreviewSessionActive: state.state === "co_review_live" && state.visualInputStatus === "live",
+    coreviewSessionActive: state.state === "co_review_live" && state.visualInputStatus === "live" && state.frameSentCount > 0,
     coreviewArtifactId: state.artifactId,
     visualSourceKind: state.visualSourceKind,
     transportKind: state.transportKind,

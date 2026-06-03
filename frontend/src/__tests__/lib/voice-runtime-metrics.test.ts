@@ -960,14 +960,79 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.counts.artifacts).toBe(1);
     expect(metrics.counts.artifactPublicEventCount).toBe(0);
     expect(metrics.counts.artifactRuntimeIngestCount).toBe(1);
+    expect(metrics.counts.artifactSelectedStageCount).toBe(0);
     expect(metrics.counts.artifactRenderedCount).toBe(1);
     expect(metrics.counts.artifactCountSource).toBe('runtime_ingest');
     expect(metrics.counts.artifactCountMismatch).toBe(true);
+    expect(metrics.counts.artifactCountMismatchReason).toBe('runtime_ingest_not_public_event');
     expect(metrics.sessionTelemetry.gemini?.artifactCount).toBe(1);
     expect(metrics.sessionTelemetry.gemini?.artifactPublicEventCount).toBe(0);
     expect(metrics.sessionTelemetry.gemini?.artifactRuntimeIngestCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.artifactSelectedStageCount).toBe(0);
     expect(metrics.sessionTelemetry.gemini?.artifactRenderedCount).toBe(1);
     expect(metrics.sessionTelemetry.gemini?.artifactCountMismatch).toBe(true);
+  });
+
+  it('counts selected stage artifacts as safe runtime ingest evidence', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { platform: 'voice', sessionId: 'session-dev', runtime: 'gemini_live' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:00.800Z',
+        category: 'artifacts-runtime',
+        name: 'select-stage-artifact',
+        payload: {
+          sessionId: 'session-dev',
+          threadId: 'thread-dev',
+          artifactId: 'coreview-real-artifact-launch-brief',
+          artifactPath: 'mnt/user-data/outputs/launch-brief.md',
+          artifactTitle: 'Launch brief',
+          exactTextSource: 'builder_file',
+          exactTextAvailable: true,
+          rawArtifactTextExcluded: true,
+        },
+      }),
+      buildEvent({
+        seq: 3,
+        at: '2026-04-07T12:00:00.900Z',
+        category: 'artifacts-runtime',
+        name: 'select-stage-artifact',
+        payload: {
+          sessionId: 'session-dev',
+          threadId: 'thread-dev',
+          artifactId: 'coreview-real-artifact-launch-brief',
+          artifactPath: 'mnt/user-data/outputs/launch-brief.md',
+          artifactTitle: 'Launch brief',
+          exactTextSource: 'builder_file',
+          exactTextAvailable: true,
+          rawArtifactTextExcluded: true,
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot({
+        artifactDom: { panelVisible: true, takeawayText: 'Visible rendered text.' },
+      }),
+      nowMs: Date.parse('2026-04-07T12:00:01.500Z'),
+    });
+
+    expect(metrics.counts.artifacts).toBe(1);
+    expect(metrics.counts.artifactPublicEventCount).toBe(0);
+    expect(metrics.counts.artifactRuntimeIngestCount).toBe(1);
+    expect(metrics.counts.artifactSelectedStageCount).toBe(1);
+    expect(metrics.counts.artifactRenderedCount).toBe(1);
+    expect(metrics.counts.artifactCountSource).toBe('selected_stage_artifact');
+    expect(metrics.counts.artifactCountMismatchReason).toBe('selected_stage_artifact_not_public_event');
+    expect(metrics.sessionTelemetry.gemini?.artifactSelectedStageCount).toBe(1);
   });
 
   it('does not count emit_artifact tool calls as artifacts without validated artifact evidence', () => {
@@ -1021,6 +1086,7 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.counts.artifacts).toBe(0);
     expect(metrics.sessionTelemetry.gemini?.artifactCount).toBe(0);
     expect(metrics.counts.artifactCountSource).toBe('none');
+    expect(metrics.counts.artifactCountMismatchReason).toBeNull();
   });
 
   it('includes builder progress and stall diagnostics in telemetry', () => {

@@ -9,6 +9,7 @@ import {
   buildGeminiArtifactTextReaderHint,
   buildGeminiLiveWebSocketUrl,
   categorizeGeminiProviderEvent,
+  classifyArtifactReviewUserIntent,
   classifyGeminiProviderEventForRelay,
   connectGeminiBrowserLiveDogfood,
   connectGeminiBrowserLiveFromBootstrap,
@@ -210,8 +211,15 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     });
     expect(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'))).toContain('artifact-1');
     expect(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'))).toContain('Do not answer this setup message');
-    expect(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'))).toContain('Do not call emit_artifact');
+    expect(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'))).toContain('do not call emit_artifact unless the user explicitly asks');
     expect(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'))).not.toContain('base64-frame');
+  });
+
+  it('classifies artifact review create/update intent conservatively', () => {
+    expect(classifyArtifactReviewUserIntent('Can you review this and tell me what changed?')).toBe('analysis');
+    expect(classifyArtifactReviewUserIntent('Please update this artifact with the revised summary.')).toBe('create_update');
+    expect(classifyArtifactReviewUserIntent('Turn this into a document I can save.')).toBe('create_update');
+    expect(classifyArtifactReviewUserIntent('   ')).toBe('unknown');
   });
 
   it('decodes Gemini output PCM16 little-endian bytes into normalized float samples', () => {
@@ -996,6 +1004,61 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         rawUsageMetadataExcluded: true,
       },
     });
+
+    await connection.close();
+  });
+
+  it('attaches safe artifact review context to relayed tool calls after a confirmed frame', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch();
+    const fakeAudioContext = new FakeAudioContext();
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+
+    await connection.sendArtifactFrame({
+      artifactId: 'artifact-1',
+      visualSourceKind: 'canvas_element',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true,
+    }, { coreviewSendStage: 'start' });
+    connection.sendText('Can you review this and tell me what changed?');
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          { id: 'artifact-call-1', name: 'emit_artifact', args: { takeaway: 'Avoid churn.' } },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(3));
+    const relayBody = JSON.parse(String(fetchMock.mock.calls.at(-1)?.[1]?.body)) as Record<string, unknown>;
+
+    expect(relayBody).toMatchObject({
+      session_id: 'browser-gemini-1',
+      artifact_review_context: {
+        active: true,
+        artifact_id: 'artifact-1',
+        source: 'coreview_still_frame',
+        user_intent: 'analysis',
+        raw_transcript_excluded: true,
+        raw_artifact_text_excluded: true,
+      },
+    });
+    expect(JSON.stringify(relayBody.artifact_review_context)).not.toContain('Can you review this');
 
     await connection.close();
   });

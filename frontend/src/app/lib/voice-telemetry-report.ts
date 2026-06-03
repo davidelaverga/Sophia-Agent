@@ -36,6 +36,7 @@ export type VoiceTelemetryReport = {
     geminiRelayBackend: Record<string, unknown> | null;
     geminiRelayThroughput: Record<string, unknown> | null;
     geminiStaleOutput: Record<string, unknown> | null;
+    artifactReview: Record<string, unknown>;
     coreviewStillFrame: Record<string, unknown>;
   };
   turnCaptureDiagnostics: TurnCaptureDiagnostics;
@@ -44,6 +45,8 @@ export type VoiceTelemetryReport = {
 
 const MAX_TELEMETRY_CAPTURE_EVENTS = 500;
 const REDACTED = '[redacted]';
+const TRANSCRIPT_RELAY_LATENCY_WARNING_MS = 15_000;
+const ORDERED_RELAY_QUEUE_DEPTH_WARNING = 20;
 const SENSITIVE_KEY_PATTERN = /(?:^|[_-])(token|secret|authorization|api[_-]?key|access[_-]?token|client[_-]?secret|credential|password)(?:$|[_-])/i;
 const SENSITIVE_QUERY_PARAMS = new Set([
   'access_token',
@@ -115,7 +118,7 @@ export function buildVoiceTelemetryReport({
     summary: sanitizeTelemetryValue(summary) as VoiceTelemetrySummary,
     coreview: sanitizeTelemetryValue(reconciledMetrics.coreview) as CoreviewUsageTelemetry,
     metrics: sanitizedMetrics,
-    diagnosticsSummary: buildDiagnosticsSummary(captureBundle, selected, reconciledMetrics.coreview),
+    diagnosticsSummary: buildDiagnosticsSummary(selected, reconciledMetrics),
     turnCaptureDiagnostics: sanitizeTelemetryValue(
       buildTurnCaptureDiagnostics(selected.events, reconciledMetrics),
     ) as TurnCaptureDiagnostics,
@@ -137,9 +140,11 @@ function reconcileArtifactTelemetryMetrics(
     artifacts: artifactMetrics.artifactCount,
     artifactPublicEventCount: artifactMetrics.artifactPublicEventCount,
     artifactRuntimeIngestCount: artifactMetrics.artifactRuntimeIngestCount,
+    artifactSelectedStageCount: artifactMetrics.artifactSelectedStageCount,
     artifactRenderedCount: artifactMetrics.artifactRenderedCount,
     artifactCountSource: artifactMetrics.artifactCountSource,
     artifactCountMismatch: artifactMetrics.artifactCountMismatch,
+    artifactCountMismatchReason: artifactMetrics.artifactCountMismatchReason,
   };
 
   if (metrics.sessionTelemetry.runtime !== 'gemini_live') {
@@ -159,9 +164,11 @@ function reconcileArtifactTelemetryMetrics(
         artifactCount: artifactMetrics.artifactCount,
         artifactPublicEventCount: artifactMetrics.artifactPublicEventCount,
         artifactRuntimeIngestCount: artifactMetrics.artifactRuntimeIngestCount,
+        artifactSelectedStageCount: artifactMetrics.artifactSelectedStageCount,
         artifactRenderedCount: artifactMetrics.artifactRenderedCount,
         artifactCountSource: artifactMetrics.artifactCountSource,
         artifactCountMismatch: artifactMetrics.artifactCountMismatch,
+        artifactCountMismatchReason: artifactMetrics.artifactCountMismatchReason,
       },
     },
   };
@@ -499,13 +506,25 @@ function buildGeminiRelayThroughputSummary(events: CaptureEvent[]): Record<strin
 
   const latest = throughputEntries.at(-1) ?? asRecord(coalescingDiagnostics.at(-1)?.metrics);
   const coalescedBySegment = latest ? asRecord(latest.coalescedBySegment) : null;
+  const maxOrderedRelayQueueDepth = maxNumericField(throughputEntries, 'orderedRelayQueueDepth');
+  const maxTranscriptRelayLatencyMs = maxNumericField(throughputEntries, 'maxTranscriptRelayLatencyMs');
+  const p95TranscriptRelayLatencyMs = latest ? asFiniteNumber(latest.p95TranscriptRelayLatencyMs) : null;
+  const warnings: string[] = [];
+
+  if ((p95TranscriptRelayLatencyMs ?? maxTranscriptRelayLatencyMs ?? 0) >= TRANSCRIPT_RELAY_LATENCY_WARNING_MS) {
+    warnings.push('public_transcript_relay_latency_high');
+  }
+  if ((maxOrderedRelayQueueDepth ?? asFiniteNumber(latest?.orderedRelayQueueDepth) ?? 0) >= ORDERED_RELAY_QUEUE_DEPTH_WARNING) {
+    warnings.push('relay_queue_depth_high');
+  }
 
   return {
     schema: 'gemini_relay_throughput_summary_v1',
+    warnings,
     relayTraceCountWithThroughput: throughputEntries.length,
     coalescingDiagnosticCount: coalescingDiagnostics.length,
     latestOrderedRelayQueueDepth: latest ? asFiniteNumber(latest.orderedRelayQueueDepth) : null,
-    maxOrderedRelayQueueDepth: maxNumericField(throughputEntries, 'orderedRelayQueueDepth'),
+    maxOrderedRelayQueueDepth,
     maxOldestQueuedAgeMs: maxNumericField(throughputEntries, 'oldestQueuedAgeMs'),
     transcriptPartialsCoalesced: latest ? asFiniteNumber(latest.transcriptPartialsCoalesced) : null,
     transcriptPartialsSent: latest ? asFiniteNumber(latest.transcriptPartialsSent) : null,
@@ -514,8 +533,8 @@ function buildGeminiRelayThroughputSummary(events: CaptureEvent[]): Record<strin
     finalTranscriptEventsSent: latest ? asFiniteNumber(latest.finalTranscriptEventsSent) : null,
     nonDroppableCriticalEventsSent: latest ? asFiniteNumber(latest.nonDroppableCriticalEventsSent) : null,
     lastTranscriptRelayLatencyMs: latest ? asFiniteNumber(latest.lastTranscriptRelayLatencyMs) : null,
-    maxTranscriptRelayLatencyMs: maxNumericField(throughputEntries, 'maxTranscriptRelayLatencyMs'),
-    p95TranscriptRelayLatencyMs: latest ? asFiniteNumber(latest.p95TranscriptRelayLatencyMs) : null,
+    maxTranscriptRelayLatencyMs,
+    p95TranscriptRelayLatencyMs,
     coalescedBySegment,
   };
 }
@@ -751,15 +770,69 @@ function findLastIndex<T>(values: T[], predicate: (value: T) => boolean): number
 }
 
 function buildDiagnosticsSummary(
-  captureBundle: SophiaCaptureBundle,
   selected: ReturnType<typeof selectCurrentRunEvents>,
-  coreview: CoreviewUsageTelemetry,
+  metrics: VoiceDeveloperMetrics,
 ): VoiceTelemetryReport['diagnosticsSummary'] {
   return {
     geminiRelayBackend: buildGeminiRelayBackendDiagnosticsSummary(selected.events),
     geminiRelayThroughput: buildGeminiRelayThroughputSummary(selected.events),
     geminiStaleOutput: buildGeminiStaleOutputDiagnosticsSummary(selected.events),
-    coreviewStillFrame: buildCoreviewStillFrameDiagnosticsSummary(coreview),
+    artifactReview: buildArtifactReviewDiagnosticsSummary(selected.events, metrics),
+    coreviewStillFrame: buildCoreviewStillFrameDiagnosticsSummary(metrics.coreview),
+  };
+}
+
+function buildArtifactReviewDiagnosticsSummary(
+  events: CaptureEvent[],
+  metrics: VoiceDeveloperMetrics,
+): Record<string, unknown> {
+  const warnings: string[] = [];
+  const counts = metrics.counts;
+  const gemini = metrics.sessionTelemetry.runtime === 'gemini_live'
+    ? metrics.sessionTelemetry.gemini
+    : null;
+  const reviewActive = Boolean(
+    metrics.coreview.visual.coreviewEnabled
+      && (
+        metrics.coreview.visual.coreviewArtifactId
+        || metrics.coreview.visual.frameSentCount > 0
+        || counts.artifactSelectedStageCount > 0
+      ),
+  );
+  const selectedStageEventCount = events.filter(
+    (event) => event.category === 'artifacts-runtime' && event.name === 'select-stage-artifact',
+  ).length;
+
+  if (counts.artifactRenderedCount > 0 && counts.artifactRuntimeIngestCount === 0) {
+    warnings.push('artifact_rendered_not_runtime_ingested');
+  }
+  if (counts.artifactCountMismatch) {
+    warnings.push('artifact_count_mismatch');
+  }
+  if (reviewActive && (gemini?.artifactToolCallCount ?? 0) > 0) {
+    warnings.push('review_emit_artifact_tool_churn_detected');
+  }
+  if (reviewActive && (gemini?.toolRejectionCount ?? 0) > 0) {
+    warnings.push('review_tool_churn_suppressed');
+  }
+
+  return {
+    schema: 'artifact_review_summary_v1',
+    warnings,
+    reviewActive,
+    artifactCount: counts.artifacts,
+    artifactPublicEventCount: counts.artifactPublicEventCount,
+    artifactRuntimeIngestCount: counts.artifactRuntimeIngestCount,
+    artifactSelectedStageCount: counts.artifactSelectedStageCount,
+    artifactRenderedCount: counts.artifactRenderedCount,
+    artifactCountSource: counts.artifactCountSource,
+    artifactCountMismatch: counts.artifactCountMismatch,
+    artifactCountMismatchReason: counts.artifactCountMismatchReason,
+    selectedStageEventCount,
+    emitArtifactToolCallCount: gemini?.artifactToolCallCount ?? 0,
+    toolRejectionCount: gemini?.toolRejectionCount ?? 0,
+    rawArtifactTextExcluded: true,
+    rawFrameExcluded: true,
   };
 }
 

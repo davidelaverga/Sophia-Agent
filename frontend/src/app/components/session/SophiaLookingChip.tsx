@@ -7,11 +7,12 @@ import { cn } from "../../lib/utils"
 
 interface SophiaLookingChipProps {
   state: CoReviewSessionState | null | undefined
+  frameConfirmed?: boolean
   className?: string
 }
 
-export function SophiaLookingChip({ state, className }: SophiaLookingChipProps) {
-  const visualLive = state?.state === "co_review_live" && state.visualInputStatus === "live"
+export function SophiaLookingChip({ state, frameConfirmed = false, className }: SophiaLookingChipProps) {
+  const visualLive = Boolean(frameConfirmed && state?.state === "co_review_live" && state.visualInputStatus === "live")
   const preparing = state?.state === "co_review_starting" || state?.refreshFrameInProgress
   const unavailable = state?.state === "co_review_error" || (state?.frameSendFailureCount ?? 0) > 0
   const label = unavailable
