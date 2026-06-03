@@ -429,7 +429,7 @@ export function PresenceArtifactPanel({
         "transition-all duration-[1200ms] ease-[cubic-bezier(0.22,1,0.36,1)]",
         isVoiceMode
           ? hasBuilder
-            ? "fixed inset-x-0 top-[72px] bottom-[calc(8.75rem+env(safe-area-inset-bottom,0px))] z-25 flex items-center justify-center px-3 sm:px-6"
+            ? "fixed inset-x-0 top-[72px] bottom-[calc(8.75rem+env(safe-area-inset-bottom,0px))] z-25 flex min-h-0 items-center justify-center overflow-hidden px-3 sm:px-6"
             : "fixed left-1/2 -translate-x-1/2 bottom-[155px] z-25 w-full max-w-[720px] px-4 sm:px-6"
           : isTextModeBuilderStage
             ? "relative z-10 h-full min-h-0 w-full max-w-none px-0"
@@ -459,7 +459,7 @@ export function PresenceArtifactPanel({
           isVoiceMode && "cursor-pointer",
           isVoiceMode
             ? hasBuilder
-              ? "flex h-full min-h-0 w-full max-w-[1120px] flex-col overflow-visible px-0 py-0"
+              ? "flex h-full min-h-0 w-full max-w-[1120px] flex-col overflow-hidden rounded-xl px-0 py-0"
               : "max-h-[68vh] overflow-y-auto rounded-2xl px-4 py-4"
             : isTextModeBuilderStage
               ? "flex h-full min-h-0 flex-col overflow-hidden rounded-xl"
@@ -480,7 +480,7 @@ export function PresenceArtifactPanel({
         <button
           onClick={(e) => { e.stopPropagation(); handleDismiss(); }}
           className={cn(
-            "absolute -top-1 -right-1 z-10 w-6 h-6 flex items-center justify-center",
+            "absolute right-2 top-2 z-10 w-6 h-6 flex items-center justify-center",
             "transition-all duration-700",
             "pointer-events-auto cursor-pointer",
             revealStep >= 1 ? "opacity-100" : "opacity-0"
@@ -499,6 +499,7 @@ export function PresenceArtifactPanel({
             className={cn(
               "relative transition-all duration-[1400ms] ease-out",
               isTextModeBuilderStage && "flex min-h-0 flex-1 flex-col",
+              isVoiceMode && "flex h-full min-h-0 w-full flex-col overflow-hidden",
               revealStep >= 1 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
             )}
           >
@@ -515,7 +516,7 @@ export function PresenceArtifactPanel({
             <div
               className={cn(
                 isTextModeBuilderStage && "flex min-h-0 flex-1 flex-col",
-                isVoiceMode && "flex h-full min-h-0 flex-col",
+                isVoiceMode && "flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden",
               )}
               onClick={(e) => e.stopPropagation()}
             >

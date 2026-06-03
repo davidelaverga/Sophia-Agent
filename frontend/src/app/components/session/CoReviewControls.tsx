@@ -36,7 +36,7 @@ export function CoReviewControls({
   return (
     <div className={cn("flex flex-wrap items-center gap-2 text-xs text-white/70", className)}>
       <div
-        aria-label={visualLive ? "Sophia is looking" : "Not Looking"}
+        aria-label={visualLive ? "Sophia is looking at this artifact" : "Not looking"}
         className={cn(
           "inline-flex items-center gap-1.5 rounded-full border px-2 py-1",
           visualLive
@@ -50,7 +50,7 @@ export function CoReviewControls({
         ) : (
           <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
         )}
-        <span>{visualLive ? "Sophia is looking" : "Not Looking"}</span>
+        <span>{visualLive ? "Sophia is looking at this artifact" : "Not looking"}</span>
       </div>
 
       {isStarting ? (

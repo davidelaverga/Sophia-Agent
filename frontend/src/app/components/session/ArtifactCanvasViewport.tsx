@@ -143,7 +143,7 @@ export function ArtifactCanvasViewport({
     <div
       data-testid="artifact-canvas-viewport"
       className={cn(
-        "relative flex min-h-[360px] flex-col overflow-hidden rounded-b-xl bg-[color:color-mix(in_srgb,var(--cosmic-panel-soft)_58%,transparent)]",
+        "relative flex min-h-[360px] max-h-full flex-col overflow-hidden rounded-b-xl bg-[color:color-mix(in_srgb,var(--cosmic-panel-soft)_58%,transparent)]",
         className,
       )}
     >
@@ -156,7 +156,7 @@ export function ArtifactCanvasViewport({
       />
       <div
         data-testid="artifact-canvas-scroll-area"
-        className="scrollbar-thin relative flex min-h-0 w-full flex-1 flex-col overflow-y-auto px-4 py-6 sm:px-8 sm:py-8"
+        className="scrollbar-thin relative flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain px-4 py-6 sm:px-8 sm:py-8"
       >
         {canPreviewMarkdown ? (
           <MarkdownDocumentPage
@@ -277,7 +277,7 @@ function MarkdownDocumentPage({
 }) {
   return (
     <div
-      className="mx-auto flex w-full max-w-[860px] flex-1 flex-col rounded-xl border bg-[color:color-mix(in_srgb,var(--card-bg)_90%,transparent)] shadow-[0_24px_70px_color-mix(in_srgb,var(--bg)_34%,transparent)]"
+      className="mx-auto flex min-h-full w-full max-w-[860px] flex-col rounded-xl border bg-[color:color-mix(in_srgb,var(--card-bg)_90%,transparent)] shadow-[0_24px_70px_color-mix(in_srgb,var(--bg)_34%,transparent)]"
       style={{ borderColor: "var(--cosmic-border-soft)" }}
       aria-label="Artifact document preview"
     >
@@ -688,7 +688,7 @@ function ArtifactMetadataPage({
 }) {
   return (
     <div
-      className="mx-auto flex w-full max-w-[680px] flex-1 flex-col rounded-xl border bg-[color:color-mix(in_srgb,var(--card-bg)_84%,transparent)] px-6 py-7 shadow-[0_24px_70px_color-mix(in_srgb,var(--bg)_34%,transparent)]"
+      className="mx-auto flex min-h-full w-full max-w-[680px] flex-col rounded-xl border bg-[color:color-mix(in_srgb,var(--card-bg)_84%,transparent)] px-6 py-7 shadow-[0_24px_70px_color-mix(in_srgb,var(--bg)_34%,transparent)]"
       style={{ borderColor: "var(--cosmic-border-soft)" }}
       aria-label="Artifact document preview"
     >

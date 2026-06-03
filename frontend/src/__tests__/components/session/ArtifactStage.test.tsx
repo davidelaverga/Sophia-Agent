@@ -179,7 +179,7 @@ describe("ArtifactStage", () => {
     expect(onStartReview).toHaveBeenCalledTimes(1)
   })
 
-  it("shows Sophia is looking, Frame sent, stale state, and exact text availability from existing review state", () => {
+  it("shows Sophia is looking at this artifact, Frame sent, stale state, and exact text availability from existing review state", () => {
     renderStage({
       state: {
         state: "co_review_live",
@@ -191,7 +191,7 @@ describe("ArtifactStage", () => {
       },
     })
 
-    expect(screen.getByRole("status", { name: "Sophia is looking" })).toBeInTheDocument()
+    expect(screen.getByRole("status", { name: "Sophia is looking at this artifact" })).toBeInTheDocument()
     expect(screen.getByText("Frame sent")).toBeInTheDocument()
     expect(screen.getByText("View may be stale")).toBeInTheDocument()
     expect(screen.getByText("Exact text available")).toBeInTheDocument()
@@ -208,7 +208,7 @@ describe("ArtifactStage", () => {
     expect(screen.getByRole("status", { name: "Preparing view" })).toBeInTheDocument()
   })
 
-  it("shows Not Looking and exact text availability before review", () => {
+  it("shows Not looking and exact text availability before review", () => {
     renderStage()
 
     expect(screen.getByRole("status", { name: /not looking/i })).toBeInTheDocument()
@@ -267,7 +267,7 @@ describe("ArtifactStage", () => {
     expect(screen.getAllByText("Frame unavailable").length).toBeGreaterThanOrEqual(1)
     expect(screen.getByRole("button", { name: /review with sophia/i })).toBeDisabled()
     const artifactRegion = screen.getByRole("region", { name: /generated artifact/i })
-    const renderedText = within(artifactRegion).queryByText(/coreview|gemini|websocket|transport|liveframes|fixture/i)
+    const renderedText = within(artifactRegion).queryByText(/coreview|gemini|websocket|transport|liveframes|fixture|direct video|provider ack/i)
     expect(renderedText).not.toBeInTheDocument()
     expect(container.textContent?.toLowerCase()).not.toContain("still-frame")
   })
@@ -441,7 +441,7 @@ describe("ArtifactStage", () => {
     expect(await screen.findByRole("heading", { name: "Launch Brief" })).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /review with sophia/i })).toBeInTheDocument()
     expect(container.textContent?.toLowerCase()).not.toMatch(
-      /coreview|gemini|websocket|transport|liveframes|fixture/,
+      /coreview|gemini|websocket|transport|liveframes|fixture|direct video|provider ack/,
     )
   })
 

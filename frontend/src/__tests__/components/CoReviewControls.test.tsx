@@ -45,7 +45,7 @@ describe("CoReviewControls", () => {
     expect(screen.queryByRole("button", { name: /review with sophia/i })).not.toBeInTheDocument()
   })
 
-  it("shows Review with Sophia and Not Looking before entry", async () => {
+  it("shows Review with Sophia and Not looking before entry", async () => {
     const user = userEvent.setup()
     const { onStart } = renderControls({}, true, liveStillFrameTransportStatus)
 
@@ -77,7 +77,7 @@ describe("CoReviewControls", () => {
     expect(screen.getByText("Preparing view")).toBeInTheDocument()
   })
 
-  it("shows Sophia is looking, Frame sent, Exact text available, and visual staleness after a still frame is sent", () => {
+  it("shows Sophia is looking at this artifact, Frame sent, Exact text available, and visual staleness after a still frame is sent", () => {
     renderControls(
       {
         state: "co_review_live",
@@ -122,7 +122,7 @@ describe("CoReviewControls", () => {
 
     expect(screen.getByText("Frame unavailable")).toBeInTheDocument()
     expect(screen.getByText("View could not be prepared")).toBeInTheDocument()
-    expect(screen.queryByText(/websocket|transport|gemini|coreview|liveframes|fixture|direct video/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/websocket|transport|gemini|coreview|liveframes|fixture|direct video|provider ack/i)).not.toBeInTheDocument()
   })
 
   it("surfaces a ready state before review when the frame path is available", () => {

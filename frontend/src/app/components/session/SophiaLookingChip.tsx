@@ -19,7 +19,7 @@ export function SophiaLookingChip({ state, className }: SophiaLookingChipProps) 
     : preparing
       ? "Preparing view"
       : visualLive
-        ? "Sophia is looking"
+        ? "Sophia is looking at this artifact"
         : "Not looking"
   const Icon = unavailable ? AlertCircle : preparing ? Loader2 : visualLive ? Eye : EyeOff
 

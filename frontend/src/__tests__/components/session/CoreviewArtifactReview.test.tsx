@@ -424,9 +424,24 @@ describe("Coreview artifact still-frame review", () => {
     })
 
     expect(await screen.findByRole("heading", { name: "Launch Brief" })).toBeInTheDocument()
+    const panel = screen.getByRole("complementary", { name: /session artifacts/i })
     const voiceStage = screen.getByTestId("voice-artifact-stage")
     const artifactRegion = within(voiceStage).getByRole("region", { name: /generated artifact/i })
+    const voiceStageWrapper = voiceStage.parentElement
+    const builderRoot = voiceStageWrapper?.parentElement
 
+    expect(panel.className).toContain("fixed")
+    expect(panel.className).toContain("top-[72px]")
+    expect(panel.className).toContain("bottom-[calc(8.75rem+env(safe-area-inset-bottom,0px))]")
+    expect(panel.className).toContain("min-h-0")
+    expect(panel.className).toContain("overflow-hidden")
+    expect(voiceStageWrapper?.className).toContain("h-full")
+    expect(voiceStageWrapper?.className).toContain("min-h-0")
+    expect(voiceStageWrapper?.className).toContain("overflow-hidden")
+    expect(builderRoot?.className).toContain("h-full")
+    expect(builderRoot?.className).toContain("min-h-0")
+    expect(builderRoot?.className).toContain("overflow-hidden")
+    expect(voiceStage.className).toContain("overflow-hidden")
     expect(within(voiceStage).getAllByTestId("artifact-canvas-viewport")).toHaveLength(1)
     expect(within(artifactRegion).getByTestId("artifact-canvas-scroll-area")).toBeInTheDocument()
     expect(within(voiceStage).getAllByText("Page 1 of 1").length).toBeGreaterThanOrEqual(1)
@@ -439,7 +454,7 @@ describe("Coreview artifact still-frame review", () => {
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md?download=true",
     )
     expect(screen.getAllByRole("region", { name: /generated artifact/i })).toHaveLength(1)
-    expect(screen.queryByText(/coreview|gemini|websocket|transport|liveframes|fixture|direct video/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/coreview|gemini|websocket|transport|liveframes|fixture|direct video|provider ack/i)).not.toBeInTheDocument()
   })
 
   it("Review with Sophia sends the selected markdown artifact frame and keeps exact text available", async () => {
@@ -522,7 +537,7 @@ describe("Coreview artifact still-frame review", () => {
     await waitFor(() => expect(screen.getByText("Frame unavailable")).toBeInTheDocument())
     expect(screen.getByRole("button", { name: /review with sophia/i })).toBeDisabled()
     expect(screen.getByText("Exact text available")).toBeInTheDocument()
-    expect(screen.queryByText(/coreview|gemini|websocket|transport|liveframes|fixture|direct video/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/coreview|gemini|websocket|transport|liveframes|fixture|direct video|provider ack/i)).not.toBeInTheDocument()
   })
 
   it("renders and registers the companion artifact canvas exact text", async () => {

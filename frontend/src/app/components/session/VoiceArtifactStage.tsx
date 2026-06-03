@@ -28,12 +28,12 @@ export function VoiceArtifactStage({
     <section
       data-testid="voice-artifact-stage"
       className={cn(
-        "pointer-events-auto flex h-full min-h-0 w-full max-w-[1120px] flex-col items-center gap-3",
+        "pointer-events-auto flex h-full min-h-0 w-full max-w-[1120px] flex-col items-center gap-3 overflow-hidden",
         className,
       )}
       aria-label="Voice artifact review stage"
     >
-      <div className="flex w-full flex-wrap items-center justify-center gap-2">
+      <div className="flex w-full shrink-0 flex-wrap items-center justify-center gap-2">
         <ArtifactReviewStatus
           state={reviewState}
           transportStatus={transportStatus}
@@ -51,7 +51,7 @@ export function VoiceArtifactStage({
         </span>
       </div>
 
-      <div className="flex min-h-0 w-full flex-1">
+      <div className="flex min-h-0 w-full flex-1 overflow-hidden">
         <ArtifactStage
           {...stageProps}
           reviewState={reviewState}
