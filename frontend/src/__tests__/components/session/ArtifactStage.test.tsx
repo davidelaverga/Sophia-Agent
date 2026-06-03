@@ -86,15 +86,17 @@ function mockPdfDocument({
   rejectLoad?: boolean
   neverLoad?: boolean
 } = {}) {
+  const getViewport = vi.fn(({ scale }: { scale: number }) => ({
+    width: 600 * scale,
+    height: 800 * scale,
+    scale,
+  }))
   const render = vi.fn(() => ({
     promise: Promise.resolve(),
     cancel: vi.fn(),
   }))
   const getPage = vi.fn(async () => ({
-    getViewport: ({ scale }: { scale: number }) => ({
-      width: 600 * scale,
-      height: 800 * scale,
-    }),
+    getViewport,
     render,
   }))
   const pdfDocument = {
@@ -114,7 +116,7 @@ function mockPdfDocument({
     getDocument,
   } as unknown as Awaited<ReturnType<typeof loadPdfJs>>)
 
-  return { getDocument, getPage, render }
+  return { getDocument, getPage, getViewport, render }
 }
 
 function renderStage({
@@ -284,21 +286,30 @@ describe("ArtifactStage", () => {
 
   it("navigates PDF pages with real bounds", async () => {
     const user = userEvent.setup()
-    mockPdfDocument({ pageCount: 3 })
+    const pdf = mockPdfDocument({ pageCount: 3 })
     renderStage({ artifact: pdfBuilderArtifact, exactTextAvailable: false })
 
     expect(await screen.findByText("Page 1 of 3")).toBeInTheDocument()
+    await waitFor(() => expect(pdf.getPage).toHaveBeenCalledWith(1))
     expect(screen.getByLabelText("Previous page")).toBeDisabled()
     expect(screen.getByLabelText("Next page")).toBeEnabled()
     expect(screen.getByTestId("artifact-page-rail")).toBeInTheDocument()
 
     await user.click(screen.getByLabelText("Next page"))
     expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument()
+    await waitFor(() => expect(pdf.getPage).toHaveBeenCalledWith(2))
     expect(screen.getByLabelText("Previous page")).toBeEnabled()
+    expect(screen.getByLabelText("PDF page 2")).toHaveAttribute("data-artifact-page-index", "1")
 
     await user.click(screen.getByLabelText("Page 3"))
     expect(await screen.findByText("Page 3 of 3")).toBeInTheDocument()
+    await waitFor(() => expect(pdf.getPage).toHaveBeenCalledWith(3))
+    expect(screen.getByLabelText("Page 3")).toHaveAttribute("aria-current", "page")
     expect(screen.getByLabelText("Next page")).toBeDisabled()
+
+    await user.click(screen.getByLabelText("Previous page"))
+    expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument()
+    await waitFor(() => expect(pdf.getPage).toHaveBeenLastCalledWith(2))
   })
 
   it("applies PDF zoom and fit controls to view state", async () => {
@@ -306,17 +317,80 @@ describe("ArtifactStage", () => {
     mockPdfDocument({ pageCount: 2 })
     renderStage({ artifact: pdfBuilderArtifact, exactTextAvailable: false })
 
+    const stage = screen.getByRole("region", { name: /generated artifact/i })
+    const canvas = await screen.findByLabelText("PDF page 1")
     expect(await screen.findByText("Fit page")).toBeInTheDocument()
+    await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-pdf-scale", "0.72"))
+    expect(stage).toHaveAttribute("data-artifact-view-signature", expect.stringContaining("fit:page"))
     await user.click(screen.getByLabelText("Zoom in"))
     expect(await screen.findByText("120%")).toBeInTheDocument()
+    await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-zoom", "1.2"))
+    await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-pdf-scale", "1.2"))
+    expect(stage).toHaveAttribute("data-artifact-view-signature", expect.stringContaining("zoom:1.20"))
     await user.click(screen.getByLabelText("Zoom out"))
     expect(await screen.findByText("100%")).toBeInTheDocument()
+    await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-pdf-scale", "1"))
     await user.click(screen.getByLabelText("Fit width"))
     expect(await screen.findByText("Fit width")).toBeInTheDocument()
+    await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-fit-mode", "width"))
+    await waitFor(() => expect(Number(canvas.getAttribute("data-artifact-pdf-scale"))).toBeCloseTo(1.35, 2))
     await user.click(screen.getByLabelText("Fit page"))
     expect(await screen.findByText("Fit page")).toBeInTheDocument()
+    await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-pdf-scale", "0.72"))
     await user.click(screen.getByLabelText("Reset zoom"))
     expect(await screen.findByText("100%")).toBeInTheDocument()
+    await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-fit-mode", "custom"))
+    await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-pdf-scale", "1"))
+  })
+
+  it("reports page and zoom changes through the artifact view state callback", async () => {
+    const user = userEvent.setup()
+    const onArtifactViewStateChange = vi.fn()
+    mockPdfDocument({ pageCount: 2 })
+    const onStartReview = vi.fn()
+    const onStopReview = vi.fn()
+
+    render(
+      <ArtifactStage
+        builderArtifact={pdfBuilderArtifact}
+        threadId="thread-1"
+        artifactId="artifact-1"
+        reviewState={{
+          ...initialCoReviewState(supportedTransportStatus.kind),
+          state: "co_review_live",
+          visualInputStatus: "live",
+          videoOrFrameMode: "still_frame",
+          frameSentCount: 1,
+          initialFrameSent: true,
+        }}
+        transportStatus={supportedTransportStatus}
+        exactTextAvailable={false}
+        reviewStale
+        canRefreshReview
+        onArtifactViewStateChange={onArtifactViewStateChange}
+        onStartReview={onStartReview}
+        onStopReview={onStopReview}
+        onRefreshReview={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText("Page 1 of 2")).toBeInTheDocument()
+
+    await user.click(screen.getByLabelText("Next page"))
+    await waitFor(() => expect(onArtifactViewStateChange).toHaveBeenLastCalledWith(expect.objectContaining({
+      pageIndex: 1,
+      zoom: 1,
+      fitMode: "page",
+    })))
+    expect(screen.getByText("View may be stale")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /refresh view/i })).toBeEnabled()
+
+    await user.click(screen.getByLabelText("Zoom in"))
+    await waitFor(() => expect(onArtifactViewStateChange).toHaveBeenLastCalledWith(expect.objectContaining({
+      pageIndex: 1,
+      zoom: 1.2,
+      fitMode: "custom",
+    })))
   })
 
   it("makes Review with Sophia prominent and calls the existing start handler", async () => {

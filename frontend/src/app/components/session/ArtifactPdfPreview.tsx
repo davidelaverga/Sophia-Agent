@@ -20,6 +20,7 @@ interface ArtifactPdfPreviewProps {
   pageIndex: number
   zoom: number
   fitMode: ArtifactFitMode
+  fitBounds?: { width: number; height: number }
   onPageCountChange?: (pageCount: number) => void
   onRenderStatusChange?: (status: ArtifactVisualCaptureStatus) => void
 }
@@ -32,12 +33,20 @@ type PdfDocumentState =
 
 type PdfPageRenderState = "idle" | "loading" | "ready" | "failed"
 
+type ActivePdfRender = {
+  token: number
+  task: PdfRenderTask
+  cancelled: boolean
+  settled: Promise<void>
+}
+
 const PDF_FALLBACK_BOUNDS = {
   width: 860,
   height: 720,
 }
 
 const PDF_CANVAS_GUTTER = 48
+const PDF_PREVIEW_CHROME_HEIGHT = 96
 
 export function ArtifactPdfPreview({
   artifact,
@@ -48,11 +57,14 @@ export function ArtifactPdfPreview({
   pageIndex,
   zoom,
   fitMode,
+  fitBounds,
   onPageCountChange,
   onRenderStatusChange,
 }: ArtifactPdfPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const pageHostRef = useRef<HTMLDivElement | null>(null)
+  const renderTokenRef = useRef(0)
+  const activeRenderRef = useRef<ActivePdfRender | null>(null)
   const [documentState, setDocumentState] = useState<PdfDocumentState>({
     status: "idle",
     document: null,
@@ -60,7 +72,12 @@ export function ArtifactPdfPreview({
   })
   const [pageRenderState, setPageRenderState] = useState<PdfPageRenderState>("idle")
   const [pageSize, setPageSize] = useState<{ width: number; height: number } | null>(null)
-  const bounds = useElementBounds(pageHostRef)
+  const measuredPageHostBounds = useElementBounds(pageHostRef)
+  const bounds = useMemo(() => (
+    fitBounds
+      ? normalizePdfFitBounds(fitBounds)
+      : measuredPageHostBounds
+  ), [fitBounds, measuredPageHostBounds])
 
   useEffect(() => {
     if (!href) {
@@ -116,16 +133,22 @@ export function ArtifactPdfPreview({
     }
   }, [href, onPageCountChange, onRenderStatusChange])
 
-  const pageNumber = Math.max(1, pageIndex + 1)
+  const pageNumber = documentState.status === "ready"
+    ? clampPdfPageNumber(pageIndex + 1, documentState.document.numPages)
+    : Math.max(1, pageIndex + 1)
 
   useEffect(() => {
     if (documentState.status !== "ready") {
       return
     }
 
-    let cancelled = false
-    let renderTask: PdfRenderTask | null = null
+    let disposed = false
+    const token = renderTokenRef.current + 1
+    renderTokenRef.current = token
     const canvas = canvasRef.current
+    const previousRender = activeRenderRef.current
+
+    cancelActivePdfRender(previousRender)
     setPageRenderState("loading")
     onRenderStatusChange?.(unavailablePdfCaptureStatus("preview_not_ready"))
 
@@ -135,64 +158,101 @@ export function ArtifactPdfPreview({
       return
     }
 
-    documentState.document.getPage(pageNumber)
-      .then((page) => {
-        if (cancelled) {
-          return null
+    clearPdfCanvas(canvas)
+
+    void (async () => {
+      if (previousRender) {
+        await previousRender.settled
+        if (activeRenderRef.current?.token === previousRender.token) {
+          activeRenderRef.current = null
         }
+      }
 
-        const baseViewport = page.getViewport({ scale: 1 })
-        const nextScale = computePdfScale({
-          baseWidth: baseViewport.width,
-          baseHeight: baseViewport.height,
-          bounds,
-          fitMode,
-          zoom,
-        })
-        const viewport = page.getViewport({ scale: nextScale })
-        const devicePixelRatio = getDevicePixelRatio()
+      if (isStalePdfRender(disposed, token, renderTokenRef)) {
+        return
+      }
 
-        canvas.width = Math.max(1, Math.floor(viewport.width * devicePixelRatio))
-        canvas.height = Math.max(1, Math.floor(viewport.height * devicePixelRatio))
-        canvas.style.width = `${Math.max(1, Math.floor(viewport.width))}px`
-        canvas.style.height = `${Math.max(1, Math.floor(viewport.height))}px`
-        setPageSize({
-          width: Math.max(1, Math.floor(viewport.width)),
-          height: Math.max(1, Math.floor(viewport.height)),
-        })
+      const page = await documentState.document.getPage(pageNumber)
 
-        renderTask = page.render({
-          canvas,
-          viewport,
-          transform: devicePixelRatio === 1 ? undefined : [devicePixelRatio, 0, 0, devicePixelRatio, 0, 0],
-        })
-        return renderTask.promise
+      if (isStalePdfRender(disposed, token, renderTokenRef)) {
+        return
+      }
+
+      const baseViewport = page.getViewport({ scale: 1 })
+      const nextScale = computePdfScale({
+        baseWidth: baseViewport.width,
+        baseHeight: baseViewport.height,
+        bounds,
+        fitMode,
+        zoom,
       })
-      .then(() => {
-        if (cancelled) {
-          return
-        }
+      const viewport = page.getViewport({ scale: nextScale })
+      const devicePixelRatio = getDevicePixelRatio()
+      const cssWidth = Math.max(1, Math.ceil(viewport.width))
+      const cssHeight = Math.max(1, Math.ceil(viewport.height))
 
-        setPageRenderState("ready")
-        onRenderStatusChange?.({
-          ready: true,
-          reason: null,
-          source: "pdf_page_canvas",
-          exactTextAvailable: false,
-        })
+      canvas.width = Math.max(1, Math.ceil(viewport.width * devicePixelRatio))
+      canvas.height = Math.max(1, Math.ceil(viewport.height * devicePixelRatio))
+      canvas.style.width = `${cssWidth}px`
+      canvas.style.height = `${cssHeight}px`
+      canvas.dataset.artifactPdfScale = String(nextScale)
+      canvas.dataset.artifactPdfRenderToken = String(token)
+      setPageSize({
+        width: cssWidth,
+        height: cssHeight,
       })
-      .catch((error: unknown) => {
-        if (cancelled || isPdfRenderCancellation(error)) {
-          return
-        }
+      clearPdfCanvas(canvas)
 
-        setPageRenderState("failed")
-        onRenderStatusChange?.(unavailablePdfCaptureStatus("capture_failed"))
+      if (isStalePdfRender(disposed, token, renderTokenRef)) {
+        return
+      }
+
+      const renderTask = page.render({
+        canvas,
+        viewport,
+        transform: devicePixelRatio === 1 ? undefined : [devicePixelRatio, 0, 0, devicePixelRatio, 0, 0],
       })
+      activeRenderRef.current = {
+        token,
+        task: renderTask,
+        cancelled: false,
+        settled: renderTask.promise.then(() => undefined, () => undefined),
+      }
+
+      await renderTask.promise
+
+      if (isStalePdfRender(disposed, token, renderTokenRef)) {
+        return
+      }
+
+      if (activeRenderRef.current?.token === token) {
+        activeRenderRef.current = null
+      }
+
+      setPageRenderState("ready")
+      onRenderStatusChange?.({
+        ready: true,
+        reason: null,
+        source: "pdf_page_canvas",
+        exactTextAvailable: false,
+      })
+    })().catch((error: unknown) => {
+      if (isStalePdfRender(disposed, token, renderTokenRef) || isPdfRenderCancellation(error)) {
+        return
+      }
+
+      if (activeRenderRef.current?.token === token) {
+        activeRenderRef.current = null
+      }
+      setPageRenderState("failed")
+      onRenderStatusChange?.(unavailablePdfCaptureStatus("capture_failed"))
+    })
 
     return () => {
-      cancelled = true
-      renderTask?.cancel()
+      disposed = true
+      if (activeRenderRef.current?.token === token) {
+        cancelActivePdfRender(activeRenderRef.current)
+      }
     }
   }, [
     bounds,
@@ -213,7 +273,7 @@ export function ArtifactPdfPreview({
     <div
       data-testid="artifact-document-page"
       data-renderer-kind="pdf"
-      className="mx-auto flex min-h-full w-full min-w-[min(100%,320px)] max-w-none flex-col overflow-hidden rounded-lg border bg-[color:color-mix(in_srgb,var(--card-bg)_96%,var(--cosmic-panel-soft))] shadow-[0_18px_54px_color-mix(in_srgb,var(--bg)_34%,transparent),0_1px_0_color-mix(in_srgb,white_26%,transparent)_inset]"
+      className="mx-auto flex min-h-full w-full min-w-[min(100%,320px)] max-w-none flex-col overflow-visible rounded-lg border bg-[color:color-mix(in_srgb,var(--card-bg)_96%,var(--cosmic-panel-soft))] shadow-[0_18px_54px_color-mix(in_srgb,var(--bg)_34%,transparent),0_1px_0_color-mix(in_srgb,white_26%,transparent)_inset]"
       style={{ borderColor: "var(--cosmic-border-soft)" }}
       aria-label="Artifact PDF preview"
     >
@@ -250,7 +310,7 @@ export function ArtifactPdfPreview({
             pageRenderState !== "ready" && "opacity-35",
           )}
           style={{
-            width: pageSize ? `${pageSize.width}px` : undefined,
+            minWidth: pageSize ? `${pageSize.width}px` : undefined,
             height: pageSize ? `${pageSize.height}px` : undefined,
           }}
         >
@@ -265,6 +325,7 @@ export function ArtifactPdfPreview({
             data-coreview-artifact-canvas={artifactId ? "true" : undefined}
             data-artifact-canvas-source="selected-pdf-page"
             data-artifact-page-index={String(pageIndex)}
+            data-artifact-page-number={String(pageNumber)}
             data-artifact-fit-mode={fitMode}
             data-artifact-zoom={String(clampArtifactZoom(zoom))}
             aria-label={`PDF page ${pageNumber}`}
@@ -274,6 +335,54 @@ export function ArtifactPdfPreview({
       </div>
     </div>
   )
+}
+
+function normalizePdfFitBounds(bounds: { width: number; height: number }): { width: number; height: number } {
+  const width = Number.isFinite(bounds.width) ? bounds.width - PDF_CANVAS_GUTTER : PDF_FALLBACK_BOUNDS.width
+  const height = Number.isFinite(bounds.height)
+    ? bounds.height - PDF_CANVAS_GUTTER - PDF_PREVIEW_CHROME_HEIGHT
+    : PDF_FALLBACK_BOUNDS.height
+  return {
+    width: width > 0 ? width : PDF_FALLBACK_BOUNDS.width,
+    height: height > 0 ? height : PDF_FALLBACK_BOUNDS.height,
+  }
+}
+
+function clampPdfPageNumber(pageNumber: number, pageCount: number): number {
+  return Math.min(Math.max(1, Math.floor(pageNumber)), Math.max(1, Math.floor(pageCount)))
+}
+
+function clearPdfCanvas(canvas: HTMLCanvasElement) {
+  try {
+    const context = canvas.getContext("2d")
+    context?.clearRect(0, 0, canvas.width, canvas.height)
+  } catch {
+    // Canvas clearing is best-effort; PDF.js may still render using the canvas directly.
+  }
+}
+
+function cancelActivePdfRender(activeRender: ActivePdfRender | null | undefined) {
+  if (!activeRender || activeRender.cancelled) {
+    return
+  }
+  activeRender.cancelled = true
+  cancelPdfRenderTask(activeRender.task)
+}
+
+function cancelPdfRenderTask(task: PdfRenderTask | null | undefined) {
+  try {
+    task?.cancel()
+  } catch {
+    // Cancellation is best-effort; the render token still prevents stale completion.
+  }
+}
+
+function isStalePdfRender(
+  disposed: boolean,
+  token: number,
+  renderTokenRef: RefObject<number>,
+): boolean {
+  return disposed || renderTokenRef.current !== token
 }
 
 function useElementBounds(ref: RefObject<HTMLElement | null>) {
@@ -288,10 +397,15 @@ function useElementBounds(ref: RefObject<HTMLElement | null>) {
     const update = () => {
       const width = element.clientWidth - PDF_CANVAS_GUTTER
       const height = element.clientHeight - PDF_CANVAS_GUTTER
-      setBounds({
+      const nextBounds = {
         width: width > 0 ? width : PDF_FALLBACK_BOUNDS.width,
         height: height > 0 ? height : PDF_FALLBACK_BOUNDS.height,
-      })
+      }
+      setBounds((current) => (
+        current.width === nextBounds.width && current.height === nextBounds.height
+          ? current
+          : nextBounds
+      ))
     }
 
     update()

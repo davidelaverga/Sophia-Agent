@@ -1,7 +1,7 @@
 "use client"
 
 import { FileText, Layers, ListChecks, Sparkles } from "lucide-react"
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react"
 
 import type { ArtifactFitMode, ArtifactRendererKind } from "../../lib/artifact-renderers"
 import { detectArtifactRendererKind } from "../../lib/artifact-renderers"
@@ -60,6 +60,10 @@ export type ArtifactReviewSurfaceState = "idle" | "preparing" | "active" | "unav
 const MARKDOWN_CAPTURE_CANVAS_WIDTH = 960
 const MARKDOWN_CAPTURE_CANVAS_HEIGHT = 1240
 const MAX_CAPTURE_BLOCKS = 28
+const ARTIFACT_CANVAS_BED_FALLBACK_BOUNDS = {
+  width: 860,
+  height: 720,
+}
 
 export function ArtifactCanvasViewport({
   artifact,
@@ -84,6 +88,8 @@ export function ArtifactCanvasViewport({
   const effectiveRendererKind = rendererKind ?? detectArtifactRendererKind(primaryFile, artifact)
   const canPreviewMarkdown = effectiveRendererKind === "markdown" || isMarkdownArtifactFile(primaryFile)
   const canPreviewPdf = effectiveRendererKind === "pdf"
+  const scrollAreaRef = useRef<HTMLDivElement | null>(null)
+  const canvasBedBounds = useElementClientBounds(scrollAreaRef)
   const preview = useMarkdownArtifactPreview({
     enabled: canPreviewMarkdown,
     href: previewHref,
@@ -237,6 +243,7 @@ export function ArtifactCanvasViewport({
           />
         ) : null}
         <div
+          ref={scrollAreaRef}
           data-testid="artifact-canvas-scroll-area"
           className={cn(
             "relative z-10 flex min-h-0 w-full flex-1 overscroll-contain px-4 py-6 [-webkit-overflow-scrolling:touch] [scrollbar-gutter:stable] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--cosmic-border)] [&::-webkit-scrollbar-track]:bg-transparent sm:px-7 sm:py-7 lg:px-10",
@@ -262,6 +269,7 @@ export function ArtifactCanvasViewport({
               pageIndex={pageIndex}
               zoom={zoom}
               fitMode={fitMode}
+              fitBounds={canvasBedBounds}
               typeLabel={typeLabel}
               onPageCountChange={onPageCountChange}
               onRenderStatusChange={handlePdfCaptureStatusChange}
@@ -333,6 +341,52 @@ function ArtifactPageRail({
       })}
     </aside>
   )
+}
+
+function useElementClientBounds(ref: RefObject<HTMLElement | null>) {
+  const [bounds, setBounds] = useState(ARTIFACT_CANVAS_BED_FALLBACK_BOUNDS)
+
+  useLayoutEffect(() => {
+    const element = ref.current
+    if (!element) {
+      return
+    }
+
+    const update = () => {
+      const width = element.clientWidth
+      const height = element.clientHeight
+      const nextBounds = {
+        width: width > 0 ? width : ARTIFACT_CANVAS_BED_FALLBACK_BOUNDS.width,
+        height: height > 0 ? height : ARTIFACT_CANVAS_BED_FALLBACK_BOUNDS.height,
+      }
+      setBounds((current) => (
+        current.width === nextBounds.width && current.height === nextBounds.height
+          ? current
+          : nextBounds
+      ))
+    }
+
+    update()
+
+    const observeWindowResize = () => {
+      window.addEventListener("resize", update)
+      return () => window.removeEventListener("resize", update)
+    }
+
+    if (typeof ResizeObserver === "undefined") {
+      return observeWindowResize()
+    }
+
+    const observer = new ResizeObserver(update)
+    if (typeof observer.observe !== "function" || typeof observer.disconnect !== "function") {
+      return observeWindowResize()
+    }
+
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [ref])
+
+  return bounds
 }
 
 type MarkdownPreviewState =
