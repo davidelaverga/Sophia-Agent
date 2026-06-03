@@ -147,6 +147,10 @@ _REQUESTED_OUTPUT_EXTENSION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = 
     ("csv", re.compile(r"\bcsv\b", re.IGNORECASE)),
     ("json", re.compile(r"\bjson\b", re.IGNORECASE)),
 )
+_SIMPLE_PRODUCT_REVIEW_RE = re.compile(
+    r"\bproduct\s+review\b",
+    re.IGNORECASE,
+)
 _TASK_TYPE_EXTENSIONS = {
     "document": "md",
     "research": "md",
@@ -263,6 +267,8 @@ def _requested_output_extension(description: str | None) -> str | None:
 
 def _suggest_artifact_filename(task_type: str | None, description: str | None) -> str:
     ext = _requested_output_extension(description) or _TASK_TYPE_EXTENSIONS.get(task_type or "", "md")
+    if ext == "pdf" and isinstance(description, str) and _SIMPLE_PRODUCT_REVIEW_RE.search(description):
+        return "simple-product-review.pdf"
     slug = _slugify_for_filename(description or _FALLBACK_TASK_SLUG)
     return f"{slug}.{ext}"
 

@@ -99,6 +99,8 @@ def _emit_skill_usage_logs(tool_calls: list[dict[str, Any]]) -> None:
 
 
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
+_SIMPLE_PDF_TOOL_NAME = "create_pdf_artifact"
+_PDF_CREATION_TOOL_NAMES = frozenset({"render_markdown_to_pdf", _SIMPLE_PDF_TOOL_NAME})
 _BUILDER_WRITE_TOOL_NAMES = {"write_file", "write_file_tool"}
 _BUILDER_RESEARCH_TOOL_NAMES = {"builder_web_search", "builder_web_fetch"}
 _BUILDER_SUBSTANTIVE_TOOL_NAMES = {
@@ -108,6 +110,13 @@ _BUILDER_SUBSTANTIVE_TOOL_NAMES = {
     "str_replace_tool",
     "emit_builder_artifact",
 }
+_SIMPLE_PDF_REQUEST_MARKERS = (
+    "simple pdf",
+    "simple .pdf",
+    "simple product review",
+    "artifact canvas smoke test",
+    "pdf artifact",
+)
 _SAFE_BASH_COMMAND_RE = re.compile(
     r"^\s*(?:pwd|ls|find|cat|sed|head|tail|grep|rg|wc|file|du|stat|jq)\b"
 )
@@ -568,10 +577,30 @@ def _pptx_path_integrity_rejection_reason(
 def _render_markdown_to_pdf_attempted(state: dict[str, Any]) -> bool:
     summaries = state.get("builder_tool_turn_summaries") or []
     return any(
-        "render_markdown_to_pdf" in (summary.get("tool_names") or [])
+        any(name in _PDF_CREATION_TOOL_NAMES for name in (summary.get("tool_names") or []))
         for summary in summaries
         if isinstance(summary, dict)
     )
+
+
+def _simple_pdf_writer_attempted(state: dict[str, Any]) -> bool:
+    summaries = state.get("builder_tool_turn_summaries") or []
+    return any(
+        _SIMPLE_PDF_TOOL_NAME in (summary.get("tool_names") or [])
+        for summary in summaries
+        if isinstance(summary, dict)
+    )
+
+
+def _requested_simple_pdf_artifact(state: dict[str, Any]) -> bool:
+    if not _requested_pdf_artifact(state):
+        return False
+    task_text = _requested_task_text(state)
+    if not task_text:
+        return False
+    if "product review" in task_text and "pdf" in task_text:
+        return True
+    return any(marker in task_text for marker in _SIMPLE_PDF_REQUEST_MARKERS)
 
 
 def _successful_pdf_render_result(state: dict[str, Any]) -> dict[str, Any] | None:
@@ -1013,6 +1042,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         name = tool_call.get("name")
         if name in _BUILDER_SUBSTANTIVE_TOOL_NAMES:
             return True
+        if name == _SIMPLE_PDF_TOOL_NAME:
+            return not _requested_simple_pdf_artifact(state)
         if name in {"bash", "bash_tool"}:
             args = tool_call.get("args") or {}
             command = args.get("command") if isinstance(args, dict) else None
@@ -1202,6 +1233,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     def _forced_pdf_render_tool_choice() -> dict[str, Any]:
         """Anthropic tool_choice payload that forces the PDF renderer."""
         return {"type": "tool", "name": "render_markdown_to_pdf"}
+
+    @staticmethod
+    def _forced_simple_pdf_tool_choice() -> dict[str, Any]:
+        """Anthropic tool_choice payload that forces the deterministic PDF writer."""
+        return {"type": "tool", "name": _SIMPLE_PDF_TOOL_NAME}
 
     def _research_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
         if self._should_force_fetch_tool(state):
@@ -2409,9 +2445,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         """
         return (
             self._pdf_terminal_tool_choice_for_state(state)
+            or self._simple_pdf_tool_choice_for_state(state)
             or self._research_tool_choice_for_state(state)
             or self._completion_tool_choice_for_state(state, runtime)
         )
+
+    def _simple_pdf_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _requested_simple_pdf_artifact(state):
+            return None
+        if _simple_pdf_writer_attempted(state) or self._has_requested_pdf_binary(state):
+            return None
+        logger.warning(
+            "BuilderArtifact: forcing tool_choice=%s for simple PDF artifact path",
+            _SIMPLE_PDF_TOOL_NAME,
+        )
+        return self._forced_simple_pdf_tool_choice()
 
     def _pdf_terminal_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
         if not _requested_pdf_artifact(state) or not _successful_pdf_ready_to_emit(state):
@@ -3205,6 +3253,79 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
         return {"builder_pdf_render_result": payload}
 
+    @staticmethod
+    def _pdf_generation_failed_fallback(
+        *,
+        steps_completed: int,
+        error_type: str,
+    ) -> dict[str, Any]:
+        safe_reason = error_type if error_type == "pdf_generation_failed" else "pdf_generation_failed"
+        return {
+            "artifact_path": None,
+            "artifact_type": "pdf",
+            "artifact_title": "PDF generation failed",
+            "steps_completed": steps_completed,
+            "decisions_made": [],
+            "companion_summary": (
+                "The builder tried to create the PDF, but PDF generation failed "
+                "before a valid file could be written."
+            ),
+            "companion_tone_hint": "Direct and apologetic — PDF generation failed; offer to retry.",
+            "user_next_action": "Ask me to retry the PDF build.",
+            "confidence": 0.0,
+            "error_reason": safe_reason,
+        }
+
+    def _pdf_generation_failure_command(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage,
+        payload: dict[str, Any],
+    ) -> Command:
+        error_type = str(payload.get("error_type") or "pdf_generation_failed")
+        fallback = self._pdf_generation_failed_fallback(
+            steps_completed=int(request.state.get("builder_non_artifact_turns", 0) or 0) + 1,
+            error_type=error_type,
+        )
+        logger.warning(
+            "BuilderArtifact: terminal PDF generation failure reason=%s",
+            fallback["error_reason"],
+        )
+        self._upload_fallback_and_fire(
+            state=request.state,
+            runtime=request.runtime,
+            fallback=fallback,
+            status="failed",
+        )
+        return Command(
+            update={
+                "messages": [result],
+                "builder_pdf_render_result": payload,
+                "builder_result": fallback,
+                "builder_non_artifact_turns": 0,
+                "builder_task_started_at_ms": 0,
+                "builder_consecutive_empty_emit_rejections": 0,
+            },
+            goto="end",
+        )
+
+    def _pdf_result_command(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage,
+    ) -> ToolMessage | Command:
+        delta = self._render_pdf_result_delta(result)
+        if delta is None:
+            return result
+        payload = delta["builder_pdf_render_result"]
+        if (
+            request.tool_call.get("name") == _SIMPLE_PDF_TOOL_NAME
+            and payload.get("success") is False
+            and payload.get("error_type") == "pdf_generation_failed"
+        ):
+            return self._pdf_generation_failure_command(request, result, payload)
+        return Command(update={"messages": [result], **delta})
+
     def _tool_result_command(
         self,
         request: ToolCallRequest,
@@ -3213,10 +3334,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         tool_name = request.tool_call.get("name")
         if tool_name in _BUILDER_WRITE_TOOL_NAMES:
             return self._write_result_command(request, result)
-        if tool_name == "render_markdown_to_pdf" and isinstance(result, ToolMessage):
-            delta = self._render_pdf_result_delta(result)
-            if delta is not None:
-                return Command(update={"messages": [result], **delta})
+        if tool_name in _PDF_CREATION_TOOL_NAMES and isinstance(result, ToolMessage):
+            return self._pdf_result_command(request, result)
         return result
 
     @override

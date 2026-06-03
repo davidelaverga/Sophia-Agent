@@ -303,6 +303,78 @@ def test_get_artifact_resolves_associated_builder_task_output(tmp_path, monkeypa
     assert response.media_type == "text/markdown"
 
 
+def test_list_artifacts_includes_builder_task_pdf_with_mime_type(tmp_path, monkeypatch) -> None:
+    parent_user_data = tmp_path / "parent" / "user-data"
+    task_user_data = tmp_path / "task" / "user-data"
+    task_outputs = task_user_data / "outputs"
+    task_outputs.mkdir(parents=True)
+    pdf_file = task_outputs / "simple-product-review.pdf"
+    pdf_file.write_bytes(b"%PDF-1.4\n")
+
+    async def associated(parent_thread_id: str) -> tuple[str, ...]:
+        assert parent_thread_id == "parent-thread"
+        return ("task-thread",)
+
+    monkeypatch.setattr(artifacts_router, "_session_store", OwnedSophiaSessionStore())
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        thread_user_data_resolver({
+            "parent-thread": parent_user_data,
+            "task-thread": task_user_data,
+        }),
+    )
+    monkeypatch.setattr(artifacts_router, "_associated_builder_task_thread_ids", associated)
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "list_artifacts", lambda *, thread_id: [])
+
+    response = asyncio.run(
+        artifacts_router.list_artifacts("parent-thread", authenticated_user_id="user-1")
+    )
+
+    assert [item.path for item in response.artifacts] == [
+        "mnt/user-data/outputs/simple-product-review.pdf"
+    ]
+    assert response.artifacts[0].mime_type == "application/pdf"
+
+
+def test_get_artifact_serves_associated_builder_task_pdf_inline(tmp_path, monkeypatch) -> None:
+    parent_user_data = tmp_path / "parent" / "user-data"
+    task_user_data = tmp_path / "task" / "user-data"
+    task_outputs = task_user_data / "outputs"
+    task_outputs.mkdir(parents=True)
+    pdf_bytes = b"%PDF-1.4\nbody"
+    (task_outputs / "simple-product-review.pdf").write_bytes(pdf_bytes)
+
+    async def associated(parent_thread_id: str) -> tuple[str, ...]:
+        assert parent_thread_id == "parent-thread"
+        return ("task-thread",)
+
+    monkeypatch.setattr(artifacts_router, "_session_store", OwnedSophiaSessionStore())
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        thread_user_data_resolver({
+            "parent-thread": parent_user_data,
+            "task-thread": task_user_data,
+        }),
+    )
+    monkeypatch.setattr(artifacts_router, "_associated_builder_task_thread_ids", associated)
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "download_artifact", lambda *, thread_id, filename: None)
+
+    response = asyncio.run(
+        artifacts_router.get_artifact(
+            "parent-thread",
+            "mnt/user-data/outputs/simple-product-review.pdf",
+            http_request(),
+            authenticated_user_id="user-1",
+        )
+    )
+
+    assert bytes(response.body) == pdf_bytes
+    assert response.media_type == "application/pdf"
+    assert response.headers["content-disposition"].startswith("inline;")
+
+
 def test_get_artifact_download_resolves_leading_slash_builder_task_output(tmp_path, monkeypatch) -> None:
     parent_user_data = tmp_path / "parent" / "user-data"
     task_user_data = tmp_path / "task" / "user-data"

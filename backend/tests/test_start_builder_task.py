@@ -188,6 +188,17 @@ def test_pdf_request_with_html_charts_still_targets_pdf():
     assert target.endswith(".pdf")
 
 
+def test_simple_product_review_pdf_targets_stable_filename():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "document",
+        "Create a simple product review PDF artifact.",
+    )
+
+    assert target == "/mnt/user-data/outputs/simple-product-review.pdf"
+
+
 def test_pdf_source_mentions_do_not_force_pdf_output():
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
 

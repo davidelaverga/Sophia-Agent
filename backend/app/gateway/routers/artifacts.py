@@ -508,6 +508,12 @@ def _try_serve_from_supabase(thread_id: str, path: str, request: Request) -> Res
             content=content.decode("utf-8", errors="replace"),
             media_type=mime_type,
         )
+    if mime_type:
+        return Response(
+            content=content,
+            media_type=mime_type,
+            headers={"Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}"},
+        )
 
     try:
         text = content.decode("utf-8")
@@ -742,6 +748,9 @@ async def get_artifact(
 
     if mime_type and mime_type.startswith("text/"):
         return PlainTextResponse(content=actual_path.read_text(encoding="utf-8"), media_type=mime_type)
+
+    if mime_type:
+        return Response(content=actual_path.read_bytes(), media_type=mime_type, headers={"Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}"})
 
     if is_text_file_by_content(actual_path):
         return PlainTextResponse(content=actual_path.read_text(encoding="utf-8"), media_type=mime_type)

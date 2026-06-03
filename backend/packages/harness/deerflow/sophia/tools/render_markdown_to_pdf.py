@@ -74,14 +74,17 @@ def _ensure_relative_to_outputs(label: str, path: str) -> str | None:
     """
     if not isinstance(path, str) or not path.strip():
         return f"{label}: empty or non-string path"
-    normalized = path.strip()
-    if not normalized.startswith(_OUTPUTS_VIRTUAL_PREFIX):
+    normalized = path.strip().replace("\\", "/")
+    outputs_prefix = _OUTPUTS_VIRTUAL_PREFIX.replace("\\", "/")
+    if not outputs_prefix.endswith("/"):
+        outputs_prefix += "/"
+    if not normalized.startswith(outputs_prefix):
         return (
             f"{label}: must start with {_OUTPUTS_VIRTUAL_PREFIX} "
-            f"(got: {normalized!r}). Files outside that prefix won't be "
+            f"(got: {path.strip()!r}). Files outside that prefix won't be "
             "delivered to the user."
         )
-    relative_part = normalized[len(_OUTPUTS_VIRTUAL_PREFIX):]
+    relative_part = normalized[len(outputs_prefix):]
     # Reject traversal attempts (parity with builder_artifact).
     if ".." in relative_part.split("/"):
         return f"{label}: path traversal ('..') is not allowed: {normalized!r}"
