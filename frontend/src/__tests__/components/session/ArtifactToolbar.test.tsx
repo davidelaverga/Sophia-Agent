@@ -25,4 +25,35 @@ describe("ArtifactToolbar", () => {
     expect(screen.queryByLabelText("Zoom in")).not.toBeInTheDocument()
     expect(screen.queryByLabelText("Fit to view")).not.toBeInTheDocument()
   })
+
+  it("shows real pagination and zoom controls when the renderer supports them", () => {
+    const onNextPage = vi.fn()
+    const onZoomIn = vi.fn()
+    const onFitWidth = vi.fn()
+
+    render(
+      <ArtifactToolbar
+        title="Launch PDF"
+        pageIndex={1}
+        pageCount={3}
+        supportsPagination
+        supportsZoom
+        zoom={1.2}
+        fitMode="custom"
+        onNextPage={onNextPage}
+        onZoomIn={onZoomIn}
+        onFitWidth={onFitWidth}
+      />,
+    )
+
+    expect(screen.getByText("Page 2 of 3")).toBeInTheDocument()
+    expect(screen.getByText("120%")).toBeInTheDocument()
+    expect(screen.getByLabelText("Previous page")).toBeEnabled()
+    expect(screen.getByLabelText("Next page")).toBeEnabled()
+    expect(screen.getByLabelText("Zoom in")).toBeInTheDocument()
+    expect(screen.getByLabelText("Zoom out")).toBeInTheDocument()
+    expect(screen.getByLabelText("Fit page")).toBeInTheDocument()
+    expect(screen.getByLabelText("Fit width")).toBeInTheDocument()
+    expect(screen.getByLabelText("Reset zoom")).toBeInTheDocument()
+  })
 })

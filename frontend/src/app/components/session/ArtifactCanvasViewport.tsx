@@ -3,12 +3,15 @@
 import { FileText, Layers, ListChecks, Sparkles } from "lucide-react"
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 
+import type { ArtifactFitMode, ArtifactRendererKind } from "../../lib/artifact-renderers"
+import { detectArtifactRendererKind } from "../../lib/artifact-renderers"
 import { isMarkdownArtifactFile } from "../../lib/builder-artifacts"
 import { registerCoreviewArtifactText } from "../../lib/coreview-artifact-text"
 import { cn } from "../../lib/utils"
 import type { BuilderArtifactFileV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 
 import { ArtifactMarkdownPreview } from "./ArtifactMarkdownPreview"
+import { ArtifactPdfPreview } from "./ArtifactPdfPreview"
 
 type ArtifactViewportFile = BuilderArtifactFileV1 & {
   mimeType?: string
@@ -25,7 +28,7 @@ export type ArtifactVisualCaptureUnavailableReason =
 export interface ArtifactVisualCaptureStatus {
   ready: boolean
   reason: ArtifactVisualCaptureUnavailableReason | null
-  source: "markdown_preview_canvas" | "metadata_canvas" | "none"
+  source: "markdown_preview_canvas" | "metadata_canvas" | "pdf_page_canvas" | "none"
   exactTextAvailable: boolean
 }
 
@@ -42,6 +45,13 @@ interface ArtifactCanvasViewportProps {
   } | null
   onVisualCaptureStatusChange?: (status: ArtifactVisualCaptureStatus) => void
   reviewSurfaceState?: ArtifactReviewSurfaceState
+  rendererKind?: ArtifactRendererKind
+  pageIndex?: number
+  pageCount?: number
+  zoom?: number
+  fitMode?: ArtifactFitMode
+  onPageIndexChange?: (pageIndex: number) => void
+  onPageCountChange?: (pageCount: number) => void
   className?: string
 }
 
@@ -60,11 +70,20 @@ export function ArtifactCanvasViewport({
   artifactTextRegistration,
   onVisualCaptureStatusChange,
   reviewSurfaceState = "idle",
+  rendererKind,
+  pageIndex = 0,
+  pageCount = 1,
+  zoom = 1,
+  fitMode = "custom",
+  onPageIndexChange,
+  onPageCountChange,
   className,
 }: ArtifactCanvasViewportProps) {
   const primaryFile = previewFile ?? files.find((file) => file.isPrimary) ?? files[0]
   const supportingFiles = files.filter((file) => !file.isPrimary)
-  const canPreviewMarkdown = isMarkdownArtifactFile(primaryFile)
+  const effectiveRendererKind = rendererKind ?? detectArtifactRendererKind(primaryFile, artifact)
+  const canPreviewMarkdown = effectiveRendererKind === "markdown" || isMarkdownArtifactFile(primaryFile)
+  const canPreviewPdf = effectiveRendererKind === "pdf"
   const preview = useMarkdownArtifactPreview({
     enabled: canPreviewMarkdown,
     href: previewHref,
@@ -95,6 +114,33 @@ export function ArtifactCanvasViewport({
       return { key: markdownCaptureKey, status }
     })
   }, [markdownCaptureKey])
+  const pdfCaptureKey = [
+    captureArtifactId ?? "",
+    primaryFile?.path ?? "",
+    pageIndex,
+    zoom,
+    fitMode,
+  ].join("::")
+  const [pdfCaptureState, setPdfCaptureState] = useState<{
+    key: string
+    status: ArtifactVisualCaptureStatus
+  }>(() => ({
+    key: "",
+    status: unavailableCaptureStatus("preview_not_ready", "pdf_page_canvas"),
+  }))
+  const currentPdfCaptureStatus = useMemo(() => (
+    pdfCaptureState.key === pdfCaptureKey
+      ? pdfCaptureState.status
+      : unavailableCaptureStatus("preview_not_ready", "pdf_page_canvas")
+  ), [pdfCaptureKey, pdfCaptureState])
+  const handlePdfCaptureStatusChange = useCallback((status: ArtifactVisualCaptureStatus) => {
+    setPdfCaptureState((current) => {
+      if (current.key === pdfCaptureKey && captureStatusesEqual(current.status, status)) {
+        return current
+      }
+      return { key: pdfCaptureKey, status }
+    })
+  }, [pdfCaptureKey])
 
   useEffect(() => {
     if (!artifactTextRegistration || preview.status !== "ready" || !preview.markdown.trim()) {
@@ -120,6 +166,11 @@ export function ArtifactCanvasViewport({
       return
     }
 
+    if (canPreviewPdf) {
+      onVisualCaptureStatusChange(currentPdfCaptureStatus)
+      return
+    }
+
     if (!canPreviewMarkdown) {
       onVisualCaptureStatusChange({
         ready: true,
@@ -141,7 +192,16 @@ export function ArtifactCanvasViewport({
     }
 
     onVisualCaptureStatusChange(currentMarkdownCaptureStatus)
-  }, [canPreviewMarkdown, captureArtifactId, currentMarkdownCaptureStatus, onVisualCaptureStatusChange, preview.markdown, preview.status])
+  }, [
+    canPreviewMarkdown,
+    canPreviewPdf,
+    captureArtifactId,
+    currentMarkdownCaptureStatus,
+    currentPdfCaptureStatus,
+    onVisualCaptureStatusChange,
+    preview.markdown,
+    preview.status,
+  ])
 
   return (
     <div
@@ -169,9 +229,21 @@ export function ArtifactCanvasViewport({
               "linear-gradient(180deg, color-mix(in srgb, var(--cosmic-panel) 28%, transparent), transparent 26%), radial-gradient(circle at 18% 5%, color-mix(in srgb, var(--sophia-purple) 8%, transparent), transparent 32%), radial-gradient(circle at 84% 10%, color-mix(in srgb, var(--cosmic-teal) 5%, transparent), transparent 34%)",
           }}
         />
+        {canPreviewPdf && pageCount > 1 ? (
+          <ArtifactPageRail
+            pageCount={pageCount}
+            pageIndex={pageIndex}
+            onPageIndexChange={onPageIndexChange}
+          />
+        ) : null}
         <div
           data-testid="artifact-canvas-scroll-area"
-          className="relative z-10 flex min-h-0 w-full flex-1 flex-col items-stretch overflow-y-auto overscroll-contain px-4 py-6 [-webkit-overflow-scrolling:touch] [scrollbar-gutter:stable] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--cosmic-border)] [&::-webkit-scrollbar-track]:bg-transparent sm:px-7 sm:py-7 lg:px-10"
+          className={cn(
+            "relative z-10 flex min-h-0 w-full flex-1 overscroll-contain px-4 py-6 [-webkit-overflow-scrolling:touch] [scrollbar-gutter:stable] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--cosmic-border)] [&::-webkit-scrollbar-track]:bg-transparent sm:px-7 sm:py-7 lg:px-10",
+            canPreviewPdf
+              ? "items-start overflow-auto"
+              : "flex-col items-stretch overflow-y-auto",
+          )}
           style={{ scrollbarColor: "var(--cosmic-border) transparent" }}
         >
           {canPreviewMarkdown ? (
@@ -180,6 +252,19 @@ export function ArtifactCanvasViewport({
               file={primaryFile}
               preview={preview}
               typeLabel={typeLabel}
+            />
+          ) : canPreviewPdf ? (
+            <ArtifactPdfPreview
+              artifact={artifact}
+              file={primaryFile}
+              href={previewHref}
+              artifactId={captureArtifactId}
+              pageIndex={pageIndex}
+              zoom={zoom}
+              fitMode={fitMode}
+              typeLabel={typeLabel}
+              onPageCountChange={onPageCountChange}
+              onRenderStatusChange={handlePdfCaptureStatusChange}
             />
           ) : (
             <ArtifactMetadataPage
@@ -202,6 +287,51 @@ export function ArtifactCanvasViewport({
         />
       ) : null}
     </div>
+  )
+}
+
+function ArtifactPageRail({
+  pageCount,
+  pageIndex,
+  onPageIndexChange,
+}: {
+  pageCount: number
+  pageIndex: number
+  onPageIndexChange?: (pageIndex: number) => void
+}) {
+  const pages = Array.from({ length: Math.min(80, Math.max(0, pageCount)) }, (_, index) => index)
+
+  if (pages.length <= 1) {
+    return null
+  }
+
+  return (
+    <aside
+      data-testid="artifact-page-rail"
+      aria-label="PDF pages"
+      className="relative z-10 hidden w-16 shrink-0 flex-col gap-2 overflow-y-auto border-r border-[color:var(--cosmic-border-soft)] bg-[color:color-mix(in_srgb,var(--cosmic-panel)_92%,var(--bg))] px-2 py-4 [scrollbar-gutter:stable] sm:flex"
+    >
+      {pages.map((index) => {
+        const selected = index === pageIndex
+        return (
+          <button
+            key={index}
+            type="button"
+            aria-label={`Page ${index + 1}`}
+            aria-current={selected ? "page" : undefined}
+            onClick={() => onPageIndexChange?.(index)}
+            className={cn(
+              "cosmic-focus-ring flex h-9 w-full items-center justify-center rounded-md border text-xs font-medium transition",
+              selected
+                ? "border-[color:color-mix(in_srgb,var(--sophia-purple)_50%,var(--cosmic-border-soft))] bg-[color:color-mix(in_srgb,var(--sophia-purple)_16%,transparent)] text-[color:var(--sophia-purple)]"
+                : "border-[color:var(--cosmic-border-soft)] bg-[color:color-mix(in_srgb,var(--cosmic-panel-soft)_82%,transparent)] text-[color:var(--cosmic-text-muted)] hover:text-[color:var(--cosmic-text)]",
+            )}
+          >
+            {index + 1}
+          </button>
+        )
+      })}
+    </aside>
   )
 }
 

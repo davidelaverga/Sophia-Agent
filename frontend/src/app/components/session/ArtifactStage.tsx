@@ -1,7 +1,17 @@
 "use client"
 
-import { useMemo } from "react"
+import { RefreshCw } from "lucide-react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 
+import {
+  artifactRendererSupportsPagination,
+  artifactRendererSupportsZoom,
+  buildArtifactViewSignature,
+  clampArtifactZoom,
+  detectArtifactRendererKind,
+  type ArtifactFitMode,
+  type ArtifactViewState,
+} from "../../lib/artifact-renderers"
 import {
   buildThreadArtifactHref,
   formatBuilderArtifactTypeLabel,
@@ -39,10 +49,14 @@ export interface ArtifactStageProps {
   pendingStartVoiceReview?: boolean
   showReviewStatus?: boolean
   visualCaptureStatus?: ArtifactVisualCaptureStatus | null
+  reviewStale?: boolean
+  canRefreshReview?: boolean
   onVisualCaptureStatusChange?: (status: ArtifactVisualCaptureStatus) => void
+  onArtifactViewStateChange?: (state: ArtifactViewState) => void
   onStartVoiceReview?: () => void
   onStartReview: () => void
   onStopReview: () => void
+  onRefreshReview?: () => void
   fillAvailable?: boolean
   className?: string
 }
@@ -64,10 +78,14 @@ export function ArtifactStage({
   pendingStartVoiceReview = false,
   showReviewStatus: showReviewStatusOverride,
   visualCaptureStatus,
+  reviewStale = false,
+  canRefreshReview = false,
   onVisualCaptureStatusChange,
+  onArtifactViewStateChange,
   onStartVoiceReview,
   onStartReview,
   onStopReview,
+  onRefreshReview,
   fillAvailable = false,
   className,
 }: ArtifactStageProps) {
@@ -86,6 +104,13 @@ export function ArtifactStage({
   const openHref = buildThreadArtifactHref(threadId, primaryFile?.path)
   const downloadHref = buildThreadArtifactHref(threadId, primaryFile?.path, { download: true })
   const typeLabel = formatBuilderArtifactTypeLabel(builderArtifact.artifactType)
+  const rendererKind = detectArtifactRendererKind(primaryFile, builderArtifact)
+  const supportsPagination = artifactRendererSupportsPagination(rendererKind)
+  const supportsZoom = artifactRendererSupportsZoom(rendererKind)
+  const [pageIndex, setPageIndex] = useState(0)
+  const [pageCount, setPageCount] = useState(1)
+  const [zoom, setZoom] = useState(1)
+  const [fitMode, setFitMode] = useState<ArtifactFitMode>(rendererKind === "pdf" ? "page" : "custom")
   const viewportPrimaryFile = primaryFile
     ? {
         path: primaryFile.path,
@@ -103,6 +128,64 @@ export function ArtifactStage({
       threadId,
     } : null
   ), [artifactId, normalSessionId, sessionId, threadId])
+  const rendererResetKey = `${primaryFile?.path ?? ""}|${rendererKind}`
+
+  useEffect(() => {
+    setPageIndex(0)
+    setPageCount(1)
+    setZoom(1)
+    setFitMode(rendererKind === "pdf" ? "page" : "custom")
+  }, [rendererKind, rendererResetKey])
+
+  const handlePageCountChange = useCallback((nextPageCount: number) => {
+    const normalizedPageCount = Math.max(1, Math.floor(nextPageCount))
+    setPageCount(normalizedPageCount)
+    setPageIndex((current) => Math.min(current, normalizedPageCount - 1))
+  }, [])
+  const handlePreviousPage = useCallback(() => {
+    setPageIndex((current) => Math.max(0, current - 1))
+  }, [])
+  const handleNextPage = useCallback(() => {
+    setPageIndex((current) => Math.min(Math.max(1, pageCount) - 1, current + 1))
+  }, [pageCount])
+  const handlePageIndexChange = useCallback((nextPageIndex: number) => {
+    setPageIndex(Math.min(Math.max(0, nextPageIndex), Math.max(1, pageCount) - 1))
+  }, [pageCount])
+  const handleZoomIn = useCallback(() => {
+    setFitMode("custom")
+    setZoom((current) => clampArtifactZoom(current * 1.2))
+  }, [])
+  const handleZoomOut = useCallback(() => {
+    setFitMode("custom")
+    setZoom((current) => clampArtifactZoom(current / 1.2))
+  }, [])
+  const handleFitPage = useCallback(() => {
+    setFitMode("page")
+    setZoom(1)
+  }, [])
+  const handleFitWidth = useCallback(() => {
+    setFitMode("width")
+    setZoom(1)
+  }, [])
+  const handleResetZoom = useCallback(() => {
+    setFitMode("custom")
+    setZoom(1)
+  }, [])
+  const artifactViewState = useMemo<ArtifactViewState>(() => ({
+    artifactId: artifactId ?? null,
+    filePath: primaryFile?.path ?? null,
+    rendererKind,
+    pageIndex,
+    pageCount,
+    zoom,
+    fitMode,
+  }), [artifactId, fitMode, pageCount, pageIndex, primaryFile?.path, rendererKind, zoom])
+  const artifactViewSignature = buildArtifactViewSignature(artifactViewState)
+
+  useEffect(() => {
+    onArtifactViewStateChange?.(artifactViewState)
+  }, [artifactViewState, onArtifactViewStateChange])
+
   const showReviewStatus = showReviewStatusOverride ?? Boolean(reviewEnabled || exactTextAvailable || visualCaptureStatus)
   const frameConfirmed = hasConfirmedStillFrame(reviewState, transportStatus)
   const reviewSurfaceState = frameConfirmed
@@ -116,6 +199,8 @@ export function ArtifactStage({
   return (
     <section
       data-review-state={reviewSurfaceState}
+      data-artifact-renderer-kind={rendererKind}
+      data-artifact-view-signature={artifactViewSignature ?? undefined}
       className={cn(
         "relative isolate flex min-h-0 w-full flex-col overflow-hidden rounded-xl border bg-[color:color-mix(in_srgb,var(--cosmic-panel)_98%,var(--bg))] shadow-[var(--cosmic-shadow-md)] transition-[border-color,box-shadow,background-color] duration-500",
         reviewSurfaceState === "active"
@@ -141,7 +226,19 @@ export function ArtifactStage({
       />
       <ArtifactToolbar
         title={builderArtifact.artifactTitle}
-        pageLabel="Page 1 of 1"
+        pageIndex={pageIndex}
+        pageCount={pageCount}
+        supportsPagination={supportsPagination}
+        supportsZoom={supportsZoom}
+        zoom={zoom}
+        fitMode={fitMode}
+        onPreviousPage={handlePreviousPage}
+        onNextPage={handleNextPage}
+        onZoomIn={handleZoomIn}
+        onZoomOut={handleZoomOut}
+        onFitPage={handleFitPage}
+        onFitWidth={handleFitWidth}
+        onResetZoom={handleResetZoom}
         openHref={openHref}
         downloadHref={downloadHref}
         downloadName={primaryFile?.name}
@@ -157,6 +254,13 @@ export function ArtifactStage({
         artifactTextRegistration={artifactTextRegistration}
         onVisualCaptureStatusChange={onVisualCaptureStatusChange}
         reviewSurfaceState={reviewSurfaceState}
+        rendererKind={rendererKind}
+        pageIndex={pageIndex}
+        pageCount={pageCount}
+        zoom={zoom}
+        fitMode={fitMode}
+        onPageIndexChange={handlePageIndexChange}
+        onPageCountChange={handlePageCountChange}
         className={fillAvailable ? "min-h-0 flex-1" : undefined}
       />
 
@@ -174,20 +278,35 @@ export function ArtifactStage({
             visualSourceUnavailableReason={visualCaptureStatus?.ready === false ? visualCaptureStatus.reason : null}
             visualReviewRequiresVoice={visualReviewRequiresVoice}
             visualReviewPreparing={visualReviewPreparing}
+            reviewStale={reviewStale}
             className="min-w-0"
           />
           {reviewEnabled ? (
-            <ReviewWithSophiaButton
-              state={reviewState}
-              canStart={canStartReview}
-              featureEnabled={reviewEnabled}
-              startVoiceRequired={visualReviewRequiresVoice}
-              pendingStartVoiceReview={pendingStartVoiceReview}
-              onStartVoiceReview={onStartVoiceReview}
-              onStart={onStartReview}
-              onStop={onStopReview}
-              className="w-full sm:w-auto"
-            />
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+              {frameConfirmed && reviewStale && onRefreshReview ? (
+                <button
+                  type="button"
+                  aria-label="Refresh view"
+                  onClick={onRefreshReview}
+                  disabled={!canRefreshReview || reviewState?.refreshFrameInProgress}
+                  className="cosmic-focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-[color:color-mix(in_srgb,var(--sophia-purple)_34%,var(--cosmic-border-soft))] bg-[color:color-mix(in_srgb,var(--sophia-purple)_10%,transparent)] px-4 text-sm font-medium text-[color:var(--sophia-purple)] transition hover:bg-[color:color-mix(in_srgb,var(--sophia-purple)_16%,transparent)] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <RefreshCw className={cn("h-4 w-4", reviewState?.refreshFrameInProgress && "animate-spin")} aria-hidden="true" />
+                  <span>{reviewState?.refreshFrameInProgress ? "Refreshing view" : "Refresh view"}</span>
+                </button>
+              ) : null}
+              <ReviewWithSophiaButton
+                state={reviewState}
+                canStart={canStartReview}
+                featureEnabled={reviewEnabled}
+                startVoiceRequired={visualReviewRequiresVoice}
+                pendingStartVoiceReview={pendingStartVoiceReview}
+                onStartVoiceReview={onStartVoiceReview}
+                onStart={onStartReview}
+                onStop={onStopReview}
+                className="w-full sm:w-auto"
+              />
+            </div>
           ) : null}
         </div>
       ) : null}

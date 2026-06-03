@@ -1,0 +1,388 @@
+"use client"
+
+import { FileText, Layers } from "lucide-react"
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react"
+
+import type { ArtifactFitMode } from "../../lib/artifact-renderers"
+import { clampArtifactZoom } from "../../lib/artifact-renderers"
+import { loadPdfJs, type PdfDocumentProxy, type PdfRenderTask } from "../../lib/pdfjs-loader"
+import { cn } from "../../lib/utils"
+import type { BuilderArtifactFileV1, BuilderArtifactV1 } from "../../types/builder-artifact"
+
+import type { ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
+
+interface ArtifactPdfPreviewProps {
+  artifact: BuilderArtifactV1
+  file?: (BuilderArtifactFileV1 & { mimeType?: string; sizeBytes?: number }) | null
+  href?: string | null
+  artifactId?: string | null
+  typeLabel: string
+  pageIndex: number
+  zoom: number
+  fitMode: ArtifactFitMode
+  onPageCountChange?: (pageCount: number) => void
+  onRenderStatusChange?: (status: ArtifactVisualCaptureStatus) => void
+}
+
+type PdfDocumentState =
+  | { status: "idle"; document: null; error: null }
+  | { status: "loading"; document: null; error: null }
+  | { status: "ready"; document: PdfDocumentProxy; error: null }
+  | { status: "failed"; document: null; error: string }
+
+type PdfPageRenderState = "idle" | "loading" | "ready" | "failed"
+
+const PDF_FALLBACK_BOUNDS = {
+  width: 860,
+  height: 720,
+}
+
+const PDF_CANVAS_GUTTER = 48
+
+export function ArtifactPdfPreview({
+  artifact,
+  file,
+  href,
+  artifactId,
+  typeLabel,
+  pageIndex,
+  zoom,
+  fitMode,
+  onPageCountChange,
+  onRenderStatusChange,
+}: ArtifactPdfPreviewProps) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const pageHostRef = useRef<HTMLDivElement | null>(null)
+  const [documentState, setDocumentState] = useState<PdfDocumentState>({
+    status: "idle",
+    document: null,
+    error: null,
+  })
+  const [pageRenderState, setPageRenderState] = useState<PdfPageRenderState>("idle")
+  const [pageSize, setPageSize] = useState<{ width: number; height: number } | null>(null)
+  const bounds = useElementBounds(pageHostRef)
+
+  useEffect(() => {
+    if (!href) {
+      setDocumentState({ status: "failed", document: null, error: "missing_pdf_href" })
+      onPageCountChange?.(1)
+      return
+    }
+
+    let cancelled = false
+    let loadingTask: { promise: Promise<PdfDocumentProxy>; destroy?: () => Promise<void> } | null = null
+    setDocumentState({ status: "loading", document: null, error: null })
+    setPageRenderState("idle")
+    onRenderStatusChange?.(unavailablePdfCaptureStatus("preview_not_ready"))
+
+    loadPdfJs()
+      .then((pdfjs) => {
+        if (cancelled) {
+          return null
+        }
+
+        loadingTask = pdfjs.getDocument({
+          url: href,
+          withCredentials: true,
+        }) as { promise: Promise<PdfDocumentProxy>; destroy?: () => Promise<void> }
+        return loadingTask.promise
+      })
+      .then((pdfDocument) => {
+        if (!pdfDocument || cancelled) {
+          return
+        }
+
+        setDocumentState({ status: "ready", document: pdfDocument, error: null })
+        onPageCountChange?.(Math.max(1, pdfDocument.numPages))
+      })
+      .catch((error: unknown) => {
+        if (cancelled) {
+          return
+        }
+
+        setDocumentState({
+          status: "failed",
+          document: null,
+          error: error instanceof Error ? error.message : "pdf_load_failed",
+        })
+        setPageRenderState("failed")
+        onPageCountChange?.(1)
+        onRenderStatusChange?.(unavailablePdfCaptureStatus("capture_failed"))
+      })
+
+    return () => {
+      cancelled = true
+      void loadingTask?.destroy?.()
+    }
+  }, [href, onPageCountChange, onRenderStatusChange])
+
+  const pageNumber = Math.max(1, pageIndex + 1)
+
+  useEffect(() => {
+    if (documentState.status !== "ready") {
+      return
+    }
+
+    let cancelled = false
+    let renderTask: PdfRenderTask | null = null
+    const canvas = canvasRef.current
+    setPageRenderState("loading")
+    onRenderStatusChange?.(unavailablePdfCaptureStatus("preview_not_ready"))
+
+    if (!canvas) {
+      setPageRenderState("failed")
+      onRenderStatusChange?.(unavailablePdfCaptureStatus("capture_target_missing"))
+      return
+    }
+
+    documentState.document.getPage(pageNumber)
+      .then((page) => {
+        if (cancelled) {
+          return null
+        }
+
+        const baseViewport = page.getViewport({ scale: 1 })
+        const nextScale = computePdfScale({
+          baseWidth: baseViewport.width,
+          baseHeight: baseViewport.height,
+          bounds,
+          fitMode,
+          zoom,
+        })
+        const viewport = page.getViewport({ scale: nextScale })
+        const devicePixelRatio = getDevicePixelRatio()
+
+        canvas.width = Math.max(1, Math.floor(viewport.width * devicePixelRatio))
+        canvas.height = Math.max(1, Math.floor(viewport.height * devicePixelRatio))
+        canvas.style.width = `${Math.max(1, Math.floor(viewport.width))}px`
+        canvas.style.height = `${Math.max(1, Math.floor(viewport.height))}px`
+        setPageSize({
+          width: Math.max(1, Math.floor(viewport.width)),
+          height: Math.max(1, Math.floor(viewport.height)),
+        })
+
+        renderTask = page.render({
+          canvas,
+          viewport,
+          transform: devicePixelRatio === 1 ? undefined : [devicePixelRatio, 0, 0, devicePixelRatio, 0, 0],
+        })
+        return renderTask.promise
+      })
+      .then(() => {
+        if (cancelled) {
+          return
+        }
+
+        setPageRenderState("ready")
+        onRenderStatusChange?.({
+          ready: true,
+          reason: null,
+          source: "pdf_page_canvas",
+          exactTextAvailable: false,
+        })
+      })
+      .catch((error: unknown) => {
+        if (cancelled || isPdfRenderCancellation(error)) {
+          return
+        }
+
+        setPageRenderState("failed")
+        onRenderStatusChange?.(unavailablePdfCaptureStatus("capture_failed"))
+      })
+
+    return () => {
+      cancelled = true
+      renderTask?.cancel()
+    }
+  }, [
+    bounds,
+    documentState,
+    fitMode,
+    onRenderStatusChange,
+    pageNumber,
+    zoom,
+  ])
+
+  const pageTitle = useMemo(() => (
+    file?.name ?? artifact.artifactTitle
+  ), [artifact.artifactTitle, file?.name])
+
+  const showCanvas = documentState.status === "ready" && pageRenderState !== "failed"
+
+  return (
+    <div
+      data-testid="artifact-document-page"
+      data-renderer-kind="pdf"
+      className="mx-auto flex min-h-full w-full min-w-[min(100%,320px)] max-w-none flex-col overflow-hidden rounded-lg border bg-[color:color-mix(in_srgb,var(--card-bg)_96%,var(--cosmic-panel-soft))] shadow-[0_18px_54px_color-mix(in_srgb,var(--bg)_34%,transparent),0_1px_0_color-mix(in_srgb,white_26%,transparent)_inset]"
+      style={{ borderColor: "var(--cosmic-border-soft)" }}
+      aria-label="Artifact PDF preview"
+    >
+      <div className="flex items-center justify-between gap-4 border-b border-[color:var(--cosmic-border-soft)] px-5 py-4 sm:px-6">
+        <div className="min-w-0">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-[color:var(--cosmic-border-soft)] px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-[color:var(--cosmic-text-muted)]">
+            <Layers className="h-3.5 w-3.5" aria-hidden="true" />
+            {typeLabel}
+          </span>
+          <p className="mt-2 truncate text-xs text-[color:var(--cosmic-text-faint)]">
+            {pageTitle}
+          </p>
+        </div>
+        <FileText className="h-7 w-7 shrink-0 text-[color:var(--cosmic-text-faint)]" aria-hidden="true" />
+      </div>
+
+      <div
+        ref={pageHostRef}
+        className="relative flex min-h-[320px] flex-1 items-start justify-center overflow-visible bg-[#ebe7f0] px-4 py-5 sm:px-7 sm:py-7"
+      >
+        {documentState.status === "loading" || pageRenderState === "loading" ? (
+          <PdfPreviewState title="Preparing PDF view" body="You can still open or download the artifact." />
+        ) : null}
+
+        {documentState.status === "failed" || pageRenderState === "failed" ? (
+          <PdfPreviewState title="Preview unavailable" body="Open or download the artifact to view the PDF." />
+        ) : null}
+
+        <div
+          data-testid="artifact-pdf-page-frame"
+          className={cn(
+            "relative shrink-0 overflow-hidden rounded-sm bg-white shadow-[0_18px_50px_rgba(25,19,35,0.28)]",
+            showCanvas ? "block" : "hidden",
+            pageRenderState !== "ready" && "opacity-35",
+          )}
+          style={{
+            width: pageSize ? `${pageSize.width}px` : undefined,
+            height: pageSize ? `${pageSize.height}px` : undefined,
+          }}
+        >
+          <canvas
+            ref={canvasRef}
+            data-testid="artifact-pdf-page-canvas"
+            data-artifact-region="true"
+            data-coreview-artifact-region="true"
+            data-artifact-id={artifactId ?? undefined}
+            data-coreview-artifact-id={artifactId ?? undefined}
+            data-artifact-canvas={artifactId ? "true" : undefined}
+            data-coreview-artifact-canvas={artifactId ? "true" : undefined}
+            data-artifact-canvas-source="selected-pdf-page"
+            data-artifact-page-index={String(pageIndex)}
+            data-artifact-fit-mode={fitMode}
+            data-artifact-zoom={String(clampArtifactZoom(zoom))}
+            aria-label={`PDF page ${pageNumber}`}
+            className="block bg-white"
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function useElementBounds(ref: RefObject<HTMLElement | null>) {
+  const [bounds, setBounds] = useState(PDF_FALLBACK_BOUNDS)
+
+  useLayoutEffect(() => {
+    const element = ref.current
+    if (!element) {
+      return
+    }
+
+    const update = () => {
+      const width = element.clientWidth - PDF_CANVAS_GUTTER
+      const height = element.clientHeight - PDF_CANVAS_GUTTER
+      setBounds({
+        width: width > 0 ? width : PDF_FALLBACK_BOUNDS.width,
+        height: height > 0 ? height : PDF_FALLBACK_BOUNDS.height,
+      })
+    }
+
+    update()
+
+    const observeWindowResize = () => {
+      window.addEventListener("resize", update)
+      return () => window.removeEventListener("resize", update)
+    }
+
+    if (typeof ResizeObserver === "undefined") {
+      return observeWindowResize()
+    }
+
+    const observer = new ResizeObserver(update)
+    if (typeof observer.observe !== "function" || typeof observer.disconnect !== "function") {
+      return observeWindowResize()
+    }
+
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [ref])
+
+  return bounds
+}
+
+function computePdfScale({
+  baseWidth,
+  baseHeight,
+  bounds,
+  fitMode,
+  zoom,
+}: {
+  baseWidth: number
+  baseHeight: number
+  bounds: { width: number; height: number }
+  fitMode: ArtifactFitMode
+  zoom: number
+}): number {
+  const widthScale = bounds.width > 0 && baseWidth > 0 ? bounds.width / baseWidth : 1
+  const pageScale = bounds.height > 0 && baseHeight > 0
+    ? Math.min(widthScale, bounds.height / baseHeight)
+    : widthScale
+
+  if (fitMode === "width") {
+    return clampArtifactZoom(widthScale)
+  }
+
+  if (fitMode === "page") {
+    return clampArtifactZoom(pageScale)
+  }
+
+  return clampArtifactZoom(zoom)
+}
+
+function unavailablePdfCaptureStatus(
+  reason: ArtifactVisualCaptureStatus["reason"],
+): ArtifactVisualCaptureStatus {
+  return {
+    ready: false,
+    reason,
+    source: "pdf_page_canvas",
+    exactTextAvailable: false,
+  }
+}
+
+function isPdfRenderCancellation(error: unknown): boolean {
+  return error instanceof Error && /cancel/i.test(error.name || error.message)
+}
+
+function getDevicePixelRatio(): number {
+  return Math.max(1, Math.min(2, window.devicePixelRatio || 1))
+}
+
+function PdfPreviewState({
+  title,
+  body,
+}: {
+  title: string
+  body: string
+}) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      data-testid="artifact-preview-state"
+      className="absolute bottom-0 left-0 right-0 top-0 z-10 flex min-h-[260px] flex-col items-center justify-center bg-[#ebe7f0] px-6 text-center"
+    >
+      <p className="text-sm font-medium text-[color:var(--cosmic-text-strong)]">{title}</p>
+      <p className="mt-2 max-w-[320px] text-sm leading-relaxed text-[color:var(--cosmic-text-muted)]">
+        {body}
+      </p>
+    </div>
+  )
+}

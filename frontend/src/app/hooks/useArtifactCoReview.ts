@@ -2,6 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
+import {
+  buildArtifactViewSignature,
+  safeArtifactViewTelemetry,
+  type ArtifactViewState,
+} from "../lib/artifact-renderers"
 import { resolveArtifactVisualSource } from "../lib/co-review-capture"
 import { coreviewFlagDiagnostics, isCoreviewStillFrameReviewEnabled } from "../lib/co-review-flags"
 import {
@@ -26,6 +31,7 @@ export interface UseArtifactCoReviewOptions {
   missingCanvasReason?: string
   visualSourceReady?: boolean
   visualSourceUnavailableReason?: string | null
+  artifactViewState?: ArtifactViewState | null
 }
 
 export function useArtifactCoReview({
@@ -40,10 +46,14 @@ export function useArtifactCoReview({
   missingCanvasReason,
   visualSourceReady = true,
   visualSourceUnavailableReason = null,
+  artifactViewState = null,
 }: UseArtifactCoReviewOptions) {
   const transportRef = useRef<CoReviewMediaTransport>(transport ?? new AudioWebSocketUnsupportedTransport())
   const [state, setState] = useState<CoReviewSessionState>(() => initialCoReviewState(transportRef.current.kind))
+  const [lastFrameViewSignature, setLastFrameViewSignature] = useState<string | null>(null)
   const machineRef = useRef<CoReviewSessionMachine | null>(null)
+  const currentViewSignature = buildArtifactViewSignature(artifactViewState)
+  const currentViewSignatureRef = useRef<string | null>(currentViewSignature)
 
   if (!machineRef.current) {
     machineRef.current = new CoReviewSessionMachine({
@@ -51,6 +61,23 @@ export function useArtifactCoReview({
       onStateChange: setState,
     })
   }
+
+  useEffect(() => {
+    currentViewSignatureRef.current = currentViewSignature
+  }, [currentViewSignature])
+
+  const transportStatus = machineRef.current.status()
+  const frameConfirmed = hasConfirmedStillFrameForReviewState(state, transportStatus)
+  const reviewStaleReason = frameConfirmed
+    && lastFrameViewSignature
+    && currentViewSignature
+    && lastFrameViewSignature !== currentViewSignature
+    ? "view_changed"
+    : null
+  const reviewStale = Boolean(reviewStaleReason)
+  const artifactViewTelemetry = useMemo(() => (
+    safeArtifactViewTelemetry(artifactViewState, lastFrameViewSignature, reviewStaleReason)
+  ), [artifactViewState, lastFrameViewSignature, reviewStaleReason])
 
   const startReview = useCallback(async () => {
     const flagDiagnostics = coreviewFlagDiagnostics()
@@ -86,6 +113,7 @@ export function useArtifactCoReview({
       recordCoreviewTelemetry("start", state, {
         featureEnabled,
         reviewStartBlockedReason: reviewStartBlockedReason ?? "missing_required_start_context",
+        artifactViewTelemetry,
       })
       return state
     }
@@ -103,6 +131,7 @@ export function useArtifactCoReview({
       recordCoreviewTelemetry("start", state, {
         featureEnabled,
         reviewStartBlockedReason: reviewStartBlockedReason ?? visualSourceUnavailableReason ?? "capture_target_missing",
+        artifactViewTelemetry,
       })
       return state
     }
@@ -138,16 +167,23 @@ export function useArtifactCoReview({
         toolAvailability: nextState.toolAvailability,
       })
     }
+    if (hasConfirmedStillFrameForReviewState(nextState, machineRef.current.status())) {
+      setLastFrameViewSignature(currentViewSignatureRef.current)
+    }
     logCoreviewBreadcrumb("coReviewStateAfterStart", safeCoReviewTelemetryFromState(nextState))
-    recordCoreviewTelemetry("start", nextState, { featureEnabled, reviewStartBlockedReason: nextState.state === "co_review_error" ? nextState.error : null })
+    recordCoreviewTelemetry("start", nextState, {
+      featureEnabled,
+      reviewStartBlockedReason: nextState.state === "co_review_error" ? nextState.error : null,
+      artifactViewTelemetry,
+    })
     return nextState
-  }, [artifactId, artifactRoot, exactTextAvailable, featureEnabled, missingCanvasReason, normalSessionId, sessionId, state, threadId, visualSourceReady, visualSourceUnavailableReason])
+  }, [artifactId, artifactRoot, artifactViewTelemetry, exactTextAvailable, featureEnabled, missingCanvasReason, normalSessionId, sessionId, state, threadId, visualSourceReady, visualSourceUnavailableReason])
 
   const stopReview = useCallback(async () => {
     const nextState = await machineRef.current.stopCoReview()
-    recordCoreviewTelemetry("stop", nextState, { featureEnabled })
+    recordCoreviewTelemetry("stop", nextState, { featureEnabled, artifactViewTelemetry })
     return nextState
-  }, [featureEnabled])
+  }, [artifactViewTelemetry, featureEnabled])
 
   const refreshReview = useCallback(async () => {
     logCoreviewBreadcrumb("coReviewRefreshClicked", {
@@ -158,7 +194,7 @@ export function useArtifactCoReview({
       websocketStateBeforeRefresh: transportRef.current.status().statusText,
     })
 
-    if (!featureEnabled || !sessionId || !threadId || !artifactId || state.state !== "co_review_live") {
+    if (!featureEnabled || !sessionId || !threadId || !artifactId || state.state !== "co_review_live" || !visualSourceReady) {
       logCoreviewBreadcrumb("coReviewRefreshError", {
         reason: "missing_required_refresh_context",
         featureEnabled,
@@ -166,6 +202,7 @@ export function useArtifactCoReview({
         hasThreadId: Boolean(threadId),
         hasArtifactId: Boolean(artifactId),
         currentState: state.state,
+        visualSourceReady,
       })
       return state
     }
@@ -199,19 +236,32 @@ export function useArtifactCoReview({
         websocketClosedAfterRefresh: nextState.websocketClosedAfterRefresh,
       })
     }
+    if (hasConfirmedStillFrameForReviewState(nextState, machineRef.current.status())) {
+      setLastFrameViewSignature(currentViewSignatureRef.current)
+    }
     logCoreviewBreadcrumb("coReviewStateAfterRefresh", safeCoReviewTelemetryFromState(nextState))
-    recordCoreviewTelemetry("refresh", nextState, { featureEnabled })
+    recordCoreviewTelemetry("refresh", nextState, { featureEnabled, artifactViewTelemetry })
     return nextState
-  }, [artifactId, artifactRoot, featureEnabled, missingCanvasReason, sessionId, state, threadId, visualSourceUnavailableReason])
+  }, [artifactId, artifactRoot, artifactViewTelemetry, featureEnabled, missingCanvasReason, sessionId, state, threadId, visualSourceReady, visualSourceUnavailableReason])
 
   const telemetry = useMemo(() => safeCoReviewTelemetryFromState(state), [state])
-  const transportStatus = machineRef.current.status()
   const canStart = Boolean(
     featureEnabled
     && sessionId
     && threadId
     && artifactId
     && visualSourceReady
+    && transportStatus.visualTransportSupported
+    && transportStatus.stillFramesSupported,
+  )
+  const canRefresh = Boolean(
+    featureEnabled
+    && sessionId
+    && threadId
+    && artifactId
+    && visualSourceReady
+    && state.state === "co_review_live"
+    && !state.refreshFrameInProgress
     && transportStatus.visualTransportSupported
     && transportStatus.stillFramesSupported,
   )
@@ -234,8 +284,8 @@ export function useArtifactCoReview({
       statusText: transportStatus.statusText,
     })
     void machineRef.current?.failCoReview(error || "frame_send_closed_gemini_websocket")
-      .then((nextState) => recordCoreviewTelemetry("transport_closed", nextState, { featureEnabled }))
-  }, [featureEnabled, state.refreshFrameInProgress, state.state, transportStatus.statusText, transportStatus.visualTransportSupported])
+      .then((nextState) => recordCoreviewTelemetry("transport_closed", nextState, { featureEnabled, artifactViewTelemetry }))
+  }, [artifactViewTelemetry, featureEnabled, state.refreshFrameInProgress, state.state, transportStatus.statusText, transportStatus.visualTransportSupported])
 
   return {
     enabled: featureEnabled,
@@ -243,7 +293,11 @@ export function useArtifactCoReview({
     telemetry,
     transportStatus,
     canStart,
-    canRefresh: false,
+    canRefresh,
+    reviewStale,
+    reviewStaleReason,
+    currentViewSignature,
+    lastFrameViewSignature,
     startReview,
     stopReview,
     refreshReview,
@@ -261,7 +315,11 @@ function logCoreviewBreadcrumb(event: string, details: Record<string, unknown> =
 function recordCoreviewTelemetry(
   action: "start" | "refresh" | "stop" | "transport_closed",
   state: CoReviewSessionState,
-  details: { featureEnabled: boolean; reviewStartBlockedReason?: string | null },
+  details: {
+    featureEnabled: boolean
+    reviewStartBlockedReason?: string | null
+    artifactViewTelemetry?: Record<string, string | number | null>
+  },
 ) {
   const flagDiagnostics = coreviewFlagDiagnostics()
   recordSophiaCaptureEvent({
@@ -276,9 +334,24 @@ function recordCoreviewTelemetry(
         ...flagDiagnostics,
         reviewStartBlockedReason: details.reviewStartBlockedReason ?? null,
         ...safeCoReviewTelemetryFromState(state),
+        ...(details.artifactViewTelemetry ?? {}),
       },
     },
   })
+}
+
+function hasConfirmedStillFrameForReviewState(
+  state: CoReviewSessionState,
+  transportStatus: { visualTransportSupported: boolean; stillFramesSupported: boolean },
+): boolean {
+  return Boolean(
+    state.state === "co_review_live"
+      && state.visualInputStatus === "live"
+      && state.videoOrFrameMode === "still_frame"
+      && (state.frameSentCount ?? 0) > 0
+      && transportStatus.stillFramesSupported !== false
+      && transportStatus.visualTransportSupported !== false,
+  )
 }
 
 function reviewStartBlockedReasonFromContext({

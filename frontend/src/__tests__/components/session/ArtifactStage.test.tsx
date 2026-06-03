@@ -13,9 +13,14 @@ import {
   clearCoreviewArtifactTextRegistryForTests,
   readCoreviewArtifactTextSideband,
 } from "../../../app/lib/coreview-artifact-text"
+import { loadPdfJs } from "../../../app/lib/pdfjs-loader"
 
 vi.mock("../../../app/hooks/useHaptics", () => ({
   haptic: vi.fn(),
+}))
+
+vi.mock("../../../app/lib/pdfjs-loader", () => ({
+  loadPdfJs: vi.fn(),
 }))
 
 const unsupportedTransportStatus = new AudioWebSocketUnsupportedTransport().status()
@@ -30,14 +35,21 @@ const supportedTransportStatus = {
 const builderArtifact = {
   artifactTitle: "Launch brief overview",
   artifactType: "document",
-  artifactPath: "mnt/user-data/outputs/launch-brief.pdf",
+  artifactPath: "mnt/user-data/outputs/launch-brief.docx",
   supportingFiles: ["mnt/user-data/outputs/launch-brief-notes.md"],
   decisionsMade: [
     "Kept the visual review focused on the deliverable.",
     "Left exact table values to trusted text.",
   ],
   companionSummary: "Overview card for the completed launch brief.",
-  userNextAction: "Open the PDF for the full deliverable.",
+  userNextAction: "Open the document for the full deliverable.",
+}
+
+const pdfBuilderArtifact = {
+  ...builderArtifact,
+  artifactPath: "mnt/user-data/outputs/launch-brief.pdf",
+  supportingFiles: [],
+  userNextAction: "Review the PDF in the canvas.",
 }
 
 const markdownBuilderArtifact = {
@@ -65,6 +77,46 @@ function mockCanvasApis() {
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(context)
 }
 
+function mockPdfDocument({
+  pageCount = 3,
+  rejectLoad = false,
+  neverLoad = false,
+}: {
+  pageCount?: number
+  rejectLoad?: boolean
+  neverLoad?: boolean
+} = {}) {
+  const render = vi.fn(() => ({
+    promise: Promise.resolve(),
+    cancel: vi.fn(),
+  }))
+  const getPage = vi.fn(async () => ({
+    getViewport: ({ scale }: { scale: number }) => ({
+      width: 600 * scale,
+      height: 800 * scale,
+    }),
+    render,
+  }))
+  const pdfDocument = {
+    numPages: pageCount,
+    getPage,
+  }
+  const getDocument = vi.fn(() => ({
+    promise: neverLoad
+      ? new Promise(() => undefined)
+      : rejectLoad
+        ? Promise.reject(new Error("pdf failed"))
+        : Promise.resolve(pdfDocument),
+    destroy: vi.fn(),
+  }))
+
+  vi.mocked(loadPdfJs).mockResolvedValue({
+    getDocument,
+  } as unknown as Awaited<ReturnType<typeof loadPdfJs>>)
+
+  return { getDocument, getPage, render }
+}
+
 function renderStage({
   artifact = builderArtifact,
   artifactLibrary = [],
@@ -76,7 +128,10 @@ function renderStage({
   canStartReview = true,
   reviewEnabled = true,
   visualCaptureStatus = null,
+  reviewStale = false,
+  canRefreshReview = false,
   onVisualCaptureStatusChange,
+  onRefreshReview,
   visualReviewRequiresVoice = false,
   pendingStartVoiceReview = false,
   onStartVoiceReview,
@@ -99,7 +154,10 @@ function renderStage({
   canStartReview?: boolean
   reviewEnabled?: boolean
   visualCaptureStatus?: ComponentProps<typeof ArtifactStage>["visualCaptureStatus"]
+  reviewStale?: ComponentProps<typeof ArtifactStage>["reviewStale"]
+  canRefreshReview?: ComponentProps<typeof ArtifactStage>["canRefreshReview"]
   onVisualCaptureStatusChange?: ComponentProps<typeof ArtifactStage>["onVisualCaptureStatusChange"]
+  onRefreshReview?: ComponentProps<typeof ArtifactStage>["onRefreshReview"]
   visualReviewRequiresVoice?: ComponentProps<typeof ArtifactStage>["visualReviewRequiresVoice"]
   pendingStartVoiceReview?: ComponentProps<typeof ArtifactStage>["pendingStartVoiceReview"]
   onStartVoiceReview?: ComponentProps<typeof ArtifactStage>["onStartVoiceReview"]
@@ -128,10 +186,13 @@ function renderStage({
       visualReviewRequiresVoice={visualReviewRequiresVoice}
       pendingStartVoiceReview={pendingStartVoiceReview}
       visualCaptureStatus={visualCaptureStatus}
+      reviewStale={reviewStale}
+      canRefreshReview={canRefreshReview}
       onVisualCaptureStatusChange={onVisualCaptureStatusChange}
       onStartVoiceReview={onStartVoiceReview}
       onStartReview={onStartReview}
       onStopReview={onStopReview}
+      onRefreshReview={onRefreshReview}
       fillAvailable={fillAvailable}
     />,
   )
@@ -141,6 +202,7 @@ function renderStage({
 
 beforeEach(() => {
   mockCanvasApis()
+  vi.mocked(loadPdfJs).mockReset()
 })
 
 afterEach(() => {
@@ -167,7 +229,30 @@ describe("ArtifactStage", () => {
     expect(documentPage.className).toContain("max-w-[960px]")
     expect(screen.getAllByText("Launch brief overview")).toHaveLength(2)
     expect(screen.getByText("Document")).toBeInTheDocument()
-    expect(screen.getByText("launch-brief.pdf")).toBeInTheDocument()
+    expect(screen.getByText("launch-brief.docx")).toBeInTheDocument()
+    expect(screen.getByLabelText("Open Launch brief overview in new tab")).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.docx",
+    )
+    expect(screen.getByLabelText("Download Launch brief overview")).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.docx?download=true",
+    )
+    expect(screen.getByText("Page 1 of 1")).toBeInTheDocument()
+    expect(screen.queryByLabelText("Zoom out")).not.toBeInTheDocument()
+    expect(screen.queryByLabelText("Zoom in")).not.toBeInTheDocument()
+    expect(screen.queryByLabelText("Fit to view")).not.toBeInTheDocument()
+  })
+
+  it("detects and loads a PDF artifact inside the canvas bed", async () => {
+    mockPdfDocument({ pageCount: 3 })
+    renderStage({ artifact: pdfBuilderArtifact, exactTextAvailable: false, fillAvailable: true })
+
+    const canvasBed = screen.getByTestId("artifact-canvas-bed")
+    expect(canvasBed).toContainElement(await screen.findByLabelText("Artifact PDF preview"))
+    expect(await screen.findByLabelText("PDF page 1")).toBeInTheDocument()
+    expect(screen.getByText("Page 1 of 3")).toBeInTheDocument()
+    expect(screen.getByText("Fit page")).toBeInTheDocument()
     expect(screen.getByLabelText("Open Launch brief overview in new tab")).toHaveAttribute(
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.pdf",
@@ -176,10 +261,62 @@ describe("ArtifactStage", () => {
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.pdf?download=true",
     )
-    expect(screen.getByText("Page 1 of 1")).toBeInTheDocument()
-    expect(screen.queryByLabelText("Zoom out")).not.toBeInTheDocument()
-    expect(screen.queryByLabelText("Zoom in")).not.toBeInTheDocument()
-    expect(screen.queryByLabelText("Fit to view")).not.toBeInTheDocument()
+    expect(screen.getByText("Exact text unavailable")).toBeInTheDocument()
+  })
+
+  it("keeps the PDF loading state inside the canvas bed", async () => {
+    mockPdfDocument({ neverLoad: true })
+    renderStage({ artifact: pdfBuilderArtifact, exactTextAvailable: false })
+
+    const canvasBed = screen.getByTestId("artifact-canvas-bed")
+    expect(canvasBed).toContainElement(await screen.findByTestId("artifact-preview-state"))
+    expect(screen.getByText("Preparing PDF view")).toBeInTheDocument()
+  })
+
+  it("shows PDF preview failure while keeping open and download actions", async () => {
+    mockPdfDocument({ rejectLoad: true })
+    renderStage({ artifact: pdfBuilderArtifact, exactTextAvailable: false })
+
+    expect(await screen.findByText("Preview unavailable")).toBeInTheDocument()
+    expect(screen.getByLabelText("Open Launch brief overview in new tab")).toBeInTheDocument()
+    expect(screen.getByLabelText("Download Launch brief overview")).toBeInTheDocument()
+  })
+
+  it("navigates PDF pages with real bounds", async () => {
+    const user = userEvent.setup()
+    mockPdfDocument({ pageCount: 3 })
+    renderStage({ artifact: pdfBuilderArtifact, exactTextAvailable: false })
+
+    expect(await screen.findByText("Page 1 of 3")).toBeInTheDocument()
+    expect(screen.getByLabelText("Previous page")).toBeDisabled()
+    expect(screen.getByLabelText("Next page")).toBeEnabled()
+    expect(screen.getByTestId("artifact-page-rail")).toBeInTheDocument()
+
+    await user.click(screen.getByLabelText("Next page"))
+    expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument()
+    expect(screen.getByLabelText("Previous page")).toBeEnabled()
+
+    await user.click(screen.getByLabelText("Page 3"))
+    expect(await screen.findByText("Page 3 of 3")).toBeInTheDocument()
+    expect(screen.getByLabelText("Next page")).toBeDisabled()
+  })
+
+  it("applies PDF zoom and fit controls to view state", async () => {
+    const user = userEvent.setup()
+    mockPdfDocument({ pageCount: 2 })
+    renderStage({ artifact: pdfBuilderArtifact, exactTextAvailable: false })
+
+    expect(await screen.findByText("Fit page")).toBeInTheDocument()
+    await user.click(screen.getByLabelText("Zoom in"))
+    expect(await screen.findByText("120%")).toBeInTheDocument()
+    await user.click(screen.getByLabelText("Zoom out"))
+    expect(await screen.findByText("100%")).toBeInTheDocument()
+    await user.click(screen.getByLabelText("Fit width"))
+    expect(await screen.findByText("Fit width")).toBeInTheDocument()
+    await user.click(screen.getByLabelText("Fit page"))
+    expect(await screen.findByText("Fit page")).toBeInTheDocument()
+    await user.click(screen.getByLabelText("Reset zoom"))
+    expect(await screen.findByText("100%")).toBeInTheDocument()
   })
 
   it("makes Review with Sophia prominent and calls the existing start handler", async () => {
@@ -201,6 +338,7 @@ describe("ArtifactStage", () => {
         initialFrameSent: true,
         exactTextAvailable: true,
       },
+      reviewStale: true,
     })
 
     const artifactRegion = screen.getByRole("region", { name: /generated artifact/i })
@@ -574,6 +712,6 @@ describe("ArtifactStage", () => {
 
     expect(fetchSpy).not.toHaveBeenCalled()
     expect(screen.getByText("Primary file")).toBeInTheDocument()
-    expect(screen.getByText("launch-brief.pdf")).toBeInTheDocument()
+    expect(screen.getByText("launch-brief.docx")).toBeInTheDocument()
   })
 })

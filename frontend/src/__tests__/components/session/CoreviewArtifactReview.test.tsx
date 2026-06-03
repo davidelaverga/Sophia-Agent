@@ -35,7 +35,7 @@ let getDisplayMedia: ReturnType<typeof vi.fn>
 const BUILDER_ARTIFACT = {
   artifactType: "document",
   artifactTitle: "Launch brief overview",
-  artifactPath: "mnt/user-data/outputs/launch-brief.pdf",
+  artifactPath: "mnt/user-data/outputs/launch-brief.docx",
   supportingFiles: ["mnt/user-data/outputs/launch-brief-notes.md"],
   decisionsMade: [
     "Kept the visual review focused on builder metadata.",
@@ -49,7 +49,7 @@ const BUILDER_ARTIFACT = {
 
 const MARKDOWN_BUILDER_ARTIFACT = {
   ...BUILDER_ARTIFACT,
-  artifactPath: "mnt/user-data/outputs/launch-brief.pdf",
+  artifactPath: "mnt/user-data/outputs/launch-brief.docx",
   supportingFiles: ["mnt/user-data/outputs/launch-brief.md"],
 }
 
@@ -65,7 +65,7 @@ const SELECTED_MARKDOWN_ARTIFACT = {
   ...MARKDOWN_BUILDER_ARTIFACT,
   artifactTitle: "launch-brief.md",
   artifactPath: "mnt/user-data/outputs/launch-brief.md",
-  supportingFiles: ["mnt/user-data/outputs/launch-brief.pdf"],
+  supportingFiles: ["mnt/user-data/outputs/launch-brief.docx"],
 }
 
 const COMPANION_ARTIFACTS: NonNullable<ComponentProps<typeof PresenceArtifactPanel>["artifacts"]> = {
@@ -246,11 +246,11 @@ describe("Coreview artifact still-frame review", () => {
       artifacts: COMPANION_ARTIFACTS,
       builderArtifact: BUILDER_ARTIFACT,
       builderArtifactLibrary: [{
-        path: "mnt/user-data/outputs/launch-brief.pdf",
-        name: "launch-brief.pdf",
-        mimeType: "application/pdf",
+        path: "mnt/user-data/outputs/launch-brief.docx",
+        name: "launch-brief.docx",
+        mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
       }],
-      selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.pdf",
+      selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.docx",
     })
 
     const artifactRegion = await screen.findByRole("region", { name: /generated artifact/i })
@@ -272,7 +272,7 @@ describe("Coreview artifact still-frame review", () => {
     renderPanel({
       artifacts: COMPANION_ARTIFACTS,
       builderArtifact: BUILDER_ARTIFACT,
-      selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.pdf",
+      selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.docx",
     })
 
     expect(await screen.findByRole("region", { name: /generated artifact/i })).toBeInTheDocument()
@@ -289,9 +289,9 @@ describe("Coreview artifact still-frame review", () => {
       expect(selectedStageEvents[0]?.payload).toMatchObject({
         artifactId: expectedArtifactId,
         coreviewArtifactId: expectedArtifactId,
-        artifactPath: "mnt/user-data/outputs/launch-brief.pdf",
+        artifactPath: "mnt/user-data/outputs/launch-brief.docx",
         artifactKind: "builder_file",
-        selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.pdf",
+        selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.docx",
         source: "selected_builder_artifact",
         reviewFeatureEnabled: false,
         rawArtifactTextExcluded: true,

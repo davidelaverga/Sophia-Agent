@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 
+import { detectArtifactRendererKind, isPdfArtifactFile } from "../../app/lib/artifact-renderers"
 import {
   buildThreadArtifactHref,
   isMarkdownArtifactFile,
@@ -24,6 +25,26 @@ describe("builder artifact utilities", () => {
       name: "brief.pdf",
       mimeType: "application/pdf",
     })).toBe(false)
+  })
+
+  it("detects PDF artifacts as the PDF renderer by extension, content type, or metadata", () => {
+    expect(isPdfArtifactFile({
+      path: "mnt/user-data/outputs/brief.pdf",
+      name: "brief.pdf",
+    })).toBe(true)
+
+    expect(detectArtifactRendererKind({
+      path: "mnt/user-data/outputs/brief",
+      name: "brief",
+      mimeType: "application/pdf",
+    })).toBe("pdf")
+
+    expect(detectArtifactRendererKind({
+      path: "mnt/user-data/outputs/brief",
+      name: "brief",
+    }, {
+      artifactType: "pdf",
+    })).toBe("pdf")
   })
 
   it("builds same-origin artifact hrefs from normalized output paths", () => {

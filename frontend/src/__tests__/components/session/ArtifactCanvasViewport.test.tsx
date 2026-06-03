@@ -2,16 +2,26 @@ import { render, screen, within } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { ArtifactCanvasViewport } from "../../../app/components/session/ArtifactCanvasViewport"
+import { loadPdfJs } from "../../../app/lib/pdfjs-loader"
 import type { BuilderArtifactV1 } from "../../../app/types/builder-artifact"
+
+vi.mock("../../../app/lib/pdfjs-loader", () => ({
+  loadPdfJs: vi.fn(),
+}))
 
 const builderArtifact = {
   artifactTitle: "Launch brief overview",
   artifactType: "document",
-  artifactPath: "mnt/user-data/outputs/launch-brief.pdf",
+  artifactPath: "mnt/user-data/outputs/launch-brief.docx",
   supportingFiles: [],
   decisionsMade: ["Kept the review focused."],
   companionSummary: "Overview card for the completed launch brief.",
-  userNextAction: "Open the PDF for the full deliverable.",
+  userNextAction: "Open the document for the full deliverable.",
+} satisfies BuilderArtifactV1
+
+const pdfArtifact = {
+  ...builderArtifact,
+  artifactPath: "mnt/user-data/outputs/launch-brief.pdf",
 } satisfies BuilderArtifactV1
 
 const markdownArtifact = {
@@ -21,6 +31,7 @@ const markdownArtifact = {
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.mocked(loadPdfJs).mockReset()
 })
 
 describe("ArtifactCanvasViewport", () => {
@@ -29,9 +40,9 @@ describe("ArtifactCanvasViewport", () => {
       <ArtifactCanvasViewport
         artifact={builderArtifact}
         files={[{
-          path: "mnt/user-data/outputs/launch-brief.pdf",
-          name: "launch-brief.pdf",
-          label: "launch-brief.pdf",
+          path: "mnt/user-data/outputs/launch-brief.docx",
+          name: "launch-brief.docx",
+          label: "launch-brief.docx",
           isPrimary: true,
         }]}
         typeLabel="Document"
@@ -52,6 +63,37 @@ describe("ArtifactCanvasViewport", () => {
     expect(scrollArea.style.scrollbarColor).toBe("var(--cosmic-border) transparent")
     expect(documentPage.className).toContain("min-h-full")
     expect(documentPage.className).toContain("max-w-[960px]")
+  })
+
+  it("keeps PDF loading state inside the canvas bed", async () => {
+    vi.mocked(loadPdfJs).mockResolvedValue({
+      getDocument: vi.fn(() => ({
+        promise: new Promise(() => undefined),
+        destroy: vi.fn(),
+      })),
+    } as unknown as Awaited<ReturnType<typeof loadPdfJs>>)
+
+    render(
+      <ArtifactCanvasViewport
+        artifact={pdfArtifact}
+        files={[{
+          path: "mnt/user-data/outputs/launch-brief.pdf",
+          name: "launch-brief.pdf",
+          label: "launch-brief.pdf",
+          isPrimary: true,
+          mimeType: "application/pdf",
+        }]}
+        typeLabel="Document"
+        previewHref="/artifact.pdf"
+      />,
+    )
+
+    const canvasBed = await screen.findByTestId("artifact-canvas-bed")
+    const previewRegion = await screen.findByLabelText("Artifact PDF preview")
+
+    expect(canvasBed).toContainElement(screen.getByTestId("artifact-preview-state"))
+    expect(within(previewRegion).getByText("Preparing PDF view")).toBeInTheDocument()
+    expect(screen.getByTestId("artifact-preview-state").className).not.toMatch(/\bfixed\b|\binset-0\b/)
   })
 
   it("keeps markdown loading state inside the canvas bed", async () => {

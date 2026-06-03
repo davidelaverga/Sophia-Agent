@@ -20,6 +20,7 @@ interface ArtifactReviewStatusProps {
   visualSourceUnavailableReason?: string | null
   visualReviewRequiresVoice?: boolean
   visualReviewPreparing?: boolean
+  reviewStale?: boolean
   className?: string
 }
 
@@ -32,6 +33,7 @@ export function ArtifactReviewStatus({
   visualSourceUnavailableReason = null,
   visualReviewRequiresVoice = false,
   visualReviewPreparing = false,
+  reviewStale = false,
   className,
 }: ArtifactReviewStatusProps) {
   const exactTextAvailable = Boolean(state?.exactTextAvailable || exactTextAvailableOverride)
@@ -52,7 +54,7 @@ export function ArtifactReviewStatus({
   }
 
   const frameSent = hasConfirmedStillFrame(state, transportStatus)
-  const stale = Boolean(frameSent && state?.state === "co_review_live")
+  const stale = Boolean(frameSent && reviewStale)
   const lookingChipPreparing = Boolean(state?.state === "co_review_starting" || state?.refreshFrameInProgress)
   const hasFrameError = Boolean(
     state?.state === "co_review_error"
