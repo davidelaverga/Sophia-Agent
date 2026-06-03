@@ -690,6 +690,10 @@ function SessionPageContent() {
   const hasRecoveredBuilderArtifact = Boolean(recoveredBuilderLibraryItem);
   const showBuilderTaskNotice = Boolean(builderTask) && !hasRecoveredBuilderArtifact;
   const builderReadyTitle = builderArtifact?.artifactTitle ?? builderPrimaryFile?.name ?? 'Builder deliverable';
+  const builderOpenHref = useMemo(
+    () => buildThreadArtifactHref(resolvedThreadId, builderPrimaryFile?.path),
+    [builderPrimaryFile?.path, resolvedThreadId],
+  );
   const builderDownloadHref = useMemo(
     () => buildThreadArtifactHref(resolvedThreadId, builderPrimaryFile?.path, { download: true }),
     [builderPrimaryFile?.path, resolvedThreadId],
@@ -1283,6 +1287,7 @@ function SessionPageContent() {
               task={builderTask}
               artifactTitle={builderArtifact?.artifactTitle}
               onOpenArtifact={builderArtifact ? handleViewBuilderArtifactInCanvas : undefined}
+              openHref={builderOpenHref}
               downloadHref={builderArtifact ? builderDownloadHref : undefined}
               onDownload={builderArtifact ? () => { haptic('medium'); setTimeout(clearBuilderTask, 1500); } : undefined}
               onDismiss={clearBuilderTask}
@@ -1297,6 +1302,7 @@ function SessionPageContent() {
               <BuilderReadyPill
                 title={builderReadyTitle}
                 onOpen={handleViewBuilderArtifactInCanvas}
+                openHref={builderOpenHref}
                 downloadHref={builderDownloadHref}
                 onDownload={() => haptic('medium')}
                 onDismiss={dismissVisibleBuilderArtifact}
@@ -1315,6 +1321,7 @@ function SessionPageContent() {
               <BuilderReadyPill
                 title={builderReadyTitle}
                 onOpen={handleViewBuilderArtifactInCanvas}
+                openHref={builderOpenHref}
                 downloadHref={builderDownloadHref}
                 onDownload={() => haptic('medium')}
                 onDismiss={dismissVisibleBuilderArtifact}
@@ -1353,6 +1360,7 @@ function SessionPageContent() {
                 task={builderTask}
                 artifactTitle={builderArtifact?.artifactTitle}
                 onOpenArtifact={builderArtifact ? handleViewBuilderArtifactInCanvas : undefined}
+                openHref={builderOpenHref}
                 downloadHref={builderArtifact ? builderDownloadHref : undefined}
                 onDownload={builderArtifact ? () => { haptic('medium'); setTimeout(clearBuilderTask, 1500); } : undefined}
                 compact={false}

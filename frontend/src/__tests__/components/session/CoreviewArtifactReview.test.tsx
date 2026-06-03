@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { type ComponentProps } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -43,6 +43,20 @@ const BUILDER_ARTIFACT = {
   stepsCompleted: 3,
 }
 
+const MARKDOWN_BUILDER_ARTIFACT = {
+  ...BUILDER_ARTIFACT,
+  artifactPath: "mnt/user-data/outputs/launch-brief.pdf",
+  supportingFiles: ["mnt/user-data/outputs/launch-brief.md"],
+}
+
+const MARKDOWN_LIBRARY = [
+  {
+    path: "mnt/user-data/outputs/launch-brief.md",
+    name: "launch-brief.md",
+    mimeType: "text/markdown",
+  },
+]
+
 const COMPANION_ARTIFACTS: NonNullable<ComponentProps<typeof PresenceArtifactPanel>["artifacts"]> = {
   takeaway: "Focus on the big picture first.",
   reflection_candidate: {
@@ -61,6 +75,9 @@ const COMPANION_ARTIFACTS: NonNullable<ComponentProps<typeof PresenceArtifactPan
 function renderPanel({
   artifacts = null,
   builderArtifact = null,
+  builderArtifactLibrary = [],
+  selectedBuilderArtifactPath,
+  isVoiceMode = false,
   transport = new GeminiStillFrameTransport({
     sendArtifactFrame: vi.fn((frame) => ({
       ok: true,
@@ -78,19 +95,23 @@ function renderPanel({
 }: {
   artifacts?: ComponentProps<typeof PresenceArtifactPanel>["artifacts"]
   builderArtifact?: ComponentProps<typeof PresenceArtifactPanel>["builderArtifact"]
+  builderArtifactLibrary?: NonNullable<ComponentProps<typeof PresenceArtifactPanel>["builderArtifactLibrary"]>
+  selectedBuilderArtifactPath?: ComponentProps<typeof PresenceArtifactPanel>["selectedBuilderArtifactPath"]
+  isVoiceMode?: boolean
   transport?: GeminiStillFrameTransport
 }) {
   render(
     <PresenceArtifactPanel
       artifacts={artifacts}
       builderArtifact={builderArtifact}
-      builderArtifactLibrary={[]}
+      builderArtifactLibrary={builderArtifactLibrary}
+      selectedBuilderArtifactPath={selectedBuilderArtifactPath}
       sessionId="session-1"
       normalSessionId="normal-1"
       threadId="thread-1"
       isVisible={true}
       onDismiss={vi.fn()}
-      isVoiceMode={false}
+      isVoiceMode={isVoiceMode}
       coReviewTransport={transport}
     />,
   )
@@ -241,6 +262,46 @@ describe("Coreview artifact still-frame review", () => {
     expect(screen.getByText("Exact text available")).toBeInTheDocument()
     expect(screen.queryByRole("button", { name: /refresh view/i })).not.toBeInTheDocument()
     expect(getDisplayMedia).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { isVoiceMode: false, label: "text mode" },
+    { isVoiceMode: true, label: "voice mode" },
+  ])("renders the same selected artifact stage in $label", async ({ isVoiceMode }) => {
+    setCoreviewFlags(true)
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("# Launch Brief\n\nShared preview source.", {
+        status: 200,
+        headers: { "Content-Type": "text/markdown" },
+      }),
+    )
+
+    renderPanel({
+      builderArtifact: MARKDOWN_BUILDER_ARTIFACT,
+      builderArtifactLibrary: MARKDOWN_LIBRARY,
+      selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.md",
+      isVoiceMode,
+    })
+
+    expect(await screen.findByRole("heading", { name: "Launch Brief" })).toBeInTheDocument()
+    const artifactRegion = screen.getByRole("region", { name: /generated artifact/i })
+    expect(within(artifactRegion).getAllByText("launch-brief.md").length).toBeGreaterThanOrEqual(1)
+    expect(within(artifactRegion).getByRole("button", { name: /review with sophia/i })).toBeInTheDocument()
+    expect(within(artifactRegion).getByLabelText(/open launch-brief\.md in new tab/i)).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md",
+    )
+    expect(within(artifactRegion).getByLabelText(/download launch-brief\.md/i)).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md?download=true",
+    )
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md",
+      expect.objectContaining({
+        cache: "no-store",
+        method: "GET",
+      }),
+    )
   })
 
   it("renders and registers the companion artifact canvas exact text", async () => {

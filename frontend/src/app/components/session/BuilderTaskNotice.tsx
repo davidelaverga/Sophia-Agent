@@ -22,6 +22,7 @@ type BuilderTaskNoticeProps = {
   task: BuilderTaskV1;
   artifactTitle?: string;
   onOpenArtifact?: () => void;
+  openHref?: string | null;
   downloadHref?: string | null;
   onDownload?: MouseEventHandler<HTMLAnchorElement>;
   compact?: boolean;
@@ -548,6 +549,7 @@ export function BuilderTaskNotice({
   task,
   artifactTitle,
   onOpenArtifact,
+  openHref,
   downloadHref,
   onDownload,
   compact = false,
@@ -641,6 +643,7 @@ export function BuilderTaskNotice({
         <BuilderReadyPill
           title={artifactTitle}
           onOpen={onOpenArtifact}
+          openHref={openHref}
           downloadHref={downloadHref}
           onDownload={onDownload}
           isNew={isFreshCompletion}

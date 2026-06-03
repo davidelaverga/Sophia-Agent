@@ -292,7 +292,6 @@ export function PresenceArtifactPanel({
 
   if ((!artifacts && !stageBuilderArtifact && !hasBuilderLibrary) || phase === "hidden") return null
 
-  const builderFiles = getBuilderArtifactFiles(stageBuilderArtifact)
   const hasContent = hasBuilder || hasBuilderLibrary || hasTakeaway || hasReflection || hasMemories
 
   if (!hasContent) return null
@@ -313,7 +312,7 @@ export function PresenceArtifactPanel({
         "pointer-events-none select-none",
         "transition-all duration-[1200ms] ease-[cubic-bezier(0.22,1,0.36,1)]",
         isVoiceMode
-          ? "fixed left-1/2 -translate-x-1/2 bottom-[155px] z-25 w-full max-w-[440px] px-6"
+          ? "fixed left-1/2 -translate-x-1/2 bottom-[155px] z-25 w-full max-w-[720px] px-4 sm:px-6"
           : cn(
               "relative z-10 w-full mx-auto px-6 mb-3",
               hasBuilder ? "max-w-4xl" : "max-w-2xl",
@@ -338,15 +337,15 @@ export function PresenceArtifactPanel({
         className={cn(
           "relative pointer-events-auto",
           isVoiceMode && "cursor-pointer",
-          !isVoiceMode && "rounded-2xl px-5 py-4"
+          isVoiceMode ? "max-h-[68vh] overflow-y-auto rounded-2xl px-4 py-4" : "rounded-2xl px-5 py-4"
         )}
-        style={!isVoiceMode ? {
+        style={{
           background: 'var(--cosmic-panel)',
           borderRadius: '16px',
           border: '1px solid var(--cosmic-border-soft)',
           backdropFilter: 'blur(20px) saturate(1.2)',
           WebkitBackdropFilter: 'blur(20px) saturate(1.2)',
-        } : undefined}
+        }}
         onClick={isVoiceMode ? handleDismiss : undefined}
       >
         {/* Dismiss hint — whisper-thin, top-right */}
@@ -370,7 +369,7 @@ export function PresenceArtifactPanel({
           <div
             ref={setBuilderArtifactRoot}
             className={cn(
-              "relative mb-4 transition-all duration-[1400ms] ease-out",
+              "relative transition-all duration-[1400ms] ease-out",
               revealStep >= 1 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
             )}
           >
@@ -384,171 +383,30 @@ export function PresenceArtifactPanel({
               />
             )}
 
-            {!isVoiceMode ? (
-              <div onClick={(e) => e.stopPropagation()}>
-                <ArtifactStage
-                  builderArtifact={stageBuilderArtifact}
-                  builderArtifactLibrary={builderArtifactLibrary}
-                  threadId={threadId}
-                  artifactId={builderArtifactId}
-                  sessionId={sessionId}
-                  normalSessionId={normalSessionId}
-                  reviewState={builderArtifactCoReview.state}
-                  transportStatus={builderArtifactCoReview.transportStatus}
-                  exactTextAvailable={Boolean(builderArtifactId)}
-                  canStartReview={builderArtifactCoReview.canStart}
-                  reviewEnabled={builderArtifactCoReview.enabled}
-                  onStartReview={() => { void builderArtifactCoReview.startReview() }}
-                  onStopReview={() => { void builderArtifactCoReview.stopReview() }}
-                />
-              </div>
-            ) : (
-              <>
-                {/* Type badge — centered */}
-                <div className="text-center mb-3">
-                  <span
-                    className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[9px] tracking-[0.14em] uppercase"
-                    style={{
-                      borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
-                      color: 'var(--sophia-purple)',
-                      background: 'color-mix(in srgb, var(--sophia-purple) 6%, transparent)',
-                    }}
-                  >
-                    ✦ {stageBuilderArtifact.artifactType?.replace(/_/g, ' ') ?? 'deliverable'}
-                  </span>
-                </div>
-
-                {/* Title */}
-                <p
-                  className="font-cormorant text-[20px] leading-[1.35] font-light text-center"
-                  style={{
-                    color: 'var(--cosmic-text-strong)',
-                    textShadow: isActive
-                      ? `0 0 20px color-mix(in srgb, ${bloomColor} 18%, transparent)`
-                      : 'none',
-                  }}
-                >
-                  {stageBuilderArtifact.artifactTitle}
-                </p>
-
-                {/* Summary */}
-                {stageBuilderArtifact.companionSummary && (
-                  <p
-                    className="mt-2 font-cormorant text-[14px] leading-[1.65] font-light text-center"
-                    style={{ color: 'var(--cosmic-text-whisper)' }}
-                  >
-                    {stageBuilderArtifact.companionSummary}
-                  </p>
-                )}
-
-                {/* Next action */}
-                {stageBuilderArtifact.userNextAction && (
-                  <p
-                    className="mt-2.5 text-center text-[10px] tracking-[0.06em]"
-                    style={{ color: 'var(--cosmic-text-faint)' }}
-                  >
-                    Next → {stageBuilderArtifact.userNextAction}
-                  </p>
-                )}
-
-                {/* File actions — pill buttons with proper tap targets */}
-                {builderFiles.length > 0 && (
-                  <div className="mt-4 flex flex-col items-center gap-2">
-                    {builderFiles.map((file) => {
-                      const downloadHref = buildThreadArtifactHref(threadId, file.path, { download: true })
-                      const openHref = buildThreadArtifactHref(threadId, file.path)
-                      const isSelected = stageBuilderArtifact.artifactPath === file.path
-
-                      return (
-                        <div
-                          key={file.path}
-                          className="flex items-center gap-2"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <span className="text-[10px]" style={{ color: 'var(--cosmic-text-whisper)' }}>
-                            {file.label}
-                          </span>
-                          <div className="flex gap-1.5">
-                            {onSelectedBuilderArtifactPathChange && (
-                              <button
-                                type="button"
-                                aria-label={`View ${file.label} in canvas`}
-                                aria-pressed={isSelected}
-                                className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
-                                style={{
-                                  borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
-                                  color: 'var(--sophia-purple)',
-                                  background: isSelected
-                                    ? 'color-mix(in srgb, var(--sophia-purple) 12%, transparent)'
-                                    : 'transparent',
-                                }}
-                                onClick={() => {
-                                  haptic('light')
-                                  onSelectedBuilderArtifactPathChange(file.path)
-                                }}
-                              >
-                                View in canvas
-                              </button>
-                            )}
-                            {openHref && (
-                              <a
-                                href={openHref}
-                                target="_blank"
-                                rel="noreferrer"
-                                aria-label={`Open ${file.label} in new tab`}
-                                className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
-                                style={{
-                                  borderColor: 'var(--cosmic-border-soft)',
-                                  color: 'var(--cosmic-text-whisper)',
-                                }}
-                                onClick={() => haptic('light')}
-                              >
-                                Open in new tab
-                              </a>
-                            )}
-                            {downloadHref && (
-                              <a
-                                href={downloadHref}
-                                aria-label={`Download ${file.label}`}
-                                className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
-                                style={{
-                                  borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
-                                  color: 'var(--sophia-purple)',
-                                  background: 'color-mix(in srgb, var(--sophia-purple) 8%, transparent)',
-                                }}
-                                onClick={() => haptic('medium')}
-                              >
-                                Download
-                              </a>
-                            )}
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
-
-                {builderArtifactId && (
-                  <div className="mt-4" onClick={(e) => e.stopPropagation()}>
-                    <CoReviewControls
-                      state={builderArtifactCoReview.state}
-                      transportStatus={builderArtifactCoReview.transportStatus}
-                      onStart={() => { void builderArtifactCoReview.startReview() }}
-                      onStop={() => { void builderArtifactCoReview.stopReview() }}
-                      canStart={builderArtifactCoReview.canStart}
-                      featureEnabled={builderArtifactCoReview.enabled}
-                      className="justify-center"
-                    />
-                  </div>
-                )}
-              </>
-            )}
+            <div onClick={(e) => e.stopPropagation()}>
+              <ArtifactStage
+                builderArtifact={stageBuilderArtifact}
+                builderArtifactLibrary={builderArtifactLibrary}
+                threadId={threadId}
+                artifactId={builderArtifactId}
+                sessionId={sessionId}
+                normalSessionId={normalSessionId}
+                reviewState={builderArtifactCoReview.state}
+                transportStatus={builderArtifactCoReview.transportStatus}
+                exactTextAvailable={Boolean(builderArtifactId)}
+                canStartReview={builderArtifactCoReview.canStart}
+                reviewEnabled={builderArtifactCoReview.enabled}
+                onStartReview={() => { void builderArtifactCoReview.startReview() }}
+                onStopReview={() => { void builderArtifactCoReview.stopReview() }}
+              />
+            </div>
           </div>
         )}
 
         {hasBuilderLibrary && (
           <div
             className={cn(
+              cn(stageBuilderArtifact ? "mt-4" : ""),
               "mb-4 transition-all duration-[1400ms] ease-out",
               revealStep >= 1 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
             )}

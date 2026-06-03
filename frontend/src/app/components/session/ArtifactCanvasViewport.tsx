@@ -181,7 +181,7 @@ function MarkdownDocumentPage({
 
       <div className="min-h-[300px] px-6 py-7 sm:px-8">
         {preview.status === "loading" ? (
-          <PreviewStateCard title="Loading preview" body="Preparing the document view." />
+          <PreviewStateCard title="Loading preview" body="Preparing document view" />
         ) : preview.status === "failed" || preview.status === "idle" ? (
           <PreviewStateCard title="Preview unavailable" body="Open or download the artifact to view the file." />
         ) : (
@@ -287,7 +287,11 @@ function PreviewStateCard({
   body: string
 }) {
   return (
-    <div className="flex min-h-[220px] flex-col items-center justify-center rounded-lg border border-[color:var(--cosmic-border-soft)] bg-[color:var(--cosmic-panel-soft)] px-6 text-center">
+    <div
+      role="status"
+      aria-live="polite"
+      className="flex min-h-[220px] flex-col items-center justify-center rounded-lg border border-[color:var(--cosmic-border-soft)] bg-[color:var(--cosmic-panel-soft)] px-6 text-center"
+    >
       <p className="text-sm font-medium text-[color:var(--cosmic-text-strong)]">{title}</p>
       <p className="mt-2 max-w-[320px] text-sm leading-relaxed text-[color:var(--cosmic-text-muted)]">
         {body}

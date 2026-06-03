@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { BuilderReadyPill } from '../../../app/components/session/BuilderReadyPill';
 
 describe('BuilderReadyPill', () => {
-  it('renders the deliverable title and wires open/download actions', () => {
+  it('renders the deliverable title and keeps view/open/download actions separated', () => {
     const onOpen = vi.fn();
     const onDownload = vi.fn((event: React.MouseEvent<HTMLAnchorElement>) => {
       event.preventDefault();
@@ -14,6 +14,7 @@ describe('BuilderReadyPill', () => {
       <BuilderReadyPill
         title="Launch brief final"
         onOpen={onOpen}
+        openHref="/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md"
         downloadHref="/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md?download=true"
         onDownload={onDownload}
         isNew={true}
@@ -25,6 +26,10 @@ describe('BuilderReadyPill', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /view launch brief final in canvas/i }));
     expect(onOpen).toHaveBeenCalledTimes(1);
+
+    const openLink = screen.getByRole('link', { name: /open launch brief final in new tab/i });
+    expect(openLink).toHaveAttribute('href', '/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md');
+    expect(openLink).toHaveAttribute('target', '_blank');
 
     const downloadLink = screen.getByRole('link', { name: /download/i });
     expect(downloadLink).toHaveAttribute('href', '/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md?download=true');

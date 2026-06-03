@@ -272,7 +272,9 @@ describe("ArtifactStage", () => {
 
     renderStage({ artifact: markdownBuilderArtifact })
 
-    expect(await screen.findByText("Loading preview")).toBeInTheDocument()
+    const previewRegion = await screen.findByLabelText("Artifact document preview")
+    expect(within(previewRegion).getByText("Loading preview")).toBeInTheDocument()
+    expect(within(previewRegion).getByText("Preparing document view")).toBeInTheDocument()
   })
 
   it("shows preview unavailable on fetch failure while keeping Open and Download available", async () => {
@@ -280,7 +282,8 @@ describe("ArtifactStage", () => {
 
     renderStage({ artifact: markdownBuilderArtifact })
 
-    expect(await screen.findByText("Preview unavailable")).toBeInTheDocument()
+    const previewRegion = await screen.findByLabelText("Artifact document preview")
+    expect(within(previewRegion).getByText("Preview unavailable")).toBeInTheDocument()
     expect(screen.getByLabelText("Open Launch brief overview in new tab")).toHaveAttribute(
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md",

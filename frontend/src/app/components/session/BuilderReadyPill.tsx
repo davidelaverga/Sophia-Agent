@@ -1,6 +1,6 @@
 'use client';
 
-import { Download, Eye, X } from 'lucide-react';
+import { Download, ExternalLink, Eye, X } from 'lucide-react';
 import type { MouseEvent, MouseEventHandler } from 'react';
 
 import { haptic } from '../../hooks/useHaptics';
@@ -9,6 +9,7 @@ import { cn } from '../../lib/utils';
 type BuilderReadyPillProps = {
   title: string;
   onOpen: () => void;
+  openHref?: string | null;
   downloadHref?: string | null;
   onDownload?: MouseEventHandler<HTMLAnchorElement>;
   onDismiss?: () => void;
@@ -22,6 +23,7 @@ type BuilderReadyPillProps = {
 export function BuilderReadyPill({
   title,
   onOpen,
+  openHref,
   downloadHref,
   onDownload,
   onDismiss,
@@ -42,6 +44,9 @@ export function BuilderReadyPill({
   const handleDownloadClick: MouseEventHandler<HTMLAnchorElement> = (event) => {
     haptic('success');
     onDownload?.(event);
+  };
+  const handleOpenInNewTabClick: MouseEventHandler<HTMLAnchorElement> = () => {
+    haptic('light');
   };
   const showCountBadge = typeof itemCount === 'number' && itemCount > 1;
   return (
@@ -156,7 +161,7 @@ export function BuilderReadyPill({
           </p>
         </button>
 
-        <div className={cn('flex shrink-0 items-center gap-1.5', compact ? 'pb-1.5' : 'pb-2')}>
+        <div className={cn('flex shrink-0 flex-wrap items-center justify-end gap-1.5', compact ? 'pb-1.5 max-w-[168px]' : 'pb-2 max-w-[220px]')}>
           <button
             type="button"
             onClick={handleOpenClick}
@@ -174,6 +179,28 @@ export function BuilderReadyPill({
             <Eye className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
             View in canvas
           </button>
+
+          {openHref && (
+            <a
+              href={openHref}
+              target="_blank"
+              rel="noreferrer"
+              onClick={handleOpenInNewTabClick}
+              className={cn(
+                'inline-flex items-center gap-1 rounded-full border tracking-[0.08em] transition-opacity hover:opacity-100',
+                compact ? 'px-2 py-0.5 text-[9px]' : 'px-2.5 py-1 text-[10px]',
+              )}
+              style={{
+                borderColor: 'color-mix(in srgb, var(--cosmic-border-soft) 88%, transparent)',
+                color: 'var(--cosmic-text-whisper)',
+                background: 'color-mix(in srgb, var(--cosmic-panel-soft) 52%, transparent)',
+              }}
+              aria-label={`Open ${title} in new tab`}
+            >
+              <ExternalLink className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+              Open in new tab
+            </a>
+          )}
 
           {downloadHref && (
             <a
