@@ -1749,9 +1749,10 @@ export async function connectGeminiBrowserLiveDogfood(
         }
         const useOrderedLane = shouldUseOrderedRelayLane(classification);
         dispatchRelay(async (queueDepth, oldestQueuedAgeMs) => {
+          const nextProviderRelaySequence = providerRelaySequence + 1;
           const relayMetadata: GeminiProviderReceiveMetadata = {
             ...receiveMetadata,
-            providerRelaySequence: providerRelaySequence += 1,
+            providerRelaySequence: nextProviderRelaySequence,
           };
           const relayStartedAt = new Date().toISOString();
           const relayStartMs = monotonicNowMs();
@@ -1778,6 +1779,7 @@ export async function connectGeminiBrowserLiveDogfood(
             artifactReviewContext,
           )
           .then((relayResponse) => {
+            providerRelaySequence = Math.max(providerRelaySequence, nextProviderRelaySequence);
             const relayCompletedAt = new Date().toISOString();
             const transcriptRelayLatencyMs = categories.includes('outputTranscription')
               ? latencyMsFromIso(receiveMetadata.providerReceivedAt, relayCompletedAt)
@@ -2392,10 +2394,10 @@ export function categorizeGeminiProviderEvent(event: unknown): GeminiProviderEve
   const serverContent = recordFromAnyKey(event, 'serverContent', 'server_content');
   if (isRecord(serverContent)) {
     categories.add('serverContent');
-    if (isRecord(recordFromAnyKey(serverContent, 'inputTranscription', 'input_transcription'))) {
+    if (hasTranscriptionText(event, 'inputTranscription', 'input_transcription')) {
       categories.add('inputTranscription');
     }
-    if (isRecord(recordFromAnyKey(serverContent, 'outputTranscription', 'output_transcription'))) {
+    if (hasTranscriptionText(event, 'outputTranscription', 'output_transcription')) {
       categories.add('outputTranscription');
     }
     const modelTurn = recordFromAnyKey(serverContent, 'modelTurn', 'model_turn');
@@ -3651,10 +3653,10 @@ function describeGeminiProviderEventType(event: Record<string, unknown>): string
     })) {
       return 'serverContent.modelTurn.inlineData.audio';
     }
-    if (isRecord(recordFromAnyKey(serverContent, 'outputTranscription', 'output_transcription'))) {
+    if (hasTranscriptionText(event, 'outputTranscription', 'output_transcription')) {
       return 'serverContent.outputTranscription';
     }
-    if (isRecord(recordFromAnyKey(serverContent, 'inputTranscription', 'input_transcription'))) {
+    if (hasTranscriptionText(event, 'inputTranscription', 'input_transcription')) {
       return 'serverContent.inputTranscription';
     }
     return 'serverContent';
@@ -3780,17 +3782,17 @@ function isGeminiModelTurnAudioPart(part: unknown): boolean {
 }
 
 function hasTranscriptionText(event: unknown, ...transcriptionKeys: string[]): boolean {
-  const serverContent = recordFromAnyKey(event, 'serverContent', 'server_content');
-  const transcription = recordFromAnyKey(serverContent, ...transcriptionKeys);
-  const text = stringFromAnyKey(transcription, 'text');
-  return Boolean(text?.trim());
+  return Boolean(readTranscriptionText(event, ...transcriptionKeys));
 }
 
 function readTranscriptionText(event: unknown, ...transcriptionKeys: string[]): string | null {
   const serverContent = recordFromAnyKey(event, 'serverContent', 'server_content');
-  const transcription = recordFromAnyKey(serverContent, ...transcriptionKeys);
-  const text = stringFromAnyKey(transcription, 'text')?.replace(/\s+/g, ' ').trim();
-  return text || null;
+  const transcription = valueFromAnyKey(serverContent, ...transcriptionKeys);
+  const text = typeof transcription === 'string'
+    ? transcription
+    : stringFromAnyKey(transcription, 'text', 'transcript');
+  const normalized = text?.replace(/\s+/g, ' ').trim();
+  return normalized || null;
 }
 
 function artifactReviewAssistantLeakageMarker(
@@ -3903,9 +3905,7 @@ function isLikelyAssistantEcho(inputText: string, assistantText: string | null):
 }
 
 function readTranscriptionTextPreview(event: unknown, ...transcriptionKeys: string[]): string | null {
-  const serverContent = recordFromAnyKey(event, 'serverContent', 'server_content');
-  const transcription = recordFromAnyKey(serverContent, ...transcriptionKeys);
-  const text = stringFromAnyKey(transcription, 'text')?.replace(/\s+/g, ' ').trim();
+  const text = readTranscriptionText(event, ...transcriptionKeys);
   if (!text) {
     return null;
   }
@@ -4570,6 +4570,20 @@ function recordFromAnyKey(value: unknown, ...keys: string[]): Record<string, unk
     const candidate = value[key];
     if (isRecord(candidate)) {
       return candidate;
+    }
+  }
+
+  return null;
+}
+
+function valueFromAnyKey(value: unknown, ...keys: string[]): unknown {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      return value[key];
     }
   }
 

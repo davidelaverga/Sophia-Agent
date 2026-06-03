@@ -1166,9 +1166,9 @@ def categorize_gemini_provider_event(event: Mapping[str, Any]) -> list[str]:
     server_content = _record_value(_value_from_any_key(event, "serverContent", "server_content"))
     if server_content is not None:
         categories.append("serverContent")
-        if _record_value(_value_from_any_key(server_content, "inputTranscription", "input_transcription")) is not None:
+        if _transcription_text_value(server_content, "inputTranscription", "input_transcription"):
             categories.append("inputTranscription")
-        if _record_value(_value_from_any_key(server_content, "outputTranscription", "output_transcription")) is not None:
+        if _transcription_text_value(server_content, "outputTranscription", "output_transcription"):
             categories.append("outputTranscription")
         model_turn = _record_value(_value_from_any_key(server_content, "modelTurn", "model_turn"))
         parts = model_turn.get("parts") if model_turn else None
@@ -1319,6 +1319,17 @@ def _resolve_gemini_api_key() -> tuple[str, str] | None:
 def _string_value(value: Any) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
+    return None
+
+
+def _transcription_text_value(record: Mapping[str, Any], *keys: str) -> str | None:
+    transcription = _value_from_any_key(record, *keys)
+    if isinstance(transcription, str):
+        return _string_value(transcription)
+    if isinstance(transcription, Mapping):
+        return _string_value(transcription.get("text")) or _string_value(
+            transcription.get("transcript")
+        )
     return None
 
 

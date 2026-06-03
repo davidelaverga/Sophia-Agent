@@ -402,6 +402,7 @@ class GeminiLiveEventMapper:
             text = _string_from_any_key(transcription, "text", "transcript")
         else:
             text = _string_value(transcription)
+        text = text.strip() if text else None
         if not text:
             return []
         turn_id = _turn_id_from_raw(raw)

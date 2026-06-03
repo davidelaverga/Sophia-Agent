@@ -395,6 +395,27 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(telemetry.outputTranscriptionTextPreview).toBe('hi');
   });
 
+  it('treats string-shaped Gemini input transcription as critical provider text', () => {
+    const event = { serverContent: { inputTranscription: 'Review this section please.' } };
+
+    expect(categorizeGeminiProviderEvent(event)).toEqual(['serverContent', 'inputTranscription']);
+    expect(classifyGeminiProviderEventForRelay(event)).toMatchObject({
+      classification: 'critical',
+      reason: 'input_transcription_updates_public_user_transcript',
+      shouldRelay: true,
+    });
+
+    const telemetry = recordGeminiProviderEventTelemetry(
+      createGeminiProviderEventCategoryCounts(),
+      createGeminiRelayClassificationCounts(),
+      event,
+      '2026-05-20T00:00:00.000Z',
+    );
+    expect(telemetry.hasInputTranscriptionText).toBe(true);
+    expect(telemetry.inputTranscriptionTextPreview).toBe('Review this section please.');
+    expect(telemetry.categoryCounts.inputTranscription.count).toBe(1);
+  });
+
   it('recognizes only meaningful Gemini provider events as relayable', () => {
     expect(isRelayableGeminiProviderEvent({})).toBe(false);
     expect(isRelayableGeminiProviderEvent('')).toBe(false);
@@ -403,6 +424,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(isRelayableGeminiProviderEvent({ setupComplete: {} })).toBe(true);
     expect(isRelayableGeminiProviderEvent({ setup_complete: {} })).toBe(true);
     expect(isRelayableGeminiProviderEvent({ serverContent: { outputTranscription: { text: 'Hi.' } } })).toBe(true);
+    expect(isRelayableGeminiProviderEvent({ serverContent: { inputTranscription: 'Hi Sophia.' } })).toBe(true);
     expect(isRelayableGeminiProviderEvent({
       toolCall: {
         functionCalls: [{ id: 'artifact-call-1', name: 'emit_artifact', args: emitArtifactArgs }],
@@ -1654,6 +1676,57 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         transcriptPartialsSent: 4,
         transcriptCoalescingDisabledReason: 'provider_output_transcription_is_delta_like',
       },
+    });
+
+    await connection.close();
+  });
+
+  it('does not skip provider relay sequence after a failed critical relay', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-relay-reuse',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-relay-reuse',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response('transient relay failure', { status: 502 }))
+      .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }));
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+    });
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const failedSetupBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)) as Record<string, unknown>;
+    expect(failedSetupBody).toMatchObject({
+      event: { setupComplete: {} },
+      provider_relay_sequence: 1,
+    });
+
+    websocket?.emitMessage({ serverContent: { inputTranscription: { text: 'Can you hear this turn?' } } });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+
+    const inputRelayBody = JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body)) as Record<string, unknown>;
+    expect(inputRelayBody).toMatchObject({
+      event: { serverContent: { inputTranscription: { text: 'Can you hear this turn?' } } },
+      provider_relay_sequence: 1,
+      provider_primary_category: 'serverContent',
+      provider_categories: ['serverContent', 'inputTranscription'],
     });
 
     await connection.close();

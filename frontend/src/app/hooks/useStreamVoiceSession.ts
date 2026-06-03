@@ -224,6 +224,18 @@ function createGeminiRuntimeTelemetry(params: Partial<Extract<VoiceRuntimeTeleme
     lastProviderEventAt: params.lastProviderEventAt ?? null,
     lastProviderEventType: params.lastProviderEventType ?? null,
     providerCategoryCounts: params.providerCategoryCounts ?? {},
+    reviewVoiceReady: params.reviewVoiceReady ?? false,
+    reviewMicAudioDetected: params.reviewMicAudioDetected ?? false,
+    reviewUserSpeechDetected: params.reviewUserSpeechDetected ?? false,
+    reviewProviderTranscriptObserved: params.reviewProviderTranscriptObserved ?? false,
+    reviewPublicTranscriptObserved: params.reviewPublicTranscriptObserved ?? false,
+    reviewTranscriptPromotionBlockedReason: params.reviewTranscriptPromotionBlockedReason ?? null,
+    providerInputTranscriptCount: params.providerInputTranscriptCount ?? 0,
+    publicUserTranscriptCount: params.publicUserTranscriptCount ?? 0,
+    providerToPublicTranscriptGap: params.providerToPublicTranscriptGap ?? 0,
+    firstProviderTranscriptAt: params.firstProviderTranscriptAt ?? null,
+    firstPublicUserTranscriptAt: params.firstPublicUserTranscriptAt ?? null,
+    transcriptPromotionLatencyMs: params.transcriptPromotionLatencyMs ?? null,
     outputAudioEventCount: params.outputAudioEventCount ?? 0,
     lastOutputAudioAt: params.lastOutputAudioAt ?? null,
     assistantTranscriptSource: params.assistantTranscriptSource ?? null,
@@ -302,6 +314,51 @@ function createGeminiRuntimeTelemetry(params: Partial<Extract<VoiceRuntimeTeleme
     lastToolAt: params.lastToolAt ?? null,
     toolCallLedger: params.toolCallLedger ?? [],
   }
+}
+
+function applyGeminiTranscriptReadiness(
+  current: Extract<VoiceRuntimeTelemetry, { runtime: "gemini_live" }>,
+  patch: Partial<Extract<VoiceRuntimeTelemetry, { runtime: "gemini_live" }>>,
+): Extract<VoiceRuntimeTelemetry, { runtime: "gemini_live" }> {
+  const next = { ...current, ...patch }
+  const providerInputTranscriptCount = next.providerInputTranscriptCount ?? 0
+  const publicUserTranscriptCount = next.publicUserTranscriptCount ?? 0
+  const providerToPublicTranscriptGap = Math.max(providerInputTranscriptCount - publicUserTranscriptCount, 0)
+  const reviewProviderTranscriptObserved = next.reviewProviderTranscriptObserved === true || providerInputTranscriptCount > 0
+  const reviewPublicTranscriptObserved = next.reviewPublicTranscriptObserved === true || publicUserTranscriptCount > 0
+  const reviewUserSpeechDetected = next.reviewUserSpeechDetected === true
+  const reviewMicAudioDetected = next.reviewMicAudioDetected === true
+  let reviewTranscriptPromotionBlockedReason: string | null = null
+
+  if (reviewProviderTranscriptObserved && !reviewPublicTranscriptObserved && providerToPublicTranscriptGap > 0) {
+    reviewTranscriptPromotionBlockedReason = "provider_transcript_not_surfaced"
+  } else if (reviewUserSpeechDetected && !reviewProviderTranscriptObserved && !reviewPublicTranscriptObserved) {
+    reviewTranscriptPromotionBlockedReason = "voice_input_detected_waiting_for_transcript"
+  } else if (patch.reviewTranscriptPromotionBlockedReason !== undefined) {
+    reviewTranscriptPromotionBlockedReason = patch.reviewTranscriptPromotionBlockedReason
+  }
+
+  return {
+    ...next,
+    reviewVoiceReady: reviewTranscriptPromotionBlockedReason === null,
+    reviewMicAudioDetected,
+    reviewUserSpeechDetected,
+    reviewProviderTranscriptObserved,
+    reviewPublicTranscriptObserved,
+    reviewTranscriptPromotionBlockedReason,
+    providerInputTranscriptCount,
+    publicUserTranscriptCount,
+    providerToPublicTranscriptGap,
+    transcriptPromotionLatencyMs: transcriptLatencyMs(next.firstProviderTranscriptAt, next.firstPublicUserTranscriptAt),
+  }
+}
+
+function transcriptLatencyMs(startIso: string | null | undefined, endIso: string | null | undefined): number | null {
+  if (!startIso || !endIso) return null
+  const start = Date.parse(startIso)
+  const end = Date.parse(endIso)
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null
+  return end - start
 }
 
 function geminiStageTelemetry(stage: string): {
@@ -1752,6 +1809,16 @@ export function useStreamVoiceSession(
     }
 
     if (type === "sophia.user_transcript") {
+      const timestamp = new Date().toISOString()
+      if (geminiConnectionRef.current) {
+        setRuntimeTelemetry((current) => current.runtime === "gemini_live"
+          ? applyGeminiTranscriptReadiness(current, {
+              publicUserTranscriptCount: (current.publicUserTranscriptCount ?? 0) + 1,
+              firstPublicUserTranscriptAt: current.firstPublicUserTranscriptAt ?? timestamp,
+              reviewPublicTranscriptObserved: true,
+            })
+          : current)
+      }
       applyUserTranscriptData(data, "public_user_transcript")
     }
 
@@ -2431,8 +2498,7 @@ export function useStreamVoiceSession(
               }
             }
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
-              ? {
-                  ...current,
+              ? applyGeminiTranscriptReadiness(current, {
                   userInputActiveAgeMs: diagnostic.userInputActiveAgeMs ?? current.userInputActiveAgeMs ?? null,
                   bargeInConfirmed: current.bargeInConfirmed === true || diagnostic.bargeInConfirmed === true,
                   bargeInConfirmationSource: diagnostic.bargeInConfirmationSource ?? current.bargeInConfirmationSource ?? "none",
@@ -2447,7 +2513,9 @@ export function useStreamVoiceSession(
                   maxRawAssistantUserOverlapMs: Math.max(current.maxRawAssistantUserOverlapMs ?? current.rawAssistantUserOverlapMs ?? current.assistantUserOverlapMs ?? 0, diagnostic.rawAssistantUserOverlapMs ?? 0),
                   confirmedAssistantUserOverlapMs: Math.max(current.confirmedAssistantUserOverlapMs ?? 0, diagnostic.confirmedAssistantUserOverlapMs ?? 0),
                   maxConfirmedAssistantUserOverlapMs: Math.max(current.maxConfirmedAssistantUserOverlapMs ?? current.confirmedAssistantUserOverlapMs ?? 0, diagnostic.confirmedAssistantUserOverlapMs ?? 0),
-                }
+                  reviewMicAudioDetected: current.reviewMicAudioDetected === true || diagnostic.eventType === "input_audio_frame_sent",
+                  reviewUserSpeechDetected: current.reviewUserSpeechDetected === true || diagnostic.eventType === "input_audio_frame_sent",
+                })
               : current)
             recordSophiaCaptureEvent({
               category: "voice-session",
@@ -2496,6 +2564,13 @@ export function useStreamVoiceSession(
             if (!userTranscriptData) return
             const applied = applyUserTranscriptData(userTranscriptData, "barge_in_transcript_handoff")
             if (!applied) return
+            setRuntimeTelemetry((current) => current.runtime === "gemini_live"
+              ? applyGeminiTranscriptReadiness(current, {
+                  publicUserTranscriptCount: (current.publicUserTranscriptCount ?? 0) + 1,
+                  firstPublicUserTranscriptAt: current.firstPublicUserTranscriptAt ?? diagnostic.timestamp,
+                  reviewPublicTranscriptObserved: true,
+                })
+              : current)
             recordSophiaCaptureEvent({
               category: "voice-session",
               name: "sophia.user_transcript",
@@ -2632,11 +2707,17 @@ export function useStreamVoiceSession(
           },
           onProviderEventTelemetry: (telemetry) => {
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
-              ? {
-                  ...current,
+              ? applyGeminiTranscriptReadiness(current, {
                   providerCategoryCounts: telemetry.categoryCounts,
                   relayClassificationCounts: telemetry.relayClassificationCounts,
-                }
+                  providerInputTranscriptCount: telemetry.categoryCounts.inputTranscription?.count ?? current.providerInputTranscriptCount ?? 0,
+                  firstProviderTranscriptAt: (
+                    telemetry.hasInputTranscriptionText
+                      ? current.firstProviderTranscriptAt ?? telemetry.timestamp
+                      : current.firstProviderTranscriptAt ?? null
+                  ),
+                  reviewProviderTranscriptObserved: current.reviewProviderTranscriptObserved === true || telemetry.hasInputTranscriptionText,
+                })
               : current)
             recordSophiaCaptureEvent({
               category: "voice-session",

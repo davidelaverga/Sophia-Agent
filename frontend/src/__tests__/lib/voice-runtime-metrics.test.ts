@@ -522,6 +522,10 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.sessionTelemetry.gemini?.setupComplete).toBe(true);
     expect(metrics.sessionTelemetry.gemini?.providerEventCount).toBe(1);
     expect(metrics.sessionTelemetry.gemini?.providerCategoryCounts.toolCall.count).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.reviewVoiceReady).toBe(true);
+    expect(metrics.sessionTelemetry.gemini?.reviewPublicTranscriptObserved).toBe(true);
+    expect(metrics.sessionTelemetry.gemini?.publicUserTranscriptCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.providerToPublicTranscriptGap).toBe(0);
     expect(metrics.sessionTelemetry.gemini?.relayDiagnosticCount).toBe(1);
     expect(metrics.sessionTelemetry.gemini?.relayTraceCount).toBe(1);
     expect(metrics.sessionTelemetry.gemini?.relayAttemptCount).toBe(2);
@@ -545,6 +549,159 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.sessionTelemetry.gemini?.artifactRuntimeIngestCount).toBe(0);
     expect(metrics.sessionTelemetry.gemini?.artifactRenderedCount).toBe(0);
     expect(metrics.sessionTelemetry.gemini?.artifactCountSource).toBe('public_event');
+  });
+
+  it('warns when mic audio is detected but Gemini has not produced input transcription', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { platform: 'voice', sessionId: 'session-dev' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:00.100Z',
+        category: 'voice-session',
+        name: 'credentials-received',
+        payload: {
+          callId: 'gemini-session-dev',
+          callType: 'gemini_live',
+          runtime: 'gemini_live',
+          sessionId: 'session-dev',
+          voiceAgentSessionId: 'gemini-session-dev',
+        },
+      }),
+      buildEvent({
+        seq: 3,
+        at: '2026-04-07T12:00:00.200Z',
+        category: 'voice-session',
+        name: 'gemini-stage-changed',
+        payload: {
+          runtime: 'gemini_live',
+          stage: 'streaming_audio',
+          connectionState: 'connected',
+          websocketState: 'connected',
+          microphoneState: 'connected',
+        },
+      }),
+      buildEvent({
+        seq: 4,
+        at: '2026-04-07T12:00:00.300Z',
+        category: 'harness-input',
+        name: 'microphone-audio-detected',
+        payload: { rms: 0.07 },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot({ detectedAudio: true }),
+      nowMs: Date.parse('2026-04-07T12:00:01.000Z'),
+    });
+
+    expect(metrics.health.title).toBe('Audio detected, transcript missing');
+    expect(metrics.sessionTelemetry.gemini?.reviewVoiceReady).toBe(false);
+    expect(metrics.sessionTelemetry.gemini?.reviewMicAudioDetected).toBe(true);
+    expect(metrics.sessionTelemetry.gemini?.reviewUserSpeechDetected).toBe(true);
+    expect(metrics.sessionTelemetry.gemini?.reviewProviderTranscriptObserved).toBe(false);
+    expect(metrics.sessionTelemetry.gemini?.reviewTranscriptPromotionBlockedReason).toBe('voice_input_detected_waiting_for_transcript');
+  });
+
+  it('warns when provider input transcription is not surfaced publicly', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { platform: 'voice', sessionId: 'session-dev' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:00.100Z',
+        category: 'voice-session',
+        name: 'credentials-received',
+        payload: {
+          callId: 'gemini-session-dev',
+          callType: 'gemini_live',
+          runtime: 'gemini_live',
+          sessionId: 'session-dev',
+          voiceAgentSessionId: 'gemini-session-dev',
+        },
+      }),
+      buildEvent({
+        seq: 3,
+        at: '2026-04-07T12:00:00.200Z',
+        category: 'voice-session',
+        name: 'gemini-stage-changed',
+        payload: {
+          runtime: 'gemini_live',
+          stage: 'streaming_audio',
+          connectionState: 'connected',
+          websocketState: 'connected',
+          microphoneState: 'connected',
+        },
+      }),
+      buildEvent({
+        seq: 4,
+        at: '2026-04-07T12:00:00.400Z',
+        category: 'voice-session',
+        name: 'gemini-provider-event-correlation',
+        payload: {
+          runtime: 'gemini_live',
+          telemetry: {
+            timestamp: '2026-04-07T12:00:00.400Z',
+            hasInputTranscriptionText: true,
+            categoryCounts: {
+              inputTranscription: { count: 1, lastAt: '2026-04-07T12:00:00.400Z' },
+            },
+          },
+        },
+      }),
+      buildEvent({
+        seq: 5,
+        at: '2026-04-07T12:00:00.420Z',
+        category: 'voice-session',
+        name: 'coreview-state',
+        payload: {
+          coreview: {
+            coreviewEnabled: true,
+            coreviewSessionActive: true,
+            coreviewArtifactId: 'artifact-1',
+            frameSentCount: 1,
+            initialFrameSent: true,
+            visualFresh: true,
+            visualFreshForTurn: true,
+            rawFrameExcluded: true,
+            rawProviderPayloadExcluded: true,
+          },
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot({ detectedAudio: true }),
+      nowMs: Date.parse('2026-04-07T12:00:01.000Z'),
+    });
+
+    expect(metrics.health.title).toBe('Provider transcript not surfaced');
+    expect(metrics.sessionTelemetry.gemini?.reviewVoiceReady).toBe(false);
+    expect(metrics.sessionTelemetry.gemini?.reviewProviderTranscriptObserved).toBe(true);
+    expect(metrics.sessionTelemetry.gemini?.reviewPublicTranscriptObserved).toBe(false);
+    expect(metrics.sessionTelemetry.gemini?.reviewTranscriptPromotionBlockedReason).toBe('provider_transcript_not_surfaced');
+    expect(metrics.sessionTelemetry.gemini?.providerInputTranscriptCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.publicUserTranscriptCount).toBe(0);
+    expect(metrics.sessionTelemetry.gemini?.providerToPublicTranscriptGap).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.firstProviderTranscriptAt).toBe('2026-04-07T12:00:00.400Z');
+    expect(metrics.sessionTelemetry.gemini?.firstPublicUserTranscriptAt).toBeNull();
+    expect(metrics.sessionTelemetry.gemini?.transcriptPromotionLatencyMs).toBeNull();
+    expect(metrics.coreview.visual.initialFrameSent).toBe(true);
+    expect(metrics.coreview.visual.frameSentCount).toBe(1);
   });
 
   it('summarizes voice preconnect hit telemetry', () => {

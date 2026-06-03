@@ -605,6 +605,21 @@ function SessionPageContent() {
     sessionContextMode,
   });
 
+  const voiceReadinessStatusText = useMemo(() => {
+    if (focusMode === 'text' || voiceState.runtimeTelemetry.runtime !== 'gemini_live') {
+      return presenceStatus;
+    }
+
+    switch (voiceState.runtimeTelemetry.reviewTranscriptPromotionBlockedReason) {
+      case 'provider_transcript_not_surfaced':
+        return 'Voice transcript is delayed';
+      case 'voice_input_detected_waiting_for_transcript':
+        return 'Voice input detected, waiting for transcript';
+      default:
+        return presenceStatus;
+    }
+  }, [focusMode, presenceStatus, voiceState.runtimeTelemetry]);
+
   const [hasNewArtifacts, setHasNewArtifacts] = useState(false);
   const [isVoiceCaptionVisible, setIsVoiceCaptionVisible] = useState(false);
   const previousArtifactCountRef = useRef(0);
@@ -1478,7 +1493,7 @@ function SessionPageContent() {
               justSent={justSent}
               voiceStatus={voiceStatus}
               isTyping={isTyping}
-              statusText={isReadOnly ? 'Read-only session' : presenceStatus}
+              statusText={isReadOnly ? 'Read-only session' : voiceReadinessStatusText}
               isOffline={isOffline}
               isConnecting={connectivityStatus === 'checking'}
               focusRequestToken={composerFocusToken}

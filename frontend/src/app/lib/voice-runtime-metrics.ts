@@ -270,6 +270,18 @@ export type GeminiSessionTelemetry = {
     lastProviderEventAt: string | null
     lastProviderEventType: string | null
     providerCategoryCounts: Record<string, { count: number; lastAt: string | null }>
+    reviewVoiceReady: boolean
+    reviewMicAudioDetected: boolean
+    reviewUserSpeechDetected: boolean
+    reviewProviderTranscriptObserved: boolean
+    reviewPublicTranscriptObserved: boolean
+    reviewTranscriptPromotionBlockedReason: string | null
+    providerInputTranscriptCount: number
+    publicUserTranscriptCount: number
+    providerToPublicTranscriptGap: number
+    firstProviderTranscriptAt: string | null
+    firstPublicUserTranscriptAt: string | null
+    transcriptPromotionLatencyMs: number | null
     outputAudioEventCount: number
     lastOutputAudioAt: string | null
     assistantTranscriptSource: string | null
@@ -1301,6 +1313,21 @@ function latestEventAt(events: NormalizedVoiceCaptureEvent[], name: string): str
   return findLast(events, (event) => event.name === name)?.recordedAt ?? null
 }
 
+function firstGeminiProviderTranscriptAt(events: NormalizedVoiceCaptureEvent[]): string | null {
+  const event = findFirst(events, (entry) => {
+    if (entry.name !== "gemini-provider-event-correlation") {
+      return false
+    }
+    const telemetry = asRecord(eventData(entry)?.telemetry)
+    if (asBoolean(telemetry?.hasInputTranscriptionText) === true) {
+      return true
+    }
+    const categoryCounts = asGeminiCategoryCounts(telemetry?.categoryCounts)
+    return (categoryCounts.inputTranscription?.count ?? 0) > 0
+  })
+  return event?.recordedAt ?? null
+}
+
 function latestGeminiToolCallLedger(events: NormalizedVoiceCaptureEvent[]): Array<Record<string, unknown>> {
   const entriesById = new Map<string, Record<string, unknown>>()
   for (const event of events) {
@@ -1462,9 +1489,10 @@ function buildSessionTelemetry(params: {
   timings: VoiceDeveloperMetrics["timings"]
   counts: VoiceDeveloperMetrics["counts"]
   lastTurn: VoiceDeveloperMetrics["lastTurn"]
+  microphone: VoiceDeveloperMetrics["microphone"]
   nowMs: number
 }): VoiceSessionTelemetry {
-  const { runtimeTelemetry, activeEvents, sessionIds, transport, timings, counts, lastTurn, nowMs } = params
+  const { runtimeTelemetry, activeEvents, sessionIds, transport, timings, counts, lastTurn, microphone, nowMs } = params
   const captureRuntime = latestRuntimeFromCapture(activeEvents)
   const preferCaptureRuntime = Boolean(
     captureRuntime
@@ -1667,6 +1695,39 @@ function buildSessionTelemetry(params: {
       hookTelemetry?.outputAudioEventCount ?? 0,
       countWhere(activeEvents, (event) => event.name === "gemini-output-audio-started"),
     )
+    const providerInputTranscriptCount = Math.max(
+      hookTelemetry?.providerInputTranscriptCount ?? 0,
+      geminiProviderCategoryCount(activeEvents, runtimeTelemetry, "inputTranscription"),
+    )
+    const publicUserTranscriptCount = Math.max(
+      hookTelemetry?.publicUserTranscriptCount ?? 0,
+      counts.userTranscripts,
+    )
+    const providerToPublicTranscriptGap = Math.max(providerInputTranscriptCount - publicUserTranscriptCount, 0)
+    const firstProviderTranscriptAt = hookTelemetry?.firstProviderTranscriptAt
+      ?? firstGeminiProviderTranscriptAt(activeEvents)
+    const firstPublicUserTranscriptAt = hookTelemetry?.firstPublicUserTranscriptAt
+      ?? findFirst(activeEvents, (event) => event.name === "sophia.user_transcript")?.recordedAt
+      ?? null
+    const reviewMicAudioDetected = hookTelemetry?.reviewMicAudioDetected === true || microphone.detectedAudio
+    const reviewUserSpeechDetected = hookTelemetry?.reviewUserSpeechDetected === true
+      || microphone.detectedAudio
+      || inputAudioDiagnostics.some((diagnostic) => asString(diagnostic.eventType) === "input_audio_frame_sent")
+      || bargeInCandidateFrameCount > 0
+    const reviewProviderTranscriptObserved = hookTelemetry?.reviewProviderTranscriptObserved === true
+      || providerInputTranscriptCount > 0
+    const reviewPublicTranscriptObserved = hookTelemetry?.reviewPublicTranscriptObserved === true
+      || publicUserTranscriptCount > 0
+    const reviewTranscriptPromotionBlockedReason = reviewProviderTranscriptObserved && !reviewPublicTranscriptObserved && providerToPublicTranscriptGap > 0
+      ? "provider_transcript_not_surfaced"
+      : reviewUserSpeechDetected && !reviewProviderTranscriptObserved && !reviewPublicTranscriptObserved
+        ? "voice_input_detected_waiting_for_transcript"
+        : hookTelemetry?.reviewTranscriptPromotionBlockedReason ?? null
+    const transcriptPromotionLatencyMs = hookTelemetry?.transcriptPromotionLatencyMs
+      ?? diffMs(
+        parseTimestampMs(firstProviderTranscriptAt),
+        parseTimestampMs(firstPublicUserTranscriptAt),
+      )
     const interruptionCount = Math.max(
       hookTelemetry?.interruptionCount ?? 0,
       countWhere(activeEvents, (event) => event.name === "gemini-interruption"),
@@ -1760,6 +1821,18 @@ function buildSessionTelemetry(params: {
         lastProviderEventAt: hookTelemetry?.lastProviderEventAt ?? latestEventAt(activeEvents, "gemini-provider-event"),
         lastProviderEventType: hookTelemetry?.lastProviderEventType ?? asString(providerPayload?.eventType),
         providerCategoryCounts: hookTelemetry?.providerCategoryCounts ?? asGeminiCategoryCounts(providerTelemetry?.categoryCounts),
+        reviewVoiceReady: reviewTranscriptPromotionBlockedReason === null,
+        reviewMicAudioDetected,
+        reviewUserSpeechDetected,
+        reviewProviderTranscriptObserved,
+        reviewPublicTranscriptObserved,
+        reviewTranscriptPromotionBlockedReason,
+        providerInputTranscriptCount,
+        publicUserTranscriptCount,
+        providerToPublicTranscriptGap,
+        firstProviderTranscriptAt,
+        firstPublicUserTranscriptAt,
+        transcriptPromotionLatencyMs,
         outputAudioEventCount,
         lastOutputAudioAt: hookTelemetry?.lastOutputAudioAt ?? latestEventAt(activeEvents, "gemini-output-audio-started"),
         assistantTranscriptSource: hookTelemetry?.assistantTranscriptSource
@@ -3607,6 +3680,7 @@ export function buildVoiceDeveloperMetrics({
     timings,
     counts,
     lastTurn,
+    microphone,
     nowMs,
   })
   const coreview = buildCoreviewUsageTelemetry(activeEvents)

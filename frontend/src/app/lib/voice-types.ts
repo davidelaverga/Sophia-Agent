@@ -66,6 +66,18 @@ export type GeminiRuntimeTelemetry = {
   lastProviderEventAt: string | null
   lastProviderEventType: string | null
   providerCategoryCounts: Record<string, GeminiRuntimeCategoryCounter>
+  reviewVoiceReady?: boolean
+  reviewMicAudioDetected?: boolean
+  reviewUserSpeechDetected?: boolean
+  reviewProviderTranscriptObserved?: boolean
+  reviewPublicTranscriptObserved?: boolean
+  reviewTranscriptPromotionBlockedReason?: string | null
+  providerInputTranscriptCount?: number
+  publicUserTranscriptCount?: number
+  providerToPublicTranscriptGap?: number
+  firstProviderTranscriptAt?: string | null
+  firstPublicUserTranscriptAt?: string | null
+  transcriptPromotionLatencyMs?: number | null
   outputAudioEventCount: number
   lastOutputAudioAt: string | null
   assistantTranscriptSource?: string | null

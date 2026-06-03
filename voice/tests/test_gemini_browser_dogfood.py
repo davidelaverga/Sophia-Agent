@@ -872,6 +872,48 @@ async def test_browser_relay_messages_enter_existing_gemini_adapter_and_normaliz
 
 
 @pytest.mark.anyio
+async def test_browser_relay_string_input_transcription_surfaces_public_user_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    realtime_sessions = RealtimeDogfoodSessionManager()
+    manager = GeminiBrowserDogfoodSessionManager(
+        realtime_sessions,
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+    )
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id="browser-gemini-string-input",
+    )
+
+    response = await manager.ingest_browser_provider_event(
+        _gemini_settings(),
+        dogfood_session_id=browser_session.dogfood_session.session_id,
+        event={
+            "eventId": "user-item-string-1",
+            "serverContent": {
+                "inputTranscription": "Please review the top section.",
+            },
+        },
+    )
+    payloads = await browser_session.dogfood_session.wait_for_public_payloads(2)
+
+    assert response["accepted"] is True
+    assert response["diagnostics"]["provider_category_counts"]["inputTranscription"] == 1
+    assert [payload["type"] for payload in payloads] == [
+        "sophia.user_transcript",
+        "sophia.turn",
+    ]
+    assert payloads[0]["data"] == {
+        "text": "Please review the top section.",
+        "utterance_id": "user-item-string-1",
+    }
+
+    await manager.close_session("browser-gemini-string-input")
+
+
+@pytest.mark.anyio
 async def test_browser_relay_tool_call_executes_existing_emit_artifact_and_returns_tool_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
