@@ -2131,6 +2131,30 @@ The single highest-leverage finding in this entire cycle was Codex P1 on the cro
 
 ---
 
+## 2026-06-03 · [artifact-canvas-visual-ux-audit] · PR #133 still-review audit
+**Author:** Codex · **Track:** frontend UX docs · **Spec reference:** `docs/audits/artifact-canvas-visual-ux-audit.md`
+
+### What Changed
+- Added a docs-only visual UX audit for the current artifact canvas / review experience.
+- Inventoried the live session stage, voice stage, builder completion/ready flows, companion artifact review controls, still-frame capture path, and secondary artifact surfaces.
+- Recommended the next implementation slice: visual shell polish first, then canvas fill, Sophia review language, text/voice unification, single-page PDF, multipage rail, and final edge-case polish.
+
+### What We Learned
+- The current implementation has useful review mechanics, but the visual product still reads as several adjacent artifact surfaces rather than one first-class Sophia canvas.
+- `Page 1 of 1`, disabled zoom controls, metadata-only fallbacks, and hidden capture canvases should not be treated as PDF/multipage readiness.
+- The next slice should avoid provider, liveframe, VAD, and PDF dependency work; the shell needs a stable canvas bed and unified review chrome first.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A — no prompt files changed.
+
+---
+
 ## 2026-05-31 · [sophia-vision-port] · PR #132 (production-hardening wave)
 **Author:** Claude (assisted) · **Track:** backend | frontend · **Spec reference:** `docs/specs/` + Codex review thread on PR #132
 
