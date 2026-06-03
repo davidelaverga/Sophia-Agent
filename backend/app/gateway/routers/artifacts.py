@@ -675,37 +675,7 @@ async def get_artifact(
 
     # Check if this is a request for a file inside a .skill archive (e.g., xxx.skill/SKILL.md)
     if ".skill/" in path:
-        # Split the path at ".skill/" to get the ZIP file path and internal path
-        skill_marker = ".skill/"
-        marker_pos = path.find(skill_marker)
-        skill_file_path = path[: marker_pos + len(".skill")]  # e.g., "mnt/user-data/outputs/my-skill.skill"
-        internal_path = path[marker_pos + len(skill_marker) :]  # e.g., "SKILL.md"
-
-        actual_skill_path = _resolve_artifact_path(thread_id, skill_file_path)
-
-        if not actual_skill_path.exists():
-            raise HTTPException(status_code=404, detail=f"Skill file not found: {skill_file_path}")
-
-        if not actual_skill_path.is_file():
-            raise HTTPException(status_code=400, detail=f"Path is not a file: {skill_file_path}")
-
-        # Extract the file from the .skill archive
-        content = _extract_file_from_skill_archive(actual_skill_path, internal_path)
-        if content is None:
-            raise HTTPException(status_code=404, detail=f"File '{internal_path}' not found in skill archive")
-
-        # Determine MIME type based on the internal file
-        mime_type, _ = mimetypes.guess_type(internal_path)
-        # Add cache headers to avoid repeated ZIP extraction (cache for 5 minutes)
-        cache_headers = {"Cache-Control": "private, max-age=300"}
-        if mime_type and mime_type.startswith("text/"):
-            return PlainTextResponse(content=content.decode("utf-8"), media_type=mime_type, headers=cache_headers)
-
-        # Default to plain text for unknown types that look like text
-        try:
-            return PlainTextResponse(content=content.decode("utf-8"), media_type="text/plain", headers=cache_headers)
-        except UnicodeDecodeError:
-            return Response(content=content, media_type=mime_type or "application/octet-stream", headers=cache_headers)
+        return _serve_skill_archive_artifact(thread_id, path)
 
     resolution = await _resolve_artifact_path_for_request(thread_id, path)
     actual_path = resolution.actual_path
@@ -719,8 +689,43 @@ async def get_artifact(
     if not actual_path.is_file():
         raise HTTPException(status_code=400, detail=f"Path is not a file: {path}")
 
-    mime_type, _ = mimetypes.guess_type(actual_path)
+    return _serve_local_artifact(thread_id, actual_path, request)
 
+
+def _serve_skill_archive_artifact(thread_id: str, path: str) -> Response:
+    # Split the path at ".skill/" to get the ZIP file path and internal path
+    skill_marker = ".skill/"
+    marker_pos = path.find(skill_marker)
+    skill_file_path = path[: marker_pos + len(".skill")]  # e.g., "mnt/user-data/outputs/my-skill.skill"
+    internal_path = path[marker_pos + len(skill_marker) :]  # e.g., "SKILL.md"
+
+    actual_skill_path = _resolve_artifact_path(thread_id, skill_file_path)
+    if not actual_skill_path.exists():
+        raise HTTPException(status_code=404, detail=f"Skill file not found: {skill_file_path}")
+    if not actual_skill_path.is_file():
+        raise HTTPException(status_code=400, detail=f"Path is not a file: {skill_file_path}")
+
+    content = _extract_file_from_skill_archive(actual_skill_path, internal_path)
+    if content is None:
+        raise HTTPException(status_code=404, detail=f"File '{internal_path}' not found in skill archive")
+
+    return _skill_archive_content_response(content, internal_path)
+
+
+def _skill_archive_content_response(content: bytes, internal_path: str) -> Response:
+    mime_type, _ = mimetypes.guess_type(internal_path)
+    cache_headers = {"Cache-Control": "private, max-age=300"}
+    if mime_type and mime_type.startswith("text/"):
+        return PlainTextResponse(content=content.decode("utf-8"), media_type=mime_type, headers=cache_headers)
+
+    try:
+        return PlainTextResponse(content=content.decode("utf-8"), media_type="text/plain", headers=cache_headers)
+    except UnicodeDecodeError:
+        return Response(content=content, media_type=mime_type or "application/octet-stream", headers=cache_headers)
+
+
+def _serve_local_artifact(thread_id: str, actual_path: Path, request: Request) -> Response:
+    mime_type, _ = mimetypes.guess_type(actual_path)
     # Encode filename for Content-Disposition header (RFC 5987)
     encoded_filename = quote(actual_path.name)
 

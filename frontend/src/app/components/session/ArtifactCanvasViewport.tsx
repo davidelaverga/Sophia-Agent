@@ -472,36 +472,11 @@ function drawMarkdownArtifactCapture(
       break
     }
 
-    if (block.kind === "spacer") {
-      y += 14
-      continue
-    }
-
-    if (block.kind === "h1") {
-      context.fillStyle = "#282233"
-      context.font = "700 28px system-ui, sans-serif"
-      y = drawWrappedCanvasText(context, block.text, contentX, y, maxTextWidth, 34, 2) + 16
-      continue
-    }
-
-    if (block.kind === "h2" || block.kind === "h3") {
-      context.fillStyle = "#312a3d"
-      context.font = `${block.kind === "h2" ? "700 23px" : "700 19px"} system-ui, sans-serif`
-      y = drawWrappedCanvasText(context, block.text, contentX, y, maxTextWidth, block.kind === "h2" ? 30 : 25, 2) + 12
-      continue
-    }
-
-    if (block.kind === "bullet" || block.kind === "numbered") {
-      context.fillStyle = "#5f586c"
-      context.font = "17px system-ui, sans-serif"
-      context.fillText(block.prefix ?? "-", contentX, y)
-      y = drawWrappedCanvasText(context, block.text, contentX + 30, y, maxTextWidth - 30, 25, 3) + 8
-      continue
-    }
-
-    context.fillStyle = "#4b4359"
-    context.font = "17px system-ui, sans-serif"
-    y = drawWrappedCanvasText(context, block.text, contentX, y, maxTextWidth, 26, 4) + 12
+    y = drawMarkdownCaptureBlock(context, block, {
+      contentX,
+      maxTextWidth,
+      y,
+    })
   }
 
   context.fillStyle = "#81798d"
@@ -513,6 +488,60 @@ type MarkdownCaptureBlock = {
   kind: "h1" | "h2" | "h3" | "paragraph" | "bullet" | "numbered" | "spacer"
   text: string
   prefix?: string
+}
+
+function drawMarkdownCaptureBlock(
+  context: CanvasRenderingContext2D,
+  block: MarkdownCaptureBlock,
+  layout: {
+    contentX: number
+    maxTextWidth: number
+    y: number
+  },
+): number {
+  if (block.kind === "spacer") {
+    return layout.y + 14
+  }
+
+  if (block.kind === "h1") {
+    context.fillStyle = "#282233"
+    context.font = "700 28px system-ui, sans-serif"
+    return drawWrappedCanvasText(context, block.text, layout.contentX, layout.y, layout.maxTextWidth, 34, 2) + 16
+  }
+
+  if (block.kind === "h2" || block.kind === "h3") {
+    const isSecondLevel = block.kind === "h2"
+    context.fillStyle = "#312a3d"
+    context.font = `${isSecondLevel ? "700 23px" : "700 19px"} system-ui, sans-serif`
+    return drawWrappedCanvasText(
+      context,
+      block.text,
+      layout.contentX,
+      layout.y,
+      layout.maxTextWidth,
+      isSecondLevel ? 30 : 25,
+      2,
+    ) + 12
+  }
+
+  if (block.kind === "bullet" || block.kind === "numbered") {
+    context.fillStyle = "#5f586c"
+    context.font = "17px system-ui, sans-serif"
+    context.fillText(block.prefix ?? "-", layout.contentX, layout.y)
+    return drawWrappedCanvasText(
+      context,
+      block.text,
+      layout.contentX + 30,
+      layout.y,
+      layout.maxTextWidth - 30,
+      25,
+      3,
+    ) + 8
+  }
+
+  context.fillStyle = "#4b4359"
+  context.font = "17px system-ui, sans-serif"
+  return drawWrappedCanvasText(context, block.text, layout.contentX, layout.y, layout.maxTextWidth, 26, 4) + 12
 }
 
 function markdownToCaptureBlocks(markdown: string): MarkdownCaptureBlock[] {
