@@ -34,9 +34,22 @@ export function ArtifactReviewStatus({
   visualReviewPreparing = false,
   className,
 }: ArtifactReviewStatusProps) {
-  if (!featureEnabled) return null
-
   const exactTextAvailable = Boolean(state?.exactTextAvailable || exactTextAvailableOverride)
+  if (!featureEnabled) {
+    return (
+      <div
+        className={cn(
+          "flex flex-wrap items-center gap-2 text-[11px]",
+          className,
+        )}
+        aria-live="polite"
+      >
+        <StatusPill icon="alert" label="Visual review disabled locally" tone="danger" />
+        <ExactTextBadge available={exactTextAvailable} />
+      </div>
+    )
+  }
+
   const frameSent = hasConfirmedStillFrame(state, transportStatus)
   const stale = Boolean(frameSent && state?.state === "co_review_live")
   const hasFrameError = Boolean(

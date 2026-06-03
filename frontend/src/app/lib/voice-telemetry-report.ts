@@ -840,6 +840,12 @@ function buildCoreviewStillFrameDiagnosticsSummary(coreview: CoreviewUsageTeleme
   return {
     schema: 'coreview_still_frame_summary_v1',
     coreviewEnabled: coreview.visual.coreviewEnabled,
+    frontendCoreviewFlagParsed: coreview.visual.frontendCoreviewFlagParsed,
+    frontendStillFrameFlagParsed: coreview.visual.frontendStillFrameFlagParsed,
+    backendCoreviewFlagParsed: coreview.visual.backendCoreviewFlagParsed,
+    backendStillFrameFlagParsed: coreview.visual.backendStillFrameFlagParsed,
+    coreviewDisabledReason: coreview.visual.coreviewDisabledReason,
+    reviewStartBlockedReason: coreview.visual.reviewStartBlockedReason,
     coreviewSessionActive: coreview.visual.coreviewSessionActive,
     coreviewArtifactId: coreview.visual.coreviewArtifactId,
     visualSourceKind: coreview.visual.visualSourceKind,

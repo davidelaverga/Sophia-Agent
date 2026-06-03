@@ -1040,6 +1040,63 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.coreview.visual.exactTextAvailable).toBe(true);
   });
 
+  it('reports Coreview enabled from parsed frontend flags even before a frame is sent', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'coreview-flag-diagnostics',
+        payload: {
+          runtime: 'gemini_live',
+          frontendCoreviewFlagParsed: true,
+          frontendStillFrameFlagParsed: true,
+          backendCoreviewFlagParsed: true,
+          backendStillFrameFlagParsed: true,
+          coreviewDisabledReason: null,
+        },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:00.800Z',
+        category: 'artifacts-runtime',
+        name: 'select-stage-artifact',
+        payload: {
+          sessionId: 'session-dev',
+          threadId: 'thread-dev',
+          artifactId: 'coreview-real-artifact-launch-brief',
+          coreviewArtifactId: 'coreview-real-artifact-launch-brief',
+          reviewFeatureEnabled: true,
+          frontendCoreviewFlagParsed: true,
+          frontendStillFrameFlagParsed: true,
+          exactTextSource: 'builder_file',
+          exactTextAvailable: true,
+          rawArtifactTextExcluded: true,
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-04-07T12:00:01.500Z'),
+    });
+
+    expect(metrics.coreview.visual).toMatchObject({
+      coreviewEnabled: true,
+      coreviewSessionActive: false,
+      coreviewArtifactId: 'coreview-real-artifact-launch-brief',
+      frameSentCount: 0,
+      exactTextAvailable: true,
+      frontendCoreviewFlagParsed: true,
+      frontendStillFrameFlagParsed: true,
+      backendCoreviewFlagParsed: true,
+      backendStillFrameFlagParsed: true,
+      coreviewDisabledReason: null,
+    });
+  });
+
   it('does not count emit_artifact tool calls as artifacts without validated artifact evidence', () => {
     const events: VoiceCaptureEvent[] = [
       buildEvent({

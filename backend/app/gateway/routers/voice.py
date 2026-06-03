@@ -185,6 +185,8 @@ class GeminiVoiceConnectResponse(BaseModel):
     gemini_voice_configured: bool | None = None
     gemini_voice_configured_value_valid: bool | None = None
     gemini_voice_diagnostic: str | None = None
+    backendCoreviewFlagParsed: bool | None = None
+    backendStillFrameFlagParsed: bool | None = None
     preconnect: bool = False
     preconnect_ttl_ms: int | None = None
     preconnect_expires_at: str | None = None
@@ -447,6 +449,10 @@ def _gemini_relay_log_context(
 
 
 GEMINI_EMIT_ARTIFACT_TOOL_NAME = "emit_artifact"
+GEMINI_REVIEW_BLOCKED_TOOL_NAMES = {
+    "emit_artifact",
+    "start_builder_task",
+}
 ARTIFACT_REVIEW_EMIT_SUPPRESSED_REASON = "artifact_review_emit_artifact_suppressed"
 
 
@@ -510,7 +516,7 @@ def _artifact_review_user_intent(context: dict[str, object] | None) -> str:
     return value if isinstance(value, str) and value else "unknown"
 
 
-def _suppressed_review_emit_artifact_calls(
+def _suppressed_review_tool_calls(
     body: GeminiBrowserDogfoodRelayRequest,
 ) -> list[dict[str, object]]:
     if not _artifact_review_context_active(body.artifact_review_context):
@@ -522,22 +528,22 @@ def _suppressed_review_emit_artifact_calls(
     if not function_calls:
         return []
 
-    emit_calls = [
+    blocked_calls = [
         call
         for call in function_calls
-        if _string_from_any_key(call, "name") == GEMINI_EMIT_ARTIFACT_TOOL_NAME
+        if (_string_from_any_key(call, "name") or "") in GEMINI_REVIEW_BLOCKED_TOOL_NAMES
     ]
-    if not emit_calls or len(emit_calls) != len(function_calls):
+    if not blocked_calls:
         return []
 
-    return emit_calls
+    return blocked_calls
 
 
 def _artifact_review_emit_suppression_payload(
     body: GeminiBrowserDogfoodRelayRequest,
 ) -> dict[str, object] | None:
-    emit_calls = _suppressed_review_emit_artifact_calls(body)
-    if not emit_calls:
+    blocked_calls = _suppressed_review_tool_calls(body)
+    if not blocked_calls:
         return None
 
     guidance = (
@@ -547,8 +553,9 @@ def _artifact_review_emit_suppression_payload(
     function_responses: list[dict[str, object]] = []
     tool_diagnostics: list[dict[str, object]] = []
 
-    for index, call in enumerate(emit_calls):
+    for index, call in enumerate(blocked_calls):
         tool_call_id = _string_from_any_key(call, "id") or f"artifact-review-emit-{index + 1}"
+        tool_name = _string_from_any_key(call, "name") or GEMINI_EMIT_ARTIFACT_TOOL_NAME
         response = {
             "ok": False,
             "status": "rejected",
@@ -558,12 +565,12 @@ def _artifact_review_emit_suppression_payload(
         }
         function_responses.append({
             "id": tool_call_id,
-            "name": GEMINI_EMIT_ARTIFACT_TOOL_NAME,
+            "name": tool_name,
             "response": response,
         })
         tool_diagnostics.append({
             "id": tool_call_id,
-            "name": GEMINI_EMIT_ARTIFACT_TOOL_NAME,
+            "name": tool_name,
             "success": False,
             "execution_rejected": True,
             "rejection_reason": ARTIFACT_REVIEW_EMIT_SUPPRESSED_REASON,
@@ -590,7 +597,11 @@ def _artifact_review_emit_suppression_payload(
             "artifact_review_active": True,
             "artifact_review_user_intent": _artifact_review_user_intent(body.artifact_review_context),
             "review_tool_churn_detected": True,
-            "suppressed_tool_count": len(emit_calls),
+            "suppressed_tool_count": len(blocked_calls),
+            "suppressed_tools": sorted({
+                _string_from_any_key(call, "name") or GEMINI_EMIT_ARTIFACT_TOOL_NAME
+                for call in blocked_calls
+            }),
             "raw_artifact_text_excluded": True,
         },
     }

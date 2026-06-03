@@ -566,6 +566,8 @@ interface BrowserSessionPayload {
   public_event_boundary?: unknown;
   transport?: unknown;
   disconnect_url?: unknown;
+  backendCoreviewFlagParsed?: unknown;
+  backendStillFrameFlagParsed?: unknown;
 }
 
 export type GeminiBrowserLiveSessionBootstrap = BrowserSessionPayload;
@@ -729,7 +731,6 @@ const RELAYABLE_GEMINI_PROVIDER_EVENT_KEYS = new Set([
   'error',
 ]);
 const ZERO_FIELD_GEMINI_PROVIDER_EVENT_KEYS = new Set(['setupComplete', 'setup_complete']);
-const GEMINI_EMIT_ARTIFACT_TOOL_NAME = 'emit_artifact';
 const GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = 'read_artifact_text';
 const GEMINI_PROVIDER_EVENT_CATEGORIES: GeminiProviderEventCategory[] = [
   'setupComplete',
@@ -840,6 +841,7 @@ export async function connectGeminiBrowserLiveDogfood(
   let artifactReviewExpiresAtMs: number | null = null;
   let artifactReviewUserIntent: GeminiArtifactReviewUserIntent = 'unknown';
   let artifactReviewUserIntentAt: string | null = null;
+  const artifactReviewSuppressedResponseIds = new Set<string>();
 
   const relayQueueOldestQueuedAgeMs = () => {
     const oldestQueuedAtMs = orderedRelayQueue[0]?.queuedAtMs;
@@ -1623,6 +1625,19 @@ export async function connectGeminiBrowserLiveDogfood(
           const confirmation = providerInputTranscriptionConfirmation(event, receiveMetadata);
           promoteBargeInInputTranscription(event, receiveMetadata, confirmation);
         }
+        const artifactReviewContext = snapshotArtifactReviewRelayContext();
+        const leakageMarker = artifactReviewAssistantLeakageMarker(event, categories, artifactReviewContext);
+        if (leakageMarker) {
+          const responseId = readGeminiResponseId(event);
+          if (responseId) {
+            artifactReviewSuppressedResponseIds.add(responseId);
+            pruneStringSet(artifactReviewSuppressedResponseIds, 50);
+          }
+          if (categories.includes('outputTranscription') || categories.includes('modelTurnText')) {
+            relayThroughputMetrics.transcriptPartialsDropped += 1;
+          }
+          return;
+        }
         const transcriptSuppressionReason = staleOutputSuppressionReason(event, categories, receiveMetadata);
         if (transcriptSuppressionReason && (categories.includes('outputTranscription') || categories.includes('modelTurnText'))) {
           relayThroughputMetrics.transcriptPartialsDropped += 1;
@@ -1677,7 +1692,7 @@ export async function connectGeminiBrowserLiveDogfood(
             event,
             relayMetadata,
             browserSession.relayTargetPath ?? RELAY_TARGET_PATH,
-            snapshotArtifactReviewRelayContext(),
+            artifactReviewContext,
           )
           .then((relayResponse) => {
             const relayCompletedAt = new Date().toISOString();
@@ -1815,6 +1830,10 @@ export async function connectGeminiBrowserLiveDogfood(
         const audioSuppressionReason = staleOutputSuppressionReason(event, categories, receiveMetadata);
         if (audioSuppressionReason) {
           emitStaleOutputSuppression(event, receiveMetadata, 'audio', audioSuppressionReason);
+          return;
+        }
+        const responseId = readGeminiResponseId(event);
+        if (responseId && artifactReviewSuppressedResponseIds.has(responseId)) {
           return;
         }
         if (audioChunks.length) {
@@ -1979,12 +1998,9 @@ export function buildGeminiArtifactTextReaderHint(artifactId: string): Record<st
   return {
     realtimeInput: {
       text: [
-        'This is app context for the current artifact review. Do not answer this setup message.',
-        "If you speak at all, say only: I'm looking at it now.",
-        `During artifact review or analysis, do not call ${GEMINI_EMIT_ARTIFACT_TOOL_NAME} unless the user explicitly asks you to create, update, rewrite, or save an artifact.`,
-        `Coreview active artifact_id: ${artifactId}.`,
-        'For exact words, numbers, table values, labels, or fine print, call read_artifact_text with this artifact_id before answering.',
-        'Use the visual frame only for layout, composition, color, and spatial structure.',
+        'App context: artifact review is active for the selected artifact.',
+        `artifact_id: ${artifactId}.`,
+        'Do not answer this context message.',
       ].join(' '),
     },
   };
@@ -3688,6 +3704,53 @@ function readTranscriptionText(event: unknown, ...transcriptionKeys: string[]): 
   return text || null;
 }
 
+function artifactReviewAssistantLeakageMarker(
+  event: Record<string, unknown>,
+  categories: GeminiProviderEventCategory[],
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null,
+): string | null {
+  if (!artifactReviewContext?.active) {
+    return null;
+  }
+  if (!categories.includes('outputTranscription') && !categories.includes('modelTurnText')) {
+    return null;
+  }
+
+  const candidates = [
+    readTranscriptionText(event, 'outputTranscription', 'output_transcription'),
+    ...readGeminiModelTurnTextParts(event),
+  ].filter((text): text is string => Boolean(text));
+
+  for (const text of candidates) {
+    const marker = promptOrToolLeakageMarker(text);
+    if (marker) return marker;
+  }
+  return null;
+}
+
+function promptOrToolLeakageMarker(text: string): string | null {
+  const normalized = text.replace(/\s+/g, ' ').trim().toLowerCase();
+  if (!normalized) return null;
+  if (/\bemit_artifact\b/u.test(normalized)) return 'emit_artifact';
+  if (/\bread_artifact_text\b/u.test(normalized)) return 'read_artifact_text';
+  if (/\bactive_goal\s*:/u.test(normalized)) return 'active_goal';
+  if (/\btool_call_id\b/u.test(normalized)) return 'tool_call_id';
+  if (/^(?:tool\s+)?schema$/u.test(normalized) || /\btool\s+schema\b/u.test(normalized)) return 'tool_schema';
+  if (/\b(?:system|developer|internal)\s+prompt\b/u.test(normalized)) return 'internal_prompt';
+  if (/\bfunction\s*declarations?\b|\bfunctiondeclarations\b|\btool\s+payload\b/u.test(normalized)) return 'tool_schema';
+  return null;
+}
+
+function readGeminiModelTurnTextParts(event: Record<string, unknown>): string[] {
+  const serverContent = recordFromAnyKey(event, 'serverContent', 'server_content');
+  const modelTurn = recordFromAnyKey(serverContent, 'modelTurn', 'model_turn');
+  const parts = arrayFromAnyKey(modelTurn, 'parts') ?? [];
+  return parts
+    .filter(isRecord)
+    .map((part) => stringFromAnyKey(part, 'text')?.replace(/\s+/g, ' ').trim())
+    .filter((text): text is string => Boolean(text));
+}
+
 function normalizeTranscriptionForIntent(text: string): string {
   return text
     .normalize('NFKD')
@@ -3695,6 +3758,14 @@ function normalizeTranscriptionForIntent(text: string): string {
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim()
     .replace(/\s+/g, ' ');
+}
+
+function pruneStringSet(values: Set<string>, maxSize: number): void {
+  while (values.size > maxSize) {
+    const first = values.values().next().value;
+    if (typeof first !== 'string') return;
+    values.delete(first);
+  }
 }
 
 export function classifyArtifactReviewUserIntent(text: string): GeminiArtifactReviewUserIntent {

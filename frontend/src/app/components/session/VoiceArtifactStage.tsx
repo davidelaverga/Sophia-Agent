@@ -59,6 +59,7 @@ export function VoiceArtifactStage({
           exactTextAvailable={exactTextAvailable}
           canStartReview={canStartReview}
           reviewEnabled={false}
+          showReviewStatus={false}
           visualCaptureStatus={visualCaptureStatus}
           visualReviewRequiresVoice={visualReviewRequiresVoice}
           visualReviewPreparing={visualReviewPreparing}

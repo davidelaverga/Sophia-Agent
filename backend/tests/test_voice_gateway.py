@@ -1011,6 +1011,92 @@ class TestGeminiBrowserDogfoodGateway:
             },
         )
 
+    def test_relay_allows_review_read_artifact_text_without_suppression(self):
+        with patch(
+            "app.gateway.routers.voice._proxy_voice_dogfood_json",
+            new_callable=AsyncMock,
+            return_value={"accepted": True, "session_id": "browser-gemini-1"},
+        ) as proxy:
+            resp = client.post(
+                "/api/sophia/user_123/voice/dogfood/gemini/relay",
+                json={
+                    "session_id": "browser-gemini-1",
+                    "event": {
+                        "toolCall": {
+                            "functionCalls": [
+                                {
+                                    "id": "read-call-1",
+                                    "name": "read_artifact_text",
+                                    "args": {"artifact_id": "artifact-1", "query": "title"},
+                                }
+                            ]
+                        }
+                    },
+                    "provider_receive_sequence": 45,
+                    "provider_relay_sequence": 10,
+                    "provider_received_at": "2026-05-24T05:29:08.000Z",
+                    "relay_correlation_id": "gemini-45",
+                    "provider_primary_category": "toolCall",
+                    "provider_categories": ["toolCall"],
+                    "artifact_review_context": {
+                        "active": True,
+                        "artifact_id": "artifact-1",
+                        "source": "coreview_still_frame",
+                        "user_intent": "analysis",
+                        "raw_transcript_excluded": True,
+                        "raw_artifact_text_excluded": True,
+                    },
+                },
+            )
+
+        assert resp.status_code == 202
+        proxy.assert_awaited_once()
+        assert resp.json()["accepted"] is True
+
+    def test_relay_suppresses_review_only_start_builder_task_without_proxying(self):
+        with patch(
+            "app.gateway.routers.voice._proxy_voice_dogfood_json",
+            new_callable=AsyncMock,
+        ) as proxy:
+            resp = client.post(
+                "/api/sophia/user_123/voice/dogfood/gemini/relay",
+                json={
+                    "session_id": "browser-gemini-1",
+                    "event": {
+                        "toolCall": {
+                            "functionCalls": [
+                                {
+                                    "id": "builder-call-1",
+                                    "name": "start_builder_task",
+                                    "args": {"description": "Build a new artifact."},
+                                }
+                            ]
+                        }
+                    },
+                    "provider_receive_sequence": 46,
+                    "provider_relay_sequence": 11,
+                    "provider_received_at": "2026-05-24T05:29:09.000Z",
+                    "relay_correlation_id": "gemini-46",
+                    "provider_primary_category": "toolCall",
+                    "provider_categories": ["toolCall"],
+                    "artifact_review_context": {
+                        "active": True,
+                        "artifact_id": "artifact-1",
+                        "source": "coreview_still_frame",
+                        "user_intent": "analysis",
+                        "raw_transcript_excluded": True,
+                        "raw_artifact_text_excluded": True,
+                    },
+                },
+            )
+
+        payload = resp.json()
+        assert resp.status_code == 202
+        proxy.assert_not_awaited()
+        assert payload["diagnostics"]["suppressed_tools"] == ["start_builder_task"]
+        assert payload["tool_diagnostics"][0]["name"] == "start_builder_task"
+        assert payload["client_actions"][0]["payload"]["toolResponse"]["functionResponses"][0]["name"] == "start_builder_task"
+
     def test_production_relay_preserves_browser_source_metadata(self):
         with patch(
             "app.gateway.routers.voice._proxy_voice_runtime_json",

@@ -37,6 +37,7 @@ export interface ArtifactStageProps {
   visualReviewRequiresVoice?: boolean
   visualReviewPreparing?: boolean
   pendingStartVoiceReview?: boolean
+  showReviewStatus?: boolean
   visualCaptureStatus?: ArtifactVisualCaptureStatus | null
   onVisualCaptureStatusChange?: (status: ArtifactVisualCaptureStatus) => void
   onStartVoiceReview?: () => void
@@ -61,6 +62,7 @@ export function ArtifactStage({
   visualReviewRequiresVoice = false,
   visualReviewPreparing = false,
   pendingStartVoiceReview = false,
+  showReviewStatus: showReviewStatusOverride,
   visualCaptureStatus,
   onVisualCaptureStatusChange,
   onStartVoiceReview,
@@ -101,6 +103,7 @@ export function ArtifactStage({
       threadId,
     } : null
   ), [artifactId, normalSessionId, sessionId, threadId])
+  const showReviewStatus = showReviewStatusOverride ?? Boolean(reviewEnabled || exactTextAvailable || visualCaptureStatus)
 
   return (
     <section
@@ -130,7 +133,7 @@ export function ArtifactStage({
         className={fillAvailable ? "min-h-0 flex-1" : undefined}
       />
 
-      {reviewEnabled ? (
+      {showReviewStatus ? (
         <div className="flex shrink-0 flex-col gap-3 border-t border-[color:var(--cosmic-border-soft)] px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
           <ArtifactReviewStatus
             state={reviewState}
@@ -143,17 +146,19 @@ export function ArtifactStage({
             visualReviewPreparing={visualReviewPreparing}
             className="min-w-0"
           />
-          <ReviewWithSophiaButton
-            state={reviewState}
-            canStart={canStartReview}
-            featureEnabled={reviewEnabled}
-            startVoiceRequired={visualReviewRequiresVoice}
-            pendingStartVoiceReview={pendingStartVoiceReview}
-            onStartVoiceReview={onStartVoiceReview}
-            onStart={onStartReview}
-            onStop={onStopReview}
-            className="w-full sm:w-auto"
-          />
+          {reviewEnabled ? (
+            <ReviewWithSophiaButton
+              state={reviewState}
+              canStart={canStartReview}
+              featureEnabled={reviewEnabled}
+              startVoiceRequired={visualReviewRequiresVoice}
+              pendingStartVoiceReview={pendingStartVoiceReview}
+              onStartVoiceReview={onStartVoiceReview}
+              onStart={onStartReview}
+              onStop={onStopReview}
+              className="w-full sm:w-auto"
+            />
+          ) : null}
         </div>
       ) : null}
     </section>

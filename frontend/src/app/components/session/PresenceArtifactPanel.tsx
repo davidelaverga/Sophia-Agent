@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useArtifactCoReview } from "../../hooks/useArtifactCoReview"
 import { haptic } from "../../hooks/useHaptics"
 import { buildThreadArtifactHref, formatBuilderArtifactFileSize, getBuilderArtifactFiles, isMarkdownArtifactFile } from "../../lib/builder-artifacts"
-import { isCoreviewStillFrameReviewEnabled } from "../../lib/co-review-flags"
+import { coreviewFlagDiagnostics, isCoreviewStillFrameReviewEnabled } from "../../lib/co-review-flags"
 import type { CoReviewMediaTransport } from "../../lib/co-review-transport"
 import { recordSophiaCaptureEvent } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
@@ -216,6 +216,7 @@ export function PresenceArtifactPanel({
   const hasMemories = memory_candidates && memory_candidates.length > 0
   const hasTakeaway = !!takeaway?.trim()
   const coreviewReviewEnabled = isCoreviewStillFrameReviewEnabled()
+  const coreviewDiagnostics = useMemo(() => coreviewFlagDiagnostics(), [])
   const builderArtifactId = stageBuilderArtifact
     ? buildCoreviewRealArtifactId(stageBuilderArtifact)
     : null
@@ -349,6 +350,7 @@ export function PresenceArtifactPanel({
         selectedBuilderArtifactPath: selectedBuilderArtifactPath ?? null,
         source: selectedBuilderArtifactPath ? "selected_builder_artifact" : "latest_builder_artifact",
         reviewFeatureEnabled: coreviewReviewEnabled,
+        ...coreviewDiagnostics,
         exactTextSource: stageUsesMarkdownPreview ? "builder_file" : "builder_metadata",
         exactTextAvailable: builderExactTextAvailable,
         visualCaptureSource: effectiveBuilderVisualCaptureStatus.source,
@@ -362,6 +364,7 @@ export function PresenceArtifactPanel({
     builderArtifactId,
     builderExactTextAvailable,
     coreviewReviewEnabled,
+    coreviewDiagnostics,
     effectiveBuilderVisualCaptureStatus.reason,
     effectiveBuilderVisualCaptureStatus.ready,
     effectiveBuilderVisualCaptureStatus.source,

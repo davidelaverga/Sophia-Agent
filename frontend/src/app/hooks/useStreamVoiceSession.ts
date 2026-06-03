@@ -15,6 +15,7 @@
 import { CallingState } from "@stream-io/video-react-sdk"
 import { useCallback, useEffect, useRef, useState } from "react"
 
+import { coreviewFlagDiagnostics } from "../lib/co-review-flags"
 import { logger } from "../lib/error-logger"
 import {
   connectGeminiBrowserLiveFromBootstrap,
@@ -2327,6 +2328,7 @@ export function useStreamVoiceSession(
               : null,
           publicSseState: "connecting",
         }))
+        const coreviewDiagnostics = coreviewFlagDiagnostics()
         recordSophiaCaptureEvent({
           category: "voice-session",
           name: "credentials-received",
@@ -2336,6 +2338,21 @@ export function useStreamVoiceSession(
             runtime: "gemini_live",
             sessionId: sessionIdRef.current ?? null,
             voiceAgentSessionId: creds.session_id,
+            ...coreviewDiagnostics,
+            backendCoreviewFlagParsed: typeof creds.backendCoreviewFlagParsed === "boolean" ? creds.backendCoreviewFlagParsed : null,
+            backendStillFrameFlagParsed: typeof creds.backendStillFrameFlagParsed === "boolean" ? creds.backendStillFrameFlagParsed : null,
+          },
+        })
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "coreview-flag-diagnostics",
+          payload: {
+            runtime: "gemini_live",
+            sessionId: sessionIdRef.current ?? null,
+            voiceAgentSessionId: creds.session_id,
+            ...coreviewDiagnostics,
+            backendCoreviewFlagParsed: typeof creds.backendCoreviewFlagParsed === "boolean" ? creds.backendCoreviewFlagParsed : null,
+            backendStillFrameFlagParsed: typeof creds.backendStillFrameFlagParsed === "boolean" ? creds.backendStillFrameFlagParsed : null,
           },
         })
 

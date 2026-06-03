@@ -35,6 +35,12 @@ export type CoreviewExactTextSource = "fixture" | "builder_metadata" | "builder_
 
 export type CoreviewVisualTelemetry = {
   coreviewEnabled: boolean
+  frontendCoreviewFlagParsed: boolean | null
+  frontendStillFrameFlagParsed: boolean | null
+  backendCoreviewFlagParsed: boolean | null
+  backendStillFrameFlagParsed: boolean | null
+  coreviewDisabledReason: string | null
+  reviewStartBlockedReason: string | null
   coreviewSessionActive: boolean
   coreviewArtifactId: string | null
   visualSourceKind: string | null
@@ -578,6 +584,14 @@ function asBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null
 }
 
+function latestBooleanFromRecords(records: Record<string, unknown>[], key: string): boolean | null {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const parsed = asBoolean(records[index]?.[key])
+    if (parsed !== null) return parsed
+  }
+  return null
+}
+
 function numberFromKeys(record: Record<string, unknown> | null | undefined, keys: string[]): number | null {
   if (!record) return null
   for (const key of keys) {
@@ -862,6 +876,12 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
   return {
     visual: {
       coreviewEnabled: false,
+      frontendCoreviewFlagParsed: null,
+      frontendStillFrameFlagParsed: null,
+      backendCoreviewFlagParsed: null,
+      backendStillFrameFlagParsed: null,
+      coreviewDisabledReason: null,
+      reviewStartBlockedReason: null,
       coreviewSessionActive: false,
       coreviewArtifactId: null,
       visualSourceKind: null,
@@ -928,6 +948,10 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((event) => event.category === "artifacts-runtime" && event.name === "select-stage-artifact")
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
+  const flagDiagnosticEvents = activeEvents
+    .filter((event) => event.name === "coreview-flag-diagnostics" || event.name === "credentials-received")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
   const latestState = stateEvents.at(-1) ?? null
   const latestSelectedStage = selectedStageEvents.at(-1) ?? null
   const firstFrameSeq = frameEvents.find((event) => {
@@ -935,7 +959,33 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     return result !== null && frameWasSent(result)
   })?.seq ?? null
 
-  visual.coreviewEnabled = stateEvents.some((entry) => asBoolean(entry.coreviewEnabled) === true) || frameEvents.length > 0
+  visual.frontendCoreviewFlagParsed = latestBooleanFromRecords(
+    [...flagDiagnosticEvents, ...stateEvents, ...selectedStageEvents],
+    "frontendCoreviewFlagParsed",
+  )
+  visual.frontendStillFrameFlagParsed = latestBooleanFromRecords(
+    [...flagDiagnosticEvents, ...stateEvents, ...selectedStageEvents],
+    "frontendStillFrameFlagParsed",
+  )
+  visual.backendCoreviewFlagParsed = latestBooleanFromRecords(
+    [...flagDiagnosticEvents, ...stateEvents, ...selectedStageEvents],
+    "backendCoreviewFlagParsed",
+  )
+  visual.backendStillFrameFlagParsed = latestBooleanFromRecords(
+    [...flagDiagnosticEvents, ...stateEvents, ...selectedStageEvents],
+    "backendStillFrameFlagParsed",
+  )
+  visual.coreviewDisabledReason = asString(latestState?.coreviewDisabledReason)
+    ?? asString(latestSelectedStage?.coreviewDisabledReason)
+    ?? asString(flagDiagnosticEvents.at(-1)?.coreviewDisabledReason)
+  visual.reviewStartBlockedReason = asString(latestState?.reviewStartBlockedReason)
+
+  const selectedStageReviewEnabled = selectedStageEvents.some((entry) => asBoolean(entry.reviewFeatureEnabled) === true)
+  const frontendFlagsEnabled = visual.frontendCoreviewFlagParsed === true && visual.frontendStillFrameFlagParsed === true
+  visual.coreviewEnabled = stateEvents.some((entry) => asBoolean(entry.coreviewEnabled) === true)
+    || selectedStageReviewEnabled
+    || frontendFlagsEnabled
+    || frameEvents.length > 0
   visual.coreviewSessionActive = asBoolean(latestState?.coreviewSessionActive) ?? false
   visual.coreviewArtifactId = asString(latestState?.coreviewArtifactId)
     ?? asString(latestSelectedStage?.coreviewArtifactId)
@@ -974,6 +1024,12 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     const stage = asString(result.coreviewSendStage)
 
     visual.coreviewEnabled = true
+    visual.frontendCoreviewFlagParsed = asBoolean(result.frontendCoreviewFlagParsed) ?? visual.frontendCoreviewFlagParsed
+    visual.frontendStillFrameFlagParsed = asBoolean(result.frontendStillFrameFlagParsed) ?? visual.frontendStillFrameFlagParsed
+    visual.backendCoreviewFlagParsed = asBoolean(result.backendCoreviewFlagParsed) ?? visual.backendCoreviewFlagParsed
+    visual.backendStillFrameFlagParsed = asBoolean(result.backendStillFrameFlagParsed) ?? visual.backendStillFrameFlagParsed
+    visual.coreviewDisabledReason = asString(result.coreviewDisabledReason) ?? visual.coreviewDisabledReason
+    visual.reviewStartBlockedReason = asString(result.reviewStartBlockedReason) ?? visual.reviewStartBlockedReason
     visual.coreviewArtifactId = visual.coreviewArtifactId ?? asString(result.artifactId) ?? asString(result.artifact_id)
     visual.visualSourceKind = asString(result.visualSourceKind) ?? visual.visualSourceKind
     if (sent) {

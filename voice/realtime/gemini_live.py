@@ -98,7 +98,10 @@ _BUILDER_TOOL_NAMES = {
     "list_async_tasks",
 }
 _MEMORY_TOOL_NAMES = {"retrieve_memories"}
-_STRUCTURED_TOOL_NAMES = _ARTIFACT_TOOL_NAMES | _BUILDER_TOOL_NAMES | _MEMORY_TOOL_NAMES
+_REVIEW_TOOL_NAMES = {"read_artifact_text"}
+_STRUCTURED_TOOL_NAMES = (
+    _ARTIFACT_TOOL_NAMES | _BUILDER_TOOL_NAMES | _MEMORY_TOOL_NAMES | _REVIEW_TOOL_NAMES
+)
 _TOOL_SYNTAX_LEAK_RE = re.compile(
     r"^\s*(?:try\s*\{\s*)?(?:"
     + "|".join(re.escape(name) for name in sorted(_STRUCTURED_TOOL_NAMES))
@@ -109,6 +112,12 @@ _JSONISH_TOOL_SYNTAX_LEAK_RE = re.compile(
     r"^\s*(?:```(?:json)?\s*)?\{?\s*['\"]?(?:"
     + "|".join(re.escape(name) for name in sorted(_STRUCTURED_TOOL_NAMES))
     + r")['\"]?\s*[:({]",
+    re.IGNORECASE,
+)
+_PROMPT_OR_TOOL_LEAK_RE = re.compile(
+    r"(?:\bactive_goal\s*:|\btool_call_id\b|\bsystem\s+prompt\b|\bdeveloper\s+instructions\b|"
+    r"\binternal\s+prompt\b|\btool\s+schema\b|\bfunction\s+declarations?\b|\bfunctiondeclarations\b|"
+    r"\bread_artifact_text\b|^\s*schema\s*$)",
     re.IGNORECASE,
 )
 
@@ -1081,6 +1090,7 @@ def _looks_like_tool_syntax_leak(text: str) -> bool:
     return bool(
         _TOOL_SYNTAX_LEAK_RE.search(text)
         or _JSONISH_TOOL_SYNTAX_LEAK_RE.search(text)
+        or _PROMPT_OR_TOOL_LEAK_RE.search(text)
     )
 
 

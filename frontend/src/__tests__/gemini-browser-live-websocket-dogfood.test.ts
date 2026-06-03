@@ -206,17 +206,26 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     });
     expect(buildGeminiArtifactTextReaderHint('artifact-1')).toEqual({
       realtimeInput: {
-        text: expect.stringContaining('read_artifact_text'),
+        text: expect.stringContaining('artifact_id: artifact-1'),
       },
     });
     expect(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'))).toContain('artifact-1');
-    expect(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'))).toContain('Do not answer this setup message');
-    expect(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'))).toContain('do not call emit_artifact unless the user explicitly asks');
+    expect(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'))).toContain('Do not answer this context message');
+    expect(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'))).not.toMatch(/emit_artifact|read_artifact_text|schema|tool_call_id/i);
     expect(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'))).not.toContain('base64-frame');
   });
 
   it('classifies artifact review create/update intent conservatively', () => {
     expect(classifyArtifactReviewUserIntent('Can you review this and tell me what changed?')).toBe('analysis');
+    expect(classifyArtifactReviewUserIntent('what do you see?')).toBe('analysis');
+    expect(classifyArtifactReviewUserIntent('review this')).toBe('analysis');
+    expect(classifyArtifactReviewUserIntent('what would you improve visually?')).toBe('analysis');
+    expect(classifyArtifactReviewUserIntent('what exact title does it show?')).toBe('analysis');
+    expect(classifyArtifactReviewUserIntent('go one by one')).toBe('analysis');
+    expect(classifyArtifactReviewUserIntent('create a new artifact')).toBe('create_update');
+    expect(classifyArtifactReviewUserIntent('rewrite this artifact')).toBe('create_update');
+    expect(classifyArtifactReviewUserIntent('save this as a new version')).toBe('create_update');
+    expect(classifyArtifactReviewUserIntent('update the document')).toBe('create_update');
     expect(classifyArtifactReviewUserIntent('Please update this artifact with the revised summary.')).toBe('create_update');
     expect(classifyArtifactReviewUserIntent('Turn this into a document I can save.')).toBe('create_update');
     expect(classifyArtifactReviewUserIntent('   ')).toBe('unknown');
@@ -832,7 +841,9 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       mimeType: 'image/jpeg',
       rawFrameExcluded: true,
     }));
-    expect(websocket?.sent.at(-2)).toBe(JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1')));
+    const reviewHint = JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'));
+    expect(websocket?.sent.at(-2)).toBe(reviewHint);
+    expect(reviewHint).not.toMatch(/emit_artifact|read_artifact_text|looking at it now/i);
     expect(websocket?.sent.at(-1)).toBe(JSON.stringify({
       realtimeInput: {
         video: {
@@ -841,6 +852,54 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         },
       },
     }));
+
+    await connection.close();
+  });
+
+  it('suppresses tool-schema-like assistant output during artifact review before relay or playback', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch();
+    const fakeAudioContext = new FakeAudioContext();
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+
+    await connection.sendArtifactFrame({
+      artifactId: 'artifact-1',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true,
+    });
+    const callsAfterFrame = fetchMock.mock.calls.length;
+    const audioChunk = Buffer.from([0x00, 0x00]).toString('base64');
+
+    websocket?.emitMessage({
+      serverContent: {
+        responseId: 'review-leak-response-1',
+        modelTurn: {
+          parts: [
+            { text: 'tool_call_id: review-leak-1 schema' },
+            { inlineData: { mimeType: 'audio/pcm;rate=24000', data: audioChunk } },
+          ],
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(fetchMock).toHaveBeenCalledTimes(callsAfterFrame);
+    expect(fakeAudioContext.createdSources).toHaveLength(0);
 
     await connection.close();
   });

@@ -216,6 +216,23 @@ describe("ArtifactStage", () => {
     expect(screen.getByText("Exact text available")).toBeInTheDocument()
   })
 
+  it("shows local disabled review state while keeping exact text visible", () => {
+    renderStage({
+      reviewEnabled: false,
+      exactTextAvailable: true,
+      visualCaptureStatus: {
+        ready: true,
+        reason: null,
+        source: "metadata_canvas",
+        exactTextAvailable: true,
+      },
+    })
+
+    expect(screen.getByText("Visual review disabled locally")).toBeInTheDocument()
+    expect(screen.getByText("Exact text available")).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /review with sophia/i })).not.toBeInTheDocument()
+  })
+
   it("does not claim Sophia is looking when live state has no confirmed sent frame", () => {
     renderStage({
       state: {
@@ -321,7 +338,7 @@ describe("ArtifactStage", () => {
   })
 
   it("hides review controls when review is disabled", () => {
-    renderStage({ reviewEnabled: false })
+    renderStage({ reviewEnabled: false, exactTextAvailable: false })
 
     expect(screen.queryByRole("button", { name: /review with sophia/i })).not.toBeInTheDocument()
     expect(screen.queryByText(/exact text/i)).not.toBeInTheDocument()

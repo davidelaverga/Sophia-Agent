@@ -111,6 +111,12 @@ def detect_gemini_coreview_media_support(*, coreview_enabled: bool | None = None
         ),
         safe_telemetry_fields=(
             "coreviewEnabled",
+            "frontendCoreviewFlagParsed",
+            "frontendStillFrameFlagParsed",
+            "backendCoreviewFlagParsed",
+            "backendStillFrameFlagParsed",
+            "coreviewDisabledReason",
+            "reviewStartBlockedReason",
             "coreviewSessionActive",
             "coreviewArtifactId",
             "normalVoiceSessionId",

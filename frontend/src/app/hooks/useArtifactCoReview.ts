@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { resolveArtifactVisualSource } from "../lib/co-review-capture"
-import { isCoreviewStillFrameReviewEnabled } from "../lib/co-review-flags"
+import { coreviewFlagDiagnostics, isCoreviewStillFrameReviewEnabled } from "../lib/co-review-flags"
 import {
   AudioWebSocketUnsupportedTransport,
   CoReviewSessionMachine,
@@ -53,32 +53,56 @@ export function useArtifactCoReview({
   }
 
   const startReview = useCallback(async () => {
+    const flagDiagnostics = coreviewFlagDiagnostics()
+    const reviewStartBlockedReason = reviewStartBlockedReasonFromContext({
+      featureEnabled,
+      sessionId,
+      threadId,
+      artifactId,
+      visualSourceReady,
+      visualSourceUnavailableReason,
+    })
+
     logCoreviewBreadcrumb("coReviewStartClicked", {
       artifactId,
       hasSessionId: Boolean(sessionId),
       hasThreadId: Boolean(threadId),
       transportKind: transportRef.current.kind,
       requestedMode: "still_frame",
+      reviewStartBlockedReason,
+      ...flagDiagnostics,
     })
 
     if (!featureEnabled || !sessionId || !threadId || !artifactId) {
       logCoreviewBreadcrumb("coReviewStartError", {
-        reason: "missing_required_start_context",
+        reason: reviewStartBlockedReason ?? "missing_required_start_context",
         featureEnabled,
         hasSessionId: Boolean(sessionId),
         hasThreadId: Boolean(threadId),
         hasArtifactId: Boolean(artifactId),
+        reviewStartBlockedReason,
+        ...flagDiagnostics,
+      })
+      recordCoreviewTelemetry("start", state, {
+        featureEnabled,
+        reviewStartBlockedReason: reviewStartBlockedReason ?? "missing_required_start_context",
       })
       return state
     }
 
     if (!visualSourceReady) {
       logCoreviewBreadcrumb("coReviewStartError", {
-        reason: visualSourceUnavailableReason ?? "capture_target_missing",
+        reason: reviewStartBlockedReason ?? visualSourceUnavailableReason ?? "capture_target_missing",
         featureEnabled,
         hasSessionId: Boolean(sessionId),
         hasThreadId: Boolean(threadId),
         hasArtifactId: Boolean(artifactId),
+        reviewStartBlockedReason,
+        ...flagDiagnostics,
+      })
+      recordCoreviewTelemetry("start", state, {
+        featureEnabled,
+        reviewStartBlockedReason: reviewStartBlockedReason ?? visualSourceUnavailableReason ?? "capture_target_missing",
       })
       return state
     }
@@ -115,7 +139,7 @@ export function useArtifactCoReview({
       })
     }
     logCoreviewBreadcrumb("coReviewStateAfterStart", safeCoReviewTelemetryFromState(nextState))
-    recordCoreviewTelemetry("start", nextState, { featureEnabled })
+    recordCoreviewTelemetry("start", nextState, { featureEnabled, reviewStartBlockedReason: nextState.state === "co_review_error" ? nextState.error : null })
     return nextState
   }, [artifactId, artifactRoot, exactTextAvailable, featureEnabled, missingCanvasReason, normalSessionId, sessionId, state, threadId, visualSourceReady, visualSourceUnavailableReason])
 
@@ -237,8 +261,9 @@ function logCoreviewBreadcrumb(event: string, details: Record<string, unknown> =
 function recordCoreviewTelemetry(
   action: "start" | "refresh" | "stop" | "transport_closed",
   state: CoReviewSessionState,
-  details: { featureEnabled: boolean },
+  details: { featureEnabled: boolean; reviewStartBlockedReason?: string | null },
 ) {
+  const flagDiagnostics = coreviewFlagDiagnostics()
   recordSophiaCaptureEvent({
     category: "voice-session",
     name: "coreview-state",
@@ -248,8 +273,33 @@ function recordCoreviewTelemetry(
       threadId: state.threadId,
       coreview: {
         coreviewEnabled: details.featureEnabled,
+        ...flagDiagnostics,
+        reviewStartBlockedReason: details.reviewStartBlockedReason ?? null,
         ...safeCoReviewTelemetryFromState(state),
       },
     },
   })
+}
+
+function reviewStartBlockedReasonFromContext({
+  featureEnabled,
+  sessionId,
+  threadId,
+  artifactId,
+  visualSourceReady,
+  visualSourceUnavailableReason,
+}: {
+  featureEnabled: boolean
+  sessionId: string | null
+  threadId: string | null
+  artifactId: string | null
+  visualSourceReady: boolean
+  visualSourceUnavailableReason: string | null
+}): string | null {
+  if (!sessionId) return "missing_session_id"
+  if (!threadId) return "missing_thread_id"
+  if (!artifactId) return "missing_artifact_id"
+  if (!featureEnabled) return coreviewFlagDiagnostics().coreviewDisabledReason ?? "coreview_feature_disabled"
+  if (!visualSourceReady) return visualSourceUnavailableReason ?? "capture_target_missing"
+  return null
 }

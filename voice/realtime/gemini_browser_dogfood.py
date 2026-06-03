@@ -15,6 +15,10 @@ from voice.realtime.dogfood_session import (
     RealtimeDogfoodSession,
     RealtimeDogfoodSessionManager,
 )
+from voice.realtime.coreview import (
+    is_coreview_enabled,
+    is_coreview_still_frame_enabled,
+)
 from voice.realtime.events import ProviderEvent, ProviderEventType
 from voice.realtime.gemini_live import DEFAULT_GEMINI_LIVE_MODEL
 from voice.realtime.gemini_memory_context import (
@@ -378,6 +382,8 @@ class GeminiBrowserDogfoodSession:
                 f"{self.dogfood_session.session_id}/provider-events"
             ),
             "public_event_boundary": "SophiaEventNormalizer",
+            "backendCoreviewFlagParsed": is_coreview_enabled(),
+            "backendStillFrameFlagParsed": is_coreview_still_frame_enabled(),
         }
 
 
