@@ -17,7 +17,7 @@ import type {
   BuilderArtifactV1,
 } from "../../types/builder-artifact"
 
-import { ArtifactCanvasViewport } from "./ArtifactCanvasViewport"
+import { ArtifactCanvasViewport, type ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
 import { ArtifactReviewStatus } from "./ArtifactReviewStatus"
 import { ArtifactToolbar } from "./ArtifactToolbar"
 import { ReviewWithSophiaButton } from "./ReviewWithSophiaButton"
@@ -34,6 +34,8 @@ interface ArtifactStageProps {
   exactTextAvailable?: boolean
   canStartReview?: boolean
   reviewEnabled?: boolean
+  visualCaptureStatus?: ArtifactVisualCaptureStatus | null
+  onVisualCaptureStatusChange?: (status: ArtifactVisualCaptureStatus) => void
   onStartReview: () => void
   onStopReview: () => void
   fillAvailable?: boolean
@@ -52,6 +54,8 @@ export function ArtifactStage({
   exactTextAvailable = false,
   canStartReview = true,
   reviewEnabled = true,
+  visualCaptureStatus,
+  onVisualCaptureStatusChange,
   onStartReview,
   onStopReview,
   fillAvailable = false,
@@ -114,6 +118,7 @@ export function ArtifactStage({
         previewFile={viewportPrimaryFile}
         previewHref={openHref}
         artifactTextRegistration={artifactTextRegistration}
+        onVisualCaptureStatusChange={onVisualCaptureStatusChange}
         className={fillAvailable ? "min-h-0 flex-1" : undefined}
       />
 
@@ -125,6 +130,7 @@ export function ArtifactStage({
             exactTextAvailable={exactTextAvailable}
             featureEnabled={reviewEnabled}
             canStart={canStartReview}
+            visualSourceUnavailableReason={visualCaptureStatus?.ready === false ? visualCaptureStatus.reason : null}
             className="min-w-0"
           />
           <ReviewWithSophiaButton

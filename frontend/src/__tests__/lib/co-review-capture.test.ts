@@ -107,6 +107,29 @@ describe("co-review artifact capture", () => {
     expect(source.kind).toBe("offscreen_render")
   })
 
+  it("prefers the selected markdown preview canvas over an older matching metadata canvas", () => {
+    const root = document.createElement("section")
+    const metadataCanvas = document.createElement("canvas")
+    metadataCanvas.dataset.artifactId = "artifact-6"
+    metadataCanvas.dataset.coreviewOffscreenRender = "true"
+    root.appendChild(metadataCanvas)
+
+    const selectedPreviewCanvas = document.createElement("canvas")
+    selectedPreviewCanvas.dataset.artifactId = "artifact-6"
+    selectedPreviewCanvas.dataset.artifactCanvasSource = "selected-markdown-preview"
+    selectedPreviewCanvas.dataset.coreviewOffscreenRender = "true"
+    root.appendChild(selectedPreviewCanvas)
+
+    const source = resolveArtifactVisualSource({
+      root,
+      artifactId: "artifact-6",
+    })
+
+    expect(source.status).toBe("ready")
+    expect(source.kind).toBe("offscreen_render")
+    expect(source.element).toBe(selectedPreviewCanvas)
+  })
+
   it("stopArtifactVisualSource is a no-op for one-shot still-frame sources", () => {
     expect(() => stopArtifactVisualSource(resolveArtifactVisualSource())).not.toThrow()
   })

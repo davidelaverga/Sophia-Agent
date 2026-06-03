@@ -1,6 +1,7 @@
-import { render, screen, within } from "@testing-library/react"
+import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import type { ComponentProps } from "react"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { ArtifactStage } from "../../../app/components/session/ArtifactStage"
 import {
@@ -46,6 +47,24 @@ const markdownBuilderArtifact = {
   userNextAction: "Review the rendered brief.",
 }
 
+function mockCanvasApis() {
+  const context = {
+    arcTo: vi.fn(),
+    beginPath: vi.fn(),
+    clearRect: vi.fn(),
+    closePath: vi.fn(),
+    fill: vi.fn(),
+    fillRect: vi.fn(),
+    fillText: vi.fn(),
+    measureText: vi.fn((text: string) => ({ width: text.length * 8 })),
+    moveTo: vi.fn(),
+    fillStyle: "",
+    font: "",
+  } as unknown as CanvasRenderingContext2D
+
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(context)
+}
+
 function renderStage({
   artifact = builderArtifact,
   artifactLibrary = [],
@@ -56,6 +75,8 @@ function renderStage({
   exactTextAvailable = true,
   canStartReview = true,
   reviewEnabled = true,
+  visualCaptureStatus = null,
+  onVisualCaptureStatusChange,
   transportStatus = supportedTransportStatus,
   fillAvailable = false,
 }: {
@@ -74,6 +95,8 @@ function renderStage({
   exactTextAvailable?: boolean
   canStartReview?: boolean
   reviewEnabled?: boolean
+  visualCaptureStatus?: ComponentProps<typeof ArtifactStage>["visualCaptureStatus"]
+  onVisualCaptureStatusChange?: ComponentProps<typeof ArtifactStage>["onVisualCaptureStatusChange"]
   transportStatus?: typeof supportedTransportStatus
   fillAvailable?: boolean
 } = {}) {
@@ -96,6 +119,8 @@ function renderStage({
       exactTextAvailable={exactTextAvailable}
       canStartReview={canStartReview}
       reviewEnabled={reviewEnabled}
+      visualCaptureStatus={visualCaptureStatus}
+      onVisualCaptureStatusChange={onVisualCaptureStatusChange}
       onStartReview={onStartReview}
       onStopReview={onStopReview}
       fillAvailable={fillAvailable}
@@ -104,6 +129,10 @@ function renderStage({
 
   return { ...view, onStartReview, onStopReview }
 }
+
+beforeEach(() => {
+  mockCanvasApis()
+})
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -141,7 +170,7 @@ describe("ArtifactStage", () => {
     expect(onStartReview).toHaveBeenCalledTimes(1)
   })
 
-  it("shows Looking, Frame sent, stale state, and exact text availability from existing review state", () => {
+  it("shows Sophia is looking, Frame sent, stale state, and exact text availability from existing review state", () => {
     renderStage({
       state: {
         state: "co_review_live",
@@ -153,10 +182,21 @@ describe("ArtifactStage", () => {
       },
     })
 
-    expect(screen.getByRole("status", { name: /looking/i })).toBeInTheDocument()
+    expect(screen.getByRole("status", { name: "Sophia is looking" })).toBeInTheDocument()
     expect(screen.getByText("Frame sent")).toBeInTheDocument()
     expect(screen.getByText("View may be stale")).toBeInTheDocument()
     expect(screen.getByText("Exact text available")).toBeInTheDocument()
+  })
+
+  it("maps starting review state to Preparing view", () => {
+    renderStage({
+      state: {
+        state: "co_review_starting",
+        visualInputStatus: "connecting",
+      },
+    })
+
+    expect(screen.getByRole("status", { name: "Preparing view" })).toBeInTheDocument()
   })
 
   it("shows Not Looking and exact text availability before review", () => {
@@ -190,6 +230,22 @@ describe("ArtifactStage", () => {
     const renderedText = within(artifactRegion).queryByText(/coreview|gemini|websocket|transport|liveframes|fixture/i)
     expect(renderedText).not.toBeInTheDocument()
     expect(container.textContent?.toLowerCase()).not.toContain("still-frame")
+  })
+
+  it("shows Frame unavailable when the artifact capture target is missing", () => {
+    renderStage({
+      canStartReview: false,
+      visualCaptureStatus: {
+        ready: false,
+        reason: "capture_target_missing",
+        source: "markdown_preview_canvas",
+        exactTextAvailable: true,
+      },
+    })
+
+    expect(screen.getAllByText("Frame unavailable").length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByRole("button", { name: /review with sophia/i })).toBeDisabled()
+    expect(screen.getByText("Exact text available")).toBeInTheDocument()
   })
 
   it("uses Stop Looking while review is active", async () => {
@@ -375,6 +431,36 @@ describe("ArtifactStage", () => {
       ok: true,
       source: "builder_file",
       text: "# Exact Title\n\nBudget delta: 17.4%",
+    })
+  })
+
+  it("reports selected markdown capture readiness from the rendered preview", async () => {
+    const onVisualCaptureStatusChange = vi.fn()
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("# Exact Title\n\nBudget delta: 17.4%", {
+        status: 200,
+        headers: { "Content-Type": "text/markdown" },
+      }),
+    )
+
+    renderStage({
+      artifact: markdownBuilderArtifact,
+      artifactId: "coreview-real-artifact-launch-brief",
+      sessionId: "session-1",
+      normalSessionId: "normal-1",
+      onVisualCaptureStatusChange,
+    })
+
+    expect(await screen.findByRole("heading", { name: "Exact Title" })).toBeInTheDocument()
+    const captureCanvas = screen.getByTestId("artifact-markdown-capture-canvas").querySelector("canvas")
+    expect(captureCanvas).toHaveAttribute("data-artifact-canvas-source", "selected-markdown-preview")
+    await waitFor(() => {
+      expect(onVisualCaptureStatusChange).toHaveBeenLastCalledWith({
+        ready: true,
+        reason: null,
+        source: "markdown_preview_canvas",
+        exactTextAvailable: true,
+      })
     })
   })
 

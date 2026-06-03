@@ -1,7 +1,7 @@
 "use client"
 
 import { FileText, Layers, ListChecks, Sparkles } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 
 import { isMarkdownArtifactFile } from "../../lib/builder-artifacts"
 import { registerCoreviewArtifactText } from "../../lib/coreview-artifact-text"
@@ -15,6 +15,20 @@ type ArtifactViewportFile = BuilderArtifactFileV1 & {
   sizeBytes?: number
 }
 
+export type ArtifactVisualCaptureUnavailableReason =
+  | "no_selected_artifact"
+  | "preview_not_ready"
+  | "capture_target_missing"
+  | "capture_failed"
+  | "exact_text_only_no_visual_source"
+
+export interface ArtifactVisualCaptureStatus {
+  ready: boolean
+  reason: ArtifactVisualCaptureUnavailableReason | null
+  source: "markdown_preview_canvas" | "metadata_canvas" | "none"
+  exactTextAvailable: boolean
+}
+
 interface ArtifactCanvasViewportProps {
   artifact: BuilderArtifactV1
   files: ArtifactViewportFile[]
@@ -26,8 +40,13 @@ interface ArtifactCanvasViewportProps {
     sessionIds?: Array<string | null | undefined>
     threadId?: string | null
   } | null
+  onVisualCaptureStatusChange?: (status: ArtifactVisualCaptureStatus) => void
   className?: string
 }
+
+const MARKDOWN_CAPTURE_CANVAS_WIDTH = 960
+const MARKDOWN_CAPTURE_CANVAS_HEIGHT = 1240
+const MAX_CAPTURE_BLOCKS = 28
 
 export function ArtifactCanvasViewport({
   artifact,
@@ -36,6 +55,7 @@ export function ArtifactCanvasViewport({
   previewFile,
   previewHref,
   artifactTextRegistration,
+  onVisualCaptureStatusChange,
   className,
 }: ArtifactCanvasViewportProps) {
   const primaryFile = previewFile ?? files.find((file) => file.isPrimary) ?? files[0]
@@ -45,6 +65,32 @@ export function ArtifactCanvasViewport({
     enabled: canPreviewMarkdown,
     href: previewHref,
   })
+  const captureArtifactId = artifactTextRegistration?.artifactId ?? null
+  const markdownCaptureKey = [
+    captureArtifactId ?? "",
+    primaryFile?.path ?? "",
+    preview.status === "ready" ? preview.markdown : "",
+  ].join("::")
+  const [markdownCaptureState, setMarkdownCaptureState] = useState<{
+    key: string
+    status: ArtifactVisualCaptureStatus
+  }>(() => ({
+    key: "",
+    status: unavailableCaptureStatus("preview_not_ready", "markdown_preview_canvas"),
+  }))
+  const currentMarkdownCaptureStatus = useMemo(() => (
+    markdownCaptureState.key === markdownCaptureKey
+      ? markdownCaptureState.status
+      : unavailableCaptureStatus("preview_not_ready", "markdown_preview_canvas")
+  ), [markdownCaptureKey, markdownCaptureState])
+  const handleMarkdownCaptureStatusChange = useCallback((status: ArtifactVisualCaptureStatus) => {
+    setMarkdownCaptureState((current) => {
+      if (current.key === markdownCaptureKey && captureStatusesEqual(current.status, status)) {
+        return current
+      }
+      return { key: markdownCaptureKey, status }
+    })
+  }, [markdownCaptureKey])
 
   useEffect(() => {
     if (!artifactTextRegistration || preview.status !== "ready" || !preview.markdown.trim()) {
@@ -59,6 +105,39 @@ export function ArtifactCanvasViewport({
       threadId: artifactTextRegistration.threadId,
     })
   }, [artifactTextRegistration, preview.markdown, preview.status])
+
+  useEffect(() => {
+    if (!onVisualCaptureStatusChange) {
+      return
+    }
+
+    if (!captureArtifactId) {
+      onVisualCaptureStatusChange(unavailableCaptureStatus("no_selected_artifact", "none"))
+      return
+    }
+
+    if (!canPreviewMarkdown) {
+      onVisualCaptureStatusChange({
+        ready: true,
+        reason: null,
+        source: "metadata_canvas",
+        exactTextAvailable: true,
+      })
+      return
+    }
+
+    if (preview.status === "idle" || preview.status === "loading") {
+      onVisualCaptureStatusChange(unavailableCaptureStatus("preview_not_ready", "markdown_preview_canvas"))
+      return
+    }
+
+    if (preview.status === "failed" || !preview.markdown.trim()) {
+      onVisualCaptureStatusChange(unavailableCaptureStatus("exact_text_only_no_visual_source", "markdown_preview_canvas"))
+      return
+    }
+
+    onVisualCaptureStatusChange(currentMarkdownCaptureStatus)
+  }, [canPreviewMarkdown, captureArtifactId, currentMarkdownCaptureStatus, onVisualCaptureStatusChange, preview.markdown, preview.status])
 
   return (
     <div
@@ -95,6 +174,16 @@ export function ArtifactCanvasViewport({
           />
         )}
       </div>
+      {canPreviewMarkdown && captureArtifactId && preview.status === "ready" && preview.markdown.trim() ? (
+        <MarkdownArtifactCaptureCanvas
+          artifact={artifact}
+          artifactId={captureArtifactId}
+          file={primaryFile}
+          markdown={preview.markdown}
+          typeLabel={typeLabel}
+          onStatusChange={handleMarkdownCaptureStatusChange}
+        />
+      ) : null}
     </div>
   )
 }
@@ -153,6 +242,28 @@ function useMarkdownArtifactPreview({
   return preview
 }
 
+function unavailableCaptureStatus(
+  reason: ArtifactVisualCaptureUnavailableReason,
+  source: ArtifactVisualCaptureStatus["source"],
+): ArtifactVisualCaptureStatus {
+  return {
+    ready: false,
+    reason,
+    source,
+    exactTextAvailable: false,
+  }
+}
+
+function captureStatusesEqual(
+  left: ArtifactVisualCaptureStatus,
+  right: ArtifactVisualCaptureStatus,
+): boolean {
+  return left.ready === right.ready
+    && left.reason === right.reason
+    && left.source === right.source
+    && left.exactTextAvailable === right.exactTextAvailable
+}
+
 function MarkdownDocumentPage({
   artifact,
   file,
@@ -194,6 +305,374 @@ function MarkdownDocumentPage({
       </div>
     </div>
   )
+}
+
+function MarkdownArtifactCaptureCanvas({
+  artifact,
+  artifactId,
+  file,
+  markdown,
+  typeLabel,
+  onStatusChange,
+}: {
+  artifact: BuilderArtifactV1
+  artifactId: string
+  file?: ArtifactViewportFile
+  markdown: string
+  typeLabel: string
+  onStatusChange: (status: ArtifactVisualCaptureStatus) => void
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) {
+      onStatusChange({
+        ready: false,
+        reason: "capture_target_missing",
+        source: "markdown_preview_canvas",
+        exactTextAvailable: true,
+      })
+      return
+    }
+
+    const context = getCanvasContext(canvas)
+    if (!context) {
+      onStatusChange({
+        ready: false,
+        reason: "capture_failed",
+        source: "markdown_preview_canvas",
+        exactTextAvailable: true,
+      })
+      return
+    }
+
+    try {
+      drawMarkdownArtifactCapture(context, canvas.width, canvas.height, {
+        artifact,
+        file,
+        markdown,
+        typeLabel,
+      })
+      onStatusChange({
+        ready: true,
+        reason: null,
+        source: "markdown_preview_canvas",
+        exactTextAvailable: true,
+      })
+    } catch {
+      onStatusChange({
+        ready: false,
+        reason: "capture_failed",
+        source: "markdown_preview_canvas",
+        exactTextAvailable: true,
+      })
+    }
+  }, [artifact, file, markdown, onStatusChange, typeLabel])
+
+  return (
+    <div
+      aria-hidden="true"
+      data-artifact-region="true"
+      data-coreview-artifact-region="true"
+      data-testid="artifact-markdown-capture-canvas"
+      className="pointer-events-none absolute h-px w-px overflow-hidden opacity-0"
+      style={{ inset: 0 }}
+    >
+      <canvas
+        ref={canvasRef}
+        width={MARKDOWN_CAPTURE_CANVAS_WIDTH}
+        height={MARKDOWN_CAPTURE_CANVAS_HEIGHT}
+        data-artifact-id={artifactId}
+        data-coreview-artifact-id={artifactId}
+        data-artifact-canvas="true"
+        data-coreview-artifact-canvas="true"
+        data-artifact-canvas-source="selected-markdown-preview"
+        data-coreview-offscreen-render="true"
+        aria-label="Generated artifact review canvas"
+      />
+    </div>
+  )
+}
+
+function getCanvasContext(canvas: HTMLCanvasElement): CanvasRenderingContext2D | null {
+  try {
+    return canvas.getContext("2d")
+  } catch {
+    return null
+  }
+}
+
+function drawMarkdownArtifactCapture(
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  input: {
+    artifact: BuilderArtifactV1
+    file?: ArtifactViewportFile
+    markdown: string
+    typeLabel: string
+  },
+) {
+  const title = firstMarkdownHeading(input.markdown) || input.artifact.artifactTitle || input.file?.name || "Generated artifact"
+  const blocks = markdownToCaptureBlocks(input.markdown)
+  const pageX = 64
+  const pageY = 48
+  const pageWidth = width - pageX * 2
+  const pageHeight = height - pageY * 2
+  const contentX = pageX + 54
+  const maxTextWidth = pageWidth - 108
+  let y = pageY + 118
+
+  context.clearRect(0, 0, width, height)
+  context.fillStyle = "#ebe7f0"
+  context.fillRect(0, 0, width, height)
+
+  context.fillStyle = "#fbfaf7"
+  fillRoundedRect(context, pageX, pageY, pageWidth, pageHeight, 24)
+
+  context.fillStyle = "#574f67"
+  context.font = "600 14px system-ui, sans-serif"
+  context.fillText(input.typeLabel.toUpperCase(), contentX, pageY + 48)
+
+  context.fillStyle = "#282233"
+  context.font = "700 32px system-ui, sans-serif"
+  y = drawWrappedCanvasText(context, title, contentX, y, maxTextWidth, 39, 2)
+
+  context.fillStyle = "#81798d"
+  context.font = "14px system-ui, sans-serif"
+  drawSingleLineCanvasText(context, input.file?.name ?? "Generated artifact", contentX, y + 12, maxTextWidth)
+  y += 52
+
+  context.fillStyle = "#ddd6e8"
+  context.fillRect(contentX, y, maxTextWidth, 1)
+  y += 38
+
+  for (const block of blocks.slice(0, MAX_CAPTURE_BLOCKS)) {
+    if (y > pageY + pageHeight - 78) {
+      drawOverflowHint(context, contentX, pageY + pageHeight - 42, maxTextWidth)
+      break
+    }
+
+    if (block.kind === "spacer") {
+      y += 14
+      continue
+    }
+
+    if (block.kind === "h1") {
+      context.fillStyle = "#282233"
+      context.font = "700 28px system-ui, sans-serif"
+      y = drawWrappedCanvasText(context, block.text, contentX, y, maxTextWidth, 34, 2) + 16
+      continue
+    }
+
+    if (block.kind === "h2" || block.kind === "h3") {
+      context.fillStyle = "#312a3d"
+      context.font = `${block.kind === "h2" ? "700 23px" : "700 19px"} system-ui, sans-serif`
+      y = drawWrappedCanvasText(context, block.text, contentX, y, maxTextWidth, block.kind === "h2" ? 30 : 25, 2) + 12
+      continue
+    }
+
+    if (block.kind === "bullet" || block.kind === "numbered") {
+      context.fillStyle = "#5f586c"
+      context.font = "17px system-ui, sans-serif"
+      context.fillText(block.prefix ?? "-", contentX, y)
+      y = drawWrappedCanvasText(context, block.text, contentX + 30, y, maxTextWidth - 30, 25, 3) + 8
+      continue
+    }
+
+    context.fillStyle = "#4b4359"
+    context.font = "17px system-ui, sans-serif"
+    y = drawWrappedCanvasText(context, block.text, contentX, y, maxTextWidth, 26, 4) + 12
+  }
+
+  context.fillStyle = "#81798d"
+  context.font = "13px system-ui, sans-serif"
+  context.fillText("Artifact review view. Exact wording is available through trusted text.", contentX, height - 48)
+}
+
+type MarkdownCaptureBlock = {
+  kind: "h1" | "h2" | "h3" | "paragraph" | "bullet" | "numbered" | "spacer"
+  text: string
+  prefix?: string
+}
+
+function markdownToCaptureBlocks(markdown: string): MarkdownCaptureBlock[] {
+  const blocks: MarkdownCaptureBlock[] = []
+  let orderedIndex = 1
+
+  for (const rawLine of markdown.split(/\r?\n/u)) {
+    const line = rawLine.trim()
+    if (!line) {
+      if (blocks.at(-1)?.kind !== "spacer") {
+        blocks.push({ kind: "spacer", text: "" })
+      }
+      continue
+    }
+
+    const heading = /^(#{1,3})\s+(.+)$/u.exec(line)
+    if (heading) {
+      const depth = heading[1]?.length ?? 1
+      blocks.push({
+        kind: depth === 1 ? "h1" : depth === 2 ? "h2" : "h3",
+        text: cleanMarkdownInline(heading[2] ?? ""),
+      })
+      orderedIndex = 1
+      continue
+    }
+
+    const bullet = /^[-*+]\s+(.+)$/u.exec(line)
+    if (bullet) {
+      blocks.push({ kind: "bullet", prefix: "-", text: cleanMarkdownInline(bullet[1] ?? "") })
+      continue
+    }
+
+    const numbered = /^\d+[.)]\s+(.+)$/u.exec(line)
+    if (numbered) {
+      blocks.push({ kind: "numbered", prefix: `${orderedIndex}.`, text: cleanMarkdownInline(numbered[1] ?? "") })
+      orderedIndex += 1
+      continue
+    }
+
+    blocks.push({ kind: "paragraph", text: cleanMarkdownInline(line) })
+    orderedIndex = 1
+  }
+
+  return blocks.filter((block) => block.kind === "spacer" || block.text.trim())
+}
+
+function firstMarkdownHeading(markdown: string): string | null {
+  for (const line of markdown.split(/\r?\n/u)) {
+    const heading = /^#\s+(.+)$/u.exec(line.trim())
+    if (heading?.[1]) {
+      return cleanMarkdownInline(heading[1])
+    }
+  }
+  return null
+}
+
+function cleanMarkdownInline(value: string): string {
+  return value
+    .replace(/!\[([^\]]*)\]\([^)]+\)/gu, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/gu, "$1")
+    .replace(/`([^`]+)`/gu, "$1")
+    .replace(/[*_~]+/gu, "")
+    .replace(/\s+/gu, " ")
+    .trim()
+}
+
+function drawWrappedCanvasText(
+  context: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth: number,
+  lineHeight: number,
+  maxLines: number,
+): number {
+  const lines = wrapCanvasText(context, text, maxWidth)
+  const visibleLines = lines.slice(0, maxLines)
+
+  visibleLines.forEach((line, index) => {
+    const isLastVisibleLine = index === maxLines - 1 && lines.length > maxLines
+    context.fillText(isLastVisibleLine ? truncateCanvasLine(context, line, maxWidth) : line, x, y + index * lineHeight)
+  })
+
+  return y + Math.max(visibleLines.length, 1) * lineHeight
+}
+
+function drawSingleLineCanvasText(
+  context: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth: number,
+) {
+  context.fillText(truncateCanvasLine(context, text, maxWidth, false), x, y)
+}
+
+function drawOverflowHint(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  maxWidth: number,
+) {
+  context.fillStyle = "#81798d"
+  context.font = "14px system-ui, sans-serif"
+  drawSingleLineCanvasText(context, "More artifact content continues below in the exact text source.", x, y, maxWidth)
+}
+
+function wrapCanvasText(context: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+  const words = cleanMarkdownInline(text).split(/\s+/u).filter(Boolean)
+  if (words.length === 0) {
+    return [""]
+  }
+
+  const lines: string[] = []
+  let currentLine = ""
+
+  for (const word of words) {
+    const candidate = currentLine ? `${currentLine} ${word}` : word
+    if (measureCanvasTextWidth(context, candidate) <= maxWidth) {
+      currentLine = candidate
+      continue
+    }
+
+    if (currentLine) {
+      lines.push(currentLine)
+      currentLine = word
+      continue
+    }
+
+    lines.push(truncateCanvasLine(context, word, maxWidth, false))
+  }
+
+  if (currentLine) {
+    lines.push(currentLine)
+  }
+
+  return lines
+}
+
+function truncateCanvasLine(
+  context: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number,
+  includeEllipsis = true,
+): string {
+  const suffix = includeEllipsis ? "..." : ""
+  if (measureCanvasTextWidth(context, text) <= maxWidth) {
+    return text
+  }
+
+  let result = text
+  while (result.length > 0 && measureCanvasTextWidth(context, `${result}${suffix}`) > maxWidth) {
+    result = result.slice(0, -1)
+  }
+
+  return `${result.trimEnd()}${suffix}`
+}
+
+function measureCanvasTextWidth(context: CanvasRenderingContext2D, text: string): number {
+  return typeof context.measureText === "function" ? context.measureText(text).width : text.length * 8
+}
+
+function fillRoundedRect(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+) {
+  context.beginPath()
+  context.moveTo(x + radius, y)
+  context.arcTo(x + width, y, x + width, y + height, radius)
+  context.arcTo(x + width, y + height, x, y + height, radius)
+  context.arcTo(x, y + height, x, y, radius)
+  context.arcTo(x, y, x + width, y, radius)
+  context.closePath()
+  context.fill()
 }
 
 function ArtifactMetadataPage({

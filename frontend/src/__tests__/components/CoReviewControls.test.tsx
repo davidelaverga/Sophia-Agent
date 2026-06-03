@@ -50,7 +50,7 @@ describe("CoReviewControls", () => {
     const { onStart } = renderControls({}, true, liveStillFrameTransportStatus)
 
     expect(screen.getByRole("status", { name: /not looking/i })).toBeInTheDocument()
-    expect(screen.getByText("Visual missing")).toBeInTheDocument()
+    expect(screen.getByText("Ready for review")).toBeInTheDocument()
 
     await user.click(screen.getByRole("button", { name: /review with sophia/i }))
 
@@ -64,7 +64,20 @@ describe("CoReviewControls", () => {
     expect(screen.getByRole("button", { name: /review with sophia/i })).toBeDisabled()
   })
 
-  it("shows Looking, Frame sent, Exact text available, and visual staleness after a still frame is sent", () => {
+  it("shows Preparing view while the review frame is starting", () => {
+    renderControls(
+      {
+        state: "co_review_starting",
+        visualInputStatus: "connecting",
+      },
+      true,
+      liveStillFrameTransportStatus,
+    )
+
+    expect(screen.getByText("Preparing view")).toBeInTheDocument()
+  })
+
+  it("shows Sophia is looking, Frame sent, Exact text available, and visual staleness after a still frame is sent", () => {
     renderControls(
       {
         state: "co_review_live",
@@ -80,7 +93,7 @@ describe("CoReviewControls", () => {
       liveStillFrameTransportStatus,
     )
 
-    expect(screen.getByRole("status", { name: /looking/i })).toBeInTheDocument()
+    expect(screen.getByRole("status", { name: /sophia is looking/i })).toBeInTheDocument()
     expect(screen.getByText("Frame sent")).toBeInTheDocument()
     expect(screen.getByText("Exact text available")).toBeInTheDocument()
     expect(screen.getByText("Visual may be stale")).toBeInTheDocument()
@@ -108,12 +121,13 @@ describe("CoReviewControls", () => {
     })
 
     expect(screen.getByText("Frame unavailable")).toBeInTheDocument()
-    expect(screen.getByText("still-frame unavailable: frame_send_closed_gemini_websocket")).toBeInTheDocument()
+    expect(screen.getByText("View could not be prepared")).toBeInTheDocument()
+    expect(screen.queryByText(/websocket|transport|gemini|coreview|liveframes|fixture|direct video/i)).not.toBeInTheDocument()
   })
 
-  it("surfaces missing artifact canvas as Visual missing before a failed start", () => {
+  it("surfaces a ready state before review when the frame path is available", () => {
     renderControls({}, true, liveStillFrameTransportStatus)
 
-    expect(screen.getByText("Visual missing")).toBeInTheDocument()
+    expect(screen.getByText("Ready for review")).toBeInTheDocument()
   })
 })

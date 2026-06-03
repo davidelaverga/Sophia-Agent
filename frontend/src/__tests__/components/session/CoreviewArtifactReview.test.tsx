@@ -57,6 +57,13 @@ const MARKDOWN_LIBRARY = [
   },
 ]
 
+const SELECTED_MARKDOWN_ARTIFACT = {
+  ...MARKDOWN_BUILDER_ARTIFACT,
+  artifactTitle: "launch-brief.md",
+  artifactPath: "mnt/user-data/outputs/launch-brief.md",
+  supportingFiles: ["mnt/user-data/outputs/launch-brief.pdf"],
+}
+
 const COMPANION_ARTIFACTS: NonNullable<ComponentProps<typeof PresenceArtifactPanel>["artifacts"]> = {
   takeaway: "Focus on the big picture first.",
   reflection_candidate: {
@@ -315,6 +322,116 @@ describe("Coreview artifact still-frame review", () => {
         method: "GET",
       }),
     )
+  })
+
+  it("exposes a capture-ready selected markdown artifact source without frame-unavailable copy", async () => {
+    setCoreviewFlags(true)
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("# Launch Brief\n\nShared preview source.", {
+        status: 200,
+        headers: { "Content-Type": "text/markdown" },
+      }),
+    )
+
+    renderPanel({
+      builderArtifact: MARKDOWN_BUILDER_ARTIFACT,
+      builderArtifactLibrary: MARKDOWN_LIBRARY,
+      selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.md",
+    })
+
+    expect(await screen.findByRole("heading", { name: "Launch Brief" })).toBeInTheDocument()
+    const expectedArtifactId = buildCoreviewRealArtifactId(SELECTED_MARKDOWN_ARTIFACT)
+    const captureRegion = await screen.findByTestId("artifact-markdown-capture-canvas")
+    const captureCanvas = captureRegion.querySelector("canvas")
+
+    expect(captureCanvas).toHaveAttribute("data-artifact-id", expectedArtifactId)
+    expect(captureCanvas).toHaveAttribute("data-artifact-canvas-source", "selected-markdown-preview")
+    await waitFor(() => expect(screen.getByRole("button", { name: /review with sophia/i })).toBeEnabled())
+    expect(screen.queryByText("Frame unavailable")).not.toBeInTheDocument()
+    expect(screen.getByText("Exact text available")).toBeInTheDocument()
+  })
+
+  it("Review with Sophia sends the selected markdown artifact frame and keeps exact text available", async () => {
+    setCoreviewFlags(true)
+    const user = userEvent.setup()
+    const sendArtifactFrame = vi.fn<ArtifactFrameSender["sendArtifactFrame"]>((frame) => ({
+      ok: true,
+      supported: true,
+      providerAcceptedFrame: true,
+      websocketSendAccepted: true,
+      frameBytes: frame.byteLength,
+      frameDimensions: frame.dimensions,
+      frameSendLatencyMs: 6,
+      estimatedVisualCost: null,
+      error: null,
+      rawFrameExcluded: true as const,
+    }))
+    const transport = new GeminiStillFrameTransport({ sendArtifactFrame })
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("# Exact Launch Title\n\nBudget delta: 17.4%", {
+        status: 200,
+        headers: { "Content-Type": "text/markdown" },
+      }),
+    )
+
+    renderPanel({
+      builderArtifact: MARKDOWN_BUILDER_ARTIFACT,
+      builderArtifactLibrary: MARKDOWN_LIBRARY,
+      selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.md",
+      transport,
+    })
+
+    expect(await screen.findByRole("heading", { name: "Exact Launch Title" })).toBeInTheDocument()
+    const expectedArtifactId = buildCoreviewRealArtifactId(SELECTED_MARKDOWN_ARTIFACT)
+    await waitFor(() => expect(screen.getByRole("button", { name: /review with sophia/i })).toBeEnabled())
+
+    const textResponse = readCoreviewArtifactTextSideband({
+      artifactId: expectedArtifactId,
+      sessionId: "session-1",
+      threadId: "thread-1",
+    })
+    expect(textResponse).toMatchObject({
+      ok: true,
+      source: "builder_file",
+      text: "# Exact Launch Title\n\nBudget delta: 17.4%",
+    })
+
+    await user.click(screen.getByRole("button", { name: /review with sophia/i }))
+
+    await waitFor(() => expect(sendArtifactFrame).toHaveBeenCalledTimes(1))
+    expect(sendArtifactFrame.mock.calls[0]?.[0]).toMatchObject({
+      artifactId: expectedArtifactId,
+      visualSourceKind: "offscreen_render",
+      rawFrameExcluded: true,
+    })
+    expect(sendArtifactFrame.mock.calls[0]?.[1]).toEqual({ coreviewSendStage: "start" })
+    expect(screen.getByRole("status", { name: /sophia is looking/i })).toBeInTheDocument()
+    expect(screen.getByText("Frame sent")).toBeInTheDocument()
+    expect(screen.getByText("Exact text available")).toBeInTheDocument()
+    expect(getDisplayMedia).not.toHaveBeenCalled()
+  })
+
+  it("shows safe frame-unavailable copy when the selected markdown capture canvas cannot be prepared", async () => {
+    setCoreviewFlags(true)
+    getContextSpy?.mockReturnValue(null)
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("# Launch Brief\n\nThe text can render even if capture fails.", {
+        status: 200,
+        headers: { "Content-Type": "text/markdown" },
+      }),
+    )
+
+    renderPanel({
+      builderArtifact: MARKDOWN_BUILDER_ARTIFACT,
+      builderArtifactLibrary: MARKDOWN_LIBRARY,
+      selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.md",
+    })
+
+    expect(await screen.findByRole("heading", { name: "Launch Brief" })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText("Frame unavailable")).toBeInTheDocument())
+    expect(screen.getByRole("button", { name: /review with sophia/i })).toBeDisabled()
+    expect(screen.getByText("Exact text available")).toBeInTheDocument()
+    expect(screen.queryByText(/coreview|gemini|websocket|transport|liveframes|fixture|direct video/i)).not.toBeInTheDocument()
   })
 
   it("renders and registers the companion artifact canvas exact text", async () => {

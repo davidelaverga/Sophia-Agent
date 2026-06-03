@@ -128,7 +128,7 @@ function drawBuilderArtifactOverview(
   context.fillStyle = "rgba(255, 255, 255, 0.05)"
   fillRoundedRect(context, 28, 28, width - 56, height - 56, 28)
 
-  drawEyebrow(context, "Coreview real artifact", 56, 72)
+  drawEyebrow(context, "Generated artifact", 56, 72)
   drawBadge(context, typeLabel, 56, 92)
 
   context.fillStyle = "#f7f2ff"

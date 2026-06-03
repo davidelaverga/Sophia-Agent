@@ -17,6 +17,7 @@ interface ArtifactReviewStatusProps {
   exactTextAvailable?: boolean
   featureEnabled?: boolean
   canStart?: boolean
+  visualSourceUnavailableReason?: string | null
   className?: string
 }
 
@@ -26,6 +27,7 @@ export function ArtifactReviewStatus({
   exactTextAvailable: exactTextAvailableOverride = false,
   featureEnabled = true,
   canStart = true,
+  visualSourceUnavailableReason = null,
   className,
 }: ArtifactReviewStatusProps) {
   if (!featureEnabled) return null
@@ -37,7 +39,8 @@ export function ArtifactReviewStatus({
     state?.state === "co_review_error"
     || (state?.frameSendFailureCount ?? 0) > 0
     || transportStatus?.stillFramesSupported === false
-    || (transportStatus?.visualTransportSupported === false && !frameSent),
+    || (transportStatus?.visualTransportSupported === false && !frameSent)
+    || Boolean(visualSourceUnavailableReason && !frameSent)
   )
 
   return (

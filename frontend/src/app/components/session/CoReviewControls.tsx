@@ -30,26 +30,27 @@ export function CoReviewControls({
   const isStarting = state.state === "co_review_starting"
   const isLive = state.state === "co_review_live"
   const isStopping = state.state === "co_review_stopping"
-  const statusItems = coReviewStatusItems(state, transportStatus)
+  const statusItems = coReviewStatusItems(state, transportStatus, canStart)
+  const visualLive = isLive && state.visualInputStatus === "live"
 
   return (
     <div className={cn("flex flex-wrap items-center gap-2 text-xs text-white/70", className)}>
       <div
-        aria-label={isLive && state.visualInputStatus === "live" ? "Looking" : "Not Looking"}
+        aria-label={visualLive ? "Sophia is looking" : "Not Looking"}
         className={cn(
           "inline-flex items-center gap-1.5 rounded-full border px-2 py-1",
-          isLive && state.visualInputStatus === "live"
+          visualLive
             ? "border-emerald-300/40 bg-emerald-400/10 text-emerald-100"
             : "border-white/12 bg-white/6 text-white/60",
         )}
         role="status"
       >
-        {isLive && state.visualInputStatus === "live" ? (
+        {visualLive ? (
           <Eye className="h-3.5 w-3.5" aria-hidden="true" />
         ) : (
           <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
         )}
-        <span>{isLive && state.visualInputStatus === "live" ? "Looking" : "Not Looking"}</span>
+        <span>{visualLive ? "Sophia is looking" : "Not Looking"}</span>
       </div>
 
       {isStarting ? (
@@ -59,7 +60,7 @@ export function CoReviewControls({
           role="status"
         >
           <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-          <span>Looking</span>
+          <span>Preparing view</span>
         </div>
       ) : null}
 
@@ -93,6 +94,7 @@ export function CoReviewControls({
 export function coReviewStatusItems(
   state: CoReviewSessionState,
   transportStatus: CoReviewTransportStatus,
+  canStart = true,
 ): string[] {
   const items: string[] = []
 
@@ -111,13 +113,17 @@ export function coReviewStatusItems(
   if (state.state === "co_review_error" || state.frameSendFailureCount > 0) {
     items.push("Frame unavailable")
     items.push(coReviewErrorText(state.error ?? state.lastFrameSendFailureReason))
-  } else if (!transportStatus.stillFramesSupported || (!transportStatus.visualTransportSupported && state.frameSentCount === 0)) {
+  } else if (
+    !canStart
+    || !transportStatus.stillFramesSupported
+    || (!transportStatus.visualTransportSupported && state.frameSentCount === 0)
+  ) {
     items.push("Frame unavailable")
   } else if (state.state !== "co_review_live" && state.frameSentCount === 0) {
-    items.push("Visual missing")
+    items.push("Ready for review")
   }
 
-  return items.length > 0 ? items : [transportStatus.statusText]
+  return items
 }
 
 export function coReviewStatusText(
@@ -137,8 +143,8 @@ export function coReviewRefreshStatusText(state: CoReviewSessionState): string |
 }
 
 function coReviewErrorText(error: string | null): string {
-  if (!error) return "still-frame unavailable"
-  if (error === "artifact_canvas_not_found") return "Canvas not found"
-  if (error === "sendArtifactFrame_missing") return "sendArtifactFrame missing"
-  return `still-frame unavailable: ${error}`
+  if (!error) return "View could not be prepared"
+  if (error === "artifact_canvas_not_found" || error === "capture_target_missing") return "Artifact view unavailable"
+  if (error === "preview_not_ready") return "Artifact view is still preparing"
+  return "View could not be prepared"
 }

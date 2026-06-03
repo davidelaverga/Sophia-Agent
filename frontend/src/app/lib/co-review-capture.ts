@@ -70,6 +70,14 @@ export function findArtifactCanvas(
 ): HTMLCanvasElement | null {
   if (artifactId) {
     const escapedArtifactId = cssEscape(artifactId)
+    const preview = root.querySelector<HTMLCanvasElement>(
+      [
+        `canvas[data-artifact-id='${escapedArtifactId}'][data-artifact-canvas-source='selected-markdown-preview']`,
+        `canvas[data-coreview-artifact-id='${escapedArtifactId}'][data-artifact-canvas-source='selected-markdown-preview']`,
+      ].join(", "),
+    )
+    if (preview) return preview
+
     const direct = root.querySelector<HTMLCanvasElement>(
       `canvas[data-artifact-id='${escapedArtifactId}'], canvas[data-coreview-artifact-id='${escapedArtifactId}']`,
     )

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { useArtifactCoReview } from "../../hooks/useArtifactCoReview"
 import { haptic } from "../../hooks/useHaptics"
-import { buildThreadArtifactHref, formatBuilderArtifactFileSize, getBuilderArtifactFiles } from "../../lib/builder-artifacts"
+import { buildThreadArtifactHref, formatBuilderArtifactFileSize, getBuilderArtifactFiles, isMarkdownArtifactFile } from "../../lib/builder-artifacts"
 import { isCoreviewStillFrameReviewEnabled } from "../../lib/co-review-flags"
 import type { CoReviewMediaTransport } from "../../lib/co-review-transport"
 import { cn } from "../../lib/utils"
@@ -13,6 +13,7 @@ import { usePresenceStore } from "../../stores/presence-store"
 import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 import type { RitualArtifacts } from "../../types/session"
 
+import type { ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
 import { ArtifactStage } from "./ArtifactStage"
 import {
   COREVIEW_COMPANION_ARTIFACT_ID,
@@ -75,6 +76,15 @@ function buildLibraryArtifact(item: BuilderArtifactLibraryItemV1): BuilderArtifa
     decisionsMade: [],
     companionSummary: 'Ready to preview in the artifact canvas.',
     userNextAction: 'Review it with Sophia when you are ready.',
+  }
+}
+
+function unavailableCaptureStatus(reason: ArtifactVisualCaptureStatus["reason"]): ArtifactVisualCaptureStatus {
+  return {
+    ready: false,
+    reason,
+    source: "none",
+    exactTextAvailable: false,
   }
 }
 
@@ -171,6 +181,9 @@ export function PresenceArtifactPanel({
   const staggerRef = useRef<ReturnType<typeof setTimeout>[]>([])
   const [builderArtifactRoot, setBuilderArtifactRoot] = useState<HTMLDivElement | null>(null)
   const [domArtifactRoot, setDomArtifactRoot] = useState<HTMLDivElement | null>(null)
+  const [builderVisualCaptureStatus, setBuilderVisualCaptureStatus] = useState<ArtifactVisualCaptureStatus>(
+    () => unavailableCaptureStatus("no_selected_artifact"),
+  )
   const status = usePresenceStore((s) => s.status)
   const hasBuilderLibrary = builderArtifactLibrary.length > 0
   const selectedBuilderLibraryItem = useMemo(
@@ -197,6 +210,34 @@ export function PresenceArtifactPanel({
   const builderArtifactId = stageBuilderArtifact && coreviewReviewEnabled
     ? buildCoreviewRealArtifactId(stageBuilderArtifact)
     : null
+  const stagePrimaryFile = useMemo(() => {
+    const file = getBuilderArtifactFiles(stageBuilderArtifact).find((candidate) => candidate.isPrimary)
+      ?? getBuilderArtifactFiles(stageBuilderArtifact)[0]
+      ?? null
+    if (!file) {
+      return null
+    }
+
+    const libraryItem = builderArtifactLibrary.find((item) => item.path === file.path)
+    return {
+      ...file,
+      ...(libraryItem?.mimeType ? { mimeType: libraryItem.mimeType } : {}),
+    }
+  }, [builderArtifactLibrary, stageBuilderArtifact])
+  const stageUsesMarkdownPreview = isMarkdownArtifactFile(stagePrimaryFile)
+  const builderVisualSourceReady = Boolean(
+    builderArtifactId
+    && (!stageUsesMarkdownPreview || builderVisualCaptureStatus.ready),
+  )
+  const builderVisualUnavailableReason = builderArtifactId
+    ? stageUsesMarkdownPreview
+      ? builderVisualCaptureStatus.reason ?? "preview_not_ready"
+      : null
+    : "no_selected_artifact"
+  const builderExactTextAvailable = Boolean(
+    builderArtifactId
+    && (!stageUsesMarkdownPreview || builderVisualCaptureStatus.exactTextAvailable),
+  )
   const showDomArtifactCoReview = Boolean(
     coreviewReviewEnabled
     && !builderArtifactId
@@ -209,9 +250,11 @@ export function PresenceArtifactPanel({
     artifactId: builderArtifactId,
     artifactRoot: builderArtifactRoot,
     featureEnabled: Boolean(builderArtifactId),
-    exactTextAvailable: Boolean(builderArtifactId),
+    exactTextAvailable: builderExactTextAvailable,
     transport: coReviewTransport,
-    missingCanvasReason: "real_artifact_canvas_unavailable",
+    missingCanvasReason: builderVisualUnavailableReason ?? "capture_target_missing",
+    visualSourceReady: builderVisualSourceReady,
+    visualSourceUnavailableReason: builderVisualUnavailableReason,
   })
   const domArtifactCoReview = useArtifactCoReview({
     sessionId: sessionId ?? null,
@@ -239,6 +282,25 @@ export function PresenceArtifactPanel({
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isVisible, artifacts, stageBuilderArtifact, hasBuilderLibrary])
+
+  useEffect(() => {
+    if (!builderArtifactId) {
+      setBuilderVisualCaptureStatus(unavailableCaptureStatus("no_selected_artifact"))
+      return
+    }
+
+    if (!stageUsesMarkdownPreview) {
+      setBuilderVisualCaptureStatus({
+        ready: true,
+        reason: null,
+        source: "metadata_canvas",
+        exactTextAvailable: true,
+      })
+      return
+    }
+
+    setBuilderVisualCaptureStatus(unavailableCaptureStatus("preview_not_ready"))
+  }, [builderArtifactId, stageUsesMarkdownPreview])
 
   // Staggered reveal — each piece fades in like a star brightening
   useEffect(() => {
@@ -383,7 +445,7 @@ export function PresenceArtifactPanel({
               revealStep >= 1 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
             )}
           >
-            {builderArtifactId && (
+            {builderArtifactId && !stageUsesMarkdownPreview && (
               <CoreviewRealArtifactCanvas
                 artifactId={builderArtifactId}
                 builderArtifact={stageBuilderArtifact}
@@ -406,9 +468,11 @@ export function PresenceArtifactPanel({
                 normalSessionId={normalSessionId}
                 reviewState={builderArtifactCoReview.state}
                 transportStatus={builderArtifactCoReview.transportStatus}
-                exactTextAvailable={Boolean(builderArtifactId)}
+                exactTextAvailable={builderExactTextAvailable}
                 canStartReview={builderArtifactCoReview.canStart}
                 reviewEnabled={builderArtifactCoReview.enabled}
+                visualCaptureStatus={stageUsesMarkdownPreview ? builderVisualCaptureStatus : null}
+                onVisualCaptureStatusChange={setBuilderVisualCaptureStatus}
                 onStartReview={() => { void builderArtifactCoReview.startReview() }}
                 onStopReview={() => { void builderArtifactCoReview.stopReview() }}
                 fillAvailable={isTextModeBuilderStage}

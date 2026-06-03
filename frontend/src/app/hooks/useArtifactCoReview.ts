@@ -24,6 +24,8 @@ export interface UseArtifactCoReviewOptions {
   featureEnabled?: boolean
   transport?: CoReviewMediaTransport
   missingCanvasReason?: string
+  visualSourceReady?: boolean
+  visualSourceUnavailableReason?: string | null
 }
 
 export function useArtifactCoReview({
@@ -36,6 +38,8 @@ export function useArtifactCoReview({
   featureEnabled = isCoreviewStillFrameReviewEnabled(),
   transport,
   missingCanvasReason,
+  visualSourceReady = true,
+  visualSourceUnavailableReason = null,
 }: UseArtifactCoReviewOptions) {
   const transportRef = useRef<CoReviewMediaTransport>(transport ?? new AudioWebSocketUnsupportedTransport())
   const [state, setState] = useState<CoReviewSessionState>(() => initialCoReviewState(transportRef.current.kind))
@@ -68,11 +72,22 @@ export function useArtifactCoReview({
       return state
     }
 
+    if (!visualSourceReady) {
+      logCoreviewBreadcrumb("coReviewStartError", {
+        reason: visualSourceUnavailableReason ?? "capture_target_missing",
+        featureEnabled,
+        hasSessionId: Boolean(sessionId),
+        hasThreadId: Boolean(threadId),
+        hasArtifactId: Boolean(artifactId),
+      })
+      return state
+    }
+
     const visualSource = resolveArtifactVisualSource({
       root: artifactRoot,
       artifactId,
       mode: "still_frame",
-      missingCanvasReason,
+      missingCanvasReason: visualSourceUnavailableReason ?? missingCanvasReason,
     })
 
     logCoreviewBreadcrumb("canvasFound", {
@@ -102,7 +117,7 @@ export function useArtifactCoReview({
     logCoreviewBreadcrumb("coReviewStateAfterStart", safeCoReviewTelemetryFromState(nextState))
     recordCoreviewTelemetry("start", nextState, { featureEnabled })
     return nextState
-  }, [artifactId, artifactRoot, exactTextAvailable, featureEnabled, missingCanvasReason, normalSessionId, sessionId, state, threadId])
+  }, [artifactId, artifactRoot, exactTextAvailable, featureEnabled, missingCanvasReason, normalSessionId, sessionId, state, threadId, visualSourceReady, visualSourceUnavailableReason])
 
   const stopReview = useCallback(async () => {
     const nextState = await machineRef.current.stopCoReview()
@@ -135,7 +150,7 @@ export function useArtifactCoReview({
       root: artifactRoot,
       artifactId,
       mode: "still_frame",
-      missingCanvasReason,
+      missingCanvasReason: visualSourceUnavailableReason ?? missingCanvasReason,
     })
 
     logCoreviewBreadcrumb("coReviewRefreshCanvasFound", {
@@ -163,7 +178,7 @@ export function useArtifactCoReview({
     logCoreviewBreadcrumb("coReviewStateAfterRefresh", safeCoReviewTelemetryFromState(nextState))
     recordCoreviewTelemetry("refresh", nextState, { featureEnabled })
     return nextState
-  }, [artifactId, artifactRoot, featureEnabled, missingCanvasReason, sessionId, state, threadId])
+  }, [artifactId, artifactRoot, featureEnabled, missingCanvasReason, sessionId, state, threadId, visualSourceUnavailableReason])
 
   const telemetry = useMemo(() => safeCoReviewTelemetryFromState(state), [state])
   const transportStatus = machineRef.current.status()
@@ -172,6 +187,7 @@ export function useArtifactCoReview({
     && sessionId
     && threadId
     && artifactId
+    && visualSourceReady
     && transportStatus.visualTransportSupported
     && transportStatus.stillFramesSupported,
   )
