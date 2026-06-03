@@ -297,6 +297,7 @@ export function PresenceArtifactPanel({
   if (!hasContent) return null
 
   const isActive = phase === "visible"
+  const isTextModeBuilderStage = !isVoiceMode && hasBuilder
 
   // Presence-reactive bloom color
   const bloomColor =
@@ -313,6 +314,8 @@ export function PresenceArtifactPanel({
         "transition-all duration-[1200ms] ease-[cubic-bezier(0.22,1,0.36,1)]",
         isVoiceMode
           ? "fixed left-1/2 -translate-x-1/2 bottom-[155px] z-25 w-full max-w-[720px] px-4 sm:px-6"
+          : isTextModeBuilderStage
+            ? "relative z-10 h-full min-h-0 w-full max-w-none px-0"
           : cn(
               "relative z-10 w-full mx-auto px-6 mb-3",
               hasBuilder ? "max-w-4xl" : "max-w-2xl",
@@ -337,15 +340,21 @@ export function PresenceArtifactPanel({
         className={cn(
           "relative pointer-events-auto",
           isVoiceMode && "cursor-pointer",
-          isVoiceMode ? "max-h-[68vh] overflow-y-auto rounded-2xl px-4 py-4" : "rounded-2xl px-5 py-4"
+          isVoiceMode
+            ? "max-h-[68vh] overflow-y-auto rounded-2xl px-4 py-4"
+            : isTextModeBuilderStage
+              ? "flex h-full min-h-0 flex-col overflow-hidden rounded-xl"
+              : "rounded-2xl px-5 py-4"
         )}
-        style={{
-          background: 'var(--cosmic-panel)',
-          borderRadius: '16px',
-          border: '1px solid var(--cosmic-border-soft)',
-          backdropFilter: 'blur(20px) saturate(1.2)',
-          WebkitBackdropFilter: 'blur(20px) saturate(1.2)',
-        }}
+        style={isTextModeBuilderStage
+          ? undefined
+          : {
+              background: 'var(--cosmic-panel)',
+              borderRadius: '16px',
+              border: '1px solid var(--cosmic-border-soft)',
+              backdropFilter: 'blur(20px) saturate(1.2)',
+              WebkitBackdropFilter: 'blur(20px) saturate(1.2)',
+            }}
         onClick={isVoiceMode ? handleDismiss : undefined}
       >
         {/* Dismiss hint — whisper-thin, top-right */}
@@ -370,6 +379,7 @@ export function PresenceArtifactPanel({
             ref={setBuilderArtifactRoot}
             className={cn(
               "relative transition-all duration-[1400ms] ease-out",
+              isTextModeBuilderStage && "flex min-h-0 flex-1 flex-col",
               revealStep >= 1 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
             )}
           >
@@ -383,7 +393,10 @@ export function PresenceArtifactPanel({
               />
             )}
 
-            <div onClick={(e) => e.stopPropagation()}>
+            <div
+              className={cn(isTextModeBuilderStage && "flex min-h-0 flex-1 flex-col")}
+              onClick={(e) => e.stopPropagation()}
+            >
               <ArtifactStage
                 builderArtifact={stageBuilderArtifact}
                 builderArtifactLibrary={builderArtifactLibrary}
@@ -398,6 +411,8 @@ export function PresenceArtifactPanel({
                 reviewEnabled={builderArtifactCoReview.enabled}
                 onStartReview={() => { void builderArtifactCoReview.startReview() }}
                 onStopReview={() => { void builderArtifactCoReview.stopReview() }}
+                fillAvailable={isTextModeBuilderStage}
+                className={cn(isTextModeBuilderStage && "min-h-0 flex-1")}
               />
             </div>
           </div>

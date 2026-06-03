@@ -1137,6 +1137,14 @@ function SessionPageContent() {
       disabled={isTyping || isReadOnly || !resolvedThreadId}
     />
   ) : undefined;
+  const showTextArtifactStage = focusMode === 'text'
+    && showArtifacts
+    && showArtifactsUi
+    && (Boolean(builderArtifact) || hasBuilderArtifactLibrary);
+  const showInlineTextArtifactsPanel = focusMode === 'text'
+    && showArtifacts
+    && showArtifactsUi
+    && !showTextArtifactStage;
 
   return (
     <SessionLayout
@@ -1147,9 +1155,23 @@ function SessionPageContent() {
       isReadOnly={isReadOnly}
       presenceRef={presenceRef}
     >
-      <div className="relative flex h-full animate-fadeIn">
+      <div
+        data-testid={showTextArtifactStage ? 'session-text-split-workspace' : undefined}
+        className={cn(
+          'relative h-full min-h-0 animate-fadeIn',
+          showTextArtifactStage
+            ? 'grid w-full grid-cols-1 grid-rows-[minmax(320px,0.56fr)_minmax(360px,0.44fr)] overflow-hidden lg:grid-cols-[minmax(420px,0.42fr)_minmax(620px,1fr)] lg:grid-rows-1 lg:gap-6'
+            : 'flex',
+        )}
+      >
         {/* Main Chat Area */}
-        <div className="relative z-10 flex-1 flex flex-col min-w-0 overflow-hidden">
+        <div
+          data-testid={showTextArtifactStage ? 'session-conversation-area' : undefined}
+          className={cn(
+            'relative z-10 flex min-w-0 flex-col overflow-hidden',
+            showTextArtifactStage ? 'min-h-0' : 'flex-1',
+          )}
+        >
             <VoiceMetricsPanel voiceState={voiceState} defaultExpanded={false} layout="floating" />
 
           {/* Reading corridor — calms the nebula behind text so messages are effortless to read.
@@ -1242,8 +1264,8 @@ function SessionPageContent() {
             />
           )}
           
-          {/* Inline Artifact Panel — text mode: above composer */}
-          {focusMode === 'text' && showArtifacts && showArtifactsUi && (
+          {/* Inline Artifact Panel — text mode companion artifacts above composer */}
+          {showInlineTextArtifactsPanel && (
             <PresenceArtifactPanel
               artifacts={artifacts}
               builderArtifact={builderArtifact}
@@ -1460,6 +1482,32 @@ function SessionPageContent() {
             />
           </VoiceComposerErrorBoundary>
         </div>
+
+        {showTextArtifactStage && (
+          <aside
+            data-testid="session-artifact-stage-area"
+            className="relative z-10 min-h-0 min-w-0 overflow-hidden px-3 pb-3 lg:pb-6 lg:pr-6 lg:pt-16"
+            aria-label="Artifact stage area"
+          >
+            <PresenceArtifactPanel
+              artifacts={artifacts}
+              builderArtifact={builderArtifact}
+              builderArtifactLibrary={builderArtifactLibrary}
+              selectedBuilderArtifactPath={selectedBuilderArtifactPath}
+              onSelectedBuilderArtifactPathChange={handleSelectBuilderArtifactPath}
+              sessionId={coReviewSessionId}
+              normalSessionId={coReviewSessionId}
+              threadId={artifactPanelThreadId}
+              isVisible={showArtifacts && showArtifactsUi}
+              onDismiss={handleCloseArtifactsPanel}
+              isVoiceMode={false}
+              coReviewTransport={coReviewTransport}
+              onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
+              onMemoryApprove={handleMemoryApprove}
+              onMemoryReject={handleMemoryReject}
+            />
+          </aside>
+        )}
         
         {/* Floating artifact panel — voice mode: fixed above mic */}
         {focusMode !== 'text' && (

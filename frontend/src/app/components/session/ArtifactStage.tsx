@@ -36,6 +36,7 @@ interface ArtifactStageProps {
   reviewEnabled?: boolean
   onStartReview: () => void
   onStopReview: () => void
+  fillAvailable?: boolean
   className?: string
 }
 
@@ -53,6 +54,7 @@ export function ArtifactStage({
   reviewEnabled = true,
   onStartReview,
   onStopReview,
+  fillAvailable = false,
   className,
 }: ArtifactStageProps) {
   const files = useMemo(() => {
@@ -91,7 +93,7 @@ export function ArtifactStage({
   return (
     <section
       className={cn(
-        "overflow-hidden rounded-xl border border-[color:var(--cosmic-border-soft)] bg-[color:var(--cosmic-panel)] shadow-[var(--cosmic-shadow-md)]",
+        "flex min-h-0 w-full flex-col overflow-hidden rounded-xl border border-[color:var(--cosmic-border-soft)] bg-[color:var(--cosmic-panel)] shadow-[var(--cosmic-shadow-md)]",
         className,
       )}
       aria-label="Generated artifact"
@@ -102,6 +104,7 @@ export function ArtifactStage({
         openHref={openHref}
         downloadHref={downloadHref}
         downloadName={primaryFile?.name}
+        className="shrink-0"
       />
 
       <ArtifactCanvasViewport
@@ -111,10 +114,11 @@ export function ArtifactStage({
         previewFile={viewportPrimaryFile}
         previewHref={openHref}
         artifactTextRegistration={artifactTextRegistration}
+        className={fillAvailable ? "min-h-0 flex-1" : undefined}
       />
 
       {reviewEnabled ? (
-        <div className="flex flex-col gap-3 border-t border-[color:var(--cosmic-border-soft)] px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex shrink-0 flex-col gap-3 border-t border-[color:var(--cosmic-border-soft)] px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
           <ArtifactReviewStatus
             state={reviewState}
             transportStatus={transportStatus}

@@ -65,4 +65,26 @@ describe('session page exit UI contract', () => {
     expect(source).toContain('artifact_path: builderCompletionRecoveryFile.path');
     expect(source).not.toContain('artifact_path: builderPrimaryFile.path');
   });
+
+  it('uses a split text workspace when a builder artifact stage is open', () => {
+    const source = readAppFile('app/session/page.tsx');
+
+    expect(source).toContain('const showTextArtifactStage = focusMode === \'text\'');
+    expect(source).toContain('Boolean(builderArtifact) || hasBuilderArtifactLibrary');
+    expect(source).toContain('session-text-split-workspace');
+    expect(source).toContain('session-conversation-area');
+    expect(source).toContain('session-artifact-stage-area');
+    expect(source).toContain('lg:grid-cols-[minmax(420px,0.42fr)_minmax(620px,1fr)]');
+  });
+
+  it('keeps text-mode builder preview to one artifact surface while voice mode uses the same source props', () => {
+    const source = readAppFile('app/session/page.tsx');
+
+    expect(source).toContain('const showInlineTextArtifactsPanel = focusMode === \'text\'');
+    expect(source).toContain('&& !showTextArtifactStage');
+    expect(source).toContain('{showTextArtifactStage && (');
+    expect(source).toContain("{focusMode !== 'text' && (");
+    expect(source.match(/selectedBuilderArtifactPath={selectedBuilderArtifactPath}/g)?.length).toBe(3);
+    expect(source.match(/onSelectedBuilderArtifactPathChange={handleSelectBuilderArtifactPath}/g)?.length).toBe(3);
+  });
 });

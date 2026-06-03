@@ -24,6 +24,7 @@ export function ArtifactToolbar({
 }: ArtifactToolbarProps) {
   return (
     <div
+      data-testid="artifact-toolbar"
       className={cn(
         "flex flex-col gap-3 border-b border-[color:var(--cosmic-border-soft)] px-4 py-3 sm:flex-row sm:items-center sm:justify-between",
         className,

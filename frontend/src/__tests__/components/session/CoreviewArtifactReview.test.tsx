@@ -188,6 +188,19 @@ describe("Coreview artifact still-frame review", () => {
     expect(screen.queryByRole("button", { name: /review with sophia/i })).not.toBeInTheDocument()
   })
 
+  it("renders a builder artifact in text mode as a wide in-session stage, not a fixed overlay", async () => {
+    renderPanel({ builderArtifact: BUILDER_ARTIFACT, isVoiceMode: false })
+
+    const panel = await screen.findByRole("complementary", { name: /session artifacts/i })
+    const artifactRegion = await screen.findByRole("region", { name: /generated artifact/i })
+
+    expect(panel.className).toContain("h-full")
+    expect(panel.className).toContain("max-w-none")
+    expect(panel.className).not.toMatch(/\bfixed\b|\binset-0\b|\bmax-w-4xl\b/)
+    expect(artifactRegion.className).toContain("w-full")
+    expect(artifactRegion.className).toContain("flex-1")
+  })
+
   it("renders the guarded builder metadata canvas when still-frame review is enabled", async () => {
     setCoreviewFlags(true)
 

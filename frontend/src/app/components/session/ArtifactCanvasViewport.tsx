@@ -62,8 +62,9 @@ export function ArtifactCanvasViewport({
 
   return (
     <div
+      data-testid="artifact-canvas-viewport"
       className={cn(
-        "relative min-h-[360px] overflow-hidden rounded-b-xl bg-[color:color-mix(in_srgb,var(--cosmic-panel-soft)_58%,transparent)]",
+        "relative flex min-h-[360px] flex-col overflow-hidden rounded-b-xl bg-[color:color-mix(in_srgb,var(--cosmic-panel-soft)_58%,transparent)]",
         className,
       )}
     >
@@ -74,7 +75,10 @@ export function ArtifactCanvasViewport({
             "radial-gradient(circle at 24% 10%, color-mix(in srgb, var(--sophia-purple) 9%, transparent), transparent 34%), radial-gradient(circle at 78% 18%, color-mix(in srgb, var(--cosmic-teal) 8%, transparent), transparent 36%)",
         }}
       />
-      <div className="relative mx-auto flex min-h-[360px] w-full max-w-[720px] flex-col px-4 py-6 sm:px-8 sm:py-8">
+      <div
+        data-testid="artifact-canvas-scroll-area"
+        className="scrollbar-thin relative flex min-h-0 w-full flex-1 flex-col overflow-y-auto px-4 py-6 sm:px-8 sm:py-8"
+      >
         {canPreviewMarkdown ? (
           <MarkdownDocumentPage
             artifact={artifact}
@@ -162,7 +166,7 @@ function MarkdownDocumentPage({
 }) {
   return (
     <div
-      className="mx-auto flex w-full max-w-[620px] flex-1 flex-col rounded-xl border bg-[color:color-mix(in_srgb,var(--card-bg)_90%,transparent)] shadow-[0_24px_70px_color-mix(in_srgb,var(--bg)_34%,transparent)]"
+      className="mx-auto flex w-full max-w-[860px] flex-1 flex-col rounded-xl border bg-[color:color-mix(in_srgb,var(--card-bg)_90%,transparent)] shadow-[0_24px_70px_color-mix(in_srgb,var(--bg)_34%,transparent)]"
       style={{ borderColor: "var(--cosmic-border-soft)" }}
       aria-label="Artifact document preview"
     >
@@ -181,7 +185,7 @@ function MarkdownDocumentPage({
 
       <div className="min-h-[300px] px-6 py-7 sm:px-8">
         {preview.status === "loading" ? (
-          <PreviewStateCard title="Loading preview" body="Preparing document view" />
+          <PreviewStateCard title="Preparing document view" body="You can still open or download the artifact." />
         ) : preview.status === "failed" || preview.status === "idle" ? (
           <PreviewStateCard title="Preview unavailable" body="Open or download the artifact to view the file." />
         ) : (
@@ -205,7 +209,7 @@ function ArtifactMetadataPage({
 }) {
   return (
     <div
-      className="mx-auto flex w-full max-w-[560px] flex-1 flex-col rounded-xl border bg-[color:color-mix(in_srgb,var(--card-bg)_84%,transparent)] px-6 py-7 shadow-[0_24px_70px_color-mix(in_srgb,var(--bg)_34%,transparent)]"
+      className="mx-auto flex w-full max-w-[680px] flex-1 flex-col rounded-xl border bg-[color:color-mix(in_srgb,var(--card-bg)_84%,transparent)] px-6 py-7 shadow-[0_24px_70px_color-mix(in_srgb,var(--bg)_34%,transparent)]"
       style={{ borderColor: "var(--cosmic-border-soft)" }}
       aria-label="Artifact document preview"
     >

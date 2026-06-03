@@ -57,6 +57,7 @@ function renderStage({
   canStartReview = true,
   reviewEnabled = true,
   transportStatus = supportedTransportStatus,
+  fillAvailable = false,
 }: {
   artifact?: typeof builderArtifact
   artifactLibrary?: Array<{
@@ -74,6 +75,7 @@ function renderStage({
   canStartReview?: boolean
   reviewEnabled?: boolean
   transportStatus?: typeof supportedTransportStatus
+  fillAvailable?: boolean
 } = {}) {
   const onStartReview = vi.fn()
   const onStopReview = vi.fn()
@@ -96,6 +98,7 @@ function renderStage({
       reviewEnabled={reviewEnabled}
       onStartReview={onStartReview}
       onStopReview={onStopReview}
+      fillAvailable={fillAvailable}
     />,
   )
 
@@ -111,7 +114,11 @@ describe("ArtifactStage", () => {
   it("renders a native artifact shell with open and download actions", () => {
     renderStage()
 
-    expect(screen.getByRole("region", { name: /generated artifact/i })).toBeInTheDocument()
+    const artifactRegion = screen.getByRole("region", { name: /generated artifact/i })
+    expect(artifactRegion).toBeInTheDocument()
+    expect(artifactRegion.className).toContain("w-full")
+    expect(artifactRegion.className).toContain("min-h-0")
+    expect(artifactRegion.className).not.toMatch(/\bfixed\b|\binset-0\b/)
     expect(screen.getAllByText("Launch brief overview")).toHaveLength(2)
     expect(screen.getByText("Document")).toBeInTheDocument()
     expect(screen.getByText("launch-brief.pdf")).toBeInTheDocument()
@@ -214,7 +221,7 @@ describe("ArtifactStage", () => {
       }),
     )
 
-    renderStage({ artifact: markdownBuilderArtifact })
+    renderStage({ artifact: markdownBuilderArtifact, fillAvailable: true })
 
     expect(await screen.findByRole("heading", { name: "Launch Brief" })).toBeInTheDocument()
     expect(screen.getByText(/The artifact is/i)).toBeInTheDocument()
@@ -270,11 +277,42 @@ describe("ArtifactStage", () => {
       () => new Promise<Response>(() => undefined),
     )
 
-    renderStage({ artifact: markdownBuilderArtifact })
+    renderStage({ artifact: markdownBuilderArtifact, fillAvailable: true })
 
+    const viewport = await screen.findByTestId("artifact-canvas-viewport")
+    expect(viewport).toContainElement(screen.getByTestId("artifact-canvas-scroll-area"))
     const previewRegion = await screen.findByLabelText("Artifact document preview")
-    expect(within(previewRegion).getByText("Loading preview")).toBeInTheDocument()
     expect(within(previewRegion).getByText("Preparing document view")).toBeInTheDocument()
+    expect(screen.queryByText("Loading preview")).not.toBeInTheDocument()
+  })
+
+  it("scrolls long markdown inside the canvas while toolbar and review actions remain outside it", async () => {
+    const longMarkdown = [
+      "# Launch Brief",
+      "",
+      ...Array.from({ length: 40 }, (_, index) => `Paragraph ${index + 1}: more detail for the in-session canvas.`),
+    ].join("\n\n")
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(longMarkdown, {
+        status: 200,
+        headers: { "Content-Type": "text/markdown; charset=utf-8" },
+      }),
+    )
+
+    renderStage({ artifact: markdownBuilderArtifact, fillAvailable: true })
+
+    expect(await screen.findByRole("heading", { name: "Launch Brief" })).toBeInTheDocument()
+    const toolbar = screen.getByTestId("artifact-toolbar")
+    const viewport = screen.getByTestId("artifact-canvas-viewport")
+    const scrollArea = screen.getByTestId("artifact-canvas-scroll-area")
+
+    expect(viewport.className).toContain("flex-1")
+    expect(scrollArea.className).toContain("overflow-y-auto")
+    expect(toolbar).not.toBe(scrollArea)
+    expect(scrollArea).not.toContainElement(toolbar)
+    expect(screen.getByRole("button", { name: /review with sophia/i })).toBeInTheDocument()
+    expect(screen.getByLabelText("Open Launch brief overview in new tab")).toBeInTheDocument()
+    expect(screen.getByLabelText("Download Launch brief overview")).toBeInTheDocument()
   })
 
   it("shows preview unavailable on fetch failure while keeping Open and Download available", async () => {
