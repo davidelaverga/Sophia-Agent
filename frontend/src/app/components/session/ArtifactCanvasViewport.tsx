@@ -7,11 +7,12 @@ import type { ArtifactFitMode, ArtifactRendererKind } from "../../lib/artifact-r
 import { detectArtifactRendererKind } from "../../lib/artifact-renderers"
 import { isMarkdownArtifactFile } from "../../lib/builder-artifacts"
 import { registerCoreviewArtifactText } from "../../lib/coreview-artifact-text"
+import { recordSophiaCaptureEvent } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
 import type { BuilderArtifactFileV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 
 import { ArtifactMarkdownPreview } from "./ArtifactMarkdownPreview"
-import { ArtifactPdfPreview } from "./ArtifactPdfPreview"
+import { ArtifactPdfPreview, type ArtifactPdfTextExtractionStatus } from "./ArtifactPdfPreview"
 
 type ArtifactViewportFile = BuilderArtifactFileV1 & {
   mimeType?: string
@@ -30,6 +31,11 @@ export interface ArtifactVisualCaptureStatus {
   reason: ArtifactVisualCaptureUnavailableReason | null
   source: "markdown_preview_canvas" | "metadata_canvas" | "pdf_page_canvas" | "none"
   exactTextAvailable: boolean
+  pdfTextExtractionStatus?: ArtifactPdfTextExtractionStatus["status"] | null
+  pdfTextExtractionSource?: ArtifactPdfTextExtractionStatus["source"] | null
+  pdfTextExtractionPageCount?: number | null
+  pdfTextExtractionCharCount?: number | null
+  pdfTextExtractionTruncated?: boolean | null
 }
 
 interface ArtifactCanvasViewportProps {
@@ -52,6 +58,7 @@ interface ArtifactCanvasViewportProps {
   fitMode?: ArtifactFitMode
   onPageIndexChange?: (pageIndex: number) => void
   onPageCountChange?: (pageCount: number) => void
+  onPinchZoomChange?: (zoom: number) => void
   className?: string
 }
 
@@ -80,6 +87,7 @@ export function ArtifactCanvasViewport({
   fitMode = "custom",
   onPageIndexChange,
   onPageCountChange,
+  onPinchZoomChange,
   className,
 }: ArtifactCanvasViewportProps) {
   const primaryFile = previewFile ?? files.find((file) => file.isPrimary) ?? files[0]
@@ -146,6 +154,49 @@ export function ArtifactCanvasViewport({
       return { key: pdfCaptureKey, status }
     })
   }, [pdfCaptureKey])
+  const pdfTextExtractionKey = [
+    captureArtifactId ?? "",
+    primaryFile?.path ?? "",
+  ].join("::")
+  const [pdfTextExtractionState, setPdfTextExtractionState] = useState<{
+    key: string
+    status: ArtifactPdfTextExtractionStatus
+  }>(() => ({
+    key: "",
+    status: emptyPdfTextExtractionStatus("unavailable"),
+  }))
+  const currentPdfTextExtractionStatus = useMemo(() => (
+    pdfTextExtractionState.key === pdfTextExtractionKey
+      ? pdfTextExtractionState.status
+      : emptyPdfTextExtractionStatus("unavailable")
+  ), [pdfTextExtractionKey, pdfTextExtractionState])
+  const currentPdfCaptureStatusWithText = useMemo<ArtifactVisualCaptureStatus>(() => ({
+    ...currentPdfCaptureStatus,
+    exactTextAvailable: currentPdfTextExtractionStatus.status === "success",
+    pdfTextExtractionStatus: currentPdfTextExtractionStatus.status,
+    pdfTextExtractionSource: currentPdfTextExtractionStatus.source,
+    pdfTextExtractionPageCount: currentPdfTextExtractionStatus.pageCount,
+    pdfTextExtractionCharCount: currentPdfTextExtractionStatus.charCount,
+    pdfTextExtractionTruncated: currentPdfTextExtractionStatus.truncated,
+  }), [
+    currentPdfCaptureStatus,
+    currentPdfTextExtractionStatus.charCount,
+    currentPdfTextExtractionStatus.pageCount,
+    currentPdfTextExtractionStatus.source,
+    currentPdfTextExtractionStatus.status,
+    currentPdfTextExtractionStatus.truncated,
+  ])
+  const handlePdfTextExtractionStatusChange = useCallback((status: ArtifactPdfTextExtractionStatus) => {
+    setPdfTextExtractionState((current) => {
+      if (
+        current.key === pdfTextExtractionKey
+        && pdfTextExtractionStatusesEqual(current.status, status)
+      ) {
+        return current
+      }
+      return { key: pdfTextExtractionKey, status }
+    })
+  }, [pdfTextExtractionKey])
 
   useEffect(() => {
     if (!artifactTextRegistration || preview.status !== "ready" || !preview.markdown.trim()) {
@@ -162,6 +213,73 @@ export function ArtifactCanvasViewport({
   }, [artifactTextRegistration, preview.markdown, preview.status])
 
   useEffect(() => {
+    if (
+      !artifactTextRegistration
+      || currentPdfTextExtractionStatus.status !== "success"
+      || !currentPdfTextExtractionStatus.text?.trim()
+    ) {
+      return
+    }
+
+    return registerCoreviewArtifactText({
+      artifactId: artifactTextRegistration.artifactId,
+      source: "pdf_text_extraction",
+      text: currentPdfTextExtractionStatus.text,
+      pageCount: currentPdfTextExtractionStatus.pageCount,
+      charCount: currentPdfTextExtractionStatus.charCount,
+      truncated: currentPdfTextExtractionStatus.truncated,
+      sessionIds: artifactTextRegistration.sessionIds,
+      threadId: artifactTextRegistration.threadId,
+    })
+  }, [
+    artifactTextRegistration,
+    currentPdfTextExtractionStatus.charCount,
+    currentPdfTextExtractionStatus.pageCount,
+    currentPdfTextExtractionStatus.status,
+    currentPdfTextExtractionStatus.text,
+    currentPdfTextExtractionStatus.truncated,
+  ])
+
+  useEffect(() => {
+    if (
+      !captureArtifactId
+      || !canPreviewPdf
+      || pdfTextExtractionState.key !== pdfTextExtractionKey
+      || currentPdfTextExtractionStatus.status === "loading"
+    ) {
+      return
+    }
+
+    recordSophiaCaptureEvent({
+      category: "artifacts-runtime",
+      name: "pdf-text-extraction",
+      payload: {
+        artifactId: captureArtifactId,
+        artifactPath: primaryFile?.path ?? null,
+        pdfTextExtractionStatus: currentPdfTextExtractionStatus.status,
+        pdfTextExtractionSource: currentPdfTextExtractionStatus.source,
+        pdfTextExtractionPageCount: currentPdfTextExtractionStatus.pageCount,
+        pdfTextExtractionCharCount: currentPdfTextExtractionStatus.charCount,
+        pdfTextExtractionTruncated: currentPdfTextExtractionStatus.truncated,
+        pdfTextExtractionSafeReason: currentPdfTextExtractionStatus.safeReason,
+        rawArtifactTextExcluded: true,
+      },
+    })
+  }, [
+    canPreviewPdf,
+    captureArtifactId,
+    currentPdfTextExtractionStatus.charCount,
+    currentPdfTextExtractionStatus.pageCount,
+    currentPdfTextExtractionStatus.safeReason,
+    currentPdfTextExtractionStatus.source,
+    currentPdfTextExtractionStatus.status,
+    currentPdfTextExtractionStatus.truncated,
+    pdfTextExtractionKey,
+    pdfTextExtractionState.key,
+    primaryFile?.path,
+  ])
+
+  useEffect(() => {
     if (!onVisualCaptureStatusChange) {
       return
     }
@@ -172,7 +290,7 @@ export function ArtifactCanvasViewport({
     }
 
     if (canPreviewPdf) {
-      onVisualCaptureStatusChange(currentPdfCaptureStatus)
+      onVisualCaptureStatusChange(currentPdfCaptureStatusWithText)
       return
     }
 
@@ -202,7 +320,7 @@ export function ArtifactCanvasViewport({
     canPreviewPdf,
     captureArtifactId,
     currentMarkdownCaptureStatus,
-    currentPdfCaptureStatus,
+    currentPdfCaptureStatusWithText,
     onVisualCaptureStatusChange,
     preview.markdown,
     preview.status,
@@ -266,6 +384,8 @@ export function ArtifactCanvasViewport({
               onPageIndexChange={onPageIndexChange}
               onPageCountChange={onPageCountChange}
               onRenderStatusChange={handlePdfCaptureStatusChange}
+              onTextExtractionStatusChange={handlePdfTextExtractionStatusChange}
+              onPinchZoomChange={onPinchZoomChange}
             />
           ) : (
             <ArtifactMetadataPage
@@ -403,6 +523,19 @@ function unavailableCaptureStatus(
   }
 }
 
+function emptyPdfTextExtractionStatus(
+  status: ArtifactPdfTextExtractionStatus["status"],
+): ArtifactPdfTextExtractionStatus {
+  return {
+    status,
+    source: "pdf_text_extraction",
+    pageCount: 0,
+    charCount: 0,
+    truncated: false,
+    safeReason: null,
+  }
+}
+
 function captureStatusesEqual(
   left: ArtifactVisualCaptureStatus,
   right: ArtifactVisualCaptureStatus,
@@ -411,6 +544,23 @@ function captureStatusesEqual(
     && left.reason === right.reason
     && left.source === right.source
     && left.exactTextAvailable === right.exactTextAvailable
+    && left.pdfTextExtractionStatus === right.pdfTextExtractionStatus
+    && left.pdfTextExtractionSource === right.pdfTextExtractionSource
+    && left.pdfTextExtractionPageCount === right.pdfTextExtractionPageCount
+    && left.pdfTextExtractionCharCount === right.pdfTextExtractionCharCount
+    && left.pdfTextExtractionTruncated === right.pdfTextExtractionTruncated
+}
+
+function pdfTextExtractionStatusesEqual(
+  left: ArtifactPdfTextExtractionStatus,
+  right: ArtifactPdfTextExtractionStatus,
+): boolean {
+  return left.status === right.status
+    && left.pageCount === right.pageCount
+    && left.charCount === right.charCount
+    && left.truncated === right.truncated
+    && left.safeReason === right.safeReason
+    && left.text === right.text
 }
 
 function MarkdownDocumentPage({

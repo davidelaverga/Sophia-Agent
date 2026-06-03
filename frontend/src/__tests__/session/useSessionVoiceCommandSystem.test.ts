@@ -164,6 +164,7 @@ describe('useSessionVoiceCommandSystem', () => {
       onUserTranscript,
       showToast,
       bargeIn,
+      softBargeIn,
     } = buildParams({
       pendingInterrupt: null,
       routeArtifactReviewCommand: vi.fn(() => ({
@@ -184,7 +185,8 @@ describe('useSessionVoiceCommandSystem', () => {
     });
 
     expect(onUserTranscript).not.toHaveBeenCalled();
-    expect(bargeIn).toHaveBeenCalledTimes(1);
+    expect(bargeIn).not.toHaveBeenCalled();
+    expect(softBargeIn).toHaveBeenCalledTimes(1);
     expect(showToast).toHaveBeenCalledWith(
       expect.objectContaining({
         message: "Switched to page 2. Refreshing Sophia's view...",

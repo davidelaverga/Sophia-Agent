@@ -393,18 +393,29 @@ describe("Coreview artifact still-frame review", () => {
     window.__sophiaCapture?.enable()
     const user = userEvent.setup()
     mockPdfPreviewReady({ pageCount: 3 })
-    const sendArtifactFrame = vi.fn<ArtifactFrameSender["sendArtifactFrame"]>((frame) => ({
-      ok: true,
-      supported: true,
-      providerAcceptedFrame: true,
-      websocketSendAccepted: true,
-      frameBytes: frame.byteLength,
-      frameDimensions: frame.dimensions,
-      frameSendLatencyMs: 6,
-      estimatedVisualCost: null,
-      error: null,
-      rawFrameExcluded: true as const,
-    }))
+    let resolveRefreshFrame: (() => void) | null = null
+    const sendArtifactFrame = vi.fn<ArtifactFrameSender["sendArtifactFrame"]>((frame, context) => {
+      const result = {
+        ok: true,
+        supported: true,
+        providerAcceptedFrame: true,
+        websocketSendAccepted: true,
+        frameBytes: frame.byteLength,
+        frameDimensions: frame.dimensions,
+        frameSendLatencyMs: 6,
+        estimatedVisualCost: null,
+        error: null,
+        rawFrameExcluded: true as const,
+      }
+
+      if (context?.coreviewSendStage === "refresh") {
+        return new Promise((resolve) => {
+          resolveRefreshFrame = () => resolve(result)
+        })
+      }
+
+      return result
+    })
     const transport = new GeminiStillFrameTransport({ sendArtifactFrame })
     let routeArtifactCommand: Parameters<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onArtifactReviewVoiceCommandRouteChange"]>>[0] = null
 
@@ -434,7 +445,7 @@ describe("Coreview artifact still-frame review", () => {
       userMessage: "Switched to page 2. Refreshing Sophia's view...",
     })
     expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument()
-    expect(screen.getByText("View may be stale")).toBeInTheDocument()
+    expect(screen.getByText("View changed. Refresh Sophia's view.")).toBeInTheDocument()
 
     await waitFor(() => expect(sendArtifactFrame).toHaveBeenCalledTimes(2))
     expect(sendArtifactFrame.mock.calls[1]?.[0]).toMatchObject({
@@ -443,6 +454,10 @@ describe("Coreview artifact still-frame review", () => {
       rawFrameExcluded: true,
     })
     expect(sendArtifactFrame.mock.calls[1]?.[1]).toEqual({ coreviewSendStage: "refresh" })
+
+    act(() => {
+      resolveRefreshFrame?.()
+    })
 
     await waitFor(() => {
       const commandEvents = exportSophiaCaptureBundle().events.filter((event) => event.name === "artifact-review-voice-command")
@@ -487,13 +502,74 @@ describe("Coreview artifact still-frame review", () => {
       handled: true,
       applied: true,
       triggeredRefresh: false,
-      refreshResult: "not_active",
+      refreshResult: "unavailable",
       userMessage: "Page changed. Start voice review to refresh Sophia's view.",
     })
     expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument()
     expect(screen.getByRole("region", { name: /generated artifact/i })).toHaveAttribute("data-review-state", "unavailable")
     expect(screen.queryByText("Frame sent")).not.toBeInTheDocument()
     expect(sendArtifactFrame).not.toHaveBeenCalled()
+  })
+
+  it("keeps review stale-active when an auto refresh attempt fails", async () => {
+    setCoreviewFlags(true)
+    mockPdfPreviewReady({ pageCount: 3 })
+    const sendArtifactFrame = vi.fn<ArtifactFrameSender["sendArtifactFrame"]>((frame, context) => {
+      if (context?.coreviewSendStage === "refresh") {
+        return {
+          ok: false,
+          supported: true,
+          providerAcceptedFrame: false,
+          websocketSendAccepted: false,
+          frameBytes: frame.byteLength,
+          frameDimensions: frame.dimensions,
+          frameSendLatencyMs: 5,
+          estimatedVisualCost: null,
+          error: "frame_send_closed_gemini_websocket",
+          rawFrameExcluded: true as const,
+        }
+      }
+
+      return {
+        ok: true,
+        supported: true,
+        providerAcceptedFrame: true,
+        websocketSendAccepted: true,
+        frameBytes: frame.byteLength,
+        frameDimensions: frame.dimensions,
+        frameSendLatencyMs: 4,
+        estimatedVisualCost: null,
+        error: null,
+        rawFrameExcluded: true as const,
+      }
+    })
+    const transport = new GeminiStillFrameTransport({ sendArtifactFrame })
+    let routeArtifactCommand: Parameters<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onArtifactReviewVoiceCommandRouteChange"]>>[0] = null
+
+    renderPanel({
+      selectedBuilderArtifactPath: PDF_SELECTED_PATH,
+      transport,
+      onArtifactReviewVoiceCommandRouteChange: (handler) => {
+        routeArtifactCommand = handler
+      },
+    })
+
+    expect(await screen.findByText("Page 1 of 3")).toBeInTheDocument()
+    await waitFor(() => expect(routeArtifactCommand).not.toBeNull())
+    await userEvent.click(screen.getByRole("button", { name: /review with sophia/i }))
+    await waitFor(() => expect(sendArtifactFrame).toHaveBeenCalledTimes(1))
+
+    act(() => {
+      routeArtifactCommand?.("go to page 2")
+    })
+
+    expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument()
+    await waitFor(() => expect(sendArtifactFrame).toHaveBeenCalledTimes(2))
+    expect(screen.getByRole("region", { name: /generated artifact/i })).toHaveAttribute("data-review-state", "active")
+    expect(screen.getByText("View changed. Refresh Sophia's view.")).toBeInTheDocument()
+    expect(screen.getByRole("status", { name: "Sophia's view is stale" })).toBeInTheDocument()
+    expect(screen.queryByText("Visual review not active")).not.toBeInTheDocument()
+    expect(sendArtifactFrame.mock.calls[1]?.[1]).toEqual({ coreviewSendStage: "refresh" })
   })
 
   it("records selected builder stage identity with Coreview off without activating companion review", async () => {

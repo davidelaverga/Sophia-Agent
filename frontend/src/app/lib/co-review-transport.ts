@@ -513,14 +513,13 @@ export class CoReviewSessionMachine {
     const refreshFrameLatencyMs = elapsedMs(this.clock(), refreshMark)
     if (!result.ok) {
       this.update({
-        state: "co_review_error",
-        visualInputStatus: result.visualInputStatus,
-        toolAvailability: result.toolAvailability,
-        coReviewSessionId: null,
+        state: "co_review_live",
+        visualInputStatus: this.current.visualInputStatus,
+        toolAvailability: this.current.toolAvailability,
         error: result.error ?? "artifact_frame_refresh_failed",
-        videoOrFrameMode: "none",
-        normalVoicePaused: false,
-        normalVoiceRestored: true,
+        videoOrFrameMode: this.current.videoOrFrameMode,
+        normalVoicePaused: this.current.normalVoicePaused,
+        normalVoiceRestored: this.current.normalVoiceRestored,
         refreshFrameInProgress: false,
         refreshFrameLatencyMs,
         refreshFrameResult: "error",
@@ -542,8 +541,8 @@ export class CoReviewSessionMachine {
         providerUsageImageCount: result.imageCountAfterFrame ?? this.current.providerUsageImageCount,
         providerUsageVideoDurationSeconds: readUsageDurationSeconds(result.usageMetadataAfterFrame ?? null, "video") ?? this.current.providerUsageVideoDurationSeconds,
         providerUsageAudioDurationSeconds: readUsageDurationSeconds(result.usageMetadataAfterFrame ?? null, "audio") ?? this.current.providerUsageAudioDurationSeconds,
-        providerAcceptedFrame: result.providerAcceptedFrame ?? false,
-        visualResponseObserved: result.visualResponseObserved ?? false,
+        providerAcceptedFrame: result.providerAcceptedFrame ?? this.current.providerAcceptedFrame,
+        visualResponseObserved: result.visualResponseObserved ?? this.current.visualResponseObserved,
         estimatedVisualCost: result.estimatedVisualCost ?? this.current.estimatedVisualCost,
       })
       return this.state()

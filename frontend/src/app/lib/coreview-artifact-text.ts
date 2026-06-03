@@ -18,6 +18,7 @@ export type CoreviewArtifactTextSource =
   | 'fixture'
   | 'builder_metadata'
   | 'builder_file'
+  | 'pdf_text_extraction'
   | 'artifact_store'
   | 'unsupported';
 
@@ -28,6 +29,7 @@ export interface CoreviewArtifactTextSuccess {
   text: string;
   truncated: boolean;
   char_count: number;
+  page_count?: number | null;
 }
 
 export interface CoreviewArtifactTextFailure {
@@ -43,6 +45,9 @@ export interface CoreviewArtifactTextRegistration {
   artifactId: string;
   source: CoreviewArtifactTextSource;
   text: string;
+  pageCount?: number | null;
+  charCount?: number | null;
+  truncated?: boolean | null;
   sessionIds?: Array<string | null | undefined>;
   threadId?: string | null;
 }
@@ -69,6 +74,9 @@ export function registerCoreviewArtifactText(
     artifactId,
     source: registration.source,
     text,
+    pageCount: normalizePositiveInteger(registration.pageCount),
+    charCount: normalizeNonNegativeInteger(registration.charCount),
+    truncated: typeof registration.truncated === 'boolean' ? registration.truncated : null,
     sessionIds: normalizeSessionIds(registration.sessionIds),
     threadId: normalizeToken(registration.threadId),
   };
@@ -118,7 +126,7 @@ export function readCoreviewArtifactTextSideband({
     );
   }
 
-  return success(normalizedArtifactId, matchingEntry.source, matchingEntry.text);
+  return success(normalizedArtifactId, matchingEntry);
 }
 
 export function clearCoreviewArtifactTextRegistryForTests(): void {
@@ -193,18 +201,20 @@ export function buildCoreviewCompanionArtifactText(artifacts: RitualArtifacts): 
 
 function success(
   artifactId: string,
-  source: CoreviewArtifactTextSource,
-  text: string,
+  registration: CoreviewArtifactTextRegistration,
 ): CoreviewArtifactTextSuccess {
+  const { source, text } = registration;
   const charCount = text.length;
-  const truncated = charCount > MAX_ARTIFACT_TEXT_CHARS;
+  const reportedCharCount = registration.charCount ?? charCount;
+  const truncated = Boolean(registration.truncated) || reportedCharCount > MAX_ARTIFACT_TEXT_CHARS;
   return {
     ok: true,
     artifact_id: artifactId,
     source,
     text: text.slice(0, MAX_ARTIFACT_TEXT_CHARS),
     truncated,
-    char_count: charCount,
+    char_count: reportedCharCount,
+    page_count: registration.pageCount ?? null,
   };
 }
 
@@ -254,4 +264,19 @@ function normalizeToken(value: string | null | undefined): string | null {
   }
   const normalized = value.trim();
   return normalized || null;
+}
+
+function normalizePositiveInteger(value: number | null | undefined): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  const normalized = Math.floor(value);
+  return normalized > 0 ? normalized : null;
+}
+
+function normalizeNonNegativeInteger(value: number | null | undefined): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  return Math.max(0, Math.floor(value));
 }

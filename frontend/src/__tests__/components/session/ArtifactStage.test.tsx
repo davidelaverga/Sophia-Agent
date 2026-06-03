@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import type { ComponentProps } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -82,10 +82,12 @@ function mockPdfDocument({
   pageCount = 3,
   rejectLoad = false,
   neverLoad = false,
+  textByPage = [],
 }: {
   pageCount?: number
   rejectLoad?: boolean
   neverLoad?: boolean
+  textByPage?: string[]
 } = {}) {
   const fetchPdf = vi.spyOn(globalThis, "fetch").mockResolvedValue(
     new Response(pdfBytes.slice(), {
@@ -102,9 +104,13 @@ function mockPdfDocument({
     promise: Promise.resolve(),
     cancel: vi.fn(),
   }))
-  const getPage = vi.fn(async () => ({
+  const getTextContent = vi.fn(async (pageNumber: number) => ({
+    items: textToPdfTextItems(textByPage[pageNumber - 1] ?? ""),
+  }))
+  const getPage = vi.fn(async (pageNumber: number) => ({
     getViewport,
     render,
+    getTextContent: () => getTextContent(pageNumber),
   }))
   const pdfDocument = {
     numPages: pageCount,
@@ -124,7 +130,11 @@ function mockPdfDocument({
     getDocument,
   } as unknown as Awaited<ReturnType<typeof loadPdfJs>>)
 
-  return { fetchPdf, getDocument, getPage, getViewport, render }
+  return { fetchPdf, getDocument, getPage, getViewport, render, getTextContent }
+}
+
+function textToPdfTextItems(text: string) {
+  return text.split(/\s+/u).filter(Boolean).map((str) => ({ str }))
 }
 
 function renderStage({
@@ -286,6 +296,47 @@ describe("ArtifactStage", () => {
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.pdf?download=true",
     )
     expect(screen.getByText("Exact text unavailable")).toBeInTheDocument()
+  })
+
+  it("registers extracted PDF text for read_artifact_text sideband reads", async () => {
+    const pdf = mockPdfDocument({
+      pageCount: 2,
+      textByPage: ["North equals 42", "Budget delta is 17.4 percent"],
+    })
+    const onVisualCaptureStatusChange = vi.fn()
+
+    renderStage({
+      artifact: pdfBuilderArtifact,
+      artifactId: "artifact-1",
+      sessionId: "session-1",
+      normalSessionId: "session-1",
+      exactTextAvailable: false,
+      onVisualCaptureStatusChange,
+    })
+
+    expect(await screen.findByText("Page 1 of 2")).toBeInTheDocument()
+    await waitFor(() => expect(pdf.getTextContent).toHaveBeenCalledWith(1))
+    await waitFor(() => expect(onVisualCaptureStatusChange).toHaveBeenCalledWith(expect.objectContaining({
+      exactTextAvailable: true,
+      pdfTextExtractionSource: "pdf_text_extraction",
+      pdfTextExtractionStatus: "success",
+      pdfTextExtractionPageCount: 2,
+    })))
+
+    const response = readCoreviewArtifactTextSideband({
+      artifactId: "artifact-1",
+      sessionId: "session-1",
+      threadId: "thread-1",
+    })
+    expect(response).toMatchObject({
+      ok: true,
+      source: "pdf_text_extraction",
+      page_count: 2,
+      char_count: expect.any(Number),
+      truncated: false,
+    })
+    expect(response.ok ? response.text : "").toContain("North equals 42")
+    expect(response.ok ? response.text : "").toContain("Budget delta is 17.4 percent")
   })
 
   it("keeps the PDF loading state inside the canvas bed", async () => {
@@ -485,6 +536,106 @@ describe("ArtifactStage", () => {
     await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-pdf-scale", "1"))
   })
 
+  it("supports scoped PDF keyboard shortcuts without firing inside inputs", async () => {
+    const onRefreshReview = vi.fn()
+    mockPdfDocument({ pageCount: 3 })
+    renderStage({
+      artifact: pdfBuilderArtifact,
+      artifactId: "artifact-1",
+      exactTextAvailable: false,
+      canRefreshReview: true,
+      reviewStale: true,
+      state: {
+        state: "co_review_live",
+        visualInputStatus: "live",
+        videoOrFrameMode: "still_frame",
+        frameSentCount: 1,
+        initialFrameSent: true,
+      },
+      onRefreshReview,
+    })
+
+    const stage = screen.getByRole("region", { name: /generated artifact/i })
+    const canvas = await screen.findByLabelText("PDF page 1")
+    stage.focus()
+
+    fireEvent.keyDown(stage, { key: "ArrowRight" })
+    expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument()
+
+    fireEvent.keyDown(stage, { key: "ArrowLeft" })
+    expect(await screen.findByText("Page 1 of 3")).toBeInTheDocument()
+
+    fireEvent.keyDown(stage, { key: "End" })
+    expect(await screen.findByText("Page 3 of 3")).toBeInTheDocument()
+
+    fireEvent.keyDown(stage, { key: "Home" })
+    expect(await screen.findByText("Page 1 of 3")).toBeInTheDocument()
+
+    fireEvent.keyDown(stage, { key: "+" })
+    expect(await screen.findByText("120%")).toBeInTheDocument()
+    await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-zoom", "1.2"))
+
+    fireEvent.keyDown(stage, { key: "-" })
+    expect(await screen.findByText("100%")).toBeInTheDocument()
+
+    fireEvent.keyDown(stage, { key: "w" })
+    expect(await screen.findByText("Fit width")).toBeInTheDocument()
+
+    fireEvent.keyDown(stage, { key: "p" })
+    expect(await screen.findByText("Fit page")).toBeInTheDocument()
+
+    fireEvent.keyDown(stage, { key: "0" })
+    expect(await screen.findByText("100%")).toBeInTheDocument()
+
+    fireEvent.keyDown(stage, { key: "r" })
+    expect(onRefreshReview).toHaveBeenCalledTimes(1)
+
+    const input = document.createElement("input")
+    stage.appendChild(input)
+    fireEvent.keyDown(input, { key: "ArrowRight" })
+    expect(screen.getByText("Page 1 of 3")).toBeInTheDocument()
+  })
+
+  it("zooms PDFs with a two-touch pinch inside the pan layer", async () => {
+    mockPdfDocument({ pageCount: 2 })
+    renderStage({
+      artifact: pdfBuilderArtifact,
+      artifactId: "artifact-1",
+      exactTextAvailable: false,
+      reviewStale: true,
+      state: {
+        state: "co_review_live",
+        visualInputStatus: "live",
+        videoOrFrameMode: "still_frame",
+        frameSentCount: 1,
+        initialFrameSent: true,
+      },
+    })
+
+    const canvas = await screen.findByLabelText("PDF page 1")
+    const panLayer = screen.getByTestId("artifact-pdf-pan-layer")
+    const bodyWidthBefore = document.body.getBoundingClientRect().width
+
+    fireEvent.touchStart(panLayer, {
+      touches: [
+        { clientX: 0, clientY: 0 },
+        { clientX: 100, clientY: 0 },
+      ],
+    })
+    fireEvent.touchMove(panLayer, {
+      touches: [
+        { clientX: 0, clientY: 0 },
+        { clientX: 150, clientY: 0 },
+      ],
+    })
+
+    expect(await screen.findByText("150%")).toBeInTheDocument()
+    await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-zoom", "1.5"))
+    expect(panLayer.className).toContain("overflow-auto")
+    expect(document.body.getBoundingClientRect().width).toBe(bodyWidthBefore)
+    expect(screen.getByText("View changed. Refresh Sophia's view.")).toBeInTheDocument()
+  })
+
   it("applies PDF zoom voice commands through the registered stage target", async () => {
     let voiceTarget: ArtifactReviewVoiceCommandTarget | null = null
     mockPdfDocument({ pageCount: 2 })
@@ -570,7 +721,7 @@ describe("ArtifactStage", () => {
       zoom: 1,
       fitMode: "page",
     })))
-    expect(screen.getByText("View may be stale")).toBeInTheDocument()
+    expect(screen.getByText("View changed. Refresh Sophia's view.")).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /refresh view/i })).toBeEnabled()
 
     await user.click(screen.getByLabelText("Zoom in"))
@@ -606,12 +757,12 @@ describe("ArtifactStage", () => {
     const artifactRegion = screen.getByRole("region", { name: /generated artifact/i })
     expect(artifactRegion).toHaveAttribute("data-review-state", "active")
     expect(screen.getByTestId("artifact-stage-review-aura").className).toContain("opacity-100")
-    const lookingChip = screen.getByRole("status", { name: "Sophia is looking at this artifact" })
+    const lookingChip = screen.getByRole("status", { name: "Sophia's view is stale" })
     expect(lookingChip).toBeInTheDocument()
-    expect(lookingChip.className).toContain("sophia-purple")
+    expect(lookingChip.className).toContain("cosmic-text-muted")
     const frameSent = screen.getByText("Frame sent").parentElement
     expect(frameSent?.className).toContain("cosmic-teal")
-    expect(screen.getByText("View may be stale")).toBeInTheDocument()
+    expect(screen.getByText("View changed. Refresh Sophia's view.")).toBeInTheDocument()
     const exactText = screen.getByText("Exact text available").parentElement
     expect(exactText?.className).toContain("cosmic-teal")
   })

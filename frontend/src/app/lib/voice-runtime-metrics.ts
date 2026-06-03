@@ -31,7 +31,7 @@ export type VoiceArtifactTelemetryCounts = {
   artifactCountMismatchReason: string | null
 }
 
-export type CoreviewExactTextSource = "fixture" | "builder_metadata" | "builder_file" | "artifact_store" | "unsupported"
+export type CoreviewExactTextSource = "fixture" | "builder_metadata" | "builder_file" | "pdf_text_extraction" | "artifact_store" | "unsupported"
 
 export type CoreviewVisualTelemetry = {
   coreviewEnabled: boolean
@@ -63,6 +63,17 @@ export type CoreviewVisualTelemetry = {
   providerUsageAudioDurationSeconds: number | null
   visualResponseObserved: boolean
   toolCallAfterFrameObserved: boolean
+  reviewCommandPreservedMic: boolean | null
+  reviewCommandPreservedReview: boolean | null
+  reviewCommandAutoRefreshAttempted: boolean
+  reviewCommandAutoRefreshResult: string | null
+  reviewCommandStaleAfterPageChange: boolean
+  pdfTextExtractionStatus: string | null
+  pdfTextExtractionPageCount: number | null
+  pdfTextExtractionCharCount: number | null
+  pdfTextExtractionSource: string | null
+  keyboardArtifactShortcutUsed: string | null
+  pinchZoomUsed: boolean
   rawFrameExcluded: true
   rawProviderPayloadExcluded: true
 }
@@ -557,6 +568,7 @@ const COREVIEW_EXACT_TEXT_SOURCES: CoreviewExactTextSource[] = [
   "fixture",
   "builder_metadata",
   "builder_file",
+  "pdf_text_extraction",
   "artifact_store",
   "unsupported",
 ]
@@ -926,6 +938,17 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       providerUsageAudioDurationSeconds: null,
       visualResponseObserved: false,
       toolCallAfterFrameObserved: false,
+      reviewCommandPreservedMic: null,
+      reviewCommandPreservedReview: null,
+      reviewCommandAutoRefreshAttempted: false,
+      reviewCommandAutoRefreshResult: null,
+      reviewCommandStaleAfterPageChange: false,
+      pdfTextExtractionStatus: null,
+      pdfTextExtractionPageCount: null,
+      pdfTextExtractionCharCount: null,
+      pdfTextExtractionSource: null,
+      keyboardArtifactShortcutUsed: null,
+      pinchZoomUsed: false,
       rawFrameExcluded: true,
       rawProviderPayloadExcluded: true,
     },
@@ -969,12 +992,31 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((event) => event.category === "artifacts-runtime" && event.name === "select-stage-artifact")
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
+  const artifactCommandEvents = activeEvents
+    .filter((event) => event.name === "artifact-review-voice-command")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const pdfTextExtractionEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "pdf-text-extraction")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const keyboardShortcutEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-keyboard-shortcut")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const pinchZoomEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-pinch-zoom")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
   const flagDiagnosticEvents = activeEvents
     .filter((event) => event.name === "coreview-flag-diagnostics" || event.name === "credentials-received")
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
   const latestState = stateEvents.at(-1) ?? null
   const latestSelectedStage = selectedStageEvents.at(-1) ?? null
+  const latestArtifactCommand = artifactCommandEvents.at(-1) ?? null
+  const latestPdfTextExtraction = pdfTextExtractionEvents.at(-1) ?? latestSelectedStage
+  const latestKeyboardShortcut = keyboardShortcutEvents.at(-1) ?? null
   const firstFrameSeq = frameEvents.find((event) => {
     const result = coreviewFrameResult(event)
     return result !== null && frameWasSent(result)
@@ -1033,6 +1075,17 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.providerUsageAudioDurationSeconds = numberFromKeys(latestState, ["providerUsageAudioDurationSeconds"])
   visual.visualResponseObserved = asBoolean(latestState?.visualResponseObserved) ?? false
   visual.toolCallAfterFrameObserved = asBoolean(latestState?.toolCallAfterFrameObserved) ?? false
+  visual.reviewCommandPreservedMic = asBoolean(latestArtifactCommand?.reviewCommandPreservedMic)
+  visual.reviewCommandPreservedReview = asBoolean(latestArtifactCommand?.reviewCommandPreservedReview)
+  visual.reviewCommandAutoRefreshAttempted = asBoolean(latestArtifactCommand?.reviewCommandAutoRefreshAttempted) ?? false
+  visual.reviewCommandAutoRefreshResult = asString(latestArtifactCommand?.reviewCommandAutoRefreshResult)
+  visual.reviewCommandStaleAfterPageChange = asBoolean(latestArtifactCommand?.reviewCommandStaleAfterPageChange) ?? false
+  visual.pdfTextExtractionStatus = asString(latestPdfTextExtraction?.pdfTextExtractionStatus)
+  visual.pdfTextExtractionPageCount = numberFromKeys(latestPdfTextExtraction, ["pdfTextExtractionPageCount"])
+  visual.pdfTextExtractionCharCount = numberFromKeys(latestPdfTextExtraction, ["pdfTextExtractionCharCount"])
+  visual.pdfTextExtractionSource = asString(latestPdfTextExtraction?.pdfTextExtractionSource)
+  visual.keyboardArtifactShortcutUsed = asString(latestKeyboardShortcut?.keyboardArtifactShortcutUsed)
+  visual.pinchZoomUsed = pinchZoomEvents.some((event) => asBoolean(event.pinchZoomUsed) === true)
 
   for (const event of frameEvents) {
     const result = coreviewFrameResult(event)
@@ -1187,7 +1240,13 @@ function normalizeCoreviewExactTextSource(
   success: boolean,
 ): CoreviewExactTextSource {
   if (!success) return "unsupported"
-  if (source === "fixture" || source === "builder_metadata" || source === "builder_file" || source === "artifact_store") {
+  if (
+    source === "fixture"
+    || source === "builder_metadata"
+    || source === "builder_file"
+    || source === "pdf_text_extraction"
+    || source === "artifact_store"
+  ) {
     return source
   }
   return "unsupported"

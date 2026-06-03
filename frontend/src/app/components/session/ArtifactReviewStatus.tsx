@@ -58,7 +58,7 @@ export function ArtifactReviewStatus({
   const lookingChipPreparing = Boolean(state?.state === "co_review_starting" || state?.refreshFrameInProgress)
   const hasFrameError = Boolean(
     state?.state === "co_review_error"
-    || (state?.frameSendFailureCount ?? 0) > 0
+    || ((state?.frameSendFailureCount ?? 0) > 0 && !frameSent)
   )
   const waitingForVoice = Boolean(visualReviewRequiresVoice && !frameSent && !hasFrameError)
   const preparingView = Boolean(visualReviewPreparing && !lookingChipPreparing && !frameSent && !hasFrameError)
@@ -82,9 +82,9 @@ export function ArtifactReviewStatus({
       data-testid="artifact-review-status"
       aria-live="polite"
     >
-      <SophiaLookingChip state={state} frameConfirmed={frameSent} />
+      <SophiaLookingChip state={state} frameConfirmed={frameSent} stale={stale} />
       {frameSent ? <StatusPill icon="check" label="Frame sent" /> : null}
-      {stale ? <StatusPill icon="clock" label="View may be stale" muted /> : null}
+      {stale ? <StatusPill icon="clock" label="View changed. Refresh Sophia's view." muted /> : null}
       {preparingView ? <StatusPill icon="clock" label="Preparing view" muted /> : null}
       {waitingForVoice ? <StatusPill icon="clock" label="Start voice to review visually" muted /> : null}
       {frameUnavailable ? <StatusPill icon="alert" label="Visual review not active" tone="danger" /> : null}
@@ -103,8 +103,7 @@ export function hasConfirmedStillFrame(
       && state.visualInputStatus === "live"
       && state.videoOrFrameMode === "still_frame"
       && (state.frameSentCount ?? 0) > 0
-      && transportStatus?.stillFramesSupported !== false
-      && transportStatus?.visualTransportSupported !== false,
+      && transportStatus?.stillFramesSupported !== false,
   )
 }
 

@@ -1,6 +1,6 @@
 "use client"
 
-import { AlertCircle, Eye, EyeOff, Loader2 } from "lucide-react"
+import { AlertCircle, Clock3, Eye, EyeOff, Loader2 } from "lucide-react"
 
 import type { CoReviewSessionState } from "../../lib/co-review-transport"
 import { cn } from "../../lib/utils"
@@ -8,28 +8,33 @@ import { cn } from "../../lib/utils"
 interface SophiaLookingChipProps {
   state: CoReviewSessionState | null | undefined
   frameConfirmed?: boolean
+  stale?: boolean
   className?: string
 }
 
-export function SophiaLookingChip({ state, frameConfirmed = false, className }: SophiaLookingChipProps) {
+export function SophiaLookingChip({ state, frameConfirmed = false, stale = false, className }: SophiaLookingChipProps) {
   const visualLive = Boolean(frameConfirmed && state?.state === "co_review_live" && state.visualInputStatus === "live")
   const preparing = state?.state === "co_review_starting" || state?.refreshFrameInProgress
-  const unavailable = state?.state === "co_review_error" || (state?.frameSendFailureCount ?? 0) > 0
+  const unavailable = state?.state === "co_review_error" || ((state?.frameSendFailureCount ?? 0) > 0 && !frameConfirmed)
   const label = unavailable
     ? "Frame unavailable"
     : preparing
       ? "Preparing view"
-      : visualLive
+      : visualLive && stale
+        ? "Sophia's view is stale"
+        : visualLive
         ? "Sophia is looking at this artifact"
         : "Not looking"
-  const Icon = unavailable ? AlertCircle : preparing ? Loader2 : visualLive ? Eye : EyeOff
+  const Icon = unavailable ? AlertCircle : preparing ? Loader2 : visualLive && stale ? Clock3 : visualLive ? Eye : EyeOff
 
   return (
     <span
       aria-label={label}
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium",
-        visualLive
+        visualLive && stale
+          ? "border-[color:var(--cosmic-border-soft)] bg-[color:var(--cosmic-panel-soft)] text-[color:var(--cosmic-text-muted)]"
+          : visualLive
           ? "border-[color:color-mix(in_srgb,var(--sophia-purple)_48%,var(--cosmic-border-soft))] bg-[color:color-mix(in_srgb,var(--sophia-purple)_14%,transparent)] text-[color:var(--cosmic-text-strong)] shadow-[0_0_18px_color-mix(in_srgb,var(--sophia-purple)_14%,transparent)]"
           : unavailable
             ? "border-[color:var(--cosmic-danger-border)] bg-[color:var(--cosmic-danger-bg)] text-[color:var(--cosmic-danger-text)]"

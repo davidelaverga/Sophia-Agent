@@ -1,7 +1,7 @@
 "use client"
 
 import { FileText, Layers } from "lucide-react"
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject, type TouchEvent } from "react"
 
 import type { ArtifactFitMode } from "../../lib/artifact-renderers"
 import { clampArtifactZoom } from "../../lib/artifact-renderers"
@@ -11,6 +11,18 @@ import type { BuilderArtifactFileV1, BuilderArtifactV1 } from "../../types/build
 
 import type { ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
 import { ArtifactPdfPageRail } from "./ArtifactPdfPageRail"
+
+export type ArtifactPdfTextExtractionStatusValue = "loading" | "success" | "failed" | "unavailable"
+
+export interface ArtifactPdfTextExtractionStatus {
+  status: ArtifactPdfTextExtractionStatusValue
+  source: "pdf_text_extraction"
+  pageCount: number
+  charCount: number
+  truncated: boolean
+  safeReason: string | null
+  text?: string
+}
 
 interface ArtifactPdfPreviewProps {
   artifact: BuilderArtifactV1
@@ -25,6 +37,8 @@ interface ArtifactPdfPreviewProps {
   onPageIndexChange?: (pageIndex: number) => void
   onPageCountChange?: (pageCount: number) => void
   onRenderStatusChange?: (status: ArtifactVisualCaptureStatus) => void
+  onTextExtractionStatusChange?: (status: ArtifactPdfTextExtractionStatus) => void
+  onPinchZoomChange?: (zoom: number) => void
 }
 
 type PdfDocumentState =
@@ -49,6 +63,7 @@ const PDF_FALLBACK_BOUNDS = {
 
 const PDF_CANVAS_GUTTER = 48
 const PDF_PREVIEW_CHROME_HEIGHT = 96
+const MAX_PDF_TEXT_EXTRACTION_CHARS = 12_000
 
 export function ArtifactPdfPreview({
   artifact,
@@ -63,6 +78,8 @@ export function ArtifactPdfPreview({
   onPageIndexChange,
   onPageCountChange,
   onRenderStatusChange,
+  onTextExtractionStatusChange,
+  onPinchZoomChange,
 }: ArtifactPdfPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const pageHostRef = useRef<HTMLDivElement | null>(null)
@@ -70,6 +87,8 @@ export function ArtifactPdfPreview({
   const activeRenderRef = useRef<ActivePdfRender | null>(null)
   const onPageCountChangeRef = useRef(onPageCountChange)
   const onRenderStatusChangeRef = useRef(onRenderStatusChange)
+  const onTextExtractionStatusChangeRef = useRef(onTextExtractionStatusChange)
+  const pinchStateRef = useRef<{ distance: number; zoom: number } | null>(null)
   const [documentState, setDocumentState] = useState<PdfDocumentState>({
     status: "idle",
     document: null,
@@ -93,11 +112,18 @@ export function ArtifactPdfPreview({
   }, [onRenderStatusChange])
 
   useEffect(() => {
+    onTextExtractionStatusChangeRef.current = onTextExtractionStatusChange
+  }, [onTextExtractionStatusChange])
+
+  useEffect(() => {
     if (!href) {
       setDocumentState({ status: "failed", document: null, error: "missing_pdf_href" })
       onPageCountChangeRef.current?.(1)
       setPageRenderState("failed")
       onRenderStatusChangeRef.current?.(unavailablePdfCaptureStatus("capture_failed"))
+      onTextExtractionStatusChangeRef.current?.(pdfTextExtractionStatus("failed", {
+        safeReason: "missing_pdf_href",
+      }))
       return
     }
 
@@ -106,6 +132,7 @@ export function ArtifactPdfPreview({
     setDocumentState({ status: "loading", document: null, error: null })
     setPageRenderState("idle")
     onRenderStatusChangeRef.current?.(unavailablePdfCaptureStatus("preview_not_ready"))
+    onTextExtractionStatusChangeRef.current?.(pdfTextExtractionStatus("loading"))
 
     void (async () => {
       const response = await fetch(href, {
@@ -140,6 +167,33 @@ export function ArtifactPdfPreview({
 
       setDocumentState({ status: "ready", document: pdfDocument, error: null })
       onPageCountChangeRef.current?.(Math.max(1, pdfDocument.numPages))
+
+      void extractPdfPlainText(pdfDocument, controller.signal)
+        .then((result) => {
+          if (controller.signal.aborted) {
+            return
+          }
+
+          onTextExtractionStatusChangeRef.current?.(pdfTextExtractionStatus(
+            result.text.trim() ? "success" : "unavailable",
+            {
+              pageCount: result.pageCount,
+              charCount: result.charCount,
+              truncated: result.truncated,
+              safeReason: result.text.trim() ? null : "pdf_text_empty",
+              text: result.text.trim() ? result.text : undefined,
+            },
+          ))
+        })
+        .catch((error: unknown) => {
+          if (controller.signal.aborted) {
+            return
+          }
+
+          onTextExtractionStatusChangeRef.current?.(pdfTextExtractionStatus("failed", {
+            safeReason: error instanceof Error ? error.message : "pdf_text_extraction_failed",
+          }))
+        })
     })().catch((error: unknown) => {
       if (controller.signal.aborted) {
         return
@@ -153,6 +207,9 @@ export function ArtifactPdfPreview({
       setPageRenderState("failed")
       onPageCountChangeRef.current?.(1)
       onRenderStatusChangeRef.current?.(unavailablePdfCaptureStatus("capture_failed"))
+      onTextExtractionStatusChangeRef.current?.(pdfTextExtractionStatus("failed", {
+        safeReason: error instanceof Error ? error.message : "pdf_load_failed",
+      }))
     })
 
     return () => {
@@ -304,6 +361,40 @@ export function ArtifactPdfPreview({
 
   const showCanvas = documentState.status === "ready" && pageRenderState !== "failed"
 
+  const handlePanLayerTouchStart = useCallback((event: TouchEvent<HTMLDivElement>) => {
+    if (event.touches.length !== 2) {
+      pinchStateRef.current = null
+      return
+    }
+
+    pinchStateRef.current = {
+      distance: touchDistance(event.touches[0], event.touches[1]),
+      zoom: clampArtifactZoom(zoom),
+    }
+  }, [zoom])
+
+  const handlePanLayerTouchMove = useCallback((event: TouchEvent<HTMLDivElement>) => {
+    const pinchState = pinchStateRef.current
+    if (!pinchState || event.touches.length !== 2) {
+      return
+    }
+
+    const distance = touchDistance(event.touches[0], event.touches[1])
+    if (pinchState.distance <= 0 || distance <= 0) {
+      return
+    }
+
+    event.preventDefault()
+    const nextZoom = clampArtifactZoom(pinchState.zoom * (distance / pinchState.distance))
+    onPinchZoomChange?.(nextZoom)
+  }, [onPinchZoomChange])
+
+  const handlePanLayerTouchEnd = useCallback((event: TouchEvent<HTMLDivElement>) => {
+    if (event.touches.length < 2) {
+      pinchStateRef.current = null
+    }
+  }, [])
+
   return (
     <div
       data-testid="artifact-document-page"
@@ -338,7 +429,11 @@ export function ArtifactPdfPreview({
           ref={pageHostRef}
           data-testid="artifact-pdf-pan-layer"
           className="relative min-h-0 min-w-0 flex-1 overflow-auto bg-[#ebe7f0] [scrollbar-gutter:stable] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--cosmic-border)] [&::-webkit-scrollbar-track]:bg-transparent"
-          style={{ scrollbarColor: "var(--cosmic-border) transparent" }}
+          style={{ scrollbarColor: "var(--cosmic-border) transparent", touchAction: "pan-x pan-y" }}
+          onTouchStart={handlePanLayerTouchStart}
+          onTouchMove={handlePanLayerTouchMove}
+          onTouchEnd={handlePanLayerTouchEnd}
+          onTouchCancel={handlePanLayerTouchEnd}
         >
           {documentState.status === "loading" || pageRenderState === "loading" ? (
             <PdfPreviewState title="Preparing PDF view" body="You can still open or download the artifact." />
@@ -521,6 +616,88 @@ function unavailablePdfCaptureStatus(
     source: "pdf_page_canvas",
     exactTextAvailable: false,
   }
+}
+
+function pdfTextExtractionStatus(
+  status: ArtifactPdfTextExtractionStatusValue,
+  overrides: Partial<Omit<ArtifactPdfTextExtractionStatus, "status" | "source">> = {},
+): ArtifactPdfTextExtractionStatus {
+  return {
+    status,
+    source: "pdf_text_extraction",
+    pageCount: overrides.pageCount ?? 0,
+    charCount: overrides.charCount ?? 0,
+    truncated: overrides.truncated ?? false,
+    safeReason: overrides.safeReason ?? null,
+    ...(overrides.text ? { text: overrides.text } : {}),
+  }
+}
+
+async function extractPdfPlainText(
+  document: PdfDocumentProxy,
+  signal: AbortSignal,
+): Promise<{ text: string; pageCount: number; charCount: number; truncated: boolean }> {
+  const pageCount = Math.max(1, Math.floor(document.numPages || 1))
+  const chunks: string[] = []
+  let charCount = 0
+  let truncated = false
+
+  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+    if (signal.aborted) {
+      break
+    }
+
+    const page = await document.getPage(pageNumber)
+    const getTextContent = (page as { getTextContent?: () => Promise<unknown> }).getTextContent
+    if (typeof getTextContent !== "function") {
+      throw new Error("pdf_text_content_unavailable")
+    }
+
+    const textContent = await getTextContent.call(page)
+    const pageText = textFromPdfTextContent(textContent)
+    if (!pageText) {
+      continue
+    }
+    const pageChunk = [`--- Page ${pageNumber} ---`, pageText].filter(Boolean).join("\n")
+    charCount += pageChunk.length + (chunks.length > 0 ? 2 : 0)
+
+    if (!truncated) {
+      const remaining = MAX_PDF_TEXT_EXTRACTION_CHARS - chunks.join("\n\n").length
+      if (remaining > 0 && pageChunk.length <= remaining) {
+        chunks.push(pageChunk)
+      } else if (remaining > 0) {
+        chunks.push(pageChunk.slice(0, remaining))
+        truncated = true
+      } else {
+        truncated = true
+      }
+    }
+  }
+
+  return {
+    text: chunks.join("\n\n").trim(),
+    pageCount,
+    charCount,
+    truncated,
+  }
+}
+
+function textFromPdfTextContent(textContent: unknown): string {
+  const items = Array.isArray((textContent as { items?: unknown[] } | null)?.items)
+    ? (textContent as { items: unknown[] }).items
+    : []
+  return items
+    .map((item) => {
+      const value = (item as { str?: unknown } | null)?.str
+      return typeof value === "string" ? value : ""
+    })
+    .join(" ")
+    .replace(/\s+/gu, " ")
+    .trim()
+}
+
+function touchDistance(a: { clientX: number; clientY: number }, b: { clientX: number; clientY: number }): number {
+  return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY)
 }
 
 function isPdfRenderCancellation(error: unknown): boolean {

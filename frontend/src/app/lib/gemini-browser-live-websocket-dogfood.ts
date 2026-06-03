@@ -4377,6 +4377,7 @@ function redactReadArtifactTextResponseForTelemetry(
     artifact_id: stringFromAnyKey(response, 'artifact_id', 'artifactId'),
     source: stringFromAnyKey(response, 'source'),
     char_count: numberFromAnyKey(response, 'char_count', 'charCount') ?? 0,
+    page_count: numberFromAnyKey(response, 'page_count', 'pageCount'),
     truncated: response.truncated === true,
     status: response.ok === true ? 'success' : stringFromAnyKey(response, 'status'),
     safe_reason: response.ok === true ? null : stringFromAnyKey(response, 'safe_reason', 'safeReason'),

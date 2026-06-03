@@ -1,7 +1,7 @@
 "use client"
 
 import { RefreshCw } from "lucide-react"
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react"
 
 import {
   artifactRendererSupportsPagination,
@@ -26,6 +26,7 @@ import type {
   CoReviewSessionState,
   CoReviewTransportStatus,
 } from "../../lib/co-review-transport"
+import { recordSophiaCaptureEvent } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
 import type {
   BuilderArtifactLibraryItemV1,
@@ -191,6 +192,28 @@ export function ArtifactStage({
     setFitMode("custom")
     setZoom(1)
   }, [])
+  const recordArtifactControlTelemetry = useCallback((
+    name: "artifact-keyboard-shortcut" | "artifact-pinch-zoom",
+    details: Record<string, string | number | boolean | null>,
+  ) => {
+    recordSophiaCaptureEvent({
+      category: "artifacts-runtime",
+      name,
+      payload: {
+        artifactId: artifactId ?? null,
+        artifactPath: primaryFile?.path ?? null,
+        artifactRendererKind: rendererKind,
+        artifactPageIndex: pageIndex,
+        artifactPageCount: pageCount,
+        artifactZoom: zoom,
+        artifactFitMode: fitMode,
+        reviewStale,
+        rawArtifactTextExcluded: true,
+        rawFrameExcluded: true,
+        ...details,
+      },
+    })
+  }, [artifactId, fitMode, pageCount, pageIndex, primaryFile?.path, rendererKind, reviewStale, zoom])
   const applyVoiceCommand = useCallback((command: ArtifactReviewVoiceCommand): ArtifactReviewVoiceCommandApplyResult => {
     const normalizedPageCount = Math.max(1, Math.floor(pageCount))
     const currentPageIndex = Math.min(Math.max(0, pageIndex), normalizedPageCount - 1)
@@ -333,6 +356,63 @@ export function ArtifactStage({
     supportsZoom,
     zoom,
   ])
+  const handlePinchZoomChange = useCallback((nextZoom: number) => {
+    if (!supportsZoom) {
+      return
+    }
+
+    const normalizedZoom = clampArtifactZoom(nextZoom)
+    if (Math.abs(normalizedZoom - zoom) < 0.01 && fitMode === "custom") {
+      return
+    }
+
+    setFitMode("custom")
+    setZoom(normalizedZoom)
+    recordArtifactControlTelemetry("artifact-pinch-zoom", {
+      pinchZoomUsed: true,
+      pinchZoom: normalizedZoom,
+    })
+  }, [fitMode, recordArtifactControlTelemetry, supportsZoom, zoom])
+  const handleStageKeyDown = useCallback((event: KeyboardEvent<HTMLElement>) => {
+    if (isArtifactShortcutTypingTarget(event.target)) {
+      return
+    }
+
+    const command = artifactCommandFromKeyboardEvent(event)
+    if (!command) {
+      return
+    }
+
+    if (command.kind === "refresh_view") {
+      if (!onRefreshReview || !canRefreshReview) {
+        return
+      }
+
+      event.preventDefault()
+      onRefreshReview()
+      recordArtifactControlTelemetry("artifact-keyboard-shortcut", {
+        keyboardArtifactShortcutUsed: keyboardShortcutLabel(event),
+        keyboardArtifactCommandKind: command.kind,
+      })
+      return
+    }
+
+    const applyResult = applyVoiceCommand(command)
+    if (!applyResult.applied) {
+      return
+    }
+
+    event.preventDefault()
+    recordArtifactControlTelemetry("artifact-keyboard-shortcut", {
+      keyboardArtifactShortcutUsed: keyboardShortcutLabel(event),
+      keyboardArtifactCommandKind: command.kind,
+    })
+  }, [
+    applyVoiceCommand,
+    canRefreshReview,
+    onRefreshReview,
+    recordArtifactControlTelemetry,
+  ])
   const artifactViewState = useMemo<ArtifactViewState>(() => ({
     artifactId: artifactId ?? null,
     filePath: primaryFile?.path ?? null,
@@ -392,6 +472,8 @@ export function ArtifactStage({
       data-review-state={reviewSurfaceState}
       data-artifact-renderer-kind={rendererKind}
       data-artifact-view-signature={artifactViewSignature ?? undefined}
+      tabIndex={0}
+      onKeyDown={handleStageKeyDown}
       className={cn(
         "relative isolate flex min-h-0 w-full flex-col overflow-hidden rounded-xl border bg-[color:color-mix(in_srgb,var(--cosmic-panel)_98%,var(--bg))] shadow-[var(--cosmic-shadow-md)] transition-[border-color,box-shadow,background-color] duration-500",
         reviewSurfaceState === "active"
@@ -452,6 +534,7 @@ export function ArtifactStage({
         fitMode={fitMode}
         onPageIndexChange={handlePageIndexChange}
         onPageCountChange={handlePageCountChange}
+        onPinchZoomChange={handlePinchZoomChange}
         className={fillAvailable ? "min-h-0 flex-1" : undefined}
       />
 
@@ -503,4 +586,52 @@ export function ArtifactStage({
       ) : null}
     </section>
   )
+}
+
+function artifactCommandFromKeyboardEvent(
+  event: KeyboardEvent<HTMLElement>,
+): ArtifactReviewVoiceCommand | null {
+  const key = event.key.toLowerCase()
+  switch (key) {
+    case "arrowright":
+    case "pagedown":
+      return { kind: "next_page" }
+    case "arrowleft":
+    case "pageup":
+      return { kind: "previous_page" }
+    case "home":
+      return { kind: "first_page" }
+    case "end":
+      return { kind: "last_page" }
+    case "+":
+    case "=":
+      return { kind: "zoom_in" }
+    case "-":
+      return { kind: "zoom_out" }
+    case "0":
+      return { kind: "reset_zoom" }
+    case "w":
+      return { kind: "fit_width" }
+    case "p":
+      return { kind: "fit_page" }
+    case "r":
+      return { kind: "refresh_view" }
+    default:
+      return null
+  }
+}
+
+function keyboardShortcutLabel(event: KeyboardEvent<HTMLElement>): string {
+  return event.key.length === 1 ? event.key.toUpperCase() : event.key
+}
+
+function isArtifactShortcutTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false
+  }
+  if (target.isContentEditable) {
+    return true
+  }
+  const editable = target.closest("input, textarea, select, [contenteditable='true']")
+  return editable !== null
 }

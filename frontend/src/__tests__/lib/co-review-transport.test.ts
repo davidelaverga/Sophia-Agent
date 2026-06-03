@@ -309,7 +309,7 @@ describe("co-review dual-path state machine", () => {
     expect(state.lastFrameSendFailureReason).toBe("gemini_live_websocket_not_open")
   })
 
-  it("blocks internal refreshCoReview with a safe reason when the websocket closes after start", async () => {
+  it("keeps review live and reports a safe refresh error when the websocket closes after start", async () => {
     mockCanvasEncoding()
     const getStatus = vi.fn()
       .mockReturnValueOnce(openWebsocketStatus())
@@ -346,12 +346,16 @@ describe("co-review dual-path state machine", () => {
       visualSource: readyCanvasSource(),
     })
 
-    expect(state.state).toBe("co_review_error")
+    expect(state.state).toBe("co_review_live")
     expect(state.error).toBe("gemini_live_websocket_not_open")
     expect(state.refreshFrameResult).toBe("error")
     expect(state.refreshErrorSafeReason).toBe("gemini_live_websocket_not_open")
     expect(state.websocketStateBeforeRefresh).toBe("closed")
     expect(state.websocketStateAfterRefresh).toBe("closed")
+    expect(state.visualFresh).toBe(false)
+    expect(state.visualFreshForTurn).toBe(false)
+    expect(state.frameSentCount).toBe(1)
+    expect(state.frameSendFailureCount).toBe(1)
     expect(sender.sendArtifactFrame).toHaveBeenCalledTimes(1)
   })
 
@@ -415,7 +419,7 @@ describe("co-review dual-path state machine", () => {
     expect(state.websocketClosedAfterFrameCount).toBe(1)
   })
 
-  it("clears looking state when refresh closes the Gemini websocket", async () => {
+  it("keeps looking state stale when refresh closes the Gemini websocket", async () => {
     mockCanvasEncoding()
     const sender = {
       getStatus: vi.fn(() => openWebsocketStatus()),
@@ -473,7 +477,7 @@ describe("co-review dual-path state machine", () => {
       visualSource: readyCanvasSource(),
     })
 
-    expect(state.state).toBe("co_review_error")
+    expect(state.state).toBe("co_review_live")
     expect(state.error).toBe("frame_send_closed_gemini_websocket")
     expect(state.refreshFrameResult).toBe("error")
     expect(state.refreshErrorSafeReason).toBe("frame_send_closed_gemini_websocket")
@@ -484,6 +488,8 @@ describe("co-review dual-path state machine", () => {
     expect(state.frameSendFailureCount).toBe(1)
     expect(state.lastFrameSendFailureReason).toBe("frame_send_closed_gemini_websocket")
     expect(state.websocketClosedAfterFrameCount).toBe(1)
+    expect(state.visualFresh).toBe(false)
+    expect(state.visualFreshForTurn).toBe(false)
     expect(sender.sendArtifactFrame).toHaveBeenCalledTimes(2)
   })
 

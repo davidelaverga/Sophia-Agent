@@ -77,9 +77,11 @@ function isThumbnailRender(params: unknown): boolean {
 function mockPdfDocument({
   pageCount = 3,
   renderTaskForPage = () => immediateRenderTask(),
+  textByPage = [],
 }: {
   pageCount?: number
   renderTaskForPage?: (pageNumber: number, params: unknown) => MockPdfRenderTask
+  textByPage?: string[]
 } = {}) {
   const fetchPdf = vi.spyOn(globalThis, "fetch").mockResolvedValue(
     new Response(pdfBytes.slice(), {
@@ -93,9 +95,13 @@ function mockPdfDocument({
     scale,
   }))
   const render = vi.fn((pageNumber: number, params: unknown) => renderTaskForPage(pageNumber, params))
+  const getTextContent = vi.fn(async (pageNumber: number) => ({
+    items: textToPdfTextItems(textByPage[pageNumber - 1] ?? ""),
+  }))
   const getPage = vi.fn(async (pageNumber: number) => ({
     getViewport,
     render: (params: unknown) => render(pageNumber, params),
+    getTextContent: () => getTextContent(pageNumber),
   }))
   const pdfDocument = {
     numPages: pageCount,
@@ -111,7 +117,11 @@ function mockPdfDocument({
     getDocument,
   } as unknown as Awaited<ReturnType<typeof loadPdfJs>>)
 
-  return { fetchPdf, getDocument, getPage, getViewport, render }
+  return { fetchPdf, getDocument, getPage, getViewport, render, getTextContent }
+}
+
+function textToPdfTextItems(text: string) {
+  return text.split(/\s+/u).filter(Boolean).map((str) => ({ str }))
 }
 
 function renderPreview(
@@ -183,6 +193,47 @@ describe("ArtifactPdfPreview", () => {
     expect(canvas.style.width).toBe("750px")
     expect(canvas.style.height).toBe("1000px")
     expect(pdf.render).toHaveBeenCalledWith(1, expect.objectContaining({ canvas }))
+  })
+
+  it("extracts PDF.js textContent and reports exact text metadata without OCR", async () => {
+    const onTextExtractionStatusChange = vi.fn()
+    const pdf = mockPdfDocument({
+      pageCount: 2,
+      textByPage: ["Launch metric Alpha 42", "Budget delta 17.4 percent"],
+    })
+
+    renderPreview({ onTextExtractionStatusChange })
+
+    expect(await screen.findByLabelText("PDF page 1")).toBeInTheDocument()
+    await waitFor(() => expect(pdf.getTextContent).toHaveBeenCalledWith(1))
+    await waitFor(() => expect(pdf.getTextContent).toHaveBeenCalledWith(2))
+    await waitFor(() => expect(onTextExtractionStatusChange).toHaveBeenCalledWith(expect.objectContaining({
+      status: "success",
+      source: "pdf_text_extraction",
+      pageCount: 2,
+      truncated: false,
+      text: expect.stringContaining("Launch metric Alpha 42"),
+    })))
+    expect(onTextExtractionStatusChange).toHaveBeenCalledWith(expect.objectContaining({
+      text: expect.stringContaining("Budget delta 17.4 percent"),
+    }))
+  })
+
+  it("reports exact text unavailable when PDF.js textContent has no text", async () => {
+    const onTextExtractionStatusChange = vi.fn()
+    mockPdfDocument({ pageCount: 2, textByPage: ["", ""] })
+
+    renderPreview({ onTextExtractionStatusChange })
+
+    expect(await screen.findByLabelText("PDF page 1")).toBeInTheDocument()
+    await waitFor(() => expect(onTextExtractionStatusChange).toHaveBeenCalledWith(expect.objectContaining({
+      status: "unavailable",
+      source: "pdf_text_extraction",
+      pageCount: 2,
+      charCount: 0,
+      safeReason: "pdf_text_empty",
+    })))
+    expect(JSON.stringify(onTextExtractionStatusChange.mock.calls)).not.toMatch(/rawArtifactText/)
   })
 
   it("keeps the zoomed PDF page inside an internal pan layer", async () => {

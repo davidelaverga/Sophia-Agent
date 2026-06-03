@@ -403,7 +403,7 @@ export function useSessionVoiceCommandSystem({
       return false;
     }
 
-    interceptVoiceAssistant(15000, 'artifact review voice command', { hard: true });
+    interceptVoiceAssistant(15000, 'artifact review voice command');
 
     if (result.userMessage) {
       showToast({

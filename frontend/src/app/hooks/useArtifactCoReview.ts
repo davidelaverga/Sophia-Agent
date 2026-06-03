@@ -54,6 +54,7 @@ export function useArtifactCoReview({
   const machineRef = useRef<CoReviewSessionMachine | null>(null)
   const currentViewSignature = buildArtifactViewSignature(artifactViewState)
   const currentViewSignatureRef = useRef<string | null>(currentViewSignature)
+  const lastTransportUnavailableTelemetryRef = useRef<string | null>(null)
 
   if (!machineRef.current) {
     machineRef.current = new CoReviewSessionMachine({
@@ -167,7 +168,10 @@ export function useArtifactCoReview({
         toolAvailability: nextState.toolAvailability,
       })
     }
-    if (hasConfirmedStillFrameForReviewState(nextState, machineRef.current.status())) {
+    if (
+      nextState.refreshFrameResult === "success"
+      && hasConfirmedStillFrameForReviewState(nextState, machineRef.current.status())
+    ) {
       setLastFrameViewSignature(currentViewSignatureRef.current)
     }
     logCoreviewBreadcrumb("coReviewStateAfterStart", safeCoReviewTelemetryFromState(nextState))
@@ -272,6 +276,7 @@ export function useArtifactCoReview({
       || state.refreshFrameInProgress
       || transportStatus.visualTransportSupported
     ) {
+      lastTransportUnavailableTelemetryRef.current = null
       return
     }
 
@@ -282,10 +287,14 @@ export function useArtifactCoReview({
       error,
       transportKind: transportRef.current.kind,
       statusText: transportStatus.statusText,
+      reviewPreserved: true,
     })
-    void machineRef.current?.failCoReview(error || "frame_send_closed_gemini_websocket")
-      .then((nextState) => recordCoreviewTelemetry("transport_closed", nextState, { featureEnabled, artifactViewTelemetry }))
-  }, [artifactViewTelemetry, featureEnabled, state.refreshFrameInProgress, state.state, transportStatus.statusText, transportStatus.visualTransportSupported])
+    const telemetryKey = `${state.sessionId ?? ""}:${state.artifactId ?? ""}:${error}`
+    if (lastTransportUnavailableTelemetryRef.current !== telemetryKey) {
+      lastTransportUnavailableTelemetryRef.current = telemetryKey
+      recordCoreviewTelemetry("transport_unavailable", state, { featureEnabled, artifactViewTelemetry })
+    }
+  }, [artifactViewTelemetry, featureEnabled, state, transportStatus.statusText, transportStatus.visualTransportSupported])
 
   return {
     enabled: featureEnabled,
@@ -313,7 +322,7 @@ function logCoreviewBreadcrumb(event: string, details: Record<string, unknown> =
 }
 
 function recordCoreviewTelemetry(
-  action: "start" | "refresh" | "stop" | "transport_closed",
+  action: "start" | "refresh" | "stop" | "transport_closed" | "transport_unavailable",
   state: CoReviewSessionState,
   details: {
     featureEnabled: boolean
@@ -350,7 +359,6 @@ function hasConfirmedStillFrameForReviewState(
       && state.videoOrFrameMode === "still_frame"
       && (state.frameSentCount ?? 0) > 0
       && transportStatus.stillFramesSupported !== false
-      && transportStatus.visualTransportSupported !== false,
   )
 }
 
