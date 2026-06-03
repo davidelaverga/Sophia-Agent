@@ -25,8 +25,8 @@ interface MinimalArtifactCoReviewControls {
   transportStatus: CoReviewTransportStatus
   canStart: boolean
   enabled: boolean
-  startReview: () => Promise<void> | void
-  stopReview: () => Promise<void> | void
+  startReview: () => Promise<unknown> | void
+  stopReview: () => Promise<unknown> | void
 }
 
 function getPathFilename(path: string | undefined): string {
