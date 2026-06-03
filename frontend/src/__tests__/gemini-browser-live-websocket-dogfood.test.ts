@@ -841,9 +841,6 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       mimeType: 'image/jpeg',
       rawFrameExcluded: true,
     }));
-    const reviewHint = JSON.stringify(buildGeminiArtifactTextReaderHint('artifact-1'));
-    expect(websocket?.sent.at(-2)).toBe(reviewHint);
-    expect(reviewHint).not.toMatch(/emit_artifact|read_artifact_text|looking at it now/i);
     expect(websocket?.sent.at(-1)).toBe(JSON.stringify({
       realtimeInput: {
         video: {
@@ -852,6 +849,59 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         },
       },
     }));
+
+    await connection.close();
+  });
+
+  it('buffers review-mode audio until matching assistant text is known safe', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch();
+    const fakeAudioContext = new FakeAudioContext();
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+
+    await connection.sendArtifactFrame({
+      artifactId: 'artifact-1',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true,
+    });
+    const audioChunk = Buffer.from([0x00, 0x00]).toString('base64');
+
+    websocket?.emitMessage({
+      responseId: 'review-safe-response-1',
+      serverContent: {
+        responseId: 'review-safe-response-1',
+        modelTurn: {
+          parts: [
+            { inlineData: { mimeType: 'audio/pcm;rate=24000', data: audioChunk } },
+          ],
+        },
+      },
+    });
+    await Promise.resolve();
+    expect(fakeAudioContext.createdSources).toHaveLength(0);
+
+    websocket?.emitMessage({
+      responseId: 'review-safe-response-1',
+      serverContent: {
+        responseId: 'review-safe-response-1',
+        outputTranscription: { text: 'The title is clean and the spacing feels balanced.' },
+      },
+    });
+    await vi.waitFor(() => expect(fakeAudioContext.createdSources).toHaveLength(1));
 
     await connection.close();
   });
@@ -893,6 +943,64 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
             { inlineData: { mimeType: 'audio/pcm;rate=24000', data: audioChunk } },
           ],
         },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(fetchMock).toHaveBeenCalledTimes(callsAfterFrame);
+    expect(fakeAudioContext.createdSources).toHaveLength(0);
+
+    await connection.close();
+  });
+
+  it('drops buffered review-mode audio when later assistant text is prompt or tool leakage', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch();
+    const fakeAudioContext = new FakeAudioContext();
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+
+    await connection.sendArtifactFrame({
+      artifactId: 'artifact-1',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true,
+    });
+    const callsAfterFrame = fetchMock.mock.calls.length;
+    const audioChunk = Buffer.from([0x00, 0x00]).toString('base64');
+
+    websocket?.emitMessage({
+      responseId: 'review-leak-response-2',
+      serverContent: {
+        responseId: 'review-leak-response-2',
+        modelTurn: {
+          parts: [
+            { inlineData: { mimeType: 'audio/pcm;rate=24000', data: audioChunk } },
+          ],
+        },
+      },
+    });
+    await Promise.resolve();
+    expect(fakeAudioContext.createdSources).toHaveLength(0);
+
+    websocket?.emitMessage({
+      responseId: 'review-leak-response-2',
+      serverContent: {
+        responseId: 'review-leak-response-2',
+        outputTranscription: { text: 'artifact_id: artifact-1' },
       },
     });
     await Promise.resolve();

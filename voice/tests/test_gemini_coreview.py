@@ -45,7 +45,8 @@ def test_coreview_prompt_appears_only_when_enabled(monkeypatch) -> None:
     prompt = build_gemini_live_realtime_setup_instructions()
     assert "<gemini_coreview_artifact_policy>" in prompt
     assert "Exact words, numbers, table values" in prompt
-    assert "call read_artifact_text with the active artifact_id" in prompt
+    assert "call read_artifact_text for the current artifact before answering" in prompt
+    assert "Do not call emit_artifact, start_builder_task" in prompt
     assert "Still-frame co-review" in prompt
 
 
@@ -71,7 +72,7 @@ def test_coreview_tool_declaration_is_opt_in(monkeypatch) -> None:
     declarations = gemini_sophia_function_declarations()
 
     assert declarations[-1]["name"] == GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME
-    assert declarations[-1]["parameters"]["required"] == ["artifact_id", "query"]
+    assert declarations[-1]["parameters"]["required"] == ["query"]
 
 
 def test_read_artifact_text_returns_fixture_exact_text(monkeypatch) -> None:

@@ -31,9 +31,10 @@ Artifact co-review is a separate, explicitly entered mode. Apply these rules onl
 - The user must see a persistent looking indicator while visual input is active.
 - Stop Looking ends visual input. After it stops, return to normal voice behavior.
 - Still-frame co-review is one artifact-canvas frame at user request, not low-rate video or continuous watching.
+- While artifact review is active, stay in review mode. Do not call emit_artifact, start_builder_task, or other artifact-creating tools unless the user explicitly asks to create, rewrite, update, save, or generate a new artifact.
 - Use visual input only for layout, composition, color, spacing, rough structure, and other visual qualities.
 - Exact words, numbers, table values, labels, citations, and data must come from read_artifact_text or another trusted artifact text sideband, not from vision.
-- When the user asks what a heading says, asks for a number/table value/label, or asks you to read fine print, call read_artifact_text with the active artifact_id before answering.
+- When the user asks what a heading says, asks for a number/table value/label, or asks you to read fine print, call read_artifact_text for the current artifact before answering.
 - If read_artifact_text returns unavailable, unsupported, forbidden, or not_found, say that the exact text is unavailable instead of guessing from the image.
 - Do not store frames, screenshots, audio, video, provider credentials, or raw artifact text in telemetry.
 - If the media path cannot use tools, say you need the trusted text reader for exact data instead of guessing.
@@ -175,8 +176,8 @@ def gemini_read_artifact_text_function_declaration() -> dict[str, object]:
         "name": GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
         "description": (
             "Trusted backend artifact text reader for co-review. Use only for exact words, numbers, "
-            "table values, labels, citations, or data from the active artifact. The response must not "
-            "be written to telemetry."
+            "table values, labels, citations, or data from the active artifact. artifact_id is optional "
+            "when the app already has an active review artifact. The response must not be written to telemetry."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -194,7 +195,7 @@ def gemini_read_artifact_text_function_declaration() -> dict[str, object]:
                     "description": "Why vision is not sufficient for this answer.",
                 },
             },
-            "required": ["artifact_id", "query"],
+            "required": ["query"],
         },
     }
 

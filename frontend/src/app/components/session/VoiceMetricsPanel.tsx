@@ -207,6 +207,11 @@ export function VoiceMetricsPanel({
 
   const isGeminiRuntime = metrics.sessionTelemetry.runtime === "gemini_live"
   const geminiHeaderTelemetry = metrics.sessionTelemetry.gemini
+  const micConnectedNoSignal = !metrics.microphone.detectedAudio && (
+    metrics.microphone.streamCount > 0
+    || metrics.microphone.audioTrackCount > 0
+    || geminiHeaderTelemetry?.microphoneState === "connected"
+  )
 
   const panelTone = useMemo(() => {
     if (metrics.regressions.some((marker) => marker.level === "bad")) {
@@ -641,7 +646,11 @@ export function VoiceMetricsPanel({
                 />
               )}
               <ToneBadge
-                label={metrics.microphone.detectedAudio ? "Mic signal detected" : "No mic signal yet"}
+                label={metrics.microphone.detectedAudio
+                  ? "Mic signal detected"
+                  : micConnectedNoSignal
+                    ? "Mic connected, no signal"
+                    : "No mic signal yet"}
                 tone={metrics.microphone.detectedAudio ? "good" : "warn"}
               />
               {metrics.builder.phase && (
@@ -1098,6 +1107,11 @@ function GeminiRuntimeDetails({
   const gemini = metrics.sessionTelemetry.gemini
   if (!gemini) return null
   const coreview = metrics.coreview
+  const micConnectedNoSignal = !metrics.microphone.detectedAudio && (
+    metrics.microphone.streamCount > 0
+    || metrics.microphone.audioTrackCount > 0
+    || gemini.microphoneState === "connected"
+  )
 
   return (
     <>
@@ -1155,8 +1169,11 @@ function GeminiRuntimeDetails({
                 ["Sample windows", String(metrics.microphone.totalSampleWindows)],
                 ["Probe errors", String(metrics.microphone.errorCount)],
               ]}
-              footer={metrics.microphone.lastError ?? "Browser microphone probe remains provider-neutral for both runtime paths."}
-              tone={metrics.microphone.detectedAudio || gemini.microphoneState === "connected" ? "good" : "warn"}
+              footer={metrics.microphone.lastError
+                ?? (micConnectedNoSignal
+                  ? "Browser microphone stream is connected, but the local probe has not observed non-silent audio yet."
+                  : "Browser microphone probe remains provider-neutral for both runtime paths.")}
+              tone={metrics.microphone.detectedAudio ? "good" : "warn"}
             />
             <InfoCard
               icon={AudioLines}

@@ -490,6 +490,44 @@ describe('buildVoiceTelemetryReport', () => {
     expect(report.captureBundle.snapshot.artifacts.recapArtifacts).toBeNull();
   });
 
+  it('does not flag review emit churn when emit_artifact was explicitly suppressed by the review guard', () => {
+    const report = buildVoiceTelemetryReport({
+      exportedAt: '2026-05-20T12:00:04.000Z',
+      metrics: buildMetrics(),
+      summary: buildSummary(),
+      captureBundle: buildCaptureBundle([
+        {
+          seq: 1,
+          recordedAt: '2026-05-20T12:00:00.000Z',
+          category: 'voice-session',
+          name: 'start-talking-requested',
+          payload: { sessionId: 'current-session', runtime: 'gemini_live' },
+        },
+        {
+          seq: 2,
+          recordedAt: '2026-05-20T12:00:01.000Z',
+          category: 'voice-session',
+          name: 'gemini-tool-loop-diagnostic',
+          payload: {
+            data: {
+              phase: 'tool_execution_rejected',
+              toolName: 'emit_artifact',
+              diagnostic: {
+                toolCall: { id: 'artifact-call-1', name: 'emit_artifact' },
+                rejection_reason: 'artifact_review_emit_artifact_suppressed',
+              },
+            },
+          },
+        },
+      ]),
+    });
+
+    const warnings = report.diagnosticsSummary.artifactReview.warnings as string[];
+
+    expect(warnings).not.toContain('review_emit_artifact_tool_churn_detected');
+    expect(warnings).not.toContain('review_tool_churn_suppressed');
+  });
+
   it('adds compact warnings for Gemini stale output, relay backlog, overlap, and unresolved tools', () => {
     const report = buildVoiceTelemetryReport({
       exportedAt: '2026-05-20T12:00:04.000Z',
@@ -687,6 +725,25 @@ describe('buildVoiceTelemetryReport', () => {
         },
         {
           seq: 2,
+          recordedAt: '2026-05-20T12:00:00.800Z',
+          category: 'voice-session',
+          name: 'coreview-state',
+          payload: {
+            data: {
+              coreview: {
+                coreviewEnabled: true,
+                coreviewSessionActive: true,
+                coreviewArtifactId: 'artifact-1',
+                visualSourceKind: 'offscreen_render',
+                frameSentCount: 1,
+                initialFrameSent: true,
+                exactTextAvailable: true,
+              },
+            },
+          },
+        },
+        {
+          seq: 3,
           recordedAt: '2026-05-20T12:00:01.000Z',
           category: 'voice-session',
           name: 'gemini-tool-call-ledger',
@@ -698,24 +755,21 @@ describe('buildVoiceTelemetryReport', () => {
     expect(report.metrics.counts.artifacts).toBe(1);
     expect(report.metrics.counts.artifactPublicEventCount).toBe(0);
     expect(report.metrics.counts.artifactRenderedCount).toBe(1);
-    expect(report.metrics.counts.artifactSelectedStageCount).toBe(0);
-    expect(report.metrics.counts.artifactCountSource).toBe('rendered_state');
+    expect(report.metrics.counts.artifactSelectedStageCount).toBe(1);
+    expect(report.metrics.counts.artifactCountSource).toBe('selected_stage_artifact');
     expect(report.metrics.counts.artifactCountMismatch).toBe(true);
-    expect(report.metrics.counts.artifactCountMismatchReason).toBe('rendered_state_without_runtime_ingest');
+    expect(report.metrics.counts.artifactCountMismatchReason).toBe('selected_stage_artifact_not_public_event');
     expect(report.metrics.sessionTelemetry.gemini?.artifactCount).toBe(1);
     expect(report.metrics.sessionTelemetry.gemini?.artifactPublicEventCount).toBe(0);
-    expect(report.metrics.sessionTelemetry.gemini?.artifactRuntimeIngestCount).toBe(0);
-    expect(report.metrics.sessionTelemetry.gemini?.artifactSelectedStageCount).toBe(0);
+    expect(report.metrics.sessionTelemetry.gemini?.artifactRuntimeIngestCount).toBe(1);
+    expect(report.metrics.sessionTelemetry.gemini?.artifactSelectedStageCount).toBe(1);
     expect(report.metrics.sessionTelemetry.gemini?.artifactRenderedCount).toBe(1);
     expect(report.turnCaptureDiagnostics.summary.finalUiState.artifactCount).toBe(1);
-    expect(report.turnCaptureDiagnostics.summary.finalUiState.artifactCountSource).toBe('rendered_state');
-    expect(report.turnCaptureDiagnostics.summary.finalUiState.artifactCountMismatchReason).toBe('rendered_state_without_runtime_ingest');
+    expect(report.turnCaptureDiagnostics.summary.finalUiState.artifactCountSource).toBe('selected_stage_artifact');
+    expect(report.turnCaptureDiagnostics.summary.finalUiState.artifactCountMismatchReason).toBe('selected_stage_artifact_not_public_event');
     expect(report.diagnosticsSummary.artifactReview).toMatchObject({
-      warnings: expect.arrayContaining([
-        'artifact_rendered_not_runtime_ingested',
-        'artifact_count_mismatch',
-      ]),
-      artifactCountMismatchReason: 'rendered_state_without_runtime_ingest',
+      warnings: expect.arrayContaining(['artifact_count_mismatch']),
+      artifactCountMismatchReason: 'selected_stage_artifact_not_public_event',
     });
   });
 

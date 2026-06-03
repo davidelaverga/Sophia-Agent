@@ -1040,6 +1040,56 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.coreview.visual.exactTextAvailable).toBe(true);
   });
 
+  it('counts coreviewArtifactId state as selected artifact evidence when stage-selection events are absent', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { platform: 'voice', sessionId: 'session-dev', runtime: 'gemini_live' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:00.900Z',
+        category: 'voice-session',
+        name: 'coreview-state',
+        payload: {
+          data: {
+            coreview: {
+              coreviewEnabled: true,
+              coreviewSessionActive: true,
+              coreviewArtifactId: 'coreview-real-artifact-launch-brief',
+              visualSourceKind: 'offscreen_render',
+              frameSentCount: 1,
+              initialFrameSent: true,
+              exactTextAvailable: true,
+            },
+          },
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot({
+        artifactDom: { panelVisible: true, takeawayText: 'Visible rendered text.' },
+      }),
+      nowMs: Date.parse('2026-04-07T12:00:01.500Z'),
+    });
+
+    expect(metrics.counts.artifacts).toBe(1);
+    expect(metrics.counts.artifactPublicEventCount).toBe(0);
+    expect(metrics.counts.artifactRuntimeIngestCount).toBe(1);
+    expect(metrics.counts.artifactSelectedStageCount).toBe(1);
+    expect(metrics.counts.artifactCountSource).toBe('selected_stage_artifact');
+    expect(metrics.counts.artifactCountMismatchReason).toBe('selected_stage_artifact_not_public_event');
+    expect(metrics.sessionTelemetry.gemini?.artifactSelectedStageCount).toBe(1);
+    expect(metrics.coreview.visual.coreviewArtifactId).toBe('coreview-real-artifact-launch-brief');
+    expect(metrics.coreview.visual.frameSentCount).toBe(1);
+  });
+
   it('reports Coreview enabled from parsed frontend flags even before a frame is sent', () => {
     const events: VoiceCaptureEvent[] = [
       buildEvent({
@@ -1342,6 +1392,51 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.regressions).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ key: 'microphone', level: 'warn' }),
+      ]),
+    );
+  });
+
+  it('surfaces a safe no-signal warning when the microphone stream is connected but silent', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { platform: 'voice', sessionId: 'session-dev', runtime: 'gemini_live' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:00.120Z',
+        category: 'voice-session',
+        name: 'gemini-stage-changed',
+        payload: {
+          runtime: 'gemini_live',
+          stage: 'streaming_audio',
+          connectionState: 'connected',
+          websocketState: 'connected',
+          microphoneState: 'connected',
+          remoteAudioState: 'idle',
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'streaming_audio',
+      events,
+      snapshot: buildSnapshot({ detectedAudio: false }),
+      nowMs: Date.parse('2026-04-07T12:00:02.000Z'),
+    });
+
+    expect(metrics.bottleneck.kind).toBe('microphone');
+    expect(metrics.bottleneck.title).toBe('Input capture is the bottleneck');
+    expect(metrics.regressions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'microphone',
+          title: 'Mic stream without signal',
+          level: 'bad',
+        }),
       ]),
     );
   });

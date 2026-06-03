@@ -292,7 +292,12 @@ class GeminiBrowserDogfoodRelayRequest(BaseModel):
     )
 
     def voice_relay_payload(self) -> dict[str, object]:
-        payload: dict[str, object] = {"event": self.event}
+        payload: dict[str, object] = {
+            "event": _apply_artifact_review_tool_defaults(
+                self.event,
+                self.artifact_review_context,
+            )
+        }
         for key in (
             "provider_receive_sequence",
             "provider_relay_sequence",
@@ -449,6 +454,7 @@ def _gemini_relay_log_context(
 
 
 GEMINI_EMIT_ARTIFACT_TOOL_NAME = "emit_artifact"
+GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = "read_artifact_text"
 GEMINI_REVIEW_BLOCKED_TOOL_NAMES = {
     "emit_artifact",
     "start_builder_task",
@@ -514,6 +520,136 @@ def _artifact_review_context_active(context: dict[str, object] | None) -> bool:
 def _artifact_review_user_intent(context: dict[str, object] | None) -> str:
     value = context.get("user_intent") if context else None
     return value if isinstance(value, str) and value else "unknown"
+
+
+def _artifact_review_context_artifact_id(context: dict[str, object] | None) -> str | None:
+    return _string_from_any_key(context, "artifact_id", "artifactId")
+
+
+def _apply_artifact_review_defaults_to_function_call(
+    call: object,
+    *,
+    artifact_id: str | None,
+) -> tuple[dict[str, object] | None, bool]:
+    if not isinstance(call, dict):
+        return None, False
+    if not artifact_id:
+        return dict(call), False
+    if (_string_from_any_key(call, "name") or "") != GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME:
+        return dict(call), False
+
+    raw_args = call.get("args")
+    if isinstance(raw_args, dict):
+        if _string_from_any_key(raw_args, "artifact_id", "artifactId"):
+            return dict(call), False
+        next_args = dict(raw_args)
+    else:
+        next_args = {}
+
+    next_args["artifact_id"] = artifact_id
+    next_call = dict(call)
+    next_call["args"] = next_args
+    return next_call, True
+
+
+def _apply_artifact_review_tool_defaults(
+    event: dict[str, object],
+    context: dict[str, object] | None,
+) -> dict[str, object]:
+    if not _artifact_review_context_active(context):
+        return event
+
+    artifact_id = _artifact_review_context_artifact_id(context)
+    if not artifact_id:
+        return event
+
+    mutated = False
+    next_event = dict(event)
+
+    tool_call_key = "toolCall" if "toolCall" in event else "tool_call" if "tool_call" in event else None
+    if tool_call_key is not None:
+        raw_tool_call = event.get(tool_call_key)
+        if isinstance(raw_tool_call, dict):
+            function_calls_key = (
+                "functionCalls"
+                if "functionCalls" in raw_tool_call
+                else "function_calls"
+                if "function_calls" in raw_tool_call
+                else None
+            )
+            if function_calls_key is not None:
+                raw_function_calls = raw_tool_call.get(function_calls_key)
+                if not isinstance(raw_function_calls, list):
+                    raw_function_calls = []
+                next_function_calls: list[object] = []
+                function_calls_mutated = False
+                for call in raw_function_calls:
+                    next_call, call_mutated = _apply_artifact_review_defaults_to_function_call(
+                        call,
+                        artifact_id=artifact_id,
+                    )
+                    next_function_calls.append(next_call if next_call is not None else call)
+                    function_calls_mutated = function_calls_mutated or call_mutated
+                if function_calls_mutated:
+                    next_tool_call = dict(raw_tool_call)
+                    next_tool_call[function_calls_key] = next_function_calls
+                    next_event[tool_call_key] = next_tool_call
+                    mutated = True
+
+    server_content_key = (
+        "serverContent" if "serverContent" in event else "server_content" if "server_content" in event else None
+    )
+    if server_content_key is not None:
+        raw_server_content = event.get(server_content_key)
+        if isinstance(raw_server_content, dict):
+            model_turn_key = (
+                "modelTurn"
+                if "modelTurn" in raw_server_content
+                else "model_turn"
+                if "model_turn" in raw_server_content
+                else None
+            )
+            if model_turn_key is not None:
+                raw_model_turn = raw_server_content.get(model_turn_key)
+                if isinstance(raw_model_turn, dict):
+                    parts = raw_model_turn.get("parts")
+                    if isinstance(parts, list):
+                        next_parts: list[object] = []
+                        parts_mutated = False
+                        for part in parts:
+                            if not isinstance(part, dict):
+                                next_parts.append(part)
+                                continue
+                            function_call_key = (
+                                "functionCall"
+                                if "functionCall" in part
+                                else "function_call"
+                                if "function_call" in part
+                                else None
+                            )
+                            if function_call_key is None:
+                                next_parts.append(part)
+                                continue
+                            next_call, call_mutated = _apply_artifact_review_defaults_to_function_call(
+                                part.get(function_call_key),
+                                artifact_id=artifact_id,
+                            )
+                            if call_mutated:
+                                next_part = dict(part)
+                                next_part[function_call_key] = next_call
+                                next_parts.append(next_part)
+                                parts_mutated = True
+                            else:
+                                next_parts.append(part)
+                        if parts_mutated:
+                            next_model_turn = dict(raw_model_turn)
+                            next_model_turn["parts"] = next_parts
+                            next_server_content = dict(raw_server_content)
+                            next_server_content[model_turn_key] = next_model_turn
+                            next_event[server_content_key] = next_server_content
+                            mutated = True
+
+    return next_event if mutated else event
 
 
 def _suppressed_review_tool_calls(

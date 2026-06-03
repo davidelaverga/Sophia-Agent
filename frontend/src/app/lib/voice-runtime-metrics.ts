@@ -646,21 +646,31 @@ function hasArtifactsRuntimeIngestContent(event: NormalizedVoiceCaptureEvent): b
   return hasArtifactContent(payload?.merged) || hasArtifactContent(payload?.incoming)
 }
 
-function selectedStageArtifactKey(event: NormalizedVoiceCaptureEvent): string | null {
-  if (event.category !== "artifacts-runtime" || event.name !== "select-stage-artifact") {
-    return null
+function artifactSelectionEvidenceKey(event: NormalizedVoiceCaptureEvent): string | null {
+  if (event.category === "artifacts-runtime" && event.name === "select-stage-artifact") {
+    const payload = event.payloadRecord
+    return asString(payload?.artifactId)
+      ?? asString(payload?.artifactPath)
+      ?? asString(payload?.artifactTitle)
   }
 
-  const payload = event.payloadRecord
-  return asString(payload?.artifactId)
-    ?? asString(payload?.artifactPath)
-    ?? asString(payload?.artifactTitle)
+  if (event.name === "coreview-state") {
+    const coreview = asRecord(eventData(event)?.coreview)
+    return asString(coreview?.coreviewArtifactId)
+  }
+
+  if (event.name === "gemini-artifact-frame-send") {
+    const result = coreviewFrameResult(event)
+    return asString(result?.artifactId) ?? asString(result?.artifact_id)
+  }
+
+  return null
 }
 
 function countSelectedStageArtifacts(events: NormalizedVoiceCaptureEvent[]): number {
   const keys = new Set<string>()
   for (const event of events) {
-    const key = selectedStageArtifactKey(event)
+    const key = artifactSelectionEvidenceKey(event)
     if (key) {
       keys.add(key)
     }

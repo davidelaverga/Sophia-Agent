@@ -12,7 +12,15 @@ type TestCaptureBridge = {
   export: () => SophiaCaptureBundle;
 };
 
-function buildDirtyCaptureBundle(): SophiaCaptureBundle {
+function buildDirtyCaptureBundle({
+  detectedAudio = true,
+  maxRms = 0.02,
+  streamCount = 1,
+}: {
+  detectedAudio?: boolean;
+  maxRms?: number | null;
+  streamCount?: number;
+} = {}): SophiaCaptureBundle {
   const snapshot: SophiaCaptureSnapshot = {
     capturedAt: '2026-05-20T12:00:03.000Z',
     location: {
@@ -75,16 +83,16 @@ function buildDirtyCaptureBundle(): SophiaCaptureBundle {
     harness: {
       microphone: {
         audioTrackCount: 1,
-        detectedAudio: true,
+        detectedAudio,
         errors: [],
-        firstAudioAt: '2026-05-20T12:00:01.000Z',
+        firstAudioAt: detectedAudio ? '2026-05-20T12:00:01.000Z' : null,
         firstStreamAt: '2026-05-20T12:00:00.500Z',
-        lastAudioAt: '2026-05-20T12:00:02.000Z',
+        lastAudioAt: detectedAudio ? '2026-05-20T12:00:02.000Z' : null,
         maxAbsPeak: 0.2,
-        maxRms: 0.02,
-        nonSilentSampleWindows: 2,
+        maxRms,
+        nonSilentSampleWindows: detectedAudio ? 2 : 0,
         patchInstalled: true,
-        streamCount: 1,
+        streamCount,
         streams: [],
         totalSampleWindows: 4,
         tracks: [],
@@ -136,13 +144,15 @@ function buildDirtyCaptureBundle(): SophiaCaptureBundle {
   };
 }
 
+let captureBundleFactory = () => buildDirtyCaptureBundle();
+
 vi.mock('../../app/lib/session-capture', () => ({
   registerSophiaCaptureBridge: vi.fn(() => {
     const bridge: TestCaptureBridge = {
       enable: vi.fn(),
       snapshot: () => null,
       getEvents: () => [],
-      export: () => buildDirtyCaptureBundle(),
+      export: () => captureBundleFactory(),
     };
     window.__sophiaCapture = bridge as unknown as NonNullable<Window['__sophiaCapture']>;
   }),
@@ -285,6 +295,7 @@ describe('VoiceMetricsPanel', () => {
   beforeEach(() => {
     window.localStorage.clear();
     setViewport(1440, 960);
+    captureBundleFactory = () => buildDirtyCaptureBundle();
   });
 
   it('labels the legacy runtime and keeps legacy latency cards visible', () => {
@@ -319,6 +330,25 @@ describe('VoiceMetricsPanel', () => {
     expect(screen.queryByText('Join latency')).not.toBeInTheDocument();
     expect(screen.queryByText('Raw backend done')).not.toBeInTheDocument();
     expect(screen.queryByText('Response pipeline')).not.toBeInTheDocument();
+  });
+
+  it('surfaces a warning when the mic stream is connected but no audio signal is detected', () => {
+    captureBundleFactory = () => buildDirtyCaptureBundle({
+      detectedAudio: false,
+      maxRms: 0.0004,
+      streamCount: 1,
+    });
+
+    render(
+      <VoiceMetricsPanel
+        voiceState={buildVoiceState(geminiTelemetry)}
+        defaultExpanded
+        layout="inline"
+      />
+    );
+
+    expect(screen.getByText('Mic connected, no signal')).toBeInTheDocument();
+    expect(screen.getByText('Browser microphone stream is connected, but the local probe has not observed non-silent audio yet.')).toBeInTheDocument();
   });
 
   it('keeps floating telemetry hidden by default', () => {

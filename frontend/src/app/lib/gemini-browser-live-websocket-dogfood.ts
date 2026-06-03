@@ -841,7 +841,12 @@ export async function connectGeminiBrowserLiveDogfood(
   let artifactReviewExpiresAtMs: number | null = null;
   let artifactReviewUserIntent: GeminiArtifactReviewUserIntent = 'unknown';
   let artifactReviewUserIntentAt: string | null = null;
+  const artifactReviewSafeResponseIds = new Set<string>();
   const artifactReviewSuppressedResponseIds = new Set<string>();
+  const pendingArtifactReviewAudio = new Map<string, Array<{
+    event: Record<string, unknown>;
+    receiveMetadata: GeminiProviderReceiveMetadata;
+  }>>();
 
   const relayQueueOldestQueuedAgeMs = () => {
     const oldestQueuedAtMs = orderedRelayQueue[0]?.queuedAtMs;
@@ -1004,6 +1009,9 @@ export async function connectGeminiBrowserLiveDogfood(
       artifactReviewExpiresAtMs = null;
       artifactReviewUserIntent = 'unknown';
       artifactReviewUserIntentAt = null;
+      artifactReviewSafeResponseIds.clear();
+      artifactReviewSuppressedResponseIds.clear();
+      pendingArtifactReviewAudio.clear();
       return null;
     }
 
@@ -1017,6 +1025,66 @@ export async function connectGeminiBrowserLiveDogfood(
       raw_transcript_excluded: true,
       raw_artifact_text_excluded: true,
     };
+  };
+
+  const prunePendingArtifactReviewAudio = () => {
+    while (pendingArtifactReviewAudio.size > 25) {
+      const oldest = pendingArtifactReviewAudio.keys().next().value;
+      if (typeof oldest !== 'string') {
+        return;
+      }
+      pendingArtifactReviewAudio.delete(oldest);
+    }
+  };
+
+  const playGeminiOutputAudio = (
+    event: Record<string, unknown>,
+    receiveMetadata: GeminiProviderReceiveMetadata,
+  ) => {
+    const audioChunks = readGeminiOutputAudioChunks(event);
+    if (!audioChunks.length) {
+      return 0;
+    }
+    options.onOutputAudio?.();
+    return outputAudioPlayer?.playEvent(event, receiveMetadata) ?? 0;
+  };
+
+  const dropBufferedArtifactReviewAudio = (responseId: string | null) => {
+    if (!responseId) {
+      return;
+    }
+    pendingArtifactReviewAudio.delete(responseId);
+    artifactReviewSafeResponseIds.delete(responseId);
+  };
+
+  const bufferArtifactReviewAudio = (
+    responseId: string,
+    event: Record<string, unknown>,
+    receiveMetadata: GeminiProviderReceiveMetadata,
+  ) => {
+    const queued = pendingArtifactReviewAudio.get(responseId) ?? [];
+    queued.push({ event, receiveMetadata });
+    pendingArtifactReviewAudio.set(responseId, queued);
+    prunePendingArtifactReviewAudio();
+  };
+
+  const markArtifactReviewResponseSafe = (responseId: string | null) => {
+    if (!responseId) {
+      return;
+    }
+    artifactReviewSafeResponseIds.add(responseId);
+    pruneStringSet(artifactReviewSafeResponseIds, 50);
+    const queued = pendingArtifactReviewAudio.get(responseId);
+    if (!queued) {
+      return;
+    }
+    pendingArtifactReviewAudio.delete(responseId);
+    if (artifactReviewSuppressedResponseIds.has(responseId)) {
+      return;
+    }
+    queued.forEach(({ event, receiveMetadata }) => {
+      playGeminiOutputAudio(event, receiveMetadata);
+    });
   };
 
   const recordWebSocketDiagnostic = (
@@ -1627,22 +1695,37 @@ export async function connectGeminiBrowserLiveDogfood(
         }
         const artifactReviewContext = snapshotArtifactReviewRelayContext();
         const leakageMarker = artifactReviewAssistantLeakageMarker(event, categories, artifactReviewContext);
+        const responseId = readGeminiResponseId(event);
         if (leakageMarker) {
-          const responseId = readGeminiResponseId(event);
           if (responseId) {
             artifactReviewSuppressedResponseIds.add(responseId);
             pruneStringSet(artifactReviewSuppressedResponseIds, 50);
           }
+          dropBufferedArtifactReviewAudio(responseId);
           if (categories.includes('outputTranscription') || categories.includes('modelTurnText')) {
             relayThroughputMetrics.transcriptPartialsDropped += 1;
           }
           return;
+        }
+        if (
+          artifactReviewContext?.active
+          && responseId
+          && (categories.includes('outputTranscription') || categories.includes('modelTurnText'))
+        ) {
+          markArtifactReviewResponseSafe(responseId);
         }
         const transcriptSuppressionReason = staleOutputSuppressionReason(event, categories, receiveMetadata);
         if (transcriptSuppressionReason && (categories.includes('outputTranscription') || categories.includes('modelTurnText'))) {
           relayThroughputMetrics.transcriptPartialsDropped += 1;
           emitStaleOutputSuppression(event, receiveMetadata, 'transcript', transcriptSuppressionReason);
           return;
+        }
+        if (
+          responseId
+          && (hasGeminiServerContentTurnBoundary(event) || isGeminiServerInterruptedEvent(event))
+          && !artifactReviewSafeResponseIds.has(responseId)
+        ) {
+          dropBufferedArtifactReviewAudio(responseId);
         }
         if (hasGeminiServerContentTurnBoundary(event) && !isGeminiServerInterruptedEvent(event)) {
           if (staleOutputSuppressionActive) {
@@ -1836,10 +1919,16 @@ export async function connectGeminiBrowserLiveDogfood(
         if (responseId && artifactReviewSuppressedResponseIds.has(responseId)) {
           return;
         }
-        if (audioChunks.length) {
-          options.onOutputAudio?.();
+        const artifactReviewContext = snapshotArtifactReviewRelayContext();
+        if (
+          artifactReviewContext?.active
+          && responseId
+          && !artifactReviewSafeResponseIds.has(responseId)
+        ) {
+          bufferArtifactReviewAudio(responseId, event, receiveMetadata);
+          return;
         }
-        outputAudioPlayer?.playEvent(event, receiveMetadata);
+        playGeminiOutputAudio(event, receiveMetadata);
       },
       onInterruption: (event) => {
         const responseId = readGeminiResponseId(event);
@@ -1927,6 +2016,9 @@ export async function connectGeminiBrowserLiveDogfood(
           if (artifactReviewArtifactId !== result.artifactId) {
             artifactReviewUserIntent = 'unknown';
             artifactReviewUserIntentAt = null;
+            artifactReviewSafeResponseIds.clear();
+            artifactReviewSuppressedResponseIds.clear();
+            pendingArtifactReviewAudio.clear();
           }
           artifactReviewArtifactId = result.artifactId;
           artifactReviewExpiresAtMs = monotonicNowMs() + ARTIFACT_REVIEW_RELAY_CONTEXT_TTL_MS;
@@ -2123,9 +2215,6 @@ async function sendGeminiArtifactFrameOverWebSocket({
   }
 
   try {
-    if (frame.artifactId) {
-      websocket.send(JSON.stringify(buildGeminiArtifactTextReaderHint(frame.artifactId)));
-    }
     websocket.send(JSON.stringify(buildGeminiArtifactFrameRealtimeInput(frame)));
   } catch (error) {
     const providerAfter = providerSnapshot();
@@ -3733,10 +3822,12 @@ function promptOrToolLeakageMarker(text: string): string | null {
   if (!normalized) return null;
   if (/\bemit_artifact\b/u.test(normalized)) return 'emit_artifact';
   if (/\bread_artifact_text\b/u.test(normalized)) return 'read_artifact_text';
+  if (/\bartifact_id\b/u.test(normalized)) return 'artifact_id';
   if (/\bactive_goal\s*:/u.test(normalized)) return 'active_goal';
   if (/\btool_call_id\b/u.test(normalized)) return 'tool_call_id';
   if (/^(?:tool\s+)?schema$/u.test(normalized) || /\btool\s+schema\b/u.test(normalized)) return 'tool_schema';
   if (/\b(?:system|developer|internal)\s+prompt\b/u.test(normalized)) return 'internal_prompt';
+  if (/\bdeveloper\s+instructions\b/u.test(normalized)) return 'internal_prompt';
   if (/\bfunction\s*declarations?\b|\bfunctiondeclarations\b|\btool\s+payload\b/u.test(normalized)) return 'tool_schema';
   return null;
 }
@@ -3777,7 +3868,10 @@ export function classifyArtifactReviewUserIntent(text: string): GeminiArtifactRe
   const createOrUpdate =
     /\b(create|make|write|draft|generate|update|edit|revise|rewrite|change|save|add|remove|replace)\b/u.test(normalized)
     && /\b(artifact|document|doc|summary|brief|report|file|canvas|it|this)\b/u.test(normalized);
-  if (createOrUpdate || /\b(turn this into|save this as|make this into)\b/u.test(normalized)) {
+  if (
+    createOrUpdate
+    || /\b(turn this into|save this as|make this into|new artifact|new version)\b/u.test(normalized)
+  ) {
     return 'create_update';
   }
 

@@ -802,6 +802,31 @@ function buildArtifactReviewDiagnosticsSummary(
   const selectedStageEventCount = events.filter(
     (event) => event.category === 'artifacts-runtime' && event.name === 'select-stage-artifact',
   ).length;
+  const suppressedReviewToolDiagnostics = events.filter((event) => {
+    if (event.category !== 'voice-session' || event.name !== 'gemini-tool-loop-diagnostic') {
+      return false;
+    }
+    const payload = asRecord(event.payload);
+    const data = asRecord(payload?.data) ?? payload;
+    if (asString(data?.phase) !== 'tool_execution_rejected') {
+      return false;
+    }
+    const diagnostic = asRecord(data?.diagnostic);
+    const toolCall = asRecord(diagnostic?.toolCall);
+    const rejectionReason = asString(data?.rejectionReason)
+      ?? asString(diagnostic?.rejectionReason)
+      ?? asString(diagnostic?.rejection_reason);
+    return rejectionReason === 'artifact_review_emit_artifact_suppressed'
+      && asString(data?.toolName ?? toolCall?.name) !== null;
+  });
+  const suppressedReviewToolCount = suppressedReviewToolDiagnostics.length;
+  const suppressedReviewEmitToolCount = suppressedReviewToolDiagnostics.filter((event) => {
+    const payload = asRecord(event.payload);
+    const data = asRecord(payload?.data) ?? payload;
+    const diagnostic = asRecord(data?.diagnostic);
+    const toolCall = asRecord(diagnostic?.toolCall);
+    return asString(data?.toolName ?? toolCall?.name) === 'emit_artifact';
+  }).length;
 
   if (counts.artifactRenderedCount > 0 && counts.artifactRuntimeIngestCount === 0) {
     warnings.push('artifact_rendered_not_runtime_ingested');
@@ -809,10 +834,10 @@ function buildArtifactReviewDiagnosticsSummary(
   if (counts.artifactCountMismatch) {
     warnings.push('artifact_count_mismatch');
   }
-  if (reviewActive && (gemini?.artifactToolCallCount ?? 0) > 0) {
+  if (reviewActive && (gemini?.artifactToolCallCount ?? 0) > suppressedReviewEmitToolCount) {
     warnings.push('review_emit_artifact_tool_churn_detected');
   }
-  if (reviewActive && (gemini?.toolRejectionCount ?? 0) > 0) {
+  if (reviewActive && (gemini?.toolRejectionCount ?? 0) > suppressedReviewToolCount) {
     warnings.push('review_tool_churn_suppressed');
   }
 

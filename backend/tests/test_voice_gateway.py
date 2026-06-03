@@ -1053,6 +1053,69 @@ class TestGeminiBrowserDogfoodGateway:
         proxy.assert_awaited_once()
         assert resp.json()["accepted"] is True
 
+    def test_relay_injects_active_review_artifact_id_for_read_artifact_text(self):
+        with patch(
+            "app.gateway.routers.voice._proxy_voice_dogfood_json",
+            new_callable=AsyncMock,
+            return_value={"accepted": True, "session_id": "browser-gemini-1"},
+        ) as proxy:
+            resp = client.post(
+                "/api/sophia/user_123/voice/dogfood/gemini/relay",
+                json={
+                    "session_id": "browser-gemini-1",
+                    "event": {
+                        "toolCall": {
+                            "functionCalls": [
+                                {
+                                    "id": "read-call-2",
+                                    "name": "read_artifact_text",
+                                    "args": {"query": "exact title"},
+                                }
+                            ]
+                        }
+                    },
+                    "provider_receive_sequence": 46,
+                    "provider_relay_sequence": 11,
+                    "provider_received_at": "2026-05-24T05:29:08.500Z",
+                    "relay_correlation_id": "gemini-46",
+                    "provider_primary_category": "toolCall",
+                    "provider_categories": ["toolCall"],
+                    "artifact_review_context": {
+                        "active": True,
+                        "artifact_id": "artifact-1",
+                        "source": "coreview_still_frame",
+                        "user_intent": "analysis",
+                        "raw_transcript_excluded": True,
+                        "raw_artifact_text_excluded": True,
+                    },
+                },
+            )
+
+        assert resp.status_code == 202
+        proxy.assert_awaited_once_with(
+            "POST",
+            "/dogfood/realtime/gemini/browser-sessions/browser-gemini-1/provider-events",
+            json_body={
+                "event": {
+                    "toolCall": {
+                        "functionCalls": [
+                            {
+                                "id": "read-call-2",
+                                "name": "read_artifact_text",
+                                "args": {"query": "exact title", "artifact_id": "artifact-1"},
+                            }
+                        ]
+                    }
+                },
+                "provider_receive_sequence": 46,
+                "provider_relay_sequence": 11,
+                "provider_received_at": "2026-05-24T05:29:08.500Z",
+                "relay_correlation_id": "gemini-46",
+                "provider_primary_category": "toolCall",
+                "provider_categories": ["toolCall"],
+            },
+        )
+
     def test_relay_suppresses_review_only_start_builder_task_without_proxying(self):
         with patch(
             "app.gateway.routers.voice._proxy_voice_dogfood_json",
