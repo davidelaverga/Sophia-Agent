@@ -8,6 +8,7 @@ then let emit_builder_artifact carry the normal completion metadata.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import logging
 import re
@@ -39,6 +40,38 @@ _DEFAULT_IMPROVEMENT_BULLETS = (
 )
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _SLUG_RE = re.compile(r"[^A-Za-z0-9]+")
+_PAGE_HEADING_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?Page\s+([1-9]\d{0,2})(?:\s*(?:[:.)-]|\u2013|\u2014)\s*(.*)|\s*)$",
+    re.IGNORECASE,
+)
+_REQUESTED_PAGE_COUNT_RE = (
+    re.compile(r"\bLength\s*:\s*([1-9]\d{0,1})\s+pages?\b", re.IGNORECASE),
+    re.compile(
+        r"\b([1-9]\d{0,1})\s*-\s*page\s+(?:pdf|document|report|artifact|deck)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:exactly|length(?:\s+of)?|create|make|generate|produce|write|render|export)"
+        r"\s+([1-9]\d{0,1})\s+pages?\b",
+        re.IGNORECASE,
+    ),
+)
+_BULLET_PREFIX_RE = re.compile(r"^\s*(?:[-*]|\u2022|\d+[.)])\s+")
+_MAX_REQUESTED_PAGES = 40
+
+
+@dataclass(frozen=True)
+class _PdfPageSpec:
+    title: str
+    subtitle: str | None
+    lines: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _PdfPagePlan:
+    pages: tuple[_PdfPageSpec, ...]
+    structure_source: str
+    structure_safe_reason: str | None
 
 
 def _result(*, success: bool, **fields: Any) -> str:
@@ -134,12 +167,228 @@ def _clean_bullets(values: list[str] | None, fallback: tuple[str, ...]) -> list[
     return cleaned[:8] or list(fallback)
 
 
-def _render_reportlab_pdf(
+def _task_text_from_state(state: dict[str, Any] | None) -> str:
+    if not isinstance(state, dict):
+        return ""
+
+    parts: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        if not isinstance(value, str):
+            return
+        text = value.strip()
+        if text and text not in seen:
+            seen.add(text)
+            parts.append(text)
+
+    delegation = state.get("delegation_context")
+    if isinstance(delegation, dict):
+        for key in ("task", "task_description", "description", "original_task"):
+            add(delegation.get(key))
+
+    for key in ("task", "task_description", "builder_task_description"):
+        add(state.get(key))
+
+    messages = state.get("messages")
+    if isinstance(messages, list):
+        for message in messages[-4:]:
+            content = (
+                message.get("content")
+                if isinstance(message, dict)
+                else getattr(message, "content", None)
+            )
+            add(content)
+
+    return "\n\n".join(parts)
+
+
+def _clean_page_title(raw_title: str | None, page_number: int) -> str:
+    title = (raw_title or "").strip(" \t:-.)\u2013\u2014")
+    return title or f"Page {page_number}"
+
+
+def _clean_page_line(raw_line: str) -> str:
+    line = raw_line.strip()
+    if not line:
+        return ""
+    return line
+
+
+def _parse_page_headings(task_text: str) -> list[_PdfPageSpec]:
+    pages: list[_PdfPageSpec] = []
+    current_number: int | None = None
+    current_title = ""
+    current_lines: list[str] = []
+
+    def flush_current() -> None:
+        nonlocal current_number, current_title, current_lines
+        if current_number is None:
+            return
+        pages.append(
+            _PdfPageSpec(
+                title=current_title,
+                subtitle=None,
+                lines=tuple(current_lines),
+            )
+        )
+        current_number = None
+        current_title = ""
+        current_lines = []
+
+    for raw_line in task_text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = _PAGE_HEADING_RE.match(line)
+        if match:
+            flush_current()
+            current_number = int(match.group(1))
+            current_title = _clean_page_title(match.group(2), current_number)
+            current_lines = []
+            continue
+        if current_number is not None:
+            cleaned = _clean_page_line(line)
+            if cleaned:
+                current_lines.append(cleaned)
+
+    flush_current()
+    return pages
+
+
+def _requested_page_count(task_text: str) -> int | None:
+    for pattern in _REQUESTED_PAGE_COUNT_RE:
+        match = pattern.search(task_text)
+        if not match:
+            continue
+        count = int(match.group(1))
+        if 1 <= count <= _MAX_REQUESTED_PAGES:
+            return count
+    return None
+
+
+def _default_page_specs(
     *,
     title: str,
     subtitle: str,
     summary_bullets: list[str],
     improvement_bullets: list[str],
+) -> list[_PdfPageSpec]:
+    return [
+        _PdfPageSpec(
+            title=title,
+            subtitle=subtitle,
+            lines=("Executive Summary", *(f"- {item}" for item in summary_bullets)),
+        ),
+        _PdfPageSpec(
+            title="Next Improvements",
+            subtitle=None,
+            lines=tuple(f"- {item}" for item in improvement_bullets),
+        ),
+    ]
+
+
+def _length_page_specs(
+    *,
+    page_count: int,
+    title: str,
+    subtitle: str,
+    summary_bullets: list[str],
+    improvement_bullets: list[str],
+) -> list[_PdfPageSpec]:
+    defaults = _default_page_specs(
+        title=title,
+        subtitle=subtitle,
+        summary_bullets=summary_bullets,
+        improvement_bullets=improvement_bullets,
+    )
+    if page_count <= len(defaults):
+        return defaults[:page_count]
+
+    pages = [defaults[0]]
+    for page_number in range(2, page_count):
+        pages.append(
+            _PdfPageSpec(
+                title=f"Page {page_number}",
+                subtitle=None,
+                lines=("No explicit section content was provided for this requested page.",),
+            )
+        )
+    pages.append(defaults[-1])
+    return pages
+
+
+def _infer_page_plan(
+    *,
+    task_text: str,
+    title: str,
+    subtitle: str,
+    summary_bullets: list[str],
+    improvement_bullets: list[str],
+) -> _PdfPagePlan:
+    requested_count = _requested_page_count(task_text)
+    explicit_pages = _parse_page_headings(task_text)
+    if explicit_pages:
+        pages = list(explicit_pages)
+        safe_reason = None
+        if requested_count is not None and requested_count > len(pages):
+            filler = _length_page_specs(
+                page_count=requested_count,
+                title=title,
+                subtitle=subtitle,
+                summary_bullets=summary_bullets,
+                improvement_bullets=improvement_bullets,
+            )
+            pages.extend(filler[len(pages):])
+            safe_reason = "page_headings_shorter_than_requested_length"
+        elif requested_count is not None and requested_count < len(pages):
+            safe_reason = "page_headings_exceed_requested_length"
+        return _PdfPagePlan(
+            pages=tuple(pages),
+            structure_source="explicit_page_headings",
+            structure_safe_reason=safe_reason,
+        )
+
+    if requested_count is not None:
+        return _PdfPagePlan(
+            pages=tuple(
+                _length_page_specs(
+                    page_count=requested_count,
+                    title=title,
+                    subtitle=subtitle,
+                    summary_bullets=summary_bullets,
+                    improvement_bullets=improvement_bullets,
+                )
+            ),
+            structure_source="requested_page_count",
+            structure_safe_reason="length_requested_without_explicit_page_headings",
+        )
+
+    return _PdfPagePlan(
+        pages=tuple(
+            _default_page_specs(
+                title=title,
+                subtitle=subtitle,
+                summary_bullets=summary_bullets,
+                improvement_bullets=improvement_bullets,
+            )
+        ),
+        structure_source="fallback",
+        structure_safe_reason="no_explicit_page_structure",
+    )
+
+
+def _display_line(raw_line: str) -> tuple[str, bool]:
+    line = raw_line.strip()
+    bullet_match = _BULLET_PREFIX_RE.match(line)
+    if bullet_match:
+        return line[bullet_match.end():].strip(), True
+    return line, False
+
+
+def _render_reportlab_pdf(
+    *,
+    pages: tuple[_PdfPageSpec, ...],
 ) -> bytes:
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.styles import getSampleStyleSheet
@@ -166,80 +415,91 @@ def _render_reportlab_pdf(
             leftIndent=20,
         )
 
-    story = [
-        paragraph(title, "Title"),
-        Spacer(1, 12),
-        paragraph(subtitle, "Heading2"),
-        Spacer(1, 24),
-        paragraph("Executive Summary", "Heading1"),
-        Spacer(1, 8),
-        bullet_list(summary_bullets),
-        PageBreak(),
-        paragraph("Next Improvements", "Title"),
-        Spacer(1, 18),
-        bullet_list(improvement_bullets),
-    ]
+    def append_page_lines(story: list[Any], lines: tuple[str, ...]) -> None:
+        bullet_items: list[str] = []
+
+        def flush_bullets() -> None:
+            if bullet_items:
+                story.append(bullet_list(list(bullet_items)))
+                story.append(Spacer(1, 10))
+                bullet_items.clear()
+
+        for raw_line in lines:
+            text, is_bullet = _display_line(raw_line)
+            if not text:
+                continue
+            if is_bullet:
+                bullet_items.append(text)
+                continue
+            flush_bullets()
+            style_name = "Heading1" if len(text) < 80 and not text.endswith(".") else "BodyText"
+            story.append(paragraph(text, style_name))
+            story.append(Spacer(1, 8))
+        flush_bullets()
+
+    story: list[Any] = []
+    for index, page in enumerate(pages):
+        if index > 0:
+            story.append(PageBreak())
+        story.append(paragraph(page.title, "Title" if index == 0 else "Heading1"))
+        if page.subtitle:
+            story.append(Spacer(1, 10))
+            story.append(paragraph(page.subtitle, "Heading2"))
+        story.append(Spacer(1, 18))
+        append_page_lines(story, page.lines)
     doc.build(story)
     return buffer.getvalue()
 
 
 def _render_fpdf_pdf(
     *,
-    title: str,
-    subtitle: str,
-    summary_bullets: list[str],
-    improvement_bullets: list[str],
+    pages: tuple[_PdfPageSpec, ...],
 ) -> bytes:
     from fpdf import FPDF
 
+    def safe_text(text: str) -> str:
+        return text.encode("latin-1", "replace").decode("latin-1")
+
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=18)
-    pdf.add_page()
-    pdf.set_font("Helvetica", "B", 20)
-    pdf.multi_cell(0, 12, title)
-    pdf.set_font("Helvetica", "", 14)
-    pdf.multi_cell(0, 10, subtitle)
-    pdf.ln(10)
-    pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(0, 10, "Executive Summary", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 12)
-    for item in summary_bullets:
-        pdf.multi_cell(0, 8, f"- {item}")
-    pdf.add_page()
-    pdf.set_font("Helvetica", "B", 20)
-    pdf.multi_cell(0, 12, "Next Improvements")
-    pdf.ln(8)
-    pdf.set_font("Helvetica", "", 12)
-    for item in improvement_bullets:
-        pdf.multi_cell(0, 8, f"- {item}")
+    for page in pages:
+        pdf.add_page()
+        pdf.set_font("Helvetica", "B", 20)
+        pdf.multi_cell(0, 12, safe_text(page.title))
+        if page.subtitle:
+            pdf.set_font("Helvetica", "", 14)
+            pdf.multi_cell(0, 10, safe_text(page.subtitle))
+        pdf.ln(8)
+        for raw_line in page.lines:
+            text, is_bullet = _display_line(raw_line)
+            if not text:
+                continue
+            if is_bullet:
+                pdf.set_font("Helvetica", "", 12)
+                pdf.multi_cell(0, 8, safe_text(f"- {text}"))
+            else:
+                style = "B" if len(text) < 80 and not text.endswith(".") else ""
+                pdf.set_font("Helvetica", style, 14 if style else 12)
+                pdf.multi_cell(0, 8, safe_text(text))
     output = pdf.output(dest="S")
     return output.encode("latin-1") if isinstance(output, str) else bytes(output)
 
 
 def _render_simple_pdf_bytes(
     *,
-    title: str,
-    subtitle: str,
-    summary_bullets: list[str],
-    improvement_bullets: list[str],
+    pages: tuple[_PdfPageSpec, ...],
 ) -> tuple[bytes, str]:
     try:
         return (
             _render_reportlab_pdf(
-                title=title,
-                subtitle=subtitle,
-                summary_bullets=summary_bullets,
-                improvement_bullets=improvement_bullets,
+                pages=pages,
             ),
             "reportlab",
         )
     except ImportError:
         return (
             _render_fpdf_pdf(
-                title=title,
-                subtitle=subtitle,
-                summary_bullets=summary_bullets,
-                improvement_bullets=improvement_bullets,
+                pages=pages,
             ),
             "fpdf2",
         )
@@ -263,14 +523,18 @@ def _impl(
     final_subtitle = (subtitle or _DEFAULT_SUBTITLE).strip() or _DEFAULT_SUBTITLE
     executive_summary = _clean_bullets(summary_bullets, _DEFAULT_SUMMARY_BULLETS)
     next_improvements = _clean_bullets(improvement_bullets, _DEFAULT_IMPROVEMENT_BULLETS)
+    page_plan = _infer_page_plan(
+        task_text=_task_text_from_state(state),
+        title=final_title,
+        subtitle=final_subtitle,
+        summary_bullets=executive_summary,
+        improvement_bullets=next_improvements,
+    )
 
     try:
         host_path = _host_path_for_pdf(virtual_path, thread_data)
         pdf_bytes, renderer = _render_simple_pdf_bytes(
-            title=final_title,
-            subtitle=final_subtitle,
-            summary_bullets=executive_summary,
-            improvement_bullets=next_improvements,
+            pages=page_plan.pages,
         )
         if not pdf_bytes.startswith(b"%PDF-"):
             raise ValueError("renderer returned non-PDF bytes")
@@ -301,7 +565,10 @@ def _impl(
         size_bytes=size_bytes,
         renderer=renderer,
         content_type="application/pdf",
-        page_count=2,
+        page_count=len(page_plan.pages),
+        page_titles=[page.title for page in page_plan.pages],
+        structure_source=page_plan.structure_source,
+        structure_safe_reason=page_plan.structure_safe_reason,
         blank_page_count=0,
         short_page_count=0,
         layout_quality="ok",
@@ -322,7 +589,9 @@ def create_pdf_artifact(
 
     Use this for simple PDF artifacts and PDF smoke tests. The tool writes
     real PDF bytes using reportlab when available, falling back to fpdf2 if
-    reportlab cannot be imported. Do not write Markdown with a .pdf suffix.
+    reportlab cannot be imported. It reads the builder task from runtime
+    state and honors explicit Page 1 / Page 2 / Length: N pages structure
+    when present. Do not write Markdown with a .pdf suffix.
 
     Args:
         pdf_path: Optional output path. If omitted, uses the builder target

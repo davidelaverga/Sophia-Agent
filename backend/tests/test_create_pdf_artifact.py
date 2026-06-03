@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 from langchain_core.messages import ToolMessage
+from pypdf import PdfReader
 
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 from deerflow.sophia.tools import create_pdf_artifact as pdf_tool
@@ -9,6 +10,11 @@ from deerflow.sophia.tools import create_pdf_artifact as pdf_tool
 
 def _payload(result: str) -> dict:
     return json.loads(result)
+
+
+def _pdf_page_texts(path) -> list[str]:
+    reader = PdfReader(str(path))
+    return [page.extract_text() or "" for page in reader.pages]
 
 
 def test_create_pdf_artifact_writes_valid_pdf_under_outputs(tmp_path) -> None:
@@ -30,8 +36,83 @@ def test_create_pdf_artifact_writes_valid_pdf_under_outputs(tmp_path) -> None:
     assert result["pdf_path"] == "/mnt/user-data/outputs/simple-product-review.pdf"
     assert result["content_type"] == "application/pdf"
     assert result["page_count"] == 2
+    assert result["structure_source"] == "fallback"
+    assert result["structure_safe_reason"] == "no_explicit_page_structure"
     assert pdf_path.read_bytes().startswith(b"%PDF-")
     assert pdf_path.stat().st_size == result["size_bytes"]
+
+
+def test_create_pdf_artifact_two_page_length_request_still_creates_two_pages(tmp_path) -> None:
+    outputs = tmp_path / "outputs"
+    result = _payload(
+        pdf_tool._impl(
+            pdf_path="Simple Product Review",
+            title=None,
+            subtitle=None,
+            summary_bullets=None,
+            improvement_bullets=None,
+            thread_data={"outputs_path": str(outputs)},
+            state={
+                "delegation_context": {
+                    "task": "Create a 2-page simple product review PDF artifact. Length: 2 pages.",
+                },
+            },
+        )
+    )
+
+    pdf_path = outputs / "simple-product-review.pdf"
+    assert result["success"] is True
+    assert result["page_count"] == 2
+    assert result["structure_source"] == "requested_page_count"
+    assert result["structure_safe_reason"] == "length_requested_without_explicit_page_headings"
+    assert len(_pdf_page_texts(pdf_path)) == 2
+    assert pdf_path.read_bytes().startswith(b"%PDF-")
+
+
+def test_create_pdf_artifact_explicit_four_page_request_creates_requested_pages(tmp_path) -> None:
+    outputs = tmp_path / "outputs"
+    prompt = "\n".join(
+        [
+            "Create a PDF for Review Together.",
+            "Length: 4 pages",
+            "Page 1 \u2014 Cover",
+            "- Visual Artifact Review Deck",
+            "- Prepared for Sophia review",
+            "Page 2 \u2014 Current State",
+            "- The canvas now opens real PDF artifacts.",
+            "Page 3 \u2014 Visual Gaps",
+            "- Page count used to collapse into a smoke template.",
+            "Page 4 \u2014 Next Improvements",
+            "- Make page navigation and thumbnails more polished.",
+        ]
+    )
+
+    result = _payload(
+        pdf_tool._impl(
+            pdf_path="visual-artifact-review-deck.pdf",
+            title=None,
+            subtitle=None,
+            summary_bullets=None,
+            improvement_bullets=None,
+            thread_data={"outputs_path": str(outputs)},
+            state={"delegation_context": {"task": prompt}},
+        )
+    )
+
+    pdf_path = outputs / "visual-artifact-review-deck.pdf"
+    page_texts = _pdf_page_texts(pdf_path)
+    assert result["success"] is True
+    assert result["pdf_path"] == "/mnt/user-data/outputs/visual-artifact-review-deck.pdf"
+    assert result["page_count"] == 4
+    assert result["page_titles"] == ["Cover", "Current State", "Visual Gaps", "Next Improvements"]
+    assert result["structure_source"] == "explicit_page_headings"
+    assert result["structure_safe_reason"] is None
+    assert len(page_texts) == 4
+    assert "Visual Artifact Review Deck" in page_texts[0]
+    assert "Current State" in page_texts[1]
+    assert "Visual Gaps" in page_texts[2]
+    assert "Next Improvements" in page_texts[3]
+    assert pdf_path.read_bytes().startswith(b"%PDF-")
 
 
 def test_create_pdf_artifact_normalizes_plain_filename(tmp_path) -> None:
@@ -156,6 +237,50 @@ def test_pdf_writer_success_result_forces_emit_next(tmp_path) -> None:
         "type": "tool",
         "name": "emit_builder_artifact",
     }
+
+
+def test_pdf_writer_recovery_emits_artifact_path_from_successful_render(tmp_path) -> None:
+    outputs = tmp_path / "outputs"
+    result = _payload(
+        pdf_tool._impl(
+            pdf_path="Visual Artifact Review Deck",
+            title=None,
+            subtitle=None,
+            summary_bullets=None,
+            improvement_bullets=None,
+            thread_data={"outputs_path": str(outputs)},
+            state={
+                "delegation_context": {
+                    "task": (
+                        "Create a PDF. Length: 4 pages\n"
+                        "Page 1 - Cover\n"
+                        "- Visual Artifact Review Deck\n"
+                        "Page 2 - Current State\n"
+                        "- Current State\n"
+                        "Page 3 - Visual Gaps\n"
+                        "- Visual Gaps\n"
+                        "Page 4 - Next Improvements\n"
+                        "- Next Improvements"
+                    ),
+                },
+            },
+        )
+    )
+    middleware = BuilderArtifactMiddleware()
+    state = {
+        "thread_data": {"outputs_path": str(outputs)},
+        "builder_artifact_target_path": result["pdf_path"],
+        "builder_pdf_render_result": result,
+    }
+
+    recovered = middleware._recover_emit_args_from_last_write(
+        {"artifact_path": None},
+        state,
+        SimpleNamespace(context={"thread_id": "task-thread"}, config={}),
+    )
+
+    assert recovered is not None
+    assert recovered["artifact_path"] == "/mnt/user-data/outputs/visual-artifact-review-deck.pdf"
 
 
 def test_pdf_writer_failure_ends_with_safe_builder_result(monkeypatch) -> None:
