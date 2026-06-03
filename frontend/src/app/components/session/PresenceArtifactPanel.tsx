@@ -21,6 +21,7 @@ import {
 } from "./CoreviewCompanionArtifactCanvas"
 import { CoReviewControls } from "./CoReviewControls"
 import { buildCoreviewRealArtifactId, CoreviewRealArtifactCanvas } from "./CoreviewRealArtifactCanvas"
+import { VoiceArtifactStage } from "./VoiceArtifactStage"
 
 interface PresenceArtifactPanelProps {
   artifacts: RitualArtifacts | null | undefined
@@ -35,6 +36,9 @@ interface PresenceArtifactPanelProps {
   onDismiss: () => void
   isVoiceMode: boolean
   coReviewTransport?: CoReviewMediaTransport
+  pendingBuilderArtifactReview?: boolean
+  onStartVoiceBuilderArtifactReview?: () => void
+  onPendingBuilderArtifactReviewConsumed?: () => void
   onReflectionTap?: (reflection: { prompt: string; why?: string }) => void
   onMemoryApprove?: (index: number) => void
   onMemoryReject?: (index: number) => void
@@ -170,6 +174,9 @@ export function PresenceArtifactPanel({
   onDismiss,
   isVoiceMode,
   coReviewTransport,
+  pendingBuilderArtifactReview = false,
+  onStartVoiceBuilderArtifactReview,
+  onPendingBuilderArtifactReviewConsumed,
   onReflectionTap,
   onMemoryApprove,
   onMemoryReject,
@@ -267,6 +274,26 @@ export function PresenceArtifactPanel({
     transport: coReviewTransport,
     missingCanvasReason: "artifact_canvas_not_found",
   })
+  const builderReviewCanStart = builderArtifactCoReview.canStart
+  const builderReviewStateName = builderArtifactCoReview.state.state
+  const startBuilderArtifactReview = builderArtifactCoReview.startReview
+  const transportNeedsVoice = Boolean(
+    builderArtifactId
+    && builderExactTextAvailable
+    && builderVisualSourceReady
+    && builderArtifactCoReview.transportStatus.stillFramesSupported
+    && !builderArtifactCoReview.transportStatus.visualTransportSupported
+    && builderArtifactCoReview.state.state !== "co_review_error"
+    && builderArtifactCoReview.state.frameSendFailureCount === 0
+  )
+  const visualReviewRequiresVoice = Boolean(
+    transportNeedsVoice
+    && !isVoiceMode
+  )
+  const visualReviewPreparing = Boolean(
+    transportNeedsVoice
+    && isVoiceMode
+  )
 
   // Phase lifecycle
   useEffect(() => {
@@ -337,6 +364,32 @@ export function PresenceArtifactPanel({
     }
   }, [phase, isVoiceMode, onDismiss, stageBuilderArtifact, hasBuilderLibrary, showDomArtifactCoReview])
 
+  useEffect(() => {
+    if (!pendingBuilderArtifactReview || !hasBuilder || !stageBuilderArtifact) {
+      return
+    }
+
+    if (builderReviewStateName === "co_review_live" || builderReviewStateName === "co_review_starting") {
+      onPendingBuilderArtifactReviewConsumed?.()
+      return
+    }
+
+    if (!builderReviewCanStart) {
+      return
+    }
+
+    onPendingBuilderArtifactReviewConsumed?.()
+    void startBuilderArtifactReview()
+  }, [
+    builderReviewCanStart,
+    builderReviewStateName,
+    hasBuilder,
+    onPendingBuilderArtifactReviewConsumed,
+    pendingBuilderArtifactReview,
+    stageBuilderArtifact,
+    startBuilderArtifactReview,
+  ])
+
   const handleDismiss = useCallback(() => {
     haptic("light")
     onDismiss()
@@ -375,7 +428,9 @@ export function PresenceArtifactPanel({
         "pointer-events-none select-none",
         "transition-all duration-[1200ms] ease-[cubic-bezier(0.22,1,0.36,1)]",
         isVoiceMode
-          ? "fixed left-1/2 -translate-x-1/2 bottom-[155px] z-25 w-full max-w-[720px] px-4 sm:px-6"
+          ? hasBuilder
+            ? "fixed inset-x-0 top-[72px] bottom-[calc(8.75rem+env(safe-area-inset-bottom,0px))] z-25 flex items-center justify-center px-3 sm:px-6"
+            : "fixed left-1/2 -translate-x-1/2 bottom-[155px] z-25 w-full max-w-[720px] px-4 sm:px-6"
           : isTextModeBuilderStage
             ? "relative z-10 h-full min-h-0 w-full max-w-none px-0"
           : cn(
@@ -403,12 +458,14 @@ export function PresenceArtifactPanel({
           "relative pointer-events-auto",
           isVoiceMode && "cursor-pointer",
           isVoiceMode
-            ? "max-h-[68vh] overflow-y-auto rounded-2xl px-4 py-4"
+            ? hasBuilder
+              ? "flex h-full min-h-0 w-full max-w-[1120px] flex-col overflow-visible px-0 py-0"
+              : "max-h-[68vh] overflow-y-auto rounded-2xl px-4 py-4"
             : isTextModeBuilderStage
               ? "flex h-full min-h-0 flex-col overflow-hidden rounded-xl"
               : "rounded-2xl px-5 py-4"
         )}
-        style={isTextModeBuilderStage
+        style={isTextModeBuilderStage || (isVoiceMode && hasBuilder)
           ? undefined
           : {
               background: 'var(--cosmic-panel)',
@@ -417,7 +474,7 @@ export function PresenceArtifactPanel({
               backdropFilter: 'blur(20px) saturate(1.2)',
               WebkitBackdropFilter: 'blur(20px) saturate(1.2)',
             }}
-        onClick={isVoiceMode ? handleDismiss : undefined}
+        onClick={isVoiceMode && !hasBuilder ? handleDismiss : undefined}
       >
         {/* Dismiss hint — whisper-thin, top-right */}
         <button
@@ -456,33 +513,61 @@ export function PresenceArtifactPanel({
             )}
 
             <div
-              className={cn(isTextModeBuilderStage && "flex min-h-0 flex-1 flex-col")}
+              className={cn(
+                isTextModeBuilderStage && "flex min-h-0 flex-1 flex-col",
+                isVoiceMode && "flex h-full min-h-0 flex-col",
+              )}
               onClick={(e) => e.stopPropagation()}
             >
-              <ArtifactStage
-                builderArtifact={stageBuilderArtifact}
-                builderArtifactLibrary={builderArtifactLibrary}
-                threadId={threadId}
-                artifactId={builderArtifactId}
-                sessionId={sessionId}
-                normalSessionId={normalSessionId}
-                reviewState={builderArtifactCoReview.state}
-                transportStatus={builderArtifactCoReview.transportStatus}
-                exactTextAvailable={builderExactTextAvailable}
-                canStartReview={builderArtifactCoReview.canStart}
-                reviewEnabled={builderArtifactCoReview.enabled}
-                visualCaptureStatus={stageUsesMarkdownPreview ? builderVisualCaptureStatus : null}
-                onVisualCaptureStatusChange={setBuilderVisualCaptureStatus}
-                onStartReview={() => { void builderArtifactCoReview.startReview() }}
-                onStopReview={() => { void builderArtifactCoReview.stopReview() }}
-                fillAvailable={isTextModeBuilderStage}
-                className={cn(isTextModeBuilderStage && "min-h-0 flex-1")}
-              />
+              {isVoiceMode ? (
+                <VoiceArtifactStage
+                  builderArtifact={stageBuilderArtifact}
+                  builderArtifactLibrary={builderArtifactLibrary}
+                  threadId={threadId}
+                  artifactId={builderArtifactId}
+                  sessionId={sessionId}
+                  normalSessionId={normalSessionId}
+                  reviewState={builderArtifactCoReview.state}
+                  transportStatus={builderArtifactCoReview.transportStatus}
+                  exactTextAvailable={builderExactTextAvailable}
+                  canStartReview={builderArtifactCoReview.canStart}
+                  reviewEnabled={builderArtifactCoReview.enabled}
+                  visualReviewPreparing={visualReviewPreparing}
+                  pendingStartVoiceReview={pendingBuilderArtifactReview}
+                  visualCaptureStatus={stageUsesMarkdownPreview ? builderVisualCaptureStatus : null}
+                  onVisualCaptureStatusChange={setBuilderVisualCaptureStatus}
+                  onStartReview={() => { void builderArtifactCoReview.startReview() }}
+                  onStopReview={() => { void builderArtifactCoReview.stopReview() }}
+                />
+              ) : (
+                <ArtifactStage
+                  builderArtifact={stageBuilderArtifact}
+                  builderArtifactLibrary={builderArtifactLibrary}
+                  threadId={threadId}
+                  artifactId={builderArtifactId}
+                  sessionId={sessionId}
+                  normalSessionId={normalSessionId}
+                  reviewState={builderArtifactCoReview.state}
+                  transportStatus={builderArtifactCoReview.transportStatus}
+                  exactTextAvailable={builderExactTextAvailable}
+                  canStartReview={builderArtifactCoReview.canStart}
+                  reviewEnabled={builderArtifactCoReview.enabled}
+                  visualReviewRequiresVoice={visualReviewRequiresVoice}
+                  pendingStartVoiceReview={pendingBuilderArtifactReview}
+                  visualCaptureStatus={stageUsesMarkdownPreview ? builderVisualCaptureStatus : null}
+                  onVisualCaptureStatusChange={setBuilderVisualCaptureStatus}
+                  onStartVoiceReview={onStartVoiceBuilderArtifactReview}
+                  onStartReview={() => { void builderArtifactCoReview.startReview() }}
+                  onStopReview={() => { void builderArtifactCoReview.stopReview() }}
+                  fillAvailable={isTextModeBuilderStage}
+                  className={cn(isTextModeBuilderStage && "min-h-0 flex-1")}
+                />
+              )}
             </div>
           </div>
         )}
 
-        {hasBuilderLibrary && (
+        {hasBuilderLibrary && !(isVoiceMode && hasBuilder) && (
           <div
             className={cn(
               cn(stageBuilderArtifact ? "mt-4" : ""),

@@ -22,7 +22,7 @@ import { ArtifactReviewStatus } from "./ArtifactReviewStatus"
 import { ArtifactToolbar } from "./ArtifactToolbar"
 import { ReviewWithSophiaButton } from "./ReviewWithSophiaButton"
 
-interface ArtifactStageProps {
+export interface ArtifactStageProps {
   builderArtifact: BuilderArtifactV1
   builderArtifactLibrary?: BuilderArtifactLibraryItemV1[]
   threadId?: string | null
@@ -34,8 +34,12 @@ interface ArtifactStageProps {
   exactTextAvailable?: boolean
   canStartReview?: boolean
   reviewEnabled?: boolean
+  visualReviewRequiresVoice?: boolean
+  visualReviewPreparing?: boolean
+  pendingStartVoiceReview?: boolean
   visualCaptureStatus?: ArtifactVisualCaptureStatus | null
   onVisualCaptureStatusChange?: (status: ArtifactVisualCaptureStatus) => void
+  onStartVoiceReview?: () => void
   onStartReview: () => void
   onStopReview: () => void
   fillAvailable?: boolean
@@ -54,8 +58,12 @@ export function ArtifactStage({
   exactTextAvailable = false,
   canStartReview = true,
   reviewEnabled = true,
+  visualReviewRequiresVoice = false,
+  visualReviewPreparing = false,
+  pendingStartVoiceReview = false,
   visualCaptureStatus,
   onVisualCaptureStatusChange,
+  onStartVoiceReview,
   onStartReview,
   onStopReview,
   fillAvailable = false,
@@ -131,12 +139,17 @@ export function ArtifactStage({
             featureEnabled={reviewEnabled}
             canStart={canStartReview}
             visualSourceUnavailableReason={visualCaptureStatus?.ready === false ? visualCaptureStatus.reason : null}
+            visualReviewRequiresVoice={visualReviewRequiresVoice}
+            visualReviewPreparing={visualReviewPreparing}
             className="min-w-0"
           />
           <ReviewWithSophiaButton
             state={reviewState}
             canStart={canStartReview}
             featureEnabled={reviewEnabled}
+            startVoiceRequired={visualReviewRequiresVoice}
+            pendingStartVoiceReview={pendingStartVoiceReview}
+            onStartVoiceReview={onStartVoiceReview}
             onStart={onStartReview}
             onStop={onStopReview}
             className="w-full sm:w-auto"

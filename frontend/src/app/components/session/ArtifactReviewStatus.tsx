@@ -18,6 +18,8 @@ interface ArtifactReviewStatusProps {
   featureEnabled?: boolean
   canStart?: boolean
   visualSourceUnavailableReason?: string | null
+  visualReviewRequiresVoice?: boolean
+  visualReviewPreparing?: boolean
   className?: string
 }
 
@@ -28,6 +30,8 @@ export function ArtifactReviewStatus({
   featureEnabled = true,
   canStart = true,
   visualSourceUnavailableReason = null,
+  visualReviewRequiresVoice = false,
+  visualReviewPreparing = false,
   className,
 }: ArtifactReviewStatusProps) {
   if (!featureEnabled) return null
@@ -35,12 +39,21 @@ export function ArtifactReviewStatus({
   const exactTextAvailable = Boolean(state?.exactTextAvailable || exactTextAvailableOverride)
   const frameSent = Boolean((state?.frameSentCount ?? 0) > 0 || state?.initialFrameSent)
   const stale = Boolean(state?.state === "co_review_live" && (state.frameSentCount ?? 0) > 0)
-  const frameUnavailable = Boolean(
+  const hasFrameError = Boolean(
     state?.state === "co_review_error"
     || (state?.frameSendFailureCount ?? 0) > 0
-    || transportStatus?.stillFramesSupported === false
-    || (transportStatus?.visualTransportSupported === false && !frameSent)
-    || Boolean(visualSourceUnavailableReason && !frameSent)
+  )
+  const waitingForVoice = Boolean(visualReviewRequiresVoice && !frameSent && !hasFrameError)
+  const preparingView = Boolean(visualReviewPreparing && !frameSent && !hasFrameError)
+  const frameUnavailable = Boolean(
+    !waitingForVoice
+    && !preparingView
+    && (
+      hasFrameError
+      || transportStatus?.stillFramesSupported === false
+      || (transportStatus?.visualTransportSupported === false && !frameSent)
+      || Boolean(visualSourceUnavailableReason && !frameSent)
+    )
   )
 
   return (
@@ -54,8 +67,10 @@ export function ArtifactReviewStatus({
       <SophiaLookingChip state={state} />
       {frameSent ? <StatusPill icon="check" label="Frame sent" /> : null}
       {stale ? <StatusPill icon="clock" label="View may be stale" muted /> : null}
+      {preparingView ? <StatusPill icon="clock" label="Preparing view" muted /> : null}
+      {waitingForVoice ? <StatusPill icon="clock" label="Start voice to review visually" muted /> : null}
       {frameUnavailable ? <StatusPill icon="alert" label="Frame unavailable" tone="danger" /> : null}
-      {!frameSent && !frameUnavailable && canStart ? <StatusPill icon="clock" label="Ready for review" muted /> : null}
+      {!frameSent && !frameUnavailable && !waitingForVoice && !preparingView && canStart ? <StatusPill icon="clock" label="Ready for review" muted /> : null}
       <ExactTextBadge available={exactTextAvailable} />
     </div>
   )

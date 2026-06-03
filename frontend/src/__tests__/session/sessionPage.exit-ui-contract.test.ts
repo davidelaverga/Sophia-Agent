@@ -84,7 +84,12 @@ describe('session page exit UI contract', () => {
     expect(source).toContain('&& !showTextArtifactStage');
     expect(source).toContain('{showTextArtifactStage && (');
     expect(source).toContain("{focusMode !== 'text' && (");
+    expect(source).toContain('<VoiceFirstComposer');
+    expect(source).toContain('const handleStartVoiceBuilderArtifactReview = useCallback(() => {');
+    expect(source).toContain("setFocusMode('voice')");
     expect(source.match(/selectedBuilderArtifactPath={selectedBuilderArtifactPath}/g)?.length).toBe(3);
     expect(source.match(/onSelectedBuilderArtifactPathChange={handleSelectBuilderArtifactPath}/g)?.length).toBe(3);
+    expect(source.match(/pendingBuilderArtifactReview={pendingBuilderArtifactReview}/g)?.length).toBe(3);
+    expect(source.match(/onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}/g)?.length).toBe(3);
   });
 });

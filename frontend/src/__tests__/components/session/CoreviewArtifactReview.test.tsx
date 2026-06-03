@@ -85,6 +85,9 @@ function renderPanel({
   builderArtifactLibrary = [],
   selectedBuilderArtifactPath,
   isVoiceMode = false,
+  pendingBuilderArtifactReview = false,
+  onStartVoiceBuilderArtifactReview,
+  onPendingBuilderArtifactReviewConsumed,
   transport = new GeminiStillFrameTransport({
     sendArtifactFrame: vi.fn((frame) => ({
       ok: true,
@@ -105,6 +108,9 @@ function renderPanel({
   builderArtifactLibrary?: NonNullable<ComponentProps<typeof PresenceArtifactPanel>["builderArtifactLibrary"]>
   selectedBuilderArtifactPath?: ComponentProps<typeof PresenceArtifactPanel>["selectedBuilderArtifactPath"]
   isVoiceMode?: boolean
+  pendingBuilderArtifactReview?: ComponentProps<typeof PresenceArtifactPanel>["pendingBuilderArtifactReview"]
+  onStartVoiceBuilderArtifactReview?: ComponentProps<typeof PresenceArtifactPanel>["onStartVoiceBuilderArtifactReview"]
+  onPendingBuilderArtifactReviewConsumed?: ComponentProps<typeof PresenceArtifactPanel>["onPendingBuilderArtifactReviewConsumed"]
   transport?: GeminiStillFrameTransport
 }) {
   render(
@@ -120,8 +126,27 @@ function renderPanel({
       onDismiss={vi.fn()}
       isVoiceMode={isVoiceMode}
       coReviewTransport={transport}
+      pendingBuilderArtifactReview={pendingBuilderArtifactReview}
+      onStartVoiceBuilderArtifactReview={onStartVoiceBuilderArtifactReview}
+      onPendingBuilderArtifactReviewConsumed={onPendingBuilderArtifactReviewConsumed}
     />,
   )
+}
+
+function closedVoiceFrameTransport(sendArtifactFrame = vi.fn()) {
+  return new GeminiStillFrameTransport({
+    getStatus: () => ({
+      websocketReadyState: null,
+      websocketState: "closed",
+      websocketOpen: false,
+      websocketCloseCode: null,
+      websocketCloseReasonSafe: null,
+      websocketCloseWasClean: null,
+      websocketCloseAt: null,
+      error: "voice_not_started",
+    }),
+    sendArtifactFrame,
+  })
 }
 
 function mockCanvasApis() {
@@ -305,8 +330,9 @@ describe("Coreview artifact still-frame review", () => {
 
     expect(await screen.findByRole("heading", { name: "Launch Brief" })).toBeInTheDocument()
     const artifactRegion = screen.getByRole("region", { name: /generated artifact/i })
+    const reviewSurface = isVoiceMode ? screen.getByTestId("voice-artifact-stage") : artifactRegion
     expect(within(artifactRegion).getAllByText("launch-brief.md").length).toBeGreaterThanOrEqual(1)
-    expect(within(artifactRegion).getByRole("button", { name: /review with sophia/i })).toBeInTheDocument()
+    expect(within(reviewSurface).getByRole("button", { name: /review with sophia/i })).toBeInTheDocument()
     expect(within(artifactRegion).getByLabelText(/open launch-brief\.md in new tab/i)).toHaveAttribute(
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md",
@@ -349,6 +375,71 @@ describe("Coreview artifact still-frame review", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /review with sophia/i })).toBeEnabled())
     expect(screen.queryByText("Frame unavailable")).not.toBeInTheDocument()
     expect(screen.getByText("Exact text available")).toBeInTheDocument()
+  })
+
+  it("shows start-voice copy for a selected markdown artifact when text mode has no visual sender", async () => {
+    setCoreviewFlags(true)
+    const user = userEvent.setup()
+    const onStartVoiceBuilderArtifactReview = vi.fn()
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("# Launch Brief\n\nExact text is ready before voice starts.", {
+        status: 200,
+        headers: { "Content-Type": "text/markdown" },
+      }),
+    )
+
+    renderPanel({
+      builderArtifact: MARKDOWN_BUILDER_ARTIFACT,
+      builderArtifactLibrary: MARKDOWN_LIBRARY,
+      selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.md",
+      isVoiceMode: false,
+      transport: closedVoiceFrameTransport(),
+      onStartVoiceBuilderArtifactReview,
+    })
+
+    expect(await screen.findByRole("heading", { name: "Launch Brief" })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText("Start voice to review visually")).toBeInTheDocument())
+    expect(screen.queryByText("Frame unavailable")).not.toBeInTheDocument()
+    expect(screen.getByText("Exact text available")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: /start voice & review/i }))
+
+    expect(onStartVoiceBuilderArtifactReview).toHaveBeenCalledTimes(1)
+  })
+
+  it("renders voice mode through the shared artifact stage without a second artifact surface", async () => {
+    setCoreviewFlags(true)
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("# Launch Brief\n\nShared preview source in voice mode.", {
+        status: 200,
+        headers: { "Content-Type": "text/markdown" },
+      }),
+    )
+
+    renderPanel({
+      builderArtifact: MARKDOWN_BUILDER_ARTIFACT,
+      builderArtifactLibrary: MARKDOWN_LIBRARY,
+      selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.md",
+      isVoiceMode: true,
+    })
+
+    expect(await screen.findByRole("heading", { name: "Launch Brief" })).toBeInTheDocument()
+    const voiceStage = screen.getByTestId("voice-artifact-stage")
+    const artifactRegion = within(voiceStage).getByRole("region", { name: /generated artifact/i })
+
+    expect(within(voiceStage).getAllByTestId("artifact-canvas-viewport")).toHaveLength(1)
+    expect(within(artifactRegion).getByTestId("artifact-canvas-scroll-area")).toBeInTheDocument()
+    expect(within(voiceStage).getAllByText("Page 1 of 1").length).toBeGreaterThanOrEqual(1)
+    expect(within(voiceStage).getByLabelText(/open launch-brief\.md in new tab/i)).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md",
+    )
+    expect(within(voiceStage).getByLabelText(/download launch-brief\.md/i)).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md?download=true",
+    )
+    expect(screen.getAllByRole("region", { name: /generated artifact/i })).toHaveLength(1)
+    expect(screen.queryByText(/coreview|gemini|websocket|transport|liveframes|fixture|direct video/i)).not.toBeInTheDocument()
   })
 
   it("Review with Sophia sends the selected markdown artifact frame and keeps exact text available", async () => {

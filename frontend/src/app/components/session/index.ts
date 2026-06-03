@@ -24,6 +24,7 @@ export { BuilderReadyPill } from './BuilderReadyPill';
 export { PresenceArtifactPanel, ArtifactToggleIcon } from './PresenceArtifactPanel';
 export { ArtifactStage } from './ArtifactStage';
 export { ArtifactCanvasViewport } from './ArtifactCanvasViewport';
+export { VoiceArtifactStage } from './VoiceArtifactStage';
 export { ArtifactReviewStatus } from './ArtifactReviewStatus';
 export { ArtifactToolbar } from './ArtifactToolbar';
 export { ExactTextBadge } from './ExactTextBadge';

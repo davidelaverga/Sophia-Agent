@@ -131,6 +131,8 @@ function ComposerAttachButton({
 function SessionPageContent() {
   const router = useRouter();
   const focusMode = useUiStore((s) => s.mode);
+  const setFocusMode = useUiStore((s) => s.setMode);
+  const setFocusModeManualOverride = useUiStore((s) => s.setManualOverride);
   const { chromeOpacity } = useChromeFade();
   const presenceRef = useRef<PresenceFieldHandle | null>(null);
   // Mutable function ref shared between the AttachmentBar (which owns
@@ -496,6 +498,7 @@ function SessionPageContent() {
   const [builderLibraryBaseline, setBuilderLibraryBaseline] = useState<Set<string> | null>(null);
   const [dismissedBuilderLibraryPath, setDismissedBuilderLibraryPath] = useState<string | null>(null);
   const [selectedBuilderArtifactPath, setSelectedBuilderArtifactPath] = useState<string | null>(null);
+  const [pendingBuilderArtifactReview, setPendingBuilderArtifactReview] = useState(false);
 
   const builderArtifactRefreshToken = useMemo(() => [
     builderArtifact?.artifactTitle ?? '',
@@ -780,6 +783,12 @@ function SessionPageContent() {
     }
   }, [builderArtifact, builderArtifactLibrary, selectedBuilderArtifactPath]);
 
+  useEffect(() => {
+    if (!showArtifacts || !showArtifactsUi) {
+      setPendingBuilderArtifactReview(false);
+    }
+  }, [showArtifacts, showArtifactsUi]);
+
   const dismissVisibleBuilderArtifact = useCallback(() => {
     if (builderPrimaryFile?.path) {
       setDismissedBuilderLibraryPath(builderPrimaryFile.path);
@@ -1016,6 +1025,22 @@ function SessionPageContent() {
     handleSelectBuilderArtifactPath(event.artifact_path ?? builderPrimaryFile?.path ?? null);
     handleOpenArtifactsPanel();
   }, [builderPrimaryFile?.path, handleOpenArtifactsPanel, handleSelectBuilderArtifactPath]);
+
+  const handleStartVoiceBuilderArtifactReview = useCallback(() => {
+    setPendingBuilderArtifactReview(true);
+    handleOpenArtifactsPanel();
+
+    if (focusMode !== 'voice') {
+      setFocusMode('voice');
+      setFocusModeManualOverride(true);
+    }
+
+    handleMicClick();
+  }, [focusMode, handleMicClick, handleOpenArtifactsPanel, setFocusMode, setFocusModeManualOverride]);
+
+  const handlePendingBuilderArtifactReviewConsumed = useCallback(() => {
+    setPendingBuilderArtifactReview(false);
+  }, []);
   
   const { shouldShowLoading, navigateHome } = useSessionPageGuards({
     hasSession: !!session,
@@ -1279,6 +1304,9 @@ function SessionPageContent() {
               onDismiss={handleCloseArtifactsPanel}
               isVoiceMode={false}
               coReviewTransport={coReviewTransport}
+              pendingBuilderArtifactReview={pendingBuilderArtifactReview}
+              onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}
+              onPendingBuilderArtifactReviewConsumed={handlePendingBuilderArtifactReviewConsumed}
               onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
               onMemoryApprove={handleMemoryApprove}
               onMemoryReject={handleMemoryReject}
@@ -1502,6 +1530,9 @@ function SessionPageContent() {
               onDismiss={handleCloseArtifactsPanel}
               isVoiceMode={false}
               coReviewTransport={coReviewTransport}
+              pendingBuilderArtifactReview={pendingBuilderArtifactReview}
+              onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}
+              onPendingBuilderArtifactReviewConsumed={handlePendingBuilderArtifactReviewConsumed}
               onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
               onMemoryApprove={handleMemoryApprove}
               onMemoryReject={handleMemoryReject}
@@ -1524,6 +1555,9 @@ function SessionPageContent() {
             onDismiss={handleCloseArtifactsPanel}
             isVoiceMode={true}
             coReviewTransport={coReviewTransport}
+            pendingBuilderArtifactReview={pendingBuilderArtifactReview}
+            onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}
+            onPendingBuilderArtifactReviewConsumed={handlePendingBuilderArtifactReviewConsumed}
             onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
             onMemoryApprove={handleMemoryApprove}
             onMemoryReject={handleMemoryReject}

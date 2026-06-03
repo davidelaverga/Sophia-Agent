@@ -77,6 +77,9 @@ function renderStage({
   reviewEnabled = true,
   visualCaptureStatus = null,
   onVisualCaptureStatusChange,
+  visualReviewRequiresVoice = false,
+  pendingStartVoiceReview = false,
+  onStartVoiceReview,
   transportStatus = supportedTransportStatus,
   fillAvailable = false,
 }: {
@@ -97,6 +100,9 @@ function renderStage({
   reviewEnabled?: boolean
   visualCaptureStatus?: ComponentProps<typeof ArtifactStage>["visualCaptureStatus"]
   onVisualCaptureStatusChange?: ComponentProps<typeof ArtifactStage>["onVisualCaptureStatusChange"]
+  visualReviewRequiresVoice?: ComponentProps<typeof ArtifactStage>["visualReviewRequiresVoice"]
+  pendingStartVoiceReview?: ComponentProps<typeof ArtifactStage>["pendingStartVoiceReview"]
+  onStartVoiceReview?: ComponentProps<typeof ArtifactStage>["onStartVoiceReview"]
   transportStatus?: typeof supportedTransportStatus
   fillAvailable?: boolean
 } = {}) {
@@ -119,8 +125,11 @@ function renderStage({
       exactTextAvailable={exactTextAvailable}
       canStartReview={canStartReview}
       reviewEnabled={reviewEnabled}
+      visualReviewRequiresVoice={visualReviewRequiresVoice}
+      pendingStartVoiceReview={pendingStartVoiceReview}
       visualCaptureStatus={visualCaptureStatus}
       onVisualCaptureStatusChange={onVisualCaptureStatusChange}
+      onStartVoiceReview={onStartVoiceReview}
       onStartReview={onStartReview}
       onStopReview={onStopReview}
       fillAvailable={fillAvailable}
@@ -205,6 +214,37 @@ describe("ArtifactStage", () => {
     expect(screen.getByRole("status", { name: /not looking/i })).toBeInTheDocument()
     expect(screen.getByText("Ready for review")).toBeInTheDocument()
     expect(screen.getByText("Exact text available")).toBeInTheDocument()
+  })
+
+  it("shows start-voice review copy instead of frame-unavailable copy when the visual sender needs voice", async () => {
+    const user = userEvent.setup()
+    const onStartVoiceReview = vi.fn()
+    renderStage({
+      canStartReview: false,
+      exactTextAvailable: true,
+      visualReviewRequiresVoice: true,
+      visualCaptureStatus: {
+        ready: true,
+        reason: null,
+        source: "markdown_preview_canvas",
+        exactTextAvailable: true,
+      },
+      transportStatus: {
+        ...supportedTransportStatus,
+        visualTransportSupported: false,
+        stillFramesSupported: true,
+        statusText: "still-frame unavailable: voice not started",
+      },
+      onStartVoiceReview,
+    })
+
+    expect(screen.getByText("Start voice to review visually")).toBeInTheDocument()
+    expect(screen.queryByText("Frame unavailable")).not.toBeInTheDocument()
+    expect(screen.getByText("Exact text available")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: /start voice & review/i }))
+
+    expect(onStartVoiceReview).toHaveBeenCalledTimes(1)
   })
 
   it("can show unavailable exact text when the artifact has no trusted text", () => {
