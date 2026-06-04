@@ -214,6 +214,29 @@ export function isMarkdownArtifactFile(
   return hasMarkdownExtension(file.name) || hasMarkdownExtension(file.path);
 }
 
+export function isHtmlArtifactFile(
+  file: {
+    path?: string | null;
+    name?: string | null;
+    mimeType?: string | null;
+  } | null | undefined,
+): boolean {
+  if (!file) {
+    return false;
+  }
+
+  const mimeType = file.mimeType?.toLowerCase().split(';')[0]?.trim() ?? '';
+  if (mimeType === 'text/html' || mimeType === 'application/xhtml+xml') {
+    return true;
+  }
+
+  const hasHtmlExtension = (value: string | null | undefined) => (
+    typeof value === 'string' && /\.(html|htm)(?:$|[?#])/u.test(value.toLowerCase())
+  );
+
+  return hasHtmlExtension(file.name) || hasHtmlExtension(file.path);
+}
+
 export function formatBuilderArtifactFileSize(bytes: number | null | undefined): string {
   if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) {
     return '';

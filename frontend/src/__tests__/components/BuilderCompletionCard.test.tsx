@@ -179,6 +179,36 @@ describe("BuilderCompletionCard — success variant", () => {
     expect(link).toHaveAttribute("download", "research_deck.pptx")
   })
 
+  it("labels usable HTML fallbacks for slide deck requests explicitly", () => {
+    const event: BuilderCompletionEventV1 = {
+      ...SUCCESS_EVENT,
+      artifact_path: "mnt/user-data/outputs/research_deck.html",
+      artifact_url: undefined,
+      artifact_filename: "research_deck.html",
+      artifact_type: "webpage",
+      requested_artifact_ext: "pptx",
+      artifact_ext: "html",
+      artifact_is_fallback: true,
+      fallback_reason: "pptx_generation_not_completed",
+      summary: undefined,
+    }
+
+    render(<BuilderCompletionCard event={event} onOpen={vi.fn()} />)
+
+    expect(screen.getByText("HTML fallback ready.")).toBeInTheDocument()
+    expect(screen.getByText("html fallback")).toBeInTheDocument()
+    expect(screen.getByText(/couldn’t finish the PowerPoint package/i)).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /view in canvas/i })).toBeInTheDocument()
+    expect(screen.getByRole("link", { name: /open artifact in new tab/i })).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/research_deck.html",
+    )
+    expect(screen.getByRole("link", { name: /download/i })).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/research_deck.html?download=true",
+    )
+  })
+
   it("does NOT render Download on error/timeout/cancelled states", () => {
     const errorEvent = {
       ...SUCCESS_EVENT,

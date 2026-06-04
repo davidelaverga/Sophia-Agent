@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import { detectArtifactRendererKind, isPdfArtifactFile } from "../../app/lib/artifact-renderers"
 import {
   buildThreadArtifactHref,
+  isHtmlArtifactFile,
   isMarkdownArtifactFile,
   normalizeBuilderArtifactPath,
 } from "../../app/lib/builder-artifacts"
@@ -45,6 +46,25 @@ describe("builder artifact utilities", () => {
     }, {
       artifactType: "pdf",
     })).toBe("pdf")
+  })
+
+  it("detects HTML artifacts by extension or content type", () => {
+    expect(isHtmlArtifactFile({
+      path: "mnt/user-data/outputs/deck-fallback.html",
+      name: "deck-fallback.html",
+    })).toBe(true)
+
+    expect(isHtmlArtifactFile({
+      path: "mnt/user-data/outputs/deck-fallback",
+      name: "deck-fallback",
+      mimeType: "text/html; charset=utf-8",
+    })).toBe(true)
+
+    expect(isHtmlArtifactFile({
+      path: "mnt/user-data/outputs/deck-fallback.md",
+      name: "deck-fallback.md",
+      mimeType: "text/markdown",
+    })).toBe(false)
   })
 
   it("builds same-origin artifact hrefs from normalized output paths", () => {

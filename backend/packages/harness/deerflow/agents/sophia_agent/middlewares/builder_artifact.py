@@ -188,6 +188,7 @@ _PPTX_REQUIRED_ZIP_ENTRIES = frozenset({
     "ppt/presentation.xml",
 })
 _PPTX_MIN_BYTES = 1024
+_HTML_FALLBACK_MIN_BYTES = 128
 _PDF_VISUAL_FALLBACK_MARKERS = (
     "chart",
     "charts",
@@ -375,17 +376,48 @@ def _is_completion_output_candidate(
         return False
     if min_mtime is not None and entry.stat().st_mtime < min_mtime:
         return False
-    if entry.suffix.lower() == ".pptx":
-        reason = _pptx_integrity_error_for_file(entry)
-        if reason is not None:
-            logger.warning(
-                "BuilderArtifact: artifact_integrity ext=pptx valid=false "
-                "reason=%s bytes=%s source=outputs_scan",
-                reason,
-                entry.stat().st_size,
-            )
-            return False
+    if _completion_candidate_integrity_error(entry, state) is not None:
+        return False
     return _output_suffix_allowed_for_request(entry.suffix.lower(), state)
+
+
+def _completion_candidate_integrity_error(entry: Path, state: dict[str, Any]) -> str | None:
+    suffix = entry.suffix.lower()
+    if suffix == ".pptx":
+        return _log_completion_candidate_integrity_error(
+            entry,
+            ext="pptx",
+            reason=_pptx_integrity_error_for_file(entry),
+        )
+    if _requested_pptx_artifact(state) and suffix in {".html", ".htm"}:
+        return _log_completion_candidate_integrity_error(
+            entry,
+            ext="html",
+            reason=_html_fallback_integrity_error_for_file(entry),
+            requested_ext="pptx",
+        )
+    return None
+
+
+def _log_completion_candidate_integrity_error(
+    entry: Path,
+    *,
+    ext: str,
+    reason: str | None,
+    requested_ext: str | None = None,
+) -> str | None:
+    if reason is None:
+        return None
+    requested = f" requested_ext={requested_ext}" if requested_ext else ""
+    logger.warning(
+        "BuilderArtifact: artifact_integrity ext=%s valid=false reason=%s "
+        "bytes=%s source=outputs_scan%s",
+        ext,
+        reason,
+        entry.stat().st_size,
+        requested,
+    )
+    return reason
 
 
 def _output_suffix_allowed_for_request(suffix: str, state: dict[str, Any]) -> bool:
@@ -394,6 +426,181 @@ def _output_suffix_allowed_for_request(suffix: str, state: dict[str, Any]) -> bo
     if _requested_pptx_artifact(state):
         return suffix in _allowed_pptx_artifact_suffixes(state)
     return True
+
+
+def _is_promotable_candidate_path(
+    path: Path,
+    *,
+    min_mtime: float | None,
+    requested_pptx: bool,
+) -> bool:
+    if not _is_recent_promotable_path(path, min_mtime):
+        return False
+    if path.suffix.lower() == ".pptx":
+        return _pptx_integrity_error_for_file(path) is None
+    if requested_pptx and path.suffix.lower() in {".html", ".htm"}:
+        return _html_fallback_integrity_error_for_file(path) is None
+    return True
+
+
+def _is_recent_promotable_path(path: Path, min_mtime: float | None) -> bool:
+    return (
+        path.is_file()
+        and not path.name.startswith("_")
+        and path.suffix.lower() in _PROMOTABLE_DELIVERABLE_EXTENSIONS
+        and (min_mtime is None or path.stat().st_mtime >= min_mtime)
+    )
+
+
+def _emit_candidate_paths(artifact_args: dict[str, Any]) -> list[str]:
+    candidates: list[str] = []
+    primary = artifact_args.get("artifact_path")
+    if isinstance(primary, str) and primary.strip():
+        candidates.append(primary.strip())
+    supporting = artifact_args.get("supporting_files")
+    if isinstance(supporting, list):
+        candidates.extend(
+            path for path in supporting
+            if isinstance(path, str) and path.strip()
+        )
+    return candidates
+
+
+def _invalid_outputs_candidate(candidate: str) -> bool:
+    return candidate.strip().startswith(_OUTPUTS_VIRTUAL_PREFIX)
+
+
+def _local_emit_candidate_status(
+    candidate: str,
+    relative: str,
+    outputs_host_path: str | None,
+) -> str:
+    if not outputs_host_path:
+        return "missing"
+    host_file = Path(outputs_host_path) / relative
+    if not host_file.is_file():
+        return "missing"
+    if PurePosixPath(candidate).suffix.lower() == ".pptx":
+        return _local_pptx_candidate_status(host_file)
+    return "valid"
+
+
+def _local_pptx_candidate_status(host_file: Path) -> str:
+    reason = _pptx_integrity_error_for_file(host_file)
+    if reason is not None:
+        logger.warning(
+            "BuilderArtifact: artifact_integrity ext=pptx valid=false "
+            "reason=%s bytes=%s source=local",
+            reason,
+            host_file.stat().st_size,
+        )
+        return "invalid"
+    logger.info(
+        "BuilderArtifact: artifact_integrity ext=pptx valid=true bytes=%s source=local",
+        host_file.stat().st_size,
+    )
+    return "valid"
+
+
+def _remote_emit_candidate_status(
+    candidate: str,
+    relative: str,
+    remote_thread_ids: list[str],
+) -> str:
+    if not remote_thread_ids:
+        return "missing"
+    if PurePosixPath(candidate).suffix.lower() == ".pptx":
+        return _remote_pptx_candidate_status(relative, remote_thread_ids)
+    if any(supabase_artifact_store.check_artifact_exists(thread_id, relative) for thread_id in remote_thread_ids):
+        return "valid"
+    return "missing"
+
+
+def _remote_pptx_candidate_status(relative: str, remote_thread_ids: list[str]) -> str:
+    for thread_id in remote_thread_ids:
+        result = _download_pptx_candidate(thread_id, relative, remote_thread_ids[0])
+        if result is None:
+            continue
+        content, _mime = result
+        reason = _pptx_integrity_error_for_bytes(content)
+        if reason is not None:
+            logger.warning(
+                "BuilderArtifact: artifact_integrity ext=pptx valid=false "
+                "reason=%s bytes=%s source=supabase",
+                reason,
+                len(content),
+            )
+            return "invalid"
+        logger.info(
+            "BuilderArtifact: artifact_integrity ext=pptx valid=true bytes=%s source=supabase",
+            len(content),
+        )
+        return "valid"
+    return "missing"
+
+
+def _download_pptx_candidate(thread_id: str, relative: str, primary_thread_id: str):
+    try:
+        return supabase_artifact_store.download_artifact(thread_id, relative)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "BuilderArtifact: pptx remote integrity check failed "
+            "error_type=%s thread_role=%s",
+            exc.__class__.__name__,
+            "parent" if thread_id == primary_thread_id else "fallback",
+        )
+        return None
+
+
+def _log_missing_emit_candidate(
+    candidate: str,
+    relative: str,
+    outputs_host_path: str | None,
+    remote_thread_ids: list[str],
+) -> None:
+    logger.warning(
+        "BuilderArtifact: file missing for emit verification: path=%s local=%s supabase=%s",
+        candidate,
+        bool(outputs_host_path and (Path(outputs_host_path) / relative).is_file()),
+        bool(
+            any(
+                supabase_artifact_store.check_artifact_exists(thread_id, relative)
+                for thread_id in remote_thread_ids
+            )
+        ),
+    )
+
+
+def _emit_candidate_verified(
+    candidate: str,
+    *,
+    outputs_host_path: str | None,
+    remote_thread_ids: list[str],
+) -> bool:
+    relative = _extract_output_relative_path(candidate)
+    if relative is None:
+        if _invalid_outputs_candidate(candidate):
+            logger.warning(
+                "BuilderArtifact: rejecting invalid outputs artifact path=%s",
+                candidate,
+            )
+            return False
+        return True
+
+    local_status = _local_emit_candidate_status(candidate, relative, outputs_host_path)
+    if local_status == "valid":
+        return True
+    if local_status == "invalid":
+        return False
+
+    remote_status = _remote_emit_candidate_status(candidate, relative, remote_thread_ids)
+    if remote_status == "valid":
+        return True
+    if remote_status == "invalid":
+        return False
+
+    _log_missing_emit_candidate(candidate, relative, outputs_host_path, remote_thread_ids)
+    return False
 
 
 def _is_user_facing_output_path(artifact_path: str | None) -> bool:
@@ -532,6 +739,74 @@ def _pptx_integrity_error_for_file(path: Path) -> str | None:
     return None
 
 
+def _html_fallback_integrity_error_for_text(content: str) -> str | None:
+    stripped = content.lstrip("\ufeff \t\r\n")
+    lowered = stripped[:512].lower()
+    if len(content.encode("utf-8", errors="ignore")) < _HTML_FALLBACK_MIN_BYTES:
+        return "html_too_small"
+    if lowered.startswith("```"):
+        return "html_markdown_fence"
+    if lowered.startswith("&lt;!doctype") or lowered.startswith("&lt;html"):
+        return "html_escaped"
+    if "<html" not in lowered and "<!doctype html" not in lowered:
+        return "html_missing_document_root"
+    if "<body" not in content.lower():
+        return "html_missing_body"
+    return None
+
+
+def _html_fallback_integrity_error_for_bytes(content: bytes) -> str | None:
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return "html_not_utf8"
+    return _html_fallback_integrity_error_for_text(text)
+
+
+def _html_fallback_integrity_error_for_file(path: Path) -> str | None:
+    if path.name.startswith(("_", ".")) or path.name.lower().startswith(("test_", "test-")):
+        return "html_internal_filename"
+    try:
+        return _html_fallback_integrity_error_for_bytes(path.read_bytes())
+    except OSError:
+        return "html_read_failed"
+
+
+def _requested_artifact_ext(state: dict[str, Any]) -> str | None:
+    suffix = _requested_target_suffix(state).lstrip(".")
+    return suffix or None
+
+
+def _artifact_ext_from_path(path: Any) -> str | None:
+    suffix = PurePosixPath(str(path or "")).suffix.lower().lstrip(".")
+    return suffix or None
+
+
+def _apply_artifact_request_metadata(
+    artifact: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    fallback_reason: str | None = None,
+) -> dict[str, Any]:
+    requested_ext = _requested_artifact_ext(state)
+    artifact_ext = _artifact_ext_from_path(artifact.get("artifact_path"))
+    if requested_ext:
+        artifact["requested_artifact_ext"] = requested_ext
+    if artifact_ext:
+        artifact["artifact_ext"] = artifact_ext
+        if requested_ext == "pptx" and artifact_ext in {"html", "htm"}:
+            artifact["artifact_type"] = "webpage"
+    is_fallback = bool(requested_ext and artifact_ext and artifact_ext != requested_ext)
+    if is_fallback:
+        artifact["artifact_is_fallback"] = True
+        artifact["fallback_reason"] = fallback_reason or artifact.get("fallback_reason") or (
+            f"{requested_ext}_generation_not_completed"
+        )
+    elif requested_ext:
+        artifact.setdefault("artifact_is_fallback", False)
+    return artifact
+
+
 def _pptx_artifact_path_rejection_reason(path: Any, state: dict[str, Any]) -> str | None:
     canonical = _canonical_outputs_artifact_path(path)
     if canonical is None:
@@ -540,6 +815,40 @@ def _pptx_artifact_path_rejection_reason(path: Any, state: dict[str, Any]) -> st
     if suffix not in _allowed_pptx_artifact_suffixes(state):
         return f"pptx_invalid_artifact_extension:{suffix or 'none'}"
     return None
+
+
+def _pptx_html_fallback_integrity_rejection_reason(
+    canonical: str,
+    state: dict[str, Any],
+    runtime: Runtime,
+) -> str | None:
+    suffix = PurePosixPath(canonical).suffix.lower()
+    if not _requested_pptx_artifact(state) or suffix not in {".html", ".htm"}:
+        return None
+    relative = _extract_output_relative_path(canonical)
+    if relative is None:
+        return "pptx_html_fallback_not_under_outputs"
+    outputs_host_path = _outputs_host_path_from_state(state)
+    if outputs_host_path:
+        host_file = Path(outputs_host_path) / relative
+        if host_file.is_file():
+            reason = _html_fallback_integrity_error_for_file(host_file)
+            if reason is not None:
+                return reason
+            return None
+    for thread_id in _artifact_remote_thread_ids(state, runtime):
+        try:
+            result = supabase_artifact_store.download_artifact(thread_id, relative)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "BuilderArtifact: html fallback remote integrity check failed error_type=%s",
+                exc.__class__.__name__,
+            )
+            continue
+        if result is not None:
+            content, _mime = result
+            return _html_fallback_integrity_error_for_bytes(content)
+    return "html_fallback_missing"
 
 
 def _pptx_path_integrity_rejection_reason(
@@ -911,7 +1220,8 @@ def _log_pptx_diagnostics(
         "[BuilderPptxDiagnostics] phase=%s pptx_skill_read_seen=%s "
         "pptx_generator_invoked=%s image_generation_invoked=%s "
         "valid_pptx_seen=%s pptx_integrity_reason=%s fallback_ext=%s "
-        "write_file_missing_arg_count=%d final_artifact_ext=%s",
+        "write_file_missing_arg_count=%d requested_artifact_ext=%s "
+        "final_artifact_ext=%s artifact_is_fallback=%s fallback_reason=%s",
         phase,
         _pptx_skill_read_seen(state),
         _pptx_generator_invoked_seen(state),
@@ -920,7 +1230,17 @@ def _log_pptx_diagnostics(
         integrity_reason,
         _pptx_fallback_suffix(state).lstrip("."),
         write_arg_errors,
+        _requested_artifact_ext(state),
         _artifact_path_suffix_label(artifact_path),
+        bool(
+            _requested_artifact_ext(state)
+            and _artifact_path_suffix_label(artifact_path)
+            and _artifact_path_suffix_label(artifact_path) != _requested_artifact_ext(state)
+        ),
+        "pptx_generation_not_completed"
+        if _requested_pptx_artifact(state)
+        and _artifact_path_suffix_label(artifact_path) not in {None, "pptx"}
+        else None,
     )
 
 
@@ -1499,11 +1819,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         min_mtime = _builder_started_min_mtime(state)
         candidates = [
             p for p in outputs_root.rglob("*")
-            if p.is_file()
-            and not p.name.startswith("_")
-            and p.suffix.lower() in _PROMOTABLE_DELIVERABLE_EXTENSIONS
-            and (min_mtime is None or p.stat().st_mtime >= min_mtime)
-            and (p.suffix.lower() != ".pptx" or _pptx_integrity_error_for_file(p) is None)
+            if _is_promotable_candidate_path(
+                p,
+                min_mtime=min_mtime,
+                requested_pptx=requested_pptx,
+            )
         ]
         if requested_pdf:
             pdf_candidates = [] if _pdf_render_unusable_after_repair(state) else [
@@ -1795,10 +2115,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             reason=reason,
         )
         if promoted_path:
-            return BuilderArtifactMiddleware._recovered_deliverable_fallback(
+            fallback = BuilderArtifactMiddleware._recovered_deliverable_fallback(
                 promoted_path,
                 promoted_type,
                 steps_completed=steps_completed,
+            )
+            return _apply_artifact_request_metadata(
+                fallback,
+                state,
+                fallback_reason="pptx_generation_not_completed" if requested_pptx else reason,
             )
         promoted_generator_path = BuilderArtifactMiddleware._promoted_generator_from_outputs(
             state,
@@ -1807,18 +2132,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             reason=reason,
         )
         if promoted_generator_path:
-            return BuilderArtifactMiddleware._generator_script_fallback(
+            fallback = BuilderArtifactMiddleware._generator_script_fallback(
                 promoted_generator_path,
                 steps_completed=steps_completed,
             )
+            return _apply_artifact_request_metadata(fallback, state, fallback_reason=reason)
         if requested_pdf:
-            return BuilderArtifactMiddleware._pdf_no_deliverable_fallback(
+            fallback = BuilderArtifactMiddleware._pdf_no_deliverable_fallback(
                 steps_completed=steps_completed,
             )
+            return _apply_artifact_request_metadata(fallback, state, fallback_reason=reason)
         if requested_pptx:
-            return BuilderArtifactMiddleware._pptx_no_deliverable_fallback(
+            fallback = BuilderArtifactMiddleware._pptx_no_deliverable_fallback(
                 steps_completed=steps_completed,
             )
+            return _apply_artifact_request_metadata(fallback, state, fallback_reason=reason)
         return BuilderArtifactMiddleware._generic_no_deliverable_fallback(
             steps_completed=steps_completed,
         )
@@ -1957,17 +2285,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return False
         if _requested_pptx_artifact(state) and not cls._pptx_artifact_args_valid(artifact_args, state, runtime):
             return False
-        candidates: list[str] = []
-        primary = artifact_args.get("artifact_path")
-        if isinstance(primary, str) and primary.strip():
-            candidates.append(primary.strip())
-        supporting = artifact_args.get("supporting_files")
-        if isinstance(supporting, list):
-            candidates.extend(
-                path for path in supporting
-                if isinstance(path, str) and path.strip()
-            )
-
+        candidates = _emit_candidate_paths(artifact_args)
         if not candidates:
             # Reject empty artifact_path under EITHER turn-count pressure
             # (existing) OR wall-clock pressure (new). Both indicate the
@@ -1997,97 +2315,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         remote_thread_ids = _artifact_remote_thread_ids(state, runtime)
 
         for candidate in candidates:
-            relative = _extract_output_relative_path(candidate)
-            if relative is None:
-                # If the path is under outputs prefix but failed relative-path
-                # extraction, treat as invalid (e.g. traversal attempt).
-                if isinstance(candidate, str) and candidate.strip().startswith(_OUTPUTS_VIRTUAL_PREFIX):
-                    logger.warning(
-                        "BuilderArtifact: rejecting invalid outputs artifact path=%s",
-                        candidate,
-                    )
-                    return False
-                # Non-virtual path — we can't verify it against the sandbox
-                # outputs dir. Accept it and let downstream consumers decide.
-                continue
-
-            # 1. Check local disk
-            if outputs_host_path:
-                host_file = Path(outputs_host_path) / relative
-                if host_file.is_file():
-                    if PurePosixPath(candidate).suffix.lower() == ".pptx":
-                        reason = _pptx_integrity_error_for_file(host_file)
-                        if reason is not None:
-                            logger.warning(
-                                "BuilderArtifact: artifact_integrity ext=pptx "
-                                "valid=false reason=%s bytes=%s source=local",
-                                reason,
-                                host_file.stat().st_size,
-                            )
-                            return False
-                        logger.info(
-                            "BuilderArtifact: artifact_integrity ext=pptx "
-                            "valid=true bytes=%s source=local",
-                            host_file.stat().st_size,
-                        )
-                    continue
-
-            # 2. Check Supabase
-            if remote_thread_ids:
-                if PurePosixPath(candidate).suffix.lower() == ".pptx":
-                    for thread_id in remote_thread_ids:
-                        try:
-                            result = supabase_artifact_store.download_artifact(thread_id, relative)
-                        except Exception as exc:  # noqa: BLE001
-                            logger.warning(
-                                "BuilderArtifact: pptx remote integrity check failed "
-                                "error_type=%s thread_role=%s",
-                                exc.__class__.__name__,
-                                "parent" if thread_id == remote_thread_ids[0] else "fallback",
-                            )
-                            continue
-                        if result is None:
-                            continue
-                        content, _mime = result
-                        reason = _pptx_integrity_error_for_bytes(content)
-                        if reason is not None:
-                            logger.warning(
-                                "BuilderArtifact: artifact_integrity ext=pptx "
-                                "valid=false reason=%s bytes=%s source=supabase",
-                                reason,
-                                len(content),
-                            )
-                            return False
-                        logger.info(
-                            "BuilderArtifact: artifact_integrity ext=pptx "
-                            "valid=true bytes=%s source=supabase",
-                            len(content),
-                        )
-                        break
-                    else:
-                        result = None
-                    if result is not None:
-                        continue
-                elif any(
-                    supabase_artifact_store.check_artifact_exists(thread_id, relative)
-                    for thread_id in remote_thread_ids
-                ):
-                    continue
-
-            # Neither local nor remote — missing.
-            logger.warning(
-                "BuilderArtifact: file missing for emit verification: "
-                "path=%s local=%s supabase=%s",
+            if not _emit_candidate_verified(
                 candidate,
-                bool(outputs_host_path and (Path(outputs_host_path) / relative).is_file()),
-                bool(
-                    any(
-                        supabase_artifact_store.check_artifact_exists(thread_id, relative)
-                        for thread_id in remote_thread_ids
-                    )
-                ),
-            )
-            return False
+                outputs_host_path=outputs_host_path,
+                remote_thread_ids=remote_thread_ids,
+            ):
+                return False
 
         return True
 
@@ -2121,7 +2354,22 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             )
             BuilderArtifactMiddleware._log_pptx_artifact_rejection(primary, integrity_rejection)
             return False
+        html_fallback_rejection = _pptx_html_fallback_integrity_rejection_reason(canonical_primary, state, runtime)
+        if html_fallback_rejection is not None:
+            _log_pptx_diagnostics(
+                phase="emit_rejected",
+                state=state,
+                artifact_path=primary,
+                integrity_reason=html_fallback_rejection,
+            )
+            BuilderArtifactMiddleware._log_pptx_artifact_rejection(primary, html_fallback_rejection)
+            return False
         artifact_args["artifact_path"] = canonical_primary
+        _apply_artifact_request_metadata(
+            artifact_args,
+            state,
+            fallback_reason="pptx_generation_not_completed",
+        )
         return True
 
     @staticmethod
@@ -2242,7 +2490,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 f"{fallback_ext} fallback if deck generation cannot complete. "
                 "Use the ppt-generation skill workflow, then emit only the valid "
                 "deck or fallback. Do not emit Python files, placeholder decks, "
-                "tiny/corrupt .pptx files, bare paths, or files outside outputs."
+                "tiny/corrupt .pptx files, bare paths, or files outside outputs. "
+                "If using HTML fallback, write a complete standalone HTML document "
+                "with <!doctype html>, <html>, <head>, and <body>; do not wrap it "
+                "in Markdown fences and do not HTML-escape the document source."
             )
         recovery_hint = cls._missing_artifact_recovery_hint(artifact_args, state)
         return (
@@ -2344,6 +2595,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         paths = cls._successful_deliverable_output_paths(state)
         if _requested_pdf_artifact(state):
             allowed = _allowed_pdf_artifact_suffixes(state)
+            paths = [path for path in paths if PurePosixPath(path).suffix.lower() in allowed]
+        if _requested_pptx_artifact(state):
+            allowed = _allowed_pptx_artifact_suffixes(state)
             paths = [path for path in paths if PurePosixPath(path).suffix.lower() in allowed]
         diagnostics = state.get("builder_write_diagnostics") or {}
         target_path = cls._target_artifact_path(state)
@@ -2619,6 +2873,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             artifact_path,
             steps_completed=int(state.get("builder_non_artifact_turns", 0) or 0),
             reason=reason,
+        )
+        _apply_artifact_request_metadata(
+            fallback,
+            state,
+            fallback_reason="pptx_generation_not_completed" if _requested_pptx_artifact(state) else reason,
         )
         if runtime is not None:
             self._upload_fallback_and_fire(
@@ -3606,6 +3865,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "has_emit_builder_artifact": True,
                             **pptx_skill_flags,
                         },
+                    )
+                    _apply_artifact_request_metadata(
+                        args,
+                        state,
+                        fallback_reason="pptx_generation_not_completed" if _requested_pptx_artifact(state) else None,
                     )
                     _log_pptx_diagnostics(
                         phase="emit_accepted",

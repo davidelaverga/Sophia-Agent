@@ -1,9 +1,10 @@
 import type { BuilderArtifactV1 } from "../types/builder-artifact"
 
-import { isMarkdownArtifactFile } from "./builder-artifacts"
+import { isHtmlArtifactFile, isMarkdownArtifactFile } from "./builder-artifacts"
 
 export type ArtifactRendererKind =
   | "markdown"
+  | "html"
   | "pdf"
   | "image"
   | "metadata"
@@ -50,6 +51,10 @@ export function detectArtifactRendererKind(
 
   if (isMarkdownArtifactFile(file)) {
     return "markdown"
+  }
+
+  if (isHtmlArtifactFile(file)) {
+    return "html"
   }
 
   if (isPdfArtifactFile(file, artifact)) {

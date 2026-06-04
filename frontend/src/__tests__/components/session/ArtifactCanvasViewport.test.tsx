@@ -74,6 +74,12 @@ function mockPdfDocument({ pageCount = 2 }: { pageCount?: number } = {}) {
   return { getDocument, getPage, getViewport, render }
 }
 
+const htmlArtifact = {
+  ...builderArtifact,
+  artifactType: "webpage",
+  artifactPath: "mnt/user-data/outputs/launch-brief.html",
+} satisfies BuilderArtifactV1
+
 afterEach(() => {
   vi.restoreAllMocks()
   vi.mocked(loadPdfJs).mockReset()
@@ -216,5 +222,51 @@ describe("ArtifactCanvasViewport", () => {
     expect(canvasBed).toContainElement(screen.getByTestId("artifact-preview-state"))
     expect(within(previewRegion).getByText("Preparing document view")).toBeInTheDocument()
     expect(screen.getByTestId("artifact-preview-state").className).not.toMatch(/\bfixed\b|\binset-0\b/)
+  })
+
+  it("renders HTML artifacts in a sandboxed iframe preview", async () => {
+    const onVisualCaptureStatusChange = vi.fn()
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        "<!doctype html><html><head><title>Deck fallback</title></head><body><h1>Deck fallback</h1><p>Readable slide content.</p></body></html>",
+        {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        },
+      ),
+    )
+
+    render(
+      <ArtifactCanvasViewport
+        artifact={htmlArtifact}
+        files={[{
+          path: "mnt/user-data/outputs/launch-brief.html",
+          name: "launch-brief.html",
+          label: "launch-brief.html",
+          isPrimary: true,
+          mimeType: "text/html",
+        }]}
+        typeLabel="Webpage"
+        previewHref="/artifact.html"
+        artifactTextRegistration={{
+          artifactId: "artifact-1",
+          threadId: "thread-1",
+        }}
+        onVisualCaptureStatusChange={onVisualCaptureStatusChange}
+      />,
+    )
+
+    const previewRegion = await screen.findByLabelText("Artifact HTML preview")
+    const iframe = await screen.findByTitle("Preview of launch-brief.html")
+
+    expect(previewRegion).toContainElement(iframe)
+    expect(iframe).toHaveAttribute("sandbox", "")
+    expect(iframe).toHaveAttribute("srcdoc", expect.stringContaining("<h1>Deck fallback</h1>"))
+    expect(onVisualCaptureStatusChange).toHaveBeenLastCalledWith({
+      ready: true,
+      reason: null,
+      source: "html_preview_canvas",
+      exactTextAvailable: true,
+    })
   })
 })

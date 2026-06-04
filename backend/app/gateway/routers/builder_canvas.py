@@ -474,6 +474,20 @@ def _completion_completed_at(task: dict[str, Any]) -> str | None:
     return completed_at if isinstance(completed_at, str) else None
 
 
+def _artifact_ext_from_path(path: str | None) -> str | None:
+    if not path or "." not in path.rsplit("/", 1)[-1]:
+        return None
+    return path.rsplit(".", 1)[-1].lower()
+
+
+def _requested_ext_from_task_or_artifact(task: dict[str, Any], artifact: dict[str, Any]) -> str | None:
+    explicit = artifact.get("requested_artifact_ext")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip().lower().lstrip(".")
+    target_path = _canonical_artifact_path(task.get("artifact_target_path"))
+    return _artifact_ext_from_path(target_path)
+
+
 def _completion_from_terminal_task(
     parent_thread_id: str,
     task: dict[str, Any],
@@ -490,6 +504,18 @@ def _completion_from_terminal_task(
     artifact_path = _canonical_artifact_path(artifact.get("artifact_path"))
     artifact_url = _completion_artifact_url(parent_thread_id, artifact_path, artifact)
     artifact_filename = artifact_path.rsplit("/", 1)[-1] if artifact_path else None
+    requested_artifact_ext = _requested_ext_from_task_or_artifact(task, artifact)
+    artifact_ext = (
+        str(artifact.get("artifact_ext")).strip().lower().lstrip(".")
+        if isinstance(artifact.get("artifact_ext"), str) and artifact.get("artifact_ext").strip()
+        else _artifact_ext_from_path(artifact_path)
+    )
+    artifact_is_fallback = artifact.get("artifact_is_fallback")
+    if artifact_is_fallback is None:
+        artifact_is_fallback = bool(requested_artifact_ext and artifact_ext and artifact_ext != requested_artifact_ext)
+    fallback_reason = artifact.get("fallback_reason")
+    if artifact_is_fallback and not isinstance(fallback_reason, str):
+        fallback_reason = f"{requested_artifact_ext}_generation_not_completed" if requested_artifact_ext else "fallback_deliverable"
     return {
         "thread_id": parent_thread_id,
         "task_id": task_id,
@@ -504,6 +530,10 @@ def _completion_from_terminal_task(
         "artifact_title": artifact.get("artifact_title"),
         "artifact_type": artifact.get("artifact_type"),
         "artifact_filename": artifact_filename,
+        "requested_artifact_ext": requested_artifact_ext,
+        "artifact_ext": artifact_ext,
+        "artifact_is_fallback": artifact_is_fallback,
+        "fallback_reason": fallback_reason,
         "summary": artifact.get("companion_summary") or artifact.get("summary"),
         "user_next_action": artifact.get("user_next_action"),
         "error_message": error_message_override or task.get("error_message") or task.get("error"),

@@ -172,6 +172,59 @@ def test_ceiling_fallback_pptx_rejects_tiny_deck_and_promotes_markdown_fallback(
 
     assert fallback["artifact_path"] == "/mnt/user-data/outputs/deck.md"
     assert fallback["artifact_type"] == "md"
+    assert fallback["requested_artifact_ext"] == "pptx"
+    assert fallback["artifact_ext"] == "md"
+    assert fallback["artifact_is_fallback"] is True
+    assert fallback["fallback_reason"] == "pptx_generation_not_completed"
+
+
+def test_ceiling_fallback_pptx_promotes_valid_html_fallback_with_metadata(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    _write_file(
+        outputs / "deck.html",
+        "<!doctype html><html><head><title>Deck</title><style>body{font-family:sans-serif}</style></head>"
+        "<body><section><h1>Research deck fallback</h1><p>Complete browser-viewable slide content.</p></section>"
+        "<section><h2>Visual summary</h2><p>Charts and diagrams are represented inline.</p></section></body></html>",
+    )
+
+    started_ms = int((time.time() - 10) * 1000)
+    state = _state_with_outputs(outputs, started_ms=started_ms)
+    state["builder_artifact_target_path"] = "/mnt/user-data/outputs/deck.pptx"
+    state["delegation_context"] = {"task": "Build a slide deck with charts and diagrams"}
+
+    fallback = BuilderArtifactMiddleware._build_ceiling_fallback(
+        state, steps_completed=12, reason="hard_ceiling"
+    )
+
+    assert fallback["artifact_path"] == "/mnt/user-data/outputs/deck.html"
+    assert fallback["artifact_type"] == "webpage"
+    assert fallback["requested_artifact_ext"] == "pptx"
+    assert fallback["artifact_ext"] == "html"
+    assert fallback["artifact_is_fallback"] is True
+    assert fallback["fallback_reason"] == "pptx_generation_not_completed"
+
+
+def test_ceiling_fallback_pptx_rejects_code_fenced_html_fallback(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    _write_file(
+        outputs / "deck.html",
+        "```html\n<!doctype html><html><head><title>Deck</title></head><body><h1>Deck</h1></body></html>\n```",
+    )
+
+    started_ms = int((time.time() - 10) * 1000)
+    state = _state_with_outputs(outputs, started_ms=started_ms)
+    state["builder_artifact_target_path"] = "/mnt/user-data/outputs/deck.pptx"
+    state["delegation_context"] = {"task": "Build a slide deck with charts and diagrams"}
+
+    fallback = BuilderArtifactMiddleware._build_ceiling_fallback(
+        state, steps_completed=12, reason="hard_ceiling"
+    )
+
+    assert fallback["artifact_path"] is None
+    assert fallback["artifact_type"] == "presentation"
+    assert fallback["confidence"] == 0.2
 
 
 def test_ceiling_fallback_pptx_refuses_generator_script(tmp_path: Path) -> None:

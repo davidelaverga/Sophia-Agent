@@ -3654,6 +3654,53 @@ class TestBuilderArtifactMiddleware:
         args = {"artifact_path": "/mnt/user-data/outputs/deck.md"}
 
         assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
+        assert args["requested_artifact_ext"] == "pptx"
+        assert args["artifact_ext"] == "md"
+        assert args["artifact_is_fallback"] is True
+        assert args["fallback_reason"] == "pptx_generation_not_completed"
+
+    def test_pptx_artifact_files_exist_accepts_valid_html_fallback_with_metadata(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "deck.html").write_text(
+            "<!doctype html><html><head><title>Deck fallback</title><style>body{font-family:sans-serif}</style></head>"
+            "<body><main><h1>Deck fallback</h1><p>Complete browser-renderable slide content.</p>"
+            "<p>Charts and diagrams are summarized in the page layout.</p></main></body></html>"
+        )
+        runtime = _make_runtime(thread_id="thread-x")
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            "delegation_context": {"task": "Build a slide deck with charts and diagrams"},
+        }
+        args = {"artifact_path": "/mnt/user-data/outputs/deck.html"}
+
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
+        assert args["artifact_path"] == "/mnt/user-data/outputs/deck.html"
+        assert args["requested_artifact_ext"] == "pptx"
+        assert args["artifact_ext"] == "html"
+        assert args["artifact_is_fallback"] is True
+        assert args["fallback_reason"] == "pptx_generation_not_completed"
+
+    def test_pptx_artifact_files_exist_rejects_invalid_html_fallback(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "deck.html").write_text(
+            "```html\n<!doctype html><html><head><title>Deck</title></head><body><h1>Deck</h1></body></html>\n```"
+        )
+        runtime = _make_runtime(thread_id="thread-x")
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            "delegation_context": {"task": "Build a slide deck with charts and diagrams"},
+        }
+        args = {"artifact_path": "/mnt/user-data/outputs/deck.html"}
+
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
 
     def test_pptx_artifact_files_exist_checks_parent_thread_supabase_namespace(self, tmp_path, monkeypatch):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware

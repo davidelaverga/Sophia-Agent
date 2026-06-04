@@ -68,6 +68,10 @@ class BuilderCompletionEvent(BaseModel):
     artifact_title: str | None = None
     artifact_type: str | None = None
     artifact_filename: str | None = None
+    requested_artifact_ext: str | None = None
+    artifact_ext: str | None = None
+    artifact_is_fallback: bool | None = None
+    fallback_reason: str | None = None
     summary: str | None = None
     user_next_action: str | None = None
     error_message: str | None = None

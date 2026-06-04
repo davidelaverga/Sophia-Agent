@@ -116,6 +116,44 @@ async def test_terminal_closes_run_and_replay_starts_after_event_id() -> None:
 
 
 @pytest.mark.anyio
+async def test_completion_preserves_fallback_metadata() -> None:
+    worker = BuilderCanvasWorker()
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "finalizing"},
+        }
+    )
+
+    await worker.publish_completion(
+        {
+            "thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "status": "success",
+            "artifact_path": "mnt/user-data/outputs/deck.html",
+            "artifact_type": "webpage",
+            "requested_artifact_ext": "pptx",
+            "artifact_ext": "html",
+            "artifact_is_fallback": True,
+            "fallback_reason": "pptx_generation_not_completed",
+        }
+    )
+
+    events = await worker.recent_events("parent-1")
+    completion = events[-1]["completion"]
+    assert completion["status"] == "success"
+    assert completion["requested_artifact_ext"] == "pptx"
+    assert completion["artifact_ext"] == "html"
+    assert completion["artifact_is_fallback"] is True
+    assert completion["fallback_reason"] == "pptx_generation_not_completed"
+
+
+@pytest.mark.anyio
 async def test_success_completion_without_deliverable_is_coerced_to_failure() -> None:
     worker = BuilderCanvasWorker()
     await worker.publish_progress(
