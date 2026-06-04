@@ -44,8 +44,11 @@ export interface CoreviewArtifactTextFailure {
     | 'extraction_pending'
     | 'extraction_unavailable'
     | 'extraction_failed'
+    | 'artifact_rebind_required'
+    | 'artifact_not_available_in_current_session'
     | 'timeout';
   safe_reason: string;
+  recovery_action?: string | null;
   source?: CoreviewArtifactTextSource;
   page_count?: number | null;
   char_count?: number | null;
@@ -63,6 +66,7 @@ export interface CoreviewArtifactTextRegistration {
   truncated?: boolean | null;
   sessionIds?: Array<string | null | undefined>;
   threadId?: string | null;
+  artifactStableIdentity?: string | null;
 }
 
 export interface CoreviewArtifactTextStatusRegistration {
@@ -75,6 +79,7 @@ export interface CoreviewArtifactTextStatusRegistration {
   truncated?: boolean | null;
   sessionIds?: Array<string | null | undefined>;
   threadId?: string | null;
+  artifactStableIdentity?: string | null;
 }
 
 export interface CoreviewArtifactTextReadInput {
@@ -105,6 +110,7 @@ export function registerCoreviewArtifactText(
     truncated: typeof registration.truncated === 'boolean' ? registration.truncated : null,
     sessionIds: normalizeSessionIds(registration.sessionIds),
     threadId: normalizeToken(registration.threadId),
+    artifactStableIdentity: normalizeToken(registration.artifactStableIdentity),
   };
   const entries = registry.get(artifactId) ?? [];
   entries.push(entry);
@@ -142,6 +148,7 @@ export function registerCoreviewArtifactTextStatus(
     truncated: typeof registration.truncated === 'boolean' ? registration.truncated : null,
     sessionIds: normalizeSessionIds(registration.sessionIds),
     threadId: normalizeToken(registration.threadId),
+    artifactStableIdentity: normalizeToken(registration.artifactStableIdentity),
   };
   const entries = statusRegistry.get(artifactId) ?? [];
   entries.push(entry);
@@ -184,11 +191,22 @@ export function readCoreviewArtifactTextSideband({
     return statusFailure(normalizedArtifactId, matchingStatus);
   }
 
-  if (entries.length > 0 || statusEntries.length > 0) {
+  const mismatch = textRegistryMismatchReason([...entries, ...statusEntries], scope);
+  if (mismatch) {
+    if (mismatch === 'thread_mismatch') {
+      return failure(
+        normalizedArtifactId,
+        'forbidden',
+        'artifact_not_available_in_current_session: the registered artifact text belongs to a different thread.',
+        'Reopen the artifact from the current session thread, then start Review with Sophia again.',
+      );
+    }
+
     return failure(
       normalizedArtifactId,
-      'forbidden',
-      'The artifact text source is registered for a different session or thread.',
+      'artifact_rebind_required',
+      'artifact_rebind_required: the artifact text is registered for an older voice session.',
+      'Keep the artifact visible and reconnect voice or start Review with Sophia to rebind exact text.',
     );
   }
 
@@ -293,12 +311,14 @@ function failure(
   artifactId: string | null,
   status: CoreviewArtifactTextFailure['status'],
   safeReason: string,
+  recoveryAction: string | null = null,
 ): CoreviewArtifactTextFailure {
   return {
     ok: false,
     artifact_id: artifactId,
     status,
     safe_reason: safeReason,
+    recovery_action: recoveryAction,
   };
 }
 
@@ -333,6 +353,12 @@ function registrationMatches(
   registration: CoreviewArtifactTextRegistration | CoreviewArtifactTextStatusRegistration,
   scope: Pick<CoreviewArtifactTextReadInput, 'sessionId' | 'threadId'>,
 ): boolean {
+  const requestedThreadId = normalizeToken(scope.threadId);
+  const registeredThreadId = normalizeToken(registration.threadId);
+  if (requestedThreadId && registeredThreadId) {
+    return requestedThreadId === registeredThreadId;
+  }
+
   const requestedSessionId = normalizeToken(scope.sessionId);
   const registeredSessionIds = normalizeSessionIds(registration.sessionIds);
   if (
@@ -343,13 +369,37 @@ function registrationMatches(
     return false;
   }
 
-  const requestedThreadId = normalizeToken(scope.threadId);
-  const registeredThreadId = normalizeToken(registration.threadId);
-  if (requestedThreadId && registeredThreadId && requestedThreadId !== registeredThreadId) {
-    return false;
+  return true;
+}
+
+function textRegistryMismatchReason(
+  registrations: Array<CoreviewArtifactTextRegistration | CoreviewArtifactTextStatusRegistration>,
+  scope: Pick<CoreviewArtifactTextReadInput, 'sessionId' | 'threadId'>,
+): 'thread_mismatch' | 'session_mismatch' | null {
+  if (registrations.length === 0) {
+    return null;
   }
 
-  return true;
+  const requestedThreadId = normalizeToken(scope.threadId);
+  if (
+    requestedThreadId
+    && registrations.some((registration) => {
+      const registeredThreadId = normalizeToken(registration.threadId);
+      return Boolean(registeredThreadId && registeredThreadId !== requestedThreadId);
+    })
+  ) {
+    return 'thread_mismatch';
+  }
+
+  const requestedSessionId = normalizeToken(scope.sessionId);
+  if (
+    requestedSessionId
+    && registrations.some((registration) => normalizeSessionIds(registration.sessionIds).length > 0)
+  ) {
+    return 'session_mismatch';
+  }
+
+  return null;
 }
 
 function normalizeSessionIds(values: Array<string | null | undefined> | undefined): string[] {

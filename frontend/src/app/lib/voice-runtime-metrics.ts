@@ -43,6 +43,17 @@ export type CoreviewVisualTelemetry = {
   reviewStartBlockedReason: string | null
   coreviewSessionActive: boolean
   coreviewArtifactId: string | null
+  artifactStableIdentity: string | null
+  artifactRebindAttempted: boolean
+  artifactRebindResult: string | null
+  artifactRebindReason: string | null
+  artifactReboundFromRenderedState: boolean
+  artifactRebindSource: string | null
+  exactTextRehydrated: boolean
+  exactTextRehydrateResult: string | null
+  currentRunSelectedStageEvents: number
+  longLivedSelectedStageState: boolean
+  telemetryScopeMode: string | null
   visualSourceKind: string | null
   frameSentCount: number
   initialFrameSent: boolean
@@ -990,6 +1001,17 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       reviewStartBlockedReason: null,
       coreviewSessionActive: false,
       coreviewArtifactId: null,
+      artifactStableIdentity: null,
+      artifactRebindAttempted: false,
+      artifactRebindResult: null,
+      artifactRebindReason: null,
+      artifactReboundFromRenderedState: false,
+      artifactRebindSource: null,
+      exactTextRehydrated: false,
+      exactTextRehydrateResult: null,
+      currentRunSelectedStageEvents: 0,
+      longLivedSelectedStageState: false,
+      telemetryScopeMode: null,
       visualSourceKind: null,
       frameSentCount: 0,
       initialFrameSent: false,
@@ -1138,6 +1160,9 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   const latestArtifactCommand = artifactCommandEvents.at(-1) ?? null
   const latestPdfTextExtraction = pdfTextExtractionEvents.at(-1) ?? latestSelectedStage
   const latestCoreviewTool = coreviewToolEvents.at(-1) ?? null
+  const latestRebindEvent = [...selectedStageEvents, ...coreviewToolEvents]
+    .filter((event) => asBoolean(event.artifactRebindAttempted) === true)
+    .at(-1) ?? null
   const latestSetupTools = setupToolEvents.at(-1) ?? null
   const latestKeyboardShortcut = keyboardShortcutEvents.at(-1) ?? null
   const firstFrameSeq = frameEvents.find((event) => {
@@ -1176,6 +1201,24 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.coreviewArtifactId = asString(latestState?.coreviewArtifactId)
     ?? asString(latestSelectedStage?.coreviewArtifactId)
     ?? asString(latestSelectedStage?.artifactId)
+  visual.artifactStableIdentity = asString(latestSelectedStage?.artifactStableIdentity)
+    ?? asString(latestRebindEvent?.artifactStableIdentity)
+    ?? asString(latestCoreviewTool?.artifactStableIdentity)
+  visual.artifactRebindAttempted = latestRebindEvent !== null
+  visual.artifactRebindResult = asString(latestRebindEvent?.artifactRebindResult)
+  visual.artifactRebindReason = asString(latestRebindEvent?.artifactRebindReason)
+  visual.artifactReboundFromRenderedState = asBoolean(latestRebindEvent?.artifactReboundFromRenderedState) ?? false
+  visual.artifactRebindSource = asString(latestRebindEvent?.artifactRebindSource)
+  visual.exactTextRehydrated = selectedStageEvents.some((event) => asBoolean(event.exactTextRehydrated) === true)
+  visual.exactTextRehydrateResult = asString(latestRebindEvent?.exactTextRehydrateResult)
+    ?? asString(latestSelectedStage?.exactTextRehydrateResult)
+  visual.currentRunSelectedStageEvents = selectedStageEvents.length
+  visual.longLivedSelectedStageState = selectedStageEvents.some((event) => (
+    asBoolean(event.longLivedSelectedStageState) === true
+  ))
+  visual.telemetryScopeMode = asString(latestRebindEvent?.telemetryScopeMode)
+    ?? asString(latestSelectedStage?.telemetryScopeMode)
+    ?? (selectedStageEvents.length > 0 ? "current_run_selected_stage" : null)
   visual.visualSourceKind = asString(latestState?.visualSourceKind)
   visual.visualFresh = asBoolean(latestState?.visualFresh) ?? false
   visual.visualFreshForTurn = asBoolean(latestState?.visualFreshForTurn) ?? false

@@ -30,6 +30,8 @@ import {
   wasRecentCoreviewToolActionHandled,
   type CoreviewActionBus,
   type CoreviewActionResult,
+  type CoreviewArtifactRebindInput,
+  type CoreviewArtifactRebindResult,
   type CoreviewCurrentView,
   type CoreviewRendererAdapter,
   type CoreviewSetViewInput,
@@ -39,6 +41,7 @@ import {
   type CoreviewToolRefreshResult,
   type CoreviewViewReadyResult,
 } from "../../lib/coreview-actions"
+import { buildCoreviewArtifactStableIdentity } from "../../lib/coreview-artifact-identity"
 import { recordSophiaCaptureEvent } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
 import { isRealReflection } from "../../session/artifacts"
@@ -63,6 +66,7 @@ interface PresenceArtifactPanelProps {
   onSelectedBuilderArtifactPathChange?: (path: string | null) => void
   sessionId?: string | null
   normalSessionId?: string | null
+  voiceAgentSessionId?: string | null
   threadId?: string
   isVisible: boolean
   onDismiss: () => void
@@ -247,6 +251,12 @@ function coreviewBlockedStatusText(reason: CoreviewToolBlockedReason | null): st
       return "No artifact is selected."
     case "artifact_mismatch":
       return "That artifact is not selected."
+    case "artifact_rebind_required":
+      return "Reconnect voice or start Review with Sophia to rebind this artifact."
+    case "artifact_rebind_failed":
+      return "Reopen this artifact, then start Review with Sophia again."
+    case "artifact_not_available_in_current_session":
+      return "This artifact is not available in the current session."
     case "requested_page_out_of_bounds":
       return "That page is not available in this PDF."
     case "unsupported_pages":
@@ -464,6 +474,31 @@ function getStagePrimaryFileWithMime(
     ...(typeof libraryItem?.sizeBytes === 'number' ? { sizeBytes: libraryItem.sizeBytes } : {}),
   }
 }
+
+function exactTextRehydrateResult({
+  isPdf,
+  exactTextAvailable,
+  pdfStatus,
+}: {
+  isPdf: boolean
+  exactTextAvailable: boolean
+  pdfStatus?: string | null
+}): string {
+  if (!isPdf) {
+    return exactTextAvailable ? "not_pdf_exact_text_available" : "not_pdf"
+  }
+  if (exactTextAvailable || pdfStatus === "success") {
+    return "success"
+  }
+  if (pdfStatus === "loading") {
+    return "pending"
+  }
+  if (pdfStatus === "failed") {
+    return "failed"
+  }
+  return "unavailable"
+}
+
 /**
  * Cosmic artifact panel — part of the presence field.
  *
@@ -483,6 +518,7 @@ export function PresenceArtifactPanel({
   onSelectedBuilderArtifactPathChange,
   sessionId,
   normalSessionId,
+  voiceAgentSessionId,
   threadId,
   isVisible,
   onDismiss,
@@ -502,6 +538,7 @@ export function PresenceArtifactPanel({
   const autoCollapseRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const staggerRef = useRef<ReturnType<typeof setTimeout>[]>([])
   const selectedStageCaptureSignatureRef = useRef<string | null>(null)
+  const selectedStageRebindSignatureRef = useRef<string | null>(null)
   const [builderArtifactRoot, setBuilderArtifactRoot] = useState<HTMLDivElement | null>(null)
   const [domArtifactRoot, setDomArtifactRoot] = useState<HTMLDivElement | null>(null)
   const [builderVisualCaptureStatus, setBuilderVisualCaptureStatus] = useState<ArtifactVisualCaptureStatus>(
@@ -551,18 +588,28 @@ export function PresenceArtifactPanel({
     return getStagePrimaryFileWithMime(stageBuilderArtifact, builderArtifactLibrary)
   }, [builderArtifactLibrary, stageBuilderArtifact])
   const stageRendererKind = detectArtifactRendererKind(stagePrimaryFile, stageBuilderArtifact)
+  const stageArtifactPath = stagePrimaryFile?.path ?? stageBuilderArtifact?.artifactPath ?? null
+  const artifactStableIdentity = useMemo(() => (
+    builderArtifactId
+      ? buildCoreviewArtifactStableIdentity({
+          threadId: threadId ?? null,
+          artifactPath: stageArtifactPath,
+          rendererKind: stageRendererKind,
+        }).key
+      : null
+  ), [builderArtifactId, stageArtifactPath, stageRendererKind, threadId])
   const stageUsesMarkdownPreview = stageRendererKind === "markdown"
   const stageUsesPdfPreview = stageRendererKind === "pdf"
   const fallbackBuilderArtifactViewState = useMemo(() => (
     createDefaultArtifactViewState({
       artifactId: builderArtifactId,
-      filePath: stagePrimaryFile?.path ?? stageBuilderArtifact?.artifactPath ?? null,
+      filePath: stageArtifactPath,
       rendererKind: stageRendererKind,
     })
-  ), [builderArtifactId, stageBuilderArtifact?.artifactPath, stagePrimaryFile?.path, stageRendererKind])
+  ), [builderArtifactId, stageArtifactPath, stageRendererKind])
   const builderArtifactViewState = (
     reportedBuilderArtifactViewState?.artifactId === builderArtifactId
-    && reportedBuilderArtifactViewState?.filePath === (stagePrimaryFile?.path ?? stageBuilderArtifact?.artifactPath ?? null)
+    && reportedBuilderArtifactViewState?.filePath === stageArtifactPath
   )
     ? reportedBuilderArtifactViewState
     : fallbackBuilderArtifactViewState
@@ -641,8 +688,9 @@ export function PresenceArtifactPanel({
   )
   const coreviewCurrentView = useMemo<CoreviewCurrentView>(() => ({
     artifactId: builderArtifactId,
-    artifactPath: stagePrimaryFile?.path ?? stageBuilderArtifact?.artifactPath ?? null,
+    artifactPath: stageArtifactPath,
     artifactTitle: stageBuilderArtifact?.artifactTitle ?? null,
+    artifactStableIdentity,
     rendererKind: builderArtifactViewState.rendererKind,
     supportsPagination: builderVoiceCommandTarget?.supportsPagination ?? stageRendererKind === "pdf",
     supportsZoom: builderVoiceCommandTarget?.supportsZoom ?? stageRendererKind === "pdf",
@@ -659,7 +707,9 @@ export function PresenceArtifactPanel({
     exactTextAvailable: builderExactTextAvailable,
     visualFrameFresh: builderReviewHasFrame && !builderReviewStale,
     annotationOverlayCaptured: stageRendererKind === "pdf" ? false : null,
+    rebindStatus: "not_attempted",
   }), [
+    artifactStableIdentity,
     builderArtifactCoReview.canRefresh,
     builderArtifactCoReview.state.refreshFrameInProgress,
     builderArtifactCoReview.state.state,
@@ -674,9 +724,8 @@ export function PresenceArtifactPanel({
     builderReviewHasFrame,
     builderReviewStale,
     builderVoiceCommandTarget,
-    stageBuilderArtifact?.artifactPath,
     stageBuilderArtifact?.artifactTitle,
-    stagePrimaryFile?.path,
+    stageArtifactPath,
     stageRendererKind,
   ])
   useEffect(() => {
@@ -715,6 +764,114 @@ export function PresenceArtifactPanel({
     transportNeedsVoice
     && isVoiceMode
   )
+
+  const recordSelectedStageArtifactTelemetry = useCallback((details: {
+    rebindAttempted: boolean
+    rebindSource: CoreviewArtifactRebindInput["source"]
+    rebindReason?: string | null
+    requestedArtifactId?: string | null
+  }): boolean => {
+    if (!isVisible || !stageBuilderArtifact || !builderArtifactId) {
+      return false
+    }
+
+    const requestedArtifactId = details.requestedArtifactId ?? null
+    const rebindResult = details.rebindAttempted
+      ? requestedArtifactId && requestedArtifactId !== builderArtifactId
+        ? "failed"
+        : "success"
+      : "not_attempted"
+    const rebindReason = details.rebindAttempted && rebindResult === "failed"
+      ? "artifact_not_available_in_current_session"
+      : details.rebindReason ?? null
+    const exactRehydrateResult = exactTextRehydrateResult({
+      isPdf: stageUsesPdfPreview,
+      exactTextAvailable: builderExactTextAvailable,
+      pdfStatus: effectiveBuilderVisualCaptureStatus.pdfTextExtractionStatus ?? null,
+    })
+
+    recordSophiaCaptureEvent({
+      category: "artifacts-runtime",
+      name: "select-stage-artifact",
+      payload: {
+        sessionId: sessionId ?? null,
+        normalSessionId: normalSessionId ?? null,
+        voiceAgentSessionId: voiceAgentSessionId ?? null,
+        threadId: threadId ?? null,
+        artifactId: builderArtifactId,
+        coreviewArtifactId: builderArtifactId,
+        artifactPath: stageArtifactPath,
+        artifactTitle: stageBuilderArtifact.artifactTitle,
+        artifactType: stageBuilderArtifact.artifactType,
+        artifactKind: "builder_file",
+        artifactStableIdentity,
+        selectedBuilderArtifactPath: normalizedSelectedBuilderArtifactPath ?? null,
+        source: normalizedSelectedBuilderArtifactPath ? "selected_builder_artifact" : "latest_builder_artifact",
+        reviewFeatureEnabled: coreviewReviewEnabled,
+        artifactRebindAttempted: details.rebindAttempted,
+        artifactRebindResult: rebindResult,
+        artifactRebindReason: rebindReason,
+        artifactReboundFromRenderedState: details.rebindAttempted && isVisible,
+        artifactRebindSource: details.rebindSource,
+        exactTextRehydrated: details.rebindAttempted && builderExactTextAvailable,
+        exactTextRehydrateResult: exactRehydrateResult,
+        currentRunSelectedStageEvents: 1,
+        longLivedSelectedStageState: true,
+        telemetryScopeMode: details.rebindAttempted ? "current_run_rebind" : "long_lived_selected_stage",
+        ...coreviewDiagnostics,
+        exactTextSource: stageUsesMarkdownPreview
+          ? "builder_file"
+          : stageUsesPdfPreview
+            ? builderExactTextAvailable
+              ? "pdf_text_extraction"
+              : "unsupported"
+            : "builder_metadata",
+        exactTextAvailable: builderExactTextAvailable,
+        pdfTextExtractionStatus: effectiveBuilderVisualCaptureStatus.pdfTextExtractionStatus ?? null,
+        pdfTextExtractionPageCount: effectiveBuilderVisualCaptureStatus.pdfTextExtractionPageCount ?? null,
+        pdfTextExtractionCharCount: effectiveBuilderVisualCaptureStatus.pdfTextExtractionCharCount ?? null,
+        pdfTextExtractionSource: effectiveBuilderVisualCaptureStatus.pdfTextExtractionSource ?? null,
+        visualCaptureSource: effectiveBuilderVisualCaptureStatus.source,
+        visualCaptureReady: effectiveBuilderVisualCaptureStatus.ready,
+        visualCaptureReason: effectiveBuilderVisualCaptureStatus.reason,
+        ...safeArtifactViewTelemetry(
+          builderArtifactViewState,
+          builderArtifactCoReview.lastFrameViewSignature,
+          builderReviewStaleReason,
+        ),
+        rawArtifactTextExcluded: true,
+        rawFrameExcluded: true,
+      },
+    })
+
+    return rebindResult !== "failed"
+  }, [
+    artifactStableIdentity,
+    builderArtifactCoReview.lastFrameViewSignature,
+    builderArtifactId,
+    builderArtifactViewState,
+    builderExactTextAvailable,
+    builderReviewStaleReason,
+    coreviewDiagnostics,
+    coreviewReviewEnabled,
+    effectiveBuilderVisualCaptureStatus.pdfTextExtractionCharCount,
+    effectiveBuilderVisualCaptureStatus.pdfTextExtractionPageCount,
+    effectiveBuilderVisualCaptureStatus.pdfTextExtractionSource,
+    effectiveBuilderVisualCaptureStatus.pdfTextExtractionStatus,
+    effectiveBuilderVisualCaptureStatus.ready,
+    effectiveBuilderVisualCaptureStatus.reason,
+    effectiveBuilderVisualCaptureStatus.source,
+    isVisible,
+    normalSessionId,
+    normalizedSelectedBuilderArtifactPath,
+    sessionId,
+    stageArtifactPath,
+    stageBuilderArtifact,
+    stageUsesMarkdownPreview,
+    stageUsesPdfPreview,
+    threadId,
+    voiceAgentSessionId,
+  ])
 
   const recordReviewVoiceCommandTelemetry = useCallback((details: {
     command: ArtifactReviewVoiceCommand
@@ -806,6 +963,12 @@ export function PresenceArtifactPanel({
         coreviewToolViewReadyWaitMs: result.view_ready_wait_ms,
         coreviewToolViewSignatureBefore: result.view_signature_before,
         coreviewToolViewSignatureAfter: result.view_signature_after,
+        artifactStableIdentity: result.artifact_stable_identity ?? artifactStableIdentity,
+        artifactRebindAttempted: result.rebind_attempted,
+        artifactRebindResult: result.rebind_result,
+        artifactRebindReason: result.rebind_reason,
+        artifactRebindSource: result.rebind_attempted ? "coreview_tool" : null,
+        artifactReboundFromRenderedState: result.rebind_attempted && isVisible,
         coreviewSetViewPageIndex: result.action === "set_view" ? result.page_index : null,
         coreviewSetViewPageCount: result.action === "set_view" ? result.page_count : null,
         artifactId: result.artifact_id,
@@ -818,7 +981,7 @@ export function PresenceArtifactPanel({
         rawFrameExcluded: true,
       },
     })
-  }, [normalSessionId, sessionId, threadId])
+  }, [artifactStableIdentity, isVisible, normalSessionId, sessionId, threadId])
 
   const applyCoreviewActionStatus = useCallback((result: CoreviewActionResult) => {
     if (!result.ok) {
@@ -929,7 +1092,65 @@ export function PresenceArtifactPanel({
         current && (!viewSignature || current === viewSignature) ? null : current
       ))
     },
-  }), [builderArtifactCoReview, coreviewCurrentView, waitForCoreviewViewReady])
+    rebindVisibleArtifact: (input: CoreviewArtifactRebindInput): CoreviewArtifactRebindResult => {
+      const current = coreviewCurrentViewRef.current ?? coreviewCurrentView
+      if (!isVisible || !builderStageActive || !builderArtifactId) {
+        return {
+          ok: false,
+          status: "failed",
+          reason: "no_selected_artifact",
+          currentView: {
+            ...current,
+            rebindStatus: "failed",
+          },
+        }
+      }
+
+      if (input.requestedArtifactId && input.requestedArtifactId !== builderArtifactId) {
+        void recordSelectedStageArtifactTelemetry({
+          rebindAttempted: true,
+          rebindSource: input.source,
+          rebindReason: "artifact_not_available_in_current_session",
+          requestedArtifactId: input.requestedArtifactId,
+        })
+        return {
+          ok: false,
+          status: "failed",
+          reason: "artifact_not_available_in_current_session",
+          currentView: {
+            ...current,
+            rebindStatus: "failed",
+          },
+        }
+      }
+
+      const rebound = recordSelectedStageArtifactTelemetry({
+        rebindAttempted: true,
+        rebindSource: input.source,
+        rebindReason: input.reason,
+        requestedArtifactId: input.requestedArtifactId ?? null,
+      })
+      const nextCurrent = {
+        ...(coreviewCurrentViewRef.current ?? coreviewCurrentView),
+        rebindStatus: rebound ? "success" : "failed",
+      } satisfies CoreviewCurrentView
+
+      return {
+        ok: rebound,
+        status: rebound ? "success" : "failed",
+        reason: rebound ? input.reason : "artifact_rebind_failed",
+        currentView: nextCurrent,
+      }
+    },
+  }), [
+    builderArtifactCoReview,
+    builderArtifactId,
+    builderStageActive,
+    coreviewCurrentView,
+    isVisible,
+    recordSelectedStageArtifactTelemetry,
+    waitForCoreviewViewReady,
+  ])
 
   const coreviewActionBus = useMemo<CoreviewActionBus>(() => (
     createCoreviewActionBus(coreviewAdapter)
@@ -1238,7 +1459,7 @@ export function PresenceArtifactPanel({
       normalSessionId ?? "",
       threadId ?? "",
       builderArtifactId,
-      stagePrimaryFile?.path ?? stageBuilderArtifact.artifactPath ?? "",
+      stageArtifactPath ?? "",
       stageRendererKind,
       builderArtifactViewSignature ?? "",
       effectiveBuilderVisualCaptureStatus.ready ? "ready" : "not-ready",
@@ -1250,56 +1471,15 @@ export function PresenceArtifactPanel({
     }
     selectedStageCaptureSignatureRef.current = signature
 
-    recordSophiaCaptureEvent({
-      category: "artifacts-runtime",
-      name: "select-stage-artifact",
-      payload: {
-        sessionId: sessionId ?? null,
-        normalSessionId: normalSessionId ?? null,
-        threadId: threadId ?? null,
-        artifactId: builderArtifactId,
-        coreviewArtifactId: builderArtifactId,
-        artifactPath: stagePrimaryFile?.path ?? stageBuilderArtifact.artifactPath ?? null,
-        artifactTitle: stageBuilderArtifact.artifactTitle,
-        artifactType: stageBuilderArtifact.artifactType,
-        artifactKind: "builder_file",
-        selectedBuilderArtifactPath: normalizedSelectedBuilderArtifactPath ?? null,
-        source: normalizedSelectedBuilderArtifactPath ? "selected_builder_artifact" : "latest_builder_artifact",
-        reviewFeatureEnabled: coreviewReviewEnabled,
-        ...coreviewDiagnostics,
-        exactTextSource: stageUsesMarkdownPreview
-          ? "builder_file"
-          : stageUsesPdfPreview
-            ? builderExactTextAvailable
-              ? "pdf_text_extraction"
-              : "unsupported"
-            : "builder_metadata",
-        exactTextAvailable: builderExactTextAvailable,
-        pdfTextExtractionStatus: effectiveBuilderVisualCaptureStatus.pdfTextExtractionStatus ?? null,
-        pdfTextExtractionPageCount: effectiveBuilderVisualCaptureStatus.pdfTextExtractionPageCount ?? null,
-        pdfTextExtractionCharCount: effectiveBuilderVisualCaptureStatus.pdfTextExtractionCharCount ?? null,
-        pdfTextExtractionSource: effectiveBuilderVisualCaptureStatus.pdfTextExtractionSource ?? null,
-        visualCaptureSource: effectiveBuilderVisualCaptureStatus.source,
-        visualCaptureReady: effectiveBuilderVisualCaptureStatus.ready,
-        visualCaptureReason: effectiveBuilderVisualCaptureStatus.reason,
-        ...safeArtifactViewTelemetry(
-          builderArtifactViewState,
-          builderArtifactCoReview.lastFrameViewSignature,
-          builderReviewStaleReason,
-        ),
-        rawArtifactTextExcluded: true,
-        rawFrameExcluded: true,
-      },
+    recordSelectedStageArtifactTelemetry({
+      rebindAttempted: false,
+      rebindSource: "artifact_stage_mount",
+      rebindReason: null,
     })
   }, [
     builderArtifactId,
-    builderArtifactCoReview.lastFrameViewSignature,
-    builderReviewStaleReason,
-    builderExactTextAvailable,
     builderArtifactViewSignature,
-    builderArtifactViewState,
-    coreviewReviewEnabled,
-    coreviewDiagnostics,
+    builderExactTextAvailable,
     effectiveBuilderVisualCaptureStatus.reason,
     effectiveBuilderVisualCaptureStatus.pdfTextExtractionCharCount,
     effectiveBuilderVisualCaptureStatus.pdfTextExtractionPageCount,
@@ -1310,13 +1490,100 @@ export function PresenceArtifactPanel({
     isVisible,
     normalSessionId,
     normalizedSelectedBuilderArtifactPath,
+    recordSelectedStageArtifactTelemetry,
     sessionId,
     stageBuilderArtifact,
-    stagePrimaryFile?.path,
+    stageArtifactPath,
     stageRendererKind,
-    stageUsesMarkdownPreview,
-    stageUsesPdfPreview,
     threadId,
+  ])
+
+  useEffect(() => {
+    if (!isVisible || !stageBuilderArtifact || !builderArtifactId || !voiceAgentSessionId) {
+      return
+    }
+
+    const signature = [
+      "voice_connect",
+      voiceAgentSessionId,
+      threadId ?? "",
+      builderArtifactId,
+      stageArtifactPath ?? "",
+      stageRendererKind,
+      builderArtifactViewSignature ?? "",
+      effectiveBuilderVisualCaptureStatus.ready ? "ready" : "not-ready",
+      builderExactTextAvailable ? "exact" : "no-exact",
+    ].join("|")
+
+    if (selectedStageRebindSignatureRef.current === signature) {
+      return
+    }
+    selectedStageRebindSignatureRef.current = signature
+
+    recordSelectedStageArtifactTelemetry({
+      rebindAttempted: true,
+      rebindSource: "voice_connect",
+      rebindReason: "voice_connect_visible_artifact",
+    })
+  }, [
+    builderArtifactId,
+    builderArtifactViewSignature,
+    builderExactTextAvailable,
+    effectiveBuilderVisualCaptureStatus.ready,
+    isVisible,
+    recordSelectedStageArtifactTelemetry,
+    stageArtifactPath,
+    stageBuilderArtifact,
+    stageRendererKind,
+    threadId,
+    voiceAgentSessionId,
+  ])
+
+  useEffect(() => {
+    if (
+      !isVisible
+      || !stageBuilderArtifact
+      || !builderArtifactId
+      || (builderReviewStateName !== "co_review_starting" && builderReviewStateName !== "co_review_live")
+    ) {
+      return
+    }
+
+    const signature = [
+      "review_start",
+      sessionId ?? "",
+      normalSessionId ?? "",
+      voiceAgentSessionId ?? "",
+      threadId ?? "",
+      builderArtifactId,
+      stageArtifactPath ?? "",
+      stageRendererKind,
+      builderArtifactViewSignature ?? "",
+    ].join("|")
+
+    if (selectedStageRebindSignatureRef.current === signature) {
+      return
+    }
+    selectedStageRebindSignatureRef.current = signature
+
+    recordSelectedStageArtifactTelemetry({
+      rebindAttempted: true,
+      rebindSource: "review_start",
+      rebindReason: "review_start_visible_artifact",
+    })
+  }, [
+    builderArtifactId,
+    builderArtifactViewSignature,
+    builderReviewStateName,
+    isVisible,
+    normalSessionId,
+    recordSelectedStageArtifactTelemetry,
+    sessionId,
+    stageArtifactPath,
+    stageBuilderArtifact,
+    stageRendererKind,
+    threadId,
+    voiceAgentSessionId,
   ])
 
   // Phase lifecycle
@@ -1534,7 +1801,9 @@ export function PresenceArtifactPanel({
                 builderArtifact={stageBuilderArtifact}
                 sessionId={sessionId}
                 normalSessionId={normalSessionId}
+                voiceAgentSessionId={voiceAgentSessionId}
                 threadId={threadId}
+                artifactStableIdentity={artifactStableIdentity}
               />
             )}
 
@@ -1553,6 +1822,8 @@ export function PresenceArtifactPanel({
                   artifactId={builderArtifactId}
                   sessionId={sessionId}
                   normalSessionId={normalSessionId}
+                  voiceAgentSessionId={voiceAgentSessionId}
+                  artifactStableIdentity={artifactStableIdentity}
                   reviewState={builderArtifactCoReview.state}
                   transportStatus={builderArtifactCoReview.transportStatus}
                   exactTextAvailable={builderExactTextAvailable}
@@ -1581,6 +1852,8 @@ export function PresenceArtifactPanel({
                   artifactId={builderArtifactId}
                   sessionId={sessionId}
                   normalSessionId={normalSessionId}
+                  voiceAgentSessionId={voiceAgentSessionId}
+                  artifactStableIdentity={artifactStableIdentity}
                   reviewState={builderArtifactCoReview.state}
                   transportStatus={builderArtifactCoReview.transportStatus}
                   exactTextAvailable={builderExactTextAvailable}

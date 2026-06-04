@@ -864,6 +864,7 @@ function buildArtifactReviewDiagnosticsSummary(
       counts,
       emitArtifactToolCallCount: gemini?.artifactToolCallCount ?? 0,
       reviewActive,
+      artifactRebindResult: metrics.coreview.visual.artifactRebindResult,
       suppressedReviewEmitToolCount: suppressedReview.emitArtifactCount,
       suppressedReviewToolCount: suppressedReview.totalCount,
       toolRejectionCount: gemini?.toolRejectionCount ?? 0,
@@ -878,6 +879,17 @@ function buildArtifactReviewDiagnosticsSummary(
     artifactCountMismatch: counts.artifactCountMismatch,
     artifactCountMismatchReason: counts.artifactCountMismatchReason,
     selectedStageEventCount,
+    currentRunSelectedStageEvents: metrics.coreview.visual.currentRunSelectedStageEvents,
+    longLivedSelectedStageState: metrics.coreview.visual.longLivedSelectedStageState,
+    telemetryScopeMode: metrics.coreview.visual.telemetryScopeMode,
+    artifactStableIdentity: metrics.coreview.visual.artifactStableIdentity,
+    artifactRebindAttempted: metrics.coreview.visual.artifactRebindAttempted,
+    artifactRebindResult: metrics.coreview.visual.artifactRebindResult,
+    artifactRebindReason: metrics.coreview.visual.artifactRebindReason,
+    artifactReboundFromRenderedState: metrics.coreview.visual.artifactReboundFromRenderedState,
+    artifactRebindSource: metrics.coreview.visual.artifactRebindSource,
+    exactTextRehydrated: metrics.coreview.visual.exactTextRehydrated,
+    exactTextRehydrateResult: metrics.coreview.visual.exactTextRehydrateResult,
     emitArtifactToolCallCount: gemini?.artifactToolCallCount ?? 0,
     emitArtifactBlockedDuringReviewCount: suppressedReview.emitArtifactCount,
     toolRejectionCount: gemini?.toolRejectionCount ?? 0,
@@ -942,6 +954,7 @@ function buildArtifactReviewWarnings({
   counts,
   emitArtifactToolCallCount,
   reviewActive,
+  artifactRebindResult,
   suppressedReviewEmitToolCount,
   suppressedReviewToolCount,
   toolRejectionCount,
@@ -949,13 +962,18 @@ function buildArtifactReviewWarnings({
   counts: VoiceDeveloperMetrics['counts'];
   emitArtifactToolCallCount: number;
   reviewActive: boolean;
+  artifactRebindResult?: string | null;
   suppressedReviewEmitToolCount: number;
   suppressedReviewToolCount: number;
   toolRejectionCount: number;
 }): string[] {
   const warnings: string[] = [];
 
-  if (counts.artifactRenderedCount > 0 && counts.artifactRuntimeIngestCount === 0) {
+  if (
+    counts.artifactRenderedCount > 0
+    && counts.artifactRuntimeIngestCount === 0
+    && artifactRebindResult !== 'success'
+  ) {
     warnings.push('artifact_rendered_not_runtime_ingested');
   }
   if (counts.artifactCountMismatch) {
@@ -983,6 +1001,17 @@ function buildCoreviewStillFrameDiagnosticsSummary(coreview: CoreviewUsageTeleme
     reviewStartBlockedReason: coreview.visual.reviewStartBlockedReason,
     coreviewSessionActive: coreview.visual.coreviewSessionActive,
     coreviewArtifactId: coreview.visual.coreviewArtifactId,
+    artifactStableIdentity: coreview.visual.artifactStableIdentity,
+    artifactRebindAttempted: coreview.visual.artifactRebindAttempted,
+    artifactRebindResult: coreview.visual.artifactRebindResult,
+    artifactRebindReason: coreview.visual.artifactRebindReason,
+    artifactReboundFromRenderedState: coreview.visual.artifactReboundFromRenderedState,
+    artifactRebindSource: coreview.visual.artifactRebindSource,
+    exactTextRehydrated: coreview.visual.exactTextRehydrated,
+    exactTextRehydrateResult: coreview.visual.exactTextRehydrateResult,
+    currentRunSelectedStageEvents: coreview.visual.currentRunSelectedStageEvents,
+    longLivedSelectedStageState: coreview.visual.longLivedSelectedStageState,
+    telemetryScopeMode: coreview.visual.telemetryScopeMode,
     visualSourceKind: coreview.visual.visualSourceKind,
     frameSentCount: coreview.visual.frameSentCount,
     initialFrameSent: coreview.visual.initialFrameSent,

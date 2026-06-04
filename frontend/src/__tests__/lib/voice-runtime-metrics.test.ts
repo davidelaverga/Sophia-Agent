@@ -1150,6 +1150,17 @@ describe('buildVoiceDeveloperMetrics', () => {
           artifactId: 'coreview-real-artifact-launch-brief',
           artifactPath: 'mnt/user-data/outputs/launch-brief.md',
           artifactTitle: 'Launch brief',
+          artifactStableIdentity: 'user:unknown|thread:thread-dev|path:mnt/user-data/outputs/launch-brief.md|renderer:markdown',
+          artifactRebindAttempted: true,
+          artifactRebindResult: 'success',
+          artifactRebindReason: 'voice_connect_visible_artifact',
+          artifactReboundFromRenderedState: true,
+          artifactRebindSource: 'voice_connect',
+          exactTextRehydrated: true,
+          exactTextRehydrateResult: 'not_pdf_exact_text_available',
+          currentRunSelectedStageEvents: 1,
+          longLivedSelectedStageState: true,
+          telemetryScopeMode: 'current_run_rebind',
           exactTextSource: 'builder_file',
           exactTextAvailable: true,
           rawArtifactTextExcluded: true,
@@ -1193,6 +1204,19 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.coreview.visual.coreviewEnabled).toBe(false);
     expect(metrics.coreview.visual.coreviewSessionActive).toBe(false);
     expect(metrics.coreview.visual.coreviewArtifactId).toBe('coreview-real-artifact-launch-brief');
+    expect(metrics.coreview.visual.artifactStableIdentity).toBe(
+      'user:unknown|thread:thread-dev|path:mnt/user-data/outputs/launch-brief.md|renderer:markdown',
+    );
+    expect(metrics.coreview.visual.artifactRebindAttempted).toBe(true);
+    expect(metrics.coreview.visual.artifactRebindResult).toBe('success');
+    expect(metrics.coreview.visual.artifactRebindReason).toBe('voice_connect_visible_artifact');
+    expect(metrics.coreview.visual.artifactReboundFromRenderedState).toBe(true);
+    expect(metrics.coreview.visual.artifactRebindSource).toBe('voice_connect');
+    expect(metrics.coreview.visual.exactTextRehydrated).toBe(true);
+    expect(metrics.coreview.visual.exactTextRehydrateResult).toBe('not_pdf_exact_text_available');
+    expect(metrics.coreview.visual.currentRunSelectedStageEvents).toBe(2);
+    expect(metrics.coreview.visual.longLivedSelectedStageState).toBe(true);
+    expect(metrics.coreview.visual.telemetryScopeMode).toBe('current_run_rebind');
     expect(metrics.coreview.visual.frameSentCount).toBe(0);
     expect(metrics.coreview.visual.exactTextAvailable).toBe(true);
   });

@@ -57,6 +57,7 @@ interface ArtifactCanvasViewportProps {
     artifactId: string
     sessionIds?: Array<string | null | undefined>
     threadId?: string | null
+    artifactStableIdentity?: string | null
   } | null
   onVisualCaptureStatusChange?: (status: ArtifactVisualCaptureStatus) => void
   reviewSurfaceState?: ArtifactReviewSurfaceState
@@ -232,6 +233,7 @@ export function ArtifactCanvasViewport({
       text: preview.markdown,
       sessionIds: artifactTextRegistration.sessionIds,
       threadId: artifactTextRegistration.threadId,
+      artifactStableIdentity: artifactTextRegistration.artifactStableIdentity,
     })
   }, [artifactTextRegistration, preview.markdown, preview.status])
 
@@ -253,6 +255,7 @@ export function ArtifactCanvasViewport({
       truncated: currentPdfTextExtractionStatus.truncated,
       sessionIds: artifactTextRegistration.sessionIds,
       threadId: artifactTextRegistration.threadId,
+      artifactStableIdentity: artifactTextRegistration.artifactStableIdentity,
     })
   }, [
     artifactTextRegistration,
@@ -283,6 +286,7 @@ export function ArtifactCanvasViewport({
       truncated: currentPdfTextExtractionStatus.truncated,
       sessionIds: artifactTextRegistration.sessionIds,
       threadId: artifactTextRegistration.threadId,
+      artifactStableIdentity: artifactTextRegistration.artifactStableIdentity,
     })
   }, [
     artifactTextRegistration,
@@ -312,6 +316,7 @@ export function ArtifactCanvasViewport({
       payload: {
         artifactId: captureArtifactId,
         artifactPath: primaryFile?.path ?? null,
+        artifactStableIdentity: artifactTextRegistration?.artifactStableIdentity ?? null,
         pdfTextExtractionStatus: currentPdfTextExtractionStatus.status,
         pdfTextExtractionSource: currentPdfTextExtractionStatus.source,
         pdfTextExtractionPageCount: currentPdfTextExtractionStatus.pageCount,
@@ -330,6 +335,7 @@ export function ArtifactCanvasViewport({
     currentPdfTextExtractionStatus.source,
     currentPdfTextExtractionStatus.status,
     currentPdfTextExtractionStatus.truncated,
+    artifactTextRegistration?.artifactStableIdentity,
     pdfTextExtractionKey,
     pdfTextExtractionState.key,
     primaryFile?.path,

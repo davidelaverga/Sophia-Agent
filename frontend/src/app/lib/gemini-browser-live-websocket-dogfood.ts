@@ -433,6 +433,7 @@ interface WebSocketLike {
 export interface GeminiBrowserLiveDogfoodConnectOptions {
   userId: string;
   sessionId?: string;
+  threadId?: string | null;
   bootstrapPayload?: GeminiBrowserLiveSessionBootstrap;
   fetchFn?: FetchLike;
   webSocketFactory?: WebSocketFactory;
@@ -1748,6 +1749,7 @@ export async function connectGeminiBrowserLiveDogfood(
         event,
         websocket,
         sessionId: browserSession.sessionId,
+        threadId: options.threadId ?? null,
         activeArtifactId: artifactReviewArtifactId,
         reviewToolTimeoutMs: options.reviewToolTimeoutMs,
         toolCallLedger,
@@ -1924,6 +1926,7 @@ export async function connectGeminiBrowserLiveDogfood(
               relayResponse,
               websocket,
               sessionId: browserSession.sessionId,
+              threadId: options.threadId ?? null,
               toolCallLedger,
               onToolCallLedgerUpdate: notifyToolCallLedgerUpdate,
               onToolLoopDiagnostic: options.onToolLoopDiagnostic,
@@ -2971,6 +2974,7 @@ function handleGeminiRelayClientActions(options: {
   relayResponse: GeminiBrowserLiveDogfoodRelayResponse;
   websocket: WebSocketLike | null;
   sessionId: string;
+  threadId?: string | null;
   toolCallLedger: Map<string, GeminiBrowserLiveToolCallLedgerEntry>;
   onToolCallLedgerUpdate?: (entry: GeminiBrowserLiveToolCallLedgerEntry) => void;
   onToolLoopDiagnostic?: (diagnostic: GeminiBrowserLiveDogfoodToolLoopDiagnostic) => void;
@@ -3019,7 +3023,10 @@ function handleGeminiRelayClientActions(options: {
     }
 
     const functionResponses = readGeminiFunctionResponsesFromToolResponse(action.payload)
-      .map((functionResponse) => applyCoreviewReadArtifactTextSideband(functionResponse, options.sessionId));
+      .map((functionResponse) => applyCoreviewReadArtifactTextSideband(functionResponse, {
+        sessionId: options.sessionId,
+        threadId: options.threadId ?? null,
+      }));
     const fallbackSummary = stringFromAnyKey(action, 'result_summary', 'resultSummary');
     const activeFunctionResponses: Record<string, unknown>[] = [];
     const suppressedFunctionResponses: Record<string, unknown>[] = [];
@@ -3148,6 +3155,7 @@ async function handleGeminiFrontendCoreviewToolEvent(options: {
   event: Record<string, unknown>;
   websocket: WebSocketLike | null;
   sessionId: string;
+  threadId?: string | null;
   activeArtifactId?: string | null;
   reviewToolTimeoutMs?: number;
   toolCallLedger: Map<string, GeminiBrowserLiveToolCallLedgerEntry>;
@@ -3165,6 +3173,7 @@ async function handleGeminiFrontendCoreviewToolEvent(options: {
   for (const call of split.frontendCalls) {
     const response = await executeFrontendReviewToolCallWithTimeout(call, {
       sessionId: options.sessionId,
+      threadId: options.threadId ?? null,
       activeArtifactId: options.activeArtifactId ?? null,
       timeoutMs: options.reviewToolTimeoutMs,
     });
@@ -3207,6 +3216,7 @@ async function handleGeminiFrontendCoreviewToolEvent(options: {
     },
     websocket: options.websocket,
     sessionId: options.sessionId,
+    threadId: options.threadId ?? null,
     toolCallLedger: options.toolCallLedger,
     onToolCallLedgerUpdate: options.onToolCallLedgerUpdate,
     onToolLoopDiagnostic: options.onToolLoopDiagnostic,
@@ -3220,6 +3230,7 @@ async function executeFrontendReviewToolCallWithTimeout(
   call: GeminiFrontendReviewToolCallInput,
   options: {
     sessionId: string;
+    threadId?: string | null;
     activeArtifactId: string | null;
     timeoutMs?: number;
   },
@@ -3232,6 +3243,7 @@ async function executeFrontendReviewToolCallWithTimeout(
       if (isReadArtifactTextToolCall(call)) {
         return executeBrowserReadArtifactTextToolCall(call, {
           sessionId: options.sessionId,
+          threadId: options.threadId ?? null,
           activeArtifactId: options.activeArtifactId,
           startedAtMs,
         });
@@ -3271,6 +3283,7 @@ function executeBrowserReadArtifactTextToolCall(
   call: GeminiReadArtifactTextToolCallInput,
   options: {
     sessionId: string;
+    threadId?: string | null;
     activeArtifactId: string | null;
     startedAtMs: number;
   },
@@ -3288,6 +3301,7 @@ function executeBrowserReadArtifactTextToolCall(
     ...readCoreviewArtifactTextSideband({
       artifactId,
       sessionId: options.sessionId,
+      threadId: options.threadId ?? null,
     }),
     latency_ms: latencyMs,
     raw_artifact_text_excluded: true,
@@ -3366,6 +3380,11 @@ function reviewToolTimeoutResult(
     review_active: true,
     current_view_summary: 'Coreview tool timed out.',
     annotation_overlay_captured: null,
+    artifact_stable_identity: null,
+    rebind_status: 'not_attempted',
+    rebind_attempted: false,
+    rebind_result: 'not_attempted',
+    rebind_reason: null,
     review_tool_timed_out: true,
     review_tool_timeout_name: call.name,
     review_tool_timeout_result_sent: true,
@@ -3497,6 +3516,11 @@ function coreviewToolExceptionResult(
     visual_fresh: false,
     review_active: false,
     annotation_overlay_captured: null,
+    artifact_stable_identity: null,
+    rebind_status: 'not_attempted',
+    rebind_attempted: false,
+    rebind_result: 'not_attempted',
+    rebind_reason: null,
     raw_artifact_text_excluded: true,
     raw_frame_excluded: true,
   };
@@ -4651,7 +4675,7 @@ function readGeminiFunctionResponsesFromToolResponse(payload: Record<string, unk
 
 function applyCoreviewReadArtifactTextSideband(
   functionResponse: Record<string, unknown>,
-  sessionId: string,
+  scope: { sessionId: string; threadId?: string | null },
 ): Record<string, unknown> {
   if (stringFromAnyKey(functionResponse, 'name') !== GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
     return functionResponse;
@@ -4668,7 +4692,11 @@ function applyCoreviewReadArtifactTextSideband(
   }
 
   const startedAtMs = monotonicNowMs();
-  const sidebandResponse = readCoreviewArtifactTextSideband({ artifactId, sessionId });
+  const sidebandResponse = readCoreviewArtifactTextSideband({
+    artifactId,
+    sessionId: scope.sessionId,
+    threadId: scope.threadId ?? null,
+  });
   const latencyMs = elapsedMs(startedAtMs);
   if (!sidebandResponse.ok) {
     return {

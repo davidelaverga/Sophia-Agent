@@ -110,6 +110,7 @@ function renderPanel({
   selectedBuilderArtifactPath,
   isVoiceMode = false,
   pendingBuilderArtifactReview = false,
+  voiceAgentSessionId = null,
   onStartVoiceBuilderArtifactReview,
   onPendingBuilderArtifactReviewConsumed,
   onArtifactReviewVoiceCommandRouteChange,
@@ -134,12 +135,13 @@ function renderPanel({
   selectedBuilderArtifactPath?: ComponentProps<typeof PresenceArtifactPanel>["selectedBuilderArtifactPath"]
   isVoiceMode?: boolean
   pendingBuilderArtifactReview?: ComponentProps<typeof PresenceArtifactPanel>["pendingBuilderArtifactReview"]
+  voiceAgentSessionId?: ComponentProps<typeof PresenceArtifactPanel>["voiceAgentSessionId"]
   onStartVoiceBuilderArtifactReview?: ComponentProps<typeof PresenceArtifactPanel>["onStartVoiceBuilderArtifactReview"]
   onPendingBuilderArtifactReviewConsumed?: ComponentProps<typeof PresenceArtifactPanel>["onPendingBuilderArtifactReviewConsumed"]
   onArtifactReviewVoiceCommandRouteChange?: ComponentProps<typeof PresenceArtifactPanel>["onArtifactReviewVoiceCommandRouteChange"]
   transport?: GeminiStillFrameTransport
 }) {
-  render(
+  return render(
     <PresenceArtifactPanel
       artifacts={artifacts}
       builderArtifact={builderArtifact}
@@ -147,6 +149,7 @@ function renderPanel({
       selectedBuilderArtifactPath={selectedBuilderArtifactPath}
       sessionId="session-1"
       normalSessionId="normal-1"
+      voiceAgentSessionId={voiceAgentSessionId}
       threadId="thread-1"
       isVisible={true}
       onDismiss={vi.fn()}
@@ -226,7 +229,13 @@ function mockPdfPreviewLoading() {
   return { getDocument }
 }
 
-function mockPdfPreviewReady({ pageCount = 3 }: { pageCount?: number } = {}) {
+function mockPdfPreviewReady({
+  pageCount = 3,
+  textByPage = null,
+}: {
+  pageCount?: number
+  textByPage?: string[] | null
+} = {}) {
   fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
     new Response(pdfBytes.slice(), {
       status: 200,
@@ -242,9 +251,16 @@ function mockPdfPreviewReady({ pageCount = 3 }: { pageCount?: number } = {}) {
     promise: Promise.resolve(),
     cancel: vi.fn(),
   }))
-  const getPage = vi.fn(async () => ({
+  const getPage = vi.fn(async (pageNumber = 1) => ({
     getViewport,
     render,
+    ...(textByPage
+      ? {
+          getTextContent: vi.fn(async () => ({
+            items: [{ str: textByPage[pageNumber - 1] ?? "" }],
+          })),
+        }
+      : {}),
   }))
   const pdfDocument = {
     numPages: pageCount,
@@ -714,6 +730,113 @@ describe("Coreview artifact still-frame review", () => {
         rawArtifactTextExcluded: true,
         rawFrameExcluded: true,
       })
+    })
+  })
+
+  it("rebinds a resumed visible PDF on voice reconnect and rehydrates exact text", async () => {
+    setCoreviewFlags(true)
+    registerSophiaCaptureBridge()
+    window.__sophiaCapture?.clear()
+    window.__sophiaCapture?.enable()
+    mockPdfPreviewReady({
+      pageCount: 2,
+      textByPage: ["North equals 42", "Budget delta is 17.4 percent"],
+    })
+    const transport = new GeminiStillFrameTransport({
+      sendArtifactFrame: vi.fn((frame) => ({
+        ok: true,
+        supported: true,
+        providerAcceptedFrame: true,
+        websocketSendAccepted: true,
+        frameBytes: frame.byteLength,
+        frameDimensions: frame.dimensions,
+        frameSendLatencyMs: 4,
+        estimatedVisualCost: null,
+        error: null,
+        rawFrameExcluded: true as const,
+      })),
+    })
+    const baseProps = {
+      artifacts: null,
+      builderArtifact: null,
+      builderArtifactLibrary: [],
+      selectedBuilderArtifactPath: PDF_SELECTED_PATH,
+      sessionId: "session-1",
+      normalSessionId: "normal-1",
+      threadId: "thread-1",
+      isVisible: true,
+      onDismiss: vi.fn(),
+      isVoiceMode: true,
+      coReviewTransport: transport,
+    } satisfies ComponentProps<typeof PresenceArtifactPanel>
+
+    const rendered = render(
+      <PresenceArtifactPanel
+        {...baseProps}
+        voiceAgentSessionId="old-voice-session"
+      />,
+    )
+
+    expect(await screen.findByText("Page 1 of 2")).toBeInTheDocument()
+    await waitFor(() => {
+      const response = readCoreviewArtifactTextSideband({
+        artifactId: buildCoreviewRealArtifactId(SELECTED_PDF_ARTIFACT),
+        sessionId: "old-voice-session",
+        threadId: "thread-1",
+      })
+      expect(response).toMatchObject({
+        ok: true,
+        source: "pdf_text_extraction",
+      })
+    })
+
+    clearCoreviewArtifactTextRegistryForTests()
+    window.__sophiaCapture?.clear()
+
+    rendered.rerender(
+      <PresenceArtifactPanel
+        {...baseProps}
+        voiceAgentSessionId="new-voice-session"
+      />,
+    )
+
+    await waitFor(() => {
+      const selectedStageEvents = exportSophiaCaptureBundle().events.filter(
+        (event) => event.category === "artifacts-runtime" && event.name === "select-stage-artifact",
+      )
+      expect(selectedStageEvents.some((event) => {
+        const payload = event.payload as Record<string, unknown> | null
+        return payload?.artifactRebindSource === "voice_connect"
+          && payload.artifactRebindResult === "success"
+          && payload.voiceAgentSessionId === "new-voice-session"
+          && payload.artifactStableIdentity === "user:unknown|thread:thread-1|path:mnt/user-data/outputs/launch-brief.pdf|renderer:pdf"
+      })).toBe(true)
+    })
+
+    await userEvent.click(screen.getByRole("button", { name: /review with sophia/i }))
+    await waitFor(() => {
+      const selectedStageEvents = exportSophiaCaptureBundle().events.filter(
+        (event) => event.category === "artifacts-runtime" && event.name === "select-stage-artifact",
+      )
+      expect(selectedStageEvents.some((event) => {
+        const payload = event.payload as Record<string, unknown> | null
+        return payload?.artifactRebindSource === "review_start"
+          && payload.artifactRebindResult === "success"
+      })).toBe(true)
+    })
+
+    await waitFor(() => {
+      const response = readCoreviewArtifactTextSideband({
+        artifactId: buildCoreviewRealArtifactId(SELECTED_PDF_ARTIFACT),
+        sessionId: "new-voice-session",
+        threadId: "thread-1",
+      })
+      expect(response).toMatchObject({
+        ok: true,
+        source: "pdf_text_extraction",
+        page_count: 2,
+      })
+      expect(response.ok ? response.text : "").toContain("North equals 42")
     })
   })
 

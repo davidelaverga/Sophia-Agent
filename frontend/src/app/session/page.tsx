@@ -525,6 +525,9 @@ function SessionPageContent() {
   const hasBuilderArtifactLibrary = builderArtifactLibrary.length > 0;
   const hasSelectedBuilderArtifactPath = Boolean(selectedBuilderArtifactPath);
   const coReviewSessionId = backendSessionId || safeSessionId || sessionId || null;
+  const coReviewVoiceAgentSessionId = voiceState.runtimeTelemetry.runtime === 'gemini_live'
+    ? voiceState.runtimeTelemetry.sessionId
+    : voiceState.runtimeTelemetry.voiceAgentSessionId;
   const artifactPanelThreadId = resolvedThreadId || undefined;
   const coReviewTransport = useMemo(
     () => new GeminiStillFrameTransport({
@@ -1314,6 +1317,7 @@ function SessionPageContent() {
               onSelectedBuilderArtifactPathChange={handleSelectBuilderArtifactPath}
               sessionId={coReviewSessionId}
               normalSessionId={coReviewSessionId}
+              voiceAgentSessionId={coReviewVoiceAgentSessionId}
               threadId={artifactPanelThreadId}
               isVisible={showArtifacts && showArtifactsUi}
               onDismiss={handleCloseArtifactsPanel}
@@ -1543,6 +1547,7 @@ function SessionPageContent() {
               onSelectedBuilderArtifactPathChange={handleSelectBuilderArtifactPath}
               sessionId={coReviewSessionId}
               normalSessionId={coReviewSessionId}
+              voiceAgentSessionId={coReviewVoiceAgentSessionId}
               threadId={artifactPanelThreadId}
               isVisible={showArtifacts && showArtifactsUi}
               onDismiss={handleCloseArtifactsPanel}
@@ -1569,6 +1574,7 @@ function SessionPageContent() {
             onSelectedBuilderArtifactPathChange={handleSelectBuilderArtifactPath}
             sessionId={coReviewSessionId}
             normalSessionId={coReviewSessionId}
+            voiceAgentSessionId={coReviewVoiceAgentSessionId}
             threadId={artifactPanelThreadId}
             isVisible={showArtifacts && showArtifactsUi}
             onDismiss={handleCloseArtifactsPanel}

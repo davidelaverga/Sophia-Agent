@@ -14,9 +14,18 @@ import {
 function createHarness(options: Partial<CoreviewCurrentView> & {
   refreshOk?: boolean
   waitOk?: boolean
+  rebindCurrent?: Partial<CoreviewCurrentView>
+  rebindOk?: boolean
+  rebindReason?: string | null
 } = {}) {
-  const refreshOk = options.refreshOk ?? true
-  const waitOk = options.waitOk ?? true
+  const {
+    refreshOk = true,
+    waitOk = true,
+    rebindCurrent,
+    rebindOk = true,
+    rebindReason = null,
+    ...currentOptions
+  } = options
   let refreshes = 0
   let staleSignature: string | null = null
   let current: CoreviewCurrentView = {
@@ -39,7 +48,7 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
     exactTextAvailable: true,
     visualFrameFresh: true,
     annotationOverlayCaptured: false,
-    ...options,
+    ...currentOptions,
   }
   current.viewSignature = buildArtifactViewSignature({
     artifactId: current.artifactId,
@@ -94,6 +103,21 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
         current = { ...current, stale: false, visualFrameFresh: true }
       }
     },
+  }
+  if (rebindCurrent) {
+    adapter.rebindVisibleArtifact = (input) => {
+      current = {
+        ...current,
+        ...rebindCurrent,
+        rebindStatus: rebindOk ? "success" : "failed",
+      }
+      return {
+        ok: rebindOk,
+        status: rebindOk ? "success" : "failed",
+        reason: rebindReason ?? input.reason,
+        currentView: current,
+      }
+    }
   }
 
   return {
@@ -156,6 +180,83 @@ describe("Coreview action bus", () => {
     expect(result.blocked_reason).toBe("no_selected_artifact")
     expect(result.raw_artifact_text_excluded).toBe(true)
     expect(result.raw_frame_excluded).toBe(true)
+  })
+
+  it("rebinds the visible artifact before returning current view metadata", () => {
+    const harness = createHarness({
+      artifactId: null,
+      artifactPath: null,
+      artifactTitle: null,
+      artifactStableIdentity: null,
+      rebindCurrent: {
+        artifactId: "artifact-1",
+        artifactPath: "outputs/report.pdf",
+        artifactTitle: "report.pdf",
+        artifactStableIdentity: "user:unknown|thread:thread-1|path:outputs/report.pdf|renderer:pdf",
+      },
+    })
+
+    const result = harness.bus.getCurrentView(undefined, "gemini_tool")
+
+    expect(result).toMatchObject({
+      ok: true,
+      action: "get_current_view",
+      artifact_id: "artifact-1",
+      artifact_path: "outputs/report.pdf",
+      artifact_stable_identity: "user:unknown|thread:thread-1|path:outputs/report.pdf|renderer:pdf",
+      rebind_attempted: true,
+      rebind_result: "success",
+      rebind_status: "success",
+      rebind_reason: "no_selected_artifact",
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
+    })
+  })
+
+  it("rebinds the visible artifact before setting the view", async () => {
+    const harness = createHarness({
+      artifactId: null,
+      artifactPath: null,
+      artifactTitle: null,
+      rebindCurrent: {
+        artifactId: "artifact-1",
+        artifactPath: "outputs/report.pdf",
+        artifactTitle: "report.pdf",
+      },
+    })
+
+    const result = await harness.bus.setView({ pageNumber: 2 }, "gemini_tool")
+
+    expect(result).toMatchObject({
+      ok: true,
+      action: "set_view",
+      page_number: 2,
+      rebind_attempted: true,
+      rebind_result: "success",
+      rebind_status: "success",
+    })
+    expect(harness.current.pageIndex).toBe(1)
+  })
+
+  it("returns a clear artifact-not-available status for a true rebind mismatch", () => {
+    const harness = createHarness({
+      rebindCurrent: {},
+      rebindOk: false,
+      rebindReason: "artifact_not_available_in_current_session",
+    })
+
+    const result = harness.bus.getCurrentView({ artifactId: "other-artifact" }, "gemini_tool")
+
+    expect(result).toMatchObject({
+      ok: false,
+      blocked_reason: "artifact_not_available_in_current_session",
+      rebind_attempted: true,
+      rebind_result: "failed",
+      rebind_status: "failed",
+      rebind_reason: "artifact_not_available_in_current_session",
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
+    })
   })
 
   it("blocks page actions on renderers without pagination", async () => {

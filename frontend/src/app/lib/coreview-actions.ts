@@ -31,6 +31,9 @@ export type CoreviewToolRefreshResult =
 export type CoreviewToolBlockedReason =
   | "no_selected_artifact"
   | "artifact_mismatch"
+  | "artifact_rebind_required"
+  | "artifact_rebind_failed"
+  | "artifact_not_available_in_current_session"
   | "unsupported_renderer"
   | "unsupported_pages"
   | "requested_page_out_of_bounds"
@@ -68,6 +71,7 @@ export interface CoreviewCurrentView {
   artifactId: string | null
   artifactPath: string | null
   artifactTitle: string | null
+  artifactStableIdentity?: string | null
   rendererKind: ArtifactRendererKind
   supportsPagination: boolean
   supportsZoom: boolean
@@ -84,6 +88,28 @@ export interface CoreviewCurrentView {
   exactTextAvailable: boolean
   visualFrameFresh: boolean
   annotationOverlayCaptured: boolean | null
+  rebindStatus?: CoreviewArtifactRebindStatus
+}
+
+export type CoreviewArtifactRebindSource =
+  | "voice_connect"
+  | "review_start"
+  | "coreview_tool"
+  | "artifact_stage_mount"
+
+export type CoreviewArtifactRebindStatus = "not_attempted" | "success" | "failed" | "not_needed"
+
+export interface CoreviewArtifactRebindInput {
+  source: CoreviewArtifactRebindSource
+  reason: string
+  requestedArtifactId?: string | null
+}
+
+export interface CoreviewArtifactRebindResult {
+  ok: boolean
+  status: CoreviewArtifactRebindStatus
+  reason: string | null
+  currentView?: CoreviewCurrentView | null
 }
 
 export interface CoreviewViewReadyResult {
@@ -105,6 +131,7 @@ export interface CoreviewRendererAdapter {
   waitForViewReady(viewSignature: string | null): Promise<CoreviewViewReadyResult>
   markViewStale(viewSignature: string | null): void
   clearViewStale(viewSignature: string | null): void
+  rebindVisibleArtifact?(input: CoreviewArtifactRebindInput): CoreviewArtifactRebindResult
 }
 
 export interface CoreviewActionResult {
@@ -138,6 +165,11 @@ export interface CoreviewActionResult {
   review_active?: boolean
   current_view_summary?: string
   annotation_overlay_captured?: boolean | null
+  artifact_stable_identity?: string | null
+  rebind_status: CoreviewArtifactRebindStatus
+  rebind_attempted: boolean
+  rebind_result: CoreviewArtifactRebindStatus
+  rebind_reason: string | null
   raw_artifact_text_excluded: true
   raw_frame_excluded: true
 }
@@ -154,8 +186,18 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
     input: CoreviewGetCurrentViewInput | undefined,
     source: CoreviewToolCommandSource,
   ): CoreviewActionResult => {
-    const current = adapter.getCurrentViewState()
-    const blockedReason = currentViewBlockedReason(current, input?.artifactId)
+    const initial = adapter.getCurrentViewState()
+    const resolved = resolveCurrentViewWithRebind({
+      adapter,
+      current: initial,
+      requestedArtifactId: input?.artifactId ?? null,
+      blockedReason: currentViewBlockedReason(initial, input?.artifactId),
+    })
+    const current = resolved.current
+    const blockedReason = blockedReasonAfterRebind(
+      currentViewBlockedReason(current, input?.artifactId),
+      resolved,
+    )
     return buildCoreviewResult({
       action: "get_current_view",
       source,
@@ -168,8 +210,9 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       refreshAttempted: false,
       refreshResult: "not_requested",
       viewReadyWaitMs: null,
-      viewSignatureBefore: current.viewSignature,
+      viewSignatureBefore: initial.viewSignature,
       viewSignatureAfter: current.viewSignature,
+      ...resolved.rebind,
     })
   }
 
@@ -245,21 +288,30 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
     input: CoreviewSetViewInput,
     source: CoreviewToolCommandSource,
   ): Promise<CoreviewActionResult> => {
-    const before = adapter.getCurrentViewState()
+    const initialBefore = adapter.getCurrentViewState()
+    const resolved = resolveCurrentViewWithRebind({
+      adapter,
+      current: initialBefore,
+      requestedArtifactId: input.artifactId ?? null,
+      blockedReason: currentViewBlockedReason(initialBefore, input.artifactId),
+    })
+    const before = resolved.current
     const baseBlockedReason = currentViewBlockedReason(before, input.artifactId)
-    if (baseBlockedReason) {
+    const blockedAfterRebind = blockedReasonAfterRebind(baseBlockedReason, resolved)
+    if (blockedAfterRebind) {
       return buildCoreviewResult({
         action: "set_view",
         source,
         current: before,
         ok: false,
-        blockedReason: baseBlockedReason,
-        resultSummary: blockedSummary(baseBlockedReason),
+        blockedReason: blockedAfterRebind,
+        resultSummary: blockedSummary(blockedAfterRebind),
         refreshAttempted: false,
         refreshResult: "not_requested",
         viewReadyWaitMs: null,
-        viewSignatureBefore: before.viewSignature,
+        viewSignatureBefore: initialBefore.viewSignature,
         viewSignatureAfter: before.viewSignature,
+        ...resolved.rebind,
       })
     }
 
@@ -276,8 +328,9 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
         refreshAttempted: false,
         refreshResult: "not_requested",
         viewReadyWaitMs: null,
-        viewSignatureBefore: before.viewSignature,
+        viewSignatureBefore: initialBefore.viewSignature,
         viewSignatureAfter: before.viewSignature,
+        ...resolved.rebind,
       })
     }
 
@@ -309,8 +362,9 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
         refreshAttempted: false,
         refreshResult: "not_requested",
         viewReadyWaitMs: ready.waitMs,
-        viewSignatureBefore: before.viewSignature,
+        viewSignatureBefore: initialBefore.viewSignature,
         viewSignatureAfter: adapter.getCurrentViewState().viewSignature,
+        ...resolved.rebind,
       })
     }
 
@@ -358,10 +412,11 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       refreshAttempted,
       refreshResult,
       viewReadyWaitMs: ready.waitMs,
-      viewSignatureBefore: before.viewSignature,
+      viewSignatureBefore: initialBefore.viewSignature,
       viewSignatureAfter: after.viewSignature,
       staleOverride: forceStale,
       visualFrameFreshOverride: forceVisualFrameFresh,
+      ...resolved.rebind,
     })
   }
 
@@ -554,6 +609,78 @@ function currentViewBlockedReason(
   return null
 }
 
+type CoreviewRebindMetadata = Pick<
+  Parameters<typeof buildCoreviewResult>[0],
+  "rebindAttempted" | "rebindResult" | "rebindReason" | "rebindStatus"
+>
+
+function resolveCurrentViewWithRebind({
+  adapter,
+  current,
+  requestedArtifactId,
+  blockedReason,
+}: {
+  adapter: CoreviewRendererAdapter
+  current: CoreviewCurrentView
+  requestedArtifactId: string | null
+  blockedReason: CoreviewToolBlockedReason | null
+}): {
+  current: CoreviewCurrentView
+  rebind: CoreviewRebindMetadata
+} {
+  const defaultRebind: CoreviewRebindMetadata = {
+    rebindAttempted: false,
+    rebindResult: current.rebindStatus ?? "not_attempted",
+    rebindReason: null,
+    rebindStatus: current.rebindStatus ?? "not_attempted",
+  }
+
+  if (
+    !adapter.rebindVisibleArtifact
+    || (blockedReason !== "no_selected_artifact" && blockedReason !== "artifact_mismatch")
+  ) {
+    return { current, rebind: defaultRebind }
+  }
+
+  const result = adapter.rebindVisibleArtifact({
+    source: "coreview_tool",
+    reason: blockedReason,
+    requestedArtifactId,
+  })
+  const reboundCurrent = result.currentView ?? adapter.getCurrentViewState()
+
+  return {
+    current: reboundCurrent,
+    rebind: {
+      rebindAttempted: true,
+      rebindResult: result.status,
+      rebindReason: result.reason,
+      rebindStatus: result.status,
+    },
+  }
+}
+
+function blockedReasonAfterRebind(
+  blockedReason: CoreviewToolBlockedReason | null,
+  resolved: { rebind: CoreviewRebindMetadata },
+): CoreviewToolBlockedReason | null {
+  if (!blockedReason || !resolved.rebind.rebindAttempted) {
+    return blockedReason
+  }
+
+  if (resolved.rebind.rebindResult === "failed") {
+    return resolved.rebind.rebindReason === "artifact_not_available_in_current_session"
+      ? "artifact_not_available_in_current_session"
+      : "artifact_rebind_failed"
+  }
+
+  if (blockedReason === "no_selected_artifact" || blockedReason === "artifact_mismatch") {
+    return "artifact_rebind_required"
+  }
+
+  return blockedReason
+}
+
 function normalizeSetViewInput(
   input: CoreviewSetViewInput,
   current: CoreviewCurrentView,
@@ -612,10 +739,17 @@ function buildCoreviewResult(params: {
   viewSignatureAfter: string | null
   staleOverride?: boolean | null
   visualFrameFreshOverride?: boolean | null
+  rebindAttempted?: boolean
+  rebindResult?: CoreviewArtifactRebindStatus
+  rebindReason?: string | null
+  rebindStatus?: CoreviewArtifactRebindStatus
 }): CoreviewActionResult {
   const current = params.current
   const stale = params.staleOverride ?? current.stale
   const visualFrameFresh = params.visualFrameFreshOverride ?? current.visualFrameFresh
+  const rebindAttempted = params.rebindAttempted ?? false
+  const rebindResult = params.rebindResult ?? current.rebindStatus ?? "not_attempted"
+  const rebindStatus = params.rebindStatus ?? current.rebindStatus ?? rebindResult
   return {
     ok: params.ok,
     action: params.action,
@@ -647,6 +781,11 @@ function buildCoreviewResult(params: {
     review_active: current.reviewActive,
     current_view_summary: currentViewSummary(current),
     annotation_overlay_captured: current.annotationOverlayCaptured,
+    artifact_stable_identity: current.artifactStableIdentity ?? null,
+    rebind_status: rebindStatus,
+    rebind_attempted: rebindAttempted,
+    rebind_result: rebindResult,
+    rebind_reason: params.rebindReason ?? null,
     raw_artifact_text_excluded: true,
     raw_frame_excluded: true,
   }
@@ -676,6 +815,12 @@ function blockedSummary(reason: CoreviewToolBlockedReason): string {
       return "No artifact is selected."
     case "artifact_mismatch":
       return "The requested artifact is not the active Coreview artifact."
+    case "artifact_rebind_required":
+      return "The visible artifact needs to be rebound before Sophia can review it."
+    case "artifact_rebind_failed":
+      return "The visible artifact could not be rebound. Reopen the artifact, then start Review with Sophia again."
+    case "artifact_not_available_in_current_session":
+      return "The requested artifact is not available in the current session. Reopen it from this session thread."
     case "unsupported_pages":
       return "The active renderer does not support pages."
     case "requested_page_out_of_bounds":
@@ -751,6 +896,7 @@ function emptyCurrentView(): CoreviewCurrentView {
     artifactId: null,
     artifactPath: null,
     artifactTitle: null,
+    artifactStableIdentity: null,
     rendererKind: "unsupported",
     supportsPagination: false,
     supportsZoom: false,
@@ -767,6 +913,7 @@ function emptyCurrentView(): CoreviewCurrentView {
     exactTextAvailable: false,
     visualFrameFresh: false,
     annotationOverlayCaptured: null,
+    rebindStatus: "not_attempted",
   }
 }
 

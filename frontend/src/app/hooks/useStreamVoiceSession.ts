@@ -2448,6 +2448,7 @@ export function useStreamVoiceSession(
         const connection = await connectGeminiBrowserLiveFromBootstrap({
           userId,
           sessionId: creds.session_id,
+          threadId: threadId ?? null,
           bootstrap: creds,
           onStage: (geminiStage) => {
             const stageTelemetry = geminiStageTelemetry(geminiStage)

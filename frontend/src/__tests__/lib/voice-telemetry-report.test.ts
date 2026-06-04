@@ -546,6 +546,46 @@ describe('buildVoiceTelemetryReport', () => {
     expect(warnings).not.toContain('review_tool_churn_suppressed');
   });
 
+  it('surfaces artifact rebind diagnostics in artifact review and Coreview summaries', () => {
+    const metrics = buildMetrics();
+    Object.assign(metrics.coreview.visual, {
+      artifactStableIdentity: 'user:unknown|thread:current-thread|path:mnt/user-data/outputs/report.pdf|renderer:pdf',
+      artifactRebindAttempted: true,
+      artifactRebindResult: 'success',
+      artifactRebindReason: 'voice_connect_visible_artifact',
+      artifactReboundFromRenderedState: true,
+      artifactRebindSource: 'voice_connect',
+      exactTextRehydrated: true,
+      exactTextRehydrateResult: 'success',
+      currentRunSelectedStageEvents: 1,
+      longLivedSelectedStageState: true,
+      telemetryScopeMode: 'current_run_rebind',
+    });
+
+    const report = buildVoiceTelemetryReport({
+      exportedAt: '2026-05-20T12:00:04.000Z',
+      metrics,
+      summary: buildSummary(),
+      captureBundle: buildCaptureBundle([]),
+    });
+
+    const expected = {
+      artifactStableIdentity: 'user:unknown|thread:current-thread|path:mnt/user-data/outputs/report.pdf|renderer:pdf',
+      artifactRebindAttempted: true,
+      artifactRebindResult: 'success',
+      artifactRebindReason: 'voice_connect_visible_artifact',
+      artifactReboundFromRenderedState: true,
+      artifactRebindSource: 'voice_connect',
+      exactTextRehydrated: true,
+      exactTextRehydrateResult: 'success',
+      currentRunSelectedStageEvents: 1,
+      longLivedSelectedStageState: true,
+      telemetryScopeMode: 'current_run_rebind',
+    };
+    expect(report.diagnosticsSummary.artifactReview).toMatchObject(expected);
+    expect(report.diagnosticsSummary.coreviewStillFrame).toMatchObject(expected);
+  });
+
   it('adds compact warnings for Gemini stale output, relay backlog, overlap, and unresolved tools', () => {
     const report = buildVoiceTelemetryReport({
       exportedAt: '2026-05-20T12:00:04.000Z',

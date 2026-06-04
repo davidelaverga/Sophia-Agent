@@ -2036,6 +2036,11 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       visual_frame_fresh: true,
       review_active: true,
       annotation_overlay_captured: false,
+      artifact_stable_identity: 'thread:thread-1|path:outputs/report.pdf|renderer:pdf',
+      rebind_status: 'not_attempted',
+      rebind_attempted: false,
+      rebind_result: 'not_attempted',
+      rebind_reason: null,
       raw_artifact_text_excluded: true,
       raw_frame_excluded: true,
     }));
@@ -2153,6 +2158,11 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       visual_fresh: true,
       review_active: true,
       annotation_overlay_captured: false,
+      artifact_stable_identity: 'thread:thread-1|path:outputs/report.pdf|renderer:pdf',
+      rebind_status: 'not_attempted',
+      rebind_attempted: false,
+      rebind_result: 'not_attempted',
+      rebind_reason: null,
       raw_artifact_text_excluded: true,
       raw_frame_excluded: true,
     }));
@@ -2631,6 +2641,65 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       review_tool_timeout_name: null,
       review_tool_timeout_result_sent: false,
       raw_artifact_text_excluded: true,
+    });
+
+    await connection.close();
+  });
+
+  it('allows read_artifact_text for an old registration when the current thread matches', async () => {
+    registerCoreviewArtifactText({
+      artifactId: 'coreview-real-artifact-resumed-pdf',
+      source: 'pdf_text_extraction',
+      text: 'North equals 42',
+      sessionIds: ['old-voice-session'],
+      threadId: 'thread-1',
+    });
+    const fetchMock = makeGeminiBrowserSessionFetch('new-voice-session');
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      sessionId: 'new-voice-session',
+      threadId: 'thread-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          {
+            id: 'read-resumed-visible-pdf',
+            name: 'read_artifact_text',
+            args: { artifact_id: 'coreview-real-artifact-resumed-pdf' },
+          },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => {
+      const responses = websocket?.sent
+        .map((payload) => JSON.parse(payload) as Record<string, unknown>)
+        .flatMap((payload) => {
+          const toolResponse = payload.toolResponse as { functionResponses?: Array<{ id: string; response: Record<string, unknown> }> } | undefined;
+          return toolResponse?.functionResponses ?? [];
+        });
+      expect(responses).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          id: 'read-resumed-visible-pdf',
+          response: expect.objectContaining({
+            ok: true,
+            source: 'pdf_text_extraction',
+            text: 'North equals 42',
+          }),
+        }),
+      ]));
     });
 
     await connection.close();

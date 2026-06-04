@@ -51,6 +51,8 @@ export interface ArtifactStageProps {
   artifactId?: string | null
   sessionId?: string | null
   normalSessionId?: string | null
+  voiceAgentSessionId?: string | null
+  artifactStableIdentity?: string | null
   reviewState?: CoReviewSessionState | null
   transportStatus?: CoReviewTransportStatus | null
   exactTextAvailable?: boolean
@@ -98,6 +100,8 @@ export function ArtifactStage({
   artifactId,
   sessionId,
   normalSessionId,
+  voiceAgentSessionId,
+  artifactStableIdentity,
   reviewState,
   transportStatus,
   exactTextAvailable = false,
@@ -162,10 +166,11 @@ export function ArtifactStage({
   const artifactTextRegistration = useMemo(() => (
     artifactId ? {
       artifactId,
-      sessionIds: [sessionId, normalSessionId],
+      sessionIds: [sessionId, normalSessionId, voiceAgentSessionId],
       threadId,
+      artifactStableIdentity,
     } : null
-  ), [artifactId, normalSessionId, sessionId, threadId])
+  ), [artifactId, artifactStableIdentity, normalSessionId, sessionId, threadId, voiceAgentSessionId])
   const rendererResetKey = `${primaryFile?.path ?? ""}|${rendererKind}`
 
   useEffect(() => {
