@@ -681,7 +681,7 @@ async def get_artifact(
 
     # Check if this is a request for a file inside a .skill archive (e.g., xxx.skill/SKILL.md)
     if ".skill/" in path:
-        return _serve_skill_archive_artifact(thread_id, path)
+        return await _serve_skill_archive_artifact(thread_id, path)
 
     resolution = await _resolve_artifact_path_for_request(thread_id, path)
     actual_path = resolution.actual_path
@@ -698,14 +698,15 @@ async def get_artifact(
     return _serve_local_artifact(thread_id, actual_path, request)
 
 
-def _serve_skill_archive_artifact(thread_id: str, path: str) -> Response:
+async def _serve_skill_archive_artifact(thread_id: str, path: str) -> Response:
     # Split the path at ".skill/" to get the ZIP file path and internal path
     skill_marker = ".skill/"
     marker_pos = path.find(skill_marker)
     skill_file_path = path[: marker_pos + len(".skill")]  # e.g., "mnt/user-data/outputs/my-skill.skill"
     internal_path = path[marker_pos + len(skill_marker) :]  # e.g., "SKILL.md"
 
-    actual_skill_path = _resolve_artifact_path(thread_id, skill_file_path)
+    resolution = await _resolve_artifact_path_for_request(thread_id, skill_file_path)
+    actual_skill_path = resolution.actual_path
     if not actual_skill_path.exists():
         raise HTTPException(status_code=404, detail=f"Skill file not found: {skill_file_path}")
     if not actual_skill_path.is_file():

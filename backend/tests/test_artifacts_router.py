@@ -1,5 +1,6 @@
 import asyncio
 import os
+import zipfile
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -300,6 +301,43 @@ def test_get_artifact_resolves_associated_builder_task_output(tmp_path, monkeypa
     )
 
     assert bytes(response.body).decode("utf-8") == "builder artifact"
+    assert response.media_type == "text/markdown"
+
+
+def test_get_skill_archive_member_resolves_associated_builder_task_output(tmp_path, monkeypatch) -> None:
+    parent_user_data = tmp_path / "parent" / "user-data"
+    task_user_data = tmp_path / "task" / "user-data"
+    task_outputs = task_user_data / "outputs"
+    task_outputs.mkdir(parents=True)
+    skill_path = task_outputs / "demo.skill"
+    with zipfile.ZipFile(skill_path, "w") as archive:
+        archive.writestr("demo/SKILL.md", "# Demo skill\n")
+
+    async def associated(parent_thread_id: str) -> tuple[str, ...]:
+        assert parent_thread_id == "parent-thread"
+        return ("task-thread",)
+
+    monkeypatch.setattr(artifacts_router, "_session_store", OwnedSophiaSessionStore())
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        thread_user_data_resolver({
+            "parent-thread": parent_user_data,
+            "task-thread": task_user_data,
+        }),
+    )
+    monkeypatch.setattr(artifacts_router, "_associated_builder_task_thread_ids", associated)
+
+    response = asyncio.run(
+        artifacts_router.get_artifact(
+            "parent-thread",
+            "mnt/user-data/outputs/demo.skill/SKILL.md",
+            http_request(),
+            authenticated_user_id="user-1",
+        )
+    )
+
+    assert bytes(response.body).decode("utf-8") == "# Demo skill\n"
     assert response.media_type == "text/markdown"
 
 

@@ -380,6 +380,54 @@ async def test_snapshot_hydrates_completed_deliverable_from_builder_thread_state
 
 
 @pytest.mark.anyio
+async def test_snapshot_reconstructs_html_fallback_metadata_for_requested_pptx(
+    app: FastAPI,
+    monkeypatch,
+) -> None:
+    async def tasks(_parent: str):
+        return [
+            {
+                "agent_name": "sophia_builder",
+                "task_id": "task-1",
+                "thread_id": "task-1",
+                "run_id": "run-1",
+                "status": "success",
+                "task_type": "presentation",
+                "artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+                "last_updated_at": RECENT_TASK_TIMESTAMP,
+            }
+        ]
+
+    async def status(_task: str, _run: str, _fallback: str | None):
+        return "completed"
+
+    async def builder_payload(_task: dict):
+        return {
+            "artifact_path": "/mnt/user-data/outputs/deck.html",
+            "artifact_title": "Deck fallback",
+            "artifact_type": "webpage",
+            "companion_summary": "Fallback is ready.",
+        }
+
+    monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", tasks)
+    monkeypatch.setattr(builder_canvas, "_native_run_status", status)
+    monkeypatch.setattr(builder_canvas, "_builder_thread_artifact_payload", builder_payload)
+    monkeypatch.setattr(builder_canvas, "_signed_artifact_url", lambda _thread_id, _artifact_path: None)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/sophia/user-1/threads/parent-1/builder-canvas/snapshot")
+
+    assert response.status_code == 200
+    completion = response.json()["active_task"]["completion"]
+    assert completion["status"] == "success"
+    assert completion["artifact_path"] == "mnt/user-data/outputs/deck.html"
+    assert completion["requested_artifact_ext"] == "pptx"
+    assert completion["artifact_ext"] == "html"
+    assert completion["artifact_is_fallback"] is True
+    assert completion["fallback_reason"] == "pptx_generation_not_completed"
+
+
+@pytest.mark.anyio
 async def test_snapshot_preserves_retained_successful_terminal_with_artifact(app: FastAPI, monkeypatch) -> None:
     async def tasks(_parent: str):
         return [

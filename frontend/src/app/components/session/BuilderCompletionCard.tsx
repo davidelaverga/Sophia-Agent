@@ -80,6 +80,9 @@ function StatusGlyph({ icon, accentVar, compact }: { icon: StatusMeta['icon']; a
 
 function deriveTitle(event: BuilderCompletionEventV1): string {
   if (event.status === 'success') {
+    if (isFallbackCompletion(event)) {
+      return `${fallbackArtifactLabel(event)} ready.`;
+    }
     return event.artifact_title || event.artifact_filename || (event.artifact_path || event.artifact_url ? 'Your file is ready.' : 'Artifact delivery is pending.');
   }
   if (event.status === 'timeout') {
@@ -93,6 +96,9 @@ function deriveTitle(event: BuilderCompletionEventV1): string {
 
 function deriveBody(event: BuilderCompletionEventV1): string | null {
   if (event.status === 'success') {
+    if (isFallbackCompletion(event)) {
+      return fallbackCompletionBody(event);
+    }
     return event.summary || event.user_next_action || null;
   }
   if (event.status === 'error') {
@@ -105,6 +111,9 @@ function deriveBody(event: BuilderCompletionEventV1): string | null {
 }
 
 function artifactExtension(event: BuilderCompletionEventV1): string {
+  if (event.artifact_ext) {
+    return event.artifact_ext.toLowerCase().replace(/^\./u, '');
+  }
   const candidate = event.artifact_filename || event.artifact_path || event.artifact_url || '';
   const clean = candidate.split('?')[0]?.split('#')[0] ?? '';
   const ext = clean.split('.').pop();
@@ -113,6 +122,33 @@ function artifactExtension(event: BuilderCompletionEventV1): string {
 
 function isDownloadFirstArtifact(event: BuilderCompletionEventV1): boolean {
   return DOWNLOAD_FIRST_EXTENSIONS.has(artifactExtension(event));
+}
+
+function isFallbackCompletion(event: BuilderCompletionEventV1): boolean {
+  return event.status === 'success' && event.artifact_is_fallback === true;
+}
+
+function fallbackArtifactLabel(event: BuilderCompletionEventV1): string {
+  const ext = artifactExtension(event);
+  if (ext === 'html' || ext === 'htm') {
+    return 'HTML fallback';
+  }
+  if (ext === 'md' || ext === 'markdown') {
+    return 'Markdown fallback';
+  }
+  return `${ext ? ext.toUpperCase() : 'Artifact'} fallback`;
+}
+
+function fallbackCompletionBody(event: BuilderCompletionEventV1): string {
+  const requested = event.requested_artifact_ext?.toLowerCase().replace(/^\./u, '') ?? '';
+  const ext = artifactExtension(event);
+  if (requested === 'pptx' && (ext === 'html' || ext === 'htm')) {
+    return 'I couldn’t finish the PowerPoint package, so I delivered a browser-viewable HTML fallback.';
+  }
+  if (requested === 'pptx' && (ext === 'md' || ext === 'markdown')) {
+    return 'I couldn’t finish the PowerPoint package, so I delivered a Markdown fallback you can open and reuse.';
+  }
+  return event.summary || 'I delivered a usable fallback artifact because the originally requested format could not be completed.';
 }
 
 export function BuilderCompletionCard({
@@ -135,32 +171,14 @@ export function BuilderCompletionCard({
     () => buildThreadArtifactHref(event.thread_id, event.artifact_path, { download: true }),
     [event.artifact_path, event.thread_id],
   );
-  const openHref = artifactProxyHref || event.artifact_url || null;
-  const downloadHref = artifactProxyDownloadHref || event.artifact_url || null;
-  const downloadFirst = isDownloadFirstArtifact(event);
-
-  const showPreview = event.status === 'success' && Boolean(artifactProxyHref) && !downloadFirst && Boolean(onOpen);
-  const showOpenInNewTab = event.status === 'success' && Boolean(openHref) && !downloadFirst;
-  const showDownload = event.status === 'success' && Boolean(downloadHref);
-  const showMissingActionHint = event.status === 'success' && !showPreview && !showOpenInNewTab && !showDownload;
-  const showRetry = event.status === 'error' || event.status === 'timeout';
+  const fallbackLabel = isFallbackCompletion(event) ? fallbackArtifactLabel(event).toLowerCase() : null;
+  const showMissingActionHint = shouldShowMissingActionHint({
+    event,
+    artifactProxyHref,
+    artifactProxyDownloadHref,
+    hasPreviewHandler: Boolean(onOpen),
+  });
   const showDismiss = Boolean(onDismiss);
-
-  const handlePreview: MouseEventHandler<HTMLButtonElement> = (e) => {
-    e.preventDefault();
-    onOpen?.(event);
-  };
-
-  // Prefer Sophia's same-origin proxy for downloads so Content-Disposition
-  // works even when the signed Supabase URL is absent or cross-origin.
-  const handleDownload: MouseEventHandler<HTMLAnchorElement> = () => {
-    onDownload?.(event);
-  };
-
-  const handleRetry: MouseEventHandler<HTMLButtonElement> = (e) => {
-    e.preventDefault();
-    onRetry?.(event);
-  };
 
   const handleDismiss: MouseEventHandler<HTMLButtonElement> = (e) => {
     e.preventDefault();
@@ -205,6 +223,17 @@ export function BuilderCompletionCard({
             >
               builder
             </span>
+            {fallbackLabel && (
+              <span
+                className={cn('rounded-full tracking-[0.1em] lowercase', compact ? 'px-1.5 py-0.5 text-[8px]' : 'px-2 py-0.5 text-[9px]')}
+                style={{
+                  color: 'var(--cosmic-amber)',
+                  background: 'color-mix(in srgb, var(--cosmic-amber) 13%, transparent)',
+                }}
+              >
+                {fallbackLabel}
+              </span>
+            )}
           </div>
 
           <p
@@ -249,93 +278,16 @@ export function BuilderCompletionCard({
       </div>
 
       <div className={cn('flex items-center justify-end gap-2', compact ? 'mt-2' : 'mt-2.5')}>
-        {showPreview && (
-          <button
-            type="button"
-            onClick={handlePreview}
-            className={cn(
-              'rounded-full border tracking-[0.08em] transition-all duration-300',
-              compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1 text-[10px]',
-            )}
-            style={{
-              borderColor: `color-mix(in srgb, ${meta.accentVar} 38%, transparent)`,
-              background: `color-mix(in srgb, ${meta.accentVar} 14%, transparent)`,
-              color: meta.accentVar,
-            }}
-          >
-            <span className="inline-flex items-center gap-1">
-              <Eye className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
-              View in canvas
-            </span>
-          </button>
-        )}
-
-        {showOpenInNewTab && openHref && (
-          <a
-            href={openHref}
-            target="_blank"
-            rel="noreferrer"
-            className={cn(
-              'rounded-full border tracking-[0.08em] transition-all duration-300',
-              compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1 text-[10px]',
-            )}
-            style={{
-              borderColor: `color-mix(in srgb, ${meta.accentVar} 24%, transparent)`,
-              background: 'transparent',
-              color: 'var(--cosmic-text-faint)',
-              textDecoration: 'none',
-            }}
-            aria-label="Open artifact in new tab"
-          >
-            <span className="inline-flex items-center gap-1">
-              <ExternalLink className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
-              Open in new tab
-            </span>
-          </a>
-        )}
-
-        {showDownload && downloadHref && (
-          <a
-            href={downloadHref}
-            download={event.artifact_filename || true}
-            onClick={handleDownload}
-            className={cn(
-              'rounded-full border tracking-[0.08em] transition-all duration-300',
-              compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1 text-[10px]',
-            )}
-            style={{
-              borderColor: `color-mix(in srgb, ${meta.accentVar} 28%, transparent)`,
-              background: 'transparent',
-              color: 'var(--cosmic-text-faint)',
-              textDecoration: 'none',
-            }}
-            aria-label="Download artifact"
-          >
-            <span className="inline-flex items-center gap-1">
-              <Download className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
-              Download
-            </span>
-          </a>
-        )}
-
-        {showRetry && (
-          <button
-            type="button"
-            onClick={handleRetry}
-            className={cn(
-              'rounded-full border tracking-[0.08em] lowercase transition-all duration-300',
-              compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1 text-[10px]',
-            )}
-            style={{
-              borderColor: `color-mix(in srgb, ${meta.accentVar} 38%, transparent)`,
-              background: `color-mix(in srgb, ${meta.accentVar} 14%, transparent)`,
-              color: meta.accentVar,
-            }}
-          >
-            try again
-          </button>
-        )}
-
+        <BuilderCompletionActions
+          event={event}
+          meta={meta}
+          compact={compact}
+          artifactProxyHref={artifactProxyHref}
+          artifactProxyDownloadHref={artifactProxyDownloadHref}
+          onOpen={onOpen}
+          onDownload={onDownload}
+          onRetry={onRetry}
+        />
         {showDismiss && (
           <button
             type="button"
@@ -352,4 +304,225 @@ export function BuilderCompletionCard({
       </div>
     </div>
   );
+}
+
+function BuilderCompletionActions({
+  event,
+  meta,
+  compact,
+  artifactProxyHref,
+  artifactProxyDownloadHref,
+  onOpen,
+  onDownload,
+  onRetry,
+}: {
+  event: BuilderCompletionEventV1;
+  meta: StatusMeta;
+  compact: boolean;
+  artifactProxyHref: string | null;
+  artifactProxyDownloadHref: string | null;
+  onOpen?: (event: BuilderCompletionEventV1) => void;
+  onDownload?: (event: BuilderCompletionEventV1) => void;
+  onRetry?: (event: BuilderCompletionEventV1) => void;
+}) {
+  const openHref = artifactProxyHref || event.artifact_url || null;
+  const downloadHref = artifactProxyDownloadHref || event.artifact_url || null;
+  const downloadFirst = isDownloadFirstArtifact(event);
+
+  return (
+    <>
+      <PreviewAction event={event} href={artifactProxyHref} downloadFirst={downloadFirst} meta={meta} compact={compact} onOpen={onOpen} />
+      <OpenAction event={event} href={openHref} downloadFirst={downloadFirst} meta={meta} compact={compact} />
+      <DownloadAction event={event} href={downloadHref} meta={meta} compact={compact} onDownload={onDownload} />
+      <RetryAction event={event} meta={meta} compact={compact} onRetry={onRetry} />
+    </>
+  );
+}
+
+function PreviewAction({
+  event,
+  href,
+  downloadFirst,
+  meta,
+  compact,
+  onOpen,
+}: {
+  event: BuilderCompletionEventV1;
+  href: string | null;
+  downloadFirst: boolean;
+  meta: StatusMeta;
+  compact: boolean;
+  onOpen?: (event: BuilderCompletionEventV1) => void;
+}) {
+  if (event.status !== 'success' || !href || downloadFirst || !onOpen) {
+    return null;
+  }
+  const handlePreview: MouseEventHandler<HTMLButtonElement> = (e) => {
+    e.preventDefault();
+    onOpen(event);
+  };
+  return (
+    <button
+      type="button"
+      onClick={handlePreview}
+      className={cn(
+        'rounded-full border tracking-[0.08em] transition-all duration-300',
+        compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1 text-[10px]',
+      )}
+      style={{
+        borderColor: `color-mix(in srgb, ${meta.accentVar} 38%, transparent)`,
+        background: `color-mix(in srgb, ${meta.accentVar} 14%, transparent)`,
+        color: meta.accentVar,
+      }}
+    >
+      <span className="inline-flex items-center gap-1">
+        <Eye className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+        View in canvas
+      </span>
+    </button>
+  );
+}
+
+function OpenAction({
+  event,
+  href,
+  downloadFirst,
+  meta,
+  compact,
+}: {
+  event: BuilderCompletionEventV1;
+  href: string | null;
+  downloadFirst: boolean;
+  meta: StatusMeta;
+  compact: boolean;
+}) {
+  if (event.status !== 'success' || !href || downloadFirst) {
+    return null;
+  }
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className={cn(
+        'rounded-full border tracking-[0.08em] transition-all duration-300',
+        compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1 text-[10px]',
+      )}
+      style={{
+        borderColor: `color-mix(in srgb, ${meta.accentVar} 24%, transparent)`,
+        background: 'transparent',
+        color: 'var(--cosmic-text-faint)',
+        textDecoration: 'none',
+      }}
+      aria-label="Open artifact in new tab"
+    >
+      <span className="inline-flex items-center gap-1">
+        <ExternalLink className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+        Open in new tab
+      </span>
+    </a>
+  );
+}
+
+function DownloadAction({
+  event,
+  href,
+  meta,
+  compact,
+  onDownload,
+}: {
+  event: BuilderCompletionEventV1;
+  href: string | null;
+  meta: StatusMeta;
+  compact: boolean;
+  onDownload?: (event: BuilderCompletionEventV1) => void;
+}) {
+  if (event.status !== 'success' || !href) {
+    return null;
+  }
+  const handleDownload: MouseEventHandler<HTMLAnchorElement> = () => {
+    onDownload?.(event);
+  };
+  return (
+    <a
+      href={href}
+      download={event.artifact_filename || true}
+      onClick={handleDownload}
+      className={cn(
+        'rounded-full border tracking-[0.08em] transition-all duration-300',
+        compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1 text-[10px]',
+      )}
+      style={{
+        borderColor: `color-mix(in srgb, ${meta.accentVar} 28%, transparent)`,
+        background: 'transparent',
+        color: 'var(--cosmic-text-faint)',
+        textDecoration: 'none',
+      }}
+      aria-label="Download artifact"
+    >
+      <span className="inline-flex items-center gap-1">
+        <Download className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+        Download
+      </span>
+    </a>
+  );
+}
+
+function RetryAction({
+  event,
+  meta,
+  compact,
+  onRetry,
+}: {
+  event: BuilderCompletionEventV1;
+  meta: StatusMeta;
+  compact: boolean;
+  onRetry?: (event: BuilderCompletionEventV1) => void;
+}) {
+  if (event.status !== 'error' && event.status !== 'timeout') {
+    return null;
+  }
+  const handleRetry: MouseEventHandler<HTMLButtonElement> = (e) => {
+    e.preventDefault();
+    onRetry?.(event);
+  };
+  return (
+    <button
+      type="button"
+      onClick={handleRetry}
+      className={cn(
+        'rounded-full border tracking-[0.08em] lowercase transition-all duration-300',
+        compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1 text-[10px]',
+      )}
+      style={{
+        borderColor: `color-mix(in srgb, ${meta.accentVar} 38%, transparent)`,
+        background: `color-mix(in srgb, ${meta.accentVar} 14%, transparent)`,
+        color: meta.accentVar,
+      }}
+    >
+      try again
+    </button>
+  );
+}
+
+function shouldShowMissingActionHint({
+  event,
+  artifactProxyHref,
+  artifactProxyDownloadHref,
+  hasPreviewHandler,
+}: {
+  event: BuilderCompletionEventV1;
+  artifactProxyHref: string | null;
+  artifactProxyDownloadHref: string | null;
+  hasPreviewHandler: boolean;
+}): boolean {
+  if (event.status !== 'success') {
+    return false;
+  }
+  const downloadFirst = isDownloadFirstArtifact(event);
+  const openHref = artifactProxyHref || event.artifact_url || null;
+  const downloadHref = artifactProxyDownloadHref || event.artifact_url || null;
+  return !(artifactProxyHref && !downloadFirst && hasPreviewHandler)
+    && !(openHref && !downloadFirst)
+    && !downloadHref;
 }

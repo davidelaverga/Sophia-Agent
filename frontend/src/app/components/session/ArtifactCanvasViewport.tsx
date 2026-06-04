@@ -5,7 +5,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 
 import type { ArtifactFitMode, ArtifactRendererKind } from "../../lib/artifact-renderers"
 import { detectArtifactRendererKind } from "../../lib/artifact-renderers"
-import { isMarkdownArtifactFile } from "../../lib/builder-artifacts"
+import { isHtmlArtifactFile, isMarkdownArtifactFile } from "../../lib/builder-artifacts"
 import {
   registerCoreviewArtifactText,
   registerCoreviewArtifactTextStatus,
@@ -39,7 +39,7 @@ export type ArtifactVisualCaptureUnavailableReason =
 export interface ArtifactVisualCaptureStatus {
   ready: boolean
   reason: ArtifactVisualCaptureUnavailableReason | null
-  source: "markdown_preview_canvas" | "metadata_canvas" | "pdf_page_canvas" | "none"
+  source: "markdown_preview_canvas" | "html_preview_canvas" | "metadata_canvas" | "pdf_page_canvas" | "none"
   exactTextAvailable: boolean
   pdfTextExtractionStatus?: ArtifactPdfTextExtractionStatus["status"] | null
   pdfTextExtractionSource?: ArtifactPdfTextExtractionStatus["source"] | null
@@ -123,14 +123,22 @@ export function ArtifactCanvasViewport({
   const primaryFile = previewFile ?? files.find((file) => file.isPrimary) ?? files[0]
   const supportingFiles = files.filter((file) => !file.isPrimary)
   const effectiveRendererKind = rendererKind ?? detectArtifactRendererKind(primaryFile, artifact)
-  const canPreviewMarkdown = effectiveRendererKind === "markdown" || isMarkdownArtifactFile(primaryFile)
-  const canPreviewPdf = effectiveRendererKind === "pdf"
+  const canPreviewHtml = effectiveRendererKind === "html" || isHtmlArtifactFile(primaryFile)
+  const canPreviewMarkdown = !canPreviewHtml && (effectiveRendererKind === "markdown" || isMarkdownArtifactFile(primaryFile))
+  const canPreviewPdf = !canPreviewHtml && effectiveRendererKind === "pdf"
   const scrollAreaRef = useRef<HTMLDivElement | null>(null)
   const canvasBedBounds = useElementClientBounds(scrollAreaRef)
   const preview = useMarkdownArtifactPreview({
     enabled: canPreviewMarkdown,
     href: previewHref,
   })
+  const htmlPreview = useHtmlArtifactPreview({
+    enabled: canPreviewHtml,
+    href: previewHref,
+  })
+  const htmlPreviewText = useMemo(() => (
+    htmlPreview.status === "ready" ? extractTextFromHtml(htmlPreview.html) : ""
+  ), [htmlPreview])
   const captureArtifactId = artifactTextRegistration?.artifactId ?? null
   const markdownCaptureKey = [
     captureArtifactId ?? "",
@@ -222,6 +230,27 @@ export function ArtifactCanvasViewport({
     currentPdfTextExtractionStatus.source,
     currentPdfTextExtractionStatus.status,
     currentPdfTextExtractionStatus.truncated,
+  ])
+  const visualCaptureStatus = useMemo(() => resolveVisualCaptureStatus({
+    captureArtifactId,
+    canPreviewHtml,
+    canPreviewMarkdown,
+    canPreviewPdf,
+    currentMarkdownCaptureStatus,
+    currentPdfCaptureStatusWithText,
+    htmlPreview,
+    htmlPreviewText,
+    markdownPreview: preview,
+  }), [
+    canPreviewHtml,
+    canPreviewMarkdown,
+    canPreviewPdf,
+    captureArtifactId,
+    currentMarkdownCaptureStatus,
+    currentPdfCaptureStatusWithText,
+    htmlPreview,
+    htmlPreviewText,
+    preview,
   ])
   const handlePdfTextExtractionStatusChange = useCallback((status: ArtifactPdfTextExtractionStatus) => {
     onPdfTextLayoutChange?.(status.status === "success" ? status.layout ?? null : null)
@@ -362,51 +391,26 @@ export function ArtifactCanvasViewport({
   ])
 
   useEffect(() => {
+    if (!artifactTextRegistration || !htmlPreviewText.trim()) {
+      return
+    }
+
+    return registerCoreviewArtifactText({
+      artifactId: artifactTextRegistration.artifactId,
+      source: "builder_file",
+      text: htmlPreviewText,
+      sessionIds: artifactTextRegistration.sessionIds,
+      threadId: artifactTextRegistration.threadId,
+      artifactStableIdentity: artifactTextRegistration.artifactStableIdentity,
+    })
+  }, [artifactTextRegistration, htmlPreviewText])
+
+  useEffect(() => {
     if (!onVisualCaptureStatusChange) {
       return
     }
-
-    if (!captureArtifactId) {
-      onVisualCaptureStatusChange(unavailableCaptureStatus("no_selected_artifact", "none"))
-      return
-    }
-
-    if (canPreviewPdf) {
-      onVisualCaptureStatusChange(currentPdfCaptureStatusWithText)
-      return
-    }
-
-    if (!canPreviewMarkdown) {
-      onVisualCaptureStatusChange({
-        ready: true,
-        reason: null,
-        source: "metadata_canvas",
-        exactTextAvailable: true,
-      })
-      return
-    }
-
-    if (preview.status === "idle" || preview.status === "loading") {
-      onVisualCaptureStatusChange(unavailableCaptureStatus("preview_not_ready", "markdown_preview_canvas"))
-      return
-    }
-
-    if (preview.status === "failed" || !preview.markdown.trim()) {
-      onVisualCaptureStatusChange(unavailableCaptureStatus("exact_text_only_no_visual_source", "markdown_preview_canvas"))
-      return
-    }
-
-    onVisualCaptureStatusChange(currentMarkdownCaptureStatus)
-  }, [
-    canPreviewMarkdown,
-    canPreviewPdf,
-    captureArtifactId,
-    currentMarkdownCaptureStatus,
-    currentPdfCaptureStatusWithText,
-    onVisualCaptureStatusChange,
-    preview.markdown,
-    preview.status,
-  ])
+    onVisualCaptureStatusChange(visualCaptureStatus)
+  }, [onVisualCaptureStatusChange, visualCaptureStatus])
 
   return (
     <div
@@ -445,7 +449,14 @@ export function ArtifactCanvasViewport({
           )}
           style={{ scrollbarColor: "var(--cosmic-border) transparent" }}
         >
-          {canPreviewMarkdown ? (
+          {canPreviewHtml ? (
+            <HtmlDocumentPage
+              artifact={artifact}
+              file={primaryFile}
+              preview={htmlPreview}
+              typeLabel={typeLabel}
+            />
+          ) : canPreviewMarkdown ? (
             <MarkdownDocumentPage
               artifact={artifact}
               file={primaryFile}
@@ -553,6 +564,12 @@ type MarkdownPreviewState =
   | { status: "ready"; markdown: string }
   | { status: "failed"; markdown: "" }
 
+type HtmlPreviewState =
+  | { status: "idle"; html: "" }
+  | { status: "loading"; html: "" }
+  | { status: "ready"; html: string }
+  | { status: "failed"; html: "" }
+
 function useMarkdownArtifactPreview({
   enabled,
   href,
@@ -599,6 +616,140 @@ function useMarkdownArtifactPreview({
   }, [enabled, href])
 
   return preview
+}
+
+function useHtmlArtifactPreview({
+  enabled,
+  href,
+}: {
+  enabled: boolean
+  href?: string | null
+}): HtmlPreviewState {
+  const [preview, setPreview] = useState<HtmlPreviewState>({ status: "idle", html: "" })
+
+  useEffect(() => {
+    if (!enabled || !href) {
+      setPreview({ status: "idle", html: "" })
+      return
+    }
+
+    const controller = new AbortController()
+    setPreview({ status: "loading", html: "" })
+
+    fetch(href, {
+      method: "GET",
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error("preview_unavailable")
+        }
+        return response.text()
+      })
+      .then((html) => {
+        if (!controller.signal.aborted) {
+          setPreview({ status: "ready", html })
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setPreview({ status: "failed", html: "" })
+        }
+      })
+
+    return () => {
+      controller.abort()
+    }
+  }, [enabled, href])
+
+  return preview
+}
+
+function extractTextFromHtml(html: string): string {
+  if (!html.trim()) {
+    return ""
+  }
+
+  try {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(html, "text/html")
+    return (doc.body?.textContent ?? doc.documentElement.textContent ?? "")
+      .replace(/\s+/gu, " ")
+      .trim()
+  } catch {
+    return html
+      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/giu, " ")
+      .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/giu, " ")
+      .replace(/<[^>]+>/gu, " ")
+      .replace(/\s+/gu, " ")
+      .trim()
+  }
+}
+
+function resolveVisualCaptureStatus({
+  captureArtifactId,
+  canPreviewHtml,
+  canPreviewMarkdown,
+  canPreviewPdf,
+  currentMarkdownCaptureStatus,
+  currentPdfCaptureStatusWithText,
+  htmlPreview,
+  htmlPreviewText,
+  markdownPreview,
+}: {
+  captureArtifactId: string | null
+  canPreviewHtml: boolean
+  canPreviewMarkdown: boolean
+  canPreviewPdf: boolean
+  currentMarkdownCaptureStatus: ArtifactVisualCaptureStatus
+  currentPdfCaptureStatusWithText: ArtifactVisualCaptureStatus
+  htmlPreview: HtmlPreviewState
+  htmlPreviewText: string
+  markdownPreview: MarkdownPreviewState
+}): ArtifactVisualCaptureStatus {
+  if (!captureArtifactId) {
+    return unavailableCaptureStatus("no_selected_artifact", "none")
+  }
+  if (canPreviewHtml) {
+    return htmlVisualCaptureStatus(htmlPreview, htmlPreviewText)
+  }
+  if (canPreviewPdf) {
+    return currentPdfCaptureStatusWithText
+  }
+  if (!canPreviewMarkdown) {
+    return {
+      ready: true,
+      reason: null,
+      source: "metadata_canvas",
+      exactTextAvailable: true,
+    }
+  }
+  if (markdownPreview.status === "idle" || markdownPreview.status === "loading") {
+    return unavailableCaptureStatus("preview_not_ready", "markdown_preview_canvas")
+  }
+  if (markdownPreview.status === "failed" || !markdownPreview.markdown.trim()) {
+    return unavailableCaptureStatus("exact_text_only_no_visual_source", "markdown_preview_canvas")
+  }
+  return currentMarkdownCaptureStatus
+}
+
+function htmlVisualCaptureStatus(
+  preview: HtmlPreviewState,
+  previewText: string,
+): ArtifactVisualCaptureStatus {
+  if (preview.status === "idle" || preview.status === "loading") {
+    return unavailableCaptureStatus("preview_not_ready", "html_preview_canvas")
+  }
+  if (preview.status === "failed" || !preview.html.trim()) {
+    return unavailableCaptureStatus("exact_text_only_no_visual_source", "html_preview_canvas")
+  }
+  return {
+    ready: true,
+    reason: null,
+    source: "html_preview_canvas",
+    exactTextAvailable: Boolean(previewText.trim()),
+  }
 }
 
 function unavailableCaptureStatus(
@@ -692,6 +843,56 @@ function MarkdownDocumentPage({
           <PreviewStateCard title="Preview unavailable" body="Open or download the artifact to view the file." />
         ) : (
           <ArtifactMarkdownPreview markdown={preview.markdown} />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function HtmlDocumentPage({
+  artifact,
+  file,
+  preview,
+  typeLabel,
+}: {
+  artifact: BuilderArtifactV1
+  file?: ArtifactViewportFile
+  preview: HtmlPreviewState
+  typeLabel: string
+}) {
+  return (
+    <div
+      data-testid="artifact-document-page"
+      className="mx-auto flex min-h-full w-full max-w-[1120px] flex-col overflow-hidden rounded-lg border bg-[color:color-mix(in_srgb,var(--card-bg)_96%,var(--cosmic-panel-soft))] shadow-[0_18px_54px_color-mix(in_srgb,var(--bg)_34%,transparent),0_1px_0_color-mix(in_srgb,white_26%,transparent)_inset]"
+      style={{ borderColor: "var(--cosmic-border-soft)" }}
+      aria-label="Artifact HTML preview"
+    >
+      <div className="flex items-center justify-between gap-4 border-b border-[color:var(--cosmic-border-soft)] px-5 py-4 sm:px-6">
+        <div className="min-w-0">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-[color:var(--cosmic-border-soft)] px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-[color:var(--cosmic-text-muted)]">
+            <Layers className="h-3.5 w-3.5" aria-hidden="true" />
+            {typeLabel}
+          </span>
+          <p className="mt-2 truncate text-xs text-[color:var(--cosmic-text-faint)]">
+            {file?.name ?? artifact.artifactTitle}
+          </p>
+        </div>
+        <Sparkles className="h-7 w-7 shrink-0 text-[color:var(--cosmic-text-faint)]" aria-hidden="true" />
+      </div>
+
+      <div className="flex min-h-[420px] flex-1 flex-col px-4 py-4 sm:px-5 sm:py-5">
+        {preview.status === "loading" ? (
+          <PreviewStateCard title="Preparing webpage view" body="You can still open or download the artifact." />
+        ) : preview.status === "failed" || preview.status === "idle" ? (
+          <PreviewStateCard title="Preview unavailable" body="Open or download the artifact to view the file." />
+        ) : (
+          <iframe
+            title={`Preview of ${file?.name ?? artifact.artifactTitle}`}
+            sandbox=""
+            srcDoc={preview.html}
+            className="min-h-[560px] w-full flex-1 rounded-md border bg-white"
+            style={{ borderColor: "var(--cosmic-border-soft)" }}
+          />
         )}
       </div>
     </div>
