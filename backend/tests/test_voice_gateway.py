@@ -1053,6 +1053,65 @@ class TestGeminiBrowserDogfoodGateway:
         proxy.assert_awaited_once()
         assert resp.json()["accepted"] is True
 
+    def test_relay_suppresses_emit_artifact_in_mixed_review_tool_batch(self):
+        with patch(
+            "app.gateway.routers.voice._proxy_voice_dogfood_json",
+            new_callable=AsyncMock,
+            return_value={"accepted": True, "session_id": "browser-gemini-1", "client_actions": []},
+        ) as proxy:
+            resp = client.post(
+                "/api/sophia/user_123/voice/dogfood/gemini/relay",
+                json={
+                    "session_id": "browser-gemini-1",
+                    "event": {
+                        "toolCall": {
+                            "functionCalls": [
+                                {
+                                    "id": "coreview-call-1",
+                                    "name": "coreview_set_view",
+                                    "args": {"page_number": 2},
+                                },
+                                {
+                                    "id": "artifact-call-1",
+                                    "name": "emit_artifact",
+                                    "args": {"takeaway": "Not for review"},
+                                },
+                            ]
+                        }
+                    },
+                    "provider_receive_sequence": 46,
+                    "provider_relay_sequence": 11,
+                    "provider_received_at": "2026-05-24T05:29:09.000Z",
+                    "relay_correlation_id": "gemini-46",
+                    "provider_primary_category": "toolCall",
+                    "provider_categories": ["toolCall"],
+                    "artifact_review_context": {
+                        "active": True,
+                        "artifact_id": "artifact-1",
+                        "source": "coreview_still_frame",
+                        "user_intent": "analysis",
+                        "raw_transcript_excluded": True,
+                        "raw_artifact_text_excluded": True,
+                    },
+                },
+            )
+
+        assert resp.status_code == 202
+        payload = resp.json()
+        proxy.assert_awaited_once()
+        proxied_json = proxy.await_args.kwargs["json_body"]
+        assert proxied_json["event"]["toolCall"]["functionCalls"] == [
+            {
+                "id": "coreview-call-1",
+                "name": "coreview_set_view",
+                "args": {"page_number": 2},
+            }
+        ]
+        function_response = payload["client_actions"][0]["payload"]["toolResponse"]["functionResponses"][0]
+        assert function_response["id"] == "artifact-call-1"
+        assert function_response["name"] == "emit_artifact"
+        assert function_response["response"]["safe_reason"] == "artifact_review_emit_artifact_suppressed"
+
     def test_relay_injects_active_review_artifact_id_for_read_artifact_text(self):
         with patch(
             "app.gateway.routers.voice._proxy_voice_dogfood_json",

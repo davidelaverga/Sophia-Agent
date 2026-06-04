@@ -35,8 +35,12 @@ export interface CoreviewArtifactTextSuccess {
 export interface CoreviewArtifactTextFailure {
   ok: false;
   artifact_id: string;
-  status: 'not_found' | 'unavailable' | 'forbidden' | 'unsupported';
+  status: 'not_found' | 'unavailable' | 'forbidden' | 'unsupported' | 'extraction_pending' | 'extraction_failed';
   safe_reason: string;
+  source?: CoreviewArtifactTextSource;
+  page_count?: number | null;
+  char_count?: number | null;
+  truncated?: boolean | null;
 }
 
 export type CoreviewArtifactTextResponse = CoreviewArtifactTextSuccess | CoreviewArtifactTextFailure;
@@ -52,6 +56,18 @@ export interface CoreviewArtifactTextRegistration {
   threadId?: string | null;
 }
 
+export interface CoreviewArtifactTextStatusRegistration {
+  artifactId: string;
+  source: CoreviewArtifactTextSource;
+  status: 'loading' | 'failed' | 'unavailable';
+  safeReason?: string | null;
+  pageCount?: number | null;
+  charCount?: number | null;
+  truncated?: boolean | null;
+  sessionIds?: Array<string | null | undefined>;
+  threadId?: string | null;
+}
+
 export interface CoreviewArtifactTextReadInput {
   artifactId: string;
   sessionId?: string | null;
@@ -60,6 +76,7 @@ export interface CoreviewArtifactTextReadInput {
 
 const MAX_ARTIFACT_TEXT_CHARS = 12_000;
 const registry = new Map<string, CoreviewArtifactTextRegistration[]>();
+const statusRegistry = new Map<string, CoreviewArtifactTextStatusRegistration[]>();
 
 export function registerCoreviewArtifactText(
   registration: CoreviewArtifactTextRegistration,
@@ -98,6 +115,43 @@ export function registerCoreviewArtifactText(
   };
 }
 
+export function registerCoreviewArtifactTextStatus(
+  registration: CoreviewArtifactTextStatusRegistration,
+): () => void {
+  const artifactId = normalizeToken(registration.artifactId);
+  if (!artifactId) {
+    return () => undefined;
+  }
+
+  const entry: CoreviewArtifactTextStatusRegistration = {
+    artifactId,
+    source: registration.source,
+    status: registration.status,
+    safeReason: normalizeToken(registration.safeReason),
+    pageCount: normalizePositiveInteger(registration.pageCount),
+    charCount: normalizeNonNegativeInteger(registration.charCount),
+    truncated: typeof registration.truncated === 'boolean' ? registration.truncated : null,
+    sessionIds: normalizeSessionIds(registration.sessionIds),
+    threadId: normalizeToken(registration.threadId),
+  };
+  const entries = statusRegistry.get(artifactId) ?? [];
+  entries.push(entry);
+  statusRegistry.set(artifactId, entries);
+
+  return () => {
+    const current = statusRegistry.get(artifactId);
+    if (!current) {
+      return;
+    }
+    const next = current.filter((candidate) => candidate !== entry);
+    if (next.length > 0) {
+      statusRegistry.set(artifactId, next);
+    } else {
+      statusRegistry.delete(artifactId);
+    }
+  };
+}
+
 export function readCoreviewArtifactTextSideband({
   artifactId,
   sessionId = null,
@@ -108,17 +162,20 @@ export function readCoreviewArtifactTextSideband({
     return failure('', 'not_found', 'No artifact_id was supplied for the trusted text read.');
   }
 
+  const scope = { sessionId, threadId };
   const entries = registry.get(normalizedArtifactId) ?? [];
-  if (!entries.length) {
-    return failure(
-      normalizedArtifactId,
-      'not_found',
-      'No trusted artifact text source is registered in this app session.',
-    );
+  const matchingEntry = [...entries].reverse().find((entry) => registrationMatches(entry, { sessionId, threadId }));
+  if (matchingEntry) {
+    return success(normalizedArtifactId, matchingEntry);
   }
 
-  const matchingEntry = [...entries].reverse().find((entry) => registrationMatches(entry, { sessionId, threadId }));
-  if (!matchingEntry) {
+  const statusEntries = statusRegistry.get(normalizedArtifactId) ?? [];
+  const matchingStatus = [...statusEntries].reverse().find((entry) => registrationMatches(entry, scope));
+  if (matchingStatus) {
+    return statusFailure(normalizedArtifactId, matchingStatus);
+  }
+
+  if (entries.length > 0 || statusEntries.length > 0) {
     return failure(
       normalizedArtifactId,
       'forbidden',
@@ -126,11 +183,16 @@ export function readCoreviewArtifactTextSideband({
     );
   }
 
-  return success(normalizedArtifactId, matchingEntry);
+  return failure(
+    normalizedArtifactId,
+    'not_found',
+    'No trusted artifact text source is registered in this app session.',
+  );
 }
 
 export function clearCoreviewArtifactTextRegistryForTests(): void {
   registry.clear();
+  statusRegistry.clear();
 }
 
 export function buildCoreviewBuilderMetadataText(builderArtifact: BuilderArtifactV1): string {
@@ -231,8 +293,35 @@ function failure(
   };
 }
 
+function statusFailure(
+  artifactId: string,
+  registration: CoreviewArtifactTextStatusRegistration,
+): CoreviewArtifactTextFailure {
+  const status = registration.status === 'loading'
+    ? 'extraction_pending'
+    : registration.status === 'failed'
+      ? 'extraction_failed'
+      : 'unavailable';
+  const defaultReason = status === 'extraction_pending'
+    ? 'exact_text_unavailable: extraction_pending'
+    : status === 'extraction_failed'
+      ? 'exact_text_unavailable: extraction_failed'
+      : 'exact_text_unavailable';
+
+  return {
+    ok: false,
+    artifact_id: artifactId,
+    status,
+    safe_reason: registration.safeReason ?? defaultReason,
+    source: registration.source,
+    page_count: registration.pageCount ?? null,
+    char_count: registration.charCount ?? null,
+    truncated: registration.truncated ?? null,
+  };
+}
+
 function registrationMatches(
-  registration: CoreviewArtifactTextRegistration,
+  registration: CoreviewArtifactTextRegistration | CoreviewArtifactTextStatusRegistration,
   scope: Pick<CoreviewArtifactTextReadInput, 'sessionId' | 'threadId'>,
 ): boolean {
   const requestedSessionId = normalizeToken(scope.sessionId);

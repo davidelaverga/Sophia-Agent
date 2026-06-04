@@ -369,7 +369,7 @@ describe("Coreview artifact still-frame review", () => {
     expect(screen.queryByTestId("coreview-companion-artifact-canvas")).not.toBeInTheDocument()
   })
 
-  it("keeps PDF exact text unavailable without registered extraction", async () => {
+  it("returns a safe failed status when PDF text extraction is unavailable", async () => {
     setCoreviewFlags(true)
     mockPdfPreviewReady({ pageCount: 2 })
 
@@ -380,14 +380,40 @@ describe("Coreview artifact still-frame review", () => {
     expect(await screen.findByText("Page 1 of 2")).toBeInTheDocument()
     expect(screen.getByText("Exact text unavailable")).toBeInTheDocument()
 
-    const response = readCoreviewArtifactTextSideband({
-      artifactId: buildCoreviewRealArtifactId(SELECTED_PDF_ARTIFACT),
-      sessionId: "session-1",
-      threadId: "thread-1",
+    await waitFor(() => {
+      const response = readCoreviewArtifactTextSideband({
+        artifactId: buildCoreviewRealArtifactId(SELECTED_PDF_ARTIFACT),
+        sessionId: "session-1",
+        threadId: "thread-1",
+      })
+      expect(response).toMatchObject({
+        ok: false,
+        status: "extraction_failed",
+        source: "pdf_text_extraction",
+      })
     })
-    expect(response).toMatchObject({
-      ok: false,
-      status: "not_found",
+  })
+
+  it("returns a safe pending status while PDF text extraction is loading", async () => {
+    setCoreviewFlags(true)
+    mockPdfPreviewLoading()
+
+    renderPanel({
+      selectedBuilderArtifactPath: PDF_SELECTED_PATH,
+    })
+
+    expect(await screen.findByText("Preparing PDF view")).toBeInTheDocument()
+    await waitFor(() => {
+      const response = readCoreviewArtifactTextSideband({
+        artifactId: buildCoreviewRealArtifactId(SELECTED_PDF_ARTIFACT),
+        sessionId: "session-1",
+        threadId: "thread-1",
+      })
+      expect(response).toMatchObject({
+        ok: false,
+        status: "extraction_pending",
+        source: "pdf_text_extraction",
+      })
     })
   })
 
@@ -587,12 +613,20 @@ describe("Coreview artifact still-frame review", () => {
     await userEvent.click(screen.getByRole("button", { name: /review with sophia/i }))
     await waitFor(() => expect(sendArtifactFrame).toHaveBeenCalledTimes(1))
 
-    await executeCoreviewToolBridgeCall({
+    const toolResult = await executeCoreviewToolBridgeCall({
       id: "coreview-call-failed-refresh",
       name: "coreview_set_view",
       args: { page_number: 2 },
     })
 
+    expect(toolResult).toMatchObject({
+      ok: true,
+      refresh_attempted: true,
+      refresh_result: "failed",
+      blocked_reason: "refresh_unavailable",
+      visual_frame_fresh: false,
+      visual_fresh: false,
+    })
     expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument()
     await waitFor(() => expect(sendArtifactFrame).toHaveBeenCalledTimes(2))
     expect(screen.getByRole("region", { name: /generated artifact/i })).toHaveAttribute("data-review-state", "active")

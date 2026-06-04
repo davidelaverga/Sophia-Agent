@@ -23,7 +23,9 @@ export type CoreviewToolRefreshResult =
   | "not_requested"
   | "success"
   | "error"
+  | "failed"
   | "not_active"
+  | "unavailable"
   | "refresh_unavailable"
 
 export type CoreviewToolBlockedReason =
@@ -131,6 +133,7 @@ export interface CoreviewActionResult {
   view_signature_after: string | null
   exact_text_available?: boolean
   visual_frame_fresh?: boolean
+  visual_fresh?: boolean
   review_active?: boolean
   annotation_overlay_captured?: boolean | null
   raw_artifact_text_excluded: true
@@ -313,20 +316,33 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
     let refreshAttempted = false
     let refreshResult: CoreviewToolRefreshResult = "not_requested"
     let blockedReason: CoreviewToolBlockedReason | null = null
-    let ok = true
+    let refreshSummary = ""
+    let forceVisualFrameFresh: boolean | null = null
+    let forceStale: boolean | null = null
 
     if (readyView.canRefresh) {
       refreshAttempted = true
       const refresh = await adapter.refreshView({ reason: input.reason })
-      refreshResult = refresh.refreshResult
-      blockedReason = refresh.blockedReason
-      ok = refresh.ok
+      refreshResult = normalizeSetViewRefreshResult(refresh.refreshResult)
+      blockedReason = refresh.ok ? null : refresh.blockedReason ?? "refresh_unavailable"
       if (refresh.ok) {
         adapter.clearViewStale(expectedViewSignature)
+        forceVisualFrameFresh = true
+        forceStale = false
+        refreshSummary = " Refresh succeeded."
+      } else {
+        forceVisualFrameFresh = false
+        forceStale = changed && before.reviewHasFrame ? true : null
+        refreshSummary = " Visual refresh failed."
       }
-    } else if (readyView.reviewHasFrame && changed) {
-      refreshResult = readyView.reviewActive ? "refresh_unavailable" : "not_active"
+    } else if (readyView.reviewActive || readyView.reviewHasFrame || changed) {
+      refreshResult = "unavailable"
       blockedReason = readyView.reviewActive ? "refresh_unavailable" : "review_not_active"
+      forceVisualFrameFresh = false
+      forceStale = changed && readyView.reviewHasFrame ? true : null
+      refreshSummary = readyView.reviewActive
+        ? " Visual refresh unavailable."
+        : " Visual review is not active."
     }
 
     const after = adapter.getCurrentViewState()
@@ -334,16 +350,16 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       action: "set_view",
       source,
       current: after,
-      ok,
+      ok: true,
       blockedReason,
-      resultSummary: ok
-        ? `Switched to ${pageSummary(after)}.${refreshAttempted ? " Refresh succeeded." : ""}`
-        : blockedSummary(blockedReason ?? "refresh_unavailable"),
+      resultSummary: `Switched to ${pageSummary(after)}.${refreshSummary}`,
       refreshAttempted,
       refreshResult,
       viewReadyWaitMs: ready.waitMs,
       viewSignatureBefore: before.viewSignature,
       viewSignatureAfter: after.viewSignature,
+      staleOverride: forceStale,
+      visualFrameFreshOverride: forceVisualFrameFresh,
     })
   }
 
@@ -578,8 +594,12 @@ function buildCoreviewResult(params: {
   viewReadyWaitMs: number | null
   viewSignatureBefore: string | null
   viewSignatureAfter: string | null
+  staleOverride?: boolean | null
+  visualFrameFreshOverride?: boolean | null
 }): CoreviewActionResult {
   const current = params.current
+  const stale = params.staleOverride ?? current.stale
+  const visualFrameFresh = params.visualFrameFreshOverride ?? current.visualFrameFresh
   return {
     ok: params.ok,
     action: params.action,
@@ -593,7 +613,7 @@ function buildCoreviewResult(params: {
     zoom: clampArtifactZoom(current.zoom),
     fit_mode: current.fitMode,
     view_signature: current.viewSignature,
-    stale: current.stale,
+    stale,
     refresh_attempted: params.refreshAttempted,
     refresh_result: params.refreshResult,
     blocked_reason: params.blockedReason,
@@ -605,12 +625,23 @@ function buildCoreviewResult(params: {
     view_signature_before: params.viewSignatureBefore,
     view_signature_after: params.viewSignatureAfter,
     exact_text_available: current.exactTextAvailable,
-    visual_frame_fresh: current.visualFrameFresh,
+    visual_frame_fresh: visualFrameFresh,
+    visual_fresh: visualFrameFresh,
     review_active: current.reviewActive,
     annotation_overlay_captured: current.annotationOverlayCaptured,
     raw_artifact_text_excluded: true,
     raw_frame_excluded: true,
   }
+}
+
+function normalizeSetViewRefreshResult(result: CoreviewToolRefreshResult): CoreviewToolRefreshResult {
+  if (result === "success") {
+    return "success"
+  }
+  if (result === "not_active" || result === "refresh_unavailable" || result === "unavailable") {
+    return "unavailable"
+  }
+  return "failed"
 }
 
 function pageSummary(current: CoreviewCurrentView): string {

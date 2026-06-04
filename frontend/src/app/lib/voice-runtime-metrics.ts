@@ -86,6 +86,14 @@ export type CoreviewVisualTelemetry = {
   pdfTextExtractionSource: string | null
   keyboardArtifactShortcutUsed: string | null
   pinchZoomUsed: boolean
+  coreviewToolCompletedCount: number
+  coreviewToolUnresolvedCount: number
+  coreviewToolLastResult: string | null
+  coreviewToolRefreshResult: string | null
+  coreviewToolVisualFreshAfterResult: boolean | null
+  providerToPublicTranscriptGapAfterCoreviewTool: number | null
+  followUpTurnDispatchedAfterCoreviewTool: boolean
+  emitArtifactBlockedDuringReviewCount: number
   rawFrameExcluded: true
   rawProviderPayloadExcluded: true
 }
@@ -114,6 +122,9 @@ export type CoreviewExactTextTelemetry = {
   lastExactTextCharCount: number | null
   lastExactTextTruncated: boolean | null
   lastExactTextLatencyMs: number | null
+  readArtifactTextResolvedCount: number
+  readArtifactTextUnresolvedCount: number
+  readArtifactTextPdfExtractionStatus: string | null
   rawArtifactTextExcluded: true
   rawQueryExcluded: true
 }
@@ -402,6 +413,17 @@ export type GeminiSessionTelemetry = {
     artifactToolCallCount: number
     artifactToolCallUnknownCount: number
     builderToolCallCount: number
+    coreviewToolCompletedCount: number
+    coreviewToolUnresolvedCount: number
+    coreviewToolLastResult: string | null
+    coreviewToolRefreshResult: string | null
+    coreviewToolVisualFreshAfterResult: boolean | null
+    readArtifactTextResolvedCount: number
+    readArtifactTextUnresolvedCount: number
+    readArtifactTextPdfExtractionStatus: string | null
+    providerToPublicTranscriptGapAfterCoreviewTool: number | null
+    followUpTurnDispatchedAfterCoreviewTool: boolean
+    emitArtifactBlockedDuringReviewCount: number
     unresolvedToolCallCount: number
     oldestUnresolvedToolCallAgeMs: number | null
     lastToolPhase: string | null
@@ -582,6 +604,11 @@ const DEFAULT_MICROPHONE: VoiceDeveloperMetrics["microphone"] = {
 
 const GEMINI_EMIT_ARTIFACT_TOOL_NAME = "emit_artifact"
 const GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = "read_artifact_text"
+const GEMINI_COREVIEW_TOOL_NAMES = new Set([
+  "coreview_set_view",
+  "coreview_refresh_view",
+  "coreview_get_current_view",
+])
 const GEMINI_BUILDER_TOOL_NAMES = new Set([
   "start_builder_task",
   "check_async_task",
@@ -986,6 +1013,14 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       pdfTextExtractionSource: null,
       keyboardArtifactShortcutUsed: null,
       pinchZoomUsed: false,
+      coreviewToolCompletedCount: 0,
+      coreviewToolUnresolvedCount: 0,
+      coreviewToolLastResult: null,
+      coreviewToolRefreshResult: null,
+      coreviewToolVisualFreshAfterResult: null,
+      providerToPublicTranscriptGapAfterCoreviewTool: null,
+      followUpTurnDispatchedAfterCoreviewTool: false,
+      emitArtifactBlockedDuringReviewCount: 0,
       rawFrameExcluded: true,
       rawProviderPayloadExcluded: true,
     },
@@ -1000,6 +1035,9 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       lastExactTextCharCount: null,
       lastExactTextTruncated: null,
       lastExactTextLatencyMs: null,
+      readArtifactTextResolvedCount: 0,
+      readArtifactTextUnresolvedCount: 0,
+      readArtifactTextPdfExtractionStatus: null,
       rawArtifactTextExcluded: true,
       rawQueryExcluded: true,
     },
@@ -1041,6 +1079,14 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((event) => event.category === "artifacts-runtime" && event.name === "pdf-text-extraction")
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
+  const coreviewToolEvents = activeEvents
+    .filter((event) => event.category === "voice-session" && event.name === "coreview-tool-call")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const coreviewToolDiagnostics = activeEvents.filter((event) => (
+    event.name === "gemini-tool-loop-diagnostic"
+    && GEMINI_COREVIEW_TOOL_NAMES.has(geminiToolName(event) ?? "")
+  ))
   const keyboardShortcutEvents = activeEvents
     .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-keyboard-shortcut")
     .map((event) => event.payloadRecord)
@@ -1057,6 +1103,7 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   const latestSelectedStage = selectedStageEvents.at(-1) ?? null
   const latestArtifactCommand = artifactCommandEvents.at(-1) ?? null
   const latestPdfTextExtraction = pdfTextExtractionEvents.at(-1) ?? latestSelectedStage
+  const latestCoreviewTool = coreviewToolEvents.at(-1) ?? null
   const latestKeyboardShortcut = keyboardShortcutEvents.at(-1) ?? null
   const firstFrameSeq = frameEvents.find((event) => {
     const result = coreviewFrameResult(event)
@@ -1143,6 +1190,40 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.pdfTextExtractionSource = asString(latestPdfTextExtraction?.pdfTextExtractionSource)
   visual.keyboardArtifactShortcutUsed = asString(latestKeyboardShortcut?.keyboardArtifactShortcutUsed)
   visual.pinchZoomUsed = pinchZoomEvents.some((event) => asBoolean(event.pinchZoomUsed) === true)
+  const coreviewToolReceivedCount = countWhere(coreviewToolDiagnostics, (event) => asString(eventData(event)?.phase) === "tool_call_received")
+  const coreviewToolResolvedCount = countWhere(coreviewToolDiagnostics, (event) => {
+    const phase = asString(eventData(event)?.phase)
+    return phase === "tool_response_sent"
+      || phase === "tool_execution_rejected"
+      || phase === "tool_response_send_suppressed"
+  })
+  visual.coreviewToolCompletedCount = Math.max(
+    countWhere(coreviewToolEvents, (event) => (numberFromKeys(event, ["coreviewToolCompletedCount"]) ?? 1) > 0),
+    coreviewToolResolvedCount,
+  )
+  visual.coreviewToolUnresolvedCount = Math.max(coreviewToolReceivedCount - coreviewToolResolvedCount, 0)
+  visual.coreviewToolLastResult = asString(latestCoreviewTool?.coreviewToolLastResult)
+    ?? asString(latestCoreviewTool?.coreviewToolResult)
+  visual.coreviewToolRefreshResult = asString(latestCoreviewTool?.coreviewToolRefreshResult)
+  visual.coreviewToolVisualFreshAfterResult = asBoolean(latestCoreviewTool?.coreviewToolVisualFreshAfterResult)
+  visual.emitArtifactBlockedDuringReviewCount = countWhere(activeEvents, isReviewEmitArtifactSuppressedDiagnostic)
+  visual.followUpTurnDispatchedAfterCoreviewTool = activeEvents.some((event) => {
+    if (event.name !== "gemini-barge-in-transcript-handoff") return false
+    const diagnostic = asRecord(eventData(event)?.diagnostic)
+    return asBoolean(diagnostic?.newTurnDispatched) === true
+      && (
+        asString(diagnostic?.bargeInConfirmationSource) === "coreview_tool_follow_up"
+        || asString(diagnostic?.bargeInConfirmationReason) === "provider_input_transcription_after_coreview_tool"
+      )
+  })
+  if (visual.coreviewToolCompletedCount > 0) {
+    const providerInputTranscriptCount = geminiProviderCategoryCount(activeEvents, null, "inputTranscription")
+    const publicUserTranscriptCount = countWhere(activeEvents, (event) => event.name === "sophia.user_transcript")
+    visual.providerToPublicTranscriptGapAfterCoreviewTool = Math.max(
+      providerInputTranscriptCount - publicUserTranscriptCount,
+      0,
+    )
+  }
 
   for (const event of frameEvents) {
     const result = coreviewFrameResult(event)
@@ -1247,6 +1328,7 @@ function buildCoreviewExactTextTelemetry(activeEvents: NormalizedVoiceCaptureEve
     && geminiToolName(event) === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME
   ))
   const finalPhases = new Set(["tool_response_sent", "tool_response_send_failed", "tool_response_send_suppressed", "tool_execution_rejected"])
+  const resolvedPhases = new Set(["tool_response_sent", "tool_response_send_suppressed", "tool_execution_rejected"])
 
   exactText.exactTextCallCount = countWhere(readEvents, (event) => asString(eventData(event)?.phase) === "tool_call_received")
 
@@ -1276,6 +1358,13 @@ function buildCoreviewExactTextTelemetry(activeEvents: NormalizedVoiceCaptureEve
     exactText.lastExactTextCharCount = numberFromKeys(backendResponse, ["char_count", "charCount"]) ?? 0
     exactText.lastExactTextTruncated = asBoolean(backendResponse?.truncated) ?? false
     exactText.lastExactTextLatencyMs = latency
+    if (
+      asString(backendResponse?.source) === "pdf_text_extraction"
+      || status === "extraction_pending"
+      || status === "extraction_failed"
+    ) {
+      exactText.readArtifactTextPdfExtractionStatus = status
+    }
   }
 
   exactText.exactTextCallCount = Math.max(
@@ -1283,6 +1372,21 @@ function buildCoreviewExactTextTelemetry(activeEvents: NormalizedVoiceCaptureEve
     exactText.exactTextSuccessCount + exactText.exactTextFailureCount,
   )
   exactText.readArtifactTextCallCount = exactText.exactTextCallCount
+  exactText.readArtifactTextResolvedCount = countWhere(readEvents, (event) => resolvedPhases.has(asString(eventData(event)?.phase) ?? ""))
+  exactText.readArtifactTextUnresolvedCount = Math.max(
+    exactText.readArtifactTextCallCount - exactText.readArtifactTextResolvedCount,
+    0,
+  )
+  const latestPdfTextExtraction = activeEvents
+    .filter((event) => (
+      (event.category === "artifacts-runtime" && event.name === "pdf-text-extraction")
+      || event.name === "select-stage-artifact"
+    ))
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+    .at(-1)
+  exactText.readArtifactTextPdfExtractionStatus = exactText.readArtifactTextPdfExtractionStatus
+    ?? asString(latestPdfTextExtraction?.pdfTextExtractionStatus)
 
   return exactText
 }
@@ -1347,6 +1451,20 @@ function geminiToolName(event: NormalizedVoiceCaptureEvent): string | null {
   const diagnostic = asRecord(data?.diagnostic)
   const toolCall = asRecord(diagnostic?.toolCall)
   return asString(data?.toolName) ?? asString(toolCall?.name)
+}
+
+function isReviewEmitArtifactSuppressedDiagnostic(event: NormalizedVoiceCaptureEvent): boolean {
+  if (event.name !== "gemini-tool-loop-diagnostic") {
+    return false
+  }
+  const data = eventData(event)
+  const diagnostic = asRecord(data?.diagnostic)
+  const rejectionReason = asString(data?.rejectionReason)
+    ?? asString(diagnostic?.rejectionReason)
+    ?? asString(diagnostic?.rejection_reason)
+  return asString(data?.phase) === "tool_execution_rejected"
+    && geminiToolName(event) === GEMINI_EMIT_ARTIFACT_TOOL_NAME
+    && rejectionReason === "artifact_review_emit_artifact_suppressed"
 }
 
 function asVoiceStage(value: string | null): VoiceStage | null {
@@ -1924,6 +2042,7 @@ function buildSessionTelemetry(params: {
       hookTelemetry?.oldestUnresolvedToolCallAgeMs ?? 0,
       oldestUnresolvedToolCallAtMs === null ? 0 : Math.max(0, nowMs - oldestUnresolvedToolCallAtMs),
     ) || null
+    const coreviewTelemetry = buildCoreviewUsageTelemetry(activeEvents)
 
     return {
       runtime: "gemini_live",
@@ -2067,6 +2186,32 @@ function buildSessionTelemetry(params: {
         artifactToolCallCount,
         artifactToolCallUnknownCount,
         builderToolCallCount,
+        coreviewToolCompletedCount: hookTelemetry?.coreviewToolCompletedCount
+          ?? coreviewTelemetry.visual.coreviewToolCompletedCount,
+        coreviewToolUnresolvedCount: hookTelemetry?.coreviewToolUnresolvedCount
+          ?? coreviewTelemetry.visual.coreviewToolUnresolvedCount,
+        coreviewToolLastResult: hookTelemetry?.coreviewToolLastResult
+          ?? coreviewTelemetry.visual.coreviewToolLastResult,
+        coreviewToolRefreshResult: hookTelemetry?.coreviewToolRefreshResult
+          ?? coreviewTelemetry.visual.coreviewToolRefreshResult,
+        coreviewToolVisualFreshAfterResult: hookTelemetry?.coreviewToolVisualFreshAfterResult
+          ?? coreviewTelemetry.visual.coreviewToolVisualFreshAfterResult,
+        readArtifactTextResolvedCount: hookTelemetry?.readArtifactTextResolvedCount
+          ?? coreviewTelemetry.exactText.readArtifactTextResolvedCount,
+        readArtifactTextUnresolvedCount: hookTelemetry?.readArtifactTextUnresolvedCount
+          ?? coreviewTelemetry.exactText.readArtifactTextUnresolvedCount,
+        readArtifactTextPdfExtractionStatus: hookTelemetry?.readArtifactTextPdfExtractionStatus
+          ?? coreviewTelemetry.exactText.readArtifactTextPdfExtractionStatus,
+        providerToPublicTranscriptGapAfterCoreviewTool: hookTelemetry?.providerToPublicTranscriptGapAfterCoreviewTool
+          ?? (
+            coreviewTelemetry.visual.coreviewToolCompletedCount > 0
+              ? providerToPublicTranscriptGap
+              : null
+          ),
+        followUpTurnDispatchedAfterCoreviewTool: hookTelemetry?.followUpTurnDispatchedAfterCoreviewTool
+          ?? coreviewTelemetry.visual.followUpTurnDispatchedAfterCoreviewTool,
+        emitArtifactBlockedDuringReviewCount: hookTelemetry?.emitArtifactBlockedDuringReviewCount
+          ?? coreviewTelemetry.visual.emitArtifactBlockedDuringReviewCount,
         unresolvedToolCallCount,
         oldestUnresolvedToolCallAgeMs,
         lastToolPhase: hookTelemetry?.lastToolPhase ?? asString(toolDiagnostic?.phase),

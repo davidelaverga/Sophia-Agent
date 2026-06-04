@@ -111,6 +111,7 @@ export type GeminiBargeInConfirmationSource =
   | 'none'
   | 'provider_interruption'
   | 'provider_input_transcription'
+  | 'coreview_tool_follow_up'
   | 'manual_interrupt'
   | 'sustained_speech';
 
@@ -722,6 +723,7 @@ const ARTIFACT_REVIEW_RELAY_CONTEXT_TTL_MS = 10 * 60 * 1000;
 const MAX_SAFE_DIAGNOSTIC_TEXT_CHARS = 180;
 const BARGE_IN_CANDIDATE_DECAY_MS = 650;
 const PROVIDER_INPUT_TRANSCRIPTION_CONFIRMATION_DELAY_MS = 350;
+const COREVIEW_FOLLOW_UP_TRANSCRIPT_WINDOW_MS = 15_000;
 const RELAYABLE_GEMINI_PROVIDER_EVENT_KEYS = new Set([
   'setupComplete',
   'setup_complete',
@@ -846,6 +848,7 @@ export async function connectGeminiBrowserLiveDogfood(
   let bargeInNewTurnDispatchCount = 0;
   let bargeInNewTurnDispatchBlockedReason: GeminiBargeInNewTurnDispatchBlockedReason = 'none';
   const promotedBargeInTranscriptFingerprints: string[] = [];
+  let lastCoreviewToolResponseSentAtMs: number | null = null;
   let artifactReviewArtifactId: string | null = null;
   let artifactReviewExpiresAtMs: number | null = null;
   let artifactReviewUserIntent: GeminiArtifactReviewUserIntent = 'unknown';
@@ -1287,6 +1290,10 @@ export async function connectGeminiBrowserLiveDogfood(
     if (!text) {
       return { confirmed: false, reason: 'empty_provider_input_transcription' };
     }
+    const coreviewFollowUp = coreviewFollowUpTranscriptionConfirmation(text, receiveMetadata);
+    if (coreviewFollowUp.confirmed) {
+      return coreviewFollowUp;
+    }
     if (assistantOutputStartedAtMs === null) {
       return { confirmed: false, reason: 'provider_input_transcription_before_assistant_output' };
     }
@@ -1305,6 +1312,30 @@ export async function connectGeminiBrowserLiveDogfood(
     }
     return { confirmed: true, reason: 'provider_input_transcription_after_assistant_output_with_text' };
   };
+
+  function coreviewFollowUpTranscriptionConfirmation(
+    text: string,
+    receiveMetadata: GeminiProviderReceiveMetadata,
+  ): { confirmed: boolean; reason: string } {
+    if (lastCoreviewToolResponseSentAtMs === null) {
+      return { confirmed: false, reason: 'no_recent_coreview_tool_response' };
+    }
+    const providerReceivedAtMs = Date.parse(receiveMetadata.providerReceivedAt);
+    if (!Number.isFinite(providerReceivedAtMs)) {
+      return { confirmed: false, reason: 'provider_input_transcription_missing_timestamp' };
+    }
+    const ageMs = providerReceivedAtMs - lastCoreviewToolResponseSentAtMs;
+    if (ageMs < 0 || ageMs > COREVIEW_FOLLOW_UP_TRANSCRIPT_WINDOW_MS) {
+      return { confirmed: false, reason: 'provider_input_transcription_outside_coreview_follow_up_window' };
+    }
+    if (!isConfirmableProviderInputTranscription(text)) {
+      return { confirmed: false, reason: 'provider_input_transcription_trivial_or_noise' };
+    }
+    if (isLikelyAssistantEcho(text, latestAssistantOutputTranscriptText)) {
+      return { confirmed: false, reason: 'provider_input_transcription_likely_echo' };
+    }
+    return { confirmed: true, reason: 'provider_input_transcription_after_coreview_tool' };
+  }
 
   const rememberPromotedBargeInTranscriptFingerprint = (fingerprint: string) => {
     promotedBargeInTranscriptFingerprints.push(fingerprint);
@@ -1403,7 +1434,10 @@ export async function connectGeminiBrowserLiveDogfood(
     }
 
     if (!staleOutputSuppressionActive && confirmation.confirmed) {
-      confirmBargeIn('provider_input_transcription', receiveMetadata.providerReceivedAt, {
+      const confirmationSource: GeminiBargeInConfirmationSource = confirmation.reason === 'provider_input_transcription_after_coreview_tool'
+        ? 'coreview_tool_follow_up'
+        : 'provider_input_transcription';
+      confirmBargeIn(confirmationSource, receiveMetadata.providerReceivedAt, {
         stopPlayback: false,
         reason: confirmation.reason,
       });
@@ -1612,6 +1646,15 @@ export async function connectGeminiBrowserLiveDogfood(
     return next;
   };
 
+  const noteToolResponseSent = (functionResponse: Record<string, unknown>, timestamp: string) => {
+    const toolName = stringFromAnyKey(functionResponse, 'name');
+    if (!isCoreviewToolName(toolName)) {
+      return;
+    }
+    const parsedTimestampMs = Date.parse(timestamp);
+    lastCoreviewToolResponseSentAtMs = Number.isFinite(parsedTimestampMs) ? parsedTimestampMs : Date.now();
+  };
+
   const cleanup = async () => {
     notifyStage('closing');
     outputAudioPlayer?.stop();
@@ -1695,6 +1738,7 @@ export async function connectGeminiBrowserLiveDogfood(
         toolCallLedger,
         onToolCallLedgerUpdate: notifyToolCallLedgerUpdate,
         onToolLoopDiagnostic: options.onToolLoopDiagnostic,
+        onToolResponseSent: noteToolResponseSent,
       }),
       onProviderEventReceived: (event) => buildGeminiProviderReceiveMetadata(
         event,
@@ -1868,6 +1912,7 @@ export async function connectGeminiBrowserLiveDogfood(
               toolCallLedger,
               onToolCallLedgerUpdate: notifyToolCallLedgerUpdate,
               onToolLoopDiagnostic: options.onToolLoopDiagnostic,
+              onToolResponseSent: noteToolResponseSent,
             });
           })
           .catch((error) => {
@@ -2912,6 +2957,7 @@ function handleGeminiRelayClientActions(options: {
   toolCallLedger: Map<string, GeminiBrowserLiveToolCallLedgerEntry>;
   onToolCallLedgerUpdate?: (entry: GeminiBrowserLiveToolCallLedgerEntry) => void;
   onToolLoopDiagnostic?: (diagnostic: GeminiBrowserLiveDogfoodToolLoopDiagnostic) => void;
+  onToolResponseSent?: (functionResponse: Record<string, unknown>, timestamp: string) => void;
 }): void {
   for (const diagnostic of options.relayResponse.toolDiagnostics) {
     const rawBackendResponse = recordFromAnyKey(diagnostic, 'response');
@@ -3011,6 +3057,7 @@ function handleGeminiRelayClientActions(options: {
       options.websocket.send(JSON.stringify(payloadToSend));
       for (const functionResponse of activeFunctionResponses.length ? activeFunctionResponses : functionResponses) {
         const timestamp = new Date().toISOString();
+        options.onToolResponseSent?.(functionResponse, timestamp);
         emitToolCallLedgerEntry(
           options.toolCallLedger,
           stringFromAnyKey(functionResponse, 'id'),
@@ -3078,6 +3125,7 @@ async function handleGeminiFrontendCoreviewToolEvent(options: {
   toolCallLedger: Map<string, GeminiBrowserLiveToolCallLedgerEntry>;
   onToolCallLedgerUpdate?: (entry: GeminiBrowserLiveToolCallLedgerEntry) => void;
   onToolLoopDiagnostic?: (diagnostic: GeminiBrowserLiveDogfoodToolLoopDiagnostic) => void;
+  onToolResponseSent?: (functionResponse: Record<string, unknown>, timestamp: string) => void;
 }): Promise<Record<string, unknown> | null> {
   const split = splitCoreviewToolCallsFromProviderEvent(options.event);
   if (split.coreviewCalls.length === 0) {
@@ -3135,6 +3183,7 @@ async function handleGeminiFrontendCoreviewToolEvent(options: {
     toolCallLedger: options.toolCallLedger,
     onToolCallLedgerUpdate: options.onToolCallLedgerUpdate,
     onToolLoopDiagnostic: options.onToolLoopDiagnostic,
+    onToolResponseSent: options.onToolResponseSent,
   });
 
   return split.relayEvent;
@@ -3253,6 +3302,7 @@ function coreviewToolExceptionResult(
     view_signature_after: null,
     exact_text_available: false,
     visual_frame_fresh: false,
+    visual_fresh: false,
     review_active: false,
     annotation_overlay_captured: null,
     raw_artifact_text_excluded: true,
@@ -4638,6 +4688,7 @@ function redactCoreviewActionResponseForTelemetry(
     view_signature_after_present: Boolean(stringFromAnyKey(response, 'view_signature_after', 'viewSignatureAfter')),
     exact_text_available: response.exact_text_available === true || response.exactTextAvailable === true,
     visual_frame_fresh: response.visual_frame_fresh === true || response.visualFrameFresh === true,
+    visual_fresh: response.visual_fresh === true || response.visualFresh === true || response.visual_frame_fresh === true || response.visualFrameFresh === true,
     review_active: response.review_active === true || response.reviewActive === true,
     annotation_overlay_captured: response.annotation_overlay_captured === true || response.annotationOverlayCaptured === true
       ? true

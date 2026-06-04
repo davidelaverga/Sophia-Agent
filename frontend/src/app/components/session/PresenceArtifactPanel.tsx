@@ -290,9 +290,11 @@ function refreshResultFromCoreview(
     case "success":
       return "success"
     case "error":
+    case "failed":
       return "error"
     case "not_active":
       return "not_active"
+    case "unavailable":
     case "refresh_unavailable":
       return "unavailable"
     default:
@@ -790,14 +792,17 @@ export function PresenceArtifactPanel({
         normalSessionId: normalSessionId ?? null,
         threadId: threadId ?? null,
         coreviewToolCallCount: 1,
+        coreviewToolCompletedCount: 1,
         coreviewToolName: coreviewToolNameFromAction(result.action),
         coreviewToolResult: result.ok ? "success" : "blocked",
+        coreviewToolLastResult: result.ok ? "success" : "blocked",
         coreviewToolBlockedReason: result.blocked_reason,
         coreviewToolCommandSource: result.command_source,
         coreviewToolPreservedMic: result.preserved_mic,
         coreviewToolPreservedReview: result.preserved_review,
         coreviewToolRefreshAttempted: result.refresh_attempted,
         coreviewToolRefreshResult: result.refresh_result,
+        coreviewToolVisualFreshAfterResult: result.visual_fresh ?? result.visual_frame_fresh ?? false,
         coreviewToolViewReadyWaitMs: result.view_ready_wait_ms,
         coreviewToolViewSignatureBefore: result.view_signature_before,
         coreviewToolViewSignatureAfter: result.view_signature_after,
@@ -1117,10 +1122,13 @@ export function PresenceArtifactPanel({
       .then((result) => {
         recordReviewVoiceCommandTelemetry({
           command,
-          applied: routeBlockedReasonFromCoreview(result.blocked_reason) === null
+          applied: result.ok
+            || routeBlockedReasonFromCoreview(result.blocked_reason) === null
             || result.blocked_reason === "refresh_unavailable"
             || result.blocked_reason === "review_not_active",
-          blockedReason: result.action === "set_view" && result.blocked_reason
+          blockedReason: result.ok
+            ? null
+            : result.action === "set_view" && result.blocked_reason
             ? routeBlockedReasonFromCoreview(result.blocked_reason)
             : null,
           triggeredRefresh: result.refresh_attempted,

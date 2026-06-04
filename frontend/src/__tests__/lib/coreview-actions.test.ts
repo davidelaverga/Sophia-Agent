@@ -172,18 +172,43 @@ describe("Coreview action bus", () => {
     expect(harness.refreshes).toBe(0)
   })
 
-  it("keeps stale state when refresh fails after a view change", async () => {
+  it("keeps the page change successful and stale when refresh fails after a view change", async () => {
     const harness = createHarness({ refreshOk: false })
 
     const result = await harness.bus.setView({ pageNumber: 3 }, "gemini_tool")
 
-    expect(result.ok).toBe(false)
+    expect(result.ok).toBe(true)
     expect(result.page_number).toBe(3)
     expect(result.refresh_attempted).toBe(true)
-    expect(result.refresh_result).toBe("error")
+    expect(result.refresh_result).toBe("failed")
     expect(result.blocked_reason).toBe("refresh_unavailable")
     expect(result.stale).toBe(true)
+    expect(result.visual_frame_fresh).toBe(false)
+    expect(result.visual_fresh).toBe(false)
+    expect(result.result_summary).toContain("Visual refresh failed")
     expect(harness.staleSignature).toBe(result.view_signature_after)
+  })
+
+  it("returns unavailable visual refresh without failing a successful page change", async () => {
+    const harness = createHarness({
+      canRefresh: false,
+      reviewActive: true,
+      reviewHasFrame: false,
+      visualFrameFresh: false,
+    })
+
+    const result = await harness.bus.setView({ pageNumber: 2 }, "gemini_tool")
+
+    expect(result).toMatchObject({
+      ok: true,
+      page_number: 2,
+      refresh_attempted: false,
+      refresh_result: "unavailable",
+      blocked_reason: "refresh_unavailable",
+      visual_frame_fresh: false,
+      visual_fresh: false,
+    })
+    expect(harness.refreshes).toBe(0)
   })
 
   it("returns current view metadata without raw artifact text or frames", () => {

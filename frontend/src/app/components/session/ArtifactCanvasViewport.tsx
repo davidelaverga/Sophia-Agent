@@ -6,7 +6,10 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import type { ArtifactFitMode, ArtifactRendererKind } from "../../lib/artifact-renderers"
 import { detectArtifactRendererKind } from "../../lib/artifact-renderers"
 import { isMarkdownArtifactFile } from "../../lib/builder-artifacts"
-import { registerCoreviewArtifactText } from "../../lib/coreview-artifact-text"
+import {
+  registerCoreviewArtifactText,
+  registerCoreviewArtifactTextStatus,
+} from "../../lib/coreview-artifact-text"
 import { recordSophiaCaptureEvent } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
 import type {
@@ -258,6 +261,39 @@ export function ArtifactCanvasViewport({
     currentPdfTextExtractionStatus.status,
     currentPdfTextExtractionStatus.text,
     currentPdfTextExtractionStatus.truncated,
+  ])
+
+  useEffect(() => {
+    if (
+      !artifactTextRegistration
+      || !canPreviewPdf
+      || pdfTextExtractionState.key !== pdfTextExtractionKey
+      || currentPdfTextExtractionStatus.status === "success"
+    ) {
+      return
+    }
+
+    return registerCoreviewArtifactTextStatus({
+      artifactId: artifactTextRegistration.artifactId,
+      source: "pdf_text_extraction",
+      status: currentPdfTextExtractionStatus.status,
+      safeReason: currentPdfTextExtractionStatus.safeReason,
+      pageCount: currentPdfTextExtractionStatus.pageCount,
+      charCount: currentPdfTextExtractionStatus.charCount,
+      truncated: currentPdfTextExtractionStatus.truncated,
+      sessionIds: artifactTextRegistration.sessionIds,
+      threadId: artifactTextRegistration.threadId,
+    })
+  }, [
+    artifactTextRegistration,
+    canPreviewPdf,
+    currentPdfTextExtractionStatus.charCount,
+    currentPdfTextExtractionStatus.pageCount,
+    currentPdfTextExtractionStatus.safeReason,
+    currentPdfTextExtractionStatus.status,
+    currentPdfTextExtractionStatus.truncated,
+    pdfTextExtractionKey,
+    pdfTextExtractionState.key,
   ])
 
   useEffect(() => {

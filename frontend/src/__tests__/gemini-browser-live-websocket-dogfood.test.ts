@@ -2122,6 +2122,103 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     await connection.close();
   });
 
+  it('dispatches provider input transcripts as follow-up turns after Coreview tool responses', async () => {
+    registerCoreviewToolBridge(async (call) => ({
+      ok: true,
+      action: 'set_view',
+      artifact_id: 'coreview-real-artifact-report-pdf',
+      artifact_path: 'outputs/report.pdf',
+      artifact_title: 'report.pdf',
+      renderer_kind: 'pdf',
+      page_index: Number(call.args.page_number) - 1,
+      page_number: Number(call.args.page_number),
+      page_count: 3,
+      zoom: 1,
+      fit_mode: 'page',
+      view_signature: 'view-signature-after',
+      stale: false,
+      refresh_attempted: true,
+      refresh_result: 'success',
+      blocked_reason: null,
+      result_summary: 'Switched to page 2 of 3. Refresh succeeded.',
+      command_source: 'gemini_tool',
+      preserved_mic: true,
+      preserved_review: true,
+      view_ready_wait_ms: 25,
+      view_signature_before: 'view-signature-before',
+      view_signature_after: 'view-signature-after',
+      exact_text_available: true,
+      visual_frame_fresh: true,
+      visual_fresh: true,
+      review_active: true,
+      annotation_overlay_captured: false,
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
+    }));
+    const fetchMock = makeGeminiBrowserSessionFetch('browser-gemini-coreview-follow-up');
+    const handoffDiagnostics: GeminiBargeInTranscriptHandoffDiagnostic[] = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      sessionId: 'browser-gemini-coreview-follow-up',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+      onBargeInTranscriptHandoff: (diagnostic) => handoffDiagnostics.push(diagnostic),
+    });
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          {
+            id: 'coreview-call-follow-up',
+            name: 'coreview_set_view',
+            args: { page_number: 2 },
+          },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(websocket?.sent.some((payload) => Boolean((JSON.parse(payload) as Record<string, unknown>).toolResponse))).toBe(true);
+    });
+
+    websocket?.emitMessage({ serverContent: { inputTranscription: { text: 'What do you see now' } } });
+
+    await vi.waitFor(() => expect(handoffDiagnostics).toHaveLength(1));
+    expect(handoffDiagnostics[0]).toEqual(expect.objectContaining({
+      text: 'What do you see now',
+      captured: true,
+      promoted: true,
+      newTurnDispatched: true,
+      newTurnDispatchBlockedReason: 'none',
+      bargeInConfirmationSource: 'coreview_tool_follow_up',
+      bargeInConfirmationReason: 'provider_input_transcription_after_coreview_tool',
+    }));
+    expect(websocket?.sent.map((message) => JSON.parse(message))).toContainEqual({
+      realtimeInput: { text: 'What do you see now' },
+    });
+
+    const sentCountAfterPromotion = websocket?.sent.length ?? 0;
+    websocket?.emitMessage({ serverContent: { inputTranscription: { text: 'What do you see now' } } });
+    await vi.waitFor(() => expect(handoffDiagnostics).toHaveLength(2));
+    expect(handoffDiagnostics[1]).toEqual(expect.objectContaining({
+      captured: true,
+      promoted: false,
+      duplicateSuppressed: true,
+      newTurnDispatched: false,
+    }));
+    expect(websocket?.sent).toHaveLength(sentCountAfterPromotion);
+
+    await connection.close();
+  });
+
   it('relays Gemini toolCall messages and sends backend toolResponse actions over the existing WebSocket', async () => {
     const toolResponsePayload = {
       toolResponse: {

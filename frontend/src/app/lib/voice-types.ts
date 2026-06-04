@@ -161,6 +161,17 @@ export type GeminiRuntimeTelemetry = {
   artifactToolCallCount: number
   artifactToolCallUnknownCount: number
   builderToolCallCount: number
+  coreviewToolCompletedCount?: number
+  coreviewToolUnresolvedCount?: number
+  coreviewToolLastResult?: string | null
+  coreviewToolRefreshResult?: string | null
+  coreviewToolVisualFreshAfterResult?: boolean | null
+  readArtifactTextResolvedCount?: number
+  readArtifactTextUnresolvedCount?: number
+  readArtifactTextPdfExtractionStatus?: string | null
+  providerToPublicTranscriptGapAfterCoreviewTool?: number | null
+  followUpTurnDispatchedAfterCoreviewTool?: boolean
+  emitArtifactBlockedDuringReviewCount?: number
   unresolvedToolCallCount: number
   oldestUnresolvedToolCallAgeMs: number | null
   lastToolPhase: string | null
