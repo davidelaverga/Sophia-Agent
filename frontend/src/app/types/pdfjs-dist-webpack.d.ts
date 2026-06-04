@@ -1,3 +1,6 @@
 declare module "pdfjs-dist/webpack.mjs" {
-  export * from "pdfjs-dist"
+  export function getDocument(params: { data: Uint8Array }): {
+    promise: Promise<unknown>
+    destroy?: () => Promise<void> | void
+  }
 }
