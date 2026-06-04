@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest"
 
-import { parseArtifactReviewVoiceCommand } from "../../app/lib/artifact-review-voice-commands"
+import {
+  parseArtifactReviewVoiceCommand,
+  parseArtifactReviewVoiceCommands,
+} from "../../app/lib/artifact-review-voice-commands"
 
 describe("artifact review voice command parser", () => {
   it("parses spoken and numeric page targets", () => {
@@ -26,6 +29,99 @@ describe("artifact review voice command parser", () => {
     expect(parseArtifactReviewVoiceCommand("fit page")).toEqual({ kind: "fit_page" })
     expect(parseArtifactReviewVoiceCommand("reset zoom")).toEqual({ kind: "reset_zoom" })
     expect(parseArtifactReviewVoiceCommand("refresh view")).toEqual({ kind: "refresh_view" })
+    expect(parseArtifactReviewVoiceCommand("refresh your page")).toEqual({ kind: "refresh_view" })
+    expect(parseArtifactReviewVoiceCommand("zoom in on the current title")).toEqual({
+      kind: "focus_anchor",
+      anchorType: "current_title",
+      zoomDelta: 1.35,
+    })
+  })
+
+  it("parses highlight and comment annotation intents", () => {
+    expect(parseArtifactReviewVoiceCommand("highlight it yellow")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "highlight",
+      color: "yellow",
+    })
+    expect(parseArtifactReviewVoiceCommand("highlight the title yellow")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "highlight",
+      anchorType: "current_title",
+      color: "yellow",
+    })
+    expect(parseArtifactReviewVoiceCommand("mark this yellow")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "highlight",
+      color: "yellow",
+    })
+    expect(parseArtifactReviewVoiceCommand("leave a comment: change the font")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "comment",
+      commentText: "change the font",
+    })
+    expect(parseArtifactReviewVoiceCommand("add a note: change the font")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "comment",
+      commentText: "change the font",
+    })
+    expect(parseArtifactReviewVoiceCommand("comment on the title: change the font")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "comment",
+      anchorType: "current_title",
+      commentText: "change the font",
+    })
+  })
+
+  it("splits compound focus, highlight, and comment review commands in order", () => {
+    expect(parseArtifactReviewVoiceCommands(
+      "Sophia, zoom in on the current title. Highlight it yellow. Leave a comment: change the font.",
+    )).toEqual([
+      {
+        kind: "focus_anchor",
+        anchorType: "current_title",
+        zoomDelta: 1.35,
+      },
+      {
+        kind: "add_annotation",
+        annotationKind: "highlight",
+        color: "yellow",
+      },
+      {
+        kind: "add_annotation",
+        annotationKind: "comment",
+        commentText: "change the font",
+      },
+    ])
+
+    expect(parseArtifactReviewVoiceCommands("highlight the title yellow and comment change the font")).toEqual([
+      {
+        kind: "add_annotation",
+        annotationKind: "highlight",
+        anchorType: "current_title",
+        color: "yellow",
+      },
+      {
+        kind: "add_annotation",
+        annotationKind: "comment",
+        anchorType: "current_title",
+        commentText: "change the font",
+      },
+    ])
+
+    expect(parseArtifactReviewVoiceCommands("highlight the current title yellow and comment \u2018change the font\u2019")).toEqual([
+      {
+        kind: "add_annotation",
+        annotationKind: "highlight",
+        anchorType: "current_title",
+        color: "yellow",
+      },
+      {
+        kind: "add_annotation",
+        annotationKind: "comment",
+        anchorType: "current_title",
+        commentText: "change the font",
+      },
+    ])
   })
 
   it("does not infer unrelated transcript text as an artifact command", () => {

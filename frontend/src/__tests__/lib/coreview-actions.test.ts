@@ -5,7 +5,10 @@ import {
   type ArtifactFitMode,
 } from "../../app/lib/artifact-renderers"
 import {
+  COREVIEW_ADD_ANNOTATION_TOOL_NAME,
   createCoreviewActionBus,
+  coreviewGeminiFunctionDeclarations,
+  withCoreviewGeminiToolDeclarations,
   type CoreviewCurrentView,
   type CoreviewRendererAdapter,
   type CoreviewToolRefreshResult,
@@ -232,6 +235,28 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
 }
 
 describe("Coreview action bus", () => {
+  it("declares annotation tools with explicit highlight/comment routing guidance", () => {
+    const declarations = coreviewGeminiFunctionDeclarations()
+    const annotationDeclaration = declarations.find((declaration) => (
+      declaration.name === COREVIEW_ADD_ANNOTATION_TOOL_NAME
+    ))
+
+    expect(JSON.stringify(declarations)).toContain("Do not use coreview_refresh_view as a substitute")
+    expect(JSON.stringify(declarations)).toContain("Do not say an annotation was added unless this tool returned ok=true")
+    expect(JSON.stringify(annotationDeclaration)).toContain("Highlight it yellow")
+    expect(JSON.stringify(annotationDeclaration)).toContain("Leave a comment: change the font")
+    expect(JSON.stringify(annotationDeclaration)).toMatch(/highlight|comment|mark|note/u)
+  })
+
+  it("injects review tool declarations without re-exposing artifact creation", () => {
+    const setup = withCoreviewGeminiToolDeclarations({
+      tools: [{ functionDeclarations: [{ name: "emit_artifact" }] }],
+    }, true, { allowArtifactCreation: false })
+
+    expect(JSON.stringify(setup)).toContain(COREVIEW_ADD_ANNOTATION_TOOL_NAME)
+    expect(JSON.stringify(setup)).not.toContain("emit_artifact")
+  })
+
   it("sets a PDF page by one-based page number, waits for readiness, and refreshes", async () => {
     const harness = createHarness()
 

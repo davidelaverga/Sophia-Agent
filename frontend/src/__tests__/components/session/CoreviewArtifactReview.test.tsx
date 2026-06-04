@@ -257,7 +257,12 @@ function mockPdfPreviewReady({
     ...(textByPage
       ? {
           getTextContent: vi.fn(async () => ({
-            items: [{ str: textByPage[pageNumber - 1] ?? "" }],
+            items: [{
+              str: textByPage[pageNumber - 1] ?? "",
+              transform: [18, 0, 0, 18, 72, 720],
+              width: 260,
+              height: 24,
+            }],
           })),
         }
       : {}),
@@ -547,6 +552,201 @@ describe("Coreview artifact still-frame review", () => {
       })).toBe(true)
       expect(JSON.stringify(commandEvents)).not.toContain("test asked for page two")
     })
+  })
+
+  it("routes highlight annotation intent through Coreview fallback when no native tool handled it", async () => {
+    setCoreviewFlags(true)
+    registerSophiaCaptureBridge()
+    window.__sophiaCapture?.clear()
+    window.__sophiaCapture?.enable()
+    mockPdfPreviewReady({ pageCount: 1, textByPage: ["Q3 Launch Review"] })
+    let routeArtifactCommand: Parameters<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onArtifactReviewVoiceCommandRouteChange"]>>[0] = null
+
+    renderPanel({
+      selectedBuilderArtifactPath: PDF_SELECTED_PATH,
+      onArtifactReviewVoiceCommandRouteChange: (handler) => {
+        routeArtifactCommand = handler
+      },
+    })
+
+    expect(await screen.findByText("Page 1 of 1")).toBeInTheDocument()
+    expect(await screen.findByText("Exact text available")).toBeInTheDocument()
+    await waitFor(() => expect(routeArtifactCommand).not.toBeNull())
+
+    act(() => {
+      expect(routeArtifactCommand?.("highlight it yellow")).toMatchObject({
+        handled: true,
+        applied: true,
+        suppressAssistant: true,
+        assistantAnnotationClaimSuppressed: true,
+      })
+    })
+
+    const highlight = await screen.findByTestId("artifact-highlight-annotation")
+    expect(highlight).toHaveAttribute("data-annotation-color", "yellow")
+    expect(highlight).toHaveAttribute("data-annotation-source", "sophia")
+    expect(await screen.findByTestId("artifact-voice-command-status")).toHaveTextContent("Sophia added a highlight")
+
+    await waitFor(() => {
+      const events = exportSophiaCaptureBundle().events
+      expect(events.some((event) => {
+        const payload = event.payload as Record<string, unknown> | undefined
+        return (
+          event.name === "coreview-tool-call"
+          && payload?.coreviewToolName === "coreview_add_annotation"
+          && payload?.coreviewToolCommandSource === "frontend_fallback"
+          && payload?.coreviewAnnotationFallbackCount === 1
+          && payload?.coreviewAnnotationCommandSource === "frontend_fallback"
+          && payload?.coreviewAnnotationKind === "highlight"
+          && payload?.coreviewAnnotationColor === "yellow"
+          && payload?.annotationCount === 1
+          && payload?.highlightCount === 1
+        )
+      })).toBe(true)
+    })
+  })
+
+  it("routes comment annotation intent through Coreview fallback without logging raw text", async () => {
+    setCoreviewFlags(true)
+    registerSophiaCaptureBridge()
+    window.__sophiaCapture?.clear()
+    window.__sophiaCapture?.enable()
+    mockPdfPreviewReady({ pageCount: 1, textByPage: ["Q3 Launch Review"] })
+    let routeArtifactCommand: Parameters<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onArtifactReviewVoiceCommandRouteChange"]>>[0] = null
+
+    renderPanel({
+      selectedBuilderArtifactPath: PDF_SELECTED_PATH,
+      onArtifactReviewVoiceCommandRouteChange: (handler) => {
+        routeArtifactCommand = handler
+      },
+    })
+
+    expect(await screen.findByText("Page 1 of 1")).toBeInTheDocument()
+    expect(await screen.findByText("Exact text available")).toBeInTheDocument()
+    await waitFor(() => expect(routeArtifactCommand).not.toBeNull())
+
+    act(() => {
+      expect(routeArtifactCommand?.("leave a comment: change the font")).toMatchObject({
+        handled: true,
+        applied: true,
+      })
+    })
+
+    expect(await screen.findByTestId("artifact-comment-pin")).toHaveAttribute("aria-pressed", "true")
+    expect(screen.getByDisplayValue("change the font")).toBeInTheDocument()
+    await waitFor(() => {
+      const serialized = JSON.stringify(exportSophiaCaptureBundle().events)
+      expect(serialized).toContain("coreviewAnnotationFallbackCount")
+      expect(serialized).toContain("comment")
+      expect(serialized).not.toContain("change the font")
+    })
+  })
+
+  it("routes compound focus, highlight, and comment commands in order through Coreview fallback", async () => {
+    setCoreviewFlags(true)
+    registerSophiaCaptureBridge()
+    window.__sophiaCapture?.clear()
+    window.__sophiaCapture?.enable()
+    mockPdfPreviewReady({ pageCount: 1, textByPage: ["Q3 Launch Review"] })
+    let routeArtifactCommand: Parameters<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onArtifactReviewVoiceCommandRouteChange"]>>[0] = null
+
+    renderPanel({
+      selectedBuilderArtifactPath: PDF_SELECTED_PATH,
+      onArtifactReviewVoiceCommandRouteChange: (handler) => {
+        routeArtifactCommand = handler
+      },
+    })
+
+    const canvas = await screen.findByLabelText("PDF page 1")
+    expect(await screen.findByText("Exact text available")).toBeInTheDocument()
+    await waitFor(() => expect(routeArtifactCommand).not.toBeNull())
+
+    act(() => {
+      expect(routeArtifactCommand?.(
+        "Sophia, zoom in on the current title. Highlight it yellow. Leave a comment: change the font.",
+      )).toMatchObject({
+        handled: true,
+        applied: true,
+        suppressAssistant: true,
+      })
+    })
+
+    await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-zoom", "1.35"))
+    expect(await screen.findByTestId("artifact-highlight-annotation")).toHaveAttribute("data-annotation-color", "yellow")
+    expect(await screen.findByTestId("artifact-comment-pin")).toBeInTheDocument()
+    expect(screen.getByDisplayValue("change the font")).toBeInTheDocument()
+
+    await waitFor(() => {
+      const toolEvents = exportSophiaCaptureBundle().events.filter((event) => event.name === "coreview-tool-call")
+      const annotationEvents = toolEvents.filter((event) => {
+        const payload = event.payload as Record<string, unknown> | undefined
+        return payload?.coreviewToolName === "coreview_add_annotation"
+      })
+      expect(toolEvents.some((event) => {
+        const payload = event.payload as Record<string, unknown> | undefined
+        return payload?.coreviewToolName === "coreview_focus_anchor" && payload?.coreviewFocusAnchorType === "current_title"
+      })).toBe(true)
+      expect(annotationEvents).toHaveLength(2)
+      expect(annotationEvents.some((event) => (event.payload as Record<string, unknown> | undefined)?.coreviewAnnotationKind === "highlight")).toBe(true)
+      expect(annotationEvents.some((event) => (event.payload as Record<string, unknown> | undefined)?.coreviewAnnotationKind === "comment")).toBe(true)
+    })
+  })
+
+  it("does not duplicate fallback annotations when a native Coreview annotation already handled the utterance", async () => {
+    setCoreviewFlags(true)
+    mockPdfPreviewReady({ pageCount: 1, textByPage: ["Q3 Launch Review"] })
+    const sendArtifactFrame = vi.fn<ArtifactFrameSender["sendArtifactFrame"]>((frame) => ({
+      ok: true,
+      supported: true,
+      providerAcceptedFrame: true,
+      websocketSendAccepted: true,
+      frameBytes: frame.byteLength,
+      frameDimensions: frame.dimensions,
+      frameSendLatencyMs: 4,
+      estimatedVisualCost: null,
+      error: null,
+      rawFrameExcluded: true as const,
+    }))
+    const transport = new GeminiStillFrameTransport({ sendArtifactFrame })
+    const user = userEvent.setup()
+    let routeArtifactCommand: Parameters<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onArtifactReviewVoiceCommandRouteChange"]>>[0] = null
+
+    renderPanel({
+      selectedBuilderArtifactPath: PDF_SELECTED_PATH,
+      transport,
+      isVoiceMode: true,
+      onArtifactReviewVoiceCommandRouteChange: (handler) => {
+        routeArtifactCommand = handler
+      },
+    })
+
+    expect(await screen.findByText("Page 1 of 1")).toBeInTheDocument()
+    expect(await screen.findByText("Exact text available")).toBeInTheDocument()
+    await waitFor(() => expect(routeArtifactCommand).not.toBeNull())
+    await user.click(screen.getByRole("button", { name: /review with sophia/i }))
+    await waitFor(() => expect(sendArtifactFrame).toHaveBeenCalledTimes(1))
+
+    await executeCoreviewToolBridgeCall({
+      id: "annotation-native-1",
+      name: "coreview_add_annotation",
+      args: {
+        kind: "highlight",
+        anchor_type: "current_title",
+        color: "yellow",
+      },
+    })
+    expect(await screen.findByTestId("artifact-highlight-annotation")).toBeInTheDocument()
+
+    act(() => {
+      expect(routeArtifactCommand?.("highlight it yellow")).toMatchObject({
+        handled: true,
+        applied: true,
+        suppressAssistant: false,
+      })
+    })
+
+    await new Promise((resolve) => window.setTimeout(resolve, 760))
+    expect(screen.getAllByTestId("artifact-highlight-annotation")).toHaveLength(1)
   })
 
   it("routes a PDF voice page command without faking a frame when visual refresh is unavailable", async () => {

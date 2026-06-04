@@ -101,12 +101,16 @@ export type CoreviewVisualTelemetry = {
   commentCount: number
   annotationActionSource: string | null
   coreviewAnnotationToolCount: number
+  coreviewAnnotationFallbackCount: number
+  coreviewAnnotationCommandSource: string | null
   coreviewAnnotationToolResult: string | null
+  coreviewAnnotationFallbackResult: string | null
   coreviewAnnotationKind: string | null
   coreviewAnnotationAnchorType: string | null
   coreviewAnnotationColor: string | null
   coreviewAnnotationPageIndex: number | null
   coreviewAnnotationBlockedReason: string | null
+  assistantAnnotationClaimSuppressedCount: number
   coreviewFocusAnchorCount: number
   coreviewFocusAnchorResult: string | null
   coreviewFocusAnchorType: string | null
@@ -473,12 +477,16 @@ export type GeminiSessionTelemetry = {
     commentCount: number
     annotationActionSource: string | null
     coreviewAnnotationToolCount: number
+    coreviewAnnotationFallbackCount: number
+    coreviewAnnotationCommandSource: string | null
     coreviewAnnotationToolResult: string | null
+    coreviewAnnotationFallbackResult: string | null
     coreviewAnnotationKind: string | null
     coreviewAnnotationAnchorType: string | null
     coreviewAnnotationColor: string | null
     coreviewAnnotationPageIndex: number | null
     coreviewAnnotationBlockedReason: string | null
+    assistantAnnotationClaimSuppressedCount: number
     coreviewFocusAnchorCount: number
     coreviewFocusAnchorResult: string | null
     coreviewFocusAnchorType: string | null
@@ -1091,12 +1099,16 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       commentCount: 0,
       annotationActionSource: null,
       coreviewAnnotationToolCount: 0,
+      coreviewAnnotationFallbackCount: 0,
+      coreviewAnnotationCommandSource: null,
       coreviewAnnotationToolResult: null,
+      coreviewAnnotationFallbackResult: null,
       coreviewAnnotationKind: null,
       coreviewAnnotationAnchorType: null,
       coreviewAnnotationColor: null,
       coreviewAnnotationPageIndex: null,
       coreviewAnnotationBlockedReason: null,
+      assistantAnnotationClaimSuppressedCount: 0,
       coreviewFocusAnchorCount: 0,
       coreviewFocusAnchorResult: null,
       coreviewFocusAnchorType: null,
@@ -1186,6 +1198,8 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((event) => event.category === "voice-session" && event.name === "coreview-tool-call")
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
+  const assistantAnnotationClaimSuppressedEvents = activeEvents
+    .filter((event) => event.category === "voice-session" && event.name === "assistant-annotation-claim-suppressed")
   const coreviewToolDiagnostics = activeEvents.filter((event) => (
     event.name === "gemini-tool-loop-diagnostic"
     && GEMINI_COREVIEW_TOOL_NAMES.has(geminiToolName(event) ?? "")
@@ -1343,12 +1357,18 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.coreviewAnnotationToolCount = coreviewToolEvents.reduce((total, event) => (
     total + (numberFromKeys(event, ["coreviewAnnotationToolCount"]) ?? 0)
   ), 0)
+  visual.coreviewAnnotationFallbackCount = coreviewToolEvents.reduce((total, event) => (
+    total + (numberFromKeys(event, ["coreviewAnnotationFallbackCount"]) ?? 0)
+  ), 0)
+  visual.coreviewAnnotationCommandSource = asString(latestAnnotationTool?.coreviewAnnotationCommandSource)
   visual.coreviewAnnotationToolResult = asString(latestAnnotationTool?.coreviewAnnotationToolResult)
+  visual.coreviewAnnotationFallbackResult = asString(latestAnnotationTool?.coreviewAnnotationFallbackResult)
   visual.coreviewAnnotationKind = asString(latestAnnotationTool?.coreviewAnnotationKind)
   visual.coreviewAnnotationAnchorType = asString(latestAnnotationTool?.coreviewAnnotationAnchorType)
   visual.coreviewAnnotationColor = asString(latestAnnotationTool?.coreviewAnnotationColor)
   visual.coreviewAnnotationPageIndex = numberFromKeys(latestAnnotationTool, ["coreviewAnnotationPageIndex"])
   visual.coreviewAnnotationBlockedReason = asString(latestAnnotationTool?.coreviewAnnotationBlockedReason)
+  visual.assistantAnnotationClaimSuppressedCount = assistantAnnotationClaimSuppressedEvents.length
   visual.coreviewFocusAnchorCount = coreviewToolEvents.reduce((total, event) => (
     total + (numberFromKeys(event, ["coreviewFocusAnchorCount"]) ?? 0)
   ), 0)
@@ -2477,10 +2497,20 @@ function buildSessionTelemetry(params: {
           ?? coreviewTelemetry.visual.commentCount,
         annotationActionSource: hookTelemetry?.annotationActionSource
           ?? coreviewTelemetry.visual.annotationActionSource,
-        coreviewAnnotationToolCount: hookTelemetry?.coreviewAnnotationToolCount
-          ?? coreviewTelemetry.visual.coreviewAnnotationToolCount,
+        coreviewAnnotationToolCount: Math.max(
+          hookTelemetry?.coreviewAnnotationToolCount ?? 0,
+          coreviewTelemetry.visual.coreviewAnnotationToolCount,
+        ),
+        coreviewAnnotationFallbackCount: Math.max(
+          hookTelemetry?.coreviewAnnotationFallbackCount ?? 0,
+          coreviewTelemetry.visual.coreviewAnnotationFallbackCount,
+        ),
+        coreviewAnnotationCommandSource: hookTelemetry?.coreviewAnnotationCommandSource
+          ?? coreviewTelemetry.visual.coreviewAnnotationCommandSource,
         coreviewAnnotationToolResult: hookTelemetry?.coreviewAnnotationToolResult
           ?? coreviewTelemetry.visual.coreviewAnnotationToolResult,
+        coreviewAnnotationFallbackResult: hookTelemetry?.coreviewAnnotationFallbackResult
+          ?? coreviewTelemetry.visual.coreviewAnnotationFallbackResult,
         coreviewAnnotationKind: hookTelemetry?.coreviewAnnotationKind
           ?? coreviewTelemetry.visual.coreviewAnnotationKind,
         coreviewAnnotationAnchorType: hookTelemetry?.coreviewAnnotationAnchorType
@@ -2491,6 +2521,10 @@ function buildSessionTelemetry(params: {
           ?? coreviewTelemetry.visual.coreviewAnnotationPageIndex,
         coreviewAnnotationBlockedReason: hookTelemetry?.coreviewAnnotationBlockedReason
           ?? coreviewTelemetry.visual.coreviewAnnotationBlockedReason,
+        assistantAnnotationClaimSuppressedCount: Math.max(
+          hookTelemetry?.assistantAnnotationClaimSuppressedCount ?? 0,
+          coreviewTelemetry.visual.assistantAnnotationClaimSuppressedCount,
+        ),
         coreviewFocusAnchorCount: hookTelemetry?.coreviewFocusAnchorCount
           ?? coreviewTelemetry.visual.coreviewFocusAnchorCount,
         coreviewFocusAnchorResult: hookTelemetry?.coreviewFocusAnchorResult

@@ -1411,12 +1411,16 @@ describe('buildVoiceTelemetryReport', () => {
       commentCount: 1,
       annotationActionSource: 'sophia',
       coreviewAnnotationToolCount: 2,
+      coreviewAnnotationFallbackCount: 1,
+      coreviewAnnotationCommandSource: 'frontend_fallback',
       coreviewAnnotationToolResult: 'success',
+      coreviewAnnotationFallbackResult: 'success',
       coreviewAnnotationKind: 'comment',
       coreviewAnnotationAnchorType: 'current_title',
       coreviewAnnotationColor: 'yellow',
       coreviewAnnotationPageIndex: 0,
       coreviewAnnotationBlockedReason: null,
+      assistantAnnotationClaimSuppressedCount: 1,
       coreviewFocusAnchorCount: 1,
       coreviewFocusAnchorResult: 'success',
       coreviewFocusAnchorType: 'current_title',
@@ -1552,11 +1556,15 @@ describe('buildVoiceTelemetryReport', () => {
     expect(report.coreview.visual.commentCount).toBe(1);
     expect(report.coreview.visual.annotationActionSource).toBe('sophia');
     expect(report.coreview.visual.coreviewAnnotationToolCount).toBe(2);
+    expect(report.coreview.visual.coreviewAnnotationFallbackCount).toBe(1);
+    expect(report.coreview.visual.coreviewAnnotationCommandSource).toBe('frontend_fallback');
     expect(report.coreview.visual.coreviewAnnotationToolResult).toBe('success');
+    expect(report.coreview.visual.coreviewAnnotationFallbackResult).toBe('success');
     expect(report.coreview.visual.coreviewAnnotationKind).toBe('comment');
     expect(report.coreview.visual.coreviewAnnotationAnchorType).toBe('current_title');
     expect(report.coreview.visual.coreviewAnnotationColor).toBe('yellow');
     expect(report.coreview.visual.coreviewAnnotationPageIndex).toBe(0);
+    expect(report.coreview.visual.assistantAnnotationClaimSuppressedCount).toBe(1);
     expect(report.coreview.visual.coreviewFocusAnchorCount).toBe(1);
     expect(report.coreview.visual.coreviewFocusAnchorResult).toBe('success');
     expect(report.coreview.visual.coreviewFocusAnchorType).toBe('current_title');
@@ -1569,11 +1577,15 @@ describe('buildVoiceTelemetryReport', () => {
       commentCount: 1,
       annotationActionSource: 'sophia',
       coreviewAnnotationToolCount: 2,
+      coreviewAnnotationFallbackCount: 1,
+      coreviewAnnotationCommandSource: 'frontend_fallback',
       coreviewAnnotationToolResult: 'success',
+      coreviewAnnotationFallbackResult: 'success',
       coreviewAnnotationKind: 'comment',
       coreviewAnnotationAnchorType: 'current_title',
       coreviewAnnotationColor: 'yellow',
       coreviewAnnotationPageIndex: 0,
+      assistantAnnotationClaimSuppressedCount: 1,
       coreviewFocusAnchorCount: 1,
       coreviewFocusAnchorResult: 'success',
       coreviewFocusAnchorType: 'current_title',

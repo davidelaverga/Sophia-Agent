@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from 'react';
 
 import type { ArtifactReviewVoiceCommandRouter } from '../lib/artifact-review-voice-commands';
 import { logger } from '../lib/error-logger';
+import { recordSophiaCaptureEvent } from '../lib/session-capture';
 import type { InterruptPayload } from '../lib/session-types';
 
 type ReflectionCandidate = {
@@ -403,7 +404,27 @@ export function useSessionVoiceCommandSystem({
       return false;
     }
 
-    interceptVoiceAssistant(15000, 'artifact review voice command');
+    if (result.suppressAssistant !== false) {
+      interceptVoiceAssistant(15000, 'artifact review voice command');
+    }
+
+    if (result.assistantAnnotationClaimSuppressed) {
+      recordSophiaCaptureEvent({
+        category: 'voice-session',
+        name: 'assistant-annotation-claim-suppressed',
+        payload: {
+          reason: result.applied && !result.blockedReason
+            ? 'annotation_fallback_owns_acknowledgement'
+            : 'annotation_not_verified',
+          reviewVoiceCommandKind: result.command?.kind ?? null,
+          annotationKind: result.command?.annotationKind ?? null,
+          rawTranscriptExcluded: true,
+          rawCommentTextExcluded: true,
+          rawArtifactTextExcluded: true,
+          rawFrameExcluded: true,
+        },
+      });
+    }
 
     if (result.userMessage) {
       showToast({

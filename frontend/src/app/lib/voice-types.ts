@@ -185,12 +185,16 @@ export type GeminiRuntimeTelemetry = {
   commentCount?: number
   annotationActionSource?: string | null
   coreviewAnnotationToolCount?: number
+  coreviewAnnotationFallbackCount?: number
+  coreviewAnnotationCommandSource?: string | null
   coreviewAnnotationToolResult?: string | null
+  coreviewAnnotationFallbackResult?: string | null
   coreviewAnnotationKind?: string | null
   coreviewAnnotationAnchorType?: string | null
   coreviewAnnotationColor?: string | null
   coreviewAnnotationPageIndex?: number | null
   coreviewAnnotationBlockedReason?: string | null
+  assistantAnnotationClaimSuppressedCount?: number
   coreviewFocusAnchorCount?: number
   coreviewFocusAnchorResult?: string | null
   coreviewFocusAnchorType?: string | null

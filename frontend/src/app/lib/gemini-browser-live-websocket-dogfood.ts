@@ -2180,6 +2180,8 @@ export function buildGeminiArtifactTextReaderHint(artifactId: string): Record<st
         `artifact_id: ${artifactId}.`,
         'For simple visibility questions, answer from the fresh artifact frame or safe current-view metadata.',
         'Use exact-text sideband only when exact words, numbers, labels, or table values are needed.',
+        'For highlight, mark, underline, annotate, note, comment, pin, flag, or callout requests, use coreview_add_annotation and wait for ok=true before saying it was added. Do not use coreview_refresh_view for annotation requests.',
+        'For zoom or focus on a title, selection, text, or area, use coreview_focus_anchor. Use coreview_refresh_view only when the user asks to refresh your view.',
         'Do not answer this context message.',
       ].join(' '),
     },

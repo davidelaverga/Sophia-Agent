@@ -529,18 +529,26 @@ describe("ArtifactPdfPreview", () => {
     expect(layer).toHaveAttribute("data-artifact-tool-mode", "select")
   })
 
-  it("keeps highlight coordinates stable after a zoom rerender", async () => {
+  it("keeps highlight and comment overlays visible after a zoom rerender", async () => {
     mockPdfDocument({ pageCount: 2 })
-    const annotation = {
+    const highlightAnnotation = {
       id: "highlight-1",
       kind: "highlight",
       pageIndex: 0,
       rect: { x: 0.1, y: 0.2, width: 0.35, height: 0.18 },
       createdAt: 1,
     } satisfies ArtifactAnnotation
+    const commentAnnotation = {
+      id: "comment-1",
+      kind: "comment",
+      pageIndex: 0,
+      point: { x: 0.62, y: 0.22 },
+      text: "change the font",
+      createdAt: 1,
+    } satisfies ArtifactAnnotation
 
     const { rerenderPreview } = renderPreview({
-      annotations: [annotation],
+      annotations: [highlightAnnotation, commentAnnotation],
       selectedAnnotationId: "highlight-1",
     })
 
@@ -551,9 +559,10 @@ describe("ArtifactPdfPreview", () => {
       width: "35%",
       height: "18%",
     })
+    expect(screen.getByTestId("artifact-comment-pin")).toBeInTheDocument()
 
     rerenderPreview({
-      annotations: [annotation],
+      annotations: [highlightAnnotation, commentAnnotation],
       selectedAnnotationId: "highlight-1",
       zoom: 1.8,
     })
@@ -565,6 +574,7 @@ describe("ArtifactPdfPreview", () => {
       width: "35%",
       height: "18%",
     })
+    expect(screen.getByTestId("artifact-comment-pin")).toBeInTheDocument()
   })
 
   it("creates a page-scoped comment pin with editable local text", async () => {

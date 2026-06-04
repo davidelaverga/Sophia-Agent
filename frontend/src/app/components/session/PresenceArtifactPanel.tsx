@@ -14,6 +14,7 @@ import {
 } from "../../lib/artifact-renderers"
 import {
   parseArtifactReviewVoiceCommand,
+  parseArtifactReviewVoiceCommands,
   type ArtifactReviewVoiceCommand,
   type ArtifactReviewVoiceCommandRefreshResult,
   type ArtifactReviewVoiceCommandRouteResult,
@@ -23,6 +24,8 @@ import { getBuilderArtifactFiles, normalizeBuilderArtifactPath } from "../../lib
 import { coreviewFlagDiagnostics, isCoreviewStillFrameReviewEnabled } from "../../lib/co-review-flags"
 import type { CoReviewMediaTransport } from "../../lib/co-review-transport"
 import {
+  COREVIEW_ADD_ANNOTATION_TOOL_NAME,
+  COREVIEW_FOCUS_ANCHOR_TOOL_NAME,
   COREVIEW_REFRESH_VIEW_TOOL_NAME,
   COREVIEW_SET_VIEW_TOOL_NAME,
   createCoreviewActionBus,
@@ -30,9 +33,12 @@ import {
   wasRecentCoreviewToolActionHandled,
   type CoreviewActionBus,
   type CoreviewActionResult,
+  type CoreviewAddAnnotationInput,
+  type CoreviewAnnotationAnchor,
   type CoreviewArtifactRebindInput,
   type CoreviewArtifactRebindResult,
   type CoreviewCurrentView,
+  type CoreviewFocusAnchorInput,
   type CoreviewRendererAdapter,
   type CoreviewSetViewInput,
   type CoreviewToolBlockedReason,
@@ -177,6 +183,10 @@ function buildAppliedVoiceCommandStatus(
       return "PDF view updated"
     case "refresh_view":
       return "Refresh requested"
+    case "focus_anchor":
+      return "PDF view updated"
+    case "add_annotation":
+      return command.annotationKind === "comment" ? "Comment added" : "Highlight added"
     default:
       return "Artifact view updated"
   }
@@ -236,13 +246,33 @@ function buildBlockedVoiceCommandMessage(
 function coreviewToolNameFromAction(action: CoreviewActionResult["action"]): CoreviewToolName {
   return action === "refresh_view"
     ? COREVIEW_REFRESH_VIEW_TOOL_NAME
-    : COREVIEW_SET_VIEW_TOOL_NAME
+    : action === "add_annotation"
+      ? COREVIEW_ADD_ANNOTATION_TOOL_NAME
+      : action === "focus_anchor"
+        ? COREVIEW_FOCUS_ANCHOR_TOOL_NAME
+        : COREVIEW_SET_VIEW_TOOL_NAME
 }
 
 function coreviewToolNameFromVoiceCommand(command: ArtifactReviewVoiceCommand): CoreviewToolName {
-  return command.kind === "refresh_view"
-    ? COREVIEW_REFRESH_VIEW_TOOL_NAME
-    : COREVIEW_SET_VIEW_TOOL_NAME
+  return command.kind === "add_annotation"
+    ? COREVIEW_ADD_ANNOTATION_TOOL_NAME
+    : command.kind === "focus_anchor"
+      ? COREVIEW_FOCUS_ANCHOR_TOOL_NAME
+      : command.kind === "refresh_view"
+        ? COREVIEW_REFRESH_VIEW_TOOL_NAME
+        : COREVIEW_SET_VIEW_TOOL_NAME
+}
+
+function isAnnotationVoiceCommand(command: ArtifactReviewVoiceCommand): boolean {
+  return command.kind === "add_annotation"
+}
+
+function isFocusVoiceCommand(command: ArtifactReviewVoiceCommand): boolean {
+  return command.kind === "focus_anchor"
+}
+
+function isAnnotationOrFocusVoiceCommand(command: ArtifactReviewVoiceCommand): boolean {
+  return isAnnotationVoiceCommand(command) || isFocusVoiceCommand(command)
 }
 
 function coreviewBlockedStatusText(reason: CoreviewToolBlockedReason | null): string {
@@ -392,6 +422,77 @@ function coreviewSetViewInputFromVoiceCommand(
         reason: "voice command fallback",
       }
   }
+}
+
+function coreviewAnchorFromVoiceCommand(
+  command: ArtifactReviewVoiceCommand,
+  lastFocusedAnchorType: CoreviewAnnotationAnchor["type"] | null,
+): CoreviewAnnotationAnchor {
+  const anchorType = command.anchorType ?? lastFocusedAnchorType ?? "current_title"
+  return anchorType === "current_selection"
+    ? { type: "current_selection" }
+    : { type: "current_title" }
+}
+
+function coreviewAddAnnotationInputFromVoiceCommand(
+  command: ArtifactReviewVoiceCommand,
+  current: CoreviewCurrentView,
+  lastFocusedAnchorType: CoreviewAnnotationAnchor["type"] | null,
+): CoreviewAddAnnotationInput {
+  return {
+    kind: command.annotationKind === "comment" ? "comment" : "highlight",
+    artifactId: current.artifactId ?? undefined,
+    pageIndex: current.pageIndex,
+    anchor: coreviewAnchorFromVoiceCommand(command, lastFocusedAnchorType),
+    color: command.color ?? "yellow",
+    text: command.commentText,
+    source: "sophia",
+  }
+}
+
+function coreviewFocusAnchorInputFromVoiceCommand(
+  command: ArtifactReviewVoiceCommand,
+  current: CoreviewCurrentView,
+  lastFocusedAnchorType: CoreviewAnnotationAnchor["type"] | null,
+): CoreviewFocusAnchorInput {
+  return {
+    artifactId: current.artifactId ?? undefined,
+    pageIndex: current.pageIndex,
+    anchor: coreviewAnchorFromVoiceCommand(command, lastFocusedAnchorType),
+    zoomDelta: command.zoomDelta ?? 1.35,
+    reason: "voice command fallback",
+  }
+}
+
+function coreviewAnnotationCommandAlreadyHandled(
+  command: ArtifactReviewVoiceCommand,
+  sinceMs: number,
+): boolean {
+  if (command.kind !== "add_annotation") {
+    return false
+  }
+  return wasRecentCoreviewToolActionHandled({
+    toolName: COREVIEW_ADD_ANNOTATION_TOOL_NAME,
+    sinceMs,
+    matchResult: (result) => (
+      result.ok
+      && result.action === "add_annotation"
+      && result.annotation_kind === (command.annotationKind === "comment" ? "comment" : "highlight")
+      && (
+        command.color === undefined
+        || result.annotation_color === command.color
+        || command.annotationKind === "comment"
+      )
+    ),
+  })
+}
+
+function coreviewFocusCommandAlreadyHandled(sinceMs: number): boolean {
+  return wasRecentCoreviewToolActionHandled({
+    toolName: COREVIEW_FOCUS_ANCHOR_TOOL_NAME,
+    sinceMs,
+    matchResult: (result) => result.ok && result.action === "focus_anchor",
+  })
 }
 
 function buildSelectedArtifactFromExisting(builderArtifact: BuilderArtifactV1, path: string): BuilderArtifactV1 | null {
@@ -547,6 +648,7 @@ export function PresenceArtifactPanel({
   const [reportedBuilderArtifactViewState, setReportedBuilderArtifactViewState] = useState<ArtifactViewState | null>(null)
   const [builderVoiceCommandTarget, setBuilderVoiceCommandTarget] = useState<ArtifactReviewVoiceCommandTarget | null>(null)
   const builderVoiceCommandTargetRef = useRef<ArtifactReviewVoiceCommandTarget | null>(null)
+  const lastCoreviewFocusedAnchorTypeRef = useRef<CoreviewAnnotationAnchor["type"] | null>(null)
   const [voiceCommandStaleViewSignature, setVoiceCommandStaleViewSignature] = useState<string | null>(null)
   const [voiceCommandStatus, setVoiceCommandStatus] = useState<ArtifactVoiceCommandStatus | null>(null)
   const coreviewCurrentViewRef = useRef<CoreviewCurrentView | null>(null)
@@ -965,6 +1067,9 @@ export function PresenceArtifactPanel({
         coreviewToolViewSignatureAfter: result.view_signature_after,
         coreviewAnnotationToolCount: result.action === "add_annotation" ? 1 : 0,
         coreviewAnnotationToolResult: result.action === "add_annotation" ? (result.ok ? "success" : "blocked") : null,
+        coreviewAnnotationFallbackCount: result.action === "add_annotation" && result.command_source === "frontend_fallback" ? 1 : 0,
+        coreviewAnnotationCommandSource: result.action === "add_annotation" ? result.command_source : null,
+        coreviewAnnotationFallbackResult: result.action === "add_annotation" && result.command_source === "frontend_fallback" ? (result.ok ? "success" : "blocked") : null,
         coreviewAnnotationKind: result.annotation_kind ?? null,
         coreviewAnnotationAnchorType: result.annotation_anchor_type ?? null,
         coreviewAnnotationColor: result.annotation_color ?? null,
@@ -1227,6 +1332,11 @@ export function PresenceArtifactPanel({
     options?: { applyStatus?: boolean },
   ): Promise<CoreviewActionResult> => {
     const result = await runner(coreviewActionBus)
+    if (result.ok && result.action === "focus_anchor" && result.focus_anchor_type) {
+      lastCoreviewFocusedAnchorTypeRef.current = result.focus_anchor_type
+    } else if (result.ok && result.action === "add_annotation" && result.annotation_anchor_type) {
+      lastCoreviewFocusedAnchorTypeRef.current = result.annotation_anchor_type
+    }
     if (options?.applyStatus !== false) {
       applyCoreviewActionStatus(result)
     }
@@ -1249,11 +1359,14 @@ export function PresenceArtifactPanel({
       return { handled: false }
     }
 
-    const command = parseArtifactReviewVoiceCommand(transcript)
+    const commands = parseArtifactReviewVoiceCommands(transcript)
+    const command = commands[0] ?? parseArtifactReviewVoiceCommand(transcript)
     if (!command) {
       return { handled: false }
     }
 
+    const startedAtMs = Date.now()
+    const annotationOrFocusCommands = commands.filter(isAnnotationOrFocusVoiceCommand)
     const currentView = coreviewCurrentViewRef.current ?? coreviewCurrentView
     const currentPageIndex = currentView.pageIndex
     const currentPageCount = Math.max(1, currentView.pageCount)
@@ -1265,6 +1378,164 @@ export function PresenceArtifactPanel({
         && builderArtifactCoReview.transportStatus.toolsSupportedInCoReview
     )
 
+    if (annotationOrFocusCommands.length > 0) {
+      const allNativeCommandsAlreadyHandled = annotationOrFocusCommands.every((candidate) => (
+        candidate.kind === "add_annotation"
+          ? coreviewAnnotationCommandAlreadyHandled(candidate, startedAtMs - 2200)
+          : coreviewFocusCommandAlreadyHandled(startedAtMs - 2200)
+      ))
+
+      if (nativeToolsPrimary && allNativeCommandsAlreadyHandled) {
+        return {
+          handled: true,
+          command,
+          applied: true,
+          blockedReason: null,
+          triggeredRefresh: false,
+          refreshResult: "not_requested",
+          userMessage: null,
+          suppressAssistant: false,
+        }
+      }
+
+      if (!builderArtifactId || !currentView.artifactId) {
+        setVoiceCommandStatus({
+          text: "No artifact is selected.",
+          tone: "warn",
+        })
+        recordReviewVoiceCommandTelemetry({
+          command,
+          applied: false,
+          blockedReason: "no_artifact_selected",
+          triggeredRefresh: false,
+          refreshResult: "not_requested",
+          artifactCurrentPageIndex: currentPageIndex,
+          artifactCurrentPageCount: currentPageCount,
+          autoRefreshBlockedReason: "no_artifact_selected",
+          transportStateBefore,
+          transportStateAfter: builderArtifactCoReview.transportStatus.statusText,
+        })
+        return {
+          handled: true,
+          command,
+          applied: false,
+          blockedReason: "no_artifact_selected",
+          triggeredRefresh: false,
+          refreshResult: "not_requested",
+          userMessage: null,
+          suppressAssistant: true,
+          assistantAnnotationClaimSuppressed: true,
+        }
+      }
+
+      setVoiceCommandStatus({
+        text: nativeToolsPrimary ? "Annotation request queued" : buildAppliedVoiceCommandStatus(command, currentPageIndex),
+        tone: nativeToolsPrimary ? "pending" : "neutral",
+      })
+
+      const executeFallbackCommands = async () => {
+        for (const nextCommand of commands) {
+          if (
+            nativeToolsPrimary
+            && nextCommand.kind === "add_annotation"
+            && coreviewAnnotationCommandAlreadyHandled(nextCommand, startedAtMs)
+          ) {
+            continue
+          }
+          if (
+            nativeToolsPrimary
+            && nextCommand.kind === "focus_anchor"
+            && coreviewFocusCommandAlreadyHandled(startedAtMs)
+          ) {
+            continue
+          }
+
+          const commandView = coreviewCurrentViewRef.current ?? currentView
+          const result = await runCoreviewAction((bus) => {
+            if (nextCommand.kind === "refresh_view") {
+              return bus.refreshView({ reason: "voice command fallback" }, "frontend_fallback")
+            }
+            if (nextCommand.kind === "add_annotation") {
+              return bus.addAnnotation(
+                coreviewAddAnnotationInputFromVoiceCommand(
+                  nextCommand,
+                  commandView,
+                  lastCoreviewFocusedAnchorTypeRef.current,
+                ),
+                "frontend_fallback",
+              )
+            }
+            if (nextCommand.kind === "focus_anchor") {
+              return bus.focusAnchor(
+                coreviewFocusAnchorInputFromVoiceCommand(
+                  nextCommand,
+                  commandView,
+                  lastCoreviewFocusedAnchorTypeRef.current,
+                ),
+                "frontend_fallback",
+              )
+            }
+            return bus.setView(coreviewSetViewInputFromVoiceCommand(nextCommand, commandView), "frontend_fallback")
+          })
+
+          recordReviewVoiceCommandTelemetry({
+            command: nextCommand,
+            applied: result.ok
+              || routeBlockedReasonFromCoreview(result.blocked_reason) === null
+              || result.blocked_reason === "refresh_unavailable"
+              || result.blocked_reason === "review_not_active",
+            blockedReason: result.ok ? null : routeBlockedReasonFromCoreview(result.blocked_reason),
+            triggeredRefresh: result.refresh_attempted,
+            refreshResult: result.refresh_attempted
+              ? refreshResultFromCoreview(result.refresh_result)
+              : "not_requested",
+            artifactCurrentPageIndex: result.page_index ?? commandView.pageIndex,
+            artifactCurrentPageCount: result.page_count ?? Math.max(1, commandView.pageCount),
+            staleAfterPageChange: result.stale,
+            waitedForViewReady: result.view_ready_wait_ms !== null,
+            autoRefreshTiming: result.view_ready_wait_ms !== null
+              ? `after_view_ready:${result.view_ready_wait_ms}ms`
+              : null,
+            autoRefreshBlockedReason: result.blocked_reason,
+            transportStateBefore,
+            transportStateAfter: builderArtifactCoReview.transportStatus.statusText,
+          })
+        }
+      }
+
+      window.setTimeout(() => {
+        void executeFallbackCommands().catch(() => {
+          recordReviewVoiceCommandTelemetry({
+            command,
+            applied: false,
+            blockedReason: "visual_refresh_unavailable",
+            triggeredRefresh: false,
+            refreshResult: "error",
+            artifactCurrentPageIndex: currentPageIndex,
+            artifactCurrentPageCount: currentPageCount,
+            staleAfterPageChange: false,
+            waitedForViewReady: false,
+            autoRefreshTiming: nativeToolsPrimary ? "delayed_native_tool_fallback" : "queued",
+            autoRefreshBlockedReason: "refresh_exception",
+            transportStateBefore,
+            transportStateAfter: builderArtifactCoReview.transportStatus.statusText,
+          })
+        })
+      }, nativeToolsPrimary ? 700 : 0)
+
+      return {
+        handled: true,
+        command,
+        applied: true,
+        blockedReason: null,
+        triggeredRefresh: false,
+        refreshResult: "not_requested",
+        userMessage: null,
+        suppressAssistant: true,
+        assistantAnnotationClaimSuppressed: true,
+      }
+    }
+
     if (nativeToolsPrimary) {
       if (wasRecentCoreviewToolActionHandled({ toolName, sinceMs: Date.now() - 2200 })) {
         return {
@@ -1275,6 +1546,7 @@ export function PresenceArtifactPanel({
           triggeredRefresh: false,
           refreshResult: "not_requested",
           userMessage: null,
+          suppressAssistant: true,
         }
       }
       return { handled: false }

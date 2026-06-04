@@ -1025,7 +1025,8 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
 export type CoreviewToolBridgeHandler = (call: CoreviewToolCallInput) => Promise<CoreviewActionResult> | CoreviewActionResult
 
 let activeToolBridge: CoreviewToolBridgeHandler | null = null
-let lastHandledToolAction: { toolName: CoreviewToolName; handledAt: number; result: CoreviewActionResult } | null = null
+let recentHandledToolActions: Array<{ toolName: CoreviewToolName; handledAt: number; result: CoreviewActionResult }> = []
+const MAX_RECENT_HANDLED_TOOL_ACTIONS = 12
 
 export function registerCoreviewToolBridge(handler: CoreviewToolBridgeHandler): () => void {
   activeToolBridge = handler
@@ -1042,11 +1043,14 @@ export async function executeCoreviewToolBridgeCall(call: CoreviewToolCallInput)
   }
 
   const result = await activeToolBridge(call)
-  lastHandledToolAction = {
-    toolName: call.name,
-    handledAt: Date.now(),
-    result,
-  }
+  recentHandledToolActions = [
+    ...recentHandledToolActions.slice(-(MAX_RECENT_HANDLED_TOOL_ACTIONS - 1)),
+    {
+      toolName: call.name,
+      handledAt: Date.now(),
+      result,
+    },
+  ]
   return result
 }
 
@@ -1054,21 +1058,26 @@ export function wasRecentCoreviewToolActionHandled(params: {
   toolName?: CoreviewToolName
   sinceMs: number
   windowMs?: number
+  matchResult?: (result: CoreviewActionResult) => boolean
 }): boolean {
-  if (!lastHandledToolAction) {
+  if (recentHandledToolActions.length === 0) {
     return false
   }
   const windowMs = params.windowMs ?? 2200
-  if (params.toolName && lastHandledToolAction.toolName !== params.toolName) {
-    return false
-  }
-  return lastHandledToolAction.handledAt >= params.sinceMs
-    && Date.now() - lastHandledToolAction.handledAt <= windowMs
+  return recentHandledToolActions.some((entry) => {
+    if (params.toolName && entry.toolName !== params.toolName) {
+      return false
+    }
+    if (entry.handledAt < params.sinceMs || Date.now() - entry.handledAt > windowMs) {
+      return false
+    }
+    return params.matchResult ? params.matchResult(entry.result) : true
+  })
 }
 
 export function clearCoreviewToolBridgeForTests(): void {
   activeToolBridge = null
-  lastHandledToolAction = null
+  recentHandledToolActions = []
 }
 
 export function isCoreviewToolName(name: string | null | undefined): name is CoreviewToolName {
@@ -1079,7 +1088,7 @@ export function coreviewGeminiFunctionDeclarations(): Record<string, unknown>[] 
   return [
     {
       name: COREVIEW_SET_VIEW_TOOL_NAME,
-      description: "Set the active Coreview artifact view during Review with Sophia. Use for page navigation or zoom changes, then wait for the app result before acknowledging.",
+      description: "Set the active Coreview artifact view during Review with Sophia. Use for page navigation or generic zoom changes. For zoom/focus on a specific title, text, selection, or area, use coreview_focus_anchor instead. Wait for the app result before acknowledging.",
       parameters: {
         type: "OBJECT",
         properties: {
@@ -1096,7 +1105,7 @@ export function coreviewGeminiFunctionDeclarations(): Record<string, unknown>[] 
     },
     {
       name: COREVIEW_REFRESH_VIEW_TOOL_NAME,
-      description: "Refresh Sophia's still-frame view of the active Coreview artifact without changing artifact contents.",
+      description: "Refresh Sophia's still-frame view of the active Coreview artifact without changing artifact contents. Use only for requests like \"refresh your view\" or \"refresh your page\". Do not use this as a substitute for highlights, marks, notes, comments, pins, flags, callouts, or other annotations.",
       parameters: {
         type: "OBJECT",
         properties: {
@@ -1118,20 +1127,20 @@ export function coreviewGeminiFunctionDeclarations(): Record<string, unknown>[] 
     },
     {
       name: COREVIEW_ADD_ANNOTATION_TOOL_NAME,
-      description: "Add a highlight or comment annotation to the active Coreview artifact during Review with Sophia. Use this for artifact review markup; do not create files or emit artifacts.",
+      description: "Required for annotation intents during Review with Sophia. For any user request containing highlight, mark, underline, annotate, note, comment, pin, flag, or callout, call this tool. Do not use coreview_refresh_view as a substitute. Do not say an annotation was added unless this tool returned ok=true. Examples: \"Highlight it yellow\" -> kind=highlight, anchor_type=current_title or current_selection, color=yellow. \"Leave a comment: change the font\" -> kind=comment, anchor_type=current_title, comment_text=\"change the font\". \"Highlight the title yellow and comment change the font\" -> call this tool twice, once for highlight and once for comment.",
       parameters: {
         type: "OBJECT",
         properties: {
-          kind: { type: "STRING", enum: ["highlight", "comment"], description: "Annotation kind to add." },
-          anchor_type: { type: "STRING", enum: ["current_title", "current_selection", "text_quote", "rect", "point"], description: "What to attach the annotation to." },
+          kind: { type: "STRING", enum: ["highlight", "comment"], description: "Annotation kind to add. Use highlight for highlight/mark/underline/flag/callout requests; use comment for comment/note/pin text requests." },
+          anchor_type: { type: "STRING", enum: ["current_title", "current_selection", "text_quote", "rect", "point"], description: "What to attach the annotation to. For \"it\" after focusing or discussing the title, prefer current_title. For selected visible text, use current_selection. Use text_quote only when the user names exact text." },
           artifact_id: { type: "STRING", description: "Optional active artifact id. Omit when using the currently selected artifact." },
           page_number: { type: "NUMBER", description: "Optional one-based user-facing page number." },
           page_index: { type: "NUMBER", description: "Optional zero-based page index." },
           text_quote: { type: "STRING", description: "Text to find when anchor_type is text_quote." },
           occurrence: { type: "NUMBER", description: "One-based occurrence for text_quote; defaults to 1." },
-          color: { type: "STRING", enum: ["yellow", "purple", "blue", "pink"], description: "Highlight color. Defaults to yellow." },
-          comment_text: { type: "STRING", description: "Comment text for comment annotations." },
-          note: { type: "STRING", description: "Alias for comment_text." },
+          color: { type: "STRING", enum: ["yellow", "purple", "blue", "pink"], description: "Highlight color. Defaults to yellow; \"Highlight it yellow\" must pass color=yellow." },
+          comment_text: { type: "STRING", description: "Comment text for comment annotations. Required for user requests like \"Leave a comment: change the font\". Do not include raw comment text in telemetry." },
+          note: { type: "STRING", description: "Alias for comment_text when the user says note." },
           rect: {
             type: "OBJECT",
             description: "Normalized page rectangle for rect anchors.",
@@ -1158,7 +1167,7 @@ export function coreviewGeminiFunctionDeclarations(): Record<string, unknown>[] 
     },
     {
       name: COREVIEW_FOCUS_ANCHOR_TOOL_NAME,
-      description: "Zoom and center the active Coreview artifact around a text or coordinate anchor during Review with Sophia.",
+      description: "Zoom and center the active Coreview artifact around a text or coordinate anchor during Review with Sophia. For \"zoom/focus on X\" requests, use this tool, for example \"Zoom in on the current title\" -> anchor_type=current_title. Do not use this for highlights or comments; follow annotation requests with coreview_add_annotation.",
       parameters: {
         type: "OBJECT",
         properties: {

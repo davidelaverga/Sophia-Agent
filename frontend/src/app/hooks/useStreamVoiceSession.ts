@@ -339,12 +339,16 @@ function createGeminiRuntimeTelemetry(params: Partial<Extract<VoiceRuntimeTeleme
     commentCount: params.commentCount ?? 0,
     annotationActionSource: params.annotationActionSource ?? null,
     coreviewAnnotationToolCount: params.coreviewAnnotationToolCount ?? 0,
+    coreviewAnnotationFallbackCount: params.coreviewAnnotationFallbackCount ?? 0,
+    coreviewAnnotationCommandSource: params.coreviewAnnotationCommandSource ?? null,
     coreviewAnnotationToolResult: params.coreviewAnnotationToolResult ?? null,
+    coreviewAnnotationFallbackResult: params.coreviewAnnotationFallbackResult ?? null,
     coreviewAnnotationKind: params.coreviewAnnotationKind ?? null,
     coreviewAnnotationAnchorType: params.coreviewAnnotationAnchorType ?? null,
     coreviewAnnotationColor: params.coreviewAnnotationColor ?? null,
     coreviewAnnotationPageIndex: params.coreviewAnnotationPageIndex ?? null,
     coreviewAnnotationBlockedReason: params.coreviewAnnotationBlockedReason ?? null,
+    assistantAnnotationClaimSuppressedCount: params.assistantAnnotationClaimSuppressedCount ?? 0,
     coreviewFocusAnchorCount: params.coreviewFocusAnchorCount ?? 0,
     coreviewFocusAnchorResult: params.coreviewFocusAnchorResult ?? null,
     coreviewFocusAnchorType: params.coreviewFocusAnchorType ?? null,
@@ -3022,9 +3026,18 @@ export function useStreamVoiceSession(
                 coreviewAnnotationToolCount: coreviewAnnotationResolved
                   ? (current.coreviewAnnotationToolCount ?? 0) + 1
                   : current.coreviewAnnotationToolCount,
+                coreviewAnnotationFallbackCount: coreviewAnnotationResolved && backendString("command_source") === "frontend_fallback"
+                  ? (current.coreviewAnnotationFallbackCount ?? 0) + 1
+                  : current.coreviewAnnotationFallbackCount,
+                coreviewAnnotationCommandSource: coreviewAnnotationResolved
+                  ? backendString("command_source")
+                  : current.coreviewAnnotationCommandSource ?? null,
                 coreviewAnnotationToolResult: coreviewAnnotationResolved
                   ? diagnostic.backendResponse?.ok === true ? "success" : "blocked"
                   : current.coreviewAnnotationToolResult ?? null,
+                coreviewAnnotationFallbackResult: coreviewAnnotationResolved && backendString("command_source") === "frontend_fallback"
+                  ? diagnostic.backendResponse?.ok === true ? "success" : "blocked"
+                  : current.coreviewAnnotationFallbackResult ?? null,
                 coreviewAnnotationKind: coreviewAnnotationResolved
                   ? backendString("annotation_kind")
                   : current.coreviewAnnotationKind ?? null,
