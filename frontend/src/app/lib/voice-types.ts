@@ -166,9 +166,19 @@ export type GeminiRuntimeTelemetry = {
   coreviewToolLastResult?: string | null
   coreviewToolRefreshResult?: string | null
   coreviewToolVisualFreshAfterResult?: boolean | null
+  reviewToolsExposed?: string[]
+  emitArtifactExposedDuringReview?: boolean
+  reviewToolTimedOut?: boolean
+  reviewToolTimeoutName?: string | null
+  reviewToolTimeoutResultSent?: boolean
+  coreviewGetCurrentViewCount?: number
+  coreviewGetCurrentViewResult?: string | null
   readArtifactTextResolvedCount?: number
   readArtifactTextUnresolvedCount?: number
+  readArtifactTextTimeoutCount?: number
+  readArtifactTextLastStatus?: string | null
   readArtifactTextPdfExtractionStatus?: string | null
+  exactTextRegistrySource?: string | null
   providerToPublicTranscriptGapAfterCoreviewTool?: number | null
   followUpTurnDispatchedAfterCoreviewTool?: boolean
   emitArtifactBlockedDuringReviewCount?: number

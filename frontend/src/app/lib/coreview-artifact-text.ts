@@ -34,8 +34,17 @@ export interface CoreviewArtifactTextSuccess {
 
 export interface CoreviewArtifactTextFailure {
   ok: false;
-  artifact_id: string;
-  status: 'not_found' | 'unavailable' | 'forbidden' | 'unsupported' | 'extraction_pending' | 'extraction_failed';
+  artifact_id: string | null;
+  status:
+    | 'no_selected_artifact'
+    | 'not_found'
+    | 'unavailable'
+    | 'forbidden'
+    | 'unsupported'
+    | 'extraction_pending'
+    | 'extraction_unavailable'
+    | 'extraction_failed'
+    | 'timeout';
   safe_reason: string;
   source?: CoreviewArtifactTextSource;
   page_count?: number | null;
@@ -159,7 +168,7 @@ export function readCoreviewArtifactTextSideband({
 }: CoreviewArtifactTextReadInput): CoreviewArtifactTextResponse {
   const normalizedArtifactId = normalizeToken(artifactId);
   if (!normalizedArtifactId) {
-    return failure('', 'not_found', 'No artifact_id was supplied for the trusted text read.');
+    return failure(null, 'no_selected_artifact', 'No artifact is selected for trusted text reading.');
   }
 
   const scope = { sessionId, threadId };
@@ -281,7 +290,7 @@ function success(
 }
 
 function failure(
-  artifactId: string,
+  artifactId: string | null,
   status: CoreviewArtifactTextFailure['status'],
   safeReason: string,
 ): CoreviewArtifactTextFailure {
@@ -301,12 +310,12 @@ function statusFailure(
     ? 'extraction_pending'
     : registration.status === 'failed'
       ? 'extraction_failed'
-      : 'unavailable';
+      : 'extraction_unavailable';
   const defaultReason = status === 'extraction_pending'
     ? 'exact_text_unavailable: extraction_pending'
     : status === 'extraction_failed'
       ? 'exact_text_unavailable: extraction_failed'
-      : 'exact_text_unavailable';
+      : 'exact_text_unavailable: extraction_unavailable';
 
   return {
     ok: false,

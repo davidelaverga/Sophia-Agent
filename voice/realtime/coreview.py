@@ -46,6 +46,7 @@ Artifact co-review is a separate, explicitly entered mode. Apply these rules onl
 - Exact words, numbers, table values, labels, citations, and data must come from read_artifact_text or another trusted artifact text sideband, not from vision.
 - When the user asks what a heading says, asks for a number/table value/label, or asks you to read fine print, call read_artifact_text for the current artifact before answering.
 - If read_artifact_text returns unavailable, unsupported, forbidden, or not_found, say that the exact text is unavailable instead of guessing from the image.
+- For simple artifact visibility questions such as "can you see the artifact?", "what page are you looking at?", or "what is visible now?", answer from a fresh frame directly or call coreview_get_current_view. Do not call read_artifact_text unless exact text is needed.
 - When the user asks to change the current artifact view (for example "go to page two", next/previous page, fit width, fit page, zoom in/out, or refresh your view), call the Coreview action tools instead of describing manual page controls.
 - Use coreview_set_view for page and zoom changes, coreview_refresh_view to refresh the current still frame, and coreview_get_current_view when you need safe page/renderer metadata before acting.
 - After a Coreview action tool succeeds, briefly acknowledge the page/view change in natural language. If it is blocked, explain only the safe blocked reason.
@@ -273,7 +274,10 @@ def gemini_coreview_action_function_declarations() -> list[dict[str, object]]:
         },
         {
             "name": GEMINI_COREVIEW_GET_CURRENT_VIEW_TOOL_NAME,
-            "description": "Get safe metadata about the active Coreview artifact view. Returns no raw artifact text or visual frame.",
+            "description": (
+                "Get safe metadata about what Sophia can currently see in the active Coreview artifact. "
+                "Prefer this for simple visibility or current-page questions. Returns no raw artifact text or visual frame."
+            ),
             "parameters": {
                 "type": "OBJECT",
                 "properties": {
@@ -326,7 +330,10 @@ def coreview_browser_action_unavailable_response(
         "view_signature_after": None,
         "exact_text_available": False,
         "visual_frame_fresh": False,
+        "visual_fresh": False,
+        "frame_sent": False,
         "review_active": False,
+        "current_view_summary": "Coreview action unavailable.",
         "annotation_overlay_captured": None,
         "raw_artifact_text_excluded": True,
         "raw_frame_excluded": True,
@@ -363,7 +370,10 @@ def redacted_coreview_action_diagnostic(response: Mapping[str, Any]) -> dict[str
         "view_ready_wait_ms": response.get("view_ready_wait_ms"),
         "exact_text_available": bool(response.get("exact_text_available")),
         "visual_frame_fresh": bool(response.get("visual_frame_fresh")),
+        "visual_fresh": bool(response.get("visual_fresh") or response.get("visual_frame_fresh")),
+        "frame_sent": bool(response.get("frame_sent")),
         "review_active": bool(response.get("review_active")),
+        "current_view_summary": str(response.get("current_view_summary") or ""),
         "annotation_overlay_captured": response.get("annotation_overlay_captured"),
         "raw_artifact_text_excluded": True,
         "raw_frame_excluded": True,
@@ -392,9 +402,9 @@ def execute_read_artifact_text_feature_gated(
 
     if not artifact_id:
         return _read_artifact_text_failure(
-            artifact_id,
-            status="not_found",
-            safe_reason="No artifact_id was supplied for the trusted text read.",
+            None,
+            status="no_selected_artifact",
+            safe_reason="No artifact is selected for trusted text reading.",
         )
 
     if artifact_id == COREVIEW_FIXTURE_ARTIFACT_ID:
@@ -462,7 +472,7 @@ def redacted_read_artifact_text_diagnostic(
 def _read_artifact_text_success(
     artifact_id: str,
     *,
-    source: Literal["fixture", "builder_metadata", "builder_file", "artifact_store", "unsupported"],
+    source: Literal["fixture", "builder_metadata", "builder_file", "pdf_text_extraction", "artifact_store", "unsupported"],
     text: str,
 ) -> dict[str, Any]:
     char_count = len(text)
@@ -478,9 +488,19 @@ def _read_artifact_text_success(
 
 
 def _read_artifact_text_failure(
-    artifact_id: str,
+    artifact_id: str | None,
     *,
-    status: Literal["not_found", "unavailable", "forbidden", "unsupported"],
+    status: Literal[
+        "no_selected_artifact",
+        "not_found",
+        "unavailable",
+        "forbidden",
+        "unsupported",
+        "extraction_pending",
+        "extraction_unavailable",
+        "extraction_failed",
+        "timeout",
+    ],
     safe_reason: str,
 ) -> dict[str, Any]:
     return {

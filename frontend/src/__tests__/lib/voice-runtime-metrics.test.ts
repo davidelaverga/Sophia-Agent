@@ -1993,6 +1993,19 @@ describe('buildVoiceDeveloperMetrics', () => {
         seq: 2,
         at: '2026-05-27T12:00:01.000Z',
         category: 'voice-session',
+        name: 'gemini-setup-tools',
+        payload: {
+          runtime: 'gemini_live',
+          reviewToolsExposed: ['read_artifact_text', 'coreview_get_current_view'],
+          emitArtifactExposedDuringReview: false,
+          rawArtifactTextExcluded: true,
+          rawFrameExcluded: true,
+        },
+      }),
+      buildEvent({
+        seq: 3,
+        at: '2026-05-27T12:00:01.000Z',
+        category: 'voice-session',
         name: 'gemini-artifact-frame-send',
         payload: {
           runtime: 'gemini_live',
@@ -2014,7 +2027,7 @@ describe('buildVoiceDeveloperMetrics', () => {
         },
       }),
       buildEvent({
-        seq: 3,
+        seq: 4,
         at: '2026-05-27T12:00:02.000Z',
         category: 'voice-session',
         name: 'gemini-artifact-frame-send',
@@ -2034,7 +2047,7 @@ describe('buildVoiceDeveloperMetrics', () => {
         },
       }),
       buildEvent({
-        seq: 4,
+        seq: 5,
         at: '2026-05-27T12:00:03.000Z',
         category: 'voice-session',
         name: 'gemini-tool-loop-diagnostic',
@@ -2049,7 +2062,7 @@ describe('buildVoiceDeveloperMetrics', () => {
         },
       }),
       buildEvent({
-        seq: 5,
+        seq: 6,
         at: '2026-05-27T12:00:03.050Z',
         category: 'voice-session',
         name: 'gemini-tool-loop-diagnostic',
@@ -2073,7 +2086,33 @@ describe('buildVoiceDeveloperMetrics', () => {
         },
       }),
       buildEvent({
-        seq: 6,
+        seq: 7,
+        at: '2026-05-27T12:00:03.100Z',
+        category: 'voice-session',
+        name: 'gemini-tool-loop-diagnostic',
+        payload: {
+          runtime: 'gemini_live',
+          phase: 'tool_response_sent',
+          toolName: 'coreview_get_current_view',
+          success: true,
+          diagnostic: {
+            toolCall: { name: 'coreview_get_current_view', args: null },
+            backendResponse: {
+              ok: true,
+              action: 'get_current_view',
+              current_view_summary: 'Current view is page 1 of 4.',
+              page_number: 1,
+              page_count: 4,
+              visual_fresh: true,
+              frame_sent: true,
+              raw_artifact_text_excluded: true,
+              raw_frame_excluded: true,
+            },
+          },
+        },
+      }),
+      buildEvent({
+        seq: 8,
         at: '2026-05-27T12:00:03.250Z',
         category: 'voice-session',
         name: 'artifact-review-voice-command',
@@ -2125,6 +2164,10 @@ describe('buildVoiceDeveloperMetrics', () => {
       reviewVoiceCommandDidHardIntercept: false,
       reviewVoiceCommandWaitedForViewReady: true,
       reviewVoiceCommandAutoRefreshTiming: 'after_view_ready:24ms',
+      reviewToolsExposed: ['read_artifact_text', 'coreview_get_current_view'],
+      emitArtifactExposedDuringReview: false,
+      coreviewGetCurrentViewCount: 1,
+      coreviewGetCurrentViewResult: 'Current view is page 1 of 4.',
       lastReviewVoiceCommandKind: 'zoom_in',
       lastReviewVoiceCommandApplied: true,
       lastReviewVoiceCommandUiMode: 'voice',
@@ -2152,9 +2195,116 @@ describe('buildVoiceDeveloperMetrics', () => {
       lastExactTextCharCount: 77,
       lastExactTextTruncated: false,
       lastExactTextLatencyMs: 4,
+      readArtifactTextResolvedCount: 1,
+      readArtifactTextUnresolvedCount: 0,
+      readArtifactTextLastStatus: 'success',
+      exactTextRegistrySource: 'builder_metadata',
       rawArtifactTextExcluded: true,
       rawQueryExcluded: true,
     });
+  });
+
+  it('counts successful PDF extraction as an exact-text registry source before a text-read tool call', () => {
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events: [
+        buildEvent({
+          seq: 1,
+          at: '2026-05-27T12:00:00.000Z',
+          category: 'voice-session',
+          name: 'start-talking-requested',
+          payload: { sessionId: 'session-dev' },
+        }),
+        buildEvent({
+          seq: 2,
+          at: '2026-05-27T12:00:01.000Z',
+          category: 'artifacts-runtime',
+          name: 'pdf-text-extraction',
+          payload: {
+            artifactId: 'artifact-1',
+            pdfTextExtractionStatus: 'success',
+            pdfTextExtractionSource: 'pdf_text_extraction',
+            pdfTextExtractionPageCount: 4,
+            pdfTextExtractionCharCount: 1297,
+            pdfTextExtractionTruncated: false,
+            rawArtifactTextExcluded: true,
+          },
+        }),
+      ],
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-05-27T12:00:04.000Z'),
+    });
+
+    expect(metrics.coreview.visual.exactTextAvailable).toBe(true);
+    expect(metrics.coreview.exactText.exactTextSuccessCount).toBe(1);
+    expect(metrics.coreview.exactText.exactTextSources.pdf_text_extraction).toBe(1);
+    expect(metrics.coreview.exactText.exactTextRegistrySource).toBe('pdf_text_extraction');
+    expect(metrics.coreview.exactText.readArtifactTextResolvedCount).toBe(0);
+    expect(metrics.coreview.exactText.readArtifactTextUnresolvedCount).toBe(0);
+  });
+
+  it('reports review tool timeouts as resolved safe tool results', () => {
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events: [
+        buildEvent({
+          seq: 1,
+          at: '2026-05-27T12:00:00.000Z',
+          category: 'voice-session',
+          name: 'start-talking-requested',
+          payload: { sessionId: 'session-dev' },
+        }),
+        buildEvent({
+          seq: 2,
+          at: '2026-05-27T12:00:01.000Z',
+          category: 'voice-session',
+          name: 'gemini-tool-loop-diagnostic',
+          payload: {
+            runtime: 'gemini_live',
+            phase: 'tool_call_received',
+            toolName: 'read_artifact_text',
+            diagnostic: { toolCall: { name: 'read_artifact_text', args: null } },
+          },
+        }),
+        buildEvent({
+          seq: 3,
+          at: '2026-05-27T12:00:01.900Z',
+          category: 'voice-session',
+          name: 'gemini-tool-loop-diagnostic',
+          payload: {
+            runtime: 'gemini_live',
+            phase: 'tool_response_sent',
+            toolName: 'read_artifact_text',
+            success: false,
+            diagnostic: {
+              toolCall: { name: 'read_artifact_text', args: null },
+              reviewToolTimedOut: true,
+              reviewToolTimeoutName: 'read_artifact_text',
+              reviewToolTimeoutResultSent: true,
+              backendResponse: {
+                ok: false,
+                status: 'timeout',
+                safe_reason: 'Trusted artifact text read timed out before the voice response deadline.',
+                review_tool_timed_out: true,
+                review_tool_timeout_name: 'read_artifact_text',
+                review_tool_timeout_result_sent: true,
+                raw_artifact_text_excluded: true,
+              },
+            },
+          },
+        }),
+      ],
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-05-27T12:00:04.000Z'),
+    });
+
+    expect(metrics.coreview.visual.reviewToolTimedOut).toBe(true);
+    expect(metrics.coreview.visual.reviewToolTimeoutName).toBe('read_artifact_text');
+    expect(metrics.coreview.visual.reviewToolTimeoutResultSent).toBe(true);
+    expect(metrics.coreview.exactText.readArtifactTextTimeoutCount).toBe(1);
+    expect(metrics.coreview.exactText.readArtifactTextLastStatus).toBe('timeout');
+    expect(metrics.coreview.exactText.readArtifactTextResolvedCount).toBe(1);
+    expect(metrics.coreview.exactText.readArtifactTextUnresolvedCount).toBe(0);
   });
 
   it('counts Coreview frame and exact-text failures without raw payloads', () => {

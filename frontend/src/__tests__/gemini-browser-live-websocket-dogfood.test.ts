@@ -7,6 +7,7 @@ import {
 import {
   clearCoreviewArtifactTextRegistryForTests,
   registerCoreviewArtifactText,
+  registerCoreviewArtifactTextStatus,
 } from '../app/lib/coreview-artifact-text';
 import {
   buildGeminiArtifactFrameRealtimeInput,
@@ -2062,11 +2063,11 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     });
 
     expect(readGeminiConfiguredToolNames(connection.setup)).toEqual(expect.arrayContaining([
-      'emit_artifact',
       'coreview_set_view',
       'coreview_refresh_view',
       'coreview_get_current_view',
     ]));
+    expect(readGeminiConfiguredToolNames(connection.setup)).not.toContain('emit_artifact');
     const fetchCallCountBeforeTool = fetchMock.mock.calls.length;
 
     websocket?.emitMessage({
@@ -2626,7 +2627,258 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       status: 'success',
       safe_reason: null,
       latency_ms: expect.any(Number),
+      review_tool_timed_out: false,
+      review_tool_timeout_name: null,
+      review_tool_timeout_result_sent: false,
       raw_artifact_text_excluded: true,
+    });
+
+    await connection.close();
+  });
+
+  it('resolves read_artifact_text pending, failed, and missing-artifact states without backend relay', async () => {
+    registerCoreviewArtifactTextStatus({
+      artifactId: 'coreview-real-artifact-pending-pdf',
+      source: 'pdf_text_extraction',
+      status: 'loading',
+      sessionIds: ['browser-gemini-read-statuses'],
+      threadId: 'thread-1',
+    });
+    registerCoreviewArtifactTextStatus({
+      artifactId: 'coreview-real-artifact-failed-pdf',
+      source: 'pdf_text_extraction',
+      status: 'failed',
+      safeReason: 'pdf_text_extraction_failed',
+      sessionIds: ['browser-gemini-read-statuses'],
+      threadId: 'thread-1',
+    });
+    const fetchMock = makeGeminiBrowserSessionFetch('browser-gemini-read-statuses');
+    const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
+    const ledgerUpdates: Array<{ toolCallId: string; finalState: string }> = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
+      onToolCallLedgerUpdate: (entry) => ledgerUpdates.push({
+        toolCallId: entry.toolCallId,
+        finalState: entry.finalState,
+      }),
+    });
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          {
+            id: 'read-pending',
+            name: 'read_artifact_text',
+            args: { artifact_id: 'coreview-real-artifact-pending-pdf', query: 'heading' },
+          },
+          {
+            id: 'read-failed',
+            name: 'read_artifact_text',
+            args: { artifact_id: 'coreview-real-artifact-failed-pdf', query: 'heading' },
+          },
+          {
+            id: 'read-missing-selected',
+            name: 'read_artifact_text',
+            args: { query: 'heading' },
+          },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => {
+      const responses = websocket?.sent
+        .map((payload) => JSON.parse(payload) as Record<string, unknown>)
+        .flatMap((payload) => {
+          const toolResponse = payload.toolResponse as { functionResponses?: Array<{ id: string; response: Record<string, unknown> }> } | undefined;
+          return toolResponse?.functionResponses ?? [];
+        });
+      expect(responses).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'read-pending', response: expect.objectContaining({ status: 'extraction_pending' }) }),
+        expect.objectContaining({ id: 'read-failed', response: expect.objectContaining({ status: 'extraction_failed' }) }),
+        expect.objectContaining({ id: 'read-missing-selected', response: expect.objectContaining({ status: 'no_selected_artifact' }) }),
+      ]));
+    });
+    const relayBodies = fetchMock.mock.calls
+      .filter((call) => String(call[0]).includes('/api/sophia/voice/dogfood/gemini/relay'))
+      .map((call) => String((call[1] as RequestInit | undefined)?.body ?? ''));
+    expect(relayBodies.join('\n')).not.toContain('read_artifact_text');
+    expect(Object.fromEntries(ledgerUpdates.map((entry) => [entry.toolCallId, entry.finalState]))).toMatchObject({
+      'read-pending': 'responded',
+      'read-failed': 'responded',
+      'read-missing-selected': 'responded',
+    });
+    expect(toolDiagnostics.filter((diagnostic) => diagnostic.phase === 'tool_response_sent' && diagnostic.toolCall.name === 'read_artifact_text')).toHaveLength(3);
+
+    await connection.close();
+  });
+
+  it('resolves read_artifact_text locally while backend guard blocks emit_artifact in a mixed review batch', async () => {
+    registerCoreviewArtifactText({
+      artifactId: 'coreview-real-artifact-launch-brief',
+      source: 'pdf_text_extraction',
+      text: 'Launch brief\nBudget delta: 17.4%',
+      sessionIds: ['browser-gemini-mixed-review-tools'],
+      threadId: 'thread-1',
+    });
+    const emitBlockedPayload = {
+      toolResponse: {
+        functionResponses: [
+          {
+            id: 'artifact-call-blocked',
+            name: 'emit_artifact',
+            response: {
+              ok: false,
+              status: 'rejected',
+              safe_reason: 'artifact_review_emit_artifact_suppressed',
+              raw_artifact_text_excluded: true,
+            },
+          },
+        ],
+      },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-mixed-review-tools',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: {
+              model: 'models/gemini-3.1-flash-live-preview',
+              inputAudioTranscription: {},
+              tools: [{ functionDeclarations: [{ name: 'emit_artifact' }, { name: 'read_artifact_text' }] }],
+            },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-mixed-review-tools',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            accepted: true,
+            client_actions: [{
+              type: 'gemini_tool_response',
+              payload: emitBlockedPayload,
+              result_summary: 'Review-only emit_artifact call suppressed.',
+            }],
+            tool_diagnostics: [{
+              id: 'artifact-call-blocked',
+              name: 'emit_artifact',
+              success: false,
+              execution_rejected: true,
+              rejection_reason: 'artifact_review_emit_artifact_suppressed',
+              response: emitBlockedPayload.toolResponse.functionResponses[0].response,
+            }],
+          }),
+          { status: 202, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(null, { status: 202 }));
+    let websocket: FakeWebSocket | null = null;
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+
+    expect(readGeminiConfiguredToolNames(connection.setup)).not.toContain('emit_artifact');
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          { id: 'artifact-call-blocked', name: 'emit_artifact', args: emitArtifactArgs },
+          {
+            id: 'read-artifact-local',
+            name: 'read_artifact_text',
+            args: { artifact_id: 'coreview-real-artifact-launch-brief', query: 'budget delta' },
+          },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => expect(JSON.stringify(websocket?.sent)).toContain('Budget delta: 17.4%'));
+    await vi.waitFor(() => expect(JSON.stringify(websocket?.sent)).toContain('artifact_review_emit_artifact_suppressed'));
+    const relayCall = fetchMock.mock.calls.find((call) => (
+      String(call[0]).includes('/api/sophia/voice/dogfood/gemini/relay')
+      && String((call[1] as RequestInit | undefined)?.body ?? '').includes('emit_artifact')
+    ));
+    expect(relayCall).toBeDefined();
+    const relayBody = JSON.parse(String((relayCall?.[1] as RequestInit | undefined)?.body)) as { event: { toolCall?: { functionCalls?: Array<{ name: string }> } } };
+    expect(relayBody.event.toolCall?.functionCalls?.map((call) => call.name)).toEqual(['emit_artifact']);
+
+    await connection.close();
+  });
+
+  it('sends a safe timeout result for a hung Coreview review tool and marks the call resolved', async () => {
+    registerCoreviewToolBridge(() => new Promise<never>(() => undefined));
+    const fetchMock = makeGeminiBrowserSessionFetch('browser-gemini-coreview-timeout');
+    const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
+    const ledgerUpdates: Array<{ toolCallId: string; finalState: string }> = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+      reviewToolTimeoutMs: 25,
+      onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
+      onToolCallLedgerUpdate: (entry) => ledgerUpdates.push({
+        toolCallId: entry.toolCallId,
+        finalState: entry.finalState,
+      }),
+    });
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          { id: 'coreview-timeout-call', name: 'coreview_get_current_view', args: {} },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(JSON.stringify(websocket?.sent)).toContain('review_tool_timeout_result_sent');
+    });
+    const responseSent = toolDiagnostics.find((diagnostic) => (
+      diagnostic.phase === 'tool_response_sent'
+      && diagnostic.toolCall.name === 'coreview_get_current_view'
+    ));
+    expect(responseSent).toMatchObject({
+      reviewToolTimedOut: true,
+      reviewToolTimeoutName: 'coreview_get_current_view',
+      reviewToolTimeoutResultSent: true,
+      backendResponse: expect.objectContaining({
+        review_tool_timed_out: true,
+        review_tool_timeout_result_sent: true,
+        raw_frame_excluded: true,
+      }),
+    });
+    expect(ledgerUpdates.find((entry) => entry.toolCallId === 'coreview-timeout-call' && entry.finalState === 'responded')).toBeTruthy();
+    expect(Object.fromEntries(ledgerUpdates.map((entry) => [entry.toolCallId, entry.finalState]))).toMatchObject({
+      'coreview-timeout-call': 'responded',
     });
 
     await connection.close();

@@ -134,7 +134,9 @@ export interface CoreviewActionResult {
   exact_text_available?: boolean
   visual_frame_fresh?: boolean
   visual_fresh?: boolean
+  frame_sent?: boolean
   review_active?: boolean
+  current_view_summary?: string
   annotation_overlay_captured?: boolean | null
   raw_artifact_text_excluded: true
   raw_frame_excluded: true
@@ -464,7 +466,7 @@ export function coreviewGeminiFunctionDeclarations(): Record<string, unknown>[] 
     },
     {
       name: COREVIEW_GET_CURRENT_VIEW_TOOL_NAME,
-      description: "Get safe metadata about the active Coreview artifact view. Returns no raw artifact text, comments, or visual frame.",
+      description: "Get safe metadata about what Sophia can currently see in the active Coreview artifact. Prefer this for simple visibility or current-page questions. Returns no raw artifact text, comments, or visual frame.",
       parameters: {
         type: "OBJECT",
         properties: {
@@ -479,6 +481,7 @@ export function coreviewGeminiFunctionDeclarations(): Record<string, unknown>[] 
 export function withCoreviewGeminiToolDeclarations(
   setup: Record<string, unknown>,
   enabled: boolean,
+  options: { allowArtifactCreation?: boolean } = {},
 ): Record<string, unknown> {
   if (!enabled) {
     return setup
@@ -488,6 +491,19 @@ export function withCoreviewGeminiToolDeclarations(
   const nextTools = existingTools.map((tool) => (
     isRecord(tool) ? { ...tool } : tool
   ))
+  if (options.allowArtifactCreation !== true) {
+    for (const tool of nextTools) {
+      if (!isRecord(tool)) {
+        continue
+      }
+      if (Array.isArray(tool.functionDeclarations)) {
+        tool.functionDeclarations = filterArtifactCreationDeclarations(tool.functionDeclarations)
+      }
+      if (Array.isArray(tool.function_declarations)) {
+        tool.function_declarations = filterArtifactCreationDeclarations(tool.function_declarations)
+      }
+    }
+  }
   const toolWithDeclarations = nextTools.find((tool): tool is Record<string, unknown> => (
     isRecord(tool) && Array.isArray(tool.functionDeclarations)
   ))
@@ -627,7 +643,9 @@ function buildCoreviewResult(params: {
     exact_text_available: current.exactTextAvailable,
     visual_frame_fresh: visualFrameFresh,
     visual_fresh: visualFrameFresh,
+    frame_sent: current.reviewHasFrame,
     review_active: current.reviewActive,
+    current_view_summary: currentViewSummary(current),
     annotation_overlay_captured: current.annotationOverlayCaptured,
     raw_artifact_text_excluded: true,
     raw_frame_excluded: true,
@@ -780,4 +798,12 @@ function numberFromAnyKey(value: Record<string, unknown>, ...keys: string[]): nu
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function filterArtifactCreationDeclarations(declarations: unknown[]): unknown[] {
+  return declarations.filter((declaration) => !(
+    isRecord(declaration)
+    && typeof declaration.name === "string"
+    && declaration.name === "emit_artifact"
+  ))
 }

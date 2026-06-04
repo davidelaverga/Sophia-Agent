@@ -91,6 +91,13 @@ export type CoreviewVisualTelemetry = {
   coreviewToolLastResult: string | null
   coreviewToolRefreshResult: string | null
   coreviewToolVisualFreshAfterResult: boolean | null
+  reviewToolsExposed: string[]
+  emitArtifactExposedDuringReview: boolean
+  reviewToolTimedOut: boolean
+  reviewToolTimeoutName: string | null
+  reviewToolTimeoutResultSent: boolean
+  coreviewGetCurrentViewCount: number
+  coreviewGetCurrentViewResult: string | null
   providerToPublicTranscriptGapAfterCoreviewTool: number | null
   followUpTurnDispatchedAfterCoreviewTool: boolean
   emitArtifactBlockedDuringReviewCount: number
@@ -124,7 +131,10 @@ export type CoreviewExactTextTelemetry = {
   lastExactTextLatencyMs: number | null
   readArtifactTextResolvedCount: number
   readArtifactTextUnresolvedCount: number
+  readArtifactTextTimeoutCount: number
+  readArtifactTextLastStatus: string | null
   readArtifactTextPdfExtractionStatus: string | null
+  exactTextRegistrySource: CoreviewExactTextSource | null
   rawArtifactTextExcluded: true
   rawQueryExcluded: true
 }
@@ -418,9 +428,19 @@ export type GeminiSessionTelemetry = {
     coreviewToolLastResult: string | null
     coreviewToolRefreshResult: string | null
     coreviewToolVisualFreshAfterResult: boolean | null
+    reviewToolsExposed: string[]
+    emitArtifactExposedDuringReview: boolean
+    reviewToolTimedOut: boolean
+    reviewToolTimeoutName: string | null
+    reviewToolTimeoutResultSent: boolean
+    coreviewGetCurrentViewCount: number
+    coreviewGetCurrentViewResult: string | null
     readArtifactTextResolvedCount: number
     readArtifactTextUnresolvedCount: number
+    readArtifactTextTimeoutCount: number
+    readArtifactTextLastStatus: string | null
     readArtifactTextPdfExtractionStatus: string | null
+    exactTextRegistrySource: CoreviewExactTextSource | null
     providerToPublicTranscriptGapAfterCoreviewTool: number | null
     followUpTurnDispatchedAfterCoreviewTool: boolean
     emitArtifactBlockedDuringReviewCount: number
@@ -1018,6 +1038,13 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       coreviewToolLastResult: null,
       coreviewToolRefreshResult: null,
       coreviewToolVisualFreshAfterResult: null,
+      reviewToolsExposed: [],
+      emitArtifactExposedDuringReview: false,
+      reviewToolTimedOut: false,
+      reviewToolTimeoutName: null,
+      reviewToolTimeoutResultSent: false,
+      coreviewGetCurrentViewCount: 0,
+      coreviewGetCurrentViewResult: null,
       providerToPublicTranscriptGapAfterCoreviewTool: null,
       followUpTurnDispatchedAfterCoreviewTool: false,
       emitArtifactBlockedDuringReviewCount: 0,
@@ -1037,7 +1064,10 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       lastExactTextLatencyMs: null,
       readArtifactTextResolvedCount: 0,
       readArtifactTextUnresolvedCount: 0,
+      readArtifactTextTimeoutCount: 0,
+      readArtifactTextLastStatus: null,
       readArtifactTextPdfExtractionStatus: null,
+      exactTextRegistrySource: null,
       rawArtifactTextExcluded: true,
       rawQueryExcluded: true,
     },
@@ -1087,6 +1117,10 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     event.name === "gemini-tool-loop-diagnostic"
     && GEMINI_COREVIEW_TOOL_NAMES.has(geminiToolName(event) ?? "")
   ))
+  const setupToolEvents = activeEvents
+    .filter((event) => event.name === "gemini-setup-tools")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
   const keyboardShortcutEvents = activeEvents
     .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-keyboard-shortcut")
     .map((event) => event.payloadRecord)
@@ -1104,6 +1138,7 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   const latestArtifactCommand = artifactCommandEvents.at(-1) ?? null
   const latestPdfTextExtraction = pdfTextExtractionEvents.at(-1) ?? latestSelectedStage
   const latestCoreviewTool = coreviewToolEvents.at(-1) ?? null
+  const latestSetupTools = setupToolEvents.at(-1) ?? null
   const latestKeyboardShortcut = keyboardShortcutEvents.at(-1) ?? null
   const firstFrameSeq = frameEvents.find((event) => {
     const result = coreviewFrameResult(event)
@@ -1206,6 +1241,43 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     ?? asString(latestCoreviewTool?.coreviewToolResult)
   visual.coreviewToolRefreshResult = asString(latestCoreviewTool?.coreviewToolRefreshResult)
   visual.coreviewToolVisualFreshAfterResult = asBoolean(latestCoreviewTool?.coreviewToolVisualFreshAfterResult)
+  visual.reviewToolsExposed = asStringArray(latestSetupTools?.reviewToolsExposed) ?? []
+  visual.emitArtifactExposedDuringReview = asBoolean(latestSetupTools?.emitArtifactExposedDuringReview)
+    ?? visual.reviewToolsExposed.includes(GEMINI_EMIT_ARTIFACT_TOOL_NAME)
+  const reviewToolTimeoutDiagnostics = activeEvents.filter((event) => {
+    if (event.name !== "gemini-tool-loop-diagnostic") return false
+    const diagnostic = asRecord(eventData(event)?.diagnostic)
+    const backendResponse = toolBackendResponseFromDiagnostic(diagnostic)
+    return asBoolean(diagnostic?.reviewToolTimedOut) === true
+      || asBoolean(backendResponse?.review_tool_timed_out) === true
+  })
+  const latestReviewToolTimeout = reviewToolTimeoutDiagnostics.at(-1) ?? null
+  const latestReviewToolTimeoutDiagnostic = latestReviewToolTimeout
+    ? asRecord(eventData(latestReviewToolTimeout)?.diagnostic)
+    : null
+  const latestReviewToolTimeoutResponse = toolBackendResponseFromDiagnostic(latestReviewToolTimeoutDiagnostic)
+  visual.reviewToolTimedOut = reviewToolTimeoutDiagnostics.length > 0
+  visual.reviewToolTimeoutName = asString(latestReviewToolTimeoutDiagnostic?.reviewToolTimeoutName)
+    ?? asString(latestReviewToolTimeoutResponse?.review_tool_timeout_name)
+    ?? (latestReviewToolTimeout ? geminiToolName(latestReviewToolTimeout) : null)
+  visual.reviewToolTimeoutResultSent = reviewToolTimeoutDiagnostics.some((event) => {
+    const diagnostic = asRecord(eventData(event)?.diagnostic)
+    const backendResponse = toolBackendResponseFromDiagnostic(diagnostic)
+    return asBoolean(diagnostic?.reviewToolTimeoutResultSent) === true
+      || asBoolean(backendResponse?.review_tool_timeout_result_sent) === true
+  })
+  const currentViewDiagnostics = coreviewToolDiagnostics.filter((event) => (
+    geminiToolName(event) === "coreview_get_current_view"
+    && asString(eventData(event)?.phase) === "tool_response_sent"
+  ))
+  visual.coreviewGetCurrentViewCount = currentViewDiagnostics.length
+  const latestCurrentViewDiagnostic = currentViewDiagnostics.at(-1) ?? null
+  const latestCurrentViewResponse = toolBackendResponseFromDiagnostic(
+    latestCurrentViewDiagnostic ? asRecord(eventData(latestCurrentViewDiagnostic)?.diagnostic) : null,
+  )
+  visual.coreviewGetCurrentViewResult = asString(latestCurrentViewResponse?.current_view_summary)
+    ?? asString(latestCurrentViewResponse?.result_summary)
+    ?? asString(latestCurrentViewResponse?.blocked_reason)
   visual.emitArtifactBlockedDuringReviewCount = countWhere(activeEvents, isReviewEmitArtifactSuppressedDiagnostic)
   visual.followUpTurnDispatchedAfterCoreviewTool = activeEvents.some((event) => {
     if (event.name !== "gemini-barge-in-transcript-handoff") return false
@@ -1352,15 +1424,25 @@ function buildCoreviewExactTextTelemetry(activeEvents: NormalizedVoiceCaptureEve
     } else {
       exactText.exactTextFailureCount += 1
     }
+    if (
+      status === "timeout"
+      || asBoolean(backendResponse?.review_tool_timed_out) === true
+      || asBoolean(diagnostic?.reviewToolTimedOut) === true
+    ) {
+      exactText.readArtifactTextTimeoutCount += 1
+    }
     exactText.exactTextSources[source] += 1
     exactText.lastExactTextStatus = status
     exactText.lastExactTextSource = source
+    exactText.readArtifactTextLastStatus = status
+    exactText.exactTextRegistrySource = success ? source : exactText.exactTextRegistrySource
     exactText.lastExactTextCharCount = numberFromKeys(backendResponse, ["char_count", "charCount"]) ?? 0
     exactText.lastExactTextTruncated = asBoolean(backendResponse?.truncated) ?? false
     exactText.lastExactTextLatencyMs = latency
     if (
       asString(backendResponse?.source) === "pdf_text_extraction"
       || status === "extraction_pending"
+      || status === "extraction_unavailable"
       || status === "extraction_failed"
     ) {
       exactText.readArtifactTextPdfExtractionStatus = status
@@ -1387,6 +1469,30 @@ function buildCoreviewExactTextTelemetry(activeEvents: NormalizedVoiceCaptureEve
     .at(-1)
   exactText.readArtifactTextPdfExtractionStatus = exactText.readArtifactTextPdfExtractionStatus
     ?? asString(latestPdfTextExtraction?.pdfTextExtractionStatus)
+  const latestPdfTextExtractionStatus = asString(latestPdfTextExtraction?.pdfTextExtractionStatus)
+  const latestPdfTextExtractionSource = normalizeCoreviewExactTextSource(
+    asString(latestPdfTextExtraction?.pdfTextExtractionSource),
+    latestPdfTextExtractionStatus === "success",
+  )
+  if (
+    latestPdfTextExtractionStatus === "success"
+    && latestPdfTextExtractionSource === "pdf_text_extraction"
+  ) {
+    if (exactText.exactTextSources.pdf_text_extraction === 0) {
+      exactText.exactTextSources.pdf_text_extraction += 1
+    }
+    exactText.exactTextSuccessCount = Math.max(exactText.exactTextSuccessCount, 1)
+    exactText.lastExactTextStatus = exactText.lastExactTextStatus ?? "success"
+    exactText.lastExactTextSource = exactText.lastExactTextSource ?? "pdf_text_extraction"
+    exactText.lastExactTextCharCount = exactText.lastExactTextCharCount
+      ?? numberFromKeys(latestPdfTextExtraction, ["pdfTextExtractionCharCount"])
+    exactText.lastExactTextTruncated = exactText.lastExactTextTruncated
+      ?? asBoolean(latestPdfTextExtraction?.pdfTextExtractionTruncated)
+    exactText.exactTextRegistrySource = exactText.exactTextRegistrySource ?? "pdf_text_extraction"
+  }
+  exactText.readArtifactTextLastStatus = exactText.readArtifactTextLastStatus
+    ?? exactText.lastExactTextStatus
+    ?? latestPdfTextExtractionStatus
 
   return exactText
 }
@@ -1429,6 +1535,12 @@ function normalizeCoreviewExactTextSource(
 }
 
 function coreviewReadArtifactTextResponse(
+  diagnostic: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  return toolBackendResponseFromDiagnostic(diagnostic)
+}
+
+function toolBackendResponseFromDiagnostic(
   diagnostic: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
   if (!diagnostic) return null
@@ -2196,12 +2308,34 @@ function buildSessionTelemetry(params: {
           ?? coreviewTelemetry.visual.coreviewToolRefreshResult,
         coreviewToolVisualFreshAfterResult: hookTelemetry?.coreviewToolVisualFreshAfterResult
           ?? coreviewTelemetry.visual.coreviewToolVisualFreshAfterResult,
+        reviewToolsExposed: hookTelemetry?.reviewToolsExposed
+          ?? coreviewTelemetry.visual.reviewToolsExposed,
+        emitArtifactExposedDuringReview: hookTelemetry?.emitArtifactExposedDuringReview
+          ?? coreviewTelemetry.visual.emitArtifactExposedDuringReview,
+        reviewToolTimedOut: hookTelemetry?.reviewToolTimedOut
+          ?? coreviewTelemetry.visual.reviewToolTimedOut,
+        reviewToolTimeoutName: hookTelemetry?.reviewToolTimeoutName
+          ?? coreviewTelemetry.visual.reviewToolTimeoutName,
+        reviewToolTimeoutResultSent: hookTelemetry?.reviewToolTimeoutResultSent
+          ?? coreviewTelemetry.visual.reviewToolTimeoutResultSent,
+        coreviewGetCurrentViewCount: hookTelemetry?.coreviewGetCurrentViewCount
+          ?? coreviewTelemetry.visual.coreviewGetCurrentViewCount,
+        coreviewGetCurrentViewResult: hookTelemetry?.coreviewGetCurrentViewResult
+          ?? coreviewTelemetry.visual.coreviewGetCurrentViewResult,
         readArtifactTextResolvedCount: hookTelemetry?.readArtifactTextResolvedCount
           ?? coreviewTelemetry.exactText.readArtifactTextResolvedCount,
         readArtifactTextUnresolvedCount: hookTelemetry?.readArtifactTextUnresolvedCount
           ?? coreviewTelemetry.exactText.readArtifactTextUnresolvedCount,
+        readArtifactTextTimeoutCount: hookTelemetry?.readArtifactTextTimeoutCount
+          ?? coreviewTelemetry.exactText.readArtifactTextTimeoutCount,
+        readArtifactTextLastStatus: hookTelemetry?.readArtifactTextLastStatus
+          ?? coreviewTelemetry.exactText.readArtifactTextLastStatus,
         readArtifactTextPdfExtractionStatus: hookTelemetry?.readArtifactTextPdfExtractionStatus
           ?? coreviewTelemetry.exactText.readArtifactTextPdfExtractionStatus,
+        exactTextRegistrySource: (() => {
+          const source = hookTelemetry?.exactTextRegistrySource ?? coreviewTelemetry.exactText.exactTextRegistrySource
+          return source ? normalizeCoreviewExactTextSource(source, true) : null
+        })(),
         providerToPublicTranscriptGapAfterCoreviewTool: hookTelemetry?.providerToPublicTranscriptGapAfterCoreviewTool
           ?? (
             coreviewTelemetry.visual.coreviewToolCompletedCount > 0

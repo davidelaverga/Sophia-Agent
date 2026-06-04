@@ -48,6 +48,7 @@ def test_coreview_prompt_appears_only_when_enabled(monkeypatch) -> None:
     assert "<gemini_coreview_artifact_policy>" in prompt
     assert "Exact words, numbers, table values" in prompt
     assert "call read_artifact_text for the current artifact before answering" in prompt
+    assert "answer from a fresh frame directly or call coreview_get_current_view" in prompt
     assert "coreview_set_view" in prompt
     assert "Do not call emit_artifact, start_builder_task" in prompt
     assert "Still-frame co-review" in prompt
@@ -139,6 +140,24 @@ def test_read_artifact_text_returns_safe_not_found_for_unregistered_artifact(mon
         "artifact_id": "artifact-from-another-session",
         "status": "not_found",
         "safe_reason": "No trusted artifact text source is registered for that artifact_id.",
+    }
+
+
+def test_read_artifact_text_returns_no_selected_artifact_without_artifact_id(monkeypatch) -> None:
+    monkeypatch.setenv(COREVIEW_FEATURE_FLAG, "true")
+
+    response = execute_read_artifact_text_feature_gated(
+        {"query": "heading"},
+        session_id="session-1",
+        user_id="user-1",
+        provider="gemini",
+    )
+
+    assert response == {
+        "ok": False,
+        "artifact_id": None,
+        "status": "no_selected_artifact",
+        "safe_reason": "No artifact is selected for trusted text reading.",
     }
 
 

@@ -19,6 +19,7 @@ import { coreviewFlagDiagnostics } from "../lib/co-review-flags"
 import { logger } from "../lib/error-logger"
 import {
   connectGeminiBrowserLiveFromBootstrap,
+  readGeminiConfiguredToolNames,
   type GeminiBrowserLiveDogfoodConnection,
   type GeminiBargeInTranscriptHandoffDiagnostic,
   type GeminiArtifactFramePayload,
@@ -181,6 +182,14 @@ const RECENT_BARGE_IN_TRANSCRIPT_FINGERPRINTS_LIMIT = 10
 const AUTO_PRECONNECT_DELAY_MS = 250
 const PREPARED_VOICE_CONNECT_TTL_MS = 30_000
 const GEMINI_EMIT_ARTIFACT_TOOL_NAME = "emit_artifact"
+const GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = "read_artifact_text"
+const GEMINI_COREVIEW_GET_CURRENT_VIEW_TOOL_NAME = "coreview_get_current_view"
+const GEMINI_REVIEW_TOOL_NAMES = new Set([
+  GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
+  "coreview_set_view",
+  "coreview_refresh_view",
+  GEMINI_COREVIEW_GET_CURRENT_VIEW_TOOL_NAME,
+])
 const GEMINI_TRANSCRIPT_COALESCING_DISABLED_REASON = "provider_output_transcription_is_delta_like"
 const GEMINI_BUILDER_TOOL_NAMES = new Set([
   "start_builder_task",
@@ -307,6 +316,19 @@ function createGeminiRuntimeTelemetry(params: Partial<Extract<VoiceRuntimeTeleme
     artifactToolCallCount: params.artifactToolCallCount ?? 0,
     artifactToolCallUnknownCount: params.artifactToolCallUnknownCount ?? 0,
     builderToolCallCount: params.builderToolCallCount ?? 0,
+    reviewToolsExposed: params.reviewToolsExposed ?? [],
+    emitArtifactExposedDuringReview: params.emitArtifactExposedDuringReview ?? false,
+    reviewToolTimedOut: params.reviewToolTimedOut ?? false,
+    reviewToolTimeoutName: params.reviewToolTimeoutName ?? null,
+    reviewToolTimeoutResultSent: params.reviewToolTimeoutResultSent ?? false,
+    coreviewGetCurrentViewCount: params.coreviewGetCurrentViewCount ?? 0,
+    coreviewGetCurrentViewResult: params.coreviewGetCurrentViewResult ?? null,
+    readArtifactTextResolvedCount: params.readArtifactTextResolvedCount ?? 0,
+    readArtifactTextUnresolvedCount: params.readArtifactTextUnresolvedCount ?? 0,
+    readArtifactTextTimeoutCount: params.readArtifactTextTimeoutCount ?? 0,
+    readArtifactTextLastStatus: params.readArtifactTextLastStatus ?? null,
+    readArtifactTextPdfExtractionStatus: params.readArtifactTextPdfExtractionStatus ?? null,
+    exactTextRegistrySource: params.exactTextRegistrySource ?? null,
     unresolvedToolCallCount: params.unresolvedToolCallCount ?? 0,
     oldestUnresolvedToolCallAgeMs: params.oldestUnresolvedToolCallAgeMs ?? null,
     lastToolPhase: params.lastToolPhase ?? null,
@@ -2877,6 +2899,31 @@ export function useStreamVoiceSession(
 
               const toolName = diagnostic.toolCall.name
               const isToolCallReceived = diagnostic.phase === "tool_call_received"
+              const backendStatus = typeof diagnostic.backendResponse?.status === "string"
+                ? diagnostic.backendResponse.status
+                : diagnostic.success === true
+                  ? "success"
+                  : null
+              const reviewToolTimedOut = diagnostic.reviewToolTimedOut === true
+                || diagnostic.backendResponse?.review_tool_timed_out === true
+              const reviewToolTimeoutResultSent = diagnostic.reviewToolTimeoutResultSent === true
+                || diagnostic.backendResponse?.review_tool_timeout_result_sent === true
+              const readArtifactTextResolved = toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME
+                && (
+                  diagnostic.phase === "tool_response_sent"
+                  || diagnostic.phase === "tool_execution_rejected"
+                  || diagnostic.phase === "tool_response_send_suppressed"
+                )
+              const coreviewGetCurrentViewResponse = toolName === GEMINI_COREVIEW_GET_CURRENT_VIEW_TOOL_NAME
+                && diagnostic.phase === "tool_response_sent"
+                ? (
+                    typeof diagnostic.backendResponse?.current_view_summary === "string"
+                      ? diagnostic.backendResponse.current_view_summary
+                      : typeof diagnostic.resultSummary === "string"
+                        ? diagnostic.resultSummary
+                        : null
+                  )
+                : null
 
               return {
                 ...current,
@@ -2894,6 +2941,40 @@ export function useStreamVoiceSession(
                 builderToolCallCount: isToolCallReceived && toolName !== null && GEMINI_BUILDER_TOOL_NAMES.has(toolName)
                   ? current.builderToolCallCount + 1
                   : current.builderToolCallCount,
+                readArtifactTextResolvedCount: readArtifactTextResolved
+                  ? (current.readArtifactTextResolvedCount ?? 0) + 1
+                  : current.readArtifactTextResolvedCount,
+                readArtifactTextTimeoutCount: toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME && reviewToolTimedOut
+                  ? (current.readArtifactTextTimeoutCount ?? 0) + 1
+                  : current.readArtifactTextTimeoutCount,
+                readArtifactTextLastStatus: toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME
+                  ? backendStatus ?? current.readArtifactTextLastStatus ?? null
+                  : current.readArtifactTextLastStatus,
+                readArtifactTextPdfExtractionStatus: toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME
+                  && (
+                    diagnostic.backendResponse?.source === "pdf_text_extraction"
+                    || backendStatus === "extraction_pending"
+                    || backendStatus === "extraction_unavailable"
+                    || backendStatus === "extraction_failed"
+                  )
+                  ? backendStatus
+                  : current.readArtifactTextPdfExtractionStatus,
+                exactTextRegistrySource: toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME
+                  && typeof diagnostic.backendResponse?.source === "string"
+                  ? diagnostic.backendResponse.source
+                  : current.exactTextRegistrySource,
+                reviewToolTimedOut: current.reviewToolTimedOut === true || reviewToolTimedOut,
+                reviewToolTimeoutName: reviewToolTimedOut
+                  ? diagnostic.reviewToolTimeoutName
+                    ?? (typeof diagnostic.backendResponse?.review_tool_timeout_name === "string"
+                      ? diagnostic.backendResponse.review_tool_timeout_name
+                      : toolName)
+                  : current.reviewToolTimeoutName,
+                reviewToolTimeoutResultSent: current.reviewToolTimeoutResultSent === true || reviewToolTimeoutResultSent,
+                coreviewGetCurrentViewCount: toolName === GEMINI_COREVIEW_GET_CURRENT_VIEW_TOOL_NAME && diagnostic.phase === "tool_response_sent"
+                  ? (current.coreviewGetCurrentViewCount ?? 0) + 1
+                  : current.coreviewGetCurrentViewCount,
+                coreviewGetCurrentViewResult: coreviewGetCurrentViewResponse ?? current.coreviewGetCurrentViewResult ?? null,
                 lastToolPhase: diagnostic.phase,
                 lastToolName: toolName,
                 lastToolAt: diagnostic.timestamp,
@@ -2943,6 +3024,11 @@ export function useStreamVoiceSession(
         setGeminiConnection(connection)
         setCredentials(null)
         clearStartupReadyTimeout()
+        const configuredToolNames = readGeminiConfiguredToolNames(connection.setup)
+        const reviewToolsExposed = configuredToolNames.filter((name) => (
+          GEMINI_REVIEW_TOOL_NAMES.has(name) || name === GEMINI_EMIT_ARTIFACT_TOOL_NAME
+        ))
+        const emitArtifactExposedDuringReview = reviewToolsExposed.includes(GEMINI_EMIT_ARTIFACT_TOOL_NAME)
         setRuntimeTelemetry((current) => current.runtime === "gemini_live"
           ? {
               ...current,
@@ -2959,8 +3045,23 @@ export function useStreamVoiceSession(
               relayUrl: connection.relayUrl,
               transport: connection.transport,
               publicEventBoundary: connection.publicEventBoundary,
+              reviewToolsExposed,
+              emitArtifactExposedDuringReview,
             }
           : current)
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "gemini-setup-tools",
+          payload: {
+            runtime: "gemini_live",
+            sessionId: sessionIdRef.current ?? null,
+            voiceAgentSessionId: creds.session_id,
+            reviewToolsExposed,
+            emitArtifactExposedDuringReview,
+            rawArtifactTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        })
         markSophiaReady("gemini-live-setup-complete", {
           runtime: "gemini_live",
           callId: creds.session_id,

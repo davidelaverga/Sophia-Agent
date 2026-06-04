@@ -387,6 +387,9 @@ export interface GeminiBrowserLiveDogfoodToolLoopDiagnostic {
   backendResponse: Record<string, unknown> | null;
   errorText: string | null;
   suppressionReason?: string | null;
+  reviewToolTimedOut?: boolean | null;
+  reviewToolTimeoutName?: string | null;
+  reviewToolTimeoutResultSent?: boolean | null;
 }
 
 export type GeminiToolCallLedgerFinalState =
@@ -436,6 +439,7 @@ export interface GeminiBrowserLiveDogfoodConnectOptions {
   getUserMedia?: GetUserMediaLike;
   audioContextFactory?: AudioContextFactory;
   coreviewStillFrameEnabled?: boolean;
+  reviewToolTimeoutMs?: number;
   onStage?: (stage: GeminiBrowserLiveDogfoodStage) => void;
   onProviderEvent?: (event: unknown) => void;
   onOutputAudio?: () => void;
@@ -720,6 +724,7 @@ const WEBSOCKET_OPEN = 1;
 const GEMINI_ARTIFACT_FRAME_PAYLOAD_SCHEMA_VERSION = 'realtimeInput.video.v1';
 const ARTIFACT_FRAME_SEND_SETTLE_MS = 125;
 const ARTIFACT_REVIEW_RELAY_CONTEXT_TTL_MS = 10 * 60 * 1000;
+const GEMINI_REVIEW_TOOL_TIMEOUT_MS = 1_000;
 const MAX_SAFE_DIAGNOSTIC_TEXT_CHARS = 180;
 const BARGE_IN_CANDIDATE_DECAY_MS = 650;
 const PROVIDER_INPUT_TRANSCRIPTION_CONFIRMATION_DELAY_MS = 350;
@@ -743,6 +748,12 @@ const RELAYABLE_GEMINI_PROVIDER_EVENT_KEYS = new Set([
 ]);
 const ZERO_FIELD_GEMINI_PROVIDER_EVENT_KEYS = new Set(['setupComplete', 'setup_complete']);
 const GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = 'read_artifact_text';
+type GeminiReadArtifactTextToolCallInput = {
+  id: string | null;
+  name: typeof GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME;
+  args: Record<string, unknown>;
+};
+type GeminiFrontendReviewToolCallInput = CoreviewToolCallInput | GeminiReadArtifactTextToolCallInput;
 const GEMINI_PROVIDER_EVENT_CATEGORIES: GeminiProviderEventCategory[] = [
   'setupComplete',
   'serverContent',
@@ -1687,7 +1698,9 @@ export async function connectGeminiBrowserLiveDogfood(
     dogfoodSessionId = browserSession.sessionId;
     disconnectTargetPath = browserSession.disconnectUrl ?? DISCONNECT_TARGET_PATH;
     const coreviewToolsEnabled = options.coreviewStillFrameEnabled ?? isCoReviewStillFrameEnabled();
-    const sessionSetup = withCoreviewGeminiToolDeclarations(browserSession.setup, coreviewToolsEnabled);
+    const sessionSetup = withCoreviewGeminiToolDeclarations(browserSession.setup, coreviewToolsEnabled, {
+      allowArtifactCreation: false,
+    });
 
     notifyStage('requesting_microphone');
     localStream = await getUserMedia({ audio: true });
@@ -1735,6 +1748,8 @@ export async function connectGeminiBrowserLiveDogfood(
         event,
         websocket,
         sessionId: browserSession.sessionId,
+        activeArtifactId: artifactReviewArtifactId,
+        reviewToolTimeoutMs: options.reviewToolTimeoutMs,
         toolCallLedger,
         onToolCallLedgerUpdate: notifyToolCallLedgerUpdate,
         onToolLoopDiagnostic: options.onToolLoopDiagnostic,
@@ -2158,6 +2173,8 @@ export function buildGeminiArtifactTextReaderHint(artifactId: string): Record<st
       text: [
         'App context: artifact review is active for the selected artifact.',
         `artifact_id: ${artifactId}.`,
+        'For simple visibility questions, answer from the fresh artifact frame or safe current-view metadata.',
+        'Use exact-text sideband only when exact words, numbers, labels, or table values are needed.',
         'Do not answer this context message.',
       ].join(' '),
     },
@@ -2990,6 +3007,9 @@ function handleGeminiRelayClientActions(options: {
       backendResponse,
       errorText: stringFromAnyKey(diagnostic, 'error_text', 'errorText')
         ?? (executionRejected ? stringFromAnyKey(backendResponse, 'error_message', 'errorMessage') : null),
+      reviewToolTimedOut: backendResponse?.review_tool_timed_out === true,
+      reviewToolTimeoutName: stringFromAnyKey(backendResponse, 'review_tool_timeout_name', 'reviewToolTimeoutName'),
+      reviewToolTimeoutResultSent: backendResponse?.review_tool_timeout_result_sent === true,
     });
   }
 
@@ -3086,6 +3106,9 @@ function handleGeminiRelayClientActions(options: {
           recoveryGuidance: stringFromAnyKey(backendResponse, 'recovery_guidance', 'recoveryGuidance'),
           backendResponse,
           errorText: null,
+          reviewToolTimedOut: backendResponse?.review_tool_timed_out === true,
+          reviewToolTimeoutName: stringFromAnyKey(backendResponse, 'review_tool_timeout_name', 'reviewToolTimeoutName'),
+          reviewToolTimeoutResultSent: backendResponse?.review_tool_timeout_result_sent === true,
         });
       }
     } catch (error) {
@@ -3112,6 +3135,9 @@ function handleGeminiRelayClientActions(options: {
               )
             : null,
           errorText,
+          reviewToolTimedOut: false,
+          reviewToolTimeoutName: null,
+          reviewToolTimeoutResultSent: false,
         });
       }
     }
@@ -3122,25 +3148,26 @@ async function handleGeminiFrontendCoreviewToolEvent(options: {
   event: Record<string, unknown>;
   websocket: WebSocketLike | null;
   sessionId: string;
+  activeArtifactId?: string | null;
+  reviewToolTimeoutMs?: number;
   toolCallLedger: Map<string, GeminiBrowserLiveToolCallLedgerEntry>;
   onToolCallLedgerUpdate?: (entry: GeminiBrowserLiveToolCallLedgerEntry) => void;
   onToolLoopDiagnostic?: (diagnostic: GeminiBrowserLiveDogfoodToolLoopDiagnostic) => void;
   onToolResponseSent?: (functionResponse: Record<string, unknown>, timestamp: string) => void;
 }): Promise<Record<string, unknown> | null> {
-  const split = splitCoreviewToolCallsFromProviderEvent(options.event);
-  if (split.coreviewCalls.length === 0) {
+  const split = splitFrontendReviewToolCallsFromProviderEvent(options.event);
+  if (split.frontendCalls.length === 0) {
     return options.event;
   }
 
   const preparedAt = new Date().toISOString();
   const functionResponses: Record<string, unknown>[] = [];
-  for (const call of split.coreviewCalls) {
-    let response: CoreviewActionResult;
-    try {
-      response = await executeCoreviewToolBridgeCall(call);
-    } catch (error) {
-      response = coreviewToolExceptionResult(call, error);
-    }
+  for (const call of split.frontendCalls) {
+    const response = await executeFrontendReviewToolCallWithTimeout(call, {
+      sessionId: options.sessionId,
+      activeArtifactId: options.activeArtifactId ?? null,
+      timeoutMs: options.reviewToolTimeoutMs,
+    });
     functionResponses.push({
       ...(call.id ? { id: call.id } : {}),
       name: call.name,
@@ -3189,8 +3216,173 @@ async function handleGeminiFrontendCoreviewToolEvent(options: {
   return split.relayEvent;
 }
 
-function splitCoreviewToolCallsFromProviderEvent(event: Record<string, unknown>): {
-  coreviewCalls: CoreviewToolCallInput[];
+async function executeFrontendReviewToolCallWithTimeout(
+  call: GeminiFrontendReviewToolCallInput,
+  options: {
+    sessionId: string;
+    activeArtifactId: string | null;
+    timeoutMs?: number;
+  },
+): Promise<Record<string, unknown>> {
+  const timeoutMs = normalizeReviewToolTimeoutMs(options.timeoutMs);
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const startedAtMs = monotonicNowMs();
+  const execution = (async () => {
+    try {
+      if (isReadArtifactTextToolCall(call)) {
+        return executeBrowserReadArtifactTextToolCall(call, {
+          sessionId: options.sessionId,
+          activeArtifactId: options.activeArtifactId,
+          startedAtMs,
+        });
+      }
+      return { ...(await executeCoreviewToolBridgeCall(call)) };
+    } catch (error) {
+      return !isReadArtifactTextToolCall(call)
+        ? { ...coreviewToolExceptionResult(call, error) }
+        : readArtifactTextFailureResponse(call, 'unavailable', error instanceof Error
+          ? error.message
+          : 'Trusted artifact text is unavailable.');
+    }
+  })();
+  const timeout = new Promise<Record<string, unknown>>((resolve) => {
+    timeoutId = setTimeout(() => {
+      resolve(reviewToolTimeoutResult(call, {
+        activeArtifactId: options.activeArtifactId,
+        timeoutMs,
+      }));
+    }, timeoutMs);
+  });
+
+  const result = await Promise.race([execution, timeout]);
+  if (timeoutId) {
+    clearTimeout(timeoutId);
+  }
+  return result;
+}
+
+function isReadArtifactTextToolCall(
+  call: GeminiFrontendReviewToolCallInput,
+): call is GeminiReadArtifactTextToolCallInput {
+  return call.name === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME;
+}
+
+function executeBrowserReadArtifactTextToolCall(
+  call: GeminiReadArtifactTextToolCallInput,
+  options: {
+    sessionId: string;
+    activeArtifactId: string | null;
+    startedAtMs: number;
+  },
+): Record<string, unknown> {
+  const artifactId = stringFromAnyKey(call.args, 'artifact_id', 'artifactId') ?? options.activeArtifactId;
+  const latencyMs = elapsedMs(options.startedAtMs);
+  if (!artifactId) {
+    return {
+      ...readArtifactTextFailureResponse(call, 'no_selected_artifact', 'No artifact is selected for trusted text reading.'),
+      latency_ms: latencyMs,
+    };
+  }
+
+  return {
+    ...readCoreviewArtifactTextSideband({
+      artifactId,
+      sessionId: options.sessionId,
+    }),
+    latency_ms: latencyMs,
+    raw_artifact_text_excluded: true,
+  };
+}
+
+function readArtifactTextFailureResponse(
+  call: GeminiReadArtifactTextToolCallInput,
+  status: string,
+  safeReason: string,
+): Record<string, unknown> {
+  return {
+    ok: false,
+    artifact_id: stringFromAnyKey(call.args, 'artifact_id', 'artifactId') ?? null,
+    status,
+    safe_reason: safeReason,
+    raw_artifact_text_excluded: true,
+  };
+}
+
+function reviewToolTimeoutResult(
+  call: GeminiFrontendReviewToolCallInput,
+  options: {
+    activeArtifactId: string | null;
+    timeoutMs: number;
+  },
+): Record<string, unknown> {
+  if (call.name === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
+    return {
+      ...readArtifactTextFailureResponse(
+        call,
+        'timeout',
+        'Trusted artifact text read timed out before the voice response deadline.',
+      ),
+      artifact_id: stringFromAnyKey(call.args, 'artifact_id', 'artifactId') ?? options.activeArtifactId,
+      latency_ms: options.timeoutMs,
+      review_tool_timed_out: true,
+      review_tool_timeout_name: call.name,
+      review_tool_timeout_result_sent: true,
+    };
+  }
+
+  const action = call.name === COREVIEW_REFRESH_VIEW_TOOL_NAME
+    ? 'refresh_view'
+    : call.name === COREVIEW_GET_CURRENT_VIEW_TOOL_NAME
+      ? 'get_current_view'
+      : 'set_view';
+  return {
+    ok: false,
+    action,
+    artifact_id: stringFromAnyKey(call.args, 'artifact_id', 'artifactId') ?? options.activeArtifactId,
+    artifact_path: null,
+    artifact_title: null,
+    renderer_kind: null,
+    page_index: null,
+    page_number: null,
+    page_count: null,
+    zoom: null,
+    fit_mode: null,
+    view_signature: null,
+    stale: false,
+    refresh_attempted: false,
+    refresh_result: 'not_requested',
+    blocked_reason: 'tool_unavailable',
+    result_summary: `${call.name} timed out before the voice response deadline.`,
+    command_source: 'gemini_tool',
+    preserved_mic: true,
+    preserved_review: true,
+    view_ready_wait_ms: options.timeoutMs,
+    view_signature_before: null,
+    view_signature_after: null,
+    exact_text_available: false,
+    visual_frame_fresh: false,
+    visual_fresh: false,
+    frame_sent: false,
+    review_active: true,
+    current_view_summary: 'Coreview tool timed out.',
+    annotation_overlay_captured: null,
+    review_tool_timed_out: true,
+    review_tool_timeout_name: call.name,
+    review_tool_timeout_result_sent: true,
+    raw_artifact_text_excluded: true,
+    raw_frame_excluded: true,
+  };
+}
+
+function normalizeReviewToolTimeoutMs(value: number | null | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return GEMINI_REVIEW_TOOL_TIMEOUT_MS;
+  }
+  return Math.min(1_500, Math.max(25, Math.floor(value)));
+}
+
+function splitFrontendReviewToolCallsFromProviderEvent(event: Record<string, unknown>): {
+  frontendCalls: GeminiFrontendReviewToolCallInput[];
   relayEvent: Record<string, unknown> | null;
 } {
   const toolCallKey = isRecord(event.toolCall)
@@ -3199,12 +3391,12 @@ function splitCoreviewToolCallsFromProviderEvent(event: Record<string, unknown>)
       ? 'tool_call'
       : null;
   if (!toolCallKey) {
-    return { coreviewCalls: [], relayEvent: event };
+    return { frontendCalls: [], relayEvent: event };
   }
 
   const toolCall = event[toolCallKey];
   if (!isRecord(toolCall)) {
-    return { coreviewCalls: [], relayEvent: event };
+    return { frontendCalls: [], relayEvent: event };
   }
 
   const functionCallsKey = Array.isArray(toolCall.functionCalls)
@@ -3213,15 +3405,15 @@ function splitCoreviewToolCallsFromProviderEvent(event: Record<string, unknown>)
       ? 'function_calls'
       : null;
   if (!functionCallsKey) {
-    return { coreviewCalls: [], relayEvent: event };
+    return { frontendCalls: [], relayEvent: event };
   }
 
   const functionCalls = toolCall[functionCallsKey];
   if (!Array.isArray(functionCalls)) {
-    return { coreviewCalls: [], relayEvent: event };
+    return { frontendCalls: [], relayEvent: event };
   }
 
-  const coreviewCalls: CoreviewToolCallInput[] = [];
+  const frontendCalls: GeminiFrontendReviewToolCallInput[] = [];
   const relayFunctionCalls: unknown[] = [];
   for (const functionCall of functionCalls) {
     if (!isRecord(functionCall)) {
@@ -3229,24 +3421,24 @@ function splitCoreviewToolCallsFromProviderEvent(event: Record<string, unknown>)
       continue;
     }
     const name = stringFromAnyKey(functionCall, 'name');
-    if (!isCoreviewToolName(name)) {
+    if (!isCoreviewToolName(name) && name !== GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
       relayFunctionCalls.push(functionCall);
       continue;
     }
-    coreviewCalls.push({
+    frontendCalls.push({
       id: stringFromAnyKey(functionCall, 'id'),
       name,
       args: readGeminiFunctionCallArgs(functionCall) ?? {},
-    });
+    } as GeminiFrontendReviewToolCallInput);
   }
 
-  if (coreviewCalls.length === 0) {
-    return { coreviewCalls, relayEvent: event };
+  if (frontendCalls.length === 0) {
+    return { frontendCalls, relayEvent: event };
   }
 
   if (relayFunctionCalls.length > 0) {
     return {
-      coreviewCalls,
+      frontendCalls,
       relayEvent: {
         ...event,
         [toolCallKey]: {
@@ -3260,7 +3452,7 @@ function splitCoreviewToolCallsFromProviderEvent(event: Record<string, unknown>)
   const relayEvent = { ...event };
   delete relayEvent[toolCallKey];
   return {
-    coreviewCalls,
+    frontendCalls,
     relayEvent: Object.keys(relayEvent).length > 0 ? relayEvent : null,
   };
 }
@@ -4689,12 +4881,17 @@ function redactCoreviewActionResponseForTelemetry(
     exact_text_available: response.exact_text_available === true || response.exactTextAvailable === true,
     visual_frame_fresh: response.visual_frame_fresh === true || response.visualFrameFresh === true,
     visual_fresh: response.visual_fresh === true || response.visualFresh === true || response.visual_frame_fresh === true || response.visualFrameFresh === true,
+    frame_sent: response.frame_sent === true || response.frameSent === true,
     review_active: response.review_active === true || response.reviewActive === true,
+    current_view_summary: stringFromAnyKey(response, 'current_view_summary', 'currentViewSummary'),
     annotation_overlay_captured: response.annotation_overlay_captured === true || response.annotationOverlayCaptured === true
       ? true
       : response.annotation_overlay_captured === false || response.annotationOverlayCaptured === false
         ? false
         : null,
+    review_tool_timed_out: response.review_tool_timed_out === true || response.reviewToolTimedOut === true,
+    review_tool_timeout_name: stringFromAnyKey(response, 'review_tool_timeout_name', 'reviewToolTimeoutName'),
+    review_tool_timeout_result_sent: response.review_tool_timeout_result_sent === true || response.reviewToolTimeoutResultSent === true,
     raw_artifact_text_excluded: true,
     raw_frame_excluded: true,
   };
@@ -4713,6 +4910,9 @@ function redactReadArtifactTextResponseForTelemetry(
     status: response.ok === true ? 'success' : stringFromAnyKey(response, 'status'),
     safe_reason: response.ok === true ? null : stringFromAnyKey(response, 'safe_reason', 'safeReason'),
     latency_ms: numberFromAnyKey(response, 'latency_ms', 'latencyMs'),
+    review_tool_timed_out: response.review_tool_timed_out === true || response.reviewToolTimedOut === true,
+    review_tool_timeout_name: stringFromAnyKey(response, 'review_tool_timeout_name', 'reviewToolTimeoutName'),
+    review_tool_timeout_result_sent: response.review_tool_timeout_result_sent === true || response.reviewToolTimeoutResultSent === true,
     raw_artifact_text_excluded: true,
   };
 }
