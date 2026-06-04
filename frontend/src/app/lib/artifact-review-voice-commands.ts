@@ -16,6 +16,12 @@ export type ArtifactReviewVoiceCommandKind =
 export type ArtifactReviewAnnotationKind = "highlight" | "comment"
 export type ArtifactReviewAnnotationColor = "yellow" | "purple" | "blue" | "pink"
 export type ArtifactReviewAnnotationAnchorType = "current_title" | "current_selection"
+export type ArtifactReviewAnnotationUtteranceKind =
+  | "annotation_highlight"
+  | "annotation_comment"
+  | "annotation_pin"
+  | "annotation_follow_up_comment"
+  | "annotation_compound"
 
 export type ArtifactReviewVoiceCommandBlockedReason =
   | "not_artifact_review_context"
@@ -40,6 +46,7 @@ export interface ArtifactReviewVoiceCommand {
   color?: ArtifactReviewAnnotationColor
   commentText?: string
   zoomDelta?: number
+  utteranceKind?: ArtifactReviewAnnotationUtteranceKind
 }
 
 export interface ArtifactReviewVoiceCommandRouteResult {
@@ -270,7 +277,7 @@ function parseArtifactReviewVoiceCommandClause(
   }
 
   const highlightIndex = firstMatchedIndex(normalized, [
-    /\b(?:highlight|mark|underline|flag|callout)\b/u,
+    /\b(?:highlight(?:ed)?|mark(?:ed)?|underline(?:d)?|flag(?:ged)?|callout)\b/u,
   ])
   if (highlightIndex >= 0) {
     commandsWithIndex.push({
@@ -280,6 +287,7 @@ function parseArtifactReviewVoiceCommandClause(
         annotationKind: "highlight",
         anchorType: annotationAnchorTypeFromNormalized(normalized),
         color: annotationColorFromNormalized(normalized) ?? "yellow",
+        utteranceKind: "annotation_highlight",
       },
     })
   }
@@ -287,6 +295,7 @@ function parseArtifactReviewVoiceCommandClause(
   const commentIndex = firstMatchedIndex(normalized, [
     /\b(?:leave|add|make|put)\s+(?:a\s+)?(?:comment|note)\b/u,
     /\b(?:comment|note)\s+(?:on\s+)?(?:the\s+)?(?:title|it|this|current)\b/u,
+    /\bpin(?:\s+(?:it|this|that|a\s+note|a\s+comment|note|comment))?\b/u,
     /\b(?:comment|note)\b/u,
   ])
   if (commentIndex >= 0) {
@@ -298,6 +307,26 @@ function parseArtifactReviewVoiceCommandClause(
         annotationKind: "comment",
         anchorType: annotationAnchorTypeFromNormalized(normalized),
         commentText,
+        utteranceKind: /\bpin\b/u.test(normalized) ? "annotation_pin" : "annotation_comment",
+      },
+    })
+  }
+
+  const followUpCommentIndex = commentIndex < 0
+    ? firstMatchedIndex(normalized, [
+        /\bchange\s+(?:the\s+)?font\b/u,
+        /\bfont\s+(?:needs|should|must)\s+(?:to\s+)?(?:change|be\s+changed)\b/u,
+      ])
+    : -1
+  if (followUpCommentIndex >= 0) {
+    commandsWithIndex.push({
+      index: followUpCommentIndex,
+      command: {
+        kind: "add_annotation",
+        annotationKind: "comment",
+        anchorType: annotationAnchorTypeFromNormalized(normalized),
+        commentText: cleanCommentText(transcript) ?? "change the font",
+        utteranceKind: "annotation_follow_up_comment",
       },
     })
   }

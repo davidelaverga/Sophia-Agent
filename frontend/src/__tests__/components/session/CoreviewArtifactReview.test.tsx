@@ -578,7 +578,7 @@ describe("Coreview artifact still-frame review", () => {
         handled: true,
         applied: true,
         suppressAssistant: true,
-        assistantAnnotationClaimSuppressed: true,
+        assistantAnnotationClaimSuppressed: false,
       })
     })
 
@@ -601,8 +601,50 @@ describe("Coreview artifact still-frame review", () => {
           && payload?.coreviewAnnotationColor === "yellow"
           && payload?.annotationCount === 1
           && payload?.highlightCount === 1
+          && payload?.annotationFallbackAttempted === true
+          && payload?.annotationFallbackResult === "success"
+          && payload?.recentAnnotationActionSucceeded === true
         )
       })).toBe(true)
+    })
+  })
+
+  it("routes highlighted-in-yellow phrasing through Coreview fallback with a visible overlay", async () => {
+    setCoreviewFlags(true)
+    registerSophiaCaptureBridge()
+    window.__sophiaCapture?.clear()
+    window.__sophiaCapture?.enable()
+    mockPdfPreviewReady({ pageCount: 1, textByPage: ["Q3 Launch Review"] })
+    let routeArtifactCommand: Parameters<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onArtifactReviewVoiceCommandRouteChange"]>>[0] = null
+
+    renderPanel({
+      selectedBuilderArtifactPath: PDF_SELECTED_PATH,
+      onArtifactReviewVoiceCommandRouteChange: (handler) => {
+        routeArtifactCommand = handler
+      },
+    })
+
+    expect(await screen.findByText("Page 1 of 1")).toBeInTheDocument()
+    expect(await screen.findByText("Exact text available")).toBeInTheDocument()
+    await waitFor(() => expect(routeArtifactCommand).not.toBeNull())
+
+    act(() => {
+      expect(routeArtifactCommand?.("highlighted in yellow")).toMatchObject({
+        handled: true,
+        applied: true,
+        suppressAssistant: true,
+        assistantAnnotationClaimSuppressed: false,
+      })
+    })
+
+    const highlight = await screen.findByTestId("artifact-highlight-annotation")
+    expect(highlight).toHaveAttribute("data-annotation-color", "yellow")
+    await waitFor(() => {
+      const serialized = JSON.stringify(exportSophiaCaptureBundle().events)
+      expect(serialized).toContain("annotationFallbackUtteranceKind")
+      expect(serialized).toContain("annotation_highlight")
+      expect(serialized).toContain("\"annotationCount\":1")
+      expect(serialized).toContain("\"highlightCount\":1")
     })
   })
 
@@ -637,6 +679,8 @@ describe("Coreview artifact still-frame review", () => {
     await waitFor(() => {
       const serialized = JSON.stringify(exportSophiaCaptureBundle().events)
       expect(serialized).toContain("coreviewAnnotationFallbackCount")
+      expect(serialized).toContain("annotationFallbackAttempted")
+      expect(serialized).toContain("recentAnnotationActionSucceeded")
       expect(serialized).toContain("comment")
       expect(serialized).not.toContain("change the font")
     })
@@ -689,6 +733,10 @@ describe("Coreview artifact still-frame review", () => {
       expect(annotationEvents).toHaveLength(2)
       expect(annotationEvents.some((event) => (event.payload as Record<string, unknown> | undefined)?.coreviewAnnotationKind === "highlight")).toBe(true)
       expect(annotationEvents.some((event) => (event.payload as Record<string, unknown> | undefined)?.coreviewAnnotationKind === "comment")).toBe(true)
+      const finalAnnotationPayload = annotationEvents.at(-1)?.payload as Record<string, unknown> | undefined
+      expect(finalAnnotationPayload?.annotationCount).toBe(2)
+      expect(finalAnnotationPayload?.highlightCount).toBe(1)
+      expect(finalAnnotationPayload?.commentCount).toBe(1)
     })
   })
 

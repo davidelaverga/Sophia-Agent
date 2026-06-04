@@ -750,10 +750,16 @@ const RELAYABLE_GEMINI_PROVIDER_EVENT_KEYS = new Set([
   'error',
 ]);
 const ZERO_FIELD_GEMINI_PROVIDER_EVENT_KEYS = new Set(['setupComplete', 'setup_complete']);
+const GEMINI_EMIT_ARTIFACT_TOOL_NAME = 'emit_artifact';
 const GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = 'read_artifact_text';
 type GeminiReadArtifactTextToolCallInput = {
   id: string | null;
   name: typeof GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME;
+  args: Record<string, unknown>;
+};
+type GeminiSuppressedEmitArtifactToolCallInput = {
+  id: string | null;
+  name: typeof GEMINI_EMIT_ARTIFACT_TOOL_NAME;
   args: Record<string, unknown>;
 };
 type GeminiFrontendReviewToolCallInput = CoreviewToolCallInput | GeminiReadArtifactTextToolCallInput;
@@ -1753,6 +1759,7 @@ export async function connectGeminiBrowserLiveDogfood(
         sessionId: browserSession.sessionId,
         threadId: options.threadId ?? null,
         activeArtifactId: artifactReviewArtifactId,
+        artifactReviewContext: snapshotArtifactReviewRelayContext(),
         reviewToolTimeoutMs: options.reviewToolTimeoutMs,
         toolCallLedger,
         onToolCallLedgerUpdate: notifyToolCallLedgerUpdate,
@@ -3104,16 +3111,19 @@ function handleGeminiRelayClientActions(options: {
           stringFromAnyKey(functionResponse, 'name'),
           rawBackendResponse,
         );
+        const responseRejected = backendResponse?.ok === false
+          || backendResponse?.rejected === true
+          || backendResponse?.execution_rejected === true;
         options.onToolLoopDiagnostic?.({
           timestamp,
           phase: 'tool_response_sent',
           toolCall: toolCallSummaryFromFunctionResponse(functionResponse),
-          success: true,
+          success: !responseRejected,
           resultSummary: responseSummaryFromFunctionResponse(functionResponse) ?? fallbackSummary,
           taskId: taskIdFromResponseRecord(backendResponse),
           taskStatus: taskStatusFromResponseRecord(backendResponse),
           trackedTaskIds: trackedTaskIdsFromResponseRecord(backendResponse),
-          rejectionReason: stringFromAnyKey(backendResponse, 'error_type', 'errorType'),
+          rejectionReason: stringFromAnyKey(backendResponse, 'error_type', 'errorType', 'rejection_reason', 'rejectionReason', 'safe_reason', 'safeReason'),
           recoveryGuidance: stringFromAnyKey(backendResponse, 'recovery_guidance', 'recoveryGuidance'),
           backendResponse,
           errorText: null,
@@ -3161,19 +3171,42 @@ async function handleGeminiFrontendCoreviewToolEvent(options: {
   sessionId: string;
   threadId?: string | null;
   activeArtifactId?: string | null;
+  artifactReviewContext?: GeminiArtifactReviewRelayContext | null;
   reviewToolTimeoutMs?: number;
   toolCallLedger: Map<string, GeminiBrowserLiveToolCallLedgerEntry>;
   onToolCallLedgerUpdate?: (entry: GeminiBrowserLiveToolCallLedgerEntry) => void;
   onToolLoopDiagnostic?: (diagnostic: GeminiBrowserLiveDogfoodToolLoopDiagnostic) => void;
   onToolResponseSent?: (functionResponse: Record<string, unknown>, timestamp: string) => void;
 }): Promise<Record<string, unknown> | null> {
-  const split = splitFrontendReviewToolCallsFromProviderEvent(options.event);
-  if (split.frontendCalls.length === 0) {
+  const split = splitFrontendReviewToolCallsFromProviderEvent(
+    options.event,
+    options.artifactReviewContext ?? null,
+  );
+  if (split.frontendCalls.length === 0 && split.suppressedEmitArtifactCalls.length === 0) {
     return options.event;
   }
 
   const preparedAt = new Date().toISOString();
   const functionResponses: Record<string, unknown>[] = [];
+  const toolDiagnostics: GeminiRelayToolDiagnosticPayload[] = [];
+  for (const call of split.suppressedEmitArtifactCalls) {
+    const response = suppressedEmitArtifactToolResponse(call, options.artifactReviewContext ?? null);
+    functionResponses.push({
+      ...(call.id ? { id: call.id } : {}),
+      name: call.name,
+      response,
+    });
+    toolDiagnostics.push(suppressedEmitArtifactToolDiagnostic(call, response));
+    emitToolCallLedgerEntry(
+      options.toolCallLedger,
+      call.id,
+      {
+        toolName: call.name,
+        toolResponsePreparedAt: preparedAt,
+      },
+      options.onToolCallLedgerUpdate,
+    );
+  }
   for (const call of split.frontendCalls) {
     const response = await executeFrontendReviewToolCallWithTimeout(call, {
       sessionId: options.sessionId,
@@ -3212,7 +3245,7 @@ async function handleGeminiFrontendCoreviewToolEvent(options: {
           .filter((summary): summary is string => Boolean(summary))
           .join(' '),
       }],
-      toolDiagnostics: [],
+      toolDiagnostics,
       statusCode: null,
       statusText: null,
       responseKind: 'client_actions',
@@ -3409,8 +3442,12 @@ function normalizeReviewToolTimeoutMs(value: number | null | undefined): number 
   return Math.min(1_500, Math.max(25, Math.floor(value)));
 }
 
-function splitFrontendReviewToolCallsFromProviderEvent(event: Record<string, unknown>): {
+function splitFrontendReviewToolCallsFromProviderEvent(
+  event: Record<string, unknown>,
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null = null,
+): {
   frontendCalls: GeminiFrontendReviewToolCallInput[];
+  suppressedEmitArtifactCalls: GeminiSuppressedEmitArtifactToolCallInput[];
   relayEvent: Record<string, unknown> | null;
 } {
   const toolCallKey = isRecord(event.toolCall)
@@ -3419,12 +3456,12 @@ function splitFrontendReviewToolCallsFromProviderEvent(event: Record<string, unk
       ? 'tool_call'
       : null;
   if (!toolCallKey) {
-    return { frontendCalls: [], relayEvent: event };
+    return { frontendCalls: [], suppressedEmitArtifactCalls: [], relayEvent: event };
   }
 
   const toolCall = event[toolCallKey];
   if (!isRecord(toolCall)) {
-    return { frontendCalls: [], relayEvent: event };
+    return { frontendCalls: [], suppressedEmitArtifactCalls: [], relayEvent: event };
   }
 
   const functionCallsKey = Array.isArray(toolCall.functionCalls)
@@ -3433,15 +3470,16 @@ function splitFrontendReviewToolCallsFromProviderEvent(event: Record<string, unk
       ? 'function_calls'
       : null;
   if (!functionCallsKey) {
-    return { frontendCalls: [], relayEvent: event };
+    return { frontendCalls: [], suppressedEmitArtifactCalls: [], relayEvent: event };
   }
 
   const functionCalls = toolCall[functionCallsKey];
   if (!Array.isArray(functionCalls)) {
-    return { frontendCalls: [], relayEvent: event };
+    return { frontendCalls: [], suppressedEmitArtifactCalls: [], relayEvent: event };
   }
 
   const frontendCalls: GeminiFrontendReviewToolCallInput[] = [];
+  const suppressedEmitArtifactCalls: GeminiSuppressedEmitArtifactToolCallInput[] = [];
   const relayFunctionCalls: unknown[] = [];
   for (const functionCall of functionCalls) {
     if (!isRecord(functionCall)) {
@@ -3449,6 +3487,17 @@ function splitFrontendReviewToolCallsFromProviderEvent(event: Record<string, unk
       continue;
     }
     const name = stringFromAnyKey(functionCall, 'name');
+    if (
+      name === GEMINI_EMIT_ARTIFACT_TOOL_NAME
+      && shouldSuppressEmitArtifactToolCallForArtifactReview(artifactReviewContext)
+    ) {
+      suppressedEmitArtifactCalls.push({
+        id: stringFromAnyKey(functionCall, 'id'),
+        name,
+        args: readGeminiFunctionCallArgs(functionCall) ?? {},
+      });
+      continue;
+    }
     if (!isCoreviewToolName(name) && name !== GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
       relayFunctionCalls.push(functionCall);
       continue;
@@ -3460,13 +3509,14 @@ function splitFrontendReviewToolCallsFromProviderEvent(event: Record<string, unk
     } as GeminiFrontendReviewToolCallInput);
   }
 
-  if (frontendCalls.length === 0) {
-    return { frontendCalls, relayEvent: event };
+  if (frontendCalls.length === 0 && suppressedEmitArtifactCalls.length === 0) {
+    return { frontendCalls, suppressedEmitArtifactCalls, relayEvent: event };
   }
 
   if (relayFunctionCalls.length > 0) {
     return {
       frontendCalls,
+      suppressedEmitArtifactCalls,
       relayEvent: {
         ...event,
         [toolCallKey]: {
@@ -3481,7 +3531,54 @@ function splitFrontendReviewToolCallsFromProviderEvent(event: Record<string, unk
   delete relayEvent[toolCallKey];
   return {
     frontendCalls,
+    suppressedEmitArtifactCalls,
     relayEvent: Object.keys(relayEvent).length > 0 ? relayEvent : null,
+  };
+}
+
+function shouldSuppressEmitArtifactToolCallForArtifactReview(
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null,
+): boolean {
+  return Boolean(
+    artifactReviewContext?.active
+    && artifactReviewContext.user_intent !== 'create_update',
+  );
+}
+
+function suppressedEmitArtifactToolResponse(
+  call: GeminiSuppressedEmitArtifactToolCallInput,
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null,
+): Record<string, unknown> {
+  return {
+    ok: false,
+    rejected: true,
+    execution_rejected: true,
+    safe_reason: 'artifact_review_emit_artifact_suppressed',
+    rejection_reason: 'artifact_review_emit_artifact_suppressed',
+    result_summary: 'Review-only emit_artifact call suppressed.',
+    artifact_review_active: artifactReviewContext?.active === true,
+    artifact_review_user_intent: artifactReviewContext?.user_intent ?? null,
+    emit_artifact_blocked_for_annotation_intent: artifactReviewContext?.user_intent !== 'create_update',
+    raw_transcript_excluded: true,
+    raw_comment_text_excluded: true,
+    raw_artifact_text_excluded: true,
+    raw_frame_excluded: true,
+  };
+}
+
+function suppressedEmitArtifactToolDiagnostic(
+  call: GeminiSuppressedEmitArtifactToolCallInput,
+  response: Record<string, unknown>,
+): GeminiRelayToolDiagnosticPayload {
+  return {
+    id: call.id ?? undefined,
+    name: call.name,
+    success: false,
+    execution_rejected: true,
+    rejection_reason: 'artifact_review_emit_artifact_suppressed',
+    recovery_guidance: 'Use Coreview review tools for annotation, highlight, comment, note, or pin requests.',
+    result_summary: 'Review-only emit_artifact call suppressed.',
+    response,
   };
 }
 

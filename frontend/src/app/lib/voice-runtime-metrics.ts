@@ -110,6 +110,13 @@ export type CoreviewVisualTelemetry = {
   coreviewAnnotationColor: string | null
   coreviewAnnotationPageIndex: number | null
   coreviewAnnotationBlockedReason: string | null
+  annotationIntentDetectedCount: number
+  annotationIntentSource: string | null
+  annotationFallbackAttempted: boolean
+  annotationFallbackResult: string | null
+  annotationFallbackBlockedReason: string | null
+  annotationFallbackUtteranceKind: string | null
+  recentAnnotationActionSucceeded: boolean
   assistantAnnotationClaimSuppressedCount: number
   coreviewFocusAnchorCount: number
   coreviewFocusAnchorResult: string | null
@@ -131,6 +138,7 @@ export type CoreviewVisualTelemetry = {
   providerToPublicTranscriptGapAfterCoreviewTool: number | null
   followUpTurnDispatchedAfterCoreviewTool: boolean
   emitArtifactBlockedDuringReviewCount: number
+  emitArtifactBlockedForAnnotationIntentCount: number
   rawFrameExcluded: true
   rawProviderPayloadExcluded: true
 }
@@ -486,6 +494,13 @@ export type GeminiSessionTelemetry = {
     coreviewAnnotationColor: string | null
     coreviewAnnotationPageIndex: number | null
     coreviewAnnotationBlockedReason: string | null
+    annotationIntentDetectedCount: number
+    annotationIntentSource: string | null
+    annotationFallbackAttempted: boolean
+    annotationFallbackResult: string | null
+    annotationFallbackBlockedReason: string | null
+    annotationFallbackUtteranceKind: string | null
+    recentAnnotationActionSucceeded: boolean
     assistantAnnotationClaimSuppressedCount: number
     coreviewFocusAnchorCount: number
     coreviewFocusAnchorResult: string | null
@@ -493,6 +508,7 @@ export type GeminiSessionTelemetry = {
     providerToPublicTranscriptGapAfterCoreviewTool: number | null
     followUpTurnDispatchedAfterCoreviewTool: boolean
     emitArtifactBlockedDuringReviewCount: number
+    emitArtifactBlockedForAnnotationIntentCount: number
     unresolvedToolCallCount: number
     oldestUnresolvedToolCallAgeMs: number | null
     lastToolPhase: string | null
@@ -1108,6 +1124,13 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       coreviewAnnotationColor: null,
       coreviewAnnotationPageIndex: null,
       coreviewAnnotationBlockedReason: null,
+      annotationIntentDetectedCount: 0,
+      annotationIntentSource: null,
+      annotationFallbackAttempted: false,
+      annotationFallbackResult: null,
+      annotationFallbackBlockedReason: null,
+      annotationFallbackUtteranceKind: null,
+      recentAnnotationActionSucceeded: false,
       assistantAnnotationClaimSuppressedCount: 0,
       coreviewFocusAnchorCount: 0,
       coreviewFocusAnchorResult: null,
@@ -1129,6 +1152,7 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       providerToPublicTranscriptGapAfterCoreviewTool: null,
       followUpTurnDispatchedAfterCoreviewTool: false,
       emitArtifactBlockedDuringReviewCount: 0,
+      emitArtifactBlockedForAnnotationIntentCount: 0,
       rawFrameExcluded: true,
       rawProviderPayloadExcluded: true,
     },
@@ -1182,6 +1206,20 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((event) => event.name === "artifact-review-voice-command")
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
+  const annotationIntentEvents = activeEvents
+    .filter((event) => (
+      event.name === "annotation-intent-detected"
+      || (
+        event.name === "artifact-review-voice-command"
+        && asBoolean(event.payloadRecord?.annotationIntentDetected) === true
+      )
+      || (
+        event.name === "coreview-tool-call"
+        && (numberFromKeys(event.payloadRecord, ["annotationIntentDetectedCount"]) ?? 0) > 0
+      )
+    ))
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
   const telemetryExportEvents = activeEvents
     .filter((event) => event.name === "voice-telemetry-export")
     .map((event) => event.payloadRecord)
@@ -1223,12 +1261,17 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   const latestState = stateEvents.at(-1) ?? null
   const latestSelectedStage = selectedStageEvents.at(-1) ?? null
   const latestArtifactCommand = artifactCommandEvents.at(-1) ?? null
+  const latestAnnotationIntent = annotationIntentEvents.at(-1) ?? null
   const latestPdfTextExtraction = pdfTextExtractionEvents.at(-1) ?? latestSelectedStage
   const latestAnnotationState = annotationStateEvents.at(-1) ?? null
   const latestCoreviewTool = coreviewToolEvents.at(-1) ?? null
   const latestAnnotationTool = coreviewToolEvents
     .filter((event) => (numberFromKeys(event, ["coreviewAnnotationToolCount"]) ?? 0) > 0)
     .at(-1) ?? null
+  const latestAnnotationFallback = [
+    ...artifactCommandEvents.filter((event) => asBoolean(event.annotationFallbackAttempted) === true),
+    ...coreviewToolEvents.filter((event) => asBoolean(event.annotationFallbackAttempted) === true),
+  ].at(-1) ?? null
   const latestFocusTool = coreviewToolEvents
     .filter((event) => (numberFromKeys(event, ["coreviewFocusAnchorCount"]) ?? 0) > 0)
     .at(-1) ?? null
@@ -1368,6 +1411,23 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.coreviewAnnotationColor = asString(latestAnnotationTool?.coreviewAnnotationColor)
   visual.coreviewAnnotationPageIndex = numberFromKeys(latestAnnotationTool, ["coreviewAnnotationPageIndex"])
   visual.coreviewAnnotationBlockedReason = asString(latestAnnotationTool?.coreviewAnnotationBlockedReason)
+  visual.annotationIntentDetectedCount = annotationIntentEvents.reduce((total, event) => (
+    total + (numberFromKeys(event, ["annotationIntentDetectedCount"]) ?? 1)
+  ), 0)
+  visual.annotationIntentSource = asString(latestAnnotationIntent?.annotationIntentSource)
+    ?? asString(latestAnnotationIntent?.source)
+  visual.annotationFallbackAttempted = asBoolean(latestAnnotationFallback?.annotationFallbackAttempted) ?? false
+  visual.annotationFallbackResult = asString(latestAnnotationFallback?.annotationFallbackResult)
+  visual.annotationFallbackBlockedReason = asString(latestAnnotationFallback?.annotationFallbackBlockedReason)
+  visual.annotationFallbackUtteranceKind = asString(latestAnnotationFallback?.annotationFallbackUtteranceKind)
+    ?? asString(latestAnnotationIntent?.annotationFallbackUtteranceKind)
+  visual.recentAnnotationActionSucceeded = coreviewToolEvents.some((event) => (
+    asBoolean(event.recentAnnotationActionSucceeded) === true
+    || (
+      asString(event.coreviewToolName) === "coreview_add_annotation"
+      && asString(event.coreviewToolResult) === "success"
+    )
+  ))
   visual.assistantAnnotationClaimSuppressedCount = assistantAnnotationClaimSuppressedEvents.length
   visual.coreviewFocusAnchorCount = coreviewToolEvents.reduce((total, event) => (
     total + (numberFromKeys(event, ["coreviewFocusAnchorCount"]) ?? 0)
@@ -1430,6 +1490,7 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     ?? asString(latestCurrentViewResponse?.result_summary)
     ?? asString(latestCurrentViewResponse?.blocked_reason)
   visual.emitArtifactBlockedDuringReviewCount = countWhere(activeEvents, isReviewEmitArtifactSuppressedDiagnostic)
+  visual.emitArtifactBlockedForAnnotationIntentCount = countWhere(activeEvents, isReviewEmitArtifactSuppressedForAnnotationIntentDiagnostic)
   visual.followUpTurnDispatchedAfterCoreviewTool = activeEvents.some((event) => {
     if (event.name !== "gemini-barge-in-transcript-handoff") return false
     const diagnostic = asRecord(eventData(event)?.diagnostic)
@@ -1722,12 +1783,24 @@ function isReviewEmitArtifactSuppressedDiagnostic(event: NormalizedVoiceCaptureE
   }
   const data = eventData(event)
   const diagnostic = asRecord(data?.diagnostic)
+  const backendResponse = toolBackendResponseFromDiagnostic(diagnostic)
   const rejectionReason = asString(data?.rejectionReason)
     ?? asString(diagnostic?.rejectionReason)
     ?? asString(diagnostic?.rejection_reason)
+    ?? asString(backendResponse?.rejection_reason)
+    ?? asString(backendResponse?.safe_reason)
   return asString(data?.phase) === "tool_execution_rejected"
     && geminiToolName(event) === GEMINI_EMIT_ARTIFACT_TOOL_NAME
     && rejectionReason === "artifact_review_emit_artifact_suppressed"
+}
+
+function isReviewEmitArtifactSuppressedForAnnotationIntentDiagnostic(event: NormalizedVoiceCaptureEvent): boolean {
+  if (!isReviewEmitArtifactSuppressedDiagnostic(event)) {
+    return false
+  }
+  const diagnostic = asRecord(eventData(event)?.diagnostic)
+  const backendResponse = toolBackendResponseFromDiagnostic(diagnostic)
+  return asBoolean(backendResponse?.emit_artifact_blocked_for_annotation_intent) === true
 }
 
 function asVoiceStage(value: string | null): VoiceStage | null {
@@ -2521,6 +2594,22 @@ function buildSessionTelemetry(params: {
           ?? coreviewTelemetry.visual.coreviewAnnotationPageIndex,
         coreviewAnnotationBlockedReason: hookTelemetry?.coreviewAnnotationBlockedReason
           ?? coreviewTelemetry.visual.coreviewAnnotationBlockedReason,
+        annotationIntentDetectedCount: Math.max(
+          hookTelemetry?.annotationIntentDetectedCount ?? 0,
+          coreviewTelemetry.visual.annotationIntentDetectedCount,
+        ),
+        annotationIntentSource: hookTelemetry?.annotationIntentSource
+          ?? coreviewTelemetry.visual.annotationIntentSource,
+        annotationFallbackAttempted: hookTelemetry?.annotationFallbackAttempted
+          ?? coreviewTelemetry.visual.annotationFallbackAttempted,
+        annotationFallbackResult: hookTelemetry?.annotationFallbackResult
+          ?? coreviewTelemetry.visual.annotationFallbackResult,
+        annotationFallbackBlockedReason: hookTelemetry?.annotationFallbackBlockedReason
+          ?? coreviewTelemetry.visual.annotationFallbackBlockedReason,
+        annotationFallbackUtteranceKind: hookTelemetry?.annotationFallbackUtteranceKind
+          ?? coreviewTelemetry.visual.annotationFallbackUtteranceKind,
+        recentAnnotationActionSucceeded: hookTelemetry?.recentAnnotationActionSucceeded
+          ?? coreviewTelemetry.visual.recentAnnotationActionSucceeded,
         assistantAnnotationClaimSuppressedCount: Math.max(
           hookTelemetry?.assistantAnnotationClaimSuppressedCount ?? 0,
           coreviewTelemetry.visual.assistantAnnotationClaimSuppressedCount,
@@ -2541,6 +2630,8 @@ function buildSessionTelemetry(params: {
           ?? coreviewTelemetry.visual.followUpTurnDispatchedAfterCoreviewTool,
         emitArtifactBlockedDuringReviewCount: hookTelemetry?.emitArtifactBlockedDuringReviewCount
           ?? coreviewTelemetry.visual.emitArtifactBlockedDuringReviewCount,
+        emitArtifactBlockedForAnnotationIntentCount: hookTelemetry?.emitArtifactBlockedForAnnotationIntentCount
+          ?? coreviewTelemetry.visual.emitArtifactBlockedForAnnotationIntentCount,
         unresolvedToolCallCount,
         oldestUnresolvedToolCallAgeMs,
         lastToolPhase: hookTelemetry?.lastToolPhase ?? asString(toolDiagnostic?.phase),

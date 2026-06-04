@@ -194,6 +194,13 @@ export type GeminiRuntimeTelemetry = {
   coreviewAnnotationColor?: string | null
   coreviewAnnotationPageIndex?: number | null
   coreviewAnnotationBlockedReason?: string | null
+  annotationIntentDetectedCount?: number
+  annotationIntentSource?: string | null
+  annotationFallbackAttempted?: boolean
+  annotationFallbackResult?: string | null
+  annotationFallbackBlockedReason?: string | null
+  annotationFallbackUtteranceKind?: string | null
+  recentAnnotationActionSucceeded?: boolean
   assistantAnnotationClaimSuppressedCount?: number
   coreviewFocusAnchorCount?: number
   coreviewFocusAnchorResult?: string | null
@@ -201,6 +208,7 @@ export type GeminiRuntimeTelemetry = {
   providerToPublicTranscriptGapAfterCoreviewTool?: number | null
   followUpTurnDispatchedAfterCoreviewTool?: boolean
   emitArtifactBlockedDuringReviewCount?: number
+  emitArtifactBlockedForAnnotationIntentCount?: number
   unresolvedToolCallCount: number
   oldestUnresolvedToolCallAgeMs: number | null
   lastToolPhase: string | null
@@ -223,6 +231,11 @@ export type VoiceStateProps = {
   stopTalking: () => Promise<void> | void
   bargeIn: () => void
   softBargeIn: () => void
+  markAnnotationActionSucceeded?: (counts?: {
+    annotationCount?: number | null
+    highlightCount?: number | null
+    commentCount?: number | null
+  }) => void
   unlockAudio?: () => void
   resetVoiceState?: () => void
   runtime?: SessionRuntime

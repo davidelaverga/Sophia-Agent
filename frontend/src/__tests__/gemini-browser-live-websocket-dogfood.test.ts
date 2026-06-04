@@ -1231,7 +1231,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       dimensions: { width: 640, height: 360 },
       rawFrameExcluded: true,
     }, { coreviewSendStage: 'start' });
-    connection.sendText('Can you review this and tell me what changed?');
+    connection.sendText('Create a new artifact from this.');
 
     websocket?.emitMessage({
       toolCall: {
@@ -1250,12 +1250,12 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         active: true,
         artifact_id: 'artifact-1',
         source: 'coreview_still_frame',
-        user_intent: 'analysis',
+        user_intent: 'create_update',
         raw_transcript_excluded: true,
         raw_artifact_text_excluded: true,
       },
     });
-    expect(JSON.stringify(relayBody.artifact_review_context)).not.toContain('Can you review this');
+    expect(JSON.stringify(relayBody.artifact_review_context)).not.toContain('Create a new artifact');
 
     await connection.close();
   });
@@ -2866,7 +2866,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     await connection.close();
   });
 
-  it('resolves read_artifact_text locally while backend guard blocks emit_artifact in a mixed review batch', async () => {
+  it('resolves read_artifact_text locally while browser blocks emit_artifact in a mixed review batch', async () => {
     registerCoreviewArtifactText({
       artifactId: 'coreview-real-artifact-launch-brief',
       source: 'pdf_text_extraction',
@@ -2874,22 +2874,6 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       sessionIds: ['browser-gemini-mixed-review-tools'],
       threadId: 'thread-1',
     });
-    const emitBlockedPayload = {
-      toolResponse: {
-        functionResponses: [
-          {
-            id: 'artifact-call-blocked',
-            name: 'emit_artifact',
-            response: {
-              ok: false,
-              status: 'rejected',
-              safe_reason: 'artifact_review_emit_artifact_suppressed',
-              raw_artifact_text_excluded: true,
-            },
-          },
-        ],
-      },
-    };
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
@@ -2908,28 +2892,8 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           { status: 201, headers: { 'Content-Type': 'application/json' } },
         ),
       )
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            accepted: true,
-            client_actions: [{
-              type: 'gemini_tool_response',
-              payload: emitBlockedPayload,
-              result_summary: 'Review-only emit_artifact call suppressed.',
-            }],
-            tool_diagnostics: [{
-              id: 'artifact-call-blocked',
-              name: 'emit_artifact',
-              success: false,
-              execution_rejected: true,
-              rejection_reason: 'artifact_review_emit_artifact_suppressed',
-              response: emitBlockedPayload.toolResponse.functionResponses[0].response,
-            }],
-          }),
-          { status: 202, headers: { 'Content-Type': 'application/json' } },
-        ),
-      )
       .mockResolvedValue(new Response(null, { status: 202 }));
+    const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
     let websocket: FakeWebSocket | null = null;
     const connection = await connectGeminiBrowserLiveDogfood({
       userId: 'user-1',
@@ -2941,9 +2905,19 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
       audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
       coreviewStillFrameEnabled: true,
+      onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
     });
 
     expect(readGeminiConfiguredToolNames(connection.setup)).not.toContain('emit_artifact');
+    await connection.sendArtifactFrame({
+      artifactId: 'coreview-real-artifact-launch-brief',
+      visualSourceKind: 'pdf_page_canvas',
+      data: 'AA==',
+      mimeType: 'image/png',
+      byteLength: 1,
+      dimensions: { width: 1, height: 1 },
+      rawFrameExcluded: true,
+    });
     websocket?.emitMessage({
       toolCall: {
         functionCalls: [
@@ -2963,9 +2937,39 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       String(call[0]).includes('/api/sophia/voice/dogfood/gemini/relay')
       && String((call[1] as RequestInit | undefined)?.body ?? '').includes('emit_artifact')
     ));
-    expect(relayCall).toBeDefined();
-    const relayBody = JSON.parse(String((relayCall?.[1] as RequestInit | undefined)?.body)) as { event: { toolCall?: { functionCalls?: Array<{ name: string }> } } };
-    expect(relayBody.event.toolCall?.functionCalls?.map((call) => call.name)).toEqual(['emit_artifact']);
+    expect(relayCall).toBeUndefined();
+    const sentToolResponse = websocket?.sent
+      .map((payload) => JSON.parse(payload) as Record<string, unknown>)
+      .find((payload) => JSON.stringify(payload).includes('artifact-call-blocked')) as {
+        toolResponse?: { functionResponses?: Array<{ id?: string; name?: string; response?: Record<string, unknown> }> }
+      } | undefined;
+    expect(sentToolResponse?.toolResponse?.functionResponses).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'artifact-call-blocked',
+        name: 'emit_artifact',
+        response: expect.objectContaining({
+          ok: false,
+          rejection_reason: 'artifact_review_emit_artifact_suppressed',
+          emit_artifact_blocked_for_annotation_intent: true,
+        }),
+      }),
+      expect.objectContaining({
+        id: 'read-artifact-local',
+        name: 'read_artifact_text',
+      }),
+    ]));
+    expect(toolDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        phase: 'tool_execution_rejected',
+        toolCall: expect.objectContaining({ name: 'emit_artifact' }),
+        rejectionReason: 'artifact_review_emit_artifact_suppressed',
+      }),
+      expect.objectContaining({
+        phase: 'tool_response_sent',
+        toolCall: expect.objectContaining({ name: 'emit_artifact' }),
+        success: false,
+      }),
+    ]));
 
     await connection.close();
   });

@@ -15,6 +15,7 @@ import {
 import {
   parseArtifactReviewVoiceCommand,
   parseArtifactReviewVoiceCommands,
+  type ArtifactReviewAnnotationUtteranceKind,
   type ArtifactReviewVoiceCommand,
   type ArtifactReviewVoiceCommandRefreshResult,
   type ArtifactReviewVoiceCommandRouteResult,
@@ -82,6 +83,11 @@ interface PresenceArtifactPanelProps {
   onStartVoiceBuilderArtifactReview?: () => void
   onPendingBuilderArtifactReviewConsumed?: () => void
   onArtifactReviewVoiceCommandRouteChange?: (handler: ArtifactReviewVoiceCommandRouter | null) => void
+  onAnnotationActionSucceeded?: (counts: {
+    annotationCount?: number | null
+    highlightCount?: number | null
+    commentCount?: number | null
+  }) => void
   onReflectionTap?: (reflection: { prompt: string; why?: string }) => void
   onMemoryApprove?: (index: number) => void
   onMemoryReject?: (index: number) => void
@@ -450,6 +456,20 @@ function coreviewAddAnnotationInputFromVoiceCommand(
   }
 }
 
+function annotationFallbackUtteranceKind(
+  command: ArtifactReviewVoiceCommand,
+  commands: ArtifactReviewVoiceCommand[] = [command],
+): ArtifactReviewAnnotationUtteranceKind | null {
+  if (command.kind !== "add_annotation") {
+    return null
+  }
+  if (commands.filter((candidate) => candidate.kind === "add_annotation").length > 1) {
+    return "annotation_compound"
+  }
+  return command.utteranceKind
+    ?? (command.annotationKind === "comment" ? "annotation_comment" : "annotation_highlight")
+}
+
 function coreviewFocusAnchorInputFromVoiceCommand(
   command: ArtifactReviewVoiceCommand,
   current: CoreviewCurrentView,
@@ -629,6 +649,7 @@ export function PresenceArtifactPanel({
   onStartVoiceBuilderArtifactReview,
   onPendingBuilderArtifactReviewConsumed,
   onArtifactReviewVoiceCommandRouteChange,
+  onAnnotationActionSucceeded,
   onReflectionTap,
   onMemoryApprove,
   onMemoryReject,
@@ -977,6 +998,7 @@ export function PresenceArtifactPanel({
 
   const recordReviewVoiceCommandTelemetry = useCallback((details: {
     command: ArtifactReviewVoiceCommand
+    commands?: ArtifactReviewVoiceCommand[]
     applied: boolean
     blockedReason: ArtifactReviewVoiceCommandRouteResult["blockedReason"]
     triggeredRefresh: boolean
@@ -989,7 +1011,13 @@ export function PresenceArtifactPanel({
     autoRefreshBlockedReason?: string | null
     transportStateBefore?: string | null
     transportStateAfter?: string | null
+    annotationFallbackAttempted?: boolean
+    annotationFallbackResult?: "success" | "blocked" | "not_attempted" | null
+    annotationFallbackBlockedReason?: string | null
+    recentAnnotationActionSucceeded?: boolean
   }) => {
+    const annotationIntentDetected = details.command.kind === "add_annotation"
+    const annotationFallbackKind = annotationFallbackUtteranceKind(details.command, details.commands)
     recordSophiaCaptureEvent({
       category: "voice-session",
       name: "artifact-review-voice-command",
@@ -1002,6 +1030,14 @@ export function PresenceArtifactPanel({
         reviewVoiceCommandDetected: true,
         reviewVoiceCommandKind: details.command.kind,
         reviewVoiceCommandPageTarget: details.command.pageTarget ?? null,
+        annotationIntentDetected,
+        annotationIntentDetectedCount: annotationIntentDetected ? 1 : 0,
+        annotationIntentSource: annotationIntentDetected ? "artifact_review_voice_command" : null,
+        annotationFallbackAttempted: details.annotationFallbackAttempted ?? false,
+        annotationFallbackResult: details.annotationFallbackResult ?? null,
+        annotationFallbackBlockedReason: details.annotationFallbackBlockedReason ?? null,
+        annotationFallbackUtteranceKind: annotationFallbackKind,
+        recentAnnotationActionSucceeded: details.recentAnnotationActionSucceeded ?? false,
         reviewVoiceCommandApplied: details.applied,
         reviewVoiceCommandBlockedReason: details.blockedReason ?? null,
         reviewVoiceCommandTriggeredRefresh: details.triggeredRefresh,
@@ -1027,6 +1063,8 @@ export function PresenceArtifactPanel({
         artifactFitMode: builderArtifactViewState.fitMode,
         artifactViewSignature: builderArtifactViewSignature,
         rawTranscriptExcluded: true,
+        rawCommentTextExcluded: true,
+        rawArtifactTextExcluded: true,
         rawFrameExcluded: true,
       },
     })
@@ -1043,6 +1081,14 @@ export function PresenceArtifactPanel({
   ])
 
   const recordCoreviewToolTelemetry = useCallback((result: CoreviewActionResult) => {
+    if (result.action === "add_annotation" && result.ok) {
+      onAnnotationActionSucceeded?.({
+        annotationCount: result.annotation_count,
+        highlightCount: result.highlight_count,
+        commentCount: result.comment_count,
+      })
+    }
+
     recordSophiaCaptureEvent({
       category: "voice-session",
       name: "coreview-tool-call",
@@ -1075,6 +1121,16 @@ export function PresenceArtifactPanel({
         coreviewAnnotationColor: result.annotation_color ?? null,
         coreviewAnnotationPageIndex: result.annotation_page_index ?? null,
         coreviewAnnotationBlockedReason: result.action === "add_annotation" ? result.blocked_reason : null,
+        annotationIntentDetectedCount: result.action === "add_annotation" ? 1 : 0,
+        annotationIntentSource: result.action === "add_annotation" ? "coreview_tool_result" : null,
+        annotationFallbackAttempted: result.action === "add_annotation" && result.command_source === "frontend_fallback",
+        annotationFallbackResult: result.action === "add_annotation" && result.command_source === "frontend_fallback"
+          ? (result.ok ? "success" : "blocked")
+          : null,
+        annotationFallbackBlockedReason: result.action === "add_annotation" && result.command_source === "frontend_fallback"
+          ? result.blocked_reason
+          : null,
+        recentAnnotationActionSucceeded: result.action === "add_annotation" && result.ok,
         coreviewFocusAnchorCount: result.action === "focus_anchor" ? 1 : 0,
         coreviewFocusAnchorResult: result.action === "focus_anchor" ? (result.ok ? "success" : "blocked") : null,
         coreviewFocusAnchorType: result.focus_anchor_type ?? null,
@@ -1097,11 +1153,12 @@ export function PresenceArtifactPanel({
         artifactCurrentPageIndex: result.page_index,
         artifactCurrentPageCount: result.page_count,
         rawTranscriptExcluded: true,
+        rawCommentTextExcluded: true,
         rawArtifactTextExcluded: true,
         rawFrameExcluded: true,
       },
     })
-  }, [artifactStableIdentity, isVisible, normalSessionId, sessionId, threadId])
+  }, [artifactStableIdentity, isVisible, normalSessionId, onAnnotationActionSucceeded, sessionId, threadId])
 
   const applyCoreviewActionStatus = useCallback((result: CoreviewActionResult) => {
     if (!result.ok) {
@@ -1405,6 +1462,7 @@ export function PresenceArtifactPanel({
         })
         recordReviewVoiceCommandTelemetry({
           command,
+          commands,
           applied: false,
           blockedReason: "no_artifact_selected",
           triggeredRefresh: false,
@@ -1414,6 +1472,10 @@ export function PresenceArtifactPanel({
           autoRefreshBlockedReason: "no_artifact_selected",
           transportStateBefore,
           transportStateAfter: builderArtifactCoReview.transportStatus.statusText,
+          annotationFallbackAttempted: command.kind === "add_annotation",
+          annotationFallbackResult: command.kind === "add_annotation" ? "blocked" : null,
+          annotationFallbackBlockedReason: command.kind === "add_annotation" ? "no_artifact_selected" : null,
+          recentAnnotationActionSucceeded: false,
         })
         return {
           handled: true,
@@ -1480,6 +1542,7 @@ export function PresenceArtifactPanel({
 
           recordReviewVoiceCommandTelemetry({
             command: nextCommand,
+            commands,
             applied: result.ok
               || routeBlockedReasonFromCoreview(result.blocked_reason) === null
               || result.blocked_reason === "refresh_unavailable"
@@ -1499,6 +1562,12 @@ export function PresenceArtifactPanel({
             autoRefreshBlockedReason: result.blocked_reason,
             transportStateBefore,
             transportStateAfter: builderArtifactCoReview.transportStatus.statusText,
+            annotationFallbackAttempted: nextCommand.kind === "add_annotation",
+            annotationFallbackResult: nextCommand.kind === "add_annotation"
+              ? (result.ok ? "success" : "blocked")
+              : null,
+            annotationFallbackBlockedReason: nextCommand.kind === "add_annotation" ? result.blocked_reason : null,
+            recentAnnotationActionSucceeded: result.action === "add_annotation" && result.ok,
           })
         }
       }
@@ -1507,6 +1576,7 @@ export function PresenceArtifactPanel({
         void executeFallbackCommands().catch(() => {
           recordReviewVoiceCommandTelemetry({
             command,
+            commands,
             applied: false,
             blockedReason: "visual_refresh_unavailable",
             triggeredRefresh: false,
@@ -1519,9 +1589,13 @@ export function PresenceArtifactPanel({
             autoRefreshBlockedReason: "refresh_exception",
             transportStateBefore,
             transportStateAfter: builderArtifactCoReview.transportStatus.statusText,
+            annotationFallbackAttempted: command.kind === "add_annotation",
+            annotationFallbackResult: command.kind === "add_annotation" ? "blocked" : null,
+            annotationFallbackBlockedReason: command.kind === "add_annotation" ? "refresh_exception" : null,
+            recentAnnotationActionSucceeded: false,
           })
         })
-      }, nativeToolsPrimary ? 700 : 0)
+      }, nativeToolsPrimary ? 120 : 0)
 
       return {
         handled: true,
@@ -1532,7 +1606,7 @@ export function PresenceArtifactPanel({
         refreshResult: "not_requested",
         userMessage: null,
         suppressAssistant: true,
-        assistantAnnotationClaimSuppressed: true,
+        assistantAnnotationClaimSuppressed: false,
       }
     }
 
@@ -1559,6 +1633,7 @@ export function PresenceArtifactPanel({
       })
       recordReviewVoiceCommandTelemetry({
         command,
+        commands,
         applied: false,
         blockedReason: "no_artifact_selected",
         triggeredRefresh: false,
@@ -1617,6 +1692,7 @@ export function PresenceArtifactPanel({
       })
       recordReviewVoiceCommandTelemetry({
         command,
+        commands,
         applied: false,
         blockedReason: routeBlockedReasonFromCoreview(blockedReason),
         triggeredRefresh: false,
@@ -1681,6 +1757,7 @@ export function PresenceArtifactPanel({
       .then((result) => {
         recordReviewVoiceCommandTelemetry({
           command,
+          commands,
           applied: result.ok
             || routeBlockedReasonFromCoreview(result.blocked_reason) === null
             || result.blocked_reason === "refresh_unavailable"

@@ -1327,6 +1327,7 @@ function SessionPageContent() {
               onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}
               onPendingBuilderArtifactReviewConsumed={handlePendingBuilderArtifactReviewConsumed}
               onArtifactReviewVoiceCommandRouteChange={handleArtifactReviewVoiceCommandRouteChange}
+              onAnnotationActionSucceeded={voiceState.markAnnotationActionSucceeded}
               onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
               onMemoryApprove={handleMemoryApprove}
               onMemoryReject={handleMemoryReject}
@@ -1557,6 +1558,7 @@ function SessionPageContent() {
               onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}
               onPendingBuilderArtifactReviewConsumed={handlePendingBuilderArtifactReviewConsumed}
               onArtifactReviewVoiceCommandRouteChange={handleArtifactReviewVoiceCommandRouteChange}
+              onAnnotationActionSucceeded={voiceState.markAnnotationActionSucceeded}
               onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
               onMemoryApprove={handleMemoryApprove}
               onMemoryReject={handleMemoryReject}
@@ -1584,6 +1586,7 @@ function SessionPageContent() {
             onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}
             onPendingBuilderArtifactReviewConsumed={handlePendingBuilderArtifactReviewConsumed}
             onArtifactReviewVoiceCommandRouteChange={handleArtifactReviewVoiceCommandRouteChange}
+            onAnnotationActionSucceeded={voiceState.markAnnotationActionSucceeded}
             onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
             onMemoryApprove={handleMemoryApprove}
             onMemoryReject={handleMemoryReject}

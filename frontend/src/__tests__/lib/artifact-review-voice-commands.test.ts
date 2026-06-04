@@ -42,33 +42,63 @@ describe("artifact review voice command parser", () => {
       kind: "add_annotation",
       annotationKind: "highlight",
       color: "yellow",
+      utteranceKind: "annotation_highlight",
+    })
+    expect(parseArtifactReviewVoiceCommand("highlighted in yellow")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "highlight",
+      color: "yellow",
+      utteranceKind: "annotation_highlight",
+    })
+    expect(parseArtifactReviewVoiceCommand("highlight this yellow")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "highlight",
+      color: "yellow",
+      utteranceKind: "annotation_highlight",
     })
     expect(parseArtifactReviewVoiceCommand("highlight the title yellow")).toEqual({
       kind: "add_annotation",
       annotationKind: "highlight",
       anchorType: "current_title",
       color: "yellow",
+      utteranceKind: "annotation_highlight",
+    })
+    expect(parseArtifactReviewVoiceCommand("mark this")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "highlight",
+      color: "yellow",
+      utteranceKind: "annotation_highlight",
     })
     expect(parseArtifactReviewVoiceCommand("mark this yellow")).toEqual({
       kind: "add_annotation",
       annotationKind: "highlight",
       color: "yellow",
+      utteranceKind: "annotation_highlight",
     })
     expect(parseArtifactReviewVoiceCommand("leave a comment: change the font")).toEqual({
       kind: "add_annotation",
       annotationKind: "comment",
       commentText: "change the font",
+      utteranceKind: "annotation_comment",
     })
     expect(parseArtifactReviewVoiceCommand("add a note: change the font")).toEqual({
       kind: "add_annotation",
       annotationKind: "comment",
       commentText: "change the font",
+      utteranceKind: "annotation_comment",
     })
-    expect(parseArtifactReviewVoiceCommand("comment on the title: change the font")).toEqual({
+    expect(parseArtifactReviewVoiceCommand("comment on the title saying change the font")).toEqual({
       kind: "add_annotation",
       annotationKind: "comment",
       anchorType: "current_title",
       commentText: "change the font",
+      utteranceKind: "annotation_comment",
+    })
+    expect(parseArtifactReviewVoiceCommand("change the font")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "comment",
+      commentText: "change the font",
+      utteranceKind: "annotation_follow_up_comment",
     })
   })
 
@@ -85,11 +115,13 @@ describe("artifact review voice command parser", () => {
         kind: "add_annotation",
         annotationKind: "highlight",
         color: "yellow",
+        utteranceKind: "annotation_highlight",
       },
       {
         kind: "add_annotation",
         annotationKind: "comment",
         commentText: "change the font",
+        utteranceKind: "annotation_comment",
       },
     ])
 
@@ -99,12 +131,14 @@ describe("artifact review voice command parser", () => {
         annotationKind: "highlight",
         anchorType: "current_title",
         color: "yellow",
+        utteranceKind: "annotation_highlight",
       },
       {
         kind: "add_annotation",
         annotationKind: "comment",
         anchorType: "current_title",
         commentText: "change the font",
+        utteranceKind: "annotation_comment",
       },
     ])
 
@@ -114,12 +148,14 @@ describe("artifact review voice command parser", () => {
         annotationKind: "highlight",
         anchorType: "current_title",
         color: "yellow",
+        utteranceKind: "annotation_highlight",
       },
       {
         kind: "add_annotation",
         annotationKind: "comment",
         anchorType: "current_title",
         commentText: "change the font",
+        utteranceKind: "annotation_comment",
       },
     ])
   })

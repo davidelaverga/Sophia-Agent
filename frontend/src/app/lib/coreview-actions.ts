@@ -1435,6 +1435,9 @@ function buildCoreviewResult(params: {
   const rebindAttempted = params.rebindAttempted ?? false
   const rebindResult = params.rebindResult ?? current.rebindStatus ?? "not_attempted"
   const rebindStatus = params.rebindStatus ?? current.rebindStatus ?? rebindResult
+  const annotationOverlayCaptured = params.annotationCount !== undefined && params.annotationCount !== null
+    ? params.annotationCount > 0
+    : current.annotationOverlayCaptured
   return {
     ok: params.ok,
     action: params.action,
@@ -1465,7 +1468,7 @@ function buildCoreviewResult(params: {
     frame_sent: current.reviewHasFrame,
     review_active: current.reviewActive,
     current_view_summary: currentViewSummary(current),
-    annotation_overlay_captured: current.annotationOverlayCaptured,
+    annotation_overlay_captured: annotationOverlayCaptured,
     annotation_id: params.annotationId ?? null,
     annotation_kind: params.annotationKind ?? null,
     annotation_anchor_type: params.annotationAnchorType ?? null,
