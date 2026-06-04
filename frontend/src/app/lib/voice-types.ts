@@ -179,6 +179,21 @@ export type GeminiRuntimeTelemetry = {
   readArtifactTextLastStatus?: string | null
   readArtifactTextPdfExtractionStatus?: string | null
   exactTextRegistrySource?: string | null
+  annotationOverlayCaptured?: boolean | null
+  annotationCount?: number
+  highlightCount?: number
+  commentCount?: number
+  annotationActionSource?: string | null
+  coreviewAnnotationToolCount?: number
+  coreviewAnnotationToolResult?: string | null
+  coreviewAnnotationKind?: string | null
+  coreviewAnnotationAnchorType?: string | null
+  coreviewAnnotationColor?: string | null
+  coreviewAnnotationPageIndex?: number | null
+  coreviewAnnotationBlockedReason?: string | null
+  coreviewFocusAnchorCount?: number
+  coreviewFocusAnchorResult?: string | null
+  coreviewFocusAnchorType?: string | null
   providerToPublicTranscriptGapAfterCoreviewTool?: number | null
   followUpTurnDispatchedAfterCoreviewTool?: boolean
   emitArtifactBlockedDuringReviewCount?: number

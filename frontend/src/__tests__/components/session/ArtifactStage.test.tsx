@@ -66,13 +66,21 @@ function mockCanvasApis() {
     beginPath: vi.fn(),
     clearRect: vi.fn(),
     closePath: vi.fn(),
+    drawImage: vi.fn(),
+    arc: vi.fn(),
     fill: vi.fn(),
     fillRect: vi.fn(),
     fillText: vi.fn(),
+    stroke: vi.fn(),
+    strokeRect: vi.fn(),
     measureText: vi.fn((text: string) => ({ width: text.length * 8 })),
     moveTo: vi.fn(),
     fillStyle: "",
+    strokeStyle: "",
+    lineWidth: 1,
     font: "",
+    textAlign: "start",
+    textBaseline: "alphabetic",
   } as unknown as CanvasRenderingContext2D
 
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(context)
@@ -134,7 +142,12 @@ function mockPdfDocument({
 }
 
 function textToPdfTextItems(text: string) {
-  return text.split(/\s+/u).filter(Boolean).map((str) => ({ str }))
+  return text.split(/\s+/u).filter(Boolean).map((str, index) => ({
+    str,
+    width: Math.max(24, str.length * 9),
+    height: 24,
+    transform: [24, 0, 0, 24, 72 + index * 72, 704],
+  }))
 }
 
 function renderStage({
@@ -703,6 +716,95 @@ describe("ArtifactStage", () => {
     })
     expect(await screen.findByText("100%")).toBeInTheDocument()
     await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-fit-mode", "custom"))
+  })
+
+  it("lets the Coreview stage target highlight, comment, and focus the current PDF title", async () => {
+    let voiceTarget: ArtifactReviewVoiceCommandTarget | null = null
+    mockPdfDocument({
+      pageCount: 1,
+      textByPage: ["Q3 Launch Review"],
+    })
+    renderStage({
+      artifact: pdfBuilderArtifact,
+      artifactId: "artifact-1",
+      exactTextAvailable: false,
+      onVoiceCommandTargetChange: (target) => {
+        voiceTarget = target
+      },
+    })
+
+    const canvas = await screen.findByLabelText("PDF page 1")
+    await waitFor(() => expect(voiceTarget?.pageCount).toBe(1))
+    await waitFor(() => {
+      const resolved = voiceTarget?.resolveAnchor({ anchor: { type: "current_title" }, pageIndex: 0 })
+      expect(resolved).toMatchObject({ ok: true })
+    })
+
+    const resolvedTitle = voiceTarget?.resolveAnchor({ anchor: { type: "current_title" }, pageIndex: 0 })
+    expect(resolvedTitle?.ok).toBe(true)
+    if (!resolvedTitle?.ok) {
+      throw new Error("title anchor did not resolve")
+    }
+
+    act(() => {
+      voiceTarget?.addAnnotation({
+        kind: "highlight",
+        pageIndex: 0,
+        anchor: resolvedTitle.anchor,
+        rect: resolvedTitle.anchor.rect,
+        point: null,
+        color: "yellow",
+        text: null,
+        source: "sophia",
+      })
+    })
+
+    const highlight = await screen.findByTestId("artifact-highlight-annotation")
+    expect(highlight).toHaveAttribute("data-annotation-color", "yellow")
+    expect(highlight).toHaveAttribute("data-annotation-source", "sophia")
+
+    act(() => {
+      voiceTarget?.addAnnotation({
+        kind: "comment",
+        pageIndex: 0,
+        anchor: resolvedTitle.anchor,
+        rect: null,
+        point: { x: 0.72, y: 0.12 },
+        color: "yellow",
+        text: "change the font",
+        source: "sophia",
+      })
+    })
+
+    expect(await screen.findByTestId("artifact-comment-pin")).toHaveAttribute("aria-pressed", "true")
+    expect(screen.getByDisplayValue("change the font")).toBeInTheDocument()
+    expect(voiceTarget?.annotationCounts).toMatchObject({
+      annotationCount: 2,
+      highlightCount: 1,
+      commentCount: 1,
+    })
+
+    const panLayer = screen.getByTestId("artifact-pdf-pan-layer")
+    const scrollTo = vi.fn()
+    panLayer.scrollTo = scrollTo
+    Object.defineProperty(panLayer, "clientWidth", { configurable: true, value: 300 })
+    Object.defineProperty(panLayer, "clientHeight", { configurable: true, value: 260 })
+    Object.defineProperty(panLayer, "scrollWidth", { configurable: true, value: 900 })
+    Object.defineProperty(panLayer, "scrollHeight", { configurable: true, value: 1000 })
+
+    act(() => {
+      const result = voiceTarget?.focusAnchor({
+        pageIndex: 0,
+        anchor: resolvedTitle.anchor,
+        zoom: 1.4,
+        fitMode: "custom",
+      })
+      expect(result).toMatchObject({ ok: true })
+    })
+
+    await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-zoom", "1.4"))
+    await waitFor(() => expect(scrollTo).toHaveBeenCalled())
+    expect(screen.getByRole("status", { name: /not looking/i })).toBeInTheDocument()
   })
 
   it("reports page and zoom changes through the artifact view state callback", async () => {

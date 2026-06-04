@@ -26,6 +26,18 @@ import type {
   CoReviewSessionState,
   CoReviewTransportStatus,
 } from "../../lib/co-review-transport"
+import type {
+  CoreviewAddAnnotationAdapterInput,
+  CoreviewAddAnnotationAdapterResult,
+  CoreviewAnnotationAnchor,
+  CoreviewFocusAnchorAdapterInput,
+  CoreviewFocusAnchorAdapterResult,
+  CoreviewResolveAnnotationAnchorResult,
+} from "../../lib/coreview-actions"
+import {
+  resolveCoreviewPdfTextAnchor,
+  type CoreviewPdfTextLayout,
+} from "../../lib/coreview-pdf-text-layout"
 import { recordSophiaCaptureEvent } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
 import type {
@@ -40,6 +52,7 @@ import type {
 } from "../../types/builder-artifact"
 
 import { ArtifactCanvasViewport, type ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
+import type { ArtifactPdfFocusRequest } from "./ArtifactPdfPreview"
 import { ArtifactReviewStatus, hasConfirmedStillFrame } from "./ArtifactReviewStatus"
 import { ArtifactToolbar } from "./ArtifactToolbar"
 import { ReviewWithSophiaButton } from "./ReviewWithSophiaButton"
@@ -91,6 +104,15 @@ export interface ArtifactReviewVoiceCommandTarget {
   fitMode: ArtifactFitMode
   applyCommand: (command: ArtifactReviewVoiceCommand) => ArtifactReviewVoiceCommandApplyResult
   setView: (view: { pageIndex: number; zoom: number; fitMode: ArtifactFitMode }) => void
+  resolveAnchor: (input: { anchor: CoreviewAnnotationAnchor; pageIndex: number }) => CoreviewResolveAnnotationAnchorResult
+  addAnnotation: (input: CoreviewAddAnnotationAdapterInput) => CoreviewAddAnnotationAdapterResult
+  focusAnchor: (input: CoreviewFocusAnchorAdapterInput) => CoreviewFocusAnchorAdapterResult
+  annotationCounts: {
+    annotationCount: number
+    highlightCount: number
+    commentCount: number
+  }
+  annotationOverlayCaptured: boolean | null
 }
 
 export function ArtifactStage({
@@ -152,6 +174,9 @@ export function ArtifactStage({
   const [toolMode, setToolMode] = useState<ArtifactToolMode>("select")
   const [annotations, setAnnotations] = useState<ArtifactAnnotation[]>([])
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null)
+  const [pdfTextLayout, setPdfTextLayout] = useState<CoreviewPdfTextLayout | null>(null)
+  const [pdfFocusRequest, setPdfFocusRequest] = useState<ArtifactPdfFocusRequest | null>(null)
+  const annotationsRef = useRef<ArtifactAnnotation[]>([])
   const annotationTelemetrySignatureRef = useRef<string | null>(null)
   const viewportPrimaryFile = primaryFile
     ? {
@@ -179,9 +204,16 @@ export function ArtifactStage({
     setZoom(1)
     setFitMode(rendererKind === "pdf" ? "page" : "custom")
     setToolMode("select")
+    annotationsRef.current = []
     setAnnotations([])
     setSelectedAnnotationId(null)
+    setPdfTextLayout(null)
+    setPdfFocusRequest(null)
   }, [artifactId, rendererKind, rendererResetKey])
+
+  useEffect(() => {
+    annotationsRef.current = annotations
+  }, [annotations])
 
   useEffect(() => {
     if (rendererKind !== "pdf" && toolMode !== "select") {
@@ -249,16 +281,20 @@ export function ArtifactStage({
     }
 
     const id = nextArtifactAnnotationId("highlight")
-    setAnnotations((current) => [
-      ...current,
+    const nextAnnotations: ArtifactAnnotation[] = [
+      ...annotationsRef.current,
       {
         id,
         kind: "highlight",
         pageIndex,
         rect,
+        color: "yellow",
+        source: "user",
         createdAt: Date.now(),
       },
-    ])
+    ]
+    annotationsRef.current = nextAnnotations
+    setAnnotations(nextAnnotations)
     setSelectedAnnotationId(id)
     setToolMode("select")
   }, [pageIndex, rendererKind])
@@ -268,17 +304,20 @@ export function ArtifactStage({
     }
 
     const id = nextArtifactAnnotationId("comment")
-    setAnnotations((current) => [
-      ...current,
+    const nextAnnotations: ArtifactAnnotation[] = [
+      ...annotationsRef.current,
       {
         id,
         kind: "comment",
         pageIndex,
         point,
         text: "",
+        source: "user",
         createdAt: Date.now(),
       },
-    ])
+    ]
+    annotationsRef.current = nextAnnotations
+    setAnnotations(nextAnnotations)
     setSelectedAnnotationId(id)
     setToolMode("select")
   }, [pageIndex, rendererKind])
@@ -289,11 +328,13 @@ export function ArtifactStage({
     }
   }, [])
   const handleUpdateCommentText = useCallback((id: string, text: string) => {
-    setAnnotations((current) => current.map((annotation) => (
+    const nextAnnotations = annotationsRef.current.map((annotation) => (
       annotation.id === id && annotation.kind === "comment"
         ? { ...annotation, text: text.slice(0, 180) }
         : annotation
-    )))
+    ))
+    annotationsRef.current = nextAnnotations
+    setAnnotations(nextAnnotations)
   }, [])
   const annotationCounts = useMemo(() => {
     let highlightCount = 0
@@ -330,14 +371,15 @@ export function ArtifactStage({
         artifactZoom: zoom,
         artifactFitMode: fitMode,
         artifactToolMode: toolMode,
-        annotationOverlayCaptured: rendererKind === "pdf" ? false : null,
+        annotationOverlayCaptured: rendererKind === "pdf" ? annotationCounts.annotationCount > 0 : null,
+        ...annotationCounts,
         reviewStale,
         rawArtifactTextExcluded: true,
         rawFrameExcluded: true,
         ...details,
       },
     })
-  }, [artifactId, fitMode, pageCount, pageIndex, primaryFile?.path, rendererKind, reviewStale, toolMode, zoom])
+  }, [annotationCounts, artifactId, fitMode, pageCount, pageIndex, primaryFile?.path, rendererKind, reviewStale, toolMode, zoom])
   const applyVoiceCommand = useCallback((command: ArtifactReviewVoiceCommand): ArtifactReviewVoiceCommandApplyResult => {
     const normalizedPageCount = Math.max(1, Math.floor(pageCount))
     const currentPageIndex = Math.min(Math.max(0, pageIndex), normalizedPageCount - 1)
@@ -490,6 +532,108 @@ export function ArtifactStage({
       setZoom(clampArtifactZoom(view.zoom))
     }
   }, [pageCount, supportsPagination, supportsZoom])
+  const resolveCoreviewAnchor = useCallback((input: {
+    anchor: CoreviewAnnotationAnchor
+    pageIndex: number
+  }): CoreviewResolveAnnotationAnchorResult => {
+    if (rendererKind !== "pdf") {
+      return { ok: false, blockedReason: "unsupported_renderer" }
+    }
+    const selected = selectedAnnotationId
+      ? annotationsRef.current.find((annotation) => annotation.id === selectedAnnotationId && annotation.pageIndex === input.pageIndex)
+      : null
+    return resolveCoreviewPdfTextAnchor(
+      pdfTextLayout,
+      input.anchor,
+      input.pageIndex,
+      selected?.kind === "highlight"
+        ? { rect: selected.rect }
+        : selected?.kind === "comment"
+          ? { point: selected.point }
+          : null,
+    )
+  }, [pdfTextLayout, rendererKind, selectedAnnotationId])
+  const addCoreviewAnnotation = useCallback((input: CoreviewAddAnnotationAdapterInput): CoreviewAddAnnotationAdapterResult => {
+    if (rendererKind !== "pdf") {
+      return {
+        ok: false,
+        annotationId: null,
+        blockedReason: "unsupported_renderer",
+        ...countAnnotations(annotationsRef.current),
+      }
+    }
+    if (input.kind === "highlight" && !input.rect) {
+      return {
+        ok: false,
+        annotationId: null,
+        blockedReason: "invalid_rect",
+        ...countAnnotations(annotationsRef.current),
+      }
+    }
+    if (input.kind === "comment" && !input.point) {
+      return {
+        ok: false,
+        annotationId: null,
+        blockedReason: "anchor_not_found",
+        ...countAnnotations(annotationsRef.current),
+      }
+    }
+
+    const id = nextArtifactAnnotationId(input.kind)
+    const annotation: ArtifactAnnotation = input.kind === "highlight"
+      ? {
+          id,
+          kind: "highlight",
+          pageIndex: input.pageIndex,
+          rect: input.rect,
+          color: input.color,
+          source: input.source,
+          createdAt: Date.now(),
+        }
+      : {
+          id,
+          kind: "comment",
+          pageIndex: input.pageIndex,
+          point: input.point,
+          text: input.text ?? "",
+          source: input.source,
+          createdAt: Date.now(),
+        }
+    const nextAnnotations = [...annotationsRef.current, annotation]
+    annotationsRef.current = nextAnnotations
+    setAnnotations(nextAnnotations)
+    setSelectedAnnotationId(id)
+    setToolMode("select")
+
+    return {
+      ok: true,
+      annotationId: id,
+      blockedReason: null,
+      ...countAnnotations(nextAnnotations),
+    }
+  }, [rendererKind])
+  const focusCoreviewAnchor = useCallback((input: CoreviewFocusAnchorAdapterInput): CoreviewFocusAnchorAdapterResult => {
+    if (rendererKind !== "pdf" || !input.anchor.rect) {
+      return {
+        ok: false,
+        blockedReason: rendererKind === "pdf" ? "anchor_not_found" : "unsupported_renderer",
+      }
+    }
+    const normalizedPageCount = Math.max(1, Math.floor(pageCount))
+    const nextPageIndex = Math.min(Math.max(0, Math.floor(input.pageIndex)), normalizedPageCount - 1)
+    setPageIndex(nextPageIndex)
+    setFitMode(input.fitMode)
+    setZoom(clampArtifactZoom(input.zoom))
+    setPdfFocusRequest({
+      id: `focus-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      pageIndex: nextPageIndex,
+      rect: input.anchor.rect,
+    })
+    return {
+      ok: true,
+      blockedReason: null,
+    }
+  }, [pageCount, rendererKind])
   const handlePinchZoomChange = useCallback((nextZoom: number) => {
     if (!supportsZoom) {
       return
@@ -585,14 +729,23 @@ export function ArtifactStage({
     fitMode,
     applyCommand: applyVoiceCommand,
     setView: setCoreviewTargetView,
+    resolveAnchor: resolveCoreviewAnchor,
+    addAnnotation: addCoreviewAnnotation,
+    focusAnchor: focusCoreviewAnchor,
+    annotationCounts,
+    annotationOverlayCaptured: rendererKind === "pdf" ? annotationCounts.annotationCount > 0 : null,
   }), [
+    addCoreviewAnnotation,
     applyVoiceCommand,
     artifactId,
+    annotationCounts,
     fitMode,
+    focusCoreviewAnchor,
     pageCount,
     pageIndex,
     primaryFile?.path,
     rendererKind,
+    resolveCoreviewAnchor,
     supportsPagination,
     supportsZoom,
     setCoreviewTargetView,
@@ -634,7 +787,7 @@ export function ArtifactStage({
         artifactRendererKind: rendererKind,
         artifactToolMode: toolMode,
         annotationPageIndex: pageIndex,
-        annotationOverlayCaptured: false,
+        annotationOverlayCaptured: annotationCounts.annotationCount > 0,
         selectedAnnotationKind,
         ...annotationCounts,
         rawArtifactTextExcluded: true,
@@ -746,6 +899,7 @@ export function ArtifactStage({
         previewHref={openHref}
         artifactTextRegistration={artifactTextRegistration}
         onVisualCaptureStatusChange={onVisualCaptureStatusChange}
+        onPdfTextLayoutChange={setPdfTextLayout}
         reviewSurfaceState={reviewSurfaceState}
         rendererKind={rendererKind}
         pageIndex={pageIndex}
@@ -762,6 +916,7 @@ export function ArtifactStage({
         onCreateComment={handleCreateComment}
         onSelectAnnotation={handleSelectAnnotation}
         onUpdateCommentText={handleUpdateCommentText}
+        focusRequest={pdfFocusRequest}
         className={fillAvailable ? "min-h-0 flex-1" : undefined}
       />
 
@@ -818,6 +973,27 @@ export function ArtifactStage({
 
 function nextArtifactAnnotationId(kind: ArtifactAnnotation["kind"]): string {
   return `${kind}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function countAnnotations(annotations: ArtifactAnnotation[]): {
+  annotationCount: number
+  highlightCount: number
+  commentCount: number
+} {
+  let highlightCount = 0
+  let commentCount = 0
+  for (const annotation of annotations) {
+    if (annotation.kind === "highlight") {
+      highlightCount += 1
+    } else {
+      commentCount += 1
+    }
+  }
+  return {
+    annotationCount: annotations.length,
+    highlightCount,
+    commentCount,
+  }
 }
 
 function artifactCommandFromKeyboardEvent(

@@ -34,13 +34,29 @@ const pdfFile = {
   mimeType: "application/pdf",
 }
 const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37])
+let canvasContext: CanvasRenderingContext2D
 
 function mockCanvasApis() {
   const context = {
     clearRect: vi.fn(),
+    drawImage: vi.fn(),
+    fill: vi.fn(),
+    fillRect: vi.fn(),
+    fillText: vi.fn(),
+    stroke: vi.fn(),
+    strokeRect: vi.fn(),
+    beginPath: vi.fn(),
+    arc: vi.fn(),
+    fillStyle: "",
+    strokeStyle: "",
+    lineWidth: 1,
+    font: "",
+    textAlign: "start",
+    textBaseline: "alphabetic",
   } as unknown as CanvasRenderingContext2D
 
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(context)
+  return context
 }
 
 function createDeferred<T>() {
@@ -127,7 +143,12 @@ function mockPdfDocument({
 }
 
 function textToPdfTextItems(text: string) {
-  return text.split(/\s+/u).filter(Boolean).map((str) => ({ str }))
+  return text.split(/\s+/u).filter(Boolean).map((str, index) => ({
+    str,
+    width: Math.max(24, str.length * 9),
+    height: 24,
+    transform: [24, 0, 0, 24, 72 + index * 72, 704],
+  }))
 }
 
 function renderPreview(
@@ -234,7 +255,7 @@ function mockAnnotationLayerBounds(layer: HTMLElement, width = 600, height = 800
 }
 
 beforeEach(() => {
-  mockCanvasApis()
+  canvasContext = mockCanvasApis()
   vi.mocked(loadPdfJs).mockReset()
 })
 
@@ -633,5 +654,44 @@ describe("ArtifactPdfPreview", () => {
     await waitFor(() => expect(screen.getByLabelText("PDF page 2")).toHaveAttribute("data-artifact-page-index", "1"))
     expect(screen.queryByTestId("artifact-highlight-annotation")).not.toBeInTheDocument()
     expect(screen.getByTestId("artifact-comment-pin")).toBeInTheDocument()
+  })
+
+  it("composites highlight and comment overlays into the still-frame canvas", async () => {
+    const onRenderStatusChange = vi.fn()
+    mockPdfDocument({ pageCount: 1 })
+    const annotations: ArtifactAnnotation[] = [
+      {
+        id: "highlight-1",
+        kind: "highlight",
+        pageIndex: 0,
+        rect: { x: 0.1, y: 0.12, width: 0.42, height: 0.08 },
+        color: "yellow",
+        source: "sophia",
+        createdAt: 1,
+      },
+      {
+        id: "comment-1",
+        kind: "comment",
+        pageIndex: 0,
+        point: { x: 0.56, y: 0.12 },
+        text: "change the font",
+        source: "sophia",
+        createdAt: 1,
+      },
+    ]
+
+    renderPreview({ annotations, onRenderStatusChange })
+
+    const composite = await screen.findByTestId("artifact-pdf-composite-canvas")
+    await waitFor(() => expect(composite).toHaveAttribute("data-annotation-overlay-captured", "true"))
+    await waitFor(() => expect(onRenderStatusChange).toHaveBeenCalledWith(expect.objectContaining({
+      ready: true,
+      source: "pdf_page_canvas",
+      annotationOverlayCaptured: true,
+    })))
+    expect(canvasContext.drawImage).toHaveBeenCalled()
+    expect(canvasContext.fillRect).toHaveBeenCalled()
+    expect(canvasContext.arc).toHaveBeenCalled()
+    expect(JSON.stringify(onRenderStatusChange.mock.calls)).not.toContain("change the font")
   })
 })

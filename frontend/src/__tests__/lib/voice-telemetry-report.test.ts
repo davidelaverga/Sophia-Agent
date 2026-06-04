@@ -971,6 +971,72 @@ describe('buildVoiceTelemetryReport', () => {
     expect(serialized).not.toContain('unsafe_preview');
   });
 
+  it('compacts direct Coreview latest tool execution diagnostics without raw annotation text', () => {
+    const report = buildVoiceTelemetryReport({
+      exportedAt: '2026-05-20T12:00:05.000Z',
+      summary: buildSummary(),
+      metrics: buildMetrics(),
+      captureBundle: buildCaptureBundle([
+        {
+          seq: 1,
+          recordedAt: '2026-05-20T12:00:00.000Z',
+          category: 'voice-session',
+          name: 'start-talking-requested',
+          payload: { sessionId: 'current-session', runtime: 'gemini_live' },
+        },
+        {
+          seq: 2,
+          recordedAt: '2026-05-20T12:00:02.000Z',
+          category: 'voice-session',
+          name: 'gemini-relay-trace',
+          payload: {
+            trace: {
+              backendDiagnostics: {
+                session_id: 'gemini-session',
+                raw_provider_events_accepted: 1,
+                provider_category_counts: { toolCall: 1 },
+                function_calls_extracted_count: 1,
+                tool_execution_counts: { finished: 1 },
+                latest_tool_execution: {
+                  phase: 'finished',
+                  tool_call_id: 'coreview-comment-1',
+                  tool_name: 'coreview_add_annotation',
+                  recorded_at: 1770000000,
+                  annotation_kind: 'comment',
+                  annotation_anchor_type: 'current_title',
+                  annotation_color: 'yellow',
+                  annotation_page_index: 0,
+                  annotation_action_source: 'sophia',
+                  raw_comment_text_excluded: true,
+                  comment_text: 'change the font',
+                  text_quote: 'private title text',
+                },
+                provider_events_pushed_into_mapper: 1,
+                provider_event_mapping_outputs: {},
+                public_sophia_emitted_counts: {},
+              },
+            },
+          },
+        },
+      ]),
+    });
+    const serialized = JSON.stringify(report);
+
+    expect(report.diagnosticsSummary.geminiRelayBackend?.latestToolExecution).toMatchObject({
+      tool_name: 'coreview_add_annotation',
+      annotation_kind: 'comment',
+      annotation_anchor_type: 'current_title',
+      annotation_color: 'yellow',
+      annotation_page_index: 0,
+      annotation_action_source: 'sophia',
+      raw_comment_text_excluded: true,
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
+    });
+    expect(serialized).not.toContain('change the font');
+    expect(serialized).not.toContain('private title text');
+  });
+
   it('falls back to current session id scoping when no start event is present', () => {
     const report = buildVoiceTelemetryReport({
       exportedAt: '2026-05-20T12:00:05.000Z',
@@ -1337,10 +1403,29 @@ describe('buildVoiceTelemetryReport', () => {
   });
 
   it('exports safe Coreview telemetry and strips raw frame or artifact text fields', () => {
+    const metrics = buildMetrics();
+    Object.assign(metrics.coreview.visual, {
+      annotationOverlayCaptured: true,
+      annotationCount: 2,
+      highlightCount: 1,
+      commentCount: 1,
+      annotationActionSource: 'sophia',
+      coreviewAnnotationToolCount: 2,
+      coreviewAnnotationToolResult: 'success',
+      coreviewAnnotationKind: 'comment',
+      coreviewAnnotationAnchorType: 'current_title',
+      coreviewAnnotationColor: 'yellow',
+      coreviewAnnotationPageIndex: 0,
+      coreviewAnnotationBlockedReason: null,
+      coreviewFocusAnchorCount: 1,
+      coreviewFocusAnchorResult: 'success',
+      coreviewFocusAnchorType: 'current_title',
+    });
+
     const report = buildVoiceTelemetryReport({
       exportedAt: '2026-05-20T12:00:05.000Z',
       summary: buildSummary(),
-      metrics: buildMetrics(),
+      metrics,
       captureBundle: buildCaptureBundle([
         {
           seq: 1,
@@ -1391,6 +1476,49 @@ describe('buildVoiceTelemetryReport', () => {
         },
         {
           seq: 4,
+          recordedAt: '2026-05-20T12:00:02.500Z',
+          category: 'voice-session',
+          name: 'gemini-relay-trace',
+          payload: {
+            trace: {
+              backendDiagnostics: {
+                session_id: 'gemini-session',
+                raw_provider_events_accepted: 1,
+                provider_category_counts: { toolCall: 1 },
+                function_calls_extracted_count: 1,
+                tool_execution_counts: { finished: 1 },
+                tool_execution_recent: [
+                  {
+                    phase: 'finished',
+                    tool_call_id: 'coreview-annotation-call-1',
+                    tool_name: 'coreview_add_annotation',
+                    recorded_at: 1770000000,
+                    ok: true,
+                    action: 'add_annotation',
+                    kind: 'comment',
+                    annotation_kind: 'comment',
+                    annotation_anchor_type: 'current_title',
+                    annotation_color: 'yellow',
+                    annotation_page_index: 0,
+                    annotation_count: 2,
+                    highlight_count: 1,
+                    comment_count: 1,
+                    annotation_overlay_captured: true,
+                    annotation_action_source: 'sophia',
+                    raw_comment_text_excluded: true,
+                    comment_text: 'change the font',
+                    text_quote: 'private title text',
+                  },
+                ],
+                provider_events_pushed_into_mapper: 1,
+                provider_event_mapping_outputs: {},
+                public_sophia_emitted_counts: {},
+              },
+            },
+          },
+        },
+        {
+          seq: 5,
           recordedAt: '2026-05-20T12:00:03.000Z',
           category: 'voice-session',
           name: 'artifact-review-voice-command',
@@ -1418,9 +1546,37 @@ describe('buildVoiceTelemetryReport', () => {
     expect(report.coreview.exactText.exactTextSuccessCount).toBe(1);
     expect(report.coreview.exactText.readArtifactTextCallCount).toBe(1);
     expect(report.coreview.exactText.lastExactTextSource).toBe('builder_metadata');
+    expect(report.coreview.visual.annotationOverlayCaptured).toBe(true);
+    expect(report.coreview.visual.annotationCount).toBe(2);
+    expect(report.coreview.visual.highlightCount).toBe(1);
+    expect(report.coreview.visual.commentCount).toBe(1);
+    expect(report.coreview.visual.annotationActionSource).toBe('sophia');
+    expect(report.coreview.visual.coreviewAnnotationToolCount).toBe(2);
+    expect(report.coreview.visual.coreviewAnnotationToolResult).toBe('success');
+    expect(report.coreview.visual.coreviewAnnotationKind).toBe('comment');
+    expect(report.coreview.visual.coreviewAnnotationAnchorType).toBe('current_title');
+    expect(report.coreview.visual.coreviewAnnotationColor).toBe('yellow');
+    expect(report.coreview.visual.coreviewAnnotationPageIndex).toBe(0);
+    expect(report.coreview.visual.coreviewFocusAnchorCount).toBe(1);
+    expect(report.coreview.visual.coreviewFocusAnchorResult).toBe('success');
+    expect(report.coreview.visual.coreviewFocusAnchorType).toBe('current_title');
     expect(report.diagnosticsSummary.coreviewStillFrame.rawProviderPayloadExcluded).toBe(true);
     expect(report.diagnosticsSummary.coreviewStillFrame.rawArtifactTextExcluded).toBe(true);
     expect(report.diagnosticsSummary.coreviewStillFrame).toMatchObject({
+      annotationOverlayCaptured: true,
+      annotationCount: 2,
+      highlightCount: 1,
+      commentCount: 1,
+      annotationActionSource: 'sophia',
+      coreviewAnnotationToolCount: 2,
+      coreviewAnnotationToolResult: 'success',
+      coreviewAnnotationKind: 'comment',
+      coreviewAnnotationAnchorType: 'current_title',
+      coreviewAnnotationColor: 'yellow',
+      coreviewAnnotationPageIndex: 0,
+      coreviewFocusAnchorCount: 1,
+      coreviewFocusAnchorResult: 'success',
+      coreviewFocusAnchorType: 'current_title',
       lastReviewVoiceCommandKind: 'go_to_page',
       lastReviewVoiceCommandApplied: true,
       lastReviewVoiceCommandUiMode: 'voice',
@@ -1435,10 +1591,30 @@ describe('buildVoiceTelemetryReport', () => {
         }),
       ],
     });
+    const latestToolExecution = report.diagnosticsSummary.geminiRelayBackend?.latestToolExecution;
+    const relayTrace = report.captureBundle.events.find((event) => event.name === 'gemini-relay-trace')?.payload as { trace?: { backendDiagnostics?: Record<string, unknown> } };
+    const compactLatest = relayTrace?.trace?.backendDiagnostics?.latest_tool_execution as Record<string, unknown> | undefined;
+    expect(latestToolExecution).toMatchObject({
+      tool_name: 'coreview_add_annotation',
+      annotation_kind: 'comment',
+      annotation_anchor_type: 'current_title',
+      annotation_color: 'yellow',
+      annotation_page_index: 0,
+      raw_comment_text_excluded: true,
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
+    });
+    expect(compactLatest).toMatchObject({
+      tool_name: 'coreview_add_annotation',
+      annotation_overlay_captured: true,
+      annotation_action_source: 'sophia',
+    });
     expect(serialized).not.toContain('base64-raw-frame');
     expect(serialized).not.toContain('raw-frame-bytes');
     expect(serialized).not.toContain('raw artifact body');
     expect(serialized).not.toContain('What exact text');
+    expect(serialized).not.toContain('change the font');
+    expect(serialized).not.toContain('private title text');
   });
 
 });

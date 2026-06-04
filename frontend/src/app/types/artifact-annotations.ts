@@ -1,4 +1,6 @@
 export type ArtifactToolMode = "select" | "pan" | "highlight" | "comment"
+export type ArtifactAnnotationColor = "yellow" | "purple" | "blue" | "pink"
+export type ArtifactAnnotationSource = "sophia" | "user"
 
 export interface NormalizedArtifactRect {
   x: number
@@ -18,6 +20,8 @@ export type ArtifactAnnotation =
       kind: "highlight"
       pageIndex: number
       rect: NormalizedArtifactRect
+      color?: ArtifactAnnotationColor
+      source?: ArtifactAnnotationSource
       point?: never
       text?: never
       createdAt: number
@@ -27,6 +31,7 @@ export type ArtifactAnnotation =
       kind: "comment"
       pageIndex: number
       point: NormalizedArtifactPoint
+      source?: ArtifactAnnotationSource
       rect?: never
       text: string
       createdAt: number

@@ -184,11 +184,15 @@ const PREPARED_VOICE_CONNECT_TTL_MS = 30_000
 const GEMINI_EMIT_ARTIFACT_TOOL_NAME = "emit_artifact"
 const GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = "read_artifact_text"
 const GEMINI_COREVIEW_GET_CURRENT_VIEW_TOOL_NAME = "coreview_get_current_view"
+const GEMINI_COREVIEW_ADD_ANNOTATION_TOOL_NAME = "coreview_add_annotation"
+const GEMINI_COREVIEW_FOCUS_ANCHOR_TOOL_NAME = "coreview_focus_anchor"
 const GEMINI_REVIEW_TOOL_NAMES = new Set([
   GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
   "coreview_set_view",
   "coreview_refresh_view",
   GEMINI_COREVIEW_GET_CURRENT_VIEW_TOOL_NAME,
+  GEMINI_COREVIEW_ADD_ANNOTATION_TOOL_NAME,
+  GEMINI_COREVIEW_FOCUS_ANCHOR_TOOL_NAME,
 ])
 const GEMINI_TRANSCRIPT_COALESCING_DISABLED_REASON = "provider_output_transcription_is_delta_like"
 const GEMINI_BUILDER_TOOL_NAMES = new Set([
@@ -329,6 +333,21 @@ function createGeminiRuntimeTelemetry(params: Partial<Extract<VoiceRuntimeTeleme
     readArtifactTextLastStatus: params.readArtifactTextLastStatus ?? null,
     readArtifactTextPdfExtractionStatus: params.readArtifactTextPdfExtractionStatus ?? null,
     exactTextRegistrySource: params.exactTextRegistrySource ?? null,
+    annotationOverlayCaptured: params.annotationOverlayCaptured ?? null,
+    annotationCount: params.annotationCount ?? 0,
+    highlightCount: params.highlightCount ?? 0,
+    commentCount: params.commentCount ?? 0,
+    annotationActionSource: params.annotationActionSource ?? null,
+    coreviewAnnotationToolCount: params.coreviewAnnotationToolCount ?? 0,
+    coreviewAnnotationToolResult: params.coreviewAnnotationToolResult ?? null,
+    coreviewAnnotationKind: params.coreviewAnnotationKind ?? null,
+    coreviewAnnotationAnchorType: params.coreviewAnnotationAnchorType ?? null,
+    coreviewAnnotationColor: params.coreviewAnnotationColor ?? null,
+    coreviewAnnotationPageIndex: params.coreviewAnnotationPageIndex ?? null,
+    coreviewAnnotationBlockedReason: params.coreviewAnnotationBlockedReason ?? null,
+    coreviewFocusAnchorCount: params.coreviewFocusAnchorCount ?? 0,
+    coreviewFocusAnchorResult: params.coreviewFocusAnchorResult ?? null,
+    coreviewFocusAnchorType: params.coreviewFocusAnchorType ?? null,
     unresolvedToolCallCount: params.unresolvedToolCallCount ?? 0,
     oldestUnresolvedToolCallAgeMs: params.oldestUnresolvedToolCallAgeMs ?? null,
     lastToolPhase: params.lastToolPhase ?? null,
@@ -2925,6 +2944,25 @@ export function useStreamVoiceSession(
                         : null
                   )
                 : null
+              const coreviewAnnotationResolved = toolName === GEMINI_COREVIEW_ADD_ANNOTATION_TOOL_NAME
+                && diagnostic.phase === "tool_response_sent"
+              const coreviewFocusResolved = toolName === GEMINI_COREVIEW_FOCUS_ANCHOR_TOOL_NAME
+                && diagnostic.phase === "tool_response_sent"
+              const backendString = (key: string) => (
+                typeof diagnostic.backendResponse?.[key] === "string"
+                  ? diagnostic.backendResponse[key]
+                  : null
+              )
+              const backendNumber = (key: string) => (
+                typeof diagnostic.backendResponse?.[key] === "number" && Number.isFinite(diagnostic.backendResponse[key])
+                  ? diagnostic.backendResponse[key]
+                  : null
+              )
+              const backendBoolean = (key: string) => (
+                typeof diagnostic.backendResponse?.[key] === "boolean"
+                  ? diagnostic.backendResponse[key]
+                  : null
+              )
 
               return {
                 ...current,
@@ -2976,6 +3014,41 @@ export function useStreamVoiceSession(
                   ? (current.coreviewGetCurrentViewCount ?? 0) + 1
                   : current.coreviewGetCurrentViewCount,
                 coreviewGetCurrentViewResult: coreviewGetCurrentViewResponse ?? current.coreviewGetCurrentViewResult ?? null,
+                annotationOverlayCaptured: backendBoolean("annotation_overlay_captured") ?? current.annotationOverlayCaptured ?? null,
+                annotationCount: backendNumber("annotation_count") ?? current.annotationCount,
+                highlightCount: backendNumber("highlight_count") ?? current.highlightCount,
+                commentCount: backendNumber("comment_count") ?? current.commentCount,
+                annotationActionSource: backendString("annotation_action_source") ?? current.annotationActionSource ?? null,
+                coreviewAnnotationToolCount: coreviewAnnotationResolved
+                  ? (current.coreviewAnnotationToolCount ?? 0) + 1
+                  : current.coreviewAnnotationToolCount,
+                coreviewAnnotationToolResult: coreviewAnnotationResolved
+                  ? diagnostic.backendResponse?.ok === true ? "success" : "blocked"
+                  : current.coreviewAnnotationToolResult ?? null,
+                coreviewAnnotationKind: coreviewAnnotationResolved
+                  ? backendString("annotation_kind")
+                  : current.coreviewAnnotationKind ?? null,
+                coreviewAnnotationAnchorType: coreviewAnnotationResolved
+                  ? backendString("annotation_anchor_type")
+                  : current.coreviewAnnotationAnchorType ?? null,
+                coreviewAnnotationColor: coreviewAnnotationResolved
+                  ? backendString("annotation_color")
+                  : current.coreviewAnnotationColor ?? null,
+                coreviewAnnotationPageIndex: coreviewAnnotationResolved
+                  ? backendNumber("annotation_page_index")
+                  : current.coreviewAnnotationPageIndex ?? null,
+                coreviewAnnotationBlockedReason: coreviewAnnotationResolved
+                  ? backendString("blocked_reason")
+                  : current.coreviewAnnotationBlockedReason ?? null,
+                coreviewFocusAnchorCount: coreviewFocusResolved
+                  ? (current.coreviewFocusAnchorCount ?? 0) + 1
+                  : current.coreviewFocusAnchorCount,
+                coreviewFocusAnchorResult: coreviewFocusResolved
+                  ? diagnostic.backendResponse?.ok === true ? "success" : "blocked"
+                  : current.coreviewFocusAnchorResult ?? null,
+                coreviewFocusAnchorType: coreviewFocusResolved
+                  ? backendString("focus_anchor_type")
+                  : current.coreviewFocusAnchorType ?? null,
                 lastToolPhase: diagnostic.phase,
                 lastToolName: toolName,
                 lastToolAt: diagnostic.timestamp,

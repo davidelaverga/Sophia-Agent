@@ -78,6 +78,14 @@ export function findArtifactCanvas(
     )
     if (preview) return preview
 
+    const composite = root.querySelector<HTMLCanvasElement>(
+      [
+        `canvas[data-artifact-id='${escapedArtifactId}'][data-artifact-canvas-source='selected-pdf-page-composite']`,
+        `canvas[data-coreview-artifact-id='${escapedArtifactId}'][data-artifact-canvas-source='selected-pdf-page-composite']`,
+      ].join(", "),
+    )
+    if (composite) return composite
+
     const direct = root.querySelector<HTMLCanvasElement>(
       `canvas[data-artifact-id='${escapedArtifactId}'], canvas[data-coreview-artifact-id='${escapedArtifactId}']`,
     )

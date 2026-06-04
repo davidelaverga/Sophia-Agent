@@ -706,7 +706,7 @@ export function PresenceArtifactPanel({
     reviewHasFrame: builderReviewHasFrame,
     exactTextAvailable: builderExactTextAvailable,
     visualFrameFresh: builderReviewHasFrame && !builderReviewStale,
-    annotationOverlayCaptured: stageRendererKind === "pdf" ? false : null,
+    annotationOverlayCaptured: builderVoiceCommandTarget?.annotationOverlayCaptured ?? (stageRendererKind === "pdf" ? false : null),
     rebindStatus: "not_attempted",
   }), [
     artifactStableIdentity,
@@ -963,6 +963,21 @@ export function PresenceArtifactPanel({
         coreviewToolViewReadyWaitMs: result.view_ready_wait_ms,
         coreviewToolViewSignatureBefore: result.view_signature_before,
         coreviewToolViewSignatureAfter: result.view_signature_after,
+        coreviewAnnotationToolCount: result.action === "add_annotation" ? 1 : 0,
+        coreviewAnnotationToolResult: result.action === "add_annotation" ? (result.ok ? "success" : "blocked") : null,
+        coreviewAnnotationKind: result.annotation_kind ?? null,
+        coreviewAnnotationAnchorType: result.annotation_anchor_type ?? null,
+        coreviewAnnotationColor: result.annotation_color ?? null,
+        coreviewAnnotationPageIndex: result.annotation_page_index ?? null,
+        coreviewAnnotationBlockedReason: result.action === "add_annotation" ? result.blocked_reason : null,
+        coreviewFocusAnchorCount: result.action === "focus_anchor" ? 1 : 0,
+        coreviewFocusAnchorResult: result.action === "focus_anchor" ? (result.ok ? "success" : "blocked") : null,
+        coreviewFocusAnchorType: result.focus_anchor_type ?? null,
+        annotationOverlayCaptured: result.annotation_overlay_captured ?? null,
+        annotationCount: result.annotation_count ?? null,
+        highlightCount: result.highlight_count ?? null,
+        commentCount: result.comment_count ?? null,
+        annotationActionSource: result.annotation_action_source ?? null,
         artifactStableIdentity: result.artifact_stable_identity ?? artifactStableIdentity,
         artifactRebindAttempted: result.rebind_attempted,
         artifactRebindResult: result.rebind_result,
@@ -1008,6 +1023,26 @@ export function PresenceArtifactPanel({
             ? `Page ${result.page_number} selected`
             : "Artifact view updated",
         tone: result.refresh_attempted && result.refresh_result === "success" ? "success" : "neutral",
+      })
+      return
+    }
+
+    if (result.action === "add_annotation") {
+      setVoiceCommandStatus({
+        text: result.annotation_kind === "comment"
+          ? "Sophia added a comment"
+          : "Sophia added a highlight",
+        tone: "success",
+      })
+      return
+    }
+
+    if (result.action === "focus_anchor") {
+      setVoiceCommandStatus({
+        text: result.focus_anchor_type === "current_title"
+          ? "Sophia focused the title"
+          : "Sophia focused the anchor",
+        tone: "success",
       })
       return
     }
@@ -1091,6 +1126,37 @@ export function PresenceArtifactPanel({
       setVoiceCommandStaleViewSignature((current) => (
         current && (!viewSignature || current === viewSignature) ? null : current
       ))
+    },
+    resolveAnnotationAnchor: (input) => {
+      const target = builderVoiceCommandTargetRef.current
+      return target
+        ? target.resolveAnchor(input)
+        : { ok: false, blockedReason: "annotation_target_unavailable" }
+    },
+    addAnnotation: (input) => {
+      const target = builderVoiceCommandTargetRef.current
+      if (target) {
+        setBuilderVisualCaptureStatus(unavailableCaptureStatus("preview_not_ready"))
+      }
+      return target
+        ? target.addAnnotation(input)
+        : {
+            ok: false,
+            annotationId: null,
+            blockedReason: "annotation_target_unavailable",
+            annotationCount: 0,
+            highlightCount: 0,
+            commentCount: 0,
+          }
+    },
+    focusAnnotationAnchor: (input) => {
+      const target = builderVoiceCommandTargetRef.current
+      if (target) {
+        setBuilderVisualCaptureStatus(unavailableCaptureStatus("preview_not_ready"))
+      }
+      return target
+        ? target.focusAnchor(input)
+        : { ok: false, blockedReason: "annotation_target_unavailable" }
     },
     rebindVisibleArtifact: (input: CoreviewArtifactRebindInput): CoreviewArtifactRebindResult => {
       const current = coreviewCurrentViewRef.current ?? coreviewCurrentView

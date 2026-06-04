@@ -8,15 +8,19 @@ import {
 export const COREVIEW_SET_VIEW_TOOL_NAME = "coreview_set_view"
 export const COREVIEW_REFRESH_VIEW_TOOL_NAME = "coreview_refresh_view"
 export const COREVIEW_GET_CURRENT_VIEW_TOOL_NAME = "coreview_get_current_view"
+export const COREVIEW_ADD_ANNOTATION_TOOL_NAME = "coreview_add_annotation"
+export const COREVIEW_FOCUS_ANCHOR_TOOL_NAME = "coreview_focus_anchor"
 
 export const COREVIEW_TOOL_NAMES = [
   COREVIEW_SET_VIEW_TOOL_NAME,
   COREVIEW_REFRESH_VIEW_TOOL_NAME,
   COREVIEW_GET_CURRENT_VIEW_TOOL_NAME,
+  COREVIEW_ADD_ANNOTATION_TOOL_NAME,
+  COREVIEW_FOCUS_ANCHOR_TOOL_NAME,
 ] as const
 
 export type CoreviewToolName = typeof COREVIEW_TOOL_NAMES[number]
-export type CoreviewActionName = "set_view" | "refresh_view" | "get_current_view"
+export type CoreviewActionName = "set_view" | "refresh_view" | "get_current_view" | "add_annotation" | "focus_anchor"
 export type CoreviewToolCommandSource = "gemini_tool" | "frontend_fallback"
 
 export type CoreviewToolRefreshResult =
@@ -42,6 +46,31 @@ export type CoreviewToolBlockedReason =
   | "review_not_active"
   | "tool_unavailable"
   | "invalid_tool_args"
+  | "anchor_not_found"
+  | "invalid_rect"
+  | "annotation_target_unavailable"
+
+export type CoreviewAnnotationKind = "highlight" | "comment"
+export type CoreviewAnnotationColor = "yellow" | "purple" | "blue" | "pink"
+
+export interface CoreviewNormalizedRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface CoreviewNormalizedPoint {
+  x: number
+  y: number
+}
+
+export type CoreviewAnnotationAnchor =
+  | { type: "current_title" }
+  | { type: "current_selection" }
+  | { type: "text_quote"; text: string; occurrence?: number }
+  | ({ type: "rect" } & CoreviewNormalizedRect)
+  | ({ type: "point" } & CoreviewNormalizedPoint)
 
 export interface CoreviewSetViewInput {
   artifactId?: string
@@ -59,6 +88,31 @@ export interface CoreviewRefreshViewInput {
 
 export interface CoreviewGetCurrentViewInput {
   artifactId?: string
+}
+
+export interface CoreviewAddAnnotationInput {
+  kind: CoreviewAnnotationKind
+  artifactId?: string
+  pageIndex?: number
+  pageNumber?: number
+  anchor?: CoreviewAnnotationAnchor
+  rect?: CoreviewNormalizedRect
+  point?: CoreviewNormalizedPoint
+  color?: CoreviewAnnotationColor
+  text?: string
+  note?: string
+  source: "sophia" | "user"
+}
+
+export interface CoreviewFocusAnchorInput {
+  artifactId?: string
+  pageIndex?: number
+  pageNumber?: number
+  anchor?: CoreviewAnnotationAnchor
+  zoom?: number
+  zoomDelta?: number
+  fitMode?: ArtifactFitMode
+  reason?: string
 }
 
 export interface CoreviewToolCallInput {
@@ -124,6 +178,51 @@ export interface CoreviewRefreshAdapterResult {
   blockedReason: CoreviewToolBlockedReason | null
 }
 
+export interface CoreviewResolvedAnnotationAnchor {
+  anchorType: CoreviewAnnotationAnchor["type"]
+  pageIndex: number
+  rect: CoreviewNormalizedRect | null
+  point: CoreviewNormalizedPoint | null
+  matchCount?: number | null
+  textLength?: number | null
+}
+
+export type CoreviewResolveAnnotationAnchorResult =
+  | { ok: true; anchor: CoreviewResolvedAnnotationAnchor }
+  | { ok: false; blockedReason: CoreviewToolBlockedReason }
+
+export interface CoreviewAddAnnotationAdapterInput {
+  kind: CoreviewAnnotationKind
+  pageIndex: number
+  anchor: CoreviewResolvedAnnotationAnchor
+  rect: CoreviewNormalizedRect | null
+  point: CoreviewNormalizedPoint | null
+  color: CoreviewAnnotationColor
+  text: string | null
+  source: "sophia" | "user"
+}
+
+export interface CoreviewAddAnnotationAdapterResult {
+  ok: boolean
+  annotationId: string | null
+  blockedReason: CoreviewToolBlockedReason | null
+  annotationCount: number
+  highlightCount: number
+  commentCount: number
+}
+
+export interface CoreviewFocusAnchorAdapterInput {
+  pageIndex: number
+  anchor: CoreviewResolvedAnnotationAnchor
+  zoom: number
+  fitMode: ArtifactFitMode
+}
+
+export interface CoreviewFocusAnchorAdapterResult {
+  ok: boolean
+  blockedReason: CoreviewToolBlockedReason | null
+}
+
 export interface CoreviewRendererAdapter {
   getCurrentViewState(): CoreviewCurrentView
   setView(input: Required<Pick<CoreviewSetViewInput, "pageIndex" | "zoom" | "fitMode">>): Promise<void> | void
@@ -132,6 +231,12 @@ export interface CoreviewRendererAdapter {
   markViewStale(viewSignature: string | null): void
   clearViewStale(viewSignature: string | null): void
   rebindVisibleArtifact?(input: CoreviewArtifactRebindInput): CoreviewArtifactRebindResult
+  resolveAnnotationAnchor?(input: {
+    anchor: CoreviewAnnotationAnchor
+    pageIndex: number
+  }): CoreviewResolveAnnotationAnchorResult
+  addAnnotation?(input: CoreviewAddAnnotationAdapterInput): CoreviewAddAnnotationAdapterResult
+  focusAnnotationAnchor?(input: CoreviewFocusAnchorAdapterInput): Promise<CoreviewFocusAnchorAdapterResult> | CoreviewFocusAnchorAdapterResult
 }
 
 export interface CoreviewActionResult {
@@ -165,11 +270,23 @@ export interface CoreviewActionResult {
   review_active?: boolean
   current_view_summary?: string
   annotation_overlay_captured?: boolean | null
+  annotation_id?: string | null
+  annotation_kind?: CoreviewAnnotationKind | null
+  annotation_anchor_type?: CoreviewAnnotationAnchor["type"] | null
+  annotation_color?: CoreviewAnnotationColor | null
+  annotation_page_index?: number | null
+  annotation_count?: number | null
+  highlight_count?: number | null
+  comment_count?: number | null
+  annotation_action_source?: "sophia" | "user" | null
+  focus_anchor_type?: CoreviewAnnotationAnchor["type"] | null
+  focused_rect?: CoreviewNormalizedRect | null
   artifact_stable_identity?: string | null
   rebind_status: CoreviewArtifactRebindStatus
   rebind_attempted: boolean
   rebind_result: CoreviewArtifactRebindStatus
   rebind_reason: string | null
+  raw_comment_text_excluded: true
   raw_artifact_text_excluded: true
   raw_frame_excluded: true
 }
@@ -178,6 +295,8 @@ export interface CoreviewActionBus {
   setView(input: CoreviewSetViewInput, source: CoreviewToolCommandSource): Promise<CoreviewActionResult>
   refreshView(input: CoreviewRefreshViewInput | undefined, source: CoreviewToolCommandSource): Promise<CoreviewActionResult>
   getCurrentView(input: CoreviewGetCurrentViewInput | undefined, source: CoreviewToolCommandSource): CoreviewActionResult
+  addAnnotation(input: CoreviewAddAnnotationInput, source: CoreviewToolCommandSource): Promise<CoreviewActionResult>
+  focusAnchor(input: CoreviewFocusAnchorInput, source: CoreviewToolCommandSource): Promise<CoreviewActionResult>
   handleToolCall(call: CoreviewToolCallInput): Promise<CoreviewActionResult>
 }
 
@@ -420,10 +539,471 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
     })
   }
 
+  const addAnnotation = async (
+    input: CoreviewAddAnnotationInput,
+    source: CoreviewToolCommandSource,
+  ): Promise<CoreviewActionResult> => {
+    const initialBefore = adapter.getCurrentViewState()
+    const resolved = resolveCurrentViewWithRebind({
+      adapter,
+      current: initialBefore,
+      requestedArtifactId: input.artifactId ?? null,
+      blockedReason: currentViewBlockedReason(initialBefore, input.artifactId),
+    })
+    const before = resolved.current
+    const baseBlockedReason = currentViewBlockedReason(before, input.artifactId)
+    const blockedAfterRebind = blockedReasonAfterRebind(baseBlockedReason, resolved)
+    if (blockedAfterRebind) {
+      return buildCoreviewResult({
+        action: "add_annotation",
+        source,
+        current: before,
+        ok: false,
+        blockedReason: blockedAfterRebind,
+        resultSummary: blockedSummary(blockedAfterRebind),
+        refreshAttempted: false,
+        refreshResult: "not_requested",
+        viewReadyWaitMs: null,
+        viewSignatureBefore: initialBefore.viewSignature,
+        viewSignatureAfter: before.viewSignature,
+        annotationKind: input.kind,
+        annotationAnchorType: input.anchor?.type ?? null,
+        annotationColor: input.color ?? null,
+        annotationActionSource: input.source,
+        ...resolved.rebind,
+      })
+    }
+
+    if (!adapter.resolveAnnotationAnchor || !adapter.addAnnotation) {
+      return buildCoreviewResult({
+        action: "add_annotation",
+        source,
+        current: before,
+        ok: false,
+        blockedReason: "annotation_target_unavailable",
+        resultSummary: blockedSummary("annotation_target_unavailable"),
+        refreshAttempted: false,
+        refreshResult: "not_requested",
+        viewReadyWaitMs: null,
+        viewSignatureBefore: initialBefore.viewSignature,
+        viewSignatureAfter: before.viewSignature,
+        annotationKind: input.kind,
+        annotationAnchorType: input.anchor?.type ?? null,
+        annotationColor: input.color ?? null,
+        annotationActionSource: input.source,
+        ...resolved.rebind,
+      })
+    }
+
+    const normalized = normalizeAddAnnotationInput(input, before)
+    if (normalized.ok === false) {
+      const blockedReason = normalized.blockedReason
+      return buildCoreviewResult({
+        action: "add_annotation",
+        source,
+        current: before,
+        ok: false,
+        blockedReason,
+        resultSummary: blockedSummary(blockedReason),
+        refreshAttempted: false,
+        refreshResult: "not_requested",
+        viewReadyWaitMs: null,
+        viewSignatureBefore: initialBefore.viewSignature,
+        viewSignatureAfter: before.viewSignature,
+        annotationKind: input.kind,
+        annotationAnchorType: input.anchor?.type ?? null,
+        annotationColor: input.color ?? null,
+        annotationActionSource: input.source,
+        ...resolved.rebind,
+      })
+    }
+
+    const resolvedAnchor = adapter.resolveAnnotationAnchor({
+      anchor: normalized.anchor,
+      pageIndex: normalized.pageIndex,
+    })
+    if (resolvedAnchor.ok === false) {
+      const blockedReason = resolvedAnchor.blockedReason
+      return buildCoreviewResult({
+        action: "add_annotation",
+        source,
+        current: adapter.getCurrentViewState(),
+        ok: false,
+        blockedReason,
+        resultSummary: blockedSummary(blockedReason),
+        refreshAttempted: false,
+        refreshResult: "not_requested",
+        viewReadyWaitMs: null,
+        viewSignatureBefore: initialBefore.viewSignature,
+        viewSignatureAfter: adapter.getCurrentViewState().viewSignature,
+        annotationKind: normalized.kind,
+        annotationAnchorType: normalized.anchor.type,
+        annotationColor: normalized.color,
+        annotationActionSource: normalized.source,
+        ...resolved.rebind,
+      })
+    }
+
+    const annotationTarget = annotationTargetFromResolvedAnchor(normalized.kind, resolvedAnchor.anchor)
+    if (annotationTarget.ok === false) {
+      const blockedReason = annotationTarget.blockedReason
+      return buildCoreviewResult({
+        action: "add_annotation",
+        source,
+        current: adapter.getCurrentViewState(),
+        ok: false,
+        blockedReason,
+        resultSummary: blockedSummary(blockedReason),
+        refreshAttempted: false,
+        refreshResult: "not_requested",
+        viewReadyWaitMs: null,
+        viewSignatureBefore: initialBefore.viewSignature,
+        viewSignatureAfter: adapter.getCurrentViewState().viewSignature,
+        annotationKind: normalized.kind,
+        annotationAnchorType: normalized.anchor.type,
+        annotationColor: normalized.color,
+        annotationActionSource: normalized.source,
+        ...resolved.rebind,
+      })
+    }
+
+    const added = adapter.addAnnotation({
+      kind: normalized.kind,
+      pageIndex: normalized.pageIndex,
+      anchor: resolvedAnchor.anchor,
+      rect: annotationTarget.rect,
+      point: annotationTarget.point,
+      color: normalized.color,
+      text: normalized.text,
+      source: normalized.source,
+    })
+    if (!added.ok) {
+      return buildCoreviewResult({
+        action: "add_annotation",
+        source,
+        current: adapter.getCurrentViewState(),
+        ok: false,
+        blockedReason: added.blockedReason ?? "annotation_target_unavailable",
+        resultSummary: blockedSummary(added.blockedReason ?? "annotation_target_unavailable"),
+        refreshAttempted: false,
+        refreshResult: "not_requested",
+        viewReadyWaitMs: null,
+        viewSignatureBefore: initialBefore.viewSignature,
+        viewSignatureAfter: adapter.getCurrentViewState().viewSignature,
+        annotationKind: normalized.kind,
+        annotationAnchorType: normalized.anchor.type,
+        annotationColor: normalized.color,
+        annotationPageIndex: normalized.pageIndex,
+        annotationActionSource: normalized.source,
+        annotationCount: added.annotationCount,
+        highlightCount: added.highlightCount,
+        commentCount: added.commentCount,
+        ...resolved.rebind,
+      })
+    }
+
+    const staleSignature = before.viewSignature
+    if (before.reviewHasFrame) {
+      adapter.markViewStale(staleSignature)
+    }
+    const ready = await adapter.waitForViewReady(staleSignature)
+    const readyView = adapter.getCurrentViewState()
+    let refreshAttempted = false
+    let refreshResult: CoreviewToolRefreshResult = "not_requested"
+    let blockedReason: CoreviewToolBlockedReason | null = null
+    let visualFrameFreshOverride: boolean | null = null
+    let staleOverride: boolean | null = before.reviewHasFrame ? true : null
+    let refreshSummary = ""
+
+    if (ready.ok && readyView.canRefresh) {
+      refreshAttempted = true
+      const refresh = await adapter.refreshView({ reason: "coreview annotation changed" })
+      refreshResult = normalizeSetViewRefreshResult(refresh.refreshResult)
+      blockedReason = refresh.ok ? null : refresh.blockedReason ?? "refresh_unavailable"
+      if (refresh.ok) {
+        adapter.clearViewStale(staleSignature)
+        visualFrameFreshOverride = true
+        staleOverride = false
+        refreshSummary = " Refresh succeeded."
+      } else {
+        visualFrameFreshOverride = false
+        staleOverride = before.reviewHasFrame ? true : null
+        refreshSummary = " Visual refresh failed."
+      }
+    } else if (!ready.ok) {
+      blockedReason = ready.blockedReason ?? "view_ready_timeout"
+      refreshResult = "unavailable"
+      visualFrameFreshOverride = false
+      staleOverride = before.reviewHasFrame ? true : null
+      refreshSummary = " Visual refresh is pending."
+    } else if (readyView.reviewActive || readyView.reviewHasFrame) {
+      refreshResult = "unavailable"
+      blockedReason = readyView.reviewActive ? "refresh_unavailable" : "review_not_active"
+      visualFrameFreshOverride = false
+      staleOverride = before.reviewHasFrame ? true : null
+      refreshSummary = readyView.reviewActive
+        ? " Visual refresh unavailable."
+        : " Visual review is not active."
+    }
+
+    const after = adapter.getCurrentViewState()
+    return buildCoreviewResult({
+      action: "add_annotation",
+      source,
+      current: after,
+      ok: true,
+      blockedReason,
+      resultSummary: `${annotationSummary(normalized.kind, normalized.anchor.type, normalized.color, normalized.pageIndex)}${refreshSummary}`,
+      refreshAttempted,
+      refreshResult,
+      viewReadyWaitMs: ready.waitMs,
+      viewSignatureBefore: initialBefore.viewSignature,
+      viewSignatureAfter: after.viewSignature,
+      staleOverride,
+      visualFrameFreshOverride,
+      annotationId: added.annotationId,
+      annotationKind: normalized.kind,
+      annotationAnchorType: normalized.anchor.type,
+      annotationColor: normalized.color,
+      annotationPageIndex: normalized.pageIndex,
+      annotationActionSource: normalized.source,
+      annotationCount: added.annotationCount,
+      highlightCount: added.highlightCount,
+      commentCount: added.commentCount,
+      ...resolved.rebind,
+    })
+  }
+
+  const focusAnchor = async (
+    input: CoreviewFocusAnchorInput,
+    source: CoreviewToolCommandSource,
+  ): Promise<CoreviewActionResult> => {
+    const initialBefore = adapter.getCurrentViewState()
+    const resolved = resolveCurrentViewWithRebind({
+      adapter,
+      current: initialBefore,
+      requestedArtifactId: input.artifactId ?? null,
+      blockedReason: currentViewBlockedReason(initialBefore, input.artifactId),
+    })
+    const before = resolved.current
+    const baseBlockedReason = currentViewBlockedReason(before, input.artifactId)
+    const blockedAfterRebind = blockedReasonAfterRebind(baseBlockedReason, resolved)
+    if (blockedAfterRebind) {
+      return buildCoreviewResult({
+        action: "focus_anchor",
+        source,
+        current: before,
+        ok: false,
+        blockedReason: blockedAfterRebind,
+        resultSummary: blockedSummary(blockedAfterRebind),
+        refreshAttempted: false,
+        refreshResult: "not_requested",
+        viewReadyWaitMs: null,
+        viewSignatureBefore: initialBefore.viewSignature,
+        viewSignatureAfter: before.viewSignature,
+        focusAnchorType: input.anchor?.type ?? null,
+        ...resolved.rebind,
+      })
+    }
+
+    if (!adapter.resolveAnnotationAnchor || !adapter.focusAnnotationAnchor) {
+      return buildCoreviewResult({
+        action: "focus_anchor",
+        source,
+        current: before,
+        ok: false,
+        blockedReason: "annotation_target_unavailable",
+        resultSummary: blockedSummary("annotation_target_unavailable"),
+        refreshAttempted: false,
+        refreshResult: "not_requested",
+        viewReadyWaitMs: null,
+        viewSignatureBefore: initialBefore.viewSignature,
+        viewSignatureAfter: before.viewSignature,
+        focusAnchorType: input.anchor?.type ?? null,
+        ...resolved.rebind,
+      })
+    }
+
+    const normalized = normalizeFocusAnchorInput(input, before)
+    if (normalized.ok === false) {
+      const blockedReason = normalized.blockedReason
+      return buildCoreviewResult({
+        action: "focus_anchor",
+        source,
+        current: before,
+        ok: false,
+        blockedReason,
+        resultSummary: blockedSummary(blockedReason),
+        refreshAttempted: false,
+        refreshResult: "not_requested",
+        viewReadyWaitMs: null,
+        viewSignatureBefore: initialBefore.viewSignature,
+        viewSignatureAfter: before.viewSignature,
+        focusAnchorType: input.anchor?.type ?? null,
+        ...resolved.rebind,
+      })
+    }
+
+    const resolvedAnchor = adapter.resolveAnnotationAnchor({
+      anchor: normalized.anchor,
+      pageIndex: normalized.pageIndex,
+    })
+    if (resolvedAnchor.ok === false) {
+      const blockedReason = resolvedAnchor.blockedReason
+      return buildCoreviewResult({
+        action: "focus_anchor",
+        source,
+        current: adapter.getCurrentViewState(),
+        ok: false,
+        blockedReason,
+        resultSummary: blockedSummary(blockedReason),
+        refreshAttempted: false,
+        refreshResult: "not_requested",
+        viewReadyWaitMs: null,
+        viewSignatureBefore: initialBefore.viewSignature,
+        viewSignatureAfter: adapter.getCurrentViewState().viewSignature,
+        focusAnchorType: normalized.anchor.type,
+        ...resolved.rebind,
+      })
+    }
+    if (!resolvedAnchor.anchor.rect) {
+      const blockedReason: CoreviewToolBlockedReason = "anchor_not_found"
+      return buildCoreviewResult({
+        action: "focus_anchor",
+        source,
+        current: adapter.getCurrentViewState(),
+        ok: false,
+        blockedReason,
+        resultSummary: blockedSummary(blockedReason),
+        refreshAttempted: false,
+        refreshResult: "not_requested",
+        viewReadyWaitMs: null,
+        viewSignatureBefore: initialBefore.viewSignature,
+        viewSignatureAfter: adapter.getCurrentViewState().viewSignature,
+        focusAnchorType: normalized.anchor.type,
+        ...resolved.rebind,
+      })
+    }
+
+    const expectedViewSignature = buildArtifactViewSignature({
+      artifactId: before.artifactId,
+      filePath: before.artifactPath,
+      rendererKind: before.rendererKind,
+      pageIndex: normalized.pageIndex,
+      pageCount: before.pageCount,
+      zoom: normalized.zoom,
+      fitMode: normalized.fitMode,
+    })
+    const changed = expectedViewSignature !== before.viewSignature
+    if (changed && before.reviewHasFrame) {
+      adapter.markViewStale(expectedViewSignature)
+    }
+
+    const focused = await adapter.focusAnnotationAnchor({
+      pageIndex: normalized.pageIndex,
+      anchor: resolvedAnchor.anchor,
+      zoom: normalized.zoom,
+      fitMode: normalized.fitMode,
+    })
+    if (!focused.ok) {
+      return buildCoreviewResult({
+        action: "focus_anchor",
+        source,
+        current: adapter.getCurrentViewState(),
+        ok: false,
+        blockedReason: focused.blockedReason ?? "annotation_target_unavailable",
+        resultSummary: blockedSummary(focused.blockedReason ?? "annotation_target_unavailable"),
+        refreshAttempted: false,
+        refreshResult: "not_requested",
+        viewReadyWaitMs: null,
+        viewSignatureBefore: initialBefore.viewSignature,
+        viewSignatureAfter: adapter.getCurrentViewState().viewSignature,
+        focusAnchorType: normalized.anchor.type,
+        focusedRect: resolvedAnchor.anchor.rect,
+        ...resolved.rebind,
+      })
+    }
+
+    const ready = await adapter.waitForViewReady(expectedViewSignature)
+    if (!ready.ok) {
+      return buildCoreviewResult({
+        action: "focus_anchor",
+        source,
+        current: adapter.getCurrentViewState(),
+        ok: false,
+        blockedReason: ready.blockedReason ?? "view_ready_timeout",
+        resultSummary: blockedSummary(ready.blockedReason ?? "view_ready_timeout"),
+        refreshAttempted: false,
+        refreshResult: "not_requested",
+        viewReadyWaitMs: ready.waitMs,
+        viewSignatureBefore: initialBefore.viewSignature,
+        viewSignatureAfter: adapter.getCurrentViewState().viewSignature,
+        focusAnchorType: normalized.anchor.type,
+        focusedRect: resolvedAnchor.anchor.rect,
+        ...resolved.rebind,
+      })
+    }
+
+    const readyView = adapter.getCurrentViewState()
+    let refreshAttempted = false
+    let refreshResult: CoreviewToolRefreshResult = "not_requested"
+    let blockedReason: CoreviewToolBlockedReason | null = null
+    let forceVisualFrameFresh: boolean | null = null
+    let forceStale: boolean | null = null
+    let refreshSummary = ""
+
+    if (readyView.canRefresh) {
+      refreshAttempted = true
+      const refresh = await adapter.refreshView({ reason: input.reason })
+      refreshResult = normalizeSetViewRefreshResult(refresh.refreshResult)
+      blockedReason = refresh.ok ? null : refresh.blockedReason ?? "refresh_unavailable"
+      if (refresh.ok) {
+        adapter.clearViewStale(expectedViewSignature)
+        forceVisualFrameFresh = true
+        forceStale = false
+        refreshSummary = " Refresh succeeded."
+      } else {
+        forceVisualFrameFresh = false
+        forceStale = changed && before.reviewHasFrame ? true : null
+        refreshSummary = " Visual refresh failed."
+      }
+    } else if (readyView.reviewActive || readyView.reviewHasFrame || changed) {
+      refreshResult = "unavailable"
+      blockedReason = readyView.reviewActive ? "refresh_unavailable" : "review_not_active"
+      forceVisualFrameFresh = false
+      forceStale = changed && readyView.reviewHasFrame ? true : null
+      refreshSummary = readyView.reviewActive
+        ? " Visual refresh unavailable."
+        : " Visual review is not active."
+    }
+
+    const after = adapter.getCurrentViewState()
+    return buildCoreviewResult({
+      action: "focus_anchor",
+      source,
+      current: after,
+      ok: true,
+      blockedReason,
+      resultSummary: `Focused ${anchorLabel(normalized.anchor.type)} on ${pageSummary(after)}.${refreshSummary}`,
+      refreshAttempted,
+      refreshResult,
+      viewReadyWaitMs: ready.waitMs,
+      viewSignatureBefore: initialBefore.viewSignature,
+      viewSignatureAfter: after.viewSignature,
+      staleOverride: forceStale,
+      visualFrameFreshOverride: forceVisualFrameFresh,
+      focusAnchorType: normalized.anchor.type,
+      focusedRect: resolvedAnchor.anchor.rect,
+      ...resolved.rebind,
+    })
+  }
+
   return {
     setView,
     refreshView,
     getCurrentView,
+    addAnnotation,
+    focusAnchor,
     handleToolCall(call) {
       if (call.name === COREVIEW_SET_VIEW_TOOL_NAME) {
         return setView(coreviewSetViewInputFromArgs(call.args), "gemini_tool")
@@ -431,7 +1011,13 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       if (call.name === COREVIEW_REFRESH_VIEW_TOOL_NAME) {
         return refreshView(coreviewRefreshViewInputFromArgs(call.args), "gemini_tool")
       }
-      return Promise.resolve(getCurrentView(coreviewGetCurrentViewInputFromArgs(call.args), "gemini_tool"))
+      if (call.name === COREVIEW_GET_CURRENT_VIEW_TOOL_NAME) {
+        return Promise.resolve(getCurrentView(coreviewGetCurrentViewInputFromArgs(call.args), "gemini_tool"))
+      }
+      if (call.name === COREVIEW_ADD_ANNOTATION_TOOL_NAME) {
+        return addAnnotation(coreviewAddAnnotationInputFromArgs(call.args), "gemini_tool")
+      }
+      return focusAnchor(coreviewFocusAnchorInputFromArgs(call.args), "gemini_tool")
     },
   }
 }
@@ -528,6 +1114,85 @@ export function coreviewGeminiFunctionDeclarations(): Record<string, unknown>[] 
           artifact_id: { type: "STRING", description: "Optional active artifact id to verify." },
         },
         required: [],
+      },
+    },
+    {
+      name: COREVIEW_ADD_ANNOTATION_TOOL_NAME,
+      description: "Add a highlight or comment annotation to the active Coreview artifact during Review with Sophia. Use this for artifact review markup; do not create files or emit artifacts.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          kind: { type: "STRING", enum: ["highlight", "comment"], description: "Annotation kind to add." },
+          anchor_type: { type: "STRING", enum: ["current_title", "current_selection", "text_quote", "rect", "point"], description: "What to attach the annotation to." },
+          artifact_id: { type: "STRING", description: "Optional active artifact id. Omit when using the currently selected artifact." },
+          page_number: { type: "NUMBER", description: "Optional one-based user-facing page number." },
+          page_index: { type: "NUMBER", description: "Optional zero-based page index." },
+          text_quote: { type: "STRING", description: "Text to find when anchor_type is text_quote." },
+          occurrence: { type: "NUMBER", description: "One-based occurrence for text_quote; defaults to 1." },
+          color: { type: "STRING", enum: ["yellow", "purple", "blue", "pink"], description: "Highlight color. Defaults to yellow." },
+          comment_text: { type: "STRING", description: "Comment text for comment annotations." },
+          note: { type: "STRING", description: "Alias for comment_text." },
+          rect: {
+            type: "OBJECT",
+            description: "Normalized page rectangle for rect anchors.",
+            properties: {
+              x: { type: "NUMBER" },
+              y: { type: "NUMBER" },
+              width: { type: "NUMBER" },
+              height: { type: "NUMBER" },
+            },
+            required: [],
+          },
+          point: {
+            type: "OBJECT",
+            description: "Normalized page point for point anchors.",
+            properties: {
+              x: { type: "NUMBER" },
+              y: { type: "NUMBER" },
+            },
+            required: [],
+          },
+        },
+        required: ["kind", "anchor_type"],
+      },
+    },
+    {
+      name: COREVIEW_FOCUS_ANCHOR_TOOL_NAME,
+      description: "Zoom and center the active Coreview artifact around a text or coordinate anchor during Review with Sophia.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          anchor_type: { type: "STRING", enum: ["current_title", "current_selection", "text_quote", "rect", "point"], description: "Anchor to focus." },
+          artifact_id: { type: "STRING", description: "Optional active artifact id. Omit when using the currently selected artifact." },
+          page_number: { type: "NUMBER", description: "Optional one-based user-facing page number." },
+          page_index: { type: "NUMBER", description: "Optional zero-based page index." },
+          text_quote: { type: "STRING", description: "Text to find when anchor_type is text_quote." },
+          occurrence: { type: "NUMBER", description: "One-based occurrence for text_quote; defaults to 1." },
+          zoom: { type: "NUMBER", description: "Target zoom multiplier." },
+          zoom_delta: { type: "NUMBER", description: "Zoom multiplier delta relative to current zoom." },
+          fit_mode: { type: "STRING", enum: ["custom"], description: "Focus uses custom fit mode." },
+          rect: {
+            type: "OBJECT",
+            description: "Normalized page rectangle for rect anchors.",
+            properties: {
+              x: { type: "NUMBER" },
+              y: { type: "NUMBER" },
+              width: { type: "NUMBER" },
+              height: { type: "NUMBER" },
+            },
+            required: [],
+          },
+          point: {
+            type: "OBJECT",
+            description: "Normalized page point for point anchors.",
+            properties: {
+              x: { type: "NUMBER" },
+              y: { type: "NUMBER" },
+            },
+            required: [],
+          },
+        },
+        required: ["anchor_type"],
       },
     },
   ]
@@ -743,6 +1408,17 @@ function buildCoreviewResult(params: {
   rebindResult?: CoreviewArtifactRebindStatus
   rebindReason?: string | null
   rebindStatus?: CoreviewArtifactRebindStatus
+  annotationId?: string | null
+  annotationKind?: CoreviewAnnotationKind | null
+  annotationAnchorType?: CoreviewAnnotationAnchor["type"] | null
+  annotationColor?: CoreviewAnnotationColor | null
+  annotationPageIndex?: number | null
+  annotationActionSource?: "sophia" | "user" | null
+  annotationCount?: number | null
+  highlightCount?: number | null
+  commentCount?: number | null
+  focusAnchorType?: CoreviewAnnotationAnchor["type"] | null
+  focusedRect?: CoreviewNormalizedRect | null
 }): CoreviewActionResult {
   const current = params.current
   const stale = params.staleOverride ?? current.stale
@@ -781,11 +1457,23 @@ function buildCoreviewResult(params: {
     review_active: current.reviewActive,
     current_view_summary: currentViewSummary(current),
     annotation_overlay_captured: current.annotationOverlayCaptured,
+    annotation_id: params.annotationId ?? null,
+    annotation_kind: params.annotationKind ?? null,
+    annotation_anchor_type: params.annotationAnchorType ?? null,
+    annotation_color: params.annotationColor ?? null,
+    annotation_page_index: params.annotationPageIndex ?? null,
+    annotation_count: params.annotationCount ?? null,
+    highlight_count: params.highlightCount ?? null,
+    comment_count: params.commentCount ?? null,
+    annotation_action_source: params.annotationActionSource ?? null,
+    focus_anchor_type: params.focusAnchorType ?? null,
+    focused_rect: params.focusedRect ?? null,
     artifact_stable_identity: current.artifactStableIdentity ?? null,
     rebind_status: rebindStatus,
     rebind_attempted: rebindAttempted,
     rebind_result: rebindResult,
     rebind_reason: params.rebindReason ?? null,
+    raw_comment_text_excluded: true,
     raw_artifact_text_excluded: true,
     raw_frame_excluded: true,
   }
@@ -837,6 +1525,12 @@ function blockedSummary(reason: CoreviewToolBlockedReason): string {
       return "The Coreview tool bridge is unavailable."
     case "invalid_tool_args":
       return "The Coreview tool arguments were invalid."
+    case "anchor_not_found":
+      return "Sophia could not find that anchor in the current artifact view."
+    case "invalid_rect":
+      return "The annotation rectangle was invalid."
+    case "annotation_target_unavailable":
+      return "The active artifact renderer cannot place annotations right now."
     default:
       return "The Coreview action was blocked."
   }
@@ -866,6 +1560,294 @@ function coreviewGetCurrentViewInputFromArgs(args: Record<string, unknown>): Cor
   }
 }
 
+function coreviewAddAnnotationInputFromArgs(args: Record<string, unknown>): CoreviewAddAnnotationInput {
+  const kind = annotationKindFromArgs(args) ?? "highlight"
+  return {
+    kind,
+    artifactId: stringFromAnyKey(args, "artifact_id", "artifactId") ?? undefined,
+    pageIndex: numberFromAnyKey(args, "page_index", "pageIndex") ?? undefined,
+    pageNumber: numberFromAnyKey(args, "page_number", "pageNumber") ?? undefined,
+    anchor: annotationAnchorFromArgs(args),
+    rect: rectFromArgs(args),
+    point: pointFromArgs(args),
+    color: annotationColorFromArgs(args),
+    text: stringFromAnyKey(args, "comment_text", "commentText", "text") ?? undefined,
+    note: stringFromAnyKey(args, "note") ?? undefined,
+    source: "sophia",
+  }
+}
+
+function coreviewFocusAnchorInputFromArgs(args: Record<string, unknown>): CoreviewFocusAnchorInput {
+  return {
+    artifactId: stringFromAnyKey(args, "artifact_id", "artifactId") ?? undefined,
+    pageIndex: numberFromAnyKey(args, "page_index", "pageIndex") ?? undefined,
+    pageNumber: numberFromAnyKey(args, "page_number", "pageNumber") ?? undefined,
+    anchor: annotationAnchorFromArgs(args),
+    zoom: numberFromAnyKey(args, "zoom") ?? undefined,
+    zoomDelta: numberFromAnyKey(args, "zoom_delta", "zoomDelta") ?? undefined,
+    fitMode: focusFitModeFromArgs(args),
+    reason: stringFromAnyKey(args, "reason") ?? undefined,
+  }
+}
+
+function normalizeAddAnnotationInput(
+  input: CoreviewAddAnnotationInput,
+  current: CoreviewCurrentView,
+): (
+  | {
+      ok: true
+      kind: CoreviewAnnotationKind
+      pageIndex: number
+      anchor: CoreviewAnnotationAnchor
+      color: CoreviewAnnotationColor
+      text: string | null
+      source: "sophia" | "user"
+    }
+  | { ok: false; blockedReason: CoreviewToolBlockedReason }
+) {
+  if (input.kind !== "highlight" && input.kind !== "comment") {
+    return { ok: false, blockedReason: "invalid_tool_args" }
+  }
+  const pageIndex = normalizePageIndex(input, current)
+  if (pageIndex === null) {
+    return { ok: false, blockedReason: "requested_page_out_of_bounds" }
+  }
+  const anchor = input.anchor
+    ?? (input.rect ? { type: "rect", ...input.rect } : null)
+    ?? (input.point ? { type: "point", ...input.point } : null)
+    ?? { type: "current_selection" }
+  const normalizedAnchor = normalizeAnnotationAnchor(anchor)
+  if (!normalizedAnchor) {
+    return { ok: false, blockedReason: anchor.type === "rect" ? "invalid_rect" : "invalid_tool_args" }
+  }
+  if (input.kind === "highlight" && normalizedAnchor.type === "point") {
+    return { ok: false, blockedReason: "invalid_rect" }
+  }
+
+  return {
+    ok: true,
+    kind: input.kind,
+    pageIndex,
+    anchor: normalizedAnchor,
+    color: input.color ?? "yellow",
+    text: normalizeAnnotationText(input.text ?? input.note),
+    source: input.source === "user" ? "user" : "sophia",
+  }
+}
+
+function normalizeFocusAnchorInput(
+  input: CoreviewFocusAnchorInput,
+  current: CoreviewCurrentView,
+): (
+  | {
+      ok: true
+      pageIndex: number
+      anchor: CoreviewAnnotationAnchor
+      zoom: number
+      fitMode: ArtifactFitMode
+    }
+  | { ok: false; blockedReason: CoreviewToolBlockedReason }
+) {
+  const pageIndex = normalizePageIndex(input, current)
+  if (pageIndex === null) {
+    return { ok: false, blockedReason: "requested_page_out_of_bounds" }
+  }
+  if (!current.supportsZoom) {
+    return { ok: false, blockedReason: "unsupported_renderer" }
+  }
+  const anchor = input.anchor ?? { type: "current_selection" }
+  const normalizedAnchor = normalizeAnnotationAnchor(anchor)
+  if (!normalizedAnchor) {
+    return { ok: false, blockedReason: anchor.type === "rect" ? "invalid_rect" : "invalid_tool_args" }
+  }
+  const explicitZoom = typeof input.zoom === "number" && Number.isFinite(input.zoom)
+    ? input.zoom
+    : null
+  const delta = typeof input.zoomDelta === "number" && Number.isFinite(input.zoomDelta)
+    ? input.zoomDelta
+    : 1.35
+  const zoom = clampArtifactZoom(explicitZoom ?? current.zoom * delta)
+  return {
+    ok: true,
+    pageIndex,
+    anchor: normalizedAnchor,
+    zoom,
+    fitMode: input.fitMode === "custom" ? "custom" : "custom",
+  }
+}
+
+function annotationTargetFromResolvedAnchor(
+  kind: CoreviewAnnotationKind,
+  anchor: CoreviewResolvedAnnotationAnchor,
+): (
+  | { ok: true; rect: CoreviewNormalizedRect | null; point: CoreviewNormalizedPoint | null }
+  | { ok: false; blockedReason: CoreviewToolBlockedReason }
+) {
+  if (kind === "highlight") {
+    const rect = anchor.rect ? normalizeRect(anchor.rect) : null
+    return rect
+      ? { ok: true, rect, point: null }
+      : { ok: false, blockedReason: "invalid_rect" }
+  }
+
+  const point = anchor.point
+    ? normalizePoint(anchor.point)
+    : anchor.rect
+      ? pointNearRect(anchor.rect)
+      : null
+  return point
+    ? { ok: true, rect: null, point }
+    : { ok: false, blockedReason: "anchor_not_found" }
+}
+
+function normalizePageIndex(
+  input: Pick<CoreviewAddAnnotationInput, "pageIndex" | "pageNumber">,
+  current: CoreviewCurrentView,
+): number | null {
+  let pageIndex = current.pageIndex
+  if (typeof input.pageIndex === "number" && Number.isFinite(input.pageIndex)) {
+    pageIndex = Math.floor(input.pageIndex)
+  } else if (typeof input.pageNumber === "number" && Number.isFinite(input.pageNumber)) {
+    pageIndex = Math.floor(input.pageNumber) - 1
+  }
+  return pageIndex >= 0 && pageIndex < Math.max(1, current.pageCount) ? pageIndex : null
+}
+
+function annotationKindFromArgs(args: Record<string, unknown>): CoreviewAnnotationKind | null {
+  const value = stringFromAnyKey(args, "kind")
+  return value === "highlight" || value === "comment" ? value : null
+}
+
+function annotationColorFromArgs(args: Record<string, unknown>): CoreviewAnnotationColor | undefined {
+  const value = stringFromAnyKey(args, "color")
+  return value === "yellow" || value === "purple" || value === "blue" || value === "pink" ? value : undefined
+}
+
+function annotationAnchorFromArgs(args: Record<string, unknown>): CoreviewAnnotationAnchor | undefined {
+  const anchorType = stringFromAnyKey(args, "anchor_type", "anchorType")
+  if (anchorType === "current_title" || anchorType === "current_selection") {
+    return { type: anchorType }
+  }
+  if (anchorType === "text_quote") {
+    const text = stringFromAnyKey(args, "text_quote", "textQuote", "text")
+    return text ? { type: "text_quote", text, occurrence: occurrenceFromArgs(args) } : undefined
+  }
+  if (anchorType === "rect") {
+    const rect = rectFromArgs(args)
+    return rect ? { type: "rect", ...rect } : undefined
+  }
+  if (anchorType === "point") {
+    const point = pointFromArgs(args)
+    return point ? { type: "point", ...point } : undefined
+  }
+  return undefined
+}
+
+function occurrenceFromArgs(args: Record<string, unknown>): number | undefined {
+  const occurrence = numberFromAnyKey(args, "occurrence")
+  if (typeof occurrence !== "number" || !Number.isFinite(occurrence)) {
+    return undefined
+  }
+  return Math.max(1, Math.floor(occurrence))
+}
+
+function rectFromArgs(args: Record<string, unknown>): CoreviewNormalizedRect | undefined {
+  const rect = recordFromAnyKey(args, "rect")
+  if (!rect) {
+    return undefined
+  }
+  const candidate = {
+    x: numberFromAnyKey(rect, "x") ?? Number.NaN,
+    y: numberFromAnyKey(rect, "y") ?? Number.NaN,
+    width: numberFromAnyKey(rect, "width") ?? Number.NaN,
+    height: numberFromAnyKey(rect, "height") ?? Number.NaN,
+  }
+  return normalizeRect(candidate) ?? undefined
+}
+
+function pointFromArgs(args: Record<string, unknown>): CoreviewNormalizedPoint | undefined {
+  const point = recordFromAnyKey(args, "point")
+  if (!point) {
+    return undefined
+  }
+  const candidate = {
+    x: numberFromAnyKey(point, "x") ?? Number.NaN,
+    y: numberFromAnyKey(point, "y") ?? Number.NaN,
+  }
+  return normalizePoint(candidate) ?? undefined
+}
+
+function normalizeAnnotationAnchor(anchor: CoreviewAnnotationAnchor): CoreviewAnnotationAnchor | null {
+  if (anchor.type === "current_title" || anchor.type === "current_selection") {
+    return anchor
+  }
+  if (anchor.type === "text_quote") {
+    const text = normalizeAnnotationText(anchor.text)
+    return text ? { type: "text_quote", text, occurrence: anchor.occurrence } : null
+  }
+  if (anchor.type === "rect") {
+    const rect = normalizeRect(anchor)
+    return rect ? { type: "rect", ...rect } : null
+  }
+  const point = normalizePoint(anchor)
+  return point ? { type: "point", ...point } : null
+}
+
+function normalizeRect(rect: CoreviewNormalizedRect): CoreviewNormalizedRect | null {
+  const x = clampNormalized(rect.x)
+  const y = clampNormalized(rect.y)
+  const right = clampNormalized(rect.x + rect.width)
+  const bottom = clampNormalized(rect.y + rect.height)
+  const width = right - x
+  const height = bottom - y
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return null
+  }
+  return { x, y, width, height }
+}
+
+function normalizePoint(point: CoreviewNormalizedPoint): CoreviewNormalizedPoint | null {
+  if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+    return null
+  }
+  return {
+    x: clampNormalized(point.x),
+    y: clampNormalized(point.y),
+  }
+}
+
+function pointNearRect(rect: CoreviewNormalizedRect): CoreviewNormalizedPoint | null {
+  const normalized = normalizeRect(rect)
+  if (!normalized) {
+    return null
+  }
+  const rightEdge = normalized.x + normalized.width
+  return {
+    x: clampNormalized(rightEdge + 0.018 <= 1 ? rightEdge + 0.018 : rightEdge - 0.018),
+    y: clampNormalized(normalized.y + Math.min(normalized.height * 0.35, 0.035)),
+  }
+}
+
+function normalizeAnnotationText(value: string | null | undefined): string | null {
+  if (typeof value !== "string") {
+    return null
+  }
+  const normalized = value.replace(/\s+/gu, " ").trim()
+  return normalized ? normalized.slice(0, 180) : null
+}
+
+function clampNormalized(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0
+  }
+  return Math.min(1, Math.max(0, value))
+}
+
+function focusFitModeFromArgs(args: Record<string, unknown>): ArtifactFitMode | undefined {
+  const value = stringFromAnyKey(args, "fit_mode", "fitMode")
+  return value === "custom" ? "custom" : undefined
+}
+
 function fitModeFromArgs(args: Record<string, unknown>): ArtifactFitMode | undefined {
   const value = stringFromAnyKey(args, "fit_mode", "fitMode")
   return value === "page" || value === "width" || value === "custom" ? value : undefined
@@ -877,7 +1859,11 @@ function unavailableToolResult(toolName: CoreviewToolName): CoreviewActionResult
       ? "refresh_view"
       : toolName === COREVIEW_GET_CURRENT_VIEW_TOOL_NAME
         ? "get_current_view"
-        : "set_view",
+        : toolName === COREVIEW_ADD_ANNOTATION_TOOL_NAME
+          ? "add_annotation"
+          : toolName === COREVIEW_FOCUS_ANCHOR_TOOL_NAME
+            ? "focus_anchor"
+            : "set_view",
     source: "gemini_tool",
     current: emptyCurrentView(),
     ok: false,
@@ -943,8 +1929,47 @@ function numberFromAnyKey(value: Record<string, unknown>, ...keys: string[]): nu
   return null
 }
 
+function recordFromAnyKey(value: Record<string, unknown>, ...keys: string[]): Record<string, unknown> | null {
+  for (const key of keys) {
+    const candidate = value[key]
+    if (isRecord(candidate)) {
+      return candidate
+    }
+  }
+  return null
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function annotationSummary(
+  kind: CoreviewAnnotationKind,
+  anchorType: CoreviewAnnotationAnchor["type"],
+  color: CoreviewAnnotationColor,
+  pageIndex: number,
+): string {
+  if (kind === "highlight") {
+    return `Added a ${color} highlight to ${anchorLabel(anchorType)} on page ${pageIndex + 1}.`
+  }
+  return `Added a comment to ${anchorLabel(anchorType)} on page ${pageIndex + 1}.`
+}
+
+function anchorLabel(anchorType: CoreviewAnnotationAnchor["type"]): string {
+  switch (anchorType) {
+    case "current_title":
+      return "the title"
+    case "current_selection":
+      return "the current selection"
+    case "text_quote":
+      return "the matching text"
+    case "rect":
+      return "the selected area"
+    case "point":
+      return "the selected point"
+    default:
+      return "the anchor"
+  }
 }
 
 function filterArtifactCreationDeclarations(declarations: unknown[]): unknown[] {

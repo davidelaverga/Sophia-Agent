@@ -1,5 +1,7 @@
 import { isCoReviewStillFrameEnabled } from './co-review-flags';
 import {
+  COREVIEW_ADD_ANNOTATION_TOOL_NAME,
+  COREVIEW_FOCUS_ANCHOR_TOOL_NAME,
   COREVIEW_GET_CURRENT_VIEW_TOOL_NAME,
   COREVIEW_REFRESH_VIEW_TOOL_NAME,
   executeCoreviewToolBridgeCall,
@@ -3348,7 +3350,11 @@ function reviewToolTimeoutResult(
     ? 'refresh_view'
     : call.name === COREVIEW_GET_CURRENT_VIEW_TOOL_NAME
       ? 'get_current_view'
-      : 'set_view';
+      : call.name === COREVIEW_ADD_ANNOTATION_TOOL_NAME
+        ? 'add_annotation'
+        : call.name === COREVIEW_FOCUS_ANCHOR_TOOL_NAME
+          ? 'focus_anchor'
+          : 'set_view';
   return {
     ok: false,
     action,
@@ -3388,6 +3394,7 @@ function reviewToolTimeoutResult(
     review_tool_timed_out: true,
     review_tool_timeout_name: call.name,
     review_tool_timeout_result_sent: true,
+    raw_comment_text_excluded: true,
     raw_artifact_text_excluded: true,
     raw_frame_excluded: true,
   };
@@ -3484,7 +3491,11 @@ function coreviewToolExceptionResult(
     ? 'refresh_view'
     : call.name === COREVIEW_GET_CURRENT_VIEW_TOOL_NAME
       ? 'get_current_view'
-      : 'set_view';
+      : call.name === COREVIEW_ADD_ANNOTATION_TOOL_NAME
+        ? 'add_annotation'
+        : call.name === COREVIEW_FOCUS_ANCHOR_TOOL_NAME
+          ? 'focus_anchor'
+          : 'set_view';
   return {
     ok: false,
     action,
@@ -3521,6 +3532,7 @@ function coreviewToolExceptionResult(
     rebind_attempted: false,
     rebind_result: 'not_attempted',
     rebind_reason: null,
+    raw_comment_text_excluded: true,
     raw_artifact_text_excluded: true,
     raw_frame_excluded: true,
   };
@@ -4805,15 +4817,29 @@ function redactToolCallArgsForTelemetry(
 ): Record<string, unknown> | null {
   if (isCoreviewToolName(toolName) && args) {
     const reason = stringFromAnyKey(args, 'reason');
+    const commentText = stringFromAnyKey(args, 'comment_text', 'commentText', 'note', 'text');
+    const textQuote = stringFromAnyKey(args, 'text_quote', 'textQuote');
     return {
       artifact_id: stringFromAnyKey(args, 'artifact_id', 'artifactId'),
       page_index: numberFromAnyKey(args, 'page_index', 'pageIndex'),
       page_number: numberFromAnyKey(args, 'page_number', 'pageNumber'),
       page_label_present: Boolean(stringFromAnyKey(args, 'page_label', 'pageLabel')),
       zoom: numberFromAnyKey(args, 'zoom'),
+      zoom_delta: numberFromAnyKey(args, 'zoom_delta', 'zoomDelta'),
       fit_mode: stringFromAnyKey(args, 'fit_mode', 'fitMode'),
+      kind: stringFromAnyKey(args, 'kind'),
+      anchor_type: stringFromAnyKey(args, 'anchor_type', 'anchorType'),
+      color: stringFromAnyKey(args, 'color'),
+      occurrence: numberFromAnyKey(args, 'occurrence'),
+      rect_present: Boolean(recordFromAnyKey(args, 'rect')),
+      point_present: Boolean(recordFromAnyKey(args, 'point')),
+      comment_text_length: commentText?.length ?? 0,
+      text_quote_length: textQuote?.length ?? 0,
+      text_quote_fingerprint: textQuote ? telemetryTextFingerprint(textQuote) : null,
       reason_length: reason?.length ?? 0,
       raw_reason_excluded: true,
+      raw_comment_text_excluded: true,
+      raw_text_quote_excluded: true,
       raw_artifact_text_excluded: true,
       raw_frame_excluded: true,
     };
@@ -4917,6 +4943,18 @@ function redactCoreviewActionResponseForTelemetry(
       : response.annotation_overlay_captured === false || response.annotationOverlayCaptured === false
         ? false
         : null,
+    annotation_id_present: Boolean(stringFromAnyKey(response, 'annotation_id', 'annotationId')),
+    annotation_kind: stringFromAnyKey(response, 'annotation_kind', 'annotationKind'),
+    annotation_anchor_type: stringFromAnyKey(response, 'annotation_anchor_type', 'annotationAnchorType'),
+    annotation_color: stringFromAnyKey(response, 'annotation_color', 'annotationColor'),
+    annotation_page_index: numberFromAnyKey(response, 'annotation_page_index', 'annotationPageIndex'),
+    annotation_count: numberFromAnyKey(response, 'annotation_count', 'annotationCount'),
+    highlight_count: numberFromAnyKey(response, 'highlight_count', 'highlightCount'),
+    comment_count: numberFromAnyKey(response, 'comment_count', 'commentCount'),
+    annotation_action_source: stringFromAnyKey(response, 'annotation_action_source', 'annotationActionSource'),
+    focus_anchor_type: stringFromAnyKey(response, 'focus_anchor_type', 'focusAnchorType'),
+    focused_rect_present: Boolean(recordFromAnyKey(response, 'focused_rect', 'focusedRect')),
+    raw_comment_text_excluded: true,
     review_tool_timed_out: response.review_tool_timed_out === true || response.reviewToolTimedOut === true,
     review_tool_timeout_name: stringFromAnyKey(response, 'review_tool_timeout_name', 'reviewToolTimeoutName'),
     review_tool_timeout_result_sent: response.review_tool_timeout_result_sent === true || response.reviewToolTimeoutResultSent === true,

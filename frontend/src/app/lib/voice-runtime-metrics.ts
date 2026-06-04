@@ -95,6 +95,21 @@ export type CoreviewVisualTelemetry = {
   pdfTextExtractionPageCount: number | null
   pdfTextExtractionCharCount: number | null
   pdfTextExtractionSource: string | null
+  annotationOverlayCaptured: boolean | null
+  annotationCount: number
+  highlightCount: number
+  commentCount: number
+  annotationActionSource: string | null
+  coreviewAnnotationToolCount: number
+  coreviewAnnotationToolResult: string | null
+  coreviewAnnotationKind: string | null
+  coreviewAnnotationAnchorType: string | null
+  coreviewAnnotationColor: string | null
+  coreviewAnnotationPageIndex: number | null
+  coreviewAnnotationBlockedReason: string | null
+  coreviewFocusAnchorCount: number
+  coreviewFocusAnchorResult: string | null
+  coreviewFocusAnchorType: string | null
   keyboardArtifactShortcutUsed: string | null
   pinchZoomUsed: boolean
   coreviewToolCompletedCount: number
@@ -452,6 +467,21 @@ export type GeminiSessionTelemetry = {
     readArtifactTextLastStatus: string | null
     readArtifactTextPdfExtractionStatus: string | null
     exactTextRegistrySource: CoreviewExactTextSource | null
+    annotationOverlayCaptured: boolean | null
+    annotationCount: number
+    highlightCount: number
+    commentCount: number
+    annotationActionSource: string | null
+    coreviewAnnotationToolCount: number
+    coreviewAnnotationToolResult: string | null
+    coreviewAnnotationKind: string | null
+    coreviewAnnotationAnchorType: string | null
+    coreviewAnnotationColor: string | null
+    coreviewAnnotationPageIndex: number | null
+    coreviewAnnotationBlockedReason: string | null
+    coreviewFocusAnchorCount: number
+    coreviewFocusAnchorResult: string | null
+    coreviewFocusAnchorType: string | null
     providerToPublicTranscriptGapAfterCoreviewTool: number | null
     followUpTurnDispatchedAfterCoreviewTool: boolean
     emitArtifactBlockedDuringReviewCount: number
@@ -639,6 +669,8 @@ const GEMINI_COREVIEW_TOOL_NAMES = new Set([
   "coreview_set_view",
   "coreview_refresh_view",
   "coreview_get_current_view",
+  "coreview_add_annotation",
+  "coreview_focus_anchor",
 ])
 const GEMINI_BUILDER_TOOL_NAMES = new Set([
   "start_builder_task",
@@ -1053,6 +1085,21 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       pdfTextExtractionPageCount: null,
       pdfTextExtractionCharCount: null,
       pdfTextExtractionSource: null,
+      annotationOverlayCaptured: null,
+      annotationCount: 0,
+      highlightCount: 0,
+      commentCount: 0,
+      annotationActionSource: null,
+      coreviewAnnotationToolCount: 0,
+      coreviewAnnotationToolResult: null,
+      coreviewAnnotationKind: null,
+      coreviewAnnotationAnchorType: null,
+      coreviewAnnotationColor: null,
+      coreviewAnnotationPageIndex: null,
+      coreviewAnnotationBlockedReason: null,
+      coreviewFocusAnchorCount: 0,
+      coreviewFocusAnchorResult: null,
+      coreviewFocusAnchorType: null,
       keyboardArtifactShortcutUsed: null,
       pinchZoomUsed: false,
       coreviewToolCompletedCount: 0,
@@ -1131,6 +1178,10 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((event) => event.category === "artifacts-runtime" && event.name === "pdf-text-extraction")
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
+  const annotationStateEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-annotation-state")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
   const coreviewToolEvents = activeEvents
     .filter((event) => event.category === "voice-session" && event.name === "coreview-tool-call")
     .map((event) => event.payloadRecord)
@@ -1159,7 +1210,14 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   const latestSelectedStage = selectedStageEvents.at(-1) ?? null
   const latestArtifactCommand = artifactCommandEvents.at(-1) ?? null
   const latestPdfTextExtraction = pdfTextExtractionEvents.at(-1) ?? latestSelectedStage
+  const latestAnnotationState = annotationStateEvents.at(-1) ?? null
   const latestCoreviewTool = coreviewToolEvents.at(-1) ?? null
+  const latestAnnotationTool = coreviewToolEvents
+    .filter((event) => (numberFromKeys(event, ["coreviewAnnotationToolCount"]) ?? 0) > 0)
+    .at(-1) ?? null
+  const latestFocusTool = coreviewToolEvents
+    .filter((event) => (numberFromKeys(event, ["coreviewFocusAnchorCount"]) ?? 0) > 0)
+    .at(-1) ?? null
   const latestRebindEvent = [...selectedStageEvents, ...coreviewToolEvents]
     .filter((event) => asBoolean(event.artifactRebindAttempted) === true)
     .at(-1) ?? null
@@ -1266,6 +1324,36 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.pdfTextExtractionPageCount = numberFromKeys(latestPdfTextExtraction, ["pdfTextExtractionPageCount"])
   visual.pdfTextExtractionCharCount = numberFromKeys(latestPdfTextExtraction, ["pdfTextExtractionCharCount"])
   visual.pdfTextExtractionSource = asString(latestPdfTextExtraction?.pdfTextExtractionSource)
+  visual.annotationOverlayCaptured = asBoolean(latestCoreviewTool?.annotationOverlayCaptured)
+    ?? asBoolean(latestAnnotationState?.annotationOverlayCaptured)
+    ?? null
+  visual.annotationCount = numberFromKeys(latestAnnotationTool, ["annotationCount"])
+    ?? numberFromKeys(latestCoreviewTool, ["annotationCount"])
+    ?? numberFromKeys(latestAnnotationState, ["annotationCount"])
+    ?? 0
+  visual.highlightCount = numberFromKeys(latestAnnotationTool, ["highlightCount"])
+    ?? numberFromKeys(latestCoreviewTool, ["highlightCount"])
+    ?? numberFromKeys(latestAnnotationState, ["highlightCount"])
+    ?? 0
+  visual.commentCount = numberFromKeys(latestAnnotationTool, ["commentCount"])
+    ?? numberFromKeys(latestCoreviewTool, ["commentCount"])
+    ?? numberFromKeys(latestAnnotationState, ["commentCount"])
+    ?? 0
+  visual.annotationActionSource = asString(latestAnnotationTool?.annotationActionSource)
+  visual.coreviewAnnotationToolCount = coreviewToolEvents.reduce((total, event) => (
+    total + (numberFromKeys(event, ["coreviewAnnotationToolCount"]) ?? 0)
+  ), 0)
+  visual.coreviewAnnotationToolResult = asString(latestAnnotationTool?.coreviewAnnotationToolResult)
+  visual.coreviewAnnotationKind = asString(latestAnnotationTool?.coreviewAnnotationKind)
+  visual.coreviewAnnotationAnchorType = asString(latestAnnotationTool?.coreviewAnnotationAnchorType)
+  visual.coreviewAnnotationColor = asString(latestAnnotationTool?.coreviewAnnotationColor)
+  visual.coreviewAnnotationPageIndex = numberFromKeys(latestAnnotationTool, ["coreviewAnnotationPageIndex"])
+  visual.coreviewAnnotationBlockedReason = asString(latestAnnotationTool?.coreviewAnnotationBlockedReason)
+  visual.coreviewFocusAnchorCount = coreviewToolEvents.reduce((total, event) => (
+    total + (numberFromKeys(event, ["coreviewFocusAnchorCount"]) ?? 0)
+  ), 0)
+  visual.coreviewFocusAnchorResult = asString(latestFocusTool?.coreviewFocusAnchorResult)
+  visual.coreviewFocusAnchorType = asString(latestFocusTool?.coreviewFocusAnchorType)
   visual.keyboardArtifactShortcutUsed = asString(latestKeyboardShortcut?.keyboardArtifactShortcutUsed)
   visual.pinchZoomUsed = pinchZoomEvents.some((event) => asBoolean(event.pinchZoomUsed) === true)
   const coreviewToolReceivedCount = countWhere(coreviewToolDiagnostics, (event) => asString(eventData(event)?.phase) === "tool_call_received")
@@ -2379,6 +2467,36 @@ function buildSessionTelemetry(params: {
           const source = hookTelemetry?.exactTextRegistrySource ?? coreviewTelemetry.exactText.exactTextRegistrySource
           return source ? normalizeCoreviewExactTextSource(source, true) : null
         })(),
+        annotationOverlayCaptured: hookTelemetry?.annotationOverlayCaptured
+          ?? coreviewTelemetry.visual.annotationOverlayCaptured,
+        annotationCount: hookTelemetry?.annotationCount
+          ?? coreviewTelemetry.visual.annotationCount,
+        highlightCount: hookTelemetry?.highlightCount
+          ?? coreviewTelemetry.visual.highlightCount,
+        commentCount: hookTelemetry?.commentCount
+          ?? coreviewTelemetry.visual.commentCount,
+        annotationActionSource: hookTelemetry?.annotationActionSource
+          ?? coreviewTelemetry.visual.annotationActionSource,
+        coreviewAnnotationToolCount: hookTelemetry?.coreviewAnnotationToolCount
+          ?? coreviewTelemetry.visual.coreviewAnnotationToolCount,
+        coreviewAnnotationToolResult: hookTelemetry?.coreviewAnnotationToolResult
+          ?? coreviewTelemetry.visual.coreviewAnnotationToolResult,
+        coreviewAnnotationKind: hookTelemetry?.coreviewAnnotationKind
+          ?? coreviewTelemetry.visual.coreviewAnnotationKind,
+        coreviewAnnotationAnchorType: hookTelemetry?.coreviewAnnotationAnchorType
+          ?? coreviewTelemetry.visual.coreviewAnnotationAnchorType,
+        coreviewAnnotationColor: hookTelemetry?.coreviewAnnotationColor
+          ?? coreviewTelemetry.visual.coreviewAnnotationColor,
+        coreviewAnnotationPageIndex: hookTelemetry?.coreviewAnnotationPageIndex
+          ?? coreviewTelemetry.visual.coreviewAnnotationPageIndex,
+        coreviewAnnotationBlockedReason: hookTelemetry?.coreviewAnnotationBlockedReason
+          ?? coreviewTelemetry.visual.coreviewAnnotationBlockedReason,
+        coreviewFocusAnchorCount: hookTelemetry?.coreviewFocusAnchorCount
+          ?? coreviewTelemetry.visual.coreviewFocusAnchorCount,
+        coreviewFocusAnchorResult: hookTelemetry?.coreviewFocusAnchorResult
+          ?? coreviewTelemetry.visual.coreviewFocusAnchorResult,
+        coreviewFocusAnchorType: hookTelemetry?.coreviewFocusAnchorType
+          ?? coreviewTelemetry.visual.coreviewFocusAnchorType,
         providerToPublicTranscriptGapAfterCoreviewTool: hookTelemetry?.providerToPublicTranscriptGapAfterCoreviewTool
           ?? (
             coreviewTelemetry.visual.coreviewToolCompletedCount > 0

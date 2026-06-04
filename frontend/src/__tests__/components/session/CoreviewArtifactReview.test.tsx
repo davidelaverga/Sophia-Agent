@@ -496,7 +496,7 @@ describe("Coreview artifact still-frame review", () => {
     await waitFor(() => expect(sendArtifactFrame).toHaveBeenCalledTimes(2))
     expect(sendArtifactFrame.mock.calls[1]?.[0]).toMatchObject({
       artifactId: buildCoreviewRealArtifactId(SELECTED_PDF_ARTIFACT),
-      visualSourceKind: "canvas_element",
+      visualSourceKind: "offscreen_render",
       rawFrameExcluded: true,
     })
     expect(sendArtifactFrame.mock.calls[1]?.[1]).toEqual({ coreviewSendStage: "refresh" })

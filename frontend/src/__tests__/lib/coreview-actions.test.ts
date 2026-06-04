@@ -27,7 +27,9 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
     ...currentOptions
   } = options
   let refreshes = 0
+  let focusCalls = 0
   let staleSignature: string | null = null
+  let annotations: Array<{ kind: "highlight" | "comment" }> = []
   let current: CoreviewCurrentView = {
     artifactId: "artifact-1",
     artifactPath: "outputs/report.pdf",
@@ -103,6 +105,95 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
         current = { ...current, stale: false, visualFrameFresh: true }
       }
     },
+    resolveAnnotationAnchor: ({ anchor, pageIndex }) => {
+      if (current.rendererKind !== "pdf") {
+        return { ok: false, blockedReason: "unsupported_renderer" }
+      }
+      if (anchor.type === "current_title") {
+        return {
+          ok: true,
+          anchor: {
+            anchorType: "current_title",
+            pageIndex,
+            rect: { x: 0.12, y: 0.08, width: 0.62, height: 0.07 },
+            point: null,
+          },
+        }
+      }
+      if (anchor.type === "text_quote") {
+        return /budget/iu.test(anchor.text)
+          ? {
+              ok: true,
+              anchor: {
+                anchorType: "text_quote",
+                pageIndex,
+                rect: { x: 0.2, y: 0.32, width: 0.38, height: 0.04 },
+                point: null,
+              },
+            }
+          : { ok: false, blockedReason: "anchor_not_found" }
+      }
+      if (anchor.type === "rect") {
+        return {
+          ok: true,
+          anchor: {
+            anchorType: "rect",
+            pageIndex,
+            rect: { x: anchor.x, y: anchor.y, width: anchor.width, height: anchor.height },
+            point: null,
+          },
+        }
+      }
+      if (anchor.type === "point") {
+        return {
+          ok: true,
+          anchor: {
+            anchorType: "point",
+            pageIndex,
+            rect: null,
+            point: { x: anchor.x, y: anchor.y },
+          },
+        }
+      }
+      return { ok: false, blockedReason: "anchor_not_found" }
+    },
+    addAnnotation: (input) => {
+      annotations = [...annotations, { kind: input.kind }]
+      current = {
+        ...current,
+        annotationOverlayCaptured: annotations.length > 0,
+      }
+      return {
+        ok: true,
+        annotationId: `${input.kind}-${annotations.length}`,
+        blockedReason: null,
+        annotationCount: annotations.length,
+        highlightCount: annotations.filter((annotation) => annotation.kind === "highlight").length,
+        commentCount: annotations.filter((annotation) => annotation.kind === "comment").length,
+      }
+    },
+    focusAnnotationAnchor: (input) => {
+      focusCalls += 1
+      current = {
+        ...current,
+        pageIndex: input.pageIndex,
+        zoom: input.zoom,
+        fitMode: input.fitMode,
+        viewSignature: buildArtifactViewSignature({
+          artifactId: current.artifactId,
+          filePath: current.artifactPath,
+          rendererKind: current.rendererKind,
+          pageIndex: input.pageIndex,
+          pageCount: current.pageCount,
+          zoom: input.zoom,
+          fitMode: input.fitMode,
+        }),
+      }
+      return {
+        ok: true,
+        blockedReason: null,
+      }
+    },
   }
   if (rebindCurrent) {
     adapter.rebindVisibleArtifact = (input) => {
@@ -127,6 +218,12 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
     },
     get staleSignature() {
       return staleSignature
+    },
+    get focusCalls() {
+      return focusCalls
+    },
+    get annotations() {
+      return annotations
     },
     get current() {
       return current
@@ -334,5 +431,136 @@ describe("Coreview action bus", () => {
       raw_frame_excluded: true,
     })
     expect(JSON.stringify(result)).not.toContain("base64")
+  })
+
+  it("adds a yellow highlight on the current title and refreshes the same review state", async () => {
+    const harness = createHarness()
+
+    const result = await harness.bus.addAnnotation({
+      kind: "highlight",
+      anchor: { type: "current_title" },
+      color: "yellow",
+      source: "sophia",
+    }, "gemini_tool")
+
+    expect(result).toMatchObject({
+      ok: true,
+      action: "add_annotation",
+      annotation_kind: "highlight",
+      annotation_anchor_type: "current_title",
+      annotation_color: "yellow",
+      annotation_page_index: 0,
+      annotation_count: 1,
+      highlight_count: 1,
+      comment_count: 0,
+      annotation_action_source: "sophia",
+      annotation_overlay_captured: true,
+      preserved_mic: true,
+      preserved_review: true,
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
+    })
+    expect(harness.annotations).toHaveLength(1)
+    expect(harness.refreshes).toBe(1)
+    expect(JSON.stringify(result)).not.toContain("change the font")
+  })
+
+  it("adds a comment on the current title without echoing raw comment text", async () => {
+    const harness = createHarness()
+
+    const result = await harness.bus.addAnnotation({
+      kind: "comment",
+      anchor: { type: "current_title" },
+      text: "change the font",
+      source: "sophia",
+    }, "gemini_tool")
+
+    expect(result).toMatchObject({
+      ok: true,
+      action: "add_annotation",
+      annotation_kind: "comment",
+      annotation_anchor_type: "current_title",
+      annotation_count: 1,
+      highlight_count: 0,
+      comment_count: 1,
+      annotation_action_source: "sophia",
+      preserved_mic: true,
+      preserved_review: true,
+    })
+    expect(JSON.stringify(result)).not.toContain("change the font")
+  })
+
+  it("blocks invalid pages and missing text anchors safely for annotations", async () => {
+    const harness = createHarness()
+
+    await expect(harness.bus.addAnnotation({
+      kind: "highlight",
+      pageNumber: 9,
+      anchor: { type: "current_title" },
+      source: "sophia",
+    }, "gemini_tool")).resolves.toMatchObject({
+      ok: false,
+      blocked_reason: "requested_page_out_of_bounds",
+    })
+
+    await expect(harness.bus.addAnnotation({
+      kind: "highlight",
+      anchor: { type: "text_quote", text: "missing" },
+      source: "sophia",
+    }, "gemini_tool")).resolves.toMatchObject({
+      ok: false,
+      blocked_reason: "anchor_not_found",
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
+    })
+  })
+
+  it("focuses the current title with bounded custom zoom", async () => {
+    const harness = createHarness()
+
+    const result = await harness.bus.focusAnchor({
+      anchor: { type: "current_title" },
+      zoomDelta: 1.5,
+    }, "gemini_tool")
+
+    expect(result).toMatchObject({
+      ok: true,
+      action: "focus_anchor",
+      page_index: 0,
+      zoom: 1.5,
+      fit_mode: "custom",
+      focus_anchor_type: "current_title",
+      focused_rect: {
+        x: 0.12,
+        y: 0.08,
+        width: 0.62,
+        height: 0.07,
+      },
+      preserved_mic: true,
+      preserved_review: true,
+      raw_frame_excluded: true,
+    })
+    expect(harness.focusCalls).toBe(1)
+    expect(harness.refreshes).toBe(1)
+  })
+
+  it("blocks annotation tools when no artifact is selected or renderer is unsupported", async () => {
+    await expect(createHarness({ artifactId: null }).bus.addAnnotation({
+      kind: "highlight",
+      anchor: { type: "current_title" },
+      source: "sophia",
+    }, "gemini_tool")).resolves.toMatchObject({
+      ok: false,
+      blocked_reason: "no_selected_artifact",
+    })
+
+    await expect(createHarness({ rendererKind: "markdown" }).bus.addAnnotation({
+      kind: "highlight",
+      anchor: { type: "current_title" },
+      source: "sophia",
+    }, "gemini_tool")).resolves.toMatchObject({
+      ok: false,
+      blocked_reason: "unsupported_renderer",
+    })
   })
 })

@@ -2008,24 +2008,29 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
   });
 
   it('handles Coreview tool calls in the browser and sends a direct Gemini toolResponse', async () => {
-    registerCoreviewToolBridge(async (call) => ({
+    registerCoreviewToolBridge(async (call) => {
+      const pageNumber = Number(call.args.page_number ?? 1);
+      const annotation = call.name === 'coreview_add_annotation';
+      return {
       ok: true,
-      action: 'set_view',
+      action: annotation ? 'add_annotation' : 'set_view',
       artifact_id: 'coreview-real-artifact-report-pdf',
       artifact_path: 'outputs/report.pdf',
       artifact_title: 'report.pdf',
       renderer_kind: 'pdf',
-      page_index: Number(call.args.page_number) - 1,
-      page_number: Number(call.args.page_number),
+      page_index: pageNumber - 1,
+      page_number: pageNumber,
       page_count: 3,
       zoom: 1,
       fit_mode: 'page',
       view_signature: 'view-signature-after',
       stale: false,
-      refresh_attempted: true,
-      refresh_result: 'success',
+      refresh_attempted: !annotation,
+      refresh_result: annotation ? 'not_requested' : 'success',
       blocked_reason: null,
-      result_summary: 'Switched to page 2 of 3. Refresh succeeded.',
+      result_summary: annotation
+        ? 'Added a comment to the title on page 1.'
+        : 'Switched to page 2 of 3. Refresh succeeded.',
       command_source: 'gemini_tool',
       preserved_mic: true,
       preserved_review: true,
@@ -2035,15 +2040,28 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       exact_text_available: true,
       visual_frame_fresh: true,
       review_active: true,
-      annotation_overlay_captured: false,
+      annotation_overlay_captured: annotation ? true : false,
+      annotation_id: annotation ? 'comment-1' : null,
+      annotation_kind: annotation ? 'comment' : null,
+      annotation_anchor_type: annotation ? 'current_title' : null,
+      annotation_color: annotation ? 'yellow' : null,
+      annotation_page_index: annotation ? 0 : null,
+      annotation_count: annotation ? 1 : null,
+      highlight_count: annotation ? 0 : null,
+      comment_count: annotation ? 1 : null,
+      annotation_action_source: annotation ? 'sophia' : null,
+      focus_anchor_type: null,
+      focused_rect: null,
       artifact_stable_identity: 'thread:thread-1|path:outputs/report.pdf|renderer:pdf',
       rebind_status: 'not_attempted',
       rebind_attempted: false,
       rebind_result: 'not_attempted',
       rebind_reason: null,
+      raw_comment_text_excluded: true,
       raw_artifact_text_excluded: true,
       raw_frame_excluded: true,
-    }));
+      };
+    });
     const fetchMock = makeGeminiBrowserSessionFetch('browser-gemini-coreview-tool');
     const stoppedTrack = vi.fn();
     const localStream = {
@@ -2071,6 +2089,8 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       'coreview_set_view',
       'coreview_refresh_view',
       'coreview_get_current_view',
+      'coreview_add_annotation',
+      'coreview_focus_anchor',
     ]));
     expect(readGeminiConfiguredToolNames(connection.setup)).not.toContain('emit_artifact');
     const fetchCallCountBeforeTool = fetchMock.mock.calls.length;
@@ -2125,6 +2145,57 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     ))).toBe(true));
     expect(JSON.stringify(toolDiagnostics)).not.toContain('user asked for page two');
 
+    const sentBeforeAnnotation = websocket?.sent.length ?? 0;
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          {
+            id: 'coreview-annotation-1',
+            name: 'coreview_add_annotation',
+            args: {
+              kind: 'comment',
+              anchor_type: 'current_title',
+              comment_text: 'change the font',
+            },
+          },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect((websocket?.sent.length ?? 0)).toBeGreaterThan(sentBeforeAnnotation);
+      expect(websocket?.sent.slice(sentBeforeAnnotation).some((payload) => {
+        const parsed = JSON.parse(payload) as Record<string, unknown>;
+        return Boolean(parsed.toolResponse);
+      })).toBe(true);
+    });
+    const annotationResponsePayload = websocket?.sent
+      .slice(sentBeforeAnnotation)
+      .map((payload) => JSON.parse(payload) as Record<string, unknown>)
+      .find((payload) => payload.toolResponse) as {
+        toolResponse: {
+          functionResponses: Array<{ id: string; name: string; response: Record<string, unknown> }>;
+        };
+      };
+    expect(annotationResponsePayload.toolResponse.functionResponses[0]).toMatchObject({
+      id: 'coreview-annotation-1',
+      name: 'coreview_add_annotation',
+      response: {
+        ok: true,
+        action: 'add_annotation',
+        annotation_kind: 'comment',
+        annotation_anchor_type: 'current_title',
+        raw_artifact_text_excluded: true,
+        raw_frame_excluded: true,
+      },
+    });
+    await vi.waitFor(() => expect(toolDiagnostics.some((diagnostic) => (
+      diagnostic.phase === 'tool_response_sent'
+      && diagnostic.toolCall.name === 'coreview_add_annotation'
+      && diagnostic.backendResponse?.raw_comment_text_excluded === true
+    ))).toBe(true));
+    expect(JSON.stringify(toolDiagnostics)).not.toContain('change the font');
+
     await connection.close();
   });
 
@@ -2163,6 +2234,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       rebind_attempted: false,
       rebind_result: 'not_attempted',
       rebind_reason: null,
+      raw_comment_text_excluded: true,
       raw_artifact_text_excluded: true,
       raw_frame_excluded: true,
     }));

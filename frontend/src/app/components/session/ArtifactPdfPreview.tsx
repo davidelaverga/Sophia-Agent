@@ -5,9 +5,15 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 
 import type { ArtifactFitMode } from "../../lib/artifact-renderers"
 import { clampArtifactZoom } from "../../lib/artifact-renderers"
+import {
+  buildCoreviewPdfTextLines,
+  type CoreviewPdfTextItemLayout,
+  type CoreviewPdfTextLayout,
+} from "../../lib/coreview-pdf-text-layout"
 import { loadPdfJs, type PdfDocumentProxy, type PdfRenderTask } from "../../lib/pdfjs-loader"
 import { cn } from "../../lib/utils"
 import type {
+  ArtifactAnnotationColor,
   ArtifactAnnotation,
   ArtifactToolMode,
   NormalizedArtifactPoint,
@@ -28,6 +34,13 @@ export interface ArtifactPdfTextExtractionStatus {
   truncated: boolean
   safeReason: string | null
   text?: string
+  layout?: CoreviewPdfTextLayout
+}
+
+export interface ArtifactPdfFocusRequest {
+  id: string
+  pageIndex: number
+  rect: NormalizedArtifactRect
 }
 
 interface ArtifactPdfPreviewProps {
@@ -52,6 +65,7 @@ interface ArtifactPdfPreviewProps {
   onCreateComment?: (point: NormalizedArtifactPoint) => void
   onSelectAnnotation?: (id: string | null) => void
   onUpdateCommentText?: (id: string, text: string) => void
+  focusRequest?: ArtifactPdfFocusRequest | null
 }
 
 type PdfDocumentState =
@@ -101,9 +115,12 @@ export function ArtifactPdfPreview({
   onCreateComment,
   onSelectAnnotation,
   onUpdateCommentText,
+  focusRequest = null,
 }: ArtifactPdfPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const compositeCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const pageHostRef = useRef<HTMLDivElement | null>(null)
+  const pageFrameRef = useRef<HTMLDivElement | null>(null)
   const renderTokenRef = useRef(0)
   const activeRenderRef = useRef<ActivePdfRender | null>(null)
   const onPageCountChangeRef = useRef(onPageCountChange)
@@ -207,6 +224,7 @@ export function ArtifactPdfPreview({
               truncated: result.truncated,
               safeReason: result.text.trim() ? null : "pdf_text_empty",
               text: result.text.trim() ? result.text : undefined,
+              layout: result.layout,
             },
           ))
         })
@@ -353,6 +371,7 @@ export function ArtifactPdfPreview({
         reason: null,
         source: "pdf_page_canvas",
         exactTextAvailable: false,
+        annotationOverlayCaptured: false,
       })
     })().catch((error: unknown) => {
       if (isStalePdfRender(disposed, token, renderTokenRef) || isPdfRenderCancellation(error)) {
@@ -394,6 +413,49 @@ export function ArtifactPdfPreview({
   const highlightDraftRect = highlightDraft
     ? normalizedRectFromPoints(highlightDraft.start, highlightDraft.current)
     : null
+  const pageAnnotationSignature = useMemo(() => (
+    pageAnnotations
+      .map((annotation) => annotation.kind === "highlight"
+        ? `${annotation.id}:${annotation.kind}:${annotation.color ?? "yellow"}:${annotation.rect.x.toFixed(4)}:${annotation.rect.y.toFixed(4)}:${annotation.rect.width.toFixed(4)}:${annotation.rect.height.toFixed(4)}`
+        : `${annotation.id}:${annotation.kind}:${annotation.point.x.toFixed(4)}:${annotation.point.y.toFixed(4)}:${annotation.text.length}`)
+      .join("|")
+  ), [pageAnnotations])
+
+  useLayoutEffect(() => {
+    const source = canvasRef.current
+    const composite = compositeCanvasRef.current
+    if (!source || !composite || !pageSize || pageRenderState !== "ready") {
+      return
+    }
+
+    const drawn = drawPdfCompositeCaptureCanvas(composite, source, {
+      pageSize,
+      annotations: pageAnnotations,
+    })
+    if (!drawn) {
+      return
+    }
+    onRenderStatusChangeRef.current?.({
+      ready: true,
+      reason: null,
+      source: "pdf_page_canvas",
+      exactTextAvailable: false,
+      annotationOverlayCaptured: pageAnnotations.length > 0,
+    })
+  }, [pageAnnotationSignature, pageAnnotations, pageRenderState, pageSize])
+
+  useLayoutEffect(() => {
+    const focusRect = focusRequest?.pageIndex === pageIndex ? focusRequest.rect : null
+    if (!focusRect || !pageSize) {
+      return
+    }
+    centerPdfRectInPanLayer({
+      panLayer: pageHostRef.current,
+      pageFrame: pageFrameRef.current,
+      pageSize,
+      rect: focusRect,
+    })
+  }, [focusRequest, pageIndex, pageSize, zoom, fitMode])
 
   const handlePanLayerTouchStart = useCallback((event: TouchEvent<HTMLDivElement>) => {
     if (event.touches.length !== 2) {
@@ -553,8 +615,9 @@ export function ArtifactPdfPreview({
             className="relative z-0 flex min-h-full min-w-full w-max items-start justify-center px-4 py-5 sm:px-7 sm:py-7"
           >
             <div
+              ref={pageFrameRef}
               data-testid="artifact-pdf-page-frame"
-              data-annotation-overlay-captured="false"
+              data-annotation-overlay-captured={pageAnnotations.length > 0 ? "true" : "false"}
               className={cn(
                 "relative shrink-0 overflow-hidden rounded-sm bg-white shadow-[0_18px_50px_rgba(25,19,35,0.28)]",
                 showCanvas ? "block" : "hidden",
@@ -596,6 +659,21 @@ export function ArtifactPdfPreview({
                 onCommentTextChange={handleCommentTextChange}
               />
             </div>
+            <canvas
+              ref={compositeCanvasRef}
+              data-testid="artifact-pdf-composite-canvas"
+              data-artifact-region="true"
+              data-coreview-artifact-region="true"
+              data-artifact-id={artifactId ?? undefined}
+              data-coreview-artifact-id={artifactId ?? undefined}
+              data-artifact-canvas={artifactId ? "true" : undefined}
+              data-coreview-artifact-canvas={artifactId ? "true" : undefined}
+              data-artifact-canvas-source="selected-pdf-page-composite"
+              data-coreview-offscreen-render="true"
+              data-annotation-overlay-captured={pageAnnotations.length > 0 ? "true" : "false"}
+              aria-hidden="true"
+              className="pointer-events-none absolute h-px w-px overflow-hidden opacity-0"
+            />
           </div>
         </div>
       </div>
@@ -632,7 +710,7 @@ function ArtifactPdfAnnotationLayer({
     <div
       data-testid="artifact-pdf-annotation-layer"
       data-artifact-tool-mode={toolMode}
-      data-annotation-overlay-captured="false"
+      data-annotation-overlay-captured={annotations.length > 0 ? "true" : "false"}
       className={cn(
         "absolute inset-0 z-10",
         toolMode === "pan" ? "pointer-events-none" : "pointer-events-auto",
@@ -695,15 +773,20 @@ function HighlightAnnotation({
       data-annotation-y={formatNormalized(annotation.rect.y)}
       data-annotation-width={formatNormalized(annotation.rect.width)}
       data-annotation-height={formatNormalized(annotation.rect.height)}
+      data-annotation-color={annotation.color ?? "yellow"}
+      data-annotation-source={annotation.source ?? "user"}
       aria-label="Highlight annotation"
       aria-pressed={selected}
       className={cn(
-        "cosmic-focus-ring absolute rounded-[3px] border bg-[color:color-mix(in_srgb,#facc15_34%,var(--sophia-purple)_16%)] transition hover:bg-[color:color-mix(in_srgb,#facc15_40%,var(--sophia-purple)_22%)]",
+        "cosmic-focus-ring absolute rounded-[3px] border transition",
         selected
           ? "border-[color:var(--sophia-purple)] shadow-[0_0_0_2px_color-mix(in_srgb,var(--sophia-purple)_34%,transparent),0_0_22px_color-mix(in_srgb,var(--sophia-purple)_26%,transparent)]"
           : "border-[color:color-mix(in_srgb,var(--sophia-purple)_26%,#facc15)]",
       )}
-      style={rectToStyle(annotation.rect)}
+      style={{
+        ...rectToStyle(annotation.rect),
+        ...highlightAnnotationStyle(annotation.color ?? "yellow"),
+      }}
       onPointerDown={(event) => {
         event.stopPropagation()
       }}
@@ -737,6 +820,7 @@ function CommentAnnotation({
       data-annotation-page-index={String(annotation.pageIndex)}
       data-annotation-x={formatNormalized(annotation.point.x)}
       data-annotation-y={formatNormalized(annotation.point.y)}
+      data-annotation-source={annotation.source ?? "user"}
       className="absolute"
       style={pointToStyle(annotation.point)}
       onPointerDown={(event) => {
@@ -831,6 +915,203 @@ function pointToStyle(point: NormalizedArtifactPoint) {
     left: `${point.x * 100}%`,
     top: `${point.y * 100}%`,
   }
+}
+
+function highlightAnnotationStyle(color: ArtifactAnnotationColor) {
+  const palette = annotationColorPalette(color)
+  return {
+    backgroundColor: palette.background,
+    borderColor: palette.border,
+  }
+}
+
+function drawPdfCompositeCaptureCanvas(
+  composite: HTMLCanvasElement,
+  source: HTMLCanvasElement,
+  input: {
+    pageSize: { width: number; height: number }
+    annotations: ArtifactAnnotation[]
+  },
+): boolean {
+  const context = get2dCanvasContext(composite)
+  if (!context || typeof context.drawImage !== "function") {
+    return false
+  }
+
+  const width = Math.max(1, source.width || Math.round(input.pageSize.width))
+  const height = Math.max(1, source.height || Math.round(input.pageSize.height))
+  const dprX = width / Math.max(1, input.pageSize.width)
+  const dprY = height / Math.max(1, input.pageSize.height)
+
+  composite.width = width
+  composite.height = height
+  composite.style.width = `${input.pageSize.width}px`
+  composite.style.height = `${input.pageSize.height}px`
+  safeClearRect(context, 0, 0, width, height)
+  try {
+    context.drawImage(source, 0, 0, width, height)
+  } catch {
+    return false
+  }
+
+  for (const annotation of input.annotations) {
+    if (annotation.kind === "highlight") {
+      const palette = annotationColorPalette(annotation.color ?? "yellow")
+      const x = annotation.rect.x * width
+      const y = annotation.rect.y * height
+      const rectWidth = annotation.rect.width * width
+      const rectHeight = annotation.rect.height * height
+      context.fillStyle = palette.captureFill
+      safeFillRect(context, x, y, rectWidth, rectHeight)
+      context.strokeStyle = palette.captureStroke
+      context.lineWidth = Math.max(1, Math.min(dprX, dprY))
+      safeStrokeRect(context, x, y, rectWidth, rectHeight)
+      continue
+    }
+
+    const x = annotation.point.x * width
+    const y = annotation.point.y * height
+    const radius = Math.max(9, Math.round(11 * Math.min(dprX, dprY)))
+    context.fillStyle = "rgba(124, 76, 202, 0.92)"
+    context.strokeStyle = "rgba(255, 255, 255, 0.96)"
+    context.lineWidth = Math.max(2, Math.round(2 * Math.min(dprX, dprY)))
+    safeBeginPath(context)
+    safeArc(context, x, y, radius, 0, Math.PI * 2)
+    safeFill(context)
+    safeStroke(context)
+    context.fillStyle = "#ffffff"
+    context.font = `${Math.max(13, Math.round(14 * Math.min(dprX, dprY)))}px system-ui, sans-serif`
+    context.textAlign = "center"
+    context.textBaseline = "middle"
+    safeFillText(context, "+", x, y - Math.max(1, radius * 0.04))
+  }
+
+  return true
+}
+
+function centerPdfRectInPanLayer({
+  panLayer,
+  pageFrame,
+  pageSize,
+  rect,
+}: {
+  panLayer: HTMLDivElement | null
+  pageFrame: HTMLDivElement | null
+  pageSize: { width: number; height: number }
+  rect: NormalizedArtifactRect
+}) {
+  if (!panLayer || !pageFrame) {
+    return
+  }
+  const targetX = pageFrame.offsetLeft + (rect.x + rect.width / 2) * pageSize.width
+  const targetY = pageFrame.offsetTop + (rect.y + rect.height / 2) * pageSize.height
+  const left = clampScroll(targetX - panLayer.clientWidth / 2, panLayer.scrollWidth - panLayer.clientWidth)
+  const top = clampScroll(targetY - panLayer.clientHeight / 2, panLayer.scrollHeight - panLayer.clientHeight)
+
+  if (typeof panLayer.scrollTo === "function") {
+    panLayer.scrollTo({ left, top, behavior: "auto" })
+  } else {
+    panLayer.scrollLeft = left
+    panLayer.scrollTop = top
+  }
+}
+
+function annotationColorPalette(color: ArtifactAnnotationColor) {
+  switch (color) {
+    case "purple":
+      return {
+        background: "color-mix(in srgb, var(--sophia-purple) 30%, transparent)",
+        border: "color-mix(in srgb, var(--sophia-purple) 58%, white)",
+        captureFill: "rgba(147, 97, 216, 0.34)",
+        captureStroke: "rgba(124, 76, 202, 0.62)",
+      }
+    case "blue":
+      return {
+        background: "rgba(96, 165, 250, 0.28)",
+        border: "rgba(59, 130, 246, 0.58)",
+        captureFill: "rgba(96, 165, 250, 0.34)",
+        captureStroke: "rgba(37, 99, 235, 0.62)",
+      }
+    case "pink":
+      return {
+        background: "rgba(244, 114, 182, 0.28)",
+        border: "rgba(219, 39, 119, 0.54)",
+        captureFill: "rgba(244, 114, 182, 0.34)",
+        captureStroke: "rgba(190, 24, 93, 0.62)",
+      }
+    case "yellow":
+    default:
+      return {
+        background: "color-mix(in srgb, #facc15 34%, var(--sophia-purple) 16%)",
+        border: "color-mix(in srgb, var(--sophia-purple) 26%, #facc15)",
+        captureFill: "rgba(250, 204, 21, 0.36)",
+        captureStroke: "rgba(161, 98, 7, 0.54)",
+      }
+  }
+}
+
+function get2dCanvasContext(canvas: HTMLCanvasElement): CanvasRenderingContext2D | null {
+  try {
+    return canvas.getContext("2d")
+  } catch {
+    return null
+  }
+}
+
+function safeClearRect(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number) {
+  if (typeof context.clearRect === "function") {
+    context.clearRect(x, y, width, height)
+  }
+}
+
+function safeFillRect(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number) {
+  if (typeof context.fillRect === "function") {
+    context.fillRect(x, y, width, height)
+  }
+}
+
+function safeStrokeRect(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number) {
+  if (typeof context.strokeRect === "function") {
+    context.strokeRect(x, y, width, height)
+  }
+}
+
+function safeBeginPath(context: CanvasRenderingContext2D) {
+  if (typeof context.beginPath === "function") {
+    context.beginPath()
+  }
+}
+
+function safeArc(context: CanvasRenderingContext2D, x: number, y: number, radius: number, startAngle: number, endAngle: number) {
+  if (typeof context.arc === "function") {
+    context.arc(x, y, radius, startAngle, endAngle)
+  }
+}
+
+function safeFill(context: CanvasRenderingContext2D) {
+  if (typeof context.fill === "function") {
+    context.fill()
+  }
+}
+
+function safeStroke(context: CanvasRenderingContext2D) {
+  if (typeof context.stroke === "function") {
+    context.stroke()
+  }
+}
+
+function safeFillText(context: CanvasRenderingContext2D, text: string, x: number, y: number) {
+  if (typeof context.fillText === "function") {
+    context.fillText(text, x, y)
+  }
+}
+
+function clampScroll(value: number, max: number): number {
+  const safeMax = Number.isFinite(max) ? Math.max(0, max) : 0
+  if (!Number.isFinite(value)) {
+    return 0
+  }
+  return Math.min(safeMax, Math.max(0, value))
 }
 
 function formatNormalized(value: number): string {
@@ -990,15 +1271,17 @@ function pdfTextExtractionStatus(
     truncated: overrides.truncated ?? false,
     safeReason: overrides.safeReason ?? null,
     ...(overrides.text ? { text: overrides.text } : {}),
+    ...(overrides.layout ? { layout: overrides.layout } : {}),
   }
 }
 
 async function extractPdfPlainText(
   document: PdfDocumentProxy,
   signal: AbortSignal,
-): Promise<{ text: string; pageCount: number; charCount: number; truncated: boolean }> {
+): Promise<{ text: string; pageCount: number; charCount: number; truncated: boolean; layout: CoreviewPdfTextLayout }> {
   const pageCount = Math.max(1, Math.floor(document.numPages || 1))
   const chunks: string[] = []
+  const pages: CoreviewPdfTextLayout["pages"] = []
   let charCount = 0
   let truncated = false
 
@@ -1015,6 +1298,24 @@ async function extractPdfPlainText(
 
     const textContent = await getTextContent.call(page)
     const pageText = textFromPdfTextContent(textContent)
+    const baseViewport = typeof (page as { getViewport?: unknown }).getViewport === "function"
+      ? (page as { getViewport: (input: { scale: number }) => { width: number; height: number; convertToViewportRectangle?: (rect: number[]) => number[] } }).getViewport({ scale: 1 })
+      : null
+    const pageWidth = positiveNumber(baseViewport?.width) ?? 1
+    const pageHeight = positiveNumber(baseViewport?.height) ?? 1
+    pages.push(buildCoreviewPdfTextLines(
+      pageNumber - 1,
+      pageWidth,
+      pageHeight,
+      textItemsFromPdfTextContent(textContent, {
+        pageIndex: pageNumber - 1,
+        pageWidth,
+        pageHeight,
+        convertToViewportRectangle: typeof baseViewport?.convertToViewportRectangle === "function"
+          ? baseViewport.convertToViewportRectangle.bind(baseViewport)
+          : null,
+      }),
+    ))
     if (!pageText) {
       continue
     }
@@ -1039,6 +1340,11 @@ async function extractPdfPlainText(
     pageCount,
     charCount,
     truncated,
+    layout: {
+      pageCount,
+      pages,
+      rawTextExcluded: true,
+    },
   }
 }
 
@@ -1054,6 +1360,130 @@ function textFromPdfTextContent(textContent: unknown): string {
     .join(" ")
     .replace(/\s+/gu, " ")
     .trim()
+}
+
+function textItemsFromPdfTextContent(
+  textContent: unknown,
+  layout: {
+    pageIndex: number
+    pageWidth: number
+    pageHeight: number
+    convertToViewportRectangle: ((rect: number[]) => number[]) | null
+  },
+): CoreviewPdfTextItemLayout[] {
+  const items = Array.isArray((textContent as { items?: unknown[] } | null)?.items)
+    ? (textContent as { items: unknown[] }).items
+    : []
+  return items
+    .map((item) => pdfTextItemLayout(item, layout))
+    .filter((item): item is CoreviewPdfTextItemLayout => item !== null)
+}
+
+function pdfTextItemLayout(
+  item: unknown,
+  layout: {
+    pageIndex: number
+    pageWidth: number
+    pageHeight: number
+    convertToViewportRectangle: ((rect: number[]) => number[]) | null
+  },
+): CoreviewPdfTextItemLayout | null {
+  const record = isRecord(item) ? item : null
+  const text = typeof record?.str === "string" ? record.str.replace(/\s+/gu, " ").trim() : ""
+  if (!text) {
+    return null
+  }
+  const transform = Array.isArray(record?.transform)
+    ? record.transform.map((value) => Number(value))
+    : []
+  if (transform.length < 6 || transform.some((value) => !Number.isFinite(value))) {
+    return null
+  }
+  const x = transform[4] ?? 0
+  const y = transform[5] ?? 0
+  const width = positiveNumber(record?.width) ?? estimateTextItemWidth(text, transform)
+  const height = positiveNumber(record?.height) ?? Math.max(Math.hypot(transform[2] ?? 0, transform[3] ?? 0), 1)
+  const rect = normalizedTextRect({
+    x,
+    y,
+    width,
+    height,
+    pageWidth: layout.pageWidth,
+    pageHeight: layout.pageHeight,
+    convertToViewportRectangle: layout.convertToViewportRectangle,
+  })
+  if (!rect) {
+    return null
+  }
+  return {
+    pageIndex: layout.pageIndex,
+    text,
+    rect,
+    fontHeight: rect.height,
+  }
+}
+
+function normalizedTextRect(input: {
+  x: number
+  y: number
+  width: number
+  height: number
+  pageWidth: number
+  pageHeight: number
+  convertToViewportRectangle: ((rect: number[]) => number[]) | null
+}): NormalizedArtifactRect | null {
+  let left: number
+  let top: number
+  let right: number
+  let bottom: number
+  if (input.convertToViewportRectangle) {
+    const viewportRect = input.convertToViewportRectangle([
+      input.x,
+      input.y,
+      input.x + input.width,
+      input.y + input.height,
+    ])
+    if (viewportRect.length < 4 || viewportRect.some((value) => !Number.isFinite(value))) {
+      return null
+    }
+    left = Math.min(viewportRect[0] ?? 0, viewportRect[2] ?? 0)
+    top = Math.min(viewportRect[1] ?? 0, viewportRect[3] ?? 0)
+    right = Math.max(viewportRect[0] ?? 0, viewportRect[2] ?? 0)
+    bottom = Math.max(viewportRect[1] ?? 0, viewportRect[3] ?? 0)
+  } else {
+    left = input.x
+    right = input.x + input.width
+    top = input.pageHeight - input.y - input.height
+    bottom = input.pageHeight - input.y
+  }
+  const rect = {
+    x: left / input.pageWidth,
+    y: top / input.pageHeight,
+    width: (right - left) / input.pageWidth,
+    height: (bottom - top) / input.pageHeight,
+  }
+  if (rect.width <= 0 || rect.height <= 0) {
+    return null
+  }
+  return {
+    x: clampNormalized(rect.x),
+    y: clampNormalized(rect.y),
+    width: Math.min(1 - clampNormalized(rect.x), Math.max(0, rect.width)),
+    height: Math.min(1 - clampNormalized(rect.y), Math.max(0, rect.height)),
+  }
+}
+
+function estimateTextItemWidth(text: string, transform: number[]): number {
+  const fontWidth = Math.max(Math.hypot(transform[0] ?? 0, transform[1] ?? 0), 1)
+  return Math.max(fontWidth, text.length * fontWidth * 0.52)
+}
+
+function positiveNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 function touchDistance(a: { clientX: number; clientY: number }, b: { clientX: number; clientY: number }): number {

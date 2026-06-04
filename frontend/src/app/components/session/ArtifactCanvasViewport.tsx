@@ -10,6 +10,7 @@ import {
   registerCoreviewArtifactText,
   registerCoreviewArtifactTextStatus,
 } from "../../lib/coreview-artifact-text"
+import type { CoreviewPdfTextLayout } from "../../lib/coreview-pdf-text-layout"
 import { recordSophiaCaptureEvent } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
 import type {
@@ -21,7 +22,7 @@ import type {
 import type { BuilderArtifactFileV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 
 import { ArtifactMarkdownPreview } from "./ArtifactMarkdownPreview"
-import { ArtifactPdfPreview, type ArtifactPdfTextExtractionStatus } from "./ArtifactPdfPreview"
+import { ArtifactPdfPreview, type ArtifactPdfFocusRequest, type ArtifactPdfTextExtractionStatus } from "./ArtifactPdfPreview"
 
 type ArtifactViewportFile = BuilderArtifactFileV1 & {
   mimeType?: string
@@ -45,6 +46,7 @@ export interface ArtifactVisualCaptureStatus {
   pdfTextExtractionPageCount?: number | null
   pdfTextExtractionCharCount?: number | null
   pdfTextExtractionTruncated?: boolean | null
+  annotationOverlayCaptured?: boolean | null
 }
 
 interface ArtifactCanvasViewportProps {
@@ -60,6 +62,7 @@ interface ArtifactCanvasViewportProps {
     artifactStableIdentity?: string | null
   } | null
   onVisualCaptureStatusChange?: (status: ArtifactVisualCaptureStatus) => void
+  onPdfTextLayoutChange?: (layout: CoreviewPdfTextLayout | null) => void
   reviewSurfaceState?: ArtifactReviewSurfaceState
   rendererKind?: ArtifactRendererKind
   pageIndex?: number
@@ -76,6 +79,7 @@ interface ArtifactCanvasViewportProps {
   onCreateComment?: (point: NormalizedArtifactPoint) => void
   onSelectAnnotation?: (id: string | null) => void
   onUpdateCommentText?: (id: string, text: string) => void
+  focusRequest?: ArtifactPdfFocusRequest | null
   className?: string
 }
 
@@ -97,6 +101,7 @@ export function ArtifactCanvasViewport({
   previewHref,
   artifactTextRegistration,
   onVisualCaptureStatusChange,
+  onPdfTextLayoutChange,
   reviewSurfaceState = "idle",
   rendererKind,
   pageIndex = 0,
@@ -112,6 +117,7 @@ export function ArtifactCanvasViewport({
   onCreateComment,
   onSelectAnnotation,
   onUpdateCommentText,
+  focusRequest = null,
   className,
 }: ArtifactCanvasViewportProps) {
   const primaryFile = previewFile ?? files.find((file) => file.isPrimary) ?? files[0]
@@ -157,6 +163,12 @@ export function ArtifactCanvasViewport({
     pageIndex,
     zoom,
     fitMode,
+    annotations
+      .filter((annotation) => annotation.pageIndex === pageIndex)
+      .map((annotation) => annotation.kind === "highlight"
+        ? `${annotation.id}:${annotation.color ?? "yellow"}:${annotation.rect.x.toFixed(4)}:${annotation.rect.y.toFixed(4)}:${annotation.rect.width.toFixed(4)}:${annotation.rect.height.toFixed(4)}`
+        : `${annotation.id}:${annotation.point.x.toFixed(4)}:${annotation.point.y.toFixed(4)}:${annotation.text.length}`)
+      .join("|"),
   ].join("::")
   const [pdfCaptureState, setPdfCaptureState] = useState<{
     key: string
@@ -202,6 +214,7 @@ export function ArtifactCanvasViewport({
     pdfTextExtractionPageCount: currentPdfTextExtractionStatus.pageCount,
     pdfTextExtractionCharCount: currentPdfTextExtractionStatus.charCount,
     pdfTextExtractionTruncated: currentPdfTextExtractionStatus.truncated,
+    annotationOverlayCaptured: currentPdfCaptureStatus.annotationOverlayCaptured ?? false,
   }), [
     currentPdfCaptureStatus,
     currentPdfTextExtractionStatus.charCount,
@@ -211,6 +224,7 @@ export function ArtifactCanvasViewport({
     currentPdfTextExtractionStatus.truncated,
   ])
   const handlePdfTextExtractionStatusChange = useCallback((status: ArtifactPdfTextExtractionStatus) => {
+    onPdfTextLayoutChange?.(status.status === "success" ? status.layout ?? null : null)
     setPdfTextExtractionState((current) => {
       if (
         current.key === pdfTextExtractionKey
@@ -220,7 +234,13 @@ export function ArtifactCanvasViewport({
       }
       return { key: pdfTextExtractionKey, status }
     })
-  }, [pdfTextExtractionKey])
+  }, [onPdfTextLayoutChange, pdfTextExtractionKey])
+
+  useEffect(() => {
+    if (canPreviewPdf) {
+      onPdfTextLayoutChange?.(null)
+    }
+  }, [canPreviewPdf, onPdfTextLayoutChange, pdfTextExtractionKey])
 
   useEffect(() => {
     if (!artifactTextRegistration || preview.status !== "ready" || !preview.markdown.trim()) {
@@ -455,6 +475,7 @@ export function ArtifactCanvasViewport({
               onCreateComment={onCreateComment}
               onSelectAnnotation={onSelectAnnotation}
               onUpdateCommentText={onUpdateCommentText}
+              focusRequest={focusRequest}
             />
           ) : (
             <ArtifactMetadataPage
@@ -618,6 +639,7 @@ function captureStatusesEqual(
     && left.pdfTextExtractionPageCount === right.pdfTextExtractionPageCount
     && left.pdfTextExtractionCharCount === right.pdfTextExtractionCharCount
     && left.pdfTextExtractionTruncated === right.pdfTextExtractionTruncated
+    && left.annotationOverlayCaptured === right.annotationOverlayCaptured
 }
 
 function pdfTextExtractionStatusesEqual(

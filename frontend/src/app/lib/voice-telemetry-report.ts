@@ -97,6 +97,41 @@ const READ_ARTIFACT_TEXT_SAFE_TOOL_EXECUTION_KEYS = new Set([
   'review_tool_timeout_name',
   'review_tool_timeout_result_sent',
 ]);
+const COREVIEW_SAFE_TOOL_EXECUTION_KEYS = new Set([
+  'action',
+  'annotation_action_source',
+  'annotation_anchor_type',
+  'annotation_color',
+  'annotation_count',
+  'annotation_kind',
+  'annotation_overlay_captured',
+  'annotation_page_index',
+  'blocked_reason',
+  'comment_count',
+  'command_source',
+  'current_view_summary',
+  'fit_mode',
+  'focus_anchor_type',
+  'highlight_count',
+  'ok',
+  'page_count',
+  'page_index',
+  'page_number',
+  'preserved_mic',
+  'preserved_review',
+  'raw_artifact_text_excluded',
+  'raw_comment_text_excluded',
+  'raw_frame_excluded',
+  'refresh_attempted',
+  'refresh_result',
+  'renderer_kind',
+  'result_summary',
+  'review_active',
+  'stale',
+  'visual_fresh',
+  'visual_frame_fresh',
+  'zoom',
+]);
 
 export function buildVoiceTelemetryReport({
   captureBundle,
@@ -480,6 +515,8 @@ function compactGeminiRelayBackendDiagnostics(diagnostics: Record<string, unknow
   const mappingOutputs = asRecord(diagnostics.provider_event_mapping_outputs) ?? asRecord(diagnostics.providerEventMappingOutputs);
   const publicCounts = asRecord(diagnostics.public_sophia_emitted_counts) ?? asRecord(diagnostics.publicSophiaEmittedCounts);
   const latestToolExecution = asRecord(toolExecutionRecent.filter((entry) => asRecord(entry)).at(-1));
+  const directLatestToolExecution = asRecord(diagnostics.latest_tool_execution)
+    ?? asRecord(diagnostics.latestToolExecution);
 
   return {
     schema: 'gemini_backend_diagnostics_compact_v1',
@@ -495,7 +532,9 @@ function compactGeminiRelayBackendDiagnostics(diagnostics: Record<string, unknow
     public_sophia_emitted_count_total: numericFallback(sumNumericRecord(publicCounts), diagnostics.public_sophia_emitted_count_total),
     latest_tool_execution: latestToolExecution
       ? compactLatestToolExecution(latestToolExecution)
-      : diagnostics.latest_tool_execution ?? null,
+      : directLatestToolExecution
+        ? compactLatestToolExecution(directLatestToolExecution)
+        : null,
   };
 }
 
@@ -523,6 +562,16 @@ function compactLatestToolExecution(latestToolExecution: Record<string, unknown>
       }
     }
     compact.raw_query_excluded = true;
+  }
+  if (toolName?.startsWith('coreview_')) {
+    for (const key of COREVIEW_SAFE_TOOL_EXECUTION_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(latestToolExecution, key)) {
+        compact[key] = latestToolExecution[key];
+      }
+    }
+    compact.raw_comment_text_excluded = true;
+    compact.raw_artifact_text_excluded = true;
+    compact.raw_frame_excluded = true;
   }
   return compact;
 }
@@ -1043,6 +1092,21 @@ function buildCoreviewStillFrameDiagnosticsSummary(coreview: CoreviewUsageTeleme
     pdfTextExtractionPageCount: coreview.visual.pdfTextExtractionPageCount,
     pdfTextExtractionCharCount: coreview.visual.pdfTextExtractionCharCount,
     pdfTextExtractionSource: coreview.visual.pdfTextExtractionSource,
+    annotationOverlayCaptured: coreview.visual.annotationOverlayCaptured,
+    annotationCount: coreview.visual.annotationCount,
+    highlightCount: coreview.visual.highlightCount,
+    commentCount: coreview.visual.commentCount,
+    annotationActionSource: coreview.visual.annotationActionSource,
+    coreviewAnnotationToolCount: coreview.visual.coreviewAnnotationToolCount,
+    coreviewAnnotationToolResult: coreview.visual.coreviewAnnotationToolResult,
+    coreviewAnnotationKind: coreview.visual.coreviewAnnotationKind,
+    coreviewAnnotationAnchorType: coreview.visual.coreviewAnnotationAnchorType,
+    coreviewAnnotationColor: coreview.visual.coreviewAnnotationColor,
+    coreviewAnnotationPageIndex: coreview.visual.coreviewAnnotationPageIndex,
+    coreviewAnnotationBlockedReason: coreview.visual.coreviewAnnotationBlockedReason,
+    coreviewFocusAnchorCount: coreview.visual.coreviewFocusAnchorCount,
+    coreviewFocusAnchorResult: coreview.visual.coreviewFocusAnchorResult,
+    coreviewFocusAnchorType: coreview.visual.coreviewFocusAnchorType,
     keyboardArtifactShortcutUsed: coreview.visual.keyboardArtifactShortcutUsed,
     pinchZoomUsed: coreview.visual.pinchZoomUsed,
     coreviewToolCompletedCount: coreview.visual.coreviewToolCompletedCount,
