@@ -1,11 +1,12 @@
 "use client"
 
-import { ChevronLeft, ChevronRight, Download, ExternalLink, Maximize, Minimize2, RotateCcw, ZoomIn, ZoomOut } from "lucide-react"
+import { ChevronLeft, ChevronRight, Download, ExternalLink, Hand, Highlighter, Maximize, MessageSquare, Minimize2, MousePointer2, RotateCcw, ZoomIn, ZoomOut } from "lucide-react"
 import type { ReactNode } from "react"
 
 import { haptic } from "../../hooks/useHaptics"
 import type { ArtifactFitMode } from "../../lib/artifact-renderers"
 import { cn } from "../../lib/utils"
+import type { ArtifactToolMode } from "../../types/artifact-annotations"
 
 interface ArtifactToolbarProps {
   title: string
@@ -23,6 +24,9 @@ interface ArtifactToolbarProps {
   onFitPage?: () => void
   onFitWidth?: () => void
   onResetZoom?: () => void
+  supportsAnnotations?: boolean
+  toolMode?: ArtifactToolMode
+  onToolModeChange?: (mode: ArtifactToolMode) => void
   openHref?: string | null
   downloadHref?: string | null
   downloadName?: string
@@ -45,6 +49,9 @@ export function ArtifactToolbar({
   onFitPage,
   onFitWidth,
   onResetZoom,
+  supportsAnnotations = false,
+  toolMode = "select",
+  onToolModeChange,
   openHref,
   downloadHref,
   downloadName,
@@ -84,6 +91,45 @@ export function ArtifactToolbar({
       </div>
 
       <div className="flex flex-wrap items-center gap-1.5" onClick={(event) => event.stopPropagation()}>
+        {supportsAnnotations ? (
+          <div
+            aria-label="Artifact annotation tools"
+            className="mr-1 flex items-center gap-1 rounded-lg border border-[color:var(--cosmic-border-soft)] bg-[color:color-mix(in_srgb,var(--cosmic-panel-soft)_68%,transparent)] p-1"
+          >
+            <ToolModeButton
+              mode="select"
+              label="Select"
+              pressed={toolMode === "select"}
+              onSelect={onToolModeChange}
+            >
+              <MousePointer2 className="h-3.5 w-3.5" aria-hidden="true" />
+            </ToolModeButton>
+            <ToolModeButton
+              mode="pan"
+              label="Pan"
+              pressed={toolMode === "pan"}
+              onSelect={onToolModeChange}
+            >
+              <Hand className="h-3.5 w-3.5" aria-hidden="true" />
+            </ToolModeButton>
+            <ToolModeButton
+              mode="highlight"
+              label="Highlight"
+              pressed={toolMode === "highlight"}
+              onSelect={onToolModeChange}
+            >
+              <Highlighter className="h-3.5 w-3.5" aria-hidden="true" />
+            </ToolModeButton>
+            <ToolModeButton
+              mode="comment"
+              label="Comment"
+              pressed={toolMode === "comment"}
+              onSelect={onToolModeChange}
+            >
+              <MessageSquare className="h-3.5 w-3.5" aria-hidden="true" />
+            </ToolModeButton>
+          </div>
+        ) : null}
         {supportsPagination ? (
           <div className="mr-1 flex items-center gap-1">
             <ToolbarButton
@@ -187,6 +233,42 @@ export function ArtifactToolbar({
         ) : null}
       </div>
     </div>
+  )
+}
+
+function ToolModeButton({
+  mode,
+  label,
+  pressed,
+  onSelect,
+  children,
+}: {
+  mode: ArtifactToolMode
+  label: string
+  pressed: boolean
+  onSelect?: (mode: ArtifactToolMode) => void
+  children: ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      aria-pressed={pressed}
+      onClick={() => {
+        haptic("light")
+        onSelect?.(mode)
+      }}
+      className={cn(
+        "cosmic-focus-ring inline-flex h-8 items-center justify-center gap-1.5 rounded-md border px-2 text-[11px] font-medium transition",
+        pressed
+          ? "border-[color:color-mix(in_srgb,var(--sophia-purple)_54%,var(--cosmic-border-soft))] bg-[color:color-mix(in_srgb,var(--sophia-purple)_16%,transparent)] text-[color:var(--sophia-purple)] shadow-[0_0_0_1px_color-mix(in_srgb,var(--sophia-purple)_14%,transparent)]"
+          : "border-transparent text-[color:var(--cosmic-text-muted)] hover:border-[color:var(--cosmic-border-soft)] hover:bg-[color:var(--cosmic-panel-soft)] hover:text-[color:var(--cosmic-text)]",
+      )}
+    >
+      {children}
+      <span className="hidden sm:inline">{label}</span>
+    </button>
   )
 }
 

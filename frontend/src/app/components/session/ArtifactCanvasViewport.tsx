@@ -9,6 +9,12 @@ import { isMarkdownArtifactFile } from "../../lib/builder-artifacts"
 import { registerCoreviewArtifactText } from "../../lib/coreview-artifact-text"
 import { recordSophiaCaptureEvent } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
+import type {
+  ArtifactAnnotation,
+  ArtifactToolMode,
+  NormalizedArtifactPoint,
+  NormalizedArtifactRect,
+} from "../../types/artifact-annotations"
 import type { BuilderArtifactFileV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 
 import { ArtifactMarkdownPreview } from "./ArtifactMarkdownPreview"
@@ -59,6 +65,13 @@ interface ArtifactCanvasViewportProps {
   onPageIndexChange?: (pageIndex: number) => void
   onPageCountChange?: (pageCount: number) => void
   onPinchZoomChange?: (zoom: number) => void
+  toolMode?: ArtifactToolMode
+  annotations?: ArtifactAnnotation[]
+  selectedAnnotationId?: string | null
+  onCreateHighlight?: (rect: NormalizedArtifactRect) => void
+  onCreateComment?: (point: NormalizedArtifactPoint) => void
+  onSelectAnnotation?: (id: string | null) => void
+  onUpdateCommentText?: (id: string, text: string) => void
   className?: string
 }
 
@@ -88,6 +101,13 @@ export function ArtifactCanvasViewport({
   onPageIndexChange,
   onPageCountChange,
   onPinchZoomChange,
+  toolMode = "select",
+  annotations = [],
+  selectedAnnotationId = null,
+  onCreateHighlight,
+  onCreateComment,
+  onSelectAnnotation,
+  onUpdateCommentText,
   className,
 }: ArtifactCanvasViewportProps) {
   const primaryFile = previewFile ?? files.find((file) => file.isPrimary) ?? files[0]
@@ -386,6 +406,13 @@ export function ArtifactCanvasViewport({
               onRenderStatusChange={handlePdfCaptureStatusChange}
               onTextExtractionStatusChange={handlePdfTextExtractionStatusChange}
               onPinchZoomChange={onPinchZoomChange}
+              toolMode={toolMode}
+              annotations={annotations}
+              selectedAnnotationId={selectedAnnotationId}
+              onCreateHighlight={onCreateHighlight}
+              onCreateComment={onCreateComment}
+              onSelectAnnotation={onSelectAnnotation}
+              onUpdateCommentText={onUpdateCommentText}
             />
           ) : (
             <ArtifactMetadataPage

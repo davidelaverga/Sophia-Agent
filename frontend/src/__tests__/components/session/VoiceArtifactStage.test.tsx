@@ -100,6 +100,7 @@ describe("VoiceArtifactStage", () => {
     const voiceStage = screen.getByTestId("voice-artifact-stage")
     const artifactRegion = within(voiceStage).getByRole("region", { name: /generated artifact/i })
 
+    expect(within(voiceStage).getByTestId("artifact-review-room")).toBe(artifactRegion)
     expect(voiceStage.className).toContain("h-full")
     expect(voiceStage.className).toContain("min-h-0")
     expect(voiceStage.className).toContain("overflow-hidden")
@@ -113,6 +114,7 @@ describe("VoiceArtifactStage", () => {
     expect(within(voiceStage).getByText("Exact text available")).toBeInTheDocument()
     expect(within(voiceStage).getAllByText("Page 1 of 1")).toHaveLength(1)
     expect(within(voiceStage).getByTestId("artifact-toolbar")).toBeInTheDocument()
+    expect(within(voiceStage).queryByLabelText("Highlight")).not.toBeInTheDocument()
     expect(within(voiceStage).getByLabelText("Open Voice launch brief in new tab")).toBeInTheDocument()
     expect(within(voiceStage).getByLabelText("Download Voice launch brief")).toBeInTheDocument()
     expect(within(voiceStage).getByRole("button", { name: /stop looking/i })).toBeInTheDocument()

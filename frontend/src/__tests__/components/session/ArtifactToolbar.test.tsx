@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
 import { describe, expect, it, vi } from "vitest"
 
 import { ArtifactToolbar } from "../../../app/components/session/ArtifactToolbar"
@@ -55,5 +56,28 @@ describe("ArtifactToolbar", () => {
     expect(screen.getByLabelText("Fit page")).toBeInTheDocument()
     expect(screen.getByLabelText("Fit width")).toBeInTheDocument()
     expect(screen.getByLabelText("Reset zoom")).toBeInTheDocument()
+  })
+
+  it("renders real annotation modes and marks the active tool", async () => {
+    const user = userEvent.setup()
+    const onToolModeChange = vi.fn()
+
+    render(
+      <ArtifactToolbar
+        title="Launch PDF"
+        supportsAnnotations
+        toolMode="highlight"
+        onToolModeChange={onToolModeChange}
+      />,
+    )
+
+    expect(screen.getByLabelText("Select")).toHaveAttribute("aria-pressed", "false")
+    expect(screen.getByLabelText("Pan")).toHaveAttribute("aria-pressed", "false")
+    expect(screen.getByLabelText("Highlight")).toHaveAttribute("aria-pressed", "true")
+    expect(screen.getByLabelText("Comment")).toHaveAttribute("aria-pressed", "false")
+
+    await user.click(screen.getByLabelText("Comment"))
+
+    expect(onToolModeChange).toHaveBeenCalledWith("comment")
   })
 })

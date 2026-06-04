@@ -1,12 +1,18 @@
 "use client"
 
 import { FileText, Layers } from "lucide-react"
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject, type TouchEvent } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type RefObject, type TouchEvent } from "react"
 
 import type { ArtifactFitMode } from "../../lib/artifact-renderers"
 import { clampArtifactZoom } from "../../lib/artifact-renderers"
 import { loadPdfJs, type PdfDocumentProxy, type PdfRenderTask } from "../../lib/pdfjs-loader"
 import { cn } from "../../lib/utils"
+import type {
+  ArtifactAnnotation,
+  ArtifactToolMode,
+  NormalizedArtifactPoint,
+  NormalizedArtifactRect,
+} from "../../types/artifact-annotations"
 import type { BuilderArtifactFileV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 
 import type { ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
@@ -39,6 +45,13 @@ interface ArtifactPdfPreviewProps {
   onRenderStatusChange?: (status: ArtifactVisualCaptureStatus) => void
   onTextExtractionStatusChange?: (status: ArtifactPdfTextExtractionStatus) => void
   onPinchZoomChange?: (zoom: number) => void
+  toolMode?: ArtifactToolMode
+  annotations?: ArtifactAnnotation[]
+  selectedAnnotationId?: string | null
+  onCreateHighlight?: (rect: NormalizedArtifactRect) => void
+  onCreateComment?: (point: NormalizedArtifactPoint) => void
+  onSelectAnnotation?: (id: string | null) => void
+  onUpdateCommentText?: (id: string, text: string) => void
 }
 
 type PdfDocumentState =
@@ -64,6 +77,7 @@ const PDF_FALLBACK_BOUNDS = {
 const PDF_CANVAS_GUTTER = 48
 const PDF_PREVIEW_CHROME_HEIGHT = 96
 const MAX_PDF_TEXT_EXTRACTION_CHARS = 12_000
+const MIN_NORMALIZED_HIGHLIGHT_SIZE = 0.008
 
 export function ArtifactPdfPreview({
   artifact,
@@ -80,6 +94,13 @@ export function ArtifactPdfPreview({
   onRenderStatusChange,
   onTextExtractionStatusChange,
   onPinchZoomChange,
+  toolMode = "select",
+  annotations = [],
+  selectedAnnotationId = null,
+  onCreateHighlight,
+  onCreateComment,
+  onSelectAnnotation,
+  onUpdateCommentText,
 }: ArtifactPdfPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const pageHostRef = useRef<HTMLDivElement | null>(null)
@@ -89,6 +110,10 @@ export function ArtifactPdfPreview({
   const onRenderStatusChangeRef = useRef(onRenderStatusChange)
   const onTextExtractionStatusChangeRef = useRef(onTextExtractionStatusChange)
   const pinchStateRef = useRef<{ distance: number; zoom: number } | null>(null)
+  const [highlightDraft, setHighlightDraft] = useState<{
+    start: NormalizedArtifactPoint
+    current: NormalizedArtifactPoint
+  } | null>(null)
   const [documentState, setDocumentState] = useState<PdfDocumentState>({
     status: "idle",
     document: null,
@@ -360,6 +385,15 @@ export function ArtifactPdfPreview({
   ), [artifact.artifactTitle, file?.name])
 
   const showCanvas = documentState.status === "ready" && pageRenderState !== "failed"
+  const pageAnnotations = useMemo(() => (
+    annotations.filter((annotation) => annotation.pageIndex === pageIndex)
+  ), [annotations, pageIndex])
+  const selectedAnnotation = useMemo(() => (
+    pageAnnotations.find((annotation) => annotation.id === selectedAnnotationId) ?? null
+  ), [pageAnnotations, selectedAnnotationId])
+  const highlightDraftRect = highlightDraft
+    ? normalizedRectFromPoints(highlightDraft.start, highlightDraft.current)
+    : null
 
   const handlePanLayerTouchStart = useCallback((event: TouchEvent<HTMLDivElement>) => {
     if (event.touches.length !== 2) {
@@ -394,6 +428,77 @@ export function ArtifactPdfPreview({
       pinchStateRef.current = null
     }
   }, [])
+  const handleAnnotationLayerPointerDown = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (!showCanvas || event.button !== 0) {
+      return
+    }
+
+    if (toolMode === "pan") {
+      return
+    }
+
+    if (toolMode === "select") {
+      onSelectAnnotation?.(null)
+      return
+    }
+
+    const point = normalizedPointFromPointerEvent(event, pageSize)
+    event.preventDefault()
+    event.stopPropagation()
+
+    if (toolMode === "comment") {
+      onCreateComment?.(point)
+      return
+    }
+
+    setHighlightDraft({ start: point, current: point })
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId)
+    } catch {
+      // Pointer capture is optional; the layer still handles normal pointerup.
+    }
+  }, [onCreateComment, onSelectAnnotation, pageSize, showCanvas, toolMode])
+  const handleAnnotationLayerPointerMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (toolMode !== "highlight" || !highlightDraft) {
+      return
+    }
+
+    event.preventDefault()
+    const point = normalizedPointFromPointerEvent(event, pageSize)
+    setHighlightDraft((current) => (
+      current
+        ? { ...current, current: point }
+        : current
+    ))
+  }, [highlightDraft, pageSize, toolMode])
+  const finishHighlightDraft = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (toolMode !== "highlight" || !highlightDraft) {
+      return
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+    const rect = normalizedRectFromPoints(highlightDraft.start, normalizedPointFromPointerEvent(event, pageSize))
+    setHighlightDraft(null)
+
+    if (
+      rect.width < MIN_NORMALIZED_HIGHLIGHT_SIZE
+      || rect.height < MIN_NORMALIZED_HIGHLIGHT_SIZE
+    ) {
+      return
+    }
+
+    onCreateHighlight?.(rect)
+  }, [highlightDraft, onCreateHighlight, pageSize, toolMode])
+  const cancelHighlightDraft = useCallback(() => {
+    setHighlightDraft(null)
+  }, [])
+  const handleAnnotationSelect = useCallback((id: string) => {
+    onSelectAnnotation?.(id)
+  }, [onSelectAnnotation])
+  const handleCommentTextChange = useCallback((id: string, value: string) => {
+    onUpdateCommentText?.(id, value)
+  }, [onUpdateCommentText])
 
   return (
     <div
@@ -449,6 +554,7 @@ export function ArtifactPdfPreview({
           >
             <div
               data-testid="artifact-pdf-page-frame"
+              data-annotation-overlay-captured="false"
               className={cn(
                 "relative shrink-0 overflow-hidden rounded-sm bg-white shadow-[0_18px_50px_rgba(25,19,35,0.28)]",
                 showCanvas ? "block" : "hidden",
@@ -476,12 +582,266 @@ export function ArtifactPdfPreview({
                 aria-label={`PDF page ${pageNumber}`}
                 className="block bg-white"
               />
+              <ArtifactPdfAnnotationLayer
+                pageIndex={pageIndex}
+                toolMode={toolMode}
+                annotations={pageAnnotations}
+                selectedAnnotation={selectedAnnotation}
+                draftRect={highlightDraftRect}
+                onPointerDown={handleAnnotationLayerPointerDown}
+                onPointerMove={handleAnnotationLayerPointerMove}
+                onPointerUp={finishHighlightDraft}
+                onPointerCancel={cancelHighlightDraft}
+                onSelectAnnotation={handleAnnotationSelect}
+                onCommentTextChange={handleCommentTextChange}
+              />
             </div>
           </div>
         </div>
       </div>
     </div>
   )
+}
+
+function ArtifactPdfAnnotationLayer({
+  pageIndex,
+  toolMode,
+  annotations,
+  selectedAnnotation,
+  draftRect,
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
+  onPointerCancel,
+  onSelectAnnotation,
+  onCommentTextChange,
+}: {
+  pageIndex: number
+  toolMode: ArtifactToolMode
+  annotations: ArtifactAnnotation[]
+  selectedAnnotation: ArtifactAnnotation | null
+  draftRect: NormalizedArtifactRect | null
+  onPointerDown: (event: PointerEvent<HTMLDivElement>) => void
+  onPointerMove: (event: PointerEvent<HTMLDivElement>) => void
+  onPointerUp: (event: PointerEvent<HTMLDivElement>) => void
+  onPointerCancel: () => void
+  onSelectAnnotation: (id: string) => void
+  onCommentTextChange: (id: string, value: string) => void
+}) {
+  return (
+    <div
+      data-testid="artifact-pdf-annotation-layer"
+      data-artifact-tool-mode={toolMode}
+      data-annotation-overlay-captured="false"
+      className={cn(
+        "absolute inset-0 z-10",
+        toolMode === "pan" ? "pointer-events-none" : "pointer-events-auto",
+        toolMode === "highlight" && "cursor-crosshair",
+        toolMode === "comment" && "cursor-copy",
+        toolMode === "select" && "cursor-default",
+      )}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
+    >
+      {annotations.map((annotation) => (
+        annotation.kind === "highlight" ? (
+          <HighlightAnnotation
+            key={annotation.id}
+            annotation={annotation}
+            selected={selectedAnnotation?.id === annotation.id}
+            onSelect={onSelectAnnotation}
+          />
+        ) : (
+          <CommentAnnotation
+            key={annotation.id}
+            annotation={annotation}
+            selected={selectedAnnotation?.id === annotation.id}
+            onSelect={onSelectAnnotation}
+            onTextChange={onCommentTextChange}
+          />
+        )
+      ))}
+      {draftRect ? (
+        <div
+          data-testid="artifact-highlight-draft"
+          data-annotation-page-index={String(pageIndex)}
+          className="pointer-events-none absolute rounded-[3px] border border-[color:color-mix(in_srgb,var(--sophia-purple)_74%,#facc15)] bg-[color:color-mix(in_srgb,#facc15_32%,var(--sophia-purple)_18%)] shadow-[0_0_0_1px_color-mix(in_srgb,var(--sophia-purple)_22%,transparent)]"
+          style={rectToStyle(draftRect)}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+function HighlightAnnotation({
+  annotation,
+  selected,
+  onSelect,
+}: {
+  annotation: Extract<ArtifactAnnotation, { kind: "highlight" }>
+  selected: boolean
+  onSelect: (id: string) => void
+}) {
+  return (
+    <button
+      type="button"
+      data-testid="artifact-highlight-annotation"
+      data-annotation-id={annotation.id}
+      data-annotation-kind="highlight"
+      data-annotation-page-index={String(annotation.pageIndex)}
+      data-annotation-x={formatNormalized(annotation.rect.x)}
+      data-annotation-y={formatNormalized(annotation.rect.y)}
+      data-annotation-width={formatNormalized(annotation.rect.width)}
+      data-annotation-height={formatNormalized(annotation.rect.height)}
+      aria-label="Highlight annotation"
+      aria-pressed={selected}
+      className={cn(
+        "cosmic-focus-ring absolute rounded-[3px] border bg-[color:color-mix(in_srgb,#facc15_34%,var(--sophia-purple)_16%)] transition hover:bg-[color:color-mix(in_srgb,#facc15_40%,var(--sophia-purple)_22%)]",
+        selected
+          ? "border-[color:var(--sophia-purple)] shadow-[0_0_0_2px_color-mix(in_srgb,var(--sophia-purple)_34%,transparent),0_0_22px_color-mix(in_srgb,var(--sophia-purple)_26%,transparent)]"
+          : "border-[color:color-mix(in_srgb,var(--sophia-purple)_26%,#facc15)]",
+      )}
+      style={rectToStyle(annotation.rect)}
+      onPointerDown={(event) => {
+        event.stopPropagation()
+      }}
+      onClick={(event) => {
+        event.stopPropagation()
+        onSelect(annotation.id)
+      }}
+    />
+  )
+}
+
+function CommentAnnotation({
+  annotation,
+  selected,
+  onSelect,
+  onTextChange,
+}: {
+  annotation: Extract<ArtifactAnnotation, { kind: "comment" }>
+  selected: boolean
+  onSelect: (id: string) => void
+  onTextChange: (id: string, value: string) => void
+}) {
+  const popoverAlign = annotation.point.x > 0.72 ? "right-0" : "left-5"
+  const popoverSide = annotation.point.y > 0.72 ? "bottom-5" : "top-5"
+
+  return (
+    <div
+      data-testid="artifact-comment-annotation"
+      data-annotation-id={annotation.id}
+      data-annotation-kind="comment"
+      data-annotation-page-index={String(annotation.pageIndex)}
+      data-annotation-x={formatNormalized(annotation.point.x)}
+      data-annotation-y={formatNormalized(annotation.point.y)}
+      className="absolute"
+      style={pointToStyle(annotation.point)}
+      onPointerDown={(event) => {
+        event.stopPropagation()
+      }}
+    >
+      <button
+        type="button"
+        data-testid="artifact-comment-pin"
+        aria-label={annotation.text.trim() ? "Comment annotation" : "Empty comment annotation"}
+        aria-pressed={selected}
+        className={cn(
+          "cosmic-focus-ring flex h-6 w-6 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border text-[11px] font-semibold shadow-[0_8px_22px_rgba(25,19,35,0.22)] transition",
+          selected
+            ? "border-[color:var(--sophia-purple)] bg-[color:color-mix(in_srgb,var(--sophia-purple)_82%,white)] text-white ring-2 ring-[color:color-mix(in_srgb,var(--sophia-purple)_34%,transparent)]"
+            : "border-[color:color-mix(in_srgb,var(--sophia-purple)_46%,white)] bg-[color:color-mix(in_srgb,var(--sophia-purple)_72%,white)] text-white hover:bg-[color:var(--sophia-purple)]",
+        )}
+        onClick={(event) => {
+          event.stopPropagation()
+          onSelect(annotation.id)
+        }}
+      >
+        +
+      </button>
+      {selected ? (
+        <label
+          className={cn(
+            "absolute z-20 flex w-[220px] flex-col gap-1 rounded-lg border border-[color:color-mix(in_srgb,var(--sophia-purple)_36%,var(--cosmic-border-soft))] bg-[color:color-mix(in_srgb,var(--cosmic-panel)_96%,white)] p-2 shadow-[0_18px_44px_rgba(25,19,35,0.24)]",
+            popoverAlign,
+            popoverSide,
+          )}
+          onClick={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <span className="text-[10px] font-medium uppercase tracking-[0.12em] text-[color:var(--cosmic-text-muted)]">
+            Comment
+          </span>
+          <textarea
+            data-testid="artifact-comment-input"
+            aria-label="Comment text"
+            value={annotation.text}
+            maxLength={180}
+            rows={3}
+            className="cosmic-focus-ring min-h-[70px] resize-none rounded-md border border-[color:var(--cosmic-border-soft)] bg-white px-2 py-1.5 text-xs leading-relaxed text-[#282233] outline-none"
+            placeholder="Add a note"
+            onChange={(event: ChangeEvent<HTMLTextAreaElement>) => onTextChange(annotation.id, event.target.value)}
+          />
+        </label>
+      ) : null}
+    </div>
+  )
+}
+
+function normalizedPointFromPointerEvent(
+  event: PointerEvent<HTMLElement>,
+  fallbackSize: { width: number; height: number } | null,
+): NormalizedArtifactPoint {
+  const rect = event.currentTarget.getBoundingClientRect()
+  const width = rect.width > 0 ? rect.width : fallbackSize?.width ?? 1
+  const height = rect.height > 0 ? rect.height : fallbackSize?.height ?? 1
+  return {
+    x: clampNormalized((event.clientX - rect.left) / width),
+    y: clampNormalized((event.clientY - rect.top) / height),
+  }
+}
+
+function normalizedRectFromPoints(
+  start: NormalizedArtifactPoint,
+  end: NormalizedArtifactPoint,
+): NormalizedArtifactRect {
+  const x = Math.min(start.x, end.x)
+  const y = Math.min(start.y, end.y)
+  return {
+    x,
+    y,
+    width: Math.max(0, Math.max(start.x, end.x) - x),
+    height: Math.max(0, Math.max(start.y, end.y) - y),
+  }
+}
+
+function rectToStyle(rect: NormalizedArtifactRect) {
+  return {
+    left: `${rect.x * 100}%`,
+    top: `${rect.y * 100}%`,
+    width: `${rect.width * 100}%`,
+    height: `${rect.height * 100}%`,
+  }
+}
+
+function pointToStyle(point: NormalizedArtifactPoint) {
+  return {
+    left: `${point.x * 100}%`,
+    top: `${point.y * 100}%`,
+  }
+}
+
+function formatNormalized(value: number): string {
+  return clampNormalized(value).toFixed(4)
+}
+
+function clampNormalized(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0
+  }
+  return Math.min(1, Math.max(0, value))
 }
 
 function normalizePdfFitBounds(bounds: { width: number; height: number }): { width: number; height: number } {

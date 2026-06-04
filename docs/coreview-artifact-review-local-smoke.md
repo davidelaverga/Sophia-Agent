@@ -149,6 +149,7 @@ Invoke-WebRequest http://localhost:3000/session -UseBasicParsing
 - No broad VAD/arbiter rewrite yet.
 - Keyboard/pinch support is still basic.
 - PDF visual design is still simple.
+- Local PDF highlights/comments are DOM overlays in the visible review room. The still-frame resolver still captures the PDF canvas source in this slice, so annotation overlay capture is reported as `annotationOverlayCaptured=false`.
 - Deploy work is not done.
 
 ## Troubleshooting

@@ -238,6 +238,7 @@ describe("ArtifactStage", () => {
     renderStage()
 
     const artifactRegion = screen.getByRole("region", { name: /generated artifact/i })
+    expect(screen.getByTestId("artifact-review-room")).toBe(artifactRegion)
     expect(artifactRegion).toBeInTheDocument()
     expect(artifactRegion.className).toContain("w-full")
     expect(artifactRegion.className).toContain("min-h-0")
@@ -262,6 +263,8 @@ describe("ArtifactStage", () => {
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.docx?download=true",
     )
     expect(screen.getByText("Page 1 of 1")).toBeInTheDocument()
+    expect(screen.queryByLabelText("Select")).not.toBeInTheDocument()
+    expect(screen.queryByLabelText("Highlight")).not.toBeInTheDocument()
     expect(screen.queryByLabelText("Zoom out")).not.toBeInTheDocument()
     expect(screen.queryByLabelText("Zoom in")).not.toBeInTheDocument()
     expect(screen.queryByLabelText("Fit to view")).not.toBeInTheDocument()
@@ -286,6 +289,10 @@ describe("ArtifactStage", () => {
       data: expect.any(Uint8Array),
     }))
     expect(screen.getByText("Page 1 of 3")).toBeInTheDocument()
+    expect(screen.getByLabelText("Select")).toHaveAttribute("aria-pressed", "true")
+    expect(screen.getByLabelText("Pan")).toHaveAttribute("aria-pressed", "false")
+    expect(screen.getByLabelText("Highlight")).toHaveAttribute("aria-pressed", "false")
+    expect(screen.getByLabelText("Comment")).toHaveAttribute("aria-pressed", "false")
     expect(screen.getByText("Fit page")).toBeInTheDocument()
     expect(screen.getByLabelText("Open Launch brief overview in new tab")).toHaveAttribute(
       "href",
@@ -534,6 +541,22 @@ describe("ArtifactStage", () => {
     expect(await screen.findByText("100%")).toBeInTheDocument()
     await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-fit-mode", "custom"))
     await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-pdf-scale", "1"))
+  })
+
+  it("returns to select mode with Escape after choosing another PDF annotation tool", async () => {
+    const user = userEvent.setup()
+    mockPdfDocument({ pageCount: 2 })
+    renderStage({ artifact: pdfBuilderArtifact, exactTextAvailable: false })
+
+    expect(await screen.findByText("Page 1 of 2")).toBeInTheDocument()
+
+    await user.click(screen.getByLabelText("Highlight"))
+    expect(screen.getByLabelText("Highlight")).toHaveAttribute("aria-pressed", "true")
+
+    fireEvent.keyDown(screen.getByTestId("artifact-review-room"), { key: "Escape" })
+
+    expect(screen.getByLabelText("Select")).toHaveAttribute("aria-pressed", "true")
+    expect(screen.getByLabelText("Highlight")).toHaveAttribute("aria-pressed", "false")
   })
 
   it("supports scoped PDF keyboard shortcuts without firing inside inputs", async () => {

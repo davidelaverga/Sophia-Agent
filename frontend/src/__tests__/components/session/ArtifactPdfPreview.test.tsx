@@ -1,9 +1,15 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
-import type { ComponentProps } from "react"
+import { useState, type ComponentProps } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { ArtifactPdfPreview } from "../../../app/components/session/ArtifactPdfPreview"
 import { loadPdfJs } from "../../../app/lib/pdfjs-loader"
+import type {
+  ArtifactAnnotation,
+  ArtifactToolMode,
+  NormalizedArtifactPoint,
+  NormalizedArtifactRect,
+} from "../../../app/types/artifact-annotations"
 import type { BuilderArtifactV1 } from "../../../app/types/builder-artifact"
 
 vi.mock("../../../app/lib/pdfjs-loader", () => ({
@@ -148,6 +154,83 @@ function renderPreview(
       view.rerender(<ArtifactPdfPreview {...props} {...nextOverrides} />)
     },
   }
+}
+
+function renderAnnotationPreview({
+  initialToolMode = "select",
+  initialAnnotations = [],
+  pageIndex = 0,
+  zoom = 1,
+}: {
+  initialToolMode?: ArtifactToolMode
+  initialAnnotations?: ArtifactAnnotation[]
+  pageIndex?: number
+  zoom?: number
+} = {}) {
+  function AnnotationHarness() {
+    const [toolMode, setToolMode] = useState<ArtifactToolMode>(initialToolMode)
+    const [annotations, setAnnotations] = useState<ArtifactAnnotation[]>(initialAnnotations)
+    const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null)
+
+    return (
+      <ArtifactPdfPreview
+        artifact={pdfArtifact}
+        file={pdfFile}
+        href="/artifact.pdf"
+        artifactId="artifact-1"
+        typeLabel="PDF"
+        pageIndex={pageIndex}
+        zoom={zoom}
+        fitMode="custom"
+        fitBounds={{ width: 900, height: 800 }}
+        toolMode={toolMode}
+        annotations={annotations}
+        selectedAnnotationId={selectedAnnotationId}
+        onCreateHighlight={(rect: NormalizedArtifactRect) => {
+          const id = `highlight-${annotations.length + 1}`
+          setAnnotations((current) => [
+            ...current,
+            { id, kind: "highlight", pageIndex, rect, createdAt: 1 },
+          ])
+          setSelectedAnnotationId(id)
+          setToolMode("select")
+        }}
+        onCreateComment={(point: NormalizedArtifactPoint) => {
+          const id = `comment-${annotations.length + 1}`
+          setAnnotations((current) => [
+            ...current,
+            { id, kind: "comment", pageIndex, point, text: "", createdAt: 1 },
+          ])
+          setSelectedAnnotationId(id)
+          setToolMode("select")
+        }}
+        onSelectAnnotation={setSelectedAnnotationId}
+        onUpdateCommentText={(id, text) => {
+          setAnnotations((current) => current.map((annotation) => (
+            annotation.id === id && annotation.kind === "comment"
+              ? { ...annotation, text }
+              : annotation
+          )))
+        }}
+      />
+    )
+  }
+
+  return render(<AnnotationHarness />)
+}
+
+function mockAnnotationLayerBounds(layer: HTMLElement, width = 600, height = 800) {
+  vi.spyOn(layer, "getBoundingClientRect").mockReturnValue({
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: width,
+    bottom: height,
+    width,
+    height,
+    toJSON: () => ({}),
+  } as DOMRect)
 }
 
 beforeEach(() => {
@@ -400,5 +483,155 @@ describe("ArtifactPdfPreview", () => {
       zoom: 1.4,
     })
     await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-pdf-scale", "1.4"))
+  })
+
+  it("creates a page-scoped normalized highlight by dragging on the PDF page", async () => {
+    mockPdfDocument({ pageCount: 2 })
+    renderAnnotationPreview({ initialToolMode: "highlight" })
+
+    expect(await screen.findByLabelText("PDF page 1")).toBeInTheDocument()
+    const layer = screen.getByTestId("artifact-pdf-annotation-layer")
+    mockAnnotationLayerBounds(layer)
+
+    fireEvent.pointerDown(layer, { button: 0, clientX: 60, clientY: 80, pointerId: 1 })
+    fireEvent.pointerMove(layer, { button: 0, clientX: 240, clientY: 320, pointerId: 1 })
+    expect(screen.getByTestId("artifact-highlight-draft")).toBeInTheDocument()
+    fireEvent.pointerUp(layer, { button: 0, clientX: 240, clientY: 320, pointerId: 1 })
+
+    const highlight = await screen.findByTestId("artifact-highlight-annotation")
+    expect(highlight).toHaveAttribute("data-annotation-page-index", "0")
+    expect(highlight).toHaveAttribute("data-annotation-x", "0.1000")
+    expect(highlight).toHaveAttribute("data-annotation-y", "0.1000")
+    expect(highlight).toHaveAttribute("data-annotation-width", "0.3000")
+    expect(highlight).toHaveAttribute("data-annotation-height", "0.3000")
+    expect(highlight).toHaveAttribute("aria-pressed", "true")
+    expect(layer).toHaveAttribute("data-artifact-tool-mode", "select")
+  })
+
+  it("keeps highlight coordinates stable after a zoom rerender", async () => {
+    mockPdfDocument({ pageCount: 2 })
+    const annotation = {
+      id: "highlight-1",
+      kind: "highlight",
+      pageIndex: 0,
+      rect: { x: 0.1, y: 0.2, width: 0.35, height: 0.18 },
+      createdAt: 1,
+    } satisfies ArtifactAnnotation
+
+    const { rerenderPreview } = renderPreview({
+      annotations: [annotation],
+      selectedAnnotationId: "highlight-1",
+    })
+
+    const highlight = await screen.findByTestId("artifact-highlight-annotation")
+    expect(highlight).toHaveStyle({
+      left: "10%",
+      top: "20%",
+      width: "35%",
+      height: "18%",
+    })
+
+    rerenderPreview({
+      annotations: [annotation],
+      selectedAnnotationId: "highlight-1",
+      zoom: 1.8,
+    })
+
+    await waitFor(() => expect(screen.getByLabelText("PDF page 1")).toHaveAttribute("data-artifact-pdf-scale", "1.8"))
+    expect(screen.getByTestId("artifact-highlight-annotation")).toHaveStyle({
+      left: "10%",
+      top: "20%",
+      width: "35%",
+      height: "18%",
+    })
+  })
+
+  it("creates a page-scoped comment pin with editable local text", async () => {
+    mockPdfDocument({ pageCount: 2 })
+    renderAnnotationPreview({ initialToolMode: "comment" })
+
+    expect(await screen.findByLabelText("PDF page 1")).toBeInTheDocument()
+    const layer = screen.getByTestId("artifact-pdf-annotation-layer")
+    mockAnnotationLayerBounds(layer)
+
+    await act(async () => {
+      fireEvent.pointerDown(layer, { button: 0, clientX: 300, clientY: 200, pointerId: 1 })
+    })
+
+    const pin = await screen.findByTestId("artifact-comment-pin")
+    expect(pin).toHaveAttribute("aria-pressed", "true")
+    const comment = screen.getByTestId("artifact-comment-annotation")
+    expect(comment).toHaveAttribute("data-annotation-page-index", "0")
+    expect(comment).toHaveAttribute("data-annotation-x", "0.5000")
+    expect(comment).toHaveAttribute("data-annotation-y", "0.2500")
+
+    const input = screen.getByLabelText("Comment text")
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "Tighten this paragraph." } })
+    })
+    expect(screen.getByDisplayValue("Tighten this paragraph.")).toBeInTheDocument()
+  })
+
+  it("selects annotations only in select mode and keeps pan mode non-intercepting", async () => {
+    const annotation = {
+      id: "highlight-1",
+      kind: "highlight",
+      pageIndex: 0,
+      rect: { x: 0.15, y: 0.2, width: 0.3, height: 0.2 },
+      createdAt: 1,
+    } satisfies ArtifactAnnotation
+    const onSelectAnnotation = vi.fn()
+    mockPdfDocument({ pageCount: 2 })
+    const { rerenderPreview } = renderPreview({
+      annotations: [annotation],
+      toolMode: "select",
+      onSelectAnnotation,
+    })
+
+    const highlight = await screen.findByTestId("artifact-highlight-annotation")
+    fireEvent.click(highlight)
+    expect(onSelectAnnotation).toHaveBeenCalledWith("highlight-1")
+
+    rerenderPreview({
+      annotations: [annotation],
+      selectedAnnotationId: "highlight-1",
+      toolMode: "pan",
+      onSelectAnnotation,
+      zoom: 1.6,
+    })
+
+    expect(screen.getByTestId("artifact-pdf-annotation-layer").className).toContain("pointer-events-none")
+    expect(screen.getByTestId("artifact-pdf-pan-layer").className).toContain("overflow-auto")
+    await waitFor(() => expect(screen.getByLabelText("PDF page 1")).toHaveAttribute("data-artifact-pdf-scale", "1.6"))
+  })
+
+  it("shows only annotations for the active PDF page", async () => {
+    mockPdfDocument({ pageCount: 2 })
+    const annotations: ArtifactAnnotation[] = [
+      {
+        id: "highlight-page-1",
+        kind: "highlight",
+        pageIndex: 0,
+        rect: { x: 0.1, y: 0.1, width: 0.2, height: 0.2 },
+        createdAt: 1,
+      },
+      {
+        id: "comment-page-2",
+        kind: "comment",
+        pageIndex: 1,
+        point: { x: 0.5, y: 0.5 },
+        text: "Second page note",
+        createdAt: 1,
+      },
+    ]
+
+    const { rerenderPreview } = renderPreview({ annotations, pageIndex: 0 })
+    expect(await screen.findByTestId("artifact-highlight-annotation")).toHaveAttribute("data-annotation-id", "highlight-page-1")
+    expect(screen.queryByTestId("artifact-comment-pin")).not.toBeInTheDocument()
+
+    rerenderPreview({ annotations, pageIndex: 1 })
+    await waitFor(() => expect(screen.getByLabelText("PDF page 2")).toHaveAttribute("data-artifact-page-index", "1"))
+    expect(screen.queryByTestId("artifact-highlight-annotation")).not.toBeInTheDocument()
+    expect(screen.getByTestId("artifact-comment-pin")).toBeInTheDocument()
   })
 })

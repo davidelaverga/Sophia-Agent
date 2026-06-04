@@ -1,7 +1,7 @@
 "use client"
 
 import { RefreshCw } from "lucide-react"
-import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 
 import {
   artifactRendererSupportsPagination,
@@ -28,6 +28,12 @@ import type {
 } from "../../lib/co-review-transport"
 import { recordSophiaCaptureEvent } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
+import type {
+  ArtifactAnnotation,
+  ArtifactToolMode,
+  NormalizedArtifactPoint,
+  NormalizedArtifactRect,
+} from "../../types/artifact-annotations"
 import type {
   BuilderArtifactLibraryItemV1,
   BuilderArtifactV1,
@@ -138,6 +144,10 @@ export function ArtifactStage({
   const [pageCount, setPageCount] = useState(1)
   const [zoom, setZoom] = useState(1)
   const [fitMode, setFitMode] = useState<ArtifactFitMode>(rendererKind === "pdf" ? "page" : "custom")
+  const [toolMode, setToolMode] = useState<ArtifactToolMode>("select")
+  const [annotations, setAnnotations] = useState<ArtifactAnnotation[]>([])
+  const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null)
+  const annotationTelemetrySignatureRef = useRef<string | null>(null)
   const viewportPrimaryFile = primaryFile
     ? {
         path: primaryFile.path,
@@ -162,7 +172,27 @@ export function ArtifactStage({
     setPageCount(1)
     setZoom(1)
     setFitMode(rendererKind === "pdf" ? "page" : "custom")
-  }, [rendererKind, rendererResetKey])
+    setToolMode("select")
+    setAnnotations([])
+    setSelectedAnnotationId(null)
+  }, [artifactId, rendererKind, rendererResetKey])
+
+  useEffect(() => {
+    if (rendererKind !== "pdf" && toolMode !== "select") {
+      setToolMode("select")
+    }
+  }, [rendererKind, toolMode])
+
+  useEffect(() => {
+    if (!selectedAnnotationId) {
+      return
+    }
+
+    const selected = annotations.find((annotation) => annotation.id === selectedAnnotationId)
+    if (selected?.pageIndex !== pageIndex) {
+      setSelectedAnnotationId(null)
+    }
+  }, [annotations, pageIndex, selectedAnnotationId])
 
   const handlePageCountChange = useCallback((nextPageCount: number) => {
     const normalizedPageCount = Math.max(1, Math.floor(nextPageCount))
@@ -198,6 +228,86 @@ export function ArtifactStage({
     setFitMode("custom")
     setZoom(1)
   }, [])
+  const handleToolModeChange = useCallback((mode: ArtifactToolMode) => {
+    if (rendererKind !== "pdf") {
+      return
+    }
+    setToolMode(mode)
+    if (mode === "pan") {
+      setSelectedAnnotationId(null)
+    }
+  }, [rendererKind])
+  const handleCreateHighlight = useCallback((rect: NormalizedArtifactRect) => {
+    if (rendererKind !== "pdf") {
+      return
+    }
+
+    const id = nextArtifactAnnotationId("highlight")
+    setAnnotations((current) => [
+      ...current,
+      {
+        id,
+        kind: "highlight",
+        pageIndex,
+        rect,
+        createdAt: Date.now(),
+      },
+    ])
+    setSelectedAnnotationId(id)
+    setToolMode("select")
+  }, [pageIndex, rendererKind])
+  const handleCreateComment = useCallback((point: NormalizedArtifactPoint) => {
+    if (rendererKind !== "pdf") {
+      return
+    }
+
+    const id = nextArtifactAnnotationId("comment")
+    setAnnotations((current) => [
+      ...current,
+      {
+        id,
+        kind: "comment",
+        pageIndex,
+        point,
+        text: "",
+        createdAt: Date.now(),
+      },
+    ])
+    setSelectedAnnotationId(id)
+    setToolMode("select")
+  }, [pageIndex, rendererKind])
+  const handleSelectAnnotation = useCallback((id: string | null) => {
+    setSelectedAnnotationId(id)
+    if (id) {
+      setToolMode("select")
+    }
+  }, [])
+  const handleUpdateCommentText = useCallback((id: string, text: string) => {
+    setAnnotations((current) => current.map((annotation) => (
+      annotation.id === id && annotation.kind === "comment"
+        ? { ...annotation, text: text.slice(0, 180) }
+        : annotation
+    )))
+  }, [])
+  const annotationCounts = useMemo(() => {
+    let highlightCount = 0
+    let commentCount = 0
+    for (const annotation of annotations) {
+      if (annotation.kind === "highlight") {
+        highlightCount += 1
+      } else {
+        commentCount += 1
+      }
+    }
+    return {
+      annotationCount: annotations.length,
+      highlightCount,
+      commentCount,
+    }
+  }, [annotations])
+  const selectedAnnotationKind = useMemo(() => (
+    annotations.find((annotation) => annotation.id === selectedAnnotationId)?.kind ?? null
+  ), [annotations, selectedAnnotationId])
   const recordArtifactControlTelemetry = useCallback((
     name: "artifact-keyboard-shortcut" | "artifact-pinch-zoom",
     details: Record<string, string | number | boolean | null>,
@@ -213,13 +323,15 @@ export function ArtifactStage({
         artifactPageCount: pageCount,
         artifactZoom: zoom,
         artifactFitMode: fitMode,
+        artifactToolMode: toolMode,
+        annotationOverlayCaptured: rendererKind === "pdf" ? false : null,
         reviewStale,
         rawArtifactTextExcluded: true,
         rawFrameExcluded: true,
         ...details,
       },
     })
-  }, [artifactId, fitMode, pageCount, pageIndex, primaryFile?.path, rendererKind, reviewStale, zoom])
+  }, [artifactId, fitMode, pageCount, pageIndex, primaryFile?.path, rendererKind, reviewStale, toolMode, zoom])
   const applyVoiceCommand = useCallback((command: ArtifactReviewVoiceCommand): ArtifactReviewVoiceCommandApplyResult => {
     const normalizedPageCount = Math.max(1, Math.floor(pageCount))
     const currentPageIndex = Math.min(Math.max(0, pageIndex), normalizedPageCount - 1)
@@ -380,6 +492,15 @@ export function ArtifactStage({
     })
   }, [fitMode, recordArtifactControlTelemetry, supportsZoom, zoom])
   const handleStageKeyDown = useCallback((event: KeyboardEvent<HTMLElement>) => {
+    if (event.key === "Escape") {
+      if (toolMode !== "select" || selectedAnnotationId) {
+        event.preventDefault()
+        setToolMode("select")
+        setSelectedAnnotationId(null)
+      }
+      return
+    }
+
     if (isArtifactShortcutTypingTarget(event.target)) {
       return
     }
@@ -418,6 +539,8 @@ export function ArtifactStage({
     canRefreshReview,
     onRefreshReview,
     recordArtifactControlTelemetry,
+    selectedAnnotationId,
+    toolMode,
   ])
   const artifactViewState = useMemo<ArtifactViewState>(() => ({
     artifactId: artifactId ?? null,
@@ -463,6 +586,53 @@ export function ArtifactStage({
     return () => onVoiceCommandTargetChange?.(null)
   }, [onVoiceCommandTargetChange, voiceCommandTarget])
 
+  useEffect(() => {
+    if (rendererKind !== "pdf") {
+      return
+    }
+
+    const signature = [
+      artifactId ?? "",
+      primaryFile?.path ?? "",
+      toolMode,
+      pageIndex,
+      annotationCounts.annotationCount,
+      annotationCounts.highlightCount,
+      annotationCounts.commentCount,
+      selectedAnnotationKind ?? "",
+    ].join("|")
+
+    if (annotationTelemetrySignatureRef.current === signature) {
+      return
+    }
+    annotationTelemetrySignatureRef.current = signature
+
+    recordSophiaCaptureEvent({
+      category: "artifacts-runtime",
+      name: "artifact-annotation-state",
+      payload: {
+        artifactId: artifactId ?? null,
+        artifactPath: primaryFile?.path ?? null,
+        artifactRendererKind: rendererKind,
+        artifactToolMode: toolMode,
+        annotationPageIndex: pageIndex,
+        annotationOverlayCaptured: false,
+        selectedAnnotationKind,
+        ...annotationCounts,
+        rawArtifactTextExcluded: true,
+        rawFrameExcluded: true,
+      },
+    })
+  }, [
+    annotationCounts,
+    artifactId,
+    pageIndex,
+    primaryFile?.path,
+    rendererKind,
+    selectedAnnotationKind,
+    toolMode,
+  ])
+
   const showReviewStatus = showReviewStatusOverride ?? Boolean(reviewEnabled || exactTextAvailable || visualCaptureStatus)
   const frameConfirmed = hasConfirmedStillFrame(reviewState, transportStatus)
   const reviewSurfaceState = frameConfirmed
@@ -475,6 +645,7 @@ export function ArtifactStage({
 
   return (
     <section
+      data-testid="artifact-review-room"
       data-review-state={reviewSurfaceState}
       data-artifact-renderer-kind={rendererKind}
       data-artifact-view-signature={artifactViewSignature ?? undefined}
@@ -518,6 +689,9 @@ export function ArtifactStage({
         onFitPage={handleFitPage}
         onFitWidth={handleFitWidth}
         onResetZoom={handleResetZoom}
+        supportsAnnotations={rendererKind === "pdf"}
+        toolMode={toolMode}
+        onToolModeChange={handleToolModeChange}
         openHref={openHref}
         downloadHref={downloadHref}
         downloadName={primaryFile?.name}
@@ -563,6 +737,13 @@ export function ArtifactStage({
         onPageIndexChange={handlePageIndexChange}
         onPageCountChange={handlePageCountChange}
         onPinchZoomChange={handlePinchZoomChange}
+        toolMode={toolMode}
+        annotations={annotations}
+        selectedAnnotationId={selectedAnnotationId}
+        onCreateHighlight={handleCreateHighlight}
+        onCreateComment={handleCreateComment}
+        onSelectAnnotation={handleSelectAnnotation}
+        onUpdateCommentText={handleUpdateCommentText}
         className={fillAvailable ? "min-h-0 flex-1" : undefined}
       />
 
@@ -615,6 +796,10 @@ export function ArtifactStage({
       ) : null}
     </section>
   )
+}
+
+function nextArtifactAnnotationId(kind: ArtifactAnnotation["kind"]): string {
+  return `${kind}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
 
 function artifactCommandFromKeyboardEvent(
