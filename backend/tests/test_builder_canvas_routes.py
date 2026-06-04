@@ -93,8 +93,17 @@ async def _single_running_builder_task(_parent: str):
     return [{"agent_name": "sophia_builder", "task_id": "task-1", "run_id": "run-1", "status": "running"}]
 
 
-def _client_factory(runs):
-    return lambda url: SimpleNamespace(runs=runs)
+class _FakeThreads:
+    def __init__(self, updates: list[tuple[str, dict]]) -> None:
+        self.updates = updates
+
+    async def update_state(self, thread_id: str, values: dict):
+        self.updates.append((thread_id, values))
+        return {"checkpoint": {"thread_id": thread_id}}
+
+
+def _client_factory(runs, updates: list[tuple[str, dict]] | None = None):
+    return lambda url: SimpleNamespace(runs=runs, threads=_FakeThreads(updates if updates is not None else []))
 
 
 async def _post_cancel(app: FastAPI):
@@ -644,17 +653,30 @@ async def test_snapshot_uses_authenticated_user_for_thread_ownership(
 @pytest.mark.anyio
 async def test_cancel_validates_native_task_and_publishes_terminal(app: FastAPI, monkeypatch) -> None:
     cancelled: list[tuple[str, str, str]] = []
+    state_updates: list[tuple[str, dict]] = []
 
     monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", _single_running_builder_task)
     monkeypatch.setattr(
         builder_canvas,
         "get_client",
-        _client_factory(_RunningThenInterruptedRuns(cancelled)),
+        _client_factory(_RunningThenInterruptedRuns(cancelled), state_updates),
     )
     response = await _post_cancel(app)
 
     assert response.status_code == 200
     assert cancelled == [("task-1", "run-1", "interrupt")]
+    assert len(state_updates) == 1
+    assert state_updates[0][0] == "parent-1"
+    persisted_task = state_updates[0][1]["async_tasks"]["task-1"]
+    assert persisted_task["agent_name"] == "sophia_builder"
+    assert persisted_task["task_id"] == "task-1"
+    assert persisted_task["run_id"] == "run-1"
+    assert persisted_task["status"] == "cancelled"
+    assert persisted_task["error_message"] == "Builder was cancelled by the user."
+    assert persisted_task["completed_at"]
+    assert persisted_task["last_checked_at"] == persisted_task["completed_at"]
+    assert persisted_task["last_updated_at"] == persisted_task["completed_at"]
+    assert persisted_task["updated_at"] == persisted_task["completed_at"]
     events = await app.state._builder_canvas_worker.recent_events("parent-1")
     assert events[-1]["status"] == "cancelled"
 
@@ -674,6 +696,7 @@ async def test_cancel_does_not_publish_cancel_when_native_status_is_success(
     expected_cancelled,
 ) -> None:
     cancelled: list[tuple[str, str, str]] = []
+    state_updates: list[tuple[str, dict]] = []
 
     worker = app.state._builder_canvas_worker
     await _publish_finalizing_progress(app)
@@ -681,7 +704,7 @@ async def test_cancel_does_not_publish_cancel_when_native_status_is_success(
     monkeypatch.setattr(
         builder_canvas,
         "get_client",
-        _client_factory(runs_factory(cancelled)),
+        _client_factory(runs_factory(cancelled), state_updates),
     )
 
     response = await _post_cancel(app)
@@ -689,6 +712,7 @@ async def test_cancel_does_not_publish_cancel_when_native_status_is_success(
     assert response.status_code == 200
     assert response.json()["status"] == "completed"
     assert cancelled == expected_cancelled
+    assert state_updates == []
     events = await worker.recent_events("parent-1")
     assert len(events) == 1
     assert events[0]["kind"] == "progress"
@@ -701,13 +725,14 @@ async def test_cancel_publishes_cancel_when_status_reread_fails_after_successful
     monkeypatch,
 ) -> None:
     cancelled: list[tuple[str, str, str]] = []
+    state_updates: list[tuple[str, dict]] = []
 
     await _publish_finalizing_progress(app)
     monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", _single_running_builder_task)
     monkeypatch.setattr(
         builder_canvas,
         "get_client",
-        _client_factory(_RunningThenReadFailureRuns(cancelled)),
+        _client_factory(_RunningThenReadFailureRuns(cancelled), state_updates),
     )
 
     response = await _post_cancel(app)
@@ -715,6 +740,8 @@ async def test_cancel_publishes_cancel_when_status_reread_fails_after_successful
     assert response.status_code == 200
     assert response.json()["status"] == "cancelled"
     assert cancelled == [("task-1", "run-1", "interrupt")]
+    assert state_updates[0][0] == "parent-1"
+    assert state_updates[0][1]["async_tasks"]["task-1"]["status"] == "cancelled"
     events = await app.state._builder_canvas_worker.recent_events("parent-1")
     assert events[-1]["kind"] == "terminal"
     assert events[-1]["status"] == "cancelled"
@@ -729,12 +756,13 @@ async def test_cancel_resolves_latest_native_run_when_run_id_is_absent(app: Fast
         ]
 
     cancelled: list[tuple[str, str, str]] = []
+    state_updates: list[tuple[str, dict]] = []
 
     monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", tasks)
     monkeypatch.setattr(
         builder_canvas,
         "get_client",
-        _client_factory(_RunningThenInterruptedRuns(cancelled)),
+        _client_factory(_RunningThenInterruptedRuns(cancelled), state_updates),
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
@@ -744,3 +772,5 @@ async def test_cancel_resolves_latest_native_run_when_run_id_is_absent(app: Fast
     assert response.status_code == 200
     assert response.json()["run_id"] == "run-new"
     assert cancelled == [("task-1", "run-new", "interrupt")]
+    assert state_updates[0][1]["async_tasks"]["task-1"]["run_id"] == "run-new"
+    assert state_updates[0][1]["async_tasks"]["task-1"]["status"] == "cancelled"

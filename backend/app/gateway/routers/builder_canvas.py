@@ -573,6 +573,63 @@ def _cancel_detail_for_status(status: str) -> str:
     }.get(status, "Builder was cancelled before finishing the deliverable.")
 
 
+def _cancelled_async_task_payload(
+    task: dict[str, Any] | None,
+    *,
+    task_id: str,
+    run_id: str,
+    completed_at: str,
+) -> dict[str, Any]:
+    payload = dict(task or {})
+    payload.update(
+        {
+            "task_id": task_id,
+            "run_id": run_id,
+            "agent_name": payload.get("agent_name") or "sophia_builder",
+            "status": "cancelled",
+            "error_message": payload.get("error_message") or "Builder was cancelled by the user.",
+            "completed_at": completed_at,
+            "last_checked_at": completed_at,
+            "last_updated_at": completed_at,
+            "updated_at": completed_at,
+        }
+    )
+    return payload
+
+
+async def _persist_cancelled_builder_task(
+    client: Any,
+    *,
+    parent_thread_id: str,
+    task_id: str,
+    run_id: str,
+    task: dict[str, Any] | None,
+    completed_at: str,
+) -> None:
+    try:
+        await client.threads.update_state(
+            parent_thread_id,
+            {
+                "async_tasks": {
+                    task_id: _cancelled_async_task_payload(
+                        task,
+                        task_id=task_id,
+                        run_id=run_id,
+                        completed_at=completed_at,
+                    )
+                }
+            },
+        )
+    except Exception as exc:
+        logger.exception(
+            "Builder canvas cancel failed to persist parent async task: parent_thread_id=%s task_id=%s run_id=%s",
+            _short_id(parent_thread_id),
+            _short_id(task_id),
+            _short_id(run_id),
+        )
+        raise HTTPException(status_code=503, detail="Builder cancellation state could not be persisted") from exc
+
+
 def _format_sse(payload: dict[str, Any]) -> bytes:
     event_id = str(payload.get("event_id") or "")
     return f"id: {event_id}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
@@ -584,6 +641,7 @@ async def _cancel_builder_run(
     run_id: str,
     request: Request,
     fallback_status: str | None = None,
+    task: dict[str, Any] | None = None,
 ) -> BuilderCanvasCancelResponse:
     client = get_client(url=_langgraph_url())
     current_status = await _native_run_status_for_client(client, task_id, run_id, fallback_status)
@@ -606,6 +664,15 @@ async def _cancel_builder_run(
             status=final_status,
             detail=_cancel_detail_for_status(final_status),
         )
+    completed_at = datetime.now(UTC).isoformat()
+    await _persist_cancelled_builder_task(
+        client,
+        parent_thread_id=parent_thread_id,
+        task_id=task_id,
+        run_id=run_id,
+        task=task,
+        completed_at=completed_at,
+    )
     worker = get_builder_canvas_worker(request.app)
     await worker.publish_completion(
         {
@@ -613,7 +680,7 @@ async def _cancel_builder_run(
             "task_id": task_id,
             "run_id": run_id,
             "status": "cancelled",
-            "completed_at": datetime.now(UTC).isoformat(),
+            "completed_at": completed_at,
         }
     )
     return BuilderCanvasCancelResponse(
@@ -806,7 +873,7 @@ async def cancel_builder_canvas_task(
     _require_thread_owner(authenticated_user_id, parent_thread_id)
     task = await _authorized_task(parent_thread_id, task_id, run_id)
     fallback_status = task.get("status") if isinstance(task.get("status"), str) else None
-    return await _cancel_builder_run(parent_thread_id, task_id, run_id, request, fallback_status)
+    return await _cancel_builder_run(parent_thread_id, task_id, run_id, request, fallback_status, task)
 
 
 @router.post(
@@ -823,4 +890,4 @@ async def cancel_latest_builder_canvas_task_run(
     _require_thread_owner(authenticated_user_id, parent_thread_id)
     task, run_id = await _authorized_latest_task(parent_thread_id, task_id)
     fallback_status = task.get("status") if isinstance(task.get("status"), str) else None
-    return await _cancel_builder_run(parent_thread_id, task_id, run_id, request, fallback_status)
+    return await _cancel_builder_run(parent_thread_id, task_id, run_id, request, fallback_status, task)
