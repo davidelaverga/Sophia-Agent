@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  clearCoreviewToolBridgeForTests,
+  registerCoreviewToolBridge,
+} from '../app/lib/coreview-actions';
+import {
   clearCoreviewArtifactTextRegistryForTests,
   registerCoreviewArtifactText,
 } from '../app/lib/coreview-artifact-text';
@@ -172,6 +176,7 @@ function makeGeminiBrowserSessionFetch(sessionId = 'browser-gemini-1') {
 describe('Gemini browser Live WebSocket dogfood connector', () => {
   afterEach(() => {
     clearCoreviewArtifactTextRegistryForTests();
+    clearCoreviewToolBridgeForTests();
   });
 
   it('builds the constrained Live WebSocket URL with only the ephemeral token', () => {
@@ -752,8 +757,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       responseId: 'gemini-old-response',
       serverContent: { responseId: 'gemini-old-response', outputTranscription: { text: 'Done and ready. Old tail.' } },
     });
-    await Promise.resolve();
-    expect(staleSuppressionDiagnostics).toEqual([
+    await vi.waitFor(() => expect(staleSuppressionDiagnostics).toEqual([
       expect.objectContaining({
         outputType: 'transcript',
         reason: 'interrupted_response_id',
@@ -762,7 +766,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         bargeInConfirmationSource: 'provider_interruption',
         staleSuppressionArmedBy: 'provider_interruption',
       }),
-    ]);
+    ]));
     expect(fetchMock).toHaveBeenCalledTimes(fetchCallsAfterInterruption);
 
     expect(connection.flushOutputAudio()).toEqual({ nextPlaybackTime: 0, activeSourceCount: 0, playbackGeneration: 2 });
@@ -2002,6 +2006,122 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     );
   });
 
+  it('handles Coreview tool calls in the browser and sends a direct Gemini toolResponse', async () => {
+    registerCoreviewToolBridge(async (call) => ({
+      ok: true,
+      action: 'set_view',
+      artifact_id: 'coreview-real-artifact-report-pdf',
+      artifact_path: 'outputs/report.pdf',
+      artifact_title: 'report.pdf',
+      renderer_kind: 'pdf',
+      page_index: Number(call.args.page_number) - 1,
+      page_number: Number(call.args.page_number),
+      page_count: 3,
+      zoom: 1,
+      fit_mode: 'page',
+      view_signature: 'view-signature-after',
+      stale: false,
+      refresh_attempted: true,
+      refresh_result: 'success',
+      blocked_reason: null,
+      result_summary: 'Switched to page 2 of 3. Refresh succeeded.',
+      command_source: 'gemini_tool',
+      preserved_mic: true,
+      preserved_review: true,
+      view_ready_wait_ms: 25,
+      view_signature_before: 'view-signature-before',
+      view_signature_after: 'view-signature-after',
+      exact_text_available: true,
+      visual_frame_fresh: true,
+      review_active: true,
+      annotation_overlay_captured: false,
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
+    }));
+    const fetchMock = makeGeminiBrowserSessionFetch('browser-gemini-coreview-tool');
+    const stoppedTrack = vi.fn();
+    const localStream = {
+      getTracks: () => [{ stop: stoppedTrack }],
+    } as unknown as MediaStream;
+    const fakeAudioContext = new FakeAudioContext();
+    const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      sessionId: 'browser-gemini-coreview-tool',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => localStream),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+      onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
+    });
+
+    expect(readGeminiConfiguredToolNames(connection.setup)).toEqual(expect.arrayContaining([
+      'emit_artifact',
+      'coreview_set_view',
+      'coreview_refresh_view',
+      'coreview_get_current_view',
+    ]));
+    const fetchCallCountBeforeTool = fetchMock.mock.calls.length;
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          {
+            id: 'coreview-call-1',
+            name: 'coreview_set_view',
+            args: {
+              page_number: 2,
+              reason: 'user asked for page two',
+            },
+          },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(websocket?.sent.some((payload) => {
+        const parsed = JSON.parse(payload) as Record<string, unknown>;
+        return Boolean(parsed.toolResponse);
+      })).toBe(true);
+    });
+    const toolResponsePayload = websocket?.sent
+      .map((payload) => JSON.parse(payload) as Record<string, unknown>)
+      .find((payload) => payload.toolResponse) as {
+        toolResponse: {
+          functionResponses: Array<{ id: string; name: string; response: Record<string, unknown> }>;
+        };
+      };
+
+    expect(toolResponsePayload.toolResponse.functionResponses[0]).toMatchObject({
+      id: 'coreview-call-1',
+      name: 'coreview_set_view',
+      response: {
+        ok: true,
+        page_number: 2,
+        refresh_attempted: true,
+        refresh_result: 'success',
+        raw_artifact_text_excluded: true,
+        raw_frame_excluded: true,
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(fetchCallCountBeforeTool);
+    await vi.waitFor(() => expect(toolDiagnostics.some((diagnostic) => (
+      diagnostic.phase === 'tool_response_sent'
+      && diagnostic.toolCall.name === 'coreview_set_view'
+      && diagnostic.backendResponse?.raw_artifact_text_excluded === true
+      && diagnostic.backendResponse?.raw_frame_excluded === true
+    ))).toBe(true));
+    expect(JSON.stringify(toolDiagnostics)).not.toContain('user asked for page two');
+
+    await connection.close();
+  });
+
   it('relays Gemini toolCall messages and sends backend toolResponse actions over the existing WebSocket', async () => {
     const toolResponsePayload = {
       toolResponse: {
@@ -2404,6 +2524,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       artifact_id: 'coreview-real-artifact-launch-brief',
       source: 'builder_metadata',
       char_count: rawArtifactText.length,
+      page_count: null,
       truncated: false,
       status: 'success',
       safe_reason: null,

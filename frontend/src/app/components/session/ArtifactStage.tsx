@@ -88,6 +88,7 @@ export interface ArtifactReviewVoiceCommandTarget {
   zoom: number
   fitMode: ArtifactFitMode
   applyCommand: (command: ArtifactReviewVoiceCommand) => ArtifactReviewVoiceCommandApplyResult
+  setView: (view: { pageIndex: number; zoom: number; fitMode: ArtifactFitMode }) => void
 }
 
 export function ArtifactStage({
@@ -474,6 +475,16 @@ export function ArtifactStage({
     supportsZoom,
     zoom,
   ])
+  const setCoreviewTargetView = useCallback((view: { pageIndex: number; zoom: number; fitMode: ArtifactFitMode }) => {
+    const normalizedPageCount = Math.max(1, Math.floor(pageCount))
+    if (supportsPagination) {
+      setPageIndex(Math.min(Math.max(0, Math.floor(view.pageIndex)), normalizedPageCount - 1))
+    }
+    if (supportsZoom) {
+      setFitMode(view.fitMode)
+      setZoom(clampArtifactZoom(view.zoom))
+    }
+  }, [pageCount, supportsPagination, supportsZoom])
   const handlePinchZoomChange = useCallback((nextZoom: number) => {
     if (!supportsZoom) {
       return
@@ -568,6 +579,7 @@ export function ArtifactStage({
     zoom,
     fitMode,
     applyCommand: applyVoiceCommand,
+    setView: setCoreviewTargetView,
   }), [
     applyVoiceCommand,
     artifactId,
@@ -578,6 +590,7 @@ export function ArtifactStage({
     rendererKind,
     supportsPagination,
     supportsZoom,
+    setCoreviewTargetView,
     zoom,
   ])
 

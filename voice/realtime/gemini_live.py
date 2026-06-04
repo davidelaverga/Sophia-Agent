@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from voice.realtime.capabilities import ProviderCapabilities
+from voice.realtime.coreview import GEMINI_COREVIEW_ACTION_TOOL_NAMES
 from voice.realtime.delivery import DeliveryIntent, DeliveryPace
 from voice.realtime.events import ProviderEvent, ProviderEventType
 
@@ -98,7 +99,7 @@ _BUILDER_TOOL_NAMES = {
     "list_async_tasks",
 }
 _MEMORY_TOOL_NAMES = {"retrieve_memories"}
-_REVIEW_TOOL_NAMES = {"read_artifact_text"}
+_REVIEW_TOOL_NAMES = {"read_artifact_text", *GEMINI_COREVIEW_ACTION_TOOL_NAMES}
 _STRUCTURED_TOOL_NAMES = (
     _ARTIFACT_TOOL_NAMES | _BUILDER_TOOL_NAMES | _MEMORY_TOOL_NAMES | _REVIEW_TOOL_NAMES
 )
@@ -117,7 +118,7 @@ _JSONISH_TOOL_SYNTAX_LEAK_RE = re.compile(
 _PROMPT_OR_TOOL_LEAK_RE = re.compile(
     r"(?:\bactive_goal\s*:|\btool_call_id\b|\bsystem\s+prompt\b|\bdeveloper\s+instructions\b|"
     r"\binternal\s+prompt\b|\btool\s+schema\b|\bfunction\s+declarations?\b|\bfunctiondeclarations\b|"
-    r"\bread_artifact_text\b|^\s*schema\s*$)",
+    r"\b(?:read_artifact_text|coreview_set_view|coreview_refresh_view|coreview_get_current_view)\b|^\s*schema\s*$)",
     re.IGNORECASE,
 )
 

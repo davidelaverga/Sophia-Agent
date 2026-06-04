@@ -1,5 +1,14 @@
 import { isCoReviewStillFrameEnabled } from './co-review-flags';
 import {
+  COREVIEW_GET_CURRENT_VIEW_TOOL_NAME,
+  COREVIEW_REFRESH_VIEW_TOOL_NAME,
+  executeCoreviewToolBridgeCall,
+  isCoreviewToolName,
+  withCoreviewGeminiToolDeclarations,
+  type CoreviewActionResult,
+  type CoreviewToolCallInput,
+} from './coreview-actions';
+import {
   readCoreviewArtifactTextSideband,
 } from './coreview-artifact-text';
 
@@ -1634,6 +1643,8 @@ export async function connectGeminiBrowserLiveDogfood(
       : await startBrowserDogfoodSession(fetchFn, options);
     dogfoodSessionId = browserSession.sessionId;
     disconnectTargetPath = browserSession.disconnectUrl ?? DISCONNECT_TARGET_PATH;
+    const coreviewToolsEnabled = options.coreviewStillFrameEnabled ?? isCoReviewStillFrameEnabled();
+    const sessionSetup = withCoreviewGeminiToolDeclarations(browserSession.setup, coreviewToolsEnabled);
 
     notifyStage('requesting_microphone');
     localStream = await getUserMedia({ audio: true });
@@ -1677,6 +1688,14 @@ export async function connectGeminiBrowserLiveDogfood(
           updateToolCallLedger(cancelledId, { cancelledAt: timestamp });
         }
       },
+      onFrontendToolEvent: (event) => handleGeminiFrontendCoreviewToolEvent({
+        event,
+        websocket,
+        sessionId: browserSession.sessionId,
+        toolCallLedger,
+        onToolCallLedgerUpdate: notifyToolCallLedgerUpdate,
+        onToolLoopDiagnostic: options.onToolLoopDiagnostic,
+      }),
       onProviderEventReceived: (event) => buildGeminiProviderReceiveMetadata(
         event,
         providerReceiveSequence += 1,
@@ -1970,7 +1989,7 @@ export async function connectGeminiBrowserLiveDogfood(
     });
 
     notifyStage('sending_setup');
-    websocket.send(JSON.stringify({ setup: browserSession.setup }));
+    websocket.send(JSON.stringify({ setup: sessionSetup }));
 
     notifyStage('waiting_setup_complete');
     await setupComplete;
@@ -1992,7 +2011,7 @@ export async function connectGeminiBrowserLiveDogfood(
       relayUrl: browserSession.relayUrl,
       publicEventBoundary: browserSession.publicEventBoundary,
       transport: browserSession.transport,
-      setup: browserSession.setup,
+      setup: sessionSetup,
       setupComplete: true,
       websocket,
       localStream,
@@ -2010,7 +2029,7 @@ export async function connectGeminiBrowserLiveDogfood(
         websocket,
         frame,
         context,
-        enabled: options.coreviewStillFrameEnabled ?? isCoReviewStillFrameEnabled(),
+        enabled: coreviewToolsEnabled,
         providerSnapshot: snapshotArtifactFrameProviderState,
         transportSnapshot: snapshotArtifactFrameTransportStatus,
       }).then((result) => {
@@ -3052,6 +3071,195 @@ function handleGeminiRelayClientActions(options: {
   }
 }
 
+async function handleGeminiFrontendCoreviewToolEvent(options: {
+  event: Record<string, unknown>;
+  websocket: WebSocketLike | null;
+  sessionId: string;
+  toolCallLedger: Map<string, GeminiBrowserLiveToolCallLedgerEntry>;
+  onToolCallLedgerUpdate?: (entry: GeminiBrowserLiveToolCallLedgerEntry) => void;
+  onToolLoopDiagnostic?: (diagnostic: GeminiBrowserLiveDogfoodToolLoopDiagnostic) => void;
+}): Promise<Record<string, unknown> | null> {
+  const split = splitCoreviewToolCallsFromProviderEvent(options.event);
+  if (split.coreviewCalls.length === 0) {
+    return options.event;
+  }
+
+  const preparedAt = new Date().toISOString();
+  const functionResponses: Record<string, unknown>[] = [];
+  for (const call of split.coreviewCalls) {
+    let response: CoreviewActionResult;
+    try {
+      response = await executeCoreviewToolBridgeCall(call);
+    } catch (error) {
+      response = coreviewToolExceptionResult(call, error);
+    }
+    functionResponses.push({
+      ...(call.id ? { id: call.id } : {}),
+      name: call.name,
+      response,
+    });
+    emitToolCallLedgerEntry(
+      options.toolCallLedger,
+      call.id,
+      {
+        toolName: call.name,
+        toolResponsePreparedAt: preparedAt,
+      },
+      options.onToolCallLedgerUpdate,
+    );
+  }
+
+  handleGeminiRelayClientActions({
+    relayResponse: {
+      accepted: true,
+      clientActions: [{
+        type: 'gemini_tool_response',
+        payload: {
+          toolResponse: {
+            functionResponses,
+          },
+        },
+        result_summary: functionResponses
+          .map((functionResponse) => responseSummaryFromFunctionResponse(functionResponse))
+          .filter((summary): summary is string => Boolean(summary))
+          .join(' '),
+      }],
+      toolDiagnostics: [],
+      statusCode: null,
+      statusText: null,
+      responseKind: 'client_actions',
+      backendDiagnostics: null,
+    },
+    websocket: options.websocket,
+    sessionId: options.sessionId,
+    toolCallLedger: options.toolCallLedger,
+    onToolCallLedgerUpdate: options.onToolCallLedgerUpdate,
+    onToolLoopDiagnostic: options.onToolLoopDiagnostic,
+  });
+
+  return split.relayEvent;
+}
+
+function splitCoreviewToolCallsFromProviderEvent(event: Record<string, unknown>): {
+  coreviewCalls: CoreviewToolCallInput[];
+  relayEvent: Record<string, unknown> | null;
+} {
+  const toolCallKey = isRecord(event.toolCall)
+    ? 'toolCall'
+    : isRecord(event.tool_call)
+      ? 'tool_call'
+      : null;
+  if (!toolCallKey) {
+    return { coreviewCalls: [], relayEvent: event };
+  }
+
+  const toolCall = event[toolCallKey];
+  if (!isRecord(toolCall)) {
+    return { coreviewCalls: [], relayEvent: event };
+  }
+
+  const functionCallsKey = Array.isArray(toolCall.functionCalls)
+    ? 'functionCalls'
+    : Array.isArray(toolCall.function_calls)
+      ? 'function_calls'
+      : null;
+  if (!functionCallsKey) {
+    return { coreviewCalls: [], relayEvent: event };
+  }
+
+  const functionCalls = toolCall[functionCallsKey];
+  if (!Array.isArray(functionCalls)) {
+    return { coreviewCalls: [], relayEvent: event };
+  }
+
+  const coreviewCalls: CoreviewToolCallInput[] = [];
+  const relayFunctionCalls: unknown[] = [];
+  for (const functionCall of functionCalls) {
+    if (!isRecord(functionCall)) {
+      relayFunctionCalls.push(functionCall);
+      continue;
+    }
+    const name = stringFromAnyKey(functionCall, 'name');
+    if (!isCoreviewToolName(name)) {
+      relayFunctionCalls.push(functionCall);
+      continue;
+    }
+    coreviewCalls.push({
+      id: stringFromAnyKey(functionCall, 'id'),
+      name,
+      args: readGeminiFunctionCallArgs(functionCall) ?? {},
+    });
+  }
+
+  if (coreviewCalls.length === 0) {
+    return { coreviewCalls, relayEvent: event };
+  }
+
+  if (relayFunctionCalls.length > 0) {
+    return {
+      coreviewCalls,
+      relayEvent: {
+        ...event,
+        [toolCallKey]: {
+          ...toolCall,
+          [functionCallsKey]: relayFunctionCalls,
+        },
+      },
+    };
+  }
+
+  const relayEvent = { ...event };
+  delete relayEvent[toolCallKey];
+  return {
+    coreviewCalls,
+    relayEvent: Object.keys(relayEvent).length > 0 ? relayEvent : null,
+  };
+}
+
+function coreviewToolExceptionResult(
+  call: CoreviewToolCallInput,
+  error: unknown,
+): CoreviewActionResult {
+  const action = call.name === COREVIEW_REFRESH_VIEW_TOOL_NAME
+    ? 'refresh_view'
+    : call.name === COREVIEW_GET_CURRENT_VIEW_TOOL_NAME
+      ? 'get_current_view'
+      : 'set_view';
+  return {
+    ok: false,
+    action,
+    artifact_id: null,
+    artifact_path: null,
+    artifact_title: null,
+    renderer_kind: null,
+    page_index: null,
+    page_number: null,
+    page_count: null,
+    zoom: null,
+    fit_mode: null,
+    view_signature: null,
+    stale: false,
+    refresh_attempted: false,
+    refresh_result: 'not_requested',
+    blocked_reason: 'tool_unavailable',
+    result_summary: error instanceof Error
+      ? `Coreview tool failed: ${error.message}`
+      : 'Coreview tool failed.',
+    command_source: 'gemini_tool',
+    preserved_mic: true,
+    preserved_review: true,
+    view_ready_wait_ms: null,
+    view_signature_before: null,
+    view_signature_after: null,
+    exact_text_available: false,
+    visual_frame_fresh: false,
+    review_active: false,
+    annotation_overlay_captured: null,
+    raw_artifact_text_excluded: true,
+    raw_frame_excluded: true,
+  };
+}
+
 function waitForWebSocketOpen(websocket: WebSocketLike): Promise<void> {
   if (websocket.readyState === WEBSOCKET_OPEN) {
     return Promise.resolve();
@@ -3071,6 +3279,7 @@ function waitForGeminiSetupComplete(
     onProviderEvent?: (event: unknown) => void;
     onProviderEventTelemetry?: (event: unknown, receiveMetadata: GeminiProviderReceiveMetadata) => void;
     onProviderToolEvent?: (event: Record<string, unknown>) => void;
+    onFrontendToolEvent?: (event: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
     onRelayEvent: (event: Record<string, unknown>, receiveMetadata: GeminiProviderReceiveMetadata) => void;
     onOutputAudio: (event: Record<string, unknown>, receiveMetadata: GeminiProviderReceiveMetadata) => void;
     onInterruption: (event: Record<string, unknown>) => void;
@@ -3097,7 +3306,12 @@ function waitForGeminiSetupComplete(
       if (interrupted) {
         handlers.onInterruption(parsed);
       }
-      handlers.onRelayEvent(parsed, receiveMetadata);
+      const relayEvent = handlers.onFrontendToolEvent
+        ? await handlers.onFrontendToolEvent(parsed)
+        : parsed;
+      if (relayEvent) {
+        handlers.onRelayEvent(relayEvent, receiveMetadata);
+      }
       if (!interrupted) {
         handlers.onOutputAudio(parsed, receiveMetadata);
       }
@@ -4286,12 +4500,21 @@ function responseSummaryFromFunctionResponse(functionResponse: Record<string, un
   if (!response) {
     return null;
   }
-  if (stringFromAnyKey(functionResponse, 'name') === GEMINI_RETRIEVE_MEMORIES_TOOL_NAME) {
+  const toolName = stringFromAnyKey(functionResponse, 'name');
+  if (isCoreviewToolName(toolName)) {
+    const summary = stringFromAnyKey(response, 'result_summary', 'resultSummary');
+    if (summary) {
+      return summary;
+    }
+    const status = response.ok === true ? 'success' : stringFromAnyKey(response, 'blocked_reason', 'blockedReason') ?? 'blocked';
+    return `${toolName} returned ${status}.`;
+  }
+  if (toolName === GEMINI_RETRIEVE_MEMORIES_TOOL_NAME) {
     const status = stringFromAnyKey(response, 'status') ?? 'unknown';
     const count = numberFromAnyKey(response, 'count') ?? 0;
     return `retrieve_memories returned ${status} with ${count} snippet(s).`;
   }
-  if (stringFromAnyKey(functionResponse, 'name') === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
+  if (toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
     if (response.ok === true) {
       const source = stringFromAnyKey(response, 'source') ?? 'unknown';
       const charCount = numberFromAnyKey(response, 'char_count', 'charCount') ?? 0;
@@ -4310,6 +4533,22 @@ function redactToolCallArgsForTelemetry(
   toolName: string | null,
   args: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
+  if (isCoreviewToolName(toolName) && args) {
+    const reason = stringFromAnyKey(args, 'reason');
+    return {
+      artifact_id: stringFromAnyKey(args, 'artifact_id', 'artifactId'),
+      page_index: numberFromAnyKey(args, 'page_index', 'pageIndex'),
+      page_number: numberFromAnyKey(args, 'page_number', 'pageNumber'),
+      page_label_present: Boolean(stringFromAnyKey(args, 'page_label', 'pageLabel')),
+      zoom: numberFromAnyKey(args, 'zoom'),
+      fit_mode: stringFromAnyKey(args, 'fit_mode', 'fitMode'),
+      reason_length: reason?.length ?? 0,
+      raw_reason_excluded: true,
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
+    };
+  }
+
   if (toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME && args) {
     const query = stringFromAnyKey(args, 'query');
     const reason = stringFromAnyKey(args, 'reason');
@@ -4340,6 +4579,10 @@ function redactBackendResponseForToolTelemetry(
   toolName: string | null,
   response: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
+  if (isCoreviewToolName(toolName) && response) {
+    return redactCoreviewActionResponseForTelemetry(response);
+  }
+
   if (toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME && response) {
     return redactReadArtifactTextResponseForTelemetry(response);
   }
@@ -4366,6 +4609,43 @@ function redactBackendResponseForToolTelemetry(
     raw_memory_text_excluded: true,
     raw_query_excluded: true,
     diagnostics: diagnostics ? redactRetrieveMemoriesDiagnosticsForTelemetry(diagnostics) : null,
+  };
+}
+
+function redactCoreviewActionResponseForTelemetry(
+  response: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ok: response.ok === true,
+    action: stringFromAnyKey(response, 'action'),
+    artifact_id: stringFromAnyKey(response, 'artifact_id', 'artifactId'),
+    renderer_kind: stringFromAnyKey(response, 'renderer_kind', 'rendererKind'),
+    page_index: numberFromAnyKey(response, 'page_index', 'pageIndex'),
+    page_number: numberFromAnyKey(response, 'page_number', 'pageNumber'),
+    page_count: numberFromAnyKey(response, 'page_count', 'pageCount'),
+    zoom: numberFromAnyKey(response, 'zoom'),
+    fit_mode: stringFromAnyKey(response, 'fit_mode', 'fitMode'),
+    stale: response.stale === true,
+    refresh_attempted: response.refresh_attempted === true || response.refreshAttempted === true,
+    refresh_result: stringFromAnyKey(response, 'refresh_result', 'refreshResult'),
+    blocked_reason: stringFromAnyKey(response, 'blocked_reason', 'blockedReason'),
+    result_summary: stringFromAnyKey(response, 'result_summary', 'resultSummary'),
+    command_source: stringFromAnyKey(response, 'command_source', 'commandSource'),
+    preserved_mic: response.preserved_mic === true || response.preservedMic === true,
+    preserved_review: response.preserved_review === true || response.preservedReview === true,
+    view_ready_wait_ms: numberFromAnyKey(response, 'view_ready_wait_ms', 'viewReadyWaitMs'),
+    view_signature_before_present: Boolean(stringFromAnyKey(response, 'view_signature_before', 'viewSignatureBefore')),
+    view_signature_after_present: Boolean(stringFromAnyKey(response, 'view_signature_after', 'viewSignatureAfter')),
+    exact_text_available: response.exact_text_available === true || response.exactTextAvailable === true,
+    visual_frame_fresh: response.visual_frame_fresh === true || response.visualFrameFresh === true,
+    review_active: response.review_active === true || response.reviewActive === true,
+    annotation_overlay_captured: response.annotation_overlay_captured === true || response.annotationOverlayCaptured === true
+      ? true
+      : response.annotation_overlay_captured === false || response.annotationOverlayCaptured === false
+        ? false
+        : null,
+    raw_artifact_text_excluded: true,
+    raw_frame_excluded: true,
   };
 }
 

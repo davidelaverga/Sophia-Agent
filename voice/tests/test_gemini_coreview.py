@@ -7,6 +7,8 @@ from voice.realtime.coreview import (
     COREVIEW_FIXTURE_ARTIFACT_ID,
     COREVIEW_FIXTURE_EXACT_TEXT,
     COREVIEW_STILL_FRAME_FEATURE_FLAG,
+    GEMINI_COREVIEW_ACTION_TOOL_NAMES,
+    GEMINI_COREVIEW_SET_VIEW_TOOL_NAME,
     GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
     build_gemini_coreview_prompt_overlay,
     coreview_tool_parity_status,
@@ -46,6 +48,7 @@ def test_coreview_prompt_appears_only_when_enabled(monkeypatch) -> None:
     assert "<gemini_coreview_artifact_policy>" in prompt
     assert "Exact words, numbers, table values" in prompt
     assert "call read_artifact_text for the current artifact before answering" in prompt
+    assert "coreview_set_view" in prompt
     assert "Do not call emit_artifact, start_builder_task" in prompt
     assert "Still-frame co-review" in prompt
 
@@ -70,9 +73,18 @@ def test_coreview_tool_declaration_is_opt_in(monkeypatch) -> None:
     monkeypatch.setenv(COREVIEW_FEATURE_FLAG, "true")
 
     declarations = gemini_sophia_function_declarations()
+    names = [declaration["name"] for declaration in declarations]
 
-    assert declarations[-1]["name"] == GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME
-    assert declarations[-1]["parameters"]["required"] == ["query"]
+    assert GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME in names
+    assert GEMINI_COREVIEW_ACTION_TOOL_NAMES.issubset(set(names))
+    read_declaration = next(
+        declaration for declaration in declarations if declaration["name"] == GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME
+    )
+    set_view_declaration = next(
+        declaration for declaration in declarations if declaration["name"] == GEMINI_COREVIEW_SET_VIEW_TOOL_NAME
+    )
+    assert read_declaration["parameters"]["required"] == ["query"]
+    assert "page_number" in set_view_declaration["parameters"]["properties"]
 
 
 def test_read_artifact_text_returns_fixture_exact_text(monkeypatch) -> None:
@@ -237,6 +249,34 @@ async def test_read_artifact_text_tool_loop_returns_fixture_without_raw_text_tel
         "raw_artifact_text_excluded": True,
     }
     assert COREVIEW_FIXTURE_EXACT_TEXT not in str(diagnostic)
+
+
+@pytest.mark.anyio
+async def test_coreview_action_tool_loop_returns_browser_owned_fallback(monkeypatch) -> None:
+    monkeypatch.setenv(COREVIEW_FEATURE_FLAG, "true")
+    executor = GeminiDogfoodToolExecutor()
+
+    execution = await executor.execute(
+        GeminiLiveFunctionCall(
+            call_id="call-coreview-set",
+            name=GEMINI_COREVIEW_SET_VIEW_TOOL_NAME,
+            args={"page_number": 2, "reason": "user asked for page two"},
+        ),
+        session_id="session-1",
+        user_id="user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="gemini",
+    )
+    diagnostic = execution.diagnostic()
+
+    assert execution.success is False
+    assert execution.response["ok"] is False
+    assert execution.response["blocked_reason"] == "browser_coreview_tool_bridge_unavailable"
+    assert execution.response["raw_artifact_text_excluded"] is True
+    assert execution.response["raw_frame_excluded"] is True
+    assert diagnostic["response"]["raw_artifact_text_excluded"] is True
+    assert diagnostic["response"]["raw_frame_excluded"] is True
+    assert "user asked for page two" not in str(diagnostic)
 
 
 def test_explicit_overlay_builder_is_empty_when_disabled() -> None:
