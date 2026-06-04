@@ -117,6 +117,16 @@ export type CoreviewVisualTelemetry = {
   annotationFallbackBlockedReason: string | null
   annotationFallbackUtteranceKind: string | null
   recentAnnotationActionSucceeded: boolean
+  annotationCommitAttempted: boolean
+  annotationCommitResult: string | null
+  annotationCommitCountBefore: number | null
+  annotationCommitCountAfter: number | null
+  annotationCommitVerified: boolean
+  annotationCommandPreventedNavigation: boolean
+  annotationCommandKeptArtifactMounted: boolean
+  annotationViewReadyTimedOut: boolean
+  annotationPartialSuccess: boolean
+  sessionLeaveGuardSuppressedForAnnotation: boolean
   assistantAnnotationClaimSuppressedCount: number
   coreviewFocusAnchorCount: number
   coreviewFocusAnchorResult: string | null
@@ -501,6 +511,16 @@ export type GeminiSessionTelemetry = {
     annotationFallbackBlockedReason: string | null
     annotationFallbackUtteranceKind: string | null
     recentAnnotationActionSucceeded: boolean
+    annotationCommitAttempted: boolean
+    annotationCommitResult: string | null
+    annotationCommitCountBefore: number | null
+    annotationCommitCountAfter: number | null
+    annotationCommitVerified: boolean
+    annotationCommandPreventedNavigation: boolean
+    annotationCommandKeptArtifactMounted: boolean
+    annotationViewReadyTimedOut: boolean
+    annotationPartialSuccess: boolean
+    sessionLeaveGuardSuppressedForAnnotation: boolean
     assistantAnnotationClaimSuppressedCount: number
     coreviewFocusAnchorCount: number
     coreviewFocusAnchorResult: string | null
@@ -762,6 +782,35 @@ function numberFromKeys(record: Record<string, unknown> | null | undefined, keys
     if (value !== null) return value
   }
   return null
+}
+
+function annotationCommitStateChanged(record: Record<string, unknown> | null | undefined): boolean {
+  if (!record) return false
+  const before = numberFromKeys(record, ["annotationCommitCountBefore", "annotation_commit_count_before"])
+  const after = numberFromKeys(record, [
+    "annotationCommitCountAfter",
+    "annotation_commit_count_after",
+    "annotationCount",
+    "annotation_count",
+  ])
+  if (before !== null && after !== null) {
+    return after > before
+  }
+  if (asBoolean(record.annotationCommitVerified) === true || asBoolean(record.annotation_commit_verified) === true) {
+    return (numberFromKeys(record, ["annotationCount", "annotation_count"]) ?? 0) > 0
+  }
+  return false
+}
+
+function annotationResultFromState(
+  record: Record<string, unknown> | null | undefined,
+  keys: string[],
+): string | null {
+  const raw = keys.reduce<string | null>((current, key) => current ?? asString(record?.[key]), null)
+  if (raw === "success" && !annotationCommitStateChanged(record)) {
+    return "annotation_commit_failed"
+  }
+  return raw
 }
 
 function asRealArtifactString(value: unknown): string | null {
@@ -1131,6 +1180,16 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       annotationFallbackBlockedReason: null,
       annotationFallbackUtteranceKind: null,
       recentAnnotationActionSucceeded: false,
+      annotationCommitAttempted: false,
+      annotationCommitResult: null,
+      annotationCommitCountBefore: null,
+      annotationCommitCountAfter: null,
+      annotationCommitVerified: false,
+      annotationCommandPreventedNavigation: false,
+      annotationCommandKeptArtifactMounted: false,
+      annotationViewReadyTimedOut: false,
+      annotationPartialSuccess: false,
+      sessionLeaveGuardSuppressedForAnnotation: false,
       assistantAnnotationClaimSuppressedCount: 0,
       coreviewFocusAnchorCount: 0,
       coreviewFocusAnchorResult: null,
@@ -1230,6 +1289,10 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((value): value is Record<string, unknown> => value !== null)
   const annotationStateEvents = activeEvents
     .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-annotation-state")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const annotationNavigationGuardEvents = activeEvents
+    .filter((event) => event.name === "session-leave-guard-suppressed-for-annotation")
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
   const coreviewToolEvents = activeEvents
@@ -1404,8 +1467,8 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     total + (numberFromKeys(event, ["coreviewAnnotationFallbackCount"]) ?? 0)
   ), 0)
   visual.coreviewAnnotationCommandSource = asString(latestAnnotationTool?.coreviewAnnotationCommandSource)
-  visual.coreviewAnnotationToolResult = asString(latestAnnotationTool?.coreviewAnnotationToolResult)
-  visual.coreviewAnnotationFallbackResult = asString(latestAnnotationTool?.coreviewAnnotationFallbackResult)
+  visual.coreviewAnnotationToolResult = annotationResultFromState(latestAnnotationTool, ["coreviewAnnotationToolResult"])
+  visual.coreviewAnnotationFallbackResult = annotationResultFromState(latestAnnotationTool, ["coreviewAnnotationFallbackResult"])
   visual.coreviewAnnotationKind = asString(latestAnnotationTool?.coreviewAnnotationKind)
   visual.coreviewAnnotationAnchorType = asString(latestAnnotationTool?.coreviewAnnotationAnchorType)
   visual.coreviewAnnotationColor = asString(latestAnnotationTool?.coreviewAnnotationColor)
@@ -1417,16 +1480,59 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.annotationIntentSource = asString(latestAnnotationIntent?.annotationIntentSource)
     ?? asString(latestAnnotationIntent?.source)
   visual.annotationFallbackAttempted = asBoolean(latestAnnotationFallback?.annotationFallbackAttempted) ?? false
-  visual.annotationFallbackResult = asString(latestAnnotationFallback?.annotationFallbackResult)
+  visual.annotationFallbackResult = annotationResultFromState(latestAnnotationFallback, ["annotationFallbackResult"])
   visual.annotationFallbackBlockedReason = asString(latestAnnotationFallback?.annotationFallbackBlockedReason)
   visual.annotationFallbackUtteranceKind = asString(latestAnnotationFallback?.annotationFallbackUtteranceKind)
     ?? asString(latestAnnotationIntent?.annotationFallbackUtteranceKind)
-  visual.recentAnnotationActionSucceeded = coreviewToolEvents.some((event) => (
-    asBoolean(event.recentAnnotationActionSucceeded) === true
-    || (
-      asString(event.coreviewToolName) === "coreview_add_annotation"
-      && asString(event.coreviewToolResult) === "success"
-    )
+  visual.recentAnnotationActionSucceeded = coreviewToolEvents.some(annotationCommitStateChanged)
+  visual.annotationCommitAttempted = coreviewToolEvents.some((event) => (
+    asBoolean(event.annotationCommitAttempted) === true
+    || asBoolean(event.annotation_commit_attempted) === true
+  ))
+  visual.annotationCommitResult = annotationResultFromState(latestAnnotationTool, [
+    "annotationCommitResult",
+    "annotation_commit_result",
+  ]) ?? annotationResultFromState(latestAnnotationFallback, [
+    "annotationCommitResult",
+    "annotation_commit_result",
+  ])
+  visual.annotationCommitCountBefore = numberFromKeys(latestAnnotationTool, [
+    "annotationCommitCountBefore",
+    "annotation_commit_count_before",
+  ]) ?? numberFromKeys(latestAnnotationFallback, [
+    "annotationCommitCountBefore",
+    "annotation_commit_count_before",
+  ])
+  visual.annotationCommitCountAfter = numberFromKeys(latestAnnotationTool, [
+    "annotationCommitCountAfter",
+    "annotation_commit_count_after",
+  ]) ?? numberFromKeys(latestAnnotationFallback, [
+    "annotationCommitCountAfter",
+    "annotation_commit_count_after",
+  ])
+  visual.annotationCommitVerified = coreviewToolEvents.some(annotationCommitStateChanged)
+  visual.annotationCommandPreventedNavigation = coreviewToolEvents.some((event) => (
+    asBoolean(event.annotationCommandPreventedNavigation) === true
+    || asBoolean(event.annotation_command_prevented_navigation) === true
+  ))
+  visual.annotationCommandKeptArtifactMounted = coreviewToolEvents.some((event) => (
+    asBoolean(event.annotationCommandKeptArtifactMounted) === true
+    || asBoolean(event.annotation_command_kept_artifact_mounted) === true
+  ))
+  visual.annotationViewReadyTimedOut = coreviewToolEvents.some((event) => (
+    asBoolean(event.annotationViewReadyTimedOut) === true
+    || asBoolean(event.annotation_view_ready_timed_out) === true
+  ))
+  visual.annotationPartialSuccess = coreviewToolEvents.some((event) => (
+    asBoolean(event.annotationPartialSuccess) === true
+    || asBoolean(event.annotation_partial_success) === true
+  ))
+  visual.sessionLeaveGuardSuppressedForAnnotation = coreviewToolEvents.some((event) => (
+    asBoolean(event.sessionLeaveGuardSuppressedForAnnotation) === true
+    || asBoolean(event.session_leave_guard_suppressed_for_annotation) === true
+  )) || annotationNavigationGuardEvents.some((event) => (
+    asBoolean(event.sessionLeaveGuardSuppressedForAnnotation) === true
+    || asBoolean(event.session_leave_guard_suppressed_for_annotation) === true
   ))
   visual.assistantAnnotationClaimSuppressedCount = assistantAnnotationClaimSuppressedEvents.length
   visual.coreviewFocusAnchorCount = coreviewToolEvents.reduce((total, event) => (
@@ -2580,9 +2686,9 @@ function buildSessionTelemetry(params: {
         ),
         coreviewAnnotationCommandSource: hookTelemetry?.coreviewAnnotationCommandSource
           ?? coreviewTelemetry.visual.coreviewAnnotationCommandSource,
-        coreviewAnnotationToolResult: hookTelemetry?.coreviewAnnotationToolResult
+        coreviewAnnotationToolResult: annotationResultFromState(asRecord(hookTelemetry), ["coreviewAnnotationToolResult"])
           ?? coreviewTelemetry.visual.coreviewAnnotationToolResult,
-        coreviewAnnotationFallbackResult: hookTelemetry?.coreviewAnnotationFallbackResult
+        coreviewAnnotationFallbackResult: annotationResultFromState(asRecord(hookTelemetry), ["coreviewAnnotationFallbackResult"])
           ?? coreviewTelemetry.visual.coreviewAnnotationFallbackResult,
         coreviewAnnotationKind: hookTelemetry?.coreviewAnnotationKind
           ?? coreviewTelemetry.visual.coreviewAnnotationKind,
@@ -2602,14 +2708,34 @@ function buildSessionTelemetry(params: {
           ?? coreviewTelemetry.visual.annotationIntentSource,
         annotationFallbackAttempted: hookTelemetry?.annotationFallbackAttempted
           ?? coreviewTelemetry.visual.annotationFallbackAttempted,
-        annotationFallbackResult: hookTelemetry?.annotationFallbackResult
+        annotationFallbackResult: annotationResultFromState(asRecord(hookTelemetry), ["annotationFallbackResult"])
           ?? coreviewTelemetry.visual.annotationFallbackResult,
         annotationFallbackBlockedReason: hookTelemetry?.annotationFallbackBlockedReason
           ?? coreviewTelemetry.visual.annotationFallbackBlockedReason,
         annotationFallbackUtteranceKind: hookTelemetry?.annotationFallbackUtteranceKind
           ?? coreviewTelemetry.visual.annotationFallbackUtteranceKind,
-        recentAnnotationActionSucceeded: hookTelemetry?.recentAnnotationActionSucceeded
-          ?? coreviewTelemetry.visual.recentAnnotationActionSucceeded,
+        recentAnnotationActionSucceeded: annotationCommitStateChanged(asRecord(hookTelemetry))
+          || coreviewTelemetry.visual.recentAnnotationActionSucceeded,
+        annotationCommitAttempted: hookTelemetry?.annotationCommitAttempted
+          ?? coreviewTelemetry.visual.annotationCommitAttempted,
+        annotationCommitResult: annotationResultFromState(asRecord(hookTelemetry), ["annotationCommitResult"])
+          ?? coreviewTelemetry.visual.annotationCommitResult,
+        annotationCommitCountBefore: hookTelemetry?.annotationCommitCountBefore
+          ?? coreviewTelemetry.visual.annotationCommitCountBefore,
+        annotationCommitCountAfter: hookTelemetry?.annotationCommitCountAfter
+          ?? coreviewTelemetry.visual.annotationCommitCountAfter,
+        annotationCommitVerified: annotationCommitStateChanged(asRecord(hookTelemetry))
+          || coreviewTelemetry.visual.annotationCommitVerified,
+        annotationCommandPreventedNavigation: hookTelemetry?.annotationCommandPreventedNavigation
+          ?? coreviewTelemetry.visual.annotationCommandPreventedNavigation,
+        annotationCommandKeptArtifactMounted: hookTelemetry?.annotationCommandKeptArtifactMounted
+          ?? coreviewTelemetry.visual.annotationCommandKeptArtifactMounted,
+        annotationViewReadyTimedOut: hookTelemetry?.annotationViewReadyTimedOut
+          ?? coreviewTelemetry.visual.annotationViewReadyTimedOut,
+        annotationPartialSuccess: hookTelemetry?.annotationPartialSuccess
+          ?? coreviewTelemetry.visual.annotationPartialSuccess,
+        sessionLeaveGuardSuppressedForAnnotation: hookTelemetry?.sessionLeaveGuardSuppressedForAnnotation
+          ?? coreviewTelemetry.visual.sessionLeaveGuardSuppressedForAnnotation,
         assistantAnnotationClaimSuppressedCount: Math.max(
           hookTelemetry?.assistantAnnotationClaimSuppressedCount ?? 0,
           coreviewTelemetry.visual.assistantAnnotationClaimSuppressedCount,

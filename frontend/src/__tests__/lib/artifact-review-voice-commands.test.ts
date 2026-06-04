@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  isArtifactReviewAnnotationIntent,
   parseArtifactReviewVoiceCommand,
   parseArtifactReviewVoiceCommands,
 } from "../../app/lib/artifact-review-voice-commands"
@@ -87,6 +88,22 @@ describe("artifact review voice command parser", () => {
       commentText: "change the font",
       utteranceKind: "annotation_comment",
     })
+    expect(parseArtifactReviewVoiceCommand("leave a note on the title")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "comment",
+      anchorType: "current_title",
+      utteranceKind: "annotation_comment",
+    })
+    expect(parseArtifactReviewVoiceCommand("leave feedback")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "comment",
+      utteranceKind: "annotation_comment",
+    })
+    expect(parseArtifactReviewVoiceCommand("leave a pin")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "comment",
+      utteranceKind: "annotation_pin",
+    })
     expect(parseArtifactReviewVoiceCommand("comment on the title saying change the font")).toEqual({
       kind: "add_annotation",
       annotationKind: "comment",
@@ -163,5 +180,14 @@ describe("artifact review voice command parser", () => {
   it("does not infer unrelated transcript text as an artifact command", () => {
     expect(parseArtifactReviewVoiceCommand("what do you notice about this section")).toBeNull()
     expect(parseArtifactReviewVoiceCommand("go back")).toBeNull()
+  })
+
+  it("exposes annotation intent without treating session leave phrases as annotations", () => {
+    expect(isArtifactReviewAnnotationIntent("leave a comment: change the font")).toBe(true)
+    expect(isArtifactReviewAnnotationIntent("leave a note on the title")).toBe(true)
+    expect(isArtifactReviewAnnotationIntent("leave feedback")).toBe(true)
+    expect(isArtifactReviewAnnotationIntent("leave a pin")).toBe(true)
+    expect(isArtifactReviewAnnotationIntent("leave the session")).toBe(false)
+    expect(isArtifactReviewAnnotationIntent("go back")).toBe(false)
   })
 })

@@ -102,7 +102,15 @@ const COREVIEW_SAFE_TOOL_EXECUTION_KEYS = new Set([
   'annotation_action_source',
   'annotation_anchor_type',
   'annotation_color',
+  'annotation_command_kept_artifact_mounted',
+  'annotation_command_prevented_navigation',
+  'annotation_commit_attempted',
+  'annotation_commit_count_after',
+  'annotation_commit_count_before',
+  'annotation_commit_result',
+  'annotation_commit_verified',
   'annotation_count',
+  'annotation_created',
   'annotation_fallback_attempted',
   'annotation_fallback_blocked_reason',
   'annotation_fallback_result',
@@ -111,7 +119,9 @@ const COREVIEW_SAFE_TOOL_EXECUTION_KEYS = new Set([
   'annotation_intent_detected_count',
   'annotation_intent_source',
   'annotation_overlay_captured',
+  'annotation_partial_success',
   'annotation_page_index',
+  'annotation_view_ready_timed_out',
   'assistant_annotation_claim_suppressed_count',
   'blocked_reason',
   'comment_count',
@@ -138,6 +148,7 @@ const COREVIEW_SAFE_TOOL_EXECUTION_KEYS = new Set([
   'renderer_kind',
   'result_summary',
   'review_active',
+  'session_leave_guard_suppressed_for_annotation',
   'stale',
   'visual_fresh',
   'visual_frame_fresh',
@@ -260,8 +271,18 @@ function buildCoreviewCommandTelemetryPatch(
     rawTranscriptExcluded: true as const,
   }));
   const latestSummary = lastReviewVoiceCommands.at(-1);
+  const annotationPayloads = commandPayloads.filter((payload) => (
+    asString(payload.reviewVoiceCommandKind) === 'add_annotation'
+    || asString(payload.lastReviewVoiceCommandKind) === 'add_annotation'
+    || asBoolean(payload.annotationCommitAttempted) === true
+    || (asFiniteNumber(payload.annotationIntentDetectedCount) ?? 0) > 0
+  ));
+  const latestAnnotation = annotationPayloads.at(-1);
+  const annotationIntentDetectedCount = annotationPayloads.reduce((total, payload) => (
+    total + (asFiniteNumber(payload.annotationIntentDetectedCount) ?? 0)
+  ), 0);
 
-  return {
+  const patch: Partial<CoreviewUsageTelemetry['visual']> = {
     reviewCommandStaleAfterViewChange: asBoolean(latest.reviewCommandStaleAfterViewChange)
       ?? asBoolean(latest.reviewCommandStaleAfterPageChange)
       ?? false,
@@ -271,19 +292,35 @@ function buildCoreviewCommandTelemetryPatch(
     reviewVoiceCommandWaitedForViewReady: asBoolean(latest.reviewVoiceCommandWaitedForViewReady),
     reviewVoiceCommandAutoRefreshTiming: asString(latest.reviewVoiceCommandAutoRefreshTiming),
     reviewVoiceCommandAutoRefreshBlockedReason: asString(latest.reviewVoiceCommandAutoRefreshBlockedReason),
-    annotationIntentDetectedCount: commandPayloads.reduce((total, payload) => (
-      total + (asFiniteNumber(payload.annotationIntentDetectedCount) ?? 0)
-    ), 0),
-    annotationIntentSource: asString(latest.annotationIntentSource),
-    annotationFallbackAttempted: asBoolean(latest.annotationFallbackAttempted) ?? false,
-    annotationFallbackResult: asString(latest.annotationFallbackResult),
-    annotationFallbackBlockedReason: asString(latest.annotationFallbackBlockedReason),
-    annotationFallbackUtteranceKind: asString(latest.annotationFallbackUtteranceKind),
-    recentAnnotationActionSucceeded: asBoolean(latest.recentAnnotationActionSucceeded) ?? false,
     lastReviewVoiceCommandKind: latestSummary?.kind ?? null,
     lastReviewVoiceCommandApplied: latestSummary?.applied ?? null,
     lastReviewVoiceCommandUiMode: latestSummary?.uiMode ?? null,
     lastReviewVoiceCommands,
+  };
+
+  if (!latestAnnotation) {
+    return patch;
+  }
+
+  return {
+    ...patch,
+    annotationIntentDetectedCount,
+    annotationIntentSource: asString(latestAnnotation.annotationIntentSource),
+    annotationFallbackAttempted: asBoolean(latestAnnotation.annotationFallbackAttempted) ?? false,
+    annotationFallbackResult: asString(latestAnnotation.annotationFallbackResult),
+    annotationFallbackBlockedReason: asString(latestAnnotation.annotationFallbackBlockedReason),
+    annotationFallbackUtteranceKind: asString(latestAnnotation.annotationFallbackUtteranceKind),
+    recentAnnotationActionSucceeded: asBoolean(latestAnnotation.recentAnnotationActionSucceeded) ?? false,
+    annotationCommitAttempted: asBoolean(latestAnnotation.annotationCommitAttempted) ?? false,
+    annotationCommitResult: asString(latestAnnotation.annotationCommitResult),
+    annotationCommitCountBefore: asFiniteNumber(latestAnnotation.annotationCommitCountBefore),
+    annotationCommitCountAfter: asFiniteNumber(latestAnnotation.annotationCommitCountAfter),
+    annotationCommitVerified: asBoolean(latestAnnotation.annotationCommitVerified) ?? false,
+    annotationCommandPreventedNavigation: asBoolean(latestAnnotation.annotationCommandPreventedNavigation) ?? false,
+    annotationCommandKeptArtifactMounted: asBoolean(latestAnnotation.annotationCommandKeptArtifactMounted) ?? false,
+    annotationViewReadyTimedOut: asBoolean(latestAnnotation.annotationViewReadyTimedOut) ?? false,
+    annotationPartialSuccess: asBoolean(latestAnnotation.annotationPartialSuccess) ?? false,
+    sessionLeaveGuardSuppressedForAnnotation: asBoolean(latestAnnotation.sessionLeaveGuardSuppressedForAnnotation) ?? false,
   };
 }
 
@@ -1135,6 +1172,16 @@ function buildCoreviewStillFrameDiagnosticsSummary(coreview: CoreviewUsageTeleme
     annotationFallbackBlockedReason: coreview.visual.annotationFallbackBlockedReason,
     annotationFallbackUtteranceKind: coreview.visual.annotationFallbackUtteranceKind,
     recentAnnotationActionSucceeded: coreview.visual.recentAnnotationActionSucceeded,
+    annotationCommitAttempted: coreview.visual.annotationCommitAttempted,
+    annotationCommitResult: coreview.visual.annotationCommitResult,
+    annotationCommitCountBefore: coreview.visual.annotationCommitCountBefore,
+    annotationCommitCountAfter: coreview.visual.annotationCommitCountAfter,
+    annotationCommitVerified: coreview.visual.annotationCommitVerified,
+    annotationCommandPreventedNavigation: coreview.visual.annotationCommandPreventedNavigation,
+    annotationCommandKeptArtifactMounted: coreview.visual.annotationCommandKeptArtifactMounted,
+    annotationViewReadyTimedOut: coreview.visual.annotationViewReadyTimedOut,
+    annotationPartialSuccess: coreview.visual.annotationPartialSuccess,
+    sessionLeaveGuardSuppressedForAnnotation: coreview.visual.sessionLeaveGuardSuppressedForAnnotation,
     assistantAnnotationClaimSuppressedCount: coreview.visual.assistantAnnotationClaimSuppressedCount,
     coreviewFocusAnchorCount: coreview.visual.coreviewFocusAnchorCount,
     coreviewFocusAnchorResult: coreview.visual.coreviewFocusAnchorResult,

@@ -365,6 +365,16 @@ function createGeminiRuntimeTelemetry(params: Partial<Extract<VoiceRuntimeTeleme
     annotationFallbackBlockedReason: params.annotationFallbackBlockedReason ?? null,
     annotationFallbackUtteranceKind: params.annotationFallbackUtteranceKind ?? null,
     recentAnnotationActionSucceeded: params.recentAnnotationActionSucceeded ?? false,
+    annotationCommitAttempted: params.annotationCommitAttempted ?? false,
+    annotationCommitResult: params.annotationCommitResult ?? null,
+    annotationCommitCountBefore: params.annotationCommitCountBefore ?? null,
+    annotationCommitCountAfter: params.annotationCommitCountAfter ?? null,
+    annotationCommitVerified: params.annotationCommitVerified ?? false,
+    annotationCommandPreventedNavigation: params.annotationCommandPreventedNavigation ?? false,
+    annotationCommandKeptArtifactMounted: params.annotationCommandKeptArtifactMounted ?? false,
+    annotationViewReadyTimedOut: params.annotationViewReadyTimedOut ?? false,
+    annotationPartialSuccess: params.annotationPartialSuccess ?? false,
+    sessionLeaveGuardSuppressedForAnnotation: params.sessionLeaveGuardSuppressedForAnnotation ?? false,
     assistantAnnotationClaimSuppressedCount: params.assistantAnnotationClaimSuppressedCount ?? 0,
     coreviewFocusAnchorCount: params.coreviewFocusAnchorCount ?? 0,
     coreviewFocusAnchorResult: params.coreviewFocusAnchorResult ?? null,
@@ -1174,6 +1184,16 @@ export function useStreamVoiceSession(
           annotationFallbackResult: null,
           annotationFallbackBlockedReason: null,
           recentAnnotationActionSucceeded: false,
+          annotationCommitAttempted: false,
+          annotationCommitResult: null,
+          annotationCommitCountBefore: baseline.annotationCount,
+          annotationCommitCountAfter: baseline.annotationCount,
+          annotationCommitVerified: false,
+          annotationCommandPreventedNavigation: true,
+          annotationCommandKeptArtifactMounted: false,
+          annotationViewReadyTimedOut: false,
+          annotationPartialSuccess: false,
+          sessionLeaveGuardSuppressedForAnnotation: true,
         }
       : current)
 
@@ -1284,6 +1304,12 @@ export function useStreamVoiceSession(
           ...current,
           ...nextCounts,
           recentAnnotationActionSucceeded: true,
+          annotationCommitAttempted: true,
+          annotationCommitResult: "success",
+          annotationCommitCountBefore: baseline?.annotationCount ?? currentCounts.annotationCount,
+          annotationCommitCountAfter: nextCounts.annotationCount,
+          annotationCommitVerified: nextCounts.annotationCount > (baseline?.annotationCount ?? currentCounts.annotationCount),
+          annotationCommandKeptArtifactMounted: true,
         }
       : current)
   }, [])
@@ -3253,13 +3279,29 @@ export function useStreamVoiceSession(
               const annotationCount = backendNumber("annotation_count")
               const highlightCount = backendNumber("highlight_count")
               const commentCount = backendNumber("comment_count")
+              const annotationCommitCountBefore = backendNumber("annotation_commit_count_before")
+              const annotationCommitCountAfter = backendNumber("annotation_commit_count_after") ?? annotationCount
+              const annotationCommitVerified = Boolean(
+                backendBoolean("annotation_commit_verified") === true
+                && annotationCommitCountBefore !== null
+                && annotationCommitCountAfter !== null
+                && annotationCommitCountAfter > annotationCommitCountBefore,
+              )
+              const annotationCountIncreased = annotationCommitCountBefore !== null && annotationCommitCountAfter !== null
+                ? annotationCommitCountAfter > annotationCommitCountBefore
+                : annotationCount !== null && annotationCount > (current.annotationCount ?? 0)
               const annotationActionSucceeded = Boolean(
                 coreviewAnnotationResolved
                 && diagnostic.backendResponse?.ok === true
                 && annotationCount !== null
                 && highlightCount !== null
-                && commentCount !== null,
+                && commentCount !== null
+                && (annotationCommitVerified || annotationCountIncreased)
               )
+              const annotationCommitResult = coreviewAnnotationResolved
+                ? backendString("annotation_commit_result")
+                  ?? (annotationActionSucceeded ? "success" : "annotation_commit_failed")
+                : current.annotationCommitResult ?? null
               if (annotationActionSucceeded) {
                 const parsedAt = Date.parse(diagnostic.timestamp)
                 recentAnnotationSuccessRef.current = {
@@ -3348,10 +3390,10 @@ export function useStreamVoiceSession(
                   ? backendString("command_source")
                   : current.coreviewAnnotationCommandSource ?? null,
                 coreviewAnnotationToolResult: coreviewAnnotationResolved
-                  ? diagnostic.backendResponse?.ok === true ? "success" : "blocked"
+                  ? annotationActionSucceeded ? annotationCommitResult : "blocked"
                   : current.coreviewAnnotationToolResult ?? null,
                 coreviewAnnotationFallbackResult: coreviewAnnotationResolved && backendString("command_source") === "frontend_fallback"
-                  ? diagnostic.backendResponse?.ok === true ? "success" : "blocked"
+                  ? annotationActionSucceeded ? annotationCommitResult : "blocked"
                   : current.coreviewAnnotationFallbackResult ?? null,
                 coreviewAnnotationKind: coreviewAnnotationResolved
                   ? backendString("annotation_kind")
@@ -3372,7 +3414,7 @@ export function useStreamVoiceSession(
                   ? true
                   : current.annotationFallbackAttempted ?? false,
                 annotationFallbackResult: coreviewAnnotationResolved && backendString("command_source") === "frontend_fallback"
-                  ? diagnostic.backendResponse?.ok === true ? "success" : "blocked"
+                  ? annotationActionSucceeded ? annotationCommitResult : "blocked"
                   : current.annotationFallbackResult ?? null,
                 annotationFallbackBlockedReason: coreviewAnnotationResolved && backendString("command_source") === "frontend_fallback"
                   ? backendString("blocked_reason")
@@ -3380,6 +3422,36 @@ export function useStreamVoiceSession(
                 recentAnnotationActionSucceeded: annotationActionSucceeded
                   ? true
                   : current.recentAnnotationActionSucceeded ?? false,
+                annotationCommitAttempted: coreviewAnnotationResolved
+                  ? backendBoolean("annotation_commit_attempted") ?? true
+                  : current.annotationCommitAttempted ?? false,
+                annotationCommitResult: coreviewAnnotationResolved
+                  ? annotationCommitResult
+                  : current.annotationCommitResult ?? null,
+                annotationCommitCountBefore: coreviewAnnotationResolved
+                  ? annotationCommitCountBefore
+                  : current.annotationCommitCountBefore ?? null,
+                annotationCommitCountAfter: coreviewAnnotationResolved
+                  ? annotationCommitCountAfter
+                  : current.annotationCommitCountAfter ?? null,
+                annotationCommitVerified: coreviewAnnotationResolved
+                  ? annotationActionSucceeded
+                  : current.annotationCommitVerified ?? false,
+                annotationCommandPreventedNavigation: coreviewAnnotationResolved
+                  ? backendBoolean("annotation_command_prevented_navigation") ?? current.annotationCommandPreventedNavigation ?? false
+                  : current.annotationCommandPreventedNavigation ?? false,
+                annotationCommandKeptArtifactMounted: coreviewAnnotationResolved
+                  ? backendBoolean("annotation_command_kept_artifact_mounted") ?? current.annotationCommandKeptArtifactMounted ?? false
+                  : current.annotationCommandKeptArtifactMounted ?? false,
+                annotationViewReadyTimedOut: coreviewAnnotationResolved
+                  ? backendBoolean("annotation_view_ready_timed_out") ?? current.annotationViewReadyTimedOut ?? false
+                  : current.annotationViewReadyTimedOut ?? false,
+                annotationPartialSuccess: coreviewAnnotationResolved
+                  ? backendBoolean("annotation_partial_success") ?? current.annotationPartialSuccess ?? false
+                  : current.annotationPartialSuccess ?? false,
+                sessionLeaveGuardSuppressedForAnnotation: coreviewAnnotationResolved
+                  ? backendBoolean("session_leave_guard_suppressed_for_annotation") ?? current.sessionLeaveGuardSuppressedForAnnotation ?? false
+                  : current.sessionLeaveGuardSuppressedForAnnotation ?? false,
                 coreviewFocusAnchorCount: coreviewFocusResolved
                   ? (current.coreviewFocusAnchorCount ?? 0) + 1
                   : current.coreviewFocusAnchorCount,

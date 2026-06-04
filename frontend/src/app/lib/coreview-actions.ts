@@ -30,6 +30,7 @@ export type CoreviewToolRefreshResult =
   | "failed"
   | "not_active"
   | "unavailable"
+  | "view_ready_timeout"
   | "refresh_unavailable"
 
 export type CoreviewToolBlockedReason =
@@ -48,10 +49,17 @@ export type CoreviewToolBlockedReason =
   | "invalid_tool_args"
   | "anchor_not_found"
   | "invalid_rect"
+  | "annotation_commit_failed"
   | "annotation_target_unavailable"
 
 export type CoreviewAnnotationKind = "highlight" | "comment"
 export type CoreviewAnnotationColor = "yellow" | "purple" | "blue" | "pink"
+export type CoreviewAnnotationCommitResult =
+  | "not_attempted"
+  | "success"
+  | "partial_success"
+  | "annotation_commit_failed"
+  | CoreviewToolBlockedReason
 
 export interface CoreviewNormalizedRect {
   x: number
@@ -142,6 +150,9 @@ export interface CoreviewCurrentView {
   exactTextAvailable: boolean
   visualFrameFresh: boolean
   annotationOverlayCaptured: boolean | null
+  annotationCount: number
+  highlightCount: number
+  commentCount: number
   rebindStatus?: CoreviewArtifactRebindStatus
 }
 
@@ -279,6 +290,14 @@ export interface CoreviewActionResult {
   highlight_count?: number | null
   comment_count?: number | null
   annotation_action_source?: "sophia" | "user" | null
+  annotation_commit_attempted?: boolean
+  annotation_commit_result?: CoreviewAnnotationCommitResult | null
+  annotation_commit_count_before?: number | null
+  annotation_commit_count_after?: number | null
+  annotation_commit_verified?: boolean
+  annotation_created?: boolean | null
+  annotation_view_ready_timed_out?: boolean
+  annotation_partial_success?: boolean
   focus_anchor_type?: CoreviewAnnotationAnchor["type"] | null
   focused_rect?: CoreviewNormalizedRect | null
   artifact_stable_identity?: string | null
@@ -667,6 +686,8 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       })
     }
 
+    const annotationCountBefore = before.annotationCount
+    const kindCountBefore = normalized.kind === "comment" ? before.commentCount : before.highlightCount
     const added = adapter.addAnnotation({
       kind: normalized.kind,
       pageIndex: normalized.pageIndex,
@@ -677,14 +698,23 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       text: normalized.text,
       source: normalized.source,
     })
-    if (!added.ok) {
+    const annotationCountAfter = added.annotationCount
+    const kindCountAfter = normalized.kind === "comment" ? added.commentCount : added.highlightCount
+    const commitVerified = Boolean(
+      added.ok
+      && added.annotationId
+      && annotationCountAfter > annotationCountBefore
+      && kindCountAfter > kindCountBefore,
+    )
+    if (!added.ok || !commitVerified) {
+      const blockedReason = added.blockedReason ?? "annotation_commit_failed"
       return buildCoreviewResult({
         action: "add_annotation",
         source,
         current: adapter.getCurrentViewState(),
         ok: false,
-        blockedReason: added.blockedReason ?? "annotation_target_unavailable",
-        resultSummary: blockedSummary(added.blockedReason ?? "annotation_target_unavailable"),
+        blockedReason,
+        resultSummary: blockedSummary(blockedReason),
         refreshAttempted: false,
         refreshResult: "not_requested",
         viewReadyWaitMs: null,
@@ -698,6 +728,12 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
         annotationCount: added.annotationCount,
         highlightCount: added.highlightCount,
         commentCount: added.commentCount,
+        annotationCommitAttempted: true,
+        annotationCommitResult: blockedReason,
+        annotationCommitCountBefore: annotationCountBefore,
+        annotationCommitCountAfter: annotationCountAfter,
+        annotationCommitVerified: false,
+        annotationCreated: false,
         ...resolved.rebind,
       })
     }
@@ -732,10 +768,10 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       }
     } else if (!ready.ok) {
       blockedReason = ready.blockedReason ?? "view_ready_timeout"
-      refreshResult = "unavailable"
+      refreshResult = "view_ready_timeout"
       visualFrameFreshOverride = false
       staleOverride = before.reviewHasFrame ? true : null
-      refreshSummary = " Visual refresh is pending."
+      refreshSummary = " Refresh timed out; annotation remains visible."
     } else if (readyView.reviewActive || readyView.reviewHasFrame) {
       refreshResult = "unavailable"
       blockedReason = readyView.reviewActive ? "refresh_unavailable" : "review_not_active"
@@ -747,6 +783,7 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
     }
 
     const after = adapter.getCurrentViewState()
+    const viewReadyTimedOut = blockedReason === "view_ready_timeout"
     return buildCoreviewResult({
       action: "add_annotation",
       source,
@@ -770,6 +807,14 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       annotationCount: added.annotationCount,
       highlightCount: added.highlightCount,
       commentCount: added.commentCount,
+      annotationCommitAttempted: true,
+      annotationCommitResult: viewReadyTimedOut ? "partial_success" : "success",
+      annotationCommitCountBefore: annotationCountBefore,
+      annotationCommitCountAfter: annotationCountAfter,
+      annotationCommitVerified: true,
+      annotationCreated: true,
+      annotationViewReadyTimedOut: viewReadyTimedOut,
+      annotationPartialSuccess: viewReadyTimedOut,
       ...resolved.rebind,
     })
   }
@@ -1426,6 +1471,14 @@ function buildCoreviewResult(params: {
   annotationCount?: number | null
   highlightCount?: number | null
   commentCount?: number | null
+  annotationCommitAttempted?: boolean
+  annotationCommitResult?: CoreviewAnnotationCommitResult | null
+  annotationCommitCountBefore?: number | null
+  annotationCommitCountAfter?: number | null
+  annotationCommitVerified?: boolean
+  annotationCreated?: boolean | null
+  annotationViewReadyTimedOut?: boolean
+  annotationPartialSuccess?: boolean
   focusAnchorType?: CoreviewAnnotationAnchor["type"] | null
   focusedRect?: CoreviewNormalizedRect | null
 }): CoreviewActionResult {
@@ -1478,6 +1531,14 @@ function buildCoreviewResult(params: {
     highlight_count: params.highlightCount ?? null,
     comment_count: params.commentCount ?? null,
     annotation_action_source: params.annotationActionSource ?? null,
+    annotation_commit_attempted: params.annotationCommitAttempted ?? false,
+    annotation_commit_result: params.annotationCommitResult ?? null,
+    annotation_commit_count_before: params.annotationCommitCountBefore ?? null,
+    annotation_commit_count_after: params.annotationCommitCountAfter ?? null,
+    annotation_commit_verified: params.annotationCommitVerified ?? false,
+    annotation_created: params.annotationCreated ?? null,
+    annotation_view_ready_timed_out: params.annotationViewReadyTimedOut ?? false,
+    annotation_partial_success: params.annotationPartialSuccess ?? false,
     focus_anchor_type: params.focusAnchorType ?? null,
     focused_rect: params.focusedRect ?? null,
     artifact_stable_identity: current.artifactStableIdentity ?? null,
@@ -1541,6 +1602,8 @@ function blockedSummary(reason: CoreviewToolBlockedReason): string {
       return "Sophia could not find that anchor in the current artifact view."
     case "invalid_rect":
       return "The annotation rectangle was invalid."
+    case "annotation_commit_failed":
+      return "Sophia could not verify that the annotation was added."
     case "annotation_target_unavailable":
       return "The active artifact renderer cannot place annotations right now."
     default:
@@ -1911,6 +1974,9 @@ function emptyCurrentView(): CoreviewCurrentView {
     exactTextAvailable: false,
     visualFrameFresh: false,
     annotationOverlayCaptured: null,
+    annotationCount: 0,
+    highlightCount: 0,
+    commentCount: 0,
     rebindStatus: "not_attempted",
   }
 }

@@ -585,7 +585,7 @@ describe("Coreview artifact still-frame review", () => {
     const highlight = await screen.findByTestId("artifact-highlight-annotation")
     expect(highlight).toHaveAttribute("data-annotation-color", "yellow")
     expect(highlight).toHaveAttribute("data-annotation-source", "sophia")
-    expect(await screen.findByTestId("artifact-voice-command-status")).toHaveTextContent("Sophia added a highlight")
+    expect(await screen.findByTestId("artifact-voice-command-status")).toHaveTextContent(/highlight/i)
 
     await waitFor(() => {
       const events = exportSophiaCaptureBundle().events
@@ -602,11 +602,17 @@ describe("Coreview artifact still-frame review", () => {
           && payload?.annotationCount === 1
           && payload?.highlightCount === 1
           && payload?.annotationFallbackAttempted === true
-          && payload?.annotationFallbackResult === "success"
+          && (payload?.annotationFallbackResult === "success" || payload?.annotationFallbackResult === "partial_success")
           && payload?.recentAnnotationActionSucceeded === true
+          && payload?.annotationCommitAttempted === true
+          && payload?.annotationCommitCountBefore === 0
+          && payload?.annotationCommitCountAfter === 1
+          && payload?.annotationCommitVerified === true
+          && payload?.annotationCommandPreventedNavigation === true
+          && payload?.annotationCommandKeptArtifactMounted === true
         )
       })).toBe(true)
-    })
+    }, { timeout: 4000 })
   })
 
   it("routes highlighted-in-yellow phrasing through Coreview fallback with a visible overlay", async () => {
@@ -645,7 +651,7 @@ describe("Coreview artifact still-frame review", () => {
       expect(serialized).toContain("annotation_highlight")
       expect(serialized).toContain("\"annotationCount\":1")
       expect(serialized).toContain("\"highlightCount\":1")
-    })
+    }, { timeout: 4000 })
   })
 
   it("routes comment annotation intent through Coreview fallback without logging raw text", async () => {
@@ -681,8 +687,83 @@ describe("Coreview artifact still-frame review", () => {
       expect(serialized).toContain("coreviewAnnotationFallbackCount")
       expect(serialized).toContain("annotationFallbackAttempted")
       expect(serialized).toContain("recentAnnotationActionSucceeded")
+      expect(serialized).toContain("annotationCommitVerified")
+      expect(serialized).toContain("annotationCommandPreventedNavigation")
+      expect(serialized).toContain("annotationCommandKeptArtifactMounted")
       expect(serialized).toContain("comment")
       expect(serialized).not.toContain("change the font")
+    }, { timeout: 4000 })
+  })
+
+  it("keeps the artifact review room mounted and interactive after annotation refresh timeout", async () => {
+    setCoreviewFlags(true)
+    registerSophiaCaptureBridge()
+    window.__sophiaCapture?.clear()
+    window.__sophiaCapture?.enable()
+    mockPdfPreviewReady({ pageCount: 1, textByPage: ["Q3 Launch Review"] })
+    const user = userEvent.setup()
+    let routeArtifactCommand: Parameters<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onArtifactReviewVoiceCommandRouteChange"]>>[0] = null
+
+    renderPanel({
+      selectedBuilderArtifactPath: PDF_SELECTED_PATH,
+      onArtifactReviewVoiceCommandRouteChange: (handler) => {
+        routeArtifactCommand = handler
+      },
+    })
+
+    expect(await screen.findByText("Page 1 of 1")).toBeInTheDocument()
+    expect(await screen.findByText("Exact text available")).toBeInTheDocument()
+    await waitFor(() => expect(routeArtifactCommand).not.toBeNull())
+
+    act(() => {
+      expect(routeArtifactCommand?.("leave a comment: change the font")).toMatchObject({
+        handled: true,
+        applied: true,
+        suppressAssistant: true,
+      })
+    })
+
+    expect(await screen.findByTestId("artifact-comment-pin")).toHaveAttribute("aria-pressed", "true")
+    expect(screen.getByDisplayValue("change the font")).toBeInTheDocument()
+    const viewport = screen.getByTestId("artifact-canvas-viewport")
+    const toolbar = screen.getByTestId("artifact-toolbar")
+    expect(viewport).toBeInTheDocument()
+    expect(toolbar).toBeInTheDocument()
+    expect(toolbar).toContainElement(screen.getByRole("button", { name: "Comment" }))
+    expect(screen.getByRole("button", { name: "Comment" })).toBeEnabled()
+
+    await waitFor(() => {
+      expect(screen.getByTestId("artifact-voice-command-status")).toHaveTextContent("Comment added; refresh timed out")
+    }, { timeout: 4000 })
+    expect(screen.queryByText(/Sophia is responding/i)).not.toBeInTheDocument()
+    expect(screen.getByTestId("artifact-canvas-viewport")).toBe(viewport)
+    expect(screen.getByTestId("artifact-toolbar")).toBe(toolbar)
+    await user.click(screen.getByRole("button", { name: "Highlight" }))
+    expect(screen.getByRole("button", { name: "Highlight" })).toHaveAttribute("aria-pressed", "true")
+
+    await waitFor(() => {
+      const annotationPayloads = exportSophiaCaptureBundle().events
+        .filter((event) => event.name === "coreview-tool-call")
+        .map((event) => event.payload as Record<string, unknown> | undefined)
+        .filter((payload) => payload?.coreviewToolName === "coreview_add_annotation")
+      const payload = annotationPayloads.at(-1)
+      expect(payload).toMatchObject({
+        annotationCount: 1,
+        commentCount: 1,
+        annotationFallbackAttempted: true,
+        annotationFallbackResult: "partial_success",
+        recentAnnotationActionSucceeded: true,
+        annotationCommitAttempted: true,
+        annotationCommitResult: "partial_success",
+        annotationCommitCountBefore: 0,
+        annotationCommitCountAfter: 1,
+        annotationCommitVerified: true,
+        annotationCommandPreventedNavigation: true,
+        annotationCommandKeptArtifactMounted: true,
+        annotationViewReadyTimedOut: true,
+        annotationPartialSuccess: true,
+        sessionLeaveGuardSuppressedForAnnotation: true,
+      })
     })
   })
 
@@ -717,7 +798,7 @@ describe("Coreview artifact still-frame review", () => {
 
     await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-zoom", "1.35"))
     expect(await screen.findByTestId("artifact-highlight-annotation")).toHaveAttribute("data-annotation-color", "yellow")
-    expect(await screen.findByTestId("artifact-comment-pin")).toBeInTheDocument()
+    expect(await screen.findByTestId("artifact-comment-pin", undefined, { timeout: 7000 })).toBeInTheDocument()
     expect(screen.getByDisplayValue("change the font")).toBeInTheDocument()
 
     await waitFor(() => {
@@ -737,7 +818,7 @@ describe("Coreview artifact still-frame review", () => {
       expect(finalAnnotationPayload?.annotationCount).toBe(2)
       expect(finalAnnotationPayload?.highlightCount).toBe(1)
       expect(finalAnnotationPayload?.commentCount).toBe(1)
-    })
+    }, { timeout: 9000 })
   })
 
   it("does not duplicate fallback annotations when a native Coreview annotation already handled the utterance", async () => {

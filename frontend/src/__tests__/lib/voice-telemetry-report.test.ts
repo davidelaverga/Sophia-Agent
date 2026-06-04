@@ -1420,6 +1420,19 @@ describe('buildVoiceTelemetryReport', () => {
       coreviewAnnotationColor: 'yellow',
       coreviewAnnotationPageIndex: 0,
       coreviewAnnotationBlockedReason: null,
+      annotationFallbackAttempted: true,
+      annotationFallbackResult: 'success',
+      recentAnnotationActionSucceeded: true,
+      annotationCommitAttempted: true,
+      annotationCommitResult: 'success',
+      annotationCommitCountBefore: 1,
+      annotationCommitCountAfter: 2,
+      annotationCommitVerified: true,
+      annotationCommandPreventedNavigation: true,
+      annotationCommandKeptArtifactMounted: true,
+      annotationViewReadyTimedOut: false,
+      annotationPartialSuccess: false,
+      sessionLeaveGuardSuppressedForAnnotation: true,
       assistantAnnotationClaimSuppressedCount: 1,
       coreviewFocusAnchorCount: 1,
       coreviewFocusAnchorResult: 'success',
@@ -1509,6 +1522,17 @@ describe('buildVoiceTelemetryReport', () => {
                     comment_count: 1,
                     annotation_overlay_captured: true,
                     annotation_action_source: 'sophia',
+                    annotation_commit_attempted: true,
+                    annotation_commit_result: 'success',
+                    annotation_commit_count_before: 1,
+                    annotation_commit_count_after: 2,
+                    annotation_commit_verified: true,
+                    annotation_created: true,
+                    annotation_command_prevented_navigation: true,
+                    annotation_command_kept_artifact_mounted: true,
+                    annotation_view_ready_timed_out: false,
+                    annotation_partial_success: false,
+                    session_leave_guard_suppressed_for_annotation: true,
                     raw_comment_text_excluded: true,
                     comment_text: 'change the font',
                     text_quote: 'private title text',
@@ -1564,6 +1588,19 @@ describe('buildVoiceTelemetryReport', () => {
     expect(report.coreview.visual.coreviewAnnotationAnchorType).toBe('current_title');
     expect(report.coreview.visual.coreviewAnnotationColor).toBe('yellow');
     expect(report.coreview.visual.coreviewAnnotationPageIndex).toBe(0);
+    expect(report.coreview.visual.annotationFallbackAttempted).toBe(true);
+    expect(report.coreview.visual.annotationFallbackResult).toBe('success');
+    expect(report.coreview.visual.recentAnnotationActionSucceeded).toBe(true);
+    expect(report.coreview.visual.annotationCommitAttempted).toBe(true);
+    expect(report.coreview.visual.annotationCommitResult).toBe('success');
+    expect(report.coreview.visual.annotationCommitCountBefore).toBe(1);
+    expect(report.coreview.visual.annotationCommitCountAfter).toBe(2);
+    expect(report.coreview.visual.annotationCommitVerified).toBe(true);
+    expect(report.coreview.visual.annotationCommandPreventedNavigation).toBe(true);
+    expect(report.coreview.visual.annotationCommandKeptArtifactMounted).toBe(true);
+    expect(report.coreview.visual.annotationViewReadyTimedOut).toBe(false);
+    expect(report.coreview.visual.annotationPartialSuccess).toBe(false);
+    expect(report.coreview.visual.sessionLeaveGuardSuppressedForAnnotation).toBe(true);
     expect(report.coreview.visual.assistantAnnotationClaimSuppressedCount).toBe(1);
     expect(report.coreview.visual.coreviewFocusAnchorCount).toBe(1);
     expect(report.coreview.visual.coreviewFocusAnchorResult).toBe('success');
@@ -1585,6 +1622,19 @@ describe('buildVoiceTelemetryReport', () => {
       coreviewAnnotationAnchorType: 'current_title',
       coreviewAnnotationColor: 'yellow',
       coreviewAnnotationPageIndex: 0,
+      annotationFallbackAttempted: true,
+      annotationFallbackResult: 'success',
+      recentAnnotationActionSucceeded: true,
+      annotationCommitAttempted: true,
+      annotationCommitResult: 'success',
+      annotationCommitCountBefore: 1,
+      annotationCommitCountAfter: 2,
+      annotationCommitVerified: true,
+      annotationCommandPreventedNavigation: true,
+      annotationCommandKeptArtifactMounted: true,
+      annotationViewReadyTimedOut: false,
+      annotationPartialSuccess: false,
+      sessionLeaveGuardSuppressedForAnnotation: true,
       assistantAnnotationClaimSuppressedCount: 1,
       coreviewFocusAnchorCount: 1,
       coreviewFocusAnchorResult: 'success',
@@ -1612,6 +1662,17 @@ describe('buildVoiceTelemetryReport', () => {
       annotation_anchor_type: 'current_title',
       annotation_color: 'yellow',
       annotation_page_index: 0,
+      annotation_commit_attempted: true,
+      annotation_commit_result: 'success',
+      annotation_commit_count_before: 1,
+      annotation_commit_count_after: 2,
+      annotation_commit_verified: true,
+      annotation_created: true,
+      annotation_command_prevented_navigation: true,
+      annotation_command_kept_artifact_mounted: true,
+      annotation_view_ready_timed_out: false,
+      annotation_partial_success: false,
+      session_leave_guard_suppressed_for_annotation: true,
       raw_comment_text_excluded: true,
       raw_artifact_text_excluded: true,
       raw_frame_excluded: true,

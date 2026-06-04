@@ -201,6 +201,16 @@ export type GeminiRuntimeTelemetry = {
   annotationFallbackBlockedReason?: string | null
   annotationFallbackUtteranceKind?: string | null
   recentAnnotationActionSucceeded?: boolean
+  annotationCommitAttempted?: boolean
+  annotationCommitResult?: string | null
+  annotationCommitCountBefore?: number | null
+  annotationCommitCountAfter?: number | null
+  annotationCommitVerified?: boolean
+  annotationCommandPreventedNavigation?: boolean
+  annotationCommandKeptArtifactMounted?: boolean
+  annotationViewReadyTimedOut?: boolean
+  annotationPartialSuccess?: boolean
+  sessionLeaveGuardSuppressedForAnnotation?: boolean
   assistantAnnotationClaimSuppressedCount?: number
   coreviewFocusAnchorCount?: number
   coreviewFocusAnchorResult?: string | null

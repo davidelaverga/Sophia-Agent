@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useRef } from 'react';
 
-import type { ArtifactReviewVoiceCommandRouter } from '../lib/artifact-review-voice-commands';
+import {
+  isArtifactReviewAnnotationIntent,
+  type ArtifactReviewVoiceCommandRouter,
+} from '../lib/artifact-review-voice-commands';
 import { logger } from '../lib/error-logger';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
 import type { InterruptPayload } from '../lib/session-types';
+
+import { suppressSessionLeaveGuardForAnnotation } from './session-annotation-navigation-guard';
 
 type ReflectionCandidate = {
   prompt?: string;
@@ -163,13 +168,20 @@ export function useSessionVoiceCommandSystem({
     const command = normalizedTranscript.replace(/^(sophia|sofia)\s+/, '').trim();
     if (!command) return false;
 
+    if (isArtifactReviewAnnotationIntent(command)) {
+      suppressSessionLeaveGuardForAnnotation();
+      return false;
+    }
+
     const matchesAny = (patterns: string[]) => patterns.some((pattern) => command === pattern || command.includes(pattern));
 
     const isGoBackCommand = matchesAny([
       'go back',
       'back',
       'exit session',
+      'exit the session',
       'leave session',
+      'leave the session',
       'salir',
       'salir de la sesion',
       'volver',
@@ -404,6 +416,10 @@ export function useSessionVoiceCommandSystem({
       return false;
     }
 
+    if (result.command?.kind === 'add_annotation') {
+      suppressSessionLeaveGuardForAnnotation();
+    }
+
     if (result.suppressAssistant !== false) {
       interceptVoiceAssistant(15000, 'artifact review voice command');
     }
@@ -443,8 +459,8 @@ export function useSessionVoiceCommandSystem({
 
   const routeVoiceCommand = useCallback((text: string) => {
     return (
-      routeSessionCommand(text) ||
       routeArtifactReviewCommandIfAvailable(text) ||
+      routeSessionCommand(text) ||
       routeDownloadCommand(text) ||
       routeInterruptCommand(text) ||
       routeReflectionCommand(text)

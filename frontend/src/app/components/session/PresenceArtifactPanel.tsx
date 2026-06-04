@@ -308,6 +308,8 @@ function coreviewBlockedStatusText(reason: CoreviewToolBlockedReason | null): st
       return "Sophia cannot control this view right now."
     case "invalid_tool_args":
       return "Sophia asked for an invalid view change."
+    case "annotation_commit_failed":
+      return "Sophia could not verify that the annotation was added."
     default:
       return "Sophia could not update this view."
   }
@@ -338,6 +340,8 @@ function refreshResultFromCoreview(
     case "error":
     case "failed":
       return "error"
+    case "view_ready_timeout":
+      return "unavailable"
     case "not_active":
       return "not_active"
     case "unavailable":
@@ -346,6 +350,32 @@ function refreshResultFromCoreview(
     default:
       return "not_requested"
   }
+}
+
+function coreviewAnnotationStateChanged(result: CoreviewActionResult): boolean {
+  if (result.action !== "add_annotation") {
+    return false
+  }
+  return Boolean(
+    result.annotation_commit_verified === true
+    && typeof result.annotation_commit_count_before === "number"
+    && typeof result.annotation_commit_count_after === "number"
+    && result.annotation_commit_count_after > result.annotation_commit_count_before,
+  )
+}
+
+function annotationFallbackResultFromCoreview(
+  result: CoreviewActionResult,
+): "success" | "partial_success" | "blocked" | "annotation_commit_failed" | null {
+  if (result.action !== "add_annotation") {
+    return null
+  }
+  if (!coreviewAnnotationStateChanged(result)) {
+    return result.blocked_reason === "annotation_commit_failed"
+      ? "annotation_commit_failed"
+      : "blocked"
+  }
+  return result.annotation_partial_success ? "partial_success" : "success"
 }
 
 function delay(ms: number): Promise<void> {
@@ -830,6 +860,9 @@ export function PresenceArtifactPanel({
     exactTextAvailable: builderExactTextAvailable,
     visualFrameFresh: builderReviewHasFrame && !builderReviewStale,
     annotationOverlayCaptured: builderVoiceCommandTarget?.annotationOverlayCaptured ?? (stageRendererKind === "pdf" ? false : null),
+    annotationCount: builderVoiceCommandTarget?.annotationCounts.annotationCount ?? 0,
+    highlightCount: builderVoiceCommandTarget?.annotationCounts.highlightCount ?? 0,
+    commentCount: builderVoiceCommandTarget?.annotationCounts.commentCount ?? 0,
     rebindStatus: "not_attempted",
   }), [
     artifactStableIdentity,
@@ -1012,9 +1045,19 @@ export function PresenceArtifactPanel({
     transportStateBefore?: string | null
     transportStateAfter?: string | null
     annotationFallbackAttempted?: boolean
-    annotationFallbackResult?: "success" | "blocked" | "not_attempted" | null
+    annotationFallbackResult?: "success" | "partial_success" | "blocked" | "not_attempted" | "annotation_commit_failed" | null
     annotationFallbackBlockedReason?: string | null
     recentAnnotationActionSucceeded?: boolean
+    annotationCommitAttempted?: boolean
+    annotationCommitResult?: string | null
+    annotationCommitCountBefore?: number | null
+    annotationCommitCountAfter?: number | null
+    annotationCommitVerified?: boolean
+    annotationCommandPreventedNavigation?: boolean
+    annotationCommandKeptArtifactMounted?: boolean
+    annotationViewReadyTimedOut?: boolean
+    annotationPartialSuccess?: boolean
+    sessionLeaveGuardSuppressedForAnnotation?: boolean
   }) => {
     const annotationIntentDetected = details.command.kind === "add_annotation"
     const annotationFallbackKind = annotationFallbackUtteranceKind(details.command, details.commands)
@@ -1038,6 +1081,16 @@ export function PresenceArtifactPanel({
         annotationFallbackBlockedReason: details.annotationFallbackBlockedReason ?? null,
         annotationFallbackUtteranceKind: annotationFallbackKind,
         recentAnnotationActionSucceeded: details.recentAnnotationActionSucceeded ?? false,
+        annotationCommitAttempted: details.annotationCommitAttempted ?? false,
+        annotationCommitResult: details.annotationCommitResult ?? null,
+        annotationCommitCountBefore: details.annotationCommitCountBefore ?? null,
+        annotationCommitCountAfter: details.annotationCommitCountAfter ?? null,
+        annotationCommitVerified: details.annotationCommitVerified ?? false,
+        annotationCommandPreventedNavigation: details.annotationCommandPreventedNavigation ?? false,
+        annotationCommandKeptArtifactMounted: details.annotationCommandKeptArtifactMounted ?? false,
+        annotationViewReadyTimedOut: details.annotationViewReadyTimedOut ?? false,
+        annotationPartialSuccess: details.annotationPartialSuccess ?? false,
+        sessionLeaveGuardSuppressedForAnnotation: details.sessionLeaveGuardSuppressedForAnnotation ?? false,
         reviewVoiceCommandApplied: details.applied,
         reviewVoiceCommandBlockedReason: details.blockedReason ?? null,
         reviewVoiceCommandTriggeredRefresh: details.triggeredRefresh,
@@ -1081,7 +1134,16 @@ export function PresenceArtifactPanel({
   ])
 
   const recordCoreviewToolTelemetry = useCallback((result: CoreviewActionResult) => {
-    if (result.action === "add_annotation" && result.ok) {
+    const annotationStateChanged = coreviewAnnotationStateChanged(result)
+    const annotationFallbackResult = annotationFallbackResultFromCoreview(result)
+    const annotationCommandKeptArtifactMounted = Boolean(
+      result.action === "add_annotation"
+      && isVisible
+      && builderStageActive
+      && builderVoiceCommandTargetRef.current,
+    )
+
+    if (result.action === "add_annotation" && annotationStateChanged) {
       onAnnotationActionSucceeded?.({
         annotationCount: result.annotation_count,
         highlightCount: result.highlight_count,
@@ -1112,10 +1174,10 @@ export function PresenceArtifactPanel({
         coreviewToolViewSignatureBefore: result.view_signature_before,
         coreviewToolViewSignatureAfter: result.view_signature_after,
         coreviewAnnotationToolCount: result.action === "add_annotation" ? 1 : 0,
-        coreviewAnnotationToolResult: result.action === "add_annotation" ? (result.ok ? "success" : "blocked") : null,
+        coreviewAnnotationToolResult: result.action === "add_annotation" ? annotationFallbackResult : null,
         coreviewAnnotationFallbackCount: result.action === "add_annotation" && result.command_source === "frontend_fallback" ? 1 : 0,
         coreviewAnnotationCommandSource: result.action === "add_annotation" ? result.command_source : null,
-        coreviewAnnotationFallbackResult: result.action === "add_annotation" && result.command_source === "frontend_fallback" ? (result.ok ? "success" : "blocked") : null,
+        coreviewAnnotationFallbackResult: result.action === "add_annotation" && result.command_source === "frontend_fallback" ? annotationFallbackResult : null,
         coreviewAnnotationKind: result.annotation_kind ?? null,
         coreviewAnnotationAnchorType: result.annotation_anchor_type ?? null,
         coreviewAnnotationColor: result.annotation_color ?? null,
@@ -1125,12 +1187,22 @@ export function PresenceArtifactPanel({
         annotationIntentSource: result.action === "add_annotation" ? "coreview_tool_result" : null,
         annotationFallbackAttempted: result.action === "add_annotation" && result.command_source === "frontend_fallback",
         annotationFallbackResult: result.action === "add_annotation" && result.command_source === "frontend_fallback"
-          ? (result.ok ? "success" : "blocked")
+          ? annotationFallbackResult
           : null,
         annotationFallbackBlockedReason: result.action === "add_annotation" && result.command_source === "frontend_fallback"
           ? result.blocked_reason
           : null,
-        recentAnnotationActionSucceeded: result.action === "add_annotation" && result.ok,
+        recentAnnotationActionSucceeded: annotationStateChanged,
+        annotationCommitAttempted: result.annotation_commit_attempted ?? false,
+        annotationCommitResult: result.annotation_commit_result ?? null,
+        annotationCommitCountBefore: result.annotation_commit_count_before ?? null,
+        annotationCommitCountAfter: result.annotation_commit_count_after ?? null,
+        annotationCommitVerified: result.annotation_commit_verified ?? false,
+        annotationCommandPreventedNavigation: result.action === "add_annotation",
+        annotationCommandKeptArtifactMounted,
+        annotationViewReadyTimedOut: result.annotation_view_ready_timed_out ?? false,
+        annotationPartialSuccess: result.annotation_partial_success ?? false,
+        sessionLeaveGuardSuppressedForAnnotation: result.action === "add_annotation",
         coreviewFocusAnchorCount: result.action === "focus_anchor" ? 1 : 0,
         coreviewFocusAnchorResult: result.action === "focus_anchor" ? (result.ok ? "success" : "blocked") : null,
         coreviewFocusAnchorType: result.focus_anchor_type ?? null,
@@ -1158,7 +1230,7 @@ export function PresenceArtifactPanel({
         rawFrameExcluded: true,
       },
     })
-  }, [artifactStableIdentity, isVisible, normalSessionId, onAnnotationActionSucceeded, sessionId, threadId])
+  }, [artifactStableIdentity, builderStageActive, isVisible, normalSessionId, onAnnotationActionSucceeded, sessionId, threadId])
 
   const applyCoreviewActionStatus = useCallback((result: CoreviewActionResult) => {
     if (!result.ok) {
@@ -1190,6 +1262,15 @@ export function PresenceArtifactPanel({
     }
 
     if (result.action === "add_annotation") {
+      if (result.annotation_partial_success && result.blocked_reason === "view_ready_timeout") {
+        setVoiceCommandStatus({
+          text: result.annotation_kind === "comment"
+            ? "Comment added; refresh timed out"
+            : "Highlight added; refresh timed out",
+          tone: "warn",
+        })
+        return
+      }
       setVoiceCommandStatus({
         text: result.annotation_kind === "comment"
           ? "Sophia added a comment"
@@ -1297,19 +1378,28 @@ export function PresenceArtifactPanel({
     },
     addAnnotation: (input) => {
       const target = builderVoiceCommandTargetRef.current
-      if (target) {
-        setBuilderVisualCaptureStatus(unavailableCaptureStatus("preview_not_ready"))
+      if (!target) {
+        return {
+          ok: false,
+          annotationId: null,
+          blockedReason: "annotation_target_unavailable",
+          annotationCount: 0,
+          highlightCount: 0,
+          commentCount: 0,
+        }
       }
-      return target
-        ? target.addAnnotation(input)
-        : {
-            ok: false,
-            annotationId: null,
-            blockedReason: "annotation_target_unavailable",
-            annotationCount: 0,
-            highlightCount: 0,
-            commentCount: 0,
-          }
+
+      const result = target.addAnnotation(input)
+      coreviewCurrentViewRef.current = {
+        ...(coreviewCurrentViewRef.current ?? coreviewCurrentView),
+        annotationOverlayCaptured: result.annotationCount > 0,
+        annotationCount: result.annotationCount,
+        highlightCount: result.highlightCount,
+        commentCount: result.commentCount,
+      }
+      coreviewVisualReadyRef.current = false
+      setBuilderVisualCaptureStatus(unavailableCaptureStatus("preview_not_ready"))
+      return result
     },
     focusAnnotationAnchor: (input) => {
       const target = builderVoiceCommandTargetRef.current
@@ -1476,6 +1566,16 @@ export function PresenceArtifactPanel({
           annotationFallbackResult: command.kind === "add_annotation" ? "blocked" : null,
           annotationFallbackBlockedReason: command.kind === "add_annotation" ? "no_artifact_selected" : null,
           recentAnnotationActionSucceeded: false,
+          annotationCommitAttempted: false,
+          annotationCommitResult: command.kind === "add_annotation" ? "no_selected_artifact" : null,
+          annotationCommitCountBefore: command.kind === "add_annotation" ? 0 : null,
+          annotationCommitCountAfter: command.kind === "add_annotation" ? 0 : null,
+          annotationCommitVerified: false,
+          annotationCommandPreventedNavigation: command.kind === "add_annotation",
+          annotationCommandKeptArtifactMounted: false,
+          annotationViewReadyTimedOut: false,
+          annotationPartialSuccess: false,
+          sessionLeaveGuardSuppressedForAnnotation: command.kind === "add_annotation",
         })
         return {
           handled: true,
@@ -1539,14 +1639,27 @@ export function PresenceArtifactPanel({
             }
             return bus.setView(coreviewSetViewInputFromVoiceCommand(nextCommand, commandView), "frontend_fallback")
           })
+          const annotationStateChanged = coreviewAnnotationStateChanged(result)
+          const annotationFallbackResult = annotationFallbackResultFromCoreview(result)
+          const annotationCommand = nextCommand.kind === "add_annotation"
+          const annotationCommandKeptArtifactMounted = Boolean(
+            annotationCommand
+            && isVisible
+            && builderStageActive
+            && builderVoiceCommandTargetRef.current,
+          )
 
           recordReviewVoiceCommandTelemetry({
             command: nextCommand,
             commands,
-            applied: result.ok
-              || routeBlockedReasonFromCoreview(result.blocked_reason) === null
-              || result.blocked_reason === "refresh_unavailable"
-              || result.blocked_reason === "review_not_active",
+            applied: annotationCommand
+              ? annotationStateChanged
+              : (
+                  result.ok
+                  || routeBlockedReasonFromCoreview(result.blocked_reason) === null
+                  || result.blocked_reason === "refresh_unavailable"
+                  || result.blocked_reason === "review_not_active"
+                ),
             blockedReason: result.ok ? null : routeBlockedReasonFromCoreview(result.blocked_reason),
             triggeredRefresh: result.refresh_attempted,
             refreshResult: result.refresh_attempted
@@ -1562,12 +1675,20 @@ export function PresenceArtifactPanel({
             autoRefreshBlockedReason: result.blocked_reason,
             transportStateBefore,
             transportStateAfter: builderArtifactCoReview.transportStatus.statusText,
-            annotationFallbackAttempted: nextCommand.kind === "add_annotation",
-            annotationFallbackResult: nextCommand.kind === "add_annotation"
-              ? (result.ok ? "success" : "blocked")
-              : null,
-            annotationFallbackBlockedReason: nextCommand.kind === "add_annotation" ? result.blocked_reason : null,
-            recentAnnotationActionSucceeded: result.action === "add_annotation" && result.ok,
+            annotationFallbackAttempted: annotationCommand,
+            annotationFallbackResult: annotationCommand ? annotationFallbackResult : null,
+            annotationFallbackBlockedReason: annotationCommand ? result.blocked_reason : null,
+            recentAnnotationActionSucceeded: annotationStateChanged,
+            annotationCommitAttempted: annotationCommand ? result.annotation_commit_attempted : false,
+            annotationCommitResult: annotationCommand ? result.annotation_commit_result : null,
+            annotationCommitCountBefore: annotationCommand ? result.annotation_commit_count_before : null,
+            annotationCommitCountAfter: annotationCommand ? result.annotation_commit_count_after : null,
+            annotationCommitVerified: annotationCommand ? result.annotation_commit_verified : false,
+            annotationCommandPreventedNavigation: annotationCommand,
+            annotationCommandKeptArtifactMounted,
+            annotationViewReadyTimedOut: annotationCommand ? result.annotation_view_ready_timed_out : false,
+            annotationPartialSuccess: annotationCommand ? result.annotation_partial_success : false,
+            sessionLeaveGuardSuppressedForAnnotation: annotationCommand,
           })
         }
       }
@@ -1593,6 +1714,21 @@ export function PresenceArtifactPanel({
             annotationFallbackResult: command.kind === "add_annotation" ? "blocked" : null,
             annotationFallbackBlockedReason: command.kind === "add_annotation" ? "refresh_exception" : null,
             recentAnnotationActionSucceeded: false,
+            annotationCommitAttempted: command.kind === "add_annotation",
+            annotationCommitResult: command.kind === "add_annotation" ? "annotation_commit_failed" : null,
+            annotationCommitCountBefore: command.kind === "add_annotation" ? currentView.annotationCount : null,
+            annotationCommitCountAfter: command.kind === "add_annotation" ? currentView.annotationCount : null,
+            annotationCommitVerified: false,
+            annotationCommandPreventedNavigation: command.kind === "add_annotation",
+            annotationCommandKeptArtifactMounted: Boolean(
+              command.kind === "add_annotation"
+              && isVisible
+              && builderStageActive
+              && builderVoiceCommandTargetRef.current,
+            ),
+            annotationViewReadyTimedOut: false,
+            annotationPartialSuccess: false,
+            sessionLeaveGuardSuppressedForAnnotation: command.kind === "add_annotation",
           })
         })
       }, nativeToolsPrimary ? 120 : 0)

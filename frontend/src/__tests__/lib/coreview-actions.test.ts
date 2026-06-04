@@ -17,6 +17,7 @@ import {
 function createHarness(options: Partial<CoreviewCurrentView> & {
   refreshOk?: boolean
   waitOk?: boolean
+  annotationCommitNoop?: boolean
   rebindCurrent?: Partial<CoreviewCurrentView>
   rebindOk?: boolean
   rebindReason?: string | null
@@ -24,6 +25,7 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
   const {
     refreshOk = true,
     waitOk = true,
+    annotationCommitNoop = false,
     rebindCurrent,
     rebindOk = true,
     rebindReason = null,
@@ -53,6 +55,9 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
     exactTextAvailable: true,
     visualFrameFresh: true,
     annotationOverlayCaptured: false,
+    annotationCount: 0,
+    highlightCount: 0,
+    commentCount: 0,
     ...currentOptions,
   }
   current.viewSignature = buildArtifactViewSignature({
@@ -161,10 +166,23 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
       return { ok: false, blockedReason: "anchor_not_found" }
     },
     addAnnotation: (input) => {
+      if (annotationCommitNoop) {
+        return {
+          ok: true,
+          annotationId: `${input.kind}-noop`,
+          blockedReason: null,
+          annotationCount: current.annotationCount,
+          highlightCount: current.highlightCount,
+          commentCount: current.commentCount,
+        }
+      }
       annotations = [...annotations, { kind: input.kind }]
       current = {
         ...current,
         annotationOverlayCaptured: annotations.length > 0,
+        annotationCount: annotations.length,
+        highlightCount: annotations.filter((annotation) => annotation.kind === "highlight").length,
+        commentCount: annotations.filter((annotation) => annotation.kind === "comment").length,
       }
       return {
         ok: true,
@@ -480,6 +498,12 @@ describe("Coreview action bus", () => {
       comment_count: 0,
       annotation_action_source: "sophia",
       annotation_overlay_captured: true,
+      annotation_commit_attempted: true,
+      annotation_commit_result: "success",
+      annotation_commit_count_before: 0,
+      annotation_commit_count_after: 1,
+      annotation_commit_verified: true,
+      annotation_created: true,
       preserved_mic: true,
       preserved_review: true,
       raw_artifact_text_excluded: true,
@@ -513,6 +537,76 @@ describe("Coreview action bus", () => {
       preserved_review: true,
     })
     expect(JSON.stringify(result)).not.toContain("change the font")
+  })
+
+  it("keeps an annotation committed when view-ready times out", async () => {
+    const harness = createHarness({ waitOk: false })
+
+    const result = await harness.bus.addAnnotation({
+      kind: "comment",
+      anchor: { type: "current_title" },
+      text: "change the font",
+      source: "sophia",
+    }, "frontend_fallback")
+
+    expect(result).toMatchObject({
+      ok: true,
+      action: "add_annotation",
+      command_source: "frontend_fallback",
+      blocked_reason: "view_ready_timeout",
+      refresh_attempted: false,
+      refresh_result: "view_ready_timeout",
+      annotation_kind: "comment",
+      annotation_count: 1,
+      comment_count: 1,
+      annotation_commit_attempted: true,
+      annotation_commit_result: "partial_success",
+      annotation_commit_count_before: 0,
+      annotation_commit_count_after: 1,
+      annotation_commit_verified: true,
+      annotation_created: true,
+      annotation_view_ready_timed_out: true,
+      annotation_partial_success: true,
+      preserved_review: true,
+    })
+    expect(harness.annotations).toHaveLength(1)
+    expect(harness.current.annotationCount).toBe(1)
+    expect(harness.current.commentCount).toBe(1)
+    expect(harness.refreshes).toBe(0)
+    expect(harness.current.stale).toBe(true)
+    expect(result.result_summary).toContain("annotation remains visible")
+    expect(JSON.stringify(result)).not.toContain("change the font")
+  })
+
+  it("does not report annotation success unless the committed count increases", async () => {
+    const harness = createHarness({ annotationCommitNoop: true })
+
+    const result = await harness.bus.addAnnotation({
+      kind: "highlight",
+      anchor: { type: "current_title" },
+      color: "yellow",
+      source: "sophia",
+    }, "frontend_fallback")
+
+    expect(result).toMatchObject({
+      ok: false,
+      action: "add_annotation",
+      command_source: "frontend_fallback",
+      blocked_reason: "annotation_commit_failed",
+      refresh_attempted: false,
+      refresh_result: "not_requested",
+      annotation_count: 0,
+      highlight_count: 0,
+      annotation_commit_attempted: true,
+      annotation_commit_result: "annotation_commit_failed",
+      annotation_commit_count_before: 0,
+      annotation_commit_count_after: 0,
+      annotation_commit_verified: false,
+      annotation_created: false,
+    })
+    expect(harness.annotations).toHaveLength(0)
+    expect(harness.current.annotationCount).toBe(0)
+    expect(harness.refreshes).toBe(0)
   })
 
   it("blocks invalid pages and missing text anchors safely for annotations", async () => {

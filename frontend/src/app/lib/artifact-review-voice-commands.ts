@@ -190,6 +190,10 @@ export function parseArtifactReviewVoiceCommands(
   return commands
 }
 
+export function isArtifactReviewAnnotationIntent(transcript: string): boolean {
+  return parseArtifactReviewVoiceCommands(transcript).some((command) => command.kind === "add_annotation")
+}
+
 function parseArtifactReviewVoiceCommandClause(
   transcript: string,
 ): ArtifactReviewVoiceCommand[] {
@@ -293,10 +297,10 @@ function parseArtifactReviewVoiceCommandClause(
   }
 
   const commentIndex = firstMatchedIndex(normalized, [
-    /\b(?:leave|add|make|put)\s+(?:a\s+)?(?:comment|note)\b/u,
-    /\b(?:comment|note)\s+(?:on\s+)?(?:the\s+)?(?:title|it|this|current)\b/u,
+    /\b(?:leave|add|make|put)\s+(?:a\s+)?(?:comment|note|feedback|pin)\b/u,
+    /\b(?:comment|note|feedback|pin)\s+(?:on\s+)?(?:the\s+)?(?:title|it|this|current)\b/u,
     /\bpin(?:\s+(?:it|this|that|a\s+note|a\s+comment|note|comment))?\b/u,
-    /\b(?:comment|note)\b/u,
+    /\b(?:comment|note|feedback)\b/u,
   ])
   if (commentIndex >= 0) {
     const commentText = extractCommentText(transcript)
@@ -404,10 +408,10 @@ function annotationColorFromNormalized(
 function extractCommentText(value: string): string | undefined {
   const text = stripWakeWord(value)
   const patterns = [
-    /\b(?:leave|add|make|put)\s+(?:a\s+)?(?:comment|note)(?:\s+on\s+(?:the\s+)?(?:current\s+)?(?:title|it|this))?\s*(?:saying|that\s+says|to\s+say|:)?\s+(.+)$/iu,
-    /\b(?:comment|note)\s+(?:on\s+)?(?:the\s+)?(?:current\s+)?(?:title|it|this)?\s*(?:saying|that\s+says|to\s+say|:)?\s+(.+)$/iu,
-    /\b(?:comment|note)\s+(?!on\b|the\b|current\b|title\b|it\b|this\b)(.+)$/iu,
-    /\b(?:comment|note)\s*:\s*(.+)$/iu,
+    /\b(?:leave|add|make|put)\s+(?:a\s+)?(?:comment|note|feedback|pin)(?:\s+on\s+(?:the\s+)?(?:current\s+)?(?:title|it|this))?\s*(?:saying|that\s+says|to\s+say|:)?\s+(.+)$/iu,
+    /\b(?:comment|note|feedback|pin)\s+(?:on\s+)?(?:the\s+)?(?:current\s+)?(?:title|it|this)?\s*(?:saying|that\s+says|to\s+say|:)?\s+(.+)$/iu,
+    /\b(?:comment|note|feedback|pin)\s+(?!on\b|the\b|current\b|title\b|it\b|this\b)(.+)$/iu,
+    /\b(?:comment|note|feedback|pin)\s*:\s*(.+)$/iu,
   ]
   for (const pattern of patterns) {
     const match = pattern.exec(text)
@@ -425,6 +429,9 @@ function cleanCommentText(value: string | undefined): string | undefined {
     .replace(/\s+/gu, " ")
     .replace(/[.!?]+$/gu, "")
     .trim()
+  if (/^(?:on\s+)?(?:the\s+)?(?:current\s+)?(?:title|it|this)$/iu.test(cleaned ?? "")) {
+    return undefined
+  }
   return cleaned || undefined
 }
 
