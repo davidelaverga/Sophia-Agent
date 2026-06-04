@@ -849,6 +849,81 @@ def test_wrapper_augmentation_includes_prior_artifact_path_when_present():
     assert "RESUMING" in msg or "resume" in msg.lower()
 
 
+def test_wrapper_persists_update_urls_in_replacement_run_input():
+    """Explicit URLs in a mid-build update must reach builder state, not
+    only directive prose. builder_web_fetch authorizes against these state
+    fields in the replacement run."""
+    update_calls: list[dict] = []
+    update_url = "https://example.com/source"
+
+    class FakeRuns:
+        async def create(self, **kwargs):
+            update_calls.append(kwargs)
+            return {"run_id": "run-new"}
+
+    class FakeClient:
+        runs = FakeRuns()
+
+    class FakeClients:
+        def get_async(self, agent_name):
+            assert agent_name == "sophia_builder"
+            return FakeClient()
+
+    agent_map = {"sophia_builder": {"graph_id": "sophia_builder"}}
+    clients = FakeClients()
+
+    async def native_coroutine(*, task_id, message, runtime):
+        # Keep these references in the closure so the wrapper can reuse the
+        # native deepagents update context, matching production.
+        assert agent_map and clients
+        raise AssertionError("URL-state dispatch should bypass native fallback")
+
+    native = SimpleNamespace(
+        name="update_async_task",
+        description="native desc",
+        func=None,
+        coroutine=native_coroutine,
+        args_schema=None,
+    )
+    wrapped = make_update_async_task_wrapper(native)
+    runtime = SimpleNamespace(
+        state={
+            "async_tasks": {
+                "task-1": {
+                    "task_id": "task-1",
+                    "agent_name": "sophia_builder",
+                    "thread_id": "builder-thread-1",
+                    "run_id": "run-old",
+                    "status": "running",
+                    "created_at": "2026-05-28T10:00:00Z",
+                    "last_checked_at": "2026-05-28T10:00:00Z",
+                    "last_updated_at": "2026-05-28T10:00:00Z",
+                }
+            },
+        },
+        tool_call_id="tc-update",
+        config={"configurable": {"user_id": "user-1", "parent_thread_id": "parent-1"}},
+    )
+
+    response = asyncio.run(
+        wrapped.coroutine(
+            task_id="task-1",
+            message=f"also include {update_url}",
+            runtime=runtime,
+        )
+    )
+
+    assert isinstance(response, Command)
+    assert len(update_calls) == 1
+    run_input = update_calls[0]["input"]
+    assert run_input["explicit_user_urls"] == [update_url]
+    assert run_input["builder_allowed_urls"] == [update_url]
+    assert run_input["builder_update_required_urls"] == [update_url]
+    assert "approved fetch targets" in run_input["messages"][0]["content"]
+    assert update_calls[0]["config"]["configurable"]["thread_id"] == "builder-thread-1"
+    assert response.update["async_tasks"]["task-1"]["run_id"] == "run-new"
+
+
 def test_wrapper_augmentation_is_idempotent():
     """If the message already carries the directive sentinel (e.g. a retry,
     or a model that copied the prior directive into a new turn), the

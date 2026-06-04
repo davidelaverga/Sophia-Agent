@@ -845,64 +845,26 @@ function buildArtifactReviewDiagnosticsSummary(
   events: CaptureEvent[],
   metrics: VoiceDeveloperMetrics,
 ): Record<string, unknown> {
-  const warnings: string[] = [];
   const counts = metrics.counts;
   const gemini = metrics.sessionTelemetry.runtime === 'gemini_live'
     ? metrics.sessionTelemetry.gemini
     : null;
-  const reviewActive = Boolean(
-    metrics.coreview.visual.coreviewEnabled
-      && (
-        metrics.coreview.visual.coreviewArtifactId
-        || metrics.coreview.visual.frameSentCount > 0
-        || counts.artifactSelectedStageCount > 0
-      ),
-  );
+  const reviewActive = isArtifactReviewActive(metrics);
   const selectedStageEventCount = events.filter(
     (event) => event.category === 'artifacts-runtime' && event.name === 'select-stage-artifact',
   ).length;
-  const suppressedReviewToolDiagnostics = events.filter((event) => {
-    if (event.category !== 'voice-session' || event.name !== 'gemini-tool-loop-diagnostic') {
-      return false;
-    }
-    const payload = asRecord(event.payload);
-    const data = asRecord(payload?.data) ?? payload;
-    if (asString(data?.phase) !== 'tool_execution_rejected') {
-      return false;
-    }
-    const diagnostic = asRecord(data?.diagnostic);
-    const toolCall = asRecord(diagnostic?.toolCall);
-    const rejectionReason = asString(data?.rejectionReason)
-      ?? asString(diagnostic?.rejectionReason)
-      ?? asString(diagnostic?.rejection_reason);
-    return rejectionReason === 'artifact_review_emit_artifact_suppressed'
-      && asString(data?.toolName ?? toolCall?.name) !== null;
-  });
-  const suppressedReviewToolCount = suppressedReviewToolDiagnostics.length;
-  const suppressedReviewEmitToolCount = suppressedReviewToolDiagnostics.filter((event) => {
-    const payload = asRecord(event.payload);
-    const data = asRecord(payload?.data) ?? payload;
-    const diagnostic = asRecord(data?.diagnostic);
-    const toolCall = asRecord(diagnostic?.toolCall);
-    return asString(data?.toolName ?? toolCall?.name) === 'emit_artifact';
-  }).length;
-
-  if (counts.artifactRenderedCount > 0 && counts.artifactRuntimeIngestCount === 0) {
-    warnings.push('artifact_rendered_not_runtime_ingested');
-  }
-  if (counts.artifactCountMismatch) {
-    warnings.push('artifact_count_mismatch');
-  }
-  if (reviewActive && (gemini?.artifactToolCallCount ?? 0) > suppressedReviewEmitToolCount) {
-    warnings.push('review_emit_artifact_tool_churn_detected');
-  }
-  if (reviewActive && (gemini?.toolRejectionCount ?? 0) > suppressedReviewToolCount) {
-    warnings.push('review_tool_churn_suppressed');
-  }
+  const suppressedReview = countSuppressedArtifactReviewTools(events);
 
   return {
     schema: 'artifact_review_summary_v1',
-    warnings,
+    warnings: buildArtifactReviewWarnings({
+      counts,
+      emitArtifactToolCallCount: gemini?.artifactToolCallCount ?? 0,
+      reviewActive,
+      suppressedReviewEmitToolCount: suppressedReview.emitArtifactCount,
+      suppressedReviewToolCount: suppressedReview.totalCount,
+      toolRejectionCount: gemini?.toolRejectionCount ?? 0,
+    }),
     reviewActive,
     artifactCount: counts.artifacts,
     artifactPublicEventCount: counts.artifactPublicEventCount,
@@ -918,6 +880,91 @@ function buildArtifactReviewDiagnosticsSummary(
     rawArtifactTextExcluded: true,
     rawFrameExcluded: true,
   };
+}
+
+function isArtifactReviewActive(metrics: VoiceDeveloperMetrics): boolean {
+  return Boolean(
+    metrics.coreview.visual.coreviewEnabled
+      && (
+        metrics.coreview.visual.coreviewArtifactId
+        || metrics.coreview.visual.frameSentCount > 0
+        || metrics.counts.artifactSelectedStageCount > 0
+      ),
+  );
+}
+
+function countSuppressedArtifactReviewTools(events: CaptureEvent[]): {
+  emitArtifactCount: number;
+  totalCount: number;
+} {
+  let emitArtifactCount = 0;
+  let totalCount = 0;
+
+  for (const event of events) {
+    const toolName = suppressedArtifactReviewToolName(event);
+    if (toolName === null) {
+      continue;
+    }
+    totalCount += 1;
+    if (toolName === 'emit_artifact') {
+      emitArtifactCount += 1;
+    }
+  }
+
+  return { emitArtifactCount, totalCount };
+}
+
+function suppressedArtifactReviewToolName(event: CaptureEvent): string | null {
+  if (event.category !== 'voice-session' || event.name !== 'gemini-tool-loop-diagnostic') {
+    return null;
+  }
+  const payload = asRecord(event.payload);
+  const data = asRecord(payload?.data) ?? payload;
+  if (asString(data?.phase) !== 'tool_execution_rejected') {
+    return null;
+  }
+  const diagnostic = asRecord(data?.diagnostic);
+  const toolCall = asRecord(diagnostic?.toolCall);
+  const rejectionReason = asString(data?.rejectionReason)
+    ?? asString(diagnostic?.rejectionReason)
+    ?? asString(diagnostic?.rejection_reason);
+  if (rejectionReason !== 'artifact_review_emit_artifact_suppressed') {
+    return null;
+  }
+  return asString(data?.toolName ?? toolCall?.name);
+}
+
+function buildArtifactReviewWarnings({
+  counts,
+  emitArtifactToolCallCount,
+  reviewActive,
+  suppressedReviewEmitToolCount,
+  suppressedReviewToolCount,
+  toolRejectionCount,
+}: {
+  counts: VoiceDeveloperMetrics['counts'];
+  emitArtifactToolCallCount: number;
+  reviewActive: boolean;
+  suppressedReviewEmitToolCount: number;
+  suppressedReviewToolCount: number;
+  toolRejectionCount: number;
+}): string[] {
+  const warnings: string[] = [];
+
+  if (counts.artifactRenderedCount > 0 && counts.artifactRuntimeIngestCount === 0) {
+    warnings.push('artifact_rendered_not_runtime_ingested');
+  }
+  if (counts.artifactCountMismatch) {
+    warnings.push('artifact_count_mismatch');
+  }
+  if (reviewActive && emitArtifactToolCallCount > suppressedReviewEmitToolCount) {
+    warnings.push('review_emit_artifact_tool_churn_detected');
+  }
+  if (reviewActive && toolRejectionCount > suppressedReviewToolCount) {
+    warnings.push('review_tool_churn_suppressed');
+  }
+
+  return warnings;
 }
 
 function buildCoreviewStillFrameDiagnosticsSummary(coreview: CoreviewUsageTelemetry): Record<string, unknown> {

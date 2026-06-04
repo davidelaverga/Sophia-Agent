@@ -298,6 +298,43 @@ describe('useBuilderCanvas', () => {
     expect(result.current.activeTask?.latest_activity?.label).toBe('Finalizing live run');
   });
 
+  it('does not treat a slow unseen stale snapshot as newer than a live stream run', async () => {
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    let resolveSnapshot!: (response: Response) => void;
+    fetchMock.mockReset();
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => {
+      resolveSnapshot = resolve;
+    }));
+
+    const { result } = renderHook(() => useBuilderCanvas('thread-1'));
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+
+    act(() => {
+      FakeEventSource.instances[0].emit({
+        version: 1,
+        event_id: 'task-1:run-2:1',
+        sequence: 1,
+        parent_thread_id: 'thread-1',
+        task_id: 'task-1',
+        run_id: 'run-2',
+        occurred_at: '2026-05-25T10:00:01Z',
+        kind: 'progress',
+        status: 'running',
+        activity: { kind: 'phase', phase: 'drafting', label: 'Drafting live run' },
+      });
+    });
+
+    await waitFor(() => expect(result.current.activeTask?.run_id).toBe('run-2'));
+
+    await act(async () => {
+      resolveSnapshot(new Response(JSON.stringify(SNAPSHOT), { status: 200 }));
+      await Promise.resolve();
+    });
+
+    expect(result.current.activeTask?.run_id).toBe('run-2');
+    expect(result.current.activeTask?.latest_activity?.label).toBe('Drafting live run');
+  });
+
   it('retires the previous run when a reconnect snapshot moves to a newer run', async () => {
     mockFetchSnapshots(SNAPSHOT, {
       version: 1,

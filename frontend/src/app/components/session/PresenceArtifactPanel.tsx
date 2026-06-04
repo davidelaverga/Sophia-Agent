@@ -20,12 +20,7 @@ import {
   type ArtifactReviewVoiceCommandRouteResult,
   type ArtifactReviewVoiceCommandRouter,
 } from "../../lib/artifact-review-voice-commands"
-import {
-  buildThreadArtifactHref,
-  formatBuilderArtifactFileSize,
-  getBuilderArtifactFiles,
-  normalizeBuilderArtifactPath,
-} from "../../lib/builder-artifacts"
+import { getBuilderArtifactFiles, normalizeBuilderArtifactPath } from "../../lib/builder-artifacts"
 import { coreviewFlagDiagnostics, isCoreviewStillFrameReviewEnabled } from "../../lib/co-review-flags"
 import type { CoReviewMediaTransport } from "../../lib/co-review-transport"
 import { recordSophiaCaptureEvent } from "../../lib/session-capture"
@@ -37,12 +32,11 @@ import type { RitualArtifacts } from "../../types/session"
 
 import type { ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
 import { ArtifactStage, type ArtifactReviewVoiceCommandTarget } from "./ArtifactStage"
+import { buildCoreviewRealArtifactId, CoreviewRealArtifactCanvas } from "./CoreviewRealArtifactCanvas"
 import {
   COREVIEW_COMPANION_ARTIFACT_ID,
-  CoreviewCompanionArtifactCanvas,
-} from "./CoreviewCompanionArtifactCanvas"
-import { CoReviewControls } from "./CoReviewControls"
-import { buildCoreviewRealArtifactId, CoreviewRealArtifactCanvas } from "./CoreviewRealArtifactCanvas"
+  PresenceArtifactSecondarySurfaces,
+} from "./PresenceArtifactSecondarySurfaces"
 import { VoiceArtifactStage } from "./VoiceArtifactStage"
 
 interface PresenceArtifactPanelProps {
@@ -298,6 +292,24 @@ function buildStageBuilderArtifact({
   return null
 }
 
+function getStagePrimaryFileWithMime(
+  stageBuilderArtifact: BuilderArtifactV1 | null,
+  builderArtifactLibrary: BuilderArtifactLibraryItemV1[],
+) {
+  const files = getBuilderArtifactFiles(stageBuilderArtifact)
+  const file = files.find((candidate) => candidate.isPrimary) ?? files[0] ?? null
+
+  if (!file) {
+    return null
+  }
+
+  const libraryItem = builderArtifactLibrary.find((item) => item.path === file.path)
+  return {
+    ...file,
+    ...(libraryItem?.mimeType ? { mimeType: libraryItem.mimeType } : {}),
+    ...(typeof libraryItem?.sizeBytes === 'number' ? { sizeBytes: libraryItem.sizeBytes } : {}),
+  }
+}
 /**
  * Cosmic artifact panel — part of the presence field.
  *
@@ -382,19 +394,7 @@ export function PresenceArtifactPanel({
     : null
   const builderReviewEnabled = Boolean(coreviewReviewEnabled && builderArtifactId)
   const stagePrimaryFile = useMemo(() => {
-    const file = getBuilderArtifactFiles(stageBuilderArtifact).find((candidate) => candidate.isPrimary)
-      ?? getBuilderArtifactFiles(stageBuilderArtifact)[0]
-      ?? null
-    if (!file) {
-      return null
-    }
-
-    const libraryItem = builderArtifactLibrary.find((item) => item.path === file.path)
-    return {
-      ...file,
-      ...(libraryItem?.mimeType ? { mimeType: libraryItem.mimeType } : {}),
-      ...(typeof libraryItem?.sizeBytes === "number" ? { sizeBytes: libraryItem.sizeBytes } : {}),
-    }
+    return getStagePrimaryFileWithMime(stageBuilderArtifact, builderArtifactLibrary)
   }, [builderArtifactLibrary, stageBuilderArtifact])
   const stageRendererKind = detectArtifactRendererKind(stagePrimaryFile, stageBuilderArtifact)
   const stageUsesMarkdownPreview = stageRendererKind === "markdown"
@@ -1375,281 +1375,27 @@ export function PresenceArtifactPanel({
           </div>
         )}
 
-        {hasBuilderLibrary && showSecondaryArtifactSurfaces && (
-          <div
-            className={cn(
-              cn(stageBuilderArtifact ? "mt-4" : ""),
-              "mb-4 transition-all duration-[1400ms] ease-out",
-              revealStep >= 1 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
-            )}
-          >
-            <p
-              className="mb-2 text-center text-[9px] tracking-[0.18em] uppercase"
-              style={{ color: 'var(--cosmic-text-faint)' }}
-            >
-              Session files
-            </p>
-
-            <div className="flex flex-col items-center gap-2">
-              {builderArtifactLibrary.map((file) => {
-                const downloadHref = buildThreadArtifactHref(threadId, file.path, { download: true })
-                const openHref = buildThreadArtifactHref(threadId, file.path)
-                const isSelected = stageBuilderArtifact?.artifactPath === file.path
-                const meta = [formatBuilderArtifactFileSize(file.sizeBytes), file.mimeType]
-                  .filter(Boolean)
-                  .join(' • ')
-
-                return (
-                  <div
-                    key={file.path}
-                    className="flex items-center gap-2"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <div className="text-center">
-                      <span className="block text-[10px]" style={{ color: 'var(--cosmic-text-whisper)' }}>
-                        {file.name}
-                      </span>
-                      {meta && (
-                        <span className="block text-[9px]" style={{ color: 'var(--cosmic-text-faint)' }}>
-                          {meta}
-                        </span>
-                      )}
-                    </div>
-                    <div className="flex gap-1.5">
-                      {onSelectedBuilderArtifactPathChange && (
-                        <button
-                          type="button"
-                          aria-label={`View ${file.name} in canvas`}
-                          aria-pressed={isSelected}
-                          className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
-                          style={{
-                            borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
-                            color: 'var(--sophia-purple)',
-                            background: isSelected
-                              ? 'color-mix(in srgb, var(--sophia-purple) 12%, transparent)'
-                              : 'transparent',
-                          }}
-                          onClick={() => {
-                            haptic('light')
-                            onSelectedBuilderArtifactPathChange(file.path)
-                          }}
-                        >
-                          View in canvas
-                        </button>
-                      )}
-                      {openHref && (
-                        <a
-                          href={openHref}
-                          target="_blank"
-                          rel="noreferrer"
-                          aria-label={`Open ${file.name} in new tab`}
-                          className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
-                          style={{
-                            borderColor: 'var(--cosmic-border-soft)',
-                            color: 'var(--cosmic-text-whisper)',
-                          }}
-                          onClick={() => haptic('light')}
-                        >
-                          Open in new tab
-                        </a>
-                      )}
-                      {downloadHref && (
-                        <a
-                          href={downloadHref}
-                          aria-label={`Download ${file.name}`}
-                          className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
-                          style={{
-                            borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
-                            color: 'var(--sophia-purple)',
-                            background: 'color-mix(in srgb, var(--sophia-purple) 8%, transparent)',
-                          }}
-                          onClick={() => haptic('medium')}
-                        >
-                          Download
-                        </a>
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )}
-
-        {showSecondaryArtifactSurfaces ? (
-        <div ref={setDomArtifactRoot}>
-          {showDomArtifactCoReview && artifacts ? (
-            <CoreviewCompanionArtifactCanvas
-              artifacts={artifacts}
-              artifactId={COREVIEW_COMPANION_ARTIFACT_ID}
-              sessionId={sessionId}
-              normalSessionId={normalSessionId}
-              threadId={threadId}
-            />
-          ) : null}
-
-          {/* === TAKEAWAY === emerges like a fading-in constellation */}
-          {hasTakeaway && (
-            <div
-              className={cn(
-                "transition-all duration-[1400ms] ease-out",
-                revealStep >= 1 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
-              )}
-            >
-              <p
-                className="font-cormorant text-[17px] leading-[1.75] font-light text-center"
-                style={{
-                  color: revealStep >= 1 ? 'var(--cosmic-text-strong)' : 'transparent',
-                  textShadow: isActive
-                    ? `0 0 24px color-mix(in srgb, ${bloomColor} 22%, transparent)`
-                    : "none",
-                  transition: 'color 1.4s ease, text-shadow 2s ease',
-                }}
-              >
-                {takeaway}
-              </p>
-            </div>
-          )}
-
-          {/* === DIVIDER === thin luminous line, like a nebula filament */}
-          {hasTakeaway && (hasReflection || hasMemories) && (
-            <div
-              className={cn(
-                "mx-auto my-4 transition-all duration-[1200ms] ease-out",
-                revealStep >= 2 ? "opacity-100 scale-x-100" : "opacity-0 scale-x-0"
-              )}
-              style={{
-                width: "32px",
-                height: "1px",
-                background: `linear-gradient(90deg, transparent, color-mix(in srgb, ${bloomColor} 25%, var(--cosmic-text-faint)), transparent)`,
-                transformOrigin: "center",
-              }}
-            />
-          )}
-
-          {/* === REFLECTION === the invitation, slightly brighter, interactive */}
-          {hasReflection && (
-            <div
-              className={cn(
-                "transition-all duration-[1400ms] ease-out",
-                revealStep >= 3 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
-              )}
-            >
-              <button
-                onClick={(e) => {
-                  e.stopPropagation()
-                  handleReflectionTap()
-                }}
-                disabled={reflectionTapped || !onReflectionTap}
-                className={cn(
-                  "w-full text-center transition-all duration-700",
-                  !reflectionTapped && onReflectionTap
-                    ? "cursor-pointer hover:scale-[1.01] active:scale-[0.99]"
-                    : "cursor-default",
-                  reflectionTapped && "opacity-40"
-                )}
-              >
-                <p
-                  className="font-cormorant text-[15px] italic leading-[1.7] font-light"
-                  style={{
-                    color: reflectionTapped ? 'var(--cosmic-text-whisper)' : 'var(--cosmic-text-strong)',
-                    textShadow: !reflectionTapped && isActive
-                      ? `0 0 20px color-mix(in srgb, ${bloomColor} 18%, transparent)`
-                      : "none",
-                    transition: "color 0.7s ease, text-shadow 1s ease",
-                  }}
-                >
-                  {reflection_candidate.prompt}
-                </p>
-                {reflection_candidate.why && !reflectionTapped && (
-                  <p className="mt-1.5 text-[10px] tracking-[0.08em] font-light" style={{ color: 'var(--cosmic-text-faint)' }}>
-                    {reflection_candidate.why}
-                  </p>
-                )}
-                {!reflectionTapped && onReflectionTap && (
-                  <span
-                    className="inline-block mt-2.5 text-[9px] tracking-[0.14em] uppercase transition-colors duration-700"
-                    style={{ color: `color-mix(in srgb, ${bloomColor} 40%, var(--cosmic-text-faint))` }}
-                  >
-                    tap to reflect
-                  </span>
-                )}
-                {reflectionTapped && (
-                  <span className="inline-block mt-1.5 text-[9px] tracking-[0.14em] uppercase" style={{ color: 'var(--cosmic-text-faint)' }}>
-                    sent
-                  </span>
-                )}
-              </button>
-            </div>
-          )}
-
-          {/* === MEMORY CONSTELLATION === tiny stars, each a memory */}
-          {hasMemories && (
-            <div
-              className={cn(
-                "mt-4 flex justify-center gap-2 flex-wrap transition-all duration-[1200ms] ease-out",
-                revealStep >= 4 ? "opacity-100" : "opacity-0"
-              )}
-            >
-              {memory_candidates.slice(0, 5).map((mem, i) => (
-                <span
-                  key={i}
-                  className={cn(
-                    "group/mem relative text-[9px] tracking-[0.12em] lowercase px-2 py-[3px]",
-                    "transition-all duration-[800ms] cursor-default",
-                  )}
-                  style={{
-                    color: 'var(--cosmic-text-muted)',
-                    animationDelay: `${i * 200}ms`,
-                  }}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  {mem.memory || mem.category}
-                  {/* Approve/reject on hover — tiny cosmic dust */}
-                  {(onMemoryApprove || onMemoryReject) && (
-                    <span className="hidden group-hover/mem:inline-flex items-center gap-0.5 ml-1">
-                      {onMemoryApprove && (
-                        <button
-                          onClick={() => { haptic("light"); onMemoryApprove(i) }}
-                          className="transition-colors hover:text-[var(--cosmic-text)]"
-                          style={{ color: 'var(--cosmic-text-faint)' }}
-                          aria-label="Save memory"
-                        >
-                          ✓
-                        </button>
-                      )}
-                      {onMemoryReject && (
-                        <button
-                          onClick={() => { haptic("light"); onMemoryReject(i) }}
-                          className="transition-colors hover:text-[var(--cosmic-text-muted)]"
-                          style={{ color: 'var(--cosmic-text-faint)' }}
-                          aria-label="Skip memory"
-                        >
-                          ×
-                        </button>
-                      )}
-                    </span>
-                  )}
-                </span>
-              ))}
-            </div>
-          )}
-
-          {showDomArtifactCoReview && (
-            <div className="mt-4" onClick={(e) => e.stopPropagation()}>
-              <CoReviewControls
-                state={domArtifactCoReview.state}
-                transportStatus={domArtifactCoReview.transportStatus}
-                onStart={() => { void domArtifactCoReview.startReview() }}
-                onStop={() => { void domArtifactCoReview.stopReview() }}
-                canStart={domArtifactCoReview.canStart}
-                featureEnabled={domArtifactCoReview.enabled}
-                className="justify-center"
-              />
-            </div>
-          )}
-        </div>
-        ) : null}
+        <PresenceArtifactSecondarySurfaces
+          artifacts={artifacts}
+          builderArtifactLibrary={builderArtifactLibrary}
+          stageBuilderArtifact={stageBuilderArtifact}
+          showSecondaryArtifactSurfaces={showSecondaryArtifactSurfaces}
+          showDomArtifactCoReview={showDomArtifactCoReview}
+          threadId={threadId}
+          sessionId={sessionId}
+          normalSessionId={normalSessionId}
+          revealStep={revealStep}
+          isActive={isActive}
+          bloomColor={bloomColor}
+          reflectionTapped={reflectionTapped}
+          domArtifactCoReview={domArtifactCoReview}
+          onSelectedBuilderArtifactPathChange={onSelectedBuilderArtifactPathChange}
+          onHandleReflectionTap={handleReflectionTap}
+          onReflectionTap={onReflectionTap}
+          onMemoryApprove={onMemoryApprove}
+          onMemoryReject={onMemoryReject}
+          onDomArtifactRootChange={setDomArtifactRoot}
+        />
       </div>
     </div>
   )
