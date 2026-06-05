@@ -198,7 +198,7 @@ function renderAnnotationPreview({
   zoom?: number
 } = {}) {
   function AnnotationHarness() {
-    const [toolMode, setToolMode] = useState<ArtifactToolMode>(initialToolMode)
+    const [toolMode] = useState<ArtifactToolMode>(initialToolMode)
     const [annotations, setAnnotations] = useState<ArtifactAnnotation[]>(initialAnnotations)
     const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null)
 
@@ -223,7 +223,6 @@ function renderAnnotationPreview({
             { id, kind: "highlight", pageIndex, rect, createdAt: 1 },
           ])
           setSelectedAnnotationId(id)
-          setToolMode("select")
         }}
         onCreateComment={(point: NormalizedArtifactPoint) => {
           const id = `comment-${annotations.length + 1}`
@@ -232,7 +231,6 @@ function renderAnnotationPreview({
             { id, kind: "comment", pageIndex, point, text: "", createdAt: 1 },
           ])
           setSelectedAnnotationId(id)
-          setToolMode("select")
         }}
         onCreateUnderline={(rect: NormalizedArtifactRect) => {
           const id = `underline-${annotations.length + 1}`
@@ -241,7 +239,6 @@ function renderAnnotationPreview({
             { id, kind: "underline", pageIndex, rect, color: "purple", createdAt: 1 },
           ])
           setSelectedAnnotationId(id)
-          setToolMode("select")
         }}
         onCreateArrow={(line: NormalizedArtifactLine) => {
           const id = `arrow-${annotations.length + 1}`
@@ -250,7 +247,6 @@ function renderAnnotationPreview({
             { id, kind: "arrow", pageIndex, line, color: "purple", createdAt: 1 },
           ])
           setSelectedAnnotationId(id)
-          setToolMode("select")
         }}
         onSelectAnnotation={setSelectedAnnotationId}
         onUpdateCommentText={(id, text) => {
@@ -580,7 +576,7 @@ describe("ArtifactPdfPreview", () => {
     expect(highlight).toHaveAttribute("data-annotation-width", "0.3000")
     expect(highlight).toHaveAttribute("data-annotation-height", "0.3000")
     expect(highlight).toHaveAttribute("aria-pressed", "true")
-    expect(layer).toHaveAttribute("data-artifact-tool-mode", "select")
+    expect(layer).toHaveAttribute("data-artifact-tool-mode", "highlight")
   })
 
   it("creates a visible page-scoped underline without creating a highlight or comment", async () => {
@@ -604,7 +600,7 @@ describe("ArtifactPdfPreview", () => {
     expect(underline).toHaveAttribute("aria-pressed", "true")
     expect(screen.queryByTestId("artifact-highlight-annotation")).not.toBeInTheDocument()
     expect(screen.queryByTestId("artifact-comment-pin")).not.toBeInTheDocument()
-    expect(layer).toHaveAttribute("data-artifact-tool-mode", "select")
+    expect(layer).toHaveAttribute("data-artifact-tool-mode", "underline")
   })
 
   it("creates a visible page-scoped arrow without triggering pan or comments", async () => {
@@ -630,7 +626,7 @@ describe("ArtifactPdfPreview", () => {
     expect(arrow).toHaveAttribute("data-annotation-end-y", "0.4500")
     expect(screen.getByTestId("artifact-pdf-pan-layer")).toHaveAttribute("data-pan-dragging", "false")
     expect(onCreateComment).not.toHaveBeenCalled()
-    expect(layer).toHaveAttribute("data-artifact-tool-mode", "select")
+    expect(layer).toHaveAttribute("data-artifact-tool-mode", "arrow")
   })
 
   it("keeps highlight, comment, underline, and arrow overlays visible after a zoom rerender", async () => {
@@ -729,6 +725,7 @@ describe("ArtifactPdfPreview", () => {
     expect(comment).toHaveAttribute("data-annotation-page-index", "0")
     expect(comment).toHaveAttribute("data-annotation-x", "0.5000")
     expect(comment).toHaveAttribute("data-annotation-y", "0.2500")
+    expect(layer).toHaveAttribute("data-artifact-tool-mode", "comment")
 
     const input = screen.getByLabelText("Comment text")
     await act(async () => {

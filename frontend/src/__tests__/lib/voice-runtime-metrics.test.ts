@@ -2542,6 +2542,83 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(JSON.stringify(metrics.coreview.visual)).not.toContain('raw artifact body');
   });
 
+  it('reports annotation restore, sticky tool mode, and canvas restore telemetry safely', () => {
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events: [
+        buildEvent({
+          seq: 1,
+          at: '2026-05-27T12:00:00.000Z',
+          category: 'artifacts-runtime',
+          name: 'artifact-canvas-restore',
+          payload: {
+            canvasRestoreAttempted: true,
+            canvasRestoreResult: 'restored',
+            canvasRestoreSource: 'page_mount',
+            canvasRestoredArtifactIdentityHash: 'artifact-hash',
+            canvasRestoreStorageKeyHash: 'canvas-key-hash',
+            canvasRestoreStorageVersion: 1,
+            rawArtifactTextExcluded: true,
+            rawCommentTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        }),
+        buildEvent({
+          seq: 2,
+          at: '2026-05-27T12:00:01.000Z',
+          category: 'artifacts-runtime',
+          name: 'artifact-annotation-state',
+          payload: {
+            artifactId: 'artifact-1',
+            artifactRendererKind: 'pdf',
+            artifactToolMode: 'highlight',
+            annotationOverlayCaptured: true,
+            annotationCount: 4,
+            highlightCount: 1,
+            commentCount: 1,
+            underlineCount: 1,
+            arrowCount: 1,
+            annotationRestoreAttempted: true,
+            annotationRestoreResult: 'restored',
+            annotationRestoreCount: 4,
+            annotationRestoreSource: 'stage_mount',
+            annotationPersistenceStatus: 'restored',
+            annotationPersistedCount: 4,
+            annotationStorageVersion: 1,
+            annotationStorageKeyHash: 'annotation-key-hash',
+            stickyToolModeEnabled: true,
+            lastToolModeBeforeAction: 'highlight',
+            lastToolModeAfterAction: 'highlight',
+            toolModeResetReason: null,
+            rawArtifactTextExcluded: true,
+            rawCommentTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        }),
+      ],
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-05-27T12:00:04.000Z'),
+    });
+
+    expect(metrics.coreview.visual).toMatchObject({
+      canvasRestoreAttempted: true,
+      canvasRestoreResult: 'restored',
+      canvasRestoreSource: 'page_mount',
+      canvasRestoredArtifactIdentityHash: 'artifact-hash',
+      annotationRestoreAttempted: true,
+      annotationRestoreResult: 'restored',
+      annotationRestoreCount: 4,
+      annotationRestoreSource: 'stage_mount',
+      annotationStorageKeyHash: 'annotation-key-hash',
+      annotationStorageVersion: 1,
+      stickyToolModeEnabled: true,
+      lastToolModeBeforeAction: 'highlight',
+      lastToolModeAfterAction: 'highlight',
+      toolModeResetReason: null,
+    });
+    expect(JSON.stringify(metrics.coreview.visual)).not.toContain('raw artifact body');
+  });
+
   it('reports review tool timeouts as resolved safe tool results', () => {
     const metrics = buildVoiceDeveloperMetrics({
       stage: 'listening',

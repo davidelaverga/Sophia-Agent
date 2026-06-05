@@ -51,9 +51,19 @@ import { haptic } from '../hooks/useHaptics';
 import { useIdleTimeout } from '../hooks/useIdleTimeout';
 import { useSessionBootstrap } from '../hooks/useSessionBootstrap';
 import { useSessionPersistence } from '../hooks/useSessionPersistence';
+import {
+  ARTIFACT_CANVAS_RESTORE_STORAGE_VERSION,
+  clearArtifactCanvasOpenState,
+  hashArtifactCanvasRestoreIdentity,
+  persistArtifactCanvasOpenState,
+  restoreArtifactCanvasOpenState,
+  type ArtifactCanvasRestoreContext,
+} from '../lib/artifact-canvas-restore-state';
+import { detectArtifactRendererKind } from '../lib/artifact-renderers';
 import type { ArtifactReviewVoiceCommandRouter } from '../lib/artifact-review-voice-commands';
 import { buildThreadArtifactHref, getBuilderArtifactFiles, normalizeBuilderArtifactPath } from '../lib/builder-artifacts';
 import { GeminiStillFrameTransport } from '../lib/co-review-still-frame-transport';
+import { buildCoreviewArtifactStableIdentity } from '../lib/coreview-artifact-identity';
 import { debugLog } from '../lib/debug-logger';
 import { errorCopy } from '../lib/error-copy';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
@@ -534,6 +544,16 @@ function SessionPageContent() {
   const hasBuilderArtifactLibrary = builderArtifactLibrary.length > 0;
   const hasSelectedBuilderArtifactPath = Boolean(selectedBuilderArtifactPath);
   const coReviewSessionId = backendSessionId || safeSessionId || sessionId || null;
+  const canvasRestoreContext = useMemo<ArtifactCanvasRestoreContext>(() => ({
+    userId: userId ?? null,
+    threadId: resolvedThreadId ?? null,
+    sessionId: coReviewSessionId,
+  }), [coReviewSessionId, resolvedThreadId, userId]);
+  const canvasRestoreContextSignature = useMemo(() => [
+    canvasRestoreContext.userId ?? 'unknown',
+    canvasRestoreContext.threadId ?? 'unknown',
+    canvasRestoreContext.sessionId ?? 'unknown',
+  ].join('|'), [canvasRestoreContext]);
   const coReviewVoiceAgentSessionId = voiceState.runtimeTelemetry.runtime === 'gemini_live'
     ? voiceState.runtimeTelemetry.sessionId
     : voiceState.runtimeTelemetry.voiceAgentSessionId;
@@ -646,6 +666,8 @@ function SessionPageContent() {
   const previousReadyCountRef = useRef(0);
   const previousArtifactSignatureRef = useRef('');
   const previousBuilderSurfaceTelemetrySignatureRef = useRef('');
+  const canvasRestoreAttemptedContextRef = useRef<string | null>(null);
+  const canvasRestoreClosedByUserRef = useRef(false);
 
   const artifactContentCount = useMemo(() => {
     const hasBuilderArtifact = Boolean(builderArtifact) || hasBuilderArtifactLibrary || hasSelectedBuilderArtifactPath;
@@ -757,6 +779,108 @@ function SessionPageContent() {
     () => buildThreadArtifactHref(resolvedThreadId, builderPrimaryFile?.path, { download: true }),
     [builderPrimaryFile?.path, resolvedThreadId],
   );
+  const resolveBuilderCanvasArtifactForPath = useCallback((path: string | null | undefined) => {
+    const normalizedPath = normalizeBuilderArtifactPath(path);
+    if (!normalizedPath || !resolvedThreadId) {
+      return null;
+    }
+
+    const builderFile = getBuilderArtifactFiles(builderArtifact).find((file) => (
+      normalizeBuilderArtifactPath(file.path) === normalizedPath
+    )) ?? null;
+    const libraryItem = builderArtifactLibrary.find((item) => (
+      normalizeBuilderArtifactPath(item.path) === normalizedPath
+    )) ?? null;
+    const name = libraryItem?.name ?? builderFile?.name ?? getBuilderArtifactFilename(normalizedPath);
+    const file = {
+      path: normalizedPath,
+      name,
+      label: name,
+      isPrimary: true,
+      ...(libraryItem?.mimeType ? { mimeType: libraryItem.mimeType } : {}),
+      ...(typeof libraryItem?.sizeBytes === 'number' ? { sizeBytes: libraryItem.sizeBytes } : {}),
+    };
+    const rendererArtifact = builderFile && builderArtifact
+      ? builderArtifact
+      : {
+          artifactPath: normalizedPath,
+          artifactTitle: name,
+          artifactType: 'document',
+          decisionsMade: [],
+          supportingFiles: [],
+        };
+    const rendererKind = detectArtifactRendererKind(file, rendererArtifact);
+    const openHref = buildThreadArtifactHref(resolvedThreadId, normalizedPath);
+    if (!openHref) {
+      return null;
+    }
+
+    return {
+      normalizedPath,
+      rendererKind,
+      openHref,
+    };
+  }, [builderArtifact, builderArtifactLibrary, resolvedThreadId]);
+  const recordCanvasRestoreTelemetry = useCallback((payload: {
+    attempted: boolean;
+    result: string;
+    source: string;
+    artifactPath?: string | null;
+    artifactIdentityHash?: string | null;
+    storageKeyHash?: string | null;
+  }) => {
+    recordSophiaCaptureEvent({
+      category: 'artifacts-runtime',
+      name: 'artifact-canvas-restore',
+      payload: {
+        canvasRestoreAttempted: payload.attempted,
+        canvasRestoreResult: payload.result,
+        canvasRestoreSource: payload.source,
+        canvasRestoredArtifactIdentityHash: payload.artifactIdentityHash ?? null,
+        canvasRestoreStorageKeyHash: payload.storageKeyHash ?? null,
+        canvasRestoreStorageVersion: ARTIFACT_CANVAS_RESTORE_STORAGE_VERSION,
+        rawArtifactTextExcluded: true,
+        rawCommentTextExcluded: true,
+        rawFrameExcluded: true,
+      },
+    });
+  }, []);
+  const persistSelectedBuilderCanvasState = useCallback((path: string | null | undefined, source: string) => {
+    const artifact = resolveBuilderCanvasArtifactForPath(path);
+    if (!artifact) {
+      recordCanvasRestoreTelemetry({
+        attempted: false,
+        result: 'invalid_artifact',
+        source,
+        artifactPath: normalizeBuilderArtifactPath(path),
+      });
+      return null;
+    }
+
+    const result = persistArtifactCanvasOpenState(canvasRestoreContext, {
+      artifactPath: artifact.normalizedPath,
+      rendererKind: artifact.rendererKind,
+    });
+    recordCanvasRestoreTelemetry({
+      attempted: false,
+      result: result.result,
+      source,
+      artifactPath: artifact.normalizedPath,
+      artifactIdentityHash: result.state?.stableArtifactIdentityHash
+        ?? hashArtifactCanvasRestoreIdentity(result.state?.stableArtifactIdentity),
+      storageKeyHash: result.storageKeyHash,
+    });
+    return artifact.normalizedPath;
+  }, [canvasRestoreContext, recordCanvasRestoreTelemetry, resolveBuilderCanvasArtifactForPath]);
+  const clearSelectedBuilderCanvasState = useCallback((source: string) => {
+    const result = clearArtifactCanvasOpenState(canvasRestoreContext);
+    recordCanvasRestoreTelemetry({
+      attempted: false,
+      result: result.result,
+      source,
+      storageKeyHash: result.storageKeyHash,
+    });
+  }, [canvasRestoreContext, recordCanvasRestoreTelemetry]);
   const builderCompletionForDisplay: BuilderCompletionEventV1 | null = useMemo(() => {
     if (!builderCompletion) {
       return null;
@@ -864,8 +988,17 @@ function SessionPageContent() {
     builderPrimaryFile?.path && dismissedBuilderLibraryPath === builderPrimaryFile.path,
   );
   const handleSelectBuilderArtifactPath = useCallback((path: string | null) => {
-    setSelectedBuilderArtifactPath(normalizeBuilderArtifactPath(path));
-  }, []);
+    const normalizedPath = normalizeBuilderArtifactPath(path);
+    if (!normalizedPath) {
+      setSelectedBuilderArtifactPath(null);
+      clearSelectedBuilderCanvasState('selection_cleared');
+      return;
+    }
+
+    canvasRestoreClosedByUserRef.current = false;
+    const persistedPath = persistSelectedBuilderCanvasState(normalizedPath, 'view_in_canvas');
+    setSelectedBuilderArtifactPath(persistedPath ?? normalizedPath);
+  }, [clearSelectedBuilderCanvasState, persistSelectedBuilderCanvasState]);
 
   useEffect(() => {
     if (!showArtifacts || !showArtifactsUi) {
@@ -881,8 +1014,9 @@ function SessionPageContent() {
       clearBuilderTask();
     }
     setSelectedBuilderArtifactPath(null);
+    clearSelectedBuilderCanvasState('canvas_close');
     clearBuilderArtifact();
-  }, [builderPrimaryFile?.path, clearBuilderArtifact, clearBuilderTask, hasRecoveredBuilderArtifact]);
+  }, [builderPrimaryFile?.path, clearBuilderArtifact, clearBuilderTask, clearSelectedBuilderCanvasState, hasRecoveredBuilderArtifact]);
   const voiceBuilderChromeOpacity = Math.max(chromeOpacity, 0.94);
   const voiceBuilderAccessoryOpacity = Math.max(chromeOpacity, 0.62);
 
@@ -1101,6 +1235,11 @@ function SessionPageContent() {
     triggerLightHaptic: () => haptic('light'),
     onBaseMicClick: baseHandleMicClick,
   });
+  const handleCloseArtifactsPanelAndCanvasState = useCallback(() => {
+    canvasRestoreClosedByUserRef.current = true;
+    clearSelectedBuilderCanvasState('canvas_close');
+    handleCloseArtifactsPanel();
+  }, [clearSelectedBuilderCanvasState, handleCloseArtifactsPanel]);
 
   const handleViewBuilderArtifactInCanvas = useCallback(() => {
     handleSelectBuilderArtifactPath(builderPrimaryFile?.path ?? null);
@@ -1110,6 +1249,87 @@ function SessionPageContent() {
     handleSelectBuilderArtifactPath(event.artifact_path ?? builderPrimaryFile?.path ?? null);
     handleOpenArtifactsPanel();
   }, [builderPrimaryFile?.path, handleOpenArtifactsPanel, handleSelectBuilderArtifactPath]);
+
+  useEffect(() => {
+    if (selectedBuilderArtifactPath || showArtifacts || canvasRestoreClosedByUserRef.current) {
+      return;
+    }
+    if (!canvasRestoreContext.threadId || !canvasRestoreContext.sessionId) {
+      return;
+    }
+    if (canvasRestoreAttemptedContextRef.current === canvasRestoreContextSignature) {
+      return;
+    }
+    canvasRestoreAttemptedContextRef.current = canvasRestoreContextSignature;
+
+    const restored = restoreArtifactCanvasOpenState(canvasRestoreContext);
+    const restoredState = restored.state;
+    if (restored.result !== 'restored' || !restoredState) {
+      recordCanvasRestoreTelemetry({
+        attempted: true,
+        result: restored.result,
+        source: 'page_mount',
+        storageKeyHash: restored.storageKeyHash,
+      });
+      return;
+    }
+
+    const artifact = resolveBuilderCanvasArtifactForPath(restoredState.normalizedArtifactPath);
+    if (!artifact) {
+      clearArtifactCanvasOpenState(canvasRestoreContext);
+      recordCanvasRestoreTelemetry({
+        attempted: true,
+        result: 'invalid_artifact',
+        source: 'page_mount',
+        artifactPath: restoredState.normalizedArtifactPath,
+        artifactIdentityHash: restoredState.stableArtifactIdentityHash,
+        storageKeyHash: restored.storageKeyHash,
+      });
+      return;
+    }
+
+    const expectedIdentityHash = hashArtifactCanvasRestoreIdentity(restoredState.stableArtifactIdentity);
+    const currentArtifactIdentity = buildCoreviewArtifactStableIdentity({
+      userId: canvasRestoreContext.userId,
+      threadId: canvasRestoreContext.threadId,
+      artifactPath: artifact.normalizedPath,
+      rendererKind: artifact.rendererKind,
+    }).key;
+    const currentArtifactIdentityHash = hashArtifactCanvasRestoreIdentity(currentArtifactIdentity);
+    if (expectedIdentityHash && currentArtifactIdentityHash && expectedIdentityHash !== currentArtifactIdentityHash) {
+      clearArtifactCanvasOpenState(canvasRestoreContext);
+      recordCanvasRestoreTelemetry({
+        attempted: true,
+        result: 'identity_mismatch',
+        source: 'page_mount',
+        artifactPath: artifact.normalizedPath,
+        artifactIdentityHash: expectedIdentityHash,
+        storageKeyHash: restored.storageKeyHash,
+      });
+      return;
+    }
+
+    setSelectedBuilderArtifactPath(artifact.normalizedPath);
+    setShowArtifacts(true);
+    setUserOpenedArtifacts(true);
+    recordCanvasRestoreTelemetry({
+      attempted: true,
+      result: 'restored',
+      source: 'page_mount',
+      artifactPath: artifact.normalizedPath,
+      artifactIdentityHash: expectedIdentityHash ?? restoredState.stableArtifactIdentityHash,
+      storageKeyHash: restored.storageKeyHash,
+    });
+  }, [
+    canvasRestoreContext,
+    canvasRestoreContextSignature,
+    recordCanvasRestoreTelemetry,
+    resolveBuilderCanvasArtifactForPath,
+    selectedBuilderArtifactPath,
+    setShowArtifacts,
+    setUserOpenedArtifacts,
+    showArtifacts,
+  ]);
 
   const handleStartVoiceBuilderArtifactReview = useCallback(() => {
     setPendingBuilderArtifactReview(true);
@@ -1501,7 +1721,7 @@ function SessionPageContent() {
               voiceAgentSessionId={coReviewVoiceAgentSessionId}
               threadId={artifactPanelThreadId}
               isVisible={showArtifacts && showArtifactsUi}
-              onDismiss={handleCloseArtifactsPanel}
+              onDismiss={handleCloseArtifactsPanelAndCanvasState}
               isVoiceMode={false}
               coReviewTransport={coReviewTransport}
               pendingBuilderArtifactReview={pendingBuilderArtifactReview}
@@ -1742,7 +1962,7 @@ function SessionPageContent() {
               voiceAgentSessionId={coReviewVoiceAgentSessionId}
               threadId={artifactPanelThreadId}
               isVisible={showArtifacts && showArtifactsUi}
-              onDismiss={handleCloseArtifactsPanel}
+              onDismiss={handleCloseArtifactsPanelAndCanvasState}
               isVoiceMode={false}
               coReviewTransport={coReviewTransport}
               pendingBuilderArtifactReview={pendingBuilderArtifactReview}
@@ -1770,7 +1990,7 @@ function SessionPageContent() {
             voiceAgentSessionId={coReviewVoiceAgentSessionId}
             threadId={artifactPanelThreadId}
             isVisible={showArtifacts && showArtifactsUi}
-            onDismiss={handleCloseArtifactsPanel}
+            onDismiss={handleCloseArtifactsPanelAndCanvasState}
             isVoiceMode={true}
             coReviewTransport={coReviewTransport}
             pendingBuilderArtifactReview={pendingBuilderArtifactReview}

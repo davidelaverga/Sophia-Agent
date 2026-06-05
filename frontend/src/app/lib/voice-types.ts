@@ -187,10 +187,21 @@ export type GeminiRuntimeTelemetry = {
   arrowCount?: number
   drawPathCount?: number
   annotationPersistenceStatus?: string | null
+  annotationRestoreAttempted?: boolean
+  annotationRestoreResult?: string | null
   annotationRestoreCount?: number
+  annotationRestoreSource?: string | null
   annotationPersistedCount?: number
   annotationStorageVersion?: number | null
   annotationStorageKeyHash?: string | null
+  canvasRestoreAttempted?: boolean
+  canvasRestoreResult?: string | null
+  canvasRestoreSource?: string | null
+  canvasRestoredArtifactIdentityHash?: string | null
+  stickyToolModeEnabled?: boolean
+  lastToolModeBeforeAction?: string | null
+  lastToolModeAfterAction?: string | null
+  toolModeResetReason?: string | null
   annotationExportAvailable?: boolean
   annotationExportResult?: string | null
   annotationExportKind?: string | null

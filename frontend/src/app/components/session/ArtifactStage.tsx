@@ -65,6 +65,9 @@ import { ArtifactReviewStatus, hasConfirmedStillFrame } from "./ArtifactReviewSt
 import { ArtifactToolbar } from "./ArtifactToolbar"
 import { ReviewWithSophiaButton } from "./ReviewWithSophiaButton"
 
+type AnnotationRestoreSource = "stage_mount" | "artifact_identity_ready" | "canvas_reopen"
+type ToolModeResetReason = "escape_key" | "select_button" | "unsupported_renderer" | null
+
 export interface ArtifactStageProps {
   builderArtifact: BuilderArtifactV1
   builderArtifactLibrary?: BuilderArtifactLibraryItemV1[]
@@ -190,12 +193,37 @@ export function ArtifactStage({
   const [annotationPersistedCount, setAnnotationPersistedCount] = useState(0)
   const [annotationDeleteCount, setAnnotationDeleteCount] = useState(0)
   const [annotationEditCount, setAnnotationEditCount] = useState(0)
+  const [annotationRestoreTelemetry, setAnnotationRestoreTelemetry] = useState<{
+    attempted: boolean
+    result: string
+    source: AnnotationRestoreSource
+    version: number
+  }>(() => ({
+    attempted: false,
+    result: "not_attempted",
+    source: "stage_mount",
+    version: ARTIFACT_ANNOTATION_STORAGE_VERSION,
+  }))
+  const [toolModeTelemetry, setToolModeTelemetry] = useState<{
+    stickyToolModeEnabled: true
+    lastToolModeBeforeAction: ArtifactToolMode
+    lastToolModeAfterAction: ArtifactToolMode
+    toolModeResetReason: ToolModeResetReason
+  }>(() => ({
+    stickyToolModeEnabled: true,
+    lastToolModeBeforeAction: "select",
+    lastToolModeAfterAction: "select",
+    toolModeResetReason: null,
+  }))
   const [pdfTextLayout, setPdfTextLayout] = useState<CoreviewPdfTextLayout | null>(null)
   const [pdfFocusRequest, setPdfFocusRequest] = useState<ArtifactPdfFocusRequest | null>(null)
   const annotationsRef = useRef<ArtifactAnnotation[]>([])
+  const toolModeRef = useRef<ArtifactToolMode>("select")
   const annotationStorageReadyRef = useRef(false)
   const annotationLastPersistedSignatureRef = useRef<string>("")
   const annotationTelemetrySignatureRef = useRef<string | null>(null)
+  const annotationRestoreMountedRef = useRef(false)
+  const annotationHadStorageIdentityRef = useRef(false)
   const viewportPrimaryFile = primaryFile
     ? {
         path: primaryFile.path,
@@ -226,31 +254,91 @@ export function ArtifactStage({
   const annotationStorageKeyHash = annotationWorkspaceIdentity.storageKeyHash
   const annotationStableArtifactIdentity = annotationWorkspaceIdentity.stableArtifactIdentity
 
+  const recordToolModeAction = useCallback((
+    before: ArtifactToolMode,
+    after: ArtifactToolMode,
+    resetReason: ToolModeResetReason,
+  ) => {
+    setToolModeTelemetry({
+      stickyToolModeEnabled: true,
+      lastToolModeBeforeAction: before,
+      lastToolModeAfterAction: after,
+      toolModeResetReason: resetReason,
+    })
+  }, [])
+  const setToolModeWithTelemetry = useCallback((nextMode: ArtifactToolMode, resetReason: ToolModeResetReason) => {
+    const before = toolModeRef.current
+    toolModeRef.current = nextMode
+    setToolMode(nextMode)
+    recordToolModeAction(before, nextMode, resetReason)
+  }, [recordToolModeAction])
+
   useEffect(() => {
+    const hasStorageIdentity = Boolean(annotationStorageKey && annotationStableArtifactIdentity)
+    const restoreSource: AnnotationRestoreSource = !annotationRestoreMountedRef.current
+      ? "stage_mount"
+      : !annotationHadStorageIdentityRef.current && hasStorageIdentity
+        ? "artifact_identity_ready"
+        : "canvas_reopen"
+    annotationRestoreMountedRef.current = true
+    annotationHadStorageIdentityRef.current = annotationHadStorageIdentityRef.current || hasStorageIdentity
     annotationStorageReadyRef.current = false
-    const restored = rendererKind === "pdf"
-      ? restoreArtifactAnnotations(annotationStorageKey, annotationStableArtifactIdentity)
-      : {
-          annotations: [],
-          status: "empty" as const,
-          restoreCount: 0,
-          version: ARTIFACT_ANNOTATION_STORAGE_VERSION,
-        }
     setPageIndex(0)
     setPageCount(1)
     setZoom(1)
     setFitMode(rendererKind === "pdf" ? "page" : "custom")
-    setToolMode("select")
-    annotationsRef.current = restored.annotations
-    setAnnotations(restored.annotations)
     setSelectedAnnotationId(null)
     setPdfTextLayout(null)
     setPdfFocusRequest(null)
+
+    if (rendererKind !== "pdf") {
+      annotationsRef.current = []
+      setAnnotations([])
+      setAnnotationPersistenceStatus("empty")
+      setAnnotationRestoreCount(0)
+      setAnnotationPersistedCount(0)
+      setAnnotationDeleteCount(0)
+      setAnnotationEditCount(0)
+      setAnnotationRestoreTelemetry({
+        attempted: false,
+        result: "unsupported_renderer",
+        source: restoreSource,
+        version: ARTIFACT_ANNOTATION_STORAGE_VERSION,
+      })
+      annotationLastPersistedSignatureRef.current = ""
+      annotationStorageReadyRef.current = true
+      return
+    }
+
+    if (!hasStorageIdentity) {
+      setAnnotationPersistenceStatus("empty")
+      setAnnotationRestoreCount(0)
+      setAnnotationPersistedCount(annotationsRef.current.length)
+      setAnnotationDeleteCount(0)
+      setAnnotationEditCount(0)
+      setAnnotationRestoreTelemetry({
+        attempted: false,
+        result: "identity_unavailable",
+        source: restoreSource,
+        version: ARTIFACT_ANNOTATION_STORAGE_VERSION,
+      })
+      return
+    }
+
+    const restored = restoreArtifactAnnotations(annotationStorageKey, annotationStableArtifactIdentity)
+    annotationsRef.current = restored.annotations
+    setAnnotations(restored.annotations)
     setAnnotationPersistenceStatus(restored.status)
     setAnnotationRestoreCount(restored.restoreCount)
     setAnnotationPersistedCount(restored.annotations.length)
     setAnnotationDeleteCount(0)
     setAnnotationEditCount(0)
+    setAnnotationRestoreTelemetry({
+      attempted: true,
+      result: restored.status,
+      source: restoreSource,
+      version: restored.version,
+    })
     annotationLastPersistedSignatureRef.current = artifactAnnotationPersistenceSignature(restored.annotations)
     annotationStorageReadyRef.current = true
   }, [annotationStableArtifactIdentity, annotationStorageKey, rendererKind, rendererResetKey])
@@ -258,6 +346,10 @@ export function ArtifactStage({
   useEffect(() => {
     annotationsRef.current = annotations
   }, [annotations])
+
+  useEffect(() => {
+    toolModeRef.current = toolMode
+  }, [toolMode])
 
   useEffect(() => {
     if (!annotationStorageReadyRef.current || rendererKind !== "pdf") {
@@ -279,9 +371,9 @@ export function ArtifactStage({
 
   useEffect(() => {
     if (rendererKind !== "pdf" && toolMode !== "select") {
-      setToolMode("select")
+      setToolModeWithTelemetry("select", "unsupported_renderer")
     }
-  }, [rendererKind, toolMode])
+  }, [rendererKind, setToolModeWithTelemetry, toolMode])
 
   useEffect(() => {
     if (!selectedAnnotationId) {
@@ -332,11 +424,11 @@ export function ArtifactStage({
     if (rendererKind !== "pdf") {
       return
     }
-    setToolMode(mode)
+    setToolModeWithTelemetry(mode, mode === "select" ? "select_button" : null)
     if (mode === "pan") {
       setSelectedAnnotationId(null)
     }
-  }, [rendererKind])
+  }, [rendererKind, setToolModeWithTelemetry])
   const handleCreateHighlight = useCallback((rect: NormalizedArtifactRect) => {
     if (rendererKind !== "pdf") {
       return
@@ -362,8 +454,8 @@ export function ArtifactStage({
     annotationsRef.current = nextAnnotations
     setAnnotations(nextAnnotations)
     setSelectedAnnotationId(id)
-    setToolMode("select")
-  }, [annotationStableArtifactIdentity, pageIndex, rendererKind])
+    recordToolModeAction(toolModeRef.current, toolModeRef.current, null)
+  }, [annotationStableArtifactIdentity, pageIndex, recordToolModeAction, rendererKind])
   const handleCreateComment = useCallback((point: NormalizedArtifactPoint) => {
     if (rendererKind !== "pdf") {
       return
@@ -389,8 +481,8 @@ export function ArtifactStage({
     annotationsRef.current = nextAnnotations
     setAnnotations(nextAnnotations)
     setSelectedAnnotationId(id)
-    setToolMode("select")
-  }, [annotationStableArtifactIdentity, pageIndex, rendererKind])
+    recordToolModeAction(toolModeRef.current, toolModeRef.current, null)
+  }, [annotationStableArtifactIdentity, pageIndex, recordToolModeAction, rendererKind])
   const handleCreateUnderline = useCallback((rect: NormalizedArtifactRect) => {
     if (rendererKind !== "pdf") {
       return
@@ -416,8 +508,8 @@ export function ArtifactStage({
     annotationsRef.current = nextAnnotations
     setAnnotations(nextAnnotations)
     setSelectedAnnotationId(id)
-    setToolMode("select")
-  }, [annotationStableArtifactIdentity, pageIndex, rendererKind])
+    recordToolModeAction(toolModeRef.current, toolModeRef.current, null)
+  }, [annotationStableArtifactIdentity, pageIndex, recordToolModeAction, rendererKind])
   const handleCreateArrow = useCallback((line: NormalizedArtifactLine) => {
     if (rendererKind !== "pdf") {
       return
@@ -443,13 +535,10 @@ export function ArtifactStage({
     annotationsRef.current = nextAnnotations
     setAnnotations(nextAnnotations)
     setSelectedAnnotationId(id)
-    setToolMode("select")
-  }, [annotationStableArtifactIdentity, pageIndex, rendererKind])
+    recordToolModeAction(toolModeRef.current, toolModeRef.current, null)
+  }, [annotationStableArtifactIdentity, pageIndex, recordToolModeAction, rendererKind])
   const handleSelectAnnotation = useCallback((id: string | null) => {
     setSelectedAnnotationId(id)
-    if (id) {
-      setToolMode("select")
-    }
   }, [])
   const handleUpdateCommentText = useCallback((id: string, text: string) => {
     let changed = false
@@ -790,7 +879,7 @@ export function ArtifactStage({
     annotationsRef.current = nextAnnotations
     setAnnotations(nextAnnotations)
     setSelectedAnnotationId(id)
-    setToolMode("select")
+    recordToolModeAction(toolModeRef.current, toolModeRef.current, null)
 
     return {
       ok: true,
@@ -798,7 +887,7 @@ export function ArtifactStage({
       blockedReason: null,
       ...countAnnotations(nextAnnotations),
     }
-  }, [annotationStableArtifactIdentity, rendererKind])
+  }, [annotationStableArtifactIdentity, recordToolModeAction, rendererKind])
   const focusCoreviewAnchor = useCallback((input: CoreviewFocusAnchorAdapterInput): CoreviewFocusAnchorAdapterResult => {
     if (rendererKind !== "pdf" || !input.anchor.rect) {
       return {
@@ -839,16 +928,16 @@ export function ArtifactStage({
     })
   }, [fitMode, recordArtifactControlTelemetry, supportsZoom, zoom])
   const handleStageKeyDown = useCallback((event: KeyboardEvent<HTMLElement>) => {
-    if (event.key === "Escape") {
-      if (toolMode !== "select" || selectedAnnotationId) {
-        event.preventDefault()
-        setToolMode("select")
-        setSelectedAnnotationId(null)
-      }
+    if (isArtifactShortcutTypingTarget(event.target)) {
       return
     }
 
-    if (isArtifactShortcutTypingTarget(event.target)) {
+    if (event.key === "Escape") {
+      if (toolMode !== "select" || selectedAnnotationId) {
+        event.preventDefault()
+        setToolModeWithTelemetry("select", "escape_key")
+        setSelectedAnnotationId(null)
+      }
       return
     }
 
@@ -895,6 +984,7 @@ export function ArtifactStage({
     recordArtifactControlTelemetry,
     selectedAnnotationId,
     handleDeleteSelectedAnnotation,
+    setToolModeWithTelemetry,
     toolMode,
   ])
   const artifactViewState = useMemo<ArtifactViewState>(() => ({
@@ -973,6 +1063,12 @@ export function ArtifactStage({
       annotationPersistedCount,
       annotationDeleteCount,
       annotationEditCount,
+      annotationRestoreTelemetry.attempted,
+      annotationRestoreTelemetry.result,
+      annotationRestoreTelemetry.source,
+      toolModeTelemetry.lastToolModeBeforeAction,
+      toolModeTelemetry.lastToolModeAfterAction,
+      toolModeTelemetry.toolModeResetReason ?? "",
       selectedAnnotationKind ?? "",
     ].join("|")
 
@@ -994,10 +1090,17 @@ export function ArtifactStage({
         annotationOverlayCaptured: annotationCounts.annotationCount > 0,
         selectedAnnotationKind,
         annotationPersistenceStatus,
+        annotationRestoreAttempted: annotationRestoreTelemetry.attempted,
+        annotationRestoreResult: annotationRestoreTelemetry.result,
         annotationRestoreCount,
+        annotationRestoreSource: annotationRestoreTelemetry.source,
         annotationPersistedCount,
-        annotationStorageVersion: ARTIFACT_ANNOTATION_STORAGE_VERSION,
+        annotationStorageVersion: annotationRestoreTelemetry.version,
         annotationStorageKeyHash,
+        stickyToolModeEnabled: toolModeTelemetry.stickyToolModeEnabled,
+        lastToolModeBeforeAction: toolModeTelemetry.lastToolModeBeforeAction,
+        lastToolModeAfterAction: toolModeTelemetry.lastToolModeAfterAction,
+        toolModeResetReason: toolModeTelemetry.toolModeResetReason,
         annotationExportAvailable: false,
         annotationExportResult: "unavailable",
         annotationExportKind: "annotated",
@@ -1015,6 +1118,7 @@ export function ArtifactStage({
     annotationCounts,
     annotationDeleteCount,
     annotationEditCount,
+    annotationRestoreTelemetry,
     annotationPersistedCount,
     annotationPersistenceStatus,
     annotationRestoreCount,
@@ -1025,6 +1129,7 @@ export function ArtifactStage({
     rendererKind,
     selectedAnnotationKind,
     toolMode,
+    toolModeTelemetry,
   ])
 
   const handleDownloadOriginal = useCallback(() => {

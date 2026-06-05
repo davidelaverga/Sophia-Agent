@@ -8,6 +8,8 @@ import type {
   NormalizedArtifactRect,
 } from "../types/artifact-annotations"
 
+import { normalizeCoreviewArtifactPath } from "./coreview-artifact-identity"
+
 export const ARTIFACT_ANNOTATION_STORAGE_VERSION = 1
 
 export type ArtifactAnnotationPersistenceStatus =
@@ -58,8 +60,8 @@ const MAX_COMMENT_TEXT_LENGTH = 180
 export function buildArtifactAnnotationWorkspaceIdentity(
   input: ArtifactAnnotationStorageIdentityInput,
 ): ArtifactAnnotationWorkspaceIdentity {
-  const stableIdentity = normalizeToken(input.artifactStableIdentity)
-  const artifactPath = normalizeToken(input.artifactPath)
+  const artifactPath = normalizeCoreviewArtifactPath(input.artifactPath) ?? normalizeToken(input.artifactPath)
+  const stableIdentity = normalizeStableArtifactIdentity(input.artifactStableIdentity)
   const rendererKind = normalizeToken(input.rendererKind)
   const artifactId = normalizeToken(input.artifactId)
   const threadId = normalizeToken(input.threadId)
@@ -368,6 +370,29 @@ function clampNormalizedNumber(value: unknown): number | null {
 
 function normalizeToken(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null
+}
+
+function normalizeStableArtifactIdentity(value: unknown): string | null {
+  const normalized = normalizeToken(value)
+  if (!normalized) {
+    return null
+  }
+
+  const parts = normalized.split("|")
+  let changed = false
+  const canonicalParts = parts.map((part) => {
+    if (!part.startsWith("path:")) {
+      return part
+    }
+    const canonicalPath = normalizeCoreviewArtifactPath(part.slice("path:".length))
+    if (!canonicalPath || canonicalPath === part.slice("path:".length)) {
+      return part
+    }
+    changed = true
+    return `path:${canonicalPath}`
+  })
+
+  return changed ? canonicalParts.join("|") : normalized
 }
 
 function getLocalStorage(): Storage | null {

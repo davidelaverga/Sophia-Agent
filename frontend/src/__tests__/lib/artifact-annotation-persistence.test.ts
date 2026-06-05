@@ -124,6 +124,49 @@ describe("artifact annotation persistence", () => {
     })
   })
 
+  it("maps artifact path variants to the same annotation storage key", () => {
+    const absoluteIdentity = buildArtifactAnnotationWorkspaceIdentity({
+      artifactStableIdentity: "user:u1|thread:thread-1|path:/mnt/user-data/outputs/launch-brief.pdf|renderer:pdf",
+      threadId: "thread-1",
+      artifactId: "artifact-1",
+      artifactPath: "/mnt/user-data/outputs/launch-brief.pdf",
+      rendererKind: "pdf",
+    })
+    const outputsIdentity = buildArtifactAnnotationWorkspaceIdentity({
+      artifactStableIdentity: "user:u1|thread:thread-1|path:outputs/launch-brief.pdf|renderer:pdf",
+      threadId: "thread-1",
+      artifactId: "artifact-1",
+      artifactPath: "outputs/launch-brief.pdf",
+      rendererKind: "pdf",
+    })
+
+    expect(absoluteIdentity.stableArtifactIdentity).toBe(outputsIdentity.stableArtifactIdentity)
+    expect(absoluteIdentity.storageKey).toBe(outputsIdentity.storageKey)
+
+    persistArtifactAnnotations(absoluteIdentity.storageKey, [
+      {
+        id: "underline-1",
+        kind: "underline",
+        artifactStableIdentity: absoluteIdentity.stableArtifactIdentity,
+        pageIndex: 0,
+        rect: { x: 0.1, y: 0.7, width: 0.4, height: 0.03 },
+        createdAt: 100,
+        updatedAt: 100,
+        version: ARTIFACT_ANNOTATION_STORAGE_VERSION,
+      },
+    ], { stableArtifactIdentity: absoluteIdentity.stableArtifactIdentity })
+
+    const restored = restoreArtifactAnnotations(outputsIdentity.storageKey, outputsIdentity.stableArtifactIdentity)
+    expect(restored).toMatchObject({
+      status: "restored",
+      restoreCount: 1,
+    })
+    expect(restored.annotations[0]).toMatchObject({
+      kind: "underline",
+      artifactStableIdentity: outputsIdentity.stableArtifactIdentity,
+    })
+  })
+
   it("preserves page indexes so callers can render only page-specific annotations", () => {
     const identity = identityFor("user:u1|thread:thread-1|path:paged.pdf|renderer:pdf")
     persistArtifactAnnotations(identity.storageKey, [

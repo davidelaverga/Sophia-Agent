@@ -262,6 +262,20 @@ function renderStage({
   return { ...view, onStartReview, onStopReview }
 }
 
+function mockAnnotationLayerBounds(layer: HTMLElement, width = 600, height = 800) {
+  vi.spyOn(layer, "getBoundingClientRect").mockReturnValue({
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: width,
+    bottom: height,
+    width,
+    height,
+    toJSON: () => ({}),
+  } as DOMRect)
+}
+
 beforeEach(() => {
   mockCanvasApis()
   vi.mocked(loadPdfJs).mockReset()
@@ -843,7 +857,7 @@ describe("ArtifactStage", () => {
     expect(screen.getByRole("status", { name: /not looking/i })).toBeInTheDocument()
   })
 
-  it("restores persisted highlight, comment, and Sophia annotations for the same stable artifact", async () => {
+  it("restores persisted highlight, comment, underline, arrow, and Sophia annotations for the same stable artifact", async () => {
     const stableIdentity = "user:test-user|thread:thread-1|path:mnt/user-data/outputs/launch-brief.pdf|renderer:pdf"
     seedPersistedAnnotations(stableIdentity, [
       {
@@ -871,6 +885,30 @@ describe("ArtifactStage", () => {
         updatedAt: 12,
         version: 1,
       },
+      {
+        id: "persisted-underline",
+        kind: "underline",
+        artifactStableIdentity: stableIdentity,
+        pageIndex: 0,
+        rect: { x: 0.18, y: 0.44, width: 0.38, height: 0.04 },
+        color: "purple",
+        source: "user",
+        createdAt: 13,
+        updatedAt: 13,
+        version: 1,
+      },
+      {
+        id: "persisted-arrow",
+        kind: "arrow",
+        artifactStableIdentity: stableIdentity,
+        pageIndex: 0,
+        line: { start: { x: 0.22, y: 0.62 }, end: { x: 0.58, y: 0.72 } },
+        color: "purple",
+        source: "sophia",
+        createdAt: 14,
+        updatedAt: 14,
+        version: 1,
+      },
     ])
     mockPdfDocument({ pageCount: 1 })
 
@@ -886,6 +924,10 @@ describe("ArtifactStage", () => {
     expect(highlight).toHaveAttribute("data-annotation-source", "user")
     const pin = screen.getByTestId("artifact-comment-pin")
     expect(pin).toHaveAttribute("aria-pressed", "false")
+    expect(screen.getByTestId("artifact-underline-annotation")).toHaveAttribute("data-annotation-id", "persisted-underline")
+    const arrow = screen.getByTestId("artifact-arrow-annotation")
+    expect(arrow).toHaveAttribute("data-annotation-id", "persisted-arrow")
+    expect(arrow).toHaveAttribute("data-annotation-source", "sophia")
     await userEvent.click(pin)
     expect(screen.getByDisplayValue("Persisted note")).toBeInTheDocument()
     expect(screen.getByTestId("artifact-comment-annotation")).toHaveAttribute("data-annotation-source", "sophia")
@@ -1083,6 +1125,78 @@ describe("ArtifactStage", () => {
     expect(screen.queryByTestId("artifact-highlight-annotation")).not.toBeInTheDocument()
     await userEvent.click(screen.getByTestId("artifact-comment-pin"))
     expect(screen.getByDisplayValue("Edited note")).toBeInTheDocument()
+  })
+
+  it("keeps annotation tools sticky and only returns to Select from explicit Select or stage Escape", async () => {
+    const stableIdentity = "user:test-user|thread:thread-1|path:sticky.pdf|renderer:pdf"
+    mockPdfDocument({ pageCount: 1 })
+    renderStage({
+      artifact: pdfBuilderArtifact,
+      artifactId: "artifact-1",
+      artifactStableIdentity: stableIdentity,
+      exactTextAvailable: false,
+    })
+
+    const stage = await screen.findByRole("region", { name: /generated artifact/i })
+    expect(await screen.findByLabelText("PDF page 1")).toBeInTheDocument()
+    const layer = screen.getByTestId("artifact-pdf-annotation-layer")
+    mockAnnotationLayerBounds(layer)
+
+    await userEvent.click(screen.getByLabelText("Highlight"))
+    fireEvent.pointerDown(layer, { button: 0, clientX: 60, clientY: 80, pointerId: 1 })
+    fireEvent.pointerMove(layer, { button: 0, clientX: 240, clientY: 320, pointerId: 1 })
+    fireEvent.pointerUp(layer, { button: 0, clientX: 240, clientY: 320, pointerId: 1 })
+    expect(await screen.findByTestId("artifact-highlight-annotation")).toBeInTheDocument()
+    expect(layer).toHaveAttribute("data-artifact-tool-mode", "highlight")
+
+    await userEvent.click(screen.getByLabelText("Underline"))
+    fireEvent.pointerDown(layer, { button: 0, clientX: 90, clientY: 420, pointerId: 2 })
+    fireEvent.pointerMove(layer, { button: 0, clientX: 360, clientY: 455, pointerId: 2 })
+    fireEvent.pointerUp(layer, { button: 0, clientX: 360, clientY: 455, pointerId: 2 })
+    expect(await screen.findByTestId("artifact-underline-annotation")).toBeInTheDocument()
+    expect(layer).toHaveAttribute("data-artifact-tool-mode", "underline")
+
+    await userEvent.click(screen.getByLabelText("Arrow"))
+    fireEvent.pointerDown(layer, { button: 0, clientX: 120, clientY: 560, pointerId: 3 })
+    fireEvent.pointerMove(layer, { button: 0, clientX: 420, clientY: 680, pointerId: 3 })
+    fireEvent.pointerUp(layer, { button: 0, clientX: 420, clientY: 680, pointerId: 3 })
+    expect(await screen.findByTestId("artifact-arrow-annotation")).toBeInTheDocument()
+    expect(layer).toHaveAttribute("data-artifact-tool-mode", "arrow")
+
+    await userEvent.click(screen.getByLabelText("Comment"))
+    fireEvent.pointerDown(layer, { button: 0, clientX: 480, clientY: 240, pointerId: 4 })
+    expect(await screen.findByTestId("artifact-comment-pin")).toHaveAttribute("aria-pressed", "true")
+    expect(layer).toHaveAttribute("data-artifact-tool-mode", "comment")
+
+    const input = screen.getByLabelText("Comment text")
+    fireEvent.change(input, { target: { value: "Keep this note editable." } })
+    fireEvent.keyDown(input, { key: "Delete" })
+    fireEvent.keyDown(input, { key: "Escape" })
+    expect(screen.getByDisplayValue("Keep this note editable.")).toBeInTheDocument()
+    expect(screen.getByTestId("artifact-comment-pin")).toBeInTheDocument()
+    expect(layer).toHaveAttribute("data-artifact-tool-mode", "comment")
+
+    await userEvent.click(screen.getByLabelText("Pan"))
+    const panLayer = screen.getByTestId("artifact-pdf-pan-layer")
+    Object.defineProperty(panLayer, "clientWidth", { configurable: true, value: 300 })
+    Object.defineProperty(panLayer, "clientHeight", { configurable: true, value: 260 })
+    Object.defineProperty(panLayer, "scrollWidth", { configurable: true, value: 900 })
+    Object.defineProperty(panLayer, "scrollHeight", { configurable: true, value: 900 })
+    panLayer.scrollLeft = 120
+    panLayer.scrollTop = 140
+    fireEvent.pointerDown(panLayer, { button: 0, clientX: 300, clientY: 240, pointerId: 5 })
+    fireEvent.pointerMove(panLayer, { clientX: 250, clientY: 190, pointerId: 5 })
+    fireEvent.pointerUp(panLayer, { clientX: 250, clientY: 190, pointerId: 5 })
+    expect(panLayer).toHaveAttribute("data-pan-mode-active", "true")
+    expect(layer).toHaveAttribute("data-artifact-tool-mode", "pan")
+
+    fireEvent.keyDown(stage, { key: "Escape" })
+    expect(layer).toHaveAttribute("data-artifact-tool-mode", "select")
+
+    await userEvent.click(screen.getByLabelText("Highlight"))
+    expect(layer).toHaveAttribute("data-artifact-tool-mode", "highlight")
+    await userEvent.click(screen.getByLabelText("Select"))
+    expect(layer).toHaveAttribute("data-artifact-tool-mode", "select")
   })
 
   it("reports page and zoom changes through the artifact view state callback", async () => {

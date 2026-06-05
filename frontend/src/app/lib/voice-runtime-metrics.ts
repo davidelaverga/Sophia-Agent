@@ -68,6 +68,10 @@ export type CoreviewVisualTelemetry = {
   currentRunSelectedStageEvents: number
   longLivedSelectedStageState: boolean
   telemetryScopeMode: string | null
+  canvasRestoreAttempted: boolean
+  canvasRestoreResult: string | null
+  canvasRestoreSource: string | null
+  canvasRestoredArtifactIdentityHash: string | null
   visualSourceKind: string | null
   frameSentCount: number
   initialFrameSent: boolean
@@ -117,10 +121,17 @@ export type CoreviewVisualTelemetry = {
   arrowCount: number
   drawPathCount: number
   annotationPersistenceStatus: string | null
+  annotationRestoreAttempted: boolean
+  annotationRestoreResult: string | null
   annotationRestoreCount: number
+  annotationRestoreSource: string | null
   annotationPersistedCount: number
   annotationStorageVersion: number | null
   annotationStorageKeyHash: string | null
+  stickyToolModeEnabled: boolean
+  lastToolModeBeforeAction: string | null
+  lastToolModeAfterAction: string | null
+  toolModeResetReason: string | null
   annotationExportAvailable: boolean
   annotationExportResult: string | null
   annotationExportKind: string | null
@@ -540,10 +551,21 @@ export type GeminiSessionTelemetry = {
     arrowCount: number
     drawPathCount: number
     annotationPersistenceStatus: string | null
+    annotationRestoreAttempted: boolean
+    annotationRestoreResult: string | null
     annotationRestoreCount: number
+    annotationRestoreSource: string | null
     annotationPersistedCount: number
     annotationStorageVersion: number | null
     annotationStorageKeyHash: string | null
+    canvasRestoreAttempted: boolean
+    canvasRestoreResult: string | null
+    canvasRestoreSource: string | null
+    canvasRestoredArtifactIdentityHash: string | null
+    stickyToolModeEnabled: boolean
+    lastToolModeBeforeAction: string | null
+    lastToolModeAfterAction: string | null
+    toolModeResetReason: string | null
     annotationExportAvailable: boolean
     annotationExportResult: string | null
     annotationExportKind: string | null
@@ -1184,6 +1206,10 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       currentRunSelectedStageEvents: 0,
       longLivedSelectedStageState: false,
       telemetryScopeMode: null,
+      canvasRestoreAttempted: false,
+      canvasRestoreResult: null,
+      canvasRestoreSource: null,
+      canvasRestoredArtifactIdentityHash: null,
       visualSourceKind: null,
       frameSentCount: 0,
       initialFrameSent: false,
@@ -1233,10 +1259,17 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       arrowCount: 0,
       drawPathCount: 0,
       annotationPersistenceStatus: null,
+      annotationRestoreAttempted: false,
+      annotationRestoreResult: null,
       annotationRestoreCount: 0,
+      annotationRestoreSource: null,
       annotationPersistedCount: 0,
       annotationStorageVersion: null,
       annotationStorageKeyHash: null,
+      stickyToolModeEnabled: false,
+      lastToolModeBeforeAction: null,
+      lastToolModeAfterAction: null,
+      toolModeResetReason: null,
       annotationExportAvailable: false,
       annotationExportResult: null,
       annotationExportKind: null,
@@ -1382,6 +1415,10 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-annotation-export")
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
+  const canvasRestoreEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-canvas-restore")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
   const annotationNavigationGuardEvents = activeEvents
     .filter((event) => event.name === "session-leave-guard-suppressed-for-annotation")
     .map((event) => event.payloadRecord)
@@ -1423,6 +1460,7 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   const latestPdfTextExtraction = pdfTextExtractionEvents.at(-1) ?? latestSelectedStage
   const latestAnnotationState = annotationStateEvents.at(-1) ?? null
   const latestAnnotationExport = annotationExportEvents.at(-1) ?? null
+  const latestCanvasRestore = canvasRestoreEvents.at(-1) ?? null
   const latestCoreviewTool = coreviewToolEvents.at(-1) ?? null
   const latestAnnotationTool = coreviewToolEvents
     .filter((event) => (numberFromKeys(event, ["coreviewAnnotationToolCount"]) ?? 0) > 0)
@@ -1494,6 +1532,12 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.telemetryScopeMode = asString(latestRebindEvent?.telemetryScopeMode)
     ?? asString(latestSelectedStage?.telemetryScopeMode)
     ?? (selectedStageEvents.length > 0 ? "current_run_selected_stage" : null)
+  visual.canvasRestoreAttempted = canvasRestoreEvents.some((event) => (
+    asBoolean(event.canvasRestoreAttempted) === true
+  ))
+  visual.canvasRestoreResult = asString(latestCanvasRestore?.canvasRestoreResult)
+  visual.canvasRestoreSource = asString(latestCanvasRestore?.canvasRestoreSource)
+  visual.canvasRestoredArtifactIdentityHash = asString(latestCanvasRestore?.canvasRestoredArtifactIdentityHash)
   visual.visualSourceKind = asString(latestState?.visualSourceKind)
   visual.visualFresh = asBoolean(latestState?.visualFresh) ?? false
   visual.visualFreshForTurn = asBoolean(latestState?.visualFreshForTurn) ?? false
@@ -1569,11 +1613,18 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     ?? numberFromKeys(latestAnnotationState, ["drawPathCount", "draw_path_count"])
     ?? 0
   visual.annotationPersistenceStatus = asString(latestAnnotationState?.annotationPersistenceStatus)
+  visual.annotationRestoreAttempted = asBoolean(latestAnnotationState?.annotationRestoreAttempted) ?? false
+  visual.annotationRestoreResult = asString(latestAnnotationState?.annotationRestoreResult)
   visual.annotationRestoreCount = numberFromKeys(latestAnnotationState, ["annotationRestoreCount"]) ?? 0
+  visual.annotationRestoreSource = asString(latestAnnotationState?.annotationRestoreSource)
   visual.annotationPersistedCount = numberFromKeys(latestAnnotationState, ["annotationPersistedCount"]) ?? 0
   visual.annotationStorageVersion = numberFromKeys(latestAnnotationState, ["annotationStorageVersion"])
   visual.annotationStorageKeyHash = asString(latestAnnotationState?.annotationStorageKeyHash)
     ?? asString(latestAnnotationExport?.annotationStorageKeyHash)
+  visual.stickyToolModeEnabled = asBoolean(latestAnnotationState?.stickyToolModeEnabled) ?? false
+  visual.lastToolModeBeforeAction = asString(latestAnnotationState?.lastToolModeBeforeAction)
+  visual.lastToolModeAfterAction = asString(latestAnnotationState?.lastToolModeAfterAction)
+  visual.toolModeResetReason = asString(latestAnnotationState?.toolModeResetReason)
   visual.annotationExportAvailable = asBoolean(latestAnnotationExport?.annotationExportAvailable)
     ?? asBoolean(latestAnnotationState?.annotationExportAvailable)
     ?? false
@@ -2821,14 +2872,36 @@ function buildSessionTelemetry(params: {
           ?? coreviewTelemetry.visual.drawPathCount,
         annotationPersistenceStatus: hookTelemetry?.annotationPersistenceStatus
           ?? coreviewTelemetry.visual.annotationPersistenceStatus,
+        annotationRestoreAttempted: hookTelemetry?.annotationRestoreAttempted
+          ?? coreviewTelemetry.visual.annotationRestoreAttempted,
+        annotationRestoreResult: hookTelemetry?.annotationRestoreResult
+          ?? coreviewTelemetry.visual.annotationRestoreResult,
         annotationRestoreCount: hookTelemetry?.annotationRestoreCount
           ?? coreviewTelemetry.visual.annotationRestoreCount,
+        annotationRestoreSource: hookTelemetry?.annotationRestoreSource
+          ?? coreviewTelemetry.visual.annotationRestoreSource,
         annotationPersistedCount: hookTelemetry?.annotationPersistedCount
           ?? coreviewTelemetry.visual.annotationPersistedCount,
         annotationStorageVersion: hookTelemetry?.annotationStorageVersion
           ?? coreviewTelemetry.visual.annotationStorageVersion,
         annotationStorageKeyHash: hookTelemetry?.annotationStorageKeyHash
           ?? coreviewTelemetry.visual.annotationStorageKeyHash,
+        canvasRestoreAttempted: hookTelemetry?.canvasRestoreAttempted
+          ?? coreviewTelemetry.visual.canvasRestoreAttempted,
+        canvasRestoreResult: hookTelemetry?.canvasRestoreResult
+          ?? coreviewTelemetry.visual.canvasRestoreResult,
+        canvasRestoreSource: hookTelemetry?.canvasRestoreSource
+          ?? coreviewTelemetry.visual.canvasRestoreSource,
+        canvasRestoredArtifactIdentityHash: hookTelemetry?.canvasRestoredArtifactIdentityHash
+          ?? coreviewTelemetry.visual.canvasRestoredArtifactIdentityHash,
+        stickyToolModeEnabled: hookTelemetry?.stickyToolModeEnabled
+          ?? coreviewTelemetry.visual.stickyToolModeEnabled,
+        lastToolModeBeforeAction: hookTelemetry?.lastToolModeBeforeAction
+          ?? coreviewTelemetry.visual.lastToolModeBeforeAction,
+        lastToolModeAfterAction: hookTelemetry?.lastToolModeAfterAction
+          ?? coreviewTelemetry.visual.lastToolModeAfterAction,
+        toolModeResetReason: hookTelemetry?.toolModeResetReason
+          ?? coreviewTelemetry.visual.toolModeResetReason,
         annotationExportAvailable: hookTelemetry?.annotationExportAvailable
           ?? coreviewTelemetry.visual.annotationExportAvailable,
         annotationExportResult: hookTelemetry?.annotationExportResult
