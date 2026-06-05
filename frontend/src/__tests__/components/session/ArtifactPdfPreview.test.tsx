@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { ArtifactPdfPreview } from "../../../app/components/session/ArtifactPdfPreview"
 import { loadPdfJs } from "../../../app/lib/pdfjs-loader"
+import { recordSophiaCaptureEvent } from "../../../app/lib/session-capture"
 import type {
   ArtifactAnnotation,
   ArtifactToolMode,
@@ -14,6 +15,10 @@ import type { BuilderArtifactV1 } from "../../../app/types/builder-artifact"
 
 vi.mock("../../../app/lib/pdfjs-loader", () => ({
   loadPdfJs: vi.fn(),
+}))
+
+vi.mock("../../../app/lib/session-capture", () => ({
+  recordSophiaCaptureEvent: vi.fn(),
 }))
 
 const pdfArtifact = {
@@ -254,9 +259,36 @@ function mockAnnotationLayerBounds(layer: HTMLElement, width = 600, height = 800
   } as DOMRect)
 }
 
+function mockPanLayerOverflow(
+  panLayer: HTMLElement,
+  {
+    clientWidth = 360,
+    clientHeight = 280,
+    scrollWidth = 1100,
+    scrollHeight = 1280,
+    scrollLeft = 120,
+    scrollTop = 140,
+  }: Partial<{
+    clientWidth: number
+    clientHeight: number
+    scrollWidth: number
+    scrollHeight: number
+    scrollLeft: number
+    scrollTop: number
+  }> = {},
+) {
+  Object.defineProperty(panLayer, "clientWidth", { configurable: true, value: clientWidth })
+  Object.defineProperty(panLayer, "clientHeight", { configurable: true, value: clientHeight })
+  Object.defineProperty(panLayer, "scrollWidth", { configurable: true, value: scrollWidth })
+  Object.defineProperty(panLayer, "scrollHeight", { configurable: true, value: scrollHeight })
+  panLayer.scrollLeft = scrollLeft
+  panLayer.scrollTop = scrollTop
+}
+
 beforeEach(() => {
   canvasContext = mockCanvasApis()
   vi.mocked(loadPdfJs).mockReset()
+  vi.mocked(recordSophiaCaptureEvent).mockClear()
 })
 
 afterEach(() => {
@@ -634,6 +666,97 @@ describe("ArtifactPdfPreview", () => {
     expect(screen.getByTestId("artifact-pdf-annotation-layer").className).toContain("pointer-events-none")
     expect(screen.getByTestId("artifact-pdf-pan-layer").className).toContain("overflow-auto")
     await waitFor(() => expect(screen.getByLabelText("PDF page 1")).toHaveAttribute("data-artifact-pdf-scale", "1.6"))
+  })
+
+  it("pans the zoomed PDF scroll container in Pan mode without creating annotations", async () => {
+    const onCreateHighlight = vi.fn()
+    const onCreateComment = vi.fn()
+    mockPdfDocument({ pageCount: 2 })
+    renderPreview({
+      toolMode: "pan",
+      zoom: 1.8,
+      fitMode: "custom",
+      fitBounds: { width: 760, height: 620 },
+      onCreateHighlight,
+      onCreateComment,
+    })
+
+    await waitFor(() => expect(screen.getByLabelText("PDF page 1")).toHaveAttribute("data-artifact-pdf-scale", "1.8"))
+    const panLayer = screen.getByTestId("artifact-pdf-pan-layer")
+    mockPanLayerOverflow(panLayer, { scrollLeft: 120, scrollTop: 140 })
+
+    expect(panLayer).toHaveAttribute("data-pan-mode-active", "true")
+    expect(panLayer).toHaveAttribute("data-pan-dragging", "false")
+    expect(panLayer.className).toContain("cursor-grab")
+
+    fireEvent.pointerDown(panLayer, { button: 0, clientX: 300, clientY: 240, pointerId: 7 })
+    expect(panLayer).toHaveAttribute("data-pan-dragging", "true")
+    expect(panLayer.className).toContain("cursor-grabbing")
+
+    fireEvent.pointerMove(panLayer, { clientX: 240, clientY: 180, pointerId: 7 })
+    expect(panLayer.scrollLeft).toBe(180)
+    expect(panLayer.scrollTop).toBe(200)
+
+    fireEvent.pointerUp(panLayer, { clientX: 240, clientY: 180, pointerId: 7 })
+    expect(panLayer).toHaveAttribute("data-pan-dragging", "false")
+    expect(onCreateHighlight).not.toHaveBeenCalled()
+    expect(onCreateComment).not.toHaveBeenCalled()
+    expect(screen.queryByTestId("artifact-highlight-draft")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("artifact-comment-pin")).not.toBeInTheDocument()
+    expect(vi.mocked(recordSophiaCaptureEvent)).toHaveBeenCalledWith(expect.objectContaining({
+      category: "artifacts-runtime",
+      name: "artifact-pan-gesture",
+      payload: expect.objectContaining({
+        panModeActive: true,
+        panGestureCount: 1,
+        panGestureResult: "success",
+        panScrollDeltaX: 60,
+        panScrollDeltaY: 60,
+        rawArtifactTextExcluded: true,
+        rawFrameExcluded: true,
+        rawCommentTextExcluded: true,
+      }),
+    }))
+  })
+
+  it("keeps Pan mode bound after zoom and page changes", async () => {
+    mockPdfDocument({ pageCount: 2 })
+    const { rerenderPreview } = renderPreview({
+      toolMode: "pan",
+      zoom: 1.2,
+      fitMode: "custom",
+      fitBounds: { width: 760, height: 620 },
+    })
+
+    await waitFor(() => expect(screen.getByLabelText("PDF page 1")).toHaveAttribute("data-artifact-pdf-scale", "1.2"))
+
+    rerenderPreview({
+      toolMode: "pan",
+      zoom: 1.8,
+      fitMode: "custom",
+      pageIndex: 1,
+      fitBounds: { width: 760, height: 620 },
+    })
+    await waitFor(() => expect(screen.getByLabelText("PDF page 2")).toHaveAttribute("data-artifact-pdf-scale", "1.8"))
+
+    const panLayer = screen.getByTestId("artifact-pdf-pan-layer")
+    mockPanLayerOverflow(panLayer, { scrollLeft: 40, scrollTop: 50 })
+
+    fireEvent.pointerDown(panLayer, { button: 0, clientX: 220, clientY: 210, pointerId: 12 })
+    fireEvent.pointerMove(panLayer, { clientX: 180, clientY: 170, pointerId: 12 })
+    fireEvent.pointerUp(panLayer, { clientX: 180, clientY: 170, pointerId: 12 })
+
+    expect(panLayer.scrollLeft).toBe(80)
+    expect(panLayer.scrollTop).toBe(90)
+    expect(vi.mocked(recordSophiaCaptureEvent)).toHaveBeenLastCalledWith(expect.objectContaining({
+      name: "artifact-pan-gesture",
+      payload: expect.objectContaining({
+        artifactPageIndex: 1,
+        artifactPageNumber: 2,
+        artifactZoom: 1.8,
+        panGestureResult: "success",
+      }),
+    }))
   })
 
   it("shows only annotations for the active PDF page", async () => {

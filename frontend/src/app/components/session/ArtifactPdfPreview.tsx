@@ -11,6 +11,7 @@ import {
   type CoreviewPdfTextLayout,
 } from "../../lib/coreview-pdf-text-layout"
 import { loadPdfJs, type PdfDocumentProxy, type PdfRenderTask } from "../../lib/pdfjs-loader"
+import { recordSophiaCaptureEvent } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
 import type {
   ArtifactAnnotationColor,
@@ -83,6 +84,19 @@ type ActivePdfRender = {
   settled: Promise<void>
 }
 
+type PdfPanGestureResult = "success" | "no_scroll_container" | "no_overflow" | "cancelled"
+
+type PdfPanDragState = {
+  pointerId: number
+  startClientX: number
+  startClientY: number
+  startScrollLeft: number
+  startScrollTop: number
+  maxScrollLeft: number
+  maxScrollTop: number
+  didScroll: boolean
+}
+
 const PDF_FALLBACK_BOUNDS = {
   width: 860,
   height: 720,
@@ -127,6 +141,9 @@ export function ArtifactPdfPreview({
   const onRenderStatusChangeRef = useRef(onRenderStatusChange)
   const onTextExtractionStatusChangeRef = useRef(onTextExtractionStatusChange)
   const pinchStateRef = useRef<{ distance: number; zoom: number } | null>(null)
+  const panDragStateRef = useRef<PdfPanDragState | null>(null)
+  const panGestureCountRef = useRef(0)
+  const [isPanDragging, setIsPanDragging] = useState(false)
   const [highlightDraft, setHighlightDraft] = useState<{
     start: NormalizedArtifactPoint
     current: NormalizedArtifactPoint
@@ -457,6 +474,16 @@ export function ArtifactPdfPreview({
     })
   }, [focusRequest, pageIndex, pageSize, zoom, fitMode])
 
+  useEffect(() => {
+    if (toolMode === "pan") {
+      return
+    }
+    if (panDragStateRef.current) {
+      panDragStateRef.current = null
+      setIsPanDragging(false)
+    }
+  }, [toolMode])
+
   const handlePanLayerTouchStart = useCallback((event: TouchEvent<HTMLDivElement>) => {
     if (event.touches.length !== 2) {
       pinchStateRef.current = null
@@ -490,6 +517,145 @@ export function ArtifactPdfPreview({
       pinchStateRef.current = null
     }
   }, [])
+  const recordPanGesture = useCallback((
+    result: PdfPanGestureResult,
+    deltaX: number | null = null,
+    deltaY: number | null = null,
+  ) => {
+    panGestureCountRef.current += 1
+    recordSophiaCaptureEvent({
+      category: "artifacts-runtime",
+      name: "artifact-pan-gesture",
+      payload: {
+        artifactId: artifactId ?? null,
+        artifactPath: file?.path ?? null,
+        artifactRendererKind: "pdf",
+        artifactPageIndex: pageIndex,
+        artifactPageNumber: pageNumber,
+        artifactZoom: zoom,
+        artifactFitMode: fitMode,
+        artifactToolMode: toolMode,
+        panModeActive: toolMode === "pan",
+        panGestureCount: panGestureCountRef.current,
+        panGestureResult: result,
+        panScrollDeltaX: deltaX === null ? null : Math.round(deltaX),
+        panScrollDeltaY: deltaY === null ? null : Math.round(deltaY),
+        rawArtifactTextExcluded: true,
+        rawFrameExcluded: true,
+        rawCommentTextExcluded: true,
+      },
+    })
+  }, [artifactId, file?.path, fitMode, pageIndex, pageNumber, toolMode, zoom])
+  const finishPanDrag = useCallback((
+    event: PointerEvent<HTMLDivElement> | null,
+    resultOverride?: PdfPanGestureResult,
+  ) => {
+    const dragState = panDragStateRef.current
+    if (!dragState) {
+      return
+    }
+
+    const panLayer = pageHostRef.current
+    const deltaX = panLayer ? panLayer.scrollLeft - dragState.startScrollLeft : 0
+    const deltaY = panLayer ? panLayer.scrollTop - dragState.startScrollTop : 0
+    const result = resultOverride ?? (dragState.didScroll ? "success" : "cancelled")
+
+    if (event) {
+      event.preventDefault()
+      event.stopPropagation()
+      try {
+        event.currentTarget.releasePointerCapture(dragState.pointerId)
+      } catch {
+        // Pointer capture release is optional across browsers and tests.
+      }
+    }
+
+    panDragStateRef.current = null
+    setIsPanDragging(false)
+    recordPanGesture(result, deltaX, deltaY)
+  }, [recordPanGesture])
+  const handlePanLayerPointerDown = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (!showCanvas || toolMode !== "pan" || event.button !== 0) {
+      return
+    }
+
+    const panLayer = pageHostRef.current ?? event.currentTarget
+    if (!panLayer) {
+      event.preventDefault()
+      event.stopPropagation()
+      recordPanGesture("no_scroll_container")
+      return
+    }
+
+    const maxScrollLeft = Math.max(0, panLayer.scrollWidth - panLayer.clientWidth)
+    const maxScrollTop = Math.max(0, panLayer.scrollHeight - panLayer.clientHeight)
+    if (maxScrollLeft <= 0 && maxScrollTop <= 0) {
+      event.preventDefault()
+      event.stopPropagation()
+      recordPanGesture("no_overflow", 0, 0)
+      return
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+    panDragStateRef.current = {
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startScrollLeft: panLayer.scrollLeft,
+      startScrollTop: panLayer.scrollTop,
+      maxScrollLeft,
+      maxScrollTop,
+      didScroll: false,
+    }
+    setIsPanDragging(true)
+
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId)
+    } catch {
+      // Dragging still works while the pointer remains over the pan layer.
+    }
+  }, [recordPanGesture, showCanvas, toolMode])
+  const handlePanLayerPointerMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const dragState = panDragStateRef.current
+    if (dragState?.pointerId !== event.pointerId) {
+      return
+    }
+
+    const panLayer = pageHostRef.current
+    if (!panLayer) {
+      finishPanDrag(event, "no_scroll_container")
+      return
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+    const nextScrollLeft = clampScroll(
+      dragState.startScrollLeft - (event.clientX - dragState.startClientX),
+      dragState.maxScrollLeft,
+    )
+    const nextScrollTop = clampScroll(
+      dragState.startScrollTop - (event.clientY - dragState.startClientY),
+      dragState.maxScrollTop,
+    )
+    panLayer.scrollLeft = nextScrollLeft
+    panLayer.scrollTop = nextScrollTop
+    dragState.didScroll = dragState.didScroll
+      || Math.abs(nextScrollLeft - dragState.startScrollLeft) > 0
+      || Math.abs(nextScrollTop - dragState.startScrollTop) > 0
+  }, [finishPanDrag])
+  const handlePanLayerPointerUp = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (panDragStateRef.current?.pointerId !== event.pointerId) {
+      return
+    }
+    finishPanDrag(event)
+  }, [finishPanDrag])
+  const handlePanLayerPointerCancel = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (panDragStateRef.current?.pointerId !== event.pointerId) {
+      return
+    }
+    finishPanDrag(event, "cancelled")
+  }, [finishPanDrag])
   const handleAnnotationLayerPointerDown = useCallback((event: PointerEvent<HTMLDivElement>) => {
     if (!showCanvas || event.button !== 0) {
       return
@@ -595,8 +761,20 @@ export function ArtifactPdfPreview({
         <div
           ref={pageHostRef}
           data-testid="artifact-pdf-pan-layer"
-          className="relative min-h-0 min-w-0 flex-1 overflow-auto bg-[#ebe7f0] [scrollbar-gutter:stable] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--cosmic-border)] [&::-webkit-scrollbar-track]:bg-transparent"
-          style={{ scrollbarColor: "var(--cosmic-border) transparent", touchAction: "pan-x pan-y" }}
+          data-pan-mode-active={toolMode === "pan" ? "true" : "false"}
+          data-pan-dragging={isPanDragging ? "true" : "false"}
+          className={cn(
+            "relative min-h-0 min-w-0 flex-1 overflow-auto bg-[#ebe7f0] [scrollbar-gutter:stable] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--cosmic-border)] [&::-webkit-scrollbar-track]:bg-transparent",
+            toolMode === "pan" && (isPanDragging ? "cursor-grabbing select-none" : "cursor-grab"),
+          )}
+          style={{
+            scrollbarColor: "var(--cosmic-border) transparent",
+            touchAction: toolMode === "pan" ? "none" : "pan-x pan-y",
+          }}
+          onPointerDown={handlePanLayerPointerDown}
+          onPointerMove={handlePanLayerPointerMove}
+          onPointerUp={handlePanLayerPointerUp}
+          onPointerCancel={handlePanLayerPointerCancel}
           onTouchStart={handlePanLayerTouchStart}
           onTouchMove={handlePanLayerTouchMove}
           onTouchEnd={handlePanLayerTouchEnd}

@@ -85,7 +85,8 @@ describe('session page exit UI contract', () => {
     expect(source).toContain('const showVoiceArtifactStage = focusMode !== \'text\'');
     expect(source).toContain('&& !showTextArtifactStage');
     expect(source).toContain('resolveBuilderSurface({');
-    expect(source).toContain('artifactStageActive: showTextArtifactStage || showVoiceArtifactStage');
+    expect(source).toContain('const artifactStageActive = showTextArtifactStage || showVoiceArtifactStage');
+    expect(source).toContain('artifactStageActive,');
     expect(source).toContain('completedBuilderAvailable: Boolean(builderPrimaryFile && !builderReadyDismissed)');
     expect(source).toContain('focusMode === \'text\' && builderSurface.showLegacyCompletionFallback && builderCompletionForDisplay');
     expect(source).toContain('focusMode !== \'text\' && builderSurface.showLegacyCompletionFallback && builderCompletionForDisplay');
@@ -102,5 +103,21 @@ describe('session page exit UI contract', () => {
     expect(source.match(/onSelectedBuilderArtifactPathChange={handleSelectBuilderArtifactPath}/g)?.length).toBe(3);
     expect(source.match(/pendingBuilderArtifactReview={pendingBuilderArtifactReview}/g)?.length).toBe(3);
     expect(source.match(/onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}/g)?.length).toBe(3);
+  });
+
+  it('places the canonical completed builder entry inline in text mode and in a safe-left voice corner', () => {
+    const source = readAppFile('app/session/page.tsx');
+
+    expect(source).toContain("const completedBuilderEntryPlacement = showCanonicalCompletedBuilderEntryCorner");
+    expect(source).toContain("&& !artifactStageActive");
+    expect(source).toContain("data-builder-entry-placement=\"inline\"");
+    expect(source).toContain("data-builder-entry-placement=\"corner\"");
+    expect(source).toContain("data-builder-entry-overlaps-controls=\"false\"");
+    expect(source).toContain("completedBuilderEntryHiddenForStage");
+    expect(source).toContain("completedBuilderEntryOverlapsControls");
+    expect(source).toContain("justify-start px-3 sm:px-4");
+    expect(source).toContain("bottom-[calc(7.75rem+env(safe-area-inset-bottom,0px))] left-4");
+    expect(source).not.toContain("voiceArtifactToggleBottom");
+    expect(source).not.toContain("className=\"fixed left-1/2 -translate-x-1/2 z-30 flex justify-center\"");
   });
 });

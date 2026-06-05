@@ -276,6 +276,9 @@ function buildMetrics(): VoiceDeveloperMetrics {
       builderReadyPillSuppressed: false,
       duplicateBuilderSurfaceSuppressed: false,
       resumedBuilderSurfaceResolved: false,
+      completedBuilderEntryPlacement: 'hidden',
+      completedBuilderEntryOverlapsControls: false,
+      completedBuilderEntryHiddenForStage: false,
     },
     coreview: {
       visual: {
@@ -307,6 +310,11 @@ function buildMetrics(): VoiceDeveloperMetrics {
         coreviewToolLastResult: 'success',
         coreviewToolRefreshResult: 'success',
         coreviewToolVisualFreshAfterResult: true,
+        panModeActive: false,
+        panGestureCount: 0,
+        panGestureResult: null,
+        panScrollDeltaX: null,
+        panScrollDeltaY: null,
         providerToPublicTranscriptGapAfterCoreviewTool: 0,
         followUpTurnDispatchedAfterCoreviewTool: true,
         emitArtifactBlockedDuringReviewCount: 0,
@@ -370,6 +378,9 @@ function buildSummary(): VoiceTelemetrySummary {
     builderReadyPillSuppressed: false,
     duplicateBuilderSurfaceSuppressed: false,
     resumedBuilderSurfaceResolved: false,
+    completedBuilderEntryPlacement: 'hidden',
+    completedBuilderEntryOverlapsControls: false,
+    completedBuilderEntryHiddenForStage: false,
   };
 }
 
@@ -491,6 +502,9 @@ describe('buildVoiceTelemetryReport', () => {
       builderReadyPillSuppressed: false,
       duplicateBuilderSurfaceSuppressed: false,
       resumedBuilderSurfaceResolved: false,
+      completedBuilderEntryPlacement: 'hidden',
+      completedBuilderEntryOverlapsControls: false,
+      completedBuilderEntryHiddenForStage: false,
       rawArtifactTextExcluded: true,
       rawFrameExcluded: true,
       rawCommentTextExcluded: true,
@@ -1482,6 +1496,11 @@ describe('buildVoiceTelemetryReport', () => {
       coreviewFocusAnchorCount: 1,
       coreviewFocusAnchorResult: 'success',
       coreviewFocusAnchorType: 'current_title',
+      panModeActive: true,
+      panGestureCount: 1,
+      panGestureResult: 'success',
+      panScrollDeltaX: 48,
+      panScrollDeltaY: 24,
     });
 
     const report = buildVoiceTelemetryReport({
@@ -1650,6 +1669,9 @@ describe('buildVoiceTelemetryReport', () => {
     expect(report.coreview.visual.coreviewFocusAnchorCount).toBe(1);
     expect(report.coreview.visual.coreviewFocusAnchorResult).toBe('success');
     expect(report.coreview.visual.coreviewFocusAnchorType).toBe('current_title');
+    expect(report.coreview.visual.panModeActive).toBe(true);
+    expect(report.coreview.visual.panGestureCount).toBe(1);
+    expect(report.coreview.visual.panGestureResult).toBe('success');
     expect(report.diagnosticsSummary.coreviewStillFrame.rawProviderPayloadExcluded).toBe(true);
     expect(report.diagnosticsSummary.coreviewStillFrame.rawArtifactTextExcluded).toBe(true);
     expect(report.diagnosticsSummary.coreviewStillFrame).toMatchObject({
@@ -1684,6 +1706,11 @@ describe('buildVoiceTelemetryReport', () => {
       coreviewFocusAnchorCount: 1,
       coreviewFocusAnchorResult: 'success',
       coreviewFocusAnchorType: 'current_title',
+      panModeActive: true,
+      panGestureCount: 1,
+      panGestureResult: 'success',
+      panScrollDeltaX: 48,
+      panScrollDeltaY: 24,
       lastReviewVoiceCommandKind: 'go_to_page',
       lastReviewVoiceCommandApplied: true,
       lastReviewVoiceCommandUiMode: 'voice',

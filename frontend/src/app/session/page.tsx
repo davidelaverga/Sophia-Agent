@@ -885,7 +885,6 @@ function SessionPageContent() {
   }, [builderPrimaryFile?.path, clearBuilderArtifact, clearBuilderTask, hasRecoveredBuilderArtifact]);
   const voiceBuilderChromeOpacity = Math.max(chromeOpacity, 0.94);
   const voiceBuilderAccessoryOpacity = Math.max(chromeOpacity, 0.62);
-  const voiceArtifactToggleBottom = 'calc(9.25rem + env(safe-area-inset-bottom, 0px))';
 
   const handleVoiceDownloadBuilderArtifact = useCallback(() => {
     if (!builderDownloadHref || typeof document === 'undefined') {
@@ -1234,12 +1233,13 @@ function SessionPageContent() {
     && showArtifacts
     && showArtifactsUi
     && (Boolean(builderArtifact) || hasBuilderArtifactLibrary || hasSelectedBuilderArtifactPath);
+  const artifactStageActive = showTextArtifactStage || showVoiceArtifactStage;
   const showInlineTextArtifactsPanel = focusMode === 'text'
     && showArtifacts
     && showArtifactsUi
     && !showTextArtifactStage;
   const builderSurface = useMemo(() => resolveBuilderSurface({
-    artifactStageActive: showTextArtifactStage || showVoiceArtifactStage,
+    artifactStageActive,
     buildRunning: isBuilderActivelyRunning && !hasRecoveredBuilderArtifact,
     completedBuilderAvailable: Boolean(builderPrimaryFile && !builderReadyDismissed),
     secondaryFileRowsAvailable: Boolean(builderArtifact) || hasBuilderArtifactLibrary,
@@ -1254,9 +1254,34 @@ function SessionPageContent() {
     hasSelectedBuilderArtifactPath,
     hasRecoveredBuilderArtifact,
     isBuilderActivelyRunning,
-    showTextArtifactStage,
-    showVoiceArtifactStage,
+    artifactStageActive,
   ]);
+  const canonicalCompletedBuilderEntryAvailable = Boolean(
+    builderPrimaryFile
+      && canonicalCompletedBuilderTask
+      && builderSurface.showCanonicalCompletedBuilder
+      && showArtifactsUi,
+  );
+  const showCanonicalCompletedBuilderEntryInline = Boolean(
+    canonicalCompletedBuilderEntryAvailable
+      && focusMode === 'text'
+      && !showArtifacts
+      && !artifactStageActive,
+  );
+  const showCanonicalCompletedBuilderEntryCorner = Boolean(
+    canonicalCompletedBuilderEntryAvailable
+      && focusMode !== 'text'
+      && !showArtifacts
+      && !artifactStageActive
+      && !isVoiceCaptionVisible,
+  );
+  const completedBuilderEntryPlacement = showCanonicalCompletedBuilderEntryCorner
+    ? 'corner'
+    : showCanonicalCompletedBuilderEntryInline
+      ? 'inline'
+      : 'hidden';
+  const completedBuilderEntryHiddenForStage = artifactStageActive && canonicalCompletedBuilderEntryAvailable;
+  const completedBuilderEntryOverlapsControls = false;
 
   useEffect(() => {
     const signature = [
@@ -1269,7 +1294,9 @@ function SessionPageContent() {
       builderTask?.phase ?? 'no-task',
       builderCompletionForDisplay?.status ?? 'no-completion',
       hasSelectedBuilderArtifactPath ? 'selected-artifact' : 'no-selected-artifact',
-      showTextArtifactStage || showVoiceArtifactStage ? 'stage-active' : 'stage-inactive',
+      artifactStageActive ? 'stage-active' : 'stage-inactive',
+      completedBuilderEntryPlacement,
+      completedBuilderEntryHiddenForStage ? 'completed-hidden-for-stage' : 'completed-not-hidden-for-stage',
     ].join('|');
 
     if (previousBuilderSurfaceTelemetrySignatureRef.current === signature) {
@@ -1287,9 +1314,12 @@ function SessionPageContent() {
         builderReadyPillSuppressed: builderSurface.builderReadyPillSuppressed,
         duplicateBuilderSurfaceSuppressed: builderSurface.duplicateBuilderSurfaceSuppressed,
         resumedBuilderSurfaceResolved: builderSurface.resumedBuilderSurfaceResolved,
-        artifactStageActive: showTextArtifactStage || showVoiceArtifactStage,
+        artifactStageActive,
         activeBuildStepsVisible: builderSurface.showActiveBuildSteps,
-        canonicalCompletedBuilderVisible: builderSurface.showCanonicalCompletedBuilder,
+        canonicalCompletedBuilderVisible: showCanonicalCompletedBuilderEntryInline || showCanonicalCompletedBuilderEntryCorner,
+        completedBuilderEntryPlacement,
+        completedBuilderEntryOverlapsControls,
+        completedBuilderEntryHiddenForStage,
         legacyCompletionFallbackVisible: builderSurface.showLegacyCompletionFallback,
         selectedBuilderArtifactPathPresent: hasSelectedBuilderArtifactPath,
         builderTaskPhase: builderTask?.phase ?? null,
@@ -1308,9 +1338,13 @@ function SessionPageContent() {
     builderSurface.showCanonicalCompletedBuilder,
     builderSurface.showLegacyCompletionFallback,
     builderTask?.phase,
+    artifactStageActive,
+    completedBuilderEntryHiddenForStage,
+    completedBuilderEntryOverlapsControls,
+    completedBuilderEntryPlacement,
     hasSelectedBuilderArtifactPath,
-    showTextArtifactStage,
-    showVoiceArtifactStage,
+    showCanonicalCompletedBuilderEntryCorner,
+    showCanonicalCompletedBuilderEntryInline,
   ]);
 
   // Loading state — the breathing nebula IS the loading indicator (R41)
@@ -1512,38 +1546,15 @@ function SessionPageContent() {
             />
           )}
 
-          {/* Canonical completed builder surface — text mode: inline above composer */}
-          {focusMode === 'text'
-            && !showArtifacts
-            && showArtifactsUi
+          {/* Canonical completed builder surface — text mode: left-column inline above composer */}
+          {showCanonicalCompletedBuilderEntryInline
             && builderPrimaryFile
-            && canonicalCompletedBuilderTask
-            && builderSurface.showCanonicalCompletedBuilder && (
-            <div className="mb-2 flex justify-center">
-              <BuilderTaskNotice
-                task={canonicalCompletedBuilderTask}
-                artifactTitle={builderReadyTitle}
-                fallbackLabel={builderCompletionFallbackLabel}
-                onOpenArtifact={handleViewBuilderArtifactInCanvas}
-                openHref={builderOpenHref}
-                downloadHref={builderDownloadHref}
-                onDownload={() => haptic('medium')}
-                onDismiss={dismissVisibleBuilderArtifact}
-              />
-            </div>
-          )}
-
-          {/* Canonical completed builder surface — voice mode: fixed above mode toggle */}
-          {focusMode !== 'text'
-            && !showArtifacts
-            && showArtifactsUi
-            && !isVoiceCaptionVisible
-            && builderPrimaryFile
-            && canonicalCompletedBuilderTask
-            && builderSurface.showCanonicalCompletedBuilder && (
+            && canonicalCompletedBuilderTask && (
             <div
-              className="fixed left-1/2 -translate-x-1/2 z-30 flex justify-center"
-              style={{ bottom: voiceArtifactToggleBottom, opacity: voiceBuilderAccessoryOpacity, transition: 'opacity 0.6s ease' }}
+              data-testid="canonical-completed-builder-entry"
+              data-builder-entry-placement="inline"
+              data-builder-entry-overlaps-controls="false"
+              className="mb-2 flex justify-start px-3 sm:px-4"
             >
               <BuilderTaskNotice
                 task={canonicalCompletedBuilderTask}
@@ -1555,6 +1566,32 @@ function SessionPageContent() {
                 onDownload={() => haptic('medium')}
                 onDismiss={dismissVisibleBuilderArtifact}
                 compact={true}
+              />
+            </div>
+          )}
+
+          {/* Canonical completed builder surface — voice mode: safe-left corner scene element */}
+          {showCanonicalCompletedBuilderEntryCorner
+            && builderPrimaryFile
+            && canonicalCompletedBuilderTask && (
+            <div
+              data-testid="canonical-completed-builder-entry"
+              data-builder-entry-placement="corner"
+              data-builder-entry-overlaps-controls="false"
+              className="pointer-events-none fixed bottom-[calc(7.75rem+env(safe-area-inset-bottom,0px))] left-4 z-30 flex w-[min(400px,calc(100vw-2rem))] justify-start sm:bottom-6 sm:left-6"
+              style={{ opacity: voiceBuilderAccessoryOpacity, transition: 'opacity 0.6s ease' }}
+            >
+              <BuilderTaskNotice
+                task={canonicalCompletedBuilderTask}
+                artifactTitle={builderReadyTitle}
+                fallbackLabel={builderCompletionFallbackLabel}
+                onOpenArtifact={handleViewBuilderArtifactInCanvas}
+                openHref={builderOpenHref}
+                downloadHref={builderDownloadHref}
+                onDownload={() => haptic('medium')}
+                onDismiss={dismissVisibleBuilderArtifact}
+                compact={true}
+                className="pointer-events-auto max-w-full"
               />
             </div>
           )}

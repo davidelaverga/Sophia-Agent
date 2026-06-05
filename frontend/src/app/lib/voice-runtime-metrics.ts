@@ -18,6 +18,8 @@ type CanonicalBuilderSurface =
   | "secondary_file_library_rows"
   | "none"
 
+type CompletedBuilderEntryPlacement = "corner" | "inline" | "hidden"
+
 export type VoiceCaptureEvent = {
   seq: number
   recordedAt: string
@@ -145,6 +147,11 @@ export type CoreviewVisualTelemetry = {
   coreviewFocusAnchorType: string | null
   keyboardArtifactShortcutUsed: string | null
   pinchZoomUsed: boolean
+  panModeActive: boolean
+  panGestureCount: number
+  panGestureResult: string | null
+  panScrollDeltaX: number | null
+  panScrollDeltaY: number | null
   coreviewToolCompletedCount: number
   coreviewToolUnresolvedCount: number
   coreviewToolLastResult: string | null
@@ -347,6 +354,9 @@ export type VoiceTelemetrySummary = {
   builderReadyPillSuppressed: boolean
   duplicateBuilderSurfaceSuppressed: boolean
   resumedBuilderSurfaceResolved: boolean
+  completedBuilderEntryPlacement: CompletedBuilderEntryPlacement | null
+  completedBuilderEntryOverlapsControls: boolean | null
+  completedBuilderEntryHiddenForStage: boolean
 }
 
 export type LegacySessionTelemetry = {
@@ -667,6 +677,9 @@ export type VoiceDeveloperMetrics = {
     builderReadyPillSuppressed: boolean
     duplicateBuilderSurfaceSuppressed: boolean
     resumedBuilderSurfaceResolved: boolean
+    completedBuilderEntryPlacement: CompletedBuilderEntryPlacement | null
+    completedBuilderEntryOverlapsControls: boolean | null
+    completedBuilderEntryHiddenForStage: boolean
   }
   health: {
     level: VoiceMetricsHealthLevel
@@ -1220,6 +1233,11 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       coreviewFocusAnchorType: null,
       keyboardArtifactShortcutUsed: null,
       pinchZoomUsed: false,
+      panModeActive: false,
+      panGestureCount: 0,
+      panGestureResult: null,
+      panScrollDeltaX: null,
+      panScrollDeltaY: null,
       coreviewToolCompletedCount: 0,
       coreviewToolUnresolvedCount: 0,
       coreviewToolLastResult: null,
@@ -1341,6 +1359,10 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-pinch-zoom")
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
+  const panGestureEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-pan-gesture")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
   const flagDiagnosticEvents = activeEvents
     .filter((event) => event.name === "coreview-flag-diagnostics" || event.name === "credentials-received")
     .map((event) => event.payloadRecord)
@@ -1367,6 +1389,7 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .at(-1) ?? null
   const latestSetupTools = setupToolEvents.at(-1) ?? null
   const latestKeyboardShortcut = keyboardShortcutEvents.at(-1) ?? null
+  const latestPanGesture = panGestureEvents.at(-1) ?? null
   const firstFrameSeq = frameEvents.find((event) => {
     const result = coreviewFrameResult(event)
     return result !== null && frameWasSent(result)
@@ -1566,6 +1589,16 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.coreviewFocusAnchorType = asString(latestFocusTool?.coreviewFocusAnchorType)
   visual.keyboardArtifactShortcutUsed = asString(latestKeyboardShortcut?.keyboardArtifactShortcutUsed)
   visual.pinchZoomUsed = pinchZoomEvents.some((event) => asBoolean(event.pinchZoomUsed) === true)
+  visual.panModeActive = asBoolean(latestPanGesture?.panModeActive)
+    ?? asBoolean(latestAnnotationState?.panModeActive)
+    ?? asString(latestAnnotationState?.artifactToolMode) === "pan"
+  visual.panGestureCount = Math.max(
+    panGestureEvents.length,
+    ...panGestureEvents.map((event) => numberFromKeys(event, ["panGestureCount"]) ?? 0),
+  )
+  visual.panGestureResult = asString(latestPanGesture?.panGestureResult)
+  visual.panScrollDeltaX = numberFromKeys(latestPanGesture, ["panScrollDeltaX"])
+  visual.panScrollDeltaY = numberFromKeys(latestPanGesture, ["panScrollDeltaY"])
   const coreviewToolReceivedCount = countWhere(coreviewToolDiagnostics, (event) => asString(eventData(event)?.phase) === "tool_call_received")
   const coreviewToolResolvedCount = countWhere(coreviewToolDiagnostics, (event) => {
     const phase = asString(eventData(event)?.phase)
@@ -3228,6 +3261,10 @@ function asCanonicalBuilderSurface(value: string | null): CanonicalBuilderSurfac
     ?? (value === "secondary_file_library_rows" || value === "none" ? value : "none")
 }
 
+function asCompletedBuilderEntryPlacement(value: string | null): CompletedBuilderEntryPlacement | null {
+  return value === "corner" || value === "inline" || value === "hidden" ? value : null
+}
+
 function buildBuilderSurfaceMetrics(events: NormalizedVoiceCaptureEvent[]): Pick<
   VoiceDeveloperMetrics["builder"],
   | "builderSurfaceMode"
@@ -3236,6 +3273,9 @@ function buildBuilderSurfaceMetrics(events: NormalizedVoiceCaptureEvent[]): Pick
   | "builderReadyPillSuppressed"
   | "duplicateBuilderSurfaceSuppressed"
   | "resumedBuilderSurfaceResolved"
+  | "completedBuilderEntryPlacement"
+  | "completedBuilderEntryOverlapsControls"
+  | "completedBuilderEntryHiddenForStage"
 > {
   const latestSurfaceEvent = findLast(
     events,
@@ -3250,6 +3290,9 @@ function buildBuilderSurfaceMetrics(events: NormalizedVoiceCaptureEvent[]): Pick
     builderReadyPillSuppressed: asBoolean(payload?.builderReadyPillSuppressed) ?? false,
     duplicateBuilderSurfaceSuppressed: asBoolean(payload?.duplicateBuilderSurfaceSuppressed) ?? false,
     resumedBuilderSurfaceResolved: asBoolean(payload?.resumedBuilderSurfaceResolved) ?? false,
+    completedBuilderEntryPlacement: asCompletedBuilderEntryPlacement(asString(payload?.completedBuilderEntryPlacement)),
+    completedBuilderEntryOverlapsControls: asBoolean(payload?.completedBuilderEntryOverlapsControls),
+    completedBuilderEntryHiddenForStage: asBoolean(payload?.completedBuilderEntryHiddenForStage) ?? false,
   }
 }
 
@@ -3782,6 +3825,9 @@ export function buildVoiceTelemetrySummary(metrics: VoiceDeveloperMetrics): Voic
     builderReadyPillSuppressed: metrics.builder.builderReadyPillSuppressed,
     duplicateBuilderSurfaceSuppressed: metrics.builder.duplicateBuilderSurfaceSuppressed,
     resumedBuilderSurfaceResolved: metrics.builder.resumedBuilderSurfaceResolved,
+    completedBuilderEntryPlacement: metrics.builder.completedBuilderEntryPlacement,
+    completedBuilderEntryOverlapsControls: metrics.builder.completedBuilderEntryOverlapsControls,
+    completedBuilderEntryHiddenForStage: metrics.builder.completedBuilderEntryHiddenForStage,
   }
 }
 

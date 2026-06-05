@@ -42,7 +42,7 @@ describe('BuilderTaskNotice', () => {
       />,
     );
 
-    expect(screen.getByText('Success')).toBeInTheDocument();
+    expect(screen.getByText('Ready')).toBeInTheDocument();
     expect(screen.getByText('Deliverable ready.')).toBeInTheDocument();
     expect(screen.queryByRole('progressbar', { name: 'Builder progress' })).not.toBeInTheDocument();
     expect(screen.queryByText('Build complete')).not.toBeInTheDocument();
@@ -111,8 +111,10 @@ describe('BuilderTaskNotice', () => {
       />,
     );
 
-    expect(screen.getByText('Success')).toBeInTheDocument();
+    expect(screen.getByText('Ready')).toBeInTheDocument();
     expect(screen.getByText('Launch brief final')).toBeInTheDocument();
+    expect(screen.getByText('Ready to review in canvas.')).toBeInTheDocument();
+    expect(screen.queryByText('Deliverable ready.')).not.toBeInTheDocument();
     expect(screen.queryByText('Build complete')).not.toBeInTheDocument();
     expect(screen.queryByText('100%')).not.toBeInTheDocument();
     expect(screen.queryByRole('progressbar', { name: 'Builder progress' })).not.toBeInTheDocument();

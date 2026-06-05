@@ -1423,6 +1423,9 @@ describe('buildVoiceDeveloperMetrics', () => {
           builderReadyPillSuppressed: true,
           duplicateBuilderSurfaceSuppressed: true,
           resumedBuilderSurfaceResolved: false,
+          completedBuilderEntryPlacement: 'hidden',
+          completedBuilderEntryOverlapsControls: false,
+          completedBuilderEntryHiddenForStage: false,
         },
       }),
     ];
@@ -1443,6 +1446,9 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.builder.builderReadyPillSuppressed).toBe(true);
     expect(metrics.builder.duplicateBuilderSurfaceSuppressed).toBe(true);
     expect(metrics.builder.resumedBuilderSurfaceResolved).toBe(false);
+    expect(metrics.builder.completedBuilderEntryPlacement).toBe('hidden');
+    expect(metrics.builder.completedBuilderEntryOverlapsControls).toBe(false);
+    expect(metrics.builder.completedBuilderEntryHiddenForStage).toBe(false);
     expect(metrics.events.builder).toBe(1);
     expect(metrics.counts.builderEvents).toBe(1);
     expect(metrics.regressions).toEqual(
@@ -1468,6 +1474,9 @@ describe('buildVoiceDeveloperMetrics', () => {
           builderReadyPillSuppressed: true,
           duplicateBuilderSurfaceSuppressed: true,
           resumedBuilderSurfaceResolved: true,
+          completedBuilderEntryPlacement: 'corner',
+          completedBuilderEntryOverlapsControls: false,
+          completedBuilderEntryHiddenForStage: false,
         },
       }),
     ];
@@ -1483,6 +1492,9 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.builder.canonicalBuilderSurface).toBe('canonical_completed_builder');
     expect(metrics.builder.builderReadyPillSuppressed).toBe(true);
     expect(metrics.builder.duplicateBuilderSurfaceSuppressed).toBe(true);
+    expect(metrics.builder.completedBuilderEntryPlacement).toBe('corner');
+    expect(metrics.builder.completedBuilderEntryOverlapsControls).toBe(false);
+    expect(metrics.builder.completedBuilderEntryHiddenForStage).toBe(false);
   });
 
   it('ages a stale builder snapshot into a stall even when the last payload said running', () => {
@@ -2463,6 +2475,71 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.coreview.exactText.exactTextRegistrySource).toBe('pdf_text_extraction');
     expect(metrics.coreview.exactText.readArtifactTextResolvedCount).toBe(0);
     expect(metrics.coreview.exactText.readArtifactTextUnresolvedCount).toBe(0);
+  });
+
+  it('reports Pan mode state and successful pan gestures without raw artifact content', () => {
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events: [
+        buildEvent({
+          seq: 1,
+          at: '2026-05-27T12:00:00.000Z',
+          category: 'voice-session',
+          name: 'start-talking-requested',
+          payload: { sessionId: 'session-dev' },
+        }),
+        buildEvent({
+          seq: 2,
+          at: '2026-05-27T12:00:01.000Z',
+          category: 'artifacts-runtime',
+          name: 'artifact-annotation-state',
+          payload: {
+            artifactId: 'artifact-1',
+            artifactRendererKind: 'pdf',
+            artifactToolMode: 'pan',
+            panModeActive: true,
+            annotationOverlayCaptured: false,
+            annotationCount: 0,
+            highlightCount: 0,
+            commentCount: 0,
+            rawArtifactTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        }),
+        buildEvent({
+          seq: 3,
+          at: '2026-05-27T12:00:01.500Z',
+          category: 'artifacts-runtime',
+          name: 'artifact-pan-gesture',
+          payload: {
+            artifactId: 'artifact-1',
+            artifactRendererKind: 'pdf',
+            artifactPageIndex: 1,
+            artifactPageNumber: 2,
+            artifactZoom: 1.8,
+            artifactFitMode: 'custom',
+            artifactToolMode: 'pan',
+            panModeActive: true,
+            panGestureCount: 1,
+            panGestureResult: 'success',
+            panScrollDeltaX: 60,
+            panScrollDeltaY: 40,
+            rawArtifactTextExcluded: true,
+            rawFrameExcluded: true,
+            rawCommentTextExcluded: true,
+          },
+        }),
+      ],
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-05-27T12:00:04.000Z'),
+    });
+
+    expect(metrics.coreview.visual.panModeActive).toBe(true);
+    expect(metrics.coreview.visual.panGestureCount).toBe(1);
+    expect(metrics.coreview.visual.panGestureResult).toBe('success');
+    expect(metrics.coreview.visual.panScrollDeltaX).toBe(60);
+    expect(metrics.coreview.visual.panScrollDeltaY).toBe(40);
+    expect(JSON.stringify(metrics.coreview.visual)).not.toContain('raw artifact body');
   });
 
   it('reports review tool timeouts as resolved safe tool results', () => {

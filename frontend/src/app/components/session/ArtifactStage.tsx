@@ -786,6 +786,7 @@ export function ArtifactStage({
         artifactPath: primaryFile?.path ?? null,
         artifactRendererKind: rendererKind,
         artifactToolMode: toolMode,
+        panModeActive: toolMode === "pan",
         annotationPageIndex: pageIndex,
         annotationOverlayCaptured: annotationCounts.annotationCount > 0,
         selectedAnnotationKind,

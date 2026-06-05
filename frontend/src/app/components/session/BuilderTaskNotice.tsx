@@ -41,13 +41,14 @@ const PHASE_META: Record<BuilderTaskV1['phase'], {
   icon: LucideIcon;
 }> = {
   running:   { label: 'Creating artifact', accentVar: 'var(--sophia-purple)', icon: Sparkles },
-  completed: { label: 'Success',           accentVar: 'var(--cosmic-teal)', icon: CheckCircle2 },
+  completed: { label: 'Ready',             accentVar: 'var(--cosmic-teal)', icon: CheckCircle2 },
   failed:    { label: 'Failed',            accentVar: 'var(--sophia-error, #f87171)', icon: XCircle },
   timed_out: { label: 'Failed',            accentVar: 'var(--cosmic-amber)', icon: XCircle },
   cancelled: { label: 'Cancelled',         accentVar: 'var(--cosmic-text-faint)', icon: XCircle },
 };
 
 const PROGRESSBAR_LABEL = 'Builder progress';
+const COMPLETED_ARTIFACT_DETAIL = 'Ready to review in canvas.';
 // Matches backend subagents.executor._STUCK_IDLE_MS. Generous enough to cover
 // long single-LLM iterations on the builder (Sonnet often spends 90–130s on a
 // single generation).
@@ -607,9 +608,9 @@ function BuilderCompletedArtifactActions({
             compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1.5 text-[10px]',
           )}
           style={{
-            borderColor: `color-mix(in srgb, ${accentVar} 30%, var(--cosmic-border-soft))`,
-            color: accentVar,
-            background: `color-mix(in srgb, ${accentVar} 8%, transparent)`,
+            borderColor: 'color-mix(in srgb, var(--cosmic-border-soft) 88%, transparent)',
+            color: 'var(--cosmic-text-whisper)',
+            background: 'color-mix(in srgb, var(--cosmic-panel-soft) 52%, transparent)',
             textDecoration: 'none',
           }}
         >
@@ -671,6 +672,9 @@ export function BuilderTaskNotice({
   const isRunning = liveTask.phase === 'running';
   const taskIdentity = task.taskId ?? task.label ?? '__builder__';
   const showCompletedArtifactState = task.phase === 'completed' && Boolean(artifactTitle && onOpenArtifact);
+  const completedArtifactDetail = showCompletedArtifactState
+    ? (fallbackLabel && visibleDetail ? visibleDetail : COMPLETED_ARTIFACT_DETAIL)
+    : visibleDetail;
 
   useEffect(() => {
     setTaskReceivedAtMs(Date.now());
@@ -709,16 +713,28 @@ export function BuilderTaskNotice({
     <div
       role="status"
       aria-live={isRunning ? 'polite' : 'assertive'}
+      data-testid="builder-task-notice"
+      data-builder-completed-artifact={showCompletedArtifactState ? 'true' : undefined}
       className={cn(
-        compact
-          ? 'w-[min(340px,calc(100vw-40px))] rounded-[20px] border px-3 py-2.5 backdrop-blur-xl transition-all duration-500 animate-[builder-reveal_0.45s_ease-out]'
-          : 'w-[min(340px,calc(100vw-48px))] rounded-[22px] border px-3.5 py-3 backdrop-blur-xl transition-all duration-700 animate-[builder-reveal_0.6s_ease-out]',
+        showCompletedArtifactState
+          ? compact
+            ? 'w-[min(380px,calc(100vw-32px))] rounded-[18px] border px-3 py-2.5 backdrop-blur-xl transition-all duration-500 animate-[builder-reveal_0.45s_ease-out]'
+            : 'w-[min(400px,calc(100vw-40px))] rounded-[18px] border px-3.5 py-3 backdrop-blur-xl transition-all duration-700 animate-[builder-reveal_0.6s_ease-out]'
+          : compact
+            ? 'w-[min(340px,calc(100vw-40px))] rounded-[20px] border px-3 py-2.5 backdrop-blur-xl transition-all duration-500 animate-[builder-reveal_0.45s_ease-out]'
+            : 'w-[min(340px,calc(100vw-48px))] rounded-[22px] border px-3.5 py-3 backdrop-blur-xl transition-all duration-700 animate-[builder-reveal_0.6s_ease-out]',
         className,
       )}
       style={{
-        borderColor: `color-mix(in srgb, ${meta.accentVar} 20%, var(--cosmic-border-soft))`,
-        background: `linear-gradient(180deg, color-mix(in srgb, ${meta.accentVar} 7%, var(--cosmic-panel)), color-mix(in srgb, var(--cosmic-panel) 86%, transparent))`,
-        boxShadow: `0 16px 38px color-mix(in srgb, ${meta.accentVar} 11%, transparent)`,
+        borderColor: showCompletedArtifactState
+          ? `color-mix(in srgb, ${meta.accentVar} 18%, var(--cosmic-border-soft))`
+          : `color-mix(in srgb, ${meta.accentVar} 20%, var(--cosmic-border-soft))`,
+        background: showCompletedArtifactState
+          ? `linear-gradient(135deg, color-mix(in srgb, var(--cosmic-panel-soft) 72%, transparent), color-mix(in srgb, ${meta.accentVar} 7%, transparent) 52%, color-mix(in srgb, var(--sophia-purple) 5%, transparent))`
+          : `linear-gradient(180deg, color-mix(in srgb, ${meta.accentVar} 7%, var(--cosmic-panel)), color-mix(in srgb, var(--cosmic-panel) 86%, transparent))`,
+        boxShadow: showCompletedArtifactState
+          ? `0 14px 34px color-mix(in srgb, var(--bg) 32%, transparent), inset 0 1px 0 color-mix(in srgb, white 12%, transparent), 0 0 22px color-mix(in srgb, ${meta.accentVar} 7%, transparent)`
+          : `0 16px 38px color-mix(in srgb, ${meta.accentVar} 11%, transparent)`,
       }}
     >
       <div className={cn('flex items-start', compact ? 'gap-2.5' : 'gap-3')}>
@@ -734,15 +750,17 @@ export function BuilderTaskNotice({
             >
               {meta.label}
             </span>
-            <span
-              className={cn('rounded-full tracking-[0.1em] lowercase', compact ? 'px-1.5 py-0.5 text-[8px]' : 'px-2 py-0.5 text-[9px]')}
-              style={{
-                color: meta.accentVar,
-                background: `color-mix(in srgb, ${meta.accentVar} 12%, transparent)`,
-              }}
-            >
-              builder
-            </span>
+            {!showCompletedArtifactState && (
+              <span
+                className={cn('rounded-full tracking-[0.1em] lowercase', compact ? 'px-1.5 py-0.5 text-[8px]' : 'px-2 py-0.5 text-[9px]')}
+                style={{
+                  color: meta.accentVar,
+                  background: `color-mix(in srgb, ${meta.accentVar} 12%, transparent)`,
+                }}
+              >
+                builder
+              </span>
+            )}
             {showCompletedArtifactState && fallbackLabel && (
               <span
                 className={cn('rounded-full tracking-[0.1em] lowercase', compact ? 'px-1.5 py-0.5 text-[8px]' : 'px-2 py-0.5 text-[9px]')}
@@ -760,7 +778,7 @@ export function BuilderTaskNotice({
             <p
               className={cn(
                 compact ? 'mt-0.5 text-[12px] leading-5' : 'mt-1 text-[13px] leading-5.5',
-                'truncate font-medium',
+                'line-clamp-2 font-medium [overflow-wrap:anywhere]',
               )}
               style={{ color: 'var(--cosmic-text-strong)' }}
               title={artifactTitle}
@@ -769,28 +787,28 @@ export function BuilderTaskNotice({
             </p>
           )}
 
-          {visibleDetail && (
+          {completedArtifactDetail && (
             <p
               className={cn(compact ? 'mt-0.5 text-[10px] leading-4.5' : 'mt-1 text-[11px] leading-5')}
               style={{ color: 'var(--cosmic-text-faint)' }}
             >
-              {visibleDetail}
+              {completedArtifactDetail}
             </p>
           )}
         </div>
       </div>
 
       <div className={cn(compact ? 'mt-2.5' : 'mt-3')}>
-        {isRunning && !liveTask.canvasStreamed && (
+        {isRunning && !liveTask.canvasStreamed && !showCompletedArtifactState && (
           <>
             <BuilderProgressTrack task={liveTask} accentVar={meta.accentVar} compact={compact} elapsedMs={elapsedMs} />
             <BuilderTodoPreview task={liveTask} compact={compact} />
           </>
         )}
-        {!isRunning && (
+        {!isRunning && !showCompletedArtifactState && (
           <BuilderTodoPreview task={liveTask} compact={compact} />
         )}
-        {liveTask.canvasStreamed && liveTask.activityLog && liveTask.activityLog.length > 0 && (
+        {!showCompletedArtifactState && liveTask.canvasStreamed && liveTask.activityLog && liveTask.activityLog.length > 0 && (
           <button
             type="button"
             onClick={() => setIsDetailOpen((open) => !open)}
@@ -803,7 +821,7 @@ export function BuilderTaskNotice({
             {isDetailOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
           </button>
         )}
-        {(!liveTask.canvasStreamed || previewActivityLog) && (
+        {!showCompletedArtifactState && (!liveTask.canvasStreamed || previewActivityLog) && (
           <BuilderSeedDetail
             task={previewActivityLog ? { ...liveTask, activityLog: previewActivityLog } : liveTask}
             compact={compact}
