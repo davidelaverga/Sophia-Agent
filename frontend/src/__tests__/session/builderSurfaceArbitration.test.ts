@@ -5,7 +5,7 @@ import { resolveBuilderSurface } from '../../app/session/builderSurfaceArbitrati
 const baseInput = {
   artifactStageActive: false,
   buildRunning: false,
-  completedArtifactEntryAvailable: false,
+  completedBuilderAvailable: false,
   secondaryFileRowsAvailable: false,
   legacyCompletionAvailable: false,
   selectedBuilderArtifactPathExists: false,
@@ -27,31 +27,35 @@ describe('resolveBuilderSurface', () => {
     expect(surface.duplicateBuilderSurfaceSuppressed).toBe(true);
   });
 
-  it('uses the compact completed artifact entry instead of the old completion card', () => {
+  it('uses the canonical completed builder surface instead of the old completion card', () => {
     const surface = resolveBuilderSurface({
       ...baseInput,
-      completedArtifactEntryAvailable: true,
+      completedBuilderAvailable: true,
       legacyCompletionAvailable: true,
     });
 
-    expect(surface.builderSurfaceMode).toBe('completed_artifact_entry');
-    expect(surface.showCompletedArtifactEntry).toBe(true);
+    expect(surface.builderSurfaceMode).toBe('canonical_completed_builder');
+    expect(surface.canonicalBuilderSurface).toBe('canonical_completed_builder');
+    expect(surface.showCanonicalCompletedBuilder).toBe(true);
     expect(surface.showLegacyCompletionFallback).toBe(false);
     expect(surface.legacyBuilderSurfaceHidden).toBe(true);
+    expect(surface.builderReadyPillSuppressed).toBe(true);
+    expect(surface.duplicateBuilderSurfaceSuppressed).toBe(true);
   });
 
   it('hides old completion surfaces while ArtifactStage is active', () => {
     const surface = resolveBuilderSurface({
       ...baseInput,
       artifactStageActive: true,
-      completedArtifactEntryAvailable: true,
+      completedBuilderAvailable: true,
       legacyCompletionAvailable: true,
     });
 
     expect(surface.builderSurfaceMode).toBe('artifact_review_room');
     expect(surface.canonicalBuilderSurface).toBe('artifact_review_room');
-    expect(surface.showCompletedArtifactEntry).toBe(false);
+    expect(surface.showCanonicalCompletedBuilder).toBe(false);
     expect(surface.showLegacyCompletionFallback).toBe(false);
+    expect(surface.builderReadyPillSuppressed).toBe(true);
     expect(surface.duplicateBuilderSurfaceSuppressed).toBe(true);
   });
 
@@ -63,8 +67,9 @@ describe('resolveBuilderSurface', () => {
     });
 
     expect(surface.builderSurfaceMode).toBe('legacy_completion_hidden');
-    expect(surface.canonicalBuilderSurface).toBe('completed_artifact_entry');
+    expect(surface.canonicalBuilderSurface).toBe('canonical_completed_builder');
     expect(surface.showLegacyCompletionFallback).toBe(false);
+    expect(surface.builderReadyPillSuppressed).toBe(true);
     expect(surface.resumedBuilderSurfaceResolved).toBe(true);
   });
 

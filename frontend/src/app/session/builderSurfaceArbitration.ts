@@ -1,7 +1,7 @@
 export type BuilderSurfaceMode =
   | 'active_build_steps'
   | 'artifact_review_room'
-  | 'completed_artifact_entry'
+  | 'canonical_completed_builder'
   | 'legacy_completion_hidden'
   | 'legacy_completion_fallback';
 
@@ -13,7 +13,7 @@ export type CanonicalBuilderSurface =
 export type BuilderSurfaceArbitrationInput = {
   artifactStageActive: boolean;
   buildRunning: boolean;
-  completedArtifactEntryAvailable: boolean;
+  completedBuilderAvailable: boolean;
   secondaryFileRowsAvailable: boolean;
   legacyCompletionAvailable: boolean;
   selectedBuilderArtifactPathExists: boolean;
@@ -23,9 +23,10 @@ export type BuilderSurfaceArbitrationResult = {
   builderSurfaceMode: BuilderSurfaceMode | null;
   canonicalBuilderSurface: CanonicalBuilderSurface;
   showActiveBuildSteps: boolean;
-  showCompletedArtifactEntry: boolean;
+  showCanonicalCompletedBuilder: boolean;
   showLegacyCompletionFallback: boolean;
   legacyBuilderSurfaceHidden: boolean;
+  builderReadyPillSuppressed: boolean;
   duplicateBuilderSurfaceSuppressed: boolean;
   resumedBuilderSurfaceResolved: boolean;
 };
@@ -33,18 +34,22 @@ export type BuilderSurfaceArbitrationResult = {
 export function resolveBuilderSurface({
   artifactStageActive,
   buildRunning,
-  completedArtifactEntryAvailable,
+  completedBuilderAvailable,
   secondaryFileRowsAvailable,
   legacyCompletionAvailable,
   selectedBuilderArtifactPathExists,
 }: BuilderSurfaceArbitrationInput): BuilderSurfaceArbitrationResult {
   const suppressesLegacy = artifactStageActive
     || buildRunning
-    || completedArtifactEntryAvailable
+    || completedBuilderAvailable
     || secondaryFileRowsAvailable
     || selectedBuilderArtifactPathExists;
   const legacyBuilderSurfaceHidden = legacyCompletionAvailable && suppressesLegacy;
-  const duplicateBuilderSurfaceSuppressed = legacyBuilderSurfaceHidden;
+  const builderReadyPillSuppressed = artifactStageActive
+    || completedBuilderAvailable
+    || secondaryFileRowsAvailable
+    || selectedBuilderArtifactPathExists;
+  const duplicateBuilderSurfaceSuppressed = legacyBuilderSurfaceHidden || builderReadyPillSuppressed;
   const resumedBuilderSurfaceResolved = selectedBuilderArtifactPathExists && suppressesLegacy;
 
   if (artifactStageActive) {
@@ -52,9 +57,10 @@ export function resolveBuilderSurface({
       builderSurfaceMode: 'artifact_review_room',
       canonicalBuilderSurface: 'artifact_review_room',
       showActiveBuildSteps: false,
-      showCompletedArtifactEntry: false,
+      showCanonicalCompletedBuilder: false,
       showLegacyCompletionFallback: false,
       legacyBuilderSurfaceHidden,
+      builderReadyPillSuppressed,
       duplicateBuilderSurfaceSuppressed,
       resumedBuilderSurfaceResolved,
     };
@@ -65,22 +71,24 @@ export function resolveBuilderSurface({
       builderSurfaceMode: 'active_build_steps',
       canonicalBuilderSurface: 'active_build_steps',
       showActiveBuildSteps: true,
-      showCompletedArtifactEntry: false,
+      showCanonicalCompletedBuilder: false,
       showLegacyCompletionFallback: false,
       legacyBuilderSurfaceHidden,
+      builderReadyPillSuppressed,
       duplicateBuilderSurfaceSuppressed,
       resumedBuilderSurfaceResolved,
     };
   }
 
-  if (completedArtifactEntryAvailable) {
+  if (completedBuilderAvailable) {
     return {
-      builderSurfaceMode: 'completed_artifact_entry',
-      canonicalBuilderSurface: 'completed_artifact_entry',
+      builderSurfaceMode: 'canonical_completed_builder',
+      canonicalBuilderSurface: 'canonical_completed_builder',
       showActiveBuildSteps: false,
-      showCompletedArtifactEntry: true,
+      showCanonicalCompletedBuilder: true,
       showLegacyCompletionFallback: false,
       legacyBuilderSurfaceHidden,
+      builderReadyPillSuppressed,
       duplicateBuilderSurfaceSuppressed,
       resumedBuilderSurfaceResolved,
     };
@@ -91,11 +99,12 @@ export function resolveBuilderSurface({
       builderSurfaceMode: legacyCompletionAvailable ? 'legacy_completion_hidden' : null,
       canonicalBuilderSurface: secondaryFileRowsAvailable
         ? 'secondary_file_library_rows'
-        : 'completed_artifact_entry',
+        : 'canonical_completed_builder',
       showActiveBuildSteps: false,
-      showCompletedArtifactEntry: false,
+      showCanonicalCompletedBuilder: false,
       showLegacyCompletionFallback: false,
       legacyBuilderSurfaceHidden,
+      builderReadyPillSuppressed,
       duplicateBuilderSurfaceSuppressed,
       resumedBuilderSurfaceResolved,
     };
@@ -106,9 +115,10 @@ export function resolveBuilderSurface({
       builderSurfaceMode: 'legacy_completion_fallback',
       canonicalBuilderSurface: 'legacy_completion_fallback',
       showActiveBuildSteps: false,
-      showCompletedArtifactEntry: false,
+      showCanonicalCompletedBuilder: false,
       showLegacyCompletionFallback: true,
       legacyBuilderSurfaceHidden: false,
+      builderReadyPillSuppressed: false,
       duplicateBuilderSurfaceSuppressed: false,
       resumedBuilderSurfaceResolved: false,
     };
@@ -118,9 +128,10 @@ export function resolveBuilderSurface({
     builderSurfaceMode: null,
     canonicalBuilderSurface: 'none',
     showActiveBuildSteps: false,
-    showCompletedArtifactEntry: false,
+    showCanonicalCompletedBuilder: false,
     showLegacyCompletionFallback: false,
     legacyBuilderSurfaceHidden: false,
+    builderReadyPillSuppressed: false,
     duplicateBuilderSurfaceSuppressed: false,
     resumedBuilderSurfaceResolved: false,
   };

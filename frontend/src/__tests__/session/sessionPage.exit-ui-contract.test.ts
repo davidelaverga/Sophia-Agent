@@ -86,11 +86,13 @@ describe('session page exit UI contract', () => {
     expect(source).toContain('&& !showTextArtifactStage');
     expect(source).toContain('resolveBuilderSurface({');
     expect(source).toContain('artifactStageActive: showTextArtifactStage || showVoiceArtifactStage');
-    expect(source).toContain('completedArtifactEntryAvailable: Boolean(builderPrimaryFile && !builderReadyDismissed)');
+    expect(source).toContain('completedBuilderAvailable: Boolean(builderPrimaryFile && !builderReadyDismissed)');
     expect(source).toContain('focusMode === \'text\' && builderSurface.showLegacyCompletionFallback && builderCompletionForDisplay');
     expect(source).toContain('focusMode !== \'text\' && builderSurface.showLegacyCompletionFallback && builderCompletionForDisplay');
     expect(source).toContain('builderSurface.showActiveBuildSteps');
-    expect(source).toContain('builderSurface.showCompletedArtifactEntry');
+    expect(source).toContain('builderSurface.showCanonicalCompletedBuilder');
+    expect(source).toContain('canonicalCompletedBuilderTask');
+    expect(source).not.toContain('BuilderReadyPill');
     expect(source).toContain('{showTextArtifactStage && (');
     expect(source).toContain("{focusMode !== 'text' && (");
     expect(source).toContain('<VoiceFirstComposer');

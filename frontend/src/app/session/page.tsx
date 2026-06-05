@@ -30,7 +30,6 @@ import {
   VoiceFirstComposer,
   VoiceCaption,
   VoiceMetricsPanel,
-  BuilderReadyPill,
   PresenceArtifactPanel,
   WhisperIndicator,
   ReflectionOverlay,
@@ -38,7 +37,11 @@ import {
   DebriefOfferModal,
   FeedbackToast,
 } from '../components/session';
-import { BuilderCompletionCard } from '../components/session/BuilderCompletionCard';
+import {
+  BuilderCompletionCard,
+  getBuilderCompletionFallbackBody,
+  getBuilderCompletionFallbackLabel,
+} from '../components/session/BuilderCompletionCard';
 import { BuilderTaskNotice } from '../components/session/BuilderTaskNotice';
 import { SessionLayout } from '../components/SessionLayout';
 import { SessionExpiredModal, MultiTabModal } from '../components/ui';
@@ -814,6 +817,49 @@ function SessionPageContent() {
       run_id: builderCompletionForDisplay.run_id?.slice(0, 12) ?? null,
     });
   }, [builderCompletionForDisplay]);
+  const builderCompletionFallbackLabel = useMemo(
+    () => builderCompletionForDisplay ? getBuilderCompletionFallbackLabel(builderCompletionForDisplay) : null,
+    [builderCompletionForDisplay],
+  );
+  const canonicalCompletedBuilderTask = useMemo(() => {
+    if (!builderPrimaryFile) {
+      return null;
+    }
+
+    const fallbackBody = builderCompletionForDisplay
+      ? getBuilderCompletionFallbackBody(builderCompletionForDisplay)
+      : null;
+    const completionCopy = builderCompletionForDisplay?.status === 'success'
+      ? builderCompletionForDisplay.summary ?? builderCompletionForDisplay.user_next_action ?? null
+      : null;
+
+    return {
+      phase: 'completed' as const,
+      taskId: builderTask?.taskId ?? builderCompletionForDisplay?.task_id,
+      runId: builderTask?.runId ?? builderCompletionForDisplay?.run_id ?? undefined,
+      label: 'Builder artifact ready',
+      detail: fallbackBody
+        ?? builderArtifact?.userNextAction
+        ?? builderArtifact?.companionSummary
+        ?? completionCopy
+        ?? 'Ready to review in canvas.',
+      todos: builderTask?.todos,
+      activityLog: builderTask?.activityLog,
+      completedAt: builderTask?.completedAt ?? builderCompletionForDisplay?.completed_at ?? undefined,
+      canvasStreamed: builderTask?.canvasStreamed,
+    };
+  }, [
+    builderArtifact?.companionSummary,
+    builderArtifact?.userNextAction,
+    builderCompletionForDisplay,
+    builderPrimaryFile,
+    builderTask?.activityLog,
+    builderTask?.canvasStreamed,
+    builderTask?.completedAt,
+    builderTask?.runId,
+    builderTask?.taskId,
+    builderTask?.todos,
+  ]);
   const builderReadyDismissed = Boolean(
     builderPrimaryFile?.path && dismissedBuilderLibraryPath === builderPrimaryFile.path,
   );
@@ -1195,7 +1241,7 @@ function SessionPageContent() {
   const builderSurface = useMemo(() => resolveBuilderSurface({
     artifactStageActive: showTextArtifactStage || showVoiceArtifactStage,
     buildRunning: isBuilderActivelyRunning && !hasRecoveredBuilderArtifact,
-    completedArtifactEntryAvailable: Boolean(builderPrimaryFile && !builderReadyDismissed),
+    completedBuilderAvailable: Boolean(builderPrimaryFile && !builderReadyDismissed),
     secondaryFileRowsAvailable: Boolean(builderArtifact) || hasBuilderArtifactLibrary,
     legacyCompletionAvailable: Boolean(builderCompletionForDisplay),
     selectedBuilderArtifactPathExists: hasSelectedBuilderArtifactPath,
@@ -1217,6 +1263,7 @@ function SessionPageContent() {
       builderSurface.builderSurfaceMode ?? 'none',
       builderSurface.canonicalBuilderSurface,
       builderSurface.legacyBuilderSurfaceHidden ? 'legacy-hidden' : 'legacy-visible',
+      builderSurface.builderReadyPillSuppressed ? 'ready-pill-suppressed' : 'ready-pill-clear',
       builderSurface.duplicateBuilderSurfaceSuppressed ? 'duplicate-suppressed' : 'duplicate-clear',
       builderSurface.resumedBuilderSurfaceResolved ? 'resumed-resolved' : 'resumed-not-selected',
       builderTask?.phase ?? 'no-task',
@@ -1237,11 +1284,12 @@ function SessionPageContent() {
         builderSurfaceMode: builderSurface.builderSurfaceMode,
         canonicalBuilderSurface: builderSurface.canonicalBuilderSurface,
         legacyBuilderSurfaceHidden: builderSurface.legacyBuilderSurfaceHidden,
+        builderReadyPillSuppressed: builderSurface.builderReadyPillSuppressed,
         duplicateBuilderSurfaceSuppressed: builderSurface.duplicateBuilderSurfaceSuppressed,
         resumedBuilderSurfaceResolved: builderSurface.resumedBuilderSurfaceResolved,
         artifactStageActive: showTextArtifactStage || showVoiceArtifactStage,
         activeBuildStepsVisible: builderSurface.showActiveBuildSteps,
-        completedArtifactEntryVisible: builderSurface.showCompletedArtifactEntry,
+        canonicalCompletedBuilderVisible: builderSurface.showCanonicalCompletedBuilder,
         legacyCompletionFallbackVisible: builderSurface.showLegacyCompletionFallback,
         selectedBuilderArtifactPathPresent: hasSelectedBuilderArtifactPath,
         builderTaskPhase: builderTask?.phase ?? null,
@@ -1250,13 +1298,14 @@ function SessionPageContent() {
     });
   }, [
     builderCompletionForDisplay?.status,
+    builderSurface.builderReadyPillSuppressed,
     builderSurface.builderSurfaceMode,
     builderSurface.canonicalBuilderSurface,
     builderSurface.duplicateBuilderSurfaceSuppressed,
     builderSurface.legacyBuilderSurfaceHidden,
     builderSurface.resumedBuilderSurfaceResolved,
     builderSurface.showActiveBuildSteps,
-    builderSurface.showCompletedArtifactEntry,
+    builderSurface.showCanonicalCompletedBuilder,
     builderSurface.showLegacyCompletionFallback,
     builderTask?.phase,
     hasSelectedBuilderArtifactPath,
@@ -1463,37 +1512,48 @@ function SessionPageContent() {
             />
           )}
 
-          {/* Builder completion pill — text mode: inline above composer */}
-          {focusMode === 'text' && !showArtifacts && showArtifactsUi && builderPrimaryFile && builderSurface.showCompletedArtifactEntry && (
+          {/* Canonical completed builder surface — text mode: inline above composer */}
+          {focusMode === 'text'
+            && !showArtifacts
+            && showArtifactsUi
+            && builderPrimaryFile
+            && canonicalCompletedBuilderTask
+            && builderSurface.showCanonicalCompletedBuilder && (
             <div className="mb-2 flex justify-center">
-              <BuilderReadyPill
-                title={builderReadyTitle}
-                onOpen={handleViewBuilderArtifactInCanvas}
+              <BuilderTaskNotice
+                task={canonicalCompletedBuilderTask}
+                artifactTitle={builderReadyTitle}
+                fallbackLabel={builderCompletionFallbackLabel}
+                onOpenArtifact={handleViewBuilderArtifactInCanvas}
                 openHref={builderOpenHref}
                 downloadHref={builderDownloadHref}
                 onDownload={() => haptic('medium')}
                 onDismiss={dismissVisibleBuilderArtifact}
-                itemCount={builderArtifactLibrary.length || undefined}
-                isNew={hasNewArtifacts}
               />
             </div>
           )}
 
-          {/* Builder completion pill — voice mode: fixed above mode toggle */}
-          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && !isVoiceCaptionVisible && builderPrimaryFile && builderSurface.showCompletedArtifactEntry && (
+          {/* Canonical completed builder surface — voice mode: fixed above mode toggle */}
+          {focusMode !== 'text'
+            && !showArtifacts
+            && showArtifactsUi
+            && !isVoiceCaptionVisible
+            && builderPrimaryFile
+            && canonicalCompletedBuilderTask
+            && builderSurface.showCanonicalCompletedBuilder && (
             <div
               className="fixed left-1/2 -translate-x-1/2 z-30 flex justify-center"
               style={{ bottom: voiceArtifactToggleBottom, opacity: voiceBuilderAccessoryOpacity, transition: 'opacity 0.6s ease' }}
             >
-              <BuilderReadyPill
-                title={builderReadyTitle}
-                onOpen={handleViewBuilderArtifactInCanvas}
+              <BuilderTaskNotice
+                task={canonicalCompletedBuilderTask}
+                artifactTitle={builderReadyTitle}
+                fallbackLabel={builderCompletionFallbackLabel}
+                onOpenArtifact={handleViewBuilderArtifactInCanvas}
                 openHref={builderOpenHref}
                 downloadHref={builderDownloadHref}
                 onDownload={() => haptic('medium')}
                 onDismiss={dismissVisibleBuilderArtifact}
-                itemCount={builderArtifactLibrary.length || undefined}
-                isNew={hasNewArtifacts}
                 compact={true}
               />
             </div>

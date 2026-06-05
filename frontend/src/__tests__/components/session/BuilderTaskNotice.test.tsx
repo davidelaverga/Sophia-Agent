@@ -32,7 +32,7 @@ describe('BuilderTaskNotice', () => {
     expect(screen.getAllByText('Refine recommendation').length).toBeGreaterThan(0);
   });
 
-  it('shows a fully completed progress state when the deliverable is ready', () => {
+  it('shows a completed green state without a completed progress bar', () => {
     render(
       <BuilderTaskNotice
         task={{
@@ -42,10 +42,11 @@ describe('BuilderTaskNotice', () => {
       />,
     );
 
-    const progressbar = screen.getByRole('progressbar', { name: 'Builder progress' });
-    expect(progressbar).toHaveAttribute('aria-valuenow', '100');
-    expect(screen.getByText('deliverable assembled')).toBeInTheDocument();
-    expect(screen.getAllByText('100%').length).toBeGreaterThan(0);
+    expect(screen.getByText('Success')).toBeInTheDocument();
+    expect(screen.getByText('Deliverable ready.')).toBeInTheDocument();
+    expect(screen.queryByRole('progressbar', { name: 'Builder progress' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Build complete')).not.toBeInTheDocument();
+    expect(screen.queryByText('100%')).not.toBeInTheDocument();
   });
 
   it('does not fabricate a percentage for a canvas-streamed running seed', () => {
@@ -90,8 +91,11 @@ describe('BuilderTaskNotice', () => {
     expect(screen.getByText('Running check')).toBeInTheDocument();
   });
 
-  it('renders the completion pill state when artifact actions are available', () => {
+  it('renders canonical completed artifact actions when artifact actions are available', () => {
     const onOpenArtifact = vi.fn();
+    const onDownload = vi.fn((event: React.MouseEvent<HTMLAnchorElement>) => {
+      event.preventDefault();
+    });
 
     render(
       <BuilderTaskNotice
@@ -101,19 +105,56 @@ describe('BuilderTaskNotice', () => {
         }}
         artifactTitle="Launch brief final"
         onOpenArtifact={onOpenArtifact}
+        openHref="/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md"
         downloadHref="/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md?download=true"
+        onDownload={onDownload}
       />,
     );
 
-    expect(screen.getByText('Ready')).toBeInTheDocument();
+    expect(screen.getByText('Success')).toBeInTheDocument();
     expect(screen.getByText('Launch brief final')).toBeInTheDocument();
+    expect(screen.queryByText('Build complete')).not.toBeInTheDocument();
+    expect(screen.queryByText('100%')).not.toBeInTheDocument();
+    expect(screen.queryByRole('progressbar', { name: 'Builder progress' })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /view launch brief final in canvas/i }));
     expect(onOpenArtifact).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole('link', { name: /download/i })).toHaveAttribute(
+
+    const openLinks = screen.getAllByRole('link', { name: /open launch brief final in new tab/i });
+    expect(openLinks).toHaveLength(1);
+    expect(openLinks[0]).toHaveAttribute(
+      'href',
+      '/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md',
+    );
+
+    const downloadLinks = screen.getAllByRole('link', { name: /download launch brief final/i });
+    expect(downloadLinks).toHaveLength(1);
+    expect(downloadLinks[0]).toHaveAttribute(
       'href',
       '/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md?download=true',
     );
+    fireEvent.click(downloadLinks[0]);
+    expect(onDownload).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByRole('button', { name: /view launch brief final in canvas/i })).toHaveLength(1);
+  });
+
+  it('keeps fallback truth copy in the canonical completed state', () => {
+    render(
+      <BuilderTaskNotice
+        task={{
+          phase: 'completed',
+          detail: 'I couldn’t finish the PowerPoint package, so I delivered a browser-viewable HTML fallback.',
+        }}
+        artifactTitle="Deck fallback"
+        fallbackLabel="html fallback"
+        onOpenArtifact={vi.fn()}
+        openHref="/api/threads/thread-1/artifacts/mnt/user-data/outputs/deck.html"
+        downloadHref="/api/threads/thread-1/artifacts/mnt/user-data/outputs/deck.html?download=true"
+      />,
+    );
+
+    expect(screen.getByText('html fallback')).toBeInTheDocument();
+    expect(screen.getByText('I couldn’t finish the PowerPoint package, so I delivered a browser-viewable HTML fallback.')).toBeInTheDocument();
   });
 
   it('surfaces a stalled builder state explicitly', () => {

@@ -1420,6 +1420,7 @@ describe('buildVoiceDeveloperMetrics', () => {
           builderSurfaceMode: 'active_build_steps',
           canonicalBuilderSurface: 'active_build_steps',
           legacyBuilderSurfaceHidden: true,
+          builderReadyPillSuppressed: true,
           duplicateBuilderSurfaceSuppressed: true,
           resumedBuilderSurfaceResolved: false,
         },
@@ -1439,6 +1440,7 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.builder.builderSurfaceMode).toBe('active_build_steps');
     expect(metrics.builder.canonicalBuilderSurface).toBe('active_build_steps');
     expect(metrics.builder.legacyBuilderSurfaceHidden).toBe(true);
+    expect(metrics.builder.builderReadyPillSuppressed).toBe(true);
     expect(metrics.builder.duplicateBuilderSurfaceSuppressed).toBe(true);
     expect(metrics.builder.resumedBuilderSurfaceResolved).toBe(false);
     expect(metrics.events.builder).toBe(1);
@@ -1450,6 +1452,37 @@ describe('buildVoiceDeveloperMetrics', () => {
     );
     expect(metrics.timeline.some((item) => item.label === 'Builder stalled')).toBe(true);
     expect(metrics.health.title).toBe('Builder appears stalled');
+  });
+
+  it('normalizes legacy completed artifact entry telemetry to the canonical completed builder surface', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:22.000Z',
+        category: 'builder-ui',
+        name: 'builder-surface-resolved',
+        payload: {
+          builderSurfaceMode: 'completed_artifact_entry',
+          canonicalBuilderSurface: 'completed_artifact_entry',
+          legacyBuilderSurfaceHidden: true,
+          builderReadyPillSuppressed: true,
+          duplicateBuilderSurfaceSuppressed: true,
+          resumedBuilderSurfaceResolved: true,
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-04-07T12:01:20.000Z'),
+    });
+
+    expect(metrics.builder.builderSurfaceMode).toBe('canonical_completed_builder');
+    expect(metrics.builder.canonicalBuilderSurface).toBe('canonical_completed_builder');
+    expect(metrics.builder.builderReadyPillSuppressed).toBe(true);
+    expect(metrics.builder.duplicateBuilderSurfaceSuppressed).toBe(true);
   });
 
   it('ages a stale builder snapshot into a stall even when the last payload said running', () => {

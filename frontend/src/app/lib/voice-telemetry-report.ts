@@ -958,6 +958,7 @@ function buildBuilderSurfaceDiagnosticsSummary(metrics: VoiceDeveloperMetrics): 
     builderSurfaceMode: metrics.builder.builderSurfaceMode,
     canonicalBuilderSurface: metrics.builder.canonicalBuilderSurface,
     legacyBuilderSurfaceHidden: metrics.builder.legacyBuilderSurfaceHidden,
+    builderReadyPillSuppressed: metrics.builder.builderReadyPillSuppressed,
     duplicateBuilderSurfaceSuppressed: metrics.builder.duplicateBuilderSurfaceSuppressed,
     resumedBuilderSurfaceResolved: metrics.builder.resumedBuilderSurfaceResolved,
     rawArtifactTextExcluded: true,

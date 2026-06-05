@@ -9,7 +9,7 @@ import type { SessionRuntime, VoiceRuntimeTelemetry, VoiceStage } from "./voice-
 type BuilderSurfaceMode =
   | "active_build_steps"
   | "artifact_review_room"
-  | "completed_artifact_entry"
+  | "canonical_completed_builder"
   | "legacy_completion_hidden"
   | "legacy_completion_fallback"
 
@@ -344,6 +344,7 @@ export type VoiceTelemetrySummary = {
   builderSurfaceMode: BuilderSurfaceMode | null
   canonicalBuilderSurface: CanonicalBuilderSurface
   legacyBuilderSurfaceHidden: boolean
+  builderReadyPillSuppressed: boolean
   duplicateBuilderSurfaceSuppressed: boolean
   resumedBuilderSurfaceResolved: boolean
 }
@@ -663,6 +664,7 @@ export type VoiceDeveloperMetrics = {
     builderSurfaceMode: BuilderSurfaceMode | null
     canonicalBuilderSurface: CanonicalBuilderSurface
     legacyBuilderSurfaceHidden: boolean
+    builderReadyPillSuppressed: boolean
     duplicateBuilderSurfaceSuppressed: boolean
     resumedBuilderSurfaceResolved: boolean
   }
@@ -3210,10 +3212,12 @@ function asBuilderSurfaceMode(value: string | null): BuilderSurfaceMode | null {
   switch (value) {
     case "active_build_steps":
     case "artifact_review_room":
-    case "completed_artifact_entry":
+    case "canonical_completed_builder":
     case "legacy_completion_hidden":
     case "legacy_completion_fallback":
       return value
+    case "completed_artifact_entry":
+      return "canonical_completed_builder"
     default:
       return null
   }
@@ -3229,6 +3233,7 @@ function buildBuilderSurfaceMetrics(events: NormalizedVoiceCaptureEvent[]): Pick
   | "builderSurfaceMode"
   | "canonicalBuilderSurface"
   | "legacyBuilderSurfaceHidden"
+  | "builderReadyPillSuppressed"
   | "duplicateBuilderSurfaceSuppressed"
   | "resumedBuilderSurfaceResolved"
 > {
@@ -3242,6 +3247,7 @@ function buildBuilderSurfaceMetrics(events: NormalizedVoiceCaptureEvent[]): Pick
     builderSurfaceMode: asBuilderSurfaceMode(asString(payload?.builderSurfaceMode)),
     canonicalBuilderSurface: asCanonicalBuilderSurface(asString(payload?.canonicalBuilderSurface)),
     legacyBuilderSurfaceHidden: asBoolean(payload?.legacyBuilderSurfaceHidden) ?? false,
+    builderReadyPillSuppressed: asBoolean(payload?.builderReadyPillSuppressed) ?? false,
     duplicateBuilderSurfaceSuppressed: asBoolean(payload?.duplicateBuilderSurfaceSuppressed) ?? false,
     resumedBuilderSurfaceResolved: asBoolean(payload?.resumedBuilderSurfaceResolved) ?? false,
   }
@@ -3773,6 +3779,7 @@ export function buildVoiceTelemetrySummary(metrics: VoiceDeveloperMetrics): Voic
     builderSurfaceMode: metrics.builder.builderSurfaceMode,
     canonicalBuilderSurface: metrics.builder.canonicalBuilderSurface,
     legacyBuilderSurfaceHidden: metrics.builder.legacyBuilderSurfaceHidden,
+    builderReadyPillSuppressed: metrics.builder.builderReadyPillSuppressed,
     duplicateBuilderSurfaceSuppressed: metrics.builder.duplicateBuilderSurfaceSuppressed,
     resumedBuilderSurfaceResolved: metrics.builder.resumedBuilderSurfaceResolved,
   }

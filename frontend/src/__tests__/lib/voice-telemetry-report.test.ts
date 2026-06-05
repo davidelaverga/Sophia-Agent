@@ -273,6 +273,7 @@ function buildMetrics(): VoiceDeveloperMetrics {
       builderSurfaceMode: null,
       canonicalBuilderSurface: 'none',
       legacyBuilderSurfaceHidden: false,
+      builderReadyPillSuppressed: false,
       duplicateBuilderSurfaceSuppressed: false,
       resumedBuilderSurfaceResolved: false,
     },
@@ -366,6 +367,7 @@ function buildSummary(): VoiceTelemetrySummary {
     builderSurfaceMode: null,
     canonicalBuilderSurface: 'none',
     legacyBuilderSurfaceHidden: false,
+    builderReadyPillSuppressed: false,
     duplicateBuilderSurfaceSuppressed: false,
     resumedBuilderSurfaceResolved: false,
   };
@@ -486,6 +488,7 @@ describe('buildVoiceTelemetryReport', () => {
       builderSurfaceMode: null,
       canonicalBuilderSurface: 'none',
       legacyBuilderSurfaceHidden: false,
+      builderReadyPillSuppressed: false,
       duplicateBuilderSurfaceSuppressed: false,
       resumedBuilderSurfaceResolved: false,
       rawArtifactTextExcluded: true,

@@ -151,6 +151,14 @@ function fallbackCompletionBody(event: BuilderCompletionEventV1): string {
   return event.summary || 'I delivered a usable fallback artifact because the originally requested format could not be completed.';
 }
 
+export function getBuilderCompletionFallbackLabel(event: BuilderCompletionEventV1): string | null {
+  return isFallbackCompletion(event) ? fallbackArtifactLabel(event).toLowerCase() : null;
+}
+
+export function getBuilderCompletionFallbackBody(event: BuilderCompletionEventV1): string | null {
+  return isFallbackCompletion(event) ? fallbackCompletionBody(event) : null;
+}
+
 export function BuilderCompletionCard({
   event,
   onOpen,

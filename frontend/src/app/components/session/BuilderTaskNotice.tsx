@@ -4,6 +4,9 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Download,
+  ExternalLink,
+  Eye,
   ListChecks,
   Search,
   Sparkles,
@@ -16,11 +19,11 @@ import { cn } from '../../lib/utils';
 import type { BuilderTaskV1 } from '../../types/builder-task';
 
 import { BuilderActivityLog } from './BuilderActivityLog';
-import { BuilderReadyPill } from './BuilderReadyPill';
 
 type BuilderTaskNoticeProps = {
   task: BuilderTaskV1;
   artifactTitle?: string;
+  fallbackLabel?: string | null;
   onOpenArtifact?: () => void;
   openHref?: string | null;
   downloadHref?: string | null;
@@ -279,7 +282,7 @@ function getProgressMeta(task: BuilderTaskV1, elapsedMs?: number): { leading: st
       return { leading, trailing: percentLabel };
     }
     case 'completed':
-      return { leading: 'deliverable assembled', trailing: '100%' };
+      return { leading: 'deliverable assembled', trailing: 'ready' };
     case 'failed':
       return { leading: 'build interrupted', trailing: percentLabel };
     case 'timed_out':
@@ -532,6 +535,92 @@ function BuilderTodoPreview({
   );
 }
 
+function BuilderCompletedArtifactActions({
+  title,
+  onOpenArtifact,
+  openHref,
+  downloadHref,
+  onDownload,
+  compact,
+  accentVar,
+}: {
+  title: string;
+  onOpenArtifact: () => void;
+  openHref?: string | null;
+  downloadHref?: string | null;
+  onDownload?: MouseEventHandler<HTMLAnchorElement>;
+  compact?: boolean;
+  accentVar: string;
+}) {
+  return (
+    <div
+      data-testid="canonical-builder-completed-actions"
+      className={cn('flex flex-wrap items-center gap-2', compact ? 'mt-2' : 'mt-2.5')}
+    >
+      <button
+        type="button"
+        onClick={onOpenArtifact}
+        aria-label={`View ${title} in canvas`}
+        className={cn(
+          'inline-flex items-center gap-1.5 rounded-full border font-medium tracking-[0.08em] transition-opacity hover:opacity-100',
+          compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1.5 text-[10px]',
+        )}
+        style={{
+          borderColor: `color-mix(in srgb, ${accentVar} 38%, transparent)`,
+          color: accentVar,
+          background: `color-mix(in srgb, ${accentVar} 14%, transparent)`,
+        }}
+      >
+        <Eye className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+        View in canvas
+      </button>
+
+      {openHref && (
+        <a
+          href={openHref}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={`Open ${title} in new tab`}
+          className={cn(
+            'inline-flex items-center gap-1.5 rounded-full border tracking-[0.08em] transition-opacity hover:opacity-100',
+            compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1.5 text-[10px]',
+          )}
+          style={{
+            borderColor: 'color-mix(in srgb, var(--cosmic-border-soft) 88%, transparent)',
+            color: 'var(--cosmic-text-whisper)',
+            background: 'color-mix(in srgb, var(--cosmic-panel-soft) 52%, transparent)',
+            textDecoration: 'none',
+          }}
+        >
+          <ExternalLink className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+          Open in new tab
+        </a>
+      )}
+
+      {downloadHref && (
+        <a
+          href={downloadHref}
+          onClick={onDownload}
+          aria-label={`Download ${title}`}
+          className={cn(
+            'inline-flex items-center gap-1.5 rounded-full border tracking-[0.08em] transition-opacity hover:opacity-100',
+            compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1.5 text-[10px]',
+          )}
+          style={{
+            borderColor: `color-mix(in srgb, ${accentVar} 30%, var(--cosmic-border-soft))`,
+            color: accentVar,
+            background: `color-mix(in srgb, ${accentVar} 8%, transparent)`,
+            textDecoration: 'none',
+          }}
+        >
+          <Download className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+          Download
+        </a>
+      )}
+    </div>
+  );
+}
+
 export function BuilderSeedDetail({
   task,
   compact,
@@ -548,6 +637,7 @@ export function BuilderSeedDetail({
 export function BuilderTaskNotice({
   task,
   artifactTitle,
+  fallbackLabel,
   onOpenArtifact,
   openHref,
   downloadHref,
@@ -558,7 +648,6 @@ export function BuilderTaskNotice({
   isCancelling = false,
   className,
 }: BuilderTaskNoticeProps) {
-  const [isFreshCompletion, setIsFreshCompletion] = useState(false);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [taskReceivedAtMs, setTaskReceivedAtMs] = useState(() => Date.now());
@@ -581,7 +670,7 @@ export function BuilderTaskNotice({
   const showCancel = Boolean(onCancel && task.phase === 'running');
   const isRunning = liveTask.phase === 'running';
   const taskIdentity = task.taskId ?? task.label ?? '__builder__';
-  const showReadyPill = task.phase === 'completed' && Boolean(artifactTitle && onOpenArtifact);
+  const showCompletedArtifactState = task.phase === 'completed' && Boolean(artifactTitle && onOpenArtifact);
 
   useEffect(() => {
     setTaskReceivedAtMs(Date.now());
@@ -604,69 +693,17 @@ export function BuilderTaskNotice({
   useEffect(() => {
     const previousTaskState = previousTaskStateRef.current;
     const isNewTask = previousTaskState.identity !== taskIdentity;
-    const justCompleted = task.phase === 'completed' && (
-      previousTaskState.phase !== 'completed' || isNewTask
-    );
 
     if (isNewTask) {
       taskFirstSeenMsRef.current = Date.now();
       setIsDetailOpen(false);
     }
 
-    let timerId: ReturnType<typeof setTimeout> | undefined;
-    if (justCompleted) {
-      setIsFreshCompletion(true);
-      timerId = setTimeout(() => setIsFreshCompletion(false), compact ? 1400 : 1800);
-    } else if (task.phase !== 'completed') {
-      setIsFreshCompletion(false);
-    }
-
     previousTaskStateRef.current = {
       phase: task.phase,
       identity: taskIdentity,
     };
-
-    return () => {
-      if (timerId) {
-        clearTimeout(timerId);
-      }
-    };
-  }, [task.phase, taskIdentity, compact]);
-
-  if (showReadyPill && artifactTitle && onOpenArtifact) {
-    return (
-      <div
-        role="status"
-        aria-live="assertive"
-        className={cn('relative w-[min(360px,calc(100vw-48px))]', className)}
-      >
-        <BuilderReadyPill
-          title={artifactTitle}
-          onOpen={onOpenArtifact}
-          openHref={openHref}
-          downloadHref={downloadHref}
-          onDownload={onDownload}
-          isNew={isFreshCompletion}
-          compact={compact}
-          className="w-full"
-        />
-
-        {showDismiss && onDismiss && (
-          <button
-            type="button"
-            onClick={onDismiss}
-            className="absolute right-2.5 top-2.5 rounded-full p-1 transition-all duration-300"
-            style={{ color: 'var(--cosmic-text-faint)' }}
-            aria-label="Dismiss"
-          >
-            <svg className="h-3 w-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1">
-              <path d="M3 3l6 6M9 3l-6 6" strokeLinecap="round" />
-            </svg>
-          </button>
-        )}
-      </div>
-    );
-  }
+  }, [task.phase, taskIdentity]);
 
   return (
     <div
@@ -706,7 +743,31 @@ export function BuilderTaskNotice({
             >
               builder
             </span>
+            {showCompletedArtifactState && fallbackLabel && (
+              <span
+                className={cn('rounded-full tracking-[0.1em] lowercase', compact ? 'px-1.5 py-0.5 text-[8px]' : 'px-2 py-0.5 text-[9px]')}
+                style={{
+                  color: 'var(--cosmic-amber)',
+                  background: 'color-mix(in srgb, var(--cosmic-amber) 13%, transparent)',
+                }}
+              >
+                {fallbackLabel}
+              </span>
+            )}
           </div>
+
+          {showCompletedArtifactState && artifactTitle && (
+            <p
+              className={cn(
+                compact ? 'mt-0.5 text-[12px] leading-5' : 'mt-1 text-[13px] leading-5.5',
+                'truncate font-medium',
+              )}
+              style={{ color: 'var(--cosmic-text-strong)' }}
+              title={artifactTitle}
+            >
+              {artifactTitle}
+            </p>
+          )}
 
           {visibleDetail && (
             <p
@@ -720,11 +781,14 @@ export function BuilderTaskNotice({
       </div>
 
       <div className={cn(compact ? 'mt-2.5' : 'mt-3')}>
-        {!liveTask.canvasStreamed && (
+        {isRunning && !liveTask.canvasStreamed && (
           <>
             <BuilderProgressTrack task={liveTask} accentVar={meta.accentVar} compact={compact} elapsedMs={elapsedMs} />
             <BuilderTodoPreview task={liveTask} compact={compact} />
           </>
+        )}
+        {!isRunning && (
+          <BuilderTodoPreview task={liveTask} compact={compact} />
         )}
         {liveTask.canvasStreamed && liveTask.activityLog && liveTask.activityLog.length > 0 && (
           <button
@@ -743,6 +807,17 @@ export function BuilderTaskNotice({
           <BuilderSeedDetail
             task={previewActivityLog ? { ...liveTask, activityLog: previewActivityLog } : liveTask}
             compact={compact}
+          />
+        )}
+        {showCompletedArtifactState && artifactTitle && onOpenArtifact && (
+          <BuilderCompletedArtifactActions
+            title={artifactTitle}
+            onOpenArtifact={onOpenArtifact}
+            openHref={openHref}
+            downloadHref={downloadHref}
+            onDownload={onDownload}
+            compact={compact}
+            accentVar={meta.accentVar}
           />
         )}
       </div>
