@@ -1411,6 +1411,19 @@ describe('buildVoiceDeveloperMetrics', () => {
           lastProgressAt: '2026-04-07T11:59:20.000Z',
         },
       }),
+      buildEvent({
+        seq: 3,
+        at: '2026-04-07T12:00:22.000Z',
+        category: 'builder-ui',
+        name: 'builder-surface-resolved',
+        payload: {
+          builderSurfaceMode: 'active_build_steps',
+          canonicalBuilderSurface: 'active_build_steps',
+          legacyBuilderSurfaceHidden: true,
+          duplicateBuilderSurfaceSuppressed: true,
+          resumedBuilderSurfaceResolved: false,
+        },
+      }),
     ];
 
     const metrics = buildVoiceDeveloperMetrics({
@@ -1423,6 +1436,11 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.builder.phase).toBe('running');
     expect(metrics.builder.progressPercent).toBe(25);
     expect(metrics.builder.stuck).toBe(true);
+    expect(metrics.builder.builderSurfaceMode).toBe('active_build_steps');
+    expect(metrics.builder.canonicalBuilderSurface).toBe('active_build_steps');
+    expect(metrics.builder.legacyBuilderSurfaceHidden).toBe(true);
+    expect(metrics.builder.duplicateBuilderSurfaceSuppressed).toBe(true);
+    expect(metrics.builder.resumedBuilderSurfaceResolved).toBe(false);
     expect(metrics.events.builder).toBe(1);
     expect(metrics.counts.builderEvents).toBe(1);
     expect(metrics.regressions).toEqual(

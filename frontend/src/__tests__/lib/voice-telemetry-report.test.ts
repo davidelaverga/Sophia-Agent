@@ -250,6 +250,32 @@ function buildMetrics(): VoiceDeveloperMetrics {
       diagnostics: 1,
       builderEvents: 0,
     },
+    builder: {
+      phase: null,
+      taskId: null,
+      label: null,
+      detail: null,
+      progressPercent: null,
+      progressSource: null,
+      totalSteps: null,
+      completedSteps: null,
+      inProgressSteps: null,
+      pendingSteps: null,
+      activeStepTitle: null,
+      startedAt: null,
+      completedAt: null,
+      lastUpdateAt: null,
+      lastProgressAt: null,
+      heartbeatMs: null,
+      idleMs: null,
+      stuck: false,
+      stuckReason: null,
+      builderSurfaceMode: null,
+      canonicalBuilderSurface: 'none',
+      legacyBuilderSurfaceHidden: false,
+      duplicateBuilderSurfaceSuppressed: false,
+      resumedBuilderSurfaceResolved: false,
+    },
     coreview: {
       visual: {
         coreviewEnabled: true,
@@ -337,6 +363,11 @@ function buildSummary(): VoiceTelemetrySummary {
     builderPhase: null,
     builderProgressPercent: null,
     builderStuck: false,
+    builderSurfaceMode: null,
+    canonicalBuilderSurface: 'none',
+    legacyBuilderSurfaceHidden: false,
+    duplicateBuilderSurfaceSuppressed: false,
+    resumedBuilderSurfaceResolved: false,
   };
 }
 
@@ -449,6 +480,17 @@ describe('buildVoiceTelemetryReport', () => {
       transcriptPartialsDropped: 0,
       transcriptCoalescingDisabledReason: 'provider_output_transcription_is_delta_like',
       p95TranscriptRelayLatencyMs: 220,
+    });
+    expect(report.diagnosticsSummary.builderSurface).toMatchObject({
+      schema: 'builder_surface_summary_v1',
+      builderSurfaceMode: null,
+      canonicalBuilderSurface: 'none',
+      legacyBuilderSurfaceHidden: false,
+      duplicateBuilderSurfaceSuppressed: false,
+      resumedBuilderSurfaceResolved: false,
+      rawArtifactTextExcluded: true,
+      rawFrameExcluded: true,
+      rawCommentTextExcluded: true,
     });
     expect(report.diagnosticsSummary.artifactReview).toMatchObject({
       schema: 'artifact_review_summary_v1',

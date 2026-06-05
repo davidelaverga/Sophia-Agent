@@ -36,6 +36,7 @@ export type VoiceTelemetryReport = {
     geminiRelayBackend: Record<string, unknown> | null;
     geminiRelayThroughput: Record<string, unknown> | null;
     geminiStaleOutput: Record<string, unknown> | null;
+    builderSurface: Record<string, unknown>;
     artifactReview: Record<string, unknown>;
     coreviewStillFrame: Record<string, unknown>;
   };
@@ -945,8 +946,23 @@ function buildDiagnosticsSummary(
     geminiRelayBackend: buildGeminiRelayBackendDiagnosticsSummary(selected.events),
     geminiRelayThroughput: buildGeminiRelayThroughputSummary(selected.events),
     geminiStaleOutput: buildGeminiStaleOutputDiagnosticsSummary(selected.events),
+    builderSurface: buildBuilderSurfaceDiagnosticsSummary(metrics),
     artifactReview: buildArtifactReviewDiagnosticsSummary(selected.events, metrics),
     coreviewStillFrame: buildCoreviewStillFrameDiagnosticsSummary(metrics.coreview),
+  };
+}
+
+function buildBuilderSurfaceDiagnosticsSummary(metrics: VoiceDeveloperMetrics): Record<string, unknown> {
+  return {
+    schema: 'builder_surface_summary_v1',
+    builderSurfaceMode: metrics.builder.builderSurfaceMode,
+    canonicalBuilderSurface: metrics.builder.canonicalBuilderSurface,
+    legacyBuilderSurfaceHidden: metrics.builder.legacyBuilderSurfaceHidden,
+    duplicateBuilderSurfaceSuppressed: metrics.builder.duplicateBuilderSurfaceSuppressed,
+    resumedBuilderSurfaceResolved: metrics.builder.resumedBuilderSurfaceResolved,
+    rawArtifactTextExcluded: true,
+    rawFrameExcluded: true,
+    rawCommentTextExcluded: true,
   };
 }
 

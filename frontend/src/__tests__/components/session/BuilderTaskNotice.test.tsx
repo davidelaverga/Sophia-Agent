@@ -105,7 +105,7 @@ describe('BuilderTaskNotice', () => {
       />,
     );
 
-    expect(screen.getByText('deliverable ready')).toBeInTheDocument();
+    expect(screen.getByText('Ready')).toBeInTheDocument();
     expect(screen.getByText('Launch brief final')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /view launch brief final in canvas/i }));

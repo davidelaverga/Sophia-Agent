@@ -131,7 +131,7 @@ export function BuilderReadyPill({
               }}
             />
             <span className={cn(compact ? 'text-[9px]' : 'text-[10px]', 'tracking-[0.14em] lowercase')} style={{ color: 'var(--cosmic-text-whisper)' }}>
-              {isNew ? 'deliverable complete' : 'deliverable ready'}
+              {isNew ? 'Build complete' : 'Ready'}
             </span>
             <span
               className={cn('rounded-full tracking-[0.1em] lowercase', compact ? 'px-1.5 py-0.5 text-[8px]' : 'px-2 py-0.5 text-[9px]')}
@@ -225,7 +225,7 @@ export function BuilderReadyPill({
             <button
               type="button"
               onClick={handleDismissClick}
-              aria-label="Dismiss deliverable"
+              aria-label="Dismiss artifact"
               // Visual footprint stays minimal (compact 20px / regular 24px), but the
               // ::before extends a full 44×44 tap area on touch devices so mobile taps
               // don't miss and accidentally re-open the pill.

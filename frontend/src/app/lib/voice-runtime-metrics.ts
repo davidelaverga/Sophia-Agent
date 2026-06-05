@@ -6,6 +6,18 @@ import type {
 } from "./session-capture"
 import type { SessionRuntime, VoiceRuntimeTelemetry, VoiceStage } from "./voice-types"
 
+type BuilderSurfaceMode =
+  | "active_build_steps"
+  | "artifact_review_room"
+  | "completed_artifact_entry"
+  | "legacy_completion_hidden"
+  | "legacy_completion_fallback"
+
+type CanonicalBuilderSurface =
+  | BuilderSurfaceMode
+  | "secondary_file_library_rows"
+  | "none"
+
 export type VoiceCaptureEvent = {
   seq: number
   recordedAt: string
@@ -329,6 +341,11 @@ export type VoiceTelemetrySummary = {
   builderPhase: BuilderTaskV1["phase"] | null
   builderProgressPercent: number | null
   builderStuck: boolean
+  builderSurfaceMode: BuilderSurfaceMode | null
+  canonicalBuilderSurface: CanonicalBuilderSurface
+  legacyBuilderSurfaceHidden: boolean
+  duplicateBuilderSurfaceSuppressed: boolean
+  resumedBuilderSurfaceResolved: boolean
 }
 
 export type LegacySessionTelemetry = {
@@ -643,6 +660,11 @@ export type VoiceDeveloperMetrics = {
     idleMs: number | null
     stuck: boolean
     stuckReason: string | null
+    builderSurfaceMode: BuilderSurfaceMode | null
+    canonicalBuilderSurface: CanonicalBuilderSurface
+    legacyBuilderSurfaceHidden: boolean
+    duplicateBuilderSurfaceSuppressed: boolean
+    resumedBuilderSurfaceResolved: boolean
   }
   health: {
     level: VoiceMetricsHealthLevel
@@ -3184,9 +3206,51 @@ function buildEventCounters(events: NormalizedVoiceCaptureEvent[]): VoiceEventCo
   }
 }
 
+function asBuilderSurfaceMode(value: string | null): BuilderSurfaceMode | null {
+  switch (value) {
+    case "active_build_steps":
+    case "artifact_review_room":
+    case "completed_artifact_entry":
+    case "legacy_completion_hidden":
+    case "legacy_completion_fallback":
+      return value
+    default:
+      return null
+  }
+}
+
+function asCanonicalBuilderSurface(value: string | null): CanonicalBuilderSurface {
+  return asBuilderSurfaceMode(value)
+    ?? (value === "secondary_file_library_rows" || value === "none" ? value : "none")
+}
+
+function buildBuilderSurfaceMetrics(events: NormalizedVoiceCaptureEvent[]): Pick<
+  VoiceDeveloperMetrics["builder"],
+  | "builderSurfaceMode"
+  | "canonicalBuilderSurface"
+  | "legacyBuilderSurfaceHidden"
+  | "duplicateBuilderSurfaceSuppressed"
+  | "resumedBuilderSurfaceResolved"
+> {
+  const latestSurfaceEvent = findLast(
+    events,
+    (event) => event.category === "builder-ui" && event.name === "builder-surface-resolved",
+  )
+  const payload = latestSurfaceEvent ? eventData(latestSurfaceEvent) : null
+
+  return {
+    builderSurfaceMode: asBuilderSurfaceMode(asString(payload?.builderSurfaceMode)),
+    canonicalBuilderSurface: asCanonicalBuilderSurface(asString(payload?.canonicalBuilderSurface)),
+    legacyBuilderSurfaceHidden: asBoolean(payload?.legacyBuilderSurfaceHidden) ?? false,
+    duplicateBuilderSurfaceSuppressed: asBoolean(payload?.duplicateBuilderSurfaceSuppressed) ?? false,
+    resumedBuilderSurfaceResolved: asBoolean(payload?.resumedBuilderSurfaceResolved) ?? false,
+  }
+}
+
 function buildBuilderMetrics(events: NormalizedVoiceCaptureEvent[], nowMs: number): VoiceDeveloperMetrics["builder"] {
   const isBuilderSignalEvent = (event: NormalizedVoiceCaptureEvent) => event.category === "builder" || event.name === "sophia.builder_task"
   const latestBuilderEvent = findLast(events, isBuilderSignalEvent)
+  const surfaceMetrics = buildBuilderSurfaceMetrics(events)
   const payload = latestBuilderEvent
     ? latestBuilderEvent.category === "builder"
       ? latestBuilderEvent.payloadRecord
@@ -3252,6 +3316,7 @@ function buildBuilderMetrics(events: NormalizedVoiceCaptureEvent[], nowMs: numbe
     idleMs,
     stuck,
     stuckReason,
+    ...surfaceMetrics,
   }
 }
 
@@ -3705,6 +3770,11 @@ export function buildVoiceTelemetrySummary(metrics: VoiceDeveloperMetrics): Voic
     builderPhase: metrics.builder.phase,
     builderProgressPercent: metrics.builder.progressPercent,
     builderStuck: metrics.builder.stuck,
+    builderSurfaceMode: metrics.builder.builderSurfaceMode,
+    canonicalBuilderSurface: metrics.builder.canonicalBuilderSurface,
+    legacyBuilderSurfaceHidden: metrics.builder.legacyBuilderSurfaceHidden,
+    duplicateBuilderSurfaceSuppressed: metrics.builder.duplicateBuilderSurfaceSuppressed,
+    resumedBuilderSurfaceResolved: metrics.builder.resumedBuilderSurfaceResolved,
   }
 }
 

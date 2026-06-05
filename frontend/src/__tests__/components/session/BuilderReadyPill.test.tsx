@@ -10,7 +10,7 @@ describe('BuilderReadyPill', () => {
       event.preventDefault();
     });
 
-    render(
+    const { container } = render(
       <BuilderReadyPill
         title="Launch brief final"
         onOpen={onOpen}
@@ -21,7 +21,7 @@ describe('BuilderReadyPill', () => {
       />,
     );
 
-    expect(screen.getByText('deliverable complete')).toBeInTheDocument();
+    expect(screen.getByText('Build complete')).toBeInTheDocument();
     expect(screen.getByText('Launch brief final')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /view launch brief final in canvas/i }));
@@ -35,5 +35,7 @@ describe('BuilderReadyPill', () => {
     expect(downloadLink).toHaveAttribute('href', '/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md?download=true');
     fireEvent.click(downloadLink);
     expect(onDownload).toHaveBeenCalledTimes(1);
+
+    expect(container).not.toHaveTextContent(/Coreview|transport|websocket|fixture|runtime ingest|selected stage/i);
   });
 });
