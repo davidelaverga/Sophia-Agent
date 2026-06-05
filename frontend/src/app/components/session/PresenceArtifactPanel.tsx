@@ -726,6 +726,7 @@ export function PresenceArtifactPanel({
   const staggerRef = useRef<ReturnType<typeof setTimeout>[]>([])
   const selectedStageCaptureSignatureRef = useRef<string | null>(null)
   const selectedStageRebindSignatureRef = useRef<string | null>(null)
+  const builderStageVisibilitySignatureRef = useRef<string | null>(null)
   const [builderArtifactRoot, setBuilderArtifactRoot] = useState<HTMLDivElement | null>(null)
   const [domArtifactRoot, setDomArtifactRoot] = useState<HTMLDivElement | null>(null)
   const [builderVisualCaptureStatus, setBuilderVisualCaptureStatus] = useState<ArtifactVisualCaptureStatus>(
@@ -777,6 +778,14 @@ export function PresenceArtifactPanel({
   }, [builderArtifactLibrary, stageBuilderArtifact])
   const stageRendererKind = detectArtifactRendererKind(stagePrimaryFile, stageBuilderArtifact)
   const stageArtifactPath = stagePrimaryFile?.path ?? stageBuilderArtifact?.artifactPath ?? null
+  const builderStageVisibilitySignature = useMemo(() => (
+    [
+      normalizedSelectedBuilderArtifactPath ?? "",
+      builderArtifactId ?? "",
+      stageArtifactPath ?? "",
+      stageRendererKind,
+    ].join("|")
+  ), [builderArtifactId, normalizedSelectedBuilderArtifactPath, stageArtifactPath, stageRendererKind])
   const artifactStableIdentity = useMemo(() => (
     builderArtifactId
       ? buildCoreviewArtifactStableIdentity({
@@ -2190,18 +2199,53 @@ export function PresenceArtifactPanel({
 
   // Phase lifecycle
   useEffect(() => {
+    if (isVisible && stageBuilderArtifact) {
+      const sameVisibleBuilderStage = builderStageVisibilitySignatureRef.current === builderStageVisibilitySignature
+      builderStageVisibilitySignatureRef.current = builderStageVisibilitySignature
+      setPhase("visible")
+      setRevealStep(4)
+      setReflectionTapped(false)
+      if (sameVisibleBuilderStage) {
+        recordSophiaCaptureEvent({
+          category: "builder-ui",
+          name: "artifact-stage-unmount-prevented",
+          payload: {
+            artifactStageUnmountPrevented: true,
+            artifactStageProtectedFromSnapshot: true,
+            builderSnapshotIgnoredForActiveArtifact: true,
+            artifactRendererKind: stageRendererKind,
+            selectedBuilderArtifactPathPresent: Boolean(normalizedSelectedBuilderArtifactPath),
+            rawArtifactTextExcluded: true,
+            rawCommentTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        })
+      }
+      return
+    }
+
     if (isVisible && (artifacts || stageBuilderArtifact || hasBuilderLibrary)) {
+      builderStageVisibilitySignatureRef.current = null
       setPhase("entering")
       setRevealStep(0)
       setReflectionTapped(false)
       requestAnimationFrame(() => setPhase("visible"))
     } else if (phase !== "hidden") {
+      builderStageVisibilitySignatureRef.current = null
       setPhase("exiting")
       const t = setTimeout(() => setPhase("hidden"), 800)
       return () => clearTimeout(t)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isVisible, artifacts, stageBuilderArtifact, hasBuilderLibrary])
+  }, [
+    artifacts,
+    builderStageVisibilitySignature,
+    hasBuilderLibrary,
+    isVisible,
+    normalizedSelectedBuilderArtifactPath,
+    stageBuilderArtifact,
+    stageRendererKind,
+  ])
 
   useEffect(() => {
     if (!builderArtifactId) {

@@ -1,7 +1,8 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
+import { recordSophiaCaptureEvent } from '../lib/session-capture';
 import type {
   BuilderCanvasEventV1,
   BuilderCanvasSnapshotV1,
@@ -91,6 +92,10 @@ function latestTerminalCompletion(
     .find((event) => event.kind === 'terminal' && (!activeTask || eventMatchesTask(event, activeTask)));
 
   return terminal?.completion ?? null;
+}
+
+function isEmptyPassiveSnapshot(snapshot: BuilderCanvasSnapshotV1): boolean {
+  return !snapshot.active_task && snapshot.recent_events.length === 0;
 }
 
 function sortEvents(events: BuilderCanvasEventV1[]): BuilderCanvasEventV1[] {
@@ -197,6 +202,10 @@ function reconcileDifferentRunSnapshot(
 }
 
 function applySnapshot(current: BuilderCanvasState, snapshot: BuilderCanvasSnapshotV1): BuilderCanvasState {
+  if (isEmptyPassiveSnapshot(snapshot)) {
+    return { ...current, reconnecting: false };
+  }
+
   const snapshotState = stateFromSnapshot(snapshot);
   const snapshotTask = snapshotState.activeTask;
   const currentTask = current.activeTask;
@@ -280,10 +289,17 @@ function applyEvent(state: BuilderCanvasState, event: BuilderCanvasEventV1): Bui
 
 export function useBuilderCanvas(
   parentThreadId: string | null | undefined,
-  options?: { enabled?: boolean },
+  options?: { enabled?: boolean; artifactReviewActive?: boolean },
 ): BuilderCanvasState {
   const enabled = options?.enabled ?? true;
+  const artifactReviewActive = options?.artifactReviewActive ?? false;
   const [state, setState] = useState<BuilderCanvasState>(EMPTY_STATE);
+  const snapshotTelemetrySignatureRef = useRef<string | null>(null);
+  const artifactReviewActiveRef = useRef(artifactReviewActive);
+
+  useEffect(() => {
+    artifactReviewActiveRef.current = artifactReviewActive;
+  }, [artifactReviewActive]);
 
   useEffect(() => {
     setState(EMPTY_STATE);
@@ -313,7 +329,52 @@ export function useBuilderCanvas(
           active_status: snapshot.active_task?.status ?? null,
           recent_events: snapshot.recent_events.length,
         });
-        setState((current) => applySnapshot(current, snapshot));
+        const emptyPassiveSnapshot = isEmptyPassiveSnapshot(snapshot);
+        const activeArtifactReview = artifactReviewActiveRef.current;
+        if (emptyPassiveSnapshot) {
+          logCanvasClient('builderSnapshotEmptyPassive', {
+            parent_thread_id: shortId(parentThreadId),
+            active_artifact_review: activeArtifactReview,
+          });
+        }
+        setState((current) => {
+          const next = applySnapshot(current, snapshot);
+          if (emptyPassiveSnapshot) {
+            const protectedExistingState = Boolean(current.activeTask || current.completion || current.recentEvents.length > 0);
+            const signature = [
+              parentThreadId ?? '',
+              protectedExistingState ? 'protected' : 'empty',
+              activeArtifactReview ? 'artifact-review-active' : 'artifact-review-inactive',
+            ].join('|');
+            if (snapshotTelemetrySignatureRef.current !== signature) {
+              snapshotTelemetrySignatureRef.current = signature;
+              if (activeArtifactReview) {
+                logCanvasClient('builderSnapshotIgnoredForActiveArtifact', {
+                  parent_thread_id: shortId(parentThreadId),
+                  protected_existing_state: protectedExistingState,
+                });
+              }
+              recordSophiaCaptureEvent({
+                category: 'builder-ui',
+                name: 'builder-canvas-snapshot-hydration',
+                payload: {
+                  builderSnapshotEmptyPassive: true,
+                  builderSnapshotIgnoredForActiveArtifact: activeArtifactReview,
+                  artifactStageProtectedFromSnapshot: activeArtifactReview,
+                  artifactStageUnmountPrevented: activeArtifactReview,
+                  parentThreadIdPresent: Boolean(parentThreadId),
+                  activeTaskPresentBeforeSnapshot: Boolean(current.activeTask),
+                  activeCompletionPresentBeforeSnapshot: Boolean(current.completion),
+                  recentEventCountBeforeSnapshot: current.recentEvents.length,
+                  rawArtifactTextExcluded: true,
+                  rawCommentTextExcluded: true,
+                  rawFrameExcluded: true,
+                },
+              });
+            }
+          }
+          return next;
+        });
       })
       .catch((error) => {
         logCanvasClient('snapshot-error', {

@@ -296,7 +296,9 @@ export function ArtifactStage({
     const result = persistArtifactAnnotations(annotationStorageKey, nextAnnotations, {
       stableArtifactIdentity: annotationStableArtifactIdentity,
     })
-    annotationLastPersistedSignatureRef.current = signature
+    if (result.status === "saved") {
+      annotationLastPersistedSignatureRef.current = signature
+    }
     setAnnotationPersistenceStatus(result.status)
     setAnnotationPersistedCount(result.persistedCount)
     setAnnotationPersistTelemetry({
@@ -1230,6 +1232,7 @@ export function ArtifactStage({
         annotationIdentityReadHash: annotationRestoreTelemetry.identityReadHash,
         annotationRestoreOverwrittenCount,
         annotationStateClearedReason,
+        canvasPointerBlockedAfterAnnotation: false,
         stickyToolModeEnabled: toolModeTelemetry.stickyToolModeEnabled,
         lastToolModeBeforeAction: toolModeTelemetry.lastToolModeBeforeAction,
         lastToolModeAfterAction: toolModeTelemetry.lastToolModeAfterAction,

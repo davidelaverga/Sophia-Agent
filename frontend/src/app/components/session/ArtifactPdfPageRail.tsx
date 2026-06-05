@@ -10,6 +10,8 @@ interface ArtifactPdfPageRailProps {
   pageCount: number
   pageIndex: number
   onPageIndexChange?: (pageIndex: number) => void
+  annotationPageCounts?: ReadonlyMap<number, number>
+  annotationVersion?: string
 }
 
 type ThumbnailRenderState = "loading" | "ready" | "failed"
@@ -22,6 +24,8 @@ export function ArtifactPdfPageRail({
   pageCount,
   pageIndex,
   onPageIndexChange,
+  annotationPageCounts,
+  annotationVersion = "",
 }: ArtifactPdfPageRailProps) {
   const documentKey = getPdfDocumentKey(document)
   const pages = useMemo(() => (
@@ -44,6 +48,8 @@ export function ArtifactPdfPageRail({
           document={document}
           documentKey={documentKey}
           pageNumber={index + 1}
+          annotationCount={annotationPageCounts?.get(index) ?? 0}
+          annotationVersion={annotationVersion}
           selected={index === pageIndex}
           onSelect={() => onPageIndexChange?.(index)}
         />
@@ -56,12 +62,16 @@ function ArtifactPdfPageThumbnail({
   document,
   documentKey,
   pageNumber,
+  annotationCount,
+  annotationVersion,
   selected,
   onSelect,
 }: {
   document: PdfDocumentProxy
   documentKey: string
   pageNumber: number
+  annotationCount: number
+  annotationVersion: string
   selected: boolean
   onSelect: () => void
 }) {
@@ -138,8 +148,12 @@ function ArtifactPdfPageThumbnail({
   return (
     <button
       type="button"
-      aria-label={`Page ${pageNumber}`}
+      aria-label={annotationCount > 0
+        ? `Page ${pageNumber}, ${annotationCount} annotation${annotationCount === 1 ? "" : "s"}`
+        : `Page ${pageNumber}`}
       aria-current={selected ? "page" : undefined}
+      data-annotation-count={String(annotationCount)}
+      data-annotation-version={annotationVersion}
       onClick={onSelect}
       className={cn(
         "cosmic-focus-ring flex w-full flex-col items-center gap-1 rounded-lg border px-1.5 py-1.5 text-xs font-medium transition",
@@ -168,6 +182,15 @@ function ArtifactPdfPageThumbnail({
             className="absolute inset-0 flex items-center justify-center text-sm font-semibold"
           >
             {pageNumber}
+          </span>
+        ) : null}
+        {annotationCount > 0 ? (
+          <span
+            data-testid="artifact-pdf-thumbnail-annotation-badge"
+            aria-hidden="true"
+            className="absolute right-1 top-1 inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-full border border-white/85 bg-[color:var(--sophia-purple)] px-1 text-[10px] font-semibold leading-none text-white shadow-[0_4px_12px_rgba(25,19,35,0.25)]"
+          >
+            {annotationCount > 9 ? "9+" : annotationCount}
           </span>
         ) : null}
       </span>

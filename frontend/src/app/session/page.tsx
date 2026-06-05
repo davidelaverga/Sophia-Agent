@@ -278,6 +278,9 @@ function SessionPageContent() {
     sessionId: session?.sessionId,
   });
 
+  const [selectedBuilderArtifactPath, setSelectedBuilderArtifactPath] = useState<string | null>(null);
+  const [pendingBuilderArtifactReview, setPendingBuilderArtifactReview] = useState(false);
+
   const {
     cancelledMessageId,
     setCancelledMessageId,
@@ -360,6 +363,7 @@ function SessionPageContent() {
     markOffline,
     debugEnabled,
     memoryHighlightsCount: memoryHighlights?.length ?? 0,
+    artifactReviewActive: showArtifacts && Boolean(selectedBuilderArtifactPath || storedBuilderArtifact),
   });
 
   const removeInternalDebriefTriggerBubble = useCallback((triggerText: string) => {
@@ -517,8 +521,6 @@ function SessionPageContent() {
   const [artifactLibraryRefreshNonce, setArtifactLibraryRefreshNonce] = useState(0);
   const [builderLibraryBaseline, setBuilderLibraryBaseline] = useState<Set<string> | null>(null);
   const [dismissedBuilderLibraryPath, setDismissedBuilderLibraryPath] = useState<string | null>(null);
-  const [selectedBuilderArtifactPath, setSelectedBuilderArtifactPath] = useState<string | null>(null);
-  const [pendingBuilderArtifactReview, setPendingBuilderArtifactReview] = useState(false);
 
   const builderArtifactRefreshToken = useMemo(() => [
     builderArtifact?.artifactTitle ?? '',
@@ -987,6 +989,39 @@ function SessionPageContent() {
   const builderReadyDismissed = Boolean(
     builderPrimaryFile?.path && dismissedBuilderLibraryPath === builderPrimaryFile.path,
   );
+  const artifactStageVisibilityProtected = showArtifacts && (
+    Boolean(builderArtifact)
+    || hasBuilderArtifactLibrary
+    || hasSelectedBuilderArtifactPath
+  );
+  const effectiveShowArtifactsUi = showArtifactsUi || artifactStageVisibilityProtected;
+
+  useEffect(() => {
+    if (!artifactStageVisibilityProtected || showArtifactsUi) {
+      return;
+    }
+    recordSophiaCaptureEvent({
+      category: 'builder-ui',
+      name: 'artifact-stage-protected-from-snapshot',
+      payload: {
+        artifactStageProtectedFromSnapshot: true,
+        artifactStageUnmountPrevented: true,
+        builderSnapshotIgnoredForActiveArtifact: true,
+        selectedBuilderArtifactPathPresent: hasSelectedBuilderArtifactPath,
+        builderArtifactPresent: Boolean(builderArtifact),
+        builderArtifactLibraryCount: builderArtifactLibrary.length,
+        rawArtifactTextExcluded: true,
+        rawCommentTextExcluded: true,
+        rawFrameExcluded: true,
+      },
+    });
+  }, [
+    artifactStageVisibilityProtected,
+    builderArtifact,
+    builderArtifactLibrary.length,
+    hasSelectedBuilderArtifactPath,
+    showArtifactsUi,
+  ]);
   const handleSelectBuilderArtifactPath = useCallback((path: string | null) => {
     const normalizedPath = normalizeBuilderArtifactPath(path);
     if (!normalizedPath) {
@@ -1001,10 +1036,10 @@ function SessionPageContent() {
   }, [clearSelectedBuilderCanvasState, persistSelectedBuilderCanvasState]);
 
   useEffect(() => {
-    if (!showArtifacts || !showArtifactsUi) {
+    if (!showArtifacts || !effectiveShowArtifactsUi) {
       setPendingBuilderArtifactReview(false);
     }
-  }, [showArtifacts, showArtifactsUi]);
+  }, [effectiveShowArtifactsUi, showArtifacts]);
 
   const dismissVisibleBuilderArtifact = useCallback(() => {
     if (builderPrimaryFile?.path) {
@@ -1086,6 +1121,8 @@ function SessionPageContent() {
   useEffect(() => {
     debugLog('ArtifactsFlow', 'mobile indicator props/state', {
       showArtifactsUi,
+      effectiveShowArtifactsUi,
+      artifactStageVisibilityProtected,
       hasNewArtifacts,
       hasPendingArtifacts,
       readyArtifactCount,
@@ -1097,6 +1134,8 @@ function SessionPageContent() {
     });
   }, [
     showArtifactsUi,
+    effectiveShowArtifactsUi,
+    artifactStageVisibilityProtected,
     hasNewArtifacts,
     hasPendingArtifacts,
     readyArtifactCount,
@@ -1212,7 +1251,6 @@ function SessionPageContent() {
     setOnUserTranscriptHandler,
     setAssistantResponseSuppressedChecker,
   });
-
   const {
     messagesEndRef,
     inputRef,
@@ -1226,7 +1264,7 @@ function SessionPageContent() {
     isTyping,
     isReadOnly,
     showArtifacts,
-    showArtifactsUi,
+    showArtifactsUi: effectiveShowArtifactsUi,
     mobileDrawerOpen,
     setShowArtifacts,
     setMobileDrawerOpen,
@@ -1234,6 +1272,7 @@ function SessionPageContent() {
     setShowScaffold,
     triggerLightHaptic: () => haptic('light'),
     onBaseMicClick: baseHandleMicClick,
+    protectArtifactStageOpen: artifactStageVisibilityProtected,
   });
   const handleCloseArtifactsPanelAndCanvasState = useCallback(() => {
     canvasRestoreClosedByUserRef.current = true;
@@ -1438,25 +1477,25 @@ function SessionPageContent() {
   // Scroll conversation to bottom when artifact panel opens in text mode
   // so the latest messages stay visible above the panel
   useEffect(() => {
-    if (focusMode === 'text' && showArtifacts && showArtifactsUi) {
+    if (focusMode === 'text' && showArtifacts && effectiveShowArtifactsUi) {
       requestAnimationFrame(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
       });
     }
-  }, [focusMode, showArtifacts, showArtifactsUi, messagesEndRef]);
+  }, [effectiveShowArtifactsUi, focusMode, showArtifacts, messagesEndRef]);
 
   const showTextArtifactStage = focusMode === 'text'
     && showArtifacts
-    && showArtifactsUi
+    && effectiveShowArtifactsUi
     && (Boolean(builderArtifact) || hasBuilderArtifactLibrary || hasSelectedBuilderArtifactPath);
   const showVoiceArtifactStage = focusMode !== 'text'
     && showArtifacts
-    && showArtifactsUi
+    && effectiveShowArtifactsUi
     && (Boolean(builderArtifact) || hasBuilderArtifactLibrary || hasSelectedBuilderArtifactPath);
   const artifactStageActive = showTextArtifactStage || showVoiceArtifactStage;
   const showInlineTextArtifactsPanel = focusMode === 'text'
     && showArtifacts
-    && showArtifactsUi
+    && effectiveShowArtifactsUi
     && !showTextArtifactStage;
   const builderSurface = useMemo(() => resolveBuilderSurface({
     artifactStageActive,
@@ -1480,7 +1519,7 @@ function SessionPageContent() {
     builderPrimaryFile
       && canonicalCompletedBuilderTask
       && builderSurface.showCanonicalCompletedBuilder
-      && showArtifactsUi,
+      && effectiveShowArtifactsUi,
   );
   const showCanonicalCompletedBuilderEntryInline = Boolean(
     canonicalCompletedBuilderEntryAvailable
@@ -1682,7 +1721,7 @@ function SessionPageContent() {
           <div
             className={cn(
               'transition-all duration-700 ease-out',
-              focusMode !== 'text' && showArtifacts && showArtifactsUi && 'voice-caption-raised'
+              focusMode !== 'text' && showArtifacts && effectiveShowArtifactsUi && 'voice-caption-raised'
             )}
           >
             <VoiceCaption
@@ -1719,7 +1758,7 @@ function SessionPageContent() {
               normalSessionId={coReviewSessionId}
               voiceAgentSessionId={coReviewVoiceAgentSessionId}
               threadId={artifactPanelThreadId}
-              isVisible={showArtifacts && showArtifactsUi}
+              isVisible={showArtifacts && effectiveShowArtifactsUi}
               onDismiss={handleCloseArtifactsPanelAndCanvasState}
               isVoiceMode={false}
               coReviewTransport={coReviewTransport}
@@ -1960,7 +1999,7 @@ function SessionPageContent() {
               normalSessionId={coReviewSessionId}
               voiceAgentSessionId={coReviewVoiceAgentSessionId}
               threadId={artifactPanelThreadId}
-              isVisible={showArtifacts && showArtifactsUi}
+              isVisible={showArtifacts && effectiveShowArtifactsUi}
               onDismiss={handleCloseArtifactsPanelAndCanvasState}
               isVoiceMode={false}
               coReviewTransport={coReviewTransport}
@@ -1988,7 +2027,7 @@ function SessionPageContent() {
             normalSessionId={coReviewSessionId}
             voiceAgentSessionId={coReviewVoiceAgentSessionId}
             threadId={artifactPanelThreadId}
-            isVisible={showArtifacts && showArtifactsUi}
+            isVisible={showArtifacts && effectiveShowArtifactsUi}
             onDismiss={handleCloseArtifactsPanelAndCanvasState}
             isVoiceMode={true}
             coReviewTransport={coReviewTransport}

@@ -544,4 +544,23 @@ describe('useBuilderCanvas', () => {
     expect(result.current.activeTask?.status).toBe('completed');
     expect(result.current.completion?.status).toBe('success');
   });
+
+  it('treats empty snapshots as passive and keeps active canvas state', async () => {
+    mockFetchSnapshots(SNAPSHOT, {
+      version: 1,
+      active_task: null,
+      recent_events: [],
+    });
+
+    const { result } = renderHook(() => useBuilderCanvas('thread-1', { artifactReviewActive: true }));
+    await waitFor(() => expect(result.current.activeTask?.run_id).toBe('run-1'));
+
+    act(() => {
+      FakeEventSource.instances[0].onerror?.();
+    });
+
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.reconnecting).toBe(false));
+    expect(result.current.activeTask?.run_id).toBe('run-1');
+  });
 });

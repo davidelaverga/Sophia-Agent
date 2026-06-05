@@ -135,6 +135,14 @@ export type CoreviewVisualTelemetry = {
   annotationIdentityReadHash: string | null
   annotationRestoreOverwrittenCount: number
   annotationStateClearedReason: string | null
+  builderSnapshotIgnoredForActiveArtifact: boolean
+  builderSnapshotEmptyPassive: boolean
+  artifactStageProtectedFromSnapshot: boolean
+  artifactStageUnmountPrevented: boolean
+  thumbnailAnnotationIndicatorMode: string | null
+  thumbnailAnnotationPageCounts: Array<{ annotationPageIndex: number; annotationCount: number }>
+  thumbnailAnnotationRefreshCount: number
+  canvasPointerBlockedAfterAnnotation: boolean | null
   stickyToolModeEnabled: boolean
   lastToolModeBeforeAction: string | null
   lastToolModeAfterAction: string | null
@@ -572,6 +580,14 @@ export type GeminiSessionTelemetry = {
     annotationIdentityReadHash: string | null
     annotationRestoreOverwrittenCount: number
     annotationStateClearedReason: string | null
+    builderSnapshotIgnoredForActiveArtifact: boolean
+    builderSnapshotEmptyPassive: boolean
+    artifactStageProtectedFromSnapshot: boolean
+    artifactStageUnmountPrevented: boolean
+    thumbnailAnnotationIndicatorMode: string | null
+    thumbnailAnnotationPageCounts: Array<{ annotationPageIndex: number; annotationCount: number }>
+    thumbnailAnnotationRefreshCount: number
+    canvasPointerBlockedAfterAnnotation: boolean | null
     canvasRestoreAttempted: boolean
     canvasRestoreResult: string | null
     canvasRestoreSource: string | null
@@ -885,6 +901,25 @@ function numberFromKeys(record: Record<string, unknown> | null | undefined, keys
     if (value !== null) return value
   }
   return null
+}
+
+function annotationPageCountsFromPayload(value: unknown): Array<{ annotationPageIndex: number; annotationCount: number }> {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((entry) => {
+      const record = asRecord(entry)
+      if (!record) return null
+      const annotationPageIndex = numberFromKeys(record, ["annotationPageIndex", "pageIndex"])
+      const annotationCount = numberFromKeys(record, ["annotationCount", "count"])
+      if (annotationPageIndex === null || annotationCount === null || annotationCount <= 0) {
+        return null
+      }
+      return {
+        annotationPageIndex: Math.floor(annotationPageIndex),
+        annotationCount: Math.floor(annotationCount),
+      }
+    })
+    .filter((entry): entry is { annotationPageIndex: number; annotationCount: number } => entry !== null)
 }
 
 function annotationCommitStateChanged(record: Record<string, unknown> | null | undefined): boolean {
@@ -1287,6 +1322,14 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       annotationIdentityReadHash: null,
       annotationRestoreOverwrittenCount: 0,
       annotationStateClearedReason: null,
+      builderSnapshotIgnoredForActiveArtifact: false,
+      builderSnapshotEmptyPassive: false,
+      artifactStageProtectedFromSnapshot: false,
+      artifactStageUnmountPrevented: false,
+      thumbnailAnnotationIndicatorMode: "none",
+      thumbnailAnnotationPageCounts: [],
+      thumbnailAnnotationRefreshCount: 0,
+      canvasPointerBlockedAfterAnnotation: null,
       stickyToolModeEnabled: false,
       lastToolModeBeforeAction: null,
       lastToolModeAfterAction: null,
@@ -1440,6 +1483,21 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-canvas-restore")
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
+  const builderSnapshotProtectionEvents = activeEvents
+    .filter((event) => (
+      event.category === "builder-ui"
+      && (
+        event.name === "builder-canvas-snapshot-hydration"
+        || event.name === "artifact-stage-protected-from-snapshot"
+        || event.name === "artifact-stage-unmount-prevented"
+      )
+    ))
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const thumbnailAnnotationEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-thumbnail-annotation-state")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
   const annotationNavigationGuardEvents = activeEvents
     .filter((event) => event.name === "session-leave-guard-suppressed-for-annotation")
     .map((event) => event.payloadRecord)
@@ -1482,6 +1540,7 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   const latestAnnotationState = annotationStateEvents.at(-1) ?? null
   const latestAnnotationExport = annotationExportEvents.at(-1) ?? null
   const latestCanvasRestore = canvasRestoreEvents.at(-1) ?? null
+  const latestThumbnailAnnotation = thumbnailAnnotationEvents.at(-1) ?? null
   const latestCoreviewTool = coreviewToolEvents.at(-1) ?? null
   const latestAnnotationTool = coreviewToolEvents
     .filter((event) => (numberFromKeys(event, ["coreviewAnnotationToolCount"]) ?? 0) > 0)
@@ -1649,6 +1708,27 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.annotationIdentityReadHash = asString(latestAnnotationState?.annotationIdentityReadHash)
   visual.annotationRestoreOverwrittenCount = numberFromKeys(latestAnnotationState, ["annotationRestoreOverwrittenCount"]) ?? 0
   visual.annotationStateClearedReason = asString(latestAnnotationState?.annotationStateClearedReason)
+  visual.builderSnapshotIgnoredForActiveArtifact = builderSnapshotProtectionEvents.some((event) => (
+    asBoolean(event.builderSnapshotIgnoredForActiveArtifact) === true
+  ))
+  visual.builderSnapshotEmptyPassive = builderSnapshotProtectionEvents.some((event) => (
+    asBoolean(event.builderSnapshotEmptyPassive) === true
+  ))
+  visual.artifactStageProtectedFromSnapshot = builderSnapshotProtectionEvents.some((event) => (
+    asBoolean(event.artifactStageProtectedFromSnapshot) === true
+  ))
+  visual.artifactStageUnmountPrevented = builderSnapshotProtectionEvents.some((event) => (
+    asBoolean(event.artifactStageUnmountPrevented) === true
+  ))
+  visual.thumbnailAnnotationIndicatorMode = asString(latestThumbnailAnnotation?.thumbnailAnnotationIndicatorMode)
+    ?? visual.thumbnailAnnotationIndicatorMode
+  visual.thumbnailAnnotationPageCounts = annotationPageCountsFromPayload(
+    latestThumbnailAnnotation?.thumbnailAnnotationPageCounts,
+  )
+  visual.thumbnailAnnotationRefreshCount = numberFromKeys(latestThumbnailAnnotation, ["thumbnailAnnotationRefreshCount"]) ?? 0
+  visual.canvasPointerBlockedAfterAnnotation = asBoolean(latestThumbnailAnnotation?.canvasPointerBlockedAfterAnnotation)
+    ?? asBoolean(latestAnnotationState?.canvasPointerBlockedAfterAnnotation)
+    ?? null
   visual.stickyToolModeEnabled = asBoolean(latestAnnotationState?.stickyToolModeEnabled) ?? false
   visual.lastToolModeBeforeAction = asString(latestAnnotationState?.lastToolModeBeforeAction)
   visual.lastToolModeAfterAction = asString(latestAnnotationState?.lastToolModeAfterAction)
@@ -2928,6 +3008,22 @@ function buildSessionTelemetry(params: {
           ?? coreviewTelemetry.visual.annotationRestoreOverwrittenCount,
         annotationStateClearedReason: hookTelemetry?.annotationStateClearedReason
           ?? coreviewTelemetry.visual.annotationStateClearedReason,
+        builderSnapshotIgnoredForActiveArtifact: hookTelemetry?.builderSnapshotIgnoredForActiveArtifact
+          ?? coreviewTelemetry.visual.builderSnapshotIgnoredForActiveArtifact,
+        builderSnapshotEmptyPassive: hookTelemetry?.builderSnapshotEmptyPassive
+          ?? coreviewTelemetry.visual.builderSnapshotEmptyPassive,
+        artifactStageProtectedFromSnapshot: hookTelemetry?.artifactStageProtectedFromSnapshot
+          ?? coreviewTelemetry.visual.artifactStageProtectedFromSnapshot,
+        artifactStageUnmountPrevented: hookTelemetry?.artifactStageUnmountPrevented
+          ?? coreviewTelemetry.visual.artifactStageUnmountPrevented,
+        thumbnailAnnotationIndicatorMode: hookTelemetry?.thumbnailAnnotationIndicatorMode
+          ?? coreviewTelemetry.visual.thumbnailAnnotationIndicatorMode,
+        thumbnailAnnotationPageCounts: hookTelemetry?.thumbnailAnnotationPageCounts
+          ?? coreviewTelemetry.visual.thumbnailAnnotationPageCounts,
+        thumbnailAnnotationRefreshCount: hookTelemetry?.thumbnailAnnotationRefreshCount
+          ?? coreviewTelemetry.visual.thumbnailAnnotationRefreshCount,
+        canvasPointerBlockedAfterAnnotation: hookTelemetry?.canvasPointerBlockedAfterAnnotation
+          ?? coreviewTelemetry.visual.canvasPointerBlockedAfterAnnotation,
         canvasRestoreAttempted: hookTelemetry?.canvasRestoreAttempted
           ?? coreviewTelemetry.visual.canvasRestoreAttempted,
         canvasRestoreResult: hookTelemetry?.canvasRestoreResult

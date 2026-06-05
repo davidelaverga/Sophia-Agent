@@ -1164,6 +1164,10 @@ describe("ArtifactStage", () => {
 
     expect(await screen.findByTestId("artifact-highlight-annotation")).toHaveAttribute("data-annotation-id", "page-1-highlight")
     expect(screen.queryByTestId("artifact-underline-annotation")).not.toBeInTheDocument()
+    const rail = screen.getByTestId("artifact-page-rail")
+    expect(within(rail).getByLabelText("Page 1, 1 annotation")).toHaveAttribute("data-annotation-count", "1")
+    expect(within(rail).getByLabelText("Page 2, 1 annotation")).toHaveAttribute("data-annotation-count", "1")
+    expect(within(rail).getAllByTestId("artifact-pdf-thumbnail-annotation-badge")).toHaveLength(2)
 
     await userEvent.click(screen.getByLabelText("Next page"))
     expect(await screen.findByText("Page 2 of 2")).toBeInTheDocument()

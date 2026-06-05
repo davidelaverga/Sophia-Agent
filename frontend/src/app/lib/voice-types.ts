@@ -201,6 +201,14 @@ export type GeminiRuntimeTelemetry = {
   annotationIdentityReadHash?: string | null
   annotationRestoreOverwrittenCount?: number
   annotationStateClearedReason?: string | null
+  builderSnapshotIgnoredForActiveArtifact?: boolean
+  builderSnapshotEmptyPassive?: boolean
+  artifactStageProtectedFromSnapshot?: boolean
+  artifactStageUnmountPrevented?: boolean
+  thumbnailAnnotationIndicatorMode?: string | null
+  thumbnailAnnotationPageCounts?: Array<{ annotationPageIndex: number; annotationCount: number }>
+  thumbnailAnnotationRefreshCount?: number
+  canvasPointerBlockedAfterAnnotation?: boolean | null
   canvasRestoreAttempted?: boolean
   canvasRestoreResult?: string | null
   canvasRestoreSource?: string | null

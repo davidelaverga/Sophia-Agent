@@ -147,6 +147,8 @@ export function ArtifactPdfPreview({
   const pinchStateRef = useRef<{ distance: number; zoom: number } | null>(null)
   const panDragStateRef = useRef<PdfPanDragState | null>(null)
   const panGestureCountRef = useRef(0)
+  const thumbnailAnnotationSignatureRef = useRef<string | null>(null)
+  const thumbnailAnnotationRefreshCountRef = useRef(0)
   const [isPanDragging, setIsPanDragging] = useState(false)
   const [annotationDraft, setAnnotationDraft] = useState<{
     kind: "highlight" | "underline" | "arrow"
@@ -445,6 +447,54 @@ export function ArtifactPdfPreview({
       .map(pdfAnnotationSignature)
       .join("|")
   ), [pageAnnotations])
+  const annotationPageCounts = useMemo(() => {
+    const counts = new Map<number, number>()
+    for (const annotation of annotations) {
+      counts.set(annotation.pageIndex, (counts.get(annotation.pageIndex) ?? 0) + 1)
+    }
+    return counts
+  }, [annotations])
+  const annotationVersion = useMemo(() => (
+    annotations
+      .map(pdfAnnotationSignature)
+      .join("|")
+  ), [annotations])
+
+  useEffect(() => {
+    const pageCounts = [...annotationPageCounts.entries()]
+      .filter(([, count]) => count > 0)
+      .sort(([leftPage], [rightPage]) => leftPage - rightPage)
+      .map(([annotationPageIndex, annotationCount]) => ({
+        annotationPageIndex,
+        annotationCount,
+      }))
+    const signature = pageCounts
+      .map((entry) => `${entry.annotationPageIndex}:${entry.annotationCount}`)
+      .join("|")
+
+    if (thumbnailAnnotationSignatureRef.current === signature) {
+      return
+    }
+
+    thumbnailAnnotationSignatureRef.current = signature
+    thumbnailAnnotationRefreshCountRef.current += 1
+    recordSophiaCaptureEvent({
+      category: "artifacts-runtime",
+      name: "artifact-thumbnail-annotation-state",
+      payload: {
+        artifactId: artifactId ?? null,
+        artifactPath: file?.path ?? artifact.artifactPath ?? null,
+        artifactRendererKind: "pdf",
+        thumbnailAnnotationIndicatorMode: "badge",
+        thumbnailAnnotationPageCounts: pageCounts,
+        thumbnailAnnotationRefreshCount: thumbnailAnnotationRefreshCountRef.current,
+        canvasPointerBlockedAfterAnnotation: false,
+        rawArtifactTextExcluded: true,
+        rawCommentTextExcluded: true,
+        rawFrameExcluded: true,
+      },
+    })
+  }, [annotationPageCounts, artifact.artifactPath, artifactId, file?.path])
 
   useLayoutEffect(() => {
     const source = canvasRef.current
@@ -798,6 +848,8 @@ export function ArtifactPdfPreview({
             pageCount={documentState.document.numPages}
             pageIndex={pageIndex}
             onPageIndexChange={onPageIndexChange}
+            annotationPageCounts={annotationPageCounts}
+            annotationVersion={annotationVersion}
           />
         ) : null}
         <div

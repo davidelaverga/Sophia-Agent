@@ -2633,6 +2633,63 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(JSON.stringify(metrics.coreview.visual)).not.toContain('raw artifact body');
   });
 
+  it('reports builder snapshot protection and thumbnail annotation indicators', () => {
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events: [
+        buildEvent({
+          seq: 1,
+          at: '2026-05-27T12:00:00.000Z',
+          category: 'builder-ui',
+          name: 'builder-canvas-snapshot-hydration',
+          payload: {
+            builderSnapshotEmptyPassive: true,
+            builderSnapshotIgnoredForActiveArtifact: true,
+            artifactStageProtectedFromSnapshot: true,
+            artifactStageUnmountPrevented: true,
+            rawArtifactTextExcluded: true,
+            rawCommentTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        }),
+        buildEvent({
+          seq: 2,
+          at: '2026-05-27T12:00:01.000Z',
+          category: 'artifacts-runtime',
+          name: 'artifact-thumbnail-annotation-state',
+          payload: {
+            thumbnailAnnotationIndicatorMode: 'badge',
+            thumbnailAnnotationPageCounts: [
+              { annotationPageIndex: 0, annotationCount: 1 },
+              { annotationPageIndex: 1, annotationCount: 2 },
+            ],
+            thumbnailAnnotationRefreshCount: 3,
+            canvasPointerBlockedAfterAnnotation: false,
+            rawArtifactTextExcluded: true,
+            rawCommentTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        }),
+      ],
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-05-27T12:00:04.000Z'),
+    });
+
+    expect(metrics.coreview.visual).toMatchObject({
+      builderSnapshotEmptyPassive: true,
+      builderSnapshotIgnoredForActiveArtifact: true,
+      artifactStageProtectedFromSnapshot: true,
+      artifactStageUnmountPrevented: true,
+      thumbnailAnnotationIndicatorMode: 'badge',
+      thumbnailAnnotationRefreshCount: 3,
+      canvasPointerBlockedAfterAnnotation: false,
+    });
+    expect(metrics.coreview.visual.thumbnailAnnotationPageCounts).toEqual([
+      { annotationPageIndex: 0, annotationCount: 1 },
+      { annotationPageIndex: 1, annotationCount: 2 },
+    ]);
+  });
+
   it('reports review tool timeouts as resolved safe tool results', () => {
     const metrics = buildVoiceDeveloperMetrics({
       stage: 'listening',

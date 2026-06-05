@@ -458,6 +458,44 @@ describe("ArtifactPdfPreview", () => {
     expect(within(rail).getByLabelText("Page 2")).toHaveAttribute("aria-current", "page")
   })
 
+  it("shows truthful per-page annotation badges in the thumbnail rail", async () => {
+    const pageOneHighlight = {
+      id: "highlight-page-1",
+      kind: "highlight",
+      pageIndex: 0,
+      rect: { x: 0.1, y: 0.1, width: 0.2, height: 0.2 },
+      createdAt: 1,
+    } satisfies ArtifactAnnotation
+    const pageTwoComment = {
+      id: "comment-page-2",
+      kind: "comment",
+      pageIndex: 1,
+      point: { x: 0.4, y: 0.4 },
+      text: "Not shown in thumbnail telemetry",
+      createdAt: 1,
+    } satisfies ArtifactAnnotation
+
+    mockPdfDocument({ pageCount: 2 })
+    const { rerenderPreview } = renderPreview({ annotations: [pageOneHighlight] })
+
+    const rail = await screen.findByTestId("artifact-page-rail")
+    await waitFor(() => expect(within(rail).getAllByTestId("artifact-pdf-thumbnail-canvas")).toHaveLength(2))
+    expect(within(rail).getByLabelText("Page 1, 1 annotation")).toHaveAttribute("data-annotation-count", "1")
+    expect(within(rail).getByTestId("artifact-pdf-thumbnail-annotation-badge")).toHaveTextContent("1")
+    expect(within(rail).getByLabelText("Page 2")).toHaveAttribute("data-annotation-count", "0")
+
+    rerenderPreview({ annotations: [pageOneHighlight, pageTwoComment] })
+    expect(await within(rail).findByLabelText("Page 2, 1 annotation")).toHaveAttribute("data-annotation-count", "1")
+    expect(within(rail).getAllByTestId("artifact-pdf-thumbnail-annotation-badge")).toHaveLength(2)
+
+    rerenderPreview({ annotations: [pageTwoComment] })
+    await waitFor(() => expect(within(rail).queryByLabelText("Page 1, 1 annotation")).not.toBeInTheDocument())
+    expect(within(rail).getByLabelText("Page 1")).toHaveAttribute("data-annotation-count", "0")
+    expect(within(rail).getByLabelText("Page 2, 1 annotation")).toHaveAttribute("data-annotation-count", "1")
+
+    expect(JSON.stringify(vi.mocked(recordSophiaCaptureEvent).mock.calls)).not.toContain("Not shown in thumbnail telemetry")
+  })
+
   it("falls back to numbered page buttons when thumbnail rendering fails", async () => {
     mockPdfDocument({
       pageCount: 2,

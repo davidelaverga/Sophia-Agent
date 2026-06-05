@@ -57,6 +57,7 @@ type UseSessionRouteExperienceParams = {
   markOffline: () => void;
   debugEnabled?: boolean;
   memoryHighlightsCount?: number;
+  artifactReviewActive?: boolean;
 };
 
 function builderRunKey(taskId?: string | null, runId?: string | null): string | null {
@@ -95,12 +96,16 @@ export function useSessionRouteExperience({
   markOffline,
   debugEnabled = false,
   memoryHighlightsCount = 0,
+  artifactReviewActive = false,
 }: UseSessionRouteExperienceParams) {
   const routeProfile = getCompanionRouteProfile('ritual');
   const [builderArtifact, setBuilderArtifact] = useState<BuilderArtifactV1 | null>(storedBuilderArtifact ?? null);
   const [builderTask, setBuilderTask] = useState<BuilderTaskV1 | null>(null);
   const [isCancellingBuilderTask, setIsCancellingBuilderTask] = useState(false);
-  const builderCanvas = useBuilderCanvas(activeThreadId, { enabled: Boolean(activeThreadId) });
+  const builderCanvas = useBuilderCanvas(activeThreadId, {
+    enabled: Boolean(activeThreadId),
+    artifactReviewActive,
+  });
   const lastBuilderCaptureSignatureRef = useRef<string | null>(null);
   /** Builder run identities dismissed by the user — stale SSE events for these are rejected. */
   const dismissedBuilderRunsRef = useRef(new Set<string>());
