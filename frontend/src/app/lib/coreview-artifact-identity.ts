@@ -10,6 +10,18 @@ export interface CoreviewArtifactIdentityInput {
   rendererKind?: ArtifactRendererKind | string | null
 }
 
+export interface CoreviewWorkspaceKeyInput {
+  userId?: string | null
+  threadId?: string | null
+  voiceAgentSessionId?: string | null
+}
+
+export interface CoreviewWorkspaceKeyIdentity {
+  userId: string | null
+  threadId: string | null
+  key: string
+}
+
 export interface CoreviewArtifactIdentity {
   userId: string | null
   threadId: string | null
@@ -32,6 +44,19 @@ export function normalizeCoreviewArtifactPath(path: string | null | undefined): 
   }
 
   return segments.join("/")
+}
+
+export function buildCoreviewWorkspaceKey(
+  input: CoreviewWorkspaceKeyInput,
+): CoreviewWorkspaceKeyIdentity {
+  const userId = normalizeIdentityToken(input.userId)
+  const threadId = normalizeIdentityToken(input.threadId)
+
+  return {
+    userId,
+    threadId,
+    key: `user:${userId ?? "unknown"}|thread:${threadId ?? "unknown"}`,
+  }
 }
 
 export function buildCoreviewArtifactStableIdentity(
@@ -60,6 +85,40 @@ export function buildCoreviewArtifactStableIdentity(
       `renderer:${rendererKind ?? "unknown"}`,
     ].filter((part): part is string => Boolean(part)).join("|"),
   }
+}
+
+export function normalizeCoreviewArtifactKey(value: string | null | undefined): string | null {
+  const normalized = normalizeIdentityToken(value)
+  if (!normalized) {
+    return null
+  }
+
+  if (normalized.startsWith("file://")) {
+    const path = normalizeCoreviewArtifactPath(normalized)
+    return path ? `path:${path}` : normalized
+  }
+
+  if (!normalized.includes("|") && !normalized.includes(":")) {
+    const path = normalizeCoreviewArtifactPath(normalized)
+    return path ? `path:${path}` : normalized
+  }
+
+  const parts = normalized.split("|")
+  let changed = false
+  const canonicalParts = parts.map((part) => {
+    if (!part.startsWith("path:")) {
+      return part
+    }
+    const originalPath = part.slice("path:".length)
+    const canonicalPath = normalizeCoreviewArtifactPath(originalPath)
+    if (!canonicalPath || canonicalPath === originalPath) {
+      return part
+    }
+    changed = true
+    return `path:${canonicalPath}`
+  })
+
+  return changed ? canonicalParts.join("|") : normalized
 }
 
 function normalizeIdentityToken(value: string | null | undefined): string | null {

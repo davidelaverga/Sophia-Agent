@@ -102,6 +102,8 @@ export interface ArtifactStageProps {
   onVisualCaptureStatusChange?: (status: ArtifactVisualCaptureStatus) => void
   onArtifactViewStateChange?: (state: ArtifactViewState) => void
   onVoiceCommandTargetChange?: (target: ArtifactReviewVoiceCommandTarget | null) => void
+  onWorkspaceToolModeChange?: (mode: ArtifactToolMode) => void
+  onWorkspaceExportRequested?: (input: { exportKind: "original" | "annotated"; annotationCount: number }) => void
   onStartVoiceReview?: () => void
   onStartReview: () => void
   onStopReview: () => void
@@ -169,6 +171,8 @@ export function ArtifactStage({
   onVisualCaptureStatusChange,
   onArtifactViewStateChange,
   onVoiceCommandTargetChange,
+  onWorkspaceToolModeChange,
+  onWorkspaceExportRequested,
   onStartVoiceReview,
   onStartReview,
   onStopReview,
@@ -367,11 +371,15 @@ export function ArtifactStage({
     if (!artifactToolModeSupported(mode, artifactCapabilities)) {
       return
     }
+    if (mode === toolModeRef.current) {
+      return
+    }
     setToolModeWithTelemetry(mode, mode === "select" ? "select_button" : null)
+    onWorkspaceToolModeChange?.(mode)
     if (mode === "pan") {
       setSelectedAnnotationId(null)
     }
-  }, [artifactCapabilities, setToolModeWithTelemetry])
+  }, [artifactCapabilities, onWorkspaceToolModeChange, setToolModeWithTelemetry])
   const commitAnnotation = useCallback((input: CoreviewAddAnnotationAdapterInput): CoreviewAddAnnotationAdapterResult => {
     if (!artifactCapabilities.supportsAnnotations || !onAddAnnotation) {
       return {
@@ -523,6 +531,7 @@ export function ArtifactStage({
         ...artifactCapabilityTelemetry,
         reviewStale,
         rawArtifactTextExcluded: true,
+        rawCommentTextExcluded: true,
         rawFrameExcluded: true,
         ...details,
       },
@@ -1073,7 +1082,18 @@ export function ArtifactStage({
         rawFrameExcluded: true,
       },
     })
-  }, [annotationCounts, annotationStorageKeyHash, artifactCapabilities.supportsAnnotatedExport, artifactCapabilityTelemetry, artifactId, primaryFile?.path, rendererKind])
+    onWorkspaceExportRequested?.({
+      exportKind: "original",
+      annotationCount: annotationCounts.annotationCount,
+    })
+  }, [annotationCounts, annotationStorageKeyHash, artifactCapabilities.supportsAnnotatedExport, artifactCapabilityTelemetry, artifactId, onWorkspaceExportRequested, primaryFile?.path, rendererKind])
+
+  const handleExportAnnotated = useCallback(() => {
+    onWorkspaceExportRequested?.({
+      exportKind: "annotated",
+      annotationCount: annotationCounts.annotationCount,
+    })
+  }, [annotationCounts.annotationCount, onWorkspaceExportRequested])
 
   const showReviewStatus = showReviewStatusOverride ?? Boolean(reviewEnabled || exactTextAvailable || visualCaptureStatus)
   const frameConfirmed = hasConfirmedStillFrame(reviewState, transportStatus)
@@ -1146,6 +1166,7 @@ export function ArtifactStage({
         annotationCount={annotationCounts.annotationCount}
         annotationExportAvailable={artifactCapabilities.supportsAnnotatedExport}
         onDownloadOriginal={handleDownloadOriginal}
+        onExportAnnotated={handleExportAnnotated}
         className="relative z-10 shrink-0"
       />
 

@@ -55,11 +55,27 @@ import {
   coreviewArtifactCapabilityTelemetry,
   getCoreviewArtifactCapabilitiesForFile,
 } from "../../lib/coreview-artifact-capabilities"
-import { buildCoreviewArtifactStableIdentity } from "../../lib/coreview-artifact-identity"
+import {
+  buildCoreviewArtifactStableIdentity,
+  buildCoreviewWorkspaceKey,
+  normalizeCoreviewArtifactKey,
+} from "../../lib/coreview-artifact-identity"
+import {
+  appendWorkspaceEvent,
+  getCoreviewWorkspaceEventLogTelemetry,
+  hashCoreviewWorkspaceKey,
+} from "../../lib/coreview-workspace-event-log"
+import {
+  buildCoreviewWorkspaceActor,
+  type CoreviewWorkspaceActor,
+  type CoreviewWorkspaceEventType,
+} from "../../lib/coreview-workspace-events"
+import { buildCoreviewWorkspaceShareState } from "../../lib/coreview-workspace-share"
 import { recordSophiaCaptureEvent } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
 import { isRealReflection } from "../../session/artifacts"
 import { usePresenceStore } from "../../stores/presence-store"
+import type { ArtifactToolMode } from "../../types/artifact-annotations"
 import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 import type { RitualArtifacts } from "../../types/session"
 
@@ -763,6 +779,14 @@ export function PresenceArtifactPanel({
   const [builderVoiceCommandTarget, setBuilderVoiceCommandTarget] = useState<ArtifactReviewVoiceCommandTarget | null>(null)
   const builderVoiceCommandTargetRef = useRef<ArtifactReviewVoiceCommandTarget | null>(null)
   const lastCoreviewFocusedAnchorTypeRef = useRef<CoreviewAnnotationAnchor["type"] | null>(null)
+  const pendingWorkspaceViewActorRef = useRef<CoreviewWorkspaceActor | null>(null)
+  const lastWorkspaceViewSignatureRef = useRef<string | null>(null)
+  const recordCoreviewWorkspaceEventRef = useRef<((input: {
+    type: CoreviewWorkspaceEventType
+    actor: CoreviewWorkspaceActor
+    payload: Record<string, unknown>
+    artifactKey?: string | null
+  }) => void) | null>(null)
   const [voiceCommandStaleViewSignature, setVoiceCommandStaleViewSignature] = useState<string | null>(null)
   const [voiceCommandStatus, setVoiceCommandStatus] = useState<ArtifactVoiceCommandStatus | null>(null)
   const coreviewCurrentViewRef = useRef<CoreviewCurrentView | null>(null)
@@ -843,6 +867,36 @@ export function PresenceArtifactPanel({
         }).key
       : null
   ), [builderArtifactId, stageArtifactPath, stageRendererKind, threadId, userId])
+  const coreviewWorkspaceIdentity = useMemo(() => (
+    buildCoreviewWorkspaceKey({
+      userId: userId ?? null,
+      threadId: threadId ?? null,
+    })
+  ), [threadId, userId])
+  const coreviewWorkspaceKey = coreviewWorkspaceIdentity.key
+  const coreviewArtifactKey = useMemo(() => (
+    normalizeCoreviewArtifactKey(artifactStableIdentity)
+  ), [artifactStableIdentity])
+  const coreviewShareState = useMemo(() => (
+    buildCoreviewWorkspaceShareState({
+      workspaceKey: coreviewWorkspaceKey,
+      artifactKey: coreviewArtifactKey,
+      status: "unavailable",
+    })
+  ), [coreviewArtifactKey, coreviewWorkspaceKey])
+  const userWorkspaceActor = useMemo(() => (
+    buildCoreviewWorkspaceActor({
+      kind: "user",
+      userId: userId ?? null,
+    })
+  ), [userId])
+  const sophiaWorkspaceActor = useMemo(() => (
+    buildCoreviewWorkspaceActor({
+      kind: "sophia",
+      userId: userId ?? null,
+      threadId: threadId ?? null,
+    })
+  ), [threadId, userId])
   const coreviewAnnotations = useCoreviewAnnotationStore(artifactStableIdentity)
   const {
     annotations: coreviewAnnotationList,
@@ -852,7 +906,56 @@ export function PresenceArtifactPanel({
     updateAnnotation: updateAnnotationInCoreviewStore,
     deleteAnnotation: deleteAnnotationFromCoreviewStore,
   } = coreviewAnnotations
+  const recordCoreviewWorkspaceEvent = useCallback((input: {
+    type: CoreviewWorkspaceEventType
+    actor: CoreviewWorkspaceActor
+    payload: Record<string, unknown>
+    artifactKey?: string | null
+  }) => {
+    const eventArtifactKey = input.artifactKey ?? coreviewArtifactKey
+    const event = appendWorkspaceEvent({
+      type: input.type,
+      workspaceKey: coreviewWorkspaceKey,
+      artifactKey: eventArtifactKey,
+      actor: input.actor,
+      payload: input.payload,
+    })
+    const telemetry = getCoreviewWorkspaceEventLogTelemetry(
+      coreviewWorkspaceKey,
+      eventArtifactKey,
+      coreviewShareState,
+    )
+
+    recordSophiaCaptureEvent({
+      category: "artifacts-runtime",
+      name: "coreview-workspace-event",
+      payload: {
+        artifactId: builderArtifactId ?? null,
+        artifactPath: stageArtifactPath,
+        artifactRendererKind: stageRendererKind,
+        artifactStableIdentity,
+        coreviewWorkspaceKeyHash: hashCoreviewWorkspaceKey(coreviewWorkspaceKey),
+        workspaceEventType: event.type,
+        workspaceEventPayloadExcluded: true,
+        ...telemetry,
+      },
+    })
+  }, [
+    artifactStableIdentity,
+    builderArtifactId,
+    coreviewArtifactKey,
+    coreviewShareState,
+    coreviewWorkspaceKey,
+    stageArtifactPath,
+    stageRendererKind,
+  ])
+
+  useEffect(() => {
+    recordCoreviewWorkspaceEventRef.current = recordCoreviewWorkspaceEvent
+  }, [recordCoreviewWorkspaceEvent])
+
   const addCoreviewAnnotation = useCallback((input: CoreviewAddAnnotationAdapterInput): CoreviewAddAnnotationAdapterResult => {
+    const actor = input.source === "sophia" ? sophiaWorkspaceActor : userWorkspaceActor
     const result = addAnnotationToCoreviewStore({
       kind: input.kind,
       pageIndex: input.pageIndex,
@@ -862,6 +965,7 @@ export function PresenceArtifactPanel({
       color: input.color,
       text: input.text,
       source: input.source,
+      actorId: actor.id,
     })
     const blockedReason = result.blockedReason === "identity_unavailable"
       ? "annotation_target_unavailable"
@@ -872,6 +976,27 @@ export function PresenceArtifactPanel({
         : result.blockedReason === "annotation_not_found"
           ? "annotation_commit_failed"
           : null
+
+    if (result.ok && result.annotation) {
+      recordCoreviewWorkspaceEvent({
+        type: "annotation.created",
+        actor,
+        payload: {
+          annotationId: result.annotation.id,
+          annotationKind: result.annotation.kind,
+          annotationPageIndex: result.annotation.pageIndex,
+          annotationColor: result.annotation.color ?? null,
+          annotationAnchorType: input.anchor.anchorType,
+          annotationSource: input.source,
+          annotationCount: result.counts.annotationCount,
+          highlightCount: result.counts.highlightCount,
+          commentCount: result.counts.commentCount,
+          underlineCount: result.counts.underlineCount,
+          arrowCount: result.counts.arrowCount,
+          drawPathCount: result.counts.drawPathCount,
+        },
+      })
+    }
 
     return {
       ok: result.ok,
@@ -884,13 +1009,53 @@ export function PresenceArtifactPanel({
       arrowCount: result.counts.arrowCount,
       drawPathCount: result.counts.drawPathCount,
     }
-  }, [addAnnotationToCoreviewStore])
-  const updateCoreviewAnnotation = useCallback((annotationId: string, patch: { text?: string | null }) => (
-    updateAnnotationInCoreviewStore(annotationId, patch).ok
-  ), [updateAnnotationInCoreviewStore])
-  const deleteCoreviewAnnotation = useCallback((annotationId: string) => (
-    deleteAnnotationFromCoreviewStore(annotationId).ok
-  ), [deleteAnnotationFromCoreviewStore])
+  }, [addAnnotationToCoreviewStore, recordCoreviewWorkspaceEvent, sophiaWorkspaceActor, userWorkspaceActor])
+  const updateCoreviewAnnotation = useCallback((annotationId: string, patch: { text?: string | null }) => {
+    const result = updateAnnotationInCoreviewStore(annotationId, {
+      ...patch,
+      actorId: userWorkspaceActor.id,
+    })
+    if (result.ok && result.annotation) {
+      recordCoreviewWorkspaceEvent({
+        type: "annotation.updated",
+        actor: userWorkspaceActor,
+        payload: {
+          annotationId: result.annotation.id,
+          annotationKind: result.annotation.kind,
+          annotationPageIndex: result.annotation.pageIndex,
+          patchKeys: Object.keys(patch).filter((key) => key !== "text").concat(
+            patch.text !== undefined ? ["text_redacted"] : [],
+          ),
+          annotationCount: result.counts.annotationCount,
+          highlightCount: result.counts.highlightCount,
+          commentCount: result.counts.commentCount,
+          underlineCount: result.counts.underlineCount,
+          arrowCount: result.counts.arrowCount,
+          drawPathCount: result.counts.drawPathCount,
+        },
+      })
+    }
+    return result.ok
+  }, [recordCoreviewWorkspaceEvent, updateAnnotationInCoreviewStore, userWorkspaceActor])
+  const deleteCoreviewAnnotation = useCallback((annotationId: string) => {
+    const result = deleteAnnotationFromCoreviewStore(annotationId)
+    if (result.ok) {
+      recordCoreviewWorkspaceEvent({
+        type: "annotation.deleted",
+        actor: userWorkspaceActor,
+        payload: {
+          annotationId,
+          annotationCount: result.counts.annotationCount,
+          highlightCount: result.counts.highlightCount,
+          commentCount: result.counts.commentCount,
+          underlineCount: result.counts.underlineCount,
+          arrowCount: result.counts.arrowCount,
+          drawPathCount: result.counts.drawPathCount,
+        },
+      })
+    }
+    return result.ok
+  }, [deleteAnnotationFromCoreviewStore, recordCoreviewWorkspaceEvent, userWorkspaceActor])
   const stageUsesMarkdownPreview = stageArtifactCapabilities.renderMode === "markdown"
   const stageUsesPdfPreview = stageArtifactCapabilities.renderMode === "canvas" && stageRendererKind === "pdf"
   const fallbackBuilderArtifactViewState = useMemo(() => (
@@ -907,6 +1072,130 @@ export function PresenceArtifactPanel({
     ? reportedBuilderArtifactViewState
     : fallbackBuilderArtifactViewState
   const builderArtifactViewSignature = buildArtifactViewSignature(builderArtifactViewState)
+  const workspaceArtifactDescriptor = useMemo(() => (
+    isVisible && builderStageActive && builderArtifactId && coreviewArtifactKey
+      ? {
+          signature: [
+            coreviewWorkspaceKey,
+            coreviewArtifactKey,
+            builderArtifactId,
+          ].join("|"),
+          artifactKey: coreviewArtifactKey,
+          artifactId: builderArtifactId,
+          artifactPath: stageArtifactPath,
+          artifactTitle: stageBuilderArtifact?.artifactTitle ?? null,
+          rendererKind: stageRendererKind,
+        }
+      : null
+  ), [
+    builderArtifactId,
+    builderStageActive,
+    coreviewArtifactKey,
+    coreviewWorkspaceKey,
+    isVisible,
+    stageArtifactPath,
+    stageBuilderArtifact?.artifactTitle,
+    stageRendererKind,
+  ])
+  const handleReportedBuilderArtifactViewStateChange = useCallback((state: ArtifactViewState) => {
+    setReportedBuilderArtifactViewState(state)
+    const nextSignature = buildArtifactViewSignature(state)
+    if (!coreviewArtifactKey || !nextSignature) {
+      lastWorkspaceViewSignatureRef.current = nextSignature
+      return
+    }
+
+    const previousSignature = lastWorkspaceViewSignatureRef.current
+    if (!previousSignature) {
+      lastWorkspaceViewSignatureRef.current = nextSignature
+      return
+    }
+    if (previousSignature === nextSignature) {
+      return
+    }
+
+    lastWorkspaceViewSignatureRef.current = nextSignature
+    const actor = pendingWorkspaceViewActorRef.current ?? userWorkspaceActor
+    pendingWorkspaceViewActorRef.current = null
+    recordCoreviewWorkspaceEvent({
+      type: "view.changed",
+      actor,
+      payload: {
+        artifactId: state.artifactId,
+        artifactPath: state.filePath,
+        rendererKind: state.rendererKind,
+        pageIndex: state.pageIndex,
+        pageCount: state.pageCount,
+        zoom: state.zoom,
+        fitMode: state.fitMode,
+        viewSignatureChanged: true,
+      },
+    })
+  }, [coreviewArtifactKey, recordCoreviewWorkspaceEvent, userWorkspaceActor])
+
+  useEffect(() => {
+    lastWorkspaceViewSignatureRef.current = null
+  }, [coreviewArtifactKey])
+
+  useEffect(() => {
+    if (!workspaceArtifactDescriptor) {
+      return
+    }
+
+    recordCoreviewWorkspaceEventRef.current?.({
+      type: "artifact.opened",
+      actor: userWorkspaceActor,
+      artifactKey: workspaceArtifactDescriptor.artifactKey,
+      payload: {
+        artifactId: workspaceArtifactDescriptor.artifactId,
+        artifactPath: workspaceArtifactDescriptor.artifactPath,
+        artifactTitle: workspaceArtifactDescriptor.artifactTitle,
+        rendererKind: workspaceArtifactDescriptor.rendererKind,
+      },
+    })
+
+    return () => {
+      recordCoreviewWorkspaceEventRef.current?.({
+        type: "artifact.closed",
+        actor: userWorkspaceActor,
+        artifactKey: workspaceArtifactDescriptor.artifactKey,
+        payload: {
+          artifactId: workspaceArtifactDescriptor.artifactId,
+          artifactPath: workspaceArtifactDescriptor.artifactPath,
+          artifactTitle: workspaceArtifactDescriptor.artifactTitle,
+          rendererKind: workspaceArtifactDescriptor.rendererKind,
+        },
+      })
+    }
+  }, [userWorkspaceActor, workspaceArtifactDescriptor])
+  const handleWorkspaceToolModeChange = useCallback((mode: ArtifactToolMode) => {
+    recordCoreviewWorkspaceEvent({
+      type: "tool.changed",
+      actor: userWorkspaceActor,
+      payload: {
+        toolMode: mode,
+        artifactId: builderArtifactId ?? null,
+        artifactPath: stageArtifactPath,
+        rendererKind: stageRendererKind,
+      },
+    })
+  }, [builderArtifactId, recordCoreviewWorkspaceEvent, stageArtifactPath, stageRendererKind, userWorkspaceActor])
+  const handleWorkspaceExportRequested = useCallback((input: {
+    exportKind: "original" | "annotated"
+    annotationCount: number
+  }) => {
+    recordCoreviewWorkspaceEvent({
+      type: "export.requested",
+      actor: userWorkspaceActor,
+      payload: {
+        exportKind: input.exportKind,
+        annotationCount: input.annotationCount,
+        artifactId: builderArtifactId ?? null,
+        artifactPath: stageArtifactPath,
+        rendererKind: stageRendererKind,
+      },
+    })
+  }, [builderArtifactId, recordCoreviewWorkspaceEvent, stageArtifactPath, stageRendererKind, userWorkspaceActor])
   const effectiveBuilderVisualCaptureStatus = useMemo<ArtifactVisualCaptureStatus>(() => {
     if (!builderArtifactId) {
       return unavailableCaptureStatus("no_selected_artifact")
@@ -1163,6 +1452,7 @@ export function PresenceArtifactPanel({
           builderReviewStaleReason,
         ),
         rawArtifactTextExcluded: true,
+        rawCommentTextExcluded: true,
         rawFrameExcluded: true,
       },
     })
@@ -1672,6 +1962,7 @@ export function PresenceArtifactPanel({
     runner: (bus: CoreviewActionBus) => Promise<CoreviewActionResult> | CoreviewActionResult,
     options?: { applyStatus?: boolean },
   ): Promise<CoreviewActionResult> => {
+    pendingWorkspaceViewActorRef.current = sophiaWorkspaceActor
     const result = await runner(coreviewActionBus)
     if (result.ok && result.action === "focus_anchor" && result.focus_anchor_type) {
       lastCoreviewFocusedAnchorTypeRef.current = result.focus_anchor_type
@@ -1682,8 +1973,11 @@ export function PresenceArtifactPanel({
       applyCoreviewActionStatus(result)
     }
     recordCoreviewToolTelemetry(result)
+    if (pendingWorkspaceViewActorRef.current === sophiaWorkspaceActor) {
+      pendingWorkspaceViewActorRef.current = null
+    }
     return result
-  }, [applyCoreviewActionStatus, coreviewActionBus, recordCoreviewToolTelemetry])
+  }, [applyCoreviewActionStatus, coreviewActionBus, recordCoreviewToolTelemetry, sophiaWorkspaceActor])
 
   useEffect(() => {
     if (!isVisible || !builderStageActive) {
@@ -2623,8 +2917,10 @@ export function PresenceArtifactPanel({
                   voiceCommandStatusText={voiceCommandStatus?.text ?? null}
                   voiceCommandStatusTone={voiceCommandStatus?.tone}
                   onVisualCaptureStatusChange={setBuilderVisualCaptureStatus}
-                  onArtifactViewStateChange={setReportedBuilderArtifactViewState}
+                  onArtifactViewStateChange={handleReportedBuilderArtifactViewStateChange}
                   onVoiceCommandTargetChange={handleBuilderVoiceCommandTargetChange}
+                  onWorkspaceToolModeChange={handleWorkspaceToolModeChange}
+                  onWorkspaceExportRequested={handleWorkspaceExportRequested}
                   onStartReview={() => { void builderArtifactCoReview.startReview() }}
                   onStopReview={() => { void builderArtifactCoReview.stopReview() }}
                   onRefreshReview={() => { void builderArtifactCoReview.refreshReview() }}
@@ -2658,8 +2954,10 @@ export function PresenceArtifactPanel({
                   voiceCommandStatusText={voiceCommandStatus?.text ?? null}
                   voiceCommandStatusTone={voiceCommandStatus?.tone}
                   onVisualCaptureStatusChange={setBuilderVisualCaptureStatus}
-                  onArtifactViewStateChange={setReportedBuilderArtifactViewState}
+                  onArtifactViewStateChange={handleReportedBuilderArtifactViewStateChange}
                   onVoiceCommandTargetChange={handleBuilderVoiceCommandTargetChange}
+                  onWorkspaceToolModeChange={handleWorkspaceToolModeChange}
+                  onWorkspaceExportRequested={handleWorkspaceExportRequested}
                   onStartVoiceReview={onStartVoiceBuilderArtifactReview}
                   onStartReview={() => { void builderArtifactCoReview.startReview() }}
                   onStopReview={() => { void builderArtifactCoReview.stopReview() }}

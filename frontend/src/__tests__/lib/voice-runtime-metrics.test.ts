@@ -2633,6 +2633,56 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(JSON.stringify(metrics.coreview.visual)).not.toContain('raw artifact body');
   });
 
+  it('summarizes Coreview workspace event log telemetry without raw payload content', () => {
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events: [
+        buildEvent({
+          seq: 1,
+          at: '2026-06-05T12:00:00.000Z',
+          category: 'artifacts-runtime',
+          name: 'coreview-workspace-event',
+          payload: {
+            workspaceEventType: 'annotation.created',
+            workspaceEventPayloadExcluded: true,
+            coreviewWorkspaceEventLogActive: true,
+            coreviewWorkspaceContractVersion: 1,
+            coreviewWorkspaceEventCount: 3,
+            coreviewWorkspaceLastEventType: 'annotation.created',
+            coreviewWorkspaceActorKind: 'sophia',
+            coreviewWorkspaceHasShareReadyMetadata: true,
+            coreviewShareStatus: 'unavailable',
+            workspaceEventLogPersistResult: 'saved',
+            workspaceEventLogRestoreCount: 2,
+            annotationEventsCreatedCount: 1,
+            viewChangedEventCount: 1,
+            commentText: 'change the font',
+            rawArtifactTextExcluded: true,
+            rawCommentTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        }),
+      ],
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-06-05T12:00:04.000Z'),
+    });
+
+    expect(metrics.coreview.visual).toMatchObject({
+      coreviewWorkspaceEventLogActive: true,
+      coreviewWorkspaceContractVersion: 1,
+      coreviewWorkspaceEventCount: 3,
+      coreviewWorkspaceLastEventType: 'annotation.created',
+      coreviewWorkspaceActorKind: 'sophia',
+      coreviewWorkspaceHasShareReadyMetadata: true,
+      coreviewShareStatus: 'unavailable',
+      workspaceEventLogPersistResult: 'saved',
+      workspaceEventLogRestoreCount: 2,
+      annotationEventsCreatedCount: 1,
+      viewChangedEventCount: 1,
+    });
+    expect(JSON.stringify(metrics.coreview.visual)).not.toContain('change the font');
+  });
+
   it('reports builder snapshot protection and thumbnail annotation indicators', () => {
     const metrics = buildVoiceDeveloperMetrics({
       stage: 'listening',

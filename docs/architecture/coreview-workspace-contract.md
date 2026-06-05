@@ -70,7 +70,26 @@ Annotations are Coreview workspace objects. The manual UI tools and Sophia/Corev
 
 ## Actor And Event Model
 
-Phase 1 adds local event types for future collaboration:
+Phase 1 adds a local-first workspace event log for future collaboration. Events are client-side only and are persisted in localStorage by workspace key. They are shaped as append-friendly records with:
+
+- `id`
+- `type`
+- `workspaceKey`
+- optional `artifactKey`
+- `actor`
+- `createdAt`
+- `version`
+- `payload`
+
+The workspace key is:
+
+```text
+user:{userId|unknown}|thread:{threadId|unknown}
+```
+
+The artifact key is the normalized `stableArtifactIdentity`. It normalizes artifact path variants before persistence. It does not use `voiceAgentSessionId`, Gemini runtime session ids, websocket ids, or DOM ids.
+
+Phase 1 event types:
 
 - `artifact.opened`
 - `artifact.closed`
@@ -84,14 +103,45 @@ Phase 1 adds local event types for future collaboration:
 - `participant.joined`
 - `participant.left`
 
-Actors are `user`, `sophia`, `system`, and `future_collaborator`. These event types are contract groundwork only. They do not start realtime sync, participant presence, share links, permissions, or backend collaboration storage.
+Actors are `user`, `sophia`, `system`, and `collaborator_future`.
+
+Actor ids:
+
+- Manual UI actions: `user:{userId|unknown}`.
+- Sophia personal actions: `sophia:personal:{userId|unknown}`.
+- Sophia room actions for future collaboration: `sophia:room:{threadId|unknown}`.
+- Restore and migration actions: `system`.
+
+Manual UI annotation actions and Sophia/Coreview annotation tools emit the same annotation event types after the shared Coreview annotation store confirms the mutation. Coreview view tools and manual page or zoom controls emit `view.changed` from the same reported view-state boundary. Event telemetry reports counts, last type, actor kind, persistence result, and share status only; it does not expose raw comment text, raw artifact text, or raw frame data.
+
+These event types are contract groundwork only. They do not start realtime sync, participant presence, share links, permissions, or backend collaboration storage.
+
+## Share-Ready Metadata
+
+Phase 1 defines local share metadata without enabling sharing:
+
+```ts
+type CoreviewWorkspaceShareState = {
+  status: "unavailable" | "ready_future" | "requested_local"
+  workspaceKey: string
+  artifactKey?: string | null
+  permissionsModel: "not_implemented"
+  participants: []
+  userFacingTruth: "Sharing is not available yet."
+}
+```
+
+The default status is `unavailable`. A local placeholder request can be represented as `requested_local`, but no backend call, share link, permission enforcement, or participant sync exists in this phase. Any UI surface must truthfully say: "Sharing is not available yet."
 
 ## Preparation For Sharing And Collaboration
 
 The contract prepares Workspace by making artifact state portable:
 
 - Capabilities can be serialized without raw artifact text, raw frames, or raw comment text.
-- View changes and annotations have common action/event names.
+- View changes and annotations have common action/event names for manual UI and Sophia tools.
+- Actors distinguish manual user actions, Sophia actions, restore/migration actions, and future collaborators.
+- The local event log can be replayed or synced later without changing renderer action names.
+- Share-ready metadata can be surfaced later without changing the truthful Phase 1 disabled state.
 - Renderer adapters can join later without changing Sophia tool semantics.
 - Future collaborators can share the same artifact identity and action vocabulary.
 - Backend sync can persist events later without changing Phase 1 UI capability truth.
@@ -104,6 +154,7 @@ The following remain intentionally unsupported in Phase 1:
 - Full PPTX renderer.
 - Backend or cloud workspace sync.
 - Share links and permissions.
+- Realtime collaboration.
 - Liveframes.
 - Dynamic fixture.
 - Broad VAD or arbiter rewrite.

@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { type ComponentProps } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -20,6 +20,10 @@ import {
   clearCoreviewArtifactTextRegistryForTests,
   readCoreviewArtifactTextSideband,
 } from "../../../app/lib/coreview-artifact-text"
+import {
+  clearWorkspaceEventsForTestOnly,
+  getWorkspaceEvents,
+} from "../../../app/lib/coreview-workspace-event-log"
 import { loadPdfJs } from "../../../app/lib/pdfjs-loader"
 import {
   exportSophiaCaptureBundle,
@@ -72,6 +76,7 @@ const MARKDOWN_LIBRARY = [
   },
 ]
 const PDF_SELECTED_PATH = "mnt/user-data/outputs/launch-brief.pdf"
+const WORKSPACE_KEY = "user:unknown|thread:thread-1"
 const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46])
 
 const SELECTED_MARKDOWN_ARTIFACT = {
@@ -284,6 +289,20 @@ function mockPdfPreviewReady({
   return { getDocument, getPage, render }
 }
 
+function mockAnnotationLayerBounds(layer: HTMLElement, width = 600, height = 800) {
+  vi.spyOn(layer, "getBoundingClientRect").mockReturnValue({
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: width,
+    bottom: height,
+    width,
+    height,
+    toJSON: () => ({}),
+  } as DOMRect)
+}
+
 function setCoreviewFlags(enabled: boolean) {
   process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_ENABLED = enabled ? "true" : "false"
   process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_STILL_FRAME_ENABLED = enabled ? "true" : "false"
@@ -294,6 +313,7 @@ describe("Coreview artifact still-frame review", () => {
     mockCanvasApis()
     window.localStorage.clear()
     clearCoreviewAnnotationStoreForTests()
+    clearWorkspaceEventsForTestOnly()
     getDisplayMedia = vi.fn()
     setCoreviewFlags(false)
     Object.defineProperty(navigator, "mediaDevices", {
@@ -307,6 +327,7 @@ describe("Coreview artifact still-frame review", () => {
     window.__sophiaCapture?.clear()
     window.localStorage.clear()
     clearCoreviewAnnotationStoreForTests()
+    clearWorkspaceEventsForTestOnly()
     clearCoreviewArtifactTextRegistryForTests()
     clearCoreviewToolBridgeForTests()
     fetchSpy?.mockRestore()
@@ -393,6 +414,127 @@ describe("Coreview artifact still-frame review", () => {
     expect(screen.queryByText("Focus on the big picture first.")).not.toBeInTheDocument()
     expect(screen.queryByText("What changed after you named the constraint?")).not.toBeInTheDocument()
     expect(screen.queryByTestId("coreview-companion-artifact-canvas")).not.toBeInTheDocument()
+  })
+
+  it("records artifact open and close events in the local workspace log", async () => {
+    mockPdfPreviewReady({ pageCount: 1 })
+    const baseProps = {
+      artifacts: null,
+      builderArtifact: null,
+      builderArtifactLibrary: [],
+      selectedBuilderArtifactPath: PDF_SELECTED_PATH,
+      sessionId: "session-1",
+      normalSessionId: "normal-1",
+      threadId: "thread-1",
+      onDismiss: vi.fn(),
+      isVoiceMode: false,
+      isVisible: true,
+    } satisfies ComponentProps<typeof PresenceArtifactPanel>
+
+    const rendered = render(
+      <PresenceArtifactPanel
+        {...baseProps}
+      />,
+    )
+
+    expect(await screen.findByText("Page 1 of 1")).toBeInTheDocument()
+    await waitFor(() => {
+      expect(getWorkspaceEvents(WORKSPACE_KEY).some((event) => event.type === "artifact.opened")).toBe(true)
+    })
+
+    rendered.rerender(
+      <PresenceArtifactPanel
+        {...baseProps}
+        isVisible={false}
+      />,
+    )
+
+    await waitFor(() => {
+      expect(getWorkspaceEvents(WORKSPACE_KEY).some((event) => event.type === "artifact.closed")).toBe(true)
+    })
+  })
+
+  it("records manual annotation create, edit, delete, tool, and export events", async () => {
+    mockPdfPreviewReady({ pageCount: 1, textByPage: ["Q3 Launch Review"] })
+    const user = userEvent.setup()
+
+    renderPanel({
+      selectedBuilderArtifactPath: PDF_SELECTED_PATH,
+    })
+
+    expect(await screen.findByText("Page 1 of 1")).toBeInTheDocument()
+    const layer = screen.getByTestId("artifact-pdf-annotation-layer")
+    mockAnnotationLayerBounds(layer)
+
+    await user.click(screen.getByRole("button", { name: "Highlight" }))
+    fireEvent.pointerDown(layer, { button: 0, clientX: 80, clientY: 96, pointerId: 1 })
+    fireEvent.pointerMove(layer, { clientX: 260, clientY: 148, pointerId: 1 })
+    fireEvent.pointerUp(layer, { clientX: 260, clientY: 148, pointerId: 1 })
+
+    expect(await screen.findByTestId("artifact-highlight-annotation")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Comment" }))
+    fireEvent.pointerDown(layer, { button: 0, clientX: 420, clientY: 180, pointerId: 2 })
+    const input = await screen.findByLabelText("Comment text")
+    fireEvent.change(input, { target: { value: "Keep this local note." } })
+    fireEvent.keyDown(screen.getByRole("region", { name: /generated artifact/i }), { key: "Delete" })
+
+    await user.click(screen.getByLabelText("Download original launch-brief.pdf"))
+
+    await waitFor(() => {
+      const events = getWorkspaceEvents(WORKSPACE_KEY)
+      expect(events.filter((event) => event.type === "tool.changed")).toHaveLength(2)
+      expect(events.filter((event) => event.type === "annotation.created")).toHaveLength(2)
+      expect(events.some((event) => event.type === "annotation.updated")).toBe(true)
+      expect(events.some((event) => event.type === "annotation.deleted")).toBe(true)
+      expect(events.some((event) => event.type === "export.requested")).toBe(true)
+      expect(events.find((event) => event.type === "annotation.created")?.actor.kind).toBe("user")
+    })
+    expect(JSON.stringify(getWorkspaceEvents(WORKSPACE_KEY))).not.toContain("Keep this local note.")
+  })
+
+  it("records manual page and zoom changes as view.changed events", async () => {
+    mockPdfPreviewReady({ pageCount: 3 })
+    const user = userEvent.setup()
+
+    renderPanel({
+      selectedBuilderArtifactPath: PDF_SELECTED_PATH,
+    })
+
+    expect(await screen.findByText("Page 1 of 3")).toBeInTheDocument()
+    await user.click(screen.getByLabelText("Next page"))
+    await user.click(screen.getByLabelText("Zoom in"))
+
+    await waitFor(() => {
+      const viewEvents = getWorkspaceEvents(WORKSPACE_KEY).filter((event) => event.type === "view.changed")
+      expect(viewEvents.length).toBeGreaterThanOrEqual(2)
+      expect(viewEvents.every((event) => event.actor.kind === "user")).toBe(true)
+    })
+  })
+
+  it("does not record annotation.created for a failed Coreview annotation action", async () => {
+    setCoreviewFlags(true)
+    mockPdfPreviewReady({ pageCount: 1, textByPage: ["Q3 Launch Review"] })
+
+    renderPanel({
+      selectedBuilderArtifactPath: PDF_SELECTED_PATH,
+    })
+
+    expect(await screen.findByText("Page 1 of 1")).toBeInTheDocument()
+    const result = await executeCoreviewToolBridgeCall({
+      id: "annotation-failed-1",
+      name: "coreview_add_annotation",
+      args: {
+        kind: "draw",
+        anchor_type: "current_title",
+      },
+    })
+
+    expect(result).toMatchObject({
+      ok: false,
+      blocked_reason: "unsupported_annotation_kind",
+    })
+    expect(getWorkspaceEvents(WORKSPACE_KEY).filter((event) => event.type === "annotation.created")).toHaveLength(0)
   })
 
   it("returns a safe failed status when PDF text extraction is unavailable", async () => {
@@ -529,6 +671,10 @@ describe("Coreview artifact still-frame review", () => {
       raw_artifact_text_excluded: true,
       raw_frame_excluded: true,
     })
+    await waitFor(() => {
+      const viewEvents = getWorkspaceEvents(WORKSPACE_KEY).filter((event) => event.type === "view.changed")
+      expect(viewEvents.some((event) => event.actor.kind === "sophia")).toBe(true)
+    })
     await waitFor(() => expect(screen.getByTestId("artifact-voice-command-status")).toHaveTextContent("Sophia's view refreshed"))
 
     expect(routeArtifactCommand?.("go to page 2")).toMatchObject({
@@ -618,6 +764,15 @@ describe("Coreview artifact still-frame review", () => {
         )
       })).toBe(true)
     }, { timeout: 4000 })
+    await waitFor(() => {
+      const annotationEvents = getWorkspaceEvents(WORKSPACE_KEY).filter((event) => event.type === "annotation.created")
+      expect(annotationEvents).toHaveLength(1)
+      expect(annotationEvents[0]?.actor.kind).toBe("sophia")
+      expect(annotationEvents[0]?.payload).toMatchObject({
+        annotationKind: "highlight",
+        annotationSource: "sophia",
+      })
+    })
   })
 
   it("routes highlighted-in-yellow phrasing through Coreview fallback with a visible overlay", async () => {
@@ -865,6 +1020,9 @@ describe("Coreview artifact still-frame review", () => {
       expect(finalAnnotationPayload?.highlightCount).toBe(1)
       expect(finalAnnotationPayload?.commentCount).toBe(1)
     }, { timeout: 9000 })
+    expect(getWorkspaceEvents(WORKSPACE_KEY).some((event) => (
+      event.type === "view.changed" && event.actor.kind === "sophia"
+    ))).toBe(true)
   })
 
   it("does not duplicate fallback annotations when a native Coreview annotation already handled the utterance", async () => {
@@ -922,6 +1080,7 @@ describe("Coreview artifact still-frame review", () => {
 
     await new Promise((resolve) => window.setTimeout(resolve, 760))
     expect(screen.getAllByTestId("artifact-highlight-annotation")).toHaveLength(1)
+    expect(getWorkspaceEvents(WORKSPACE_KEY).filter((event) => event.type === "annotation.created")).toHaveLength(1)
   })
 
   it("routes a PDF voice page command without faking a frame when visual refresh is unavailable", async () => {

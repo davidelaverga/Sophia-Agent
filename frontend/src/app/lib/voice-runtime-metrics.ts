@@ -70,7 +70,16 @@ export type CoreviewVisualTelemetry = {
   artifactCapabilitySupportsPptxNativeRender: boolean | null
   artifactCapabilitySupportsAnnotatedExport: boolean | null
   artifactCapabilityFallbackReason: string | null
+  coreviewWorkspaceEventLogActive: boolean
   coreviewWorkspaceEventCount: number
+  coreviewWorkspaceLastEventType: string | null
+  coreviewWorkspaceActorKind: string | null
+  coreviewWorkspaceHasShareReadyMetadata: boolean
+  coreviewShareStatus: string | null
+  workspaceEventLogPersistResult: string | null
+  workspaceEventLogRestoreCount: number
+  annotationEventsCreatedCount: number
+  viewChangedEventCount: number
   artifactRebindAttempted: boolean
   artifactRebindResult: string | null
   artifactRebindReason: string | null
@@ -1282,7 +1291,16 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       artifactCapabilitySupportsPptxNativeRender: null,
       artifactCapabilitySupportsAnnotatedExport: null,
       artifactCapabilityFallbackReason: null,
+      coreviewWorkspaceEventLogActive: false,
       coreviewWorkspaceEventCount: 0,
+      coreviewWorkspaceLastEventType: null,
+      coreviewWorkspaceActorKind: null,
+      coreviewWorkspaceHasShareReadyMetadata: false,
+      coreviewShareStatus: null,
+      workspaceEventLogPersistResult: null,
+      workspaceEventLogRestoreCount: 0,
+      annotationEventsCreatedCount: 0,
+      viewChangedEventCount: 0,
       artifactRebindAttempted: false,
       artifactRebindResult: null,
       artifactRebindReason: null,
@@ -1554,6 +1572,7 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((event) => event.category === "artifacts-runtime" && event.name === "coreview-workspace-event")
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
+  const latestWorkspaceEvent = workspaceEvents.at(-1) ?? null
   const assistantAnnotationClaimSuppressedEvents = activeEvents
     .filter((event) => event.category === "voice-session" && event.name === "assistant-annotation-claim-suppressed")
   const coreviewToolDiagnostics = activeEvents.filter((event) => (
@@ -1649,6 +1668,7 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     ...selectedStageEvents,
     ...annotationStateEvents,
     ...annotationExportEvents,
+    ...workspaceEvents,
     ...coreviewToolEvents,
   ]
   visual.coreviewWorkspaceContractVersion = latestFiniteFromRecords(capabilityEvents, "coreviewWorkspaceContractVersion")
@@ -1663,7 +1683,19 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.artifactCapabilitySupportsPptxNativeRender = latestBooleanFromRecords(capabilityEvents, "artifactCapabilitySupportsPptxNativeRender")
   visual.artifactCapabilitySupportsAnnotatedExport = latestBooleanFromRecords(capabilityEvents, "artifactCapabilitySupportsAnnotatedExport")
   visual.artifactCapabilityFallbackReason = latestStringFromRecords(capabilityEvents, "artifactCapabilityFallbackReason")
-  visual.coreviewWorkspaceEventCount = workspaceEvents.length
+  visual.coreviewWorkspaceEventLogActive = asBoolean(latestWorkspaceEvent?.coreviewWorkspaceEventLogActive) ?? false
+  visual.coreviewWorkspaceEventCount = numberFromKeys(latestWorkspaceEvent, ["coreviewWorkspaceEventCount"]) ?? workspaceEvents.length
+  visual.coreviewWorkspaceLastEventType = asString(latestWorkspaceEvent?.coreviewWorkspaceLastEventType)
+    ?? asString(latestWorkspaceEvent?.workspaceEventType)
+  visual.coreviewWorkspaceActorKind = asString(latestWorkspaceEvent?.coreviewWorkspaceActorKind)
+  visual.coreviewWorkspaceHasShareReadyMetadata = asBoolean(latestWorkspaceEvent?.coreviewWorkspaceHasShareReadyMetadata) ?? false
+  visual.coreviewShareStatus = asString(latestWorkspaceEvent?.coreviewShareStatus)
+  visual.workspaceEventLogPersistResult = asString(latestWorkspaceEvent?.workspaceEventLogPersistResult)
+  visual.workspaceEventLogRestoreCount = numberFromKeys(latestWorkspaceEvent, ["workspaceEventLogRestoreCount"]) ?? 0
+  visual.annotationEventsCreatedCount = numberFromKeys(latestWorkspaceEvent, ["annotationEventsCreatedCount"])
+    ?? workspaceEvents.filter((event) => asString(event.workspaceEventType) === "annotation.created").length
+  visual.viewChangedEventCount = numberFromKeys(latestWorkspaceEvent, ["viewChangedEventCount"])
+    ?? workspaceEvents.filter((event) => asString(event.workspaceEventType) === "view.changed").length
   visual.artifactRebindAttempted = latestRebindEvent !== null
   visual.artifactRebindResult = asString(latestRebindEvent?.artifactRebindResult)
   visual.artifactRebindReason = asString(latestRebindEvent?.artifactRebindReason)
