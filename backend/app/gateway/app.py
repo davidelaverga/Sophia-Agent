@@ -10,6 +10,7 @@ from app.gateway.routers import (
     agents,
     artifacts,
     bootstrap,
+    builder_canvas,
     builder_events,
     channels,
     mcp,
@@ -22,6 +23,7 @@ from app.gateway.routers import (
     uploads,
     voice,
 )
+from app.gateway.workers.builder_canvas import install_builder_canvas_worker
 from app.gateway.workers.builder_events import install_builder_events_worker
 from app.gateway.workers.companion_wakeup import install_companion_wakeup
 from deerflow.config.app_config import get_app_config
@@ -56,6 +58,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # to webapp SSE subscribers and channel adapters.
     install_builder_events_worker(app)
     logger.info("Builder events worker installed")
+    install_builder_canvas_worker(app)
+    logger.info("Builder canvas worker installed")
 
     # Install the companion wakeup worker. When a builder completion
     # event arrives, this worker triggers a synthetic empty turn on the
@@ -271,10 +275,11 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     from app.gateway.routers import sophia
     app.include_router(sophia.router)
     app.include_router(sophia.internal_router)
+    app.include_router(builder_canvas.router)
 
-    # Builder events: internal POST + public SSE for completion cards
+    # Builder events: internal webhook delivery remains; browsers consume
+    # the authenticated builder-canvas route instead of the legacy public SSE.
     app.include_router(builder_events.internal_router)
-    app.include_router(builder_events.public_router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:

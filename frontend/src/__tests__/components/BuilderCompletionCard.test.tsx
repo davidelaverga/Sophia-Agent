@@ -9,6 +9,7 @@ const SUCCESS_EVENT: BuilderCompletionEventV1 = {
   task_id: "task-1",
   status: "success",
   task_brief: "Write a one-pager about LLM time-series solutions.",
+  artifact_path: "mnt/user-data/outputs/llm_time_series.md",
   artifact_url: "https://example.com/llm_time_series.md",
   artifact_title: "LLM Time-Series Solutions",
   artifact_type: "document",
@@ -53,17 +54,37 @@ describe("BuilderCompletionCard — success variant", () => {
     expect(screen.getByText("ready")).toBeTruthy()
   })
 
-  it("opens the artifact URL in a new tab when 'open' is clicked", () => {
+  it("selects the artifact for in-session preview when View in canvas is clicked", () => {
     const onOpen = vi.fn()
     render(<BuilderCompletionCard event={SUCCESS_EVENT} onOpen={onOpen} />)
-    const button = screen.getByRole("button", { name: /open/i })
+    const button = screen.getByRole("button", { name: /view in canvas/i })
     fireEvent.click(button)
-    expect(window.open).toHaveBeenCalledWith(
-      "https://example.com/llm_time_series.md",
-      "_blank",
-      "noopener,noreferrer",
-    )
+    expect(window.open).not.toHaveBeenCalled()
     expect(onOpen).toHaveBeenCalledWith(SUCCESS_EVENT)
+  })
+
+  it("keeps Open in new tab as a secondary same-origin action", () => {
+    render(<BuilderCompletionCard event={SUCCESS_EVENT} onOpen={vi.fn()} />)
+    const link = screen.getByRole("link", { name: /open artifact in new tab/i })
+    expect(link).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/llm_time_series.md",
+    )
+    expect(link).toHaveAttribute("target", "_blank")
+  })
+
+  it("uses the signed URL as Open in new tab when artifact_path is missing", () => {
+    const event: BuilderCompletionEventV1 = {
+      ...SUCCESS_EVENT,
+      artifact_path: undefined,
+    }
+
+    render(<BuilderCompletionCard event={event} onOpen={vi.fn()} />)
+    expect(screen.queryByRole("button", { name: /view in canvas/i })).toBeNull()
+    expect(screen.getByRole("link", { name: /open artifact in new tab/i })).toHaveAttribute(
+      "href",
+      "https://example.com/llm_time_series.md",
+    )
   })
 
   it("does NOT show retry on success", () => {
@@ -71,14 +92,62 @@ describe("BuilderCompletionCard — success variant", () => {
     expect(screen.queryByRole("button", { name: /try again/i })).toBeNull()
   })
 
-  it("renders a Download anchor with the signed URL and download attribute", () => {
+  it("renders a Download anchor with the same-origin proxy and download attribute", () => {
     render(<BuilderCompletionCard event={SUCCESS_EVENT} />)
     const link = screen.getByRole("link", { name: /download/i })
-    expect(link.getAttribute("href")).toBe(SUCCESS_EVENT.artifact_url)
+    expect(link.getAttribute("href")).toBe(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/llm_time_series.md?download=true",
+    )
     // The download attribute makes the browser save instead of navigating.
     expect(link.hasAttribute("download")).toBe(true)
     // Filename hint is preferred over the boolean form.
     expect(link.getAttribute("download")).toBe(SUCCESS_EVENT.artifact_filename)
+  })
+
+  it("falls back to artifact_path when the signed URL is missing", () => {
+    const event: BuilderCompletionEventV1 = {
+      ...SUCCESS_EVENT,
+      artifact_url: undefined,
+    }
+
+    render(<BuilderCompletionCard event={event} onOpen={vi.fn()} />)
+    expect(screen.getByRole("button", { name: /view in canvas/i })).toBeInTheDocument()
+    expect(screen.getByRole("link", { name: /open artifact in new tab/i })).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/llm_time_series.md",
+    )
+    expect(screen.getByRole("link", { name: /download/i })).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/llm_time_series.md?download=true",
+    )
+  })
+
+  it("explains when a successful completion has no artifact action yet", () => {
+    const event: BuilderCompletionEventV1 = {
+      ...SUCCESS_EVENT,
+      artifact_path: undefined,
+      artifact_url: undefined,
+    }
+
+    render(<BuilderCompletionCard event={event} />)
+    expect(screen.queryByRole("button", { name: /view in canvas/i })).toBeNull()
+    expect(screen.queryByRole("link", { name: /open artifact in new tab/i })).toBeNull()
+    expect(screen.queryByRole("link", { name: /download/i })).toBeNull()
+    expect(screen.getByText(/keep checking the library/i)).toBeTruthy()
+  })
+
+  it("does not claim a file is ready when success has no title or action", () => {
+    const event: BuilderCompletionEventV1 = {
+      ...SUCCESS_EVENT,
+      artifact_path: undefined,
+      artifact_url: undefined,
+      artifact_title: undefined,
+      artifact_filename: undefined,
+    }
+
+    render(<BuilderCompletionCard event={event} />)
+    expect(screen.queryByText("Your file is ready.")).toBeNull()
+    expect(screen.getByText("Artifact delivery is pending.")).toBeTruthy()
   })
 
   it("invokes onDownload when the Download link is clicked", () => {
@@ -87,6 +156,57 @@ describe("BuilderCompletionCard — success variant", () => {
     const link = screen.getByRole("link", { name: /download/i })
     fireEvent.click(link)
     expect(onDownload).toHaveBeenCalledWith(SUCCESS_EVENT)
+  })
+
+  it("treats PowerPoint artifacts as download-first", () => {
+    const event: BuilderCompletionEventV1 = {
+      ...SUCCESS_EVENT,
+      artifact_path: "mnt/user-data/outputs/research_deck.pptx",
+      artifact_url: "https://example.com/research_deck.pptx",
+      artifact_filename: "research_deck.pptx",
+      artifact_type: "presentation",
+    }
+
+    render(<BuilderCompletionCard event={event} />)
+
+    expect(screen.queryByRole("button", { name: /view in canvas/i })).toBeNull()
+    expect(screen.queryByRole("link", { name: /open artifact in new tab/i })).toBeNull()
+    const link = screen.getByRole("link", { name: /download/i })
+    expect(link).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/research_deck.pptx?download=true",
+    )
+    expect(link).toHaveAttribute("download", "research_deck.pptx")
+  })
+
+  it("labels usable HTML fallbacks for slide deck requests explicitly", () => {
+    const event: BuilderCompletionEventV1 = {
+      ...SUCCESS_EVENT,
+      artifact_path: "mnt/user-data/outputs/research_deck.html",
+      artifact_url: undefined,
+      artifact_filename: "research_deck.html",
+      artifact_type: "webpage",
+      requested_artifact_ext: "pptx",
+      artifact_ext: "html",
+      artifact_is_fallback: true,
+      fallback_reason: "pptx_generation_not_completed",
+      summary: undefined,
+    }
+
+    render(<BuilderCompletionCard event={event} onOpen={vi.fn()} />)
+
+    expect(screen.getByText("HTML fallback ready.")).toBeInTheDocument()
+    expect(screen.getByText("html fallback")).toBeInTheDocument()
+    expect(screen.getByText(/couldn’t finish the PowerPoint package/i)).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /view in canvas/i })).toBeInTheDocument()
+    expect(screen.getByRole("link", { name: /open artifact in new tab/i })).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/research_deck.html",
+    )
+    expect(screen.getByRole("link", { name: /download/i })).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/research_deck.html?download=true",
+    )
   })
 
   it("does NOT render Download on error/timeout/cancelled states", () => {
@@ -121,7 +241,8 @@ describe("BuilderCompletionCard — error variant", () => {
 
   it("does NOT show open on error (no artifact_url)", () => {
     render(<BuilderCompletionCard event={ERROR_EVENT} />)
-    expect(screen.queryByRole("button", { name: /open/i })).toBeNull()
+    expect(screen.queryByRole("button", { name: /view in canvas/i })).toBeNull()
+    expect(screen.queryByRole("link", { name: /open artifact in new tab/i })).toBeNull()
   })
 
   it("surfaces a custom error_message when provided", () => {

@@ -36,9 +36,16 @@ import logging
 import shutil
 import subprocess  # noqa: S404 — invoking pandoc by absolute path
 from pathlib import Path
+from typing import Any
 
-from langchain_core.tools import tool
-from pydantic import BaseModel, Field
+from langchain.tools import ToolRuntime, tool
+
+from deerflow.sandbox.tools import get_thread_data, mask_local_paths_in_output, replace_virtual_path
+
+try:  # pragma: no cover - import availability varies by runtime image
+    from pypdf import PdfReader
+except Exception:  # noqa: BLE001
+    PdfReader = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -53,31 +60,8 @@ _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 # (font cache warmup). 90s is generous; the per-turn timeout in
 # ``SubagentExecutor`` (300s) gives further headroom.
 _PANDOC_TIMEOUT_SECONDS = 90
-
-
-class RenderMarkdownToPdfInput(BaseModel):
-    markdown_path: str = Field(
-        description=(
-            "Absolute path to the Markdown source file (must exist and be readable). "
-            "Prefer paths under /mnt/user-data/outputs/ for visibility in the artifact pipeline."
-        ),
-    )
-    pdf_path: str = Field(
-        description=(
-            "Absolute path where the PDF should be written. MUST start with "
-            "/mnt/user-data/outputs/ — files outside that prefix won't be "
-            "delivered to the user. The builder should pass the same path "
-            "to ``emit_builder_artifact.artifact_path`` after this tool succeeds."
-        ),
-    )
-    pdf_engine: str | None = Field(
-        default=None,
-        description=(
-            "Optional pandoc PDF engine override (e.g. 'xelatex', 'lualatex', "
-            "'wkhtmltopdf'). Default is xelatex when available, else pandoc's "
-            "auto-select. Most users should leave this unset."
-        ),
-    )
+_SHORT_PAGE_WORD_THRESHOLD = 80
+_DEFAULT_MAX_PAGES = 15
 
 
 def _ensure_relative_to_outputs(label: str, path: str) -> str | None:
@@ -90,14 +74,17 @@ def _ensure_relative_to_outputs(label: str, path: str) -> str | None:
     """
     if not isinstance(path, str) or not path.strip():
         return f"{label}: empty or non-string path"
-    normalized = path.strip()
-    if not normalized.startswith(_OUTPUTS_VIRTUAL_PREFIX):
+    normalized = path.strip().replace("\\", "/")
+    outputs_prefix = _OUTPUTS_VIRTUAL_PREFIX.replace("\\", "/")
+    if not outputs_prefix.endswith("/"):
+        outputs_prefix += "/"
+    if not normalized.startswith(outputs_prefix):
         return (
             f"{label}: must start with {_OUTPUTS_VIRTUAL_PREFIX} "
-            f"(got: {normalized!r}). Files outside that prefix won't be "
+            f"(got: {path.strip()!r}). Files outside that prefix won't be "
             "delivered to the user."
         )
-    relative_part = normalized[len(_OUTPUTS_VIRTUAL_PREFIX):]
+    relative_part = normalized[len(outputs_prefix):]
     # Reject traversal attempts (parity with builder_artifact).
     if ".." in relative_part.split("/"):
         return f"{label}: path traversal ('..') is not allowed: {normalized!r}"
@@ -113,6 +100,16 @@ def _result(*, success: bool, **fields) -> str:
     """
     payload = {"success": success, **fields}
     return json.dumps(payload)
+
+
+def _host_path_for_virtual_output(path: str, thread_data: dict[str, Any] | None) -> Path:
+    if thread_data is None:
+        return Path(path)
+    return Path(replace_virtual_path(path, thread_data))
+
+
+def _mask_local_output(text: str, thread_data: dict[str, Any] | None) -> str:
+    return mask_local_paths_in_output(text, thread_data) if thread_data is not None else text
 
 
 def _resolve_pdf_engine(explicit: str | None) -> tuple[str | None, str]:
@@ -139,7 +136,63 @@ def _resolve_pdf_engine(explicit: str | None) -> tuple[str | None, str]:
     return None, "no preferred PDF engine on PATH; using pandoc's default"
 
 
-def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
+def _page_word_count(page: Any) -> int:
+    text = page.extract_text() or ""
+    return len([word for word in text.split() if word.strip()])
+
+
+def _layout_quality(page_count: int, blank_count: int, short_count: int) -> tuple[str, str | None]:
+    if page_count <= 0:
+        return "unknown", "pdf_layout_unreadable"
+    if blank_count >= page_count:
+        return "unusable", "all_pages_blank"
+    if blank_count > 0:
+        return "warning", "blank_pages_detected"
+    if page_count > _DEFAULT_MAX_PAGES and short_count > 0:
+        return "warning", "sparse_long_pdf"
+    return "ok", None
+
+
+def _inspect_pdf_layout(pdf_file: Path) -> dict[str, int | str | None]:
+    if PdfReader is None:
+        return {
+            "page_count": 0,
+            "blank_page_count": 0,
+            "short_page_count": 0,
+            "layout_quality": "unknown",
+            "layout_warning": "pypdf_unavailable",
+        }
+    try:
+        reader = PdfReader(str(pdf_file))
+        counts = [_page_word_count(page) for page in reader.pages]
+    except Exception:  # noqa: BLE001
+        logger.warning("render_markdown_to_pdf: layout_inspection_failed", exc_info=True)
+        return {
+            "page_count": 0,
+            "blank_page_count": 0,
+            "short_page_count": 0,
+            "layout_quality": "unknown",
+            "layout_warning": "pdf_layout_unreadable",
+        }
+    page_count = len(counts)
+    blank_count = sum(1 for count in counts if count <= 1)
+    short_count = sum(1 for count in counts if 1 < count < _SHORT_PAGE_WORD_THRESHOLD)
+    quality, warning = _layout_quality(page_count, blank_count, short_count)
+    return {
+        "page_count": page_count,
+        "blank_page_count": blank_count,
+        "short_page_count": short_count,
+        "layout_quality": quality,
+        "layout_warning": warning,
+    }
+
+
+def _impl(
+    markdown_path: str,
+    pdf_path: str,
+    pdf_engine: str | None,
+    thread_data: dict[str, Any] | None = None,
+) -> str:
     """Concrete pandoc invocation. Tested independently of the @tool wrapper."""
     # ---- Path validation -----------------------------------------------
     md_check = _ensure_relative_to_outputs("markdown_path", markdown_path)
@@ -153,7 +206,7 @@ def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
     if pdf_check is not None:
         return _result(success=False, error=pdf_check, error_type="invalid_input")
 
-    md_file = Path(markdown_path)
+    md_file = _host_path_for_virtual_output(markdown_path, thread_data)
     if not md_file.is_file():
         return _result(
             success=False,
@@ -164,6 +217,14 @@ def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
     # ---- Pandoc availability --------------------------------------------
     pandoc_bin = shutil.which("pandoc")
     if pandoc_bin is None:
+        logger.warning(
+            "render_markdown_to_pdf: capability_check pandoc_available=false "
+            "xelatex_available=%s lualatex_available=%s wkhtmltopdf_available=%s "
+            "error_type=pandoc_missing",
+            shutil.which("xelatex") is not None,
+            shutil.which("lualatex") is not None,
+            shutil.which("wkhtmltopdf") is not None,
+        )
         return _result(
             success=False,
             error=(
@@ -179,9 +240,18 @@ def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
         )
 
     engine, engine_msg = _resolve_pdf_engine(pdf_engine)
-    logger.info("render_markdown_to_pdf: %s", engine_msg)
+    logger.info(
+        "render_markdown_to_pdf: capability_check pandoc_available=true "
+        "xelatex_available=%s lualatex_available=%s wkhtmltopdf_available=%s "
+        "selected_engine=%s message=%s",
+        shutil.which("xelatex") is not None,
+        shutil.which("lualatex") is not None,
+        shutil.which("wkhtmltopdf") is not None,
+        engine or "pandoc_default",
+        engine_msg,
+    )
 
-    pdf_file = Path(pdf_path)
+    pdf_file = _host_path_for_virtual_output(pdf_path, thread_data)
     pdf_file.parent.mkdir(parents=True, exist_ok=True)
 
     # ---- Invocation -----------------------------------------------------
@@ -193,8 +263,16 @@ def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
         "-o",
         str(pdf_file),
     ]
+    public_cmd: list[str] = [
+        "--standalone",
+        "--from=markdown+smart+yaml_metadata_block",
+        markdown_path,
+        "-o",
+        pdf_path,
+    ]
     if engine is not None:
         cmd.append(f"--pdf-engine={engine}")
+        public_cmd.append(f"--pdf-engine={engine}")
 
     try:
         completed = subprocess.run(  # noqa: S603 — pandoc binary path is from shutil.which
@@ -223,6 +301,12 @@ def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
         )
 
     if completed.returncode != 0:
+        logger.warning(
+            "render_markdown_to_pdf: render_failed error_type=pandoc_error "
+            "selected_engine=%s returncode=%s",
+            engine or "pandoc_default",
+            completed.returncode,
+        )
         # Pandoc errors are usually about LaTeX issues (missing
         # packages, unicode chars without xelatex, broken image paths).
         # Return stderr so the model can decide whether to retry with a
@@ -231,11 +315,11 @@ def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
             success=False,
             error=(
                 f"pandoc exited with code {completed.returncode}. "
-                f"stderr: {completed.stderr.strip()[:1500]}"
+                f"stderr: {_mask_local_output(completed.stderr.strip(), thread_data)[:1500]}"
             ),
             error_type="pandoc_error",
             engine=engine or "default",
-            command=" ".join(cmd[1:]),  # omit the binary path itself
+            command=" ".join(public_cmd),
         )
 
     if not pdf_file.is_file():
@@ -253,18 +337,39 @@ def _impl(markdown_path: str, pdf_path: str, pdf_engine: str | None) -> str:
         size_bytes = pdf_file.stat().st_size
     except OSError:
         size_bytes = -1
+    layout = _inspect_pdf_layout(pdf_file)
 
+    logger.info(
+        "render_markdown_to_pdf: render_success selected_engine=%s "
+        "final_artifact_ext=%s size_bytes=%s page_count=%s "
+        "blank_page_count=%s short_page_count=%s layout_quality=%s "
+        "layout_warning=%s",
+        engine or "pandoc_default",
+        pdf_file.suffix.lower().lstrip(".") or "unknown",
+        size_bytes,
+        layout.get("page_count"),
+        layout.get("blank_page_count"),
+        layout.get("short_page_count"),
+        layout.get("layout_quality"),
+        layout.get("layout_warning"),
+    )
     return _result(
         success=True,
-        pdf_path=str(pdf_file),
+        pdf_path=pdf_path,
         size_bytes=size_bytes,
         engine=engine or "default",
         engine_message=engine_msg,
+        **layout,
     )
 
 
-@tool(args_schema=RenderMarkdownToPdfInput)
-def render_markdown_to_pdf(markdown_path: str, pdf_path: str, pdf_engine: str | None = None) -> str:
+@tool("render_markdown_to_pdf", parse_docstring=True)
+def render_markdown_to_pdf(
+    runtime: ToolRuntime,
+    markdown_path: str,
+    pdf_path: str,
+    pdf_engine: str | None = None,
+) -> str:
     """Convert a Markdown file to a PDF using pandoc.
 
     Use this for any PDF deliverable. Compose your Markdown source first
@@ -277,9 +382,11 @@ def render_markdown_to_pdf(markdown_path: str, pdf_path: str, pdf_engine: str | 
     reportlab to produce a PDF. That pattern is unreliable. This tool
     encapsulates a known-working pipeline.
 
-    On success, returns a JSON object with ``success: true`` and the
-    PDF path. After success, call emit_builder_artifact with
-    ``artifact_path`` set to the PDF path.
+    On success, returns a JSON object with ``success: true``, the PDF path,
+    and safe layout metrics (page_count, blank_page_count,
+    short_page_count, layout_quality). After success, call
+    emit_builder_artifact with ``artifact_path`` set to the PDF path unless
+    Sophia injects a one-time layout repair instruction.
 
     On failure, returns ``success: false`` with a descriptive error
     type (``pandoc_missing``, ``pandoc_error``, ``pandoc_timeout``,
@@ -288,5 +395,18 @@ def render_markdown_to_pdf(markdown_path: str, pdf_path: str, pdf_engine: str | 
     (``artifact_type='document'``, ``artifact_path`` to the .md file)
     with confidence<=0.5 and explain the limitation in
     ``companion_tone_hint``.
+
+    Args:
+        markdown_path: Absolute path to the Markdown source file under
+            /mnt/user-data/outputs/.
+        pdf_path: Absolute path where the PDF should be written. Must be
+            under /mnt/user-data/outputs/.
+        pdf_engine: Optional pandoc PDF engine override, such as xelatex,
+            lualatex, or wkhtmltopdf.
     """
-    return _impl(markdown_path=markdown_path, pdf_path=pdf_path, pdf_engine=pdf_engine)
+    return _impl(
+        markdown_path=markdown_path,
+        pdf_path=pdf_path,
+        pdf_engine=pdf_engine,
+        thread_data=get_thread_data(runtime),
+    )

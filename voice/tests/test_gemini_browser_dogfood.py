@@ -542,7 +542,8 @@ async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_de
         "skills/public/sophia/soul.md",
         "skills/public/sophia/voice.md",
         "skills/public/sophia/techniques.md",
-        "skills/public/sophia/AGENTS.md",
+        "skills/public/sophia/coordination_core.md",
+        "skills/public/sophia/companion_delegation.md",
         EMOTIONAL_SKILLS_REPERTOIRE_SOURCE,
         "backend/packages/harness/deerflow/agents/sophia_agent/middlewares/platform_context.py::PLATFORM_PROMPTS",
         "skills/public/sophia/context/life.md",
@@ -869,6 +870,48 @@ async def test_browser_relay_messages_enter_existing_gemini_adapter_and_normaliz
     assert "serverContent" not in json.dumps(payloads)
 
     await manager.close_session("browser-gemini-2")
+
+
+@pytest.mark.anyio
+async def test_browser_relay_string_input_transcription_surfaces_public_user_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    realtime_sessions = RealtimeDogfoodSessionManager()
+    manager = GeminiBrowserDogfoodSessionManager(
+        realtime_sessions,
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+    )
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id="browser-gemini-string-input",
+    )
+
+    response = await manager.ingest_browser_provider_event(
+        _gemini_settings(),
+        dogfood_session_id=browser_session.dogfood_session.session_id,
+        event={
+            "eventId": "user-item-string-1",
+            "serverContent": {
+                "inputTranscription": "Please review the top section.",
+            },
+        },
+    )
+    payloads = await browser_session.dogfood_session.wait_for_public_payloads(2)
+
+    assert response["accepted"] is True
+    assert response["diagnostics"]["provider_category_counts"]["inputTranscription"] == 1
+    assert [payload["type"] for payload in payloads] == [
+        "sophia.user_transcript",
+        "sophia.turn",
+    ]
+    assert payloads[0]["data"] == {
+        "text": "Please review the top section.",
+        "utterance_id": "user-item-string-1",
+    }
+
+    await manager.close_session("browser-gemini-string-input")
 
 
 @pytest.mark.anyio

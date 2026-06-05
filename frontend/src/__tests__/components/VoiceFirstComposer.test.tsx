@@ -71,6 +71,11 @@ describe("VoiceFirstComposer", () => {
       renderComposer({ slotBeforeText: <div>mode toggle</div> })
       expect(screen.getByText(/mode toggle/i)).toBeInTheDocument()
     })
+
+    it("shows voice readiness status near the mic", () => {
+      renderComposer({ statusText: "Voice transcript is delayed" })
+      expect(screen.getByText("Voice transcript is delayed")).toBeInTheDocument()
+    })
   })
 
   describe("text-only mode (textOnly=true)", () => {

@@ -32,6 +32,27 @@ def _thread_data() -> dict[str, str]:
     }
 
 
+def _thread_data_under(base) -> dict[str, str]:
+    return {
+        "workspace_path": str(base / "workspace"),
+        "uploads_path": str(base / "uploads"),
+        "outputs_path": str(base / "outputs"),
+    }
+
+
+class _Provider:
+    def __init__(self, sandbox: _DummySandbox) -> None:
+        self.sandbox = sandbox
+        self.acquired: list[str] = []
+
+    def acquire(self, thread_id: str) -> str:
+        self.acquired.append(thread_id)
+        return "local"
+
+    def get(self, sandbox_id: str):
+        return self.sandbox if sandbox_id == "local" else None
+
+
 def test_write_file_tool_skips_mirror_when_disabled(monkeypatch) -> None:
     sandbox = _DummySandbox()
     runtime = _runtime()
@@ -71,6 +92,81 @@ def test_write_file_tool_calls_mirror_when_enabled(monkeypatch) -> None:
 
     assert result == "OK"
     assert mirrored_paths == ["/tmp/outputs/a.txt"]
+
+
+def test_write_file_tool_reacquires_sandbox_with_config_thread_id_when_context_missing(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    sandbox = _DummySandbox()
+    provider = _Provider(sandbox)
+    thread_data = _thread_data_under(tmp_path)
+    runtime = SimpleNamespace(
+        context=None,
+        config={"configurable": {"thread_id": "thread-from-config"}},
+        state={"thread_data": thread_data},
+    )
+
+    monkeypatch.setattr(tools, "get_sandbox_provider", lambda: provider)
+    monkeypatch.setattr(tools.supabase_mirror, "is_mirror_enabled", lambda: False)
+
+    result = tools.write_file_tool.func(
+        runtime=runtime,
+        description="write",
+        path="/mnt/user-data/outputs/a.txt",
+        content="hello",
+    )
+
+    resolved_path = str(tmp_path / "outputs" / "a.txt")
+    assert result == "OK"
+    assert provider.acquired == ["thread-from-config"]
+    assert runtime.state["sandbox"] == {"sandbox_id": "local"}
+    assert sandbox.files[resolved_path] == "hello"
+
+
+def test_ensure_sandbox_initialized_uses_config_thread_id_when_context_missing(
+    monkeypatch,
+) -> None:
+    sandbox = _DummySandbox()
+    provider = _Provider(sandbox)
+    runtime = SimpleNamespace(
+        context=None,
+        config={"configurable": {"thread_id": "thread-from-config"}},
+        state={},
+    )
+
+    monkeypatch.setattr(tools, "get_sandbox_provider", lambda: provider)
+
+    assert tools.ensure_sandbox_initialized(runtime) is sandbox
+    assert provider.acquired == ["thread-from-config"]
+    assert runtime.state["sandbox"] == {"sandbox_id": "local"}
+
+
+def test_write_file_tool_reacquires_sandbox_with_empty_context_and_config_thread_id(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    sandbox = _DummySandbox()
+    provider = _Provider(sandbox)
+    runtime = SimpleNamespace(
+        context={},
+        config={"configurable": {"thread_id": "thread-from-config"}},
+        state={"thread_data": _thread_data_under(tmp_path)},
+    )
+
+    monkeypatch.setattr(tools, "get_sandbox_provider", lambda: provider)
+    monkeypatch.setattr(tools.supabase_mirror, "is_mirror_enabled", lambda: False)
+
+    result = tools.write_file_tool.func(
+        runtime=runtime,
+        description="write",
+        path="/mnt/user-data/outputs/a.txt",
+        content="hello",
+    )
+
+    assert result == "OK"
+    assert provider.acquired == ["thread-from-config"]
+    assert runtime.context == {"sandbox_id": "local"}
 
 
 def test_str_replace_tool_invokes_mirror_path(monkeypatch) -> None:

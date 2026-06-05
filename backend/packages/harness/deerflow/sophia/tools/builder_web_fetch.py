@@ -46,9 +46,6 @@ def builder_web_fetch(
         return _tool_response(tool_call_id, "Error: Builder runtime state is not available.", tool_name="builder_web_fetch")
 
     state = runtime.state
-    if not state.get("allow_web_research"):
-        return _tool_response(tool_call_id, "Error: Web fetch is disabled for this builder task.", tool_name="builder_web_fetch")
-
     normalized_url = normalize_builder_web_url(url)
     allowed_urls = {
         normalize_builder_web_url(str(item))

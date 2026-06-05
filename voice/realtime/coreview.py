@@ -8,6 +8,16 @@ from typing import Any, Literal
 COREVIEW_FEATURE_FLAG = "SOPHIA_GEMINI_COREVIEW_ENABLED"
 COREVIEW_STILL_FRAME_FEATURE_FLAG = "SOPHIA_GEMINI_COREVIEW_STILL_FRAME_ENABLED"
 GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = "read_artifact_text"
+GEMINI_COREVIEW_SET_VIEW_TOOL_NAME = "coreview_set_view"
+GEMINI_COREVIEW_REFRESH_VIEW_TOOL_NAME = "coreview_refresh_view"
+GEMINI_COREVIEW_GET_CURRENT_VIEW_TOOL_NAME = "coreview_get_current_view"
+GEMINI_COREVIEW_ACTION_TOOL_NAMES = frozenset(
+    {
+        GEMINI_COREVIEW_SET_VIEW_TOOL_NAME,
+        GEMINI_COREVIEW_REFRESH_VIEW_TOOL_NAME,
+        GEMINI_COREVIEW_GET_CURRENT_VIEW_TOOL_NAME,
+    }
+)
 COREVIEW_FIXTURE_ARTIFACT_ID = "coreview-fixture-q3-launch-review"
 COREVIEW_PROMPT_SOURCE = "voice/realtime/coreview.py::build_gemini_coreview_prompt_overlay"
 
@@ -25,16 +35,21 @@ COREVIEW_FIXTURE_EXACT_TEXT = "\n".join(
 )
 
 _GEMINI_COREVIEW_PROMPT_OVERLAY = """<gemini_coreview_artifact_policy>
-Artifact co-review is a separate, explicitly entered mode. Apply these rules only while Review Together is active.
+Artifact co-review is a separate, explicitly entered mode. Apply these rules only while Review with Sophia is active.
 
 - Visual input is limited to the artifact region selected by the app. Never ask for or imply whole-screen, whole-tab, desktop, or browser chrome access.
 - The user must see a persistent looking indicator while visual input is active.
 - Stop Looking ends visual input. After it stops, return to normal voice behavior.
-- Still-frame co-review is single-frame or low-rate artifact-canvas input, not continuous video.
+- Still-frame co-review is one artifact-canvas frame at user request, not low-rate video or continuous watching.
+- While artifact review is active, stay in review mode. Do not call emit_artifact, start_builder_task, or other artifact-creating tools unless the user explicitly asks to create, rewrite, update, save, or generate a new artifact.
 - Use visual input only for layout, composition, color, spacing, rough structure, and other visual qualities.
 - Exact words, numbers, table values, labels, citations, and data must come from read_artifact_text or another trusted artifact text sideband, not from vision.
-- When the user asks what a heading says, asks for a number/table value/label, or asks you to read fine print, call read_artifact_text with the active artifact_id before answering.
+- When the user asks what a heading says, asks for a number/table value/label, or asks you to read fine print, call read_artifact_text for the current artifact before answering.
 - If read_artifact_text returns unavailable, unsupported, forbidden, or not_found, say that the exact text is unavailable instead of guessing from the image.
+- For simple artifact visibility questions such as "can you see the artifact?", "what page are you looking at?", or "what is visible now?", answer from a fresh frame directly or call coreview_get_current_view. Do not call read_artifact_text unless exact text is needed.
+- When the user asks to change the current artifact view (for example "go to page two", next/previous page, fit width, fit page, zoom in/out, or refresh your view), call the Coreview action tools instead of describing manual page controls.
+- Use coreview_set_view for page and zoom changes, coreview_refresh_view to refresh the current still frame, and coreview_get_current_view when you need safe page/renderer metadata before acting.
+- After a Coreview action tool succeeds, briefly acknowledge the page/view change in natural language. If it is blocked, explain only the safe blocked reason.
 - Do not store frames, screenshots, audio, video, provider credentials, or raw artifact text in telemetry.
 - If the media path cannot use tools, say you need the trusted text reader for exact data instead of guessing.
 </gemini_coreview_artifact_policy>"""
@@ -44,7 +59,6 @@ Artifact co-review is a separate, explicitly entered mode. Apply these rules onl
 class CoreviewMediaSupportReport:
     transport_kind: str
     media_capable_session_possible: Literal["yes", "no", "unknown"]
-    continuous_video_supported: bool
     still_frames_supported: bool
     tools_supported_in_normal_voice: bool
     tools_supported_in_coreview_media: Literal["yes", "no", "unknown"]
@@ -87,7 +101,6 @@ def detect_gemini_coreview_media_support(*, coreview_enabled: bool | None = None
     return CoreviewMediaSupportReport(
         transport_kind="gemini_live_audio_websocket_current_path",
         media_capable_session_possible="unknown",
-        continuous_video_supported=False,
         still_frames_supported=still_frame_enabled,
         tools_supported_in_normal_voice=True,
         tools_supported_in_coreview_media="unknown",
@@ -105,16 +118,26 @@ def detect_gemini_coreview_media_support(*, coreview_enabled: bool | None = None
             "No repo code exposes RTCPeerConnection/addTrack/replaceTrack for Gemini visual input.",
             "Still-frame WebSocket mediaChunks send is experimental and not provider-ack verified.",
             "Installed Vision Agents package exposes generic video-track helpers, not a wired Gemini media session.",
-            "Artifact panel is DOM-first; artifact-scoped visual input needs a canvas renderer or safe still-frame path.",
+            "Artifact-scoped visual input requires a registered canvas renderer and trusted text sideband.",
         ),
         recommended_next_step=(
             "Keep normal voice untouched. Manually smoke-test one feature-flagged artifact-canvas still frame "
-            "before attempting low-rate stills or continuous co-review."
+            "before adding any broader visual mode."
         ),
         safe_telemetry_fields=(
+            "coreviewEnabled",
+            "frontendCoreviewFlagParsed",
+            "frontendStillFrameFlagParsed",
+            "backendCoreviewFlagParsed",
+            "backendStillFrameFlagParsed",
+            "coreviewDisabledReason",
+            "reviewStartBlockedReason",
+            "coreviewSessionActive",
+            "coreviewArtifactId",
             "normalVoiceSessionId",
             "coReviewSessionId",
             "transportKind",
+            "visualSourceKind",
             "visualTransportSupported",
             "toolsSupportedInCoReview",
             "coReviewStartLatencyMs",
@@ -125,9 +148,14 @@ def detect_gemini_coreview_media_support(*, coreview_enabled: bool | None = None
             "videoOrFrameMode",
             "frameSentCount",
             "initialFrameSent",
+            "visualFresh",
+            "visualFreshForTurn",
+            "exactTextAvailable",
             "refreshFrameCount",
             "frameBytes",
             "frameDimensions",
+            "lastFrameBytes",
+            "lastFrameDimensions",
             "totalFrameBytes",
             "frameSendLatencyMs",
             "maxFrameSendLatencyMs",
@@ -145,10 +173,14 @@ def detect_gemini_coreview_media_support(*, coreview_enabled: bool | None = None
             "exactTextCallCount",
             "exactTextSuccessCount",
             "exactTextFailureCount",
+            "readArtifactTextCallCount",
             "lastExactTextSource",
             "lastExactTextStatus",
             "lastExactTextCharCount",
             "lastExactTextLatencyMs",
+            "rawFrameExcluded",
+            "rawProviderPayloadExcluded",
+            "rawArtifactTextExcluded",
         ),
     )
 
@@ -158,8 +190,8 @@ def gemini_read_artifact_text_function_declaration() -> dict[str, object]:
         "name": GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
         "description": (
             "Trusted backend artifact text reader for co-review. Use only for exact words, numbers, "
-            "table values, labels, citations, or data from the active artifact. The response must not "
-            "be written to telemetry."
+            "table values, labels, citations, or data from the active artifact. artifact_id is optional "
+            "when the app already has an active review artifact. The response must not be written to telemetry."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -177,8 +209,174 @@ def gemini_read_artifact_text_function_declaration() -> dict[str, object]:
                     "description": "Why vision is not sufficient for this answer.",
                 },
             },
-            "required": ["artifact_id", "query"],
+            "required": ["query"],
         },
+    }
+
+
+def gemini_coreview_action_function_declarations() -> list[dict[str, object]]:
+    return [
+        {
+            "name": GEMINI_COREVIEW_SET_VIEW_TOOL_NAME,
+            "description": (
+                "Set the active Coreview artifact view during Review with Sophia. Use for page navigation "
+                "or zoom changes, then wait for the tool response before acknowledging."
+            ),
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "artifact_id": {
+                        "type": "STRING",
+                        "description": "Optional active artifact id. Omit when using the currently selected artifact.",
+                    },
+                    "page_index": {
+                        "type": "NUMBER",
+                        "description": "Zero-based page index. Preferred for exact page navigation.",
+                    },
+                    "page_number": {
+                        "type": "NUMBER",
+                        "description": "One-based user-facing page number.",
+                    },
+                    "page_label": {
+                        "type": "STRING",
+                        "description": "Optional user-facing page label.",
+                    },
+                    "zoom": {
+                        "type": "NUMBER",
+                        "description": "Zoom multiplier, for example 1.2.",
+                    },
+                    "fit_mode": {
+                        "type": "STRING",
+                        "enum": ["page", "width", "custom"],
+                        "description": "View fit mode.",
+                    },
+                    "reason": {
+                        "type": "STRING",
+                        "description": "Short safe reason for the view change.",
+                    },
+                },
+                "required": [],
+            },
+        },
+        {
+            "name": GEMINI_COREVIEW_REFRESH_VIEW_TOOL_NAME,
+            "description": "Refresh Sophia's still-frame view of the active Coreview artifact without changing artifact contents.",
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "reason": {
+                        "type": "STRING",
+                        "description": "Short safe reason for refreshing the current view.",
+                    },
+                },
+                "required": [],
+            },
+        },
+        {
+            "name": GEMINI_COREVIEW_GET_CURRENT_VIEW_TOOL_NAME,
+            "description": (
+                "Get safe metadata about what Sophia can currently see in the active Coreview artifact. "
+                "Prefer this for simple visibility or current-page questions. Returns no raw artifact text or visual frame."
+            ),
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "artifact_id": {
+                        "type": "STRING",
+                        "description": "Optional active artifact id to verify.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    ]
+
+
+def coreview_browser_action_unavailable_response(
+    tool_name: str,
+    args: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    args = args or {}
+    action = (
+        "refresh_view"
+        if tool_name == GEMINI_COREVIEW_REFRESH_VIEW_TOOL_NAME
+        else "get_current_view"
+        if tool_name == GEMINI_COREVIEW_GET_CURRENT_VIEW_TOOL_NAME
+        else "set_view"
+    )
+    return {
+        "ok": False,
+        "action": action,
+        "artifact_id": str(args.get("artifact_id") or args.get("artifactId") or "") or None,
+        "artifact_path": None,
+        "artifact_title": None,
+        "renderer_kind": None,
+        "page_index": None,
+        "page_number": None,
+        "page_count": None,
+        "zoom": None,
+        "fit_mode": None,
+        "view_signature": None,
+        "stale": False,
+        "refresh_attempted": False,
+        "refresh_result": "not_requested",
+        "blocked_reason": "browser_coreview_tool_bridge_unavailable",
+        "result_summary": "Coreview action must be executed by the browser; the browser bridge was unavailable.",
+        "command_source": "backend_fallback",
+        "preserved_mic": True,
+        "preserved_review": True,
+        "view_ready_wait_ms": None,
+        "view_signature_before": None,
+        "view_signature_after": None,
+        "exact_text_available": False,
+        "visual_frame_fresh": False,
+        "visual_fresh": False,
+        "frame_sent": False,
+        "review_active": False,
+        "current_view_summary": "Coreview action unavailable.",
+        "annotation_overlay_captured": None,
+        "raw_artifact_text_excluded": True,
+        "raw_frame_excluded": True,
+    }
+
+
+def coreview_action_result_summary(response: Mapping[str, Any]) -> str:
+    summary = str(response.get("result_summary") or "").strip()
+    if summary:
+        return summary
+    action = str(response.get("action") or "coreview_action")
+    blocked = str(response.get("blocked_reason") or "blocked")
+    return f"{action} returned {blocked}."
+
+
+def redacted_coreview_action_diagnostic(response: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": response.get("ok") is True,
+        "action": str(response.get("action") or ""),
+        "artifact_id": response.get("artifact_id"),
+        "renderer_kind": response.get("renderer_kind"),
+        "page_index": response.get("page_index"),
+        "page_number": response.get("page_number"),
+        "page_count": response.get("page_count"),
+        "zoom": response.get("zoom"),
+        "fit_mode": response.get("fit_mode"),
+        "stale": bool(response.get("stale")),
+        "refresh_attempted": bool(response.get("refresh_attempted")),
+        "refresh_result": response.get("refresh_result"),
+        "blocked_reason": response.get("blocked_reason"),
+        "command_source": response.get("command_source"),
+        "preserved_mic": bool(response.get("preserved_mic")),
+        "preserved_review": bool(response.get("preserved_review")),
+        "view_ready_wait_ms": response.get("view_ready_wait_ms"),
+        "exact_text_available": bool(response.get("exact_text_available")),
+        "visual_frame_fresh": bool(response.get("visual_frame_fresh")),
+        "visual_fresh": bool(response.get("visual_fresh") or response.get("visual_frame_fresh")),
+        "frame_sent": bool(response.get("frame_sent")),
+        "review_active": bool(response.get("review_active")),
+        "current_view_summary": str(response.get("current_view_summary") or ""),
+        "annotation_overlay_captured": response.get("annotation_overlay_captured"),
+        "raw_artifact_text_excluded": True,
+        "raw_frame_excluded": True,
     }
 
 
@@ -204,9 +402,9 @@ def execute_read_artifact_text_feature_gated(
 
     if not artifact_id:
         return _read_artifact_text_failure(
-            artifact_id,
-            status="not_found",
-            safe_reason="No artifact_id was supplied for the trusted text read.",
+            None,
+            status="no_selected_artifact",
+            safe_reason="No artifact is selected for trusted text reading.",
         )
 
     if artifact_id == COREVIEW_FIXTURE_ARTIFACT_ID:
@@ -274,7 +472,7 @@ def redacted_read_artifact_text_diagnostic(
 def _read_artifact_text_success(
     artifact_id: str,
     *,
-    source: Literal["fixture", "builder_metadata", "builder_file", "artifact_store", "unsupported"],
+    source: Literal["fixture", "builder_metadata", "builder_file", "pdf_text_extraction", "artifact_store", "unsupported"],
     text: str,
 ) -> dict[str, Any]:
     char_count = len(text)
@@ -290,9 +488,19 @@ def _read_artifact_text_success(
 
 
 def _read_artifact_text_failure(
-    artifact_id: str,
+    artifact_id: str | None,
     *,
-    status: Literal["not_found", "unavailable", "forbidden", "unsupported"],
+    status: Literal[
+        "no_selected_artifact",
+        "not_found",
+        "unavailable",
+        "forbidden",
+        "unsupported",
+        "extraction_pending",
+        "extraction_unavailable",
+        "extraction_failed",
+        "timeout",
+    ],
     safe_reason: str,
 ) -> dict[str, Any]:
     return {

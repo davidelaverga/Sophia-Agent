@@ -25,7 +25,12 @@ import {
   buildLastSessionTelemetrySnapshot,
   persistLastSessionTelemetrySnapshot,
 } from "../../lib/recap-telemetry-report"
-import { registerSophiaCaptureBridge } from "../../lib/session-capture"
+import {
+  recordSophiaCaptureEvent,
+  registerSophiaCaptureBridge,
+  type SophiaCaptureBundle,
+  type SophiaCaptureSnapshot,
+} from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
 import {
   buildVoiceDeveloperMetrics,
@@ -137,6 +142,158 @@ function readPersistedFloatingBounds(defaultExpanded: boolean): { bounds: Floati
   }
 }
 
+function withTelemetryExportCommandFlag(metrics: VoiceDeveloperMetrics): VoiceDeveloperMetrics {
+  const hasCommand = Boolean(
+    metrics.coreview.visual.lastReviewVoiceCommandKind
+      || metrics.coreview.visual.lastReviewVoiceCommands.length > 0,
+  )
+
+  return {
+    ...metrics,
+    coreview: {
+      ...metrics.coreview,
+      visual: {
+        ...metrics.coreview.visual,
+        telemetryExportAfterCommandSucceeded: hasCommand,
+      },
+    },
+  }
+}
+
+function readTelemetryCaptureBundle(
+  capture: Window["__sophiaCapture"] | undefined,
+  metrics: VoiceDeveloperMetrics,
+  exportedAt: string,
+): SophiaCaptureBundle {
+  try {
+    const bundle = capture?.export()
+    if (bundle?.snapshot && Array.isArray(bundle.events)) {
+      return bundle
+    }
+  } catch {
+    // Fall back to a sparse safe bundle below.
+  }
+
+  return buildFallbackTelemetryCaptureBundle(metrics, exportedAt)
+}
+
+function buildFallbackTelemetryCaptureBundle(
+  metrics: VoiceDeveloperMetrics,
+  exportedAt: string,
+): SophiaCaptureBundle {
+  const snapshot = buildFallbackTelemetrySnapshot(metrics, exportedAt)
+
+  return {
+    startedAt: exportedAt,
+    exportedAt,
+    eventCount: 0,
+    events: [],
+    snapshot,
+  }
+}
+
+function buildFallbackTelemetrySnapshot(
+  metrics: VoiceDeveloperMetrics,
+  exportedAt: string,
+): SophiaCaptureSnapshot {
+  const sessionId = metrics.sessionIds.sessionId
+  const threadId = metrics.sessionIds.threadId
+
+  return {
+    capturedAt: exportedAt,
+    location: {
+      href: typeof window === "undefined" ? "about:blank" : window.location.href,
+      pathname: typeof window === "undefined" ? "" : window.location.pathname,
+      title: typeof document === "undefined" ? "Sophia" : document.title,
+      theme: null,
+    },
+    debug: {},
+    session: sessionId && threadId
+      ? {
+          sessionId,
+          threadId,
+          status: metrics.stage,
+          isActive: metrics.stage !== "idle",
+          presetType: "voice",
+          contextMode: "",
+          voiceMode: metrics.stage !== "idle",
+          startedAt: exportedAt,
+          endedAt: null,
+          lastActivityAt: metrics.transport.lastEventAt,
+          messageCount: metrics.counts.turns,
+        }
+      : null,
+    transcript: {
+      chatMessages: [],
+      voiceMessages: [],
+      dom: {
+        articleCount: 0,
+        articles: [],
+      },
+    },
+    artifacts: {
+      sessionArtifacts: null,
+      recapArtifacts: null,
+      recapCommitStatus: null,
+      dom: {
+        railLabel: null,
+        takeawayText: null,
+        reflectionText: null,
+        memoriesText: null,
+        panelVisible: metrics.counts.artifactSelectedStageCount > 0,
+      },
+    },
+    harness: {
+      microphone: {
+        audioTrackCount: metrics.microphone.audioTrackCount,
+        detectedAudio: metrics.microphone.detectedAudio,
+        errors: metrics.microphone.lastError ? [metrics.microphone.lastError] : [],
+        firstAudioAt: metrics.microphone.firstAudioAt,
+        firstStreamAt: null,
+        lastAudioAt: metrics.microphone.lastAudioAt,
+        maxAbsPeak: metrics.microphone.maxAbsPeak,
+        maxRms: metrics.microphone.maxRms,
+        nonSilentSampleWindows: metrics.microphone.detectedAudio ? 1 : 0,
+        patchInstalled: metrics.microphone.patchInstalled,
+        streamCount: metrics.microphone.streamCount,
+        streams: [],
+        totalSampleWindows: metrics.microphone.totalSampleWindows,
+        tracks: [],
+      },
+    },
+    metadata: {
+      currentSessionId: sessionId,
+      currentThreadId: threadId,
+      currentRunId: metrics.sessionIds.runId,
+      emotionalWeather: null,
+    },
+    presence: {
+      labels: [],
+    },
+    storage: {},
+  }
+}
+
+function recordVoiceTelemetryExportSuccess(
+  action: "copy" | "download",
+  metrics: VoiceDeveloperMetrics,
+) {
+  recordSophiaCaptureEvent({
+    category: "voice-session",
+    name: "voice-telemetry-export",
+    payload: {
+      action,
+      telemetryExportAfterCommandSucceeded: Boolean(
+        metrics.coreview.visual.lastReviewVoiceCommandKind
+          || metrics.coreview.visual.lastReviewVoiceCommands.length > 0,
+      ),
+      lastReviewVoiceCommandKind: metrics.coreview.visual.lastReviewVoiceCommandKind,
+      rawTranscriptExcluded: true,
+      rawFrameExcluded: true,
+    },
+  })
+}
+
 export function VoiceMetricsPanel({
   voiceState,
   defaultExpanded = true,
@@ -164,6 +321,7 @@ export function VoiceMetricsPanel({
       runtimeTelemetry: voiceState.runtimeTelemetry ?? null,
     }),
   )
+  const [exportError, setExportError] = useState<string | null>(null)
 
   useEffect(() => {
     if (typeof window === "undefined") return
@@ -207,6 +365,11 @@ export function VoiceMetricsPanel({
 
   const isGeminiRuntime = metrics.sessionTelemetry.runtime === "gemini_live"
   const geminiHeaderTelemetry = metrics.sessionTelemetry.gemini
+  const micConnectedNoSignal = !metrics.microphone.detectedAudio && (
+    metrics.microphone.streamCount > 0
+    || metrics.microphone.audioTrackCount > 0
+    || geminiHeaderTelemetry?.microphoneState === "connected"
+  )
 
   const panelTone = useMemo(() => {
     if (metrics.regressions.some((marker) => marker.level === "bad")) {
@@ -487,17 +650,19 @@ export function VoiceMetricsPanel({
       return null
     }
 
+    registerSophiaCaptureBridge()
     const capture = window.__sophiaCapture
-    if (!capture) {
-      return null
-    }
+    capture?.enable()
+    const exportedAt = new Date().toISOString()
+    const exportMetrics = withTelemetryExportCommandFlag(metrics)
+    const captureBundle = readTelemetryCaptureBundle(capture, exportMetrics, exportedAt)
 
     return JSON.stringify(
       buildVoiceTelemetryReport({
-        exportedAt: new Date().toISOString(),
-        summary: buildVoiceTelemetrySummary(metrics),
-        metrics,
-        captureBundle: capture.export(),
+        exportedAt,
+        summary: buildVoiceTelemetrySummary(exportMetrics),
+        metrics: exportMetrics,
+        captureBundle,
       }),
       null,
       2,
@@ -513,8 +678,11 @@ export function VoiceMetricsPanel({
       }
 
       await navigator.clipboard.writeText(payload)
+      setExportError(null)
+      recordVoiceTelemetryExportSuccess("copy", metrics)
       showToast({ message: "Voice telemetry report copied", variant: "success", durationMs: 1800 })
     } catch {
+      setExportError("Could not copy session JSON.")
       showToast({ message: "Could not copy session JSON", variant: "error", durationMs: 2200 })
     }
   }
@@ -536,8 +704,11 @@ export function VoiceMetricsPanel({
       anchor.download = `sophia-voice-telemetry-report-${stamp}.json`
       anchor.click()
       URL.revokeObjectURL(href)
+      setExportError(null)
+      recordVoiceTelemetryExportSuccess("download", metrics)
       showToast({ message: "Voice telemetry report exported", variant: "success", durationMs: 1800 })
     } catch {
+      setExportError("Could not export session JSON.")
       showToast({ message: "Could not export session JSON", variant: "error", durationMs: 2200 })
     }
   }
@@ -641,7 +812,11 @@ export function VoiceMetricsPanel({
                 />
               )}
               <ToneBadge
-                label={metrics.microphone.detectedAudio ? "Mic signal detected" : "No mic signal yet"}
+                label={metrics.microphone.detectedAudio
+                  ? "Mic signal detected"
+                  : micConnectedNoSignal
+                    ? "Mic connected, no signal"
+                    : "No mic signal yet"}
                 tone={metrics.microphone.detectedAudio ? "good" : "warn"}
               />
               {metrics.builder.phase && (
@@ -666,58 +841,65 @@ export function VoiceMetricsPanel({
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 self-start">
-          {showFloatingControls && (
-            <>
+        <div className="flex flex-col items-start gap-2 self-start sm:items-end">
+          <div className="flex flex-wrap items-center gap-2">
+            {showFloatingControls && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void copySessionJson()
+                  }}
+                  className={floatingActionButtonClass}
+                >
+                  <Clipboard className="h-3.5 w-3.5" />
+                  Copy JSON
+                </button>
+                <button
+                  type="button"
+                  onClick={exportSessionJson}
+                  className={floatingActionButtonClass}
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Export JSON
+                </button>
+              </>
+            )}
+            {layout === "floating" && (
               <button
                 type="button"
-                onClick={() => {
-                  void copySessionJson()
-                }}
+                onClick={resetFloatingPanel}
+                title="Reset telemetry drawer size"
                 className={floatingActionButtonClass}
               >
-                <Clipboard className="h-3.5 w-3.5" />
-                Copy JSON
+                <RotateCcw className="h-3.5 w-3.5" />
+                Reset
               </button>
-              <button
-                type="button"
-                onClick={exportSessionJson}
-                className={floatingActionButtonClass}
-              >
-                <Download className="h-3.5 w-3.5" />
-                Export JSON
-              </button>
-            </>
-          )}
-          {layout === "floating" && (
+            )}
             <button
               type="button"
-              onClick={resetFloatingPanel}
-              title="Reset telemetry drawer size"
+              onClick={() => setExpanded((value) => !value)}
               className={floatingActionButtonClass}
             >
-              <RotateCcw className="h-3.5 w-3.5" />
-              Reset
+              {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+              {expanded ? "Collapse metrics" : "Expand metrics"}
             </button>
-          )}
-          <button
-            type="button"
-            onClick={() => setExpanded((value) => !value)}
-            className={floatingActionButtonClass}
-          >
-            {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-            {expanded ? "Collapse metrics" : "Expand metrics"}
-          </button>
-          {layout === "floating" && (
-            <button
-              type="button"
-              aria-label="Close telemetry panel"
-              onClick={closeFloatingPanel}
-              className={floatingIconButtonClass}
-            >
-              <X className="h-4 w-4" />
-            </button>
-          )}
+            {layout === "floating" && (
+              <button
+                type="button"
+                aria-label="Close telemetry panel"
+                onClick={closeFloatingPanel}
+                className={floatingIconButtonClass}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+          {exportError ? (
+            <p role="alert" className="max-w-[18rem] text-right text-xs text-rose-100">
+              {exportError}
+            </p>
+          ) : null}
         </div>
       </div>
 
@@ -1098,6 +1280,11 @@ function GeminiRuntimeDetails({
   const gemini = metrics.sessionTelemetry.gemini
   if (!gemini) return null
   const coreview = metrics.coreview
+  const micConnectedNoSignal = !metrics.microphone.detectedAudio && (
+    metrics.microphone.streamCount > 0
+    || metrics.microphone.audioTrackCount > 0
+    || gemini.microphoneState === "connected"
+  )
 
   return (
     <>
@@ -1155,8 +1342,11 @@ function GeminiRuntimeDetails({
                 ["Sample windows", String(metrics.microphone.totalSampleWindows)],
                 ["Probe errors", String(metrics.microphone.errorCount)],
               ]}
-              footer={metrics.microphone.lastError ?? "Browser microphone probe remains provider-neutral for both runtime paths."}
-              tone={metrics.microphone.detectedAudio || gemini.microphoneState === "connected" ? "good" : "warn"}
+              footer={metrics.microphone.lastError
+                ?? (micConnectedNoSignal
+                  ? "Browser microphone stream is connected, but the local probe has not observed non-silent audio yet."
+                  : "Browser microphone probe remains provider-neutral for both runtime paths.")}
+              tone={metrics.microphone.detectedAudio ? "good" : "warn"}
             />
             <InfoCard
               icon={AudioLines}
@@ -1190,8 +1380,10 @@ function GeminiRuntimeDetails({
                 ["Artifacts", String(gemini.artifactCount)],
                 ["Artifact public events", String(gemini.artifactPublicEventCount)],
                 ["Artifact runtime ingest", String(gemini.artifactRuntimeIngestCount)],
+                ["Artifact selected stage", String(gemini.artifactSelectedStageCount)],
                 ["Artifact rendered", String(gemini.artifactRenderedCount)],
                 ["Artifact source", gemini.artifactCountSource],
+                ["Artifact mismatch", gemini.artifactCountMismatchReason ?? "none"],
                 ["Public diagnostics", String(gemini.publicDiagnosticCount)],
                 ["Last user transcript", formatIsoAge(gemini.lastUserTranscriptAt)],
                 ["Last Sophia transcript", formatIsoAge(gemini.lastAssistantTranscriptAt)],
@@ -1256,17 +1448,19 @@ function GeminiRuntimeDetails({
             title="Coreview"
             rows={[
               ["Frames sent", String(coreview.visual.frameSentCount)],
-              ["Refresh frames", String(coreview.visual.refreshFrameCount)],
+              ["Initial frame", coreview.visual.initialFrameSent ? "sent" : "pending"],
+              ["Visual fresh", coreview.visual.visualFresh ? "yes" : "no"],
+              ["Exact text", coreview.visual.exactTextAvailable ? "available" : "unavailable"],
               ["Last frame", formatBytes(coreview.visual.lastFrameBytes)],
               ["Max send latency", formatMs(coreview.visual.maxFrameSendLatencyMs)],
               ["Frame failures", String(coreview.visual.frameSendFailureCount)],
               ["Closed after frame", String(coreview.visual.websocketClosedAfterFrameCount)],
               ["Provider image count", coreview.visual.providerUsageImageCount === null ? "pending" : String(coreview.visual.providerUsageImageCount)],
-              ["Exact-text calls", String(coreview.exactText.exactTextCallCount)],
+              ["Exact-text calls", String(coreview.exactText.readArtifactTextCallCount)],
               ["Last text source", coreview.exactText.lastExactTextSource ?? "pending"],
               ["Last text status", coreview.exactText.lastExactTextStatus ?? "pending"],
             ]}
-            footer={coreview.visual.lastFrameSendFailureReason ?? "Coreview telemetry excludes raw frames, base64, raw text, and raw queries."}
+            footer={coreview.visual.lastFrameSendFailureReason ?? "Coreview telemetry excludes raw frames, raw provider payloads, raw text, and raw queries."}
             tone={coreview.visual.frameSendFailureCount > 0 || coreview.exactText.exactTextFailureCount > 0
               ? "warn"
               : coreview.visual.frameSentCount > 0 || coreview.exactText.exactTextCallCount > 0

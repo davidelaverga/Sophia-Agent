@@ -185,6 +185,8 @@ class GeminiVoiceConnectResponse(BaseModel):
     gemini_voice_configured: bool | None = None
     gemini_voice_configured_value_valid: bool | None = None
     gemini_voice_diagnostic: str | None = None
+    backendCoreviewFlagParsed: bool | None = None
+    backendStillFrameFlagParsed: bool | None = None
     preconnect: bool = False
     preconnect_ttl_ms: int | None = None
     preconnect_expires_at: str | None = None
@@ -284,9 +286,18 @@ class GeminiBrowserDogfoodRelayRequest(BaseModel):
         default=None,
         description="Browser-classified provider event categories",
     )
+    artifact_review_context: dict[str, object] | None = Field(
+        default=None,
+        description="Browser-safe artifact review context for suppressing review-only artifact churn",
+    )
 
     def voice_relay_payload(self) -> dict[str, object]:
-        payload: dict[str, object] = {"event": self.event}
+        payload: dict[str, object] = {
+            "event": _apply_artifact_review_tool_defaults(
+                self.event,
+                self.artifact_review_context,
+            )
+        }
         for key in (
             "provider_receive_sequence",
             "provider_relay_sequence",
@@ -413,6 +424,487 @@ def _build_gemini_production_relay_url() -> str:
 
 def _build_gemini_production_disconnect_url() -> str:
     return "/api/sophia/voice/gemini/disconnect"
+
+
+def _safe_prefix(value: object, *, length: int = 24) -> str | None:
+    return value[:length] if isinstance(value, str) and value else None
+
+
+def _safe_voice_error_detail(detail: object) -> str | None:
+    if isinstance(detail, str) and detail:
+        return detail[:240]
+    return None
+
+
+def _gemini_relay_log_context(
+    *,
+    user_id: str,
+    session_id: str,
+    body: "GeminiBrowserDogfoodRelayRequest",
+) -> dict[str, object]:
+    return {
+        "user_id": user_id,
+        "session_id_prefix": _safe_prefix(session_id),
+        "relay_correlation_id": _safe_prefix(body.relay_correlation_id),
+        "provider_receive_sequence": body.provider_receive_sequence,
+        "provider_relay_sequence": body.provider_relay_sequence,
+        "provider_primary_category": body.provider_primary_category,
+        "provider_categories": list(body.provider_categories or [])[:6],
+    }
+
+
+GEMINI_EMIT_ARTIFACT_TOOL_NAME = "emit_artifact"
+GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = "read_artifact_text"
+GEMINI_REVIEW_BLOCKED_TOOL_NAMES = {
+    "emit_artifact",
+    "start_builder_task",
+}
+ARTIFACT_REVIEW_EMIT_SUPPRESSED_REASON = "artifact_review_emit_artifact_suppressed"
+
+
+def _record_from_any_key(value: object, *keys: str) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+
+    for key in keys:
+        candidate = value.get(key)
+        if isinstance(candidate, dict):
+            return candidate
+    return None
+
+
+def _array_from_any_key(value: object, *keys: str) -> list[object]:
+    if not isinstance(value, dict):
+        return []
+
+    for key in keys:
+        candidate = value.get(key)
+        if isinstance(candidate, list):
+            return candidate
+    return []
+
+
+def _read_gemini_function_calls(event: dict[str, object]) -> list[dict[str, object]]:
+    tool_call = _record_from_any_key(event, "toolCall", "tool_call")
+    calls = [
+        call
+        for call in _array_from_any_key(tool_call, "functionCalls", "function_calls")
+        if isinstance(call, dict)
+    ]
+
+    server_content = _record_from_any_key(event, "serverContent", "server_content")
+    model_turn = _record_from_any_key(server_content, "modelTurn", "model_turn")
+    for part in _array_from_any_key(model_turn, "parts"):
+        function_call = _record_from_any_key(part, "functionCall", "function_call")
+        if function_call is not None:
+            calls.append(function_call)
+
+    return calls
+
+
+def _is_artifact_review_blocked_call(call: object) -> bool:
+    return (
+        isinstance(call, dict)
+        and (_string_from_any_key(call, "name") or "") in GEMINI_REVIEW_BLOCKED_TOOL_NAMES
+    )
+
+
+def _string_from_any_key(value: object, *keys: str) -> str | None:
+    if not isinstance(value, dict):
+        return None
+
+    for key in keys:
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    return None
+
+
+def _artifact_review_context_active(context: dict[str, object] | None) -> bool:
+    return bool(context and context.get("active") is True)
+
+
+def _artifact_review_user_intent(context: dict[str, object] | None) -> str:
+    value = context.get("user_intent") if context else None
+    return value if isinstance(value, str) and value else "unknown"
+
+
+def _artifact_review_context_artifact_id(context: dict[str, object] | None) -> str | None:
+    return _string_from_any_key(context, "artifact_id", "artifactId")
+
+
+def _apply_artifact_review_defaults_to_function_call(
+    call: object,
+    *,
+    artifact_id: str | None,
+) -> tuple[dict[str, object] | None, bool]:
+    if not isinstance(call, dict):
+        return None, False
+    if not artifact_id:
+        return dict(call), False
+    if (_string_from_any_key(call, "name") or "") != GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME:
+        return dict(call), False
+
+    raw_args = call.get("args")
+    if isinstance(raw_args, dict):
+        if _string_from_any_key(raw_args, "artifact_id", "artifactId"):
+            return dict(call), False
+        next_args = dict(raw_args)
+    else:
+        next_args = {}
+
+    next_args["artifact_id"] = artifact_id
+    next_call = dict(call)
+    next_call["args"] = next_args
+    return next_call, True
+
+
+def _event_key(payload: dict[str, object], camel: str, snake: str) -> str | None:
+    if camel in payload:
+        return camel
+    if snake in payload:
+        return snake
+    return None
+
+
+def _apply_artifact_review_defaults_to_call_list(
+    calls: object,
+    *,
+    artifact_id: str,
+) -> tuple[list[object], bool]:
+    raw_calls = calls if isinstance(calls, list) else []
+    next_calls: list[object] = []
+    mutated = False
+
+    for call in raw_calls:
+        next_call, call_mutated = _apply_artifact_review_defaults_to_function_call(
+            call,
+            artifact_id=artifact_id,
+        )
+        next_calls.append(next_call if next_call is not None else call)
+        mutated = mutated or call_mutated
+
+    return next_calls, mutated
+
+
+def _apply_artifact_review_defaults_to_tool_call_event(
+    event: dict[str, object],
+    *,
+    artifact_id: str,
+) -> tuple[str | None, dict[str, object] | None]:
+    tool_call_key = _event_key(event, "toolCall", "tool_call")
+    raw_tool_call = event.get(tool_call_key) if tool_call_key else None
+
+    if tool_call_key is None or not isinstance(raw_tool_call, dict):
+        return None, None
+
+    function_calls_key = _event_key(raw_tool_call, "functionCalls", "function_calls")
+    if function_calls_key is None:
+        return None, None
+
+    next_function_calls, mutated = _apply_artifact_review_defaults_to_call_list(
+        raw_tool_call.get(function_calls_key),
+        artifact_id=artifact_id,
+    )
+    if not mutated:
+        return None, None
+
+    next_tool_call = dict(raw_tool_call)
+    next_tool_call[function_calls_key] = next_function_calls
+    return tool_call_key, next_tool_call
+
+
+def _apply_artifact_review_defaults_to_model_part(
+    part: object,
+    *,
+    artifact_id: str,
+) -> tuple[object, bool]:
+    if not isinstance(part, dict):
+        return part, False
+
+    function_call_key = _event_key(part, "functionCall", "function_call")
+    if function_call_key is None:
+        return part, False
+
+    next_call, call_mutated = _apply_artifact_review_defaults_to_function_call(
+        part.get(function_call_key),
+        artifact_id=artifact_id,
+    )
+    if not call_mutated:
+        return part, False
+
+    next_part = dict(part)
+    next_part[function_call_key] = next_call
+    return next_part, True
+
+
+def _apply_artifact_review_defaults_to_model_parts(
+    parts: object,
+    *,
+    artifact_id: str,
+) -> tuple[list[object], bool]:
+    if not isinstance(parts, list):
+        return [], False
+
+    next_parts: list[object] = []
+    mutated = False
+    for part in parts:
+        next_part, part_mutated = _apply_artifact_review_defaults_to_model_part(
+            part,
+            artifact_id=artifact_id,
+        )
+        next_parts.append(next_part)
+        mutated = mutated or part_mutated
+
+    return next_parts, mutated
+
+
+def _apply_artifact_review_defaults_to_server_content_event(
+    event: dict[str, object],
+    *,
+    artifact_id: str,
+) -> tuple[str | None, dict[str, object] | None]:
+    server_content_key = _event_key(event, "serverContent", "server_content")
+    raw_server_content = event.get(server_content_key) if server_content_key else None
+
+    if server_content_key is None or not isinstance(raw_server_content, dict):
+        return None, None
+
+    model_turn_key = _event_key(raw_server_content, "modelTurn", "model_turn")
+    raw_model_turn = raw_server_content.get(model_turn_key) if model_turn_key else None
+
+    if model_turn_key is None or not isinstance(raw_model_turn, dict):
+        return None, None
+
+    next_parts, mutated = _apply_artifact_review_defaults_to_model_parts(
+        raw_model_turn.get("parts"),
+        artifact_id=artifact_id,
+    )
+    if not mutated:
+        return None, None
+
+    next_model_turn = dict(raw_model_turn)
+    next_model_turn["parts"] = next_parts
+    next_server_content = dict(raw_server_content)
+    next_server_content[model_turn_key] = next_model_turn
+    return server_content_key, next_server_content
+
+
+def _apply_artifact_review_tool_defaults(
+    event: dict[str, object],
+    context: dict[str, object] | None,
+) -> dict[str, object]:
+    if not _artifact_review_context_active(context):
+        return event
+
+    artifact_id = _artifact_review_context_artifact_id(context)
+    if not artifact_id:
+        return event
+
+    mutated = False
+    next_event = dict(event)
+
+    tool_call_key, next_tool_call = _apply_artifact_review_defaults_to_tool_call_event(
+        event,
+        artifact_id=artifact_id,
+    )
+    if tool_call_key and next_tool_call is not None:
+        next_event[tool_call_key] = next_tool_call
+        mutated = True
+
+    server_content_key, next_server_content = _apply_artifact_review_defaults_to_server_content_event(
+        event,
+        artifact_id=artifact_id,
+    )
+    if server_content_key and next_server_content is not None:
+        next_event[server_content_key] = next_server_content
+        mutated = True
+
+    return next_event if mutated else event
+
+
+def _suppressed_review_tool_calls(
+    body: GeminiBrowserDogfoodRelayRequest,
+) -> list[dict[str, object]]:
+    if not _artifact_review_context_active(body.artifact_review_context):
+        return []
+    if _artifact_review_user_intent(body.artifact_review_context) == "create_update":
+        return []
+
+    function_calls = _read_gemini_function_calls(body.event)
+    if not function_calls:
+        return []
+
+    blocked_calls = [call for call in function_calls if _is_artifact_review_blocked_call(call)]
+    if not blocked_calls:
+        return []
+
+    return blocked_calls
+
+
+def _artifact_review_batch_has_allowed_calls(body: GeminiBrowserDogfoodRelayRequest) -> bool:
+    function_calls = _read_gemini_function_calls(body.event)
+    return any(not _is_artifact_review_blocked_call(call) for call in function_calls)
+
+
+def _without_blocked_artifact_review_calls(event: dict[str, object]) -> dict[str, object]:
+    next_event = dict(event)
+    _remove_blocked_top_level_tool_calls(next_event)
+    _remove_blocked_model_turn_tool_calls(next_event)
+    return next_event
+
+
+def _remove_blocked_top_level_tool_calls(event: dict[str, object]) -> None:
+    tool_call_key = _event_key(event, "toolCall", "tool_call")
+    raw_tool_call = event.get(tool_call_key) if tool_call_key else None
+    if tool_call_key is None or not isinstance(raw_tool_call, dict):
+        return
+
+    function_calls_key = _event_key(raw_tool_call, "functionCalls", "function_calls")
+    raw_calls = raw_tool_call.get(function_calls_key) if function_calls_key else None
+    if function_calls_key is None or not isinstance(raw_calls, list):
+        return
+
+    next_tool_call = dict(raw_tool_call)
+    next_tool_call[function_calls_key] = [
+        call for call in raw_calls if not _is_artifact_review_blocked_call(call)
+    ]
+    event[tool_call_key] = next_tool_call
+
+
+def _remove_blocked_model_turn_tool_calls(event: dict[str, object]) -> None:
+    server_content_key = _event_key(event, "serverContent", "server_content")
+    raw_server_content = event.get(server_content_key) if server_content_key else None
+    if server_content_key is None or not isinstance(raw_server_content, dict):
+        return
+
+    model_turn_key = _event_key(raw_server_content, "modelTurn", "model_turn")
+    raw_model_turn = raw_server_content.get(model_turn_key) if model_turn_key else None
+    if model_turn_key is None or not isinstance(raw_model_turn, dict):
+        return
+
+    parts = raw_model_turn.get("parts")
+    if not isinstance(parts, list):
+        return
+
+    next_model_turn = dict(raw_model_turn)
+    next_model_turn["parts"] = [
+        part for part in parts if not _model_part_has_blocked_artifact_review_call(part)
+    ]
+    next_server_content = dict(raw_server_content)
+    next_server_content[model_turn_key] = next_model_turn
+    event[server_content_key] = next_server_content
+
+
+def _model_part_has_blocked_artifact_review_call(part: object) -> bool:
+    if not isinstance(part, dict):
+        return False
+    function_call = _record_from_any_key(part, "functionCall", "function_call")
+    return _is_artifact_review_blocked_call(function_call)
+
+
+def _voice_relay_payload_for_event(
+    body: GeminiBrowserDogfoodRelayRequest,
+    event: dict[str, object],
+) -> dict[str, object]:
+    payload = body.voice_relay_payload()
+    payload["event"] = _apply_artifact_review_tool_defaults(
+        event,
+        body.artifact_review_context,
+    )
+    return payload
+
+
+def _merge_artifact_review_guard_payload(
+    payload: dict[str, object],
+    guard_payload: dict[str, object] | None,
+) -> dict[str, object]:
+    if guard_payload is None:
+        return payload
+
+    for key in ("client_actions", "tool_diagnostics"):
+        existing = payload.get(key)
+        payload[key] = [
+            *(existing if isinstance(existing, list) else []),
+            *(guard_payload.get(key) if isinstance(guard_payload.get(key), list) else []),
+        ]
+
+    diagnostics = payload.get("diagnostics")
+    guard_diagnostics = guard_payload.get("diagnostics")
+    if isinstance(diagnostics, dict) and isinstance(guard_diagnostics, dict):
+        payload["diagnostics"] = {**diagnostics, "artifact_review_guard": guard_diagnostics}
+    elif isinstance(guard_diagnostics, dict):
+        payload["diagnostics"] = {"artifact_review_guard": guard_diagnostics}
+
+    return payload
+
+
+def _artifact_review_emit_suppression_payload(
+    body: GeminiBrowserDogfoodRelayRequest,
+) -> dict[str, object] | None:
+    blocked_calls = _suppressed_review_tool_calls(body)
+    if not blocked_calls:
+        return None
+
+    guidance = (
+        "Artifact review is active. Use read_artifact_text for exact artifact text and answer from the "
+        "existing artifact unless the user explicitly asks to create or update an artifact."
+    )
+    function_responses: list[dict[str, object]] = []
+    tool_diagnostics: list[dict[str, object]] = []
+
+    for index, call in enumerate(blocked_calls):
+        tool_call_id = _string_from_any_key(call, "id") or f"artifact-review-emit-{index + 1}"
+        tool_name = _string_from_any_key(call, "name") or GEMINI_EMIT_ARTIFACT_TOOL_NAME
+        response = {
+            "ok": False,
+            "status": "rejected",
+            "safe_reason": ARTIFACT_REVIEW_EMIT_SUPPRESSED_REASON,
+            "recovery_guidance": guidance,
+            "raw_artifact_text_excluded": True,
+        }
+        function_responses.append({
+            "id": tool_call_id,
+            "name": tool_name,
+            "response": response,
+        })
+        tool_diagnostics.append({
+            "id": tool_call_id,
+            "name": tool_name,
+            "success": False,
+            "execution_rejected": True,
+            "rejection_reason": ARTIFACT_REVIEW_EMIT_SUPPRESSED_REASON,
+            "recovery_guidance": guidance,
+            "response": response,
+        })
+
+    return {
+        "accepted": True,
+        "client_actions": [
+            {
+                "type": "gemini_tool_response",
+                "payload": {
+                    "toolResponse": {
+                        "functionResponses": function_responses,
+                    },
+                },
+                "result_summary": "Review-only emit_artifact call suppressed.",
+            },
+        ],
+        "tool_diagnostics": tool_diagnostics,
+        "diagnostics": {
+            "schema": "artifact_review_tool_guard_v1",
+            "artifact_review_active": True,
+            "artifact_review_user_intent": _artifact_review_user_intent(body.artifact_review_context),
+            "review_tool_churn_detected": True,
+            "suppressed_tool_count": len(blocked_calls),
+            "suppressed_tools": sorted({
+                _string_from_any_key(call, "name") or GEMINI_EMIT_ARTIFACT_TOOL_NAME
+                for call in blocked_calls
+            }),
+            "raw_artifact_text_excluded": True,
+        },
+    }
 
 
 async def _raise_voice_dogfood_error(response: httpx.Response) -> None:
@@ -1101,11 +1593,24 @@ async def gemini_browser_dogfood_relay(
     body: GeminiBrowserDogfoodRelayRequest,
 ) -> dict[str, object]:
     encoded_session_id = quote(body.session_id, safe="")
+    guard_payload = _artifact_review_emit_suppression_payload(body)
+    has_allowed_calls = _artifact_review_batch_has_allowed_calls(body) if guard_payload is not None else False
+    if guard_payload is not None and not has_allowed_calls:
+        guard_payload["stream_url"] = _build_gemini_dogfood_events_stream_url(user_id, body.session_id)
+        return guard_payload
+
+    relay_payload = (
+        _voice_relay_payload_for_event(body, _without_blocked_artifact_review_calls(body.event))
+        if guard_payload is not None
+        else body.voice_relay_payload()
+    )
+
     payload = await _proxy_voice_dogfood_json(
         "POST",
         f"/dogfood/realtime/gemini/browser-sessions/{encoded_session_id}/provider-events",
-        json_body=body.voice_relay_payload(),
+        json_body=relay_payload,
     )
+    payload = _merge_artifact_review_guard_payload(payload, guard_payload)
     payload["stream_url"] = _build_gemini_dogfood_events_stream_url(user_id, body.session_id)
     return payload
 
@@ -1208,11 +1713,42 @@ async def gemini_production_relay(
     body: GeminiBrowserDogfoodRelayRequest,
 ) -> dict[str, object]:
     encoded_session_id = quote(body.session_id, safe="")
-    payload = await _proxy_voice_runtime_json(
-        "POST",
-        f"/production/realtime/gemini/browser-sessions/{encoded_session_id}/provider-events",
-        json_body=body.voice_relay_payload(),
+    log_context = _gemini_relay_log_context(user_id=user_id, session_id=body.session_id, body=body)
+    guard_payload = _artifact_review_emit_suppression_payload(body)
+    has_allowed_calls = _artifact_review_batch_has_allowed_calls(body) if guard_payload is not None else False
+    if guard_payload is not None and not has_allowed_calls:
+        logger.info(
+            "voice.gemini.relay suppressed review emit_artifact context=%s",
+            log_context,
+        )
+        guard_payload["stream_url"] = _build_gemini_production_events_stream_url(body.session_id)
+        return guard_payload
+
+    relay_payload = (
+        _voice_relay_payload_for_event(body, _without_blocked_artifact_review_calls(body.event))
+        if guard_payload is not None
+        else body.voice_relay_payload()
     )
+
+    try:
+        payload = await _proxy_voice_runtime_json(
+            "POST",
+            f"/production/realtime/gemini/browser-sessions/{encoded_session_id}/provider-events",
+            json_body=relay_payload,
+        )
+    except HTTPException as exc:
+        logger.warning(
+            "voice.gemini.relay failed status=%s detail=%s context=%s",
+            exc.status_code,
+            _safe_voice_error_detail(exc.detail),
+            log_context,
+        )
+        raise
+    logger.info(
+        "voice.gemini.relay accepted status=202 context=%s",
+        log_context,
+    )
+    payload = _merge_artifact_review_guard_payload(payload, guard_payload)
     payload["stream_url"] = _build_gemini_production_events_stream_url(body.session_id)
     return payload
 

@@ -1,7 +1,12 @@
 import { act, renderHook } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import type { ArtifactReviewVoiceCommandRouteResult } from '../../app/lib/artifact-review-voice-commands';
 import type { InterruptPayload } from '../../app/lib/session-types';
+import {
+  clearSessionLeaveGuardAnnotationSuppressionForTests,
+  isSessionLeaveGuardSuppressedForAnnotation,
+} from '../../app/session/session-annotation-navigation-guard';
 import { useSessionVoiceCommandSystem } from '../../app/session/useSessionVoiceCommandSystem';
 
 function buildParams(overrides: Partial<Parameters<typeof useSessionVoiceCommandSystem>[0]> = {}) {
@@ -62,6 +67,10 @@ function buildParams(overrides: Partial<Parameters<typeof useSessionVoiceCommand
 }
 
 describe('useSessionVoiceCommandSystem', () => {
+  afterEach(() => {
+    clearSessionLeaveGuardAnnotationSuppressionForTests();
+  });
+
   it('routes session end command and suppresses assistant response', () => {
     const {
       params,
@@ -84,6 +93,44 @@ describe('useSessionVoiceCommandSystem', () => {
     expect(showToast).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Ending session by voice command.', variant: 'info' }),
     );
+  });
+
+  it('keeps the explicit leave-session command routed to session exit', () => {
+    const {
+      params,
+      onUserTranscript,
+      handleVoiceEndSession,
+      bargeIn,
+    } = buildParams();
+
+    const { result } = renderHook(() => useSessionVoiceCommandSystem(params));
+
+    act(() => {
+      result.current.handleVoiceTranscript('Sophia leave the session');
+    });
+
+    expect(handleVoiceEndSession).toHaveBeenCalledTimes(1);
+    expect(onUserTranscript).not.toHaveBeenCalled();
+    expect(bargeIn).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps go back routed to session exit outside annotation context', () => {
+    const {
+      params,
+      onUserTranscript,
+      handleVoiceEndSession,
+      bargeIn,
+    } = buildParams();
+
+    const { result } = renderHook(() => useSessionVoiceCommandSystem(params));
+
+    act(() => {
+      result.current.handleVoiceTranscript('Sophia go back');
+    });
+
+    expect(handleVoiceEndSession).toHaveBeenCalledTimes(1);
+    expect(onUserTranscript).not.toHaveBeenCalled();
+    expect(bargeIn).toHaveBeenCalledTimes(1);
   });
 
   it('routes interrupt accept command to selected option handler', () => {
@@ -155,6 +202,100 @@ describe('useSessionVoiceCommandSystem', () => {
     expect(showToast).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Downloading deliverable.', variant: 'success' }),
     );
+  });
+
+  it('routes artifact review commands without appending them as normal transcripts', () => {
+    const {
+      params,
+      onUserTranscript,
+      showToast,
+      bargeIn,
+      softBargeIn,
+    } = buildParams({
+      pendingInterrupt: null,
+      routeArtifactReviewCommand: vi.fn(() => ({
+        handled: true,
+        command: { kind: 'go_to_page', pageTarget: 2 },
+        applied: true,
+        blockedReason: null,
+        triggeredRefresh: true,
+        refreshResult: 'pending',
+        userMessage: null,
+      } satisfies ArtifactReviewVoiceCommandRouteResult)),
+    });
+
+    const { result } = renderHook(() => useSessionVoiceCommandSystem(params));
+
+    act(() => {
+      result.current.handleVoiceTranscript('Go to page two in your analysis.');
+    });
+
+    expect(onUserTranscript).not.toHaveBeenCalled();
+    expect(bargeIn).not.toHaveBeenCalled();
+    expect(softBargeIn).toHaveBeenCalledTimes(1);
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('routes leave-a-comment phrasing as annotation without ending the session', () => {
+    const routeArtifactReviewCommand = vi.fn(() => ({
+      handled: true,
+      command: {
+        kind: 'add_annotation',
+        annotationKind: 'comment',
+        commentText: 'change the font',
+        utteranceKind: 'annotation_comment',
+      },
+      applied: true,
+      blockedReason: null,
+      triggeredRefresh: false,
+      refreshResult: 'not_requested',
+      userMessage: null,
+    } satisfies ArtifactReviewVoiceCommandRouteResult));
+    const {
+      params,
+      onUserTranscript,
+      handleVoiceEndSession,
+      bargeIn,
+      softBargeIn,
+    } = buildParams({
+      pendingInterrupt: null,
+      routeArtifactReviewCommand,
+    });
+
+    const { result } = renderHook(() => useSessionVoiceCommandSystem(params));
+
+    act(() => {
+      result.current.handleVoiceTranscript('Sophia leave a comment: change the font');
+    });
+
+    expect(routeArtifactReviewCommand).toHaveBeenCalledWith('Sophia leave a comment: change the font');
+    expect(handleVoiceEndSession).not.toHaveBeenCalled();
+    expect(onUserTranscript).not.toHaveBeenCalled();
+    expect(bargeIn).not.toHaveBeenCalled();
+    expect(softBargeIn).toHaveBeenCalledTimes(1);
+    expect(isSessionLeaveGuardSuppressedForAnnotation()).toBe(true);
+  });
+
+  it('suppresses session exit for annotation phrases even before a review target handles them', () => {
+    const {
+      params,
+      onUserTranscript,
+      handleVoiceEndSession,
+      bargeIn,
+      softBargeIn,
+    } = buildParams({ pendingInterrupt: null });
+
+    const { result } = renderHook(() => useSessionVoiceCommandSystem(params));
+
+    act(() => {
+      result.current.handleVoiceTranscript('Sophia leave a note on the title');
+    });
+
+    expect(handleVoiceEndSession).not.toHaveBeenCalled();
+    expect(bargeIn).not.toHaveBeenCalled();
+    expect(softBargeIn).not.toHaveBeenCalled();
+    expect(onUserTranscript).toHaveBeenCalledWith('Sophia leave a note on the title');
+    expect(isSessionLeaveGuardSuppressedForAnnotation()).toBe(true);
   });
 
   it('warns for wake-word download command when no builder deliverable is ready', () => {

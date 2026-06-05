@@ -15,9 +15,15 @@
 import { CallingState } from "@stream-io/video-react-sdk"
 import { useCallback, useEffect, useRef, useState } from "react"
 
+import {
+  parseArtifactReviewVoiceCommands,
+  type ArtifactReviewVoiceCommand,
+} from "../lib/artifact-review-voice-commands"
+import { coreviewFlagDiagnostics } from "../lib/co-review-flags"
 import { logger } from "../lib/error-logger"
 import {
   connectGeminiBrowserLiveFromBootstrap,
+  readGeminiConfiguredToolNames,
   type GeminiBrowserLiveDogfoodConnection,
   type GeminiBargeInTranscriptHandoffDiagnostic,
   type GeminiArtifactFramePayload,
@@ -143,6 +149,14 @@ export type StreamVoiceSessionReturn = {
   bargeIn: () => void
   /** Clears speaking UI state without tearing down transport (SSE/call/credentials stay alive). */
   softBargeIn: () => void
+  markAnnotationActionSucceeded: (counts?: {
+    annotationCount?: number | null
+    highlightCount?: number | null
+    commentCount?: number | null
+    underlineCount?: number | null
+    arrowCount?: number | null
+    drawPathCount?: number | null
+  }) => void
   resetVoiceState: () => void
   /** Always false — Stream handles retries server-side */
   hasRetryableVoiceTurn: () => boolean
@@ -180,6 +194,19 @@ const RECENT_BARGE_IN_TRANSCRIPT_FINGERPRINTS_LIMIT = 10
 const AUTO_PRECONNECT_DELAY_MS = 250
 const PREPARED_VOICE_CONNECT_TTL_MS = 30_000
 const GEMINI_EMIT_ARTIFACT_TOOL_NAME = "emit_artifact"
+const GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = "read_artifact_text"
+const GEMINI_COREVIEW_GET_CURRENT_VIEW_TOOL_NAME = "coreview_get_current_view"
+const GEMINI_COREVIEW_ADD_ANNOTATION_TOOL_NAME = "coreview_add_annotation"
+const GEMINI_COREVIEW_FOCUS_ANCHOR_TOOL_NAME = "coreview_focus_anchor"
+const RECENT_ANNOTATION_INTENT_WINDOW_MS = 20_000
+const GEMINI_REVIEW_TOOL_NAMES = new Set([
+  GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
+  "coreview_set_view",
+  "coreview_refresh_view",
+  GEMINI_COREVIEW_GET_CURRENT_VIEW_TOOL_NAME,
+  GEMINI_COREVIEW_ADD_ANNOTATION_TOOL_NAME,
+  GEMINI_COREVIEW_FOCUS_ANCHOR_TOOL_NAME,
+])
 const GEMINI_TRANSCRIPT_COALESCING_DISABLED_REASON = "provider_output_transcription_is_delta_like"
 const GEMINI_BUILDER_TOOL_NAMES = new Set([
   "start_builder_task",
@@ -223,6 +250,18 @@ function createGeminiRuntimeTelemetry(params: Partial<Extract<VoiceRuntimeTeleme
     lastProviderEventAt: params.lastProviderEventAt ?? null,
     lastProviderEventType: params.lastProviderEventType ?? null,
     providerCategoryCounts: params.providerCategoryCounts ?? {},
+    reviewVoiceReady: params.reviewVoiceReady ?? false,
+    reviewMicAudioDetected: params.reviewMicAudioDetected ?? false,
+    reviewUserSpeechDetected: params.reviewUserSpeechDetected ?? false,
+    reviewProviderTranscriptObserved: params.reviewProviderTranscriptObserved ?? false,
+    reviewPublicTranscriptObserved: params.reviewPublicTranscriptObserved ?? false,
+    reviewTranscriptPromotionBlockedReason: params.reviewTranscriptPromotionBlockedReason ?? null,
+    providerInputTranscriptCount: params.providerInputTranscriptCount ?? 0,
+    publicUserTranscriptCount: params.publicUserTranscriptCount ?? 0,
+    providerToPublicTranscriptGap: params.providerToPublicTranscriptGap ?? 0,
+    firstProviderTranscriptAt: params.firstProviderTranscriptAt ?? null,
+    firstPublicUserTranscriptAt: params.firstPublicUserTranscriptAt ?? null,
+    transcriptPromotionLatencyMs: params.transcriptPromotionLatencyMs ?? null,
     outputAudioEventCount: params.outputAudioEventCount ?? 0,
     lastOutputAudioAt: params.lastOutputAudioAt ?? null,
     assistantTranscriptSource: params.assistantTranscriptSource ?? null,
@@ -294,13 +333,222 @@ function createGeminiRuntimeTelemetry(params: Partial<Extract<VoiceRuntimeTeleme
     artifactToolCallCount: params.artifactToolCallCount ?? 0,
     artifactToolCallUnknownCount: params.artifactToolCallUnknownCount ?? 0,
     builderToolCallCount: params.builderToolCallCount ?? 0,
+    reviewToolsExposed: params.reviewToolsExposed ?? [],
+    emitArtifactExposedDuringReview: params.emitArtifactExposedDuringReview ?? false,
+    reviewToolTimedOut: params.reviewToolTimedOut ?? false,
+    reviewToolTimeoutName: params.reviewToolTimeoutName ?? null,
+    reviewToolTimeoutResultSent: params.reviewToolTimeoutResultSent ?? false,
+    coreviewGetCurrentViewCount: params.coreviewGetCurrentViewCount ?? 0,
+    coreviewGetCurrentViewResult: params.coreviewGetCurrentViewResult ?? null,
+    readArtifactTextResolvedCount: params.readArtifactTextResolvedCount ?? 0,
+    readArtifactTextUnresolvedCount: params.readArtifactTextUnresolvedCount ?? 0,
+    readArtifactTextTimeoutCount: params.readArtifactTextTimeoutCount ?? 0,
+    readArtifactTextLastStatus: params.readArtifactTextLastStatus ?? null,
+    readArtifactTextPdfExtractionStatus: params.readArtifactTextPdfExtractionStatus ?? null,
+    exactTextRegistrySource: params.exactTextRegistrySource ?? null,
+    annotationOverlayCaptured: params.annotationOverlayCaptured ?? null,
+    annotationCount: params.annotationCount ?? 0,
+    highlightCount: params.highlightCount ?? 0,
+    commentCount: params.commentCount ?? 0,
+    underlineCount: params.underlineCount ?? 0,
+    arrowCount: params.arrowCount ?? 0,
+    drawPathCount: params.drawPathCount ?? 0,
+    annotationPersistenceStatus: params.annotationPersistenceStatus ?? null,
+    annotationRestoreAttempted: params.annotationRestoreAttempted ?? false,
+    annotationRestoreResult: params.annotationRestoreResult ?? null,
+    annotationRestoreCount: params.annotationRestoreCount ?? 0,
+    annotationRestoreSource: params.annotationRestoreSource ?? null,
+    annotationPersistAttempted: params.annotationPersistAttempted ?? false,
+    annotationPersistResult: params.annotationPersistResult ?? null,
+    annotationPersistCount: params.annotationPersistCount ?? 0,
+    annotationPersistedCount: params.annotationPersistedCount ?? 0,
+    annotationStorageVersion: params.annotationStorageVersion ?? null,
+    annotationStorageKeyHash: params.annotationStorageKeyHash ?? null,
+    annotationIdentityWriteHash: params.annotationIdentityWriteHash ?? null,
+    annotationIdentityReadHash: params.annotationIdentityReadHash ?? null,
+    annotationRestoreOverwrittenCount: params.annotationRestoreOverwrittenCount ?? 0,
+    annotationStateClearedReason: params.annotationStateClearedReason ?? null,
+    canvasRestoreAttempted: params.canvasRestoreAttempted ?? false,
+    canvasRestoreResult: params.canvasRestoreResult ?? null,
+    canvasRestoreSource: params.canvasRestoreSource ?? null,
+    canvasRestoredArtifactIdentityHash: params.canvasRestoredArtifactIdentityHash ?? null,
+    stickyToolModeEnabled: params.stickyToolModeEnabled ?? false,
+    lastToolModeBeforeAction: params.lastToolModeBeforeAction ?? null,
+    lastToolModeAfterAction: params.lastToolModeAfterAction ?? null,
+    toolModeResetReason: params.toolModeResetReason ?? null,
+    annotationExportAvailable: params.annotationExportAvailable ?? false,
+    annotationExportResult: params.annotationExportResult ?? null,
+    annotationExportKind: params.annotationExportKind ?? null,
+    annotationExportPageScope: params.annotationExportPageScope ?? null,
+    annotationDeleteCount: params.annotationDeleteCount ?? 0,
+    annotationEditCount: params.annotationEditCount ?? 0,
+    unsupportedAnnotationKind: params.unsupportedAnnotationKind ?? null,
+    annotationActionSource: params.annotationActionSource ?? null,
+    coreviewAnnotationToolCount: params.coreviewAnnotationToolCount ?? 0,
+    coreviewAnnotationFallbackCount: params.coreviewAnnotationFallbackCount ?? 0,
+    coreviewAnnotationCommandSource: params.coreviewAnnotationCommandSource ?? null,
+    coreviewAnnotationToolResult: params.coreviewAnnotationToolResult ?? null,
+    coreviewAnnotationFallbackResult: params.coreviewAnnotationFallbackResult ?? null,
+    coreviewAnnotationKind: params.coreviewAnnotationKind ?? null,
+    coreviewAnnotationAnchorType: params.coreviewAnnotationAnchorType ?? null,
+    coreviewAnnotationColor: params.coreviewAnnotationColor ?? null,
+    coreviewAnnotationPageIndex: params.coreviewAnnotationPageIndex ?? null,
+    coreviewAnnotationBlockedReason: params.coreviewAnnotationBlockedReason ?? null,
+    annotationIntentDetectedCount: params.annotationIntentDetectedCount ?? 0,
+    annotationIntentSource: params.annotationIntentSource ?? null,
+    annotationFallbackAttempted: params.annotationFallbackAttempted ?? false,
+    annotationFallbackResult: params.annotationFallbackResult ?? null,
+    annotationFallbackBlockedReason: params.annotationFallbackBlockedReason ?? null,
+    annotationFallbackUtteranceKind: params.annotationFallbackUtteranceKind ?? null,
+    recentAnnotationActionSucceeded: params.recentAnnotationActionSucceeded ?? false,
+    annotationCommitAttempted: params.annotationCommitAttempted ?? false,
+    annotationCommitResult: params.annotationCommitResult ?? null,
+    annotationCommitCountBefore: params.annotationCommitCountBefore ?? null,
+    annotationCommitCountAfter: params.annotationCommitCountAfter ?? null,
+    annotationCommitVerified: params.annotationCommitVerified ?? false,
+    annotationCommandPreventedNavigation: params.annotationCommandPreventedNavigation ?? false,
+    annotationCommandKeptArtifactMounted: params.annotationCommandKeptArtifactMounted ?? false,
+    annotationViewReadyTimedOut: params.annotationViewReadyTimedOut ?? false,
+    annotationPartialSuccess: params.annotationPartialSuccess ?? false,
+    sessionLeaveGuardSuppressedForAnnotation: params.sessionLeaveGuardSuppressedForAnnotation ?? false,
+    assistantAnnotationClaimSuppressedCount: params.assistantAnnotationClaimSuppressedCount ?? 0,
+    coreviewFocusAnchorCount: params.coreviewFocusAnchorCount ?? 0,
+    coreviewFocusAnchorResult: params.coreviewFocusAnchorResult ?? null,
+    coreviewFocusAnchorType: params.coreviewFocusAnchorType ?? null,
     unresolvedToolCallCount: params.unresolvedToolCallCount ?? 0,
     oldestUnresolvedToolCallAgeMs: params.oldestUnresolvedToolCallAgeMs ?? null,
     lastToolPhase: params.lastToolPhase ?? null,
     lastToolName: params.lastToolName ?? null,
     lastToolAt: params.lastToolAt ?? null,
+    emitArtifactBlockedDuringReviewCount: params.emitArtifactBlockedDuringReviewCount ?? 0,
+    emitArtifactBlockedForAnnotationIntentCount: params.emitArtifactBlockedForAnnotationIntentCount ?? 0,
     toolCallLedger: params.toolCallLedger ?? [],
   }
+}
+
+function applyGeminiTranscriptReadiness(
+  current: Extract<VoiceRuntimeTelemetry, { runtime: "gemini_live" }>,
+  patch: Partial<Extract<VoiceRuntimeTelemetry, { runtime: "gemini_live" }>>,
+): Extract<VoiceRuntimeTelemetry, { runtime: "gemini_live" }> {
+  const next = { ...current, ...patch }
+  const providerInputTranscriptCount = next.providerInputTranscriptCount ?? 0
+  const publicUserTranscriptCount = next.publicUserTranscriptCount ?? 0
+  const providerToPublicTranscriptGap = Math.max(providerInputTranscriptCount - publicUserTranscriptCount, 0)
+  const reviewProviderTranscriptObserved = next.reviewProviderTranscriptObserved === true || providerInputTranscriptCount > 0
+  const reviewPublicTranscriptObserved = next.reviewPublicTranscriptObserved === true || publicUserTranscriptCount > 0
+  const reviewUserSpeechDetected = next.reviewUserSpeechDetected === true
+  const reviewMicAudioDetected = next.reviewMicAudioDetected === true
+  let reviewTranscriptPromotionBlockedReason: string | null = null
+
+  if (reviewProviderTranscriptObserved && !reviewPublicTranscriptObserved && providerToPublicTranscriptGap > 0) {
+    reviewTranscriptPromotionBlockedReason = "provider_transcript_not_surfaced"
+  } else if (reviewUserSpeechDetected && !reviewProviderTranscriptObserved && !reviewPublicTranscriptObserved) {
+    reviewTranscriptPromotionBlockedReason = "voice_input_detected_waiting_for_transcript"
+  } else if (patch.reviewTranscriptPromotionBlockedReason !== undefined) {
+    reviewTranscriptPromotionBlockedReason = patch.reviewTranscriptPromotionBlockedReason
+  }
+
+  return {
+    ...next,
+    reviewVoiceReady: reviewTranscriptPromotionBlockedReason === null,
+    reviewMicAudioDetected,
+    reviewUserSpeechDetected,
+    reviewProviderTranscriptObserved,
+    reviewPublicTranscriptObserved,
+    reviewTranscriptPromotionBlockedReason,
+    providerInputTranscriptCount,
+    publicUserTranscriptCount,
+    providerToPublicTranscriptGap,
+    transcriptPromotionLatencyMs: transcriptLatencyMs(next.firstProviderTranscriptAt, next.firstPublicUserTranscriptAt),
+  }
+}
+
+function transcriptLatencyMs(startIso: string | null | undefined, endIso: string | null | undefined): number | null {
+  if (!startIso || !endIso) return null
+  const start = Date.parse(startIso)
+  const end = Date.parse(endIso)
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null
+  return end - start
+}
+
+type AnnotationIntentTranscriptSource = "public_user_transcript" | "barge_in_transcript_handoff"
+
+type RecentAnnotationIntentState = {
+  atMs: number
+  source: AnnotationIntentTranscriptSource
+  utteranceKind: string
+  annotationCount: number
+  highlightCount: number
+  commentCount: number
+  underlineCount: number
+  arrowCount: number
+  drawPathCount: number
+}
+
+type RecentAnnotationSuccessState = {
+  atMs: number
+  annotationCount: number
+  highlightCount: number
+  commentCount: number
+  underlineCount: number
+  arrowCount: number
+  drawPathCount: number
+}
+
+function annotationCommandsFromTranscript(text: string): ArtifactReviewVoiceCommand[] {
+  return parseArtifactReviewVoiceCommands(text).filter((command) => command.kind === "add_annotation")
+}
+
+function annotationUtteranceKindFromCommands(commands: ArtifactReviewVoiceCommand[]): string {
+  if (commands.length > 1) return "annotation_compound"
+  const command = commands[0]
+  if (!command) return "annotation_unknown"
+  return command.utteranceKind
+    ?? (command.annotationKind === "comment" ? "annotation_comment" : "annotation_highlight")
+}
+
+function isAssistantAnnotationSuccessClaim(text: string): boolean {
+  const normalized = text
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .replace(/\s+/g, " ")
+  if (!normalized) return false
+  return [
+    /\b(?:i\s+)?highlighted\b/u,
+    /\b(?:i\s+)?marked\b/u,
+    /\b(?:i\s+)?annotated\b/u,
+    /\badded\s+(?:a\s+)?comment\b/u,
+    /\bleft\s+(?:a\s+)?comment\b/u,
+    /\bpinned\s+(?:a\s+)?note\b/u,
+    /\bdone\s+i\s+added\b/u,
+    /\bdone\s+i\s+highlighted\b/u,
+  ].some((pattern) => pattern.test(normalized))
+}
+
+function annotationCountsIncreased(
+  baseline: RecentAnnotationIntentState,
+  success: RecentAnnotationSuccessState | null,
+): boolean {
+  if (!success || success.atMs < baseline.atMs) {
+    return false
+  }
+  return success.annotationCount > baseline.annotationCount
+    || success.highlightCount > baseline.highlightCount
+    || success.commentCount > baseline.commentCount
+    || success.underlineCount > baseline.underlineCount
+    || success.arrowCount > baseline.arrowCount
+    || success.drawPathCount > baseline.drawPathCount
+}
+
+function annotationSuccessCount(
+  value: number | null | undefined,
+  fallback: number,
+): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.floor(value))
+    : fallback
 }
 
 function geminiStageTelemetry(stage: string): {
@@ -704,6 +952,10 @@ export function useStreamVoiceSession(
   const recentUserTranscriptIdsRef = useRef<string[]>([])
   const recentBargeInTranscriptFingerprintsRef = useRef<string[]>([])
   const currentTurnUserTranscriptRef = useRef<string | null>(null)
+  const runtimeTelemetryRef = useRef<VoiceRuntimeTelemetry>(runtimeTelemetry)
+  const recentAnnotationIntentRef = useRef<RecentAnnotationIntentState | null>(null)
+  const recentAnnotationSuccessRef = useRef<RecentAnnotationSuccessState | null>(null)
+  const suppressedAssistantAnnotationClaimKeysRef = useRef<string[]>([])
   const softBargeInActiveRef = useRef(false)
   const userMicMutedRef = useRef(false)
   const destroyedRef = useRef(false)
@@ -749,6 +1001,7 @@ export function useStreamVoiceSession(
   })
 
   // Keep refs current without re-binding effects
+  useEffect(() => { runtimeTelemetryRef.current = runtimeTelemetry }, [runtimeTelemetry])
   useEffect(() => { credentialsRef.current = credentials }, [credentials])
   useEffect(() => { geminiConnectionRef.current = geminiConnection }, [geminiConnection])
   useEffect(() => { onArtifactsRef.current = onArtifacts }, [onArtifacts])
@@ -937,6 +1190,193 @@ export function useStreamVoiceSession(
     return true
   }, [resetGeminiOpeningGreetingLatch])
 
+  const rememberAnnotationIntentFromTranscript = useCallback((
+    text: string,
+    source: AnnotationIntentTranscriptSource,
+  ) => {
+    const annotationCommands = annotationCommandsFromTranscript(text)
+    if (annotationCommands.length === 0) {
+      return
+    }
+
+    const telemetry = runtimeTelemetryRef.current
+    const baseline = telemetry.runtime === "gemini_live"
+        ? {
+          annotationCount: telemetry.annotationCount ?? 0,
+          highlightCount: telemetry.highlightCount ?? 0,
+          commentCount: telemetry.commentCount ?? 0,
+          underlineCount: telemetry.underlineCount ?? 0,
+          arrowCount: telemetry.arrowCount ?? 0,
+          drawPathCount: telemetry.drawPathCount ?? 0,
+        }
+      : {
+          annotationCount: 0,
+          highlightCount: 0,
+          commentCount: 0,
+          underlineCount: 0,
+          arrowCount: 0,
+          drawPathCount: 0,
+        }
+    const utteranceKind = annotationUtteranceKindFromCommands(annotationCommands)
+    recentAnnotationIntentRef.current = {
+      atMs: Date.now(),
+      source,
+      utteranceKind,
+      ...baseline,
+    }
+
+    setRuntimeTelemetry((current) => current.runtime === "gemini_live"
+      ? {
+          ...current,
+          annotationIntentDetectedCount: (current.annotationIntentDetectedCount ?? 0) + 1,
+          annotationIntentSource: source,
+          annotationFallbackUtteranceKind: utteranceKind,
+          annotationFallbackAttempted: false,
+          annotationFallbackResult: null,
+          annotationFallbackBlockedReason: null,
+          recentAnnotationActionSucceeded: false,
+          annotationCommitAttempted: false,
+          annotationCommitResult: null,
+          annotationCommitCountBefore: baseline.annotationCount,
+          annotationCommitCountAfter: baseline.annotationCount,
+          annotationCommitVerified: false,
+          annotationCommandPreventedNavigation: true,
+          annotationCommandKeptArtifactMounted: false,
+          annotationViewReadyTimedOut: false,
+          annotationPartialSuccess: false,
+          sessionLeaveGuardSuppressedForAnnotation: true,
+        }
+      : current)
+
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "annotation-intent-detected",
+      payload: {
+        runtime: geminiConnectionRef.current ? "gemini_live" : "legacy_cascade",
+        sessionId: sessionIdRef.current ?? null,
+        source,
+        annotationIntentDetectedCount: 1,
+        annotationIntentSource: source,
+        annotationFallbackUtteranceKind: utteranceKind,
+        rawTranscriptExcluded: true,
+        rawCommentTextExcluded: true,
+        rawArtifactTextExcluded: true,
+        rawFrameExcluded: true,
+      },
+    })
+  }, [])
+
+  const suppressUnverifiedAssistantAnnotationClaim = useCallback((text: string, responseKey: string | null): boolean => {
+    if (!isAssistantAnnotationSuccessClaim(text)) {
+      return false
+    }
+
+    const nowMs = Date.now()
+    const recentIntent = recentAnnotationIntentRef.current
+    const hasRecentIntent = Boolean(
+      recentIntent && nowMs - recentIntent.atMs <= RECENT_ANNOTATION_INTENT_WINDOW_MS,
+    )
+    const hasVerifiedAnnotation = recentIntent
+      ? annotationCountsIncreased(recentIntent, recentAnnotationSuccessRef.current)
+      : Boolean(
+          recentAnnotationSuccessRef.current
+          && nowMs - recentAnnotationSuccessRef.current.atMs <= RECENT_ANNOTATION_INTENT_WINDOW_MS,
+        )
+
+    if (!hasRecentIntent || hasVerifiedAnnotation) {
+      return false
+    }
+
+    const key = responseKey ?? `annotation-claim:${userTranscriptFingerprint(text)}`
+    if (suppressedAssistantAnnotationClaimKeysRef.current.includes(key)) {
+      return true
+    }
+    suppressedAssistantAnnotationClaimKeysRef.current = [
+      ...suppressedAssistantAnnotationClaimKeysRef.current.slice(-9),
+      key,
+    ]
+
+    setRuntimeTelemetry((current) => current.runtime === "gemini_live"
+      ? {
+          ...current,
+          assistantAnnotationClaimSuppressedCount: (current.assistantAnnotationClaimSuppressedCount ?? 0) + 1,
+          recentAnnotationActionSucceeded: false,
+        }
+      : current)
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "assistant-annotation-claim-suppressed",
+      payload: {
+        reason: "annotation_not_verified",
+        annotationIntentSource: recentIntent?.source ?? null,
+        annotationFallbackUtteranceKind: recentIntent?.utteranceKind ?? null,
+        recentAnnotationActionSucceeded: false,
+        rawTranscriptExcluded: true,
+        rawCommentTextExcluded: true,
+        rawArtifactTextExcluded: true,
+        rawFrameExcluded: true,
+      },
+    })
+    return true
+  }, [])
+
+  const markAnnotationActionSucceeded = useCallback((counts?: {
+    annotationCount?: number | null
+    highlightCount?: number | null
+    commentCount?: number | null
+    underlineCount?: number | null
+    arrowCount?: number | null
+    drawPathCount?: number | null
+  }) => {
+    const telemetry = runtimeTelemetryRef.current
+    const currentCounts = telemetry.runtime === "gemini_live"
+      ? {
+          annotationCount: telemetry.annotationCount ?? 0,
+          highlightCount: telemetry.highlightCount ?? 0,
+          commentCount: telemetry.commentCount ?? 0,
+          underlineCount: telemetry.underlineCount ?? 0,
+          arrowCount: telemetry.arrowCount ?? 0,
+          drawPathCount: telemetry.drawPathCount ?? 0,
+        }
+      : {
+          annotationCount: 0,
+          highlightCount: 0,
+          commentCount: 0,
+          underlineCount: 0,
+          arrowCount: 0,
+          drawPathCount: 0,
+        }
+    const baseline = recentAnnotationIntentRef.current
+    const nextCounts = {
+      annotationCount: annotationSuccessCount(
+        counts?.annotationCount,
+        Math.max(currentCounts.annotationCount, (baseline?.annotationCount ?? currentCounts.annotationCount) + 1),
+      ),
+      highlightCount: annotationSuccessCount(counts?.highlightCount, currentCounts.highlightCount),
+      commentCount: annotationSuccessCount(counts?.commentCount, currentCounts.commentCount),
+      underlineCount: annotationSuccessCount(counts?.underlineCount, currentCounts.underlineCount),
+      arrowCount: annotationSuccessCount(counts?.arrowCount, currentCounts.arrowCount),
+      drawPathCount: annotationSuccessCount(counts?.drawPathCount, currentCounts.drawPathCount),
+    }
+    recentAnnotationSuccessRef.current = {
+      atMs: Date.now(),
+      ...nextCounts,
+    }
+    setRuntimeTelemetry((current) => current.runtime === "gemini_live"
+      ? {
+          ...current,
+          ...nextCounts,
+          recentAnnotationActionSucceeded: true,
+          annotationCommitAttempted: true,
+          annotationCommitResult: "success",
+          annotationCommitCountBefore: baseline?.annotationCount ?? currentCounts.annotationCount,
+          annotationCommitCountAfter: nextCounts.annotationCount,
+          annotationCommitVerified: nextCounts.annotationCount > (baseline?.annotationCount ?? currentCounts.annotationCount),
+          annotationCommandKeptArtifactMounted: true,
+        }
+      : current)
+  }, [])
+
   const applyUserTranscriptData = useCallback((
     data: Record<string, unknown> | undefined,
     source: "public_user_transcript" | "barge_in_transcript_handoff",
@@ -1006,9 +1446,10 @@ export function useStreamVoiceSession(
     if (source === "barge_in_transcript_handoff") {
       rememberBargeInTranscriptFingerprint(userTranscriptFingerprint(reconciledTranscript.text))
     }
+    rememberAnnotationIntentFromTranscript(reconciledTranscript.text, source)
     onUserTranscriptRef.current?.(reconciledTranscript.text)
     return true
-  }, [forgetBargeInTranscriptFingerprint, hasSeenBargeInTranscriptFingerprint, hasSeenUserTranscriptId, rememberBargeInTranscriptFingerprint, rememberUserTranscriptId])
+  }, [forgetBargeInTranscriptFingerprint, hasSeenBargeInTranscriptFingerprint, hasSeenUserTranscriptId, rememberAnnotationIntentFromTranscript, rememberBargeInTranscriptFingerprint, rememberUserTranscriptId])
 
   const cancelPendingStartRequest = useCallback(() => {
     startRequestVersionRef.current += 1
@@ -1731,6 +2172,14 @@ export function useStreamVoiceSession(
         }
       }
 
+      const guardedUpdate = suppressUnverifiedAssistantAnnotationClaim(
+        update.text,
+        update.responseId || update.segmentId || update.sourceSequence
+          ? `annotation-claim:${update.responseId ?? "active"}:${update.segmentId ?? "default"}:${update.sourceSequence ?? "na"}`
+          : null,
+      )
+        ? { ...update, text: "I have not added that annotation yet." }
+        : update
       const handlers = {
         setFinalReply,
         setPartialReply,
@@ -1739,18 +2188,28 @@ export function useStreamVoiceSession(
       }
 
       if (geminiConnectionRef.current) {
-        applyPacedAssistantTranscriptUpdate(update, handlers, assistantTranscriptPacingRef.current, {
+        applyPacedAssistantTranscriptUpdate(guardedUpdate, handlers, assistantTranscriptPacingRef.current, {
           minInitialCharacters: 16,
           minCharacterDelta: 16,
           minIntervalMs: 120,
           maxIntervalMs: 360,
         })
       } else {
-        applyAssistantTranscriptUpdate(update, handlers)
+        applyAssistantTranscriptUpdate(guardedUpdate, handlers)
       }
     }
 
     if (type === "sophia.user_transcript") {
+      const timestamp = new Date().toISOString()
+      if (geminiConnectionRef.current) {
+        setRuntimeTelemetry((current) => current.runtime === "gemini_live"
+          ? applyGeminiTranscriptReadiness(current, {
+              publicUserTranscriptCount: (current.publicUserTranscriptCount ?? 0) + 1,
+              firstPublicUserTranscriptAt: current.firstPublicUserTranscriptAt ?? timestamp,
+              reviewPublicTranscriptObserved: true,
+            })
+          : current)
+      }
       applyUserTranscriptData(data, "public_user_transcript")
     }
 
@@ -1798,7 +2257,7 @@ export function useStreamVoiceSession(
         startThinkingTimeout()
       }
     }
-  }, [addVoiceMessage, applyUserTranscriptData, clearCurrentTurnUserTranscript, clearThinking, shouldApplyGeminiOpeningGreetingUpdate, startThinkingTimeout, setListeningPresence, setSpeakingPresence, setMetaPresence])
+  }, [addVoiceMessage, applyUserTranscriptData, clearCurrentTurnUserTranscript, clearThinking, shouldApplyGeminiOpeningGreetingUpdate, startThinkingTimeout, suppressUnverifiedAssistantAnnotationClaim, setListeningPresence, setSpeakingPresence, setMetaPresence])
 
   // --- Map CallingState → VoiceStage (only on actual changes) -------------
   useEffect(() => {
@@ -2327,6 +2786,7 @@ export function useStreamVoiceSession(
               : null,
           publicSseState: "connecting",
         }))
+        const coreviewDiagnostics = coreviewFlagDiagnostics()
         recordSophiaCaptureEvent({
           category: "voice-session",
           name: "credentials-received",
@@ -2336,12 +2796,28 @@ export function useStreamVoiceSession(
             runtime: "gemini_live",
             sessionId: sessionIdRef.current ?? null,
             voiceAgentSessionId: creds.session_id,
+            ...coreviewDiagnostics,
+            backendCoreviewFlagParsed: typeof creds.backendCoreviewFlagParsed === "boolean" ? creds.backendCoreviewFlagParsed : null,
+            backendStillFrameFlagParsed: typeof creds.backendStillFrameFlagParsed === "boolean" ? creds.backendStillFrameFlagParsed : null,
+          },
+        })
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "coreview-flag-diagnostics",
+          payload: {
+            runtime: "gemini_live",
+            sessionId: sessionIdRef.current ?? null,
+            voiceAgentSessionId: creds.session_id,
+            ...coreviewDiagnostics,
+            backendCoreviewFlagParsed: typeof creds.backendCoreviewFlagParsed === "boolean" ? creds.backendCoreviewFlagParsed : null,
+            backendStillFrameFlagParsed: typeof creds.backendStillFrameFlagParsed === "boolean" ? creds.backendStillFrameFlagParsed : null,
           },
         })
 
         const connection = await connectGeminiBrowserLiveFromBootstrap({
           userId,
           sessionId: creds.session_id,
+          threadId: threadId ?? null,
           bootstrap: creds,
           onStage: (geminiStage) => {
             const stageTelemetry = geminiStageTelemetry(geminiStage)
@@ -2414,8 +2890,7 @@ export function useStreamVoiceSession(
               }
             }
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
-              ? {
-                  ...current,
+              ? applyGeminiTranscriptReadiness(current, {
                   userInputActiveAgeMs: diagnostic.userInputActiveAgeMs ?? current.userInputActiveAgeMs ?? null,
                   bargeInConfirmed: current.bargeInConfirmed === true || diagnostic.bargeInConfirmed === true,
                   bargeInConfirmationSource: diagnostic.bargeInConfirmationSource ?? current.bargeInConfirmationSource ?? "none",
@@ -2430,7 +2905,9 @@ export function useStreamVoiceSession(
                   maxRawAssistantUserOverlapMs: Math.max(current.maxRawAssistantUserOverlapMs ?? current.rawAssistantUserOverlapMs ?? current.assistantUserOverlapMs ?? 0, diagnostic.rawAssistantUserOverlapMs ?? 0),
                   confirmedAssistantUserOverlapMs: Math.max(current.confirmedAssistantUserOverlapMs ?? 0, diagnostic.confirmedAssistantUserOverlapMs ?? 0),
                   maxConfirmedAssistantUserOverlapMs: Math.max(current.maxConfirmedAssistantUserOverlapMs ?? current.confirmedAssistantUserOverlapMs ?? 0, diagnostic.confirmedAssistantUserOverlapMs ?? 0),
-                }
+                  reviewMicAudioDetected: current.reviewMicAudioDetected === true || diagnostic.eventType === "input_audio_frame_sent",
+                  reviewUserSpeechDetected: current.reviewUserSpeechDetected === true || diagnostic.eventType === "input_audio_frame_sent",
+                })
               : current)
             recordSophiaCaptureEvent({
               category: "voice-session",
@@ -2479,6 +2956,13 @@ export function useStreamVoiceSession(
             if (!userTranscriptData) return
             const applied = applyUserTranscriptData(userTranscriptData, "barge_in_transcript_handoff")
             if (!applied) return
+            setRuntimeTelemetry((current) => current.runtime === "gemini_live"
+              ? applyGeminiTranscriptReadiness(current, {
+                  publicUserTranscriptCount: (current.publicUserTranscriptCount ?? 0) + 1,
+                  firstPublicUserTranscriptAt: current.firstPublicUserTranscriptAt ?? diagnostic.timestamp,
+                  reviewPublicTranscriptObserved: true,
+                })
+              : current)
             recordSophiaCaptureEvent({
               category: "voice-session",
               name: "sophia.user_transcript",
@@ -2615,11 +3099,17 @@ export function useStreamVoiceSession(
           },
           onProviderEventTelemetry: (telemetry) => {
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
-              ? {
-                  ...current,
+              ? applyGeminiTranscriptReadiness(current, {
                   providerCategoryCounts: telemetry.categoryCounts,
                   relayClassificationCounts: telemetry.relayClassificationCounts,
-                }
+                  providerInputTranscriptCount: telemetry.categoryCounts.inputTranscription?.count ?? current.providerInputTranscriptCount ?? 0,
+                  firstProviderTranscriptAt: (
+                    telemetry.hasInputTranscriptionText
+                      ? current.firstProviderTranscriptAt ?? telemetry.timestamp
+                      : current.firstProviderTranscriptAt ?? null
+                  ),
+                  reviewProviderTranscriptObserved: current.reviewProviderTranscriptObserved === true || telemetry.hasInputTranscriptionText,
+                })
               : current)
             recordSophiaCaptureEvent({
               category: "voice-session",
@@ -2772,6 +3262,38 @@ export function useStreamVoiceSession(
             })
           },
           onToolLoopDiagnostic: (diagnostic) => {
+            const diagnosticToolName = diagnostic.toolCall.name
+            const diagnosticBackendNumber = (key: string) => (
+              typeof diagnostic.backendResponse?.[key] === "number" && Number.isFinite(diagnostic.backendResponse[key])
+                ? diagnostic.backendResponse[key]
+                : null
+            )
+            const diagnosticAnnotationCount = diagnosticBackendNumber("annotation_count")
+            const diagnosticHighlightCount = diagnosticBackendNumber("highlight_count")
+            const diagnosticCommentCount = diagnosticBackendNumber("comment_count")
+            const diagnosticUnderlineCount = diagnosticBackendNumber("underline_count")
+            const diagnosticArrowCount = diagnosticBackendNumber("arrow_count")
+            const diagnosticDrawPathCount = diagnosticBackendNumber("draw_path_count")
+            if (
+              diagnosticToolName === GEMINI_COREVIEW_ADD_ANNOTATION_TOOL_NAME
+              && diagnostic.phase === "tool_response_sent"
+              && diagnostic.backendResponse?.ok === true
+              && diagnosticAnnotationCount !== null
+              && diagnosticHighlightCount !== null
+              && diagnosticCommentCount !== null
+            ) {
+              const parsedAt = Date.parse(diagnostic.timestamp)
+              recentAnnotationSuccessRef.current = {
+                atMs: Number.isFinite(parsedAt) ? parsedAt : Date.now(),
+                annotationCount: diagnosticAnnotationCount,
+                highlightCount: diagnosticHighlightCount,
+                commentCount: diagnosticCommentCount,
+                underlineCount: diagnosticUnderlineCount ?? 0,
+                arrowCount: diagnosticArrowCount ?? 0,
+                drawPathCount: diagnosticDrawPathCount ?? 0,
+              }
+            }
+
             setRuntimeTelemetry((current) => {
               if (current.runtime !== "gemini_live") {
                 return current
@@ -2779,6 +3301,104 @@ export function useStreamVoiceSession(
 
               const toolName = diagnostic.toolCall.name
               const isToolCallReceived = diagnostic.phase === "tool_call_received"
+              const backendStatus = typeof diagnostic.backendResponse?.status === "string"
+                ? diagnostic.backendResponse.status
+                : diagnostic.success === true
+                  ? "success"
+                  : null
+              const reviewToolTimedOut = diagnostic.reviewToolTimedOut === true
+                || diagnostic.backendResponse?.review_tool_timed_out === true
+              const reviewToolTimeoutResultSent = diagnostic.reviewToolTimeoutResultSent === true
+                || diagnostic.backendResponse?.review_tool_timeout_result_sent === true
+              const readArtifactTextResolved = toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME
+                && (
+                  diagnostic.phase === "tool_response_sent"
+                  || diagnostic.phase === "tool_execution_rejected"
+                  || diagnostic.phase === "tool_response_send_suppressed"
+                )
+              const coreviewGetCurrentViewResponse = toolName === GEMINI_COREVIEW_GET_CURRENT_VIEW_TOOL_NAME
+                && diagnostic.phase === "tool_response_sent"
+                ? (
+                    typeof diagnostic.backendResponse?.current_view_summary === "string"
+                      ? diagnostic.backendResponse.current_view_summary
+                      : typeof diagnostic.resultSummary === "string"
+                        ? diagnostic.resultSummary
+                        : null
+                  )
+                : null
+              const coreviewAnnotationResolved = toolName === GEMINI_COREVIEW_ADD_ANNOTATION_TOOL_NAME
+                && diagnostic.phase === "tool_response_sent"
+              const coreviewFocusResolved = toolName === GEMINI_COREVIEW_FOCUS_ANCHOR_TOOL_NAME
+                && diagnostic.phase === "tool_response_sent"
+              const backendString = (key: string) => (
+                typeof diagnostic.backendResponse?.[key] === "string"
+                  ? diagnostic.backendResponse[key]
+                  : null
+              )
+              const backendNumber = (key: string) => (
+                typeof diagnostic.backendResponse?.[key] === "number" && Number.isFinite(diagnostic.backendResponse[key])
+                  ? diagnostic.backendResponse[key]
+                  : null
+              )
+              const backendBoolean = (key: string) => (
+                typeof diagnostic.backendResponse?.[key] === "boolean"
+                  ? diagnostic.backendResponse[key]
+                  : null
+              )
+              const annotationCount = backendNumber("annotation_count")
+              const highlightCount = backendNumber("highlight_count")
+              const commentCount = backendNumber("comment_count")
+              const underlineCount = backendNumber("underline_count")
+              const arrowCount = backendNumber("arrow_count")
+              const drawPathCount = backendNumber("draw_path_count")
+              const annotationCommitCountBefore = backendNumber("annotation_commit_count_before")
+              const annotationCommitCountAfter = backendNumber("annotation_commit_count_after") ?? annotationCount
+              const annotationCommitVerified = Boolean(
+                backendBoolean("annotation_commit_verified") === true
+                && annotationCommitCountBefore !== null
+                && annotationCommitCountAfter !== null
+                && annotationCommitCountAfter > annotationCommitCountBefore,
+              )
+              const annotationCountIncreased = annotationCommitCountBefore !== null && annotationCommitCountAfter !== null
+                ? annotationCommitCountAfter > annotationCommitCountBefore
+                : annotationCount !== null && annotationCount > (current.annotationCount ?? 0)
+              const annotationActionSucceeded = Boolean(
+                coreviewAnnotationResolved
+                && diagnostic.backendResponse?.ok === true
+                && annotationCount !== null
+                && highlightCount !== null
+                && commentCount !== null
+                && (annotationCommitVerified || annotationCountIncreased)
+              )
+              const annotationCommitResult = coreviewAnnotationResolved
+                ? backendString("annotation_commit_result")
+                  ?? (annotationActionSucceeded ? "success" : "annotation_commit_failed")
+                : current.annotationCommitResult ?? null
+              if (annotationActionSucceeded) {
+                const parsedAt = Date.parse(diagnostic.timestamp)
+                recentAnnotationSuccessRef.current = {
+                  atMs: Number.isFinite(parsedAt) ? parsedAt : Date.now(),
+                  annotationCount: annotationCount ?? current.annotationCount ?? 0,
+                  highlightCount: highlightCount ?? current.highlightCount ?? 0,
+                  commentCount: commentCount ?? current.commentCount ?? 0,
+                  underlineCount: underlineCount ?? current.underlineCount ?? 0,
+                  arrowCount: arrowCount ?? current.arrowCount ?? 0,
+                  drawPathCount: drawPathCount ?? current.drawPathCount ?? 0,
+                }
+              }
+              const rejectionReason = typeof diagnostic.rejectionReason === "string"
+                ? diagnostic.rejectionReason
+                : backendString("rejection_reason") ?? backendString("safe_reason")
+              const emitArtifactBlockedDuringReview = Boolean(
+                toolName === GEMINI_EMIT_ARTIFACT_TOOL_NAME
+                && diagnostic.phase === "tool_execution_rejected"
+                && rejectionReason === "artifact_review_emit_artifact_suppressed",
+              )
+              const emitArtifactBlockedForAnnotationIntent = Boolean(
+                emitArtifactBlockedDuringReview
+                && recentAnnotationIntentRef.current
+                && Date.now() - recentAnnotationIntentRef.current.atMs <= RECENT_ANNOTATION_INTENT_WINDOW_MS,
+              )
 
               return {
                 ...current,
@@ -2796,9 +3416,139 @@ export function useStreamVoiceSession(
                 builderToolCallCount: isToolCallReceived && toolName !== null && GEMINI_BUILDER_TOOL_NAMES.has(toolName)
                   ? current.builderToolCallCount + 1
                   : current.builderToolCallCount,
+                readArtifactTextResolvedCount: readArtifactTextResolved
+                  ? (current.readArtifactTextResolvedCount ?? 0) + 1
+                  : current.readArtifactTextResolvedCount,
+                readArtifactTextTimeoutCount: toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME && reviewToolTimedOut
+                  ? (current.readArtifactTextTimeoutCount ?? 0) + 1
+                  : current.readArtifactTextTimeoutCount,
+                readArtifactTextLastStatus: toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME
+                  ? backendStatus ?? current.readArtifactTextLastStatus ?? null
+                  : current.readArtifactTextLastStatus,
+                readArtifactTextPdfExtractionStatus: toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME
+                  && (
+                    diagnostic.backendResponse?.source === "pdf_text_extraction"
+                    || backendStatus === "extraction_pending"
+                    || backendStatus === "extraction_unavailable"
+                    || backendStatus === "extraction_failed"
+                  )
+                  ? backendStatus
+                  : current.readArtifactTextPdfExtractionStatus,
+                exactTextRegistrySource: toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME
+                  && typeof diagnostic.backendResponse?.source === "string"
+                  ? diagnostic.backendResponse.source
+                  : current.exactTextRegistrySource,
+                reviewToolTimedOut: current.reviewToolTimedOut === true || reviewToolTimedOut,
+                reviewToolTimeoutName: reviewToolTimedOut
+                  ? diagnostic.reviewToolTimeoutName
+                    ?? (typeof diagnostic.backendResponse?.review_tool_timeout_name === "string"
+                      ? diagnostic.backendResponse.review_tool_timeout_name
+                      : toolName)
+                  : current.reviewToolTimeoutName,
+                reviewToolTimeoutResultSent: current.reviewToolTimeoutResultSent === true || reviewToolTimeoutResultSent,
+                coreviewGetCurrentViewCount: toolName === GEMINI_COREVIEW_GET_CURRENT_VIEW_TOOL_NAME && diagnostic.phase === "tool_response_sent"
+                  ? (current.coreviewGetCurrentViewCount ?? 0) + 1
+                  : current.coreviewGetCurrentViewCount,
+                coreviewGetCurrentViewResult: coreviewGetCurrentViewResponse ?? current.coreviewGetCurrentViewResult ?? null,
+                annotationOverlayCaptured: backendBoolean("annotation_overlay_captured") ?? current.annotationOverlayCaptured ?? null,
+                annotationCount: annotationCount ?? current.annotationCount,
+                highlightCount: highlightCount ?? current.highlightCount,
+                commentCount: commentCount ?? current.commentCount,
+                underlineCount: underlineCount ?? current.underlineCount,
+                arrowCount: arrowCount ?? current.arrowCount,
+                drawPathCount: drawPathCount ?? current.drawPathCount,
+                unsupportedAnnotationKind: backendString("unsupported_annotation_kind") ?? current.unsupportedAnnotationKind ?? null,
+                annotationActionSource: backendString("annotation_action_source") ?? current.annotationActionSource ?? null,
+                coreviewAnnotationToolCount: coreviewAnnotationResolved
+                  ? (current.coreviewAnnotationToolCount ?? 0) + 1
+                  : current.coreviewAnnotationToolCount,
+                coreviewAnnotationFallbackCount: coreviewAnnotationResolved && backendString("command_source") === "frontend_fallback"
+                  ? (current.coreviewAnnotationFallbackCount ?? 0) + 1
+                  : current.coreviewAnnotationFallbackCount,
+                coreviewAnnotationCommandSource: coreviewAnnotationResolved
+                  ? backendString("command_source")
+                  : current.coreviewAnnotationCommandSource ?? null,
+                coreviewAnnotationToolResult: coreviewAnnotationResolved
+                  ? annotationActionSucceeded ? annotationCommitResult : "blocked"
+                  : current.coreviewAnnotationToolResult ?? null,
+                coreviewAnnotationFallbackResult: coreviewAnnotationResolved && backendString("command_source") === "frontend_fallback"
+                  ? annotationActionSucceeded ? annotationCommitResult : "blocked"
+                  : current.coreviewAnnotationFallbackResult ?? null,
+                coreviewAnnotationKind: coreviewAnnotationResolved
+                  ? backendString("annotation_kind")
+                  : current.coreviewAnnotationKind ?? null,
+                coreviewAnnotationAnchorType: coreviewAnnotationResolved
+                  ? backendString("annotation_anchor_type")
+                  : current.coreviewAnnotationAnchorType ?? null,
+                coreviewAnnotationColor: coreviewAnnotationResolved
+                  ? backendString("annotation_color")
+                  : current.coreviewAnnotationColor ?? null,
+                coreviewAnnotationPageIndex: coreviewAnnotationResolved
+                  ? backendNumber("annotation_page_index")
+                  : current.coreviewAnnotationPageIndex ?? null,
+                coreviewAnnotationBlockedReason: coreviewAnnotationResolved
+                  ? backendString("blocked_reason")
+                  : current.coreviewAnnotationBlockedReason ?? null,
+                annotationFallbackAttempted: coreviewAnnotationResolved && backendString("command_source") === "frontend_fallback"
+                  ? true
+                  : current.annotationFallbackAttempted ?? false,
+                annotationFallbackResult: coreviewAnnotationResolved && backendString("command_source") === "frontend_fallback"
+                  ? annotationActionSucceeded ? annotationCommitResult : "blocked"
+                  : current.annotationFallbackResult ?? null,
+                annotationFallbackBlockedReason: coreviewAnnotationResolved && backendString("command_source") === "frontend_fallback"
+                  ? backendString("blocked_reason")
+                  : current.annotationFallbackBlockedReason ?? null,
+                recentAnnotationActionSucceeded: annotationActionSucceeded
+                  ? true
+                  : current.recentAnnotationActionSucceeded ?? false,
+                annotationCommitAttempted: coreviewAnnotationResolved
+                  ? backendBoolean("annotation_commit_attempted") ?? true
+                  : current.annotationCommitAttempted ?? false,
+                annotationCommitResult: coreviewAnnotationResolved
+                  ? annotationCommitResult
+                  : current.annotationCommitResult ?? null,
+                annotationCommitCountBefore: coreviewAnnotationResolved
+                  ? annotationCommitCountBefore
+                  : current.annotationCommitCountBefore ?? null,
+                annotationCommitCountAfter: coreviewAnnotationResolved
+                  ? annotationCommitCountAfter
+                  : current.annotationCommitCountAfter ?? null,
+                annotationCommitVerified: coreviewAnnotationResolved
+                  ? annotationActionSucceeded
+                  : current.annotationCommitVerified ?? false,
+                annotationCommandPreventedNavigation: coreviewAnnotationResolved
+                  ? backendBoolean("annotation_command_prevented_navigation") ?? current.annotationCommandPreventedNavigation ?? false
+                  : current.annotationCommandPreventedNavigation ?? false,
+                annotationCommandKeptArtifactMounted: coreviewAnnotationResolved
+                  ? backendBoolean("annotation_command_kept_artifact_mounted") ?? current.annotationCommandKeptArtifactMounted ?? false
+                  : current.annotationCommandKeptArtifactMounted ?? false,
+                annotationViewReadyTimedOut: coreviewAnnotationResolved
+                  ? backendBoolean("annotation_view_ready_timed_out") ?? current.annotationViewReadyTimedOut ?? false
+                  : current.annotationViewReadyTimedOut ?? false,
+                annotationPartialSuccess: coreviewAnnotationResolved
+                  ? backendBoolean("annotation_partial_success") ?? current.annotationPartialSuccess ?? false
+                  : current.annotationPartialSuccess ?? false,
+                sessionLeaveGuardSuppressedForAnnotation: coreviewAnnotationResolved
+                  ? backendBoolean("session_leave_guard_suppressed_for_annotation") ?? current.sessionLeaveGuardSuppressedForAnnotation ?? false
+                  : current.sessionLeaveGuardSuppressedForAnnotation ?? false,
+                coreviewFocusAnchorCount: coreviewFocusResolved
+                  ? (current.coreviewFocusAnchorCount ?? 0) + 1
+                  : current.coreviewFocusAnchorCount,
+                coreviewFocusAnchorResult: coreviewFocusResolved
+                  ? diagnostic.backendResponse?.ok === true ? "success" : "blocked"
+                  : current.coreviewFocusAnchorResult ?? null,
+                coreviewFocusAnchorType: coreviewFocusResolved
+                  ? backendString("focus_anchor_type")
+                  : current.coreviewFocusAnchorType ?? null,
                 lastToolPhase: diagnostic.phase,
                 lastToolName: toolName,
                 lastToolAt: diagnostic.timestamp,
+                emitArtifactBlockedDuringReviewCount: emitArtifactBlockedDuringReview
+                  ? (current.emitArtifactBlockedDuringReviewCount ?? 0) + 1
+                  : current.emitArtifactBlockedDuringReviewCount ?? 0,
+                emitArtifactBlockedForAnnotationIntentCount: emitArtifactBlockedForAnnotationIntent
+                  ? (current.emitArtifactBlockedForAnnotationIntentCount ?? 0) + 1
+                  : current.emitArtifactBlockedForAnnotationIntentCount ?? 0,
               }
             })
             recordSophiaCaptureEvent({
@@ -2845,6 +3595,11 @@ export function useStreamVoiceSession(
         setGeminiConnection(connection)
         setCredentials(null)
         clearStartupReadyTimeout()
+        const configuredToolNames = readGeminiConfiguredToolNames(connection.setup)
+        const reviewToolsExposed = configuredToolNames.filter((name) => (
+          GEMINI_REVIEW_TOOL_NAMES.has(name) || name === GEMINI_EMIT_ARTIFACT_TOOL_NAME
+        ))
+        const emitArtifactExposedDuringReview = reviewToolsExposed.includes(GEMINI_EMIT_ARTIFACT_TOOL_NAME)
         setRuntimeTelemetry((current) => current.runtime === "gemini_live"
           ? {
               ...current,
@@ -2861,8 +3616,23 @@ export function useStreamVoiceSession(
               relayUrl: connection.relayUrl,
               transport: connection.transport,
               publicEventBoundary: connection.publicEventBoundary,
+              reviewToolsExposed,
+              emitArtifactExposedDuringReview,
             }
           : current)
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "gemini-setup-tools",
+          payload: {
+            runtime: "gemini_live",
+            sessionId: sessionIdRef.current ?? null,
+            voiceAgentSessionId: creds.session_id,
+            reviewToolsExposed,
+            emitArtifactExposedDuringReview,
+            rawArtifactTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        })
         markSophiaReady("gemini-live-setup-complete", {
           runtime: "gemini_live",
           callId: creds.session_id,
@@ -3292,6 +4062,7 @@ export function useStreamVoiceSession(
     hasLiveCall: callingState === CallingState.JOINED || Boolean(geminiConnection),
     bargeIn,
     softBargeIn,
+    markAnnotationActionSucceeded,
     resetVoiceState,
     hasRetryableVoiceTurn: () => false,
     retryLastVoiceTurn: async () => false,

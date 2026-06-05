@@ -522,6 +522,10 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.sessionTelemetry.gemini?.setupComplete).toBe(true);
     expect(metrics.sessionTelemetry.gemini?.providerEventCount).toBe(1);
     expect(metrics.sessionTelemetry.gemini?.providerCategoryCounts.toolCall.count).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.reviewVoiceReady).toBe(true);
+    expect(metrics.sessionTelemetry.gemini?.reviewPublicTranscriptObserved).toBe(true);
+    expect(metrics.sessionTelemetry.gemini?.publicUserTranscriptCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.providerToPublicTranscriptGap).toBe(0);
     expect(metrics.sessionTelemetry.gemini?.relayDiagnosticCount).toBe(1);
     expect(metrics.sessionTelemetry.gemini?.relayTraceCount).toBe(1);
     expect(metrics.sessionTelemetry.gemini?.relayAttemptCount).toBe(2);
@@ -545,6 +549,159 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.sessionTelemetry.gemini?.artifactRuntimeIngestCount).toBe(0);
     expect(metrics.sessionTelemetry.gemini?.artifactRenderedCount).toBe(0);
     expect(metrics.sessionTelemetry.gemini?.artifactCountSource).toBe('public_event');
+  });
+
+  it('warns when mic audio is detected but Gemini has not produced input transcription', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { platform: 'voice', sessionId: 'session-dev' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:00.100Z',
+        category: 'voice-session',
+        name: 'credentials-received',
+        payload: {
+          callId: 'gemini-session-dev',
+          callType: 'gemini_live',
+          runtime: 'gemini_live',
+          sessionId: 'session-dev',
+          voiceAgentSessionId: 'gemini-session-dev',
+        },
+      }),
+      buildEvent({
+        seq: 3,
+        at: '2026-04-07T12:00:00.200Z',
+        category: 'voice-session',
+        name: 'gemini-stage-changed',
+        payload: {
+          runtime: 'gemini_live',
+          stage: 'streaming_audio',
+          connectionState: 'connected',
+          websocketState: 'connected',
+          microphoneState: 'connected',
+        },
+      }),
+      buildEvent({
+        seq: 4,
+        at: '2026-04-07T12:00:00.300Z',
+        category: 'harness-input',
+        name: 'microphone-audio-detected',
+        payload: { rms: 0.07 },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot({ detectedAudio: true }),
+      nowMs: Date.parse('2026-04-07T12:00:01.000Z'),
+    });
+
+    expect(metrics.health.title).toBe('Audio detected, transcript missing');
+    expect(metrics.sessionTelemetry.gemini?.reviewVoiceReady).toBe(false);
+    expect(metrics.sessionTelemetry.gemini?.reviewMicAudioDetected).toBe(true);
+    expect(metrics.sessionTelemetry.gemini?.reviewUserSpeechDetected).toBe(true);
+    expect(metrics.sessionTelemetry.gemini?.reviewProviderTranscriptObserved).toBe(false);
+    expect(metrics.sessionTelemetry.gemini?.reviewTranscriptPromotionBlockedReason).toBe('voice_input_detected_waiting_for_transcript');
+  });
+
+  it('warns when provider input transcription is not surfaced publicly', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { platform: 'voice', sessionId: 'session-dev' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:00.100Z',
+        category: 'voice-session',
+        name: 'credentials-received',
+        payload: {
+          callId: 'gemini-session-dev',
+          callType: 'gemini_live',
+          runtime: 'gemini_live',
+          sessionId: 'session-dev',
+          voiceAgentSessionId: 'gemini-session-dev',
+        },
+      }),
+      buildEvent({
+        seq: 3,
+        at: '2026-04-07T12:00:00.200Z',
+        category: 'voice-session',
+        name: 'gemini-stage-changed',
+        payload: {
+          runtime: 'gemini_live',
+          stage: 'streaming_audio',
+          connectionState: 'connected',
+          websocketState: 'connected',
+          microphoneState: 'connected',
+        },
+      }),
+      buildEvent({
+        seq: 4,
+        at: '2026-04-07T12:00:00.400Z',
+        category: 'voice-session',
+        name: 'gemini-provider-event-correlation',
+        payload: {
+          runtime: 'gemini_live',
+          telemetry: {
+            timestamp: '2026-04-07T12:00:00.400Z',
+            hasInputTranscriptionText: true,
+            categoryCounts: {
+              inputTranscription: { count: 1, lastAt: '2026-04-07T12:00:00.400Z' },
+            },
+          },
+        },
+      }),
+      buildEvent({
+        seq: 5,
+        at: '2026-04-07T12:00:00.420Z',
+        category: 'voice-session',
+        name: 'coreview-state',
+        payload: {
+          coreview: {
+            coreviewEnabled: true,
+            coreviewSessionActive: true,
+            coreviewArtifactId: 'artifact-1',
+            frameSentCount: 1,
+            initialFrameSent: true,
+            visualFresh: true,
+            visualFreshForTurn: true,
+            rawFrameExcluded: true,
+            rawProviderPayloadExcluded: true,
+          },
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot({ detectedAudio: true }),
+      nowMs: Date.parse('2026-04-07T12:00:01.000Z'),
+    });
+
+    expect(metrics.health.title).toBe('Provider transcript not surfaced');
+    expect(metrics.sessionTelemetry.gemini?.reviewVoiceReady).toBe(false);
+    expect(metrics.sessionTelemetry.gemini?.reviewProviderTranscriptObserved).toBe(true);
+    expect(metrics.sessionTelemetry.gemini?.reviewPublicTranscriptObserved).toBe(false);
+    expect(metrics.sessionTelemetry.gemini?.reviewTranscriptPromotionBlockedReason).toBe('provider_transcript_not_surfaced');
+    expect(metrics.sessionTelemetry.gemini?.providerInputTranscriptCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.publicUserTranscriptCount).toBe(0);
+    expect(metrics.sessionTelemetry.gemini?.providerToPublicTranscriptGap).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.firstProviderTranscriptAt).toBe('2026-04-07T12:00:00.400Z');
+    expect(metrics.sessionTelemetry.gemini?.firstPublicUserTranscriptAt).toBeNull();
+    expect(metrics.sessionTelemetry.gemini?.transcriptPromotionLatencyMs).toBeNull();
+    expect(metrics.coreview.visual.initialFrameSent).toBe(true);
+    expect(metrics.coreview.visual.frameSentCount).toBe(1);
   });
 
   it('summarizes voice preconnect hit telemetry', () => {
@@ -960,14 +1117,215 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.counts.artifacts).toBe(1);
     expect(metrics.counts.artifactPublicEventCount).toBe(0);
     expect(metrics.counts.artifactRuntimeIngestCount).toBe(1);
+    expect(metrics.counts.artifactSelectedStageCount).toBe(0);
     expect(metrics.counts.artifactRenderedCount).toBe(1);
     expect(metrics.counts.artifactCountSource).toBe('runtime_ingest');
     expect(metrics.counts.artifactCountMismatch).toBe(true);
+    expect(metrics.counts.artifactCountMismatchReason).toBe('runtime_ingest_not_public_event');
     expect(metrics.sessionTelemetry.gemini?.artifactCount).toBe(1);
     expect(metrics.sessionTelemetry.gemini?.artifactPublicEventCount).toBe(0);
     expect(metrics.sessionTelemetry.gemini?.artifactRuntimeIngestCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.artifactSelectedStageCount).toBe(0);
     expect(metrics.sessionTelemetry.gemini?.artifactRenderedCount).toBe(1);
     expect(metrics.sessionTelemetry.gemini?.artifactCountMismatch).toBe(true);
+  });
+
+  it('counts selected stage artifacts as safe runtime ingest evidence', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { platform: 'voice', sessionId: 'session-dev', runtime: 'gemini_live' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:00.800Z',
+        category: 'artifacts-runtime',
+        name: 'select-stage-artifact',
+        payload: {
+          sessionId: 'session-dev',
+          threadId: 'thread-dev',
+          artifactId: 'coreview-real-artifact-launch-brief',
+          artifactPath: 'mnt/user-data/outputs/launch-brief.md',
+          artifactTitle: 'Launch brief',
+          artifactStableIdentity: 'user:unknown|thread:thread-dev|path:mnt/user-data/outputs/launch-brief.md|renderer:markdown',
+          artifactRebindAttempted: true,
+          artifactRebindResult: 'success',
+          artifactRebindReason: 'voice_connect_visible_artifact',
+          artifactReboundFromRenderedState: true,
+          artifactRebindSource: 'voice_connect',
+          exactTextRehydrated: true,
+          exactTextRehydrateResult: 'not_pdf_exact_text_available',
+          currentRunSelectedStageEvents: 1,
+          longLivedSelectedStageState: true,
+          telemetryScopeMode: 'current_run_rebind',
+          exactTextSource: 'builder_file',
+          exactTextAvailable: true,
+          rawArtifactTextExcluded: true,
+        },
+      }),
+      buildEvent({
+        seq: 3,
+        at: '2026-04-07T12:00:00.900Z',
+        category: 'artifacts-runtime',
+        name: 'select-stage-artifact',
+        payload: {
+          sessionId: 'session-dev',
+          threadId: 'thread-dev',
+          artifactId: 'coreview-real-artifact-launch-brief',
+          artifactPath: 'mnt/user-data/outputs/launch-brief.md',
+          artifactTitle: 'Launch brief',
+          exactTextSource: 'builder_file',
+          exactTextAvailable: true,
+          rawArtifactTextExcluded: true,
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot({
+        artifactDom: { panelVisible: true, takeawayText: 'Visible rendered text.' },
+      }),
+      nowMs: Date.parse('2026-04-07T12:00:01.500Z'),
+    });
+
+    expect(metrics.counts.artifacts).toBe(1);
+    expect(metrics.counts.artifactPublicEventCount).toBe(0);
+    expect(metrics.counts.artifactRuntimeIngestCount).toBe(1);
+    expect(metrics.counts.artifactSelectedStageCount).toBe(1);
+    expect(metrics.counts.artifactRenderedCount).toBe(1);
+    expect(metrics.counts.artifactCountSource).toBe('selected_stage_artifact');
+    expect(metrics.counts.artifactCountMismatchReason).toBe('selected_stage_artifact_not_public_event');
+    expect(metrics.sessionTelemetry.gemini?.artifactSelectedStageCount).toBe(1);
+    expect(metrics.coreview.visual.coreviewEnabled).toBe(false);
+    expect(metrics.coreview.visual.coreviewSessionActive).toBe(false);
+    expect(metrics.coreview.visual.coreviewArtifactId).toBe('coreview-real-artifact-launch-brief');
+    expect(metrics.coreview.visual.artifactStableIdentity).toBe(
+      'user:unknown|thread:thread-dev|path:mnt/user-data/outputs/launch-brief.md|renderer:markdown',
+    );
+    expect(metrics.coreview.visual.artifactRebindAttempted).toBe(true);
+    expect(metrics.coreview.visual.artifactRebindResult).toBe('success');
+    expect(metrics.coreview.visual.artifactRebindReason).toBe('voice_connect_visible_artifact');
+    expect(metrics.coreview.visual.artifactReboundFromRenderedState).toBe(true);
+    expect(metrics.coreview.visual.artifactRebindSource).toBe('voice_connect');
+    expect(metrics.coreview.visual.exactTextRehydrated).toBe(true);
+    expect(metrics.coreview.visual.exactTextRehydrateResult).toBe('not_pdf_exact_text_available');
+    expect(metrics.coreview.visual.currentRunSelectedStageEvents).toBe(2);
+    expect(metrics.coreview.visual.longLivedSelectedStageState).toBe(true);
+    expect(metrics.coreview.visual.telemetryScopeMode).toBe('current_run_rebind');
+    expect(metrics.coreview.visual.frameSentCount).toBe(0);
+    expect(metrics.coreview.visual.exactTextAvailable).toBe(true);
+  });
+
+  it('counts coreviewArtifactId state as selected artifact evidence when stage-selection events are absent', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { platform: 'voice', sessionId: 'session-dev', runtime: 'gemini_live' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:00.900Z',
+        category: 'voice-session',
+        name: 'coreview-state',
+        payload: {
+          data: {
+            coreview: {
+              coreviewEnabled: true,
+              coreviewSessionActive: true,
+              coreviewArtifactId: 'coreview-real-artifact-launch-brief',
+              visualSourceKind: 'offscreen_render',
+              frameSentCount: 1,
+              initialFrameSent: true,
+              exactTextAvailable: true,
+            },
+          },
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot({
+        artifactDom: { panelVisible: true, takeawayText: 'Visible rendered text.' },
+      }),
+      nowMs: Date.parse('2026-04-07T12:00:01.500Z'),
+    });
+
+    expect(metrics.counts.artifacts).toBe(1);
+    expect(metrics.counts.artifactPublicEventCount).toBe(0);
+    expect(metrics.counts.artifactRuntimeIngestCount).toBe(1);
+    expect(metrics.counts.artifactSelectedStageCount).toBe(1);
+    expect(metrics.counts.artifactCountSource).toBe('selected_stage_artifact');
+    expect(metrics.counts.artifactCountMismatchReason).toBe('selected_stage_artifact_not_public_event');
+    expect(metrics.sessionTelemetry.gemini?.artifactSelectedStageCount).toBe(1);
+    expect(metrics.coreview.visual.coreviewArtifactId).toBe('coreview-real-artifact-launch-brief');
+    expect(metrics.coreview.visual.frameSentCount).toBe(1);
+  });
+
+  it('reports Coreview enabled from parsed frontend flags even before a frame is sent', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'coreview-flag-diagnostics',
+        payload: {
+          runtime: 'gemini_live',
+          frontendCoreviewFlagParsed: true,
+          frontendStillFrameFlagParsed: true,
+          backendCoreviewFlagParsed: true,
+          backendStillFrameFlagParsed: true,
+          coreviewDisabledReason: null,
+        },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:00.800Z',
+        category: 'artifacts-runtime',
+        name: 'select-stage-artifact',
+        payload: {
+          sessionId: 'session-dev',
+          threadId: 'thread-dev',
+          artifactId: 'coreview-real-artifact-launch-brief',
+          coreviewArtifactId: 'coreview-real-artifact-launch-brief',
+          reviewFeatureEnabled: true,
+          frontendCoreviewFlagParsed: true,
+          frontendStillFrameFlagParsed: true,
+          exactTextSource: 'builder_file',
+          exactTextAvailable: true,
+          rawArtifactTextExcluded: true,
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-04-07T12:00:01.500Z'),
+    });
+
+    expect(metrics.coreview.visual).toMatchObject({
+      coreviewEnabled: true,
+      coreviewSessionActive: false,
+      coreviewArtifactId: 'coreview-real-artifact-launch-brief',
+      frameSentCount: 0,
+      exactTextAvailable: true,
+      frontendCoreviewFlagParsed: true,
+      frontendStillFrameFlagParsed: true,
+      backendCoreviewFlagParsed: true,
+      backendStillFrameFlagParsed: true,
+      coreviewDisabledReason: null,
+    });
   });
 
   it('does not count emit_artifact tool calls as artifacts without validated artifact evidence', () => {
@@ -1021,6 +1379,7 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.counts.artifacts).toBe(0);
     expect(metrics.sessionTelemetry.gemini?.artifactCount).toBe(0);
     expect(metrics.counts.artifactCountSource).toBe('none');
+    expect(metrics.counts.artifactCountMismatchReason).toBeNull();
   });
 
   it('includes builder progress and stall diagnostics in telemetry', () => {
@@ -1052,6 +1411,23 @@ describe('buildVoiceDeveloperMetrics', () => {
           lastProgressAt: '2026-04-07T11:59:20.000Z',
         },
       }),
+      buildEvent({
+        seq: 3,
+        at: '2026-04-07T12:00:22.000Z',
+        category: 'builder-ui',
+        name: 'builder-surface-resolved',
+        payload: {
+          builderSurfaceMode: 'active_build_steps',
+          canonicalBuilderSurface: 'active_build_steps',
+          legacyBuilderSurfaceHidden: true,
+          builderReadyPillSuppressed: true,
+          duplicateBuilderSurfaceSuppressed: true,
+          resumedBuilderSurfaceResolved: false,
+          completedBuilderEntryPlacement: 'hidden',
+          completedBuilderEntryOverlapsControls: false,
+          completedBuilderEntryHiddenForStage: false,
+        },
+      }),
     ];
 
     const metrics = buildVoiceDeveloperMetrics({
@@ -1064,6 +1440,15 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.builder.phase).toBe('running');
     expect(metrics.builder.progressPercent).toBe(25);
     expect(metrics.builder.stuck).toBe(true);
+    expect(metrics.builder.builderSurfaceMode).toBe('active_build_steps');
+    expect(metrics.builder.canonicalBuilderSurface).toBe('active_build_steps');
+    expect(metrics.builder.legacyBuilderSurfaceHidden).toBe(true);
+    expect(metrics.builder.builderReadyPillSuppressed).toBe(true);
+    expect(metrics.builder.duplicateBuilderSurfaceSuppressed).toBe(true);
+    expect(metrics.builder.resumedBuilderSurfaceResolved).toBe(false);
+    expect(metrics.builder.completedBuilderEntryPlacement).toBe('hidden');
+    expect(metrics.builder.completedBuilderEntryOverlapsControls).toBe(false);
+    expect(metrics.builder.completedBuilderEntryHiddenForStage).toBe(false);
     expect(metrics.events.builder).toBe(1);
     expect(metrics.counts.builderEvents).toBe(1);
     expect(metrics.regressions).toEqual(
@@ -1073,6 +1458,43 @@ describe('buildVoiceDeveloperMetrics', () => {
     );
     expect(metrics.timeline.some((item) => item.label === 'Builder stalled')).toBe(true);
     expect(metrics.health.title).toBe('Builder appears stalled');
+  });
+
+  it('normalizes legacy completed artifact entry telemetry to the canonical completed builder surface', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:22.000Z',
+        category: 'builder-ui',
+        name: 'builder-surface-resolved',
+        payload: {
+          builderSurfaceMode: 'completed_artifact_entry',
+          canonicalBuilderSurface: 'completed_artifact_entry',
+          legacyBuilderSurfaceHidden: true,
+          builderReadyPillSuppressed: true,
+          duplicateBuilderSurfaceSuppressed: true,
+          resumedBuilderSurfaceResolved: true,
+          completedBuilderEntryPlacement: 'corner',
+          completedBuilderEntryOverlapsControls: false,
+          completedBuilderEntryHiddenForStage: false,
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-04-07T12:01:20.000Z'),
+    });
+
+    expect(metrics.builder.builderSurfaceMode).toBe('canonical_completed_builder');
+    expect(metrics.builder.canonicalBuilderSurface).toBe('canonical_completed_builder');
+    expect(metrics.builder.builderReadyPillSuppressed).toBe(true);
+    expect(metrics.builder.duplicateBuilderSurfaceSuppressed).toBe(true);
+    expect(metrics.builder.completedBuilderEntryPlacement).toBe('corner');
+    expect(metrics.builder.completedBuilderEntryOverlapsControls).toBe(false);
+    expect(metrics.builder.completedBuilderEntryHiddenForStage).toBe(false);
   });
 
   it('ages a stale builder snapshot into a stall even when the last payload said running', () => {
@@ -1214,6 +1636,51 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.regressions).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ key: 'microphone', level: 'warn' }),
+      ]),
+    );
+  });
+
+  it('surfaces a safe no-signal warning when the microphone stream is connected but silent', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { platform: 'voice', sessionId: 'session-dev', runtime: 'gemini_live' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:00.120Z',
+        category: 'voice-session',
+        name: 'gemini-stage-changed',
+        payload: {
+          runtime: 'gemini_live',
+          stage: 'streaming_audio',
+          connectionState: 'connected',
+          websocketState: 'connected',
+          microphoneState: 'connected',
+          remoteAudioState: 'idle',
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot({ detectedAudio: false }),
+      nowMs: Date.parse('2026-04-07T12:00:02.000Z'),
+    });
+
+    expect(metrics.bottleneck.kind).toBe('microphone');
+    expect(metrics.bottleneck.title).toBe('Input capture is the bottleneck');
+    expect(metrics.regressions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'microphone',
+          title: 'Mic stream without signal',
+          level: 'bad',
+        }),
       ]),
     );
   });
@@ -1613,6 +2080,19 @@ describe('buildVoiceDeveloperMetrics', () => {
         seq: 2,
         at: '2026-05-27T12:00:01.000Z',
         category: 'voice-session',
+        name: 'gemini-setup-tools',
+        payload: {
+          runtime: 'gemini_live',
+          reviewToolsExposed: ['read_artifact_text', 'coreview_get_current_view'],
+          emitArtifactExposedDuringReview: false,
+          rawArtifactTextExcluded: true,
+          rawFrameExcluded: true,
+        },
+      }),
+      buildEvent({
+        seq: 3,
+        at: '2026-05-27T12:00:01.000Z',
+        category: 'voice-session',
         name: 'gemini-artifact-frame-send',
         payload: {
           runtime: 'gemini_live',
@@ -1634,7 +2114,7 @@ describe('buildVoiceDeveloperMetrics', () => {
         },
       }),
       buildEvent({
-        seq: 3,
+        seq: 4,
         at: '2026-05-27T12:00:02.000Z',
         category: 'voice-session',
         name: 'gemini-artifact-frame-send',
@@ -1654,7 +2134,7 @@ describe('buildVoiceDeveloperMetrics', () => {
         },
       }),
       buildEvent({
-        seq: 4,
+        seq: 5,
         at: '2026-05-27T12:00:03.000Z',
         category: 'voice-session',
         name: 'gemini-tool-loop-diagnostic',
@@ -1669,7 +2149,7 @@ describe('buildVoiceDeveloperMetrics', () => {
         },
       }),
       buildEvent({
-        seq: 5,
+        seq: 6,
         at: '2026-05-27T12:00:03.050Z',
         category: 'voice-session',
         name: 'gemini-tool-loop-diagnostic',
@@ -1692,6 +2172,115 @@ describe('buildVoiceDeveloperMetrics', () => {
           },
         },
       }),
+      buildEvent({
+        seq: 7,
+        at: '2026-05-27T12:00:03.100Z',
+        category: 'voice-session',
+        name: 'gemini-tool-loop-diagnostic',
+        payload: {
+          runtime: 'gemini_live',
+          phase: 'tool_response_sent',
+          toolName: 'coreview_get_current_view',
+          success: true,
+          diagnostic: {
+            toolCall: { name: 'coreview_get_current_view', args: null },
+            backendResponse: {
+              ok: true,
+              action: 'get_current_view',
+              current_view_summary: 'Current view is page 1 of 4.',
+              page_number: 1,
+              page_count: 4,
+              visual_fresh: true,
+              frame_sent: true,
+              raw_artifact_text_excluded: true,
+              raw_frame_excluded: true,
+            },
+          },
+        },
+      }),
+      buildEvent({
+        seq: 8,
+        at: '2026-05-27T12:00:03.180Z',
+        category: 'voice-session',
+        name: 'coreview-tool-call',
+        payload: {
+          coreviewToolName: 'coreview_add_annotation',
+          coreviewToolResult: 'success',
+          coreviewToolLastResult: 'success',
+          coreviewAnnotationToolCount: 1,
+          coreviewAnnotationFallbackCount: 1,
+          coreviewAnnotationCommandSource: 'frontend_fallback',
+          coreviewAnnotationToolResult: 'success',
+          coreviewAnnotationFallbackResult: 'success',
+          coreviewAnnotationKind: 'comment',
+          coreviewAnnotationAnchorType: 'current_title',
+          coreviewAnnotationColor: 'yellow',
+          coreviewAnnotationPageIndex: 0,
+          coreviewAnnotationBlockedReason: null,
+          annotationIntentDetectedCount: 1,
+          annotationIntentSource: 'artifact_review_voice_command',
+          annotationFallbackAttempted: true,
+          annotationFallbackResult: 'success',
+          annotationFallbackBlockedReason: null,
+          annotationFallbackUtteranceKind: 'annotation_comment',
+          recentAnnotationActionSucceeded: true,
+          annotationCommitAttempted: true,
+          annotationCommitResult: 'success',
+          annotationCommitCountBefore: 1,
+          annotationCommitCountAfter: 2,
+          annotationCommitVerified: true,
+          annotationCommandPreventedNavigation: true,
+          annotationCommandKeptArtifactMounted: true,
+          annotationViewReadyTimedOut: false,
+          annotationPartialSuccess: false,
+          sessionLeaveGuardSuppressedForAnnotation: true,
+          annotationOverlayCaptured: true,
+          annotationCount: 2,
+          highlightCount: 1,
+          commentCount: 1,
+          annotationActionSource: 'sophia',
+          rawCommentTextExcluded: true,
+          rawArtifactTextExcluded: true,
+          rawFrameExcluded: true,
+        },
+      }),
+      buildEvent({
+        seq: 9,
+        at: '2026-05-27T12:00:03.220Z',
+        category: 'voice-session',
+        name: 'assistant-annotation-claim-suppressed',
+        payload: {
+          reason: 'annotation_fallback_owns_acknowledgement',
+          reviewVoiceCommandKind: 'add_annotation',
+          annotationKind: 'comment',
+          rawTranscriptExcluded: true,
+          rawCommentTextExcluded: true,
+          rawArtifactTextExcluded: true,
+          rawFrameExcluded: true,
+        },
+      }),
+      buildEvent({
+        seq: 10,
+        at: '2026-05-27T12:00:03.250Z',
+        category: 'voice-session',
+        name: 'artifact-review-voice-command',
+        payload: {
+          reviewVoiceCommandKind: 'zoom_in',
+          reviewVoiceCommandApplied: true,
+          reviewVoiceCommandRefreshResult: 'success',
+          reviewVoiceCommandTransportStateBefore: 'ready',
+          reviewVoiceCommandTransportStateAfter: 'ready',
+          reviewVoiceCommandDidHardIntercept: false,
+          reviewVoiceCommandWaitedForViewReady: true,
+          reviewVoiceCommandAutoRefreshTiming: 'after_view_ready:24ms',
+          reviewVoiceCommandAutoRefreshBlockedReason: null,
+          reviewCommandStaleAfterViewChange: false,
+          lastReviewVoiceCommandUiMode: 'voice',
+          artifactCurrentPageIndex: 0,
+          artifactCurrentPageCount: 3,
+          rawTranscriptExcluded: true,
+        },
+      }),
     ];
 
     const metrics = buildVoiceDeveloperMetrics({
@@ -1705,6 +2294,9 @@ describe('buildVoiceDeveloperMetrics', () => {
       coreviewEnabled: true,
       frameSentCount: 2,
       initialFrameSent: true,
+      visualFresh: true,
+      visualFreshForTurn: true,
+      exactTextAvailable: true,
       refreshFrameCount: 1,
       lastFrameBytes: 2048,
       lastFrameDimensions: { width: 800, height: 450 },
@@ -1715,10 +2307,59 @@ describe('buildVoiceDeveloperMetrics', () => {
       providerUsageAudioDurationSeconds: 2,
       visualResponseObserved: true,
       toolCallAfterFrameObserved: true,
+      reviewVoiceCommandTransportStateBefore: 'ready',
+      reviewVoiceCommandTransportStateAfter: 'ready',
+      reviewVoiceCommandDidHardIntercept: false,
+      reviewVoiceCommandWaitedForViewReady: true,
+      reviewVoiceCommandAutoRefreshTiming: 'after_view_ready:24ms',
+      reviewToolsExposed: ['read_artifact_text', 'coreview_get_current_view'],
+      emitArtifactExposedDuringReview: false,
+      coreviewGetCurrentViewCount: 1,
+      coreviewGetCurrentViewResult: 'Current view is page 1 of 4.',
+      coreviewAnnotationToolCount: 1,
+      coreviewAnnotationFallbackCount: 1,
+      coreviewAnnotationCommandSource: 'frontend_fallback',
+      coreviewAnnotationToolResult: 'success',
+      coreviewAnnotationFallbackResult: 'success',
+      coreviewAnnotationKind: 'comment',
+      coreviewAnnotationAnchorType: 'current_title',
+      coreviewAnnotationColor: 'yellow',
+      coreviewAnnotationPageIndex: 0,
+      annotationOverlayCaptured: true,
+      annotationCount: 2,
+      highlightCount: 1,
+      commentCount: 1,
+      annotationActionSource: 'sophia',
+      annotationCommitAttempted: true,
+      annotationCommitResult: 'success',
+      annotationCommitCountBefore: 1,
+      annotationCommitCountAfter: 2,
+      annotationCommitVerified: true,
+      annotationCommandPreventedNavigation: true,
+      annotationCommandKeptArtifactMounted: true,
+      annotationViewReadyTimedOut: false,
+      annotationPartialSuccess: false,
+      sessionLeaveGuardSuppressedForAnnotation: true,
+      assistantAnnotationClaimSuppressedCount: 1,
+      lastReviewVoiceCommandKind: 'zoom_in',
+      lastReviewVoiceCommandApplied: true,
+      lastReviewVoiceCommandUiMode: 'voice',
+      lastReviewVoiceCommands: [
+        expect.objectContaining({
+          kind: 'zoom_in',
+          applied: true,
+          uiMode: 'voice',
+          waitedForViewReady: true,
+          didHardIntercept: false,
+          rawTranscriptExcluded: true,
+        }),
+      ],
       rawFrameExcluded: true,
+      rawProviderPayloadExcluded: true,
     });
     expect(metrics.coreview.exactText).toMatchObject({
       exactTextCallCount: 1,
+      readArtifactTextCallCount: 1,
       exactTextSuccessCount: 1,
       exactTextFailureCount: 0,
       exactTextSources: expect.objectContaining({ builder_metadata: 1 }),
@@ -1727,9 +2368,440 @@ describe('buildVoiceDeveloperMetrics', () => {
       lastExactTextCharCount: 77,
       lastExactTextTruncated: false,
       lastExactTextLatencyMs: 4,
+      readArtifactTextResolvedCount: 1,
+      readArtifactTextUnresolvedCount: 0,
+      readArtifactTextLastStatus: 'success',
+      exactTextRegistrySource: 'builder_metadata',
       rawArtifactTextExcluded: true,
       rawQueryExcluded: true,
     });
+  });
+
+  it('downgrades annotation success telemetry when committed counts did not change', () => {
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events: [
+        buildEvent({
+          seq: 1,
+          at: '2026-05-27T12:00:00.000Z',
+          category: 'voice-session',
+          name: 'start-talking-requested',
+          payload: { sessionId: 'session-dev' },
+        }),
+        buildEvent({
+          seq: 2,
+          at: '2026-05-27T12:00:01.000Z',
+          category: 'voice-session',
+          name: 'coreview-tool-call',
+          payload: {
+            coreviewToolName: 'coreview_add_annotation',
+            coreviewToolResult: 'success',
+            coreviewAnnotationToolCount: 1,
+            coreviewAnnotationFallbackCount: 1,
+            coreviewAnnotationCommandSource: 'frontend_fallback',
+            coreviewAnnotationToolResult: 'success',
+            coreviewAnnotationFallbackResult: 'success',
+            annotationFallbackAttempted: true,
+            annotationFallbackResult: 'success',
+            recentAnnotationActionSucceeded: true,
+            annotationCommitAttempted: true,
+            annotationCommitResult: 'success',
+            annotationCommitCountBefore: 0,
+            annotationCommitCountAfter: 0,
+            annotationCommitVerified: false,
+            annotationCount: 0,
+            highlightCount: 0,
+            commentCount: 0,
+            rawCommentTextExcluded: true,
+            rawArtifactTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        }),
+      ],
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-05-27T12:00:02.000Z'),
+    });
+
+    expect(metrics.coreview.visual).toMatchObject({
+      coreviewAnnotationToolResult: 'annotation_commit_failed',
+      coreviewAnnotationFallbackResult: 'annotation_commit_failed',
+      annotationFallbackResult: 'annotation_commit_failed',
+      recentAnnotationActionSucceeded: false,
+      annotationCommitAttempted: true,
+      annotationCommitResult: 'annotation_commit_failed',
+      annotationCommitCountBefore: 0,
+      annotationCommitCountAfter: 0,
+      annotationCommitVerified: false,
+      annotationCount: 0,
+      highlightCount: 0,
+      commentCount: 0,
+    });
+  });
+
+  it('counts successful PDF extraction as an exact-text registry source before a text-read tool call', () => {
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events: [
+        buildEvent({
+          seq: 1,
+          at: '2026-05-27T12:00:00.000Z',
+          category: 'voice-session',
+          name: 'start-talking-requested',
+          payload: { sessionId: 'session-dev' },
+        }),
+        buildEvent({
+          seq: 2,
+          at: '2026-05-27T12:00:01.000Z',
+          category: 'artifacts-runtime',
+          name: 'pdf-text-extraction',
+          payload: {
+            artifactId: 'artifact-1',
+            pdfTextExtractionStatus: 'success',
+            pdfTextExtractionSource: 'pdf_text_extraction',
+            pdfTextExtractionPageCount: 4,
+            pdfTextExtractionCharCount: 1297,
+            pdfTextExtractionTruncated: false,
+            rawArtifactTextExcluded: true,
+          },
+        }),
+      ],
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-05-27T12:00:04.000Z'),
+    });
+
+    expect(metrics.coreview.visual.exactTextAvailable).toBe(true);
+    expect(metrics.coreview.exactText.exactTextSuccessCount).toBe(1);
+    expect(metrics.coreview.exactText.exactTextSources.pdf_text_extraction).toBe(1);
+    expect(metrics.coreview.exactText.exactTextRegistrySource).toBe('pdf_text_extraction');
+    expect(metrics.coreview.exactText.readArtifactTextResolvedCount).toBe(0);
+    expect(metrics.coreview.exactText.readArtifactTextUnresolvedCount).toBe(0);
+  });
+
+  it('reports Pan mode state and successful pan gestures without raw artifact content', () => {
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events: [
+        buildEvent({
+          seq: 1,
+          at: '2026-05-27T12:00:00.000Z',
+          category: 'voice-session',
+          name: 'start-talking-requested',
+          payload: { sessionId: 'session-dev' },
+        }),
+        buildEvent({
+          seq: 2,
+          at: '2026-05-27T12:00:01.000Z',
+          category: 'artifacts-runtime',
+          name: 'artifact-annotation-state',
+          payload: {
+            artifactId: 'artifact-1',
+            artifactRendererKind: 'pdf',
+            artifactToolMode: 'pan',
+            panModeActive: true,
+            annotationOverlayCaptured: false,
+            annotationCount: 0,
+            highlightCount: 0,
+            commentCount: 0,
+            rawArtifactTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        }),
+        buildEvent({
+          seq: 3,
+          at: '2026-05-27T12:00:01.500Z',
+          category: 'artifacts-runtime',
+          name: 'artifact-pan-gesture',
+          payload: {
+            artifactId: 'artifact-1',
+            artifactRendererKind: 'pdf',
+            artifactPageIndex: 1,
+            artifactPageNumber: 2,
+            artifactZoom: 1.8,
+            artifactFitMode: 'custom',
+            artifactToolMode: 'pan',
+            panModeActive: true,
+            panGestureCount: 1,
+            panGestureResult: 'success',
+            panScrollDeltaX: 60,
+            panScrollDeltaY: 40,
+            rawArtifactTextExcluded: true,
+            rawFrameExcluded: true,
+            rawCommentTextExcluded: true,
+          },
+        }),
+      ],
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-05-27T12:00:04.000Z'),
+    });
+
+    expect(metrics.coreview.visual.panModeActive).toBe(true);
+    expect(metrics.coreview.visual.panGestureCount).toBe(1);
+    expect(metrics.coreview.visual.panGestureResult).toBe('success');
+    expect(metrics.coreview.visual.panScrollDeltaX).toBe(60);
+    expect(metrics.coreview.visual.panScrollDeltaY).toBe(40);
+    expect(JSON.stringify(metrics.coreview.visual)).not.toContain('raw artifact body');
+  });
+
+  it('reports annotation restore, sticky tool mode, and canvas restore telemetry safely', () => {
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events: [
+        buildEvent({
+          seq: 1,
+          at: '2026-05-27T12:00:00.000Z',
+          category: 'artifacts-runtime',
+          name: 'artifact-canvas-restore',
+          payload: {
+            canvasRestoreAttempted: true,
+            canvasRestoreResult: 'restored',
+            canvasRestoreSource: 'page_mount',
+            canvasRestoredArtifactIdentityHash: 'artifact-hash',
+            canvasRestoreStorageKeyHash: 'canvas-key-hash',
+            canvasRestoreStorageVersion: 1,
+            rawArtifactTextExcluded: true,
+            rawCommentTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        }),
+        buildEvent({
+          seq: 2,
+          at: '2026-05-27T12:00:01.000Z',
+          category: 'artifacts-runtime',
+          name: 'artifact-annotation-state',
+          payload: {
+            artifactId: 'artifact-1',
+            artifactRendererKind: 'pdf',
+            artifactToolMode: 'highlight',
+            annotationOverlayCaptured: true,
+            annotationCount: 4,
+            highlightCount: 1,
+            commentCount: 1,
+            underlineCount: 1,
+            arrowCount: 1,
+            annotationRestoreAttempted: true,
+            annotationRestoreResult: 'restored',
+            annotationRestoreCount: 4,
+            annotationRestoreSource: 'stage_mount',
+            annotationPersistenceStatus: 'restored',
+            annotationPersistAttempted: true,
+            annotationPersistResult: 'saved',
+            annotationPersistCount: 4,
+            annotationPersistedCount: 4,
+            annotationStorageVersion: 1,
+            annotationStorageKeyHash: 'annotation-key-hash',
+            annotationIdentityWriteHash: 'annotation-key-hash',
+            annotationIdentityReadHash: 'annotation-key-hash',
+            annotationRestoreOverwrittenCount: 0,
+            annotationStateClearedReason: null,
+            stickyToolModeEnabled: true,
+            lastToolModeBeforeAction: 'highlight',
+            lastToolModeAfterAction: 'highlight',
+            toolModeResetReason: null,
+            rawArtifactTextExcluded: true,
+            rawCommentTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        }),
+      ],
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-05-27T12:00:04.000Z'),
+    });
+
+    expect(metrics.coreview.visual).toMatchObject({
+      canvasRestoreAttempted: true,
+      canvasRestoreResult: 'restored',
+      canvasRestoreSource: 'page_mount',
+      canvasRestoredArtifactIdentityHash: 'artifact-hash',
+      annotationRestoreAttempted: true,
+      annotationRestoreResult: 'restored',
+      annotationRestoreCount: 4,
+      annotationRestoreSource: 'stage_mount',
+      annotationPersistAttempted: true,
+      annotationPersistResult: 'saved',
+      annotationPersistCount: 4,
+      annotationStorageKeyHash: 'annotation-key-hash',
+      annotationStorageVersion: 1,
+      annotationIdentityWriteHash: 'annotation-key-hash',
+      annotationIdentityReadHash: 'annotation-key-hash',
+      annotationRestoreOverwrittenCount: 0,
+      annotationStateClearedReason: null,
+      stickyToolModeEnabled: true,
+      lastToolModeBeforeAction: 'highlight',
+      lastToolModeAfterAction: 'highlight',
+      toolModeResetReason: null,
+    });
+    expect(JSON.stringify(metrics.coreview.visual)).not.toContain('raw artifact body');
+  });
+
+  it('summarizes Coreview workspace event log telemetry without raw payload content', () => {
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events: [
+        buildEvent({
+          seq: 1,
+          at: '2026-06-05T12:00:00.000Z',
+          category: 'artifacts-runtime',
+          name: 'coreview-workspace-event',
+          payload: {
+            workspaceEventType: 'annotation.created',
+            workspaceEventPayloadExcluded: true,
+            coreviewWorkspaceEventLogActive: true,
+            coreviewWorkspaceContractVersion: 1,
+            coreviewWorkspaceEventCount: 3,
+            coreviewWorkspaceLastEventType: 'annotation.created',
+            coreviewWorkspaceActorKind: 'sophia',
+            coreviewWorkspaceHasShareReadyMetadata: true,
+            coreviewShareStatus: 'unavailable',
+            workspaceEventLogPersistResult: 'saved',
+            workspaceEventLogRestoreCount: 2,
+            annotationEventsCreatedCount: 1,
+            viewChangedEventCount: 1,
+            commentText: 'change the font',
+            rawArtifactTextExcluded: true,
+            rawCommentTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        }),
+      ],
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-06-05T12:00:04.000Z'),
+    });
+
+    expect(metrics.coreview.visual).toMatchObject({
+      coreviewWorkspaceEventLogActive: true,
+      coreviewWorkspaceContractVersion: 1,
+      coreviewWorkspaceEventCount: 3,
+      coreviewWorkspaceLastEventType: 'annotation.created',
+      coreviewWorkspaceActorKind: 'sophia',
+      coreviewWorkspaceHasShareReadyMetadata: true,
+      coreviewShareStatus: 'unavailable',
+      workspaceEventLogPersistResult: 'saved',
+      workspaceEventLogRestoreCount: 2,
+      annotationEventsCreatedCount: 1,
+      viewChangedEventCount: 1,
+    });
+    expect(JSON.stringify(metrics.coreview.visual)).not.toContain('change the font');
+  });
+
+  it('reports builder snapshot protection and thumbnail annotation indicators', () => {
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events: [
+        buildEvent({
+          seq: 1,
+          at: '2026-05-27T12:00:00.000Z',
+          category: 'builder-ui',
+          name: 'builder-canvas-snapshot-hydration',
+          payload: {
+            builderSnapshotEmptyPassive: true,
+            builderSnapshotIgnoredForActiveArtifact: true,
+            artifactStageProtectedFromSnapshot: true,
+            artifactStageUnmountPrevented: true,
+            rawArtifactTextExcluded: true,
+            rawCommentTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        }),
+        buildEvent({
+          seq: 2,
+          at: '2026-05-27T12:00:01.000Z',
+          category: 'artifacts-runtime',
+          name: 'artifact-thumbnail-annotation-state',
+          payload: {
+            thumbnailAnnotationIndicatorMode: 'badge',
+            thumbnailAnnotationPageCounts: [
+              { annotationPageIndex: 0, annotationCount: 1 },
+              { annotationPageIndex: 1, annotationCount: 2 },
+            ],
+            thumbnailAnnotationRefreshCount: 3,
+            canvasPointerBlockedAfterAnnotation: false,
+            rawArtifactTextExcluded: true,
+            rawCommentTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        }),
+      ],
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-05-27T12:00:04.000Z'),
+    });
+
+    expect(metrics.coreview.visual).toMatchObject({
+      builderSnapshotEmptyPassive: true,
+      builderSnapshotIgnoredForActiveArtifact: true,
+      artifactStageProtectedFromSnapshot: true,
+      artifactStageUnmountPrevented: true,
+      thumbnailAnnotationIndicatorMode: 'badge',
+      thumbnailAnnotationRefreshCount: 3,
+      canvasPointerBlockedAfterAnnotation: false,
+    });
+    expect(metrics.coreview.visual.thumbnailAnnotationPageCounts).toEqual([
+      { annotationPageIndex: 0, annotationCount: 1 },
+      { annotationPageIndex: 1, annotationCount: 2 },
+    ]);
+  });
+
+  it('reports review tool timeouts as resolved safe tool results', () => {
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events: [
+        buildEvent({
+          seq: 1,
+          at: '2026-05-27T12:00:00.000Z',
+          category: 'voice-session',
+          name: 'start-talking-requested',
+          payload: { sessionId: 'session-dev' },
+        }),
+        buildEvent({
+          seq: 2,
+          at: '2026-05-27T12:00:01.000Z',
+          category: 'voice-session',
+          name: 'gemini-tool-loop-diagnostic',
+          payload: {
+            runtime: 'gemini_live',
+            phase: 'tool_call_received',
+            toolName: 'read_artifact_text',
+            diagnostic: { toolCall: { name: 'read_artifact_text', args: null } },
+          },
+        }),
+        buildEvent({
+          seq: 3,
+          at: '2026-05-27T12:00:01.900Z',
+          category: 'voice-session',
+          name: 'gemini-tool-loop-diagnostic',
+          payload: {
+            runtime: 'gemini_live',
+            phase: 'tool_response_sent',
+            toolName: 'read_artifact_text',
+            success: false,
+            diagnostic: {
+              toolCall: { name: 'read_artifact_text', args: null },
+              reviewToolTimedOut: true,
+              reviewToolTimeoutName: 'read_artifact_text',
+              reviewToolTimeoutResultSent: true,
+              backendResponse: {
+                ok: false,
+                status: 'timeout',
+                safe_reason: 'Trusted artifact text read timed out before the voice response deadline.',
+                review_tool_timed_out: true,
+                review_tool_timeout_name: 'read_artifact_text',
+                review_tool_timeout_result_sent: true,
+                raw_artifact_text_excluded: true,
+              },
+            },
+          },
+        }),
+      ],
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-05-27T12:00:04.000Z'),
+    });
+
+    expect(metrics.coreview.visual.reviewToolTimedOut).toBe(true);
+    expect(metrics.coreview.visual.reviewToolTimeoutName).toBe('read_artifact_text');
+    expect(metrics.coreview.visual.reviewToolTimeoutResultSent).toBe(true);
+    expect(metrics.coreview.exactText.readArtifactTextTimeoutCount).toBe(1);
+    expect(metrics.coreview.exactText.readArtifactTextLastStatus).toBe('timeout');
+    expect(metrics.coreview.exactText.readArtifactTextResolvedCount).toBe(1);
+    expect(metrics.coreview.exactText.readArtifactTextUnresolvedCount).toBe(0);
   });
 
   it('counts Coreview frame and exact-text failures without raw payloads', () => {
@@ -1798,7 +2870,9 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.coreview.visual.frameSendFailureCount).toBe(1);
     expect(metrics.coreview.visual.lastFrameSendFailureReason).toBe('frame_send_closed_gemini_websocket');
     expect(metrics.coreview.visual.websocketClosedAfterFrameCount).toBe(1);
+    expect(metrics.coreview.visual.exactTextAvailable).toBe(false);
     expect(metrics.coreview.exactText.exactTextFailureCount).toBe(1);
+    expect(metrics.coreview.exactText.readArtifactTextCallCount).toBe(1);
     expect(metrics.coreview.exactText.exactTextSources.unsupported).toBe(1);
     expect(metrics.coreview.exactText.lastExactTextStatus).toBe('forbidden');
     expect(serialized).not.toContain('base64');

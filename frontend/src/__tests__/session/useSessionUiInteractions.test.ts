@@ -13,7 +13,11 @@ function createMessage(id: string, content: string): UIMessage {
   };
 }
 
-function buildParams(messages: UIMessage[], isTyping: boolean) {
+function buildParams(
+  messages: UIMessage[],
+  isTyping: boolean,
+  overrides: Partial<Parameters<typeof useSessionUiInteractions>[0]> = {},
+) {
   return {
     messages,
     isTyping,
@@ -27,6 +31,7 @@ function buildParams(messages: UIMessage[], isTyping: boolean) {
     setShowScaffold: vi.fn(),
     triggerLightHaptic: vi.fn(),
     onBaseMicClick: vi.fn(),
+    ...overrides,
   };
 }
 
@@ -97,5 +102,18 @@ describe('useSessionUiInteractions', () => {
     });
 
     expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'end' });
+  });
+
+  it('does not auto-close artifacts while ArtifactStage is protected open', () => {
+    const setShowArtifacts = vi.fn();
+
+    renderHook(() => useSessionUiInteractions(buildParams([], false, {
+      showArtifacts: true,
+      showArtifactsUi: false,
+      protectArtifactStageOpen: true,
+      setShowArtifacts,
+    })));
+
+    expect(setShowArtifacts).not.toHaveBeenCalled();
   });
 });

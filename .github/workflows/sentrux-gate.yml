@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      issues: write
       pull-requests: write
     env:
       # Pinned sentrux release. Bump after verifying the new version locally.
@@ -55,24 +56,34 @@ jobs:
 
       - name: Comment score delta on PR (best-effort)
         if: always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { execSync } = require('child_process');
-            let body = "**Sentrux architecture gate**\n\n";
-            try {
-              const out = execSync('sentrux gate . --json 2>/dev/null || sentrux gate .', { encoding: 'utf8' });
-              body += "```\n" + out.trim().slice(0, 3500) + "\n```";
-            } catch (e) {
-              body += "Score regressed vs `main` — see job logs for details.";
-            }
-            try {
-              await github.rest.issues.createComment({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body,
-              });
-            } catch (e) {
-              core.warning(`Could not post PR comment: ${e.message}`);
-            }
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          {
+            echo "**Sentrux architecture gate**"
+            echo
+            echo '```'
+            sentrux gate . --json 2>/dev/null || sentrux gate . || echo 'Score regressed vs `main` — see job logs for details.'
+            echo '```'
+          } > /tmp/sentrux-comment.md
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          body = Path("/tmp/sentrux-comment.md").read_text(encoding="utf-8")[:3800]
+          Path("/tmp/sentrux-comment.json").write_text(
+              json.dumps({"body": body}),
+              encoding="utf-8",
+          )
+          PY
+          curl -fsSL \
+            -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --data @/tmp/sentrux-comment.json \
+            || echo "Could not post sentrux PR comment."

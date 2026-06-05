@@ -417,15 +417,15 @@ def test_terminal_redirect_successful_keeps_artifact_delivered_claim(successful_
     assert "/mnt/user-data/outputs/recursive_llms.md" in response
 
 
-# ---- Codex P1: directive gates write_file_tool prescription by task_type --
+# ---- Codex P1: directive gates write_file prescription by target type --
 
 
-@pytest.mark.parametrize("binary_task_type", ["presentation", "visual_report"])
-def test_directive_binary_task_type_does_not_prescribe_write_file_tool(binary_task_type):
+@pytest.mark.parametrize("binary_task_type", ["visual_report"])
+def test_directive_binary_task_type_does_not_prescribe_write_file_for_binary(binary_task_type):
     """Codex P1 review 2026-05-22: binary deliverables (.pptx /.pdf)
-    cannot be authored by write_file_tool — they need a generator
+    cannot be authored by write_file — they need a generator
     script run via bash_tool. The directive must NOT tell the model
-    "MUST use write_file_tool" for these task_types."""
+    "MUST use write_file" for these task_types."""
     from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
 
     augmented = _augment_update_message(
@@ -433,8 +433,8 @@ def test_directive_binary_task_type_does_not_prescribe_write_file_tool(binary_ta
         tracked={"task_id": "t1", "task_type": binary_task_type},
         delegation_context={"task": "build the deck", "task_type": binary_task_type},
     )
-    # Anti-pattern guard: must NOT say "write_file_tool" can author the binary.
-    assert "MUST use write_file_tool" not in augmented
+    # Anti-pattern guard: must NOT say "write_file" can author the binary.
+    assert "MUST use write_file" not in augmented
     assert "extend via `append=True` chunks" not in augmented
     # Must instruct the script + bash approach.
     assert "BINARY" in augmented
@@ -444,10 +444,26 @@ def test_directive_binary_task_type_does_not_prescribe_write_file_tool(binary_ta
     assert "/mnt/user-data/outputs/" in augmented
 
 
+def test_directive_pptx_target_requires_presentation_skill_workflow():
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    augmented = _augment_update_message(
+        message="add a section on X",
+        tracked={"task_id": "t1", "task_type": "presentation"},
+        delegation_context={"task": "build the deck", "task_type": "presentation"},
+    )
+
+    assert "PPTX slide-deck update" in augmented
+    assert "/mnt/skills/public/ppt-generation/SKILL.md" in augmented
+    assert "/mnt/skills/public/image-generation/scripts/generate.py" in augmented
+    assert "/mnt/skills/public/ppt-generation/scripts/generate.py" in augmented
+    assert "write_file(description=..." in augmented
+
+
 @pytest.mark.parametrize("text_task_type", ["document", "research", "frontend"])
-def test_directive_text_task_type_keeps_write_file_tool_prescription(text_task_type):
+def test_directive_text_task_type_keeps_write_file_prescription(text_task_type):
     """Text deliverables (markdown, html, plain text) DO use
-    write_file_tool. The directive must keep the canonical write_file_tool
+    write_file. The directive must keep the canonical write_file
     guidance for those task_types."""
     from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
 
@@ -456,8 +472,10 @@ def test_directive_text_task_type_keeps_write_file_tool_prescription(text_task_t
         tracked={"task_id": "t1", "task_type": text_task_type},
         delegation_context={"task": "build the doc", "task_type": text_task_type},
     )
-    # Canonical write_file_tool prescription is present.
-    assert "write_file_tool" in augmented
+    # Canonical write_file prescription is present.
+    assert "write_file(description=" in augmented
+    assert "path=..." in augmented
+    assert "content=..." in augmented
     assert "append=True" in augmented
     # Binary-only prose is NOT mixed in.
     assert "BINARY" not in augmented
@@ -466,7 +484,7 @@ def test_directive_text_task_type_keeps_write_file_tool_prescription(text_task_t
 
 def test_directive_missing_task_type_defaults_to_text_branch():
     """When task_type is missing entirely, default to the text-output
-    branch (write_file_tool) so we don't accidentally tell a typical
+    branch (write_file) so we don't accidentally tell a typical
     markdown build to use a generator script."""
     from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
 
@@ -475,7 +493,7 @@ def test_directive_missing_task_type_defaults_to_text_branch():
         tracked={"task_id": "t1"},  # no task_type
         delegation_context={"task": "the brief"},  # no task_type
     )
-    assert "write_file_tool" in augmented
+    assert "write_file(description=" in augmented
     assert "append=True" in augmented
     assert "BINARY" not in augmented
 
@@ -490,8 +508,49 @@ def test_directive_unknown_task_type_defaults_to_text_branch():
         tracked={"task_id": "t1", "task_type": "exotic_unknown"},
         delegation_context={"task": "the brief", "task_type": "exotic_unknown"},
     )
-    assert "write_file_tool" in augmented
+    assert "write_file(description=" in augmented
     assert "BINARY" not in augmented
+
+
+def test_directive_visual_report_html_target_uses_text_writer():
+    """A visual_report can still be an HTML document. The concrete target
+    extension, not task_type, must choose the authoring workflow."""
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    augmented = _augment_update_message(
+        message="add one chart",
+        tracked={
+            "task_id": "t1",
+            "task_type": "visual_report",
+            "artifact_target_path": "/mnt/user-data/outputs/report.html",
+        },
+        delegation_context={
+            "task": "Build an HTML document with charts and diagrams",
+            "task_type": "visual_report",
+        },
+    )
+
+    assert "Concrete file target: `/mnt/user-data/outputs/report.html`" in augmented
+    assert "write_file(description=" in augmented
+    assert "BINARY" not in augmented
+    assert "generator script" not in augmented.lower()
+
+
+def test_directive_visual_report_pdf_target_keeps_binary_guidance():
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    augmented = _augment_update_message(
+        message="add one chart",
+        tracked={
+            "task_id": "t1",
+            "task_type": "visual_report",
+            "artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+        },
+        delegation_context={"task": "Build a visual report", "task_type": "visual_report"},
+    )
+
+    assert "BINARY" in augmented
+    assert "generator script" in augmented.lower()
 
 
 # ---- F.1: slug-derived filename + resume-not-restart directive ------------
@@ -528,6 +587,20 @@ def test_augment_prefix_carries_slug_derived_filename_from_delegation_context():
         "Phase 2F.1: directive must precede the user message so the model "
         "anchors on the directive at the top of the new HumanMessage"
     )
+
+
+def test_augment_prefix_preserves_research_but_requires_new_url_fetch():
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    augmented = _augment_update_message(
+        message="also include https://github.com/RecursiveMAS/RecursiveMAS",
+        tracked={"task_id": "t1", "task_type": "research"},
+        delegation_context={"task": "Build a report", "task_type": "research"},
+    )
+
+    assert "DO NOT re-run web_search" not in augmented
+    assert "builder_web_search" in augmented or "builder_web_fetch" in augmented
+    assert "Before editing the deliverable" in augmented
 
 
 def test_augment_prefix_includes_resume_not_restart_language():
@@ -569,6 +642,46 @@ def test_augment_extension_matches_task_type():
         )
 
 
+def test_augment_preserves_html_document_output_format():
+    """Static HTML document builds are document-style tasks, but the resumed
+    concrete file target must still keep the requested .html output format."""
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    source_url = "https://github.com/RecursiveMAS/RecursiveMAS"
+    augmented = _augment_update_message(
+        message=f"add recursive MAS section from {source_url}",
+        tracked={"task_id": "t1", "task_type": "document"},
+        delegation_context={
+            "task": "Build an HTML document about Karpathy autoresearch",
+            "task_type": "document",
+        },
+    )
+
+    assert "/mnt/user-data/outputs/" in augmented
+    assert "build-an-html-document-about-karpathy-au.html" in augmented
+    assert source_url in augmented
+    assert "approved fetch targets" in augmented
+    assert "use builder_web_fetch on the exact new URL" in augmented
+    assert "add recursive MAS section" in augmented
+
+
+def test_augment_preserves_html_output_for_visual_report_task_type():
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    augmented = _augment_update_message(
+        message="also include the Recursive MAS framework",
+        tracked={"task_id": "t1", "task_type": "visual_report"},
+        delegation_context={
+            "task": "Build a concise HTML file document with charts and diagrams about GEPA SkillOpt",
+            "task_type": "visual_report",
+        },
+    )
+
+    assert "build-a-concise-html-file-document-with.html" in augmented
+    assert "write_file(description=" in augmented
+    assert "BINARY" not in augmented
+
+
 def test_augment_prefer_prior_artifact_path_over_suggested_filename():
     """If the prior builder already produced an artifact_path, use that
     exact path instead of a derived suggestion. The model should continue
@@ -586,6 +699,44 @@ def test_augment_prefer_prior_artifact_path_over_suggested_filename():
     )
     # Existing artifact wins.
     assert "/mnt/user-data/outputs/already-written.md" in augmented
+
+
+def test_augment_reuses_tracked_artifact_target_path_before_artifact_exists():
+    """Mid-build updates should keep the canonical launch target even before
+    the builder has emitted a real artifact_path."""
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    augmented = _augment_update_message(
+        message="also include the new framework",
+        tracked={
+            "task_id": "t1",
+            "task_type": "document",
+            "artifact_target_path": "/mnt/user-data/outputs/canonical.html",
+        },
+        delegation_context={
+            "task": "Build an HTML document about the original topic",
+            "task_type": "document",
+        },
+    )
+
+    assert "Concrete file target: `/mnt/user-data/outputs/canonical.html`" in augmented
+    assert "build-an-html-document" not in augmented
+
+
+def test_augment_uses_delegated_artifact_target_path_when_tracking_missing():
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    augmented = _augment_update_message(
+        message="also include the new framework",
+        tracked={"task_id": "t1", "task_type": "document"},
+        delegation_context={
+            "task": "Build an HTML document about the original topic",
+            "task_type": "document",
+            "artifact_target_path": "/mnt/user-data/outputs/original.html",
+        },
+    )
+
+    assert "Concrete file target: `/mnt/user-data/outputs/original.html`" in augmented
 
 
 def test_augment_falls_back_to_build_slug_when_description_missing():
@@ -696,6 +847,81 @@ def test_wrapper_augmentation_includes_prior_artifact_path_when_present():
     # Phase 2F.1: directive language asserts "RESUMING (not restarting)"
     # which is the canonical anti-re-research framing.
     assert "RESUMING" in msg or "resume" in msg.lower()
+
+
+def test_wrapper_persists_update_urls_in_replacement_run_input():
+    """Explicit URLs in a mid-build update must reach builder state, not
+    only directive prose. builder_web_fetch authorizes against these state
+    fields in the replacement run."""
+    update_calls: list[dict] = []
+    update_url = "https://example.com/source"
+
+    class FakeRuns:
+        async def create(self, **kwargs):
+            update_calls.append(kwargs)
+            return {"run_id": "run-new"}
+
+    class FakeClient:
+        runs = FakeRuns()
+
+    class FakeClients:
+        def get_async(self, agent_name):
+            assert agent_name == "sophia_builder"
+            return FakeClient()
+
+    agent_map = {"sophia_builder": {"graph_id": "sophia_builder"}}
+    clients = FakeClients()
+
+    async def native_coroutine(*, task_id, message, runtime):
+        # Keep these references in the closure so the wrapper can reuse the
+        # native deepagents update context, matching production.
+        assert agent_map and clients
+        raise AssertionError("URL-state dispatch should bypass native fallback")
+
+    native = SimpleNamespace(
+        name="update_async_task",
+        description="native desc",
+        func=None,
+        coroutine=native_coroutine,
+        args_schema=None,
+    )
+    wrapped = make_update_async_task_wrapper(native)
+    runtime = SimpleNamespace(
+        state={
+            "async_tasks": {
+                "task-1": {
+                    "task_id": "task-1",
+                    "agent_name": "sophia_builder",
+                    "thread_id": "builder-thread-1",
+                    "run_id": "run-old",
+                    "status": "running",
+                    "created_at": "2026-05-28T10:00:00Z",
+                    "last_checked_at": "2026-05-28T10:00:00Z",
+                    "last_updated_at": "2026-05-28T10:00:00Z",
+                }
+            },
+        },
+        tool_call_id="tc-update",
+        config={"configurable": {"user_id": "user-1", "parent_thread_id": "parent-1"}},
+    )
+
+    response = asyncio.run(
+        wrapped.coroutine(
+            task_id="task-1",
+            message=f"also include {update_url}",
+            runtime=runtime,
+        )
+    )
+
+    assert isinstance(response, Command)
+    assert len(update_calls) == 1
+    run_input = update_calls[0]["input"]
+    assert run_input["explicit_user_urls"] == [update_url]
+    assert run_input["builder_allowed_urls"] == [update_url]
+    assert run_input["builder_update_required_urls"] == [update_url]
+    assert "approved fetch targets" in run_input["messages"][0]["content"]
+    assert update_calls[0]["config"]["configurable"]["thread_id"] == "builder-thread-1"
+    assert response.update["async_tasks"]["task-1"]["run_id"] == "run-new"
 
 
 def test_wrapper_augmentation_is_idempotent():

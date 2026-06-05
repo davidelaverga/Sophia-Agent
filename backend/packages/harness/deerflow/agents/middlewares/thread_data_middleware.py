@@ -11,6 +11,44 @@ from deerflow.config.paths import Paths, get_paths
 logger = logging.getLogger(__name__)
 
 
+def _runtime_context_dict(runtime: Runtime | None) -> dict | None:
+    context = getattr(runtime, "context", None) if runtime is not None else None
+    return context if isinstance(context, dict) else None
+
+
+def _runtime_configurable(runtime: Runtime | None) -> dict:
+    config = getattr(runtime, "config", None) if runtime is not None else None
+    if isinstance(config, dict):
+        configurable = config.get("configurable") or {}
+        if isinstance(configurable, dict):
+            return configurable
+    return {}
+
+
+def _resolve_runtime_thread_id(runtime: Runtime | None) -> str | None:
+    context = _runtime_context_dict(runtime)
+    if context:
+        candidate = context.get("thread_id")
+        if isinstance(candidate, str) and candidate:
+            return candidate
+
+    candidate = _runtime_configurable(runtime).get("thread_id")
+    if isinstance(candidate, str) and candidate:
+        return candidate
+
+    try:
+        from langchain_core.runnables.config import var_child_runnable_config
+
+        config = var_child_runnable_config.get({}) or {}
+        configurable = config.get("configurable") or {}
+        candidate = configurable.get("thread_id") if isinstance(configurable, dict) else None
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    except Exception:
+        return None
+    return None
+
+
 class ThreadDataMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
 
@@ -74,15 +112,13 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
 
     @override
     def before_agent(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:
-        # Extract thread_id from runtime context (may be None in subagent execution)
-        thread_id = None
-        if runtime and runtime.context:
-            thread_id = runtime.context.get("thread_id")
-
-        if thread_id is None and runtime and getattr(runtime, "config", None):
-            thread_id = runtime.config.get("configurable", {}).get("thread_id")
-            if thread_id and runtime.context is not None:
-                runtime.context["thread_id"] = thread_id
+        # Extract thread_id from every runtime carrier. Resumed async-subagent
+        # runs can have no mutable context even though configurable.thread_id
+        # is present.
+        thread_id = _resolve_runtime_thread_id(runtime)
+        context = _runtime_context_dict(runtime)
+        if thread_id and context is not None:
+            context["thread_id"] = thread_id
 
         if thread_id is None:
             # Subagents may already have thread_data passed from the parent agent.

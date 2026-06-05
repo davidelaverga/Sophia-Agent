@@ -66,6 +66,18 @@ export type GeminiRuntimeTelemetry = {
   lastProviderEventAt: string | null
   lastProviderEventType: string | null
   providerCategoryCounts: Record<string, GeminiRuntimeCategoryCounter>
+  reviewVoiceReady?: boolean
+  reviewMicAudioDetected?: boolean
+  reviewUserSpeechDetected?: boolean
+  reviewProviderTranscriptObserved?: boolean
+  reviewPublicTranscriptObserved?: boolean
+  reviewTranscriptPromotionBlockedReason?: string | null
+  providerInputTranscriptCount?: number
+  publicUserTranscriptCount?: number
+  providerToPublicTranscriptGap?: number
+  firstProviderTranscriptAt?: string | null
+  firstPublicUserTranscriptAt?: string | null
+  transcriptPromotionLatencyMs?: number | null
   outputAudioEventCount: number
   lastOutputAudioAt: string | null
   assistantTranscriptSource?: string | null
@@ -149,6 +161,111 @@ export type GeminiRuntimeTelemetry = {
   artifactToolCallCount: number
   artifactToolCallUnknownCount: number
   builderToolCallCount: number
+  coreviewToolCompletedCount?: number
+  coreviewToolUnresolvedCount?: number
+  coreviewToolLastResult?: string | null
+  coreviewToolRefreshResult?: string | null
+  coreviewToolVisualFreshAfterResult?: boolean | null
+  reviewToolsExposed?: string[]
+  emitArtifactExposedDuringReview?: boolean
+  reviewToolTimedOut?: boolean
+  reviewToolTimeoutName?: string | null
+  reviewToolTimeoutResultSent?: boolean
+  coreviewGetCurrentViewCount?: number
+  coreviewGetCurrentViewResult?: string | null
+  readArtifactTextResolvedCount?: number
+  readArtifactTextUnresolvedCount?: number
+  readArtifactTextTimeoutCount?: number
+  readArtifactTextLastStatus?: string | null
+  readArtifactTextPdfExtractionStatus?: string | null
+  exactTextRegistrySource?: string | null
+  annotationOverlayCaptured?: boolean | null
+  annotationCount?: number
+  highlightCount?: number
+  commentCount?: number
+  underlineCount?: number
+  arrowCount?: number
+  drawPathCount?: number
+  annotationPersistenceStatus?: string | null
+  annotationRestoreAttempted?: boolean
+  annotationRestoreResult?: string | null
+  annotationRestoreCount?: number
+  annotationRestoreSource?: string | null
+  annotationPersistAttempted?: boolean
+  annotationPersistResult?: string | null
+  annotationPersistCount?: number
+  annotationPersistedCount?: number
+  annotationStorageVersion?: number | null
+  annotationStorageKeyHash?: string | null
+  annotationIdentityWriteHash?: string | null
+  annotationIdentityReadHash?: string | null
+  annotationRestoreOverwrittenCount?: number
+  coreviewAnnotationStoreActive?: boolean
+  coreviewAnnotationStateSource?: string | null
+  annotationPreventedEmptyOverwriteCount?: number
+  annotationMigratedIdentityCount?: number
+  annotationStoreSurvivedCanvasClose?: boolean
+  annotationStoreHydratedArtifactStage?: boolean
+  annotationStateClearedReason?: string | null
+  builderSnapshotIgnoredForActiveArtifact?: boolean
+  builderSnapshotEmptyPassive?: boolean
+  artifactStageProtectedFromSnapshot?: boolean
+  artifactStageUnmountPrevented?: boolean
+  thumbnailAnnotationIndicatorMode?: string | null
+  thumbnailAnnotationPageCounts?: Array<{ annotationPageIndex: number; annotationCount: number }>
+  thumbnailAnnotationRefreshCount?: number
+  canvasPointerBlockedAfterAnnotation?: boolean | null
+  canvasRestoreAttempted?: boolean
+  canvasRestoreResult?: string | null
+  canvasRestoreSource?: string | null
+  canvasRestoredArtifactIdentityHash?: string | null
+  stickyToolModeEnabled?: boolean
+  lastToolModeBeforeAction?: string | null
+  lastToolModeAfterAction?: string | null
+  toolModeResetReason?: string | null
+  annotationExportAvailable?: boolean
+  annotationExportResult?: string | null
+  annotationExportKind?: string | null
+  annotationExportPageScope?: string | null
+  annotationDeleteCount?: number
+  annotationEditCount?: number
+  unsupportedAnnotationKind?: string | null
+  annotationActionSource?: string | null
+  coreviewAnnotationToolCount?: number
+  coreviewAnnotationFallbackCount?: number
+  coreviewAnnotationCommandSource?: string | null
+  coreviewAnnotationToolResult?: string | null
+  coreviewAnnotationFallbackResult?: string | null
+  coreviewAnnotationKind?: string | null
+  coreviewAnnotationAnchorType?: string | null
+  coreviewAnnotationColor?: string | null
+  coreviewAnnotationPageIndex?: number | null
+  coreviewAnnotationBlockedReason?: string | null
+  annotationIntentDetectedCount?: number
+  annotationIntentSource?: string | null
+  annotationFallbackAttempted?: boolean
+  annotationFallbackResult?: string | null
+  annotationFallbackBlockedReason?: string | null
+  annotationFallbackUtteranceKind?: string | null
+  recentAnnotationActionSucceeded?: boolean
+  annotationCommitAttempted?: boolean
+  annotationCommitResult?: string | null
+  annotationCommitCountBefore?: number | null
+  annotationCommitCountAfter?: number | null
+  annotationCommitVerified?: boolean
+  annotationCommandPreventedNavigation?: boolean
+  annotationCommandKeptArtifactMounted?: boolean
+  annotationViewReadyTimedOut?: boolean
+  annotationPartialSuccess?: boolean
+  sessionLeaveGuardSuppressedForAnnotation?: boolean
+  assistantAnnotationClaimSuppressedCount?: number
+  coreviewFocusAnchorCount?: number
+  coreviewFocusAnchorResult?: string | null
+  coreviewFocusAnchorType?: string | null
+  providerToPublicTranscriptGapAfterCoreviewTool?: number | null
+  followUpTurnDispatchedAfterCoreviewTool?: boolean
+  emitArtifactBlockedDuringReviewCount?: number
+  emitArtifactBlockedForAnnotationIntentCount?: number
   unresolvedToolCallCount: number
   oldestUnresolvedToolCallAgeMs: number | null
   lastToolPhase: string | null
@@ -171,6 +288,14 @@ export type VoiceStateProps = {
   stopTalking: () => Promise<void> | void
   bargeIn: () => void
   softBargeIn: () => void
+  markAnnotationActionSucceeded?: (counts?: {
+    annotationCount?: number | null
+    highlightCount?: number | null
+    commentCount?: number | null
+    underlineCount?: number | null
+    arrowCount?: number | null
+    drawPathCount?: number | null
+  }) => void
   unlockAudio?: () => void
   resetVoiceState?: () => void
   runtime?: SessionRuntime

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from voice.realtime import (
     DeliveryIntent,
     ProviderCapabilities,
@@ -297,6 +299,44 @@ def test_gemini_emit_artifact_correction_transcript_is_suppressed_from_public_as
     assert payloads[0]["data"]["reason"] == "gemini_internal_output_suppressed"
     assert payloads[0]["data"]["matched_marker"] == "emit_artifact_correction"
     assert "Emit Artifact Correction attempt" not in str(payloads)
+
+
+@pytest.mark.parametrize(
+    ("text", "matched_marker"),
+    [
+        ("emit_artifact{", "emit_artifact_tool_syntax"),
+        ("read_artifact_text", "read_artifact_text"),
+        ("active_goal: Wait for completion", "active_goal"),
+        ("tool_call_id", "tool_call_id"),
+        ("schema", "schema_word"),
+    ],
+)
+def test_gemini_tool_schema_like_transcript_is_suppressed_from_public_assistant_text(
+    text: str,
+    matched_marker: str,
+) -> None:
+    payloads = _payloads(
+        [
+            _event(
+                ProviderEventType.ASSISTANT_TEXT_DELTA,
+                {
+                    "text": text,
+                    "is_delta": False,
+                    "transcript_assembly": "auto",
+                    "segment_id": "gemini-segment-0",
+                    "source_sequence": 53,
+                },
+                provider="google-gemini-live",
+                response_id="gemini-response-internal-markers",
+            )
+        ]
+    )
+
+    assert [payload["type"] for payload in payloads] == ["sophia.turn_diagnostic"]
+    assert payloads[0]["data"]["reason"] == "gemini_internal_output_suppressed"
+    assert payloads[0]["data"]["matched_marker"] == matched_marker
+    assert "text" not in payloads[0]["data"]
+    assert not any(payload["type"] == "sophia.transcript" for payload in payloads)
 
 
 def test_normal_gemini_assistant_text_still_emits_public_transcript() -> None:

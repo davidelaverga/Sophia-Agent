@@ -13,6 +13,7 @@ export const BUILDER_DISCOVERY_PROMPT =
 
 type CancelBuilderTaskResponse = {
   task_id?: string;
+  run_id?: string;
   status?: string;
   detail?: string | null;
 };
@@ -38,6 +39,7 @@ type BuilderTaskStatusShellCommandPayload = {
 
 export type BuilderTaskStatusResponse = {
   task_id?: string;
+  run_id?: string;
   status?: string;
   trace_id?: string | null;
   description?: string | null;
@@ -227,8 +229,15 @@ export function getBuilderTaskPhaseFromStatus(status: string | null | undefined)
   }
 }
 
-export async function cancelBuilderTask(taskId: string): Promise<CancelBuilderTaskResponse> {
-  const response = await fetch(`/api/sophia/tasks/${encodeURIComponent(taskId)}/cancel`, {
+export async function cancelBuilderTask(
+  parentThreadId: string,
+  taskId: string,
+  runId?: string | null,
+): Promise<CancelBuilderTaskResponse> {
+  const path = runId
+    ? `/api/sophia/builder/threads/${encodeURIComponent(parentThreadId)}/canvas/tasks/${encodeURIComponent(taskId)}/runs/${encodeURIComponent(runId)}/cancel`
+    : `/api/sophia/builder/threads/${encodeURIComponent(parentThreadId)}/canvas/tasks/${encodeURIComponent(taskId)}/cancel`;
+  const response = await fetch(path, {
     method: 'POST',
   });
 
@@ -318,6 +327,7 @@ export function mergeBuilderTaskStatus(
     ...(currentTask ?? { phase: nextPhase ?? 'running' }),
     ...(nextPhase ? { phase: nextPhase } : {}),
     ...(statusPayload.task_id ? { taskId: statusPayload.task_id } : {}),
+    ...(statusPayload.run_id ? { runId: statusPayload.run_id } : {}),
     ...(statusPayload.description ? { label: statusPayload.description } : {}),
     ...(detail ? { detail } : {}),
     ...(typeof statusPayload.progress_percent === 'number'

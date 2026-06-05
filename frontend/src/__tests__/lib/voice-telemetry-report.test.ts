@@ -250,14 +250,70 @@ function buildMetrics(): VoiceDeveloperMetrics {
       diagnostics: 1,
       builderEvents: 0,
     },
+    builder: {
+      phase: null,
+      taskId: null,
+      label: null,
+      detail: null,
+      progressPercent: null,
+      progressSource: null,
+      totalSteps: null,
+      completedSteps: null,
+      inProgressSteps: null,
+      pendingSteps: null,
+      activeStepTitle: null,
+      startedAt: null,
+      completedAt: null,
+      lastUpdateAt: null,
+      lastProgressAt: null,
+      heartbeatMs: null,
+      idleMs: null,
+      stuck: false,
+      stuckReason: null,
+      builderSurfaceMode: null,
+      canonicalBuilderSurface: 'none',
+      legacyBuilderSurfaceHidden: false,
+      builderReadyPillSuppressed: false,
+      duplicateBuilderSurfaceSuppressed: false,
+      resumedBuilderSurfaceResolved: false,
+      completedBuilderEntryPlacement: 'hidden',
+      completedBuilderEntryOverlapsControls: false,
+      completedBuilderEntryHiddenForStage: false,
+    },
     coreview: {
       visual: {
         coreviewEnabled: true,
         coreviewSessionActive: true,
         coreviewArtifactId: 'artifact-1',
+        coreviewWorkspaceContractVersion: 1,
+        artifactStableIdentity: 'user:unknown|thread:thread-1|path:mnt/user-data/outputs/report.pdf|renderer:pdf',
+        artifactCapabilityRendererKind: 'pdf',
+        artifactCapabilityRenderMode: 'canvas',
+        artifactCapabilitySupportsPages: true,
+        artifactCapabilitySupportsAnnotations: true,
+        artifactCapabilitySupportsTextExtraction: true,
+        artifactCapabilitySupportsLayoutAnchors: true,
+        artifactCapabilitySupportsOCR: false,
+        artifactCapabilityRequiresOCR: false,
+        artifactCapabilitySupportsPptxNativeRender: false,
+        artifactCapabilitySupportsAnnotatedExport: false,
+        artifactCapabilityFallbackReason: null,
+        coreviewWorkspaceEventLogActive: true,
+        coreviewWorkspaceEventCount: 3,
+        coreviewWorkspaceLastEventType: 'annotation.created',
+        coreviewWorkspaceActorKind: 'sophia',
+        coreviewWorkspaceHasShareReadyMetadata: true,
+        coreviewShareStatus: 'unavailable',
+        workspaceEventLogPersistResult: 'saved',
+        workspaceEventLogRestoreCount: 2,
+        annotationEventsCreatedCount: 1,
+        viewChangedEventCount: 1,
         visualSourceKind: 'canvas_element',
         frameSentCount: 1,
         initialFrameSent: true,
+        visualFresh: true,
+        visualFreshForTurn: true,
+        exactTextAvailable: true,
         refreshFrameCount: 0,
         lastFrameBytes: 1024,
         lastFrameDimensions: { width: 640, height: 360 },
@@ -272,10 +328,25 @@ function buildMetrics(): VoiceDeveloperMetrics {
         providerUsageAudioDurationSeconds: 2,
         visualResponseObserved: true,
         toolCallAfterFrameObserved: true,
+        coreviewToolCompletedCount: 1,
+        coreviewToolUnresolvedCount: 0,
+        coreviewToolLastResult: 'success',
+        coreviewToolRefreshResult: 'success',
+        coreviewToolVisualFreshAfterResult: true,
+        panModeActive: false,
+        panGestureCount: 0,
+        panGestureResult: null,
+        panScrollDeltaX: null,
+        panScrollDeltaY: null,
+        providerToPublicTranscriptGapAfterCoreviewTool: 0,
+        followUpTurnDispatchedAfterCoreviewTool: true,
+        emitArtifactBlockedDuringReviewCount: 0,
         rawFrameExcluded: true,
+        rawProviderPayloadExcluded: true,
       },
       exactText: {
         exactTextCallCount: 1,
+        readArtifactTextCallCount: 1,
         exactTextSuccessCount: 1,
         exactTextFailureCount: 0,
         exactTextSources: {
@@ -289,6 +360,9 @@ function buildMetrics(): VoiceDeveloperMetrics {
         lastExactTextCharCount: 77,
         lastExactTextTruncated: false,
         lastExactTextLatencyMs: 4,
+        readArtifactTextResolvedCount: 1,
+        readArtifactTextUnresolvedCount: 0,
+        readArtifactTextPdfExtractionStatus: null,
         rawArtifactTextExcluded: true,
         rawQueryExcluded: true,
       },
@@ -321,6 +395,15 @@ function buildSummary(): VoiceTelemetrySummary {
     builderPhase: null,
     builderProgressPercent: null,
     builderStuck: false,
+    builderSurfaceMode: null,
+    canonicalBuilderSurface: 'none',
+    legacyBuilderSurfaceHidden: false,
+    builderReadyPillSuppressed: false,
+    duplicateBuilderSurfaceSuppressed: false,
+    resumedBuilderSurfaceResolved: false,
+    completedBuilderEntryPlacement: 'hidden',
+    completedBuilderEntryOverlapsControls: false,
+    completedBuilderEntryHiddenForStage: false,
   };
 }
 
@@ -425,6 +508,7 @@ describe('buildVoiceTelemetryReport', () => {
     });
     expect(report.diagnosticsSummary.geminiRelayThroughput).toMatchObject({
       schema: 'gemini_relay_throughput_summary_v1',
+      warnings: [],
       relayTraceCountWithThroughput: 1,
       maxOrderedRelayQueueDepth: 2,
       maxOldestQueuedAgeMs: 180,
@@ -432,6 +516,66 @@ describe('buildVoiceTelemetryReport', () => {
       transcriptPartialsDropped: 0,
       transcriptCoalescingDisabledReason: 'provider_output_transcription_is_delta_like',
       p95TranscriptRelayLatencyMs: 220,
+    });
+    expect(report.diagnosticsSummary.builderSurface).toMatchObject({
+      schema: 'builder_surface_summary_v1',
+      builderSurfaceMode: null,
+      canonicalBuilderSurface: 'none',
+      legacyBuilderSurfaceHidden: false,
+      builderReadyPillSuppressed: false,
+      duplicateBuilderSurfaceSuppressed: false,
+      resumedBuilderSurfaceResolved: false,
+      completedBuilderEntryPlacement: 'hidden',
+      completedBuilderEntryOverlapsControls: false,
+      completedBuilderEntryHiddenForStage: false,
+      rawArtifactTextExcluded: true,
+      rawFrameExcluded: true,
+      rawCommentTextExcluded: true,
+    });
+    expect(report.diagnosticsSummary.artifactReview).toMatchObject({
+      schema: 'artifact_review_summary_v1',
+      warnings: expect.arrayContaining(['artifact_count_mismatch', 'review_emit_artifact_tool_churn_detected']),
+      artifactCount: 1,
+      artifactRuntimeIngestCount: 0,
+      artifactRenderedCount: 1,
+      artifactCountMismatchReason: 'rendered_state_without_runtime_ingest',
+      emitArtifactToolCallCount: 1,
+      emitArtifactBlockedDuringReviewCount: 0,
+      rawArtifactTextExcluded: true,
+    });
+    expect(report.diagnosticsSummary.coreviewStillFrame).toMatchObject({
+      schema: 'coreview_still_frame_summary_v1',
+      coreviewEnabled: true,
+      coreviewSessionActive: true,
+      coreviewArtifactId: 'artifact-1',
+      coreviewWorkspaceEventLogActive: true,
+      coreviewWorkspaceEventCount: 3,
+      coreviewWorkspaceLastEventType: 'annotation.created',
+      coreviewWorkspaceActorKind: 'sophia',
+      coreviewWorkspaceHasShareReadyMetadata: true,
+      coreviewShareStatus: 'unavailable',
+      workspaceEventLogPersistResult: 'saved',
+      workspaceEventLogRestoreCount: 2,
+      annotationEventsCreatedCount: 1,
+      viewChangedEventCount: 1,
+      visualSourceKind: 'canvas_element',
+      frameSentCount: 1,
+      initialFrameSent: true,
+      visualFresh: true,
+      visualFreshForTurn: true,
+      exactTextAvailable: true,
+      exactTextCallCount: 1,
+      exactTextSuccessCount: 1,
+      readArtifactTextCallCount: 1,
+      coreviewToolCompletedCount: 1,
+      coreviewToolUnresolvedCount: 0,
+      coreviewToolRefreshResult: 'success',
+      coreviewToolVisualFreshAfterResult: true,
+      readArtifactTextResolvedCount: 1,
+      readArtifactTextUnresolvedCount: 0,
+      rawFrameExcluded: true,
+      rawProviderPayloadExcluded: true,
+      rawArtifactTextExcluded: true,
     });
     const relayTrace = report.captureBundle.events.find((event) => event.name === 'gemini-relay-trace')?.payload as { trace?: { backendDiagnostics?: Record<string, unknown> } };
     expect(relayTrace?.trace?.backendDiagnostics).toMatchObject({
@@ -454,6 +598,84 @@ describe('buildVoiceTelemetryReport', () => {
     expect(report.captureBundle.snapshot.transcript.voiceMessages).toEqual([]);
     expect(report.captureBundle.snapshot.artifacts.sessionArtifacts).toBeNull();
     expect(report.captureBundle.snapshot.artifacts.recapArtifacts).toBeNull();
+  });
+
+  it('does not flag review emit churn when emit_artifact was explicitly suppressed by the review guard', () => {
+    const report = buildVoiceTelemetryReport({
+      exportedAt: '2026-05-20T12:00:04.000Z',
+      metrics: buildMetrics(),
+      summary: buildSummary(),
+      captureBundle: buildCaptureBundle([
+        {
+          seq: 1,
+          recordedAt: '2026-05-20T12:00:00.000Z',
+          category: 'voice-session',
+          name: 'start-talking-requested',
+          payload: { sessionId: 'current-session', runtime: 'gemini_live' },
+        },
+        {
+          seq: 2,
+          recordedAt: '2026-05-20T12:00:01.000Z',
+          category: 'voice-session',
+          name: 'gemini-tool-loop-diagnostic',
+          payload: {
+            data: {
+              phase: 'tool_execution_rejected',
+              toolName: 'emit_artifact',
+              diagnostic: {
+                toolCall: { id: 'artifact-call-1', name: 'emit_artifact' },
+                rejection_reason: 'artifact_review_emit_artifact_suppressed',
+              },
+            },
+          },
+        },
+      ]),
+    });
+
+    const warnings = report.diagnosticsSummary.artifactReview.warnings as string[];
+
+    expect(warnings).not.toContain('review_emit_artifact_tool_churn_detected');
+    expect(warnings).not.toContain('review_tool_churn_suppressed');
+  });
+
+  it('surfaces artifact rebind diagnostics in artifact review and Coreview summaries', () => {
+    const metrics = buildMetrics();
+    Object.assign(metrics.coreview.visual, {
+      artifactStableIdentity: 'user:unknown|thread:current-thread|path:mnt/user-data/outputs/report.pdf|renderer:pdf',
+      artifactRebindAttempted: true,
+      artifactRebindResult: 'success',
+      artifactRebindReason: 'voice_connect_visible_artifact',
+      artifactReboundFromRenderedState: true,
+      artifactRebindSource: 'voice_connect',
+      exactTextRehydrated: true,
+      exactTextRehydrateResult: 'success',
+      currentRunSelectedStageEvents: 1,
+      longLivedSelectedStageState: true,
+      telemetryScopeMode: 'current_run_rebind',
+    });
+
+    const report = buildVoiceTelemetryReport({
+      exportedAt: '2026-05-20T12:00:04.000Z',
+      metrics,
+      summary: buildSummary(),
+      captureBundle: buildCaptureBundle([]),
+    });
+
+    const expected = {
+      artifactStableIdentity: 'user:unknown|thread:current-thread|path:mnt/user-data/outputs/report.pdf|renderer:pdf',
+      artifactRebindAttempted: true,
+      artifactRebindResult: 'success',
+      artifactRebindReason: 'voice_connect_visible_artifact',
+      artifactReboundFromRenderedState: true,
+      artifactRebindSource: 'voice_connect',
+      exactTextRehydrated: true,
+      exactTextRehydrateResult: 'success',
+      currentRunSelectedStageEvents: 1,
+      longLivedSelectedStageState: true,
+      telemetryScopeMode: 'current_run_rebind',
+    };
+    expect(report.diagnosticsSummary.artifactReview).toMatchObject(expected);
+    expect(report.diagnosticsSummary.coreviewStillFrame).toMatchObject(expected);
   });
 
   it('adds compact warnings for Gemini stale output, relay backlog, overlap, and unresolved tools', () => {
@@ -621,6 +843,15 @@ describe('buildVoiceTelemetryReport', () => {
       unresolvedToolCallCount: 1,
       artifactToolCallUnknownCount: 1,
     });
+    expect(report.diagnosticsSummary.geminiRelayThroughput).toMatchObject({
+      warnings: expect.arrayContaining([
+        'public_transcript_relay_latency_high',
+        'relay_queue_depth_high',
+      ]),
+      maxOrderedRelayQueueDepth: 105,
+      maxTranscriptRelayLatencyMs: 109931,
+      p95TranscriptRelayLatencyMs: 106203,
+    });
   });
 
   it('reconciles rendered artifact state into exported artifact counts', () => {
@@ -644,6 +875,25 @@ describe('buildVoiceTelemetryReport', () => {
         },
         {
           seq: 2,
+          recordedAt: '2026-05-20T12:00:00.800Z',
+          category: 'voice-session',
+          name: 'coreview-state',
+          payload: {
+            data: {
+              coreview: {
+                coreviewEnabled: true,
+                coreviewSessionActive: true,
+                coreviewArtifactId: 'artifact-1',
+                visualSourceKind: 'offscreen_render',
+                frameSentCount: 1,
+                initialFrameSent: true,
+                exactTextAvailable: true,
+              },
+            },
+          },
+        },
+        {
+          seq: 3,
           recordedAt: '2026-05-20T12:00:01.000Z',
           category: 'voice-session',
           name: 'gemini-tool-call-ledger',
@@ -655,14 +905,22 @@ describe('buildVoiceTelemetryReport', () => {
     expect(report.metrics.counts.artifacts).toBe(1);
     expect(report.metrics.counts.artifactPublicEventCount).toBe(0);
     expect(report.metrics.counts.artifactRenderedCount).toBe(1);
-    expect(report.metrics.counts.artifactCountSource).toBe('rendered_state');
+    expect(report.metrics.counts.artifactSelectedStageCount).toBe(1);
+    expect(report.metrics.counts.artifactCountSource).toBe('selected_stage_artifact');
     expect(report.metrics.counts.artifactCountMismatch).toBe(true);
+    expect(report.metrics.counts.artifactCountMismatchReason).toBe('selected_stage_artifact_not_public_event');
     expect(report.metrics.sessionTelemetry.gemini?.artifactCount).toBe(1);
     expect(report.metrics.sessionTelemetry.gemini?.artifactPublicEventCount).toBe(0);
-    expect(report.metrics.sessionTelemetry.gemini?.artifactRuntimeIngestCount).toBe(0);
+    expect(report.metrics.sessionTelemetry.gemini?.artifactRuntimeIngestCount).toBe(1);
+    expect(report.metrics.sessionTelemetry.gemini?.artifactSelectedStageCount).toBe(1);
     expect(report.metrics.sessionTelemetry.gemini?.artifactRenderedCount).toBe(1);
     expect(report.turnCaptureDiagnostics.summary.finalUiState.artifactCount).toBe(1);
-    expect(report.turnCaptureDiagnostics.summary.finalUiState.artifactCountSource).toBe('rendered_state');
+    expect(report.turnCaptureDiagnostics.summary.finalUiState.artifactCountSource).toBe('selected_stage_artifact');
+    expect(report.turnCaptureDiagnostics.summary.finalUiState.artifactCountMismatchReason).toBe('selected_stage_artifact_not_public_event');
+    expect(report.diagnosticsSummary.artifactReview).toMatchObject({
+      warnings: expect.arrayContaining(['artifact_count_mismatch']),
+      artifactCountMismatchReason: 'selected_stage_artifact_not_public_event',
+    });
   });
 
   it('redacts auth-bearing transport material while keeping transport diagnostics readable', () => {
@@ -803,6 +1061,72 @@ describe('buildVoiceTelemetryReport', () => {
     });
     expect(serialized).not.toContain(rawMemoryText);
     expect(serialized).not.toContain('unsafe_preview');
+  });
+
+  it('compacts direct Coreview latest tool execution diagnostics without raw annotation text', () => {
+    const report = buildVoiceTelemetryReport({
+      exportedAt: '2026-05-20T12:00:05.000Z',
+      summary: buildSummary(),
+      metrics: buildMetrics(),
+      captureBundle: buildCaptureBundle([
+        {
+          seq: 1,
+          recordedAt: '2026-05-20T12:00:00.000Z',
+          category: 'voice-session',
+          name: 'start-talking-requested',
+          payload: { sessionId: 'current-session', runtime: 'gemini_live' },
+        },
+        {
+          seq: 2,
+          recordedAt: '2026-05-20T12:00:02.000Z',
+          category: 'voice-session',
+          name: 'gemini-relay-trace',
+          payload: {
+            trace: {
+              backendDiagnostics: {
+                session_id: 'gemini-session',
+                raw_provider_events_accepted: 1,
+                provider_category_counts: { toolCall: 1 },
+                function_calls_extracted_count: 1,
+                tool_execution_counts: { finished: 1 },
+                latest_tool_execution: {
+                  phase: 'finished',
+                  tool_call_id: 'coreview-comment-1',
+                  tool_name: 'coreview_add_annotation',
+                  recorded_at: 1770000000,
+                  annotation_kind: 'comment',
+                  annotation_anchor_type: 'current_title',
+                  annotation_color: 'yellow',
+                  annotation_page_index: 0,
+                  annotation_action_source: 'sophia',
+                  raw_comment_text_excluded: true,
+                  comment_text: 'change the font',
+                  text_quote: 'private title text',
+                },
+                provider_events_pushed_into_mapper: 1,
+                provider_event_mapping_outputs: {},
+                public_sophia_emitted_counts: {},
+              },
+            },
+          },
+        },
+      ]),
+    });
+    const serialized = JSON.stringify(report);
+
+    expect(report.diagnosticsSummary.geminiRelayBackend?.latestToolExecution).toMatchObject({
+      tool_name: 'coreview_add_annotation',
+      annotation_kind: 'comment',
+      annotation_anchor_type: 'current_title',
+      annotation_color: 'yellow',
+      annotation_page_index: 0,
+      annotation_action_source: 'sophia',
+      raw_comment_text_excluded: true,
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
+    });
+    expect(serialized).not.toContain('change the font');
+    expect(serialized).not.toContain('private title text');
   });
 
   it('falls back to current session id scoping when no start event is present', () => {
@@ -1171,10 +1495,51 @@ describe('buildVoiceTelemetryReport', () => {
   });
 
   it('exports safe Coreview telemetry and strips raw frame or artifact text fields', () => {
+    const metrics = buildMetrics();
+    Object.assign(metrics.coreview.visual, {
+      annotationOverlayCaptured: true,
+      annotationCount: 2,
+      highlightCount: 1,
+      commentCount: 1,
+      annotationActionSource: 'sophia',
+      coreviewAnnotationToolCount: 2,
+      coreviewAnnotationFallbackCount: 1,
+      coreviewAnnotationCommandSource: 'frontend_fallback',
+      coreviewAnnotationToolResult: 'success',
+      coreviewAnnotationFallbackResult: 'success',
+      coreviewAnnotationKind: 'comment',
+      coreviewAnnotationAnchorType: 'current_title',
+      coreviewAnnotationColor: 'yellow',
+      coreviewAnnotationPageIndex: 0,
+      coreviewAnnotationBlockedReason: null,
+      annotationFallbackAttempted: true,
+      annotationFallbackResult: 'success',
+      recentAnnotationActionSucceeded: true,
+      annotationCommitAttempted: true,
+      annotationCommitResult: 'success',
+      annotationCommitCountBefore: 1,
+      annotationCommitCountAfter: 2,
+      annotationCommitVerified: true,
+      annotationCommandPreventedNavigation: true,
+      annotationCommandKeptArtifactMounted: true,
+      annotationViewReadyTimedOut: false,
+      annotationPartialSuccess: false,
+      sessionLeaveGuardSuppressedForAnnotation: true,
+      assistantAnnotationClaimSuppressedCount: 1,
+      coreviewFocusAnchorCount: 1,
+      coreviewFocusAnchorResult: 'success',
+      coreviewFocusAnchorType: 'current_title',
+      panModeActive: true,
+      panGestureCount: 1,
+      panGestureResult: 'success',
+      panScrollDeltaX: 48,
+      panScrollDeltaY: 24,
+    });
+
     const report = buildVoiceTelemetryReport({
       exportedAt: '2026-05-20T12:00:05.000Z',
       summary: buildSummary(),
-      metrics: buildMetrics(),
+      metrics,
       captureBundle: buildCaptureBundle([
         {
           seq: 1,
@@ -1223,17 +1588,211 @@ describe('buildVoiceTelemetryReport', () => {
             },
           },
         },
+        {
+          seq: 4,
+          recordedAt: '2026-05-20T12:00:02.500Z',
+          category: 'voice-session',
+          name: 'gemini-relay-trace',
+          payload: {
+            trace: {
+              backendDiagnostics: {
+                session_id: 'gemini-session',
+                raw_provider_events_accepted: 1,
+                provider_category_counts: { toolCall: 1 },
+                function_calls_extracted_count: 1,
+                tool_execution_counts: { finished: 1 },
+                tool_execution_recent: [
+                  {
+                    phase: 'finished',
+                    tool_call_id: 'coreview-annotation-call-1',
+                    tool_name: 'coreview_add_annotation',
+                    recorded_at: 1770000000,
+                    ok: true,
+                    action: 'add_annotation',
+                    kind: 'comment',
+                    annotation_kind: 'comment',
+                    annotation_anchor_type: 'current_title',
+                    annotation_color: 'yellow',
+                    annotation_page_index: 0,
+                    annotation_count: 2,
+                    highlight_count: 1,
+                    comment_count: 1,
+                    annotation_overlay_captured: true,
+                    annotation_action_source: 'sophia',
+                    annotation_commit_attempted: true,
+                    annotation_commit_result: 'success',
+                    annotation_commit_count_before: 1,
+                    annotation_commit_count_after: 2,
+                    annotation_commit_verified: true,
+                    annotation_created: true,
+                    annotation_command_prevented_navigation: true,
+                    annotation_command_kept_artifact_mounted: true,
+                    annotation_view_ready_timed_out: false,
+                    annotation_partial_success: false,
+                    session_leave_guard_suppressed_for_annotation: true,
+                    raw_comment_text_excluded: true,
+                    comment_text: 'change the font',
+                    text_quote: 'private title text',
+                  },
+                ],
+                provider_events_pushed_into_mapper: 1,
+                provider_event_mapping_outputs: {},
+                public_sophia_emitted_counts: {},
+              },
+            },
+          },
+        },
+        {
+          seq: 5,
+          recordedAt: '2026-05-20T12:00:03.000Z',
+          category: 'voice-session',
+          name: 'artifact-review-voice-command',
+          payload: {
+            reviewVoiceCommandKind: 'go_to_page',
+            reviewVoiceCommandPageTarget: 2,
+            reviewVoiceCommandApplied: true,
+            reviewVoiceCommandRefreshResult: 'success',
+            reviewVoiceCommandDidHardIntercept: false,
+            reviewVoiceCommandWaitedForViewReady: true,
+            reviewVoiceCommandAutoRefreshTiming: 'after_view_ready:18ms',
+            lastReviewVoiceCommandUiMode: 'voice',
+            artifactCurrentPageIndex: 1,
+            artifactCurrentPageCount: 3,
+            rawTranscriptExcluded: true,
+          },
+        },
       ]),
     });
     const serialized = JSON.stringify(report);
 
     expect(report.coreview.visual.frameSentCount).toBe(1);
+    expect(report.coreview.visual.initialFrameSent).toBe(true);
+    expect(report.coreview.visual.rawProviderPayloadExcluded).toBe(true);
     expect(report.coreview.exactText.exactTextSuccessCount).toBe(1);
+    expect(report.coreview.exactText.readArtifactTextCallCount).toBe(1);
     expect(report.coreview.exactText.lastExactTextSource).toBe('builder_metadata');
+    expect(report.coreview.visual.annotationOverlayCaptured).toBe(true);
+    expect(report.coreview.visual.annotationCount).toBe(2);
+    expect(report.coreview.visual.highlightCount).toBe(1);
+    expect(report.coreview.visual.commentCount).toBe(1);
+    expect(report.coreview.visual.annotationActionSource).toBe('sophia');
+    expect(report.coreview.visual.coreviewAnnotationToolCount).toBe(2);
+    expect(report.coreview.visual.coreviewAnnotationFallbackCount).toBe(1);
+    expect(report.coreview.visual.coreviewAnnotationCommandSource).toBe('frontend_fallback');
+    expect(report.coreview.visual.coreviewAnnotationToolResult).toBe('success');
+    expect(report.coreview.visual.coreviewAnnotationFallbackResult).toBe('success');
+    expect(report.coreview.visual.coreviewAnnotationKind).toBe('comment');
+    expect(report.coreview.visual.coreviewAnnotationAnchorType).toBe('current_title');
+    expect(report.coreview.visual.coreviewAnnotationColor).toBe('yellow');
+    expect(report.coreview.visual.coreviewAnnotationPageIndex).toBe(0);
+    expect(report.coreview.visual.annotationFallbackAttempted).toBe(true);
+    expect(report.coreview.visual.annotationFallbackResult).toBe('success');
+    expect(report.coreview.visual.recentAnnotationActionSucceeded).toBe(true);
+    expect(report.coreview.visual.annotationCommitAttempted).toBe(true);
+    expect(report.coreview.visual.annotationCommitResult).toBe('success');
+    expect(report.coreview.visual.annotationCommitCountBefore).toBe(1);
+    expect(report.coreview.visual.annotationCommitCountAfter).toBe(2);
+    expect(report.coreview.visual.annotationCommitVerified).toBe(true);
+    expect(report.coreview.visual.annotationCommandPreventedNavigation).toBe(true);
+    expect(report.coreview.visual.annotationCommandKeptArtifactMounted).toBe(true);
+    expect(report.coreview.visual.annotationViewReadyTimedOut).toBe(false);
+    expect(report.coreview.visual.annotationPartialSuccess).toBe(false);
+    expect(report.coreview.visual.sessionLeaveGuardSuppressedForAnnotation).toBe(true);
+    expect(report.coreview.visual.assistantAnnotationClaimSuppressedCount).toBe(1);
+    expect(report.coreview.visual.coreviewFocusAnchorCount).toBe(1);
+    expect(report.coreview.visual.coreviewFocusAnchorResult).toBe('success');
+    expect(report.coreview.visual.coreviewFocusAnchorType).toBe('current_title');
+    expect(report.coreview.visual.panModeActive).toBe(true);
+    expect(report.coreview.visual.panGestureCount).toBe(1);
+    expect(report.coreview.visual.panGestureResult).toBe('success');
+    expect(report.diagnosticsSummary.coreviewStillFrame.rawProviderPayloadExcluded).toBe(true);
+    expect(report.diagnosticsSummary.coreviewStillFrame.rawArtifactTextExcluded).toBe(true);
+    expect(report.diagnosticsSummary.coreviewStillFrame).toMatchObject({
+      annotationOverlayCaptured: true,
+      annotationCount: 2,
+      highlightCount: 1,
+      commentCount: 1,
+      annotationActionSource: 'sophia',
+      coreviewAnnotationToolCount: 2,
+      coreviewAnnotationFallbackCount: 1,
+      coreviewAnnotationCommandSource: 'frontend_fallback',
+      coreviewAnnotationToolResult: 'success',
+      coreviewAnnotationFallbackResult: 'success',
+      coreviewAnnotationKind: 'comment',
+      coreviewAnnotationAnchorType: 'current_title',
+      coreviewAnnotationColor: 'yellow',
+      coreviewAnnotationPageIndex: 0,
+      annotationFallbackAttempted: true,
+      annotationFallbackResult: 'success',
+      recentAnnotationActionSucceeded: true,
+      annotationCommitAttempted: true,
+      annotationCommitResult: 'success',
+      annotationCommitCountBefore: 1,
+      annotationCommitCountAfter: 2,
+      annotationCommitVerified: true,
+      annotationCommandPreventedNavigation: true,
+      annotationCommandKeptArtifactMounted: true,
+      annotationViewReadyTimedOut: false,
+      annotationPartialSuccess: false,
+      sessionLeaveGuardSuppressedForAnnotation: true,
+      assistantAnnotationClaimSuppressedCount: 1,
+      coreviewFocusAnchorCount: 1,
+      coreviewFocusAnchorResult: 'success',
+      coreviewFocusAnchorType: 'current_title',
+      panModeActive: true,
+      panGestureCount: 1,
+      panGestureResult: 'success',
+      panScrollDeltaX: 48,
+      panScrollDeltaY: 24,
+      lastReviewVoiceCommandKind: 'go_to_page',
+      lastReviewVoiceCommandApplied: true,
+      lastReviewVoiceCommandUiMode: 'voice',
+      reviewVoiceCommandDidHardIntercept: false,
+      reviewVoiceCommandWaitedForViewReady: true,
+      reviewVoiceCommandAutoRefreshTiming: 'after_view_ready:18ms',
+      lastReviewVoiceCommands: [
+        expect.objectContaining({
+          kind: 'go_to_page',
+          applied: true,
+          rawTranscriptExcluded: true,
+        }),
+      ],
+    });
+    const latestToolExecution = report.diagnosticsSummary.geminiRelayBackend?.latestToolExecution;
+    const relayTrace = report.captureBundle.events.find((event) => event.name === 'gemini-relay-trace')?.payload as { trace?: { backendDiagnostics?: Record<string, unknown> } };
+    const compactLatest = relayTrace?.trace?.backendDiagnostics?.latest_tool_execution as Record<string, unknown> | undefined;
+    expect(latestToolExecution).toMatchObject({
+      tool_name: 'coreview_add_annotation',
+      annotation_kind: 'comment',
+      annotation_anchor_type: 'current_title',
+      annotation_color: 'yellow',
+      annotation_page_index: 0,
+      annotation_commit_attempted: true,
+      annotation_commit_result: 'success',
+      annotation_commit_count_before: 1,
+      annotation_commit_count_after: 2,
+      annotation_commit_verified: true,
+      annotation_created: true,
+      annotation_command_prevented_navigation: true,
+      annotation_command_kept_artifact_mounted: true,
+      annotation_view_ready_timed_out: false,
+      annotation_partial_success: false,
+      session_leave_guard_suppressed_for_annotation: true,
+      raw_comment_text_excluded: true,
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
+    });
+    expect(compactLatest).toMatchObject({
+      tool_name: 'coreview_add_annotation',
+      annotation_overlay_captured: true,
+      annotation_action_source: 'sophia',
+    });
     expect(serialized).not.toContain('base64-raw-frame');
     expect(serialized).not.toContain('raw-frame-bytes');
     expect(serialized).not.toContain('raw artifact body');
     expect(serialized).not.toContain('What exact text');
+    expect(serialized).not.toContain('change the font');
+    expect(serialized).not.toContain('private title text');
   });
 
 });

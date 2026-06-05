@@ -107,7 +107,8 @@ def builder_web_search(
 ) -> Command:
     """Search the web for current external information during builder execution.
 
-    Use this only when the delegated task explicitly allows web research.
+    Builder tasks should attempt web research before substantive artifact
+    writing, editing, or emitting.
 
     Args:
         query: Search query for the external information needed.
@@ -116,9 +117,6 @@ def builder_web_search(
         return _tool_response(tool_call_id, "Error: Builder runtime state is not available.", tool_name="builder_web_search")
 
     state = runtime.state
-    if not state.get("allow_web_research"):
-        return _tool_response(tool_call_id, "Error: Web research is disabled for this builder task.", tool_name="builder_web_search")
-
     budget, budget_error = _budget_guard(state, "search")
     if budget_error:
         return _tool_response(tool_call_id, budget_error, tool_name="builder_web_search")

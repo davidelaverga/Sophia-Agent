@@ -11,11 +11,15 @@ Command(goto="model") so the builder gets another turn to retry instead
 of completing with a phantom artifact.
 """
 
+import json
 import logging
+import re
+import shlex
 import time
+import zipfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
-from typing import Any, NotRequired, override
+from typing import Annotated, Any, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -28,10 +32,32 @@ from langgraph.types import Command
 from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
 from deerflow.agents.sophia_agent.utils import log_middleware
 from deerflow.sophia.builder_events import fire_completion_webhook_from_artifact
+from deerflow.sophia.builder_web_policy import extract_explicit_user_urls
 from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.sophia.storage.supabase_mirror import maybe_mirror_file
 
 logger = logging.getLogger(__name__)
+
+
+def _skill_name_from_path(path: str) -> str | None:
+    for marker in ("/skills/public/", "/mnt/skills/public/", "/skills/", "/mnt/skills/"):
+        if marker in path:
+            tail = path.split(marker, 1)[1]
+            skill = tail.split("/", 1)[0]
+            return skill or None
+    return None
+
+
+def _command_references_skill(command: str, skill_name: str) -> bool:
+    return any(
+        marker in command
+        for marker in (
+            f"/skills/{skill_name}/",
+            f"/mnt/skills/{skill_name}/",
+            f"/skills/public/{skill_name}/",
+            f"/mnt/skills/public/{skill_name}/",
+        )
+    )
 
 
 def _emit_skill_usage_logs(tool_calls: list[dict[str, Any]]) -> None:
@@ -57,8 +83,7 @@ def _emit_skill_usage_logs(tool_calls: list[dict[str, Any]]) -> None:
         if name in ("read_file", "read_file_tool"):
             path = args.get("path") or args.get("file_path") or ""
             if isinstance(path, str) and "/skills/" in path and path.endswith("/SKILL.md"):
-                # Extract the skill folder name: ``…/skills/<name>/SKILL.md``.
-                segment = path.split("/skills/", 1)[1].split("/", 1)[0]
+                segment = _skill_name_from_path(path)
                 if segment in relevant:
                     logger.info("[BuilderSkill] manifest_read: skill=%s", segment)
         elif name == "bash":
@@ -69,15 +94,187 @@ def _emit_skill_usage_logs(tool_calls: list[dict[str, Any]]) -> None:
                 # Match both the host (``skills/<name>/``) and container
                 # (``/mnt/skills/<name>/``) layouts so this works in
                 # local-sandbox and aio-sandbox modes alike.
-                if (
-                    f"/skills/{skill_name}/" in cmd
-                    or f"/mnt/skills/{skill_name}/" in cmd
-                ):
+                if _command_references_skill(cmd, skill_name):
                     logger.info("[BuilderSkill] script_invoked: skill=%s", skill_name)
                     break
 
 
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
+_SIMPLE_PDF_TOOL_NAME = "create_pdf_artifact"
+_PDF_CREATION_TOOL_NAMES = frozenset({"render_markdown_to_pdf", _SIMPLE_PDF_TOOL_NAME})
+_BUILDER_WRITE_TOOL_NAMES = {"write_file", "write_file_tool"}
+_BUILDER_RESEARCH_TOOL_NAMES = {"builder_web_search", "builder_web_fetch"}
+_BUILDER_SUBSTANTIVE_TOOL_NAMES = {
+    "write_file",
+    "write_file_tool",
+    "str_replace",
+    "str_replace_tool",
+    "emit_builder_artifact",
+}
+_SIMPLE_PDF_REQUEST_MARKERS = (
+    "simple pdf",
+    "simple .pdf",
+    "simple product review",
+    "artifact canvas smoke test",
+    "pdf artifact",
+)
+_SAFE_BASH_COMMAND_RE = re.compile(
+    r"^\s*(?:pwd|ls|find|cat|sed|head|tail|grep|rg|wc|file|du|stat|jq)\b"
+)
+_BASH_WRITE_MARKER_RE = re.compile(
+    r"(?:^|\s)(?:python|node|perl|ruby)\b|[>|]\s*|(?:^|\s)tee\s+|<<"
+)
+_FILE_TARGET_HINT_MARKER = "[Sophia/post-interrupt build directive]"
+_CONCRETE_FILE_TARGET_RE = re.compile(r"Concrete file target:\s*`([^`]+)`")
+_PPTX_SKILL_PATH_MARKERS = (
+    "/skills/public/ppt-generation/SKILL.md",
+    "/mnt/skills/public/ppt-generation/SKILL.md",
+    "/skills/ppt-generation/SKILL.md",
+    "/mnt/skills/ppt-generation/SKILL.md",
+)
+_PPTX_GENERATOR_PATH_MARKERS = (
+    "/skills/public/ppt-generation/scripts/generate.py",
+    "/mnt/skills/public/ppt-generation/scripts/generate.py",
+    "/skills/ppt-generation/scripts/generate.py",
+    "/mnt/skills/ppt-generation/scripts/generate.py",
+)
+_IMAGE_GENERATION_PATH_MARKERS = (
+    "/skills/public/image-generation/scripts/generate.py",
+    "/mnt/skills/public/image-generation/scripts/generate.py",
+    "/skills/image-generation/scripts/generate.py",
+    "/mnt/skills/image-generation/scripts/generate.py",
+)
+_PATH_CORRECTABLE_WRITE_ERROR_CLASSES = {
+    "path_is_directory",
+    "path_not_outputs",
+    "path_traversal",
+    "permission_denied",
+    "write_tool_error",
+}
+_RUNTIME_WRITE_ERROR_CLASSES = {
+    "missing_thread_data",
+    "missing_thread_id",
+    "sandbox_not_found",
+    "sandbox_runtime",
+    "unexpected_write_error",
+    "write_os_error",
+}
+_PROMOTABLE_DELIVERABLE_EXTENSIONS = frozenset({
+    ".pdf",
+    ".pptx",
+    ".docx",
+    ".xlsx",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".svg",
+    ".html",
+    ".htm",
+    ".zip",
+    ".md",
+    ".txt",
+    ".csv",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".js",
+    ".ts",
+    ".css",
+})
+_PDF_FALLBACK_EXTENSIONS = frozenset({".md", ".html"})
+_PPTX_FALLBACK_EXTENSIONS = frozenset({".md", ".html"})
+_PPTX_REQUIRED_ZIP_ENTRIES = frozenset({
+    "[Content_Types].xml",
+    "_rels/.rels",
+    "ppt/presentation.xml",
+})
+_PPTX_MIN_BYTES = 1024
+_PPTX_IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+_HTML_FALLBACK_MIN_BYTES = 128
+_PDF_VISUAL_FALLBACK_MARKERS = (
+    "chart",
+    "charts",
+    "diagram",
+    "diagrams",
+    "visual",
+    "visuals",
+    "visualization",
+    "visualisation",
+    "infographic",
+    "layout",
+    "image",
+    "images",
+)
+_WRITE_ERROR_CLASS_MARKERS = (
+    ("missing_thread_id", ("thread id not available", "nonetype' object has no attribute 'get")),
+    ("missing_thread_data", ("thread data not available", "no allowed local sandbox directories")),
+    ("sandbox_not_found", ("sandbox with id", "sandbox not found")),
+    ("sandbox_runtime", ("sandbox",)),
+    ("path_traversal", ("path traversal", "access denied")),
+    ("permission_denied", ("permission denied",)),
+    ("path_is_directory", ("path is a directory",)),
+    ("write_os_error", ("failed to write file",)),
+    ("unexpected_write_error", ("unexpected error writing file",)),
+)
+
+
+def _merge_builder_write_diagnostics(
+    current: dict | None, update: dict | None
+) -> dict:
+    if current is None and update is None:
+        return {}
+    if current is None:
+        return dict(update or {})
+    if update is None:
+        return dict(current)
+    merged = dict(current)
+    for key, value in update.items():
+        _merge_builder_write_diagnostic_value(merged, key, value)
+    return merged
+
+
+def _merge_builder_write_diagnostic_value(
+    merged: dict, key: str, value: object
+) -> None:
+    if key in {"success_count", "error_count"} and isinstance(value, int):
+        merged[key] = int(merged.get(key, 0) or 0) + value
+        return
+    if key in {"successful_output_paths", "successful_deliverable_output_paths"} and isinstance(value, list):
+        merged[key] = _merge_string_list(merged.get(key), value)
+        return
+    merged[key] = value
+
+
+def _merge_string_list(current: object, update: list) -> list[str]:
+    seen = {str(item): None for item in current if isinstance(item, str)} if isinstance(current, list) else {}
+    for item in update:
+        if isinstance(item, str):
+            seen[item] = None
+    return list(seen)
+
+
+def _merge_builder_pptx_diagnostics(
+    current: dict | None, update: dict | None
+) -> dict:
+    if current is None and update is None:
+        return {}
+    if current is None:
+        return dict(update or {})
+    if update is None:
+        return dict(current)
+    merged = dict(current)
+    for key, value in update.items():
+        if key.endswith("_count") and isinstance(value, int):
+            merged[key] = int(merged.get(key, 0) or 0) + value
+            continue
+        if key in {"image_output_paths", "pptx_output_paths"} and isinstance(value, list):
+            merged[key] = _merge_string_list(merged.get(key), value)
+            continue
+        if key.endswith("_bytes_total") and isinstance(value, int):
+            merged[key] = int(merged.get(key, 0) or 0) + value
+            continue
+        merged[key] = value
+    return merged
 
 
 def _extract_output_relative_path(artifact_path: str | None) -> str | None:
@@ -136,11 +333,1134 @@ def _upload_builder_outputs_to_supabase(
         maybe_mirror_file(str(host_file), thread_id, outputs_host_path)
 
 
+def _outputs_host_path_from_state(state: dict[str, Any]) -> str | None:
+    thread_data = state.get("thread_data") or {}
+    return thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
+
+
+def _outputs_root_from_state(state: dict[str, Any]) -> Path | None:
+    outputs_host_path = _outputs_host_path_from_state(state)
+    if not outputs_host_path:
+        return None
+    outputs_root = Path(outputs_host_path)
+    return outputs_root if outputs_root.is_dir() else None
+
+
+def _builder_started_min_mtime(state: dict[str, Any]) -> float | None:
+    started_ms = state.get("builder_task_started_at_ms")
+    if isinstance(started_ms, (int, float)) and started_ms > 0:
+        return (float(started_ms) / 1000.0) - 5.0
+    return None
+
+
+def _is_recovery_candidate(entry: Path, *, requested_suffix: str, min_mtime: float | None) -> bool:
+    if not entry.is_file() or entry.name.startswith((".", "_")):
+        return False
+    if requested_suffix and entry.suffix.lower() != requested_suffix:
+        return False
+    return min_mtime is None or entry.stat().st_mtime >= min_mtime
+
+
+def _is_fresh_pdf_output(entry: Path, min_mtime: float | None) -> bool:
+    if not _is_public_output_file(entry):
+        return False
+    if entry.suffix.lower() != ".pdf":
+        return False
+    return min_mtime is None or entry.stat().st_mtime >= min_mtime
+
+
+def _is_public_output_file(entry: Path) -> bool:
+    if not entry.is_file():
+        return False
+    return not entry.name.startswith((".", "_"))
+
+
+def _output_tree_has_fresh_pdf(outputs_root: Path, min_mtime: float | None) -> bool:
+    for entry in outputs_root.rglob("*"):
+        if _is_fresh_pdf_output(entry, min_mtime):
+            return True
+    return False
+
+
+def _output_tree_has_completion_candidate(
+    outputs_root: Path,
+    state: dict[str, Any],
+    min_mtime: float | None,
+) -> bool:
+    for entry in outputs_root.rglob("*"):
+        if _is_completion_output_candidate(entry, state, min_mtime):
+            return True
+    return False
+
+
+def _is_completion_output_candidate(
+    entry: Path,
+    state: dict[str, Any],
+    min_mtime: float | None,
+) -> bool:
+    if not _is_public_output_file(entry):
+        return False
+    if min_mtime is not None and entry.stat().st_mtime < min_mtime:
+        return False
+    if _completion_candidate_integrity_error(entry, state) is not None:
+        return False
+    return _output_suffix_allowed_for_request(entry.suffix.lower(), state)
+
+
+def _completion_candidate_integrity_error(entry: Path, state: dict[str, Any]) -> str | None:
+    suffix = entry.suffix.lower()
+    if suffix == ".pptx":
+        return _log_completion_candidate_integrity_error(
+            entry,
+            ext="pptx",
+            reason=_pptx_integrity_error_for_file(entry),
+        )
+    if _requested_pptx_artifact(state) and suffix in {".html", ".htm"}:
+        return _log_completion_candidate_integrity_error(
+            entry,
+            ext="html",
+            reason=_html_fallback_integrity_error_for_file(entry),
+            requested_ext="pptx",
+        )
+    return None
+
+
+def _log_completion_candidate_integrity_error(
+    entry: Path,
+    *,
+    ext: str,
+    reason: str | None,
+    requested_ext: str | None = None,
+) -> str | None:
+    if reason is None:
+        return None
+    requested = f" requested_ext={requested_ext}" if requested_ext else ""
+    logger.warning(
+        "BuilderArtifact: artifact_integrity ext=%s valid=false reason=%s "
+        "bytes=%s source=outputs_scan%s",
+        ext,
+        reason,
+        entry.stat().st_size,
+        requested,
+    )
+    return reason
+
+
+def _output_suffix_allowed_for_request(suffix: str, state: dict[str, Any]) -> bool:
+    if _requested_pdf_artifact(state):
+        return suffix in _allowed_pdf_artifact_suffixes(state)
+    if _requested_pptx_artifact(state):
+        return suffix in _allowed_pptx_artifact_suffixes(state)
+    return True
+
+
+def _is_promotable_candidate_path(
+    path: Path,
+    *,
+    min_mtime: float | None,
+    requested_pptx: bool,
+) -> bool:
+    if not _is_recent_promotable_path(path, min_mtime):
+        return False
+    if path.suffix.lower() == ".pptx":
+        return _pptx_integrity_error_for_file(path) is None
+    if requested_pptx and path.suffix.lower() in {".html", ".htm"}:
+        return _html_fallback_integrity_error_for_file(path) is None
+    return True
+
+
+def _is_recent_promotable_path(path: Path, min_mtime: float | None) -> bool:
+    return (
+        path.is_file()
+        and not path.name.startswith("_")
+        and path.suffix.lower() in _PROMOTABLE_DELIVERABLE_EXTENSIONS
+        and (min_mtime is None or path.stat().st_mtime >= min_mtime)
+    )
+
+
+def _emit_candidate_paths(artifact_args: dict[str, Any]) -> list[str]:
+    candidates: list[str] = []
+    primary = artifact_args.get("artifact_path")
+    if isinstance(primary, str) and primary.strip():
+        candidates.append(primary.strip())
+    supporting = artifact_args.get("supporting_files")
+    if isinstance(supporting, list):
+        candidates.extend(
+            path for path in supporting
+            if isinstance(path, str) and path.strip()
+        )
+    return candidates
+
+
+def _invalid_outputs_candidate(candidate: str) -> bool:
+    return candidate.strip().startswith(_OUTPUTS_VIRTUAL_PREFIX)
+
+
+def _local_emit_candidate_status(
+    candidate: str,
+    relative: str,
+    outputs_host_path: str | None,
+) -> str:
+    if not outputs_host_path:
+        return "missing"
+    host_file = Path(outputs_host_path) / relative
+    if not host_file.is_file():
+        return "missing"
+    if PurePosixPath(candidate).suffix.lower() == ".pptx":
+        return _local_pptx_candidate_status(host_file)
+    return "valid"
+
+
+def _local_pptx_candidate_status(host_file: Path) -> str:
+    reason = _pptx_integrity_error_for_file(host_file)
+    if reason is not None:
+        logger.warning(
+            "BuilderArtifact: artifact_integrity ext=pptx valid=false "
+            "reason=%s bytes=%s source=local",
+            reason,
+            host_file.stat().st_size,
+        )
+        return "invalid"
+    logger.info(
+        "BuilderArtifact: artifact_integrity ext=pptx valid=true bytes=%s source=local",
+        host_file.stat().st_size,
+    )
+    return "valid"
+
+
+def _remote_emit_candidate_status(
+    candidate: str,
+    relative: str,
+    remote_thread_ids: list[str],
+) -> str:
+    if not remote_thread_ids:
+        return "missing"
+    if PurePosixPath(candidate).suffix.lower() == ".pptx":
+        return _remote_pptx_candidate_status(relative, remote_thread_ids)
+    if any(supabase_artifact_store.check_artifact_exists(thread_id, relative) for thread_id in remote_thread_ids):
+        return "valid"
+    return "missing"
+
+
+def _remote_pptx_candidate_status(relative: str, remote_thread_ids: list[str]) -> str:
+    for thread_id in remote_thread_ids:
+        result = _download_pptx_candidate(thread_id, relative, remote_thread_ids[0])
+        if result is None:
+            continue
+        content, _mime = result
+        reason = _pptx_integrity_error_for_bytes(content)
+        if reason is not None:
+            logger.warning(
+                "BuilderArtifact: artifact_integrity ext=pptx valid=false "
+                "reason=%s bytes=%s source=supabase",
+                reason,
+                len(content),
+            )
+            return "invalid"
+        logger.info(
+            "BuilderArtifact: artifact_integrity ext=pptx valid=true bytes=%s source=supabase",
+            len(content),
+        )
+        return "valid"
+    return "missing"
+
+
+def _download_pptx_candidate(thread_id: str, relative: str, primary_thread_id: str):
+    try:
+        return supabase_artifact_store.download_artifact(thread_id, relative)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "BuilderArtifact: pptx remote integrity check failed "
+            "error_type=%s thread_role=%s",
+            exc.__class__.__name__,
+            "parent" if thread_id == primary_thread_id else "fallback",
+        )
+        return None
+
+
+def _log_missing_emit_candidate(
+    candidate: str,
+    relative: str,
+    outputs_host_path: str | None,
+    remote_thread_ids: list[str],
+) -> None:
+    logger.warning(
+        "BuilderArtifact: file missing for emit verification: path=%s local=%s supabase=%s",
+        candidate,
+        bool(outputs_host_path and (Path(outputs_host_path) / relative).is_file()),
+        bool(
+            any(
+                supabase_artifact_store.check_artifact_exists(thread_id, relative)
+                for thread_id in remote_thread_ids
+            )
+        ),
+    )
+
+
+def _emit_candidate_verified(
+    candidate: str,
+    *,
+    outputs_host_path: str | None,
+    remote_thread_ids: list[str],
+) -> bool:
+    relative = _extract_output_relative_path(candidate)
+    if relative is None:
+        if _invalid_outputs_candidate(candidate):
+            logger.warning(
+                "BuilderArtifact: rejecting invalid outputs artifact path=%s",
+                candidate,
+            )
+            return False
+        return True
+
+    local_status = _local_emit_candidate_status(candidate, relative, outputs_host_path)
+    if local_status == "valid":
+        return True
+    if local_status == "invalid":
+        return False
+
+    remote_status = _remote_emit_candidate_status(candidate, relative, remote_thread_ids)
+    if remote_status == "valid":
+        return True
+    if remote_status == "invalid":
+        return False
+
+    _log_missing_emit_candidate(candidate, relative, outputs_host_path, remote_thread_ids)
+    return False
+
+
+def _is_user_facing_output_path(artifact_path: str | None) -> bool:
+    relative = _extract_output_relative_path(artifact_path)
+    if relative is None:
+        return False
+    name = PurePosixPath(relative).name
+    if not name or name.startswith((".", "_")):
+        return False
+    return PurePosixPath(relative).suffix.lower() in _PROMOTABLE_DELIVERABLE_EXTENSIONS
+
+
+def _requested_target_suffix(state: dict[str, Any]) -> str:
+    target = state.get("builder_artifact_target_path")
+    if not isinstance(target, str):
+        delegation = state.get("delegation_context")
+        target = delegation.get("artifact_target_path") if isinstance(delegation, dict) else None
+    if not isinstance(target, str):
+        return ""
+    return PurePosixPath(target.strip()).suffix.lower()
+
+
+def _requested_pdf_artifact(state: dict[str, Any]) -> bool:
+    return _requested_target_suffix(state) == ".pdf"
+
+
+def _requested_pptx_artifact(state: dict[str, Any]) -> bool:
+    return _requested_target_suffix(state) == ".pptx"
+
+
+def _requested_office_artifact(state: dict[str, Any]) -> bool:
+    return _requested_target_suffix(state) in {".pptx", ".docx", ".xlsx"}
+
+
+def _requested_task_text(state: dict[str, Any]) -> str:
+    parts = _delegation_task_text_parts(state) + _state_task_text_parts(state)
+    return "\n".join(parts).lower()
+
+
+def _delegation_task_text_parts(state: dict[str, Any]) -> list[str]:
+    delegation = state.get("delegation_context")
+    if not isinstance(delegation, dict):
+        return []
+    keys = ("task", "task_description", "description", "original_task", "task_type")
+    return [value for key in keys if isinstance((value := delegation.get(key)), str)]
+
+
+def _state_task_text_parts(state: dict[str, Any]) -> list[str]:
+    keys = ("task", "task_description", "builder_task_description")
+    return [value for key in keys if isinstance((value := state.get(key)), str)]
+
+
+def _pdf_fallback_suffix(state: dict[str, Any]) -> str:
+    task_text = _requested_task_text(state)
+    if any(marker in task_text for marker in _PDF_VISUAL_FALLBACK_MARKERS):
+        return ".html"
+    return ".md"
+
+
+def _allowed_pdf_artifact_suffixes(state: dict[str, Any]) -> frozenset[str]:
+    return frozenset({".pdf", _pdf_fallback_suffix(state)})
+
+
+def _pptx_fallback_suffix(state: dict[str, Any]) -> str:
+    task_text = _requested_task_text(state)
+    if any(marker in task_text for marker in _PDF_VISUAL_FALLBACK_MARKERS):
+        return ".html"
+    return ".md"
+
+
+def _allowed_pptx_artifact_suffixes(state: dict[str, Any]) -> frozenset[str]:
+    return frozenset({".pptx", _pptx_fallback_suffix(state)})
+
+
+def _runtime_thread_id(runtime: Runtime | None) -> str | None:
+    context = getattr(runtime, "context", None)
+    if isinstance(context, dict) and isinstance(context.get("thread_id"), str):
+        return context["thread_id"]
+    config = getattr(runtime, "config", None)
+    configurable = config.get("configurable") if isinstance(config, dict) else None
+    if isinstance(configurable, dict) and isinstance(configurable.get("thread_id"), str):
+        return configurable["thread_id"]
+    return None
+
+
+def _artifact_remote_thread_ids(state: dict[str, Any], runtime: Runtime | None) -> list[str]:
+    ids: list[str] = []
+    delegation = state.get("delegation_context")
+    if isinstance(delegation, dict):
+        parent = delegation.get("parent_thread_id")
+        if isinstance(parent, str) and parent:
+            ids.append(parent)
+    runtime_thread_id = _runtime_thread_id(runtime)
+    if runtime_thread_id:
+        ids.append(runtime_thread_id)
+    deduped: list[str] = []
+    for thread_id in ids:
+        if thread_id not in deduped:
+            deduped.append(thread_id)
+    return deduped
+
+
+def _pptx_integrity_error_for_bytes(content: bytes) -> str | None:
+    if len(content) < _PPTX_MIN_BYTES:
+        return "pptx_too_small"
+    try:
+        from io import BytesIO
+
+        with zipfile.ZipFile(BytesIO(content)) as archive:
+            entries = set(archive.namelist())
+    except zipfile.BadZipFile:
+        return "pptx_not_zip"
+    missing = sorted(_PPTX_REQUIRED_ZIP_ENTRIES - entries)
+    if missing:
+        return f"pptx_missing_entries:{','.join(missing)}"
+    return None
+
+
+def _pptx_integrity_error_for_file(path: Path) -> str | None:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return "pptx_stat_failed"
+    if size < _PPTX_MIN_BYTES:
+        return "pptx_too_small"
+    try:
+        with zipfile.ZipFile(path) as archive:
+            entries = set(archive.namelist())
+    except zipfile.BadZipFile:
+        return "pptx_not_zip"
+    except OSError:
+        return "pptx_read_failed"
+    missing = sorted(_PPTX_REQUIRED_ZIP_ENTRIES - entries)
+    if missing:
+        return f"pptx_missing_entries:{','.join(missing)}"
+    return None
+
+
+def _html_fallback_integrity_error_for_text(content: str) -> str | None:
+    stripped = content.lstrip("\ufeff \t\r\n")
+    lowered = stripped[:512].lower()
+    if len(content.encode("utf-8", errors="ignore")) < _HTML_FALLBACK_MIN_BYTES:
+        return "html_too_small"
+    if lowered.startswith("```"):
+        return "html_markdown_fence"
+    if lowered.startswith("&lt;!doctype") or lowered.startswith("&lt;html"):
+        return "html_escaped"
+    if "<html" not in lowered and "<!doctype html" not in lowered:
+        return "html_missing_document_root"
+    if "<body" not in content.lower():
+        return "html_missing_body"
+    return None
+
+
+def _html_fallback_integrity_error_for_bytes(content: bytes) -> str | None:
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return "html_not_utf8"
+    return _html_fallback_integrity_error_for_text(text)
+
+
+def _html_fallback_integrity_error_for_file(path: Path) -> str | None:
+    if path.name.startswith(("_", ".")) or path.name.lower().startswith(("test_", "test-")):
+        return "html_internal_filename"
+    try:
+        return _html_fallback_integrity_error_for_bytes(path.read_bytes())
+    except OSError:
+        return "html_read_failed"
+
+
+def _requested_artifact_ext(state: dict[str, Any]) -> str | None:
+    suffix = _requested_target_suffix(state).lstrip(".")
+    return suffix or None
+
+
+def _artifact_ext_from_path(path: Any) -> str | None:
+    suffix = PurePosixPath(str(path or "")).suffix.lower().lstrip(".")
+    return suffix or None
+
+
+def _apply_artifact_request_metadata(
+    artifact: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    fallback_reason: str | None = None,
+) -> dict[str, Any]:
+    requested_ext = _requested_artifact_ext(state)
+    artifact_ext = _artifact_ext_from_path(artifact.get("artifact_path"))
+    if requested_ext:
+        artifact["requested_artifact_ext"] = requested_ext
+    if artifact_ext:
+        artifact["artifact_ext"] = artifact_ext
+        if requested_ext == "pptx" and artifact_ext in {"html", "htm"}:
+            artifact["artifact_type"] = "webpage"
+    is_fallback = bool(requested_ext and artifact_ext and artifact_ext != requested_ext)
+    if is_fallback:
+        artifact["artifact_is_fallback"] = True
+        artifact["fallback_reason"] = fallback_reason or artifact.get("fallback_reason") or (
+            f"{requested_ext}_generation_not_completed"
+        )
+    elif requested_ext:
+        artifact.setdefault("artifact_is_fallback", False)
+    return artifact
+
+
+def _pptx_artifact_path_rejection_reason(path: Any, state: dict[str, Any]) -> str | None:
+    canonical = _canonical_outputs_artifact_path(path)
+    if canonical is None:
+        return "pptx_artifact_path_not_under_outputs"
+    suffix = PurePosixPath(canonical).suffix.lower()
+    if suffix not in _allowed_pptx_artifact_suffixes(state):
+        return f"pptx_invalid_artifact_extension:{suffix or 'none'}"
+    return None
+
+
+def _pptx_html_fallback_integrity_rejection_reason(
+    canonical: str,
+    state: dict[str, Any],
+    runtime: Runtime,
+) -> str | None:
+    suffix = PurePosixPath(canonical).suffix.lower()
+    if not _requested_pptx_artifact(state) or suffix not in {".html", ".htm"}:
+        return None
+    relative = _extract_output_relative_path(canonical)
+    if relative is None:
+        return "pptx_html_fallback_not_under_outputs"
+    outputs_host_path = _outputs_host_path_from_state(state)
+    if outputs_host_path:
+        host_file = Path(outputs_host_path) / relative
+        if host_file.is_file():
+            reason = _html_fallback_integrity_error_for_file(host_file)
+            if reason is not None:
+                return reason
+            return None
+    for thread_id in _artifact_remote_thread_ids(state, runtime):
+        try:
+            result = supabase_artifact_store.download_artifact(thread_id, relative)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "BuilderArtifact: html fallback remote integrity check failed error_type=%s",
+                exc.__class__.__name__,
+            )
+            continue
+        if result is not None:
+            content, _mime = result
+            return _html_fallback_integrity_error_for_bytes(content)
+    return "html_fallback_missing"
+
+
+def _pptx_path_integrity_rejection_reason(
+    canonical: str,
+    state: dict[str, Any],
+    runtime: Runtime,
+) -> str | None:
+    suffix = PurePosixPath(canonical).suffix.lower()
+    if suffix != ".pptx":
+        return None
+    relative = _extract_output_relative_path(canonical)
+    if relative is None:
+        return "pptx_artifact_path_not_under_outputs"
+    thread_data = state.get("thread_data") or {}
+    outputs_host_path = thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
+    if outputs_host_path:
+        host_file = Path(outputs_host_path) / relative
+        if host_file.is_file():
+            return _pptx_integrity_error_for_file(host_file)
+    for thread_id in _artifact_remote_thread_ids(state, runtime):
+        try:
+            result = supabase_artifact_store.download_artifact(thread_id, relative)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "BuilderArtifact: pptx remote integrity check failed error_type=%s",
+                exc.__class__.__name__,
+            )
+            continue
+        if result is not None:
+            content, _mime = result
+            return _pptx_integrity_error_for_bytes(content)
+    return None
+
+
+def _render_markdown_to_pdf_attempted(state: dict[str, Any]) -> bool:
+    summaries = state.get("builder_tool_turn_summaries") or []
+    return any(
+        any(name in _PDF_CREATION_TOOL_NAMES for name in (summary.get("tool_names") or []))
+        for summary in summaries
+        if isinstance(summary, dict)
+    )
+
+
+def _simple_pdf_writer_attempted(state: dict[str, Any]) -> bool:
+    summaries = state.get("builder_tool_turn_summaries") or []
+    return any(
+        _SIMPLE_PDF_TOOL_NAME in (summary.get("tool_names") or [])
+        for summary in summaries
+        if isinstance(summary, dict)
+    )
+
+
+def _requested_simple_pdf_artifact(state: dict[str, Any]) -> bool:
+    if not _requested_pdf_artifact(state):
+        return False
+    task_text = _requested_task_text(state)
+    if not task_text:
+        return False
+    if "product review" in task_text and "pdf" in task_text:
+        return True
+    return any(marker in task_text for marker in _SIMPLE_PDF_REQUEST_MARKERS)
+
+
+def _successful_pdf_render_result(state: dict[str, Any]) -> dict[str, Any] | None:
+    result = state.get("builder_pdf_render_result")
+    if not isinstance(result, dict) or result.get("success") is not True:
+        return None
+    pdf_path = result.get("pdf_path")
+    if not isinstance(pdf_path, str) or not pdf_path.strip():
+        return None
+    return result
+
+
+def _pdf_render_layout_quality(state: dict[str, Any]) -> str:
+    result = _successful_pdf_render_result(state) or {}
+    return str(result.get("layout_quality") or "unknown")
+
+
+def _pdf_layout_repair_attempts(state: dict[str, Any]) -> int:
+    return int(state.get("builder_pdf_layout_repair_attempts", 0) or 0)
+
+
+def _pdf_layout_repair_needed(state: dict[str, Any]) -> bool:
+    quality = _pdf_render_layout_quality(state)
+    return quality in {"warning", "unusable"} and _pdf_layout_repair_attempts(state) < 1
+
+
+def _pdf_render_unusable_after_repair(state: dict[str, Any]) -> bool:
+    return _pdf_render_layout_quality(state) == "unusable" and _pdf_layout_repair_attempts(state) >= 1
+
+
+def _successful_pdf_ready_to_emit(state: dict[str, Any]) -> bool:
+    result = _successful_pdf_render_result(state)
+    if result is None:
+        return False
+    if _pdf_layout_repair_needed(state):
+        return False
+    if _pdf_render_unusable_after_repair(state):
+        return False
+    return _canonical_outputs_artifact_path(result.get("pdf_path")) is not None
+
+
+def _pdf_layout_repair_message(result: dict[str, Any]) -> str:
+    page_count = result.get("page_count")
+    blank_count = result.get("blank_page_count")
+    short_count = result.get("short_page_count")
+    warning = result.get("layout_warning") or "layout_quality_warning"
+    return (
+        "[Sophia/PDF layout repair]\n"
+        "The PDF rendered successfully, but the layout quality check found a sparse document. "
+        f"Metrics: page_count={page_count}, blank_page_count={blank_count}, "
+        f"short_page_count={short_count}, warning={warning}. Target length is 10-15 pages "
+        "when the user did not ask for a longer PDF.\n\n"
+        "Revise the Markdown source once: compact sparse tables or continuation pages, remove "
+        "unnecessary page breaks, combine thin sections, then call render_markdown_to_pdf again. "
+        "After this single repair pass, emit the best PDF rather than looping."
+    )
+
+
+def _canonical_outputs_artifact_path(path: Any) -> str | None:
+    candidate = _stripped_artifact_path(path)
+    if candidate is None:
+        return None
+    if candidate.startswith(_OUTPUTS_VIRTUAL_PREFIX):
+        return _valid_prefixed_output_path(candidate)
+    return _plain_output_artifact_path(candidate)
+
+
+def _stripped_artifact_path(path: Any) -> str | None:
+    if not isinstance(path, str) or not path.strip():
+        return None
+    return path.strip()
+
+
+def _valid_prefixed_output_path(candidate: str) -> str | None:
+    return candidate if _extract_output_relative_path(candidate) is not None else None
+
+
+def _plain_output_artifact_path(candidate: str) -> str | None:
+    return f"{_OUTPUTS_VIRTUAL_PREFIX}{candidate}" if _is_plain_output_filename(candidate) else None
+
+
+def _is_plain_output_filename(candidate: str) -> bool:
+    pure = PurePosixPath(candidate)
+    return (
+        not pure.is_absolute()
+        and ".." not in pure.parts
+        and "/" not in candidate
+        and "\\" not in candidate
+    )
+
+
+def _pdf_artifact_path_rejection_reason(path: Any, state: dict[str, Any]) -> str | None:
+    canonical = _canonical_outputs_artifact_path(path)
+    if canonical is None:
+        return "pdf_artifact_path_not_under_outputs"
+    return _pdf_artifact_suffix_rejection_reason(canonical, state)
+
+
+def _pdf_artifact_suffix_rejection_reason(canonical: str, state: dict[str, Any]) -> str | None:
+    suffix = PurePosixPath(canonical).suffix.lower()
+    if suffix not in _allowed_pdf_artifact_suffixes(state):
+        return f"pdf_invalid_artifact_extension:{suffix or 'none'}"
+    return _pdf_fallback_rejection_reason(suffix, state)
+
+
+def _pdf_fallback_rejection_reason(suffix: str, state: dict[str, Any]) -> str | None:
+    if suffix in _PDF_FALLBACK_EXTENSIONS and not _render_markdown_to_pdf_attempted(state):
+        return "pdf_fallback_before_render_attempt"
+    return None
+
+
+def _pdf_render_attempt_missing(state: dict[str, Any]) -> bool:
+    if not _requested_pdf_artifact(state):
+        return False
+    return not _render_markdown_to_pdf_attempted(state)
+
+
+def _artifact_path_suffix_label(path: object) -> str | None:
+    return PurePosixPath(str(path or "")).suffix.lower().lstrip(".") or None
+
+
+def _recovery_hint(outputs_root: Path, candidates: list[Path]) -> str:
+    logger.info(
+        "BuilderArtifact: emit_path_missing recovery_candidate_count=%s recovery_accepted=%s",
+        len(candidates),
+        len(candidates) == 1,
+    )
+    if len(candidates) != 1:
+        return ""
+    recovered = candidates[0].relative_to(outputs_root).as_posix()
+    return (
+        " I found exactly one plausible output candidate in the artifact "
+        f"directory: `{_OUTPUTS_VIRTUAL_PREFIX}{recovered}`. If that is the "
+        "intended deliverable, call emit_builder_artifact again with that exact path."
+    )
+
+
+def _first_research_tool_index(tool_names: list[str]) -> int:
+    indexes = [
+        index
+        for index, name in enumerate(tool_names)
+        if name in _BUILDER_RESEARCH_TOOL_NAMES
+    ]
+    return indexes[0] if indexes else len(tool_names) + 1
+
+
+def _first_write_tool_index(tool_names: list[str]) -> int:
+    indexes = [
+        index
+        for index, name in enumerate(tool_names)
+        if name in _BUILDER_WRITE_TOOL_NAMES
+    ]
+    return indexes[0] if indexes else len(tool_names) + 1
+
+
+def _diagnostic_int(diagnostics: dict[str, Any], key: str) -> int:
+    return int(diagnostics.get(key, 0) or 0)
+
+
+def _diagnostic_counts(diagnostics: dict[str, Any]) -> tuple[int, int, int]:
+    return (
+        _diagnostic_int(diagnostics, "builder_web_search_count"),
+        _diagnostic_int(diagnostics, "builder_web_fetch_count"),
+        _diagnostic_int(diagnostics, "write_file_count"),
+    )
+
+
+def _is_safe_pre_research_bash(command: Any) -> bool:
+    """Return whether a bash command is read-only inspection."""
+    if not isinstance(command, str) or not command.strip():
+        return False
+    if _BASH_WRITE_MARKER_RE.search(command):
+        return False
+    return bool(_SAFE_BASH_COMMAND_RE.search(command))
+
+
+def _should_warn_missing_web_tools(
+    *,
+    phase: str,
+    allow_web_research: bool,
+    search_count: int,
+    fetch_count: int,
+    write_file_count: int,
+) -> bool:
+    return (
+        allow_web_research
+        and (phase == "completion" or write_file_count > 0)
+        and search_count + fetch_count == 0
+    )
+
+
+def _write_tool_names(tool_names: list[str]) -> list[str]:
+    return [name for name in tool_names if name in _BUILDER_WRITE_TOOL_NAMES]
+
+
+def _builder_web_attempt_count(state: dict[str, Any]) -> int:
+    budget = state.get("builder_web_budget") or {}
+    if not isinstance(budget, dict):
+        return 0
+    return int(budget.get("search_calls", 0) or 0) + int(budget.get("fetch_calls", 0) or 0)
+
+
+def _builder_web_call_count(state: dict[str, Any], key: str) -> int:
+    budget = state.get("builder_web_budget") or {}
+    if not isinstance(budget, dict):
+        return 0
+    return int(budget.get(f"{key}_calls", 0) or 0)
+
+
+def _has_builder_search_source(state: dict[str, Any]) -> bool:
+    sources = state.get("builder_search_sources") or []
+    return any(isinstance(source, dict) and source.get("url") for source in sources)
+
+
+def _has_fetchable_builder_source(state: dict[str, Any]) -> bool:
+    allowed = state.get("builder_allowed_urls") or []
+    sources = state.get("builder_search_sources") or []
+    return any(str(url).strip() for url in allowed) or any(
+        isinstance(source, dict) and source.get("url") for source in sources
+    )
+
+
+def _builder_task_needs_fetch(state: dict[str, Any]) -> bool:
+    if _requested_pdf_artifact(state):
+        return True
+    delegation = state.get("delegation_context")
+    task_type = delegation.get("task_type") if isinstance(delegation, dict) else None
+    return str(task_type or "").lower() in {"document", "research", "visual_report"}
+
+
+def _needs_fetch_before_write(state: dict[str, Any]) -> bool:
+    if not _builder_task_needs_fetch(state):
+        return False
+    if _builder_web_call_count(state, "fetch") > 0:
+        return False
+    return _builder_web_call_count(state, "search") > 0 and _has_fetchable_builder_source(state)
+
+
+def _pptx_skill_read_seen(state: dict[str, Any]) -> bool:
+    summaries = state.get("builder_tool_turn_summaries") or []
+    return any(
+        bool(summary.get("pptx_skill_read"))
+        for summary in summaries
+        if isinstance(summary, dict)
+    )
+
+
+def _pptx_diagnostics(state: dict[str, Any]) -> dict[str, Any]:
+    diagnostics = state.get("builder_pptx_diagnostics")
+    return diagnostics if isinstance(diagnostics, dict) else {}
+
+
+def _pptx_diagnostic_count(state: dict[str, Any], key: str) -> int:
+    value = _pptx_diagnostics(state).get(key)
+    return int(value or 0) if isinstance(value, int) else 0
+
+
+def _pptx_generator_invoked_seen(state: dict[str, Any]) -> bool:
+    if _pptx_diagnostic_count(state, "pptx_generator_attempt_count") > 0:
+        return True
+    summaries = state.get("builder_tool_turn_summaries") or []
+    return any(
+        bool(summary.get("pptx_generator_invoked"))
+        for summary in summaries
+        if isinstance(summary, dict)
+    )
+
+
+def _image_generation_invoked_seen(state: dict[str, Any]) -> bool:
+    if _pptx_diagnostic_count(state, "image_generation_attempt_count") > 0:
+        return True
+    summaries = state.get("builder_tool_turn_summaries") or []
+    return any(
+        bool(summary.get("image_generation_invoked"))
+        for summary in summaries
+        if isinstance(summary, dict)
+    )
+
+
+def _command_parts(command: str) -> list[str]:
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return []
+
+
+def _command_flag_value(command: str, flag: str) -> str | None:
+    parts = _command_parts(command)
+    for index, part in enumerate(parts):
+        if part == flag and index + 1 < len(parts):
+            return parts[index + 1]
+        if part.startswith(flag + "="):
+            return part.split("=", 1)[1]
+    return None
+
+
+def _command_flag_values(command: str, flag: str) -> list[str]:
+    parts = _command_parts(command)
+    values: list[str] = []
+    collect = False
+    for part in parts:
+        if collect:
+            if part.startswith("--"):
+                collect = False
+            else:
+                values.append(part)
+                continue
+        if part == flag:
+            collect = True
+            continue
+        if part.startswith(flag + "="):
+            values.append(part.split("=", 1)[1])
+    return values
+
+
+def _empty_pptx_skill_flags() -> dict[str, Any]:
+    return {
+        "pptx_skill_read": False,
+        "pptx_generator_invoked": False,
+        "image_generation_invoked": False,
+        "image_output_paths": [],
+        "pptx_output_paths": [],
+    }
+
+
+def _pptx_skill_flags_for_read(args: dict[str, Any]) -> dict[str, Any]:
+    flags = _empty_pptx_skill_flags()
+    path = str(args.get("path") or args.get("file_path") or "")
+    flags["pptx_skill_read"] = any(marker in path for marker in _PPTX_SKILL_PATH_MARKERS)
+    return flags
+
+
+def _pptx_skill_flags_for_bash(args: dict[str, Any]) -> dict[str, Any]:
+    flags = _empty_pptx_skill_flags()
+    command = str(args.get("command") or "")
+    command_invokes_generator = any(marker in command for marker in _PPTX_GENERATOR_PATH_MARKERS)
+    command_invokes_image = any(marker in command for marker in _IMAGE_GENERATION_PATH_MARKERS)
+    flags["pptx_generator_invoked"] = command_invokes_generator
+    flags["image_generation_invoked"] = command_invokes_image
+    output_path = _command_flag_value(command, "--output-file")
+    if output_path and command_invokes_image:
+        flags["image_output_paths"] = [output_path]
+    if output_path and command_invokes_generator:
+        flags["pptx_output_paths"] = [output_path]
+    return flags
+
+
+def _merge_pptx_skill_flags(current: dict[str, Any], update: dict[str, Any]) -> None:
+    current["pptx_skill_read"] = bool(current["pptx_skill_read"] or update.get("pptx_skill_read"))
+    current["pptx_generator_invoked"] = bool(
+        current["pptx_generator_invoked"] or update.get("pptx_generator_invoked")
+    )
+    current["image_generation_invoked"] = bool(
+        current["image_generation_invoked"] or update.get("image_generation_invoked")
+    )
+    current["image_output_paths"].extend(update.get("image_output_paths") or [])
+    current["pptx_output_paths"].extend(update.get("pptx_output_paths") or [])
+
+
+def _pptx_skill_flags_from_tool_calls(tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
+    flags = _empty_pptx_skill_flags()
+    for call in tool_calls:
+        args = call.get("args") or {}
+        if not isinstance(args, dict):
+            continue
+        name = call.get("name")
+        if name in ("read_file", "read_file_tool"):
+            _merge_pptx_skill_flags(flags, _pptx_skill_flags_for_read(args))
+        elif name in ("bash", "bash_tool"):
+            _merge_pptx_skill_flags(flags, _pptx_skill_flags_for_bash(args))
+    return flags
+
+
+def _virtual_output_status(state: dict[str, Any], path: str | None) -> tuple[bool, int, str | None]:
+    canonical = _canonical_outputs_artifact_path(path)
+    if canonical is None:
+        return False, 0, "not_outputs_path"
+    relative = _extract_output_relative_path(canonical)
+    outputs_root = _outputs_root_from_state(state)
+    if relative is None or outputs_root is None:
+        return False, 0, "missing_outputs_root"
+    host_path = outputs_root / relative
+    if not host_path.is_file():
+        return False, 0, "missing_output"
+    try:
+        return True, int(host_path.stat().st_size), None
+    except OSError:
+        return False, 0, "stat_failed"
+
+
+def _classify_image_generation_error(text: str, exists: bool, bytes_count: int) -> str | None:
+    lowered = text.lower()
+    if exists and bytes_count > 0:
+        return None
+    if "openai_api_key" in lowered:
+        return "missing_openai_api_key"
+    if "openai image generation failed" in lowered:
+        return "openai_api_error"
+    if "reference image" in lowered and "invalid" in lowered:
+        return "invalid_reference_image"
+    if "no bytes landed" in lowered:
+        return "no_output_bytes"
+    if "error" in lowered or "failed" in lowered:
+        return "image_generation_error"
+    return "missing_output"
+
+
+def _classify_pptx_generation_error(
+    state: dict[str, Any],
+    path: str | None,
+    text: str,
+    exists: bool,
+) -> str | None:
+    if exists:
+        canonical = _canonical_outputs_artifact_path(path)
+        if canonical:
+            relative = _extract_output_relative_path(canonical)
+            outputs_root = _outputs_root_from_state(state)
+            if relative and outputs_root:
+                reason = _pptx_integrity_error_for_file(outputs_root / relative)
+                if reason is None:
+                    return None
+                return reason
+    lowered = text.lower()
+    if "slide image not found" in lowered:
+        return "missing_slide_image"
+    if "invalid presentation plan" in lowered or "json" in lowered:
+        return "invalid_plan_json"
+    if "error" in lowered or "failed" in lowered:
+        return "pptx_generation_error"
+    return "missing_output"
+
+
+def _log_pptx_diagnostics(
+    *,
+    phase: str,
+    state: dict[str, Any],
+    artifact_path: object = None,
+    integrity_reason: str | None = None,
+) -> None:
+    if not _requested_pptx_artifact(state):
+        return
+    diagnostics = state.get("builder_write_diagnostics") or {}
+    write_arg_errors = (
+        int(diagnostics.get("error_count", 0) or 0)
+        if isinstance(diagnostics, dict)
+        and diagnostics.get("last_error_class") == "missing_required_tool_arg"
+        else 0
+    )
+    pptx_diagnostics = _pptx_diagnostics(state)
+    logger.info(
+        "[BuilderPptxDiagnostics] phase=%s pptx_skill_read_seen=%s "
+        "pptx_generator_invoked=%s image_generation_invoked=%s "
+        "valid_pptx_seen=%s pptx_integrity_reason=%s fallback_ext=%s "
+        "write_file_missing_arg_count=%d requested_artifact_ext=%s "
+        "final_artifact_ext=%s artifact_is_fallback=%s fallback_reason=%s "
+        "image_generation_attempt_count=%d image_generation_success_count=%d "
+        "image_generation_bytes_total=%d image_generation_error_class=%s "
+        "pptx_generator_attempt_count=%d pptx_generator_success_count=%d "
+        "pptx_generator_bytes_total=%d pptx_generator_error_class=%s",
+        phase,
+        _pptx_skill_read_seen(state),
+        _pptx_generator_invoked_seen(state),
+        _image_generation_invoked_seen(state),
+        BuilderArtifactMiddleware._has_valid_pptx_output(state),
+        integrity_reason,
+        _pptx_fallback_suffix(state).lstrip("."),
+        write_arg_errors,
+        _requested_artifact_ext(state),
+        _artifact_path_suffix_label(artifact_path),
+        bool(
+            _requested_artifact_ext(state)
+            and _artifact_path_suffix_label(artifact_path)
+            and _artifact_path_suffix_label(artifact_path) != _requested_artifact_ext(state)
+        ),
+        "pptx_generation_not_completed"
+        if _requested_pptx_artifact(state)
+        and _artifact_path_suffix_label(artifact_path) not in {None, "pptx"}
+        else None,
+        _pptx_diagnostic_count(state, "image_generation_attempt_count"),
+        _pptx_diagnostic_count(state, "image_generation_success_count"),
+        int(pptx_diagnostics.get("image_generation_bytes_total", 0) or 0),
+        pptx_diagnostics.get("image_generation_error_class"),
+        _pptx_diagnostic_count(state, "pptx_generator_attempt_count"),
+        _pptx_diagnostic_count(state, "pptx_generator_success_count"),
+        int(pptx_diagnostics.get("pptx_generator_bytes_total", 0) or 0),
+        pptx_diagnostics.get("pptx_generator_error_class"),
+    )
+
+
+def _force_reason(turn_force: bool, clock_force: bool) -> str:
+    if turn_force and clock_force:
+        return "turns+wall_clock"
+    if clock_force:
+        return "wall_clock"
+    return "turns"
+
+
+def _wrote_before_research(
+    *,
+    previous: dict[str, Any],
+    search_count: int,
+    fetch_count: int,
+    write_names: list[str],
+    tool_names: list[str],
+) -> bool:
+    if previous.get("wrote_before_research", False):
+        return True
+    if not write_names or search_count + fetch_count > 0:
+        return False
+    return _first_research_tool_index(tool_names) > _first_write_tool_index(tool_names)
+
+
 class BuilderArtifactState(AgentState):
     builder_result: NotRequired[dict | None]
     builder_non_artifact_turns: NotRequired[int]
     builder_last_tool_names: NotRequired[list[str]]
     builder_tool_turn_summaries: NotRequired[list[dict]]
+    builder_research_diagnostics: NotRequired[dict]
+    builder_update_epoch: NotRequired[int]
+    builder_update_required_urls: NotRequired[list[str]]
+    builder_artifact_target_path: NotRequired[str]
+    builder_last_successful_output_path: NotRequired[str | None]
+    builder_write_diagnostics: NotRequired[Annotated[dict, _merge_builder_write_diagnostics]]
+    builder_pptx_diagnostics: NotRequired[Annotated[dict, _merge_builder_pptx_diagnostics]]
     # PR #94: count consecutive emit attempts rejected for empty/missing
     # ``artifact_path``. When this reaches ``_REJECTION_SHORT_CIRCUIT_AT``
     # we route directly to the hard-ceiling fallback instead of letting
@@ -150,6 +1470,13 @@ class BuilderArtifactState(AgentState):
     # correction HumanMessage after N consecutive write_file_tool errors,
     # so we don't repeat the correction on every subsequent before_model.
     builder_path_correction_emitted: NotRequired[bool]
+    builder_tool_argument_correction_emitted: NotRequired[bool]
+    builder_recovered_deliverable_emitted: NotRequired[bool]
+    builder_pdf_render_result: NotRequired[dict | None]
+    builder_pdf_layout_repair_attempts: NotRequired[int]
+    builder_pdf_layout_repair_requested: NotRequired[bool]
+    builder_pptx_skill_correction_emitted: NotRequired[bool]
+    builder_pptx_fallback_directive_emitted: NotRequired[bool]
 
 
 class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
@@ -171,6 +1498,126 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         history = list(state.get("builder_tool_turn_summaries", []) or [])
         history.append(summary)
         return history[-12:]
+
+    @staticmethod
+    def _allow_web_research(state: BuilderArtifactState) -> bool:
+        delegation = state.get("delegation_context")
+        if "allow_web_research" in state or isinstance(delegation, dict):
+            return True
+        return False
+
+    @staticmethod
+    def _research_attempted(state: BuilderArtifactState) -> bool:
+        return _builder_web_attempt_count(state) > 0 or _has_builder_search_source(state)
+
+    @staticmethod
+    def _planning_completed(state: BuilderArtifactState) -> bool:
+        summaries = state.get("builder_tool_turn_summaries") or []
+        if any(
+            "write_todos" in (summary.get("tool_names") or [])
+            for summary in summaries
+            if isinstance(summary, dict)
+        ):
+            return True
+        return int(state.get("builder_non_artifact_turns", 0) or 0) > 0
+
+    @classmethod
+    def _should_force_research_tool(cls, state: BuilderArtifactState) -> bool:
+        return (
+            cls._allow_web_research(state)
+            and cls._planning_completed(state)
+            and not cls._research_attempted(state)
+        )
+
+    @classmethod
+    def _should_force_fetch_tool(cls, state: BuilderArtifactState) -> bool:
+        return (
+            cls._allow_web_research(state)
+            and cls._planning_completed(state)
+            and _needs_fetch_before_write(state)
+        )
+
+    @classmethod
+    def _is_substantive_before_research_tool(cls, state: BuilderArtifactState, tool_call: dict[str, Any]) -> bool:
+        if not cls._allow_web_research(state):
+            return False
+        if cls._research_attempted(state) and not cls._should_force_fetch_tool(state):
+            return False
+        name = tool_call.get("name")
+        if name in _BUILDER_SUBSTANTIVE_TOOL_NAMES:
+            return True
+        if name == _SIMPLE_PDF_TOOL_NAME:
+            return not _requested_simple_pdf_artifact(state)
+        if name in {"bash", "bash_tool"}:
+            args = tool_call.get("args") or {}
+            command = args.get("command") if isinstance(args, dict) else None
+            return not _is_safe_pre_research_bash(command)
+        return False
+
+    @staticmethod
+    def _update_research_diagnostics(
+        state: BuilderArtifactState,
+        tool_names: list[str],
+    ) -> dict[str, Any]:
+        previous = dict(state.get("builder_research_diagnostics") or {})
+        search_count, fetch_count, write_file_count = _diagnostic_counts(previous)
+        first_content_tool = previous.get("first_content_tool")
+        write_names = _write_tool_names(tool_names)
+        wrote_before_research = _wrote_before_research(
+            previous=previous,
+            search_count=search_count,
+            fetch_count=fetch_count,
+            write_names=write_names,
+            tool_names=tool_names,
+        )
+        search_count += tool_names.count("builder_web_search")
+        fetch_count += tool_names.count("builder_web_fetch")
+        write_file_count += len(write_names)
+        first_content_tool = first_content_tool or (write_names[0] if write_names else None)
+
+        return {
+            "builder_web_search_count": search_count,
+            "builder_web_fetch_count": fetch_count,
+            "write_file_count": write_file_count,
+            "first_content_tool": first_content_tool,
+            "wrote_before_research": wrote_before_research,
+        }
+
+    @staticmethod
+    def _log_research_diagnostics(
+        *,
+        phase: str,
+        diagnostics: dict[str, Any],
+        allow_web_research: bool,
+        sources_used: Any = None,
+    ) -> None:
+        sources_empty = isinstance(sources_used, list) and len(sources_used) == 0
+        search_count, fetch_count, write_file_count = _diagnostic_counts(diagnostics)
+        logger.info(
+            "[BuilderResearchDiagnostics] phase=%s allow_web_research=%s builder_web_search_count=%d builder_web_fetch_count=%d write_file_count=%d first_content_tool=%s wrote_before_research=%s sources_used_empty=%s",
+            phase,
+            allow_web_research,
+            search_count,
+            fetch_count,
+            write_file_count,
+            diagnostics.get("first_content_tool"),
+            bool(diagnostics.get("wrote_before_research", False)),
+            sources_empty,
+        )
+        if _should_warn_missing_web_tools(
+            phase=phase,
+            allow_web_research=allow_web_research,
+            search_count=search_count,
+            fetch_count=fetch_count,
+            write_file_count=write_file_count,
+        ):
+            logger.warning(
+                "[BuilderResearchDiagnostics] reason=research_enabled_no_web_tools first_content_tool=%s write_file_count=%d",
+                diagnostics.get("first_content_tool"),
+                write_file_count,
+            )
+        if allow_web_research and sources_empty:
+            logger.warning("[BuilderResearchDiagnostics] reason=research_enabled_empty_sources_used")
 
     # Ceiling enforcement — MUST stay in sync with _HARD_CEILING in after_model
     # and with builder_task.py's _HARD_CEILING. When the model is within this
@@ -277,6 +1724,171 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return {"type": "tool", "name": "write_file"}
 
     @staticmethod
+    def _forced_search_tool_choice() -> dict[str, Any]:
+        """Anthropic tool_choice payload that forces builder_web_search."""
+        return {"type": "tool", "name": "builder_web_search"}
+
+    @staticmethod
+    def _forced_fetch_tool_choice() -> dict[str, Any]:
+        """Anthropic tool_choice payload that forces builder_web_fetch."""
+        return {"type": "tool", "name": "builder_web_fetch"}
+
+    @staticmethod
+    def _forced_pdf_render_tool_choice() -> dict[str, Any]:
+        """Anthropic tool_choice payload that forces the PDF renderer."""
+        return {"type": "tool", "name": "render_markdown_to_pdf"}
+
+    @staticmethod
+    def _forced_simple_pdf_tool_choice() -> dict[str, Any]:
+        """Anthropic tool_choice payload that forces the deterministic PDF writer."""
+        return {"type": "tool", "name": _SIMPLE_PDF_TOOL_NAME}
+
+    def _research_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if self._should_force_fetch_tool(state):
+            logger.warning(
+                "BuilderArtifact: forcing tool_choice=builder_web_fetch "
+                "after search before factual artifact writing"
+            )
+            return self._forced_fetch_tool_choice()
+        if not self._should_force_research_tool(state):
+            return None
+        explicit_urls = [
+            url for url in (state.get("explicit_user_urls") or []) if str(url).strip()
+        ]
+        if explicit_urls:
+            logger.warning(
+                "BuilderArtifact: forcing tool_choice=builder_web_fetch "
+                "before artifact writing (explicit_urls=%d)",
+                len(explicit_urls),
+            )
+            return self._forced_fetch_tool_choice()
+        logger.warning(
+            "BuilderArtifact: forcing tool_choice=builder_web_search "
+            "before artifact writing"
+        )
+        return self._forced_search_tool_choice()
+
+    def _completion_tool_choice_for_state(
+        self,
+        state: BuilderArtifactState,
+        runtime: Runtime | None = None,
+    ) -> dict[str, Any] | None:
+        turn_force = self._should_force_emit(state)
+        clock_force = self._should_force_emit_by_clock(state, runtime)
+        if not (turn_force or clock_force):
+            return None
+        force_reason = _force_reason(turn_force, clock_force)
+        non_artifact_turns = state.get("builder_non_artifact_turns")
+
+        if self._has_output_file(state):
+            return self._output_file_completion_tool_choice(state, non_artifact_turns, force_reason)
+
+        if self._has_generator_script(state):
+            return self._generator_recovery_tool_choice(state, non_artifact_turns, force_reason)
+
+        if _requested_pptx_artifact(state) and not state.get("builder_pptx_skill_correction_emitted"):
+            logger.warning(
+                "BuilderArtifact: PPTX target has no valid deck/fallback and no "
+                "skill correction yet; withholding generic write_file force so "
+                "the presentation-skill correction can steer the next turn "
+                "(non_artifact_turns=%s, reason=%s)",
+                non_artifact_turns,
+                force_reason,
+            )
+            return None
+
+        logger.warning(
+            "BuilderArtifact: forcing tool_choice=write_file before emit "
+            "(non_artifact_turns=%s, ceiling=%s, reason=%s, no output file yet — "
+            "force prevents phantom-emit loop)",
+            non_artifact_turns,
+            self._CEILING_FOR_FORCE,
+            force_reason,
+        )
+        return self._forced_write_tool_choice()
+
+    def _output_file_completion_tool_choice(
+        self,
+        state: BuilderArtifactState,
+        non_artifact_turns: object,
+        force_reason: str,
+    ) -> dict[str, Any]:
+        if self._should_force_pdf_render_before_emit(state):
+            logger.warning(
+                "BuilderArtifact: forcing tool_choice=render_markdown_to_pdf "
+                "before PDF fallback emit (non_artifact_turns=%s, "
+                "ceiling=%s, reason=%s)",
+                non_artifact_turns,
+                self._CEILING_FOR_FORCE,
+                force_reason,
+            )
+            return self._forced_pdf_render_tool_choice()
+        logger.warning(
+            "BuilderArtifact: forcing tool_choice=emit_builder_artifact "
+            "(non_artifact_turns=%s, ceiling=%s, reason=%s)",
+            non_artifact_turns,
+            self._CEILING_FOR_FORCE,
+            force_reason,
+        )
+        return self._forced_tool_choice()
+
+    @classmethod
+    def _should_force_pdf_render_before_emit(cls, state: BuilderArtifactState) -> bool:
+        if not _requested_pdf_artifact(state):
+            return False
+        if cls._has_requested_pdf_binary(state):
+            return False
+        return not _render_markdown_to_pdf_attempted(state)
+
+    def _generator_recovery_tool_choice(
+        self,
+        state: BuilderArtifactState,
+        non_artifact_turns: object,
+        force_reason: str,
+    ) -> dict[str, Any]:
+        if _requested_pdf_artifact(state):
+            logger.warning(
+                "BuilderArtifact: PDF target has generator script but no deliverable; "
+                "forcing write_file to create a Markdown source/fallback instead "
+                "(non_artifact_turns=%s, ceiling=%s, reason=%s)",
+                non_artifact_turns,
+                self._CEILING_FOR_FORCE,
+                force_reason,
+            )
+            return self._forced_write_tool_choice()
+        if _requested_pptx_artifact(state):
+            if not state.get("builder_pptx_skill_correction_emitted"):
+                logger.warning(
+                    "BuilderArtifact: PPTX target has ad hoc generator script but "
+                    "no valid deck/fallback; withholding bash force until the "
+                    "ppt-generation skill correction runs (non_artifact_turns=%s, "
+                    "reason=%s)",
+                    non_artifact_turns,
+                    force_reason,
+                )
+                return None
+            logger.warning(
+                "BuilderArtifact: PPTX target still has no valid deck after skill "
+                "correction; forcing write_file only to create a Markdown/HTML "
+                "fallback, never a Python deck script (non_artifact_turns=%s, "
+                "reason=%s)",
+                non_artifact_turns,
+                force_reason,
+            )
+            return self._forced_write_tool_choice()
+        logger.warning(
+            "BuilderArtifact: forcing tool_choice=bash before emit "
+            "(non_artifact_turns=%s, ceiling=%s, reason=%s, generator "
+            "script on disk but no binary — three-stage force gives the "
+            "model a chance to RUN the generator instead of writing yet "
+            "another one)",
+            non_artifact_turns,
+            self._CEILING_FOR_FORCE,
+            force_reason,
+        )
+        return self._forced_bash_tool_choice()
+
+    @staticmethod
     def _forced_bash_tool_choice() -> dict[str, Any]:
         """Anthropic tool_choice payload that forces bash.
 
@@ -308,37 +1920,20 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         ``_generate_foo.py``) or ``.`` (hidden files) are excluded — those
         aren't user-facing deliverables.
         """
-        thread_data = state.get("thread_data") or {}
-        outputs_host_path = (
-            thread_data.get("outputs_path")
-            if isinstance(thread_data, dict)
-            else None
-        )
-        if not isinstance(outputs_host_path, str) or not outputs_host_path:
+        outputs_host_path = _outputs_host_path_from_state(state)
+        outputs_root = _outputs_root_from_state(state)
+        if outputs_root is None:
             # No outputs dir configured — assume the model hasn't written
             # anything. Returning False routes through the safer path
             # (force write_file first) instead of forcing a phantom emit.
             return False
 
-        builder_task_started_at_ms = state.get("builder_task_started_at_ms")
-        min_mtime: float | None = None
-        if isinstance(builder_task_started_at_ms, (int, float)) and builder_task_started_at_ms > 0:
-            # Ignore stale artifacts from prior builder tasks in the same thread.
-            # Keep the same 5s grace used by hard-ceiling promotion.
-            min_mtime = (float(builder_task_started_at_ms) / 1000.0) - 5.0
+        # Ignore stale artifacts from prior builder tasks in the same thread.
+        # Keep the same 5s grace used by hard-ceiling promotion.
+        min_mtime = _builder_started_min_mtime(state)
 
         try:
-            outputs_root = Path(outputs_host_path)
-            if not outputs_root.is_dir():
-                return False
-            for entry in outputs_root.rglob("*"):
-                if not entry.is_file():
-                    continue
-                if entry.name.startswith("_") or entry.name.startswith("."):
-                    continue
-                if min_mtime is not None and entry.stat().st_mtime < min_mtime:
-                    continue
-                return True
+            return _output_tree_has_completion_candidate(outputs_root, state, min_mtime)
         except OSError:
             # Filesystem error (permissions, race) — fall through to True
             # so the existing forced-emit path proceeds. Better to risk one
@@ -352,6 +1947,316 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             )
             return True
         return False
+
+    @staticmethod
+    def _has_requested_pdf_binary(state: BuilderArtifactState) -> bool:
+        outputs_root = _outputs_root_from_state(state)
+        if outputs_root is None:
+            return False
+        min_mtime = _builder_started_min_mtime(state)
+        try:
+            return _output_tree_has_fresh_pdf(outputs_root, min_mtime)
+        except OSError:
+            logger.debug(
+                "BuilderArtifact._has_requested_pdf_binary: scan failed for outputs_path=%s",
+                _outputs_host_path_from_state(state),
+                exc_info=True,
+            )
+            return False
+
+    @staticmethod
+    def _has_valid_pptx_output(state: BuilderArtifactState) -> bool:
+        outputs_root = _outputs_root_from_state(state)
+        if outputs_root is None:
+            return False
+        min_mtime = _builder_started_min_mtime(state)
+        try:
+            for entry in outputs_root.rglob("*.pptx"):
+                if not _is_public_output_file(entry):
+                    continue
+                if min_mtime is not None and entry.stat().st_mtime < min_mtime:
+                    continue
+                if _pptx_integrity_error_for_file(entry) is None:
+                    return True
+        except OSError:
+            logger.debug(
+                "BuilderArtifact._has_valid_pptx_output: scan failed for outputs_path=%s",
+                _outputs_host_path_from_state(state),
+                exc_info=True,
+            )
+        return False
+
+    @staticmethod
+    def _promotable_output_candidates(
+        state: BuilderArtifactState,
+        *,
+        requested_pdf: bool,
+        requested_pptx: bool,
+    ) -> list[Path]:
+        outputs_host_path = _outputs_host_path_from_state(state)
+        if not outputs_host_path:
+            return []
+        outputs_root = Path(outputs_host_path)
+        if not outputs_root.is_dir():
+            return []
+
+        min_mtime = _builder_started_min_mtime(state)
+        candidates = [
+            p for p in outputs_root.rglob("*")
+            if _is_promotable_candidate_path(
+                p,
+                min_mtime=min_mtime,
+                requested_pptx=requested_pptx,
+            )
+        ]
+        if requested_pdf:
+            pdf_candidates = [] if _pdf_render_unusable_after_repair(state) else [
+                p for p in candidates if p.suffix.lower() == ".pdf"
+            ]
+            fallback_suffix = _pdf_fallback_suffix(state)
+            fallback_candidates = [
+                p for p in candidates if p.suffix.lower() == fallback_suffix
+            ]
+            candidates = pdf_candidates or fallback_candidates
+        elif requested_pptx:
+            pptx_candidates = [
+                p for p in candidates if p.suffix.lower() == ".pptx"
+            ]
+            fallback_suffix = _pptx_fallback_suffix(state)
+            fallback_candidates = [
+                p for p in candidates if p.suffix.lower() == fallback_suffix
+            ]
+            candidates = pptx_candidates or fallback_candidates
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return candidates
+
+    @staticmethod
+    def _generator_output_candidates(state: BuilderArtifactState) -> list[Path]:
+        outputs_host_path = _outputs_host_path_from_state(state)
+        if not outputs_host_path:
+            return []
+        outputs_root = Path(outputs_host_path)
+        if not outputs_root.is_dir():
+            return []
+
+        min_mtime = _builder_started_min_mtime(state)
+        candidates = [
+            p for p in outputs_root.rglob("*")
+            if p.is_file()
+            and p.name.startswith("_generate_")
+            and p.suffix.lower() == ".py"
+            and (min_mtime is None or p.stat().st_mtime >= min_mtime)
+        ]
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return candidates
+
+    @staticmethod
+    def _virtual_output_path(path: Path, state: BuilderArtifactState) -> str:
+        outputs_host_path = _outputs_host_path_from_state(state)
+        outputs_root = Path(outputs_host_path or "")
+        return f"/mnt/user-data/outputs/{path.relative_to(outputs_root).as_posix()}"
+
+    @staticmethod
+    def _promoted_deliverable_from_outputs(
+        state: BuilderArtifactState,
+        *,
+        requested_pdf: bool,
+        requested_pptx: bool,
+        reason: str,
+    ) -> tuple[str | None, str]:
+        try:
+            candidates = BuilderArtifactMiddleware._promotable_output_candidates(
+                state,
+                requested_pdf=requested_pdf,
+                requested_pptx=requested_pptx,
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort only
+            logger.warning(
+                "BuilderArtifact: ceiling fallback scan failed reason=%s error=%s",
+                reason,
+                exc,
+            )
+            return None, "unknown"
+        if not candidates:
+            return None, "unknown"
+        best = candidates[0]
+        return (
+            BuilderArtifactMiddleware._virtual_output_path(best, state),
+            best.suffix.lower().lstrip(".") or "unknown",
+        )
+
+    @staticmethod
+    def _promoted_generator_from_outputs(
+        state: BuilderArtifactState,
+        *,
+        requested_pdf: bool,
+        requested_pptx: bool,
+        reason: str,
+    ) -> str | None:
+        try:
+            gen_candidates = BuilderArtifactMiddleware._generator_output_candidates(state)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "BuilderArtifact: generator-script fallback scan failed reason=%s error=%s",
+                reason,
+                exc,
+            )
+            return None
+        if not gen_candidates:
+            return None
+        promoted_path = BuilderArtifactMiddleware._virtual_output_path(
+            gen_candidates[0],
+            state,
+        )
+        if requested_pdf:
+            logger.warning(
+                "BuilderArtifact: PDF fallback refusing generator script %s "
+                "(reason=%s, no pdf_or_markdown deliverable found)",
+                promoted_path,
+                reason,
+            )
+            return None
+        if requested_pptx:
+            logger.warning(
+                "BuilderArtifact: PPTX fallback refusing generator script %s "
+                "(reason=%s, no valid deck_or_fallback deliverable found)",
+                promoted_path,
+                reason,
+            )
+            return None
+        logger.warning(
+            "BuilderArtifact: fallback promoting generator script %s "
+            "(reason=%s, no binary deliverable found)",
+            promoted_path,
+            reason,
+        )
+        return promoted_path
+
+    @staticmethod
+    def _recovered_deliverable_fallback(
+        promoted_path: str,
+        promoted_type: str,
+        *,
+        steps_completed: int,
+    ) -> dict[str, Any]:
+        return {
+            "artifact_path": promoted_path,
+            "artifact_type": promoted_type,
+            "artifact_title": "Build task completed (recovered)",
+            "steps_completed": steps_completed,
+            "decisions_made": [],
+            "companion_summary": (
+                "The builder ran long and didn't call emit cleanly, "
+                "but the deliverable is on disk — I'm surfacing it now."
+            ),
+            "companion_tone_hint": "Reassuring — deliverable recovered despite rough run.",
+            "user_next_action": "Open the file and let me know if it lands.",
+            "confidence": 0.5,
+        }
+
+    @staticmethod
+    def _generator_script_fallback(
+        promoted_generator_path: str,
+        *,
+        steps_completed: int,
+    ) -> dict[str, Any]:
+        return {
+            "artifact_path": promoted_generator_path,
+            "artifact_type": "code",
+            "artifact_title": "Build task partial (generator script only)",
+            "steps_completed": steps_completed,
+            "decisions_made": [],
+            "companion_summary": (
+                "I built the generator script but couldn't produce the final "
+                "binary cleanly — sharing the script so you have something to "
+                "work with."
+            ),
+            "companion_tone_hint": (
+                "Honest and constructive — partial deliverable; offer to debug "
+                "if the user shares the error from running it."
+            ),
+            "user_next_action": (
+                "Try running `python <path>` yourself, or send me the error "
+                "and I'll fix it."
+            ),
+            "confidence": 0.4,
+        }
+
+    @staticmethod
+    def _pdf_no_deliverable_fallback(*, steps_completed: int) -> dict[str, Any]:
+        return {
+            "artifact_path": None,
+            "artifact_type": "pdf",
+            "artifact_title": "PDF build did not complete",
+            "steps_completed": steps_completed,
+            "decisions_made": [],
+            "companion_summary": (
+                "The builder could not produce a PDF or Markdown fallback. "
+                "I did not surface the generator script as a completed PDF."
+            ),
+            "companion_tone_hint": (
+                "Apologetic and direct — PDF rendering did not produce a "
+                "deliverable; offer to retry."
+            ),
+            "user_next_action": "Ask me to retry the PDF build.",
+            "confidence": 0.2,
+        }
+
+    @staticmethod
+    def _pptx_no_deliverable_fallback(*, steps_completed: int) -> dict[str, Any]:
+        return {
+            "artifact_path": None,
+            "artifact_type": "presentation",
+            "artifact_title": "Slide deck did not complete",
+            "steps_completed": steps_completed,
+            "decisions_made": [],
+            "companion_summary": (
+                "The builder could not produce a valid PowerPoint deck or "
+                "a usable markdown/html fallback. I did not surface a broken "
+                "PPTX as completed."
+            ),
+            "companion_tone_hint": (
+                "Apologetic and direct — deck generation did not produce a "
+                "valid deliverable; offer to retry."
+            ),
+            "user_next_action": "Ask me to retry the slide deck build.",
+            "confidence": 0.2,
+        }
+
+    @staticmethod
+    def _generic_no_deliverable_fallback(*, steps_completed: int) -> dict[str, Any]:
+        return {
+            "artifact_path": None,
+            "artifact_type": "unknown",
+            "artifact_title": "Build task force-stopped",
+            "steps_completed": steps_completed,
+            "decisions_made": [],
+            "companion_summary": (
+                f"The builder made {steps_completed} edits but didn't finish cleanly. "
+                "No final deliverable was produced."
+            ),
+            "companion_tone_hint": "Apologetic — builder ran out of budget.",
+            "user_next_action": "Tell me what to try differently and I'll run it again.",
+            "confidence": 0.2,
+        }
+
+    @staticmethod
+    def _fallback_completion_status(fallback: dict[str, Any]) -> str:
+        return "completed" if fallback.get("artifact_path") else "failed"
+
+    @staticmethod
+    def _log_missing_pdf_render_attempt_if_needed(
+        state: BuilderArtifactState,
+        artifact_args: dict[str, Any],
+    ) -> None:
+        if not _pdf_render_attempt_missing(state):
+            return
+        logger.warning(
+            "BuilderArtifact: requested_ext=pdf render_tool_attempted=false "
+            "fallback_ext=%s rejected_ext=%s reason=pdf_render_tool_not_attempted",
+            _pdf_fallback_suffix(state).lstrip("."),
+            _artifact_path_suffix_label(artifact_args.get("artifact_path")),
+        )
 
     @staticmethod
     def _build_ceiling_fallback(
@@ -379,162 +2284,56 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
         ``reason`` is included in log lines so traces can distinguish ceiling
         terminations from rejection short-circuits.
+
+        PDF requests are stricter than generic binary fallbacks: a
+        ``_generate_*.py`` file is never a successful PDF artifact. If
+        ``render_markdown_to_pdf`` cannot produce a PDF, the only acceptable
+        degraded deliverable is the Markdown source; otherwise fail truthfully.
         """
-        builder_task_started_at_ms = state.get("builder_task_started_at_ms") or 0
-
-        promoted_path: str | None = None
-        promoted_type = "unknown"
-        try:
-            thread_data_local = state.get("thread_data") or {}
-            outputs_host_path_local = (
-                thread_data_local.get("outputs_path")
-                if isinstance(thread_data_local, dict)
-                else None
-            )
-            if outputs_host_path_local:
-                outputs_root_local = Path(outputs_host_path_local)
-                if outputs_root_local.is_dir():
-                    # Promotion priority is left-to-right; the mtime sort
-                    # below then picks the most-recently-written file
-                    # within the set, so a fresh ``.pdf`` will still win
-                    # over an older ``.md``. The text extensions were
-                    # added in PR #126 Phase 4F after a production
-                    # markdown-deep-dive failed because ``.md`` wasn't in
-                    # the list — the model emitted ``artifact_path=None``
-                    # under force-emit, the short-circuit kicked in, the
-                    # ceiling fallback scanned outputs/ but found nothing
-                    # promotable, and the run coerced to error instead of
-                    # delivering the markdown the builder had written.
-                    _PROMOTE_EXTS = (
-                        # Binary deliverables — high signal, listed first.
-                        ".pdf", ".pptx", ".docx", ".xlsx",
-                        ".png", ".jpg", ".jpeg", ".svg",
-                        ".html", ".zip",
-                        # Text deliverables — markdown deep dives, JSON/CSV
-                        # data reports, YAML specs.
-                        ".md", ".txt", ".csv", ".json", ".yaml", ".yml",
-                    )
-                    candidates = [
-                        p for p in outputs_root_local.rglob("*")
-                        if p.is_file()
-                        and not p.name.startswith("_")
-                        and p.suffix.lower() in _PROMOTE_EXTS
-                    ]
-                    if builder_task_started_at_ms:
-                        min_mtime = (builder_task_started_at_ms / 1000.0) - 5.0
-                        candidates = [
-                            p for p in candidates
-                            if p.stat().st_mtime >= min_mtime
-                        ]
-                    if candidates:
-                        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                        best = candidates[0]
-                        rel = best.relative_to(outputs_root_local).as_posix()
-                        promoted_path = f"/mnt/user-data/outputs/{rel}"
-                        ext = best.suffix.lower().lstrip(".")
-                        promoted_type = ext or "unknown"
-        except Exception as exc:  # noqa: BLE001 — best-effort only
-            logger.warning(
-                "BuilderArtifact: ceiling fallback scan failed reason=%s error=%s",
-                reason,
-                exc,
-            )
-
-        promoted_generator_path: str | None = None
-        if promoted_path is None:
-            try:
-                thread_data_local = state.get("thread_data") or {}
-                outputs_host_path_local = (
-                    thread_data_local.get("outputs_path")
-                    if isinstance(thread_data_local, dict)
-                    else None
-                )
-                if outputs_host_path_local:
-                    outputs_root_local = Path(outputs_host_path_local)
-                    if outputs_root_local.is_dir():
-                        gen_candidates = [
-                            p for p in outputs_root_local.rglob("*")
-                            if p.is_file()
-                            and p.name.startswith("_generate_")
-                            and p.suffix.lower() == ".py"
-                        ]
-                        if builder_task_started_at_ms:
-                            min_mtime = (builder_task_started_at_ms / 1000.0) - 5.0
-                            gen_candidates = [
-                                p for p in gen_candidates
-                                if p.stat().st_mtime >= min_mtime
-                            ]
-                        if gen_candidates:
-                            gen_candidates.sort(
-                                key=lambda p: p.stat().st_mtime, reverse=True
-                            )
-                            best = gen_candidates[0]
-                            rel = best.relative_to(outputs_root_local).as_posix()
-                            promoted_generator_path = f"/mnt/user-data/outputs/{rel}"
-                            logger.warning(
-                                "BuilderArtifact: fallback promoting generator script %s "
-                                "(reason=%s, no binary deliverable found)",
-                                promoted_generator_path,
-                                reason,
-                            )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "BuilderArtifact: generator-script fallback scan failed reason=%s error=%s",
-                    reason,
-                    exc,
-                )
-
+        requested_pdf = _requested_pdf_artifact(state)
+        requested_pptx = _requested_pptx_artifact(state)
+        promoted_path, promoted_type = BuilderArtifactMiddleware._promoted_deliverable_from_outputs(
+            state,
+            requested_pdf=requested_pdf,
+            requested_pptx=requested_pptx,
+            reason=reason,
+        )
         if promoted_path:
-            return {
-                "artifact_path": promoted_path,
-                "artifact_type": promoted_type,
-                "artifact_title": "Build task completed (recovered)",
-                "steps_completed": steps_completed,
-                "decisions_made": [],
-                "companion_summary": (
-                    "The builder ran long and didn't call emit cleanly, "
-                    "but the deliverable is on disk — I'm surfacing it now."
-                ),
-                "companion_tone_hint": "Reassuring — deliverable recovered despite rough run.",
-                "user_next_action": "Open the file and let me know if it lands.",
-                "confidence": 0.5,
-            }
+            fallback = BuilderArtifactMiddleware._recovered_deliverable_fallback(
+                promoted_path,
+                promoted_type,
+                steps_completed=steps_completed,
+            )
+            return _apply_artifact_request_metadata(
+                fallback,
+                state,
+                fallback_reason="pptx_generation_not_completed" if requested_pptx else reason,
+            )
+        promoted_generator_path = BuilderArtifactMiddleware._promoted_generator_from_outputs(
+            state,
+            requested_pdf=requested_pdf,
+            requested_pptx=requested_pptx,
+            reason=reason,
+        )
         if promoted_generator_path:
-            return {
-                "artifact_path": promoted_generator_path,
-                "artifact_type": "code",
-                "artifact_title": "Build task partial (generator script only)",
-                "steps_completed": steps_completed,
-                "decisions_made": [],
-                "companion_summary": (
-                    "I built the generator script but couldn't produce the final "
-                    "binary cleanly — sharing the script so you have something to "
-                    "work with."
-                ),
-                "companion_tone_hint": (
-                    "Honest and constructive — partial deliverable; offer to debug "
-                    "if the user shares the error from running it."
-                ),
-                "user_next_action": (
-                    "Try running `python <path>` yourself, or send me the error "
-                    "and I'll fix it."
-                ),
-                "confidence": 0.4,
-            }
-        return {
-            "artifact_path": None,
-            "artifact_type": "unknown",
-            "artifact_title": "Build task force-stopped",
-            "steps_completed": steps_completed,
-            "decisions_made": [],
-            "companion_summary": (
-                f"The builder made {steps_completed} edits but didn't finish cleanly. "
-                "No final deliverable was produced."
-            ),
-            "companion_tone_hint": "Apologetic — builder ran out of budget.",
-            "user_next_action": "Tell me what to try differently and I'll run it again.",
-            "confidence": 0.2,
-        }
+            fallback = BuilderArtifactMiddleware._generator_script_fallback(
+                promoted_generator_path,
+                steps_completed=steps_completed,
+            )
+            return _apply_artifact_request_metadata(fallback, state, fallback_reason=reason)
+        if requested_pdf:
+            fallback = BuilderArtifactMiddleware._pdf_no_deliverable_fallback(
+                steps_completed=steps_completed,
+            )
+            return _apply_artifact_request_metadata(fallback, state, fallback_reason=reason)
+        if requested_pptx:
+            fallback = BuilderArtifactMiddleware._pptx_no_deliverable_fallback(
+                steps_completed=steps_completed,
+            )
+            return _apply_artifact_request_metadata(fallback, state, fallback_reason=reason)
+        return BuilderArtifactMiddleware._generic_no_deliverable_fallback(
+            steps_completed=steps_completed,
+        )
 
     @staticmethod
     def _upload_fallback_and_fire(
@@ -666,17 +2465,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         Outside the forced-emit window the old behaviour applies — text-only
         / conceptual artifacts are still accepted.
         """
-        candidates: list[str] = []
-        primary = artifact_args.get("artifact_path")
-        if isinstance(primary, str) and primary.strip():
-            candidates.append(primary.strip())
-        supporting = artifact_args.get("supporting_files")
-        if isinstance(supporting, list):
-            candidates.extend(
-                path for path in supporting
-                if isinstance(path, str) and path.strip()
-            )
-
+        if _requested_pdf_artifact(state) and not cls._pdf_artifact_args_valid(artifact_args, state):
+            return False
+        if _requested_pptx_artifact(state) and not cls._pptx_artifact_args_valid(artifact_args, state, runtime):
+            return False
+        candidates = _emit_candidate_paths(artifact_args)
         if not candidates:
             # Reject empty artifact_path under EITHER turn-count pressure
             # (existing) OR wall-clock pressure (new). Both indicate the
@@ -703,44 +2496,361 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             if isinstance(thread_data, dict)
             else None
         )
-        thread_id = runtime.context.get("thread_id") if runtime.context else None
+        remote_thread_ids = _artifact_remote_thread_ids(state, runtime)
 
         for candidate in candidates:
-            relative = _extract_output_relative_path(candidate)
-            if relative is None:
-                # If the path is under outputs prefix but failed relative-path
-                # extraction, treat as invalid (e.g. traversal attempt).
-                if isinstance(candidate, str) and candidate.strip().startswith(_OUTPUTS_VIRTUAL_PREFIX):
-                    logger.warning(
-                        "BuilderArtifact: rejecting invalid outputs artifact path=%s",
-                        candidate,
-                    )
-                    return False
-                # Non-virtual path — we can't verify it against the sandbox
-                # outputs dir. Accept it and let downstream consumers decide.
-                continue
-
-            # 1. Check local disk
-            if outputs_host_path:
-                host_file = Path(outputs_host_path) / relative
-                if host_file.is_file():
-                    continue
-
-            # 2. Check Supabase
-            if thread_id and supabase_artifact_store.check_artifact_exists(thread_id, relative):
-                continue
-
-            # Neither local nor remote — missing.
-            logger.warning(
-                "BuilderArtifact: file missing for emit verification: "
-                "path=%s local=%s supabase=%s",
+            if not _emit_candidate_verified(
                 candidate,
-                bool(outputs_host_path and (Path(outputs_host_path) / relative).is_file()),
-                bool(thread_id and supabase_artifact_store.check_artifact_exists(thread_id, relative)),
-            )
-            return False
+                outputs_host_path=outputs_host_path,
+                remote_thread_ids=remote_thread_ids,
+            ):
+                return False
 
         return True
+
+    @staticmethod
+    def _pptx_artifact_args_valid(
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> bool:
+        primary = artifact_args.get("artifact_path")
+        rejection_reason = _pptx_artifact_path_rejection_reason(primary, state)
+        if rejection_reason is not None:
+            _log_pptx_diagnostics(
+                phase="emit_rejected",
+                state=state,
+                artifact_path=primary,
+                integrity_reason=rejection_reason,
+            )
+            BuilderArtifactMiddleware._log_pptx_artifact_rejection(primary, rejection_reason)
+            return False
+        canonical_primary = _canonical_outputs_artifact_path(primary)
+        if canonical_primary is None:
+            return False
+        integrity_rejection = _pptx_path_integrity_rejection_reason(canonical_primary, state, runtime)
+        if integrity_rejection is not None:
+            _log_pptx_diagnostics(
+                phase="emit_rejected",
+                state=state,
+                artifact_path=primary,
+                integrity_reason=integrity_rejection,
+            )
+            BuilderArtifactMiddleware._log_pptx_artifact_rejection(primary, integrity_rejection)
+            return False
+        html_fallback_rejection = _pptx_html_fallback_integrity_rejection_reason(canonical_primary, state, runtime)
+        if html_fallback_rejection is not None:
+            _log_pptx_diagnostics(
+                phase="emit_rejected",
+                state=state,
+                artifact_path=primary,
+                integrity_reason=html_fallback_rejection,
+            )
+            BuilderArtifactMiddleware._log_pptx_artifact_rejection(primary, html_fallback_rejection)
+            return False
+        artifact_args["artifact_path"] = canonical_primary
+        _apply_artifact_request_metadata(
+            artifact_args,
+            state,
+            fallback_reason="pptx_generation_not_completed",
+        )
+        return True
+
+    @staticmethod
+    def _log_pptx_artifact_rejection(primary: object, rejection_reason: str) -> None:
+        rejected_ext = PurePosixPath(str(primary or "")).suffix.lower().lstrip(".") or None
+        logger.warning(
+            "BuilderArtifact: rejecting PPTX artifact path reason=%s "
+            "requested_ext=pptx rejected_ext=%s",
+            rejection_reason,
+            rejected_ext,
+        )
+
+    @staticmethod
+    def _pdf_artifact_args_valid(
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+    ) -> bool:
+        primary = artifact_args.get("artifact_path")
+        rejection_reason = _pdf_artifact_path_rejection_reason(primary, state)
+        if rejection_reason is not None:
+            BuilderArtifactMiddleware._log_pdf_artifact_rejection(primary, rejection_reason, state)
+            return False
+        return BuilderArtifactMiddleware._canonicalize_pdf_artifact_path(artifact_args, primary)
+
+    @staticmethod
+    def _log_pdf_artifact_rejection(
+        primary: object,
+        rejection_reason: str,
+        state: BuilderArtifactState,
+    ) -> None:
+        rejected_ext = PurePosixPath(str(primary or "")).suffix.lower().lstrip(".") or None
+        logger.warning(
+            "BuilderArtifact: rejecting PDF artifact path reason=%s "
+            "requested_ext=pdf render_tool_attempted=%s fallback_ext=%s "
+            "rejected_ext=%s",
+            rejection_reason,
+            _render_markdown_to_pdf_attempted(state),
+            _pdf_fallback_suffix(state).lstrip("."),
+            rejected_ext,
+        )
+        if not _render_markdown_to_pdf_attempted(state):
+            BuilderArtifactMiddleware._log_missing_pdf_render_attempt_if_needed(
+                state,
+                {"artifact_path": primary},
+            )
+
+    @staticmethod
+    def _canonicalize_pdf_artifact_path(
+        artifact_args: dict[str, Any],
+        primary: object,
+    ) -> bool:
+        canonical_primary = _canonical_outputs_artifact_path(primary)
+        if canonical_primary is None:
+            return False
+        artifact_args["artifact_path"] = canonical_primary
+        return True
+
+    @classmethod
+    def _missing_artifact_recovery_hint(
+        cls,
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+    ) -> str:
+        primary = artifact_args.get("artifact_path")
+        outputs_host_path = _outputs_host_path_from_state(state)
+        if not isinstance(primary, str) or not primary.strip() or not outputs_host_path:
+            return ""
+        try:
+            outputs_root = Path(outputs_host_path)
+            if not outputs_root.is_dir():
+                return ""
+            requested_suffix = Path(primary).suffix.lower()
+            min_mtime = _builder_started_min_mtime(state)
+            candidates = [
+                entry for entry in outputs_root.rglob("*")
+                if _is_recovery_candidate(entry, requested_suffix=requested_suffix, min_mtime=min_mtime)
+            ]
+        except OSError:
+            logger.debug(
+                "BuilderArtifact: missing-path recovery scan failed outputs_path=%s",
+                outputs_host_path,
+                exc_info=True,
+            )
+            return ""
+        return _recovery_hint(outputs_root, candidates)
+
+    @classmethod
+    def _emit_rejection_message(
+        cls,
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+    ) -> str:
+        if _requested_pdf_artifact(state):
+            primary = artifact_args.get("artifact_path")
+            reason = _pdf_artifact_path_rejection_reason(primary, state)
+            if reason is not None:
+                fallback_ext = _pdf_fallback_suffix(state)
+                if reason == "pdf_fallback_before_render_attempt":
+                    return (
+                        "Error: emit_builder_artifact rejected — this is a PDF request, "
+                        "so you must attempt render_markdown_to_pdf before emitting a "
+                        f"{fallback_ext} fallback. If rendering fails, emit the "
+                        f"{fallback_ext} fallback from /mnt/user-data/outputs/."
+                    )
+                return (
+                    "Error: emit_builder_artifact rejected — this is a PDF request. "
+                    "The final artifact must be a real .pdf, or the approved "
+                    f"{fallback_ext} fallback after a render_markdown_to_pdf attempt. "
+                    "Do not emit Python files, generator scripts, bare paths, or "
+                    "files outside /mnt/user-data/outputs/ as the user-ready artifact."
+                )
+        if _requested_pptx_artifact(state):
+            fallback_ext = _pptx_fallback_suffix(state)
+            return (
+                "Error: emit_builder_artifact rejected — this is a slide-deck "
+                "request. The final artifact must be a structurally valid .pptx "
+                "PowerPoint package under /mnt/user-data/outputs/, or a real "
+                f"{fallback_ext} fallback if deck generation cannot complete. "
+                "Use the ppt-generation skill workflow, then emit only the valid "
+                "deck or fallback. Do not emit Python files, placeholder decks, "
+                "tiny/corrupt .pptx files, bare paths, or files outside outputs. "
+                "If using HTML fallback, write a complete standalone HTML document "
+                "with <!doctype html>, <html>, <head>, and <body>; do not wrap it "
+                "in Markdown fences and do not HTML-escape the document source."
+            )
+        recovery_hint = cls._missing_artifact_recovery_hint(artifact_args, state)
+        return (
+            "Error: emit_builder_artifact rejected — the referenced "
+            f"artifact file ({artifact_args.get('artifact_path')}) does not exist "
+            "on disk or in remote storage. Please write the file first, "
+            "then call emit_builder_artifact again."
+            f"{recovery_hint}"
+        )
+
+    @classmethod
+    def _recover_emit_args_from_last_write(
+        cls,
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> dict[str, Any] | None:
+        recovered_path = (
+            cls._preferred_successful_pdf_render_path(state, runtime)
+            or cls._preferred_successful_deliverable_path(state, runtime)
+        )
+        if not recovered_path:
+            return None
+        recovered_args = dict(artifact_args)
+        recovered_args["artifact_path"] = recovered_path
+        if not cls._artifact_files_exist(recovered_args, state, runtime):
+            return None
+        logger.warning(
+            "BuilderArtifact: emit_path_missing recovered_from_last_successful_write ext=%s",
+            Path(recovered_path).suffix.lower().lstrip(".") or None,
+        )
+        return recovered_args
+
+    @classmethod
+    def _preferred_successful_pdf_render_path(
+        cls,
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> str | None:
+        if not _requested_pdf_artifact(state) or not _successful_pdf_ready_to_emit(state):
+            return None
+        result = _successful_pdf_render_result(state)
+        if result is None:
+            return None
+        pdf_path = _canonical_outputs_artifact_path(result.get("pdf_path"))
+        if pdf_path is None:
+            return None
+        if cls._artifact_files_exist({"artifact_path": pdf_path}, state, runtime):
+            return pdf_path
+        return None
+
+    @staticmethod
+    def _successful_output_paths(state: BuilderArtifactState) -> list[str]:
+        diagnostics = state.get("builder_write_diagnostics") or {}
+        if not isinstance(diagnostics, dict):
+            return []
+        return [
+            path
+            for path in (diagnostics.get("successful_output_paths") or [])
+            if isinstance(path, str) and _extract_output_relative_path(path) is not None
+        ]
+
+    @staticmethod
+    def _successful_deliverable_output_paths(state: BuilderArtifactState) -> list[str]:
+        diagnostics = state.get("builder_write_diagnostics") or {}
+        if not isinstance(diagnostics, dict):
+            return []
+        explicit = [
+            path
+            for path in (diagnostics.get("successful_deliverable_output_paths") or [])
+            if isinstance(path, str) and _is_user_facing_output_path(path)
+        ]
+        if explicit:
+            return explicit
+        return [
+            path
+            for path in BuilderArtifactMiddleware._successful_output_paths(state)
+            if _is_user_facing_output_path(path)
+        ]
+
+    @staticmethod
+    def _target_artifact_path(state: BuilderArtifactState) -> str | None:
+        target = state.get("builder_artifact_target_path")
+        if isinstance(target, str) and _extract_output_relative_path(target) is not None:
+            return target
+        delegation = state.get("delegation_context")
+        if isinstance(delegation, dict):
+            delegated = delegation.get("artifact_target_path")
+            if isinstance(delegated, str) and _extract_output_relative_path(delegated) is not None:
+                return delegated
+        return None
+
+    @classmethod
+    def _preferred_successful_deliverable_path(
+        cls,
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> str | None:
+        paths = cls._successful_deliverable_output_paths(state)
+        if _requested_pdf_artifact(state):
+            allowed = _allowed_pdf_artifact_suffixes(state)
+            paths = [path for path in paths if PurePosixPath(path).suffix.lower() in allowed]
+        if _requested_pptx_artifact(state):
+            allowed = _allowed_pptx_artifact_suffixes(state)
+            paths = [path for path in paths if PurePosixPath(path).suffix.lower() in allowed]
+        diagnostics = state.get("builder_write_diagnostics") or {}
+        target_path = cls._target_artifact_path(state)
+        if target_path and _is_user_facing_output_path(target_path):
+            target_args = {"artifact_path": target_path}
+            if target_path in paths or cls._artifact_files_exist(target_args, state, runtime):
+                return target_path
+
+        target_suffix = Path(target_path or "").suffix.lower()
+        matching = [
+            path for path in paths
+            if not target_suffix or Path(path).suffix.lower() == target_suffix
+        ]
+        if len(matching) == 1:
+            return matching[0]
+
+        last_successful = (
+            diagnostics.get("last_successful_deliverable_output_path")
+            if isinstance(diagnostics, dict)
+            else None
+        )
+        if isinstance(last_successful, str):
+            if last_successful in matching:
+                return last_successful
+            if not matching and last_successful in paths:
+                return last_successful
+
+        if len(paths) == 1:
+            return paths[0]
+        return None
+
+    @staticmethod
+    def _build_recovered_artifact_result(
+        artifact_path: str,
+        *,
+        steps_completed: int,
+        reason: str,
+    ) -> dict[str, Any]:
+        artifact_type = Path(artifact_path).suffix.lower().lstrip(".") or "unknown"
+        logger.warning(
+            "BuilderArtifact: promoting recovered deliverable reason=%s ext=%s",
+            reason,
+            artifact_type or None,
+        )
+        return {
+            "artifact_path": artifact_path,
+            "artifact_type": artifact_type,
+            "artifact_title": "Build task completed (recovered)",
+            "steps_completed": steps_completed,
+            "decisions_made": [],
+            "companion_summary": (
+                "The builder wrote a deliverable but did not emit it cleanly, "
+                "so I recovered the completed file from the output directory."
+            ),
+            "companion_tone_hint": "Reassuring — deliverable recovered despite rough run.",
+            "user_next_action": "Open the file and let me know if it lands.",
+            "confidence": 0.55,
+        }
+
+    @classmethod
+    def _recover_missing_emit_args_if_possible(
+        cls,
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> dict[str, Any]:
+        if cls._artifact_files_exist(artifact_args, state, runtime):
+            return artifact_args
+        return cls._recover_emit_args_from_last_write(artifact_args, state, runtime) or artifact_args
 
     def _force_choice_for_state(
         self,
@@ -771,52 +2881,34 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
           nor a generator exists — the model has produced nothing on disk
           and needs to land at least one file before emit is forced.
         """
-        turn_force = self._should_force_emit(state)
-        clock_force = self._should_force_emit_by_clock(state, runtime)
-        if not (turn_force or clock_force):
+        return (
+            self._pdf_terminal_tool_choice_for_state(state)
+            or self._simple_pdf_tool_choice_for_state(state)
+            or self._research_tool_choice_for_state(state)
+            or self._completion_tool_choice_for_state(state, runtime)
+        )
+
+    def _simple_pdf_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _requested_simple_pdf_artifact(state):
             return None
-        force_reason = "turns" if turn_force and not clock_force else (
-            "wall_clock" if clock_force and not turn_force else "turns+wall_clock"
-        )
-        non_artifact_turns = state.get("builder_non_artifact_turns")
-
-        # Stage 1: a real user-facing binary is on disk → force emit.
-        if self._has_output_file(state):
-            logger.warning(
-                "BuilderArtifact: forcing tool_choice=emit_builder_artifact "
-                "(non_artifact_turns=%s, ceiling=%s, reason=%s)",
-                non_artifact_turns,
-                self._CEILING_FOR_FORCE,
-                force_reason,
-            )
-            return self._forced_tool_choice()
-
-        # Stage 2 (PR-B): a generator script exists but no binary yet →
-        # force bash so the model runs what it has, instead of writing
-        # another generator that gets filtered out by _has_output_file.
-        if self._has_generator_script(state):
-            logger.warning(
-                "BuilderArtifact: forcing tool_choice=bash before emit "
-                "(non_artifact_turns=%s, ceiling=%s, reason=%s, generator "
-                "script on disk but no binary — three-stage force gives the "
-                "model a chance to RUN the generator instead of writing yet "
-                "another one)",
-                non_artifact_turns,
-                self._CEILING_FOR_FORCE,
-                force_reason,
-            )
-            return self._forced_bash_tool_choice()
-
-        # Stage 3: nothing on disk at all → force write_file (PR-A).
+        if _simple_pdf_writer_attempted(state) or self._has_requested_pdf_binary(state):
+            return None
         logger.warning(
-            "BuilderArtifact: forcing tool_choice=write_file before emit "
-            "(non_artifact_turns=%s, ceiling=%s, reason=%s, no output file yet — "
-            "force prevents phantom-emit loop)",
-            non_artifact_turns,
-            self._CEILING_FOR_FORCE,
-            force_reason,
+            "BuilderArtifact: forcing tool_choice=%s for simple PDF artifact path",
+            _SIMPLE_PDF_TOOL_NAME,
         )
-        return self._forced_write_tool_choice()
+        return self._forced_simple_pdf_tool_choice()
+
+    def _pdf_terminal_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _requested_pdf_artifact(state) or not _successful_pdf_ready_to_emit(state):
+            return None
+        logger.warning(
+            "BuilderArtifact: forcing tool_choice=emit_builder_artifact after "
+            "successful PDF render (layout_quality=%s repair_attempts=%d)",
+            _pdf_render_layout_quality(state),
+            _pdf_layout_repair_attempts(state),
+        )
+        return self._forced_tool_choice()
 
     # Phase 2F.3: after N consecutive write_file_tool errors, inject a
     # corrective HumanMessage so the model breaks out of the loop and
@@ -856,8 +2948,252 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 return count
         return count
 
+    @classmethod
+    def _trailing_write_file_error_classes(
+        cls,
+        messages: list,
+        lookback: int,
+    ) -> list[str]:
+        classes: list[str] = []
+        scanned = 0
+        for msg in reversed(messages):
+            scanned += 1
+            if scanned > lookback:
+                break
+            if not isinstance(msg, ToolMessage):
+                continue
+            name = getattr(msg, "name", None) or ""
+            if name not in ("write_file", "write_file_tool"):
+                return classes
+            text = cls._tool_message_text(msg)
+            if text.startswith("Error"):
+                classes.append(cls._classify_write_error(text, under_outputs=None))
+            else:
+                return classes
+        return classes
+
+    @staticmethod
+    def _tool_message_content_shape(result: ToolMessage) -> str:
+        content = result.content
+        if isinstance(content, str):
+            return "text"
+        if isinstance(content, list):
+            return "list"
+        if isinstance(content, dict):
+            return "dict"
+        if content is None:
+            return "none"
+        return type(content).__name__
+
+    @staticmethod
+    def _classify_write_error(text: str, under_outputs: bool | None) -> str:
+        if not text.startswith("Error"):
+            return ""
+        lowered = text.lower()
+        if "field required" in lowered and any(
+            field in lowered for field in ("description", "path", "content", "command")
+        ):
+            return "missing_required_tool_arg"
+        for error_class, markers in _WRITE_ERROR_CLASS_MARKERS:
+            if any(marker in lowered for marker in markers):
+                return error_class
+        if under_outputs is False:
+            return "path_not_outputs"
+        return "write_tool_error"
+
+    @staticmethod
+    def _is_runtime_write_failure(error_class: str | None) -> bool:
+        return bool(error_class and error_class in _RUNTIME_WRITE_ERROR_CLASSES)
+
+    @staticmethod
+    def _is_path_correctable_write_failure(error_class: str | None) -> bool:
+        return not error_class or error_class in _PATH_CORRECTABLE_WRITE_ERROR_CLASSES
+
+    def _write_runtime_failure_update(
+        self,
+        state: BuilderArtifactState,
+        runtime: Runtime | None,
+        *,
+        count: int,
+        error_class: str,
+    ) -> dict[str, Any]:
+        logger.error(
+            "[BuilderArtifact] %d consecutive write_file_tool runtime errors "
+            "detected; stopping build instead of path-correcting error_class=%s",
+            count,
+            error_class,
+        )
+        fallback = self._build_ceiling_fallback(
+            state,
+            steps_completed=int(state.get("builder_non_artifact_turns", 0) or 0),
+            reason=f"runtime_write_failure:{error_class}",
+        )
+        status = "failed" if not fallback.get("artifact_path") else "completed"
+        if runtime is not None:
+            self._upload_fallback_and_fire(
+                state=state,
+                runtime=runtime,
+                fallback=fallback,
+                status=status,
+            )
+        return {
+            "builder_result": fallback,
+            "builder_non_artifact_turns": 0,
+            "builder_task_started_at_ms": 0,
+            "builder_consecutive_empty_emit_rejections": 0,
+            "builder_runtime_write_failure_emitted": True,
+            "jump_to": "end",
+        }
+
+    def _recovered_deliverable_update(
+        self,
+        state: BuilderArtifactState,
+        runtime: Runtime | None,
+        *,
+        artifact_path: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        fallback = self._build_recovered_artifact_result(
+            artifact_path,
+            steps_completed=int(state.get("builder_non_artifact_turns", 0) or 0),
+            reason=reason,
+        )
+        _apply_artifact_request_metadata(
+            fallback,
+            state,
+            fallback_reason="pptx_generation_not_completed" if _requested_pptx_artifact(state) else reason,
+        )
+        if runtime is not None:
+            self._upload_fallback_and_fire(
+                state=state,
+                runtime=runtime,
+                fallback=fallback,
+                status="completed",
+            )
+        return {
+            "builder_result": fallback,
+            "builder_non_artifact_turns": 0,
+            "builder_task_started_at_ms": 0,
+            "builder_consecutive_empty_emit_rejections": 0,
+            "builder_recovered_deliverable_emitted": True,
+            "jump_to": "end",
+        }
+
+    def _maybe_promote_recovered_deliverable(
+        self,
+        state: BuilderArtifactState,
+        runtime: Runtime | None,
+        *,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        if state.get("builder_recovered_deliverable_emitted") or runtime is None:
+            return None
+        diagnostics = state.get("builder_write_diagnostics") or {}
+        if not isinstance(diagnostics, dict):
+            return None
+        if diagnostics.get("last_status") != "success":
+            return None
+        error_count = int(diagnostics.get("error_count", 0) or 0)
+        had_correction = bool(
+            state.get("builder_path_correction_emitted")
+            or state.get("builder_tool_argument_correction_emitted")
+        )
+        if error_count < self._PATH_CORRECTION_ERROR_THRESHOLD and not had_correction:
+            return None
+        candidate = self._preferred_successful_deliverable_path(state, runtime)
+        if not candidate:
+            return None
+        if not self._artifact_files_exist({"artifact_path": candidate}, state, runtime):
+            return None
+        return self._recovered_deliverable_update(
+            state,
+            runtime,
+            artifact_path=candidate,
+            reason=reason,
+        )
+
+    def _write_tool_argument_failure_update(
+        self,
+        state: BuilderArtifactState,
+        runtime: Runtime | None,
+        *,
+        count: int,
+        error_class: str,
+    ) -> dict[str, Any] | None:
+        candidate = (
+            self._preferred_successful_deliverable_path(state, runtime)
+            if runtime is not None
+            else None
+        )
+        if candidate and self._artifact_files_exist({"artifact_path": candidate}, state, runtime):
+            return self._recovered_deliverable_update(
+                state,
+                runtime,
+                artifact_path=candidate,
+                reason=error_class,
+            )
+
+        if state.get("builder_tool_argument_correction_emitted"):
+            logger.error(
+                "[BuilderArtifact] repeated missing required tool arguments "
+                "after correction; stopping build count=%d error_class=%s",
+                count,
+                error_class,
+            )
+            fallback = self._build_ceiling_fallback(
+                state,
+                steps_completed=int(state.get("builder_non_artifact_turns", 0) or 0),
+                reason=f"repeated_{error_class}",
+            )
+            status = "failed" if not fallback.get("artifact_path") else "completed"
+            if runtime is not None:
+                self._upload_fallback_and_fire(
+                    state=state,
+                    runtime=runtime,
+                    fallback=fallback,
+                    status=status,
+                )
+            return {
+                "builder_result": fallback,
+                "builder_non_artifact_turns": 0,
+                "builder_task_started_at_ms": 0,
+                "builder_consecutive_empty_emit_rejections": 0,
+                "builder_tool_argument_correction_emitted": True,
+                "jump_to": "end",
+            }
+
+        logger.warning(
+            "[BuilderArtifact] %d consecutive write_file_tool missing-argument "
+            "errors detected — injecting tool-argument correction instead of "
+            "path correction. error_class=%s",
+            count,
+            error_class,
+        )
+        correction = HumanMessage(
+            content=(
+                "[Sophia/tool-argument correction]\n"
+                "Your recent tool call was missing required arguments. "
+                "Do not retry the same incomplete call.\n\n"
+                "For text deliverables, call the exposed `write_file` tool with "
+                "`description`, `path`, and `content` arguments, for example "
+                "`write_file(description='write the final report', "
+                "path='/mnt/user-data/outputs/report.html', "
+                "content='<html>...</html>', append=False)`. For shell work, "
+                "call `bash_tool` with a non-empty `command` argument.\n\n"
+                "If you have already written the final file under "
+                "`/mnt/user-data/outputs/`, call `emit_builder_artifact` with "
+                "that exact path and stop."
+            )
+        )
+        return {
+            "messages": [correction],
+            "builder_tool_argument_correction_emitted": True,
+        }
+
     def _maybe_inject_path_correction(
-        self, state: BuilderArtifactState
+        self,
+        state: BuilderArtifactState,
+        runtime: Runtime | None = None,
     ) -> dict[str, Any] | None:
         """Phase 2F.3: detect ``write_file_tool`` error loops and inject a
         single corrective HumanMessage so the model recovers.
@@ -882,21 +3218,56 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
         if count < self._PATH_CORRECTION_ERROR_THRESHOLD:
             return None
+        diagnostics = state.get("builder_write_diagnostics") or {}
+        error_class = (
+            diagnostics.get("last_error_class")
+            if isinstance(diagnostics, dict)
+            else None
+        )
+        if not isinstance(error_class, str) or not error_class:
+            classes = self._trailing_write_file_error_classes(
+                messages,
+                self._PATH_CORRECTION_LOOKBACK,
+            )
+            error_class = classes[0] if classes else "write_tool_error"
+        if self._is_runtime_write_failure(error_class):
+            if state.get("builder_runtime_write_failure_emitted"):
+                return None
+            return self._write_runtime_failure_update(
+                state,
+                runtime,
+                count=count,
+                error_class=error_class,
+            )
+        if error_class == "missing_required_tool_arg":
+            return self._write_tool_argument_failure_update(
+                state,
+                runtime,
+                count=count,
+                error_class=error_class,
+            )
+        if not self._is_path_correctable_write_failure(error_class):
+            return None
         logger.warning(
             "[BuilderArtifact] %d consecutive write_file_tool errors detected "
-            "— injecting path-correction directive (Phase 2F.3 escape hatch).",
+            "— injecting path-correction directive (Phase 2F.3 escape hatch). "
+            "error_class=%s",
             count,
+            error_class,
         )
         correction = HumanMessage(
             content=(
                 "[Sophia/path-correction directive]\n"
-                f"Your last {count} write_file_tool calls all failed with "
+                f"Your last {count} write_file calls all failed with "
                 "errors. This usually means the path you used is not under "
                 "/mnt/user-data/outputs/.\n\n"
                 "STOP retrying with the same kind of path. Your NEXT "
-                "write_file_tool call MUST use an absolute path starting "
-                "with `/mnt/user-data/outputs/`, e.g. "
-                "`/mnt/user-data/outputs/my-document.md`. If you only had a "
+                "`write_file` call MUST include `description`, `path`, and "
+                "`content`, and the path MUST start with "
+                "`/mnt/user-data/outputs/`, e.g. "
+                "`write_file(description='write final document', "
+                "path='/mnt/user-data/outputs/my-document.md', content='...', "
+                "append=False)`. If you only had a "
                 "bare filename like `report.md`, prepend "
                 "`/mnt/user-data/outputs/` to it.\n\n"
                 "After the file is on disk under /mnt/user-data/outputs/, "
@@ -940,6 +3311,47 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     return True
         return False
 
+    @staticmethod
+    def _latest_human_content(messages: list) -> str:
+        if not messages or not isinstance(messages[-1], HumanMessage):
+            return ""
+        content = messages[-1].content
+        return content if isinstance(content, str) else str(content or "")
+
+    @staticmethod
+    def _extract_update_target_path(content: str) -> str | None:
+        match = _CONCRETE_FILE_TARGET_RE.search(content or "")
+        if not match:
+            return None
+        target = match.group(1).strip()
+        if not target.startswith(_OUTPUTS_VIRTUAL_PREFIX):
+            return None
+        if _extract_output_relative_path(target) is None:
+            return None
+        return target
+
+    def _post_interrupt_state_hints(
+        self, state: BuilderArtifactState, messages: list
+    ) -> dict[str, Any]:
+        content = self._latest_human_content(messages)
+        update: dict[str, Any] = {}
+        urls = extract_explicit_user_urls(content)
+        if urls:
+            update["explicit_user_urls"] = urls
+            update["builder_allowed_urls"] = urls
+            update["builder_update_required_urls"] = urls
+        target_path = self._extract_update_target_path(content)
+        if target_path:
+            update["builder_artifact_target_path"] = target_path
+        if _FILE_TARGET_HINT_MARKER in content:
+            update["builder_update_epoch"] = int(state.get("builder_update_epoch", 0) or 0) + 1
+            logger.info(
+                "[BuilderArtifact] post-interrupt update hints: explicit_url_count=%d target_ext=%s",
+                len(urls),
+                Path(target_path).suffix.lower().lstrip(".") if target_path else None,
+            )
+        return update
+
     def _maybe_reset_turn_budget(
         self, state: BuilderArtifactState
     ) -> dict[str, Any] | None:
@@ -954,17 +3366,169 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if not self._is_post_interrupt_update(messages):
             return None
         current = int(state.get("builder_non_artifact_turns", 0) or 0)
-        if current <= 0:
-            return None  # Nothing to reset — fresh run.
-        logger.info(
-            "[BuilderArtifact] post-interrupt update detected — resetting "
-            "builder_non_artifact_turns: %d → 0 (fresh budget for the update)",
-            current,
+        update = self._post_interrupt_state_hints(state, messages)
+        if current > 0:
+            logger.info(
+                "[BuilderArtifact] post-interrupt update detected — resetting "
+                "builder_non_artifact_turns: %d -> 0 (fresh budget for the update)",
+                current,
+            )
+            update["builder_non_artifact_turns"] = 0
+        return update or None
+
+    def _maybe_inject_pdf_layout_repair(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _requested_pdf_artifact(state) or state.get("builder_pdf_layout_repair_requested"):
+            return None
+        result = _successful_pdf_render_result(state)
+        if result is None or not _pdf_layout_repair_needed(state):
+            return None
+        logger.warning(
+            "BuilderArtifact: requesting one PDF layout repair page_count=%s "
+            "blank_page_count=%s short_page_count=%s layout_quality=%s",
+            result.get("page_count"),
+            result.get("blank_page_count"),
+            result.get("short_page_count"),
+            result.get("layout_quality"),
         )
-        return {"builder_non_artifact_turns": 0}
+        return {
+            "messages": [HumanMessage(content=_pdf_layout_repair_message(result))],
+            "builder_pdf_render_result": None,
+            "builder_pdf_layout_repair_requested": True,
+            "builder_pdf_layout_repair_attempts": _pdf_layout_repair_attempts(state) + 1,
+        }
+
+    def _maybe_inject_pptx_skill_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _requested_pptx_artifact(state):
+            return None
+        if state.get("builder_pptx_skill_correction_emitted"):
+            return None
+        valid_pptx_seen = self._has_valid_pptx_output(state)
+        skill_read_seen = _pptx_skill_read_seen(state)
+        generator_invoked_seen = _pptx_generator_invoked_seen(state)
+        image_invoked_seen = _image_generation_invoked_seen(state)
+        if valid_pptx_seen or generator_invoked_seen:
+            return None
+        non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0)
+        summaries = state.get("builder_tool_turn_summaries") or []
+        recent_tool_names = [
+            name
+            for summary in summaries[-4:]
+            if isinstance(summary, dict)
+            for name in (summary.get("tool_names") or [])
+            if isinstance(name, str)
+        ]
+        drifted = any(
+            name in {
+                "write_file",
+                "write_file_tool",
+                "bash",
+                "bash_tool",
+                "str_replace",
+                "str_replace_tool",
+                "emit_builder_artifact",
+            }
+            for name in recent_tool_names
+        )
+        if not drifted and non_artifact_turns < 3:
+            return None
+        logger.warning(
+            "BuilderArtifact: presentation target needs ppt-generation correction "
+            "turn=%d recent_tools=%s pptx_skill_read_seen=%s "
+            "pptx_generator_invoked=%s image_generation_invoked=%s "
+            "valid_pptx_seen=%s fallback_ext=%s write_file_missing_arg_count=%s",
+            non_artifact_turns,
+            ",".join(recent_tool_names[-6:]),
+            skill_read_seen,
+            generator_invoked_seen,
+            image_invoked_seen,
+            valid_pptx_seen,
+            _pptx_fallback_suffix(state).lstrip("."),
+            int(
+                (state.get("builder_write_diagnostics") or {}).get("error_count", 0)
+                if isinstance(state.get("builder_write_diagnostics"), dict)
+                else 0
+            ),
+        )
+        return {
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "[Sophia/presentation-skill correction]\n"
+                        "This is a PPTX slide-deck build. Reading SKILL.md is useful, "
+                        "but it is not completion. Stop ad hoc deck generation, "
+                        "python-pptx scripts, `.py` files, and generic write_file loops.\n\n"
+                        "Your next safe workflow is:\n"
+                        "1. If you have not already done so, call "
+                        "`read_file(path='/mnt/skills/public/ppt-generation/SKILL.md')`.\n"
+                        "2. Create the slide plan/assets the skill expects under "
+                        "`/mnt/user-data/workspace/`.\n"
+                        "3. Generate slide images with "
+                        "`/mnt/skills/public/image-generation/scripts/generate.py`.\n"
+                        "4. Compose the deck by running "
+                        "`/mnt/skills/public/ppt-generation/scripts/generate.py`.\n"
+                        "5. Emit only after the `.pptx` exists and is a valid PowerPoint package.\n\n"
+                        "If image/deck generation cannot complete after this correction, create a real "
+                        f"{_pptx_fallback_suffix(state)} fallback under `/mnt/user-data/outputs/` with "
+                        "`write_file(description='fallback deck outline', path='/mnt/user-data/outputs/deck"
+                        f"{_pptx_fallback_suffix(state)}', content='...', append=False)`, then emit that "
+                        "fallback. Do not emit placeholder/tiny/corrupt `.pptx` files, Python scripts, "
+                        "or test files."
+                    )
+                )
+            ],
+            "builder_pptx_skill_correction_emitted": True,
+        }
+
+    def _maybe_inject_pptx_fallback_after_image_failure(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _requested_pptx_artifact(state):
+            return None
+        if state.get("builder_pptx_fallback_directive_emitted"):
+            return None
+        if not state.get("builder_pptx_skill_correction_emitted"):
+            return None
+        if self._has_valid_pptx_output(state):
+            return None
+        image_attempts = _pptx_diagnostic_count(state, "image_generation_attempt_count")
+        image_successes = _pptx_diagnostic_count(state, "image_generation_success_count")
+        if image_attempts <= 0 or image_successes > 0:
+            return None
+        non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0)
+        if non_artifact_turns < 5:
+            return None
+        diagnostics = _pptx_diagnostics(state)
+        fallback_ext = _pptx_fallback_suffix(state)
+        logger.warning(
+            "BuilderArtifact: presentation image generation produced no valid images "
+            "after correction; directing explicit fallback image_attempts=%d "
+            "error_class=%s fallback_ext=%s",
+            image_attempts,
+            diagnostics.get("image_generation_error_class"),
+            fallback_ext.lstrip("."),
+        )
+        return {
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "[Sophia/presentation fallback directive]\n"
+                        "Image generation did not produce valid slide image bytes after the PPTX correction. "
+                        "Stop trying to compose a PowerPoint package in this run. Create a real degraded "
+                        f"{fallback_ext} fallback under `/mnt/user-data/outputs/` now, then call "
+                        "emit_builder_artifact for that fallback with explicit fallback metadata: "
+                        "`requested_artifact_ext='pptx'`, `artifact_is_fallback=true`, and "
+                        "`fallback_reason='pptx_generation_not_completed'`. "
+                        "If the fallback is HTML, it must be standalone browser-renderable HTML with "
+                        "`<!doctype html>`, `<html>`, `<head>`, and `<body>`; no Markdown fences. "
+                        "Do not emit Python scripts, test files, or placeholder PPTX files."
+                    )
+                )
+            ],
+            "builder_pptx_fallback_directive_emitted": True,
+        }
 
     def _combined_before_model_updates(
-        self, state: BuilderArtifactState
+        self,
+        state: BuilderArtifactState,
+        runtime: Runtime | None = None,
     ) -> dict | None:
         """Run all before_model state-update probes (Phase 2E.1 turn-budget
         reset + Phase 2F.3 path-correction injection) and merge their
@@ -973,24 +3537,46 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         reset = self._maybe_reset_turn_budget(state)
         if isinstance(reset, dict):
             update.update(reset)
-        correction = self._maybe_inject_path_correction(state)
+        promotion = self._maybe_promote_recovered_deliverable(
+            state,
+            runtime,
+            reason="successful_write_after_correction",
+        )
+        if isinstance(promotion, dict):
+            update.update(promotion)
+            return update
+        pdf_repair = self._maybe_inject_pdf_layout_repair(state)
+        if isinstance(pdf_repair, dict):
+            update.update(pdf_repair)
+            return update
+        pptx_fallback = self._maybe_inject_pptx_fallback_after_image_failure(state)
+        if isinstance(pptx_fallback, dict):
+            update.update(pptx_fallback)
+            return update
+        pptx_correction = self._maybe_inject_pptx_skill_correction(state)
+        if isinstance(pptx_correction, dict):
+            update.update(pptx_correction)
+            return update
+        correction = self._maybe_inject_path_correction(state, runtime)
         if isinstance(correction, dict):
             # Merge: ``messages`` reducer concatenates, scalar flags overwrite.
             for key, value in correction.items():
                 update[key] = value
         return update or None
 
+    @hook_config(can_jump_to=["end"])
     @override
     def before_model(
         self, state: BuilderArtifactState, runtime: Runtime | None = None
     ) -> dict | None:
-        return self._combined_before_model_updates(state)
+        return self._combined_before_model_updates(state, runtime)
 
+    @hook_config(can_jump_to=["end"])
     @override
     async def abefore_model(
         self, state: BuilderArtifactState, runtime: Runtime | None = None
     ) -> dict | None:
-        return self._combined_before_model_updates(state)
+        return self._combined_before_model_updates(state, runtime)
 
     @override
     def wrap_model_call(
@@ -1016,6 +3602,342 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             request = request.override(tool_choice=choice)
         return await handler(request)
 
+    def _block_substantive_tool_before_research(
+        self,
+        request: ToolCallRequest,
+    ) -> Command | None:
+        if not self._is_substantive_before_research_tool(request.state, request.tool_call):
+            return None
+
+        tool_name = request.tool_call.get("name") or "unknown"
+        tool_call_id = request.tool_call.get("id", "")
+        logger.warning(
+            "[BuilderResearchEnforcement] blocked_content_tool_before_research "
+            "tool=%s",
+            tool_name,
+        )
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=(
+                            "Error: research-before-write enforcement blocked this tool call. "
+                            "You may keep your plan, but before writing, editing, running "
+                            "artifact-generating bash, or emitting the artifact, call "
+                            "builder_web_search first, then builder_web_fetch on one approved "
+                            "result URL for factual document/PDF work. If the web tool fails "
+                            "or returns weak results, continue afterward with the best "
+                            "available context."
+                        ),
+                        tool_call_id=tool_call_id,
+                        name=str(tool_name),
+                        status="error",
+                    ),
+                ],
+            },
+            goto="model",
+        )
+
+    @staticmethod
+    def _normalized_write_path(tool_call: dict[str, Any]) -> str | None:
+        args = tool_call.get("args") or {}
+        if not isinstance(args, dict):
+            return None
+        raw_path = args.get("path") or args.get("file_path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return None
+        return BuilderArtifactMiddleware._normalize_requested_write_path(raw_path.strip())
+
+    @staticmethod
+    def _normalize_requested_write_path(path: str) -> str:
+        if path.startswith(_OUTPUTS_VIRTUAL_PREFIX):
+            return path
+        if "/" not in path and "\\" not in path:
+            return _OUTPUTS_VIRTUAL_PREFIX + path
+        return path
+
+    @staticmethod
+    def _tool_message_text(result: ToolMessage) -> str:
+        content = result.content
+        if isinstance(content, str):
+            return content
+        return str(content or "")
+
+    def _write_result_delta(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage,
+    ) -> dict[str, Any]:
+        text = self._tool_message_text(result).strip()
+        success = text.startswith("OK")
+        path = self._normalized_write_path(request.tool_call)
+        ext, under_outputs = self._write_path_metadata(path)
+        delta: dict[str, Any] = {
+            "success_count": 1 if success else 0,
+            "error_count": 0 if success else 1,
+            "last_content_shape": self._tool_message_content_shape(result),
+            "last_ext": ext,
+            "last_under_outputs": under_outputs,
+            "last_status": "success" if success else "error",
+        }
+        if not success:
+            delta["last_error_class"] = self._classify_write_error(text, under_outputs)
+        if success and under_outputs and path:
+            delta["last_successful_output_path"] = path
+            delta["successful_output_paths"] = [path]
+            if _is_user_facing_output_path(path):
+                delta["last_successful_deliverable_output_path"] = path
+                delta["successful_deliverable_output_paths"] = [path]
+        return delta
+
+    @staticmethod
+    def _write_path_metadata(path: str | None) -> tuple[str, bool]:
+        if not path:
+            return "", False
+        return Path(path).suffix.lower().lstrip("."), _extract_output_relative_path(path) is not None
+
+    def _write_result_command(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage | Command,
+    ) -> ToolMessage | Command:
+        tool_name = request.tool_call.get("name")
+        if tool_name not in _BUILDER_WRITE_TOOL_NAMES or not isinstance(result, ToolMessage):
+            return result
+
+        delta = self._write_result_delta(request, result)
+        logger.info(
+            "[BuilderWriteDiagnostics] tool=%s status=%s path_under_outputs=%s "
+            "ext=%s error_class=%s content_shape=%s",
+            tool_name,
+            delta["last_status"],
+            delta["last_under_outputs"],
+            delta["last_ext"] or None,
+            delta.get("last_error_class"),
+            delta.get("last_content_shape"),
+        )
+        return Command(
+            update={
+                "messages": [result],
+                "builder_write_diagnostics": delta,
+            }
+        )
+
+    @staticmethod
+    def _render_pdf_result_delta(result: ToolMessage) -> dict[str, Any] | None:
+        if not isinstance(result.content, str):
+            return None
+        try:
+            payload = json.loads(result.content)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        logger.info(
+            "[BuilderPdfDiagnostics] render_success=%s page_count=%s "
+            "blank_page_count=%s short_page_count=%s layout_quality=%s "
+            "layout_warning=%s",
+            payload.get("success"),
+            payload.get("page_count"),
+            payload.get("blank_page_count"),
+            payload.get("short_page_count"),
+            payload.get("layout_quality"),
+            payload.get("layout_warning"),
+        )
+        return {"builder_pdf_render_result": payload}
+
+    @staticmethod
+    def _pdf_generation_failed_fallback(
+        *,
+        steps_completed: int,
+        error_type: str,
+    ) -> dict[str, Any]:
+        safe_reason = error_type if error_type == "pdf_generation_failed" else "pdf_generation_failed"
+        return {
+            "artifact_path": None,
+            "artifact_type": "pdf",
+            "artifact_title": "PDF generation failed",
+            "steps_completed": steps_completed,
+            "decisions_made": [],
+            "companion_summary": (
+                "The builder tried to create the PDF, but PDF generation failed "
+                "before a valid file could be written."
+            ),
+            "companion_tone_hint": "Direct and apologetic — PDF generation failed; offer to retry.",
+            "user_next_action": "Ask me to retry the PDF build.",
+            "confidence": 0.0,
+            "error_reason": safe_reason,
+        }
+
+    def _pdf_generation_failure_command(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage,
+        payload: dict[str, Any],
+    ) -> Command:
+        error_type = str(payload.get("error_type") or "pdf_generation_failed")
+        fallback = self._pdf_generation_failed_fallback(
+            steps_completed=int(request.state.get("builder_non_artifact_turns", 0) or 0) + 1,
+            error_type=error_type,
+        )
+        logger.warning(
+            "BuilderArtifact: terminal PDF generation failure reason=%s",
+            fallback["error_reason"],
+        )
+        self._upload_fallback_and_fire(
+            state=request.state,
+            runtime=request.runtime,
+            fallback=fallback,
+            status="failed",
+        )
+        return Command(
+            update={
+                "messages": [result],
+                "builder_pdf_render_result": payload,
+                "builder_result": fallback,
+                "builder_non_artifact_turns": 0,
+                "builder_task_started_at_ms": 0,
+                "builder_consecutive_empty_emit_rejections": 0,
+            },
+            goto="end",
+        )
+
+    def _pdf_result_command(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage,
+    ) -> ToolMessage | Command:
+        delta = self._render_pdf_result_delta(result)
+        if delta is None:
+            return result
+        payload = delta["builder_pdf_render_result"]
+        if (
+            request.tool_call.get("name") == _SIMPLE_PDF_TOOL_NAME
+            and payload.get("success") is False
+            and payload.get("error_type") == "pdf_generation_failed"
+        ):
+            return self._pdf_generation_failure_command(request, result, payload)
+        return Command(update={"messages": [result], **delta})
+
+    @staticmethod
+    def _image_generation_bash_delta(
+        *,
+        command: str,
+        text: str,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        output_path = _command_flag_value(command, "--output-file")
+        exists, bytes_count, status_reason = _virtual_output_status(state, output_path)
+        suffix = PurePosixPath(str(output_path or "")).suffix.lower()
+        valid_image = exists and bytes_count > 0 and suffix in _PPTX_IMAGE_EXTENSIONS
+        error_class = _classify_image_generation_error(text, valid_image, bytes_count)
+        logger.info(
+            "[BuilderImageGeneration] model=gpt-image-2 success=%s output_ext=%s "
+            "bytes=%d error_class=%s status_reason=%s",
+            valid_image,
+            suffix.lstrip(".") or None,
+            bytes_count,
+            error_class,
+            status_reason,
+        )
+        delta: dict[str, Any] = {
+            "image_generation_attempt_count": 1,
+            "image_generation_success_count": 1 if valid_image else 0,
+            "image_generation_bytes_total": bytes_count if valid_image else 0,
+            "image_generation_error_class": error_class,
+        }
+        if output_path and valid_image:
+            delta["image_output_paths"] = [output_path]
+        return delta
+
+    @staticmethod
+    def _pptx_generation_bash_delta(
+        *,
+        command: str,
+        text: str,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        output_path = _command_flag_value(command, "--output-file")
+        exists, bytes_count, status_reason = _virtual_output_status(state, output_path)
+        error_class = _classify_pptx_generation_error(state, output_path, text, exists)
+        valid_pptx = error_class is None
+        slide_count = len(_command_flag_values(command, "--slide-images"))
+        logger.info(
+            "[BuilderPptxGeneration] success=%s output_ext=%s bytes=%d "
+            "slide_image_count=%d error_class=%s status_reason=%s",
+            valid_pptx,
+            PurePosixPath(str(output_path or "")).suffix.lower().lstrip(".") or None,
+            bytes_count,
+            slide_count,
+            error_class,
+            status_reason,
+        )
+        delta: dict[str, Any] = {
+            "pptx_generator_attempt_count": 1,
+            "pptx_generator_success_count": 1 if valid_pptx else 0,
+            "pptx_generator_bytes_total": bytes_count if valid_pptx else 0,
+            "pptx_generator_error_class": error_class,
+        }
+        if output_path and valid_pptx:
+            delta["pptx_output_paths"] = [output_path]
+        return delta
+
+    @staticmethod
+    def _pptx_bash_result_delta(
+        request: ToolCallRequest,
+        result: ToolMessage,
+    ) -> dict[str, Any] | None:
+        args = request.tool_call.get("args") or {}
+        if not isinstance(args, dict):
+            return None
+        command = str(args.get("command") or "")
+        text = BuilderArtifactMiddleware._tool_message_text(result)
+        state = request.state or {}
+        if any(marker in command for marker in _IMAGE_GENERATION_PATH_MARKERS):
+            return BuilderArtifactMiddleware._image_generation_bash_delta(
+                command=command,
+                text=text,
+                state=state,
+            )
+        if any(marker in command for marker in _PPTX_GENERATOR_PATH_MARKERS):
+            return BuilderArtifactMiddleware._pptx_generation_bash_delta(
+                command=command,
+                text=text,
+                state=state,
+            )
+        return None
+
+    def _pptx_bash_result_command(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage | Command,
+    ) -> ToolMessage | Command:
+        if not isinstance(result, ToolMessage):
+            return result
+        delta = self._pptx_bash_result_delta(request, result)
+        if delta is None:
+            return result
+        return Command(
+            update={
+                "messages": [result],
+                "builder_pptx_diagnostics": delta,
+            }
+        )
+
+    def _tool_result_command(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage | Command,
+    ) -> ToolMessage | Command:
+        tool_name = request.tool_call.get("name")
+        if tool_name in _BUILDER_WRITE_TOOL_NAMES:
+            return self._write_result_command(request, result)
+        if tool_name in _PDF_CREATION_TOOL_NAMES and isinstance(result, ToolMessage):
+            return self._pdf_result_command(request, result)
+        if tool_name in {"bash", "bash_tool"}:
+            return self._pptx_bash_result_command(request, result)
+        return result
+
     @override
     def wrap_tool_call(
         self,
@@ -1029,11 +3951,19 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         builder graph) and instead return a ``Command(goto=\"model\")`` with an
         error ToolMessage. This lets the model see the rejection and retry.
         """
+        research_block = self._block_substantive_tool_before_research(request)
+        if research_block is not None:
+            return research_block
+
         if request.tool_call.get("name") != "emit_builder_artifact":
-            return handler(request)
+            return self._tool_result_command(request, handler(request))
 
         args = request.tool_call.get("args", {})
         if self._artifact_files_exist(args, request.state, request.runtime):
+            return handler(request)
+        recovered_args = self._recover_emit_args_from_last_write(args, request.state, request.runtime)
+        if recovered_args is not None:
+            request.tool_call["args"] = recovered_args
             return handler(request)
 
         tool_call_id = request.tool_call.get("id", "")
@@ -1046,12 +3976,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             update={
                 "messages": [
                     ToolMessage(
-                        content=(
-                            "Error: emit_builder_artifact rejected — the referenced "
-                            f"artifact file ({args.get('artifact_path')}) does not exist "
-                            "on disk or in remote storage. Please write the file first, "
-                            "then call emit_builder_artifact again."
-                        ),
+                        content=self._emit_rejection_message(args, request.state),
                         tool_call_id=tool_call_id,
                         name="emit_builder_artifact",
                         status="error",
@@ -1068,11 +3993,19 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
         """Async variant — same logic as wrap_tool_call."""
+        research_block = self._block_substantive_tool_before_research(request)
+        if research_block is not None:
+            return research_block
+
         if request.tool_call.get("name") != "emit_builder_artifact":
-            return await handler(request)
+            return self._tool_result_command(request, await handler(request))
 
         args = request.tool_call.get("args", {})
         if self._artifact_files_exist(args, request.state, request.runtime):
+            return await handler(request)
+        recovered_args = self._recover_emit_args_from_last_write(args, request.state, request.runtime)
+        if recovered_args is not None:
+            request.tool_call["args"] = recovered_args
             return await handler(request)
 
         tool_call_id = request.tool_call.get("id", "")
@@ -1085,12 +4018,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             update={
                 "messages": [
                     ToolMessage(
-                        content=(
-                            "Error: emit_builder_artifact rejected — the referenced "
-                            f"artifact file ({args.get('artifact_path')}) does not exist "
-                            "on disk or in remote storage. Please write the file first, "
-                            "then call emit_builder_artifact again."
-                        ),
+                        content=self._emit_rejection_message(args, request.state),
                         tool_call_id=tool_call_id,
                         name="emit_builder_artifact",
                         status="error",
@@ -1130,6 +4058,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 _emit_skill_usage_logs(tool_calls)
                 artifact_calls = [tc for tc in tool_calls if tc.get("name") == "emit_builder_artifact"]
                 tool_names = self._tool_names(tool_calls)
+                pptx_skill_flags = _pptx_skill_flags_from_tool_calls(tool_calls)
+                research_diagnostics = self._update_research_diagnostics(state, tool_names)
+                allow_web_research = self._allow_web_research(state)
 
                 if artifact_calls and len(artifact_calls) == len(tool_calls):
                     args = artifact_calls[-1].get("args", {})
@@ -1146,6 +4077,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     # emit is rejected → tool_choice forces emit again → loop.
                     # Incrementing lets the hard ceiling (10) trigger after a few
                     # retries and terminate the run instead of spinning forever.
+                    args = self._recover_missing_emit_args_if_possible(args, state, runtime)
+
                     if not self._artifact_files_exist(args, state, runtime):
                         logger.warning(
                             "BuilderArtifact: emit rejected in after_model — "
@@ -1182,8 +4115,39 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 "has_emit_builder_artifact": True,
                                 "emit_rejected": True,
                                 "empty_artifact_path": is_empty_path_rejection,
+                                **pptx_skill_flags,
                             },
                         )
+                        write_diagnostics = state.get("builder_write_diagnostics") or {}
+                        write_success_count = int(write_diagnostics.get("success_count", 0) or 0)
+                        write_error_count = int(write_diagnostics.get("error_count", 0) or 0)
+                        if write_success_count == 0 and write_error_count >= 3:
+                            logger.warning(
+                                "BuilderArtifact: stopping after repeated write failures "
+                                "with no successful output write (write_errors=%d)",
+                                write_error_count,
+                            )
+                            fallback = self._build_ceiling_fallback(
+                                state,
+                                steps_completed=non_artifact_turns,
+                                reason="repeated_write_failures_no_output",
+                            )
+                            self._upload_fallback_and_fire(
+                                state=state,
+                                runtime=runtime,
+                                fallback=fallback,
+                                status=self._fallback_completion_status(fallback),
+                            )
+                            return {
+                                "builder_result": fallback,
+                                "builder_non_artifact_turns": 0,
+                                "builder_last_tool_names": tool_names,
+                                "builder_tool_turn_summaries": history,
+                                "builder_research_diagnostics": research_diagnostics,
+                                "builder_task_started_at_ms": 0,
+                                "builder_consecutive_empty_emit_rejections": 0,
+                                "jump_to": "end",
+                            }
 
                         if (
                             is_empty_path_rejection
@@ -1213,13 +4177,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 state=state,
                                 runtime=runtime,
                                 fallback=fallback,
-                                status="completed",
+                                status="failed" if not fallback.get("artifact_path") else "completed",
                             )
                             return {
                                 "builder_result": fallback,
                                 "builder_non_artifact_turns": 0,
                                 "builder_last_tool_names": tool_names,
                                 "builder_tool_turn_summaries": history,
+                                "builder_research_diagnostics": research_diagnostics,
                                 "builder_task_started_at_ms": 0,
                                 "builder_consecutive_empty_emit_rejections": 0,
                                 "jump_to": "end",
@@ -1229,6 +4194,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "builder_non_artifact_turns": non_artifact_turns,
                             "builder_last_tool_names": tool_names,
                             "builder_tool_turn_summaries": history,
+                            "builder_research_diagnostics": research_diagnostics,
                             "builder_consecutive_empty_emit_rejections": consecutive_rejections,
                         }
 
@@ -1238,7 +4204,18 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "turn": int(state.get("builder_non_artifact_turns", 0) or 0) + 1,
                             "tool_names": tool_names,
                             "has_emit_builder_artifact": True,
+                            **pptx_skill_flags,
                         },
+                    )
+                    _apply_artifact_request_metadata(
+                        args,
+                        state,
+                        fallback_reason="pptx_generation_not_completed" if _requested_pptx_artifact(state) else None,
+                    )
+                    _log_pptx_diagnostics(
+                        phase="emit_accepted",
+                        state={**state, "builder_tool_turn_summaries": history},
+                        artifact_path=args.get("artifact_path"),
                     )
                     thread_data = state.get("thread_data") or {}
                     outputs_host_path = (
@@ -1276,6 +4253,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         outputs_host_path=outputs_host_path,
                         artifact_args=args,
                     )
+                    self._log_missing_pdf_render_attempt_if_needed(state, args)
+                    self._log_research_diagnostics(
+                        phase="completion",
+                        diagnostics=research_diagnostics,
+                        allow_web_research=allow_web_research,
+                        sources_used=args.get("sources_used"),
+                    )
                     log_middleware(
                         "BuilderArtifact",
                         f"builder artifact captured: type={args.get('artifact_type')}, "
@@ -1297,6 +4281,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "builder_non_artifact_turns": 0,
                         "builder_last_tool_names": tool_names,
                         "builder_tool_turn_summaries": history,
+                        "builder_research_diagnostics": research_diagnostics,
                         "builder_task_started_at_ms": 0,
                         "builder_consecutive_empty_emit_rejections": 0,
                         "jump_to": "end",
@@ -1321,9 +4306,22 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "turn": non_artifact_turns,
                         "tool_names": tool_names,
                         "has_emit_builder_artifact": False,
+                        **pptx_skill_flags,
                     },
                 )
                 joined_names = ", ".join(tool_names) if tool_names else "none"
+                recovered = self._maybe_promote_recovered_deliverable(
+                    state,
+                    runtime,
+                    reason="non_emit_after_successful_deliverable_write",
+                )
+                if recovered is not None:
+                    recovered.update({
+                        "builder_last_tool_names": tool_names,
+                        "builder_tool_turn_summaries": history,
+                        "builder_research_diagnostics": research_diagnostics,
+                    })
+                    return recovered
 
                 # PR-C F6 (2026-04-24): soft-warn halfway so the model sees
                 # an early wrap-up signal in logs (and future trace events).
@@ -1367,13 +4365,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         state=state,
                         runtime=runtime,
                         fallback=fallback,
-                        status="completed",
+                        status=self._fallback_completion_status(fallback),
                     )
                     return {
                         "builder_result": fallback,
                         "builder_non_artifact_turns": 0,
                         "builder_last_tool_names": tool_names,
                         "builder_tool_turn_summaries": history,
+                        "builder_research_diagnostics": research_diagnostics,
                         "builder_task_started_at_ms": 0,
                         "builder_consecutive_empty_emit_rejections": 0,
                         "jump_to": "end",
@@ -1384,10 +4383,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     f"tool calls present but no builder artifact: turn={non_artifact_turns}, tools={joined_names}",
                     _t0,
                 )
+                self._log_research_diagnostics(
+                    phase="progress",
+                    diagnostics=research_diagnostics,
+                    allow_web_research=allow_web_research,
+                )
                 return {
                     "builder_non_artifact_turns": non_artifact_turns,
                     "builder_last_tool_names": tool_names,
                     "builder_tool_turn_summaries": history,
+                    "builder_research_diagnostics": research_diagnostics,
                     "builder_task_started_at_ms": builder_task_started_at_ms,
                     # PR #94: any non-emit turn breaks the empty-rejection
                     # streak. Reset so the short-circuit only fires on
@@ -1417,14 +4422,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 },
             )
             log_middleware("BuilderArtifact", "no builder artifact tool call, using fallback", _t0)
-            # Fire the gateway webhook (phantom-success guard will likely
-            # coerce this to an error card since the fallback has no
-            # artifact_path and confidence=0.3).
+            # Fire an explicit failure webhook: this fallback has no real
+            # deliverable, so it must not surface as a ready/completed card.
             fire_completion_webhook_from_artifact(
                 state=state,
                 runtime=runtime,
                 artifact=fallback,
-                status="completed",
+                status="failed",
+                error_message=(
+                    "Builder finished without producing a deliverable. "
+                    "Want me to try again?"
+                ),
             )
             return {
                 "builder_result": fallback,

@@ -430,6 +430,41 @@ describe('voice session proxy routes', () => {
     expect(response.status).toBe(202);
   });
 
+  it('logs safe production Gemini relay metadata when backend rejects the relay', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    fetchSophiaApiMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: 'Gemini Live toolCall omitted functionCalls.' }), {
+        status: 422,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const body = {
+      session_id: 'gemini-prod-sensitive-session',
+      event: { serverContent: { inputTranscription: { text: 'private transcript' } } },
+      provider_receive_sequence: 42,
+      provider_relay_sequence: 7,
+      relay_correlation_id: 'gemini-relay-42',
+      provider_primary_category: 'inputTranscription',
+      provider_categories: ['serverContent', 'inputTranscription'],
+    };
+    const response = await geminiProductionRelayPOST(
+      {
+        nextUrl: new URL('http://localhost:3000/api/sophia/voice/gemini/relay'),
+        text: async () => JSON.stringify(body),
+      } as unknown as NextRequest,
+    );
+
+    expect(response.status).toBe(422);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const serializedLog = JSON.stringify(warnSpy.mock.calls);
+    expect(serializedLog).toContain('gemini-relay-42');
+    expect(serializedLog).toContain('inputTranscription');
+    expect(serializedLog).toContain('Gemini Live toolCall omitted functionCalls.');
+    expect(serializedLog).not.toContain('private transcript');
+    warnSpy.mockRestore();
+  });
+
   it('proxies production Gemini events through the authenticated user', async () => {
     const stream = new ReadableStream({
       start(controller) {

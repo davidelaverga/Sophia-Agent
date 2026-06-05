@@ -705,6 +705,7 @@ function buildBuilderTaskEvent(
   accumulator?: BuilderTaskAccumulator,
 ): BuilderTaskV1 {
   const taskId = typeof data.task_id === 'string' ? data.task_id : undefined;
+  const runId = extractRunId(data);
   const label = typeof data.description === 'string' ? data.description : accumulator?.label;
   const messageIndex = typeof data.message_index === 'number' ? data.message_index : undefined;
   const totalMessages = typeof data.total_messages === 'number' ? data.total_messages : undefined;
@@ -774,6 +775,7 @@ function buildBuilderTaskEvent(
   return {
     phase,
     ...(taskId ? { taskId } : {}),
+    ...(runId ? { runId } : {}),
     ...(label ? { label } : {}),
     ...(detail ? { detail } : {}),
     ...(typeof messageIndex === 'number' ? { messageIndex } : {}),

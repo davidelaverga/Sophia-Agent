@@ -92,11 +92,12 @@ middlewares = [
     ThreadDataMiddleware(),
     # 2. Crisis fast-path — BEFORE any expensive middleware
     CrisisCheckMiddleware(),
-    # 3. Always-loaded identity files (incl. AGENTS.md = companion ↔ builder contract)
+    # 3. Always-loaded identity files (incl. role-scoped companion build contract)
     FileInjectionMiddleware(SKILLS_PATH / "soul.md"),
     FileInjectionMiddleware(SKILLS_PATH / "voice.md",       skip_on_crisis=True),
     FileInjectionMiddleware(SKILLS_PATH / "techniques.md",  skip_on_crisis=True),
-    FileInjectionMiddleware(SKILLS_PATH / "AGENTS.md"),
+    FileInjectionMiddleware(SKILLS_PATH / "coordination_core.md"),
+    FileInjectionMiddleware(SKILLS_PATH / "companion_delegation.md"),
     # 4. Platform signal — sets state["platform"] for all downstream
     PlatformContextMiddleware(),
     # 5–6. User context

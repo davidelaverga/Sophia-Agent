@@ -79,6 +79,24 @@ def _has_substantive_transcript(text: str) -> bool:
     return any(char.isalnum() for char in text)
 
 
+def _safe_prefix(value: object, *, length: int = 24) -> str | None:
+    return value[:length] if isinstance(value, str) and value else None
+
+
+def _gemini_relay_context(
+    session_id: str,
+    request: "SophiaGeminiBrowserRelayRequest",
+) -> dict[str, object]:
+    return {
+        "session_id_prefix": _safe_prefix(session_id),
+        "relay_correlation_id": _safe_prefix(request.relay_correlation_id),
+        "provider_receive_sequence": request.provider_receive_sequence,
+        "provider_relay_sequence": request.provider_relay_sequence,
+        "provider_primary_category": request.provider_primary_category,
+        "provider_categories": list(request.provider_categories or [])[:6],
+    }
+
+
 class SophiaStartSessionRequest(BaseModel):
     """Request body for joining a call with Sophia-specific runtime context."""
 
@@ -841,26 +859,44 @@ async def relay_gemini_production_provider_event(
     session_id: str,
     request: SophiaGeminiBrowserRelayRequest,
 ) -> dict[str, object]:
+    log_context = _gemini_relay_context(session_id, request)
     try:
         settings = get_settings()
-        return await gemini_production_browser_sessions.ingest_browser_provider_event(
+        payload = await gemini_production_browser_sessions.ingest_browser_provider_event(
             settings,
             session_id=session_id,
             event=request.event,
             source_metadata=request.source_metadata(),
         )
+        logger.info("voice.gemini.production_relay accepted context=%s", log_context)
+        return payload
     except RealtimeDogfoodConfigurationError as exc:
+        logger.warning(
+            "voice.gemini.production_relay rejected reason=configuration_error context=%s",
+            log_context,
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
     except ValueError as exc:
+        logger.warning(
+            "voice.gemini.production_relay rejected reason=value_error error_type=%s context=%s",
+            exc.__class__.__name__,
+            log_context,
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
     except GeminiBrowserRelayError as exc:
         status_code = status.HTTP_404_NOT_FOUND if "was not found" in str(exc) else status.HTTP_422_UNPROCESSABLE_ENTITY
+        logger.warning(
+            "voice.gemini.production_relay rejected reason=relay_error status=%s error_type=%s context=%s",
+            status_code,
+            exc.__class__.__name__,
+            log_context,
+        )
         raise HTTPException(
             status_code=status_code,
             detail=str(exc),

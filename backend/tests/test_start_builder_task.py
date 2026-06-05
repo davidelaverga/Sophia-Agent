@@ -166,6 +166,83 @@ def test_dispatch_sets_stream_resumable_true(monkeypatch):
     )
 
 
+def test_visual_report_html_request_targets_html_file():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "visual_report",
+        "Build a concise HTML document with charts and diagrams about GEPA SkillOpt.",
+    )
+
+    assert target.endswith(".html")
+
+
+def test_pdf_request_with_html_charts_still_targets_pdf():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "visual_report",
+        "Make a PDF report with HTML charts about GEPA SkillOpt.",
+    )
+
+    assert target.endswith(".pdf")
+
+
+def test_simple_product_review_pdf_targets_stable_filename():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "document",
+        "Create a simple product review PDF artifact.",
+    )
+
+    assert target == "/mnt/user-data/outputs/simple-product-review.pdf"
+
+
+def test_pdf_source_mentions_do_not_force_pdf_output():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "document",
+        "Summarize these PDFs into a concise research brief with recommendations.",
+    )
+
+    assert target.endswith(".md")
+
+
+def test_pdf_source_material_with_markdown_request_targets_markdown():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "research",
+        "Read the attached PDF source material and write the final brief in markdown.",
+    )
+
+    assert target.endswith(".md")
+
+
+def test_incidental_html_charts_do_not_override_visual_report_pdf_default():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "visual_report",
+        "Build a concise visual report with HTML charts and diagrams about GEPA SkillOpt.",
+    )
+
+    assert target.endswith(".pdf")
+
+
+def test_visual_report_without_html_request_still_targets_pdf():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "visual_report",
+        "Build a concise visual report with charts and diagrams about GEPA SkillOpt.",
+    )
+
+    assert target.endswith(".pdf")
+
+
 # ---------- duplicate protection --------------------------------------------
 
 
@@ -541,6 +618,28 @@ def test_start_builder_task_normalizes_demo_request(monkeypatch):
     # The async_tasks entry records demo_mode=True so the gateway can log it.
     task_id = next(iter(response.update["async_tasks"]))
     assert response.update["async_tasks"][task_id]["demo_mode"] is True
+
+
+def test_start_builder_task_keeps_web_research_available_for_frontend(monkeypatch):
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+    fake_client, captured = _make_fake_sdk_client()
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+
+    response = asyncio.run(
+        module.start_builder_task.coroutine(
+            description="Build an HTML document about the Meta Harness framework.",
+            task_type="frontend",
+            runtime=_make_runtime({"user_id": "alice"}),
+        )
+    )
+
+    assert isinstance(response, Command)
+    run_input = captured["run_kwargs"]["input"]
+    delegation = run_input["delegation_context"]
+    assert delegation["task_type"] == "frontend"
+    assert delegation["allow_web_research"] is True
+    assert run_input["allow_web_research"] is True
+    assert isinstance(run_input["builder_web_budget"], dict)
 
 
 # ---------- user_id resolution ----------------------------------------------
