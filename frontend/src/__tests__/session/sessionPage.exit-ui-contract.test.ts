@@ -117,6 +117,7 @@ describe('session page exit UI contract', () => {
     expect(source).toContain("completedBuilderEntryOverlapsControls");
     expect(source).toContain("justify-start px-3 sm:px-4");
     expect(source).toContain("bottom-[calc(7.75rem+env(safe-area-inset-bottom,0px))] left-4");
+    expect(source).not.toContain("&& !isVoiceCaptionVisible");
     expect(source).not.toContain("voiceArtifactToggleBottom");
     expect(source).not.toContain("className=\"fixed left-1/2 -translate-x-1/2 z-30 flex justify-center\"");
   });

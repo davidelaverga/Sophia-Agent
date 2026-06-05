@@ -818,6 +818,56 @@ describe("ArtifactPdfPreview", () => {
     }))
   })
 
+  it("re-measures Pan mode overflow during drag after zoom layout settles", async () => {
+    mockPdfDocument({ pageCount: 2 })
+    renderPreview({
+      toolMode: "pan",
+      zoom: 1.8,
+      fitMode: "custom",
+      fitBounds: { width: 760, height: 620 },
+    })
+
+    await waitFor(() => expect(screen.getByLabelText("PDF page 1")).toHaveAttribute("data-artifact-pdf-scale", "1.8"))
+    const panLayer = screen.getByTestId("artifact-pdf-pan-layer")
+    mockPanLayerOverflow(panLayer, {
+      clientWidth: 360,
+      clientHeight: 280,
+      scrollWidth: 360,
+      scrollHeight: 280,
+      scrollLeft: 0,
+      scrollTop: 0,
+    })
+
+    fireEvent.pointerDown(panLayer, { button: 0, clientX: 300, clientY: 240, pointerId: 9 })
+    expect(panLayer).toHaveAttribute("data-pan-dragging", "true")
+
+    mockPanLayerOverflow(panLayer, {
+      clientWidth: 360,
+      clientHeight: 280,
+      scrollWidth: 1100,
+      scrollHeight: 1280,
+      scrollLeft: 0,
+      scrollTop: 0,
+    })
+
+    fireEvent.pointerMove(panLayer, { clientX: 220, clientY: 190, pointerId: 9 })
+    expect(panLayer.scrollLeft).toBe(80)
+    expect(panLayer.scrollTop).toBe(50)
+
+    fireEvent.pointerUp(panLayer, { clientX: 220, clientY: 190, pointerId: 9 })
+    expect(panLayer).toHaveAttribute("data-pan-dragging", "false")
+    expect(vi.mocked(recordSophiaCaptureEvent)).toHaveBeenLastCalledWith(expect.objectContaining({
+      category: "artifacts-runtime",
+      name: "artifact-pan-gesture",
+      payload: expect.objectContaining({
+        panModeActive: true,
+        panGestureResult: "success",
+        panScrollDeltaX: 80,
+        panScrollDeltaY: 50,
+      }),
+    }))
+  })
+
   it("keeps Pan mode bound after zoom and page changes", async () => {
     mockPdfDocument({ pageCount: 2 })
     const { rerenderPreview } = renderPreview({

@@ -661,7 +661,7 @@ function SessionPageContent() {
   }, [focusMode, presenceStatus, voiceState.runtimeTelemetry]);
 
   const [hasNewArtifacts, setHasNewArtifacts] = useState(false);
-  const [isVoiceCaptionVisible, setIsVoiceCaptionVisible] = useState(false);
+  const [, setIsVoiceCaptionVisible] = useState(false);
   const previousArtifactCountRef = useRef(0);
   const previousReadyCountRef = useRef(0);
   const previousArtifactSignatureRef = useRef('');
@@ -1492,8 +1492,7 @@ function SessionPageContent() {
     canonicalCompletedBuilderEntryAvailable
       && focusMode !== 'text'
       && !showArtifacts
-      && !artifactStageActive
-      && !isVoiceCaptionVisible,
+      && !artifactStageActive,
   );
   const completedBuilderEntryPlacement = showCanonicalCompletedBuilderEntryCorner
     ? 'corner'

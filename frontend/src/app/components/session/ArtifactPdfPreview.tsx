@@ -95,8 +95,7 @@ type PdfPanDragState = {
   startClientY: number
   startScrollLeft: number
   startScrollTop: number
-  maxScrollLeft: number
-  maxScrollTop: number
+  hadOverflow: boolean
   didScroll: boolean
 }
 
@@ -567,7 +566,13 @@ export function ArtifactPdfPreview({
     const panLayer = pageHostRef.current
     const deltaX = panLayer ? panLayer.scrollLeft - dragState.startScrollLeft : 0
     const deltaY = panLayer ? panLayer.scrollTop - dragState.startScrollTop : 0
-    const result = resultOverride ?? (dragState.didScroll ? "success" : "cancelled")
+    const result = resultOverride ?? (
+      dragState.didScroll
+        ? "success"
+        : dragState.hadOverflow
+          ? "cancelled"
+          : "no_overflow"
+    )
 
     if (event) {
       event.preventDefault()
@@ -596,14 +601,7 @@ export function ArtifactPdfPreview({
       return
     }
 
-    const maxScrollLeft = Math.max(0, panLayer.scrollWidth - panLayer.clientWidth)
-    const maxScrollTop = Math.max(0, panLayer.scrollHeight - panLayer.clientHeight)
-    if (maxScrollLeft <= 0 && maxScrollTop <= 0) {
-      event.preventDefault()
-      event.stopPropagation()
-      recordPanGesture("no_overflow", 0, 0)
-      return
-    }
+    const overflow = getPdfPanOverflow(panLayer)
 
     event.preventDefault()
     event.stopPropagation()
@@ -613,8 +611,7 @@ export function ArtifactPdfPreview({
       startClientY: event.clientY,
       startScrollLeft: panLayer.scrollLeft,
       startScrollTop: panLayer.scrollTop,
-      maxScrollLeft,
-      maxScrollTop,
+      hadOverflow: overflow.hasOverflow,
       didScroll: false,
     }
     setIsPanDragging(true)
@@ -639,13 +636,15 @@ export function ArtifactPdfPreview({
 
     event.preventDefault()
     event.stopPropagation()
+    const overflow = getPdfPanOverflow(panLayer)
+    dragState.hadOverflow = dragState.hadOverflow || overflow.hasOverflow
     const nextScrollLeft = clampScroll(
       dragState.startScrollLeft - (event.clientX - dragState.startClientX),
-      dragState.maxScrollLeft,
+      overflow.maxScrollLeft,
     )
     const nextScrollTop = clampScroll(
       dragState.startScrollTop - (event.clientY - dragState.startClientY),
-      dragState.maxScrollTop,
+      overflow.maxScrollTop,
     )
     panLayer.scrollLeft = nextScrollLeft
     panLayer.scrollTop = nextScrollTop
@@ -660,6 +659,21 @@ export function ArtifactPdfPreview({
     finishPanDrag(event)
   }, [finishPanDrag])
   const handlePanLayerPointerCancel = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (panDragStateRef.current?.pointerId !== event.pointerId) {
+      return
+    }
+    finishPanDrag(event, "cancelled")
+  }, [finishPanDrag])
+  const handlePanLayerPointerLeave = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (
+      panDragStateRef.current?.pointerId !== event.pointerId
+      || event.currentTarget.hasPointerCapture?.(event.pointerId)
+    ) {
+      return
+    }
+    finishPanDrag(event, "cancelled")
+  }, [finishPanDrag])
+  const handlePanLayerLostPointerCapture = useCallback((event: PointerEvent<HTMLDivElement>) => {
     if (panDragStateRef.current?.pointerId !== event.pointerId) {
       return
     }
@@ -803,6 +817,8 @@ export function ArtifactPdfPreview({
           onPointerMove={handlePanLayerPointerMove}
           onPointerUp={handlePanLayerPointerUp}
           onPointerCancel={handlePanLayerPointerCancel}
+          onPointerLeave={handlePanLayerPointerLeave}
+          onLostPointerCapture={handlePanLayerLostPointerCapture}
           onTouchStart={handlePanLayerTouchStart}
           onTouchMove={handlePanLayerTouchMove}
           onTouchEnd={handlePanLayerTouchEnd}
@@ -1539,6 +1555,20 @@ function centerPdfRectInPanLayer({
   } else {
     panLayer.scrollLeft = left
     panLayer.scrollTop = top
+  }
+}
+
+function getPdfPanOverflow(panLayer: HTMLElement): {
+  maxScrollLeft: number
+  maxScrollTop: number
+  hasOverflow: boolean
+} {
+  const maxScrollLeft = Math.max(0, panLayer.scrollWidth - panLayer.clientWidth)
+  const maxScrollTop = Math.max(0, panLayer.scrollHeight - panLayer.clientHeight)
+  return {
+    maxScrollLeft,
+    maxScrollTop,
+    hasOverflow: maxScrollLeft > 0 || maxScrollTop > 0,
   }
 }
 
