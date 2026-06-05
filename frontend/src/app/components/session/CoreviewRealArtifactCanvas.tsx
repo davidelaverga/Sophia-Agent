@@ -5,13 +5,14 @@ import { useEffect, useRef } from "react"
 import {
   formatBuilderArtifactTypeLabel,
   getBuilderArtifactFiles,
-  normalizeBuilderArtifactPath,
 } from "../../lib/builder-artifacts"
 import {
   buildCoreviewBuilderMetadataText,
   registerCoreviewArtifactText,
 } from "../../lib/coreview-artifact-text"
 import type { BuilderArtifactV1 } from "../../types/builder-artifact"
+
+export { buildCoreviewRealArtifactId } from "./artifact-stage-selection"
 
 const CANVAS_WIDTH = 960
 const CANVAS_HEIGHT = 640
@@ -89,18 +90,6 @@ export function CoreviewRealArtifactCanvas({
       />
     </div>
   )
-}
-
-export function buildCoreviewRealArtifactId(builderArtifact: BuilderArtifactV1): string {
-  const normalizedPath = normalizeBuilderArtifactPath(builderArtifact.artifactPath)
-  const source = normalizedPath || builderArtifact.artifactTitle || builderArtifact.artifactType || "builder-artifact"
-  const slug = source
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 72)
-
-  return `coreview-real-artifact-${slug || "builder-artifact"}`
 }
 
 function getCanvasContext(canvas: HTMLCanvasElement): CanvasRenderingContext2D | null {

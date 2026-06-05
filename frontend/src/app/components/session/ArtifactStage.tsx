@@ -1,6 +1,5 @@
 "use client"
 
-import { RefreshCw } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 
 import {
@@ -48,7 +47,6 @@ import type {
   CoreviewArtifactCapabilities,
 } from "../../lib/coreview-workspace-contract"
 import { recordSophiaCaptureEvent } from "../../lib/session-capture"
-import { cn } from "../../lib/utils"
 import type {
   ArtifactAnnotation,
   ArtifactToolMode,
@@ -63,9 +61,10 @@ import type {
 
 import { ArtifactCanvasViewport, type ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
 import type { ArtifactPdfFocusRequest } from "./ArtifactPdfPreview"
-import { ArtifactReviewStatus, hasConfirmedStillFrame } from "./ArtifactReviewStatus"
-import { ArtifactToolbar } from "./ArtifactToolbar"
-import { ReviewWithSophiaButton } from "./ReviewWithSophiaButton"
+import {
+  ArtifactStageReviewChrome,
+  getArtifactReviewSurfaceState,
+} from "./ArtifactStageReviewChrome"
 
 type ToolModeResetReason = "escape_key" | "select_button" | "unsupported_renderer" | null
 type ArtifactStageAnnotationPatch = { text?: string | null }
@@ -1096,14 +1095,12 @@ export function ArtifactStage({
   }, [annotationCounts.annotationCount, onWorkspaceExportRequested])
 
   const showReviewStatus = showReviewStatusOverride ?? Boolean(reviewEnabled || exactTextAvailable || visualCaptureStatus)
-  const frameConfirmed = hasConfirmedStillFrame(reviewState, transportStatus)
-  const reviewSurfaceState = frameConfirmed
-    ? "active"
-    : visualReviewPreparing || reviewState?.state === "co_review_starting" || reviewState?.refreshFrameInProgress
-      ? "preparing"
-      : visualCaptureStatus?.ready === false || reviewState?.state === "co_review_error"
-        ? "unavailable"
-        : "idle"
+  const reviewSurfaceState = getArtifactReviewSurfaceState({
+    reviewState,
+    transportStatus,
+    visualReviewPreparing,
+    visualCaptureReady: visualCaptureStatus?.ready,
+  })
 
   return (
     <section
@@ -1113,7 +1110,7 @@ export function ArtifactStage({
       data-artifact-view-signature={artifactViewSignature ?? undefined}
       tabIndex={0}
       onKeyDown={handleStageKeyDown}
-      className={cn(
+      className={[
         "relative isolate flex min-h-0 w-full flex-col overflow-hidden rounded-xl border bg-[color:color-mix(in_srgb,var(--cosmic-panel)_98%,var(--bg))] shadow-[var(--cosmic-shadow-md)] transition-[border-color,box-shadow,background-color] duration-500",
         reviewSurfaceState === "active"
           ? "border-[color:color-mix(in_srgb,var(--sophia-purple)_58%,var(--cosmic-border-soft))] shadow-[0_0_0_1px_color-mix(in_srgb,var(--sophia-purple)_18%,transparent),0_26px_88px_color-mix(in_srgb,var(--sophia-purple)_18%,transparent)]"
@@ -1121,22 +1118,22 @@ export function ArtifactStage({
             ? "border-[color:color-mix(in_srgb,var(--sophia-purple)_42%,var(--cosmic-border-soft))] shadow-[0_0_0_1px_color-mix(in_srgb,var(--sophia-purple)_10%,transparent),0_24px_76px_color-mix(in_srgb,var(--sophia-purple)_12%,transparent)]"
             : "border-[color:var(--cosmic-border-soft)]",
         className,
-      )}
+      ].filter(Boolean).join(" ")}
       aria-label="Generated artifact"
     >
       <div
         data-testid="artifact-stage-review-aura"
         aria-hidden="true"
-        className={cn(
+        className={[
           "pointer-events-none absolute inset-0 rounded-xl opacity-0 transition-opacity duration-500",
-          (reviewSurfaceState === "active" || reviewSurfaceState === "preparing") && "opacity-100",
-        )}
+          (reviewSurfaceState === "active" || reviewSurfaceState === "preparing") ? "opacity-100" : null,
+        ].filter(Boolean).join(" ")}
         style={{
           background:
             "linear-gradient(180deg, color-mix(in srgb, var(--sophia-purple) 7%, transparent), transparent 32%), radial-gradient(circle at 50% -18%, color-mix(in srgb, var(--sophia-purple) 15%, transparent), transparent 48%)",
         }}
       />
-      <ArtifactToolbar
+      <ArtifactStageReviewChrome
         title={builderArtifact.artifactTitle}
         pageIndex={pageIndex}
         pageCount={pageCount}
@@ -1151,126 +1148,68 @@ export function ArtifactStage({
         onFitPage={handleFitPage}
         onFitWidth={handleFitWidth}
         onResetZoom={handleResetZoom}
-        supportsAnnotations={artifactCapabilities.supportsAnnotations}
-        supportsPan={artifactCapabilities.supportsPan}
-        supportsComments={artifactCapabilities.supportsComments}
-        supportsUnderline={artifactCapabilities.supportsUnderline}
-        supportsArrow={artifactCapabilities.supportsArrow}
-        supportsOriginalDownload={artifactCapabilities.supportsOriginalDownload}
-        supportsOpenInNewTab={artifactCapabilities.supportsOpenInNewTab}
+        artifactCapabilities={artifactCapabilities}
         toolMode={toolMode}
         onToolModeChange={handleToolModeChange}
         openHref={openHref}
         downloadHref={downloadHref}
         downloadName={primaryFile?.name}
-        annotationCount={annotationCounts.annotationCount}
-        annotationExportAvailable={artifactCapabilities.supportsAnnotatedExport}
+        annotationCounts={annotationCounts}
         onDownloadOriginal={handleDownloadOriginal}
         onExportAnnotated={handleExportAnnotated}
-        className="relative z-10 shrink-0"
-      />
-
-      {voiceCommandStatusText ? (
-        <div className="relative z-10 border-b border-[color:var(--cosmic-border-soft)] bg-[color:color-mix(in_srgb,var(--cosmic-panel)_96%,var(--bg))] px-4 py-2">
-          <span
-            role="status"
-            aria-live="polite"
-            data-testid="artifact-voice-command-status"
-            className={cn(
-              "inline-flex max-w-full items-center rounded-full border px-2.5 py-1 text-[11px] font-medium",
-              voiceCommandStatusTone === "success"
-                ? "border-[color:var(--cosmic-teal-border)] bg-[color:var(--cosmic-teal-bg)] text-[color:var(--cosmic-text-strong)]"
-                : voiceCommandStatusTone === "warn"
-                  ? "border-[color:color-mix(in_srgb,#fbbf24_36%,var(--cosmic-border-soft))] bg-[color:color-mix(in_srgb,#fbbf24_10%,transparent)] text-[color:var(--cosmic-text)]"
-                  : voiceCommandStatusTone === "pending"
-                    ? "border-[color:color-mix(in_srgb,var(--sophia-purple)_34%,var(--cosmic-border-soft))] bg-[color:color-mix(in_srgb,var(--sophia-purple)_9%,var(--cosmic-panel-soft))] text-[color:var(--cosmic-text)]"
-                    : "border-[color:var(--cosmic-border-soft)] bg-[color:var(--cosmic-panel-soft)] text-[color:var(--cosmic-text-muted)]",
-            )}
-          >
-            <span className="truncate">{voiceCommandStatusText}</span>
-          </span>
-        </div>
-      ) : null}
-
-      <ArtifactCanvasViewport
-        artifact={builderArtifact}
-        files={files}
-        typeLabel={typeLabel}
-        previewFile={viewportPrimaryFile}
-        previewHref={openHref}
-        artifactTextRegistration={artifactTextRegistration}
-        onVisualCaptureStatusChange={onVisualCaptureStatusChange}
-        onPdfTextLayoutChange={setPdfTextLayout}
+        voiceCommandStatusText={voiceCommandStatusText}
+        voiceCommandStatusTone={voiceCommandStatusTone}
+        showReviewStatus={showReviewStatus}
+        reviewState={reviewState}
+        transportStatus={transportStatus}
+        exactTextAvailable={exactTextAvailable}
+        reviewEnabled={reviewEnabled}
+        canStartReview={canStartReview}
+        visualSourceUnavailableReason={visualCaptureStatus?.ready === false ? visualCaptureStatus.reason : null}
+        visualReviewRequiresVoice={visualReviewRequiresVoice}
+        visualReviewPreparing={visualReviewPreparing}
+        reviewViewPending={reviewViewPending}
+        reviewStale={reviewStale}
         reviewSurfaceState={reviewSurfaceState}
-        rendererKind={rendererKind}
-        capabilities={artifactCapabilities}
-        pageIndex={pageIndex}
-        pageCount={pageCount}
-        zoom={zoom}
-        fitMode={fitMode}
-        onPageIndexChange={handlePageIndexChange}
-        onPageCountChange={handlePageCountChange}
-        onPinchZoomChange={handlePinchZoomChange}
-        toolMode={toolMode}
-        annotations={annotations}
-        selectedAnnotationId={selectedAnnotationId}
-        onCreateHighlight={handleCreateHighlight}
-        onCreateComment={handleCreateComment}
-        onCreateUnderline={handleCreateUnderline}
-        onCreateArrow={handleCreateArrow}
-        onSelectAnnotation={handleSelectAnnotation}
-        onUpdateCommentText={handleUpdateCommentText}
-        focusRequest={pdfFocusRequest}
-        className={fillAvailable ? "min-h-0 flex-1" : undefined}
-      />
-
-      {showReviewStatus ? (
-        <div
-          data-testid="artifact-review-chrome"
-          className="relative z-10 flex shrink-0 flex-col gap-3 border-t border-[color:var(--cosmic-border-soft)] bg-[color:color-mix(in_srgb,var(--cosmic-panel)_96%,var(--bg))] px-4 py-4 sm:flex-row sm:items-center sm:justify-between"
-        >
-          <ArtifactReviewStatus
-            state={reviewState}
-            transportStatus={transportStatus}
-            exactTextAvailable={exactTextAvailable}
-            featureEnabled={reviewEnabled}
-            canStart={canStartReview}
-            visualSourceUnavailableReason={visualCaptureStatus?.ready === false ? visualCaptureStatus.reason : null}
-            visualReviewRequiresVoice={visualReviewRequiresVoice}
-            visualReviewPreparing={visualReviewPreparing}
-            reviewViewPending={reviewViewPending}
-            reviewStale={reviewStale}
-            className="min-w-0"
-          />
-          {reviewEnabled ? (
-            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
-              {frameConfirmed && reviewStale && onRefreshReview ? (
-                <button
-                  type="button"
-                  aria-label="Refresh view"
-                  onClick={onRefreshReview}
-                  disabled={!canRefreshReview || reviewState?.refreshFrameInProgress}
-                  className="cosmic-focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-[color:color-mix(in_srgb,var(--sophia-purple)_34%,var(--cosmic-border-soft))] bg-[color:color-mix(in_srgb,var(--sophia-purple)_10%,transparent)] px-4 text-sm font-medium text-[color:var(--sophia-purple)] transition hover:bg-[color:color-mix(in_srgb,var(--sophia-purple)_16%,transparent)] disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <RefreshCw className={cn("h-4 w-4", reviewState?.refreshFrameInProgress && "animate-spin")} aria-hidden="true" />
-                  <span>{reviewState?.refreshFrameInProgress ? "Refreshing view" : "Refresh view"}</span>
-                </button>
-              ) : null}
-              <ReviewWithSophiaButton
-                state={reviewState}
-                canStart={canStartReview}
-                featureEnabled={reviewEnabled}
-                startVoiceRequired={visualReviewRequiresVoice}
-                pendingStartVoiceReview={pendingStartVoiceReview}
-                onStartVoiceReview={onStartVoiceReview}
-                onStart={onStartReview}
-                onStop={onStopReview}
-                className="w-full sm:w-auto"
-              />
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+        onRefreshReview={onRefreshReview}
+        canRefreshReview={canRefreshReview}
+        pendingStartVoiceReview={pendingStartVoiceReview}
+        onStartVoiceReview={onStartVoiceReview}
+        onStartReview={onStartReview}
+        onStopReview={onStopReview}
+      >
+        <ArtifactCanvasViewport
+          artifact={builderArtifact}
+          files={files}
+          typeLabel={typeLabel}
+          previewFile={viewportPrimaryFile}
+          previewHref={openHref}
+          artifactTextRegistration={artifactTextRegistration}
+          onVisualCaptureStatusChange={onVisualCaptureStatusChange}
+          onPdfTextLayoutChange={setPdfTextLayout}
+          reviewSurfaceState={reviewSurfaceState}
+          rendererKind={rendererKind}
+          capabilities={artifactCapabilities}
+          pageIndex={pageIndex}
+          pageCount={pageCount}
+          zoom={zoom}
+          fitMode={fitMode}
+          onPageIndexChange={handlePageIndexChange}
+          onPageCountChange={handlePageCountChange}
+          onPinchZoomChange={handlePinchZoomChange}
+          toolMode={toolMode}
+          annotations={annotations}
+          selectedAnnotationId={selectedAnnotationId}
+          onCreateHighlight={handleCreateHighlight}
+          onCreateComment={handleCreateComment}
+          onCreateUnderline={handleCreateUnderline}
+          onCreateArrow={handleCreateArrow}
+          onSelectAnnotation={handleSelectAnnotation}
+          onUpdateCommentText={handleUpdateCommentText}
+          focusRequest={pdfFocusRequest}
+          className={fillAvailable ? "min-h-0 flex-1" : undefined}
+        />
+      </ArtifactStageReviewChrome>
     </section>
   )
 }

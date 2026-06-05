@@ -7,185 +7,71 @@ import { haptic } from "../../hooks/useHaptics"
 import {
   buildArtifactViewSignature,
   createDefaultArtifactViewState,
-  detectArtifactRendererKind,
   clampArtifactZoom,
   safeArtifactViewTelemetry,
   type ArtifactViewState,
 } from "../../lib/artifact-renderers"
-import {
-  parseArtifactReviewVoiceCommand,
-  parseArtifactReviewVoiceCommands,
-  type ArtifactReviewAnnotationUtteranceKind,
-  type ArtifactReviewVoiceCommand,
-  type ArtifactReviewVoiceCommandRefreshResult,
-  type ArtifactReviewVoiceCommandRouteResult,
-  type ArtifactReviewVoiceCommandRouter,
-} from "../../lib/artifact-review-voice-commands"
-import { getBuilderArtifactFiles, normalizeBuilderArtifactPath } from "../../lib/builder-artifacts"
 import { coreviewFlagDiagnostics, isCoreviewStillFrameReviewEnabled } from "../../lib/co-review-flags"
-import type { CoReviewMediaTransport } from "../../lib/co-review-transport"
 import {
-  COREVIEW_ADD_ANNOTATION_TOOL_NAME,
-  COREVIEW_FOCUS_ANCHOR_TOOL_NAME,
-  COREVIEW_REFRESH_VIEW_TOOL_NAME,
-  COREVIEW_SET_VIEW_TOOL_NAME,
   createCoreviewActionBus,
   registerCoreviewToolBridge,
   wasRecentCoreviewToolActionHandled,
   type CoreviewActionBus,
   type CoreviewActionResult,
-  type CoreviewAddAnnotationAdapterInput,
-  type CoreviewAddAnnotationAdapterResult,
-  type CoreviewAddAnnotationInput,
   type CoreviewAnnotationAnchor,
   type CoreviewArtifactRebindInput,
   type CoreviewArtifactRebindResult,
   type CoreviewCurrentView,
-  type CoreviewFocusAnchorInput,
   type CoreviewRendererAdapter,
-  type CoreviewSetViewInput,
   type CoreviewToolBlockedReason,
   type CoreviewToolCallInput,
-  type CoreviewToolName,
-  type CoreviewToolRefreshResult,
   type CoreviewViewReadyResult,
 } from "../../lib/coreview-actions"
-import { useCoreviewAnnotationStore } from "../../lib/coreview-annotation-store"
-import {
-  coreviewArtifactCapabilityTelemetry,
-  getCoreviewArtifactCapabilitiesForFile,
-} from "../../lib/coreview-artifact-capabilities"
-import {
-  buildCoreviewArtifactStableIdentity,
-  buildCoreviewWorkspaceKey,
-  normalizeCoreviewArtifactKey,
-} from "../../lib/coreview-artifact-identity"
-import {
-  appendWorkspaceEvent,
-  getCoreviewWorkspaceEventLogTelemetry,
-  hashCoreviewWorkspaceKey,
-} from "../../lib/coreview-workspace-event-log"
-import {
-  buildCoreviewWorkspaceActor,
-  type CoreviewWorkspaceActor,
-  type CoreviewWorkspaceEventType,
-} from "../../lib/coreview-workspace-events"
-import { buildCoreviewWorkspaceShareState } from "../../lib/coreview-workspace-share"
 import { recordSophiaCaptureEvent } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
 import { isRealReflection } from "../../session/artifacts"
 import { usePresenceStore } from "../../stores/presence-store"
 import type { ArtifactToolMode } from "../../types/artifact-annotations"
-import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../types/builder-artifact"
-import type { RitualArtifacts } from "../../types/session"
 
 import type { ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
-import { ArtifactStage, type ArtifactReviewVoiceCommandTarget } from "./ArtifactStage"
-import { buildCoreviewRealArtifactId, CoreviewRealArtifactCanvas } from "./CoreviewRealArtifactCanvas"
+import type { PresenceArtifactPanelProps } from "./PresenceArtifactPanel.types"
 import {
   COREVIEW_COMPANION_ARTIFACT_ID,
-  PresenceArtifactSecondarySurfaces,
-} from "./PresenceArtifactSecondarySurfaces"
-import { VoiceArtifactStage } from "./VoiceArtifactStage"
-
-interface PresenceArtifactPanelProps {
-  artifacts: RitualArtifacts | null | undefined
-  builderArtifact?: BuilderArtifactV1 | null
-  builderArtifactLibrary?: BuilderArtifactLibraryItemV1[]
-  selectedBuilderArtifactPath?: string | null
-  onSelectedBuilderArtifactPathChange?: (path: string | null) => void
-  sessionId?: string | null
-  normalSessionId?: string | null
-  voiceAgentSessionId?: string | null
-  userId?: string | null
-  threadId?: string
-  isVisible: boolean
-  onDismiss: () => void
-  isVoiceMode: boolean
-  coReviewTransport?: CoReviewMediaTransport
-  pendingBuilderArtifactReview?: boolean
-  onStartVoiceBuilderArtifactReview?: () => void
-  onPendingBuilderArtifactReviewConsumed?: () => void
-  onArtifactReviewVoiceCommandRouteChange?: (handler: ArtifactReviewVoiceCommandRouter | null) => void
-  onAnnotationActionSucceeded?: (counts: {
-    annotationCount?: number | null
-    highlightCount?: number | null
-    commentCount?: number | null
-    underlineCount?: number | null
-    arrowCount?: number | null
-    drawPathCount?: number | null
-  }) => void
-  onReflectionTap?: (reflection: { prompt: string; why?: string }) => void
-  onMemoryApprove?: (index: number) => void
-  onMemoryReject?: (index: number) => void
-}
+  PresenceArtifactPanelBuilderSurfaces,
+  type ArtifactReviewVoiceCommandTarget,
+} from "./PresenceArtifactPanelBuilderSurfaces"
+import {
+  annotationFallbackResultFromCoreview,
+  annotationFallbackUtteranceKind,
+  buildAppliedVoiceCommandStatus,
+  buildBlockedVoiceCommandMessage,
+  buildRefreshUnavailableVoiceCommandMessage,
+  coreviewAddAnnotationInputFromVoiceCommand,
+  coreviewAnnotationCommandAlreadyHandled,
+  coreviewAnnotationStateChanged,
+  coreviewBlockedStatusText,
+  coreviewFocusAnchorInputFromVoiceCommand,
+  coreviewFocusCommandAlreadyHandled,
+  coreviewSetViewInputFromVoiceCommand,
+  coreviewToolNameFromAction,
+  coreviewToolNameFromVoiceCommand,
+  exactTextRehydrateResult,
+  isAnnotationOrFocusVoiceCommand,
+  parseArtifactReviewVoiceCommand,
+  parseArtifactReviewVoiceCommands,
+  refreshResultFromCoreview,
+  routeBlockedReasonFromCoreview,
+  useCoreviewArtifactStageModel,
+  type ArtifactReviewVoiceCommand,
+  type ArtifactReviewVoiceCommandRefreshResult,
+  type ArtifactReviewVoiceCommandRouteResult,
+  type CoreviewArtifactWorkspaceActor,
+  type CoreviewWorkspaceEventRecorderInput,
+} from "./useCoreviewArtifactStageModel"
 
 type ArtifactVoiceCommandStatus = {
   text: string
   tone: "neutral" | "pending" | "success" | "warn"
-}
-
-function getPathFilename(path: string | undefined): string {
-  return path?.split('/').filter(Boolean).pop() || 'Builder deliverable'
-}
-
-function inferArtifactTypeFromMetadata(
-  name: string | undefined,
-  mimeTypeValue?: string,
-): BuilderArtifactV1["artifactType"] {
-  const mimeType = mimeTypeValue?.toLowerCase().split(';')[0]?.trim() ?? ''
-  const extension = name?.split('.').pop()?.toLowerCase() ?? ''
-
-  if (mimeType.includes('presentation') || extension === 'ppt' || extension === 'pptx') {
-    return 'presentation'
-  }
-  if (mimeType.includes('html') || extension === 'html' || extension === 'htm') {
-    return 'webpage'
-  }
-  if (
-    mimeType.includes('json')
-    || mimeType.includes('csv')
-    || ['csv', 'json', 'xlsx', 'xls'].includes(extension)
-  ) {
-    return 'data_analysis'
-  }
-  if (mimeType.includes('image') || extension === 'svg') {
-    return 'visual_report'
-  }
-
-  return 'document'
-}
-
-function inferArtifactType(item: BuilderArtifactLibraryItemV1): BuilderArtifactV1["artifactType"] {
-  return inferArtifactTypeFromMetadata(item.name, item.mimeType)
-}
-
-function buildLibraryArtifact(item: BuilderArtifactLibraryItemV1): BuilderArtifactV1 {
-  return {
-    artifactPath: item.path,
-    artifactTitle: item.name || getPathFilename(item.path),
-    artifactType: inferArtifactType(item),
-    decisionsMade: [],
-    companionSummary: 'Ready to preview in the artifact canvas.',
-    userNextAction: 'Review it with Sophia when you are ready.',
-  }
-}
-
-function buildSelectedPathArtifact(path: string): BuilderArtifactV1 | null {
-  const normalizedPath = normalizeBuilderArtifactPath(path)
-  if (!normalizedPath) {
-    return null
-  }
-
-  const name = getPathFilename(normalizedPath)
-  return {
-    artifactPath: normalizedPath,
-    artifactTitle: name,
-    artifactType: inferArtifactTypeFromMetadata(name),
-    decisionsMade: [],
-    supportingFiles: [],
-    userNextAction: 'Open or download the artifact if the in-canvas preview is unavailable.',
-  }
 }
 
 function unavailableCaptureStatus(reason: ArtifactVisualCaptureStatus["reason"]): ArtifactVisualCaptureStatus {
@@ -197,534 +83,8 @@ function unavailableCaptureStatus(reason: ArtifactVisualCaptureStatus["reason"])
   }
 }
 
-function buildAppliedVoiceCommandStatus(
-  command: ArtifactReviewVoiceCommand,
-  pageIndex: number,
-): string {
-  switch (command.kind) {
-    case "go_to_page":
-    case "next_page":
-    case "previous_page":
-    case "first_page":
-    case "last_page":
-      return `Page ${pageIndex + 1} selected`
-    case "zoom_in":
-    case "zoom_out":
-    case "fit_width":
-    case "fit_page":
-    case "reset_zoom":
-      return "PDF view updated"
-    case "refresh_view":
-      return "Refresh requested"
-    case "focus_anchor":
-      return "PDF view updated"
-    case "add_annotation":
-      return appliedAnnotationStatusText(command.annotationKind)
-    default:
-      return "Artifact view updated"
-  }
-}
-
-function appliedAnnotationStatusText(kind: ArtifactReviewVoiceCommand["annotationKind"]): string {
-  switch (kind) {
-    case "comment":
-      return "Comment added"
-    case "underline":
-      return "Underline added"
-    case "arrow":
-      return "Arrow added"
-    case "highlight":
-    default:
-      return "Highlight added"
-  }
-}
-
-function isPageNavigationVoiceCommand(command: ArtifactReviewVoiceCommand): boolean {
-  return (
-    command.kind === "go_to_page"
-    || command.kind === "next_page"
-    || command.kind === "previous_page"
-    || command.kind === "first_page"
-    || command.kind === "last_page"
-  )
-}
-
-function buildRefreshUnavailableVoiceCommandMessage(
-  command: ArtifactReviewVoiceCommand,
-  shouldStartVoiceReview: boolean,
-  staleAfterViewChange = false,
-): string {
-  if (staleAfterViewChange && command.kind !== "refresh_view") {
-    return isPageNavigationVoiceCommand(command)
-      ? "Page changed. Sophia's view is stale."
-      : "PDF view updated. Sophia's view is stale."
-  }
-
-  if (shouldStartVoiceReview) {
-    return isPageNavigationVoiceCommand(command)
-      ? "Page changed. Start Review with Sophia to share this view."
-      : "PDF view updated. Start Review with Sophia to share this view."
-  }
-
-  if (command.kind === "refresh_view") {
-    return "Visual refresh is not active."
-  }
-
-  return isPageNavigationVoiceCommand(command)
-    ? "Page changed. Visual refresh is not active."
-    : "PDF view updated. Visual refresh is not active."
-}
-
-function buildBlockedVoiceCommandMessage(
-  command: ArtifactReviewVoiceCommand,
-  pageCount: number,
-): string {
-  if (command.kind === "go_to_page" && command.pageTarget && command.pageTarget > Math.max(1, pageCount)) {
-    return "That page is not available in this PDF."
-  }
-
-  if (command.kind === "go_to_page" && command.pageTarget) {
-    return `I can only review the page you have open. Please switch to page ${command.pageTarget} or use the page controls.`
-  }
-
-  return "I can only review the page you have open. Please use the page controls."
-}
-
-function coreviewToolNameFromAction(action: CoreviewActionResult["action"]): CoreviewToolName {
-  return action === "refresh_view"
-    ? COREVIEW_REFRESH_VIEW_TOOL_NAME
-    : action === "add_annotation"
-      ? COREVIEW_ADD_ANNOTATION_TOOL_NAME
-      : action === "focus_anchor"
-        ? COREVIEW_FOCUS_ANCHOR_TOOL_NAME
-        : COREVIEW_SET_VIEW_TOOL_NAME
-}
-
-function coreviewToolNameFromVoiceCommand(command: ArtifactReviewVoiceCommand): CoreviewToolName {
-  return command.kind === "add_annotation"
-    ? COREVIEW_ADD_ANNOTATION_TOOL_NAME
-    : command.kind === "focus_anchor"
-      ? COREVIEW_FOCUS_ANCHOR_TOOL_NAME
-      : command.kind === "refresh_view"
-        ? COREVIEW_REFRESH_VIEW_TOOL_NAME
-        : COREVIEW_SET_VIEW_TOOL_NAME
-}
-
-function isAnnotationVoiceCommand(command: ArtifactReviewVoiceCommand): boolean {
-  return command.kind === "add_annotation"
-}
-
-function isFocusVoiceCommand(command: ArtifactReviewVoiceCommand): boolean {
-  return command.kind === "focus_anchor"
-}
-
-function isAnnotationOrFocusVoiceCommand(command: ArtifactReviewVoiceCommand): boolean {
-  return isAnnotationVoiceCommand(command) || isFocusVoiceCommand(command)
-}
-
-function coreviewBlockedStatusText(reason: CoreviewToolBlockedReason | null): string {
-  switch (reason) {
-    case "no_selected_artifact":
-      return "No artifact is selected."
-    case "artifact_mismatch":
-      return "That artifact is not selected."
-    case "artifact_rebind_required":
-      return "Reconnect voice or start Review with Sophia to rebind this artifact."
-    case "artifact_rebind_failed":
-      return "Reopen this artifact, then start Review with Sophia again."
-    case "artifact_not_available_in_current_session":
-      return "This artifact is not available in the current session."
-    case "requested_page_out_of_bounds":
-      return "That page is not available in this PDF."
-    case "pages_not_supported":
-      return "This artifact does not support page navigation."
-    case "zoom_not_supported":
-      return "This artifact does not support zoom controls."
-    case "annotations_not_supported":
-      return "Annotations are not available for this artifact format."
-    case "layout_anchor_not_supported":
-      return "Layout anchors are not available for this artifact format."
-    case "ocr_not_available":
-      return "OCR is not available yet."
-    case "pptx_native_renderer_unavailable":
-      return "PPTX native canvas rendering is not available yet."
-    case "unsupported_pages":
-    case "unsupported_renderer":
-      return "This view cannot be controlled by Sophia."
-    case "review_not_active":
-      return "Visual review is not active."
-    case "refresh_unavailable":
-      return "Sophia's visual refresh is unavailable."
-    case "view_ready_timeout":
-      return "The artifact view did not become ready in time."
-    case "tool_unavailable":
-      return "Sophia cannot control this view right now."
-    case "invalid_tool_args":
-      return "Sophia asked for an invalid view change."
-    case "annotation_commit_failed":
-      return "Sophia could not verify that the annotation was added."
-    case "unsupported_annotation_kind":
-      return "That annotation type is not available yet."
-    default:
-      return "Sophia could not update this view."
-  }
-}
-
-function routeBlockedReasonFromCoreview(
-  reason: CoreviewToolBlockedReason | null,
-): ArtifactReviewVoiceCommandRouteResult["blockedReason"] {
-  switch (reason) {
-    case "no_selected_artifact":
-      return "no_artifact_selected"
-    case "requested_page_out_of_bounds":
-      return "requested_page_out_of_bounds"
-    case "pages_not_supported":
-    case "zoom_not_supported":
-    case "annotations_not_supported":
-    case "layout_anchor_not_supported":
-    case "ocr_not_available":
-    case "pptx_native_renderer_unavailable":
-    case "unsupported_pages":
-    case "unsupported_renderer":
-      return "no_multipage_artifact_selected"
-    default:
-      return reason ? "visual_refresh_unavailable" : null
-  }
-}
-
-function refreshResultFromCoreview(
-  result: CoreviewToolRefreshResult,
-): ArtifactReviewVoiceCommandRefreshResult {
-  switch (result) {
-    case "success":
-      return "success"
-    case "error":
-    case "failed":
-      return "error"
-    case "view_ready_timeout":
-      return "unavailable"
-    case "not_active":
-      return "not_active"
-    case "unavailable":
-    case "refresh_unavailable":
-      return "unavailable"
-    default:
-      return "not_requested"
-  }
-}
-
-function coreviewAnnotationStateChanged(result: CoreviewActionResult): boolean {
-  if (result.action !== "add_annotation") {
-    return false
-  }
-  return Boolean(
-    result.annotation_commit_verified === true
-    && typeof result.annotation_commit_count_before === "number"
-    && typeof result.annotation_commit_count_after === "number"
-    && result.annotation_commit_count_after > result.annotation_commit_count_before,
-  )
-}
-
-function annotationFallbackResultFromCoreview(
-  result: CoreviewActionResult,
-): "success" | "partial_success" | "blocked" | "annotation_commit_failed" | null {
-  if (result.action !== "add_annotation") {
-    return null
-  }
-  if (!coreviewAnnotationStateChanged(result)) {
-    return result.blocked_reason === "annotation_commit_failed"
-      ? "annotation_commit_failed"
-      : "blocked"
-  }
-  return result.annotation_partial_success ? "partial_success" : "success"
-}
-
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
-}
-
-function coreviewSetViewInputFromVoiceCommand(
-  command: ArtifactReviewVoiceCommand,
-  current: CoreviewCurrentView,
-): CoreviewSetViewInput {
-  switch (command.kind) {
-    case "go_to_page":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        pageNumber: command.pageTarget,
-        reason: "voice command fallback",
-      }
-    case "next_page":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        pageIndex: current.pageIndex + 1,
-        reason: "voice command fallback",
-      }
-    case "previous_page":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        pageIndex: current.pageIndex - 1,
-        reason: "voice command fallback",
-      }
-    case "first_page":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        pageIndex: 0,
-        reason: "voice command fallback",
-      }
-    case "last_page":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        pageIndex: Math.max(0, current.pageCount - 1),
-        reason: "voice command fallback",
-      }
-    case "zoom_in":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        zoom: clampArtifactZoom(current.zoom * 1.2),
-        fitMode: "custom",
-        reason: "voice command fallback",
-      }
-    case "zoom_out":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        zoom: clampArtifactZoom(current.zoom / 1.2),
-        fitMode: "custom",
-        reason: "voice command fallback",
-      }
-    case "fit_width":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        zoom: 1,
-        fitMode: "width",
-        reason: "voice command fallback",
-      }
-    case "fit_page":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        zoom: 1,
-        fitMode: "page",
-        reason: "voice command fallback",
-      }
-    case "reset_zoom":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        zoom: 1,
-        fitMode: "custom",
-        reason: "voice command fallback",
-      }
-    default:
-      return {
-        artifactId: current.artifactId ?? undefined,
-        reason: "voice command fallback",
-      }
-  }
-}
-
-function coreviewAnchorFromVoiceCommand(
-  command: ArtifactReviewVoiceCommand,
-  lastFocusedAnchorType: CoreviewAnnotationAnchor["type"] | null,
-): CoreviewAnnotationAnchor {
-  const anchorType = command.anchorType ?? lastFocusedAnchorType ?? "current_title"
-  return anchorType === "current_selection"
-    ? { type: "current_selection" }
-    : { type: "current_title" }
-}
-
-function coreviewAddAnnotationInputFromVoiceCommand(
-  command: ArtifactReviewVoiceCommand,
-  current: CoreviewCurrentView,
-  lastFocusedAnchorType: CoreviewAnnotationAnchor["type"] | null,
-): CoreviewAddAnnotationInput {
-  return {
-    kind: command.annotationKind ?? "highlight",
-    artifactId: current.artifactId ?? undefined,
-    pageIndex: current.pageIndex,
-    anchor: coreviewAnchorFromVoiceCommand(command, lastFocusedAnchorType),
-    color: command.color,
-    text: command.commentText,
-    source: "sophia",
-  }
-}
-
-function annotationFallbackUtteranceKind(
-  command: ArtifactReviewVoiceCommand,
-  commands: ArtifactReviewVoiceCommand[] = [command],
-): ArtifactReviewAnnotationUtteranceKind | null {
-  if (command.kind !== "add_annotation") {
-    return null
-  }
-  if (commands.filter((candidate) => candidate.kind === "add_annotation").length > 1) {
-    return "annotation_compound"
-  }
-  return command.utteranceKind
-    ?? annotationUtteranceKindForKind(command.annotationKind)
-}
-
-function annotationUtteranceKindForKind(
-  kind: ArtifactReviewVoiceCommand["annotationKind"],
-): ArtifactReviewAnnotationUtteranceKind {
-  switch (kind) {
-    case "comment":
-      return "annotation_comment"
-    case "underline":
-      return "annotation_underline"
-    case "arrow":
-      return "annotation_arrow"
-    case "highlight":
-    default:
-      return "annotation_highlight"
-  }
-}
-
-function coreviewFocusAnchorInputFromVoiceCommand(
-  command: ArtifactReviewVoiceCommand,
-  current: CoreviewCurrentView,
-  lastFocusedAnchorType: CoreviewAnnotationAnchor["type"] | null,
-): CoreviewFocusAnchorInput {
-  return {
-    artifactId: current.artifactId ?? undefined,
-    pageIndex: current.pageIndex,
-    anchor: coreviewAnchorFromVoiceCommand(command, lastFocusedAnchorType),
-    zoomDelta: command.zoomDelta ?? 1.35,
-    reason: "voice command fallback",
-  }
-}
-
-function coreviewAnnotationCommandAlreadyHandled(
-  command: ArtifactReviewVoiceCommand,
-  sinceMs: number,
-): boolean {
-  if (command.kind !== "add_annotation") {
-    return false
-  }
-  return wasRecentCoreviewToolActionHandled({
-    toolName: COREVIEW_ADD_ANNOTATION_TOOL_NAME,
-    sinceMs,
-    matchResult: (result) => (
-      result.ok
-      && result.action === "add_annotation"
-      && result.annotation_kind === (command.annotationKind ?? "highlight")
-      && (
-        command.color === undefined
-        || result.annotation_color === command.color
-        || command.annotationKind === "comment"
-      )
-    ),
-  })
-}
-
-function coreviewFocusCommandAlreadyHandled(sinceMs: number): boolean {
-  return wasRecentCoreviewToolActionHandled({
-    toolName: COREVIEW_FOCUS_ANCHOR_TOOL_NAME,
-    sinceMs,
-    matchResult: (result) => result.ok && result.action === "focus_anchor",
-  })
-}
-
-function buildSelectedArtifactFromExisting(builderArtifact: BuilderArtifactV1, path: string): BuilderArtifactV1 | null {
-  const files = getBuilderArtifactFiles(builderArtifact)
-  const selectedFile = files.find((file) => file.path === path)
-
-  if (!selectedFile) {
-    return null
-  }
-
-  return {
-    ...builderArtifact,
-    artifactPath: selectedFile.path,
-    artifactTitle: selectedFile.isPrimary ? builderArtifact.artifactTitle : selectedFile.label,
-    supportingFiles: files
-      .filter((file) => file.path !== selectedFile.path)
-      .map((file) => file.path),
-  }
-}
-
-function buildStageBuilderArtifact({
-  builderArtifact,
-  selectedBuilderArtifactPath,
-  selectedLibraryItem,
-  latestLibraryItem,
-}: {
-  builderArtifact?: BuilderArtifactV1 | null
-  selectedBuilderArtifactPath?: string | null
-  selectedLibraryItem?: BuilderArtifactLibraryItemV1 | null
-  latestLibraryItem?: BuilderArtifactLibraryItemV1 | null
-}): BuilderArtifactV1 | null {
-  const normalizedSelectedPath = normalizeBuilderArtifactPath(selectedBuilderArtifactPath)
-
-  if (normalizedSelectedPath) {
-    const selectedExistingArtifact = builderArtifact
-      ? buildSelectedArtifactFromExisting(builderArtifact, normalizedSelectedPath)
-      : null
-
-    if (selectedExistingArtifact) {
-      return selectedExistingArtifact
-    }
-
-    if (selectedLibraryItem) {
-      return buildLibraryArtifact(selectedLibraryItem)
-    }
-
-    return buildSelectedPathArtifact(normalizedSelectedPath)
-  }
-
-  if (latestLibraryItem) {
-    const latestExistingArtifact = builderArtifact
-      ? buildSelectedArtifactFromExisting(builderArtifact, latestLibraryItem.path)
-      : null
-
-    return latestExistingArtifact ?? buildLibraryArtifact(latestLibraryItem)
-  }
-
-  if (builderArtifact) {
-    return builderArtifact
-  }
-
-  return null
-}
-
-function getStagePrimaryFileWithMime(
-  stageBuilderArtifact: BuilderArtifactV1 | null,
-  builderArtifactLibrary: BuilderArtifactLibraryItemV1[],
-) {
-  const files = getBuilderArtifactFiles(stageBuilderArtifact)
-  const file = files.find((candidate) => candidate.isPrimary) ?? files[0] ?? null
-
-  if (!file) {
-    return null
-  }
-
-  const libraryItem = builderArtifactLibrary.find((item) => item.path === file.path)
-  return {
-    ...file,
-    ...(libraryItem?.mimeType ? { mimeType: libraryItem.mimeType } : {}),
-    ...(typeof libraryItem?.sizeBytes === 'number' ? { sizeBytes: libraryItem.sizeBytes } : {}),
-  }
-}
-
-function exactTextRehydrateResult({
-  isPdf,
-  exactTextAvailable,
-  pdfStatus,
-}: {
-  isPdf: boolean
-  exactTextAvailable: boolean
-  pdfStatus?: string | null
-}): string {
-  if (!isPdf) {
-    return exactTextAvailable ? "not_pdf_exact_text_available" : "not_pdf"
-  }
-  if (exactTextAvailable || pdfStatus === "success") {
-    return "success"
-  }
-  if (pdfStatus === "loading") {
-    return "pending"
-  }
-  if (pdfStatus === "failed") {
-    return "failed"
-  }
-  return "unavailable"
 }
 
 /**
@@ -779,283 +139,60 @@ export function PresenceArtifactPanel({
   const [builderVoiceCommandTarget, setBuilderVoiceCommandTarget] = useState<ArtifactReviewVoiceCommandTarget | null>(null)
   const builderVoiceCommandTargetRef = useRef<ArtifactReviewVoiceCommandTarget | null>(null)
   const lastCoreviewFocusedAnchorTypeRef = useRef<CoreviewAnnotationAnchor["type"] | null>(null)
-  const pendingWorkspaceViewActorRef = useRef<CoreviewWorkspaceActor | null>(null)
+  const pendingWorkspaceViewActorRef = useRef<CoreviewArtifactWorkspaceActor | null>(null)
   const lastWorkspaceViewSignatureRef = useRef<string | null>(null)
-  const recordCoreviewWorkspaceEventRef = useRef<((input: {
-    type: CoreviewWorkspaceEventType
-    actor: CoreviewWorkspaceActor
-    payload: Record<string, unknown>
-    artifactKey?: string | null
-  }) => void) | null>(null)
+  const recordCoreviewWorkspaceEventRef = useRef<((input: CoreviewWorkspaceEventRecorderInput) => void) | null>(null)
   const [voiceCommandStaleViewSignature, setVoiceCommandStaleViewSignature] = useState<string | null>(null)
   const [voiceCommandStatus, setVoiceCommandStatus] = useState<ArtifactVoiceCommandStatus | null>(null)
   const coreviewCurrentViewRef = useRef<CoreviewCurrentView | null>(null)
   const coreviewVisualReadyRef = useRef(false)
   const status = usePresenceStore((s) => s.status)
-  const hasBuilderLibrary = builderArtifactLibrary.length > 0
-  const normalizedSelectedBuilderArtifactPath = useMemo(
-    () => normalizeBuilderArtifactPath(selectedBuilderArtifactPath),
-    [selectedBuilderArtifactPath],
-  )
-  const selectedBuilderLibraryItem = useMemo(
-    () => builderArtifactLibrary.find((file) => file.path === normalizedSelectedBuilderArtifactPath) ?? null,
-    [builderArtifactLibrary, normalizedSelectedBuilderArtifactPath],
-  )
-  const stageBuilderArtifact = useMemo(
-    () => buildStageBuilderArtifact({
-      builderArtifact,
-      selectedBuilderArtifactPath: normalizedSelectedBuilderArtifactPath,
-      selectedLibraryItem: selectedBuilderLibraryItem,
-      latestLibraryItem: builderArtifactLibrary[0] ?? null,
-    }),
-    [builderArtifact, builderArtifactLibrary, normalizedSelectedBuilderArtifactPath, selectedBuilderLibraryItem],
-  )
+  const {
+    hasBuilderLibrary,
+    normalizedSelectedBuilderArtifactPath,
+    stageBuilderArtifact,
+    hasBuilder,
+    builderStageActive,
+    builderArtifactId,
+    stagePrimaryFile,
+    stageRendererKind,
+    stageArtifactPath,
+    stageArtifactCapabilities,
+    stageArtifactCapabilityTelemetry,
+    builderStageVisibilitySignature,
+    artifactStableIdentity,
+    coreviewWorkspaceKey,
+    coreviewArtifactKey,
+    userWorkspaceActor,
+    sophiaWorkspaceActor,
+    coreviewAnnotationList,
+    coreviewAnnotationCounts,
+    coreviewAnnotationTelemetry,
+    recordCoreviewWorkspaceEvent,
+    addCoreviewAnnotation,
+    updateCoreviewAnnotation,
+    deleteCoreviewAnnotation,
+  } = useCoreviewArtifactStageModel({
+    builderArtifact,
+    builderArtifactLibrary,
+    selectedBuilderArtifactPath,
+    builderVisualCaptureStatus,
+    userId,
+    threadId,
+  })
   const takeaway = artifacts?.takeaway
   const reflection_candidate = artifacts?.reflection_candidate
   const memory_candidates = artifacts?.memory_candidates
-  const hasBuilder = !!stageBuilderArtifact
-  const builderStageActive = hasBuilder && Boolean(stageBuilderArtifact)
   const hasReflection = isRealReflection(reflection_candidate?.prompt)
   const hasMemories = memory_candidates && memory_candidates.length > 0
   const hasTakeaway = !!takeaway?.trim()
   const coreviewReviewEnabled = isCoreviewStillFrameReviewEnabled()
   const coreviewDiagnostics = useMemo(() => coreviewFlagDiagnostics(), [])
-  const builderArtifactId = stageBuilderArtifact
-    ? buildCoreviewRealArtifactId(stageBuilderArtifact)
-    : null
   const builderReviewEnabled = Boolean(coreviewReviewEnabled && builderArtifactId)
-  const stagePrimaryFile = useMemo(() => {
-    return getStagePrimaryFileWithMime(stageBuilderArtifact, builderArtifactLibrary)
-  }, [builderArtifactLibrary, stageBuilderArtifact])
-  const stageRendererKind = detectArtifactRendererKind(stagePrimaryFile, stageBuilderArtifact)
-  const stageArtifactPath = stagePrimaryFile?.path ?? stageBuilderArtifact?.artifactPath ?? null
-  const stageArtifactCapabilities = useMemo(() => (
-    getCoreviewArtifactCapabilitiesForFile({
-      file: stagePrimaryFile,
-      rendererKind: stageRendererKind,
-      textExtractionStatus: builderVisualCaptureStatus.pdfTextExtractionStatus ?? null,
-      exactTextAvailable: builderVisualCaptureStatus.exactTextAvailable,
-      layoutAnchorsAvailable: false,
-      originalDownloadAvailable: Boolean(stageArtifactPath),
-      openInNewTabAvailable: Boolean(stageArtifactPath),
-    })
-  ), [
-    builderVisualCaptureStatus.exactTextAvailable,
-    builderVisualCaptureStatus.pdfTextExtractionStatus,
-    stageArtifactPath,
-    stagePrimaryFile,
-    stageRendererKind,
-  ])
-  const stageArtifactCapabilityTelemetry = useMemo(() => (
-    coreviewArtifactCapabilityTelemetry(stageRendererKind, stageArtifactCapabilities)
-  ), [stageArtifactCapabilities, stageRendererKind])
-  const builderStageVisibilitySignature = useMemo(() => (
-    [
-      normalizedSelectedBuilderArtifactPath ?? "",
-      builderArtifactId ?? "",
-      stageArtifactPath ?? "",
-      stageRendererKind,
-    ].join("|")
-  ), [builderArtifactId, normalizedSelectedBuilderArtifactPath, stageArtifactPath, stageRendererKind])
-  const artifactStableIdentity = useMemo(() => (
-    builderArtifactId
-      ? buildCoreviewArtifactStableIdentity({
-          userId: userId ?? null,
-          threadId: threadId ?? null,
-          artifactPath: stageArtifactPath,
-          rendererKind: stageRendererKind,
-        }).key
-      : null
-  ), [builderArtifactId, stageArtifactPath, stageRendererKind, threadId, userId])
-  const coreviewWorkspaceIdentity = useMemo(() => (
-    buildCoreviewWorkspaceKey({
-      userId: userId ?? null,
-      threadId: threadId ?? null,
-    })
-  ), [threadId, userId])
-  const coreviewWorkspaceKey = coreviewWorkspaceIdentity.key
-  const coreviewArtifactKey = useMemo(() => (
-    normalizeCoreviewArtifactKey(artifactStableIdentity)
-  ), [artifactStableIdentity])
-  const coreviewShareState = useMemo(() => (
-    buildCoreviewWorkspaceShareState({
-      workspaceKey: coreviewWorkspaceKey,
-      artifactKey: coreviewArtifactKey,
-      status: "unavailable",
-    })
-  ), [coreviewArtifactKey, coreviewWorkspaceKey])
-  const userWorkspaceActor = useMemo(() => (
-    buildCoreviewWorkspaceActor({
-      kind: "user",
-      userId: userId ?? null,
-    })
-  ), [userId])
-  const sophiaWorkspaceActor = useMemo(() => (
-    buildCoreviewWorkspaceActor({
-      kind: "sophia",
-      userId: userId ?? null,
-      threadId: threadId ?? null,
-    })
-  ), [threadId, userId])
-  const coreviewAnnotations = useCoreviewAnnotationStore(artifactStableIdentity)
-  const {
-    annotations: coreviewAnnotationList,
-    counts: coreviewAnnotationCounts,
-    telemetry: coreviewAnnotationTelemetry,
-    addAnnotation: addAnnotationToCoreviewStore,
-    updateAnnotation: updateAnnotationInCoreviewStore,
-    deleteAnnotation: deleteAnnotationFromCoreviewStore,
-  } = coreviewAnnotations
-  const recordCoreviewWorkspaceEvent = useCallback((input: {
-    type: CoreviewWorkspaceEventType
-    actor: CoreviewWorkspaceActor
-    payload: Record<string, unknown>
-    artifactKey?: string | null
-  }) => {
-    const eventArtifactKey = input.artifactKey ?? coreviewArtifactKey
-    const event = appendWorkspaceEvent({
-      type: input.type,
-      workspaceKey: coreviewWorkspaceKey,
-      artifactKey: eventArtifactKey,
-      actor: input.actor,
-      payload: input.payload,
-    })
-    const telemetry = getCoreviewWorkspaceEventLogTelemetry(
-      coreviewWorkspaceKey,
-      eventArtifactKey,
-      coreviewShareState,
-    )
-
-    recordSophiaCaptureEvent({
-      category: "artifacts-runtime",
-      name: "coreview-workspace-event",
-      payload: {
-        artifactId: builderArtifactId ?? null,
-        artifactPath: stageArtifactPath,
-        artifactRendererKind: stageRendererKind,
-        artifactStableIdentity,
-        coreviewWorkspaceKeyHash: hashCoreviewWorkspaceKey(coreviewWorkspaceKey),
-        workspaceEventType: event.type,
-        workspaceEventPayloadExcluded: true,
-        ...telemetry,
-      },
-    })
-  }, [
-    artifactStableIdentity,
-    builderArtifactId,
-    coreviewArtifactKey,
-    coreviewShareState,
-    coreviewWorkspaceKey,
-    stageArtifactPath,
-    stageRendererKind,
-  ])
-
   useEffect(() => {
     recordCoreviewWorkspaceEventRef.current = recordCoreviewWorkspaceEvent
   }, [recordCoreviewWorkspaceEvent])
 
-  const addCoreviewAnnotation = useCallback((input: CoreviewAddAnnotationAdapterInput): CoreviewAddAnnotationAdapterResult => {
-    const actor = input.source === "sophia" ? sophiaWorkspaceActor : userWorkspaceActor
-    const result = addAnnotationToCoreviewStore({
-      kind: input.kind,
-      pageIndex: input.pageIndex,
-      rect: input.rect,
-      point: input.point,
-      line: input.line,
-      color: input.color,
-      text: input.text,
-      source: input.source,
-      actorId: actor.id,
-    })
-    const blockedReason = result.blockedReason === "identity_unavailable"
-      ? "annotation_target_unavailable"
-      : result.blockedReason === "invalid_annotation"
-        ? input.kind === "highlight" || input.kind === "underline"
-          ? "invalid_rect"
-          : "anchor_not_found"
-        : result.blockedReason === "annotation_not_found"
-          ? "annotation_commit_failed"
-          : null
-
-    if (result.ok && result.annotation) {
-      recordCoreviewWorkspaceEvent({
-        type: "annotation.created",
-        actor,
-        payload: {
-          annotationId: result.annotation.id,
-          annotationKind: result.annotation.kind,
-          annotationPageIndex: result.annotation.pageIndex,
-          annotationColor: result.annotation.color ?? null,
-          annotationAnchorType: input.anchor.anchorType,
-          annotationSource: input.source,
-          annotationCount: result.counts.annotationCount,
-          highlightCount: result.counts.highlightCount,
-          commentCount: result.counts.commentCount,
-          underlineCount: result.counts.underlineCount,
-          arrowCount: result.counts.arrowCount,
-          drawPathCount: result.counts.drawPathCount,
-        },
-      })
-    }
-
-    return {
-      ok: result.ok,
-      annotationId: result.annotation?.id ?? null,
-      blockedReason,
-      annotationCount: result.counts.annotationCount,
-      highlightCount: result.counts.highlightCount,
-      commentCount: result.counts.commentCount,
-      underlineCount: result.counts.underlineCount,
-      arrowCount: result.counts.arrowCount,
-      drawPathCount: result.counts.drawPathCount,
-    }
-  }, [addAnnotationToCoreviewStore, recordCoreviewWorkspaceEvent, sophiaWorkspaceActor, userWorkspaceActor])
-  const updateCoreviewAnnotation = useCallback((annotationId: string, patch: { text?: string | null }) => {
-    const result = updateAnnotationInCoreviewStore(annotationId, {
-      ...patch,
-      actorId: userWorkspaceActor.id,
-    })
-    if (result.ok && result.annotation) {
-      recordCoreviewWorkspaceEvent({
-        type: "annotation.updated",
-        actor: userWorkspaceActor,
-        payload: {
-          annotationId: result.annotation.id,
-          annotationKind: result.annotation.kind,
-          annotationPageIndex: result.annotation.pageIndex,
-          patchKeys: Object.keys(patch).filter((key) => key !== "text").concat(
-            patch.text !== undefined ? ["text_redacted"] : [],
-          ),
-          annotationCount: result.counts.annotationCount,
-          highlightCount: result.counts.highlightCount,
-          commentCount: result.counts.commentCount,
-          underlineCount: result.counts.underlineCount,
-          arrowCount: result.counts.arrowCount,
-          drawPathCount: result.counts.drawPathCount,
-        },
-      })
-    }
-    return result.ok
-  }, [recordCoreviewWorkspaceEvent, updateAnnotationInCoreviewStore, userWorkspaceActor])
-  const deleteCoreviewAnnotation = useCallback((annotationId: string) => {
-    const result = deleteAnnotationFromCoreviewStore(annotationId)
-    if (result.ok) {
-      recordCoreviewWorkspaceEvent({
-        type: "annotation.deleted",
-        actor: userWorkspaceActor,
-        payload: {
-          annotationId,
-          annotationCount: result.counts.annotationCount,
-          highlightCount: result.counts.highlightCount,
-          commentCount: result.counts.commentCount,
-          underlineCount: result.counts.underlineCount,
-          arrowCount: result.counts.arrowCount,
-          drawPathCount: result.counts.drawPathCount,
-        },
-      })
-    }
-    return result.ok
-  }, [deleteAnnotationFromCoreviewStore, recordCoreviewWorkspaceEvent, userWorkspaceActor])
   const stageUsesMarkdownPreview = stageArtifactCapabilities.renderMode === "markdown"
   const stageUsesPdfPreview = stageArtifactCapabilities.renderMode === "canvas" && stageRendererKind === "pdf"
   const fallbackBuilderArtifactViewState = useMemo(() => (
@@ -2859,127 +1996,45 @@ export function PresenceArtifactPanel({
           </svg>
         </button>
 
-        {hasBuilder && stageBuilderArtifact && (
-          <div
-            ref={setBuilderArtifactRoot}
-            className={cn(
-              "relative transition-all duration-[1400ms] ease-out",
-              isTextModeBuilderStage && "flex min-h-0 flex-1 flex-col",
-              isVoiceMode && "flex h-full min-h-0 w-full flex-col overflow-hidden",
-              revealStep >= 1 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
-            )}
-          >
-            {builderArtifactId && !stageUsesMarkdownPreview && !stageUsesPdfPreview && (
-              <CoreviewRealArtifactCanvas
-                artifactId={builderArtifactId}
-                builderArtifact={stageBuilderArtifact}
-                sessionId={sessionId}
-                normalSessionId={normalSessionId}
-                voiceAgentSessionId={voiceAgentSessionId}
-                threadId={threadId}
-                artifactStableIdentity={artifactStableIdentity}
-              />
-            )}
-
-            <div
-              className={cn(
-                isTextModeBuilderStage && "flex min-h-0 flex-1 flex-col",
-                isVoiceMode && "flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden",
-              )}
-              onClick={(e) => e.stopPropagation()}
-            >
-              {isVoiceMode ? (
-                <VoiceArtifactStage
-                  builderArtifact={stageBuilderArtifact}
-                  builderArtifactLibrary={builderArtifactLibrary}
-                  threadId={threadId}
-                  artifactId={builderArtifactId}
-                  sessionId={sessionId}
-                  normalSessionId={normalSessionId}
-                  voiceAgentSessionId={voiceAgentSessionId}
-                  artifactStableIdentity={artifactStableIdentity}
-                  annotations={coreviewAnnotationList}
-                  annotationStoreTelemetry={coreviewAnnotationTelemetry}
-                  onAddAnnotation={addCoreviewAnnotation}
-                  onUpdateAnnotation={updateCoreviewAnnotation}
-                  onDeleteAnnotation={deleteCoreviewAnnotation}
-                  reviewState={builderArtifactCoReview.state}
-                  transportStatus={builderArtifactCoReview.transportStatus}
-                  exactTextAvailable={builderExactTextAvailable}
-                  canStartReview={builderArtifactCoReview.canStart}
-                  reviewEnabled={builderArtifactCoReview.enabled}
-                  visualReviewPreparing={visualReviewPreparing}
-                  pendingStartVoiceReview={pendingBuilderArtifactReview}
-                  visualCaptureStatus={stageUsesMarkdownPreview || stageUsesPdfPreview ? builderVisualCaptureStatus : null}
-                  reviewViewPending={voiceCommandViewPending}
-                  reviewStale={builderReviewStale}
-                  canRefreshReview={builderArtifactCoReview.canRefresh}
-                  voiceCommandStatusText={voiceCommandStatus?.text ?? null}
-                  voiceCommandStatusTone={voiceCommandStatus?.tone}
-                  onVisualCaptureStatusChange={setBuilderVisualCaptureStatus}
-                  onArtifactViewStateChange={handleReportedBuilderArtifactViewStateChange}
-                  onVoiceCommandTargetChange={handleBuilderVoiceCommandTargetChange}
-                  onWorkspaceToolModeChange={handleWorkspaceToolModeChange}
-                  onWorkspaceExportRequested={handleWorkspaceExportRequested}
-                  onStartReview={() => { void builderArtifactCoReview.startReview() }}
-                  onStopReview={() => { void builderArtifactCoReview.stopReview() }}
-                  onRefreshReview={() => { void builderArtifactCoReview.refreshReview() }}
-                />
-              ) : (
-                <ArtifactStage
-                  builderArtifact={stageBuilderArtifact}
-                  builderArtifactLibrary={builderArtifactLibrary}
-                  threadId={threadId}
-                  artifactId={builderArtifactId}
-                  sessionId={sessionId}
-                  normalSessionId={normalSessionId}
-                  voiceAgentSessionId={voiceAgentSessionId}
-                  artifactStableIdentity={artifactStableIdentity}
-                  annotations={coreviewAnnotationList}
-                  annotationStoreTelemetry={coreviewAnnotationTelemetry}
-                  onAddAnnotation={addCoreviewAnnotation}
-                  onUpdateAnnotation={updateCoreviewAnnotation}
-                  onDeleteAnnotation={deleteCoreviewAnnotation}
-                  reviewState={builderArtifactCoReview.state}
-                  transportStatus={builderArtifactCoReview.transportStatus}
-                  exactTextAvailable={builderExactTextAvailable}
-                  canStartReview={builderArtifactCoReview.canStart}
-                  reviewEnabled={builderArtifactCoReview.enabled}
-                  visualReviewRequiresVoice={visualReviewRequiresVoice}
-                  pendingStartVoiceReview={pendingBuilderArtifactReview}
-                  visualCaptureStatus={stageUsesMarkdownPreview || stageUsesPdfPreview ? builderVisualCaptureStatus : null}
-                  reviewViewPending={voiceCommandViewPending}
-                  reviewStale={builderReviewStale}
-                  canRefreshReview={builderArtifactCoReview.canRefresh}
-                  voiceCommandStatusText={voiceCommandStatus?.text ?? null}
-                  voiceCommandStatusTone={voiceCommandStatus?.tone}
-                  onVisualCaptureStatusChange={setBuilderVisualCaptureStatus}
-                  onArtifactViewStateChange={handleReportedBuilderArtifactViewStateChange}
-                  onVoiceCommandTargetChange={handleBuilderVoiceCommandTargetChange}
-                  onWorkspaceToolModeChange={handleWorkspaceToolModeChange}
-                  onWorkspaceExportRequested={handleWorkspaceExportRequested}
-                  onStartVoiceReview={onStartVoiceBuilderArtifactReview}
-                  onStartReview={() => { void builderArtifactCoReview.startReview() }}
-                  onStopReview={() => { void builderArtifactCoReview.stopReview() }}
-                  onRefreshReview={() => { void builderArtifactCoReview.refreshReview() }}
-                  fillAvailable={isTextModeBuilderStage}
-                  className={cn(isTextModeBuilderStage && "min-h-0 flex-1")}
-                />
-              )}
-            </div>
-          </div>
-        )}
-
-        <PresenceArtifactSecondarySurfaces
+        <PresenceArtifactPanelBuilderSurfaces
           artifacts={artifacts}
           builderArtifactLibrary={builderArtifactLibrary}
           stageBuilderArtifact={stageBuilderArtifact}
+          hasBuilder={hasBuilder}
+          builderArtifactId={builderArtifactId}
+          stageUsesMarkdownPreview={stageUsesMarkdownPreview}
+          stageUsesPdfPreview={stageUsesPdfPreview}
+          isTextModeBuilderStage={isTextModeBuilderStage}
+          isVoiceMode={isVoiceMode}
+          revealStep={revealStep}
+          voiceAgentSessionId={voiceAgentSessionId}
+          artifactStableIdentity={artifactStableIdentity}
+          coreviewAnnotationList={coreviewAnnotationList}
+          coreviewAnnotationTelemetry={coreviewAnnotationTelemetry}
+          addCoreviewAnnotation={addCoreviewAnnotation}
+          updateCoreviewAnnotation={updateCoreviewAnnotation}
+          deleteCoreviewAnnotation={deleteCoreviewAnnotation}
+          builderArtifactCoReview={builderArtifactCoReview}
+          builderExactTextAvailable={builderExactTextAvailable}
+          visualReviewPreparing={visualReviewPreparing}
+          visualReviewRequiresVoice={visualReviewRequiresVoice}
+          pendingBuilderArtifactReview={pendingBuilderArtifactReview}
+          builderVisualCaptureStatus={builderVisualCaptureStatus}
+          voiceCommandViewPending={voiceCommandViewPending}
+          builderReviewStale={builderReviewStale}
+          voiceCommandStatusText={voiceCommandStatus?.text ?? null}
+          voiceCommandStatusTone={voiceCommandStatus?.tone}
+          setBuilderVisualCaptureStatus={setBuilderVisualCaptureStatus}
+          handleReportedBuilderArtifactViewStateChange={handleReportedBuilderArtifactViewStateChange}
+          handleBuilderVoiceCommandTargetChange={handleBuilderVoiceCommandTargetChange}
+          handleWorkspaceToolModeChange={handleWorkspaceToolModeChange}
+          handleWorkspaceExportRequested={handleWorkspaceExportRequested}
+          onStartVoiceBuilderArtifactReview={onStartVoiceBuilderArtifactReview}
           showSecondaryArtifactSurfaces={showSecondaryArtifactSurfaces}
           showDomArtifactCoReview={showDomArtifactCoReview}
           threadId={threadId}
           sessionId={sessionId}
           normalSessionId={normalSessionId}
-          revealStep={revealStep}
           isActive={isActive}
           bloomColor={bloomColor}
           reflectionTapped={reflectionTapped}
@@ -2989,6 +2044,7 @@ export function PresenceArtifactPanel({
           onReflectionTap={onReflectionTap}
           onMemoryApprove={onMemoryApprove}
           onMemoryReject={onMemoryReject}
+          onBuilderArtifactRootChange={setBuilderArtifactRoot}
           onDomArtifactRootChange={setDomArtifactRoot}
         />
       </div>
