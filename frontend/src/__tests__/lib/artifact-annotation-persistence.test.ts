@@ -139,9 +139,27 @@ describe("artifact annotation persistence", () => {
       artifactPath: "outputs/launch-brief.pdf",
       rendererKind: "pdf",
     })
+    const userDataIdentity = buildArtifactAnnotationWorkspaceIdentity({
+      artifactStableIdentity: "user:u1|thread:thread-1|path:user-data/outputs/launch-brief.pdf|renderer:pdf",
+      threadId: "thread-1",
+      artifactId: "artifact-1",
+      artifactPath: "user-data/outputs/launch-brief.pdf",
+      rendererKind: "pdf",
+    })
+    const hrefIdentity = buildArtifactAnnotationWorkspaceIdentity({
+      artifactStableIdentity: "user:u1|thread:thread-1|path:file:///mnt/user-data/outputs/launch-brief.pdf|renderer:pdf",
+      threadId: "thread-1",
+      artifactId: "artifact-1",
+      artifactPath: "file:///mnt/user-data/outputs/launch-brief.pdf",
+      rendererKind: "pdf",
+    })
 
     expect(absoluteIdentity.stableArtifactIdentity).toBe(outputsIdentity.stableArtifactIdentity)
+    expect(absoluteIdentity.stableArtifactIdentity).toBe(userDataIdentity.stableArtifactIdentity)
+    expect(absoluteIdentity.stableArtifactIdentity).toBe(hrefIdentity.stableArtifactIdentity)
     expect(absoluteIdentity.storageKey).toBe(outputsIdentity.storageKey)
+    expect(absoluteIdentity.storageKey).toBe(userDataIdentity.storageKey)
+    expect(absoluteIdentity.storageKey).toBe(hrefIdentity.storageKey)
 
     persistArtifactAnnotations(absoluteIdentity.storageKey, [
       {

@@ -7,6 +7,7 @@ import { ArtifactStage, type ArtifactReviewVoiceCommandTarget } from "../../../a
 import {
   buildArtifactAnnotationWorkspaceIdentity,
   persistArtifactAnnotations,
+  restoreArtifactAnnotations,
 } from "../../../app/lib/artifact-annotation-persistence"
 import {
   AudioWebSocketUnsupportedTransport,
@@ -931,6 +932,171 @@ describe("ArtifactStage", () => {
     await userEvent.click(pin)
     expect(screen.getByDisplayValue("Persisted note")).toBeInTheDocument()
     expect(screen.getByTestId("artifact-comment-annotation")).toHaveAttribute("data-annotation-source", "sophia")
+  })
+
+  it.each([
+    {
+      kind: "highlight",
+      toolLabel: "Highlight",
+      testId: "artifact-highlight-annotation",
+      draw: (layer: HTMLElement) => {
+        fireEvent.pointerDown(layer, { button: 0, clientX: 60, clientY: 90, pointerId: 11 })
+        fireEvent.pointerMove(layer, { button: 0, clientX: 260, clientY: 260, pointerId: 11 })
+        fireEvent.pointerUp(layer, { button: 0, clientX: 260, clientY: 260, pointerId: 11 })
+      },
+    },
+    {
+      kind: "comment",
+      toolLabel: "Comment",
+      testId: "artifact-comment-pin",
+      draw: (layer: HTMLElement) => {
+        fireEvent.pointerDown(layer, { button: 0, clientX: 360, clientY: 180, pointerId: 12 })
+      },
+    },
+    {
+      kind: "underline",
+      toolLabel: "Underline",
+      testId: "artifact-underline-annotation",
+      draw: (layer: HTMLElement) => {
+        fireEvent.pointerDown(layer, { button: 0, clientX: 80, clientY: 430, pointerId: 13 })
+        fireEvent.pointerMove(layer, { button: 0, clientX: 330, clientY: 455, pointerId: 13 })
+        fireEvent.pointerUp(layer, { button: 0, clientX: 330, clientY: 455, pointerId: 13 })
+      },
+    },
+    {
+      kind: "arrow",
+      toolLabel: "Arrow",
+      testId: "artifact-arrow-annotation",
+      draw: (layer: HTMLElement) => {
+        fireEvent.pointerDown(layer, { button: 0, clientX: 130, clientY: 560, pointerId: 14 })
+        fireEvent.pointerMove(layer, { button: 0, clientX: 430, clientY: 675, pointerId: 14 })
+        fireEvent.pointerUp(layer, { button: 0, clientX: 430, clientY: 675, pointerId: 14 })
+      },
+    },
+  ])("persists a newly created $kind before close and restores it on ArtifactStage reopen", async ({ kind, toolLabel, testId, draw }) => {
+    const stableIdentity = `user:test-user|thread:thread-1|path:close-reopen-${kind}.pdf|renderer:pdf`
+    const identity = buildArtifactAnnotationWorkspaceIdentity({
+      artifactStableIdentity: stableIdentity,
+      threadId: "thread-1",
+      artifactId: "artifact-1",
+      artifactPath: pdfBuilderArtifact.artifactPath,
+      rendererKind: "pdf",
+    })
+    mockPdfDocument({ pageCount: 1 })
+    const view = renderStage({
+      artifact: pdfBuilderArtifact,
+      artifactId: "artifact-1",
+      artifactStableIdentity: stableIdentity,
+      exactTextAvailable: false,
+    })
+    const layer = await screen.findByTestId("artifact-pdf-annotation-layer")
+    mockAnnotationLayerBounds(layer)
+
+    await userEvent.click(screen.getByLabelText(toolLabel))
+    draw(layer)
+    expect(await screen.findByTestId(testId)).toBeInTheDocument()
+    expect(restoreArtifactAnnotations(identity.storageKey, identity.stableArtifactIdentity)).toMatchObject({
+      restoreCount: 1,
+      status: "restored",
+    })
+
+    view.unmount()
+    mockPdfDocument({ pageCount: 1 })
+    renderStage({
+      artifact: pdfBuilderArtifact,
+      artifactId: "artifact-1",
+      artifactStableIdentity: stableIdentity,
+      exactTextAvailable: false,
+    })
+
+    expect(await screen.findByTestId(testId)).toBeInTheDocument()
+  })
+
+  it("persists comment edits and annotation deletes immediately", async () => {
+    const stableIdentity = "user:test-user|thread:thread-1|path:edit-delete.pdf|renderer:pdf"
+    const identity = buildArtifactAnnotationWorkspaceIdentity({
+      artifactStableIdentity: stableIdentity,
+      threadId: "thread-1",
+      artifactId: "artifact-1",
+      artifactPath: pdfBuilderArtifact.artifactPath,
+      rendererKind: "pdf",
+    })
+    mockPdfDocument({ pageCount: 1 })
+    renderStage({
+      artifact: pdfBuilderArtifact,
+      artifactId: "artifact-1",
+      artifactStableIdentity: stableIdentity,
+      exactTextAvailable: false,
+    })
+    const stage = await screen.findByRole("region", { name: /generated artifact/i })
+    const layer = screen.getByTestId("artifact-pdf-annotation-layer")
+    mockAnnotationLayerBounds(layer)
+
+    await userEvent.click(screen.getByLabelText("Comment"))
+    fireEvent.pointerDown(layer, { button: 0, clientX: 360, clientY: 180, pointerId: 21 })
+    await userEvent.click(await screen.findByTestId("artifact-comment-pin"))
+    fireEvent.change(screen.getByLabelText("Comment text"), { target: { value: "Edited before close." } })
+    expect(restoreArtifactAnnotations(identity.storageKey, identity.stableArtifactIdentity).annotations[0]).toMatchObject({
+      kind: "comment",
+      text: "Edited before close.",
+    })
+
+    await userEvent.click(screen.getByLabelText("Highlight"))
+    fireEvent.pointerDown(layer, { button: 0, clientX: 60, clientY: 90, pointerId: 22 })
+    fireEvent.pointerMove(layer, { button: 0, clientX: 260, clientY: 260, pointerId: 22 })
+    fireEvent.pointerUp(layer, { button: 0, clientX: 260, clientY: 260, pointerId: 22 })
+    await userEvent.click(await screen.findByTestId("artifact-highlight-annotation"))
+    fireEvent.keyDown(stage, { key: "Delete" })
+
+    const restored = restoreArtifactAnnotations(identity.storageKey, identity.stableArtifactIdentity)
+    expect(restored.annotations).toHaveLength(1)
+    expect(restored.annotations[0]).toMatchObject({ kind: "comment", text: "Edited before close." })
+  })
+
+  it("keeps restored annotations through late same-identity library hydration", async () => {
+    const stableIdentity = "user:test-user|thread:thread-1|path:hydration.pdf|renderer:pdf"
+    seedPersistedAnnotations(stableIdentity, [
+      {
+        id: "hydrated-highlight",
+        kind: "highlight",
+        artifactStableIdentity: stableIdentity,
+        pageIndex: 0,
+        rect: { x: 0.1, y: 0.16, width: 0.25, height: 0.08 },
+        createdAt: 10,
+        updatedAt: 10,
+        version: 1,
+      },
+    ])
+    mockPdfDocument({ pageCount: 1 })
+    const view = renderStage({
+      artifact: pdfBuilderArtifact,
+      artifactId: "artifact-1",
+      artifactStableIdentity: stableIdentity,
+      exactTextAvailable: false,
+    })
+
+    expect(await screen.findByTestId("artifact-highlight-annotation")).toHaveAttribute("data-annotation-id", "hydrated-highlight")
+
+    view.rerender(
+      <ArtifactStage
+        builderArtifact={pdfBuilderArtifact}
+        builderArtifactLibrary={[{
+          path: pdfBuilderArtifact.artifactPath,
+          name: "launch-brief.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 1234,
+          modifiedAt: "2026-06-05T00:00:00Z",
+        }]}
+        threadId="thread-1"
+        artifactId="artifact-1"
+        artifactStableIdentity={stableIdentity}
+        exactTextAvailable={false}
+        onStartReview={view.onStartReview}
+        onStopReview={view.onStopReview}
+      />,
+    )
+
+    expect(await screen.findByTestId("artifact-highlight-annotation")).toHaveAttribute("data-annotation-id", "hydrated-highlight")
   })
 
   it("does not leak persisted annotations across stable artifact identities", async () => {

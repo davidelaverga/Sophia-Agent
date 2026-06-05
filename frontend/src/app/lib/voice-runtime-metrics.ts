@@ -125,9 +125,16 @@ export type CoreviewVisualTelemetry = {
   annotationRestoreResult: string | null
   annotationRestoreCount: number
   annotationRestoreSource: string | null
+  annotationPersistAttempted: boolean
+  annotationPersistResult: string | null
+  annotationPersistCount: number
   annotationPersistedCount: number
   annotationStorageVersion: number | null
   annotationStorageKeyHash: string | null
+  annotationIdentityWriteHash: string | null
+  annotationIdentityReadHash: string | null
+  annotationRestoreOverwrittenCount: number
+  annotationStateClearedReason: string | null
   stickyToolModeEnabled: boolean
   lastToolModeBeforeAction: string | null
   lastToolModeAfterAction: string | null
@@ -555,9 +562,16 @@ export type GeminiSessionTelemetry = {
     annotationRestoreResult: string | null
     annotationRestoreCount: number
     annotationRestoreSource: string | null
+    annotationPersistAttempted: boolean
+    annotationPersistResult: string | null
+    annotationPersistCount: number
     annotationPersistedCount: number
     annotationStorageVersion: number | null
     annotationStorageKeyHash: string | null
+    annotationIdentityWriteHash: string | null
+    annotationIdentityReadHash: string | null
+    annotationRestoreOverwrittenCount: number
+    annotationStateClearedReason: string | null
     canvasRestoreAttempted: boolean
     canvasRestoreResult: string | null
     canvasRestoreSource: string | null
@@ -1263,9 +1277,16 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       annotationRestoreResult: null,
       annotationRestoreCount: 0,
       annotationRestoreSource: null,
+      annotationPersistAttempted: false,
+      annotationPersistResult: null,
+      annotationPersistCount: 0,
       annotationPersistedCount: 0,
       annotationStorageVersion: null,
       annotationStorageKeyHash: null,
+      annotationIdentityWriteHash: null,
+      annotationIdentityReadHash: null,
+      annotationRestoreOverwrittenCount: 0,
+      annotationStateClearedReason: null,
       stickyToolModeEnabled: false,
       lastToolModeBeforeAction: null,
       lastToolModeAfterAction: null,
@@ -1617,10 +1638,17 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.annotationRestoreResult = asString(latestAnnotationState?.annotationRestoreResult)
   visual.annotationRestoreCount = numberFromKeys(latestAnnotationState, ["annotationRestoreCount"]) ?? 0
   visual.annotationRestoreSource = asString(latestAnnotationState?.annotationRestoreSource)
+  visual.annotationPersistAttempted = asBoolean(latestAnnotationState?.annotationPersistAttempted) ?? false
+  visual.annotationPersistResult = asString(latestAnnotationState?.annotationPersistResult)
+  visual.annotationPersistCount = numberFromKeys(latestAnnotationState, ["annotationPersistCount"]) ?? 0
   visual.annotationPersistedCount = numberFromKeys(latestAnnotationState, ["annotationPersistedCount"]) ?? 0
   visual.annotationStorageVersion = numberFromKeys(latestAnnotationState, ["annotationStorageVersion"])
   visual.annotationStorageKeyHash = asString(latestAnnotationState?.annotationStorageKeyHash)
     ?? asString(latestAnnotationExport?.annotationStorageKeyHash)
+  visual.annotationIdentityWriteHash = asString(latestAnnotationState?.annotationIdentityWriteHash)
+  visual.annotationIdentityReadHash = asString(latestAnnotationState?.annotationIdentityReadHash)
+  visual.annotationRestoreOverwrittenCount = numberFromKeys(latestAnnotationState, ["annotationRestoreOverwrittenCount"]) ?? 0
+  visual.annotationStateClearedReason = asString(latestAnnotationState?.annotationStateClearedReason)
   visual.stickyToolModeEnabled = asBoolean(latestAnnotationState?.stickyToolModeEnabled) ?? false
   visual.lastToolModeBeforeAction = asString(latestAnnotationState?.lastToolModeBeforeAction)
   visual.lastToolModeAfterAction = asString(latestAnnotationState?.lastToolModeAfterAction)
@@ -2880,12 +2908,26 @@ function buildSessionTelemetry(params: {
           ?? coreviewTelemetry.visual.annotationRestoreCount,
         annotationRestoreSource: hookTelemetry?.annotationRestoreSource
           ?? coreviewTelemetry.visual.annotationRestoreSource,
+        annotationPersistAttempted: hookTelemetry?.annotationPersistAttempted
+          ?? coreviewTelemetry.visual.annotationPersistAttempted,
+        annotationPersistResult: hookTelemetry?.annotationPersistResult
+          ?? coreviewTelemetry.visual.annotationPersistResult,
+        annotationPersistCount: hookTelemetry?.annotationPersistCount
+          ?? coreviewTelemetry.visual.annotationPersistCount,
         annotationPersistedCount: hookTelemetry?.annotationPersistedCount
           ?? coreviewTelemetry.visual.annotationPersistedCount,
         annotationStorageVersion: hookTelemetry?.annotationStorageVersion
           ?? coreviewTelemetry.visual.annotationStorageVersion,
         annotationStorageKeyHash: hookTelemetry?.annotationStorageKeyHash
           ?? coreviewTelemetry.visual.annotationStorageKeyHash,
+        annotationIdentityWriteHash: hookTelemetry?.annotationIdentityWriteHash
+          ?? coreviewTelemetry.visual.annotationIdentityWriteHash,
+        annotationIdentityReadHash: hookTelemetry?.annotationIdentityReadHash
+          ?? coreviewTelemetry.visual.annotationIdentityReadHash,
+        annotationRestoreOverwrittenCount: hookTelemetry?.annotationRestoreOverwrittenCount
+          ?? coreviewTelemetry.visual.annotationRestoreOverwrittenCount,
+        annotationStateClearedReason: hookTelemetry?.annotationStateClearedReason
+          ?? coreviewTelemetry.visual.annotationStateClearedReason,
         canvasRestoreAttempted: hookTelemetry?.canvasRestoreAttempted
           ?? coreviewTelemetry.visual.canvasRestoreAttempted,
         canvasRestoreResult: hookTelemetry?.canvasRestoreResult

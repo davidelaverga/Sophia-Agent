@@ -191,9 +191,16 @@ export type GeminiRuntimeTelemetry = {
   annotationRestoreResult?: string | null
   annotationRestoreCount?: number
   annotationRestoreSource?: string | null
+  annotationPersistAttempted?: boolean
+  annotationPersistResult?: string | null
+  annotationPersistCount?: number
   annotationPersistedCount?: number
   annotationStorageVersion?: number | null
   annotationStorageKeyHash?: string | null
+  annotationIdentityWriteHash?: string | null
+  annotationIdentityReadHash?: string | null
+  annotationRestoreOverwrittenCount?: number
+  annotationStateClearedReason?: string | null
   canvasRestoreAttempted?: boolean
   canvasRestoreResult?: string | null
   canvasRestoreSource?: string | null
