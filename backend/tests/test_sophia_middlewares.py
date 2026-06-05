@@ -2270,6 +2270,9 @@ class TestBuilderTaskMiddleware:
         assert "Do NOT use relative paths like outputs/report.md" in briefing
 
     def test_adds_research_citation_requirements(self):
+        from deerflow.agents.sophia_agent.middlewares.builder_research_policy import (
+            BuilderResearchPolicyMiddleware,
+        )
         from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
 
         mw = BuilderTaskMiddleware()
@@ -2288,8 +2291,22 @@ class TestBuilderTaskMiddleware:
         result = mw.before_agent(state, _make_runtime())
         assert result is not None
         briefing = result["system_prompt_blocks"][-1]
-        assert "[citation:Title](URL)" in briefing
-        assert "Sources section" in briefing
+        assert "<builder_target_workflows>" in briefing
+        assert '<builder_workflow_card name="research" task_type="research">' in briefing
+        assert "Web research is available for every builder task type" in briefing
+        assert "`builder_web_search` or `builder_web_fetch` at least once" in briefing
+        assert "include a concise Sources appendix" in briefing
+        assert "emit_builder_artifact.sources_used" in briefing
+
+        policy_state = {**state, **result}
+        policy_result = BuilderResearchPolicyMiddleware().before_agent(policy_state, _make_runtime())
+        assert policy_result is not None
+        research_policy = policy_result["system_prompt_blocks"][-1]
+        assert "<builder_research_policy>" in research_policy
+        assert "Research reports must include inline [citation:Title](URL) citations" in research_policy
+        assert "after factual claims" in research_policy
+        assert "Sources section" in research_policy
+        assert "emit_builder_artifact.sources_used MUST contain structured {title, url}" in research_policy
 
     def test_skills_inventory_block_lists_all_relevant_skills_unconditionally(
         self, monkeypatch, caplog
