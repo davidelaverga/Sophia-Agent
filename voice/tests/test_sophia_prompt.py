@@ -49,7 +49,8 @@ def test_realtime_prompt_source_files_exist_for_voice_runtime() -> None:
         "soul.md",
         "voice.md",
         "techniques.md",
-        "AGENTS.md",
+        "coordination_core.md",
+        "companion_delegation.md",
     }
 
     for path in CORE_SKILL_FILES:

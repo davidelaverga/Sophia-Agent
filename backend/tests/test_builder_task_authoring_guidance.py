@@ -165,8 +165,8 @@ class TestBuilderResearchGuidance:
         briefing = _briefing(result)
 
         assert "Web research is available for every builder task type" in briefing
-        assert "write_todos for planning" in briefing
-        assert "builder_web_search or builder_web_fetch at least once" in briefing
+        assert "`write_todos` for planning" in briefing
+        assert "`builder_web_search` or `builder_web_fetch` at least once" in briefing
         assert "write_file, str_replace, artifact-generating bash" in briefing
 
     def test_briefing_does_not_disable_research_for_frontend(self) -> None:
@@ -178,3 +178,28 @@ class TestBuilderResearchGuidance:
 
         assert "Web research is available for every builder task type" in briefing
         assert "External browsing is disabled" not in briefing
+
+
+class TestBuilderWorkflowCards:
+    def test_pptx_task_gets_pptx_card_without_pdf_card(self) -> None:
+        state = _make_state("presentation")
+        state["delegation_context"]["artifact_target_path"] = "/mnt/user-data/outputs/deck.pptx"
+
+        result = BuilderTaskMiddleware().before_agent(state, _make_runtime())
+        briefing = _briefing(result)
+
+        assert '<builder_workflow_card name="pptx"' in briefing
+        assert "image-generation/scripts/generate.py" in briefing
+        assert "ppt-generation/scripts/generate.py" in briefing
+        assert '<builder_workflow_card name="pdf"' not in briefing
+
+    def test_html_task_gets_html_card_without_pptx_card(self) -> None:
+        state = _make_state("document")
+        state["delegation_context"]["artifact_target_path"] = "/mnt/user-data/outputs/report.html"
+
+        result = BuilderTaskMiddleware().before_agent(state, _make_runtime())
+        briefing = _briefing(result)
+
+        assert '<builder_workflow_card name="html"' in briefing
+        assert "standalone browser-renderable document" in briefing
+        assert '<builder_workflow_card name="pptx"' not in briefing

@@ -14,6 +14,7 @@ of completing with a phantom artifact.
 import json
 import logging
 import re
+import shlex
 import time
 import zipfile
 from collections.abc import Awaitable, Callable
@@ -188,6 +189,7 @@ _PPTX_REQUIRED_ZIP_ENTRIES = frozenset({
     "ppt/presentation.xml",
 })
 _PPTX_MIN_BYTES = 1024
+_PPTX_IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 _HTML_FALLBACK_MIN_BYTES = 128
 _PDF_VISUAL_FALLBACK_MARKERS = (
     "chart",
@@ -249,6 +251,30 @@ def _merge_string_list(current: object, update: list) -> list[str]:
         if isinstance(item, str):
             seen[item] = None
     return list(seen)
+
+
+def _merge_builder_pptx_diagnostics(
+    current: dict | None, update: dict | None
+) -> dict:
+    if current is None and update is None:
+        return {}
+    if current is None:
+        return dict(update or {})
+    if update is None:
+        return dict(current)
+    merged = dict(current)
+    for key, value in update.items():
+        if key.endswith("_count") and isinstance(value, int):
+            merged[key] = int(merged.get(key, 0) or 0) + value
+            continue
+        if key in {"image_output_paths", "pptx_output_paths"} and isinstance(value, list):
+            merged[key] = _merge_string_list(merged.get(key), value)
+            continue
+        if key.endswith("_bytes_total") and isinstance(value, int):
+            merged[key] = int(merged.get(key, 0) or 0) + value
+            continue
+        merged[key] = value
+    return merged
 
 
 def _extract_output_relative_path(artifact_path: str | None) -> str | None:
@@ -1157,7 +1183,19 @@ def _pptx_skill_read_seen(state: dict[str, Any]) -> bool:
     )
 
 
+def _pptx_diagnostics(state: dict[str, Any]) -> dict[str, Any]:
+    diagnostics = state.get("builder_pptx_diagnostics")
+    return diagnostics if isinstance(diagnostics, dict) else {}
+
+
+def _pptx_diagnostic_count(state: dict[str, Any], key: str) -> int:
+    value = _pptx_diagnostics(state).get(key)
+    return int(value or 0) if isinstance(value, int) else 0
+
+
 def _pptx_generator_invoked_seen(state: dict[str, Any]) -> bool:
+    if _pptx_diagnostic_count(state, "pptx_generator_attempt_count") > 0:
+        return True
     summaries = state.get("builder_tool_turn_summaries") or []
     return any(
         bool(summary.get("pptx_generator_invoked"))
@@ -1167,6 +1205,8 @@ def _pptx_generator_invoked_seen(state: dict[str, Any]) -> bool:
 
 
 def _image_generation_invoked_seen(state: dict[str, Any]) -> bool:
+    if _pptx_diagnostic_count(state, "image_generation_attempt_count") > 0:
+        return True
     summaries = state.get("builder_tool_turn_summaries") or []
     return any(
         bool(summary.get("image_generation_invoked"))
@@ -1175,29 +1215,158 @@ def _image_generation_invoked_seen(state: dict[str, Any]) -> bool:
     )
 
 
-def _pptx_skill_flags_from_tool_calls(tool_calls: list[dict[str, Any]]) -> dict[str, bool]:
-    skill_read = False
-    generator_invoked = False
-    image_generation_invoked = False
+def _command_parts(command: str) -> list[str]:
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return []
+
+
+def _command_flag_value(command: str, flag: str) -> str | None:
+    parts = _command_parts(command)
+    for index, part in enumerate(parts):
+        if part == flag and index + 1 < len(parts):
+            return parts[index + 1]
+        if part.startswith(flag + "="):
+            return part.split("=", 1)[1]
+    return None
+
+
+def _command_flag_values(command: str, flag: str) -> list[str]:
+    parts = _command_parts(command)
+    values: list[str] = []
+    collect = False
+    for part in parts:
+        if collect:
+            if part.startswith("--"):
+                collect = False
+            else:
+                values.append(part)
+                continue
+        if part == flag:
+            collect = True
+            continue
+        if part.startswith(flag + "="):
+            values.append(part.split("=", 1)[1])
+    return values
+
+
+def _empty_pptx_skill_flags() -> dict[str, Any]:
+    return {
+        "pptx_skill_read": False,
+        "pptx_generator_invoked": False,
+        "image_generation_invoked": False,
+        "image_output_paths": [],
+        "pptx_output_paths": [],
+    }
+
+
+def _pptx_skill_flags_for_read(args: dict[str, Any]) -> dict[str, Any]:
+    flags = _empty_pptx_skill_flags()
+    path = str(args.get("path") or args.get("file_path") or "")
+    flags["pptx_skill_read"] = any(marker in path for marker in _PPTX_SKILL_PATH_MARKERS)
+    return flags
+
+
+def _pptx_skill_flags_for_bash(args: dict[str, Any]) -> dict[str, Any]:
+    flags = _empty_pptx_skill_flags()
+    command = str(args.get("command") or "")
+    command_invokes_generator = any(marker in command for marker in _PPTX_GENERATOR_PATH_MARKERS)
+    command_invokes_image = any(marker in command for marker in _IMAGE_GENERATION_PATH_MARKERS)
+    flags["pptx_generator_invoked"] = command_invokes_generator
+    flags["image_generation_invoked"] = command_invokes_image
+    output_path = _command_flag_value(command, "--output-file")
+    if output_path and command_invokes_image:
+        flags["image_output_paths"] = [output_path]
+    if output_path and command_invokes_generator:
+        flags["pptx_output_paths"] = [output_path]
+    return flags
+
+
+def _merge_pptx_skill_flags(current: dict[str, Any], update: dict[str, Any]) -> None:
+    current["pptx_skill_read"] = bool(current["pptx_skill_read"] or update.get("pptx_skill_read"))
+    current["pptx_generator_invoked"] = bool(
+        current["pptx_generator_invoked"] or update.get("pptx_generator_invoked")
+    )
+    current["image_generation_invoked"] = bool(
+        current["image_generation_invoked"] or update.get("image_generation_invoked")
+    )
+    current["image_output_paths"].extend(update.get("image_output_paths") or [])
+    current["pptx_output_paths"].extend(update.get("pptx_output_paths") or [])
+
+
+def _pptx_skill_flags_from_tool_calls(tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
+    flags = _empty_pptx_skill_flags()
     for call in tool_calls:
-        name = call.get("name")
         args = call.get("args") or {}
         if not isinstance(args, dict):
             continue
+        name = call.get("name")
         if name in ("read_file", "read_file_tool"):
-            path = str(args.get("path") or args.get("file_path") or "")
-            skill_read = skill_read or any(marker in path for marker in _PPTX_SKILL_PATH_MARKERS)
-        if name in ("bash", "bash_tool"):
-            command = str(args.get("command") or "")
-            generator_invoked = generator_invoked or any(marker in command for marker in _PPTX_GENERATOR_PATH_MARKERS)
-            image_generation_invoked = image_generation_invoked or any(
-                marker in command for marker in _IMAGE_GENERATION_PATH_MARKERS
-            )
-    return {
-        "pptx_skill_read": skill_read,
-        "pptx_generator_invoked": generator_invoked,
-        "image_generation_invoked": image_generation_invoked,
-    }
+            _merge_pptx_skill_flags(flags, _pptx_skill_flags_for_read(args))
+        elif name in ("bash", "bash_tool"):
+            _merge_pptx_skill_flags(flags, _pptx_skill_flags_for_bash(args))
+    return flags
+
+
+def _virtual_output_status(state: dict[str, Any], path: str | None) -> tuple[bool, int, str | None]:
+    canonical = _canonical_outputs_artifact_path(path)
+    if canonical is None:
+        return False, 0, "not_outputs_path"
+    relative = _extract_output_relative_path(canonical)
+    outputs_root = _outputs_root_from_state(state)
+    if relative is None or outputs_root is None:
+        return False, 0, "missing_outputs_root"
+    host_path = outputs_root / relative
+    if not host_path.is_file():
+        return False, 0, "missing_output"
+    try:
+        return True, int(host_path.stat().st_size), None
+    except OSError:
+        return False, 0, "stat_failed"
+
+
+def _classify_image_generation_error(text: str, exists: bool, bytes_count: int) -> str | None:
+    lowered = text.lower()
+    if exists and bytes_count > 0:
+        return None
+    if "openai_api_key" in lowered:
+        return "missing_openai_api_key"
+    if "openai image generation failed" in lowered:
+        return "openai_api_error"
+    if "reference image" in lowered and "invalid" in lowered:
+        return "invalid_reference_image"
+    if "no bytes landed" in lowered:
+        return "no_output_bytes"
+    if "error" in lowered or "failed" in lowered:
+        return "image_generation_error"
+    return "missing_output"
+
+
+def _classify_pptx_generation_error(
+    state: dict[str, Any],
+    path: str | None,
+    text: str,
+    exists: bool,
+) -> str | None:
+    if exists:
+        canonical = _canonical_outputs_artifact_path(path)
+        if canonical:
+            relative = _extract_output_relative_path(canonical)
+            outputs_root = _outputs_root_from_state(state)
+            if relative and outputs_root:
+                reason = _pptx_integrity_error_for_file(outputs_root / relative)
+                if reason is None:
+                    return None
+                return reason
+    lowered = text.lower()
+    if "slide image not found" in lowered:
+        return "missing_slide_image"
+    if "invalid presentation plan" in lowered or "json" in lowered:
+        return "invalid_plan_json"
+    if "error" in lowered or "failed" in lowered:
+        return "pptx_generation_error"
+    return "missing_output"
 
 
 def _log_pptx_diagnostics(
@@ -1216,12 +1385,17 @@ def _log_pptx_diagnostics(
         and diagnostics.get("last_error_class") == "missing_required_tool_arg"
         else 0
     )
+    pptx_diagnostics = _pptx_diagnostics(state)
     logger.info(
         "[BuilderPptxDiagnostics] phase=%s pptx_skill_read_seen=%s "
         "pptx_generator_invoked=%s image_generation_invoked=%s "
         "valid_pptx_seen=%s pptx_integrity_reason=%s fallback_ext=%s "
         "write_file_missing_arg_count=%d requested_artifact_ext=%s "
-        "final_artifact_ext=%s artifact_is_fallback=%s fallback_reason=%s",
+        "final_artifact_ext=%s artifact_is_fallback=%s fallback_reason=%s "
+        "image_generation_attempt_count=%d image_generation_success_count=%d "
+        "image_generation_bytes_total=%d image_generation_error_class=%s "
+        "pptx_generator_attempt_count=%d pptx_generator_success_count=%d "
+        "pptx_generator_bytes_total=%d pptx_generator_error_class=%s",
         phase,
         _pptx_skill_read_seen(state),
         _pptx_generator_invoked_seen(state),
@@ -1241,6 +1415,14 @@ def _log_pptx_diagnostics(
         if _requested_pptx_artifact(state)
         and _artifact_path_suffix_label(artifact_path) not in {None, "pptx"}
         else None,
+        _pptx_diagnostic_count(state, "image_generation_attempt_count"),
+        _pptx_diagnostic_count(state, "image_generation_success_count"),
+        int(pptx_diagnostics.get("image_generation_bytes_total", 0) or 0),
+        pptx_diagnostics.get("image_generation_error_class"),
+        _pptx_diagnostic_count(state, "pptx_generator_attempt_count"),
+        _pptx_diagnostic_count(state, "pptx_generator_success_count"),
+        int(pptx_diagnostics.get("pptx_generator_bytes_total", 0) or 0),
+        pptx_diagnostics.get("pptx_generator_error_class"),
     )
 
 
@@ -1278,6 +1460,7 @@ class BuilderArtifactState(AgentState):
     builder_artifact_target_path: NotRequired[str]
     builder_last_successful_output_path: NotRequired[str | None]
     builder_write_diagnostics: NotRequired[Annotated[dict, _merge_builder_write_diagnostics]]
+    builder_pptx_diagnostics: NotRequired[Annotated[dict, _merge_builder_pptx_diagnostics]]
     # PR #94: count consecutive emit attempts rejected for empty/missing
     # ``artifact_path``. When this reaches ``_REJECTION_SHORT_CIRCUIT_AT``
     # we route directly to the hard-ceiling fallback instead of letting
@@ -1293,6 +1476,7 @@ class BuilderArtifactState(AgentState):
     builder_pdf_layout_repair_attempts: NotRequired[int]
     builder_pdf_layout_repair_requested: NotRequired[bool]
     builder_pptx_skill_correction_emitted: NotRequired[bool]
+    builder_pptx_fallback_directive_emitted: NotRequired[bool]
 
 
 class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
@@ -3295,6 +3479,52 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "builder_pptx_skill_correction_emitted": True,
         }
 
+    def _maybe_inject_pptx_fallback_after_image_failure(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _requested_pptx_artifact(state):
+            return None
+        if state.get("builder_pptx_fallback_directive_emitted"):
+            return None
+        if not state.get("builder_pptx_skill_correction_emitted"):
+            return None
+        if self._has_valid_pptx_output(state):
+            return None
+        image_attempts = _pptx_diagnostic_count(state, "image_generation_attempt_count")
+        image_successes = _pptx_diagnostic_count(state, "image_generation_success_count")
+        if image_attempts <= 0 or image_successes > 0:
+            return None
+        non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0)
+        if non_artifact_turns < 5:
+            return None
+        diagnostics = _pptx_diagnostics(state)
+        fallback_ext = _pptx_fallback_suffix(state)
+        logger.warning(
+            "BuilderArtifact: presentation image generation produced no valid images "
+            "after correction; directing explicit fallback image_attempts=%d "
+            "error_class=%s fallback_ext=%s",
+            image_attempts,
+            diagnostics.get("image_generation_error_class"),
+            fallback_ext.lstrip("."),
+        )
+        return {
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "[Sophia/presentation fallback directive]\n"
+                        "Image generation did not produce valid slide image bytes after the PPTX correction. "
+                        "Stop trying to compose a PowerPoint package in this run. Create a real degraded "
+                        f"{fallback_ext} fallback under `/mnt/user-data/outputs/` now, then call "
+                        "emit_builder_artifact for that fallback with explicit fallback metadata: "
+                        "`requested_artifact_ext='pptx'`, `artifact_is_fallback=true`, and "
+                        "`fallback_reason='pptx_generation_not_completed'`. "
+                        "If the fallback is HTML, it must be standalone browser-renderable HTML with "
+                        "`<!doctype html>`, `<html>`, `<head>`, and `<body>`; no Markdown fences. "
+                        "Do not emit Python scripts, test files, or placeholder PPTX files."
+                    )
+                )
+            ],
+            "builder_pptx_fallback_directive_emitted": True,
+        }
+
     def _combined_before_model_updates(
         self,
         state: BuilderArtifactState,
@@ -3318,6 +3548,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         pdf_repair = self._maybe_inject_pdf_layout_repair(state)
         if isinstance(pdf_repair, dict):
             update.update(pdf_repair)
+            return update
+        pptx_fallback = self._maybe_inject_pptx_fallback_after_image_failure(state)
+        if isinstance(pptx_fallback, dict):
+            update.update(pptx_fallback)
             return update
         pptx_correction = self._maybe_inject_pptx_skill_correction(state)
         if isinstance(pptx_correction, dict):
@@ -3585,6 +3819,111 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return self._pdf_generation_failure_command(request, result, payload)
         return Command(update={"messages": [result], **delta})
 
+    @staticmethod
+    def _image_generation_bash_delta(
+        *,
+        command: str,
+        text: str,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        output_path = _command_flag_value(command, "--output-file")
+        exists, bytes_count, status_reason = _virtual_output_status(state, output_path)
+        suffix = PurePosixPath(str(output_path or "")).suffix.lower()
+        valid_image = exists and bytes_count > 0 and suffix in _PPTX_IMAGE_EXTENSIONS
+        error_class = _classify_image_generation_error(text, valid_image, bytes_count)
+        logger.info(
+            "[BuilderImageGeneration] model=gpt-image-2 success=%s output_ext=%s "
+            "bytes=%d error_class=%s status_reason=%s",
+            valid_image,
+            suffix.lstrip(".") or None,
+            bytes_count,
+            error_class,
+            status_reason,
+        )
+        delta: dict[str, Any] = {
+            "image_generation_attempt_count": 1,
+            "image_generation_success_count": 1 if valid_image else 0,
+            "image_generation_bytes_total": bytes_count if valid_image else 0,
+            "image_generation_error_class": error_class,
+        }
+        if output_path and valid_image:
+            delta["image_output_paths"] = [output_path]
+        return delta
+
+    @staticmethod
+    def _pptx_generation_bash_delta(
+        *,
+        command: str,
+        text: str,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        output_path = _command_flag_value(command, "--output-file")
+        exists, bytes_count, status_reason = _virtual_output_status(state, output_path)
+        error_class = _classify_pptx_generation_error(state, output_path, text, exists)
+        valid_pptx = error_class is None
+        slide_count = len(_command_flag_values(command, "--slide-images"))
+        logger.info(
+            "[BuilderPptxGeneration] success=%s output_ext=%s bytes=%d "
+            "slide_image_count=%d error_class=%s status_reason=%s",
+            valid_pptx,
+            PurePosixPath(str(output_path or "")).suffix.lower().lstrip(".") or None,
+            bytes_count,
+            slide_count,
+            error_class,
+            status_reason,
+        )
+        delta: dict[str, Any] = {
+            "pptx_generator_attempt_count": 1,
+            "pptx_generator_success_count": 1 if valid_pptx else 0,
+            "pptx_generator_bytes_total": bytes_count if valid_pptx else 0,
+            "pptx_generator_error_class": error_class,
+        }
+        if output_path and valid_pptx:
+            delta["pptx_output_paths"] = [output_path]
+        return delta
+
+    @staticmethod
+    def _pptx_bash_result_delta(
+        request: ToolCallRequest,
+        result: ToolMessage,
+    ) -> dict[str, Any] | None:
+        args = request.tool_call.get("args") or {}
+        if not isinstance(args, dict):
+            return None
+        command = str(args.get("command") or "")
+        text = BuilderArtifactMiddleware._tool_message_text(result)
+        state = request.state or {}
+        if any(marker in command for marker in _IMAGE_GENERATION_PATH_MARKERS):
+            return BuilderArtifactMiddleware._image_generation_bash_delta(
+                command=command,
+                text=text,
+                state=state,
+            )
+        if any(marker in command for marker in _PPTX_GENERATOR_PATH_MARKERS):
+            return BuilderArtifactMiddleware._pptx_generation_bash_delta(
+                command=command,
+                text=text,
+                state=state,
+            )
+        return None
+
+    def _pptx_bash_result_command(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage | Command,
+    ) -> ToolMessage | Command:
+        if not isinstance(result, ToolMessage):
+            return result
+        delta = self._pptx_bash_result_delta(request, result)
+        if delta is None:
+            return result
+        return Command(
+            update={
+                "messages": [result],
+                "builder_pptx_diagnostics": delta,
+            }
+        )
+
     def _tool_result_command(
         self,
         request: ToolCallRequest,
@@ -3595,6 +3934,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return self._write_result_command(request, result)
         if tool_name in _PDF_CREATION_TOOL_NAMES and isinstance(result, ToolMessage):
             return self._pdf_result_command(request, result)
+        if tool_name in {"bash", "bash_tool"}:
+            return self._pptx_bash_result_command(request, result)
         return result
 
     @override

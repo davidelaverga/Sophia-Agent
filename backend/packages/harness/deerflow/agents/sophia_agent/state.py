@@ -149,6 +149,32 @@ def _merge_builder_write_diagnostic_value(
     merged[key] = value
 
 
+def _merge_builder_pptx_diagnostics(
+    current: dict | None, update: dict | None
+) -> dict:
+    """Reducer for safe PPTX/image-generation diagnostics."""
+    if current is None and update is None:
+        return {}
+    if current is None:
+        return dict(update or {})
+    if update is None:
+        return dict(current)
+
+    merged = dict(current)
+    for key, value in update.items():
+        if key.endswith("_count") and isinstance(value, int):
+            merged[key] = int(merged.get(key, 0) or 0) + value
+            continue
+        if key in {"image_output_paths", "pptx_output_paths"} and isinstance(value, list):
+            merged[key] = _merge_string_list(merged.get(key), value)
+            continue
+        if key.endswith("_bytes_total") and isinstance(value, int):
+            merged[key] = int(merged.get(key, 0) or 0) + value
+            continue
+        merged[key] = value
+    return merged
+
+
 def _merge_string_list(current: object, update: list) -> list[str]:
     seen = {str(item): None for item in current if isinstance(item, str)} if isinstance(current, list) else {}
     for item in update:
@@ -217,6 +243,7 @@ class SophiaState(AgentState):
     builder_artifact_target_path: NotRequired[str]
     builder_last_successful_output_path: NotRequired[str | None]
     builder_write_diagnostics: NotRequired[Annotated[dict, _merge_builder_write_diagnostics]]
+    builder_pptx_diagnostics: NotRequired[Annotated[dict, _merge_builder_pptx_diagnostics]]
     last_shell_command: NotRequired[dict | None]
     recent_shell_commands: NotRequired[list[dict] | None]
     # These three fields are written by the builder's web tools

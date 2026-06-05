@@ -499,7 +499,7 @@ Phase 11.0 keeps the same browser-owned Gemini transport and backend relay, but 
 Prompt-source alignment:
 
 - `voice/realtime/sophia_prompt.py` assembles Gemini Live setup instructions from canonical Sophia sources rather than a Gemini-specific compact persona.
-- The source list includes `skills/public/sophia/soul.md`, `voice.md`, `techniques.md`, `AGENTS.md`, platform guidance from `PlatformContextMiddleware`, the selected context/ritual prompt files when present, and the voice artifact contract from `ArtifactMiddleware`.
+- The source list includes `skills/public/sophia/soul.md`, `voice.md`, `techniques.md`, `coordination_core.md`, `companion_delegation.md`, platform guidance from `PlatformContextMiddleware`, the selected context/ritual prompt files when present, and the voice artifact contract from `ArtifactMiddleware`.
 - The Gemini browser-session route no longer accepts an arbitrary instruction override, so ordinary debug sessions use the same Sophia prompt assembly by default.
 
 Existing-tool coverage:

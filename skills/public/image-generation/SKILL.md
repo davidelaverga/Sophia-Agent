@@ -7,7 +7,7 @@ description: Use this skill when the user requests to generate, create, imagine,
 
 ## Overview
 
-This skill generates high-quality images using structured prompts and a Python script. The workflow includes creating JSON-formatted prompts and executing image generation with optional reference images.
+This skill generates high-quality images using structured prompts and a Python script backed by OpenAI `gpt-image-2`. The workflow includes creating JSON-formatted prompts and executing image generation with optional reference images.
 
 ## Core Capabilities
 
@@ -34,7 +34,7 @@ Generate a structured JSON file in `/mnt/user-data/workspace/` with naming patte
 
 ### Step 3: Execute Generation
 
-Call the Python script:
+Call the Python script. It requires `OPENAI_API_KEY` in the builder/LangGraph environment and exits non-zero if the key is missing, the OpenAI request fails, reference images are invalid, or no image bytes land on disk:
 ```bash
 python /mnt/skills/public/image-generation/scripts/generate.py \
   --prompt-file /mnt/user-data/workspace/prompt-file.json \

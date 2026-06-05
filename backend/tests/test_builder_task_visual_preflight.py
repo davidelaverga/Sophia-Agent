@@ -1,7 +1,7 @@
 """Pre-flight gate test: when ``OPENAI_API_KEY`` is missing and the task
 will hit the image-generation skill, ``BuilderTaskMiddleware`` injects a
 ``<missing_capability>`` block telling the model to STOP rather than
-loop. Spec-aligned per ``skills/public/sophia/AGENTS.md``.
+loop. Spec-aligned per ``skills/public/sophia/builder_obligations.md``.
 """
 
 from __future__ import annotations

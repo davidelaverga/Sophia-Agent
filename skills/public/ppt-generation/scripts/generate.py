@@ -1,5 +1,7 @@
 import json
 import os
+import sys
+import zipfile
 from io import BytesIO
 
 from PIL import Image
@@ -26,6 +28,10 @@ def generate_ppt(
     # Load presentation plan
     with open(plan_file, "r", encoding="utf-8") as f:
         plan = json.load(f)
+    if not isinstance(plan, dict):
+        raise ValueError("Invalid presentation plan: top-level JSON must be an object")
+    if not slide_images:
+        raise ValueError("No slide images were provided")
 
     # Determine slide dimensions based on aspect ratio
     aspect_ratio = plan.get("aspect_ratio", "16:9")
@@ -53,7 +59,7 @@ def generate_ppt(
 
     for i, image_path in enumerate(slide_images):
         if not os.path.exists(image_path):
-            return f"Error: Slide image not found: {image_path}"
+            raise FileNotFoundError("Slide image not found")
 
         # Add a blank slide
         slide = prs.slides.add_slide(blank_layout)
@@ -119,14 +125,22 @@ def generate_ppt(
                     text_frame.text = "\n".join(notes)
 
     # Save presentation
+    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
     prs.save(output_file)
+    if not os.path.exists(output_file) or os.path.getsize(output_file) <= 0:
+        raise RuntimeError("PPTX save did not produce output bytes")
+    with zipfile.ZipFile(output_file, "r") as archive:
+        names = set(archive.namelist())
+    required = {"[Content_Types].xml", "_rels/.rels", "ppt/presentation.xml"}
+    missing = sorted(required.difference(names))
+    if missing:
+        raise RuntimeError(f"PPTX save missing required Office entries: {','.join(missing)}")
 
-    return f"Successfully generated presentation with {len(slide_images)} slides to {output_file}"
+    return f"Successfully generated presentation with {len(slide_images)} slides"
 
 
-if __name__ == "__main__":
+def main() -> int:
     import argparse
-
     parser = argparse.ArgumentParser(
         description="Generate PowerPoint presentation from slide images"
     )
@@ -150,12 +164,26 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     try:
-        print(
-            generate_ppt(
-                args.plan_file,
-                args.slide_images,
-                args.output_file,
-            )
+        message = generate_ppt(
+            args.plan_file,
+            args.slide_images,
+            args.output_file,
         )
+        size = os.path.getsize(args.output_file)
+        print(message)
+        print(
+            "PPT generation diagnostics: "
+            f"slide_count={len(args.slide_images)} output_ext=.pptx bytes={size}",
+            file=sys.stderr,
+        )
+        return 0
     except Exception as e:
-        print(f"Error while generating presentation: {e}")
+        print(
+            f"Error while generating presentation: {type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
