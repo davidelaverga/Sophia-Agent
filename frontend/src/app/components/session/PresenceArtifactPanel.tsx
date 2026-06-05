@@ -2,36 +2,50 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
-import { useArtifactCoReview } from "../../hooks/useArtifactCoReview"
-import { haptic } from "../../hooks/useHaptics"
 import {
+  appendWorkspaceEvent,
   buildArtifactViewSignature,
+  buildCoreviewArtifactStableIdentity,
+  buildCoreviewWorkspaceActor,
+  buildCoreviewWorkspaceKey,
+  buildCoreviewWorkspaceShareState,
+  clampArtifactZoom,
+  cn,
+  COREVIEW_ADD_ANNOTATION_TOOL_NAME,
+  COREVIEW_FOCUS_ANCHOR_TOOL_NAME,
+  COREVIEW_REFRESH_VIEW_TOOL_NAME,
+  COREVIEW_SET_VIEW_TOOL_NAME,
+  coreviewArtifactCapabilityTelemetry,
+  coreviewFlagDiagnostics,
+  createCoreviewActionBus,
   createDefaultArtifactViewState,
   detectArtifactRendererKind,
-  clampArtifactZoom,
-  safeArtifactViewTelemetry,
-  type ArtifactViewState,
-} from "../../lib/artifact-renderers"
-import {
+  getBuilderArtifactFiles,
+  getCoreviewArtifactCapabilitiesForFile,
+  getCoreviewWorkspaceEventLogTelemetry,
+  haptic,
+  hashCoreviewWorkspaceKey,
+  isCoreviewStillFrameReviewEnabled,
+  isRealReflection,
+  normalizeBuilderArtifactPath,
+  normalizeCoreviewArtifactKey,
   parseArtifactReviewVoiceCommand,
   parseArtifactReviewVoiceCommands,
+  recordSophiaCaptureEvent,
+  registerCoreviewToolBridge,
+  safeArtifactViewTelemetry,
+  useArtifactCoReview,
+  useCoreviewAnnotationStore,
+  usePresenceStore,
+  wasRecentCoreviewToolActionHandled,
+  type ArtifactReviewAnnotationKind,
   type ArtifactReviewAnnotationUtteranceKind,
   type ArtifactReviewVoiceCommand,
   type ArtifactReviewVoiceCommandRefreshResult,
   type ArtifactReviewVoiceCommandRouteResult,
   type ArtifactReviewVoiceCommandRouter,
-} from "../../lib/artifact-review-voice-commands"
-import { getBuilderArtifactFiles, normalizeBuilderArtifactPath } from "../../lib/builder-artifacts"
-import { coreviewFlagDiagnostics, isCoreviewStillFrameReviewEnabled } from "../../lib/co-review-flags"
-import type { CoReviewMediaTransport } from "../../lib/co-review-transport"
-import {
-  COREVIEW_ADD_ANNOTATION_TOOL_NAME,
-  COREVIEW_FOCUS_ANCHOR_TOOL_NAME,
-  COREVIEW_REFRESH_VIEW_TOOL_NAME,
-  COREVIEW_SET_VIEW_TOOL_NAME,
-  createCoreviewActionBus,
-  registerCoreviewToolBridge,
-  wasRecentCoreviewToolActionHandled,
+  type ArtifactViewState,
+  type CoReviewMediaTransport,
   type CoreviewActionBus,
   type CoreviewActionResult,
   type CoreviewAddAnnotationAdapterInput,
@@ -49,32 +63,9 @@ import {
   type CoreviewToolName,
   type CoreviewToolRefreshResult,
   type CoreviewViewReadyResult,
-} from "../../lib/coreview-actions"
-import { useCoreviewAnnotationStore } from "../../lib/coreview-annotation-store"
-import {
-  coreviewArtifactCapabilityTelemetry,
-  getCoreviewArtifactCapabilitiesForFile,
-} from "../../lib/coreview-artifact-capabilities"
-import {
-  buildCoreviewArtifactStableIdentity,
-  buildCoreviewWorkspaceKey,
-  normalizeCoreviewArtifactKey,
-} from "../../lib/coreview-artifact-identity"
-import {
-  appendWorkspaceEvent,
-  getCoreviewWorkspaceEventLogTelemetry,
-  hashCoreviewWorkspaceKey,
-} from "../../lib/coreview-workspace-event-log"
-import {
-  buildCoreviewWorkspaceActor,
   type CoreviewWorkspaceActor,
   type CoreviewWorkspaceEventType,
-} from "../../lib/coreview-workspace-events"
-import { buildCoreviewWorkspaceShareState } from "../../lib/coreview-workspace-share"
-import { recordSophiaCaptureEvent } from "../../lib/session-capture"
-import { cn } from "../../lib/utils"
-import { isRealReflection } from "../../session/artifacts"
-import { usePresenceStore } from "../../stores/presence-store"
+} from "./PresenceArtifactPanelDeps"
 import type { ArtifactToolMode } from "../../types/artifact-annotations"
 import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 import type { RitualArtifacts } from "../../types/session"
@@ -135,26 +126,18 @@ function inferArtifactTypeFromMetadata(
 ): BuilderArtifactV1["artifactType"] {
   const mimeType = mimeTypeValue?.toLowerCase().split(';')[0]?.trim() ?? ''
   const extension = name?.split('.').pop()?.toLowerCase() ?? ''
-
-  if (mimeType.includes('presentation') || extension === 'ppt' || extension === 'pptx') {
-    return 'presentation'
-  }
-  if (mimeType.includes('html') || extension === 'html' || extension === 'htm') {
-    return 'webpage'
-  }
-  if (
-    mimeType.includes('json')
-    || mimeType.includes('csv')
-    || ['csv', 'json', 'xlsx', 'xls'].includes(extension)
-  ) {
-    return 'data_analysis'
-  }
-  if (mimeType.includes('image') || extension === 'svg') {
-    return 'visual_report'
-  }
-
-  return 'document'
+  return ARTIFACT_TYPE_RULES.find((rule) => rule.matches(mimeType, extension))?.type ?? 'document'
 }
+
+const ARTIFACT_TYPE_RULES: Array<{
+  type: BuilderArtifactV1["artifactType"]
+  matches: (mimeType: string, extension: string) => boolean
+}> = [
+  { type: 'presentation', matches: (mimeType, extension) => mimeType.includes('presentation') || ['ppt', 'pptx'].includes(extension) },
+  { type: 'webpage', matches: (mimeType, extension) => mimeType.includes('html') || ['html', 'htm'].includes(extension) },
+  { type: 'data_analysis', matches: (mimeType, extension) => mimeType.includes('json') || mimeType.includes('csv') || ['csv', 'json', 'xlsx', 'xls'].includes(extension) },
+  { type: 'visual_report', matches: (mimeType, extension) => mimeType.includes('image') || extension === 'svg' },
+]
 
 function inferArtifactType(item: BuilderArtifactLibraryItemV1): BuilderArtifactV1["artifactType"] {
   return inferArtifactTypeFromMetadata(item.name, item.mimeType)
@@ -291,23 +274,23 @@ function buildBlockedVoiceCommandMessage(
 }
 
 function coreviewToolNameFromAction(action: CoreviewActionResult["action"]): CoreviewToolName {
-  return action === "refresh_view"
-    ? COREVIEW_REFRESH_VIEW_TOOL_NAME
-    : action === "add_annotation"
-      ? COREVIEW_ADD_ANNOTATION_TOOL_NAME
-      : action === "focus_anchor"
-        ? COREVIEW_FOCUS_ANCHOR_TOOL_NAME
-        : COREVIEW_SET_VIEW_TOOL_NAME
+  return COREVIEW_TOOL_NAME_BY_ACTION[action] ?? COREVIEW_SET_VIEW_TOOL_NAME
 }
 
 function coreviewToolNameFromVoiceCommand(command: ArtifactReviewVoiceCommand): CoreviewToolName {
-  return command.kind === "add_annotation"
-    ? COREVIEW_ADD_ANNOTATION_TOOL_NAME
-    : command.kind === "focus_anchor"
-      ? COREVIEW_FOCUS_ANCHOR_TOOL_NAME
-      : command.kind === "refresh_view"
-        ? COREVIEW_REFRESH_VIEW_TOOL_NAME
-        : COREVIEW_SET_VIEW_TOOL_NAME
+  return COREVIEW_TOOL_NAME_BY_VOICE_COMMAND[command.kind] ?? COREVIEW_SET_VIEW_TOOL_NAME
+}
+
+const COREVIEW_TOOL_NAME_BY_ACTION: Partial<Record<CoreviewActionResult["action"], CoreviewToolName>> = {
+  refresh_view: COREVIEW_REFRESH_VIEW_TOOL_NAME,
+  add_annotation: COREVIEW_ADD_ANNOTATION_TOOL_NAME,
+  focus_anchor: COREVIEW_FOCUS_ANCHOR_TOOL_NAME,
+}
+
+const COREVIEW_TOOL_NAME_BY_VOICE_COMMAND: Partial<Record<ArtifactReviewVoiceCommand["kind"], CoreviewToolName>> = {
+  add_annotation: COREVIEW_ADD_ANNOTATION_TOOL_NAME,
+  focus_anchor: COREVIEW_FOCUS_ANCHOR_TOOL_NAME,
+  refresh_view: COREVIEW_REFRESH_VIEW_TOOL_NAME,
 }
 
 function isAnnotationVoiceCommand(command: ArtifactReviewVoiceCommand): boolean {
@@ -323,94 +306,69 @@ function isAnnotationOrFocusVoiceCommand(command: ArtifactReviewVoiceCommand): b
 }
 
 function coreviewBlockedStatusText(reason: CoreviewToolBlockedReason | null): string {
-  switch (reason) {
-    case "no_selected_artifact":
-      return "No artifact is selected."
-    case "artifact_mismatch":
-      return "That artifact is not selected."
-    case "artifact_rebind_required":
-      return "Reconnect voice or start Review with Sophia to rebind this artifact."
-    case "artifact_rebind_failed":
-      return "Reopen this artifact, then start Review with Sophia again."
-    case "artifact_not_available_in_current_session":
-      return "This artifact is not available in the current session."
-    case "requested_page_out_of_bounds":
-      return "That page is not available in this PDF."
-    case "pages_not_supported":
-      return "This artifact does not support page navigation."
-    case "zoom_not_supported":
-      return "This artifact does not support zoom controls."
-    case "annotations_not_supported":
-      return "Annotations are not available for this artifact format."
-    case "layout_anchor_not_supported":
-      return "Layout anchors are not available for this artifact format."
-    case "ocr_not_available":
-      return "OCR is not available yet."
-    case "pptx_native_renderer_unavailable":
-      return "PPTX native canvas rendering is not available yet."
-    case "unsupported_pages":
-    case "unsupported_renderer":
-      return "This view cannot be controlled by Sophia."
-    case "review_not_active":
-      return "Visual review is not active."
-    case "refresh_unavailable":
-      return "Sophia's visual refresh is unavailable."
-    case "view_ready_timeout":
-      return "The artifact view did not become ready in time."
-    case "tool_unavailable":
-      return "Sophia cannot control this view right now."
-    case "invalid_tool_args":
-      return "Sophia asked for an invalid view change."
-    case "annotation_commit_failed":
-      return "Sophia could not verify that the annotation was added."
-    case "unsupported_annotation_kind":
-      return "That annotation type is not available yet."
-    default:
-      return "Sophia could not update this view."
-  }
+  return reason ? COREVIEW_BLOCKED_STATUS_TEXT[reason] ?? "Sophia could not update this view." : "Sophia could not update this view."
+}
+
+const COREVIEW_BLOCKED_STATUS_TEXT: Partial<Record<CoreviewToolBlockedReason, string>> = {
+  no_selected_artifact: "No artifact is selected.",
+  artifact_mismatch: "That artifact is not selected.",
+  artifact_rebind_required: "Reconnect voice or start Review with Sophia to rebind this artifact.",
+  artifact_rebind_failed: "Reopen this artifact, then start Review with Sophia again.",
+  artifact_not_available_in_current_session: "This artifact is not available in the current session.",
+  requested_page_out_of_bounds: "That page is not available in this PDF.",
+  pages_not_supported: "This artifact does not support page navigation.",
+  zoom_not_supported: "This artifact does not support zoom controls.",
+  annotations_not_supported: "Annotations are not available for this artifact format.",
+  layout_anchor_not_supported: "Layout anchors are not available for this artifact format.",
+  ocr_not_available: "OCR is not available yet.",
+  pptx_native_renderer_unavailable: "PPTX native canvas rendering is not available yet.",
+  unsupported_pages: "This view cannot be controlled by Sophia.",
+  unsupported_renderer: "This view cannot be controlled by Sophia.",
+  review_not_active: "Visual review is not active.",
+  refresh_unavailable: "Sophia's visual refresh is unavailable.",
+  view_ready_timeout: "The artifact view did not become ready in time.",
+  tool_unavailable: "Sophia cannot control this view right now.",
+  invalid_tool_args: "Sophia asked for an invalid view change.",
+  annotation_commit_failed: "Sophia could not verify that the annotation was added.",
+  unsupported_annotation_kind: "That annotation type is not available yet.",
 }
 
 function routeBlockedReasonFromCoreview(
   reason: CoreviewToolBlockedReason | null,
 ): ArtifactReviewVoiceCommandRouteResult["blockedReason"] {
-  switch (reason) {
-    case "no_selected_artifact":
-      return "no_artifact_selected"
-    case "requested_page_out_of_bounds":
-      return "requested_page_out_of_bounds"
-    case "pages_not_supported":
-    case "zoom_not_supported":
-    case "annotations_not_supported":
-    case "layout_anchor_not_supported":
-    case "ocr_not_available":
-    case "pptx_native_renderer_unavailable":
-    case "unsupported_pages":
-    case "unsupported_renderer":
-      return "no_multipage_artifact_selected"
-    default:
-      return reason ? "visual_refresh_unavailable" : null
-  }
+  return reason ? COREVIEW_ROUTE_BLOCKED_REASON[reason] ?? "visual_refresh_unavailable" : null
+}
+
+const COREVIEW_ROUTE_BLOCKED_REASON: Partial<Record<
+  CoreviewToolBlockedReason,
+  NonNullable<ArtifactReviewVoiceCommandRouteResult["blockedReason"]>
+>> = {
+  no_selected_artifact: "no_artifact_selected",
+  requested_page_out_of_bounds: "requested_page_out_of_bounds",
+  pages_not_supported: "no_multipage_artifact_selected",
+  zoom_not_supported: "no_multipage_artifact_selected",
+  annotations_not_supported: "no_multipage_artifact_selected",
+  layout_anchor_not_supported: "no_multipage_artifact_selected",
+  ocr_not_available: "no_multipage_artifact_selected",
+  pptx_native_renderer_unavailable: "no_multipage_artifact_selected",
+  unsupported_pages: "no_multipage_artifact_selected",
+  unsupported_renderer: "no_multipage_artifact_selected",
 }
 
 function refreshResultFromCoreview(
   result: CoreviewToolRefreshResult,
 ): ArtifactReviewVoiceCommandRefreshResult {
-  switch (result) {
-    case "success":
-      return "success"
-    case "error":
-    case "failed":
-      return "error"
-    case "view_ready_timeout":
-      return "unavailable"
-    case "not_active":
-      return "not_active"
-    case "unavailable":
-    case "refresh_unavailable":
-      return "unavailable"
-    default:
-      return "not_requested"
-  }
+  return COREVIEW_REFRESH_RESULT[result] ?? "not_requested"
+}
+
+const COREVIEW_REFRESH_RESULT: Partial<Record<CoreviewToolRefreshResult, ArtifactReviewVoiceCommandRefreshResult>> = {
+  success: "success",
+  error: "error",
+  failed: "error",
+  view_ready_timeout: "unavailable",
+  not_active: "not_active",
+  unavailable: "unavailable",
+  refresh_unavailable: "unavailable",
 }
 
 function coreviewAnnotationStateChanged(result: CoreviewActionResult): boolean {
@@ -447,78 +405,27 @@ function coreviewSetViewInputFromVoiceCommand(
   command: ArtifactReviewVoiceCommand,
   current: CoreviewCurrentView,
 ): CoreviewSetViewInput {
-  switch (command.kind) {
-    case "go_to_page":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        pageNumber: command.pageTarget,
-        reason: "voice command fallback",
-      }
-    case "next_page":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        pageIndex: current.pageIndex + 1,
-        reason: "voice command fallback",
-      }
-    case "previous_page":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        pageIndex: current.pageIndex - 1,
-        reason: "voice command fallback",
-      }
-    case "first_page":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        pageIndex: 0,
-        reason: "voice command fallback",
-      }
-    case "last_page":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        pageIndex: Math.max(0, current.pageCount - 1),
-        reason: "voice command fallback",
-      }
-    case "zoom_in":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        zoom: clampArtifactZoom(current.zoom * 1.2),
-        fitMode: "custom",
-        reason: "voice command fallback",
-      }
-    case "zoom_out":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        zoom: clampArtifactZoom(current.zoom / 1.2),
-        fitMode: "custom",
-        reason: "voice command fallback",
-      }
-    case "fit_width":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        zoom: 1,
-        fitMode: "width",
-        reason: "voice command fallback",
-      }
-    case "fit_page":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        zoom: 1,
-        fitMode: "page",
-        reason: "voice command fallback",
-      }
-    case "reset_zoom":
-      return {
-        artifactId: current.artifactId ?? undefined,
-        zoom: 1,
-        fitMode: "custom",
-        reason: "voice command fallback",
-      }
-    default:
-      return {
-        artifactId: current.artifactId ?? undefined,
-        reason: "voice command fallback",
-      }
+  return {
+    artifactId: current.artifactId ?? undefined,
+    reason: "voice command fallback",
+    ...COREVIEW_SET_VIEW_INPUT_BY_COMMAND[command.kind]?.(command, current),
   }
+}
+
+const COREVIEW_SET_VIEW_INPUT_BY_COMMAND: Partial<Record<
+  ArtifactReviewVoiceCommand["kind"],
+  (command: ArtifactReviewVoiceCommand, current: CoreviewCurrentView) => Partial<CoreviewSetViewInput>
+>> = {
+  go_to_page: (command) => ({ pageNumber: command.pageTarget }),
+  next_page: (_command, current) => ({ pageIndex: current.pageIndex + 1 }),
+  previous_page: (_command, current) => ({ pageIndex: current.pageIndex - 1 }),
+  first_page: () => ({ pageIndex: 0 }),
+  last_page: (_command, current) => ({ pageIndex: Math.max(0, current.pageCount - 1) }),
+  zoom_in: (_command, current) => ({ zoom: clampArtifactZoom(current.zoom * 1.2), fitMode: "custom" }),
+  zoom_out: (_command, current) => ({ zoom: clampArtifactZoom(current.zoom / 1.2), fitMode: "custom" }),
+  fit_width: () => ({ zoom: 1, fitMode: "width" }),
+  fit_page: () => ({ zoom: 1, fitMode: "page" }),
+  reset_zoom: () => ({ zoom: 1, fitMode: "custom" }),
 }
 
 function coreviewAnchorFromVoiceCommand(
@@ -564,17 +471,14 @@ function annotationFallbackUtteranceKind(
 function annotationUtteranceKindForKind(
   kind: ArtifactReviewVoiceCommand["annotationKind"],
 ): ArtifactReviewAnnotationUtteranceKind {
-  switch (kind) {
-    case "comment":
-      return "annotation_comment"
-    case "underline":
-      return "annotation_underline"
-    case "arrow":
-      return "annotation_arrow"
-    case "highlight":
-    default:
-      return "annotation_highlight"
-  }
+  return ANNOTATION_UTTERANCE_BY_KIND[kind ?? "highlight"] ?? "annotation_highlight"
+}
+
+const ANNOTATION_UTTERANCE_BY_KIND: Record<ArtifactReviewAnnotationKind, ArtifactReviewAnnotationUtteranceKind> = {
+  comment: "annotation_comment",
+  underline: "annotation_underline",
+  arrow: "annotation_arrow",
+  highlight: "annotation_highlight",
 }
 
 function coreviewFocusAnchorInputFromVoiceCommand(

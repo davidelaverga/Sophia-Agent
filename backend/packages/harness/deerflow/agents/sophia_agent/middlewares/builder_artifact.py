@@ -264,17 +264,18 @@ def _merge_builder_pptx_diagnostics(
         return dict(current)
     merged = dict(current)
     for key, value in update.items():
-        if key.endswith("_count") and isinstance(value, int):
-            merged[key] = int(merged.get(key, 0) or 0) + value
-            continue
-        if key in {"image_output_paths", "pptx_output_paths"} and isinstance(value, list):
-            merged[key] = _merge_string_list(merged.get(key), value)
-            continue
-        if key.endswith("_bytes_total") and isinstance(value, int):
-            merged[key] = int(merged.get(key, 0) or 0) + value
-            continue
-        merged[key] = value
+        _merge_builder_pptx_diagnostic_value(merged, key, value)
     return merged
+
+
+def _merge_builder_pptx_diagnostic_value(merged: dict, key: str, value: object) -> None:
+    if (key.endswith("_count") or key.endswith("_bytes_total")) and isinstance(value, int):
+        merged[key] = int(merged.get(key, 0) or 0) + value
+        return
+    if key in {"image_output_paths", "pptx_output_paths"} and isinstance(value, list):
+        merged[key] = _merge_string_list(merged.get(key), value)
+        return
+    merged[key] = value
 
 
 def _extract_output_relative_path(artifact_path: str | None) -> str | None:
@@ -822,15 +823,26 @@ def _apply_artifact_request_metadata(
         artifact["artifact_ext"] = artifact_ext
         if requested_ext == "pptx" and artifact_ext in {"html", "htm"}:
             artifact["artifact_type"] = "webpage"
-    is_fallback = bool(requested_ext and artifact_ext and artifact_ext != requested_ext)
-    if is_fallback:
+    if _artifact_is_extension_fallback(requested_ext, artifact_ext):
         artifact["artifact_is_fallback"] = True
-        artifact["fallback_reason"] = fallback_reason or artifact.get("fallback_reason") or (
-            f"{requested_ext}_generation_not_completed"
-        )
+        artifact["fallback_reason"] = _artifact_fallback_reason(artifact, requested_ext, fallback_reason)
     elif requested_ext:
         artifact.setdefault("artifact_is_fallback", False)
     return artifact
+
+
+def _artifact_is_extension_fallback(requested_ext: str | None, artifact_ext: str | None) -> bool:
+    return bool(requested_ext and artifact_ext and artifact_ext != requested_ext)
+
+
+def _artifact_fallback_reason(
+    artifact: dict[str, Any],
+    requested_ext: str | None,
+    fallback_reason: str | None,
+) -> str | None:
+    return fallback_reason or artifact.get("fallback_reason") or (
+        f"{requested_ext}_generation_not_completed" if requested_ext else None
+    )
 
 
 def _pptx_artifact_path_rejection_reason(path: Any, state: dict[str, Any]) -> str | None:
@@ -1350,15 +1362,24 @@ def _classify_pptx_generation_error(
     exists: bool,
 ) -> str | None:
     if exists:
-        canonical = _canonical_outputs_artifact_path(path)
-        if canonical:
-            relative = _extract_output_relative_path(canonical)
-            outputs_root = _outputs_root_from_state(state)
-            if relative and outputs_root:
-                reason = _pptx_integrity_error_for_file(outputs_root / relative)
-                if reason is None:
-                    return None
-                return reason
+        integrity_reason = _existing_pptx_generation_error(state, path)
+        if integrity_reason != "__inspect_text__":
+            return integrity_reason
+    return _pptx_generation_error_from_text(text)
+
+
+def _existing_pptx_generation_error(state: dict[str, Any], path: str | None) -> str | None:
+    canonical = _canonical_outputs_artifact_path(path)
+    if not canonical:
+        return "__inspect_text__"
+    relative = _extract_output_relative_path(canonical)
+    outputs_root = _outputs_root_from_state(state)
+    if not relative or not outputs_root:
+        return "__inspect_text__"
+    return _pptx_integrity_error_for_file(outputs_root / relative)
+
+
+def _pptx_generation_error_from_text(text: str) -> str:
     lowered = text.lower()
     if "slide image not found" in lowered:
         return "missing_slide_image"
@@ -1379,12 +1400,7 @@ def _log_pptx_diagnostics(
     if not _requested_pptx_artifact(state):
         return
     diagnostics = state.get("builder_write_diagnostics") or {}
-    write_arg_errors = (
-        int(diagnostics.get("error_count", 0) or 0)
-        if isinstance(diagnostics, dict)
-        and diagnostics.get("last_error_class") == "missing_required_tool_arg"
-        else 0
-    )
+    write_arg_errors = _pptx_write_arg_error_count(diagnostics)
     pptx_diagnostics = _pptx_diagnostics(state)
     logger.info(
         "[BuilderPptxDiagnostics] phase=%s pptx_skill_read_seen=%s "
@@ -1406,15 +1422,8 @@ def _log_pptx_diagnostics(
         write_arg_errors,
         _requested_artifact_ext(state),
         _artifact_path_suffix_label(artifact_path),
-        bool(
-            _requested_artifact_ext(state)
-            and _artifact_path_suffix_label(artifact_path)
-            and _artifact_path_suffix_label(artifact_path) != _requested_artifact_ext(state)
-        ),
-        "pptx_generation_not_completed"
-        if _requested_pptx_artifact(state)
-        and _artifact_path_suffix_label(artifact_path) not in {None, "pptx"}
-        else None,
+        _pptx_artifact_is_fallback_label(state, artifact_path),
+        _pptx_fallback_reason_label(state, artifact_path),
         _pptx_diagnostic_count(state, "image_generation_attempt_count"),
         _pptx_diagnostic_count(state, "image_generation_success_count"),
         int(pptx_diagnostics.get("image_generation_bytes_total", 0) or 0),
@@ -1423,6 +1432,109 @@ def _log_pptx_diagnostics(
         _pptx_diagnostic_count(state, "pptx_generator_success_count"),
         int(pptx_diagnostics.get("pptx_generator_bytes_total", 0) or 0),
         pptx_diagnostics.get("pptx_generator_error_class"),
+    )
+
+
+def _pptx_write_arg_error_count(diagnostics: object) -> int:
+    if not isinstance(diagnostics, dict):
+        return 0
+    if diagnostics.get("last_error_class") != "missing_required_tool_arg":
+        return 0
+    return int(diagnostics.get("error_count", 0) or 0)
+
+
+def _pptx_artifact_is_fallback_label(state: dict[str, Any], artifact_path: object) -> bool:
+    requested = _requested_artifact_ext(state)
+    artifact = _artifact_path_suffix_label(artifact_path)
+    return bool(requested and artifact and artifact != requested)
+
+
+def _pptx_fallback_reason_label(state: dict[str, Any], artifact_path: object) -> str | None:
+    if _requested_pptx_artifact(state) and _artifact_path_suffix_label(artifact_path) not in {None, "pptx"}:
+        return "pptx_generation_not_completed"
+    return None
+
+
+_PPTX_DRIFT_TOOL_NAMES = {
+    "write_file",
+    "write_file_tool",
+    "bash",
+    "bash_tool",
+    "str_replace",
+    "str_replace_tool",
+    "emit_builder_artifact",
+}
+
+
+def _recent_builder_tool_names(state: dict[str, Any], *, limit: int) -> list[str]:
+    summaries = state.get("builder_tool_turn_summaries") or []
+    return [
+        name
+        for summary in summaries[-limit:]
+        if isinstance(summary, dict)
+        for name in (summary.get("tool_names") or [])
+        if isinstance(name, str)
+    ]
+
+
+def _pptx_recent_tools_drifted(tool_names: list[str]) -> bool:
+    return any(name in _PPTX_DRIFT_TOOL_NAMES for name in tool_names)
+
+
+def _pptx_write_error_count(state: dict[str, Any]) -> int:
+    diagnostics = state.get("builder_write_diagnostics")
+    if not isinstance(diagnostics, dict):
+        return 0
+    return int(diagnostics.get("error_count", 0) or 0)
+
+
+def _log_pptx_skill_correction(
+    state: dict[str, Any],
+    *,
+    non_artifact_turns: int,
+    recent_tool_names: list[str],
+    generator_invoked_seen: bool,
+    valid_pptx_seen: bool,
+) -> None:
+    logger.warning(
+        "BuilderArtifact: presentation target needs ppt-generation correction "
+        "turn=%d recent_tools=%s pptx_skill_read_seen=%s "
+        "pptx_generator_invoked=%s image_generation_invoked=%s "
+        "valid_pptx_seen=%s fallback_ext=%s write_file_missing_arg_count=%s",
+        non_artifact_turns,
+        ",".join(recent_tool_names[-6:]),
+        _pptx_skill_read_seen(state),
+        generator_invoked_seen,
+        _image_generation_invoked_seen(state),
+        valid_pptx_seen,
+        _pptx_fallback_suffix(state).lstrip("."),
+        _pptx_write_error_count(state),
+    )
+
+
+def _pptx_skill_correction_message(state: dict[str, Any]) -> str:
+    fallback_suffix = _pptx_fallback_suffix(state)
+    return (
+        "[Sophia/presentation-skill correction]\n"
+        "This is a PPTX slide-deck build. Reading SKILL.md is useful, "
+        "but it is not completion. Stop ad hoc deck generation, "
+        "python-pptx scripts, `.py` files, and generic write_file loops.\n\n"
+        "Your next safe workflow is:\n"
+        "1. If you have not already done so, call "
+        "`read_file(path='/mnt/skills/public/ppt-generation/SKILL.md')`.\n"
+        "2. Create the slide plan/assets the skill expects under "
+        "`/mnt/user-data/workspace/`.\n"
+        "3. Generate slide images with "
+        "`/mnt/skills/public/image-generation/scripts/generate.py`.\n"
+        "4. Compose the deck by running "
+        "`/mnt/skills/public/ppt-generation/scripts/generate.py`.\n"
+        "5. Emit only after the `.pptx` exists and is a valid PowerPoint package.\n\n"
+        "If image/deck generation cannot complete after this correction, create a real "
+        f"{fallback_suffix} fallback under `/mnt/user-data/outputs/` with "
+        "`write_file(description='fallback deck outline', path='/mnt/user-data/outputs/deck"
+        f"{fallback_suffix}', content='...', append=False)`, then emit that "
+        "fallback. Do not emit placeholder/tiny/corrupt `.pptx` files, Python scripts, "
+        "or test files."
     )
 
 
@@ -2009,26 +2121,53 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 requested_pptx=requested_pptx,
             )
         ]
-        if requested_pdf:
-            pdf_candidates = [] if _pdf_render_unusable_after_repair(state) else [
-                p for p in candidates if p.suffix.lower() == ".pdf"
-            ]
-            fallback_suffix = _pdf_fallback_suffix(state)
-            fallback_candidates = [
-                p for p in candidates if p.suffix.lower() == fallback_suffix
-            ]
-            candidates = pdf_candidates or fallback_candidates
-        elif requested_pptx:
-            pptx_candidates = [
-                p for p in candidates if p.suffix.lower() == ".pptx"
-            ]
-            fallback_suffix = _pptx_fallback_suffix(state)
-            fallback_candidates = [
-                p for p in candidates if p.suffix.lower() == fallback_suffix
-            ]
-            candidates = pptx_candidates or fallback_candidates
+        candidates = BuilderArtifactMiddleware._target_promotable_candidates(
+            candidates,
+            state,
+            requested_pdf=requested_pdf,
+            requested_pptx=requested_pptx,
+        )
         candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return candidates
+
+    @staticmethod
+    def _target_promotable_candidates(
+        candidates: list[Path],
+        state: BuilderArtifactState,
+        *,
+        requested_pdf: bool,
+        requested_pptx: bool,
+    ) -> list[Path]:
+        if requested_pdf:
+            return BuilderArtifactMiddleware._preferred_suffix_candidates(
+                candidates,
+                primary_suffix=".pdf",
+                fallback_suffix=_pdf_fallback_suffix(state),
+                primary_disabled=_pdf_render_unusable_after_repair(state),
+            )
+        if requested_pptx:
+            return BuilderArtifactMiddleware._preferred_suffix_candidates(
+                candidates,
+                primary_suffix=".pptx",
+                fallback_suffix=_pptx_fallback_suffix(state),
+            )
+        return candidates
+
+    @staticmethod
+    def _preferred_suffix_candidates(
+        candidates: list[Path],
+        *,
+        primary_suffix: str,
+        fallback_suffix: str,
+        primary_disabled: bool = False,
+    ) -> list[Path]:
+        primary = [] if primary_disabled else [
+            p for p in candidates if p.suffix.lower() == primary_suffix
+        ]
+        fallback = [
+            p for p in candidates if p.suffix.lower() == fallback_suffix
+        ]
+        return primary or fallback
 
     @staticmethod
     def _generator_output_candidates(state: BuilderArtifactState) -> list[Path]:
@@ -2776,19 +2915,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         state: BuilderArtifactState,
         runtime: Runtime,
     ) -> str | None:
-        paths = cls._successful_deliverable_output_paths(state)
-        if _requested_pdf_artifact(state):
-            allowed = _allowed_pdf_artifact_suffixes(state)
-            paths = [path for path in paths if PurePosixPath(path).suffix.lower() in allowed]
-        if _requested_pptx_artifact(state):
-            allowed = _allowed_pptx_artifact_suffixes(state)
-            paths = [path for path in paths if PurePosixPath(path).suffix.lower() in allowed]
+        paths = cls._allowed_successful_deliverable_paths(state)
         diagnostics = state.get("builder_write_diagnostics") or {}
         target_path = cls._target_artifact_path(state)
-        if target_path and _is_user_facing_output_path(target_path):
-            target_args = {"artifact_path": target_path}
-            if target_path in paths or cls._artifact_files_exist(target_args, state, runtime):
-                return target_path
+        target_match = cls._preferred_target_deliverable_path(target_path, paths, state, runtime)
+        if target_match is not None:
+            return target_match
 
         target_suffix = Path(target_path or "").suffix.lower()
         matching = [
@@ -2798,19 +2930,69 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if len(matching) == 1:
             return matching[0]
 
-        last_successful = (
-            diagnostics.get("last_successful_deliverable_output_path")
-            if isinstance(diagnostics, dict)
-            else None
+        last_successful = cls._last_successful_deliverable_path(diagnostics)
+        last_match = cls._preferred_last_successful_path(
+            last_successful,
+            paths=paths,
+            matching=matching,
         )
-        if isinstance(last_successful, str):
-            if last_successful in matching:
-                return last_successful
-            if not matching and last_successful in paths:
-                return last_successful
+        if last_match is not None:
+            return last_match
 
         if len(paths) == 1:
             return paths[0]
+        return None
+
+    @classmethod
+    def _allowed_successful_deliverable_paths(cls, state: BuilderArtifactState) -> list[str]:
+        paths = cls._successful_deliverable_output_paths(state)
+        if _requested_pdf_artifact(state):
+            return [
+                path for path in paths
+                if PurePosixPath(path).suffix.lower() in _allowed_pdf_artifact_suffixes(state)
+            ]
+        if _requested_pptx_artifact(state):
+            return [
+                path for path in paths
+                if PurePosixPath(path).suffix.lower() in _allowed_pptx_artifact_suffixes(state)
+            ]
+        return paths
+
+    @classmethod
+    def _preferred_target_deliverable_path(
+        cls,
+        target_path: str | None,
+        paths: list[str],
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> str | None:
+        if not target_path or not _is_user_facing_output_path(target_path):
+            return None
+        target_args = {"artifact_path": target_path}
+        if target_path in paths or cls._artifact_files_exist(target_args, state, runtime):
+            return target_path
+        return None
+
+    @staticmethod
+    def _last_successful_deliverable_path(diagnostics: object) -> str | None:
+        if not isinstance(diagnostics, dict):
+            return None
+        path = diagnostics.get("last_successful_deliverable_output_path")
+        return path if isinstance(path, str) else None
+
+    @staticmethod
+    def _preferred_last_successful_path(
+        last_successful: str | None,
+        *,
+        paths: list[str],
+        matching: list[str],
+    ) -> str | None:
+        if last_successful is None:
+            return None
+        if last_successful in matching:
+            return last_successful
+        if not matching and last_successful in paths:
+            return last_successful
         return None
 
     @staticmethod
@@ -3086,19 +3268,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         *,
         reason: str,
     ) -> dict[str, Any] | None:
-        if state.get("builder_recovered_deliverable_emitted") or runtime is None:
-            return None
-        diagnostics = state.get("builder_write_diagnostics") or {}
-        if not isinstance(diagnostics, dict):
-            return None
-        if diagnostics.get("last_status") != "success":
-            return None
-        error_count = int(diagnostics.get("error_count", 0) or 0)
-        had_correction = bool(
-            state.get("builder_path_correction_emitted")
-            or state.get("builder_tool_argument_correction_emitted")
-        )
-        if error_count < self._PATH_CORRECTION_ERROR_THRESHOLD and not had_correction:
+        if not self._should_attempt_recovered_deliverable_promotion(state, runtime):
             return None
         candidate = self._preferred_successful_deliverable_path(state, runtime)
         if not candidate:
@@ -3111,6 +3281,30 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             artifact_path=candidate,
             reason=reason,
         )
+
+    def _should_attempt_recovered_deliverable_promotion(
+        self,
+        state: BuilderArtifactState,
+        runtime: Runtime | None,
+    ) -> bool:
+        if state.get("builder_recovered_deliverable_emitted") or runtime is None:
+            return False
+        diagnostics = state.get("builder_write_diagnostics") or {}
+        if not isinstance(diagnostics, dict) or diagnostics.get("last_status") != "success":
+            return False
+        return self._write_error_threshold_reached(state, diagnostics)
+
+    def _write_error_threshold_reached(
+        self,
+        state: BuilderArtifactState,
+        diagnostics: dict,
+    ) -> bool:
+        error_count = int(diagnostics.get("error_count", 0) or 0)
+        had_correction = bool(
+            state.get("builder_path_correction_emitted")
+            or state.get("builder_tool_argument_correction_emitted")
+        )
+        return error_count >= self._PATH_CORRECTION_ERROR_THRESHOLD or had_correction
 
     def _write_tool_argument_failure_update(
         self,
@@ -3218,18 +3412,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
         if count < self._PATH_CORRECTION_ERROR_THRESHOLD:
             return None
-        diagnostics = state.get("builder_write_diagnostics") or {}
-        error_class = (
-            diagnostics.get("last_error_class")
-            if isinstance(diagnostics, dict)
-            else None
-        )
-        if not isinstance(error_class, str) or not error_class:
-            classes = self._trailing_write_file_error_classes(
-                messages,
-                self._PATH_CORRECTION_LOOKBACK,
-            )
-            error_class = classes[0] if classes else "write_tool_error"
+        error_class = self._write_error_class_from_state(state, messages)
         if self._is_runtime_write_failure(error_class):
             if state.get("builder_runtime_write_failure_emitted"):
                 return None
@@ -3279,6 +3462,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "messages": [correction],
             "builder_path_correction_emitted": True,
         }
+
+    def _write_error_class_from_state(
+        self,
+        state: BuilderArtifactState,
+        messages: list,
+    ) -> str:
+        diagnostics = state.get("builder_write_diagnostics") or {}
+        error_class = diagnostics.get("last_error_class") if isinstance(diagnostics, dict) else None
+        if isinstance(error_class, str) and error_class:
+            return error_class
+        classes = self._trailing_write_file_error_classes(
+            messages,
+            self._PATH_CORRECTION_LOOKBACK,
+        )
+        return classes[0] if classes else "write_tool_error"
 
     @staticmethod
     def _is_post_interrupt_update(messages: list) -> bool:
@@ -3403,78 +3601,24 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if state.get("builder_pptx_skill_correction_emitted"):
             return None
         valid_pptx_seen = self._has_valid_pptx_output(state)
-        skill_read_seen = _pptx_skill_read_seen(state)
         generator_invoked_seen = _pptx_generator_invoked_seen(state)
-        image_invoked_seen = _image_generation_invoked_seen(state)
         if valid_pptx_seen or generator_invoked_seen:
             return None
         non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0)
-        summaries = state.get("builder_tool_turn_summaries") or []
-        recent_tool_names = [
-            name
-            for summary in summaries[-4:]
-            if isinstance(summary, dict)
-            for name in (summary.get("tool_names") or [])
-            if isinstance(name, str)
-        ]
-        drifted = any(
-            name in {
-                "write_file",
-                "write_file_tool",
-                "bash",
-                "bash_tool",
-                "str_replace",
-                "str_replace_tool",
-                "emit_builder_artifact",
-            }
-            for name in recent_tool_names
-        )
+        recent_tool_names = _recent_builder_tool_names(state, limit=4)
+        drifted = _pptx_recent_tools_drifted(recent_tool_names)
         if not drifted and non_artifact_turns < 3:
             return None
-        logger.warning(
-            "BuilderArtifact: presentation target needs ppt-generation correction "
-            "turn=%d recent_tools=%s pptx_skill_read_seen=%s "
-            "pptx_generator_invoked=%s image_generation_invoked=%s "
-            "valid_pptx_seen=%s fallback_ext=%s write_file_missing_arg_count=%s",
-            non_artifact_turns,
-            ",".join(recent_tool_names[-6:]),
-            skill_read_seen,
-            generator_invoked_seen,
-            image_invoked_seen,
-            valid_pptx_seen,
-            _pptx_fallback_suffix(state).lstrip("."),
-            int(
-                (state.get("builder_write_diagnostics") or {}).get("error_count", 0)
-                if isinstance(state.get("builder_write_diagnostics"), dict)
-                else 0
-            ),
+        _log_pptx_skill_correction(
+            state,
+            non_artifact_turns=non_artifact_turns,
+            recent_tool_names=recent_tool_names,
+            generator_invoked_seen=generator_invoked_seen,
+            valid_pptx_seen=valid_pptx_seen,
         )
         return {
             "messages": [
-                HumanMessage(
-                    content=(
-                        "[Sophia/presentation-skill correction]\n"
-                        "This is a PPTX slide-deck build. Reading SKILL.md is useful, "
-                        "but it is not completion. Stop ad hoc deck generation, "
-                        "python-pptx scripts, `.py` files, and generic write_file loops.\n\n"
-                        "Your next safe workflow is:\n"
-                        "1. If you have not already done so, call "
-                        "`read_file(path='/mnt/skills/public/ppt-generation/SKILL.md')`.\n"
-                        "2. Create the slide plan/assets the skill expects under "
-                        "`/mnt/user-data/workspace/`.\n"
-                        "3. Generate slide images with "
-                        "`/mnt/skills/public/image-generation/scripts/generate.py`.\n"
-                        "4. Compose the deck by running "
-                        "`/mnt/skills/public/ppt-generation/scripts/generate.py`.\n"
-                        "5. Emit only after the `.pptx` exists and is a valid PowerPoint package.\n\n"
-                        "If image/deck generation cannot complete after this correction, create a real "
-                        f"{_pptx_fallback_suffix(state)} fallback under `/mnt/user-data/outputs/` with "
-                        "`write_file(description='fallback deck outline', path='/mnt/user-data/outputs/deck"
-                        f"{_pptx_fallback_suffix(state)}', content='...', append=False)`, then emit that "
-                        "fallback. Do not emit placeholder/tiny/corrupt `.pptx` files, Python scripts, "
-                        "or test files."
-                    )
-                )
+                HumanMessage(content=_pptx_skill_correction_message(state))
             ],
             "builder_pptx_skill_correction_emitted": True,
         }

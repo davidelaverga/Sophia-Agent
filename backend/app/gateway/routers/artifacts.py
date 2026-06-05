@@ -293,14 +293,28 @@ async def _associated_builder_task_thread_ids(parent_thread_id: str) -> tuple[st
     task_thread_ids: list[str] = []
     seen: set[str] = set()
     for task in tasks.values():
-        if not isinstance(task, dict) or not _is_completed_builder_task_for_parent(parent_thread_id, task):
-            continue
-        task_thread_id = _builder_task_thread_id(task)
-        if not task_thread_id or task_thread_id == parent_thread_id or task_thread_id in seen:
-            continue
-        seen.add(task_thread_id)
-        task_thread_ids.append(task_thread_id)
+        _append_associated_builder_task_thread_id(
+            task_thread_ids,
+            seen,
+            parent_thread_id,
+            task,
+        )
     return tuple(task_thread_ids)
+
+
+def _append_associated_builder_task_thread_id(
+    task_thread_ids: list[str],
+    seen: set[str],
+    parent_thread_id: str,
+    task: object,
+) -> None:
+    if not isinstance(task, dict) or not _is_completed_builder_task_for_parent(parent_thread_id, task):
+        return
+    task_thread_id = _builder_task_thread_id(task)
+    if not task_thread_id or task_thread_id == parent_thread_id or task_thread_id in seen:
+        return
+    seen.add(task_thread_id)
+    task_thread_ids.append(task_thread_id)
 
 
 async def _builder_task_thread_ids_to_check(parent_thread_id: str) -> tuple[str, ...]:
@@ -476,7 +490,6 @@ def _try_serve_from_supabase(thread_id: str, path: str, request: Request) -> Res
     content, supabase_mime = result
     filename = Path(relative).name
     mime_type = supabase_mime or mimetypes.guess_type(filename)[0]
-    encoded_filename = quote(filename)
 
     logger.info(
         "Serving artifact from Supabase bucket: thread_id=%s requested_path=%s bytes=%d",
@@ -486,21 +499,38 @@ def _try_serve_from_supabase(thread_id: str, path: str, request: Request) -> Res
     )
 
     if request.query_params.get("download") or _is_office_download(filename):
-        logger.info(
-            "Serving artifact with attachment disposition: thread_id=%s ext=%s source=supabase download=%s bytes=%d",
-            thread_id,
-            Path(filename).suffix.lower().lstrip(".") or None,
-            bool(request.query_params.get("download")),
-            len(content),
-        )
-        return Response(
-            content=content,
-            media_type=mime_type or "application/octet-stream",
-            headers={
-                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
-            },
-        )
+        return _supabase_attachment_response(thread_id, filename, content, mime_type, request)
 
+    return _supabase_inline_response(filename, content, mime_type)
+
+
+def _supabase_attachment_response(
+    thread_id: str,
+    filename: str,
+    content: bytes,
+    mime_type: str | None,
+    request: Request,
+) -> Response:
+    logger.info(
+        "Serving artifact with attachment disposition: thread_id=%s ext=%s source=supabase download=%s bytes=%d",
+        thread_id,
+        Path(filename).suffix.lower().lstrip(".") or None,
+        bool(request.query_params.get("download")),
+        len(content),
+    )
+    return Response(
+        content=content,
+        media_type=mime_type or "application/octet-stream",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+    )
+
+
+def _supabase_inline_response(
+    filename: str,
+    content: bytes,
+    mime_type: str | None,
+) -> Response:
+    encoded_filename = quote(filename)
     if mime_type == "text/html":
         return HTMLResponse(content=content.decode("utf-8", errors="replace"))
     if mime_type and mime_type.startswith("text/"):
@@ -549,72 +579,23 @@ async def list_artifacts(
 
     supabase_count = 0
     owns_thread = _is_thread_owner(authenticated_user_id, thread_id)
-    builder_task_local_count = 0
-    checked_builder_task_thread_ids: tuple[str, ...] = ()
+    builder_task_local_count, checked_builder_task_thread_ids = await _add_builder_task_local_artifacts(
+        artifacts_by_path,
+        thread_id,
+        owns_thread=owns_thread,
+    )
     if owns_thread:
-        checked_builder_task_thread_ids = await _builder_task_thread_ids_to_check(thread_id)
-        for task_thread_id in checked_builder_task_thread_ids:
-            try:
-                task_outputs_path = resolve_thread_virtual_path(task_thread_id, _OUTPUTS_VIRTUAL_PATH)
-            except HTTPException:
-                logger.warning(
-                    "Builder task artifact list skipped invalid task output root: parent_thread_id=%s task_thread_id=%s",
-                    _short_id(thread_id),
-                    _short_id(task_thread_id),
-                )
-                continue
-            if task_outputs_path.exists() and not task_outputs_path.is_dir():
-                logger.warning(
-                    "Builder task artifact list skipped non-directory output root: parent_thread_id=%s task_thread_id=%s",
-                    _short_id(thread_id),
-                    _short_id(task_thread_id),
-                )
-                continue
-            if task_outputs_path.exists():
-                builder_task_local_count += _add_output_artifacts_from_dir(artifacts_by_path, task_outputs_path)
-
-    if owns_thread:
-        try:
-            supabase_artifacts = supabase_artifact_store.list_artifacts(thread_id=thread_id)
-        except Exception as exc:  # noqa: BLE001 — listing is best-effort.
-            status_code = getattr(getattr(exc, "response", None), "status_code", None)
-            logger.warning(
-                "Supabase artifact list failed: thread_id=%s error_type=%s status=%s",
-                thread_id,
-                exc.__class__.__name__,
-                status_code,
-            )
-            supabase_artifacts = []
-    elif _has_sophia_session(thread_id):
-        _require_thread_owner(authenticated_user_id, thread_id)
-        supabase_artifacts = []
-    elif artifacts_by_path:
-        logger.warning(
-            "Skipping Supabase artifact list for non-Sophia thread: user_id=%s thread_id=%s local_count=%d",
-            _short_id(authenticated_user_id),
-            _short_id(thread_id),
-            local_count,
+        supabase_count = _merge_supabase_artifacts(
+            artifacts_by_path,
+            _list_supabase_artifacts(thread_id),
         )
-        supabase_artifacts = []
     else:
-        _require_thread_owner(authenticated_user_id, thread_id)
-        supabase_artifacts = []
-
-    for artifact in supabase_artifacts:
-        if _is_builder_internal(Path(artifact.filename).name):
-            continue
-        path = f"{_OUTPUTS_VIRTUAL_PATH}/{artifact.filename}"
-        if path in artifacts_by_path:
-            continue
-        mime_type = artifact.content_type or mimetypes.guess_type(artifact.filename)[0]
-        artifacts_by_path[path] = ThreadArtifactListItem(
-            path=path,
-            name=Path(artifact.filename).name,
-            size_bytes=artifact.size_bytes,
-            modified_at=artifact.modified_at,
-            mime_type=mime_type,
+        _enforce_artifact_list_access(
+            authenticated_user_id,
+            thread_id,
+            has_local_artifacts=bool(artifacts_by_path),
+            local_count=local_count,
         )
-        supabase_count += 1
 
     artifacts = sorted(
         artifacts_by_path.values(),
@@ -634,6 +615,97 @@ async def list_artifacts(
     )
 
     return ThreadArtifactListResponse(thread_id=thread_id, artifacts=artifacts)
+
+
+async def _add_builder_task_local_artifacts(
+    artifacts_by_path: dict[str, ThreadArtifactListItem],
+    thread_id: str,
+    *,
+    owns_thread: bool,
+) -> tuple[int, tuple[str, ...]]:
+    if not owns_thread:
+        return 0, ()
+    checked_thread_ids = await _builder_task_thread_ids_to_check(thread_id)
+    count = 0
+    for task_thread_id in checked_thread_ids:
+        task_outputs_path = _builder_task_outputs_path(thread_id, task_thread_id)
+        if task_outputs_path is not None and task_outputs_path.exists():
+            count += _add_output_artifacts_from_dir(artifacts_by_path, task_outputs_path)
+    return count, checked_thread_ids
+
+
+def _builder_task_outputs_path(parent_thread_id: str, task_thread_id: str) -> Path | None:
+    try:
+        task_outputs_path = resolve_thread_virtual_path(task_thread_id, _OUTPUTS_VIRTUAL_PATH)
+    except HTTPException:
+        logger.warning(
+            "Builder task artifact list skipped invalid task output root: parent_thread_id=%s task_thread_id=%s",
+            _short_id(parent_thread_id),
+            _short_id(task_thread_id),
+        )
+        return None
+    if task_outputs_path.exists() and not task_outputs_path.is_dir():
+        logger.warning(
+            "Builder task artifact list skipped non-directory output root: parent_thread_id=%s task_thread_id=%s",
+            _short_id(parent_thread_id),
+            _short_id(task_thread_id),
+        )
+        return None
+    return task_outputs_path
+
+
+def _list_supabase_artifacts(thread_id: str):
+    try:
+        return supabase_artifact_store.list_artifacts(thread_id=thread_id)
+    except Exception as exc:  # noqa: BLE001 — listing is best-effort.
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        logger.warning(
+            "Supabase artifact list failed: thread_id=%s error_type=%s status=%s",
+            thread_id,
+            exc.__class__.__name__,
+            status_code,
+        )
+        return []
+
+
+def _merge_supabase_artifacts(
+    artifacts_by_path: dict[str, ThreadArtifactListItem],
+    supabase_artifacts,
+) -> int:
+    count = 0
+    for artifact in supabase_artifacts:
+        if _is_builder_internal(Path(artifact.filename).name):
+            continue
+        path = f"{_OUTPUTS_VIRTUAL_PATH}/{artifact.filename}"
+        if path in artifacts_by_path:
+            continue
+        artifacts_by_path[path] = ThreadArtifactListItem(
+            path=path,
+            name=Path(artifact.filename).name,
+            size_bytes=artifact.size_bytes,
+            modified_at=artifact.modified_at,
+            mime_type=artifact.content_type or mimetypes.guess_type(artifact.filename)[0],
+        )
+        count += 1
+    return count
+
+
+def _enforce_artifact_list_access(
+    authenticated_user_id: str | None,
+    thread_id: str,
+    *,
+    has_local_artifacts: bool,
+    local_count: int,
+) -> None:
+    if _has_sophia_session(thread_id) or not has_local_artifacts:
+        _require_thread_owner(authenticated_user_id, thread_id)
+        return
+    logger.warning(
+        "Skipping Supabase artifact list for non-Sophia thread: user_id=%s thread_id=%s local_count=%d",
+        _short_id(authenticated_user_id),
+        _short_id(thread_id),
+        local_count,
+    )
 
 
 @router.get(

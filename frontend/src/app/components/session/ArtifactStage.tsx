@@ -1,6 +1,5 @@
 "use client"
 
-import { RefreshCw } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 
 import {
@@ -15,11 +14,6 @@ import type {
   ArtifactReviewVoiceCommand,
   ArtifactReviewVoiceCommandApplyResult,
 } from "../../lib/artifact-review-voice-commands"
-import {
-  buildThreadArtifactHref,
-  formatBuilderArtifactTypeLabel,
-  getBuilderArtifactFiles,
-} from "../../lib/builder-artifacts"
 import type {
   CoReviewSessionState,
   CoReviewTransportStatus,
@@ -37,18 +31,12 @@ import {
   type CoreviewAnnotationStoreTelemetry,
 } from "../../lib/coreview-annotation-store"
 import {
-  coreviewArtifactCapabilityTelemetry,
-  getCoreviewArtifactCapabilitiesForFile,
-} from "../../lib/coreview-artifact-capabilities"
-import {
   resolveCoreviewPdfTextAnchor,
   type CoreviewPdfTextLayout,
 } from "../../lib/coreview-pdf-text-layout"
 import type {
   CoreviewArtifactCapabilities,
 } from "../../lib/coreview-workspace-contract"
-import { recordSophiaCaptureEvent } from "../../lib/session-capture"
-import { cn } from "../../lib/utils"
 import type {
   ArtifactAnnotation,
   ArtifactToolMode,
@@ -62,6 +50,16 @@ import type {
 } from "../../types/builder-artifact"
 
 import { ArtifactCanvasViewport, type ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
+import {
+  buildThreadArtifactHref,
+  cn,
+  coreviewArtifactCapabilityTelemetry,
+  formatBuilderArtifactTypeLabel,
+  getBuilderArtifactFiles,
+  getCoreviewArtifactCapabilitiesForFile,
+  recordSophiaCaptureEvent,
+  RefreshCw,
+} from "./ArtifactStageDeps"
 import type { ArtifactPdfFocusRequest } from "./ArtifactPdfPreview"
 import { ArtifactReviewStatus, hasConfirmedStillFrame } from "./ArtifactReviewStatus"
 import { ArtifactToolbar } from "./ArtifactToolbar"
@@ -137,6 +135,154 @@ export interface ArtifactReviewVoiceCommandTarget {
     drawPathCount: number
   }
   annotationOverlayCaptured: boolean | null
+}
+
+type VoiceCommandContext = {
+  artifactId?: string | null
+  currentPageIndex: number
+  normalizedPageCount: number
+  supportsPagination: boolean
+  supportsZoom: boolean
+  zoom: number
+  fitMode: ArtifactFitMode
+  setPageIndex: (index: number) => void
+  handleZoomIn: () => void
+  handleZoomOut: () => void
+  handleFitWidth: () => void
+  handleFitPage: () => void
+  handleResetZoom: () => void
+}
+
+type ArtifactVoiceCommandHandler = (
+  command: ArtifactReviewVoiceCommand,
+  context: VoiceCommandContext,
+) => ArtifactReviewVoiceCommandApplyResult
+
+function blockedVoiceCommand(
+  context: VoiceCommandContext,
+  blockedReason: ArtifactReviewVoiceCommandApplyResult["blockedReason"],
+): ArtifactReviewVoiceCommandApplyResult {
+  return {
+    applied: false,
+    changed: false,
+    shouldRefresh: false,
+    blockedReason,
+    artifactCurrentPageIndex: context.currentPageIndex,
+    artifactCurrentPageCount: context.normalizedPageCount,
+  }
+}
+
+function appliedVoiceCommand(
+  context: VoiceCommandContext,
+  nextPageIndex: number,
+  changed: boolean,
+  shouldRefresh = true,
+): ArtifactReviewVoiceCommandApplyResult {
+  return {
+    applied: true,
+    changed,
+    shouldRefresh,
+    blockedReason: null,
+    artifactCurrentPageIndex: Math.min(Math.max(0, nextPageIndex), context.normalizedPageCount - 1),
+    artifactCurrentPageCount: context.normalizedPageCount,
+  }
+}
+
+function requirePageCommand(context: VoiceCommandContext): ArtifactReviewVoiceCommandApplyResult | null {
+  return context.supportsPagination && context.normalizedPageCount > 1
+    ? null
+    : blockedVoiceCommand(context, "no_multipage_artifact_selected")
+}
+
+function requireZoomCommand(context: VoiceCommandContext): ArtifactReviewVoiceCommandApplyResult | null {
+  return context.supportsZoom ? null : blockedVoiceCommand(context, "no_multipage_artifact_selected")
+}
+
+function applyArtifactVoiceCommand(
+  command: ArtifactReviewVoiceCommand,
+  context: VoiceCommandContext,
+): ArtifactReviewVoiceCommandApplyResult {
+  if (!context.artifactId) {
+    return blockedVoiceCommand(context, "no_artifact_selected")
+  }
+  const handler = ARTIFACT_VOICE_COMMAND_HANDLERS[command.kind]
+  return handler
+    ? handler(command, context)
+    : blockedVoiceCommand(context, "not_artifact_review_context")
+}
+
+function applyZoomVoiceCommand(
+  context: VoiceCommandContext,
+  action: () => void,
+  nextZoom: number,
+  nextFitMode: ArtifactFitMode,
+): ArtifactReviewVoiceCommandApplyResult {
+  const blocked = requireZoomCommand(context)
+  if (blocked) return blocked
+  action()
+  return appliedVoiceCommand(
+    context,
+    context.currentPageIndex,
+    context.fitMode !== nextFitMode || nextZoom !== context.zoom,
+  )
+}
+
+const ARTIFACT_VOICE_COMMAND_HANDLERS: Partial<Record<ArtifactReviewVoiceCommand["kind"], ArtifactVoiceCommandHandler>> = {
+  go_to_page: (command, context) => {
+    const blocked = requirePageCommand(context)
+    if (blocked) return blocked
+    const targetPage = command.pageTarget
+    if (!targetPage || targetPage < 1 || targetPage > context.normalizedPageCount) {
+      return blockedVoiceCommand(context, "requested_page_out_of_bounds")
+    }
+    const nextPageIndex = targetPage - 1
+    context.setPageIndex(nextPageIndex)
+    return appliedVoiceCommand(context, nextPageIndex, nextPageIndex !== context.currentPageIndex)
+  },
+  next_page: (_command, context) => {
+    const blocked = requirePageCommand(context)
+    if (blocked) return blocked
+    if (context.currentPageIndex >= context.normalizedPageCount - 1) {
+      return blockedVoiceCommand(context, "requested_page_out_of_bounds")
+    }
+    const nextPageIndex = context.currentPageIndex + 1
+    context.setPageIndex(nextPageIndex)
+    return appliedVoiceCommand(context, nextPageIndex, true)
+  },
+  previous_page: (_command, context) => {
+    const blocked = requirePageCommand(context)
+    if (blocked) return blocked
+    if (context.currentPageIndex <= 0) {
+      return blockedVoiceCommand(context, "requested_page_out_of_bounds")
+    }
+    const nextPageIndex = context.currentPageIndex - 1
+    context.setPageIndex(nextPageIndex)
+    return appliedVoiceCommand(context, nextPageIndex, true)
+  },
+  first_page: (_command, context) => {
+    const blocked = requirePageCommand(context)
+    if (blocked) return blocked
+    context.setPageIndex(0)
+    return appliedVoiceCommand(context, 0, context.currentPageIndex !== 0)
+  },
+  last_page: (_command, context) => {
+    const blocked = requirePageCommand(context)
+    if (blocked) return blocked
+    const nextPageIndex = context.normalizedPageCount - 1
+    context.setPageIndex(nextPageIndex)
+    return appliedVoiceCommand(context, nextPageIndex, nextPageIndex !== context.currentPageIndex)
+  },
+  zoom_in: (_command, context) => applyZoomVoiceCommand(context, context.handleZoomIn, clampArtifactZoom(context.zoom * 1.2), "custom"),
+  zoom_out: (_command, context) => applyZoomVoiceCommand(context, context.handleZoomOut, clampArtifactZoom(context.zoom / 1.2), "custom"),
+  fit_width: (_command, context) => applyZoomVoiceCommand(context, context.handleFitWidth, 1, "width"),
+  fit_page: (_command, context) => applyZoomVoiceCommand(context, context.handleFitPage, 1, "page"),
+  reset_zoom: (_command, context) => applyZoomVoiceCommand(context, context.handleResetZoom, 1, "custom"),
+  refresh_view: (_command, context) => {
+    if (!context.supportsPagination && !context.supportsZoom) {
+      return blockedVoiceCommand(context, "no_multipage_artifact_selected")
+    }
+    return appliedVoiceCommand(context, context.currentPageIndex, false)
+  },
 }
 
 export function ArtifactStage({
@@ -540,131 +686,21 @@ export function ArtifactStage({
   const applyVoiceCommand = useCallback((command: ArtifactReviewVoiceCommand): ArtifactReviewVoiceCommandApplyResult => {
     const normalizedPageCount = Math.max(1, Math.floor(pageCount))
     const currentPageIndex = Math.min(Math.max(0, pageIndex), normalizedPageCount - 1)
-    const blocked = (
-      blockedReason: ArtifactReviewVoiceCommandApplyResult["blockedReason"],
-    ): ArtifactReviewVoiceCommandApplyResult => ({
-      applied: false,
-      changed: false,
-      shouldRefresh: false,
-      blockedReason,
-      artifactCurrentPageIndex: currentPageIndex,
-      artifactCurrentPageCount: normalizedPageCount,
+    return applyArtifactVoiceCommand(command, {
+      artifactId,
+      currentPageIndex,
+      normalizedPageCount,
+      supportsPagination,
+      supportsZoom,
+      zoom,
+      fitMode,
+      setPageIndex,
+      handleZoomIn,
+      handleZoomOut,
+      handleFitWidth,
+      handleFitPage,
+      handleResetZoom,
     })
-    const applied = (
-      nextPageIndex: number,
-      changed: boolean,
-      shouldRefresh = true,
-    ): ArtifactReviewVoiceCommandApplyResult => ({
-      applied: true,
-      changed,
-      shouldRefresh,
-      blockedReason: null,
-      artifactCurrentPageIndex: Math.min(Math.max(0, nextPageIndex), normalizedPageCount - 1),
-      artifactCurrentPageCount: normalizedPageCount,
-    })
-    const canApplyPageCommand = supportsPagination && normalizedPageCount > 1
-    const canApplyZoomCommand = supportsZoom
-
-    if (!artifactId) {
-      return blocked("no_artifact_selected")
-    }
-
-    switch (command.kind) {
-      case "go_to_page": {
-        if (!canApplyPageCommand) {
-          return blocked("no_multipage_artifact_selected")
-        }
-        const targetPage = command.pageTarget
-        if (!targetPage || targetPage < 1 || targetPage > normalizedPageCount) {
-          return blocked("requested_page_out_of_bounds")
-        }
-        const nextPageIndex = targetPage - 1
-        setPageIndex(nextPageIndex)
-        return applied(nextPageIndex, nextPageIndex !== currentPageIndex)
-      }
-      case "next_page": {
-        if (!canApplyPageCommand) {
-          return blocked("no_multipage_artifact_selected")
-        }
-        if (currentPageIndex >= normalizedPageCount - 1) {
-          return blocked("requested_page_out_of_bounds")
-        }
-        const nextPageIndex = currentPageIndex + 1
-        setPageIndex(nextPageIndex)
-        return applied(nextPageIndex, true)
-      }
-      case "previous_page": {
-        if (!canApplyPageCommand) {
-          return blocked("no_multipage_artifact_selected")
-        }
-        if (currentPageIndex <= 0) {
-          return blocked("requested_page_out_of_bounds")
-        }
-        const nextPageIndex = currentPageIndex - 1
-        setPageIndex(nextPageIndex)
-        return applied(nextPageIndex, true)
-      }
-      case "first_page": {
-        if (!canApplyPageCommand) {
-          return blocked("no_multipage_artifact_selected")
-        }
-        setPageIndex(0)
-        return applied(0, currentPageIndex !== 0)
-      }
-      case "last_page": {
-        if (!canApplyPageCommand) {
-          return blocked("no_multipage_artifact_selected")
-        }
-        const nextPageIndex = normalizedPageCount - 1
-        setPageIndex(nextPageIndex)
-        return applied(nextPageIndex, nextPageIndex !== currentPageIndex)
-      }
-      case "zoom_in": {
-        if (!canApplyZoomCommand) {
-          return blocked("no_multipage_artifact_selected")
-        }
-        const nextZoom = clampArtifactZoom(zoom * 1.2)
-        handleZoomIn()
-        return applied(currentPageIndex, fitMode !== "custom" || nextZoom !== zoom)
-      }
-      case "zoom_out": {
-        if (!canApplyZoomCommand) {
-          return blocked("no_multipage_artifact_selected")
-        }
-        const nextZoom = clampArtifactZoom(zoom / 1.2)
-        handleZoomOut()
-        return applied(currentPageIndex, fitMode !== "custom" || nextZoom !== zoom)
-      }
-      case "fit_width": {
-        if (!canApplyZoomCommand) {
-          return blocked("no_multipage_artifact_selected")
-        }
-        handleFitWidth()
-        return applied(currentPageIndex, fitMode !== "width" || zoom !== 1)
-      }
-      case "fit_page": {
-        if (!canApplyZoomCommand) {
-          return blocked("no_multipage_artifact_selected")
-        }
-        handleFitPage()
-        return applied(currentPageIndex, fitMode !== "page" || zoom !== 1)
-      }
-      case "reset_zoom": {
-        if (!canApplyZoomCommand) {
-          return blocked("no_multipage_artifact_selected")
-        }
-        handleResetZoom()
-        return applied(currentPageIndex, fitMode !== "custom" || zoom !== 1)
-      }
-      case "refresh_view": {
-        if (!supportsPagination && !supportsZoom) {
-          return blocked("no_multipage_artifact_selected")
-        }
-        return applied(currentPageIndex, false)
-      }
-      default:
-        return blocked("not_artifact_review_context")
-    }
   }, [
     artifactId,
     fitMode,

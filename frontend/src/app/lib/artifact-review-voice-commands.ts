@@ -119,6 +119,45 @@ const PAGE_NUMBER_WORDS = new Map<string, number>([
   ["twentieth", 20],
 ])
 
+const FIRST_PAGE_PATTERNS = [
+  /\b(?:go to|open|show)\s+(?:the\s+)?first\s+page\b/u,
+  /\bfirst\s+page\b/u,
+]
+const LAST_PAGE_PATTERNS = [
+  /\b(?:go to|open|show)\s+(?:the\s+)?last\s+page\b/u,
+  /\blast\s+page\b/u,
+]
+const PREVIOUS_PAGE_PATTERNS = [
+  /\b(?:previous|prev)\s+page\b/u,
+  /\bgo\s+back\s+(?:a\s+)?page\b/u,
+]
+const TITLE_FOCUS_PATTERNS = [
+  /\b(?:zoom\s+in|focus|center)\s+(?:on\s+)?(?:the\s+)?(?:current\s+)?title\b/u,
+  /\b(?:current\s+)?title\b.*\b(?:zoom\s+in|focus|center)\b/u,
+]
+const UNDERLINE_PATTERNS = [/\bunderline(?:d)?\b/u]
+const ARROW_PATTERNS = [
+  /\b(?:draw|add|place|put|make)\s+(?:an?\s+)?arrow\b/u,
+  /\barrow\s+(?:pointing|to|at|toward|towards)\b/u,
+]
+const HIGHLIGHT_PATTERNS = [/\b(?:highlight(?:ed)?|mark(?:ed)?|flag(?:ged)?|callout)\b/u]
+const COMMENT_PATTERNS = [
+  /\b(?:leave|add|make|put)\s+(?:a\s+)?(?:comment|note|feedback|pin)\b/u,
+  /\b(?:comment|note|feedback|pin)\s+(?:on\s+)?(?:the\s+)?(?:title|it|this|current)\b/u,
+  /\bpin(?:\s+(?:it|this|that|a\s+note|a\s+comment|note|comment))?\b/u,
+  /\b(?:comment|note|feedback)\b/u,
+]
+const FONT_FOLLOW_UP_PATTERNS = [
+  /\bchange\s+(?:the\s+)?font\b/u,
+  /\bfont\s+(?:needs|should|must)\s+(?:to\s+)?(?:change|be\s+changed)\b/u,
+]
+const COMMENT_TEXT_PATTERNS = [
+  /\b(?:leave|add|make|put)\s+(?:a\s+)?(?:comment|note|feedback|pin)(?:\s+on\s+(?:the\s+)?(?:current\s+)?(?:title|it|this))?\s*(?:saying|that\s+says|to\s+say|:)?\s+(.+)$/iu,
+  /\b(?:comment|note|feedback|pin)\s+(?:on\s+)?(?:the\s+)?(?:current\s+)?(?:title|it|this)?\s*(?:saying|that\s+says|to\s+say|:)?\s+(.+)$/iu,
+  /\b(?:comment|note|feedback|pin)\s+(?!on\b|the\b|current\b|title\b|it\b|this\b)(.+)$/iu,
+  /\b(?:comment|note|feedback|pin)\s*:\s*(.+)$/iu,
+]
+
 const PAGE_NUMBER_PATTERN = [
   "\\d+",
   "one",
@@ -203,46 +242,56 @@ function parseArtifactReviewVoiceCommandClause(
   if (!normalized) {
     return []
   }
-  const commandsWithIndex: Array<{ index: number; command: ArtifactReviewVoiceCommand }> = []
+  const commandsWithIndex: IndexedArtifactReviewCommand[] = [
+    ...parseArtifactPageCommands(normalized),
+    ...parseArtifactViewCommands(normalized),
+    ...parseArtifactRefreshCommands(normalized),
+    ...parseArtifactAnnotationCommands(transcript, normalized),
+  ]
 
+  return commandsWithIndex
+    .sort((left, right) => left.index - right.index)
+    .map((entry) => entry.command)
+}
+
+type IndexedArtifactReviewCommand = {
+  index: number
+  command: ArtifactReviewVoiceCommand
+}
+
+function indexedCommand(
+  normalized: string,
+  patterns: RegExp[],
+  command: ArtifactReviewVoiceCommand,
+): IndexedArtifactReviewCommand[] {
+  const index = firstMatchedIndex(normalized, patterns)
+  return index >= 0 ? [{ index, command }] : []
+}
+
+function parseArtifactPageCommands(normalized: string): IndexedArtifactReviewCommand[] {
+  const commands: IndexedArtifactReviewCommand[] = []
   const pageMatch = GO_TO_PAGE_PATTERN.exec(normalized)
   if (pageMatch?.[1]) {
     const pageTarget = parseSpokenPageNumber(pageMatch[1])
     if (pageTarget !== null) {
-      commandsWithIndex.push({
-        index: pageMatch.index,
-        command: { kind: "go_to_page", pageTarget },
-      })
+      commands.push({ index: pageMatch.index, command: { kind: "go_to_page", pageTarget } })
     }
   }
-
-  if (/\b(?:go to|open|show)\s+(?:the\s+)?first\s+page\b/u.test(normalized) || /\bfirst\s+page\b/u.test(normalized)) {
-    commandsWithIndex.push({ index: normalized.indexOf("first page"), command: { kind: "first_page" } })
-  }
-
-  if (/\b(?:go to|open|show)\s+(?:the\s+)?last\s+page\b/u.test(normalized) || /\blast\s+page\b/u.test(normalized)) {
-    commandsWithIndex.push({ index: normalized.indexOf("last page"), command: { kind: "last_page" } })
-  }
-
+  commands.push(...indexedCommand(normalized, FIRST_PAGE_PATTERNS, { kind: "first_page" }))
+  commands.push(...indexedCommand(normalized, LAST_PAGE_PATTERNS, { kind: "last_page" }))
   const nextPageIndex = normalized.search(/\bnext\s+page\b/u)
   if (nextPageIndex >= 0) {
-    commandsWithIndex.push({ index: nextPageIndex, command: { kind: "next_page" } })
+    commands.push({ index: nextPageIndex, command: { kind: "next_page" } })
   }
+  commands.push(...indexedCommand(normalized, PREVIOUS_PAGE_PATTERNS, { kind: "previous_page" }))
+  return commands
+}
 
-  const previousPageIndex = firstMatchedIndex(normalized, [
-    /\b(?:previous|prev)\s+page\b/u,
-    /\bgo\s+back\s+(?:a\s+)?page\b/u,
-  ])
-  if (previousPageIndex >= 0) {
-    commandsWithIndex.push({ index: previousPageIndex, command: { kind: "previous_page" } })
-  }
-
-  const focusIndex = firstMatchedIndex(normalized, [
-    /\b(?:zoom\s+in|focus|center)\s+(?:on\s+)?(?:the\s+)?(?:current\s+)?title\b/u,
-    /\b(?:current\s+)?title\b.*\b(?:zoom\s+in|focus|center)\b/u,
-  ])
+function parseArtifactViewCommands(normalized: string): IndexedArtifactReviewCommand[] {
+  const commands: IndexedArtifactReviewCommand[] = []
+  const focusIndex = firstMatchedIndex(normalized, TITLE_FOCUS_PATTERNS)
   if (focusIndex >= 0) {
-    commandsWithIndex.push({
+    commands.push({
       index: focusIndex,
       command: {
         kind: "focus_anchor",
@@ -251,128 +300,106 @@ function parseArtifactReviewVoiceCommandClause(
       },
     })
   }
-
   const zoomInIndex = normalized.search(/\bzoom\s+in\b/u)
   if (zoomInIndex >= 0 && focusIndex < 0) {
-    commandsWithIndex.push({ index: zoomInIndex, command: { kind: "zoom_in" } })
+    commands.push({ index: zoomInIndex, command: { kind: "zoom_in" } })
   }
-
-  const zoomOutIndex = normalized.search(/\bzoom\s+out\b/u)
-  if (zoomOutIndex >= 0) {
-    commandsWithIndex.push({ index: zoomOutIndex, command: { kind: "zoom_out" } })
+  for (const [index, kind] of [
+    [normalized.search(/\bzoom\s+out\b/u), "zoom_out"],
+    [normalized.search(/\bfit\s+width\b/u), "fit_width"],
+    [normalized.search(/\bfit\s+page\b/u), "fit_page"],
+    [normalized.search(/\breset\s+zoom\b/u), "reset_zoom"],
+  ] as const) {
+    if (index >= 0) {
+      commands.push({ index, command: { kind } })
+    }
   }
+  return commands
+}
 
-  const fitWidthIndex = normalized.search(/\bfit\s+width\b/u)
-  if (fitWidthIndex >= 0) {
-    commandsWithIndex.push({ index: fitWidthIndex, command: { kind: "fit_width" } })
-  }
-
-  const fitPageIndex = normalized.search(/\bfit\s+page\b/u)
-  if (fitPageIndex >= 0) {
-    commandsWithIndex.push({ index: fitPageIndex, command: { kind: "fit_page" } })
-  }
-
-  const resetZoomIndex = normalized.search(/\breset\s+zoom\b/u)
-  if (resetZoomIndex >= 0) {
-    commandsWithIndex.push({ index: resetZoomIndex, command: { kind: "reset_zoom" } })
-  }
-
+function parseArtifactRefreshCommands(normalized: string): IndexedArtifactReviewCommand[] {
   const refreshIndex = normalized.search(/\brefresh\s+(?:your\s+)?(?:view|page)\b/u)
-  if (refreshIndex >= 0) {
-    commandsWithIndex.push({ index: refreshIndex, command: { kind: "refresh_view" } })
-  }
+  return refreshIndex >= 0
+    ? [{ index: refreshIndex, command: { kind: "refresh_view" } }]
+    : []
+}
 
-  const underlineIndex = firstMatchedIndex(normalized, [
-    /\bunderline(?:d)?\b/u,
-  ])
-  if (underlineIndex >= 0) {
-    commandsWithIndex.push({
-      index: underlineIndex,
-      command: {
-        kind: "add_annotation",
-        annotationKind: "underline",
-        anchorType: annotationAnchorTypeFromNormalized(normalized),
-        color: annotationColorFromNormalized(normalized) ?? "purple",
-        utteranceKind: "annotation_underline",
-      },
-    })
-  }
+function parseArtifactAnnotationCommands(
+  transcript: string,
+  normalized: string,
+): IndexedArtifactReviewCommand[] {
+  const commentIndex = firstMatchedIndex(normalized, COMMENT_PATTERNS)
+  return [
+    annotationCommand(normalized, UNDERLINE_PATTERNS, "underline", "purple", "annotation_underline"),
+    annotationCommand(normalized, ARROW_PATTERNS, "arrow", "purple", "annotation_arrow"),
+    annotationCommand(normalized, HIGHLIGHT_PATTERNS, "highlight", "yellow", "annotation_highlight"),
+    commentCommand(transcript, normalized, commentIndex),
+    followUpCommentCommand(transcript, normalized, commentIndex),
+  ].filter((command): command is IndexedArtifactReviewCommand => command !== null)
+}
 
-  const arrowIndex = firstMatchedIndex(normalized, [
-    /\b(?:draw|add|place|put|make)\s+(?:an?\s+)?arrow\b/u,
-    /\barrow\s+(?:pointing|to|at|toward|towards)\b/u,
-  ])
-  if (arrowIndex >= 0) {
-    commandsWithIndex.push({
-      index: arrowIndex,
-      command: {
-        kind: "add_annotation",
-        annotationKind: "arrow",
-        anchorType: annotationAnchorTypeFromNormalized(normalized),
-        color: annotationColorFromNormalized(normalized) ?? "purple",
-        utteranceKind: "annotation_arrow",
-      },
-    })
+function annotationCommand(
+  normalized: string,
+  patterns: RegExp[],
+  annotationKind: ArtifactReviewAnnotationKind,
+  defaultColor: ArtifactReviewAnnotationColor,
+  utteranceKind: ArtifactReviewAnnotationUtteranceKind,
+): IndexedArtifactReviewCommand | null {
+  const index = firstMatchedIndex(normalized, patterns)
+  if (index < 0) {
+    return null
   }
-
-  const highlightIndex = firstMatchedIndex(normalized, [
-    /\b(?:highlight(?:ed)?|mark(?:ed)?|flag(?:ged)?|callout)\b/u,
-  ])
-  if (highlightIndex >= 0) {
-    commandsWithIndex.push({
-      index: highlightIndex,
-      command: {
-        kind: "add_annotation",
-        annotationKind: "highlight",
-        anchorType: annotationAnchorTypeFromNormalized(normalized),
-        color: annotationColorFromNormalized(normalized) ?? "yellow",
-        utteranceKind: "annotation_highlight",
-      },
-    })
+  return {
+    index,
+    command: {
+      kind: "add_annotation",
+      annotationKind,
+      anchorType: annotationAnchorTypeFromNormalized(normalized),
+      color: annotationColorFromNormalized(normalized) ?? defaultColor,
+      utteranceKind,
+    },
   }
+}
 
-  const commentIndex = firstMatchedIndex(normalized, [
-    /\b(?:leave|add|make|put)\s+(?:a\s+)?(?:comment|note|feedback|pin)\b/u,
-    /\b(?:comment|note|feedback|pin)\s+(?:on\s+)?(?:the\s+)?(?:title|it|this|current)\b/u,
-    /\bpin(?:\s+(?:it|this|that|a\s+note|a\s+comment|note|comment))?\b/u,
-    /\b(?:comment|note|feedback)\b/u,
-  ])
-  if (commentIndex >= 0) {
-    const commentText = extractCommentText(transcript)
-    commandsWithIndex.push({
-      index: commentIndex,
-      command: {
-        kind: "add_annotation",
-        annotationKind: "comment",
-        anchorType: annotationAnchorTypeFromNormalized(normalized),
-        commentText,
-        utteranceKind: /\bpin\b/u.test(normalized) ? "annotation_pin" : "annotation_comment",
-      },
-    })
+function commentCommand(
+  transcript: string,
+  normalized: string,
+  commentIndex: number,
+): IndexedArtifactReviewCommand | null {
+  if (commentIndex < 0) {
+    return null
   }
-
-  const followUpCommentIndex = commentIndex < 0
-    ? firstMatchedIndex(normalized, [
-        /\bchange\s+(?:the\s+)?font\b/u,
-        /\bfont\s+(?:needs|should|must)\s+(?:to\s+)?(?:change|be\s+changed)\b/u,
-      ])
-    : -1
-  if (followUpCommentIndex >= 0) {
-    commandsWithIndex.push({
-      index: followUpCommentIndex,
-      command: {
-        kind: "add_annotation",
-        annotationKind: "comment",
-        anchorType: annotationAnchorTypeFromNormalized(normalized),
-        commentText: cleanCommentText(transcript) ?? "change the font",
-        utteranceKind: "annotation_follow_up_comment",
-      },
-    })
+  return {
+    index: commentIndex,
+    command: {
+      kind: "add_annotation",
+      annotationKind: "comment",
+      anchorType: annotationAnchorTypeFromNormalized(normalized),
+      commentText: extractCommentText(transcript),
+      utteranceKind: /\bpin\b/u.test(normalized) ? "annotation_pin" : "annotation_comment",
+    },
   }
+}
 
-  return commandsWithIndex
-    .sort((left, right) => left.index - right.index)
-    .map((entry) => entry.command)
+function followUpCommentCommand(
+  transcript: string,
+  normalized: string,
+  commentIndex: number,
+): IndexedArtifactReviewCommand | null {
+  const index = commentIndex < 0 ? firstMatchedIndex(normalized, FONT_FOLLOW_UP_PATTERNS) : -1
+  if (index < 0) {
+    return null
+  }
+  return {
+    index,
+    command: {
+      kind: "add_annotation",
+      annotationKind: "comment",
+      anchorType: annotationAnchorTypeFromNormalized(normalized),
+      commentText: cleanCommentText(transcript) ?? "change the font",
+      utteranceKind: "annotation_follow_up_comment",
+    },
+  }
 }
 
 export function normalizeArtifactReviewVoiceCommand(value: string): string {
@@ -442,13 +469,7 @@ function annotationColorFromNormalized(
 
 function extractCommentText(value: string): string | undefined {
   const text = stripWakeWord(value)
-  const patterns = [
-    /\b(?:leave|add|make|put)\s+(?:a\s+)?(?:comment|note|feedback|pin)(?:\s+on\s+(?:the\s+)?(?:current\s+)?(?:title|it|this))?\s*(?:saying|that\s+says|to\s+say|:)?\s+(.+)$/iu,
-    /\b(?:comment|note|feedback|pin)\s+(?:on\s+)?(?:the\s+)?(?:current\s+)?(?:title|it|this)?\s*(?:saying|that\s+says|to\s+say|:)?\s+(.+)$/iu,
-    /\b(?:comment|note|feedback|pin)\s+(?!on\b|the\b|current\b|title\b|it\b|this\b)(.+)$/iu,
-    /\b(?:comment|note|feedback|pin)\s*:\s*(.+)$/iu,
-  ]
-  for (const pattern of patterns) {
+  for (const pattern of COMMENT_TEXT_PATTERNS) {
     const match = pattern.exec(text)
     const candidate = cleanCommentText(match?.[1])
     if (candidate) {

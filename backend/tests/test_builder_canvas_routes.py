@@ -667,18 +667,24 @@ async def test_cancel_validates_native_task_and_publishes_terminal(app: FastAPI,
     assert cancelled == [("task-1", "run-1", "interrupt")]
     assert len(state_updates) == 1
     assert state_updates[0][0] == "parent-1"
-    persisted_task = state_updates[0][1]["async_tasks"]["task-1"]
-    assert persisted_task["agent_name"] == "sophia_builder"
-    assert persisted_task["task_id"] == "task-1"
-    assert persisted_task["run_id"] == "run-1"
-    assert persisted_task["status"] == "cancelled"
-    assert persisted_task["error_message"] == "Builder was cancelled by the user."
-    assert persisted_task["completed_at"]
-    assert persisted_task["last_checked_at"] == persisted_task["completed_at"]
-    assert persisted_task["last_updated_at"] == persisted_task["completed_at"]
-    assert persisted_task["updated_at"] == persisted_task["completed_at"]
+    _assert_persisted_cancelled_task(state_updates[0][1]["async_tasks"]["task-1"])
     events = await app.state._builder_canvas_worker.recent_events("parent-1")
     assert events[-1]["status"] == "cancelled"
+
+
+def _assert_persisted_cancelled_task(persisted_task: dict) -> None:
+    expected = {
+        "agent_name": "sophia_builder",
+        "task_id": "task-1",
+        "run_id": "run-1",
+        "status": "cancelled",
+        "error_message": "Builder was cancelled by the user.",
+    }
+    for key, value in expected.items():
+        assert persisted_task[key] == value
+    assert persisted_task["completed_at"]
+    for timestamp_key in ("last_checked_at", "last_updated_at", "updated_at"):
+        assert persisted_task[timestamp_key] == persisted_task["completed_at"]
 
 
 @pytest.mark.anyio

@@ -93,20 +93,13 @@ def maybe_mirror_file(
     if not thread_id or not outputs_host_path:
         return
 
-    try:
-        host_file = Path(host_path).resolve()
-        outputs_root = Path(outputs_host_path).resolve()
-    except (OSError, ValueError) as exc:
-        logger.debug("Mirror skipped; path resolution failed path=%s error=%s", host_path, exc)
+    resolved = _resolved_mirror_paths(host_path, outputs_host_path)
+    if resolved is None:
         return
+    host_file, outputs_root = resolved
 
     # Only mirror files inside the outputs directory
-    try:
-        host_file.relative_to(outputs_root)
-    except ValueError:
-        return
-
-    if not host_file.is_file():
+    if not _is_output_file(host_file, outputs_root):
         return
 
     try:
@@ -116,17 +109,8 @@ def maybe_mirror_file(
         return
 
     relative = host_file.relative_to(outputs_root).as_posix()
-    if host_file.suffix.lower() == ".pptx":
-        integrity_error = _pptx_integrity_error(content)
-        if integrity_error is not None:
-            logger.warning(
-                "Mirror skipped; invalid pptx thread_id=%s path=%s reason=%s bytes=%d",
-                thread_id,
-                relative,
-                integrity_error,
-                len(content),
-            )
-            return
+    if not _valid_mirror_artifact(thread_id, relative, host_file, content):
+        return
 
     file_hash = hashlib.sha256(content).hexdigest()
     cache_key = (thread_id, relative)
@@ -156,6 +140,38 @@ def maybe_mirror_file(
             relative,
             exc,
         )
+
+
+def _valid_mirror_artifact(thread_id: str, relative: str, host_file: Path, content: bytes) -> bool:
+    if host_file.suffix.lower() != ".pptx":
+        return True
+    integrity_error = _pptx_integrity_error(content)
+    if integrity_error is None:
+        return True
+    logger.warning(
+        "Mirror skipped; invalid pptx thread_id=%s path=%s reason=%s bytes=%d",
+        thread_id,
+        relative,
+        integrity_error,
+        len(content),
+    )
+    return False
+
+
+def _resolved_mirror_paths(host_path: str, outputs_host_path: str) -> tuple[Path, Path] | None:
+    try:
+        return Path(host_path).resolve(), Path(outputs_host_path).resolve()
+    except (OSError, ValueError) as exc:
+        logger.debug("Mirror skipped; path resolution failed path=%s error=%s", host_path, exc)
+        return None
+
+
+def _is_output_file(host_file: Path, outputs_root: Path) -> bool:
+    try:
+        host_file.relative_to(outputs_root)
+    except ValueError:
+        return False
+    return host_file.is_file()
 
 
 def scan_and_mirror_outputs(

@@ -113,13 +113,7 @@ def _target_pdf_path_from_state(state: dict[str, Any] | None) -> str | None:
 
 
 def _canonical_prefixed_pdf_path(value: str) -> str | None:
-    candidate = value.replace("\\", "/").strip()
-    if candidate.startswith("mnt/user-data/outputs/"):
-        candidate = f"/{candidate}"
-    elif candidate.startswith("user-data/outputs/"):
-        candidate = f"/mnt/{candidate}"
-    elif candidate.startswith("outputs/"):
-        candidate = f"{_OUTPUTS_VIRTUAL_PREFIX}{candidate[len('outputs/'):]}"
+    candidate = _normalize_pdf_output_prefix(value)
     if not candidate.startswith(_OUTPUTS_VIRTUAL_PREFIX):
         return None
 
@@ -127,11 +121,26 @@ def _canonical_prefixed_pdf_path(value: str) -> str | None:
     if not relative:
         return None
     pure = PurePosixPath(relative)
-    if pure.is_absolute() or ".." in pure.parts or pure.suffix.lower() != ".pdf":
-        return None
-    if any(not _SAFE_SEGMENT_RE.fullmatch(part) or part.startswith(".") for part in pure.parts):
+    if not _valid_pdf_output_relative_path(pure):
         return None
     return f"{_OUTPUTS_VIRTUAL_PREFIX}{pure.as_posix()}"
+
+
+def _normalize_pdf_output_prefix(value: str) -> str:
+    candidate = value.replace("\\", "/").strip()
+    if candidate.startswith("mnt/user-data/outputs/"):
+        return f"/{candidate}"
+    if candidate.startswith("user-data/outputs/"):
+        return f"/mnt/{candidate}"
+    if candidate.startswith("outputs/"):
+        return f"{_OUTPUTS_VIRTUAL_PREFIX}{candidate[len('outputs/'):]}"
+    return candidate
+
+
+def _valid_pdf_output_relative_path(path: PurePosixPath) -> bool:
+    if path.is_absolute() or ".." in path.parts or path.suffix.lower() != ".pdf":
+        return False
+    return all(_SAFE_SEGMENT_RE.fullmatch(part) and not part.startswith(".") for part in path.parts)
 
 
 def _canonical_pdf_path(
@@ -240,30 +249,21 @@ def _artifact_brief_from_state(state: dict[str, Any] | None) -> _PdfBrief:
     if not isinstance(state, dict):
         return _PdfBrief(text="", source="none", structure_safe_reason=None)
 
-    def sanitized(value: Any, source: str) -> _PdfBrief | None:
-        if not isinstance(value, str):
-            return None
-        text = value.strip()
-        if not text:
-            return None
-        brief = _sanitize_artifact_brief_text(text)
-        return _PdfBrief(
-            text=brief.text,
-            source=source,
-            structure_safe_reason=brief.structure_safe_reason,
-        )
-
     delegation = state.get("delegation_context")
-    if isinstance(delegation, dict):
-        for key in ("artifact_brief", "task", "task_description", "description", "original_task"):
-            brief = sanitized(delegation.get(key), f"delegation_context.{key}")
-            if brief is not None:
-                return brief
+    brief = _first_pdf_brief_from_mapping(
+        delegation if isinstance(delegation, dict) else {},
+        ("artifact_brief", "task", "task_description", "description", "original_task"),
+        "delegation_context.",
+    )
+    if brief is not None:
+        return brief
 
-    for key in ("task", "task_description", "builder_task_description"):
-        brief = sanitized(state.get(key), key)
-        if brief is not None:
-            return brief
+    brief = _first_pdf_brief_from_mapping(
+        state,
+        ("task", "task_description", "builder_task_description"),
+    )
+    if brief is not None:
+        return brief
 
     messages = state.get("messages")
     if isinstance(messages, list):
@@ -273,11 +273,37 @@ def _artifact_brief_from_state(state: dict[str, Any] | None) -> _PdfBrief:
                 if isinstance(message, dict)
                 else getattr(message, "content", None)
             )
-            brief = sanitized(content, "messages")
+            brief = _sanitized_pdf_brief(content, "messages")
             if brief is not None:
                 return brief
 
     return _PdfBrief(text="", source="none", structure_safe_reason=None)
+
+
+def _sanitized_pdf_brief(value: Any, source: str) -> _PdfBrief | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    brief = _sanitize_artifact_brief_text(text)
+    return _PdfBrief(
+        text=brief.text,
+        source=source,
+        structure_safe_reason=brief.structure_safe_reason,
+    )
+
+
+def _first_pdf_brief_from_mapping(
+    values: dict[str, Any],
+    keys: tuple[str, ...],
+    source_prefix: str = "",
+) -> _PdfBrief | None:
+    for key in keys:
+        brief = _sanitized_pdf_brief(values.get(key), f"{source_prefix}{key}")
+        if brief is not None:
+            return brief
+    return None
 
 
 def _clean_page_title(raw_title: str | None, page_number: int) -> str:
@@ -415,12 +441,8 @@ def _dedupe_page_specs(
             break
 
         title_key = page.title.strip().casefold()
-        if page.number in seen_numbers or title_key in seen_titles:
-            safe_reason = (
-                "trimmed_to_requested_page_count"
-                if requested_count is not None
-                else "deduplicated_repeated_page_blocks"
-            )
+        if _page_spec_seen(page, title_key, seen_numbers, seen_titles):
+            safe_reason = _dedupe_safe_reason(requested_count)
             continue
 
         kept.append(page)
@@ -432,6 +454,23 @@ def _dedupe_page_specs(
         safe_reason = "trimmed_to_requested_page_count"
 
     return kept, safe_reason
+
+
+def _page_spec_seen(
+    page: _PdfPageSpec,
+    title_key: str,
+    seen_numbers: set[int],
+    seen_titles: set[str],
+) -> bool:
+    return page.number in seen_numbers or title_key in seen_titles
+
+
+def _dedupe_safe_reason(requested_count: int | None) -> str:
+    return (
+        "trimmed_to_requested_page_count"
+        if requested_count is not None
+        else "deduplicated_repeated_page_blocks"
+    )
 
 
 def _infer_page_plan(

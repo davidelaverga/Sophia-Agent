@@ -375,6 +375,44 @@ class BuilderCanvasWorker:
             return False
         return event_time >= active_latest
 
+    def _dropped_progress_replaces_active_locked(
+        self,
+        event: dict[str, Any],
+        key: tuple[str, str, str],
+        active: tuple[str, str],
+    ) -> bool | None:
+        if key not in self._dropped_progress_runs:
+            return None
+        dropped_active = self._dropped_progress_runs.get(key)
+        if event["kind"] != "terminal":
+            return True
+        if dropped_active is not None and dropped_active == active:
+            return False
+        return not self._terminal_is_newer_than_active_locked(event, active)
+
+    def _older_observed_run_locked(
+        self,
+        parent_thread_id: str,
+        task_id: str,
+        run_id: str,
+        active: tuple[str, str],
+    ) -> bool:
+        run_orders = self._run_order.get(parent_thread_id, {})
+        active_order = run_orders.get(active)
+        event_order = run_orders.get((task_id, run_id))
+        return active_order is not None and event_order is not None and event_order < active_order
+
+    def _unobserved_terminal_replaced_locked(
+        self,
+        event: dict[str, Any],
+        active: tuple[str, str],
+    ) -> bool:
+        if event["kind"] != "terminal":
+            return False
+        if event.get("_run_observed_before_publish"):
+            return False
+        return not self._terminal_is_newer_than_active_locked(event, active)
+
     def _is_replaced_run_locked(self, event: dict[str, Any], key: tuple[str, str, str]) -> bool:
         parent_thread_id, task_id, run_id = key
         active = self._active.get(parent_thread_id)
@@ -382,23 +420,12 @@ class BuilderCanvasWorker:
             return True
         if active is None or active == (task_id, run_id):
             return False
-        dropped_active = self._dropped_progress_runs.get(key)
-        if key in self._dropped_progress_runs:
-            if event["kind"] != "terminal":
-                return True
-            if dropped_active is not None and dropped_active == active:
-                return False
-            return not self._terminal_is_newer_than_active_locked(event, active)
-        run_orders = self._run_order.get(parent_thread_id, {})
-        active_order = run_orders.get(active)
-        event_order = run_orders.get((task_id, run_id))
-        if active_order is not None and event_order is not None and event_order < active_order:
+        dropped_decision = self._dropped_progress_replaces_active_locked(event, key, active)
+        if dropped_decision is not None:
+            return dropped_decision
+        if self._older_observed_run_locked(parent_thread_id, task_id, run_id, active):
             return True
-        if event["kind"] == "terminal":
-            if not event.get("_run_observed_before_publish"):
-                return not self._terminal_is_newer_than_active_locked(event, active)
-            return False
-        return key in self._histories
+        return self._unobserved_terminal_replaced_locked(event, active) or key in self._histories
 
     def _is_duplicate_terminal_locked(self, event: dict[str, Any], key: tuple[str, str, str]) -> bool:
         if event["kind"] != "terminal":
@@ -498,6 +525,12 @@ class BuilderCanvasWorker:
         active = self._active.get(parent_thread_id)
         if active is not None and active[0] == task_id:
             return active[1]
+        task_run_ids = self._known_task_run_ids_locked(parent_thread_id, task_id)
+        if len(task_run_ids) == 1:
+            return next(iter(task_run_ids))
+        return None
+
+    def _known_task_run_ids_locked(self, parent_thread_id: str, task_id: str) -> set[str]:
         task_run_ids = {
             observed_run_id
             for observed_task_id, observed_run_id in self._run_order.get(parent_thread_id, {})
@@ -508,9 +541,7 @@ class BuilderCanvasWorker:
             for history_parent_id, history_task_id, history_run_id in self._histories
             if history_parent_id == parent_thread_id and history_task_id == task_id
         )
-        if len(task_run_ids) == 1:
-            return next(iter(task_run_ids))
-        return None
+        return task_run_ids
 
     async def _publish_event(self, event: dict[str, Any]) -> int:
         parent_thread_id = event["parent_thread_id"]

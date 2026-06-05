@@ -14,40 +14,83 @@ interface SophiaLookingChipProps {
 }
 
 export function SophiaLookingChip({ state, frameConfirmed = false, stale = false, viewPending = false, className }: SophiaLookingChipProps) {
-  const visualLive = Boolean(frameConfirmed && state?.state === "co_review_live" && state.visualInputStatus === "live")
-  const preparing = viewPending || state?.state === "co_review_starting" || state?.refreshFrameInProgress
-  const unavailable = state?.state === "co_review_error" || ((state?.frameSendFailureCount ?? 0) > 0 && !frameConfirmed)
-  const label = unavailable
-    ? "Frame unavailable"
-    : preparing
-      ? "Preparing view"
-      : visualLive && stale
-        ? "Sophia's view is stale"
-        : visualLive
-        ? "Sophia is looking at this artifact"
-        : "Not looking"
-  const Icon = unavailable ? AlertCircle : preparing ? Loader2 : visualLive && stale ? Clock3 : visualLive ? Eye : EyeOff
+  const view = sophiaLookingChipView({ state, frameConfirmed, stale, viewPending })
 
   return (
     <span
-      aria-label={label}
+      aria-label={view.label}
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium",
-        visualLive && stale
-          ? "border-[color:var(--cosmic-border-soft)] bg-[color:var(--cosmic-panel-soft)] text-[color:var(--cosmic-text-muted)]"
-          : visualLive
-          ? "border-[color:color-mix(in_srgb,var(--sophia-purple)_48%,var(--cosmic-border-soft))] bg-[color:color-mix(in_srgb,var(--sophia-purple)_14%,transparent)] text-[color:var(--cosmic-text-strong)] shadow-[0_0_18px_color-mix(in_srgb,var(--sophia-purple)_14%,transparent)]"
-          : unavailable
-            ? "border-[color:var(--cosmic-danger-border)] bg-[color:var(--cosmic-danger-bg)] text-[color:var(--cosmic-danger-text)]"
-            : preparing
-              ? "border-[color:color-mix(in_srgb,var(--sophia-purple)_34%,var(--cosmic-border-soft))] bg-[color:color-mix(in_srgb,var(--sophia-purple)_9%,var(--cosmic-panel-soft))] text-[color:var(--cosmic-text)]"
-              : "border-[color:var(--cosmic-border-soft)] bg-[color:var(--cosmic-panel-soft)] text-[color:var(--cosmic-text-muted)]",
+        view.className,
         className,
       )}
       role="status"
     >
-      <Icon className={cn("h-3.5 w-3.5", preparing && "animate-spin")} aria-hidden="true" />
-      <span>{label}</span>
+      <view.Icon className={cn("h-3.5 w-3.5", view.spinning && "animate-spin")} aria-hidden="true" />
+      <span>{view.label}</span>
     </span>
   )
+}
+
+function sophiaLookingChipView({
+  state,
+  frameConfirmed,
+  stale,
+  viewPending,
+}: Required<Pick<SophiaLookingChipProps, "frameConfirmed" | "stale" | "viewPending">> & {
+  state: CoReviewSessionState | null | undefined
+}) {
+  const visualLive = sophiaLookingVisualLive(state, frameConfirmed)
+  const preparing = sophiaLookingPreparing(state, viewPending)
+  const unavailable = sophiaLookingUnavailable(state, frameConfirmed)
+  if (unavailable) {
+    return {
+      label: "Frame unavailable",
+      Icon: AlertCircle,
+      spinning: false,
+      className: "border-[color:var(--cosmic-danger-border)] bg-[color:var(--cosmic-danger-bg)] text-[color:var(--cosmic-danger-text)]",
+    }
+  }
+  if (preparing) {
+    return {
+      label: "Preparing view",
+      Icon: Loader2,
+      spinning: true,
+      className: "border-[color:color-mix(in_srgb,var(--sophia-purple)_34%,var(--cosmic-border-soft))] bg-[color:color-mix(in_srgb,var(--sophia-purple)_9%,var(--cosmic-panel-soft))] text-[color:var(--cosmic-text)]",
+    }
+  }
+  if (visualLive && stale) {
+    return {
+      label: "Sophia's view is stale",
+      Icon: Clock3,
+      spinning: false,
+      className: "border-[color:var(--cosmic-border-soft)] bg-[color:var(--cosmic-panel-soft)] text-[color:var(--cosmic-text-muted)]",
+    }
+  }
+  if (visualLive) {
+    return {
+      label: "Sophia is looking at this artifact",
+      Icon: Eye,
+      spinning: false,
+      className: "border-[color:color-mix(in_srgb,var(--sophia-purple)_48%,var(--cosmic-border-soft))] bg-[color:color-mix(in_srgb,var(--sophia-purple)_14%,transparent)] text-[color:var(--cosmic-text-strong)] shadow-[0_0_18px_color-mix(in_srgb,var(--sophia-purple)_14%,transparent)]",
+    }
+  }
+  return {
+    label: "Not looking",
+    Icon: EyeOff,
+    spinning: false,
+    className: "border-[color:var(--cosmic-border-soft)] bg-[color:var(--cosmic-panel-soft)] text-[color:var(--cosmic-text-muted)]",
+  }
+}
+
+function sophiaLookingVisualLive(state: CoReviewSessionState | null | undefined, frameConfirmed: boolean): boolean {
+  return Boolean(frameConfirmed && state?.state === "co_review_live" && state.visualInputStatus === "live")
+}
+
+function sophiaLookingPreparing(state: CoReviewSessionState | null | undefined, viewPending: boolean): boolean {
+  return Boolean(viewPending || state?.state === "co_review_starting" || state?.refreshFrameInProgress)
+}
+
+function sophiaLookingUnavailable(state: CoReviewSessionState | null | undefined, frameConfirmed: boolean): boolean {
+  return Boolean(state?.state === "co_review_error" || ((state?.frameSendFailureCount ?? 0) > 0 && !frameConfirmed))
 }

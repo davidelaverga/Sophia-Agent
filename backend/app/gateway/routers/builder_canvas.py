@@ -504,18 +504,7 @@ def _completion_from_terminal_task(
     artifact_path = _canonical_artifact_path(artifact.get("artifact_path"))
     artifact_url = _completion_artifact_url(parent_thread_id, artifact_path, artifact)
     artifact_filename = artifact_path.rsplit("/", 1)[-1] if artifact_path else None
-    requested_artifact_ext = _requested_ext_from_task_or_artifact(task, artifact)
-    artifact_ext = (
-        str(artifact.get("artifact_ext")).strip().lower().lstrip(".")
-        if isinstance(artifact.get("artifact_ext"), str) and artifact.get("artifact_ext").strip()
-        else _artifact_ext_from_path(artifact_path)
-    )
-    artifact_is_fallback = artifact.get("artifact_is_fallback")
-    if artifact_is_fallback is None:
-        artifact_is_fallback = bool(requested_artifact_ext and artifact_ext and artifact_ext != requested_artifact_ext)
-    fallback_reason = artifact.get("fallback_reason")
-    if artifact_is_fallback and not isinstance(fallback_reason, str):
-        fallback_reason = f"{requested_artifact_ext}_generation_not_completed" if requested_artifact_ext else "fallback_deliverable"
+    fallback = _completion_fallback_metadata(task, artifact, artifact_path)
     return {
         "thread_id": parent_thread_id,
         "task_id": task_id,
@@ -530,16 +519,70 @@ def _completion_from_terminal_task(
         "artifact_title": artifact.get("artifact_title"),
         "artifact_type": artifact.get("artifact_type"),
         "artifact_filename": artifact_filename,
-        "requested_artifact_ext": requested_artifact_ext,
-        "artifact_ext": artifact_ext,
-        "artifact_is_fallback": artifact_is_fallback,
-        "fallback_reason": fallback_reason,
+        **fallback,
         "summary": artifact.get("companion_summary") or artifact.get("summary"),
         "user_next_action": artifact.get("user_next_action"),
         "error_message": error_message_override or task.get("error_message") or task.get("error"),
         "completed_at": _completion_completed_at(task),
         "source": "builder_canvas_snapshot",
     }
+
+
+def _completion_fallback_metadata(
+    task: dict[str, Any],
+    artifact: dict[str, Any],
+    artifact_path: str | None,
+) -> dict[str, Any]:
+    requested_artifact_ext = _requested_ext_from_task_or_artifact(task, artifact)
+    artifact_ext = _completion_artifact_ext(artifact, artifact_path)
+    artifact_is_fallback = _completion_artifact_is_fallback(
+        artifact,
+        requested_artifact_ext=requested_artifact_ext,
+        artifact_ext=artifact_ext,
+    )
+    return {
+        "requested_artifact_ext": requested_artifact_ext,
+        "artifact_ext": artifact_ext,
+        "artifact_is_fallback": artifact_is_fallback,
+        "fallback_reason": _completion_fallback_reason(
+            artifact,
+            artifact_is_fallback=artifact_is_fallback,
+            requested_artifact_ext=requested_artifact_ext,
+        ),
+    }
+
+
+def _completion_artifact_ext(artifact: dict[str, Any], artifact_path: str | None) -> str | None:
+    explicit = artifact.get("artifact_ext")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip().lower().lstrip(".")
+    return _artifact_ext_from_path(artifact_path)
+
+
+def _completion_artifact_is_fallback(
+    artifact: dict[str, Any],
+    *,
+    requested_artifact_ext: str | None,
+    artifact_ext: str | None,
+) -> bool:
+    explicit = artifact.get("artifact_is_fallback")
+    if explicit is not None:
+        return bool(explicit)
+    return bool(requested_artifact_ext and artifact_ext and artifact_ext != requested_artifact_ext)
+
+
+def _completion_fallback_reason(
+    artifact: dict[str, Any],
+    *,
+    artifact_is_fallback: bool,
+    requested_artifact_ext: str | None,
+) -> str | None:
+    fallback_reason = artifact.get("fallback_reason")
+    if isinstance(fallback_reason, str):
+        return fallback_reason
+    if artifact_is_fallback:
+        return f"{requested_artifact_ext}_generation_not_completed" if requested_artifact_ext else "fallback_deliverable"
+    return None
 
 
 async def _read_native_run_status_for_client(client: Any, task_id: str, run_id: str) -> str | None:

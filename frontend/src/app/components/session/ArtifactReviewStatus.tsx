@@ -55,25 +55,15 @@ export function ArtifactReviewStatus({
     )
   }
 
-  const frameSent = hasConfirmedStillFrame(state, transportStatus)
-  const stale = Boolean(frameSent && !reviewViewPending && reviewStale)
-  const lookingChipPreparing = Boolean(state?.state === "co_review_starting" || state?.refreshFrameInProgress)
-  const hasFrameError = Boolean(
-    state?.state === "co_review_error"
-    || ((state?.frameSendFailureCount ?? 0) > 0 && !frameSent)
-  )
-  const waitingForVoice = Boolean(visualReviewRequiresVoice && !frameSent && !hasFrameError)
-  const preparingView = Boolean((visualReviewPreparing || reviewViewPending) && !lookingChipPreparing && !hasFrameError)
-  const frameUnavailable = Boolean(
-    !waitingForVoice
-    && !preparingView
-    && (
-      hasFrameError
-      || transportStatus?.stillFramesSupported === false
-      || (transportStatus?.visualTransportSupported === false && !frameSent)
-      || Boolean(visualSourceUnavailableReason && !frameSent)
-    )
-  )
+  const status = artifactReviewStatusView({
+    state,
+    transportStatus,
+    visualReviewRequiresVoice,
+    visualReviewPreparing,
+    reviewViewPending,
+    reviewStale,
+    visualSourceUnavailableReason,
+  })
 
   return (
     <div
@@ -84,15 +74,85 @@ export function ArtifactReviewStatus({
       data-testid="artifact-review-status"
       aria-live="polite"
     >
-      <SophiaLookingChip state={state} frameConfirmed={frameSent && !reviewViewPending} stale={stale} viewPending={reviewViewPending} />
-      {frameSent && !reviewViewPending ? <StatusPill icon="check" label="Frame sent" /> : null}
-      {stale ? <StatusPill icon="clock" label="View changed. Refresh Sophia's view." muted /> : null}
-      {preparingView ? <StatusPill icon="clock" label="Preparing view" muted /> : null}
-      {waitingForVoice ? <StatusPill icon="clock" label="Start voice to review visually" muted /> : null}
-      {frameUnavailable ? <StatusPill icon="alert" label="Visual review not active" tone="danger" /> : null}
-      {!frameSent && !frameUnavailable && !waitingForVoice && !preparingView && canStart ? <StatusPill icon="clock" label="Frame not sent yet" muted /> : null}
+      <SophiaLookingChip state={state} frameConfirmed={status.frameConfirmed} stale={status.stale} viewPending={reviewViewPending} />
+      {status.showFrameSent ? <StatusPill icon="check" label="Frame sent" /> : null}
+      {status.stale ? <StatusPill icon="clock" label="View changed. Refresh Sophia's view." muted /> : null}
+      {status.preparingView ? <StatusPill icon="clock" label="Preparing view" muted /> : null}
+      {status.waitingForVoice ? <StatusPill icon="clock" label="Start voice to review visually" muted /> : null}
+      {status.frameUnavailable ? <StatusPill icon="alert" label="Visual review not active" tone="danger" /> : null}
+      {status.showFrameNotSent && canStart ? <StatusPill icon="clock" label="Frame not sent yet" muted /> : null}
       <ExactTextBadge available={exactTextAvailable} />
     </div>
+  )
+}
+
+function artifactReviewStatusView({
+  state,
+  transportStatus,
+  visualReviewRequiresVoice,
+  visualReviewPreparing,
+  reviewViewPending,
+  reviewStale,
+  visualSourceUnavailableReason,
+}: Pick<ArtifactReviewStatusProps,
+  | "state"
+  | "transportStatus"
+  | "visualReviewRequiresVoice"
+  | "visualReviewPreparing"
+  | "reviewViewPending"
+  | "reviewStale"
+  | "visualSourceUnavailableReason"
+>) {
+  const frameSent = hasConfirmedStillFrame(state, transportStatus)
+  const frameConfirmed = frameSent && !reviewViewPending
+  const stale = Boolean(frameConfirmed && reviewStale)
+  const lookingChipPreparing = Boolean(state?.state === "co_review_starting" || state?.refreshFrameInProgress)
+  const hasFrameError = Boolean(
+    state?.state === "co_review_error"
+    || ((state?.frameSendFailureCount ?? 0) > 0 && !frameSent)
+  )
+  const waitingForVoice = Boolean(visualReviewRequiresVoice && !frameSent && !hasFrameError)
+  const preparingView = Boolean((visualReviewPreparing || reviewViewPending) && !lookingChipPreparing && !hasFrameError)
+  const frameUnavailable = artifactReviewFrameUnavailable({
+    waitingForVoice,
+    preparingView,
+    hasFrameError,
+    frameSent,
+    transportStatus,
+    visualSourceUnavailableReason,
+  })
+  return {
+    frameConfirmed,
+    stale,
+    preparingView,
+    waitingForVoice,
+    frameUnavailable,
+    showFrameSent: frameConfirmed,
+    showFrameNotSent: !frameSent && !frameUnavailable && !waitingForVoice && !preparingView,
+  }
+}
+
+function artifactReviewFrameUnavailable({
+  waitingForVoice,
+  preparingView,
+  hasFrameError,
+  frameSent,
+  transportStatus,
+  visualSourceUnavailableReason,
+}: {
+  waitingForVoice: boolean
+  preparingView: boolean
+  hasFrameError: boolean
+  frameSent: boolean
+  transportStatus: CoReviewTransportStatus | null | undefined
+  visualSourceUnavailableReason: string | null | undefined
+}) {
+  if (waitingForVoice || preparingView) return false
+  return Boolean(
+    hasFrameError
+    || transportStatus?.stillFramesSupported === false
+    || (transportStatus?.visualTransportSupported === false && !frameSent)
+    || Boolean(visualSourceUnavailableReason && !frameSent)
   )
 }
 

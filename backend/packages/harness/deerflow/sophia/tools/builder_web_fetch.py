@@ -28,6 +28,56 @@ def _extract_title(content: str, fallback_url: str) -> str:
     return fallback_url
 
 
+def _authorized_builder_urls(state: SophiaState) -> set[str]:
+    allowed_urls = {
+        normalize_builder_web_url(str(item))
+        for item in (state.get("builder_allowed_urls") or [])
+        if str(item).strip()
+    }
+    allowed_urls.update(
+        normalize_builder_web_url(str(item))
+        for item in (state.get("explicit_user_urls") or [])
+        if str(item).strip()
+    )
+    return allowed_urls
+
+
+def _fetch_error(tool_call_id: str, content: str, budget: dict[str, int] | None = None) -> Command:
+    updates: dict[str, object] = {}
+    if budget is not None:
+        updates["builder_web_budget"] = budget
+    return _tool_response(tool_call_id, content, tool_name="builder_web_fetch", **updates)
+
+
+def _configured_fetch_result(normalized_url: str) -> tuple[str | None, str | None]:
+    fetch_tool = _resolve_configured_tool("web_fetch")
+    if fetch_tool is None:
+        return None, "Error: No configured web_fetch provider is available."
+    raw_result = fetch_tool.run(normalized_url)
+    if not isinstance(raw_result, str):
+        return None, "Error: Configured web_fetch provider returned a non-text response."
+    if raw_result.startswith("Error:"):
+        return None, raw_result
+    return raw_result, None
+
+
+def _existing_search_sources(state: SophiaState) -> list[dict[str, str]]:
+    return [
+        source
+        for source in (state.get("builder_search_sources") or [])
+        if isinstance(source, dict)
+    ]
+
+
+def _fetch_source_record(raw_result: str, normalized_url: str) -> dict[str, str]:
+    return {
+        "title": _extract_title(raw_result, normalized_url),
+        "url": normalized_url,
+        "snippet": "",
+        "query": "explicit_fetch",
+    }
+
+
 @tool("builder_web_fetch", parse_docstring=True)
 def builder_web_fetch(
     runtime: ToolRuntime[ContextT, SophiaState],
@@ -43,65 +93,29 @@ def builder_web_fetch(
         url: Exact URL to fetch.
     """
     if runtime.state is None:
-        return _tool_response(tool_call_id, "Error: Builder runtime state is not available.", tool_name="builder_web_fetch")
+        return _fetch_error(tool_call_id, "Error: Builder runtime state is not available.")
 
     state = runtime.state
     normalized_url = normalize_builder_web_url(url)
-    allowed_urls = {
-        normalize_builder_web_url(str(item))
-        for item in (state.get("builder_allowed_urls") or [])
-        if str(item).strip()
-    }
-    explicit_urls = {
-        normalize_builder_web_url(str(item))
-        for item in (state.get("explicit_user_urls") or [])
-        if str(item).strip()
-    }
-    allowed_urls.update(explicit_urls)
-    if normalized_url not in allowed_urls:
-        return _tool_response(
+    if normalized_url not in _authorized_builder_urls(state):
+        return _fetch_error(
             tool_call_id,
             "Error: URL not allowed for builder_web_fetch. "
             "Only exact URLs provided in the task brief or returned by builder_web_search may be fetched.",
-            tool_name="builder_web_fetch",
         )
 
     budget, budget_error = _budget_guard(state, "fetch")
     if budget_error:
-        return _tool_response(tool_call_id, budget_error, tool_name="builder_web_fetch")
+        return _fetch_error(tool_call_id, budget_error)
 
-    fetch_tool = _resolve_configured_tool("web_fetch")
-    if fetch_tool is None:
-        return _tool_response(
-            tool_call_id,
-            "Error: No configured web_fetch provider is available.",
-            tool_name="builder_web_fetch",
-            builder_web_budget=budget,
-        )
+    raw_result, provider_error = _configured_fetch_result(normalized_url)
+    if provider_error is not None or raw_result is None:
+        return _fetch_error(tool_call_id, provider_error or "Error: web_fetch failed.", budget)
 
-    raw_result = fetch_tool.run(normalized_url)
-    if not isinstance(raw_result, str):
-        return _tool_response(
-            tool_call_id,
-            "Error: Configured web_fetch provider returned a non-text response.",
-            tool_name="builder_web_fetch",
-            builder_web_budget=budget,
-        )
-    if raw_result.startswith("Error:"):
-        return _tool_response(tool_call_id, raw_result, tool_name="builder_web_fetch", builder_web_budget=budget)
-
-    existing_sources = [
-        source
-        for source in (state.get("builder_search_sources") or [])
-        if isinstance(source, dict)
-    ]
-    source_record = {
-        "title": _extract_title(raw_result, normalized_url),
-        "url": normalized_url,
-        "snippet": "",
-        "query": "explicit_fetch",
-    }
-    updated_sources = _merge_source_records(existing_sources, [source_record])
+    updated_sources = _merge_source_records(
+        _existing_search_sources(state),
+        [_fetch_source_record(raw_result, normalized_url)],
+    )
     return _tool_response(
         tool_call_id,
         raw_result,

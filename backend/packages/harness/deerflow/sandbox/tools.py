@@ -482,26 +482,31 @@ def resolve_runtime_thread_id(
     Sandbox reacquisition must therefore not depend on context alone.
     """
     context = _runtime_context_dict(runtime)
-    if context:
-        candidate = context.get("thread_id")
-        if isinstance(candidate, str) and candidate:
-            return candidate
-
-    candidate = _runtime_configurable(runtime).get("thread_id")
-    if isinstance(candidate, str) and candidate:
+    candidate = _thread_id_from_mapping(context)
+    if candidate is not None:
         return candidate
 
+    candidate = _thread_id_from_mapping(_runtime_configurable(runtime))
+    if candidate is not None:
+        return candidate
+
+    return _thread_id_from_current_runnable_config()
+
+
+def _thread_id_from_mapping(values: dict | None) -> str | None:
+    candidate = values.get("thread_id") if isinstance(values, dict) else None
+    return candidate if isinstance(candidate, str) and candidate else None
+
+
+def _thread_id_from_current_runnable_config() -> str | None:
     try:
         from langchain_core.runnables.config import var_child_runnable_config
 
         config = var_child_runnable_config.get({}) or {}
         configurable = config.get("configurable") or {}
-        candidate = configurable.get("thread_id") if isinstance(configurable, dict) else None
-        if isinstance(candidate, str) and candidate:
-            return candidate
+        return _thread_id_from_mapping(configurable)
     except Exception:
         return None
-    return None
 
 
 def _store_sandbox_id_in_runtime_context(

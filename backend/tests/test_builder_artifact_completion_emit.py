@@ -160,28 +160,31 @@ def test_build_completion_payload_from_artifact_success_shape():
             state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
         )
 
-    # ``thread_id`` in webhook = COMPANION thread (where Telegram chat lives).
-    assert payload["thread_id"] == "t-parent"
-    # ``task_id`` = builder thread (also key in async_tasks dict).
-    assert payload["task_id"] == "t-build"
-    # ``run_id`` = LangGraph run id of the terminating run. Phase 4I
-    # post-review (codex P1): plumbed through so the gateway's
-    # ``_on_builder_completion`` can validate run_id matching.
-    assert payload["run_id"] == "r-1"
-    assert payload["agent_name"] == "sophia_builder"
-    assert payload["status"] == "success"  # _map_status normalizes "completed" -> "success"
-    assert payload["task_type"] == "document"
-    assert payload["task_brief"] == "Build a brief about X"
-    assert payload["artifact_path"] == "mnt/user-data/outputs/foo.md"
-    assert payload["artifact_url"] == "https://supabase.test/foo.md"
-    assert payload["artifact_filename"] == "foo.md"
-    assert payload["artifact_title"] == "Foo One-Pager"
-    assert payload["summary"] == "Wrote the one-pager you asked for."
-    assert payload["user_next_action"] == "Open or download to review."
-    assert payload["error_message"] is None
-    assert payload["user_id"] == "alice"
-    assert payload["source"] == "builder_artifact_middleware"
-    assert payload["trace_id"] == "trace-1"
+    _assert_success_completion_payload_shape(payload)
+
+
+def _assert_success_completion_payload_shape(payload: dict) -> None:
+    expected = {
+        "thread_id": "t-parent",
+        "task_id": "t-build",
+        "run_id": "r-1",
+        "agent_name": "sophia_builder",
+        "status": "success",
+        "task_type": "document",
+        "task_brief": "Build a brief about X",
+        "artifact_path": "mnt/user-data/outputs/foo.md",
+        "artifact_url": "https://supabase.test/foo.md",
+        "artifact_filename": "foo.md",
+        "artifact_title": "Foo One-Pager",
+        "summary": "Wrote the one-pager you asked for.",
+        "user_next_action": "Open or download to review.",
+        "error_message": None,
+        "user_id": "alice",
+        "source": "builder_artifact_middleware",
+        "trace_id": "trace-1",
+    }
+    for key, value in expected.items():
+        assert payload[key] == value
 
 
 def test_completion_payload_preserves_artifact_path_when_signed_url_missing():

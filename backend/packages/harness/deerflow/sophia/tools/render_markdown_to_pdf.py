@@ -187,59 +187,46 @@ def _inspect_pdf_layout(pdf_file: Path) -> dict[str, int | str | None]:
     }
 
 
-def _impl(
-    markdown_path: str,
-    pdf_path: str,
-    pdf_engine: str | None,
-    thread_data: dict[str, Any] | None = None,
-) -> str:
-    """Concrete pandoc invocation. Tested independently of the @tool wrapper."""
-    # ---- Path validation -----------------------------------------------
+def _path_validation_error(markdown_path: str, pdf_path: str) -> str | None:
     md_check = _ensure_relative_to_outputs("markdown_path", markdown_path)
     if md_check is not None:
-        # Markdown source can technically live anywhere readable, but we
-        # require outputs/ for consistency with the builder workflow.
-        # Loosen this if a real use case appears.
-        return _result(success=False, error=md_check, error_type="invalid_input")
+        return md_check
+    return _ensure_relative_to_outputs("pdf_path", pdf_path)
 
-    pdf_check = _ensure_relative_to_outputs("pdf_path", pdf_path)
-    if pdf_check is not None:
-        return _result(success=False, error=pdf_check, error_type="invalid_input")
 
-    md_file = _host_path_for_virtual_output(markdown_path, thread_data)
-    if not md_file.is_file():
-        return _result(
-            success=False,
-            error=f"markdown source not found: {markdown_path}",
-            error_type="missing_input",
-        )
+def _missing_markdown_result(markdown_path: str) -> str:
+    return _result(
+        success=False,
+        error=f"markdown source not found: {markdown_path}",
+        error_type="missing_input",
+    )
 
-    # ---- Pandoc availability --------------------------------------------
-    pandoc_bin = shutil.which("pandoc")
-    if pandoc_bin is None:
-        logger.warning(
-            "render_markdown_to_pdf: capability_check pandoc_available=false "
-            "xelatex_available=%s lualatex_available=%s wkhtmltopdf_available=%s "
-            "error_type=pandoc_missing",
-            shutil.which("xelatex") is not None,
-            shutil.which("lualatex") is not None,
-            shutil.which("wkhtmltopdf") is not None,
-        )
-        return _result(
-            success=False,
-            error=(
-                "pandoc binary not found on PATH. Install with "
-                "`apt-get install pandoc texlive-xetex` (Linux) or "
-                "`brew install pandoc` (macOS). "
-                "Fallback: ship the Markdown source directly as the "
-                "artifact (set artifact_type='document', artifact_path "
-                "to the .md file) and explain the limitation in "
-                "companion_tone_hint."
-            ),
-            error_type="pandoc_missing",
-        )
 
-    engine, engine_msg = _resolve_pdf_engine(pdf_engine)
+def _pandoc_missing_result() -> str:
+    logger.warning(
+        "render_markdown_to_pdf: capability_check pandoc_available=false "
+        "xelatex_available=%s lualatex_available=%s wkhtmltopdf_available=%s "
+        "error_type=pandoc_missing",
+        shutil.which("xelatex") is not None,
+        shutil.which("lualatex") is not None,
+        shutil.which("wkhtmltopdf") is not None,
+    )
+    return _result(
+        success=False,
+        error=(
+            "pandoc binary not found on PATH. Install with "
+            "`apt-get install pandoc texlive-xetex` (Linux) or "
+            "`brew install pandoc` (macOS). "
+            "Fallback: ship the Markdown source directly as the "
+            "artifact (set artifact_type='document', artifact_path "
+            "to the .md file) and explain the limitation in "
+            "companion_tone_hint."
+        ),
+        error_type="pandoc_missing",
+    )
+
+
+def _log_pandoc_capability(engine: str | None, engine_msg: str) -> None:
     logger.info(
         "render_markdown_to_pdf: capability_check pandoc_available=true "
         "xelatex_available=%s lualatex_available=%s wkhtmltopdf_available=%s "
@@ -251,19 +238,25 @@ def _impl(
         engine_msg,
     )
 
-    pdf_file = _host_path_for_virtual_output(pdf_path, thread_data)
-    pdf_file.parent.mkdir(parents=True, exist_ok=True)
 
-    # ---- Invocation -----------------------------------------------------
-    cmd: list[str] = [
+def _pandoc_command(
+    *,
+    pandoc_bin: str,
+    markdown_path: str,
+    pdf_path: str,
+    md_file: Path,
+    pdf_file: Path,
+    engine: str | None,
+) -> tuple[list[str], list[str]]:
+    cmd = [
         pandoc_bin,
-        "--standalone",  # produce a self-contained document
+        "--standalone",
         "--from=markdown+smart+yaml_metadata_block",
         str(md_file),
         "-o",
         str(pdf_file),
     ]
-    public_cmd: list[str] = [
+    public_cmd = [
         "--standalone",
         "--from=markdown+smart+yaml_metadata_block",
         markdown_path,
@@ -273,9 +266,12 @@ def _impl(
     if engine is not None:
         cmd.append(f"--pdf-engine={engine}")
         public_cmd.append(f"--pdf-engine={engine}")
+    return cmd, public_cmd
 
+
+def _run_pandoc(cmd: list[str]) -> subprocess.CompletedProcess[str] | str:
     try:
-        completed = subprocess.run(  # noqa: S603 — pandoc binary path is from shutil.which
+        return subprocess.run(  # noqa: S603 — pandoc binary path is from shutil.which
             cmd,
             capture_output=True,
             text=True,
@@ -300,45 +296,59 @@ def _impl(
             error_type="pandoc_oserror",
         )
 
-    if completed.returncode != 0:
-        logger.warning(
-            "render_markdown_to_pdf: render_failed error_type=pandoc_error "
-            "selected_engine=%s returncode=%s",
-            engine or "pandoc_default",
-            completed.returncode,
-        )
-        # Pandoc errors are usually about LaTeX issues (missing
-        # packages, unicode chars without xelatex, broken image paths).
-        # Return stderr so the model can decide whether to retry with a
-        # different engine, fix the markdown, or ship the .md.
-        return _result(
-            success=False,
-            error=(
-                f"pandoc exited with code {completed.returncode}. "
-                f"stderr: {_mask_local_output(completed.stderr.strip(), thread_data)[:1500]}"
-            ),
-            error_type="pandoc_error",
-            engine=engine or "default",
-            command=" ".join(public_cmd),
-        )
 
-    if not pdf_file.is_file():
-        return _result(
-            success=False,
-            error=(
-                f"pandoc reported success but PDF was not written to {pdf_path}. "
-                "This is unexpected; check filesystem permissions."
-            ),
-            error_type="pandoc_no_output",
-        )
+def _pandoc_error_result(
+    *,
+    completed: subprocess.CompletedProcess[str],
+    engine: str | None,
+    public_cmd: list[str],
+    thread_data: dict[str, Any] | None,
+) -> str:
+    logger.warning(
+        "render_markdown_to_pdf: render_failed error_type=pandoc_error "
+        "selected_engine=%s returncode=%s",
+        engine or "pandoc_default",
+        completed.returncode,
+    )
+    return _result(
+        success=False,
+        error=(
+            f"pandoc exited with code {completed.returncode}. "
+            f"stderr: {_mask_local_output(completed.stderr.strip(), thread_data)[:1500]}"
+        ),
+        error_type="pandoc_error",
+        engine=engine or "default",
+        command=" ".join(public_cmd),
+    )
 
-    # ---- Success --------------------------------------------------------
+
+def _pandoc_no_output_result(pdf_path: str) -> str:
+    return _result(
+        success=False,
+        error=(
+            f"pandoc reported success but PDF was not written to {pdf_path}. "
+            "This is unexpected; check filesystem permissions."
+        ),
+        error_type="pandoc_no_output",
+    )
+
+
+def _pdf_size(pdf_file: Path) -> int:
     try:
-        size_bytes = pdf_file.stat().st_size
+        return pdf_file.stat().st_size
     except OSError:
-        size_bytes = -1
-    layout = _inspect_pdf_layout(pdf_file)
+        return -1
 
+
+def _pdf_success_result(
+    *,
+    pdf_path: str,
+    pdf_file: Path,
+    engine: str | None,
+    engine_msg: str,
+) -> str:
+    size_bytes = _pdf_size(pdf_file)
+    layout = _inspect_pdf_layout(pdf_file)
     logger.info(
         "render_markdown_to_pdf: render_success selected_engine=%s "
         "final_artifact_ext=%s size_bytes=%s page_count=%s "
@@ -360,6 +370,66 @@ def _impl(
         engine=engine or "default",
         engine_message=engine_msg,
         **layout,
+    )
+
+
+def _impl(
+    markdown_path: str,
+    pdf_path: str,
+    pdf_engine: str | None,
+    thread_data: dict[str, Any] | None = None,
+) -> str:
+    """Concrete pandoc invocation. Tested independently of the @tool wrapper."""
+    # ---- Path validation -----------------------------------------------
+    path_error = _path_validation_error(markdown_path, pdf_path)
+    if path_error is not None:
+        return _result(success=False, error=path_error, error_type="invalid_input")
+
+    md_file = _host_path_for_virtual_output(markdown_path, thread_data)
+    if not md_file.is_file():
+        return _missing_markdown_result(markdown_path)
+
+    # ---- Pandoc availability --------------------------------------------
+    pandoc_bin = shutil.which("pandoc")
+    if pandoc_bin is None:
+        return _pandoc_missing_result()
+
+    engine, engine_msg = _resolve_pdf_engine(pdf_engine)
+    _log_pandoc_capability(engine, engine_msg)
+
+    pdf_file = _host_path_for_virtual_output(pdf_path, thread_data)
+    pdf_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # ---- Invocation -----------------------------------------------------
+    cmd, public_cmd = _pandoc_command(
+        pandoc_bin=pandoc_bin,
+        markdown_path=markdown_path,
+        pdf_path=pdf_path,
+        md_file=md_file,
+        pdf_file=pdf_file,
+        engine=engine,
+    )
+    completed = _run_pandoc(cmd)
+    if isinstance(completed, str):
+        return completed
+
+    if completed.returncode != 0:
+        return _pandoc_error_result(
+            completed=completed,
+            engine=engine,
+            public_cmd=public_cmd,
+            thread_data=thread_data,
+        )
+
+    if not pdf_file.is_file():
+        return _pandoc_no_output_result(pdf_path)
+
+    # ---- Success --------------------------------------------------------
+    return _pdf_success_result(
+        pdf_path=pdf_path,
+        pdf_file=pdf_file,
+        engine=engine,
+        engine_msg=engine_msg,
     )
 
 

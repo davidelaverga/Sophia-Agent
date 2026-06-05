@@ -99,6 +99,68 @@ def _budget_guard(state: SophiaState, key: str) -> tuple[dict[str, int], str | N
     return {calls_key: 1}, None
 
 
+def _search_error(tool_call_id: str, content: str, budget: dict[str, int] | None = None) -> Command:
+    updates: dict[str, object] = {}
+    if budget is not None:
+        updates["builder_web_budget"] = budget
+    return _tool_response(tool_call_id, content, tool_name="builder_web_search", **updates)
+
+
+def _configured_search_result(query: str) -> tuple[str | None, str | None]:
+    search_tool = _resolve_configured_tool("web_search")
+    if search_tool is None:
+        return None, "Error: No configured web_search provider is available."
+    raw_result = search_tool.run(query)
+    if not isinstance(raw_result, str):
+        return None, "Error: Configured web_search provider returned a non-text response."
+    if raw_result.startswith("Error:"):
+        return None, raw_result
+    return raw_result, None
+
+
+def _parsed_search_payload(raw_result: str) -> tuple[list[Any] | None, str | None]:
+    try:
+        parsed = json.loads(raw_result)
+    except json.JSONDecodeError:
+        return None, "Error: Configured web_search provider returned invalid JSON."
+    if not isinstance(parsed, list):
+        return None, "Error: Configured web_search provider returned an unexpected payload."
+    return parsed, None
+
+
+def _normalized_search_results(parsed: list[Any], query: str) -> list[dict[str, str]]:
+    return [
+        normalized
+        for item in parsed
+        if (normalized := _normalize_search_result(item, query)) is not None
+    ]
+
+
+def _updated_allowed_urls(state: SophiaState, normalized_results: list[dict[str, str]]) -> list[str]:
+    allowed_urls = {
+        normalize_builder_web_url(str(url))
+        for url in (state.get("builder_allowed_urls") or [])
+        if str(url).strip()
+    }
+    allowed_urls.update(result["url"] for result in normalized_results)
+    return sorted(allowed_urls)
+
+
+def _existing_search_sources(state: SophiaState) -> list[dict[str, str]]:
+    return [
+        source
+        for source in (state.get("builder_search_sources") or [])
+        if isinstance(source, dict)
+    ]
+
+
+def _public_search_payload(normalized_results: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [
+        {"title": result["title"], "url": result["url"], "snippet": result["snippet"]}
+        for result in normalized_results
+    ]
+
+
 @tool("builder_web_search", parse_docstring=True)
 def builder_web_search(
     runtime: ToolRuntime[ContextT, SophiaState],
@@ -114,81 +176,30 @@ def builder_web_search(
         query: Search query for the external information needed.
     """
     if runtime.state is None:
-        return _tool_response(tool_call_id, "Error: Builder runtime state is not available.", tool_name="builder_web_search")
+        return _search_error(tool_call_id, "Error: Builder runtime state is not available.")
 
     state = runtime.state
     budget, budget_error = _budget_guard(state, "search")
     if budget_error:
-        return _tool_response(tool_call_id, budget_error, tool_name="builder_web_search")
+        return _search_error(tool_call_id, budget_error)
 
-    search_tool = _resolve_configured_tool("web_search")
-    if search_tool is None:
-        return _tool_response(
-            tool_call_id,
-            "Error: No configured web_search provider is available.",
-            tool_name="builder_web_search",
-            builder_web_budget=budget,
-        )
+    raw_result, provider_error = _configured_search_result(query)
+    if provider_error is not None or raw_result is None:
+        return _search_error(tool_call_id, provider_error or "Error: web_search failed.", budget)
 
-    raw_result = search_tool.run(query)
-    if not isinstance(raw_result, str):
-        return _tool_response(
-            tool_call_id,
-            "Error: Configured web_search provider returned a non-text response.",
-            tool_name="builder_web_search",
-            builder_web_budget=budget,
-        )
-    if raw_result.startswith("Error:"):
-        return _tool_response(tool_call_id, raw_result, tool_name="builder_web_search", builder_web_budget=budget)
+    parsed, parse_error = _parsed_search_payload(raw_result)
+    if parse_error is not None or parsed is None:
+        return _search_error(tool_call_id, parse_error or "Error: web_search parse failed.", budget)
 
-    try:
-        parsed = json.loads(raw_result)
-    except json.JSONDecodeError:
-        return _tool_response(
-            tool_call_id,
-            "Error: Configured web_search provider returned invalid JSON.",
-            tool_name="builder_web_search",
-            builder_web_budget=budget,
-        )
-
-    if not isinstance(parsed, list):
-        return _tool_response(
-            tool_call_id,
-            "Error: Configured web_search provider returned an unexpected payload.",
-            tool_name="builder_web_search",
-            builder_web_budget=budget,
-        )
-
-    normalized_results = [
-        normalized
-        for item in parsed
-        if (normalized := _normalize_search_result(item, query)) is not None
-    ]
-
-    allowed_urls = {
-        normalize_builder_web_url(str(url))
-        for url in (state.get("builder_allowed_urls") or [])
-        if str(url).strip()
-    }
-    allowed_urls.update(result["url"] for result in normalized_results)
-    updated_allowed_urls = sorted(allowed_urls)
-
-    existing_sources = [
-        source
-        for source in (state.get("builder_search_sources") or [])
-        if isinstance(source, dict)
-    ]
+    normalized_results = _normalized_search_results(parsed, query)
+    existing_sources = _existing_search_sources(state)
     updated_sources = _merge_source_records(existing_sources, normalized_results)
 
-    response_payload = [
-        {"title": result["title"], "url": result["url"], "snippet": result["snippet"]}
-        for result in normalized_results
-    ]
     return _tool_response(
         tool_call_id,
-        json.dumps(response_payload, indent=2, ensure_ascii=False),
+        json.dumps(_public_search_payload(normalized_results), indent=2, ensure_ascii=False),
         tool_name="builder_web_search",
         builder_web_budget=budget,
-        builder_allowed_urls=updated_allowed_urls,
+        builder_allowed_urls=_updated_allowed_urls(state, normalized_results),
         builder_search_sources=updated_sources,
     )
