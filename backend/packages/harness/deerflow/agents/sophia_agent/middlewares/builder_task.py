@@ -32,6 +32,7 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
+from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.utils import log_middleware
 
 logger = logging.getLogger(__name__)
@@ -309,6 +310,43 @@ def _generator_listing_tag(
     return "(generator script)", has_generator
 
 
+def _workflow_card(name: str) -> str | None:
+    path = SKILLS_PATH / "builder_workflows" / f"{name}.md"
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        logger.warning("BuilderTask: workflow card missing/unreadable name=%s path=%s", name, path)
+        return None
+
+
+def _builder_workflow_sections(
+    *,
+    artifact_target_ext: str,
+    task_type: str,
+    allow_web_research: bool,
+) -> list[str]:
+    cards: list[str] = []
+    if allow_web_research:
+        cards.append("research")
+    if artifact_target_ext == ".pptx":
+        cards.append("pptx")
+    elif artifact_target_ext == ".pdf":
+        cards.append("pdf")
+    elif artifact_target_ext in {".html", ".htm"}:
+        cards.append("html")
+
+    sections: list[str] = []
+    for name in dict.fromkeys(cards):
+        content = _workflow_card(name)
+        if content:
+            sections.append(
+                f"<builder_workflow_card name=\"{name}\" task_type=\"{html.escape(task_type, quote=True)}\">\n"
+                f"{content}\n"
+                "</builder_workflow_card>"
+            )
+    return sections
+
+
 class BuilderTaskState(AgentState):
     system_prompt_blocks: NotRequired[list[str]]
     delegation_context: NotRequired[dict | None]
@@ -454,10 +492,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         # Pre-flight gate: when this build will need image-generation but the
         # required API key isn't configured, tell the model to STOP rather
         # than burning 30 turns on a doomed loop. Spec-aligned per
-        # AGENTS.md: "When the task cannot be completed because a required
-        # capability is missing, STOP — do not loop retrying the same
-        # command. Call emit_builder_artifact with low confidence and
-        # explain the missing capability in companion_summary."
+        # builder_obligations.md: when a required capability is missing,
+        # stop cleanly instead of looping on the same doomed command.
         api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
         if task_type in _VISUAL_TASK_TYPES and not api_key:
             sections.append(
@@ -506,6 +542,18 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         if skills_block:
             sections.append(skills_block)
 
+        workflow_sections = _builder_workflow_sections(
+            artifact_target_ext=artifact_target_ext,
+            task_type=task_type,
+            allow_web_research=allow_web_research,
+        )
+        if workflow_sections:
+            sections.append(
+                "<builder_target_workflows>\n"
+                + "\n\n".join(workflow_sections)
+                + "\n</builder_target_workflows>"
+            )
+
         sections.append(
             "<preinstalled_libraries>\n"
             "The sandbox already has these Python libraries installed. Import them directly — do NOT run pip install:\n"
@@ -521,28 +569,6 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "generators that handle font/encoding/embedding correctly.\n"
             "</preinstalled_libraries>"
         )
-
-        if allow_web_research:
-            source_requirements = (
-                "<source_output_requirements>\n"
-                "- Web research is available for every builder task type, including frontend builds.\n"
-                "- Turn 1 may be write_todos for planning and UI progress. After that, before any substantive "
-                "write/edit/emit step, you MUST attempt builder_web_search or builder_web_fetch at least once.\n"
-                "- For factual documents and PDFs, if builder_web_search returns useful results, fetch at least "
-                "one approved result URL with builder_web_fetch before final source writing.\n"
-                "- Substantive write/edit/emit steps include write_file, str_replace, artifact-generating bash, "
-                "and emit_builder_artifact. Safe inspection tools such as ls, read_file, and simple read-only "
-                "bash commands may run before research.\n"
-                "- If web tools fail or return weak results, continue the task using the best available context "
-                "instead of stopping.\n"
-                "- If you use external sources, include a concise Sources appendix in the deliverable or create a small sidecar markdown file.\n"
-                "- emit_builder_artifact.sources_used must include structured {title, url} entries for the sources you actually used.\n"
-            )
-            if task_type == "research":
-                source_requirements += (
-                    "- Research reports must include inline [citation:Title](URL) citations after factual claims and end with a Sources section.\n"
-                )
-            sections.append(source_requirements + "</source_output_requirements>")
 
         if tracked_sources:
             source_lines = [
@@ -608,54 +634,24 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "each turn regenerates the entire document.\n"
             "- For binary deliverables (pdf, pptx, docx, xlsx, png, charts): the DELIVERABLE IS THE BINARY. "
             "**Use skills and tools that wrap pre-tested generators — do NOT write your own matplotlib / "
-            "reportlab / python-pptx code.** Past attempts failed repeatedly on font/encoding/image-embedding "
-            "errors. Picks by deliverable shape:\n"
-            "    * **PDF** (technical report, document with diagrams):\n"
-            "      For a simple PDF artifact or Artifact Canvas smoke test, call "
-            "`create_pdf_artifact(pdf_path=<target .pdf path>)`. It writes real PDF bytes via "
-            "reportlab/fpdf2 and returns `pdf_path`; after success, immediately emit that .pdf.\n"
-            "      1. For each diagram or chart, use the chart-visualization skill (read its SKILL.md, then "
-            "         invoke the appropriate generate_*_chart script via bash_tool). The skill outputs PNG/SVG "
-            "         to a path under /mnt/user-data/outputs/.\n"
-            "      2. Compose a Markdown source file in /mnt/user-data/outputs/<name>.md with image embeds "
-            "         pointing to the chart files. Write it once with `write_file(description=..., path=..., content=..., append=False)`.\n"
-            "         If the user did not request a length, aim for a moderate 10-15 page PDF; avoid forced "
-            "         page breaks, sparse section-per-page layouts, and tables that create mostly empty "
-            "         continuation pages.\n"
-            "      3. Call render_markdown_to_pdf(markdown_path=<.md>, pdf_path=<.pdf>) to produce the binary. "
-            "         This tool wraps pandoc and handles fonts/unicode/embedding correctly. It also returns "
-            "         page_count, blank_page_count, short_page_count, and layout_quality.\n"
-            "      4. If render_markdown_to_pdf succeeds with layout_quality='ok', immediately emit the .pdf. "
-            "         Do not call bash, write_todos, or render again. If Sophia injects a PDF layout repair "
-            "         message, revise the Markdown once, render again, then emit the best usable PDF.\n"
-            "      If render_markdown_to_pdf returns success=false with error_type='pandoc_missing' or "
-            "      'pandoc_error'/'pandoc_timeout': for mostly text documents, SHIP THE MARKDOWN as the artifact "
-            "      instead (artifact_type='document', artifact_path = the .md file); for visual/chart/diagram "
-            "      documents, write and ship an HTML fallback that embeds the visuals. Use confidence<=0.5 and "
-            "      explain the PDF renderer limitation in companion_tone_hint.\n"
-            "      Never emit a _generate_*.py script, test_write.py, or any Python/code file as the final "
-            "      artifact for a requested PDF.\n"
-            "    * **PPTX / presentation**: use the ppt-generation skill. You MUST read "
-            "      `/mnt/skills/public/ppt-generation/SKILL.md`, generate slide images through "
-            "      `/mnt/skills/public/image-generation/scripts/generate.py`, then run "
-            "      `/mnt/skills/public/ppt-generation/scripts/generate.py` to compose the PPTX. "
-            "      Reading the skill alone is not enough. Do not write your own python-pptx code, "
-            "      do not emit `.py` files, and emit only after a structurally valid `.pptx` exists. "
-            "      If the skill path fails after one correction, produce a real `.md` or `.html` fallback "
-            "      under `/mnt/user-data/outputs/` and emit that degraded artifact.\n"
+            "reportlab / python-pptx code.** Follow the matching <builder_workflow_card> above when one is "
+            "present. If no workflow card covers the requested format, use the closest listed skill first.\n"
+            "    * **PDF**: follow the PDF workflow card. A valid render is terminal-ready; emit immediately "
+            "unless Sophia asks for one layout repair.\n"
+            "    * **PPTX / presentation**: follow the PPTX workflow card. Reading SKILL.md alone is not "
+            "completion; normal success requires image generation, deck composition, and a valid .pptx.\n"
+            "    * **HTML**: follow the HTML workflow card. Standalone browser-renderable HTML is a text "
+            "deliverable, not a frontend app unless the user requested app behavior.\n"
             "    * **Standalone chart / image**: use the chart-visualization or image-generation skill. The "
-            "      generated PNG/SVG is the deliverable.\n"
+            "generated PNG/SVG is the deliverable.\n"
             "    * **Data analysis / spreadsheet**: use the data-analysis skill (DuckDB-based) for SQL over "
-            "      tabular data. Output CSV/JSON/Markdown directly.\n"
+            "tabular data. Output CSV/JSON/Markdown directly.\n"
             "    * **xlsx / docx / other formats not covered by a skill**: as a LAST RESORT, write a short "
-            "      generator script to /mnt/user-data/outputs/_generate_<name>.py and bash-run it. This path "
-            "      is fragile (the very pattern PR #93/#94 spent recovery machinery on). Prefer a skill if at "
-            "      all possible. If you must use a generator script: keep it under 120 lines, run it with "
-            "      bash_tool, verify with ls_tool, and at most 2 fix-and-retry cycles before shipping the .py "
-            "      with confidence<=0.4.\n"
-            "    Libraries listed in <preinstalled_libraries> are already available — do NOT pip install. "
-            "    The render_markdown_to_pdf tool encapsulates the PDF rendering pipeline; you do not need to "
-            "    install anything to use it.\n"
+            "generator script to /mnt/user-data/outputs/_generate_<name>.py and bash-run it. This path is "
+            "fragile. Prefer a skill if at all possible. If you must use a generator script: keep it under "
+            "120 lines, run it with bash_tool, verify with ls_tool, and at most 2 fix-and-retry cycles before "
+            "shipping the .py with confidence<=0.4.\n"
+            "    Libraries listed in <preinstalled_libraries> are already available — do NOT pip install.\n"
             "- After each meaningful step (write_file, successful skill invocation, render_markdown_to_pdf), "
             "call write_todos again to mark the corresponding item 'completed' or 'in-progress'. This is how "
             "the user sees the progress bar advance — skipping these updates leaves the UI stuck.\n"

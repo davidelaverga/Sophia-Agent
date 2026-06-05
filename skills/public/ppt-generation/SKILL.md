@@ -162,6 +162,11 @@ Parameters:
 [!NOTE]
 Do NOT read the python file, just call it with the parameters.
 
+The composition script exits non-zero if the plan JSON is invalid, a slide image
+is missing, saving fails, or the produced file is not a valid Office PPTX
+package. If it fails after one correction, create an explicit Markdown or HTML
+fallback instead of writing ad hoc `python-pptx` code.
+
 ## Complete Example: Glassmorphism Style (最现代前卫)
 
 User request: "Create a presentation about AI product launch"

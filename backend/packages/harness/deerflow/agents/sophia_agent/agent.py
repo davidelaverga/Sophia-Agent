@@ -59,8 +59,10 @@ logger = logging.getLogger(__name__)
 
 
 # System-prompt preface injected alongside the five async-subagent tools.
-# Kept short on purpose — the heavy contract lives in
-# `skills/public/sophia/AGENTS.md` (loaded by FileInjectionMiddleware).
+# Kept short on purpose — the heavy companion-side contract lives in
+# `skills/public/sophia/coordination_core.md` and
+# `skills/public/sophia/companion_delegation.md` (loaded by
+# FileInjectionMiddleware).
 # This block just teaches the companion the async vocabulary so it picks the
 # right tool for the user's intent. The preamble is appended by
 # AsyncSubAgentMiddleware.wrap_model_call only when this middleware is in the
@@ -310,14 +312,15 @@ def make_sophia_agent(config: RunnableConfig):
         # 3. Crisis fast-path (before any expensive middleware)
         CrisisCheckMiddleware(),
         # 4. Always-loaded identity files (soul always, voice+techniques skip on
-        #    crisis). AGENTS.md is the small shared companion↔builder building
-        #    contract; skip_on_crisis=False because crisis paths never call the
-        #    builder and the extra ~500 tokens are negligible at peak.
+        #    crisis). Build coordination is role-scoped: companion receives the
+        #    shared core plus companion delegation rules, not builder execution
+        #    workflows.
         FileInjectionMiddleware(
             (SKILLS_PATH / "soul.md", False),
             (SKILLS_PATH / "voice.md", True),
             (SKILLS_PATH / "techniques.md", True),
-            (SKILLS_PATH / "AGENTS.md", False),
+            (SKILLS_PATH / "coordination_core.md", False),
+            (SKILLS_PATH / "companion_delegation.md", False),
         ),
         # 5. Platform signal
         PlatformContextMiddleware(),

@@ -30,7 +30,8 @@ CORE_SKILL_FILES = (
     SKILLS_PATH / "soul.md",
     SKILLS_PATH / "voice.md",
     SKILLS_PATH / "techniques.md",
-    SKILLS_PATH / "AGENTS.md",
+    SKILLS_PATH / "coordination_core.md",
+    SKILLS_PATH / "companion_delegation.md",
 )
 
 GEMINI_LIVE_SPOKEN_TURN_POLICY_SOURCE = (
