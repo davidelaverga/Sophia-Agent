@@ -169,10 +169,7 @@ export function useArtifactCoReview({
         toolAvailability: nextState.toolAvailability,
       })
     }
-    if (
-      nextState.refreshFrameResult === "success"
-      && hasConfirmedStillFrameForReviewState(nextState, machineRef.current.status())
-    ) {
+    if (hasConfirmedStillFrameForReviewState(nextState, machineRef.current.status())) {
       setLastFrameViewSignature(currentViewSignatureRef.current)
     }
     logCoreviewBreadcrumb("coReviewStateAfterStart", safeCoReviewTelemetryFromState(nextState))

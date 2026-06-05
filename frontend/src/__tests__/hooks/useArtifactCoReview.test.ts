@@ -181,6 +181,7 @@ describe("useArtifactCoReview", () => {
       await result.current.startReview()
     })
 
+    expect(result.current.lastFrameViewSignature).toBe(result.current.currentViewSignature)
     expect(result.current.reviewStale).toBe(false)
 
     rerender({ viewState: pdfViewState({ pageIndex: 1 }) })
