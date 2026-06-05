@@ -802,8 +802,16 @@ export function PresenceArtifactPanel({
       : null
   ), [builderArtifactId, stageArtifactPath, stageRendererKind, threadId, userId])
   const coreviewAnnotations = useCoreviewAnnotationStore(artifactStableIdentity)
+  const {
+    annotations: coreviewAnnotationList,
+    counts: coreviewAnnotationCounts,
+    telemetry: coreviewAnnotationTelemetry,
+    addAnnotation: addAnnotationToCoreviewStore,
+    updateAnnotation: updateAnnotationInCoreviewStore,
+    deleteAnnotation: deleteAnnotationFromCoreviewStore,
+  } = coreviewAnnotations
   const addCoreviewAnnotation = useCallback((input: CoreviewAddAnnotationAdapterInput): CoreviewAddAnnotationAdapterResult => {
-    const result = coreviewAnnotations.addAnnotation({
+    const result = addAnnotationToCoreviewStore({
       kind: input.kind,
       pageIndex: input.pageIndex,
       rect: input.rect,
@@ -834,7 +842,13 @@ export function PresenceArtifactPanel({
       arrowCount: result.counts.arrowCount,
       drawPathCount: result.counts.drawPathCount,
     }
-  }, [coreviewAnnotations])
+  }, [addAnnotationToCoreviewStore])
+  const updateCoreviewAnnotation = useCallback((annotationId: string, patch: { text?: string | null }) => (
+    updateAnnotationInCoreviewStore(annotationId, patch).ok
+  ), [updateAnnotationInCoreviewStore])
+  const deleteCoreviewAnnotation = useCallback((annotationId: string) => (
+    deleteAnnotationFromCoreviewStore(annotationId).ok
+  ), [deleteAnnotationFromCoreviewStore])
   const stageUsesMarkdownPreview = stageRendererKind === "markdown"
   const stageUsesPdfPreview = stageRendererKind === "pdf"
   const fallbackBuilderArtifactViewState = useMemo(() => (
@@ -879,7 +893,9 @@ export function PresenceArtifactPanel({
   )
   const handleBuilderVoiceCommandTargetChange = useCallback((target: ArtifactReviewVoiceCommandTarget | null) => {
     builderVoiceCommandTargetRef.current = target
-    setBuilderVoiceCommandTarget(target)
+    setBuilderVoiceCommandTarget((current) => (
+      current === target ? current : target
+    ))
   }, [])
 
   useEffect(() => {
@@ -943,13 +959,13 @@ export function PresenceArtifactPanel({
     reviewHasFrame: builderReviewHasFrame,
     exactTextAvailable: builderExactTextAvailable,
     visualFrameFresh: builderReviewHasFrame && !builderReviewStale,
-    annotationOverlayCaptured: builderVoiceCommandTarget?.annotationOverlayCaptured ?? (stageRendererKind === "pdf" ? coreviewAnnotations.counts.annotationCount > 0 : null),
-    annotationCount: builderVoiceCommandTarget?.annotationCounts.annotationCount ?? coreviewAnnotations.counts.annotationCount,
-    highlightCount: builderVoiceCommandTarget?.annotationCounts.highlightCount ?? coreviewAnnotations.counts.highlightCount,
-    commentCount: builderVoiceCommandTarget?.annotationCounts.commentCount ?? coreviewAnnotations.counts.commentCount,
-    underlineCount: builderVoiceCommandTarget?.annotationCounts.underlineCount ?? coreviewAnnotations.counts.underlineCount,
-    arrowCount: builderVoiceCommandTarget?.annotationCounts.arrowCount ?? coreviewAnnotations.counts.arrowCount,
-    drawPathCount: builderVoiceCommandTarget?.annotationCounts.drawPathCount ?? coreviewAnnotations.counts.drawPathCount,
+    annotationOverlayCaptured: builderVoiceCommandTarget?.annotationOverlayCaptured ?? (stageRendererKind === "pdf" ? coreviewAnnotationCounts.annotationCount > 0 : null),
+    annotationCount: builderVoiceCommandTarget?.annotationCounts.annotationCount ?? coreviewAnnotationCounts.annotationCount,
+    highlightCount: builderVoiceCommandTarget?.annotationCounts.highlightCount ?? coreviewAnnotationCounts.highlightCount,
+    commentCount: builderVoiceCommandTarget?.annotationCounts.commentCount ?? coreviewAnnotationCounts.commentCount,
+    underlineCount: builderVoiceCommandTarget?.annotationCounts.underlineCount ?? coreviewAnnotationCounts.underlineCount,
+    arrowCount: builderVoiceCommandTarget?.annotationCounts.arrowCount ?? coreviewAnnotationCounts.arrowCount,
+    drawPathCount: builderVoiceCommandTarget?.annotationCounts.drawPathCount ?? coreviewAnnotationCounts.drawPathCount,
     rebindStatus: "not_attempted",
   }), [
     artifactStableIdentity,
@@ -967,12 +983,12 @@ export function PresenceArtifactPanel({
     builderReviewHasFrame,
     builderReviewStale,
     builderVoiceCommandTarget,
-    coreviewAnnotations.counts.annotationCount,
-    coreviewAnnotations.counts.arrowCount,
-    coreviewAnnotations.counts.commentCount,
-    coreviewAnnotations.counts.drawPathCount,
-    coreviewAnnotations.counts.highlightCount,
-    coreviewAnnotations.counts.underlineCount,
+    coreviewAnnotationCounts.annotationCount,
+    coreviewAnnotationCounts.arrowCount,
+    coreviewAnnotationCounts.commentCount,
+    coreviewAnnotationCounts.drawPathCount,
+    coreviewAnnotationCounts.highlightCount,
+    coreviewAnnotationCounts.underlineCount,
     stageBuilderArtifact?.artifactTitle,
     stageArtifactPath,
     stageRendererKind,
@@ -2516,11 +2532,11 @@ export function PresenceArtifactPanel({
                   normalSessionId={normalSessionId}
                   voiceAgentSessionId={voiceAgentSessionId}
                   artifactStableIdentity={artifactStableIdentity}
-                  annotations={coreviewAnnotations.annotations}
-                  annotationStoreTelemetry={coreviewAnnotations.telemetry}
+                  annotations={coreviewAnnotationList}
+                  annotationStoreTelemetry={coreviewAnnotationTelemetry}
                   onAddAnnotation={addCoreviewAnnotation}
-                  onUpdateAnnotation={(annotationId, patch) => coreviewAnnotations.updateAnnotation(annotationId, patch).ok}
-                  onDeleteAnnotation={(annotationId) => coreviewAnnotations.deleteAnnotation(annotationId).ok}
+                  onUpdateAnnotation={updateCoreviewAnnotation}
+                  onDeleteAnnotation={deleteCoreviewAnnotation}
                   reviewState={builderArtifactCoReview.state}
                   transportStatus={builderArtifactCoReview.transportStatus}
                   exactTextAvailable={builderExactTextAvailable}
@@ -2551,11 +2567,11 @@ export function PresenceArtifactPanel({
                   normalSessionId={normalSessionId}
                   voiceAgentSessionId={voiceAgentSessionId}
                   artifactStableIdentity={artifactStableIdentity}
-                  annotations={coreviewAnnotations.annotations}
-                  annotationStoreTelemetry={coreviewAnnotations.telemetry}
+                  annotations={coreviewAnnotationList}
+                  annotationStoreTelemetry={coreviewAnnotationTelemetry}
                   onAddAnnotation={addCoreviewAnnotation}
-                  onUpdateAnnotation={(annotationId, patch) => coreviewAnnotations.updateAnnotation(annotationId, patch).ok}
-                  onDeleteAnnotation={(annotationId) => coreviewAnnotations.deleteAnnotation(annotationId).ok}
+                  onUpdateAnnotation={updateCoreviewAnnotation}
+                  onDeleteAnnotation={deleteCoreviewAnnotation}
                   reviewState={builderArtifactCoReview.state}
                   transportStatus={builderArtifactCoReview.transportStatus}
                   exactTextAvailable={builderExactTextAvailable}

@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import type { ComponentProps } from "react"
+import { useCallback, type ComponentProps } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { ArtifactStage, type ArtifactReviewVoiceCommandTarget } from "../../../app/components/session/ArtifactStage"
@@ -177,45 +177,55 @@ function seedPersistedAnnotations(
 
 function ControlledArtifactStage(props: ComponentProps<typeof ArtifactStage>) {
   const annotationStore = useCoreviewAnnotationStore(props.artifactStableIdentity ?? null)
+  const addAnnotation = useCallback<NonNullable<ComponentProps<typeof ArtifactStage>["onAddAnnotation"]>>((input) => {
+    const result = annotationStore.addAnnotation({
+      kind: input.kind,
+      pageIndex: input.pageIndex,
+      rect: input.rect,
+      point: input.point,
+      line: input.line,
+      color: input.color,
+      text: input.text,
+      source: input.source,
+    })
+    const blockedReason: ReturnType<NonNullable<ComponentProps<typeof ArtifactStage>["onAddAnnotation"]>>["blockedReason"] = (
+      result.blockedReason === "identity_unavailable"
+        ? "annotation_target_unavailable"
+        : result.blockedReason === "invalid_annotation"
+          ? input.kind === "highlight" || input.kind === "underline"
+            ? "invalid_rect"
+            : "anchor_not_found"
+          : result.blockedReason === "annotation_not_found"
+            ? "annotation_commit_failed"
+            : null
+    )
+    return {
+      ok: result.ok,
+      annotationId: result.annotation?.id ?? null,
+      blockedReason,
+      annotationCount: result.counts.annotationCount,
+      highlightCount: result.counts.highlightCount,
+      commentCount: result.counts.commentCount,
+      underlineCount: result.counts.underlineCount,
+      arrowCount: result.counts.arrowCount,
+      drawPathCount: result.counts.drawPathCount,
+    }
+  }, [annotationStore])
+  const updateAnnotation = useCallback((annotationId: string, patch: { text?: string | null }) => (
+    annotationStore.updateAnnotation(annotationId, patch).ok
+  ), [annotationStore])
+  const deleteAnnotation = useCallback((annotationId: string) => (
+    annotationStore.deleteAnnotation(annotationId).ok
+  ), [annotationStore])
 
   return (
     <ArtifactStage
       {...props}
       annotations={annotationStore.annotations}
       annotationStoreTelemetry={annotationStore.telemetry}
-      onAddAnnotation={(input) => {
-        const result = annotationStore.addAnnotation({
-          kind: input.kind,
-          pageIndex: input.pageIndex,
-          rect: input.rect,
-          point: input.point,
-          line: input.line,
-          color: input.color,
-          text: input.text,
-          source: input.source,
-        })
-        return {
-          ok: result.ok,
-          annotationId: result.annotation?.id ?? null,
-          blockedReason: result.blockedReason === "identity_unavailable"
-            ? "annotation_target_unavailable"
-            : result.blockedReason === "invalid_annotation"
-              ? input.kind === "highlight" || input.kind === "underline"
-                ? "invalid_rect"
-                : "anchor_not_found"
-              : result.blockedReason === "annotation_not_found"
-                ? "annotation_commit_failed"
-                : null,
-          annotationCount: result.counts.annotationCount,
-          highlightCount: result.counts.highlightCount,
-          commentCount: result.counts.commentCount,
-          underlineCount: result.counts.underlineCount,
-          arrowCount: result.counts.arrowCount,
-          drawPathCount: result.counts.drawPathCount,
-        }
-      }}
-      onUpdateAnnotation={(annotationId, patch) => annotationStore.updateAnnotation(annotationId, patch).ok}
-      onDeleteAnnotation={(annotationId) => annotationStore.deleteAnnotation(annotationId).ok}
+      onAddAnnotation={addAnnotation}
+      onUpdateAnnotation={updateAnnotation}
+      onDeleteAnnotation={deleteAnnotation}
     />
   )
 }
@@ -908,6 +918,53 @@ describe("ArtifactStage", () => {
     await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-zoom", "1.4"))
     await waitFor(() => expect(scrollTo).toHaveBeenCalled())
     expect(screen.getByRole("status", { name: /not looking/i })).toBeInTheDocument()
+  })
+
+  it("does not unregister the Coreview stage target during annotation state updates", async () => {
+    const stableIdentity = "user:test-user|thread:thread-1|path:target-cleanup.pdf|renderer:pdf"
+    let voiceTarget: ArtifactReviewVoiceCommandTarget | null = null
+    const onVoiceCommandTargetChange = vi.fn((target: ArtifactReviewVoiceCommandTarget | null) => {
+      voiceTarget = target
+    })
+    mockPdfDocument({ pageCount: 1 })
+
+    const view = renderStage({
+      artifact: pdfBuilderArtifact,
+      artifactId: "artifact-1",
+      artifactStableIdentity: stableIdentity,
+      exactTextAvailable: false,
+      onVoiceCommandTargetChange,
+    })
+
+    await screen.findByLabelText("PDF page 1")
+    await waitFor(() => expect(voiceTarget?.pageCount).toBe(1))
+    onVoiceCommandTargetChange.mockClear()
+
+    act(() => {
+      voiceTarget?.addAnnotation({
+        kind: "highlight",
+        pageIndex: 0,
+        anchor: {
+          anchorType: "rect",
+          pageIndex: 0,
+          rect: { x: 0.12, y: 0.18, width: 0.34, height: 0.08 },
+          point: null,
+        },
+        rect: { x: 0.12, y: 0.18, width: 0.34, height: 0.08 },
+        point: null,
+        line: null,
+        color: "yellow",
+        text: null,
+        source: "user",
+      })
+    })
+
+    expect(await screen.findByTestId("artifact-highlight-annotation")).toBeInTheDocument()
+    await waitFor(() => expect(voiceTarget?.annotationCounts.annotationCount).toBe(1))
+    expect(onVoiceCommandTargetChange.mock.calls.filter(([target]) => target === null)).toHaveLength(0)
+
+    view.unmount()
+    expect(onVoiceCommandTargetChange.mock.calls.filter(([target]) => target === null)).toHaveLength(1)
   })
 
   it("restores persisted highlight, comment, underline, arrow, and Sophia annotations for the same stable artifact", async () => {

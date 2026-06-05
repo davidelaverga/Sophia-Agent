@@ -15,6 +15,7 @@ import {
   clearCoreviewToolBridgeForTests,
   executeCoreviewToolBridgeCall,
 } from "../../../app/lib/coreview-actions"
+import { clearCoreviewAnnotationStoreForTests } from "../../../app/lib/coreview-annotation-store"
 import {
   clearCoreviewArtifactTextRegistryForTests,
   readCoreviewArtifactTextSideband,
@@ -292,6 +293,7 @@ describe("Coreview artifact still-frame review", () => {
   beforeEach(() => {
     mockCanvasApis()
     window.localStorage.clear()
+    clearCoreviewAnnotationStoreForTests()
     getDisplayMedia = vi.fn()
     setCoreviewFlags(false)
     Object.defineProperty(navigator, "mediaDevices", {
@@ -304,6 +306,7 @@ describe("Coreview artifact still-frame review", () => {
     window.__sophiaCapture?.disable()
     window.__sophiaCapture?.clear()
     window.localStorage.clear()
+    clearCoreviewAnnotationStoreForTests()
     clearCoreviewArtifactTextRegistryForTests()
     clearCoreviewToolBridgeForTests()
     fetchSpy?.mockRestore()
@@ -1000,6 +1003,7 @@ describe("Coreview artifact still-frame review", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /review with sophia/i })).toBeEnabled())
     await userEvent.click(screen.getByRole("button", { name: /review with sophia/i }))
     await waitFor(() => expect(sendArtifactFrame).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(screen.getByRole("region", { name: /generated artifact/i })).toHaveAttribute("data-review-state", "active"))
 
     const toolResult = await executeCoreviewToolBridgeCall({
       id: "coreview-call-failed-refresh",

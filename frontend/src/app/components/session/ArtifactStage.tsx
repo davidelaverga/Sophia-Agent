@@ -210,6 +210,10 @@ export function ArtifactStage({
   const [pdfFocusRequest, setPdfFocusRequest] = useState<ArtifactPdfFocusRequest | null>(null)
   const annotationsRef = useRef<ArtifactAnnotation[]>([])
   const toolModeRef = useRef<ArtifactToolMode>("select")
+  const voiceCommandTargetRegistrationRef = useRef<{
+    key: string
+    target: ArtifactReviewVoiceCommandTarget
+  } | null>(null)
   const annotationTelemetrySignatureRef = useRef<string | null>(null)
   const viewportPrimaryFile = primaryFile
     ? {
@@ -856,11 +860,32 @@ export function ArtifactStage({
     setCoreviewTargetView,
     zoom,
   ])
+  const voiceCommandTargetRegistrationKey = [
+    artifactStableIdentity ?? "",
+    artifactId ?? "",
+    primaryFile?.path ?? "",
+    rendererKind,
+  ].join("|")
+  voiceCommandTargetRegistrationRef.current = {
+    key: voiceCommandTargetRegistrationKey,
+    target: voiceCommandTarget,
+  }
 
   useEffect(() => {
     onVoiceCommandTargetChange?.(voiceCommandTarget)
-    return () => onVoiceCommandTargetChange?.(null)
-  }, [onVoiceCommandTargetChange, voiceCommandTarget])
+    return () => {
+      const currentRegistration = voiceCommandTargetRegistrationRef.current
+      if (
+        currentRegistration?.key !== voiceCommandTargetRegistrationKey
+        || currentRegistration.target !== voiceCommandTarget
+      ) {
+        return
+      }
+
+      voiceCommandTargetRegistrationRef.current = null
+      onVoiceCommandTargetChange?.(null)
+    }
+  }, [onVoiceCommandTargetChange, voiceCommandTarget, voiceCommandTargetRegistrationKey])
 
   useEffect(() => {
     if (rendererKind !== "pdf") {

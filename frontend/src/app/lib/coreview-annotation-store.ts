@@ -203,13 +203,13 @@ export function useCoreviewAnnotationStore(stableArtifactIdentity: string | null
     deleteAnnotation(normalizedIdentity, annotationId)
   ), [normalizedIdentity])
 
-  return {
+  return useMemo(() => ({
     ...snapshot,
     stableArtifactIdentity: normalizedIdentity,
     addAnnotation: add,
     updateAnnotation: update,
     deleteAnnotation: remove,
-  }
+  }), [add, normalizedIdentity, remove, snapshot, update])
 }
 
 export function subscribeCoreviewAnnotationStore(listener: () => void): () => void {
