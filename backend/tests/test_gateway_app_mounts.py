@@ -61,6 +61,8 @@ def test_gateway_app_mounts_voice_connect_route(monkeypatch):
 
     monkeypatch.setenv("STREAM_API_KEY", "test-api-key")
     monkeypatch.setenv("STREAM_API_SECRET", "test-api-secret")
+    monkeypatch.setenv("SOPHIA_VOICE_RUNTIME_MODE", "legacy_cascade")
+    monkeypatch.setenv("SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED", "false")
 
     app = create_app()
     app.dependency_overrides[require_authorized_user_scope] = lambda: "test_user"

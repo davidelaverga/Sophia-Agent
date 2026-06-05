@@ -2,8 +2,10 @@
 
 Acceptance criteria #2 + #3 from the Sophia vision-port spec.
 
-Builder uses upstream ``view_image_tool`` and ``ViewImageMiddleware``
-directly. Companion uses the narrow ``view_user_image`` wrapper and
+Builder uses upstream ``view_image_tool`` and
+``ClearOnInjectViewImageMiddleware`` (a ``ViewImageMiddleware`` subclass
+that prevents stale image accumulation). Companion uses the narrow
+``view_user_image`` wrapper and
 ``SophiaViewImageMiddleware`` (subclass that recognizes both tool names).
 Both chains gate on ``vision_gate.supports_vision(model_name)``.
 """
@@ -53,13 +55,14 @@ def test_builder_includes_view_image_tool_and_middleware_when_vision_enabled(mon
         "Builder must expose upstream view_image_tool when vision gate is True. "
         f"Got tools: {tool_names}"
     )
-    assert "ViewImageMiddleware" in middleware_names, (
-        "Builder middleware chain must include ViewImageMiddleware when vision "
-        "gate is True so injected image content blocks reach the model. "
+    assert "ClearOnInjectViewImageMiddleware" in middleware_names, (
+        "Builder middleware chain must include the cleanup ViewImageMiddleware "
+        "subclass when vision gate is True so injected image content blocks "
+        "reach the model without stale image accumulation. "
         f"Got middlewares: {middleware_names}"
     )
 
-    # Position assertion: ViewImageMiddleware must run AFTER BuilderArtifactMiddleware
+    # Position assertion: image middleware must run AFTER BuilderArtifactMiddleware
     # (so artifact emission isn't shadowed by image injection) and BEFORE
     # PromptAssemblyMiddleware (so the injected HumanMessage participates in
     # prompt finalization).
@@ -67,9 +70,9 @@ def test_builder_includes_view_image_tool_and_middleware_when_vision_enabled(mon
     assert "PromptAssemblyMiddleware" in middleware_names
     assert (
         middleware_names.index("BuilderArtifactMiddleware")
-        < middleware_names.index("ViewImageMiddleware")
+        < middleware_names.index("ClearOnInjectViewImageMiddleware")
         < middleware_names.index("PromptAssemblyMiddleware")
-    ), f"ViewImageMiddleware in wrong slot: {middleware_names}"
+    ), f"Image middleware in wrong slot: {middleware_names}"
 
 
 def test_builder_excludes_view_image_when_vision_disabled(monkeypatch) -> None:
@@ -88,6 +91,7 @@ def test_builder_excludes_view_image_when_vision_disabled(monkeypatch) -> None:
 
     assert "view_image" not in tool_names
     assert "ViewImageMiddleware" not in middleware_names
+    assert "ClearOnInjectViewImageMiddleware" not in middleware_names
 
 
 def test_companion_includes_vision_tools_and_subclass_middleware(monkeypatch) -> None:

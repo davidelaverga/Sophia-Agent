@@ -108,12 +108,13 @@ def test_copy_skips_filenames_with_unsafe_characters(tmp_path: Path, monkeypatch
     the ``<uploaded_images>`` briefing block, where characters like
     ``<``, ``>``, spaces, or quotes can confuse the model's tag
     boundary detection. Newline-in-filename is the worst case (would
-    let an attacker close the tag and inject system instructions);
-    macOS filesystems sometimes reject newlines so that variant is
-    covered by the direct regex test below.
+    let an attacker close the tag and inject system instructions).
+    Filenames containing angle brackets or quotes are rejected by
+    some filesystems, so those variants are covered by the direct
+    regex test below.
 
     Filesystem-legal-but-unsafe names tested here: spaces, parens,
-    angle brackets, quotes.
+    plus signs, brackets.
     """
     import logging
 
@@ -125,8 +126,8 @@ def test_copy_skips_filenames_with_unsafe_characters(tmp_path: Path, monkeypatch
     safe.write_bytes(b"\x89PNG\r\n\x1a\n")
     dangerous_names = [
         "trickery with spaces.png",
-        "weird<tag>.png",
-        "quote\"injection.png",
+        "plus+injection.png",
+        "bracket[injection].png",
         "with(parens).png",
     ]
     for name in dangerous_names:
@@ -168,6 +169,8 @@ def test_copy_filename_regex_rejects_newline_tag_breakout() -> None:
     assert sbt._SAFE_COPY_FILENAME.match(breakout) is None, (
         "Newline-tag-breakout filename must NOT match the allow-list."
     )
+    assert sbt._SAFE_COPY_FILENAME.match("weird<tag>.png") is None
+    assert sbt._SAFE_COPY_FILENAME.match('quote"injection.png') is None
     assert sbt._SAFE_COPY_FILENAME.match("photo.png") is not None
     assert sbt._SAFE_COPY_FILENAME.match("with-dash_under.dot.png") is not None
 
