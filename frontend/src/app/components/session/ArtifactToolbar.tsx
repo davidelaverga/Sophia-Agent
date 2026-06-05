@@ -25,6 +25,12 @@ interface ArtifactToolbarProps {
   onFitWidth?: () => void
   onResetZoom?: () => void
   supportsAnnotations?: boolean
+  supportsPan?: boolean
+  supportsComments?: boolean
+  supportsUnderline?: boolean
+  supportsArrow?: boolean
+  supportsOriginalDownload?: boolean
+  supportsOpenInNewTab?: boolean
   toolMode?: ArtifactToolMode
   onToolModeChange?: (mode: ArtifactToolMode) => void
   openHref?: string | null
@@ -34,6 +40,7 @@ interface ArtifactToolbarProps {
   annotationExportAvailable?: boolean
   onDownloadOriginal?: () => void
   onExportAnnotated?: () => void
+  annotationExportUnavailableLabel?: string
   className?: string
 }
 
@@ -54,6 +61,12 @@ export function ArtifactToolbar({
   onFitWidth,
   onResetZoom,
   supportsAnnotations = false,
+  supportsPan = false,
+  supportsComments = supportsAnnotations,
+  supportsUnderline = supportsAnnotations,
+  supportsArrow = supportsAnnotations,
+  supportsOriginalDownload,
+  supportsOpenInNewTab,
   toolMode = "select",
   onToolModeChange,
   openHref,
@@ -63,6 +76,7 @@ export function ArtifactToolbar({
   annotationExportAvailable = false,
   onDownloadOriginal,
   onExportAnnotated,
+  annotationExportUnavailableLabel = "Annotated export is not available yet.",
   className,
 }: ArtifactToolbarProps) {
   const normalizedPageCount = Math.max(1, pageCount)
@@ -70,6 +84,8 @@ export function ArtifactToolbar({
   const effectivePageLabel = pageLabel ?? `Page ${normalizedPageIndex + 1} of ${normalizedPageCount}`
   const canGoPrevious = supportsPagination && normalizedPageIndex > 0
   const canGoNext = supportsPagination && normalizedPageIndex < normalizedPageCount - 1
+  const canOpenInNewTab = supportsOpenInNewTab ?? Boolean(openHref)
+  const canDownloadOriginal = supportsOriginalDownload ?? Boolean(downloadHref)
   const zoomLabel = fitMode === "page"
     ? "Fit page"
     : fitMode === "width"
@@ -99,7 +115,7 @@ export function ArtifactToolbar({
       </div>
 
       <div className="flex flex-wrap items-center gap-1.5" onClick={(event) => event.stopPropagation()}>
-        {supportsAnnotations ? (
+        {supportsAnnotations || supportsPan ? (
           <div
             aria-label="Artifact annotation tools"
             className="mr-1 flex items-center gap-1 rounded-lg border border-[color:var(--cosmic-border-soft)] bg-[color:color-mix(in_srgb,var(--cosmic-panel-soft)_68%,transparent)] p-1"
@@ -112,46 +128,56 @@ export function ArtifactToolbar({
             >
               <MousePointer2 className="h-3.5 w-3.5" aria-hidden="true" />
             </ToolModeButton>
-            <ToolModeButton
-              mode="pan"
-              label="Pan"
-              pressed={toolMode === "pan"}
-              onSelect={onToolModeChange}
-            >
-              <Hand className="h-3.5 w-3.5" aria-hidden="true" />
-            </ToolModeButton>
-            <ToolModeButton
-              mode="highlight"
-              label="Highlight"
-              pressed={toolMode === "highlight"}
-              onSelect={onToolModeChange}
-            >
-              <Highlighter className="h-3.5 w-3.5" aria-hidden="true" />
-            </ToolModeButton>
-            <ToolModeButton
-              mode="underline"
-              label="Underline"
-              pressed={toolMode === "underline"}
-              onSelect={onToolModeChange}
-            >
-              <Underline className="h-3.5 w-3.5" aria-hidden="true" />
-            </ToolModeButton>
-            <ToolModeButton
-              mode="arrow"
-              label="Arrow"
-              pressed={toolMode === "arrow"}
-              onSelect={onToolModeChange}
-            >
-              <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
-            </ToolModeButton>
-            <ToolModeButton
-              mode="comment"
-              label="Comment"
-              pressed={toolMode === "comment"}
-              onSelect={onToolModeChange}
-            >
-              <MessageSquare className="h-3.5 w-3.5" aria-hidden="true" />
-            </ToolModeButton>
+            {supportsPan ? (
+              <ToolModeButton
+                mode="pan"
+                label="Pan"
+                pressed={toolMode === "pan"}
+                onSelect={onToolModeChange}
+              >
+                <Hand className="h-3.5 w-3.5" aria-hidden="true" />
+              </ToolModeButton>
+            ) : null}
+            {supportsAnnotations ? (
+              <ToolModeButton
+                mode="highlight"
+                label="Highlight"
+                pressed={toolMode === "highlight"}
+                onSelect={onToolModeChange}
+              >
+                <Highlighter className="h-3.5 w-3.5" aria-hidden="true" />
+              </ToolModeButton>
+            ) : null}
+            {supportsUnderline ? (
+              <ToolModeButton
+                mode="underline"
+                label="Underline"
+                pressed={toolMode === "underline"}
+                onSelect={onToolModeChange}
+              >
+                <Underline className="h-3.5 w-3.5" aria-hidden="true" />
+              </ToolModeButton>
+            ) : null}
+            {supportsArrow ? (
+              <ToolModeButton
+                mode="arrow"
+                label="Arrow"
+                pressed={toolMode === "arrow"}
+                onSelect={onToolModeChange}
+              >
+                <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
+              </ToolModeButton>
+            ) : null}
+            {supportsComments ? (
+              <ToolModeButton
+                mode="comment"
+                label="Comment"
+                pressed={toolMode === "comment"}
+                onSelect={onToolModeChange}
+              >
+                <MessageSquare className="h-3.5 w-3.5" aria-hidden="true" />
+              </ToolModeButton>
+            ) : null}
           </div>
         ) : null}
         {supportsPagination ? (
@@ -230,7 +256,7 @@ export function ArtifactToolbar({
             </ToolbarButton>
           </div>
         ) : null}
-        {openHref ? (
+        {openHref && canOpenInNewTab ? (
           <a
             href={openHref}
             target="_blank"
@@ -243,7 +269,7 @@ export function ArtifactToolbar({
             <span>Open in new tab</span>
           </a>
         ) : null}
-        {downloadHref ? (
+        {downloadHref && canDownloadOriginal ? (
           <a
             href={downloadHref}
             download={downloadName}
@@ -264,7 +290,7 @@ export function ArtifactToolbar({
             type="button"
             aria-label={`Export annotated copy ${title}`}
             data-annotation-count={String(annotationCount)}
-            title="Annotated export is not available yet."
+            title={annotationExportAvailable ? "Export annotated copy" : annotationExportUnavailableLabel}
             disabled={!annotationExportAvailable}
             className="cosmic-focus-ring inline-flex h-8 items-center gap-1.5 rounded-md border border-[color:var(--cosmic-border-soft)] px-2.5 text-[11px] font-medium text-[color:var(--cosmic-text-muted)] transition hover:bg-[color:var(--cosmic-panel-soft)] disabled:cursor-not-allowed disabled:opacity-45"
             onClick={() => {

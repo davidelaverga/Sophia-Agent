@@ -57,7 +57,20 @@ export type CoreviewVisualTelemetry = {
   reviewStartBlockedReason: string | null
   coreviewSessionActive: boolean
   coreviewArtifactId: string | null
+  coreviewWorkspaceContractVersion: number | null
   artifactStableIdentity: string | null
+  artifactCapabilityRendererKind: string | null
+  artifactCapabilityRenderMode: string | null
+  artifactCapabilitySupportsPages: boolean | null
+  artifactCapabilitySupportsAnnotations: boolean | null
+  artifactCapabilitySupportsTextExtraction: boolean | null
+  artifactCapabilitySupportsLayoutAnchors: boolean | null
+  artifactCapabilitySupportsOCR: boolean | null
+  artifactCapabilityRequiresOCR: boolean | null
+  artifactCapabilitySupportsPptxNativeRender: boolean | null
+  artifactCapabilitySupportsAnnotatedExport: boolean | null
+  artifactCapabilityFallbackReason: string | null
+  coreviewWorkspaceEventCount: number
   artifactRebindAttempted: boolean
   artifactRebindResult: string | null
   artifactRebindReason: string | null
@@ -1256,7 +1269,20 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       reviewStartBlockedReason: null,
       coreviewSessionActive: false,
       coreviewArtifactId: null,
+      coreviewWorkspaceContractVersion: null,
       artifactStableIdentity: null,
+      artifactCapabilityRendererKind: null,
+      artifactCapabilityRenderMode: null,
+      artifactCapabilitySupportsPages: null,
+      artifactCapabilitySupportsAnnotations: null,
+      artifactCapabilitySupportsTextExtraction: null,
+      artifactCapabilitySupportsLayoutAnchors: null,
+      artifactCapabilitySupportsOCR: null,
+      artifactCapabilityRequiresOCR: null,
+      artifactCapabilitySupportsPptxNativeRender: null,
+      artifactCapabilitySupportsAnnotatedExport: null,
+      artifactCapabilityFallbackReason: null,
+      coreviewWorkspaceEventCount: 0,
       artifactRebindAttempted: false,
       artifactRebindResult: null,
       artifactRebindReason: null,
@@ -1524,6 +1550,10 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((event) => event.category === "voice-session" && event.name === "coreview-tool-call")
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
+  const workspaceEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "coreview-workspace-event")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
   const assistantAnnotationClaimSuppressedEvents = activeEvents
     .filter((event) => event.category === "voice-session" && event.name === "assistant-annotation-claim-suppressed")
   const coreviewToolDiagnostics = activeEvents.filter((event) => (
@@ -1615,6 +1645,25 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.artifactStableIdentity = asString(latestSelectedStage?.artifactStableIdentity)
     ?? asString(latestRebindEvent?.artifactStableIdentity)
     ?? asString(latestCoreviewTool?.artifactStableIdentity)
+  const capabilityEvents = [
+    ...selectedStageEvents,
+    ...annotationStateEvents,
+    ...annotationExportEvents,
+    ...coreviewToolEvents,
+  ]
+  visual.coreviewWorkspaceContractVersion = latestFiniteFromRecords(capabilityEvents, "coreviewWorkspaceContractVersion")
+  visual.artifactCapabilityRendererKind = latestStringFromRecords(capabilityEvents, "artifactCapabilityRendererKind")
+  visual.artifactCapabilityRenderMode = latestStringFromRecords(capabilityEvents, "artifactCapabilityRenderMode")
+  visual.artifactCapabilitySupportsPages = latestBooleanFromRecords(capabilityEvents, "artifactCapabilitySupportsPages")
+  visual.artifactCapabilitySupportsAnnotations = latestBooleanFromRecords(capabilityEvents, "artifactCapabilitySupportsAnnotations")
+  visual.artifactCapabilitySupportsTextExtraction = latestBooleanFromRecords(capabilityEvents, "artifactCapabilitySupportsTextExtraction")
+  visual.artifactCapabilitySupportsLayoutAnchors = latestBooleanFromRecords(capabilityEvents, "artifactCapabilitySupportsLayoutAnchors")
+  visual.artifactCapabilitySupportsOCR = latestBooleanFromRecords(capabilityEvents, "artifactCapabilitySupportsOCR")
+  visual.artifactCapabilityRequiresOCR = latestBooleanFromRecords(capabilityEvents, "artifactCapabilityRequiresOCR")
+  visual.artifactCapabilitySupportsPptxNativeRender = latestBooleanFromRecords(capabilityEvents, "artifactCapabilitySupportsPptxNativeRender")
+  visual.artifactCapabilitySupportsAnnotatedExport = latestBooleanFromRecords(capabilityEvents, "artifactCapabilitySupportsAnnotatedExport")
+  visual.artifactCapabilityFallbackReason = latestStringFromRecords(capabilityEvents, "artifactCapabilityFallbackReason")
+  visual.coreviewWorkspaceEventCount = workspaceEvents.length
   visual.artifactRebindAttempted = latestRebindEvent !== null
   visual.artifactRebindResult = asString(latestRebindEvent?.artifactRebindResult)
   visual.artifactRebindReason = asString(latestRebindEvent?.artifactRebindReason)

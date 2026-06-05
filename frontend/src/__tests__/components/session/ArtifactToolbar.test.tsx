@@ -66,6 +66,10 @@ describe("ArtifactToolbar", () => {
       <ArtifactToolbar
         title="Launch PDF"
         supportsAnnotations
+        supportsPan
+        supportsComments
+        supportsUnderline
+        supportsArrow
         toolMode="highlight"
         onToolModeChange={onToolModeChange}
       />,
@@ -93,6 +97,10 @@ describe("ArtifactToolbar", () => {
         downloadHref="/artifact.pdf?download=true"
         downloadName="artifact.pdf"
         supportsAnnotations
+        supportsPan
+        supportsComments
+        supportsUnderline
+        supportsArrow
         annotationCount={2}
         annotationExportAvailable={false}
         onDownloadOriginal={onDownloadOriginal}
@@ -105,5 +113,31 @@ describe("ArtifactToolbar", () => {
     expect(exportButton).toBeDisabled()
     expect(exportButton).toHaveAttribute("title", "Annotated export is not available yet.")
     expect(exportButton).toHaveAttribute("data-annotation-count", "2")
+  })
+
+  it("does not show unsupported annotation or export tools for PPTX fallback", () => {
+    render(
+      <ArtifactToolbar
+        title="Launch deck"
+        openHref="/artifact.pptx"
+        downloadHref="/artifact.pptx?download=true"
+        downloadName="artifact.pptx"
+        supportsAnnotations={false}
+        supportsPan={false}
+        supportsZoom={false}
+        supportsPagination={false}
+        supportsOpenInNewTab
+        supportsOriginalDownload
+        annotationExportAvailable={false}
+      />,
+    )
+
+    expect(screen.getByLabelText("Open Launch deck in new tab")).toBeInTheDocument()
+    expect(screen.getByLabelText("Download original Launch deck")).toBeInTheDocument()
+    expect(screen.queryByLabelText("Highlight")).not.toBeInTheDocument()
+    expect(screen.queryByLabelText("Underline")).not.toBeInTheDocument()
+    expect(screen.queryByLabelText("Arrow")).not.toBeInTheDocument()
+    expect(screen.queryByLabelText("Comment")).not.toBeInTheDocument()
+    expect(screen.queryByLabelText("Export annotated copy Launch deck")).not.toBeInTheDocument()
   })
 })

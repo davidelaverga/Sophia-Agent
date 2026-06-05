@@ -51,6 +51,10 @@ import {
   type CoreviewViewReadyResult,
 } from "../../lib/coreview-actions"
 import { useCoreviewAnnotationStore } from "../../lib/coreview-annotation-store"
+import {
+  coreviewArtifactCapabilityTelemetry,
+  getCoreviewArtifactCapabilitiesForFile,
+} from "../../lib/coreview-artifact-capabilities"
 import { buildCoreviewArtifactStableIdentity } from "../../lib/coreview-artifact-identity"
 import { recordSophiaCaptureEvent } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
@@ -316,6 +320,18 @@ function coreviewBlockedStatusText(reason: CoreviewToolBlockedReason | null): st
       return "This artifact is not available in the current session."
     case "requested_page_out_of_bounds":
       return "That page is not available in this PDF."
+    case "pages_not_supported":
+      return "This artifact does not support page navigation."
+    case "zoom_not_supported":
+      return "This artifact does not support zoom controls."
+    case "annotations_not_supported":
+      return "Annotations are not available for this artifact format."
+    case "layout_anchor_not_supported":
+      return "Layout anchors are not available for this artifact format."
+    case "ocr_not_available":
+      return "OCR is not available yet."
+    case "pptx_native_renderer_unavailable":
+      return "PPTX native canvas rendering is not available yet."
     case "unsupported_pages":
     case "unsupported_renderer":
       return "This view cannot be controlled by Sophia."
@@ -346,6 +362,12 @@ function routeBlockedReasonFromCoreview(
       return "no_artifact_selected"
     case "requested_page_out_of_bounds":
       return "requested_page_out_of_bounds"
+    case "pages_not_supported":
+    case "zoom_not_supported":
+    case "annotations_not_supported":
+    case "layout_anchor_not_supported":
+    case "ocr_not_available":
+    case "pptx_native_renderer_unavailable":
     case "unsupported_pages":
     case "unsupported_renderer":
       return "no_multipage_artifact_selected"
@@ -783,6 +805,26 @@ export function PresenceArtifactPanel({
   }, [builderArtifactLibrary, stageBuilderArtifact])
   const stageRendererKind = detectArtifactRendererKind(stagePrimaryFile, stageBuilderArtifact)
   const stageArtifactPath = stagePrimaryFile?.path ?? stageBuilderArtifact?.artifactPath ?? null
+  const stageArtifactCapabilities = useMemo(() => (
+    getCoreviewArtifactCapabilitiesForFile({
+      file: stagePrimaryFile,
+      rendererKind: stageRendererKind,
+      textExtractionStatus: builderVisualCaptureStatus.pdfTextExtractionStatus ?? null,
+      exactTextAvailable: builderVisualCaptureStatus.exactTextAvailable,
+      layoutAnchorsAvailable: false,
+      originalDownloadAvailable: Boolean(stageArtifactPath),
+      openInNewTabAvailable: Boolean(stageArtifactPath),
+    })
+  ), [
+    builderVisualCaptureStatus.exactTextAvailable,
+    builderVisualCaptureStatus.pdfTextExtractionStatus,
+    stageArtifactPath,
+    stagePrimaryFile,
+    stageRendererKind,
+  ])
+  const stageArtifactCapabilityTelemetry = useMemo(() => (
+    coreviewArtifactCapabilityTelemetry(stageRendererKind, stageArtifactCapabilities)
+  ), [stageArtifactCapabilities, stageRendererKind])
   const builderStageVisibilitySignature = useMemo(() => (
     [
       normalizedSelectedBuilderArtifactPath ?? "",
@@ -849,8 +891,8 @@ export function PresenceArtifactPanel({
   const deleteCoreviewAnnotation = useCallback((annotationId: string) => (
     deleteAnnotationFromCoreviewStore(annotationId).ok
   ), [deleteAnnotationFromCoreviewStore])
-  const stageUsesMarkdownPreview = stageRendererKind === "markdown"
-  const stageUsesPdfPreview = stageRendererKind === "pdf"
+  const stageUsesMarkdownPreview = stageArtifactCapabilities.renderMode === "markdown"
+  const stageUsesPdfPreview = stageArtifactCapabilities.renderMode === "canvas" && stageRendererKind === "pdf"
   const fallbackBuilderArtifactViewState = useMemo(() => (
     createDefaultArtifactViewState({
       artifactId: builderArtifactId,
@@ -872,15 +914,26 @@ export function PresenceArtifactPanel({
 
     if (!stageUsesMarkdownPreview && !stageUsesPdfPreview) {
       return {
-        ready: true,
-        reason: null,
+        ready: stageArtifactCapabilities.supportsStillFrame,
+        reason: stageArtifactCapabilities.supportsStillFrame ? null : "exact_text_only_no_visual_source",
         source: "metadata_canvas",
-        exactTextAvailable: true,
+        exactTextAvailable: stageArtifactCapabilities.canRender && stageArtifactCapabilities.renderMode === "metadata"
+          ? true
+          : stageArtifactCapabilities.supportsTextExtraction,
       }
     }
 
     return builderVisualCaptureStatus
-  }, [builderArtifactId, builderVisualCaptureStatus, stageUsesMarkdownPreview, stageUsesPdfPreview])
+  }, [
+    builderArtifactId,
+    builderVisualCaptureStatus,
+    stageArtifactCapabilities.canRender,
+    stageArtifactCapabilities.renderMode,
+    stageArtifactCapabilities.supportsStillFrame,
+    stageArtifactCapabilities.supportsTextExtraction,
+    stageUsesMarkdownPreview,
+    stageUsesPdfPreview,
+  ])
   const builderVisualSourceReady = Boolean(
     builderArtifactId
     && effectiveBuilderVisualCaptureStatus.ready,
@@ -939,35 +992,39 @@ export function PresenceArtifactPanel({
     builderArtifactCoReview.state.state === "co_review_live"
       && (builderArtifactCoReview.state.frameSentCount ?? 0) > 0,
   )
-  const coreviewCurrentView = useMemo<CoreviewCurrentView>(() => ({
-    artifactId: builderArtifactId,
-    artifactPath: stageArtifactPath,
-    artifactTitle: stageBuilderArtifact?.artifactTitle ?? null,
-    artifactStableIdentity,
-    rendererKind: builderArtifactViewState.rendererKind,
-    supportsPagination: builderVoiceCommandTarget?.supportsPagination ?? stageRendererKind === "pdf",
-    supportsZoom: builderVoiceCommandTarget?.supportsZoom ?? stageRendererKind === "pdf",
-    pageIndex: builderVoiceCommandTarget?.pageIndex ?? builderArtifactViewState.pageIndex,
-    pageCount: Math.max(1, builderVoiceCommandTarget?.pageCount ?? builderArtifactViewState.pageCount),
-    zoom: builderVoiceCommandTarget?.zoom ?? builderArtifactViewState.zoom,
-    fitMode: builderVoiceCommandTarget?.fitMode ?? builderArtifactViewState.fitMode,
-    viewSignature: builderArtifactViewSignature,
-    stale: builderReviewStale,
-    refreshInProgress: builderArtifactCoReview.state.refreshFrameInProgress,
-    canRefresh: builderArtifactCoReview.canRefresh,
-    reviewActive: builderArtifactCoReview.state.state === "co_review_live",
-    reviewHasFrame: builderReviewHasFrame,
-    exactTextAvailable: builderExactTextAvailable,
-    visualFrameFresh: builderReviewHasFrame && !builderReviewStale,
-    annotationOverlayCaptured: builderVoiceCommandTarget?.annotationOverlayCaptured ?? (stageRendererKind === "pdf" ? coreviewAnnotationCounts.annotationCount > 0 : null),
-    annotationCount: builderVoiceCommandTarget?.annotationCounts.annotationCount ?? coreviewAnnotationCounts.annotationCount,
-    highlightCount: builderVoiceCommandTarget?.annotationCounts.highlightCount ?? coreviewAnnotationCounts.highlightCount,
-    commentCount: builderVoiceCommandTarget?.annotationCounts.commentCount ?? coreviewAnnotationCounts.commentCount,
-    underlineCount: builderVoiceCommandTarget?.annotationCounts.underlineCount ?? coreviewAnnotationCounts.underlineCount,
-    arrowCount: builderVoiceCommandTarget?.annotationCounts.arrowCount ?? coreviewAnnotationCounts.arrowCount,
-    drawPathCount: builderVoiceCommandTarget?.annotationCounts.drawPathCount ?? coreviewAnnotationCounts.drawPathCount,
-    rebindStatus: "not_attempted",
-  }), [
+  const coreviewCurrentView = useMemo<CoreviewCurrentView>(() => {
+    const capabilities = builderVoiceCommandTarget?.capabilities ?? stageArtifactCapabilities
+    return {
+      artifactId: builderArtifactId,
+      artifactPath: stageArtifactPath,
+      artifactTitle: stageBuilderArtifact?.artifactTitle ?? null,
+      artifactStableIdentity,
+      rendererKind: builderArtifactViewState.rendererKind,
+      capabilities,
+      supportsPagination: capabilities.supportsPages,
+      supportsZoom: capabilities.supportsZoom,
+      pageIndex: builderVoiceCommandTarget?.pageIndex ?? builderArtifactViewState.pageIndex,
+      pageCount: Math.max(1, builderVoiceCommandTarget?.pageCount ?? builderArtifactViewState.pageCount),
+      zoom: builderVoiceCommandTarget?.zoom ?? builderArtifactViewState.zoom,
+      fitMode: builderVoiceCommandTarget?.fitMode ?? builderArtifactViewState.fitMode,
+      viewSignature: builderArtifactViewSignature,
+      stale: builderReviewStale,
+      refreshInProgress: builderArtifactCoReview.state.refreshFrameInProgress,
+      canRefresh: builderArtifactCoReview.canRefresh,
+      reviewActive: builderArtifactCoReview.state.state === "co_review_live",
+      reviewHasFrame: builderReviewHasFrame,
+      exactTextAvailable: builderExactTextAvailable,
+      visualFrameFresh: builderReviewHasFrame && !builderReviewStale,
+      annotationOverlayCaptured: builderVoiceCommandTarget?.annotationOverlayCaptured ?? (capabilities.supportsAnnotations ? coreviewAnnotationCounts.annotationCount > 0 : null),
+      annotationCount: builderVoiceCommandTarget?.annotationCounts.annotationCount ?? coreviewAnnotationCounts.annotationCount,
+      highlightCount: builderVoiceCommandTarget?.annotationCounts.highlightCount ?? coreviewAnnotationCounts.highlightCount,
+      commentCount: builderVoiceCommandTarget?.annotationCounts.commentCount ?? coreviewAnnotationCounts.commentCount,
+      underlineCount: builderVoiceCommandTarget?.annotationCounts.underlineCount ?? coreviewAnnotationCounts.underlineCount,
+      arrowCount: builderVoiceCommandTarget?.annotationCounts.arrowCount ?? coreviewAnnotationCounts.arrowCount,
+      drawPathCount: builderVoiceCommandTarget?.annotationCounts.drawPathCount ?? coreviewAnnotationCounts.drawPathCount,
+      rebindStatus: "not_attempted",
+    }
+  }, [
     artifactStableIdentity,
     builderArtifactCoReview.canRefresh,
     builderArtifactCoReview.state.refreshFrameInProgress,
@@ -991,7 +1048,7 @@ export function PresenceArtifactPanel({
     coreviewAnnotationCounts.underlineCount,
     stageBuilderArtifact?.artifactTitle,
     stageArtifactPath,
-    stageRendererKind,
+    stageArtifactCapabilities,
   ])
   useEffect(() => {
     coreviewCurrentViewRef.current = coreviewCurrentView
@@ -1084,6 +1141,7 @@ export function PresenceArtifactPanel({
         longLivedSelectedStageState: true,
         telemetryScopeMode: details.rebindAttempted ? "current_run_rebind" : "long_lived_selected_stage",
         ...coreviewDiagnostics,
+        ...stageArtifactCapabilityTelemetry,
         exactTextSource: stageUsesMarkdownPreview
           ? "builder_file"
           : stageUsesPdfPreview
@@ -1131,6 +1189,7 @@ export function PresenceArtifactPanel({
     normalizedSelectedBuilderArtifactPath,
     sessionId,
     stageArtifactPath,
+    stageArtifactCapabilityTelemetry,
     stageBuilderArtifact,
     stageUsesMarkdownPreview,
     stageUsesPdfPreview,
@@ -1245,6 +1304,7 @@ export function PresenceArtifactPanel({
   const recordCoreviewToolTelemetry = useCallback((result: CoreviewActionResult) => {
     const annotationStateChanged = coreviewAnnotationStateChanged(result)
     const annotationFallbackResult = annotationFallbackResultFromCoreview(result)
+    const capabilitySummary = result.capability_summary ?? null
     const annotationCommandKeptArtifactMounted = Boolean(
       result.action === "add_annotation"
       && isVisible
@@ -1285,6 +1345,18 @@ export function PresenceArtifactPanel({
         coreviewToolViewReadyWaitMs: result.view_ready_wait_ms,
         coreviewToolViewSignatureBefore: result.view_signature_before,
         coreviewToolViewSignatureAfter: result.view_signature_after,
+        coreviewWorkspaceContractVersion: result.coreview_workspace_contract_version ?? null,
+        artifactCapabilityRendererKind: capabilitySummary?.rendererKind ?? result.renderer_kind,
+        artifactCapabilityRenderMode: capabilitySummary?.renderMode ?? null,
+        artifactCapabilitySupportsPages: capabilitySummary?.supportsPages ?? null,
+        artifactCapabilitySupportsAnnotations: capabilitySummary?.supportsAnnotations ?? null,
+        artifactCapabilitySupportsTextExtraction: capabilitySummary?.supportsTextExtraction ?? null,
+        artifactCapabilitySupportsLayoutAnchors: capabilitySummary?.supportsLayoutAnchors ?? null,
+        artifactCapabilitySupportsOCR: capabilitySummary?.supportsOCR ?? null,
+        artifactCapabilityRequiresOCR: capabilitySummary?.requiresOCR ?? null,
+        artifactCapabilitySupportsPptxNativeRender: capabilitySummary?.supportsPptxNativeRender ?? null,
+        artifactCapabilitySupportsAnnotatedExport: capabilitySummary?.supportsAnnotatedExport ?? null,
+        artifactCapabilityFallbackReason: capabilitySummary?.fallbackReason ?? null,
         coreviewAnnotationToolCount: result.action === "add_annotation" ? 1 : 0,
         coreviewAnnotationToolResult: result.action === "add_annotation" ? annotationFallbackResult : null,
         coreviewAnnotationFallbackCount: result.action === "add_annotation" && result.command_source === "frontend_fallback" ? 1 : 0,
@@ -1934,12 +2006,12 @@ export function PresenceArtifactPanel({
 
       const requestedPage = typeof setInput.pageIndex === "number" || typeof setInput.pageNumber === "number"
       const requestedZoom = typeof setInput.zoom === "number" || typeof setInput.fitMode === "string"
-      if (requestedPage && (!currentView.supportsPagination || currentPageCount <= 1)) {
-        blockedReason = "unsupported_pages"
+      if (requestedPage && (!currentView.capabilities.supportsPages || currentPageCount <= 1)) {
+        blockedReason = "pages_not_supported"
       } else if (requestedPage && (nextPageIndex < 0 || nextPageIndex >= currentPageCount)) {
         blockedReason = "requested_page_out_of_bounds"
-      } else if (requestedZoom && !currentView.supportsZoom) {
-        blockedReason = "unsupported_renderer"
+      } else if (requestedZoom && !currentView.capabilities.supportsZoom) {
+        blockedReason = "zoom_not_supported"
       }
     }
 

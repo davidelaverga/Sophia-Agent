@@ -7,10 +7,14 @@ import type { ArtifactFitMode, ArtifactRendererKind } from "../../lib/artifact-r
 import { detectArtifactRendererKind } from "../../lib/artifact-renderers"
 import { isHtmlArtifactFile, isMarkdownArtifactFile } from "../../lib/builder-artifacts"
 import {
+  getCoreviewArtifactCapabilitiesForFile,
+} from "../../lib/coreview-artifact-capabilities"
+import {
   registerCoreviewArtifactText,
   registerCoreviewArtifactTextStatus,
 } from "../../lib/coreview-artifact-text"
 import type { CoreviewPdfTextLayout } from "../../lib/coreview-pdf-text-layout"
+import type { CoreviewArtifactCapabilities } from "../../lib/coreview-workspace-contract"
 import { recordSophiaCaptureEvent } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
 import type {
@@ -66,6 +70,7 @@ interface ArtifactCanvasViewportProps {
   onPdfTextLayoutChange?: (layout: CoreviewPdfTextLayout | null) => void
   reviewSurfaceState?: ArtifactReviewSurfaceState
   rendererKind?: ArtifactRendererKind
+  capabilities?: CoreviewArtifactCapabilities
   pageIndex?: number
   pageCount?: number
   zoom?: number
@@ -107,6 +112,7 @@ export function ArtifactCanvasViewport({
   onPdfTextLayoutChange,
   reviewSurfaceState = "idle",
   rendererKind,
+  capabilities,
   pageIndex = 0,
   zoom = 1,
   fitMode = "custom",
@@ -128,9 +134,15 @@ export function ArtifactCanvasViewport({
   const primaryFile = previewFile ?? files.find((file) => file.isPrimary) ?? files[0]
   const supportingFiles = files.filter((file) => !file.isPrimary)
   const effectiveRendererKind = rendererKind ?? detectArtifactRendererKind(primaryFile, artifact)
-  const canPreviewHtml = effectiveRendererKind === "html" || isHtmlArtifactFile(primaryFile)
-  const canPreviewMarkdown = !canPreviewHtml && (effectiveRendererKind === "markdown" || isMarkdownArtifactFile(primaryFile))
-  const canPreviewPdf = !canPreviewHtml && effectiveRendererKind === "pdf"
+  const effectiveCapabilities = capabilities ?? getCoreviewArtifactCapabilitiesForFile({
+    file: primaryFile,
+    rendererKind: effectiveRendererKind,
+    originalDownloadAvailable: Boolean(previewHref),
+    openInNewTabAvailable: Boolean(previewHref),
+  })
+  const canPreviewHtml = effectiveCapabilities.renderMode === "html" && (effectiveRendererKind === "html" || isHtmlArtifactFile(primaryFile))
+  const canPreviewMarkdown = !canPreviewHtml && effectiveCapabilities.renderMode === "markdown" && (effectiveRendererKind === "markdown" || isMarkdownArtifactFile(primaryFile))
+  const canPreviewPdf = !canPreviewHtml && effectiveCapabilities.renderMode === "canvas" && effectiveRendererKind === "pdf"
   const scrollAreaRef = useRef<HTMLDivElement | null>(null)
   const canvasBedBounds = useElementClientBounds(scrollAreaRef)
   const preview = useMarkdownArtifactPreview({
@@ -241,6 +253,7 @@ export function ArtifactCanvasViewport({
     canPreviewPdf,
     currentMarkdownCaptureStatus,
     currentPdfCaptureStatusWithText,
+    effectiveCapabilities,
     htmlPreview,
     htmlPreviewText,
     markdownPreview: preview,
@@ -251,6 +264,7 @@ export function ArtifactCanvasViewport({
     captureArtifactId,
     currentMarkdownCaptureStatus,
     currentPdfCaptureStatusWithText,
+    effectiveCapabilities,
     htmlPreview,
     htmlPreviewText,
     preview,
@@ -499,6 +513,7 @@ export function ArtifactCanvasViewport({
               primaryFile={primaryFile}
               supportingFileCount={supportingFiles.length}
               typeLabel={typeLabel}
+              capabilityTruth={effectiveCapabilities.userFacingTruth ?? null}
             />
           )}
         </div>
@@ -699,6 +714,7 @@ function resolveVisualCaptureStatus({
   canPreviewPdf,
   currentMarkdownCaptureStatus,
   currentPdfCaptureStatusWithText,
+  effectiveCapabilities,
   htmlPreview,
   htmlPreviewText,
   markdownPreview,
@@ -709,6 +725,7 @@ function resolveVisualCaptureStatus({
   canPreviewPdf: boolean
   currentMarkdownCaptureStatus: ArtifactVisualCaptureStatus
   currentPdfCaptureStatusWithText: ArtifactVisualCaptureStatus
+  effectiveCapabilities: CoreviewArtifactCapabilities
   htmlPreview: HtmlPreviewState
   htmlPreviewText: string
   markdownPreview: MarkdownPreviewState
@@ -724,10 +741,12 @@ function resolveVisualCaptureStatus({
   }
   if (!canPreviewMarkdown) {
     return {
-      ready: true,
-      reason: null,
+      ready: effectiveCapabilities.supportsStillFrame,
+      reason: effectiveCapabilities.supportsStillFrame ? null : "exact_text_only_no_visual_source",
       source: "metadata_canvas",
-      exactTextAvailable: true,
+      exactTextAvailable: effectiveCapabilities.canRender && effectiveCapabilities.renderMode === "metadata"
+        ? true
+        : effectiveCapabilities.supportsTextExtraction,
     }
   }
   if (markdownPreview.status === "idle" || markdownPreview.status === "loading") {
@@ -1338,11 +1357,13 @@ function ArtifactMetadataPage({
   primaryFile,
   supportingFileCount,
   typeLabel,
+  capabilityTruth,
 }: {
   artifact: BuilderArtifactV1
   primaryFile?: ArtifactViewportFile
   supportingFileCount: number
   typeLabel: string
+  capabilityTruth?: string | null
 }) {
   return (
     <div
@@ -1373,6 +1394,12 @@ function ArtifactMetadataPage({
           The artifact is ready to review.
         </p>
       )}
+
+      {capabilityTruth ? (
+        <p className="mt-4 text-sm leading-relaxed text-[color:var(--cosmic-text-muted)]">
+          {capabilityTruth}
+        </p>
+      ) : null}
 
       {primaryFile ? (
         <div className="mt-6 rounded-lg border border-[color:var(--cosmic-border-soft)] bg-[color:var(--cosmic-panel-soft)] px-3.5 py-3">

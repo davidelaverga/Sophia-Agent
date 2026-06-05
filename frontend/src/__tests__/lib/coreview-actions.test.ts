@@ -13,6 +13,7 @@ import {
   type CoreviewRendererAdapter,
   type CoreviewToolRefreshResult,
 } from "../../app/lib/coreview-actions"
+import { getCoreviewArtifactCapabilities } from "../../app/lib/coreview-artifact-capabilities"
 
 function createHarness(options: Partial<CoreviewCurrentView> & {
   refreshOk?: boolean
@@ -35,13 +36,21 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
   let focusCalls = 0
   let staleSignature: string | null = null
   let annotations: Array<{ kind: "highlight" | "comment" | "underline" | "arrow" }> = []
+  const defaultCapabilities = getCoreviewArtifactCapabilities({
+    rendererKind: "pdf",
+    artifactPath: "outputs/report.pdf",
+    exactTextAvailable: true,
+    textExtractionStatus: "success",
+    layoutAnchorsAvailable: true,
+  })
   let current: CoreviewCurrentView = {
     artifactId: "artifact-1",
     artifactPath: "outputs/report.pdf",
     artifactTitle: "report.pdf",
     rendererKind: "pdf",
-    supportsPagination: true,
-    supportsZoom: true,
+    capabilities: defaultCapabilities,
+    supportsPagination: defaultCapabilities.supportsPages,
+    supportsZoom: defaultCapabilities.supportsZoom,
     pageIndex: 0,
     pageCount: 3,
     zoom: 1,
@@ -63,6 +72,16 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
     drawPathCount: 0,
     ...currentOptions,
   }
+  current.capabilities = currentOptions.capabilities ?? getCoreviewArtifactCapabilities({
+    rendererKind: current.rendererKind,
+    artifactPath: current.artifactPath,
+    title: current.artifactTitle,
+    exactTextAvailable: current.exactTextAvailable,
+    textExtractionStatus: current.exactTextAvailable ? "success" : "unavailable",
+    layoutAnchorsAvailable: current.rendererKind === "pdf" && current.exactTextAvailable,
+  })
+  current.supportsPagination = currentOptions.supportsPagination ?? current.capabilities.supportsPages
+  current.supportsZoom = currentOptions.supportsZoom ?? current.capabilities.supportsZoom
   current.viewSignature = buildArtifactViewSignature({
     artifactId: current.artifactId,
     filePath: current.artifactPath,
@@ -427,7 +446,7 @@ describe("Coreview action bus", () => {
     const result = await harness.bus.setView({ pageNumber: 2 }, "gemini_tool")
 
     expect(result.ok).toBe(false)
-    expect(result.blocked_reason).toBe("unsupported_pages")
+    expect(result.blocked_reason).toBe("pages_not_supported")
     expect(harness.refreshes).toBe(0)
   })
 
@@ -487,6 +506,24 @@ describe("Coreview action bus", () => {
       visual_frame_fresh: true,
       frame_sent: true,
       current_view_summary: "Current view is page 2 of 3.",
+      coreview_workspace_contract_version: 1,
+      capability_summary: {
+        rendererKind: "pdf",
+        renderMode: "canvas",
+        supportsPages: true,
+        supportsPageRail: true,
+        currentPage: 2,
+        pageCount: 3,
+        supportsTextExtraction: true,
+        supportsLayoutAnchors: true,
+        supportsAnnotations: true,
+        supportsZoom: true,
+        supportsPan: true,
+        supportsAnnotatedExport: false,
+        supportsOCR: false,
+        supportsPptxNativeRender: false,
+        userFacingTruth: null,
+      },
       annotation_overlay_captured: false,
       raw_artifact_text_excluded: true,
       raw_frame_excluded: true,
@@ -766,7 +803,7 @@ describe("Coreview action bus", () => {
     expect(harness.refreshes).toBe(1)
   })
 
-  it("blocks annotation tools when no artifact is selected or renderer is unsupported", async () => {
+  it("blocks annotation tools when no artifact is selected or annotations are unsupported", async () => {
     await expect(createHarness({ artifactId: null }).bus.addAnnotation({
       kind: "highlight",
       anchor: { type: "current_title" },
@@ -782,7 +819,46 @@ describe("Coreview action bus", () => {
       source: "sophia",
     }, "gemini_tool")).resolves.toMatchObject({
       ok: false,
+      blocked_reason: "annotations_not_supported",
+    })
+
+    await expect(createHarness({ rendererKind: "unsupported" }).bus.addAnnotation({
+      kind: "highlight",
+      anchor: { type: "current_title" },
+      source: "sophia",
+    }, "gemini_tool")).resolves.toMatchObject({
+      ok: false,
       blocked_reason: "unsupported_renderer",
+    })
+
+    await expect(createHarness({
+      rendererKind: "download_only",
+      artifactPath: "outputs/deck.pptx",
+      artifactTitle: "deck.pptx",
+    }).bus.addAnnotation({
+      kind: "highlight",
+      anchor: { type: "current_title" },
+      source: "sophia",
+    }, "gemini_tool")).resolves.toMatchObject({
+      ok: false,
+      blocked_reason: "annotations_not_supported",
+      capability_summary: {
+        renderMode: "metadata",
+        supportsAnnotations: false,
+        supportsPptxNativeRender: false,
+        fallbackReason: "pptx_native_renderer_unavailable",
+      },
+    })
+  })
+
+  it("blocks focus anchors when layout anchors are unsupported", async () => {
+    const result = await createHarness({ rendererKind: "markdown" }).bus.focusAnchor({
+      anchor: { type: "current_title" },
+    }, "gemini_tool")
+
+    expect(result).toMatchObject({
+      ok: false,
+      blocked_reason: "layout_anchor_not_supported",
     })
   })
 })

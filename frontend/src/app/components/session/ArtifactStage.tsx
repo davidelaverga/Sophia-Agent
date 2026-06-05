@@ -4,8 +4,6 @@ import { RefreshCw } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 
 import {
-  artifactRendererSupportsPagination,
-  artifactRendererSupportsZoom,
   buildArtifactViewSignature,
   clampArtifactZoom,
   detectArtifactRendererKind,
@@ -39,9 +37,16 @@ import {
   type CoreviewAnnotationStoreTelemetry,
 } from "../../lib/coreview-annotation-store"
 import {
+  coreviewArtifactCapabilityTelemetry,
+  getCoreviewArtifactCapabilitiesForFile,
+} from "../../lib/coreview-artifact-capabilities"
+import {
   resolveCoreviewPdfTextAnchor,
   type CoreviewPdfTextLayout,
 } from "../../lib/coreview-pdf-text-layout"
+import type {
+  CoreviewArtifactCapabilities,
+} from "../../lib/coreview-workspace-contract"
 import { recordSophiaCaptureEvent } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
 import type {
@@ -109,6 +114,7 @@ export interface ArtifactReviewVoiceCommandTarget {
   artifactId: string | null
   filePath: string | null
   rendererKind: ArtifactRendererKind
+  capabilities: CoreviewArtifactCapabilities
   supportsPagination: boolean
   supportsZoom: boolean
   pageIndex: number
@@ -186,8 +192,6 @@ export function ArtifactStage({
   const downloadHref = buildThreadArtifactHref(threadId, primaryFile?.path, { download: true })
   const typeLabel = formatBuilderArtifactTypeLabel(builderArtifact.artifactType)
   const rendererKind = detectArtifactRendererKind(primaryFile, builderArtifact)
-  const supportsPagination = artifactRendererSupportsPagination(rendererKind)
-  const supportsZoom = artifactRendererSupportsZoom(rendererKind)
   const [pageIndex, setPageIndex] = useState(0)
   const [pageCount, setPageCount] = useState(1)
   const [zoom, setZoom] = useState(1)
@@ -215,16 +219,43 @@ export function ArtifactStage({
     target: ArtifactReviewVoiceCommandTarget
   } | null>(null)
   const annotationTelemetrySignatureRef = useRef<string | null>(null)
-  const viewportPrimaryFile = primaryFile
-    ? {
-        path: primaryFile.path,
-        name: primaryFile.name,
-        label: "label" in primaryFile ? primaryFile.label : primaryFile.name,
-        isPrimary: "isPrimary" in primaryFile ? primaryFile.isPrimary : true,
-        ...("mimeType" in primaryFile && primaryFile.mimeType ? { mimeType: primaryFile.mimeType } : {}),
-        ...("sizeBytes" in primaryFile && typeof primaryFile.sizeBytes === "number" ? { sizeBytes: primaryFile.sizeBytes } : {}),
-      }
-    : null
+  const viewportPrimaryFile = useMemo(() => (
+    primaryFile
+      ? {
+          path: primaryFile.path,
+          name: primaryFile.name,
+          label: "label" in primaryFile ? primaryFile.label : primaryFile.name,
+          isPrimary: "isPrimary" in primaryFile ? primaryFile.isPrimary : true,
+          ...("mimeType" in primaryFile && primaryFile.mimeType ? { mimeType: primaryFile.mimeType } : {}),
+          ...("sizeBytes" in primaryFile && typeof primaryFile.sizeBytes === "number" ? { sizeBytes: primaryFile.sizeBytes } : {}),
+        }
+      : null
+  ), [primaryFile])
+  const artifactCapabilities = useMemo(() => (
+    getCoreviewArtifactCapabilitiesForFile({
+      file: viewportPrimaryFile,
+      rendererKind,
+      textExtractionStatus: visualCaptureStatus?.pdfTextExtractionStatus ?? null,
+      exactTextAvailable: exactTextAvailable || visualCaptureStatus?.exactTextAvailable === true || Boolean(pdfTextLayout),
+      layoutAnchorsAvailable: rendererKind === "pdf" && Boolean(pdfTextLayout),
+      originalDownloadAvailable: Boolean(downloadHref),
+      openInNewTabAvailable: Boolean(openHref),
+    })
+  ), [
+    downloadHref,
+    exactTextAvailable,
+    openHref,
+    pdfTextLayout,
+    rendererKind,
+    viewportPrimaryFile,
+    visualCaptureStatus?.exactTextAvailable,
+    visualCaptureStatus?.pdfTextExtractionStatus,
+  ])
+  const artifactCapabilityTelemetry = useMemo(() => (
+    coreviewArtifactCapabilityTelemetry(rendererKind, artifactCapabilities)
+  ), [artifactCapabilities, rendererKind])
+  const supportsPagination = artifactCapabilities.supportsPages
+  const supportsZoom = artifactCapabilities.supportsZoom
   const artifactTextRegistration = useMemo(() => (
     artifactId ? {
       artifactId,
@@ -262,7 +293,7 @@ export function ArtifactStage({
     setPageIndex(0)
     setPageCount(1)
     setZoom(1)
-    setFitMode(rendererKind === "pdf" ? "page" : "custom")
+    setFitMode(supportsZoom ? "page" : "custom")
     setSelectedAnnotationId(null)
     setPdfTextLayout(null)
     setPdfFocusRequest(null)
@@ -270,6 +301,7 @@ export function ArtifactStage({
     annotationStableArtifactIdentity,
     rendererKind,
     rendererResetKey,
+    supportsZoom,
   ])
 
   useEffect(() => {
@@ -281,10 +313,10 @@ export function ArtifactStage({
   }, [toolMode])
 
   useEffect(() => {
-    if (rendererKind !== "pdf" && toolMode !== "select") {
+    if (!artifactToolModeSupported(toolMode, artifactCapabilities)) {
       setToolModeWithTelemetry("select", "unsupported_renderer")
     }
-  }, [rendererKind, setToolModeWithTelemetry, toolMode])
+  }, [artifactCapabilities, setToolModeWithTelemetry, toolMode])
 
   useEffect(() => {
     if (!selectedAnnotationId) {
@@ -332,20 +364,20 @@ export function ArtifactStage({
     setZoom(1)
   }, [])
   const handleToolModeChange = useCallback((mode: ArtifactToolMode) => {
-    if (rendererKind !== "pdf") {
+    if (!artifactToolModeSupported(mode, artifactCapabilities)) {
       return
     }
     setToolModeWithTelemetry(mode, mode === "select" ? "select_button" : null)
     if (mode === "pan") {
       setSelectedAnnotationId(null)
     }
-  }, [rendererKind, setToolModeWithTelemetry])
+  }, [artifactCapabilities, setToolModeWithTelemetry])
   const commitAnnotation = useCallback((input: CoreviewAddAnnotationAdapterInput): CoreviewAddAnnotationAdapterResult => {
-    if (rendererKind !== "pdf" || !onAddAnnotation) {
+    if (!artifactCapabilities.supportsAnnotations || !onAddAnnotation) {
       return {
         ok: false,
         annotationId: null,
-        blockedReason: rendererKind === "pdf" ? "annotation_target_unavailable" : "unsupported_renderer",
+        blockedReason: artifactCapabilities.supportsAnnotations ? "annotation_target_unavailable" : "annotations_not_supported",
         ...countAnnotations(annotationsRef.current),
       }
     }
@@ -356,9 +388,9 @@ export function ArtifactStage({
       recordToolModeAction(toolModeRef.current, toolModeRef.current, null)
     }
     return result
-  }, [onAddAnnotation, recordToolModeAction, rendererKind])
+  }, [artifactCapabilities.supportsAnnotations, onAddAnnotation, recordToolModeAction])
   const handleCreateHighlight = useCallback((rect: NormalizedArtifactRect) => {
-    if (rendererKind !== "pdf") {
+    if (!artifactCapabilities.supportsAnnotations) {
       return
     }
 
@@ -378,9 +410,9 @@ export function ArtifactStage({
       text: null,
       source: "user",
     })
-  }, [commitAnnotation, pageIndex, rendererKind])
+  }, [artifactCapabilities.supportsAnnotations, commitAnnotation, pageIndex])
   const handleCreateComment = useCallback((point: NormalizedArtifactPoint) => {
-    if (rendererKind !== "pdf") {
+    if (!artifactCapabilities.supportsComments) {
       return
     }
 
@@ -400,9 +432,9 @@ export function ArtifactStage({
       text: "",
       source: "user",
     })
-  }, [commitAnnotation, pageIndex, rendererKind])
+  }, [artifactCapabilities.supportsComments, commitAnnotation, pageIndex])
   const handleCreateUnderline = useCallback((rect: NormalizedArtifactRect) => {
-    if (rendererKind !== "pdf") {
+    if (!artifactCapabilities.supportsUnderline) {
       return
     }
 
@@ -422,9 +454,9 @@ export function ArtifactStage({
       text: null,
       source: "user",
     })
-  }, [commitAnnotation, pageIndex, rendererKind])
+  }, [artifactCapabilities.supportsUnderline, commitAnnotation, pageIndex])
   const handleCreateArrow = useCallback((line: NormalizedArtifactLine) => {
-    if (rendererKind !== "pdf") {
+    if (!artifactCapabilities.supportsArrow) {
       return
     }
 
@@ -444,7 +476,7 @@ export function ArtifactStage({
       text: null,
       source: "user",
     })
-  }, [commitAnnotation, pageIndex, rendererKind])
+  }, [artifactCapabilities.supportsArrow, commitAnnotation, pageIndex])
   const handleSelectAnnotation = useCallback((id: string | null) => {
     setSelectedAnnotationId(id)
   }, [])
@@ -486,15 +518,16 @@ export function ArtifactStage({
         artifactZoom: zoom,
         artifactFitMode: fitMode,
         artifactToolMode: toolMode,
-        annotationOverlayCaptured: rendererKind === "pdf" ? annotationCounts.annotationCount > 0 : null,
+        annotationOverlayCaptured: artifactCapabilities.supportsAnnotations ? annotationCounts.annotationCount > 0 : null,
         ...annotationCounts,
+        ...artifactCapabilityTelemetry,
         reviewStale,
         rawArtifactTextExcluded: true,
         rawFrameExcluded: true,
         ...details,
       },
     })
-  }, [annotationCounts, artifactId, fitMode, pageCount, pageIndex, primaryFile?.path, rendererKind, reviewStale, toolMode, zoom])
+  }, [annotationCounts, artifactCapabilities.supportsAnnotations, artifactCapabilityTelemetry, artifactId, fitMode, pageCount, pageIndex, primaryFile?.path, rendererKind, reviewStale, toolMode, zoom])
   const applyVoiceCommand = useCallback((command: ArtifactReviewVoiceCommand): ArtifactReviewVoiceCommandApplyResult => {
     const normalizedPageCount = Math.max(1, Math.floor(pageCount))
     const currentPageIndex = Math.min(Math.max(0, pageIndex), normalizedPageCount - 1)
@@ -651,8 +684,11 @@ export function ArtifactStage({
     anchor: CoreviewAnnotationAnchor
     pageIndex: number
   }): CoreviewResolveAnnotationAnchorResult => {
-    if (rendererKind !== "pdf") {
-      return { ok: false, blockedReason: "unsupported_renderer" }
+    if (!artifactCapabilities.supportsLayoutAnchors) {
+      return {
+        ok: false,
+        blockedReason: artifactCapabilities.requiresOCR ? "ocr_not_available" : "layout_anchor_not_supported",
+      }
     }
     const selected = selectedAnnotationId
       ? annotationsRef.current.find((annotation) => annotation.id === selectedAnnotationId && annotation.pageIndex === input.pageIndex)
@@ -667,13 +703,13 @@ export function ArtifactStage({
           ? { point: selected.point }
           : null,
     )
-  }, [pdfTextLayout, rendererKind, selectedAnnotationId])
+  }, [artifactCapabilities.requiresOCR, artifactCapabilities.supportsLayoutAnchors, pdfTextLayout, selectedAnnotationId])
   const addCoreviewAnnotation = useCallback((input: CoreviewAddAnnotationAdapterInput): CoreviewAddAnnotationAdapterResult => {
-    if (rendererKind !== "pdf") {
+    if (!artifactAnnotationKindSupported(input.kind, artifactCapabilities)) {
       return {
         ok: false,
         annotationId: null,
-        blockedReason: "unsupported_renderer",
+        blockedReason: "annotations_not_supported",
         ...countAnnotations(annotationsRef.current),
       }
     }
@@ -711,12 +747,24 @@ export function ArtifactStage({
     }
 
     return commitAnnotation(input)
-  }, [commitAnnotation, rendererKind])
+  }, [artifactCapabilities, commitAnnotation])
   const focusCoreviewAnchor = useCallback((input: CoreviewFocusAnchorAdapterInput): CoreviewFocusAnchorAdapterResult => {
-    if (rendererKind !== "pdf" || !input.anchor.rect) {
+    if (!artifactCapabilities.supportsLayoutAnchors) {
       return {
         ok: false,
-        blockedReason: rendererKind === "pdf" ? "anchor_not_found" : "unsupported_renderer",
+        blockedReason: artifactCapabilities.requiresOCR ? "ocr_not_available" : "layout_anchor_not_supported",
+      }
+    }
+    if (!artifactCapabilities.supportsZoom) {
+      return {
+        ok: false,
+        blockedReason: "zoom_not_supported",
+      }
+    }
+    if (!input.anchor.rect) {
+      return {
+        ok: false,
+        blockedReason: "anchor_not_found",
       }
     }
     const normalizedPageCount = Math.max(1, Math.floor(pageCount))
@@ -733,7 +781,7 @@ export function ArtifactStage({
       ok: true,
       blockedReason: null,
     }
-  }, [pageCount, rendererKind])
+  }, [artifactCapabilities.requiresOCR, artifactCapabilities.supportsLayoutAnchors, artifactCapabilities.supportsZoom, pageCount])
   const handlePinchZoomChange = useCallback((nextZoom: number) => {
     if (!supportsZoom) {
       return
@@ -830,6 +878,7 @@ export function ArtifactStage({
     artifactId: artifactId ?? null,
     filePath: primaryFile?.path ?? null,
     rendererKind,
+    capabilities: artifactCapabilities,
     supportsPagination,
     supportsZoom,
     pageIndex,
@@ -842,9 +891,10 @@ export function ArtifactStage({
     addAnnotation: addCoreviewAnnotation,
     focusAnchor: focusCoreviewAnchor,
     annotationCounts,
-    annotationOverlayCaptured: rendererKind === "pdf" ? annotationCounts.annotationCount > 0 : null,
+    annotationOverlayCaptured: artifactCapabilities.supportsAnnotations ? annotationCounts.annotationCount > 0 : null,
   }), [
     addCoreviewAnnotation,
+    artifactCapabilities,
     applyVoiceCommand,
     artifactId,
     annotationCounts,
@@ -888,7 +938,7 @@ export function ArtifactStage({
   }, [onVoiceCommandTargetChange, voiceCommandTarget, voiceCommandTargetRegistrationKey])
 
   useEffect(() => {
-    if (rendererKind !== "pdf") {
+    if (!artifactCapabilities.supportsAnnotations) {
       return
     }
 
@@ -941,6 +991,7 @@ export function ArtifactStage({
         artifactId: artifactId ?? null,
         artifactPath: primaryFile?.path ?? null,
         artifactRendererKind: rendererKind,
+        ...artifactCapabilityTelemetry,
         artifactToolMode: toolMode,
         panModeActive: toolMode === "pan",
         annotationPageIndex: pageIndex,
@@ -972,7 +1023,7 @@ export function ArtifactStage({
         lastToolModeBeforeAction: toolModeTelemetry.lastToolModeBeforeAction,
         lastToolModeAfterAction: toolModeTelemetry.lastToolModeAfterAction,
         toolModeResetReason: toolModeTelemetry.toolModeResetReason,
-        annotationExportAvailable: false,
+        annotationExportAvailable: artifactCapabilities.supportsAnnotatedExport,
         annotationExportResult: "unavailable",
         annotationExportKind: "annotated",
         annotationExportPageScope: "unavailable",
@@ -989,6 +1040,9 @@ export function ArtifactStage({
     annotationStore,
     annotationCounts,
     annotationStorageKeyHash,
+    artifactCapabilities.supportsAnnotatedExport,
+    artifactCapabilities.supportsAnnotations,
+    artifactCapabilityTelemetry,
     artifactId,
     pageIndex,
     primaryFile?.path,
@@ -1006,7 +1060,8 @@ export function ArtifactStage({
         artifactId: artifactId ?? null,
         artifactPath: primaryFile?.path ?? null,
         artifactRendererKind: rendererKind,
-        annotationExportAvailable: false,
+        ...artifactCapabilityTelemetry,
+        annotationExportAvailable: artifactCapabilities.supportsAnnotatedExport,
         annotationExportResult: "original_download_started",
         annotationExportKind: "original",
         annotationExportPageScope: "unavailable",
@@ -1018,7 +1073,7 @@ export function ArtifactStage({
         rawFrameExcluded: true,
       },
     })
-  }, [annotationCounts, annotationStorageKeyHash, artifactId, primaryFile?.path, rendererKind])
+  }, [annotationCounts, annotationStorageKeyHash, artifactCapabilities.supportsAnnotatedExport, artifactCapabilityTelemetry, artifactId, primaryFile?.path, rendererKind])
 
   const showReviewStatus = showReviewStatusOverride ?? Boolean(reviewEnabled || exactTextAvailable || visualCaptureStatus)
   const frameConfirmed = hasConfirmedStillFrame(reviewState, transportStatus)
@@ -1076,14 +1131,20 @@ export function ArtifactStage({
         onFitPage={handleFitPage}
         onFitWidth={handleFitWidth}
         onResetZoom={handleResetZoom}
-        supportsAnnotations={rendererKind === "pdf"}
+        supportsAnnotations={artifactCapabilities.supportsAnnotations}
+        supportsPan={artifactCapabilities.supportsPan}
+        supportsComments={artifactCapabilities.supportsComments}
+        supportsUnderline={artifactCapabilities.supportsUnderline}
+        supportsArrow={artifactCapabilities.supportsArrow}
+        supportsOriginalDownload={artifactCapabilities.supportsOriginalDownload}
+        supportsOpenInNewTab={artifactCapabilities.supportsOpenInNewTab}
         toolMode={toolMode}
         onToolModeChange={handleToolModeChange}
         openHref={openHref}
         downloadHref={downloadHref}
         downloadName={primaryFile?.name}
         annotationCount={annotationCounts.annotationCount}
-        annotationExportAvailable={false}
+        annotationExportAvailable={artifactCapabilities.supportsAnnotatedExport}
         onDownloadOriginal={handleDownloadOriginal}
         className="relative z-10 shrink-0"
       />
@@ -1121,6 +1182,7 @@ export function ArtifactStage({
         onPdfTextLayoutChange={setPdfTextLayout}
         reviewSurfaceState={reviewSurfaceState}
         rendererKind={rendererKind}
+        capabilities={artifactCapabilities}
         pageIndex={pageIndex}
         pageCount={pageCount}
         zoom={zoom}
@@ -1223,6 +1285,47 @@ function countAnnotations(annotations: ArtifactAnnotation[]): {
     arrowCount,
     drawPathCount: 0,
   }
+}
+
+function artifactToolModeSupported(
+  mode: ArtifactToolMode,
+  capabilities: CoreviewArtifactCapabilities,
+): boolean {
+  if (mode === "select") {
+    return true
+  }
+  if (mode === "pan") {
+    return capabilities.supportsPan
+  }
+  if (mode === "comment") {
+    return capabilities.supportsComments
+  }
+  if (mode === "underline") {
+    return capabilities.supportsUnderline
+  }
+  if (mode === "arrow") {
+    return capabilities.supportsArrow
+  }
+  return capabilities.supportsAnnotations
+}
+
+function artifactAnnotationKindSupported(
+  kind: CoreviewAddAnnotationAdapterInput["kind"],
+  capabilities: CoreviewArtifactCapabilities,
+): boolean {
+  if (!capabilities.supportsAnnotations) {
+    return false
+  }
+  if (kind === "comment") {
+    return capabilities.supportsComments
+  }
+  if (kind === "underline") {
+    return capabilities.supportsUnderline
+  }
+  if (kind === "arrow") {
+    return capabilities.supportsArrow
+  }
+  return true
 }
 
 function emptyCoreviewAnnotationStoreTelemetry(): CoreviewAnnotationStoreTelemetry {

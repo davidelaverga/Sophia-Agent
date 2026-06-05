@@ -4,6 +4,15 @@ import {
   type ArtifactFitMode,
   type ArtifactRendererKind,
 } from "./artifact-renderers"
+import {
+  buildCoreviewCapabilitySummary,
+  getCoreviewArtifactCapabilities,
+} from "./coreview-artifact-capabilities"
+import {
+  COREVIEW_WORKSPACE_CONTRACT_VERSION,
+  type CoreviewArtifactCapabilities,
+  type CoreviewCurrentViewCapabilitySummary,
+} from "./coreview-workspace-contract"
 
 export const COREVIEW_SET_VIEW_TOOL_NAME = "coreview_set_view"
 export const COREVIEW_REFRESH_VIEW_TOOL_NAME = "coreview_refresh_view"
@@ -41,6 +50,12 @@ export type CoreviewToolBlockedReason =
   | "artifact_not_available_in_current_session"
   | "unsupported_renderer"
   | "unsupported_pages"
+  | "pages_not_supported"
+  | "zoom_not_supported"
+  | "annotations_not_supported"
+  | "layout_anchor_not_supported"
+  | "ocr_not_available"
+  | "pptx_native_renderer_unavailable"
   | "requested_page_out_of_bounds"
   | "view_ready_timeout"
   | "refresh_unavailable"
@@ -141,6 +156,7 @@ export interface CoreviewCurrentView {
   artifactTitle: string | null
   artifactStableIdentity?: string | null
   rendererKind: ArtifactRendererKind
+  capabilities: CoreviewArtifactCapabilities
   supportsPagination: boolean
   supportsZoom: boolean
   pageIndex: number
@@ -270,6 +286,8 @@ export interface CoreviewActionResult {
   artifact_path: string | null
   artifact_title: string | null
   renderer_kind: ArtifactRendererKind | null
+  coreview_workspace_contract_version?: number
+  capability_summary?: CoreviewCurrentViewCapabilitySummary
   page_index: number | null
   page_number: number | null
   page_count: number | null
@@ -611,6 +629,58 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       })
     }
 
+    const requestedKind = normalizeAnnotationKindValue(input.kind)
+    const unsupportedAnnotationKind = unsupportedAnnotationKindFromValue(input.kind)
+    if (!requestedKind) {
+      return buildCoreviewResult({
+        action: "add_annotation",
+        source,
+        current: before,
+        ok: false,
+        blockedReason: "unsupported_annotation_kind",
+        resultSummary: blockedSummary("unsupported_annotation_kind"),
+        refreshAttempted: false,
+        refreshResult: "not_requested",
+        viewReadyWaitMs: null,
+        viewSignatureBefore: initialBefore.viewSignature,
+        viewSignatureAfter: before.viewSignature,
+        annotationKind: null,
+        annotationAnchorType: input.anchor?.type ?? null,
+        annotationColor: input.color ?? null,
+        annotationActionSource: input.source,
+        annotationCount: before.annotationCount,
+        highlightCount: before.highlightCount,
+        commentCount: before.commentCount,
+        underlineCount: before.underlineCount ?? 0,
+        arrowCount: before.arrowCount ?? 0,
+        drawPathCount: before.drawPathCount ?? 0,
+        unsupportedAnnotationKind,
+        ...resolved.rebind,
+      })
+    }
+
+    if (!annotationKindSupportedByCapabilities(requestedKind, before.capabilities)) {
+      return buildCoreviewResult({
+        action: "add_annotation",
+        source,
+        current: before,
+        ok: false,
+        blockedReason: "annotations_not_supported",
+        resultSummary: blockedSummary("annotations_not_supported"),
+        refreshAttempted: false,
+        refreshResult: "not_requested",
+        viewReadyWaitMs: null,
+        viewSignatureBefore: initialBefore.viewSignature,
+        viewSignatureAfter: before.viewSignature,
+        annotationKind: requestedKind,
+        annotationAnchorType: input.anchor?.type ?? null,
+        annotationColor: input.color ?? null,
+        annotationActionSource: input.source,
+        unsupportedAnnotationKind: null,
+        ...resolved.rebind,
+      })
+    }
+
     if (!adapter.resolveAnnotationAnchor || !adapter.addAnnotation) {
       return buildCoreviewResult({
         action: "add_annotation",
@@ -880,6 +950,25 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
         viewSignatureBefore: initialBefore.viewSignature,
         viewSignatureAfter: before.viewSignature,
         focusAnchorType: input.anchor?.type ?? null,
+        ...resolved.rebind,
+      })
+    }
+
+    const capabilityBlock = focusCapabilityBlockedReason(input.anchor ?? { type: "current_selection" }, before.capabilities)
+    if (capabilityBlock) {
+      return buildCoreviewResult({
+        action: "focus_anchor",
+        source,
+        current: before,
+        ok: false,
+        blockedReason: capabilityBlock,
+        resultSummary: blockedSummary(capabilityBlock),
+        refreshAttempted: false,
+        refreshResult: "not_requested",
+        viewReadyWaitMs: null,
+        viewSignatureBefore: initialBefore.viewSignature,
+        viewSignatureAfter: before.viewSignature,
+        focusAnchorType: input.anchor?.type ?? "current_selection",
         ...resolved.rebind,
       })
     }
@@ -1355,7 +1444,7 @@ function currentViewBlockedReason(
   if (artifactId && artifactId !== current.artifactId) {
     return "artifact_mismatch"
   }
-  if (current.rendererKind === "unsupported" || current.rendererKind === "download_only") {
+  if (current.rendererKind === "unsupported" || !current.capabilities.canRender) {
     return "unsupported_renderer"
   }
   return null
@@ -1455,16 +1544,16 @@ function normalizeSetViewInput(
   const pageRequested = typeof input.pageIndex === "number"
     || typeof input.pageNumber === "number"
     || Boolean(input.pageLabel)
-  if (pageRequested && !current.supportsPagination) {
-    return { ok: false, blockedReason: "unsupported_pages" }
+  if (pageRequested && !current.capabilities.supportsPages) {
+    return { ok: false, blockedReason: "pages_not_supported" }
   }
   if (pageRequested && (pageIndex < 0 || pageIndex >= Math.max(1, current.pageCount))) {
     return { ok: false, blockedReason: "requested_page_out_of_bounds" }
   }
 
   const zoomRequested = typeof input.zoom === "number" || typeof input.fitMode === "string"
-  if (zoomRequested && !current.supportsZoom) {
-    return { ok: false, blockedReason: "unsupported_renderer" }
+  if (zoomRequested && !current.capabilities.supportsZoom) {
+    return { ok: false, blockedReason: "zoom_not_supported" }
   }
 
   const fitMode = input.fitMode ?? current.fitMode
@@ -1525,6 +1614,12 @@ function buildCoreviewResult(params: {
   const rebindAttempted = params.rebindAttempted ?? false
   const rebindResult = params.rebindResult ?? current.rebindStatus ?? "not_attempted"
   const rebindStatus = params.rebindStatus ?? current.rebindStatus ?? rebindResult
+  const capabilitySummary = buildCoreviewCapabilitySummary({
+    capabilities: current.capabilities,
+    rendererKind: current.rendererKind,
+    pageIndex: current.pageIndex,
+    pageCount: current.pageCount,
+  })
   const annotationOverlayCaptured = params.annotationCount !== undefined && params.annotationCount !== null
     ? params.annotationCount > 0
     : current.annotationOverlayCaptured
@@ -1535,6 +1630,8 @@ function buildCoreviewResult(params: {
     artifact_path: current.artifactPath,
     artifact_title: current.artifactTitle,
     renderer_kind: current.rendererKind,
+    coreview_workspace_contract_version: COREVIEW_WORKSPACE_CONTRACT_VERSION,
+    capability_summary: capabilitySummary,
     page_index: current.pageIndex,
     page_number: current.pageIndex + 1,
     page_count: current.pageCount,
@@ -1642,11 +1739,22 @@ function blockedSummary(reason: CoreviewToolBlockedReason): string {
     case "artifact_not_available_in_current_session":
       return "The requested artifact is not available in the current session. Reopen it from this session thread."
     case "unsupported_pages":
+    case "pages_not_supported":
       return "The active renderer does not support pages."
+    case "zoom_not_supported":
+      return "The active renderer does not support zoom controls."
     case "requested_page_out_of_bounds":
       return "The requested page is out of range."
     case "unsupported_renderer":
       return "The active renderer does not support that Coreview action."
+    case "annotations_not_supported":
+      return "Annotations are not available for this artifact format."
+    case "layout_anchor_not_supported":
+      return "Layout anchors are not available for this artifact format."
+    case "ocr_not_available":
+      return "OCR is not available yet."
+    case "pptx_native_renderer_unavailable":
+      return "PPTX native canvas rendering is not available yet."
     case "review_not_active":
       return "Artifact review is not active."
     case "refresh_unavailable":
@@ -1670,6 +1778,50 @@ function blockedSummary(reason: CoreviewToolBlockedReason): string {
     default:
       return "The Coreview action was blocked."
   }
+}
+
+function annotationKindSupportedByCapabilities(
+  kind: CoreviewAnnotationKind,
+  capabilities: CoreviewArtifactCapabilities,
+): boolean {
+  if (!capabilities.supportsAnnotations) {
+    return false
+  }
+  if (kind === "comment") {
+    return capabilities.supportsComments
+  }
+  if (kind === "underline") {
+    return capabilities.supportsUnderline
+  }
+  if (kind === "arrow") {
+    return capabilities.supportsArrow
+  }
+  return true
+}
+
+function focusCapabilityBlockedReason(
+  anchor: CoreviewAnnotationAnchor,
+  capabilities: CoreviewArtifactCapabilities,
+): CoreviewToolBlockedReason | null {
+  if (anchorRequiresLayoutAnchor(anchor) && !capabilities.supportsLayoutAnchors) {
+    if (capabilities.fallbackReason === "pptx_native_renderer_unavailable") {
+      return "pptx_native_renderer_unavailable"
+    }
+    if (capabilities.requiresOCR && !capabilities.supportsOCR) {
+      return "ocr_not_available"
+    }
+    return "layout_anchor_not_supported"
+  }
+  if (!capabilities.supportsZoom) {
+    return "zoom_not_supported"
+  }
+  return null
+}
+
+function anchorRequiresLayoutAnchor(anchor: CoreviewAnnotationAnchor): boolean {
+  return anchor.type === "current_title"
+    || anchor.type === "current_selection"
+    || anchor.type === "text_quote"
 }
 
 function coreviewSetViewInputFromArgs(args: Record<string, unknown>): CoreviewSetViewInput {
@@ -1797,8 +1949,8 @@ function normalizeFocusAnchorInput(
   if (pageIndex === null) {
     return { ok: false, blockedReason: "requested_page_out_of_bounds" }
   }
-  if (!current.supportsZoom) {
-    return { ok: false, blockedReason: "unsupported_renderer" }
+  if (!current.capabilities.supportsZoom) {
+    return { ok: false, blockedReason: "zoom_not_supported" }
   }
   const anchor = input.anchor ?? { type: "current_selection" }
   const normalizedAnchor = normalizeAnnotationAnchor(anchor)
@@ -2062,12 +2214,18 @@ function unavailableToolResult(toolName: CoreviewToolName): CoreviewActionResult
 }
 
 function emptyCurrentView(): CoreviewCurrentView {
+  const capabilities = getCoreviewArtifactCapabilities({
+    rendererKind: "unsupported",
+    originalDownloadAvailable: false,
+    openInNewTabAvailable: false,
+  })
   return {
     artifactId: null,
     artifactPath: null,
     artifactTitle: null,
     artifactStableIdentity: null,
     rendererKind: "unsupported",
+    capabilities,
     supportsPagination: false,
     supportsZoom: false,
     pageIndex: 0,
