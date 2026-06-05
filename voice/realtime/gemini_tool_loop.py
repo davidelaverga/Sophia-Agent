@@ -16,9 +16,13 @@ import httpx
 
 from voice.realtime.runtime_selection import VoiceRuntimeMode
 from voice.realtime.coreview import (
+    GEMINI_COREVIEW_ACTION_TOOL_NAMES,
     GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
+    coreview_action_result_summary,
+    coreview_browser_action_unavailable_response,
     execute_read_artifact_text_feature_gated,
     read_artifact_text_result_summary,
+    redacted_coreview_action_diagnostic,
     redacted_read_artifact_text_diagnostic,
 )
 from voice.realtime.sophia_backend_tools import (
@@ -55,6 +59,7 @@ GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES = frozenset(
         GEMINI_LIST_ASYNC_TASKS_TOOL_NAME,
         GEMINI_RETRIEVE_MEMORIES_TOOL_NAME,
         GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
+        *GEMINI_COREVIEW_ACTION_TOOL_NAMES,
     }
 )
 
@@ -120,6 +125,8 @@ class GeminiDogfoodToolExecution:
             return _retrieve_memories_execution_diagnostic(self)
         if self.call.name == GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME:
             return _read_artifact_text_execution_diagnostic(self)
+        if self.call.name in GEMINI_COREVIEW_ACTION_TOOL_NAMES:
+            return _coreview_action_execution_diagnostic(self)
 
         task_id = _task_id_from_response(self.response)
         task_status = _task_status_from_response(self.response)
@@ -207,6 +214,11 @@ class GeminiBuilderLifecycleHttpBackend:
     ) -> GeminiBuilderLifecycleResult:
         existing_task_id = _active_builder_task_id(async_tasks)
         if existing_task_id:
+            logger.info(
+                "gemini.builder_lifecycle.start_builder_task duplicate_suppressed session_id=%s existing_task_id=%s",
+                session_id,
+                existing_task_id,
+            )
             response = {
                 "ok": True,
                 "tool": GEMINI_START_BUILDER_TASK_TOOL_NAME,
@@ -310,6 +322,14 @@ class GeminiBuilderLifecycleHttpBackend:
             "provider": provider,
             "result_summary": f"Launched builder task. task_id: {thread_id}.",
         }
+        logger.info(
+            "gemini.builder_lifecycle.start_builder_task launched session_id=%s task_id=%s run_id=%s status=%s task_type=%s",
+            session_id,
+            thread_id,
+            run_id,
+            response["status"],
+            task_type,
+        )
         return GeminiBuilderLifecycleResult(
             response=response,
             result_summary=f"Existing Sophia builder task launched: {thread_id}.",
@@ -904,6 +924,17 @@ class GeminiDogfoodToolExecutor:
                 diagnostic_metadata={"latency_ms": latency_ms},
             )
 
+        if call.name in GEMINI_COREVIEW_ACTION_TOOL_NAMES:
+            response = coreview_browser_action_unavailable_response(call.name, call.args)
+            result_summary = coreview_action_result_summary(response)
+            return GeminiDogfoodToolExecution(
+                call=call,
+                response=response,
+                result_summary=result_summary,
+                success=False,
+                error_text=str(response.get("result_summary") or "browser_coreview_tool_bridge_unavailable"),
+            )
+
         try:
             validated_args = validate_builder_lifecycle_tool_args(call.name, call.args)
             lifecycle_result = await self._builder_lifecycle_backend.execute(
@@ -1291,6 +1322,30 @@ def _read_artifact_text_execution_diagnostic(
         "safe_reason": redacted_response.get("safe_reason"),
         "latency_ms": latency_ms,
         "raw_artifact_text_excluded": True,
+        "response": redacted_response,
+    }
+
+
+def _coreview_action_execution_diagnostic(
+    execution: GeminiDogfoodToolExecution,
+) -> dict[str, Any]:
+    redacted_response = redacted_coreview_action_diagnostic(execution.response)
+    return {
+        "id": execution.call.call_id,
+        "name": execution.call.name,
+        "success": execution.success,
+        "result_summary": execution.result_summary,
+        "action": redacted_response.get("action"),
+        "artifact_id": redacted_response.get("artifact_id"),
+        "renderer_kind": redacted_response.get("renderer_kind"),
+        "page_index": redacted_response.get("page_index"),
+        "page_number": redacted_response.get("page_number"),
+        "page_count": redacted_response.get("page_count"),
+        "refresh_attempted": redacted_response.get("refresh_attempted"),
+        "refresh_result": redacted_response.get("refresh_result"),
+        "blocked_reason": redacted_response.get("blocked_reason"),
+        "raw_artifact_text_excluded": True,
+        "raw_frame_excluded": True,
         "response": redacted_response,
     }
 

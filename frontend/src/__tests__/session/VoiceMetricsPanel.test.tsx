@@ -7,12 +7,20 @@ import type { VoiceRuntimeTelemetry, VoiceStateProps } from '../../app/lib/voice
 
 type TestCaptureBridge = {
   enable: () => void;
-  snapshot: () => null;
-  getEvents: () => [];
+  snapshot: () => SophiaCaptureSnapshot;
+  getEvents: () => SophiaCaptureBundle['events'];
   export: () => SophiaCaptureBundle;
 };
 
-function buildDirtyCaptureBundle(): SophiaCaptureBundle {
+function buildDirtyCaptureBundle({
+  detectedAudio = true,
+  maxRms = 0.02,
+  streamCount = 1,
+}: {
+  detectedAudio?: boolean;
+  maxRms?: number | null;
+  streamCount?: number;
+} = {}): SophiaCaptureBundle {
   const snapshot: SophiaCaptureSnapshot = {
     capturedAt: '2026-05-20T12:00:03.000Z',
     location: {
@@ -75,16 +83,16 @@ function buildDirtyCaptureBundle(): SophiaCaptureBundle {
     harness: {
       microphone: {
         audioTrackCount: 1,
-        detectedAudio: true,
+        detectedAudio,
         errors: [],
-        firstAudioAt: '2026-05-20T12:00:01.000Z',
+        firstAudioAt: detectedAudio ? '2026-05-20T12:00:01.000Z' : null,
         firstStreamAt: '2026-05-20T12:00:00.500Z',
-        lastAudioAt: '2026-05-20T12:00:02.000Z',
+        lastAudioAt: detectedAudio ? '2026-05-20T12:00:02.000Z' : null,
         maxAbsPeak: 0.2,
-        maxRms: 0.02,
-        nonSilentSampleWindows: 2,
+        maxRms,
+        nonSilentSampleWindows: detectedAudio ? 2 : 0,
         patchInstalled: true,
-        streamCount: 1,
+        streamCount,
         streams: [],
         totalSampleWindows: 4,
         tracks: [],
@@ -108,7 +116,7 @@ function buildDirtyCaptureBundle(): SophiaCaptureBundle {
   return {
     startedAt: '2026-05-20T12:00:00.000Z',
     exportedAt: '2026-05-20T12:00:03.000Z',
-    eventCount: 3,
+    eventCount: 4,
     events: [
       {
         seq: 1,
@@ -131,18 +139,36 @@ function buildDirtyCaptureBundle(): SophiaCaptureBundle {
         name: 'gemini-tool-call-ledger',
         payload: { entry: { toolCallId: 'tool-call-dev', finalState: 'responded' } },
       },
+      {
+        seq: 4,
+        recordedAt: '2026-05-20T12:00:02.000Z',
+        category: 'voice-session',
+        name: 'artifact-review-voice-command',
+        payload: {
+          reviewVoiceCommandKind: 'fit_width',
+          reviewVoiceCommandApplied: true,
+          reviewVoiceCommandRefreshResult: 'success',
+          reviewVoiceCommandDidHardIntercept: false,
+          reviewVoiceCommandWaitedForViewReady: true,
+          lastReviewVoiceCommandUiMode: 'voice',
+          rawTranscriptExcluded: true,
+        },
+      },
     ],
     snapshot,
   };
 }
 
+let captureBundleFactory = () => buildDirtyCaptureBundle();
+
 vi.mock('../../app/lib/session-capture', () => ({
   registerSophiaCaptureBridge: vi.fn(() => {
+    const bundle = captureBundleFactory();
     const bridge: TestCaptureBridge = {
       enable: vi.fn(),
-      snapshot: () => null,
-      getEvents: () => [],
-      export: () => buildDirtyCaptureBundle(),
+      snapshot: () => bundle.snapshot,
+      getEvents: () => bundle.events,
+      export: () => captureBundleFactory(),
     };
     window.__sophiaCapture = bridge as unknown as NonNullable<Window['__sophiaCapture']>;
   }),
@@ -285,6 +311,7 @@ describe('VoiceMetricsPanel', () => {
   beforeEach(() => {
     window.localStorage.clear();
     setViewport(1440, 960);
+    captureBundleFactory = () => buildDirtyCaptureBundle();
   });
 
   it('labels the legacy runtime and keeps legacy latency cards visible', () => {
@@ -319,6 +346,25 @@ describe('VoiceMetricsPanel', () => {
     expect(screen.queryByText('Join latency')).not.toBeInTheDocument();
     expect(screen.queryByText('Raw backend done')).not.toBeInTheDocument();
     expect(screen.queryByText('Response pipeline')).not.toBeInTheDocument();
+  });
+
+  it('surfaces a warning when the mic stream is connected but no audio signal is detected', () => {
+    captureBundleFactory = () => buildDirtyCaptureBundle({
+      detectedAudio: false,
+      maxRms: 0.0004,
+      streamCount: 1,
+    });
+
+    render(
+      <VoiceMetricsPanel
+        voiceState={buildVoiceState(geminiTelemetry)}
+        defaultExpanded
+        layout="inline"
+      />
+    );
+
+    expect(screen.getByText('Mic connected, no signal')).toBeInTheDocument();
+    expect(screen.getByText('Browser microphone stream is connected, but the local probe has not observed non-silent audio yet.')).toBeInTheDocument();
   });
 
   it('keeps floating telemetry hidden by default', () => {
@@ -483,6 +529,13 @@ describe('VoiceMetricsPanel', () => {
     const report = JSON.parse(writeText.mock.calls[0][0] as string) as {
       reportType: string;
       version: number;
+      coreview: {
+        visual: {
+          telemetryExportAfterCommandSucceeded: boolean;
+          lastReviewVoiceCommandKind: string | null;
+          lastReviewVoiceCommands: Array<Record<string, unknown>>;
+        };
+      };
       captureBundle: {
         scope: { strategy: string };
         snapshot: { storage: Record<string, unknown> };
@@ -493,6 +546,13 @@ describe('VoiceMetricsPanel', () => {
     expect(report.reportType).toBe('voice-telemetry-report');
     expect(report.version).toBe(2);
     expect(report.captureBundle.scope.strategy).toBe('last-start-event');
+    expect(report.coreview.visual.telemetryExportAfterCommandSucceeded).toBe(true);
+    expect(report.coreview.visual.lastReviewVoiceCommandKind).toBe('fit_width');
+    expect(report.coreview.visual.lastReviewVoiceCommands.at(-1)).toMatchObject({
+      kind: 'fit_width',
+      applied: true,
+      rawTranscriptExcluded: true,
+    });
     expect(serialized).toContain('gemini-tool-call-ledger');
     expect(serialized).toContain('tool-call-dev');
     expect(serialized).not.toContain('old persisted session message should not export');
@@ -500,5 +560,26 @@ describe('VoiceMetricsPanel', () => {
     expect(serialized).not.toContain('old persisted recap should not export');
     expect(serialized).not.toContain('old event should not export');
     expect(report.captureBundle.snapshot.storage).toEqual({});
+  });
+
+  it('shows a safe inline error when telemetry export fails', async () => {
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => {
+        throw new Error('blob url failed');
+      }),
+    });
+
+    render(
+      <VoiceMetricsPanel
+        voiceState={buildVoiceState(geminiTelemetry)}
+        defaultExpanded
+        layout="inline"
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /export json/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not export session JSON.');
   });
 });

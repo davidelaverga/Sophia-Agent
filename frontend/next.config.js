@@ -1,6 +1,11 @@
 /** @type {import('next').NextConfig} */
 const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 const gatewayUrl = process.env.NEXT_PUBLIC_GATEWAY_URL || 'http://localhost:8001'
+const appBuildId = process.env.NEXT_PUBLIC_APP_BUILD_ID
+  || process.env.VERCEL_GIT_COMMIT_SHA
+  || process.env.RENDER_GIT_COMMIT
+  || process.env.COMMIT_SHA
+  || 'development'
 
 const websocketUrl = (() => {
   if (apiUrl.startsWith('https://')) return apiUrl.replace('https://', 'wss://')
@@ -27,6 +32,7 @@ const nextConfig = {
   // Environment variables (Vercel will handle these automatically)
   env: {
     NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL,
+    NEXT_PUBLIC_APP_BUILD_ID: appBuildId,
   },
   
   // Performance optimizations

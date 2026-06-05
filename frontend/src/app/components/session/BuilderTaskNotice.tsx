@@ -1,17 +1,31 @@
 'use client';
 
+import {
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Download,
+  ExternalLink,
+  Eye,
+  ListChecks,
+  Search,
+  Sparkles,
+  XCircle,
+  type LucideIcon,
+} from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type MouseEventHandler } from 'react';
 
 import { cn } from '../../lib/utils';
 import type { BuilderTaskV1 } from '../../types/builder-task';
 
 import { BuilderActivityLog } from './BuilderActivityLog';
-import { BuilderReadyPill } from './BuilderReadyPill';
 
 type BuilderTaskNoticeProps = {
   task: BuilderTaskV1;
   artifactTitle?: string;
+  fallbackLabel?: string | null;
   onOpenArtifact?: () => void;
+  openHref?: string | null;
   downloadHref?: string | null;
   onDownload?: MouseEventHandler<HTMLAnchorElement>;
   compact?: boolean;
@@ -24,15 +38,17 @@ type BuilderTaskNoticeProps = {
 const PHASE_META: Record<BuilderTaskV1['phase'], {
   label: string;
   accentVar: string;
+  icon: LucideIcon;
 }> = {
-  running:   { label: 'building',    accentVar: 'var(--sophia-purple)' },
-  completed: { label: 'ready',       accentVar: 'var(--cosmic-teal)' },
-  failed:    { label: 'failed',      accentVar: 'var(--sophia-error, #f87171)' },
-  timed_out: { label: 'timed out',   accentVar: 'var(--cosmic-amber)' },
-  cancelled: { label: 'cancelled',   accentVar: 'var(--cosmic-text-faint)' },
+  running:   { label: 'Creating artifact', accentVar: 'var(--sophia-purple)', icon: Sparkles },
+  completed: { label: 'Ready',             accentVar: 'var(--cosmic-teal)', icon: CheckCircle2 },
+  failed:    { label: 'Failed',            accentVar: 'var(--sophia-error, #f87171)', icon: XCircle },
+  timed_out: { label: 'Failed',            accentVar: 'var(--cosmic-amber)', icon: XCircle },
+  cancelled: { label: 'Cancelled',         accentVar: 'var(--cosmic-text-faint)', icon: XCircle },
 };
 
 const PROGRESSBAR_LABEL = 'Builder progress';
+const COMPLETED_ARTIFACT_DETAIL = 'Ready to review in canvas.';
 // Matches backend subagents.executor._STUCK_IDLE_MS. Generous enough to cover
 // long single-LLM iterations on the builder (Sonnet often spends 90–130s on a
 // single generation).
@@ -100,9 +116,32 @@ function applyLiveTiming(task: BuilderTaskV1, nowMs: number, receivedAtMs: numbe
   };
 }
 
-function getDisplayMeta(task: BuilderTaskV1): { label: string; accentVar: string } {
+function latestAction(task: BuilderTaskV1): string | undefined {
+  return task.activityLog?.[task.activityLog.length - 1]?.action;
+}
+
+function getDisplayMeta(task: BuilderTaskV1): { label: string; accentVar: string; icon: LucideIcon } {
   if (task.phase === 'running' && task.stuck) {
-    return { label: 'stalled', accentVar: 'var(--cosmic-amber)' };
+    return { label: 'Stalled', accentVar: 'var(--cosmic-amber)', icon: XCircle };
+  }
+
+  if (task.phase === 'running') {
+    const action = latestAction(task);
+    if (action === 'searching_web' || action === 'reading_source' || action === 'researching') {
+      return { label: 'Researching', accentVar: 'var(--cosmic-teal)', icon: Search };
+    }
+    if (action === 'creating_plan') {
+      return { label: 'Creating plan', accentVar: 'var(--cosmic-amber)', icon: ListChecks };
+    }
+    if (action === 'updating_plan') {
+      return { label: 'Updating plan', accentVar: 'var(--cosmic-amber)', icon: ListChecks };
+    }
+    if (task.detail === 'Researching') {
+      return { label: 'Researching', accentVar: 'var(--cosmic-teal)', icon: Search };
+    }
+    if (task.detail === 'Creating plan' || task.detail === 'Updating plan') {
+      return { label: task.detail, accentVar: 'var(--cosmic-amber)', icon: ListChecks };
+    }
   }
 
   return PHASE_META[task.phase];
@@ -244,7 +283,7 @@ function getProgressMeta(task: BuilderTaskV1, elapsedMs?: number): { leading: st
       return { leading, trailing: percentLabel };
     }
     case 'completed':
-      return { leading: 'deliverable assembled', trailing: '100%' };
+      return { leading: 'deliverable assembled', trailing: 'ready' };
     case 'failed':
       return { leading: 'build interrupted', trailing: percentLabel };
     case 'timed_out':
@@ -270,7 +309,13 @@ function getSecondaryMeta(task: BuilderTaskV1): string | null {
 }
 
 /* ── Constellation spinner ── 3 tiny particles orbiting a breathing core */
-function BuilderConstellation() {
+function BuilderConstellation({
+  accentVar,
+  Icon,
+}: {
+  accentVar: string;
+  Icon: LucideIcon;
+}) {
   const particles = [
     { delay: '0s',    duration: '3s',   radius: '14px', size: 3,   opacity: 0.6 },
     { delay: '0.9s',  duration: '4.2s', radius: '10px', size: 2,   opacity: 0.4 },
@@ -279,17 +324,17 @@ function BuilderConstellation() {
 
   return (
     <div className="relative flex items-center justify-center" style={{ width: 40, height: 40 }}>
-      {/* Core — breathing glow */}
       <div
-        className="absolute rounded-full"
+        className="absolute flex h-5 w-5 items-center justify-center rounded-full"
         style={{
-          width: 6,
-          height: 6,
-          background: 'var(--sophia-purple)',
+          color: accentVar,
+          background: `color-mix(in srgb, ${accentVar} 12%, transparent)`,
+          border: `1px solid color-mix(in srgb, ${accentVar} 24%, transparent)`,
           animation: 'builder-core-breath 2.4s ease-in-out infinite',
         }}
-      />
-      {/* Orbiting particles */}
+      >
+        <Icon size={12} />
+      </div>
       {particles.map((p, i) => (
         <div
           key={i}
@@ -304,7 +349,7 @@ function BuilderConstellation() {
             style={{
               width: p.size,
               height: p.size,
-              background: 'var(--sophia-purple)',
+              background: accentVar,
               opacity: p.opacity,
             }}
           />
@@ -317,14 +362,16 @@ function BuilderConstellation() {
 function BuilderStatusGlyph({
   isRunning,
   accentVar,
+  Icon,
   compact,
 }: {
   isRunning: boolean;
   accentVar: string;
+  Icon: LucideIcon;
   compact?: boolean;
 }) {
   if (isRunning) {
-    return <BuilderConstellation />;
+    return <BuilderConstellation accentVar={accentVar} Icon={Icon} />;
   }
 
   return (
@@ -339,13 +386,7 @@ function BuilderStatusGlyph({
         boxShadow: `0 0 18px color-mix(in srgb, ${accentVar} 16%, transparent)`,
       }}
     >
-      <span
-        className="h-2.5 w-2.5 rounded-full"
-        style={{
-          background: accentVar,
-          boxShadow: `0 0 12px color-mix(in srgb, ${accentVar} 40%, transparent)`,
-        }}
-      />
+      <Icon size={compact ? 15 : 17} />
     </div>
   );
 }
@@ -495,10 +536,111 @@ function BuilderTodoPreview({
   );
 }
 
+function BuilderCompletedArtifactActions({
+  title,
+  onOpenArtifact,
+  openHref,
+  downloadHref,
+  onDownload,
+  compact,
+  accentVar,
+}: {
+  title: string;
+  onOpenArtifact: () => void;
+  openHref?: string | null;
+  downloadHref?: string | null;
+  onDownload?: MouseEventHandler<HTMLAnchorElement>;
+  compact?: boolean;
+  accentVar: string;
+}) {
+  return (
+    <div
+      data-testid="canonical-builder-completed-actions"
+      className={cn('flex flex-wrap items-center gap-2', compact ? 'mt-2' : 'mt-2.5')}
+    >
+      <button
+        type="button"
+        onClick={onOpenArtifact}
+        aria-label={`View ${title} in canvas`}
+        className={cn(
+          'inline-flex items-center gap-1.5 rounded-full border font-medium tracking-[0.08em] transition-opacity hover:opacity-100',
+          compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1.5 text-[10px]',
+        )}
+        style={{
+          borderColor: `color-mix(in srgb, ${accentVar} 38%, transparent)`,
+          color: accentVar,
+          background: `color-mix(in srgb, ${accentVar} 14%, transparent)`,
+        }}
+      >
+        <Eye className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+        View in canvas
+      </button>
+
+      {openHref && (
+        <a
+          href={openHref}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={`Open ${title} in new tab`}
+          className={cn(
+            'inline-flex items-center gap-1.5 rounded-full border tracking-[0.08em] transition-opacity hover:opacity-100',
+            compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1.5 text-[10px]',
+          )}
+          style={{
+            borderColor: 'color-mix(in srgb, var(--cosmic-border-soft) 88%, transparent)',
+            color: 'var(--cosmic-text-whisper)',
+            background: 'color-mix(in srgb, var(--cosmic-panel-soft) 52%, transparent)',
+            textDecoration: 'none',
+          }}
+        >
+          <ExternalLink className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+          Open in new tab
+        </a>
+      )}
+
+      {downloadHref && (
+        <a
+          href={downloadHref}
+          onClick={onDownload}
+          aria-label={`Download ${title}`}
+          className={cn(
+            'inline-flex items-center gap-1.5 rounded-full border tracking-[0.08em] transition-opacity hover:opacity-100',
+            compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1.5 text-[10px]',
+          )}
+          style={{
+            borderColor: 'color-mix(in srgb, var(--cosmic-border-soft) 88%, transparent)',
+            color: 'var(--cosmic-text-whisper)',
+            background: 'color-mix(in srgb, var(--cosmic-panel-soft) 52%, transparent)',
+            textDecoration: 'none',
+          }}
+        >
+          <Download className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+          Download
+        </a>
+      )}
+    </div>
+  );
+}
+
+export function BuilderSeedDetail({
+  task,
+  compact,
+}: {
+  task: BuilderTaskV1;
+  compact?: boolean;
+}) {
+  if (!task.activityLog || task.activityLog.length === 0) {
+    return null;
+  }
+  return <BuilderActivityLog entries={task.activityLog} compact={compact} />;
+}
+
 export function BuilderTaskNotice({
   task,
   artifactTitle,
+  fallbackLabel,
   onOpenArtifact,
+  openHref,
   downloadHref,
   onDownload,
   compact = false,
@@ -507,7 +649,7 @@ export function BuilderTaskNotice({
   isCancelling = false,
   className,
 }: BuilderTaskNoticeProps) {
-  const [isFreshCompletion, setIsFreshCompletion] = useState(false);
+  const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [taskReceivedAtMs, setTaskReceivedAtMs] = useState(() => Date.now());
   const taskFirstSeenMsRef = useRef(Date.now());
@@ -516,15 +658,23 @@ export function BuilderTaskNotice({
     identity: task.taskId ?? task.label ?? '__builder__',
   });
   const liveTask = useMemo(() => applyLiveTiming(task, nowMs, taskReceivedAtMs), [task, nowMs, taskReceivedAtMs]);
+  const previewActivityLog = useMemo(() => {
+    if (!liveTask.activityLog || liveTask.activityLog.length === 0) return undefined;
+    return isDetailOpen ? liveTask.activityLog : liveTask.activityLog.slice(-6);
+  }, [isDetailOpen, liveTask.activityLog]);
   const taskStartMs = parseTimestampMs(task.startedAt) ?? taskFirstSeenMsRef.current;
   const elapsedMs = Math.max(nowMs - taskStartMs, 0);
   const meta = getDisplayMeta(liveTask);
   const detail = getDetail(liveTask, elapsedMs);
+  const visibleDetail = detail && detail !== meta.label ? detail : null;
   const showDismiss = Boolean(onDismiss && task.phase !== 'running');
   const showCancel = Boolean(onCancel && task.phase === 'running');
   const isRunning = liveTask.phase === 'running';
   const taskIdentity = task.taskId ?? task.label ?? '__builder__';
-  const showReadyPill = task.phase === 'completed' && Boolean(artifactTitle && onOpenArtifact);
+  const showCompletedArtifactState = task.phase === 'completed' && Boolean(artifactTitle && onOpenArtifact);
+  const completedArtifactDetail = showCompletedArtifactState
+    ? (fallbackLabel && visibleDetail ? visibleDetail : COMPLETED_ARTIFACT_DETAIL)
+    : visibleDetail;
 
   useEffect(() => {
     setTaskReceivedAtMs(Date.now());
@@ -547,124 +697,146 @@ export function BuilderTaskNotice({
   useEffect(() => {
     const previousTaskState = previousTaskStateRef.current;
     const isNewTask = previousTaskState.identity !== taskIdentity;
-    const justCompleted = task.phase === 'completed' && (
-      previousTaskState.phase !== 'completed' || isNewTask
-    );
 
     if (isNewTask) {
       taskFirstSeenMsRef.current = Date.now();
-    }
-
-    let timerId: ReturnType<typeof setTimeout> | undefined;
-    if (justCompleted) {
-      setIsFreshCompletion(true);
-      timerId = setTimeout(() => setIsFreshCompletion(false), compact ? 1400 : 1800);
-    } else if (task.phase !== 'completed') {
-      setIsFreshCompletion(false);
+      setIsDetailOpen(false);
     }
 
     previousTaskStateRef.current = {
       phase: task.phase,
       identity: taskIdentity,
     };
-
-    return () => {
-      if (timerId) {
-        clearTimeout(timerId);
-      }
-    };
-  }, [task.phase, taskIdentity, compact]);
-
-  if (showReadyPill && artifactTitle && onOpenArtifact) {
-    return (
-      <div
-        role="status"
-        aria-live="assertive"
-        className={cn('relative w-[min(360px,calc(100vw-48px))]', className)}
-      >
-        <BuilderReadyPill
-          title={artifactTitle}
-          onOpen={onOpenArtifact}
-          downloadHref={downloadHref}
-          onDownload={onDownload}
-          isNew={isFreshCompletion}
-          compact={compact}
-          className="w-full"
-        />
-
-        {showDismiss && onDismiss && (
-          <button
-            type="button"
-            onClick={onDismiss}
-            className="absolute right-2.5 top-2.5 rounded-full p-1 transition-all duration-300"
-            style={{ color: 'var(--cosmic-text-faint)' }}
-            aria-label="Dismiss"
-          >
-            <svg className="h-3 w-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1">
-              <path d="M3 3l6 6M9 3l-6 6" strokeLinecap="round" />
-            </svg>
-          </button>
-        )}
-      </div>
-    );
-  }
+  }, [task.phase, taskIdentity]);
 
   return (
     <div
       role="status"
       aria-live={isRunning ? 'polite' : 'assertive'}
+      data-testid="builder-task-notice"
+      data-builder-completed-artifact={showCompletedArtifactState ? 'true' : undefined}
       className={cn(
-        compact
-          ? 'w-[min(340px,calc(100vw-40px))] rounded-[20px] border px-3 py-2.5 backdrop-blur-xl transition-all duration-500 animate-[builder-reveal_0.45s_ease-out]'
-          : 'w-[min(340px,calc(100vw-48px))] rounded-[22px] border px-3.5 py-3 backdrop-blur-xl transition-all duration-700 animate-[builder-reveal_0.6s_ease-out]',
+        showCompletedArtifactState
+          ? compact
+            ? 'w-[min(380px,calc(100vw-32px))] rounded-[18px] border px-3 py-2.5 backdrop-blur-xl transition-all duration-500 animate-[builder-reveal_0.45s_ease-out]'
+            : 'w-[min(400px,calc(100vw-40px))] rounded-[18px] border px-3.5 py-3 backdrop-blur-xl transition-all duration-700 animate-[builder-reveal_0.6s_ease-out]'
+          : compact
+            ? 'w-[min(340px,calc(100vw-40px))] rounded-[20px] border px-3 py-2.5 backdrop-blur-xl transition-all duration-500 animate-[builder-reveal_0.45s_ease-out]'
+            : 'w-[min(340px,calc(100vw-48px))] rounded-[22px] border px-3.5 py-3 backdrop-blur-xl transition-all duration-700 animate-[builder-reveal_0.6s_ease-out]',
         className,
       )}
       style={{
-        borderColor: `color-mix(in srgb, ${meta.accentVar} 20%, var(--cosmic-border-soft))`,
-        background: 'color-mix(in srgb, var(--cosmic-panel) 84%, transparent)',
-        boxShadow: `0 16px 36px color-mix(in srgb, ${meta.accentVar} 8%, transparent)`,
+        borderColor: showCompletedArtifactState
+          ? `color-mix(in srgb, ${meta.accentVar} 18%, var(--cosmic-border-soft))`
+          : `color-mix(in srgb, ${meta.accentVar} 20%, var(--cosmic-border-soft))`,
+        background: showCompletedArtifactState
+          ? `linear-gradient(135deg, color-mix(in srgb, var(--cosmic-panel-soft) 72%, transparent), color-mix(in srgb, ${meta.accentVar} 7%, transparent) 52%, color-mix(in srgb, var(--sophia-purple) 5%, transparent))`
+          : `linear-gradient(180deg, color-mix(in srgb, ${meta.accentVar} 7%, var(--cosmic-panel)), color-mix(in srgb, var(--cosmic-panel) 86%, transparent))`,
+        boxShadow: showCompletedArtifactState
+          ? `0 14px 34px color-mix(in srgb, var(--bg) 32%, transparent), inset 0 1px 0 color-mix(in srgb, white 12%, transparent), 0 0 22px color-mix(in srgb, ${meta.accentVar} 7%, transparent)`
+          : `0 16px 38px color-mix(in srgb, ${meta.accentVar} 11%, transparent)`,
       }}
     >
       <div className={cn('flex items-start', compact ? 'gap-2.5' : 'gap-3')}>
         <div className="shrink-0">
-          <BuilderStatusGlyph isRunning={isRunning} accentVar={meta.accentVar} compact={compact} />
+          <BuilderStatusGlyph isRunning={isRunning} accentVar={meta.accentVar} Icon={meta.icon} compact={compact} />
         </div>
 
         <div className="min-w-0 flex-1">
           <div className={cn('flex items-center', compact ? 'gap-1.5' : 'gap-2')}>
             <span
-              className={cn(compact ? 'text-[9px]' : 'text-[10px]', 'tracking-[0.14em] lowercase')}
-              style={{ color: 'var(--cosmic-text-whisper)' }}
+              className={cn(compact ? 'text-[9px]' : 'text-[10px]', 'tracking-[0.12em]')}
+              style={{ color: meta.accentVar }}
             >
               {meta.label}
             </span>
-            <span
-              className={cn('rounded-full tracking-[0.1em] lowercase', compact ? 'px-1.5 py-0.5 text-[8px]' : 'px-2 py-0.5 text-[9px]')}
-              style={{
-                color: meta.accentVar,
-                background: `color-mix(in srgb, ${meta.accentVar} 12%, transparent)`,
-              }}
-            >
-              builder
-            </span>
+            {!showCompletedArtifactState && (
+              <span
+                className={cn('rounded-full tracking-[0.1em] lowercase', compact ? 'px-1.5 py-0.5 text-[8px]' : 'px-2 py-0.5 text-[9px]')}
+                style={{
+                  color: meta.accentVar,
+                  background: `color-mix(in srgb, ${meta.accentVar} 12%, transparent)`,
+                }}
+              >
+                builder
+              </span>
+            )}
+            {showCompletedArtifactState && fallbackLabel && (
+              <span
+                className={cn('rounded-full tracking-[0.1em] lowercase', compact ? 'px-1.5 py-0.5 text-[8px]' : 'px-2 py-0.5 text-[9px]')}
+                style={{
+                  color: 'var(--cosmic-amber)',
+                  background: 'color-mix(in srgb, var(--cosmic-amber) 13%, transparent)',
+                }}
+              >
+                {fallbackLabel}
+              </span>
+            )}
           </div>
 
-          {detail && (
+          {showCompletedArtifactState && artifactTitle && (
+            <p
+              className={cn(
+                compact ? 'mt-0.5 text-[12px] leading-5' : 'mt-1 text-[13px] leading-5.5',
+                'line-clamp-2 font-medium [overflow-wrap:anywhere]',
+              )}
+              style={{ color: 'var(--cosmic-text-strong)' }}
+              title={artifactTitle}
+            >
+              {artifactTitle}
+            </p>
+          )}
+
+          {completedArtifactDetail && (
             <p
               className={cn(compact ? 'mt-0.5 text-[10px] leading-4.5' : 'mt-1 text-[11px] leading-5')}
               style={{ color: 'var(--cosmic-text-faint)' }}
             >
-              {detail}
+              {completedArtifactDetail}
             </p>
           )}
         </div>
       </div>
 
       <div className={cn(compact ? 'mt-2.5' : 'mt-3')}>
-        <BuilderProgressTrack task={liveTask} accentVar={meta.accentVar} compact={compact} elapsedMs={elapsedMs} />
-        <BuilderTodoPreview task={liveTask} compact={compact} />
-        {liveTask.activityLog && liveTask.activityLog.length > 0 && (
-          <BuilderActivityLog entries={liveTask.activityLog} compact={compact} />
+        {isRunning && !liveTask.canvasStreamed && !showCompletedArtifactState && (
+          <>
+            <BuilderProgressTrack task={liveTask} accentVar={meta.accentVar} compact={compact} elapsedMs={elapsedMs} />
+            <BuilderTodoPreview task={liveTask} compact={compact} />
+          </>
+        )}
+        {!isRunning && !showCompletedArtifactState && (
+          <BuilderTodoPreview task={liveTask} compact={compact} />
+        )}
+        {!showCompletedArtifactState && liveTask.canvasStreamed && liveTask.activityLog && liveTask.activityLog.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setIsDetailOpen((open) => !open)}
+            aria-expanded={isDetailOpen}
+            aria-label={isDetailOpen ? 'Hide builder activity' : 'Show builder activity'}
+            className={cn('flex items-center gap-1 transition-opacity hover:opacity-100', compact ? 'mt-1 text-[9px]' : 'mt-1.5 text-[10px]')}
+            style={{ color: 'var(--cosmic-text-faint)' }}
+          >
+            <span>{isDetailOpen ? 'showing full activity' : 'recent activity'}</span>
+            {isDetailOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+          </button>
+        )}
+        {!showCompletedArtifactState && (!liveTask.canvasStreamed || previewActivityLog) && (
+          <BuilderSeedDetail
+            task={previewActivityLog ? { ...liveTask, activityLog: previewActivityLog } : liveTask}
+            compact={compact}
+          />
+        )}
+        {showCompletedArtifactState && artifactTitle && onOpenArtifact && (
+          <BuilderCompletedArtifactActions
+            title={artifactTitle}
+            onOpenArtifact={onOpenArtifact}
+            openHref={openHref}
+            downloadHref={downloadHref}
+            onDownload={onDownload}
+            compact={compact}
+            accentVar={meta.accentVar}
+          />
         )}
       </div>
 

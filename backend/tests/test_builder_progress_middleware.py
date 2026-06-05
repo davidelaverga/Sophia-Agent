@@ -50,6 +50,10 @@ def captured_posts(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
         "deerflow.agents.sophia_agent.middlewares.builder_progress._schedule_post",
         _capture,
     )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_progress._schedule_ordered_posts",
+        lambda events: captured.extend(events),
+    )
     return captured
 
 
@@ -137,6 +141,23 @@ class TestAbeforeAgent:
         assert update == {"builder_progress_last_phase": "starting"}
         assert captured_posts == []
 
+    @pytest.mark.anyio
+    async def test_native_delegated_run_includes_parent_and_sequence(
+        self, captured_posts: list[dict]
+    ) -> None:
+        mw = BuilderProgressMiddleware()
+        update = await mw.abefore_agent(
+            {"delegation_context": {"parent_thread_id": "parent-A"}},
+            _runtime("task-A", "run-A"),
+        )
+        assert captured_posts[0]["parent_thread_id"] == "parent-A"
+        assert captured_posts[0]["sequence"] == 1
+        assert captured_posts[0]["occurred_at"]
+        assert update == {
+            "builder_progress_last_phase": "starting",
+            "builder_progress_sequence": 1,
+        }
+
 
 class TestAafterModel:
     @pytest.mark.anyio
@@ -166,6 +187,33 @@ class TestAafterModel:
         # renderer-safe projection. query → kept; nothing else.
         assert tcs[0]["args"] == {"query": "FST"}
         assert update == {"builder_progress_last_phase": "researching"}
+
+    @pytest.mark.anyio
+    async def test_native_run_schedules_updates_before_phase_sequence(
+        self, captured_posts: list[dict]
+    ) -> None:
+        mw = BuilderProgressMiddleware()
+        state = {
+            "builder_progress_last_phase": "starting",
+            "builder_progress_sequence": 1,
+            "delegation_context": {"parent_thread_id": "parent-A"},
+            "messages": [
+                _ai_message(tool_calls=[
+                    {"name": "write_file", "args": {"path": "/mnt/user-data/outputs/report.md"}},
+                ])
+            ],
+        }
+
+        update = await mw.aafter_model(state, _runtime("task-A", "run-A"))
+
+        assert [post["event_name"] for post in captured_posts] == ["updates", "custom"]
+        assert [post["sequence"] for post in captured_posts] == [2, 3]
+        assert captured_posts[0]["parent_thread_id"] == "parent-A"
+        assert captured_posts[1]["data"] == {"name": "phase", "phase": "drafting"}
+        assert update == {
+            "builder_progress_last_phase": "drafting",
+            "builder_progress_sequence": 3,
+        }
 
     @pytest.mark.anyio
     async def test_aafter_model_trims_write_file_content_field(

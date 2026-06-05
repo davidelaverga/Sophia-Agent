@@ -30,7 +30,6 @@ import {
   VoiceFirstComposer,
   VoiceCaption,
   VoiceMetricsPanel,
-  BuilderReadyPill,
   PresenceArtifactPanel,
   WhisperIndicator,
   ReflectionOverlay,
@@ -38,8 +37,11 @@ import {
   DebriefOfferModal,
   FeedbackToast,
 } from '../components/session';
-import { BuilderCompletionCard } from '../components/session/BuilderCompletionCard';
-import { CoreviewFixtureLauncher } from '../components/session/CoreviewFixtureLauncher';
+import {
+  BuilderCompletionCard,
+  getBuilderCompletionFallbackBody,
+  getBuilderCompletionFallbackLabel,
+} from '../components/session/BuilderCompletionCard';
 import { BuilderTaskNotice } from '../components/session/BuilderTaskNotice';
 import { SessionLayout } from '../components/SessionLayout';
 import { SessionExpiredModal, MultiTabModal } from '../components/ui';
@@ -49,14 +51,27 @@ import { haptic } from '../hooks/useHaptics';
 import { useIdleTimeout } from '../hooks/useIdleTimeout';
 import { useSessionBootstrap } from '../hooks/useSessionBootstrap';
 import { useSessionPersistence } from '../hooks/useSessionPersistence';
-import { buildThreadArtifactHref, getBuilderArtifactFiles } from '../lib/builder-artifacts';
-import { isCoReviewFixtureEnabled } from '../lib/co-review-flags';
+import {
+  ARTIFACT_CANVAS_RESTORE_STORAGE_VERSION,
+  clearArtifactCanvasOpenState,
+  hashArtifactCanvasRestoreIdentity,
+  persistArtifactCanvasOpenState,
+  restoreArtifactCanvasOpenState,
+  type ArtifactCanvasRestoreContext,
+} from '../lib/artifact-canvas-restore-state';
+import { detectArtifactRendererKind } from '../lib/artifact-renderers';
+import type { ArtifactReviewVoiceCommandRouter } from '../lib/artifact-review-voice-commands';
+import { buildThreadArtifactHref, getBuilderArtifactFiles, normalizeBuilderArtifactPath } from '../lib/builder-artifacts';
 import { GeminiStillFrameTransport } from '../lib/co-review-still-frame-transport';
+import { buildCoreviewArtifactStableIdentity } from '../lib/coreview-artifact-identity';
 import { debugLog } from '../lib/debug-logger';
 import { errorCopy } from '../lib/error-copy';
+import { recordSophiaCaptureEvent } from '../lib/session-capture';
 import { cn } from '../lib/utils';
 import { useUiStore } from '../stores/ui-store';
+import type { BuilderCompletionEventV1 } from '../types/builder-completion';
 
+import { resolveBuilderSurface } from './builderSurfaceArbitration';
 import { useSessionBuilderArtifactLibrary } from './useSessionBuilderArtifactLibrary';
 import { useSessionCompanionIntegration } from './useSessionCompanionIntegration';
 import { useSessionConversationArchive } from './useSessionConversationArchive';
@@ -77,6 +92,9 @@ import { useSessionUiDerivedState } from './useSessionUiDerivedState';
 import { useSessionUiInteractions } from './useSessionUiInteractions';
 import { useSessionValidationState } from './useSessionValidationState';
 import { useSessionVoiceCommandSystem } from './useSessionVoiceCommandSystem';
+
+const MISSING_BUILDER_DELIVERABLE_ERROR = 'Builder finished without a deliverable artifact.';
+const MISSING_BUILDER_DELIVERABLE_RETRY_MESSAGE = `${MISSING_BUILDER_DELIVERABLE_ERROR} Please try again.`;
 
 // ============================================================================
 // PROTECTED SESSION PAGE WRAPPER
@@ -126,9 +144,15 @@ function ComposerAttachButton({
   );
 }
 
+function getBuilderArtifactFilename(path: string): string {
+  return path.split('/').filter(Boolean).pop() || 'Builder deliverable';
+}
+
 function SessionPageContent() {
   const router = useRouter();
   const focusMode = useUiStore((s) => s.mode);
+  const setFocusMode = useUiStore((s) => s.setMode);
+  const setFocusModeManualOverride = useUiStore((s) => s.setManualOverride);
   const { chromeOpacity } = useChromeFade();
   const presenceRef = useRef<PresenceFieldHandle | null>(null);
   // Mutable function ref shared between the AttachmentBar (which owns
@@ -254,6 +278,9 @@ function SessionPageContent() {
     sessionId: session?.sessionId,
   });
 
+  const [selectedBuilderArtifactPath, setSelectedBuilderArtifactPath] = useState<string | null>(null);
+  const [pendingBuilderArtifactReview, setPendingBuilderArtifactReview] = useState(false);
+
   const {
     cancelledMessageId,
     setCancelledMessageId,
@@ -336,6 +363,7 @@ function SessionPageContent() {
     markOffline,
     debugEnabled,
     memoryHighlightsCount: memoryHighlights?.length ?? 0,
+    artifactReviewActive: showArtifacts && Boolean(selectedBuilderArtifactPath || storedBuilderArtifact),
   });
 
   const removeInternalDebriefTriggerBubble = useCallback((triggerText: string) => {
@@ -490,23 +518,48 @@ function SessionPageContent() {
     showToast,
   });
 
+  const [artifactLibraryRefreshNonce, setArtifactLibraryRefreshNonce] = useState(0);
+  const [builderLibraryBaseline, setBuilderLibraryBaseline] = useState<Set<string> | null>(null);
+  const [dismissedBuilderLibraryPath, setDismissedBuilderLibraryPath] = useState<string | null>(null);
+
   const builderArtifactRefreshToken = useMemo(() => [
     builderArtifact?.artifactTitle ?? '',
     builderArtifact?.artifactPath ?? '',
     (builderArtifact?.supportingFiles ?? []).join('|'),
-  ].join('::'), [builderArtifact]);
+    builderTask?.taskId ?? '',
+    builderTask?.runId ?? '',
+    builderTask?.phase ?? '',
+    builderCompletion?.task_id ?? '',
+    builderCompletion?.run_id ?? '',
+    artifactLibraryRefreshNonce,
+  ].join('::'), [artifactLibraryRefreshNonce, builderArtifact, builderCompletion?.run_id, builderCompletion?.task_id, builderTask?.phase, builderTask?.runId, builderTask?.taskId]);
 
   const {
     items: builderArtifactLibrary,
   } = useSessionBuilderArtifactLibrary({
     threadId: resolvedThreadId,
     refreshToken: builderArtifactRefreshToken,
+    pollIntervalMs: builderTask?.phase === 'running' ? 5000 : null,
+    refreshOnFocus: true,
   });
 
   const hasBuilderArtifactLibrary = builderArtifactLibrary.length > 0;
-  const coReviewFixtureEnabled = isCoReviewFixtureEnabled();
-  const coReviewSessionId = backendSessionId || safeSessionId || sessionId || (coReviewFixtureEnabled ? 'local-coreview-fixture-session' : null);
-  const artifactPanelThreadId = resolvedThreadId || (coReviewFixtureEnabled ? coReviewSessionId ?? 'local-coreview-fixture-thread' : undefined);
+  const hasSelectedBuilderArtifactPath = Boolean(selectedBuilderArtifactPath);
+  const coReviewSessionId = backendSessionId || safeSessionId || sessionId || null;
+  const canvasRestoreContext = useMemo<ArtifactCanvasRestoreContext>(() => ({
+    userId: userId ?? null,
+    threadId: resolvedThreadId ?? null,
+    sessionId: coReviewSessionId,
+  }), [coReviewSessionId, resolvedThreadId, userId]);
+  const canvasRestoreContextSignature = useMemo(() => [
+    canvasRestoreContext.userId ?? 'unknown',
+    canvasRestoreContext.threadId ?? 'unknown',
+    canvasRestoreContext.sessionId ?? 'unknown',
+  ].join('|'), [canvasRestoreContext]);
+  const coReviewVoiceAgentSessionId = voiceState.runtimeTelemetry.runtime === 'gemini_live'
+    ? voiceState.runtimeTelemetry.sessionId
+    : voiceState.runtimeTelemetry.voiceAgentSessionId;
+  const artifactPanelThreadId = resolvedThreadId || undefined;
   const coReviewTransport = useMemo(
     () => new GeminiStillFrameTransport({
       sendArtifactFrame: voiceState.sendArtifactFrame,
@@ -514,6 +567,60 @@ function SessionPageContent() {
     }),
     [voiceState.getArtifactFrameTransportStatus, voiceState.sendArtifactFrame],
   );
+  const artifactReviewVoiceCommandRouterRef = useRef<ArtifactReviewVoiceCommandRouter | null>(null);
+  const handleArtifactReviewVoiceCommandRouteChange = useCallback((handler: ArtifactReviewVoiceCommandRouter | null) => {
+    artifactReviewVoiceCommandRouterRef.current = handler;
+  }, []);
+  const routeArtifactReviewVoiceCommand = useCallback<ArtifactReviewVoiceCommandRouter>((text) => (
+    artifactReviewVoiceCommandRouterRef.current?.(text) ?? { handled: false }
+  ), []);
+  const builderArtifactLibraryRef = useRef(builderArtifactLibrary);
+
+  useEffect(() => {
+    builderArtifactLibraryRef.current = builderArtifactLibrary;
+  }, [builderArtifactLibrary]);
+
+  useEffect(() => {
+    if (!builderTask?.taskId || builderTask.phase !== 'running') {
+      setBuilderLibraryBaseline(null);
+      return;
+    }
+    setBuilderLibraryBaseline(
+      new Set(
+        builderArtifactLibraryRef.current.map((item) => `${item.path}:${item.modifiedAt ?? ''}:${item.sizeBytes ?? ''}`),
+      ),
+    );
+  }, [builderTask?.phase, builderTask?.runId, builderTask?.taskId]);
+
+  useEffect(() => {
+    if (builderTask?.taskId || builderCompletion?.task_id) {
+      setArtifactLibraryRefreshNonce((value) => value + 1);
+    }
+  }, [builderCompletion?.run_id, builderCompletion?.task_id, builderTask?.phase, builderTask?.runId, builderTask?.taskId]);
+
+  useEffect(() => {
+    if (chatStatus === 'ready') {
+      setArtifactLibraryRefreshNonce((value) => value + 1);
+    }
+  }, [chatStatus]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const refresh = () => {
+      setArtifactLibraryRefreshNonce((value) => value + 1);
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') {
+        refresh();
+      }
+    };
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
+  }, []);
 
   const {
     hasArtifactsContent,
@@ -529,8 +636,7 @@ function SessionPageContent() {
     messages,
     artifacts,
     builderArtifact,
-    hasBuilderArtifactLibrary,
-    hasCoReviewFixture: coReviewFixtureEnabled,
+    hasBuilderArtifactLibrary: hasBuilderArtifactLibrary || hasSelectedBuilderArtifactPath,
     isBuilderRunning: builderTask?.phase === 'running',
     isStreaming,
     isReflectionVoiceFlowActive,
@@ -541,25 +647,43 @@ function SessionPageContent() {
     sessionContextMode,
   });
 
+  const voiceReadinessStatusText = useMemo(() => {
+    if (focusMode === 'text' || voiceState.runtimeTelemetry.runtime !== 'gemini_live') {
+      return presenceStatus;
+    }
+
+    switch (voiceState.runtimeTelemetry.reviewTranscriptPromotionBlockedReason) {
+      case 'provider_transcript_not_surfaced':
+        return 'Voice transcript is delayed';
+      case 'voice_input_detected_waiting_for_transcript':
+        return 'Voice input detected, waiting for transcript';
+      default:
+        return presenceStatus;
+    }
+  }, [focusMode, presenceStatus, voiceState.runtimeTelemetry]);
+
   const [hasNewArtifacts, setHasNewArtifacts] = useState(false);
-  const [isVoiceCaptionVisible, setIsVoiceCaptionVisible] = useState(false);
+  const [, setIsVoiceCaptionVisible] = useState(false);
   const previousArtifactCountRef = useRef(0);
   const previousReadyCountRef = useRef(0);
   const previousArtifactSignatureRef = useRef('');
+  const previousBuilderSurfaceTelemetrySignatureRef = useRef('');
+  const canvasRestoreAttemptedContextRef = useRef<string | null>(null);
+  const canvasRestoreClosedByUserRef = useRef(false);
 
   const artifactContentCount = useMemo(() => {
-    const hasBuilderArtifact = Boolean(builderArtifact) || hasBuilderArtifactLibrary;
+    const hasBuilderArtifact = Boolean(builderArtifact) || hasBuilderArtifactLibrary || hasSelectedBuilderArtifactPath;
     const hasTakeaway = Boolean(artifacts?.takeaway?.trim());
     const hasReflection = Boolean(artifacts?.reflection_candidate?.prompt?.trim());
     const memoryCount = artifacts?.memory_candidates?.length ?? 0;
-    return (hasBuilderArtifact ? 1 : 0) + (coReviewFixtureEnabled ? 1 : 0) + (hasTakeaway ? 1 : 0) + (hasReflection ? 1 : 0) + Math.min(1, memoryCount);
-  }, [artifacts, builderArtifact, hasBuilderArtifactLibrary, coReviewFixtureEnabled]);
+    return (hasBuilderArtifact ? 1 : 0) + (hasTakeaway ? 1 : 0) + (hasReflection ? 1 : 0) + Math.min(1, memoryCount);
+  }, [artifacts, builderArtifact, hasBuilderArtifactLibrary, hasSelectedBuilderArtifactPath]);
 
   const readyArtifactCount = useMemo(() => {
     return [artifactStatus.takeaway, artifactStatus.reflection, artifactStatus.memories].filter(
       (status) => status === 'ready'
-    ).length + ((builderArtifact || hasBuilderArtifactLibrary) ? 1 : 0) + (coReviewFixtureEnabled ? 1 : 0);
-  }, [artifactStatus, builderArtifact, hasBuilderArtifactLibrary, coReviewFixtureEnabled]);
+    ).length + ((builderArtifact || hasBuilderArtifactLibrary || hasSelectedBuilderArtifactPath) ? 1 : 0);
+  }, [artifactStatus, builderArtifact, hasBuilderArtifactLibrary, hasSelectedBuilderArtifactPath]);
 
   const waitingArtifactCount = useMemo(() => {
     return [artifactStatus.takeaway, artifactStatus.reflection, artifactStatus.memories].filter(
@@ -590,24 +714,346 @@ function SessionPageContent() {
       .filter((memory) => memory.length > 0)
       .join('|');
     const library = builderArtifactLibrary.map((item) => item.path).join('|');
-    const fixture = coReviewFixtureEnabled ? 'coreview-fixture-q3-launch-review' : '';
 
-    return `${builder}::${library}::${fixture}::${takeaway}::${reflection}::${memories}`;
-  }, [artifacts, builderArtifact, builderArtifactLibrary, coReviewFixtureEnabled]);
+    return `${builder}::${library}::${selectedBuilderArtifactPath ?? ''}::${takeaway}::${reflection}::${memories}`;
+  }, [artifacts, builderArtifact, builderArtifactLibrary, selectedBuilderArtifactPath]);
 
   const hasDesktopStyleBadge = hasPendingArtifacts || waitingArtifactCount > 0;
-  const showBuilderTaskNotice = Boolean(builderTask);
-  const builderPrimaryFile = useMemo(
+  const recoveredBuilderLibraryItem = useMemo(() => {
+    if (builderTask?.phase !== 'running' || !builderLibraryBaseline) {
+      return null;
+    }
+    return builderArtifactLibrary.find((item) => (
+      !builderLibraryBaseline.has(`${item.path}:${item.modifiedAt ?? ''}:${item.sizeBytes ?? ''}`)
+    )) ?? null;
+  }, [builderArtifactLibrary, builderLibraryBaseline, builderTask?.phase]);
+  const builderArtifactPrimaryFile = useMemo(
     () => getBuilderArtifactFiles(builderArtifact)[0] ?? null,
     [builderArtifact],
+  );
+  const isBuilderActivelyRunning = builderTask?.phase === 'running';
+  const builderLibraryPrimaryFile = useMemo(
+    () => recoveredBuilderLibraryItem ?? (!isBuilderActivelyRunning ? builderArtifactLibrary[0] : null) ?? null,
+    [builderArtifactLibrary, isBuilderActivelyRunning, recoveredBuilderLibraryItem],
+  );
+  const selectedBuilderPrimaryFile = useMemo(() => {
+    if (!selectedBuilderArtifactPath) {
+      return null;
+    }
+    const name = getBuilderArtifactFilename(selectedBuilderArtifactPath);
+    return {
+      path: selectedBuilderArtifactPath,
+      name,
+      label: name,
+      isPrimary: true,
+    };
+  }, [selectedBuilderArtifactPath]);
+  const builderPrimaryFile = useMemo(() => {
+    if (builderArtifactPrimaryFile) {
+      return builderArtifactPrimaryFile;
+    }
+    if (builderLibraryPrimaryFile) {
+      return {
+        path: builderLibraryPrimaryFile.path,
+        name: builderLibraryPrimaryFile.name,
+        label: builderLibraryPrimaryFile.name,
+        isPrimary: true,
+      };
+    }
+    return selectedBuilderPrimaryFile;
+  }, [builderArtifactPrimaryFile, builderLibraryPrimaryFile, selectedBuilderPrimaryFile]);
+  const builderCompletionRecoveryFile = recoveredBuilderLibraryItem
+    ? {
+        path: recoveredBuilderLibraryItem.path,
+        name: recoveredBuilderLibraryItem.name,
+        label: recoveredBuilderLibraryItem.name,
+        isPrimary: true,
+      }
+    : null;
+  const hasRecoveredBuilderArtifact = Boolean(recoveredBuilderLibraryItem);
+  const showBuilderTaskNotice = Boolean(builderTask) && !hasRecoveredBuilderArtifact;
+  const builderReadyTitle = builderArtifact?.artifactTitle ?? builderPrimaryFile?.name ?? 'Builder deliverable';
+  const builderOpenHref = useMemo(
+    () => buildThreadArtifactHref(resolvedThreadId, builderPrimaryFile?.path),
+    [builderPrimaryFile?.path, resolvedThreadId],
   );
   const builderDownloadHref = useMemo(
     () => buildThreadArtifactHref(resolvedThreadId, builderPrimaryFile?.path, { download: true }),
     [builderPrimaryFile?.path, resolvedThreadId],
   );
+  const resolveBuilderCanvasArtifactForPath = useCallback((path: string | null | undefined) => {
+    const normalizedPath = normalizeBuilderArtifactPath(path);
+    if (!normalizedPath || !resolvedThreadId) {
+      return null;
+    }
+
+    const builderFile = getBuilderArtifactFiles(builderArtifact).find((file) => (
+      normalizeBuilderArtifactPath(file.path) === normalizedPath
+    )) ?? null;
+    const libraryItem = builderArtifactLibrary.find((item) => (
+      normalizeBuilderArtifactPath(item.path) === normalizedPath
+    )) ?? null;
+    const name = libraryItem?.name ?? builderFile?.name ?? getBuilderArtifactFilename(normalizedPath);
+    const file = {
+      path: normalizedPath,
+      name,
+      label: name,
+      isPrimary: true,
+      ...(libraryItem?.mimeType ? { mimeType: libraryItem.mimeType } : {}),
+      ...(typeof libraryItem?.sizeBytes === 'number' ? { sizeBytes: libraryItem.sizeBytes } : {}),
+    };
+    const rendererArtifact = builderFile && builderArtifact
+      ? builderArtifact
+      : {
+          artifactPath: normalizedPath,
+          artifactTitle: name,
+          artifactType: 'document',
+          decisionsMade: [],
+          supportingFiles: [],
+        };
+    const rendererKind = detectArtifactRendererKind(file, rendererArtifact);
+    const openHref = buildThreadArtifactHref(resolvedThreadId, normalizedPath);
+    if (!openHref) {
+      return null;
+    }
+
+    return {
+      normalizedPath,
+      rendererKind,
+      openHref,
+    };
+  }, [builderArtifact, builderArtifactLibrary, resolvedThreadId]);
+  const recordCanvasRestoreTelemetry = useCallback((payload: {
+    attempted: boolean;
+    result: string;
+    source: string;
+    artifactPath?: string | null;
+    artifactIdentityHash?: string | null;
+    storageKeyHash?: string | null;
+  }) => {
+    recordSophiaCaptureEvent({
+      category: 'artifacts-runtime',
+      name: 'artifact-canvas-restore',
+      payload: {
+        canvasRestoreAttempted: payload.attempted,
+        canvasRestoreResult: payload.result,
+        canvasRestoreSource: payload.source,
+        canvasRestoredArtifactIdentityHash: payload.artifactIdentityHash ?? null,
+        canvasRestoreStorageKeyHash: payload.storageKeyHash ?? null,
+        canvasRestoreStorageVersion: ARTIFACT_CANVAS_RESTORE_STORAGE_VERSION,
+        rawArtifactTextExcluded: true,
+        rawCommentTextExcluded: true,
+        rawFrameExcluded: true,
+      },
+    });
+  }, []);
+  const persistSelectedBuilderCanvasState = useCallback((path: string | null | undefined, source: string) => {
+    const artifact = resolveBuilderCanvasArtifactForPath(path);
+    if (!artifact) {
+      recordCanvasRestoreTelemetry({
+        attempted: false,
+        result: 'invalid_artifact',
+        source,
+        artifactPath: normalizeBuilderArtifactPath(path),
+      });
+      return null;
+    }
+
+    const result = persistArtifactCanvasOpenState(canvasRestoreContext, {
+      artifactPath: artifact.normalizedPath,
+      rendererKind: artifact.rendererKind,
+    });
+    recordCanvasRestoreTelemetry({
+      attempted: false,
+      result: result.result,
+      source,
+      artifactPath: artifact.normalizedPath,
+      artifactIdentityHash: result.state?.stableArtifactIdentityHash
+        ?? hashArtifactCanvasRestoreIdentity(result.state?.stableArtifactIdentity),
+      storageKeyHash: result.storageKeyHash,
+    });
+    return artifact.normalizedPath;
+  }, [canvasRestoreContext, recordCanvasRestoreTelemetry, resolveBuilderCanvasArtifactForPath]);
+  const clearSelectedBuilderCanvasState = useCallback((source: string) => {
+    const result = clearArtifactCanvasOpenState(canvasRestoreContext);
+    recordCanvasRestoreTelemetry({
+      attempted: false,
+      result: result.result,
+      source,
+      storageKeyHash: result.storageKeyHash,
+    });
+  }, [canvasRestoreContext, recordCanvasRestoreTelemetry]);
+  const builderCompletionForDisplay: BuilderCompletionEventV1 | null = useMemo(() => {
+    if (!builderCompletion) {
+      return null;
+    }
+    const hasActionPath = Boolean(builderCompletion.artifact_path || builderCompletion.artifact_url);
+    const isMissingDeliverableError = (
+      builderCompletion.status === 'error'
+      && builderCompletion.error_message === MISSING_BUILDER_DELIVERABLE_ERROR
+    );
+    if (hasActionPath) {
+      return builderCompletion;
+    }
+    if (!builderCompletionRecoveryFile?.path) {
+      if (builderCompletion.status === 'success') {
+        console.warn('[builder-artifacts] success completion downgraded because no action is available', {
+          thread_id: (builderCompletion.thread_id || resolvedThreadId || '').slice(0, 12),
+          task_id: builderCompletion.task_id.slice(0, 12),
+          run_id: builderCompletion.run_id?.slice(0, 12) ?? null,
+        });
+        return {
+          ...builderCompletion,
+          thread_id: builderCompletion.thread_id || resolvedThreadId || '',
+          status: 'error',
+          error_message: builderCompletion.error_message ?? MISSING_BUILDER_DELIVERABLE_RETRY_MESSAGE,
+          source: builderCompletion.source ?? 'artifact_missing_reclassified',
+        };
+      }
+      return builderCompletion;
+    }
+    if (builderCompletion.status !== 'success' && !isMissingDeliverableError) {
+      return builderCompletion;
+    }
+    const recovered: BuilderCompletionEventV1 = {
+      ...builderCompletion,
+      thread_id: builderCompletion.thread_id || resolvedThreadId || '',
+      status: 'success',
+      artifact_path: builderCompletionRecoveryFile.path,
+      artifact_filename: builderCompletion.artifact_filename ?? builderCompletionRecoveryFile.name,
+      artifact_title: builderCompletion.artifact_title ?? builderReadyTitle,
+      error_message: null,
+      source: 'artifact_library_recovery',
+    };
+    console.warn('[builder-artifacts] completion action recovered from library', {
+      thread_id: resolvedThreadId?.slice(0, 12) ?? null,
+      task_id: builderCompletion.task_id.slice(0, 12),
+      run_id: builderCompletion.run_id?.slice(0, 12) ?? null,
+      artifact_path_present: true,
+    });
+    return recovered;
+  }, [builderCompletion, builderCompletionRecoveryFile?.name, builderCompletionRecoveryFile?.path, builderReadyTitle, resolvedThreadId]);
+
+  useEffect(() => {
+    if (builderCompletionForDisplay?.status !== 'success') return;
+    if (builderCompletionForDisplay.artifact_path || builderCompletionForDisplay.artifact_url) return;
+    console.warn('[builder-artifacts] terminal completion has no action href', {
+      thread_id: builderCompletionForDisplay.thread_id.slice(0, 12),
+      task_id: builderCompletionForDisplay.task_id.slice(0, 12),
+      run_id: builderCompletionForDisplay.run_id?.slice(0, 12) ?? null,
+    });
+  }, [builderCompletionForDisplay]);
+  const builderCompletionFallbackLabel = useMemo(
+    () => builderCompletionForDisplay ? getBuilderCompletionFallbackLabel(builderCompletionForDisplay) : null,
+    [builderCompletionForDisplay],
+  );
+  const canonicalCompletedBuilderTask = useMemo(() => {
+    if (!builderPrimaryFile) {
+      return null;
+    }
+
+    const fallbackBody = builderCompletionForDisplay
+      ? getBuilderCompletionFallbackBody(builderCompletionForDisplay)
+      : null;
+    const completionCopy = builderCompletionForDisplay?.status === 'success'
+      ? builderCompletionForDisplay.summary ?? builderCompletionForDisplay.user_next_action ?? null
+      : null;
+
+    return {
+      phase: 'completed' as const,
+      taskId: builderTask?.taskId ?? builderCompletionForDisplay?.task_id,
+      runId: builderTask?.runId ?? builderCompletionForDisplay?.run_id ?? undefined,
+      label: 'Builder artifact ready',
+      detail: fallbackBody
+        ?? builderArtifact?.userNextAction
+        ?? builderArtifact?.companionSummary
+        ?? completionCopy
+        ?? 'Ready to review in canvas.',
+      todos: builderTask?.todos,
+      activityLog: builderTask?.activityLog,
+      completedAt: builderTask?.completedAt ?? builderCompletionForDisplay?.completed_at ?? undefined,
+      canvasStreamed: builderTask?.canvasStreamed,
+    };
+  }, [
+    builderArtifact?.companionSummary,
+    builderArtifact?.userNextAction,
+    builderCompletionForDisplay,
+    builderPrimaryFile,
+    builderTask?.activityLog,
+    builderTask?.canvasStreamed,
+    builderTask?.completedAt,
+    builderTask?.runId,
+    builderTask?.taskId,
+    builderTask?.todos,
+  ]);
+  const builderReadyDismissed = Boolean(
+    builderPrimaryFile?.path && dismissedBuilderLibraryPath === builderPrimaryFile.path,
+  );
+  const artifactStageVisibilityProtected = showArtifacts && (
+    Boolean(builderArtifact)
+    || hasBuilderArtifactLibrary
+    || hasSelectedBuilderArtifactPath
+  );
+  const effectiveShowArtifactsUi = showArtifactsUi || artifactStageVisibilityProtected;
+
+  useEffect(() => {
+    if (!artifactStageVisibilityProtected || showArtifactsUi) {
+      return;
+    }
+    recordSophiaCaptureEvent({
+      category: 'builder-ui',
+      name: 'artifact-stage-protected-from-snapshot',
+      payload: {
+        artifactStageProtectedFromSnapshot: true,
+        artifactStageUnmountPrevented: true,
+        builderSnapshotIgnoredForActiveArtifact: true,
+        selectedBuilderArtifactPathPresent: hasSelectedBuilderArtifactPath,
+        builderArtifactPresent: Boolean(builderArtifact),
+        builderArtifactLibraryCount: builderArtifactLibrary.length,
+        rawArtifactTextExcluded: true,
+        rawCommentTextExcluded: true,
+        rawFrameExcluded: true,
+      },
+    });
+  }, [
+    artifactStageVisibilityProtected,
+    builderArtifact,
+    builderArtifactLibrary.length,
+    hasSelectedBuilderArtifactPath,
+    showArtifactsUi,
+  ]);
+  const handleSelectBuilderArtifactPath = useCallback((path: string | null) => {
+    const normalizedPath = normalizeBuilderArtifactPath(path);
+    if (!normalizedPath) {
+      setSelectedBuilderArtifactPath(null);
+      clearSelectedBuilderCanvasState('selection_cleared');
+      return;
+    }
+
+    canvasRestoreClosedByUserRef.current = false;
+    const persistedPath = persistSelectedBuilderCanvasState(normalizedPath, 'view_in_canvas');
+    setSelectedBuilderArtifactPath(persistedPath ?? normalizedPath);
+  }, [clearSelectedBuilderCanvasState, persistSelectedBuilderCanvasState]);
+
+  useEffect(() => {
+    if (!showArtifacts || !effectiveShowArtifactsUi) {
+      setPendingBuilderArtifactReview(false);
+    }
+  }, [effectiveShowArtifactsUi, showArtifacts]);
+
+  const dismissVisibleBuilderArtifact = useCallback(() => {
+    if (builderPrimaryFile?.path) {
+      setDismissedBuilderLibraryPath(builderPrimaryFile.path);
+    }
+    if (hasRecoveredBuilderArtifact) {
+      clearBuilderTask();
+    }
+    setSelectedBuilderArtifactPath(null);
+    clearSelectedBuilderCanvasState('canvas_close');
+    clearBuilderArtifact();
+  }, [builderPrimaryFile?.path, clearBuilderArtifact, clearBuilderTask, clearSelectedBuilderCanvasState, hasRecoveredBuilderArtifact]);
   const voiceBuilderChromeOpacity = Math.max(chromeOpacity, 0.94);
   const voiceBuilderAccessoryOpacity = Math.max(chromeOpacity, 0.62);
-  const voiceArtifactToggleBottom = 'calc(9.25rem + env(safe-area-inset-bottom, 0px))';
 
   const handleVoiceDownloadBuilderArtifact = useCallback(() => {
     if (!builderDownloadHref || typeof document === 'undefined') {
@@ -675,6 +1121,8 @@ function SessionPageContent() {
   useEffect(() => {
     debugLog('ArtifactsFlow', 'mobile indicator props/state', {
       showArtifactsUi,
+      effectiveShowArtifactsUi,
+      artifactStageVisibilityProtected,
       hasNewArtifacts,
       hasPendingArtifacts,
       readyArtifactCount,
@@ -686,6 +1134,8 @@ function SessionPageContent() {
     });
   }, [
     showArtifactsUi,
+    effectiveShowArtifactsUi,
+    artifactStageVisibilityProtected,
     hasNewArtifacts,
     hasPendingArtifacts,
     readyArtifactCount,
@@ -797,10 +1247,10 @@ function SessionPageContent() {
     handleVoiceEndSession,
     voiceState,
     showToast,
+    routeArtifactReviewCommand: routeArtifactReviewVoiceCommand,
     setOnUserTranscriptHandler,
     setAssistantResponseSuppressedChecker,
   });
-
   const {
     messagesEndRef,
     inputRef,
@@ -814,7 +1264,7 @@ function SessionPageContent() {
     isTyping,
     isReadOnly,
     showArtifacts,
-    showArtifactsUi,
+    showArtifactsUi: effectiveShowArtifactsUi,
     mobileDrawerOpen,
     setShowArtifacts,
     setMobileDrawerOpen,
@@ -822,7 +1272,119 @@ function SessionPageContent() {
     setShowScaffold,
     triggerLightHaptic: () => haptic('light'),
     onBaseMicClick: baseHandleMicClick,
+    protectArtifactStageOpen: artifactStageVisibilityProtected,
   });
+  const handleCloseArtifactsPanelAndCanvasState = useCallback(() => {
+    canvasRestoreClosedByUserRef.current = true;
+    clearSelectedBuilderCanvasState('canvas_close');
+    handleCloseArtifactsPanel();
+  }, [clearSelectedBuilderCanvasState, handleCloseArtifactsPanel]);
+
+  const handleViewBuilderArtifactInCanvas = useCallback(() => {
+    handleSelectBuilderArtifactPath(builderPrimaryFile?.path ?? null);
+    handleOpenArtifactsPanel();
+  }, [builderPrimaryFile?.path, handleOpenArtifactsPanel, handleSelectBuilderArtifactPath]);
+  const handleBuilderCompletionPreview = useCallback((event: BuilderCompletionEventV1) => {
+    handleSelectBuilderArtifactPath(event.artifact_path ?? builderPrimaryFile?.path ?? null);
+    handleOpenArtifactsPanel();
+  }, [builderPrimaryFile?.path, handleOpenArtifactsPanel, handleSelectBuilderArtifactPath]);
+
+  useEffect(() => {
+    if (selectedBuilderArtifactPath || showArtifacts || canvasRestoreClosedByUserRef.current) {
+      return;
+    }
+    if (!canvasRestoreContext.threadId || !canvasRestoreContext.sessionId) {
+      return;
+    }
+    if (canvasRestoreAttemptedContextRef.current === canvasRestoreContextSignature) {
+      return;
+    }
+    canvasRestoreAttemptedContextRef.current = canvasRestoreContextSignature;
+
+    const restored = restoreArtifactCanvasOpenState(canvasRestoreContext);
+    const restoredState = restored.state;
+    if (restored.result !== 'restored' || !restoredState) {
+      recordCanvasRestoreTelemetry({
+        attempted: true,
+        result: restored.result,
+        source: 'page_mount',
+        storageKeyHash: restored.storageKeyHash,
+      });
+      return;
+    }
+
+    const artifact = resolveBuilderCanvasArtifactForPath(restoredState.normalizedArtifactPath);
+    if (!artifact) {
+      clearArtifactCanvasOpenState(canvasRestoreContext);
+      recordCanvasRestoreTelemetry({
+        attempted: true,
+        result: 'invalid_artifact',
+        source: 'page_mount',
+        artifactPath: restoredState.normalizedArtifactPath,
+        artifactIdentityHash: restoredState.stableArtifactIdentityHash,
+        storageKeyHash: restored.storageKeyHash,
+      });
+      return;
+    }
+
+    const expectedIdentityHash = hashArtifactCanvasRestoreIdentity(restoredState.stableArtifactIdentity);
+    const currentArtifactIdentity = buildCoreviewArtifactStableIdentity({
+      userId: canvasRestoreContext.userId,
+      threadId: canvasRestoreContext.threadId,
+      artifactPath: artifact.normalizedPath,
+      rendererKind: artifact.rendererKind,
+    }).key;
+    const currentArtifactIdentityHash = hashArtifactCanvasRestoreIdentity(currentArtifactIdentity);
+    if (expectedIdentityHash && currentArtifactIdentityHash && expectedIdentityHash !== currentArtifactIdentityHash) {
+      clearArtifactCanvasOpenState(canvasRestoreContext);
+      recordCanvasRestoreTelemetry({
+        attempted: true,
+        result: 'identity_mismatch',
+        source: 'page_mount',
+        artifactPath: artifact.normalizedPath,
+        artifactIdentityHash: expectedIdentityHash,
+        storageKeyHash: restored.storageKeyHash,
+      });
+      return;
+    }
+
+    setSelectedBuilderArtifactPath(artifact.normalizedPath);
+    setShowArtifacts(true);
+    setUserOpenedArtifacts(true);
+    recordCanvasRestoreTelemetry({
+      attempted: true,
+      result: 'restored',
+      source: 'page_mount',
+      artifactPath: artifact.normalizedPath,
+      artifactIdentityHash: expectedIdentityHash ?? restoredState.stableArtifactIdentityHash,
+      storageKeyHash: restored.storageKeyHash,
+    });
+  }, [
+    canvasRestoreContext,
+    canvasRestoreContextSignature,
+    recordCanvasRestoreTelemetry,
+    resolveBuilderCanvasArtifactForPath,
+    selectedBuilderArtifactPath,
+    setShowArtifacts,
+    setUserOpenedArtifacts,
+    showArtifacts,
+  ]);
+
+  const handleStartVoiceBuilderArtifactReview = useCallback(() => {
+    setPendingBuilderArtifactReview(true);
+    handleOpenArtifactsPanel();
+
+    if (focusMode !== 'voice') {
+      setFocusMode('voice');
+      setFocusModeManualOverride(true);
+    }
+
+    handleMicClick();
+  }, [focusMode, handleMicClick, handleOpenArtifactsPanel, setFocusMode, setFocusModeManualOverride]);
+
+  const handlePendingBuilderArtifactReviewConsumed = useCallback(() => {
+    setPendingBuilderArtifactReview(false);
+  }, []);
   
   const { shouldShowLoading, navigateHome } = useSessionPageGuards({
     hasSession: !!session,
@@ -915,12 +1477,133 @@ function SessionPageContent() {
   // Scroll conversation to bottom when artifact panel opens in text mode
   // so the latest messages stay visible above the panel
   useEffect(() => {
-    if (focusMode === 'text' && showArtifacts && showArtifactsUi) {
+    if (focusMode === 'text' && showArtifacts && effectiveShowArtifactsUi) {
       requestAnimationFrame(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
       });
     }
-  }, [focusMode, showArtifacts, showArtifactsUi, messagesEndRef]);
+  }, [effectiveShowArtifactsUi, focusMode, showArtifacts, messagesEndRef]);
+
+  const showTextArtifactStage = focusMode === 'text'
+    && showArtifacts
+    && effectiveShowArtifactsUi
+    && (Boolean(builderArtifact) || hasBuilderArtifactLibrary || hasSelectedBuilderArtifactPath);
+  const showVoiceArtifactStage = focusMode !== 'text'
+    && showArtifacts
+    && effectiveShowArtifactsUi
+    && (Boolean(builderArtifact) || hasBuilderArtifactLibrary || hasSelectedBuilderArtifactPath);
+  const artifactStageActive = showTextArtifactStage || showVoiceArtifactStage;
+  const showInlineTextArtifactsPanel = focusMode === 'text'
+    && showArtifacts
+    && effectiveShowArtifactsUi
+    && !showTextArtifactStage;
+  const builderSurface = useMemo(() => resolveBuilderSurface({
+    artifactStageActive,
+    buildRunning: isBuilderActivelyRunning && !hasRecoveredBuilderArtifact,
+    completedBuilderAvailable: Boolean(builderPrimaryFile && !builderReadyDismissed),
+    secondaryFileRowsAvailable: Boolean(builderArtifact) || hasBuilderArtifactLibrary,
+    legacyCompletionAvailable: Boolean(builderCompletionForDisplay),
+    selectedBuilderArtifactPathExists: hasSelectedBuilderArtifactPath,
+  }), [
+    builderArtifact,
+    builderCompletionForDisplay,
+    builderPrimaryFile,
+    builderReadyDismissed,
+    hasBuilderArtifactLibrary,
+    hasSelectedBuilderArtifactPath,
+    hasRecoveredBuilderArtifact,
+    isBuilderActivelyRunning,
+    artifactStageActive,
+  ]);
+  const canonicalCompletedBuilderEntryAvailable = Boolean(
+    builderPrimaryFile
+      && canonicalCompletedBuilderTask
+      && builderSurface.showCanonicalCompletedBuilder
+      && effectiveShowArtifactsUi,
+  );
+  const showCanonicalCompletedBuilderEntryInline = Boolean(
+    canonicalCompletedBuilderEntryAvailable
+      && focusMode === 'text'
+      && !showArtifacts
+      && !artifactStageActive,
+  );
+  const showCanonicalCompletedBuilderEntryCorner = Boolean(
+    canonicalCompletedBuilderEntryAvailable
+      && focusMode !== 'text'
+      && !showArtifacts
+      && !artifactStageActive,
+  );
+  const completedBuilderEntryPlacement = showCanonicalCompletedBuilderEntryCorner
+    ? 'corner'
+    : showCanonicalCompletedBuilderEntryInline
+      ? 'inline'
+      : 'hidden';
+  const completedBuilderEntryHiddenForStage = artifactStageActive && canonicalCompletedBuilderEntryAvailable;
+  const completedBuilderEntryOverlapsControls = false;
+
+  useEffect(() => {
+    const signature = [
+      builderSurface.builderSurfaceMode ?? 'none',
+      builderSurface.canonicalBuilderSurface,
+      builderSurface.legacyBuilderSurfaceHidden ? 'legacy-hidden' : 'legacy-visible',
+      builderSurface.builderReadyPillSuppressed ? 'ready-pill-suppressed' : 'ready-pill-clear',
+      builderSurface.duplicateBuilderSurfaceSuppressed ? 'duplicate-suppressed' : 'duplicate-clear',
+      builderSurface.resumedBuilderSurfaceResolved ? 'resumed-resolved' : 'resumed-not-selected',
+      builderTask?.phase ?? 'no-task',
+      builderCompletionForDisplay?.status ?? 'no-completion',
+      hasSelectedBuilderArtifactPath ? 'selected-artifact' : 'no-selected-artifact',
+      artifactStageActive ? 'stage-active' : 'stage-inactive',
+      completedBuilderEntryPlacement,
+      completedBuilderEntryHiddenForStage ? 'completed-hidden-for-stage' : 'completed-not-hidden-for-stage',
+    ].join('|');
+
+    if (previousBuilderSurfaceTelemetrySignatureRef.current === signature) {
+      return;
+    }
+    previousBuilderSurfaceTelemetrySignatureRef.current = signature;
+
+    recordSophiaCaptureEvent({
+      category: 'builder-ui',
+      name: 'builder-surface-resolved',
+      payload: {
+        builderSurfaceMode: builderSurface.builderSurfaceMode,
+        canonicalBuilderSurface: builderSurface.canonicalBuilderSurface,
+        legacyBuilderSurfaceHidden: builderSurface.legacyBuilderSurfaceHidden,
+        builderReadyPillSuppressed: builderSurface.builderReadyPillSuppressed,
+        duplicateBuilderSurfaceSuppressed: builderSurface.duplicateBuilderSurfaceSuppressed,
+        resumedBuilderSurfaceResolved: builderSurface.resumedBuilderSurfaceResolved,
+        artifactStageActive,
+        activeBuildStepsVisible: builderSurface.showActiveBuildSteps,
+        canonicalCompletedBuilderVisible: showCanonicalCompletedBuilderEntryInline || showCanonicalCompletedBuilderEntryCorner,
+        completedBuilderEntryPlacement,
+        completedBuilderEntryOverlapsControls,
+        completedBuilderEntryHiddenForStage,
+        legacyCompletionFallbackVisible: builderSurface.showLegacyCompletionFallback,
+        selectedBuilderArtifactPathPresent: hasSelectedBuilderArtifactPath,
+        builderTaskPhase: builderTask?.phase ?? null,
+        builderCompletionStatus: builderCompletionForDisplay?.status ?? null,
+      },
+    });
+  }, [
+    builderCompletionForDisplay?.status,
+    builderSurface.builderReadyPillSuppressed,
+    builderSurface.builderSurfaceMode,
+    builderSurface.canonicalBuilderSurface,
+    builderSurface.duplicateBuilderSurfaceSuppressed,
+    builderSurface.legacyBuilderSurfaceHidden,
+    builderSurface.resumedBuilderSurfaceResolved,
+    builderSurface.showActiveBuildSteps,
+    builderSurface.showCanonicalCompletedBuilder,
+    builderSurface.showLegacyCompletionFallback,
+    builderTask?.phase,
+    artifactStageActive,
+    completedBuilderEntryHiddenForStage,
+    completedBuilderEntryOverlapsControls,
+    completedBuilderEntryPlacement,
+    hasSelectedBuilderArtifactPath,
+    showCanonicalCompletedBuilderEntryCorner,
+    showCanonicalCompletedBuilderEntryInline,
+  ]);
 
   // Loading state — the breathing nebula IS the loading indicator (R41)
   if (shouldShowLoading) {
@@ -954,17 +1637,23 @@ function SessionPageContent() {
       isReadOnly={isReadOnly}
       presenceRef={presenceRef}
     >
-      <CoreviewFixtureLauncher
-        isVisible={coReviewFixtureEnabled}
-        sessionId={coReviewSessionId}
-        normalSessionId={coReviewSessionId}
-        threadId={artifactPanelThreadId}
-        coReviewTransport={coReviewTransport}
-      />
-
-      <div className="relative flex h-full animate-fadeIn">
+      <div
+        data-testid={showTextArtifactStage ? 'session-text-split-workspace' : undefined}
+        className={cn(
+          'relative h-full min-h-0 animate-fadeIn',
+          showTextArtifactStage
+            ? 'grid w-full grid-cols-1 grid-rows-[minmax(320px,0.52fr)_minmax(380px,0.48fr)] overflow-hidden lg:grid-cols-[minmax(360px,0.38fr)_minmax(0,1fr)] lg:grid-rows-1 lg:gap-6 xl:grid-cols-[minmax(420px,0.34fr)_minmax(720px,1fr)]'
+            : 'flex',
+        )}
+      >
         {/* Main Chat Area */}
-        <div className="relative z-10 flex-1 flex flex-col min-w-0 overflow-hidden">
+        <div
+          data-testid={showTextArtifactStage ? 'session-conversation-area' : undefined}
+          className={cn(
+            'relative z-10 flex min-w-0 flex-col overflow-hidden',
+            showTextArtifactStage ? 'min-h-0' : 'flex-1',
+          )}
+        >
             <VoiceMetricsPanel voiceState={voiceState} defaultExpanded={false} layout="floating" />
 
           {/* Reading corridor — calms the nebula behind text so messages are effortless to read.
@@ -1032,7 +1721,7 @@ function SessionPageContent() {
           <div
             className={cn(
               'transition-all duration-700 ease-out',
-              focusMode !== 'text' && showArtifacts && showArtifactsUi && 'voice-caption-raised'
+              focusMode !== 'text' && showArtifacts && effectiveShowArtifactsUi && 'voice-caption-raised'
             )}
           >
             <VoiceCaption
@@ -1057,20 +1746,28 @@ function SessionPageContent() {
             />
           )}
           
-          {/* Inline Artifact Panel — text mode: above composer */}
-          {focusMode === 'text' && showArtifacts && showArtifactsUi && (
+          {/* Inline Artifact Panel — text mode companion artifacts above composer */}
+          {showInlineTextArtifactsPanel && (
             <PresenceArtifactPanel
               artifacts={artifacts}
               builderArtifact={builderArtifact}
               builderArtifactLibrary={builderArtifactLibrary}
+              selectedBuilderArtifactPath={selectedBuilderArtifactPath}
+              onSelectedBuilderArtifactPathChange={handleSelectBuilderArtifactPath}
               sessionId={coReviewSessionId}
               normalSessionId={coReviewSessionId}
+              voiceAgentSessionId={coReviewVoiceAgentSessionId}
+              userId={userId}
               threadId={artifactPanelThreadId}
-              isVisible={showArtifacts && showArtifactsUi}
-              onDismiss={handleCloseArtifactsPanel}
+              isVisible={showArtifacts && effectiveShowArtifactsUi}
+              onDismiss={handleCloseArtifactsPanelAndCanvasState}
               isVoiceMode={false}
-              showCoReviewFixture={coReviewFixtureEnabled}
               coReviewTransport={coReviewTransport}
+              pendingBuilderArtifactReview={pendingBuilderArtifactReview}
+              onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}
+              onPendingBuilderArtifactReviewConsumed={handlePendingBuilderArtifactReviewConsumed}
+              onArtifactReviewVoiceCommandRouteChange={handleArtifactReviewVoiceCommandRouteChange}
+              onAnnotationActionSucceeded={voiceState.markAnnotationActionSucceeded}
               onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
               onMemoryApprove={handleMemoryApprove}
               onMemoryReject={handleMemoryReject}
@@ -1078,28 +1775,28 @@ function SessionPageContent() {
           )}
 
           {/*
-            PR-B: in text mode, prefer the new BuilderCompletionCard whenever
-            an SSE completion event has arrived for this thread. The new card
-            carries Open + Download (success) and Try Again (error/timeout)
-            with the original task brief inline. We only fall through to the
-            running BuilderTaskNotice while the task is still in flight.
+            Builder surface arbitration: review room and active build progress
+            win first; the completion card is now only a fallback when no
+            artifact entry or library surface can take over.
           */}
-          {focusMode === 'text' && builderCompletion && (
+          {focusMode === 'text' && builderSurface.showLegacyCompletionFallback && builderCompletionForDisplay && (
             <BuilderCompletionCard
-              event={builderCompletion}
+              event={builderCompletionForDisplay}
+              onOpen={handleBuilderCompletionPreview}
               onRetry={handleBuilderRetry}
               onDismiss={handleBuilderCompletionDismiss}
               onDownload={() => haptic('medium')}
             />
           )}
           {focusMode === 'text'
-            && !builderCompletion
+            && builderSurface.showActiveBuildSteps
             && showBuilderTaskNotice
             && builderTask && (
             <BuilderTaskNotice
               task={builderTask}
               artifactTitle={builderArtifact?.artifactTitle}
-              onOpenArtifact={builderArtifact ? handleOpenArtifactsPanel : undefined}
+              onOpenArtifact={builderArtifact ? handleViewBuilderArtifactInCanvas : undefined}
+              openHref={builderOpenHref}
               downloadHref={builderArtifact ? builderDownloadHref : undefined}
               onDownload={builderArtifact ? () => { haptic('medium'); setTimeout(clearBuilderTask, 1500); } : undefined}
               onDismiss={clearBuilderTask}
@@ -1108,48 +1805,65 @@ function SessionPageContent() {
             />
           )}
 
-          {/* Builder completion pill — text mode: inline above composer */}
-          {focusMode === 'text' && !showArtifacts && showArtifactsUi && builderArtifact && !builderTask && (
-            <div className="mb-2 flex justify-center">
-              <BuilderReadyPill
-                title={builderArtifact.artifactTitle}
-                onOpen={handleOpenArtifactsPanel}
-                downloadHref={builderDownloadHref}
-                onDownload={() => haptic('medium')}
-                onDismiss={clearBuilderArtifact}
-                itemCount={builderArtifactLibrary.length || undefined}
-                isNew={hasNewArtifacts}
-              />
-            </div>
-          )}
-
-          {/* Builder completion pill — voice mode: fixed above mode toggle */}
-          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && !isVoiceCaptionVisible && !builderTask && builderArtifact && (
+          {/* Canonical completed builder surface — text mode: left-column inline above composer */}
+          {showCanonicalCompletedBuilderEntryInline
+            && builderPrimaryFile
+            && canonicalCompletedBuilderTask && (
             <div
-              className="fixed left-1/2 -translate-x-1/2 z-30 flex justify-center"
-              style={{ bottom: voiceArtifactToggleBottom, opacity: voiceBuilderAccessoryOpacity, transition: 'opacity 0.6s ease' }}
+              data-testid="canonical-completed-builder-entry"
+              data-builder-entry-placement="inline"
+              data-builder-entry-overlaps-controls="false"
+              className="mb-2 flex justify-start px-3 sm:px-4"
             >
-              <BuilderReadyPill
-                title={builderArtifact.artifactTitle}
-                onOpen={handleOpenArtifactsPanel}
+              <BuilderTaskNotice
+                task={canonicalCompletedBuilderTask}
+                artifactTitle={builderReadyTitle}
+                fallbackLabel={builderCompletionFallbackLabel}
+                onOpenArtifact={handleViewBuilderArtifactInCanvas}
+                openHref={builderOpenHref}
                 downloadHref={builderDownloadHref}
                 onDownload={() => haptic('medium')}
-                onDismiss={clearBuilderArtifact}
-                itemCount={builderArtifactLibrary.length || undefined}
-                isNew={hasNewArtifacts}
+                onDismiss={dismissVisibleBuilderArtifact}
                 compact={true}
               />
             </div>
           )}
 
-          {/* PR-B: voice-mode equivalent of the completion card. */}
-          {focusMode !== 'text' && builderCompletion && (
+          {/* Canonical completed builder surface — voice mode: safe-left corner scene element */}
+          {showCanonicalCompletedBuilderEntryCorner
+            && builderPrimaryFile
+            && canonicalCompletedBuilderTask && (
+            <div
+              data-testid="canonical-completed-builder-entry"
+              data-builder-entry-placement="corner"
+              data-builder-entry-overlaps-controls="false"
+              className="pointer-events-none fixed bottom-[calc(7.75rem+env(safe-area-inset-bottom,0px))] left-4 z-30 flex w-[min(400px,calc(100vw-2rem))] justify-start sm:bottom-6 sm:left-6"
+              style={{ opacity: voiceBuilderAccessoryOpacity, transition: 'opacity 0.6s ease' }}
+            >
+              <BuilderTaskNotice
+                task={canonicalCompletedBuilderTask}
+                artifactTitle={builderReadyTitle}
+                fallbackLabel={builderCompletionFallbackLabel}
+                onOpenArtifact={handleViewBuilderArtifactInCanvas}
+                openHref={builderOpenHref}
+                downloadHref={builderDownloadHref}
+                onDownload={() => haptic('medium')}
+                onDismiss={dismissVisibleBuilderArtifact}
+                compact={true}
+                className="pointer-events-auto max-w-full"
+              />
+            </div>
+          )}
+
+          {/* Voice-mode completion fallback, gated by the same surface arbitration. */}
+          {focusMode !== 'text' && builderSurface.showLegacyCompletionFallback && builderCompletionForDisplay && (
             <div
               className="fixed left-1/2 -translate-x-1/2 z-40"
               style={{ bottom: '180px', opacity: voiceBuilderChromeOpacity, transition: 'opacity 0.6s ease' }}
             >
               <BuilderCompletionCard
-                event={builderCompletion}
+                event={builderCompletionForDisplay}
+                onOpen={handleBuilderCompletionPreview}
                 onRetry={handleBuilderRetry}
                 onDismiss={handleBuilderCompletionDismiss}
                 onDownload={() => haptic('medium')}
@@ -1158,7 +1872,7 @@ function SessionPageContent() {
             </div>
           )}
           {focusMode !== 'text'
-            && !builderCompletion
+            && builderSurface.showActiveBuildSteps
             && showBuilderTaskNotice
             && builderTask && (
             <div
@@ -1168,7 +1882,8 @@ function SessionPageContent() {
               <BuilderTaskNotice
                 task={builderTask}
                 artifactTitle={builderArtifact?.artifactTitle}
-                onOpenArtifact={builderArtifact ? handleOpenArtifactsPanel : undefined}
+                onOpenArtifact={builderArtifact ? handleViewBuilderArtifactInCanvas : undefined}
+                openHref={builderOpenHref}
                 downloadHref={builderArtifact ? builderDownloadHref : undefined}
                 onDownload={builderArtifact ? () => { haptic('medium'); setTimeout(clearBuilderTask, 1500); } : undefined}
                 compact={false}
@@ -1243,7 +1958,7 @@ function SessionPageContent() {
               justSent={justSent}
               voiceStatus={voiceStatus}
               isTyping={isTyping}
-              statusText={isReadOnly ? 'Read-only session' : presenceStatus}
+              statusText={isReadOnly ? 'Read-only session' : voiceReadinessStatusText}
               isOffline={isOffline}
               isConnecting={connectivityStatus === 'checking'}
               focusRequestToken={composerFocusToken}
@@ -1268,6 +1983,39 @@ function SessionPageContent() {
             />
           </VoiceComposerErrorBoundary>
         </div>
+
+        {showTextArtifactStage && (
+          <aside
+            data-testid="session-artifact-stage-area"
+            className="relative z-10 min-h-0 min-w-0 overflow-hidden px-3 pb-3 lg:pb-6 lg:pl-0 lg:pr-6 lg:pt-16"
+            aria-label="Artifact stage area"
+          >
+            <PresenceArtifactPanel
+              artifacts={artifacts}
+              builderArtifact={builderArtifact}
+              builderArtifactLibrary={builderArtifactLibrary}
+              selectedBuilderArtifactPath={selectedBuilderArtifactPath}
+              onSelectedBuilderArtifactPathChange={handleSelectBuilderArtifactPath}
+              sessionId={coReviewSessionId}
+              normalSessionId={coReviewSessionId}
+              voiceAgentSessionId={coReviewVoiceAgentSessionId}
+              userId={userId}
+              threadId={artifactPanelThreadId}
+              isVisible={showArtifacts && effectiveShowArtifactsUi}
+              onDismiss={handleCloseArtifactsPanelAndCanvasState}
+              isVoiceMode={false}
+              coReviewTransport={coReviewTransport}
+              pendingBuilderArtifactReview={pendingBuilderArtifactReview}
+              onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}
+              onPendingBuilderArtifactReviewConsumed={handlePendingBuilderArtifactReviewConsumed}
+              onArtifactReviewVoiceCommandRouteChange={handleArtifactReviewVoiceCommandRouteChange}
+              onAnnotationActionSucceeded={voiceState.markAnnotationActionSucceeded}
+              onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
+              onMemoryApprove={handleMemoryApprove}
+              onMemoryReject={handleMemoryReject}
+            />
+          </aside>
+        )}
         
         {/* Floating artifact panel — voice mode: fixed above mic */}
         {focusMode !== 'text' && (
@@ -1275,14 +2023,22 @@ function SessionPageContent() {
             artifacts={artifacts}
             builderArtifact={builderArtifact}
             builderArtifactLibrary={builderArtifactLibrary}
+            selectedBuilderArtifactPath={selectedBuilderArtifactPath}
+            onSelectedBuilderArtifactPathChange={handleSelectBuilderArtifactPath}
             sessionId={coReviewSessionId}
             normalSessionId={coReviewSessionId}
+            voiceAgentSessionId={coReviewVoiceAgentSessionId}
+            userId={userId}
             threadId={artifactPanelThreadId}
-            isVisible={showArtifacts && showArtifactsUi}
-            onDismiss={handleCloseArtifactsPanel}
+            isVisible={showArtifacts && effectiveShowArtifactsUi}
+            onDismiss={handleCloseArtifactsPanelAndCanvasState}
             isVoiceMode={true}
-            showCoReviewFixture={coReviewFixtureEnabled}
             coReviewTransport={coReviewTransport}
+            pendingBuilderArtifactReview={pendingBuilderArtifactReview}
+            onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}
+            onPendingBuilderArtifactReviewConsumed={handlePendingBuilderArtifactReviewConsumed}
+            onArtifactReviewVoiceCommandRouteChange={handleArtifactReviewVoiceCommandRouteChange}
+            onAnnotationActionSucceeded={voiceState.markAnnotationActionSucceeded}
             onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
             onMemoryApprove={handleMemoryApprove}
             onMemoryReject={handleMemoryReject}

@@ -18,6 +18,7 @@ export type CoreviewArtifactTextSource =
   | 'fixture'
   | 'builder_metadata'
   | 'builder_file'
+  | 'pdf_text_extraction'
   | 'artifact_store'
   | 'unsupported';
 
@@ -28,13 +29,30 @@ export interface CoreviewArtifactTextSuccess {
   text: string;
   truncated: boolean;
   char_count: number;
+  page_count?: number | null;
 }
 
 export interface CoreviewArtifactTextFailure {
   ok: false;
-  artifact_id: string;
-  status: 'not_found' | 'unavailable' | 'forbidden' | 'unsupported';
+  artifact_id: string | null;
+  status:
+    | 'no_selected_artifact'
+    | 'not_found'
+    | 'unavailable'
+    | 'forbidden'
+    | 'unsupported'
+    | 'extraction_pending'
+    | 'extraction_unavailable'
+    | 'extraction_failed'
+    | 'artifact_rebind_required'
+    | 'artifact_not_available_in_current_session'
+    | 'timeout';
   safe_reason: string;
+  recovery_action?: string | null;
+  source?: CoreviewArtifactTextSource;
+  page_count?: number | null;
+  char_count?: number | null;
+  truncated?: boolean | null;
 }
 
 export type CoreviewArtifactTextResponse = CoreviewArtifactTextSuccess | CoreviewArtifactTextFailure;
@@ -43,8 +61,25 @@ export interface CoreviewArtifactTextRegistration {
   artifactId: string;
   source: CoreviewArtifactTextSource;
   text: string;
+  pageCount?: number | null;
+  charCount?: number | null;
+  truncated?: boolean | null;
   sessionIds?: Array<string | null | undefined>;
   threadId?: string | null;
+  artifactStableIdentity?: string | null;
+}
+
+export interface CoreviewArtifactTextStatusRegistration {
+  artifactId: string;
+  source: CoreviewArtifactTextSource;
+  status: 'loading' | 'failed' | 'unavailable';
+  safeReason?: string | null;
+  pageCount?: number | null;
+  charCount?: number | null;
+  truncated?: boolean | null;
+  sessionIds?: Array<string | null | undefined>;
+  threadId?: string | null;
+  artifactStableIdentity?: string | null;
 }
 
 export interface CoreviewArtifactTextReadInput {
@@ -55,6 +90,7 @@ export interface CoreviewArtifactTextReadInput {
 
 const MAX_ARTIFACT_TEXT_CHARS = 12_000;
 const registry = new Map<string, CoreviewArtifactTextRegistration[]>();
+const statusRegistry = new Map<string, CoreviewArtifactTextStatusRegistration[]>();
 
 export function registerCoreviewArtifactText(
   registration: CoreviewArtifactTextRegistration,
@@ -69,8 +105,12 @@ export function registerCoreviewArtifactText(
     artifactId,
     source: registration.source,
     text,
+    pageCount: normalizePositiveInteger(registration.pageCount),
+    charCount: normalizeNonNegativeInteger(registration.charCount),
+    truncated: typeof registration.truncated === 'boolean' ? registration.truncated : null,
     sessionIds: normalizeSessionIds(registration.sessionIds),
     threadId: normalizeToken(registration.threadId),
+    artifactStableIdentity: normalizeToken(registration.artifactStableIdentity),
   };
   const entries = registry.get(artifactId) ?? [];
   entries.push(entry);
@@ -90,6 +130,44 @@ export function registerCoreviewArtifactText(
   };
 }
 
+export function registerCoreviewArtifactTextStatus(
+  registration: CoreviewArtifactTextStatusRegistration,
+): () => void {
+  const artifactId = normalizeToken(registration.artifactId);
+  if (!artifactId) {
+    return () => undefined;
+  }
+
+  const entry: CoreviewArtifactTextStatusRegistration = {
+    artifactId,
+    source: registration.source,
+    status: registration.status,
+    safeReason: normalizeToken(registration.safeReason),
+    pageCount: normalizePositiveInteger(registration.pageCount),
+    charCount: normalizeNonNegativeInteger(registration.charCount),
+    truncated: typeof registration.truncated === 'boolean' ? registration.truncated : null,
+    sessionIds: normalizeSessionIds(registration.sessionIds),
+    threadId: normalizeToken(registration.threadId),
+    artifactStableIdentity: normalizeToken(registration.artifactStableIdentity),
+  };
+  const entries = statusRegistry.get(artifactId) ?? [];
+  entries.push(entry);
+  statusRegistry.set(artifactId, entries);
+
+  return () => {
+    const current = statusRegistry.get(artifactId);
+    if (!current) {
+      return;
+    }
+    const next = current.filter((candidate) => candidate !== entry);
+    if (next.length > 0) {
+      statusRegistry.set(artifactId, next);
+    } else {
+      statusRegistry.delete(artifactId);
+    }
+  };
+}
+
 export function readCoreviewArtifactTextSideband({
   artifactId,
   sessionId = null,
@@ -97,32 +175,51 @@ export function readCoreviewArtifactTextSideband({
 }: CoreviewArtifactTextReadInput): CoreviewArtifactTextResponse {
   const normalizedArtifactId = normalizeToken(artifactId);
   if (!normalizedArtifactId) {
-    return failure('', 'not_found', 'No artifact_id was supplied for the trusted text read.');
+    return failure(null, 'no_selected_artifact', 'No artifact is selected for trusted text reading.');
   }
 
+  const scope = { sessionId, threadId };
   const entries = registry.get(normalizedArtifactId) ?? [];
-  if (!entries.length) {
+  const matchingEntry = [...entries].reverse().find((entry) => registrationMatches(entry, { sessionId, threadId }));
+  if (matchingEntry) {
+    return success(normalizedArtifactId, matchingEntry);
+  }
+
+  const statusEntries = statusRegistry.get(normalizedArtifactId) ?? [];
+  const matchingStatus = [...statusEntries].reverse().find((entry) => registrationMatches(entry, scope));
+  if (matchingStatus) {
+    return statusFailure(normalizedArtifactId, matchingStatus);
+  }
+
+  const mismatch = textRegistryMismatchReason([...entries, ...statusEntries], scope);
+  if (mismatch) {
+    if (mismatch === 'thread_mismatch') {
+      return failure(
+        normalizedArtifactId,
+        'forbidden',
+        'artifact_not_available_in_current_session: the registered artifact text belongs to a different thread.',
+        'Reopen the artifact from the current session thread, then start Review with Sophia again.',
+      );
+    }
+
     return failure(
       normalizedArtifactId,
-      'not_found',
-      'No trusted artifact text source is registered in this app session.',
+      'artifact_rebind_required',
+      'artifact_rebind_required: the artifact text is registered for an older voice session.',
+      'Keep the artifact visible and reconnect voice or start Review with Sophia to rebind exact text.',
     );
   }
 
-  const matchingEntry = entries.find((entry) => registrationMatches(entry, { sessionId, threadId }));
-  if (!matchingEntry) {
-    return failure(
-      normalizedArtifactId,
-      'forbidden',
-      'The artifact text source is registered for a different session or thread.',
-    );
-  }
-
-  return success(normalizedArtifactId, matchingEntry.source, matchingEntry.text);
+  return failure(
+    normalizedArtifactId,
+    'not_found',
+    'No trusted artifact text source is registered in this app session.',
+  );
 }
 
 export function clearCoreviewArtifactTextRegistryForTests(): void {
   registry.clear();
+  statusRegistry.clear();
 }
 
 export function buildCoreviewBuilderMetadataText(builderArtifact: BuilderArtifactV1): string {
@@ -193,38 +290,75 @@ export function buildCoreviewCompanionArtifactText(artifacts: RitualArtifacts): 
 
 function success(
   artifactId: string,
-  source: CoreviewArtifactTextSource,
-  text: string,
+  registration: CoreviewArtifactTextRegistration,
 ): CoreviewArtifactTextSuccess {
+  const { source, text } = registration;
   const charCount = text.length;
-  const truncated = charCount > MAX_ARTIFACT_TEXT_CHARS;
+  const reportedCharCount = registration.charCount ?? charCount;
+  const truncated = Boolean(registration.truncated) || reportedCharCount > MAX_ARTIFACT_TEXT_CHARS;
   return {
     ok: true,
     artifact_id: artifactId,
     source,
     text: text.slice(0, MAX_ARTIFACT_TEXT_CHARS),
     truncated,
-    char_count: charCount,
+    char_count: reportedCharCount,
+    page_count: registration.pageCount ?? null,
   };
 }
 
 function failure(
-  artifactId: string,
+  artifactId: string | null,
   status: CoreviewArtifactTextFailure['status'],
   safeReason: string,
+  recoveryAction: string | null = null,
 ): CoreviewArtifactTextFailure {
   return {
     ok: false,
     artifact_id: artifactId,
     status,
     safe_reason: safeReason,
+    recovery_action: recoveryAction,
+  };
+}
+
+function statusFailure(
+  artifactId: string,
+  registration: CoreviewArtifactTextStatusRegistration,
+): CoreviewArtifactTextFailure {
+  const status = registration.status === 'loading'
+    ? 'extraction_pending'
+    : registration.status === 'failed'
+      ? 'extraction_failed'
+      : 'extraction_unavailable';
+  const defaultReason = status === 'extraction_pending'
+    ? 'exact_text_unavailable: extraction_pending'
+    : status === 'extraction_failed'
+      ? 'exact_text_unavailable: extraction_failed'
+      : 'exact_text_unavailable: extraction_unavailable';
+
+  return {
+    ok: false,
+    artifact_id: artifactId,
+    status,
+    safe_reason: registration.safeReason ?? defaultReason,
+    source: registration.source,
+    page_count: registration.pageCount ?? null,
+    char_count: registration.charCount ?? null,
+    truncated: registration.truncated ?? null,
   };
 }
 
 function registrationMatches(
-  registration: CoreviewArtifactTextRegistration,
+  registration: CoreviewArtifactTextRegistration | CoreviewArtifactTextStatusRegistration,
   scope: Pick<CoreviewArtifactTextReadInput, 'sessionId' | 'threadId'>,
 ): boolean {
+  const requestedThreadId = normalizeToken(scope.threadId);
+  const registeredThreadId = normalizeToken(registration.threadId);
+  if (requestedThreadId && registeredThreadId) {
+    return requestedThreadId === registeredThreadId;
+  }
+
   const requestedSessionId = normalizeToken(scope.sessionId);
   const registeredSessionIds = normalizeSessionIds(registration.sessionIds);
   if (
@@ -235,13 +369,37 @@ function registrationMatches(
     return false;
   }
 
-  const requestedThreadId = normalizeToken(scope.threadId);
-  const registeredThreadId = normalizeToken(registration.threadId);
-  if (requestedThreadId && registeredThreadId && requestedThreadId !== registeredThreadId) {
-    return false;
+  return true;
+}
+
+function textRegistryMismatchReason(
+  registrations: Array<CoreviewArtifactTextRegistration | CoreviewArtifactTextStatusRegistration>,
+  scope: Pick<CoreviewArtifactTextReadInput, 'sessionId' | 'threadId'>,
+): 'thread_mismatch' | 'session_mismatch' | null {
+  if (registrations.length === 0) {
+    return null;
   }
 
-  return true;
+  const requestedThreadId = normalizeToken(scope.threadId);
+  if (
+    requestedThreadId
+    && registrations.some((registration) => {
+      const registeredThreadId = normalizeToken(registration.threadId);
+      return Boolean(registeredThreadId && registeredThreadId !== requestedThreadId);
+    })
+  ) {
+    return 'thread_mismatch';
+  }
+
+  const requestedSessionId = normalizeToken(scope.sessionId);
+  if (
+    requestedSessionId
+    && registrations.some((registration) => normalizeSessionIds(registration.sessionIds).length > 0)
+  ) {
+    return 'session_mismatch';
+  }
+
+  return null;
 }
 
 function normalizeSessionIds(values: Array<string | null | undefined> | undefined): string[] {
@@ -254,4 +412,19 @@ function normalizeToken(value: string | null | undefined): string | null {
   }
   const normalized = value.trim();
   return normalized || null;
+}
+
+function normalizePositiveInteger(value: number | null | undefined): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  const normalized = Math.floor(value);
+  return normalized > 0 ? normalized : null;
+}
+
+function normalizeNonNegativeInteger(value: number | null | undefined): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  return Math.max(0, Math.floor(value));
 }

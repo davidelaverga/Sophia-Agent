@@ -24,9 +24,7 @@ function canvasSource(width = 2048, height = 512): ArtifactVisualSource {
     status: "ready",
     artifactId: "artifact-frame",
     element: canvas,
-    stream: null,
     reason: null,
-    frameRate: null,
   }
 }
 
@@ -74,9 +72,7 @@ describe("co-review still-frame encoder", () => {
       status: "unsupported",
       artifactId: "dom-only",
       element: null,
-      stream: null,
       reason: "artifact_canvas_not_found",
-      frameRate: null,
     })
 
     expect(result.ok).toBe(false)

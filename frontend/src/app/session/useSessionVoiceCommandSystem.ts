@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef } from 'react';
 
+import {
+  isArtifactReviewAnnotationIntent,
+  type ArtifactReviewVoiceCommandRouter,
+} from '../lib/artifact-review-voice-commands';
 import { logger } from '../lib/error-logger';
+import { recordSophiaCaptureEvent } from '../lib/session-capture';
 import type { InterruptPayload } from '../lib/session-types';
+
+import { suppressSessionLeaveGuardForAnnotation } from './session-annotation-navigation-guard';
 
 type ReflectionCandidate = {
   prompt?: string;
@@ -19,6 +26,7 @@ interface UseSessionVoiceCommandSystemParams {
   handleReflectionTap: (reflection: { prompt: string; why?: string }, source: 'tap' | 'voice-command') => void;
   canDownloadBuilderArtifact?: boolean;
   handleDownloadBuilderArtifact?: () => boolean;
+  routeArtifactReviewCommand?: ArtifactReviewVoiceCommandRouter;
 
   pendingInterrupt: InterruptPayload | null;
   isResuming: boolean;
@@ -42,6 +50,7 @@ export function useSessionVoiceCommandSystem({
   handleReflectionTap,
   canDownloadBuilderArtifact = false,
   handleDownloadBuilderArtifact,
+  routeArtifactReviewCommand,
   pendingInterrupt,
   isResuming,
   handleInterruptSelectWithRetry,
@@ -159,13 +168,20 @@ export function useSessionVoiceCommandSystem({
     const command = normalizedTranscript.replace(/^(sophia|sofia)\s+/, '').trim();
     if (!command) return false;
 
+    if (isArtifactReviewAnnotationIntent(command)) {
+      suppressSessionLeaveGuardForAnnotation();
+      return false;
+    }
+
     const matchesAny = (patterns: string[]) => patterns.some((pattern) => command === pattern || command.includes(pattern));
 
     const isGoBackCommand = matchesAny([
       'go back',
       'back',
       'exit session',
+      'exit the session',
       'leave session',
+      'leave the session',
       'salir',
       'salir de la sesion',
       'volver',
@@ -394,14 +410,68 @@ export function useSessionVoiceCommandSystem({
     showToast,
   ]);
 
+  const routeArtifactReviewCommandIfAvailable = useCallback((text: string) => {
+    const result = routeArtifactReviewCommand?.(text);
+    if (!result?.handled) {
+      return false;
+    }
+
+    if (result.command?.kind === 'add_annotation') {
+      suppressSessionLeaveGuardForAnnotation();
+    }
+
+    if (result.suppressAssistant !== false) {
+      interceptVoiceAssistant(15000, 'artifact review voice command');
+    }
+
+    if (result.assistantAnnotationClaimSuppressed) {
+      recordSophiaCaptureEvent({
+        category: 'voice-session',
+        name: 'assistant-annotation-claim-suppressed',
+        payload: {
+          reason: result.applied && !result.blockedReason
+            ? 'annotation_fallback_owns_acknowledgement'
+            : 'annotation_not_verified',
+          reviewVoiceCommandKind: result.command?.kind ?? null,
+          annotationKind: result.command?.annotationKind ?? null,
+          rawTranscriptExcluded: true,
+          rawCommentTextExcluded: true,
+          rawArtifactTextExcluded: true,
+          rawFrameExcluded: true,
+        },
+      });
+    }
+
+    if (result.userMessage) {
+      showToast({
+        message: result.userMessage,
+        variant: result.applied && !result.blockedReason ? 'info' : 'warning',
+        durationMs: result.triggeredRefresh ? 2800 : 2600,
+      });
+    }
+
+    return true;
+  }, [
+    interceptVoiceAssistant,
+    routeArtifactReviewCommand,
+    showToast,
+  ]);
+
   const routeVoiceCommand = useCallback((text: string) => {
     return (
+      routeArtifactReviewCommandIfAvailable(text) ||
       routeSessionCommand(text) ||
       routeDownloadCommand(text) ||
       routeInterruptCommand(text) ||
       routeReflectionCommand(text)
     );
-  }, [routeSessionCommand, routeDownloadCommand, routeInterruptCommand, routeReflectionCommand]);
+  }, [
+    routeSessionCommand,
+    routeArtifactReviewCommandIfAvailable,
+    routeDownloadCommand,
+    routeInterruptCommand,
+    routeReflectionCommand,
+  ]);
 
   const handleVoiceTranscript = useCallback((text: string) => {
     if (routeVoiceCommand(text)) {

@@ -5,13 +5,14 @@ import { useEffect, useRef } from "react"
 import {
   formatBuilderArtifactTypeLabel,
   getBuilderArtifactFiles,
-  normalizeBuilderArtifactPath,
 } from "../../lib/builder-artifacts"
 import {
   buildCoreviewBuilderMetadataText,
   registerCoreviewArtifactText,
 } from "../../lib/coreview-artifact-text"
 import type { BuilderArtifactV1 } from "../../types/builder-artifact"
+
+export { buildCoreviewRealArtifactId } from "./artifact-stage-selection"
 
 const CANVAS_WIDTH = 960
 const CANVAS_HEIGHT = 640
@@ -24,7 +25,9 @@ interface CoreviewRealArtifactCanvasProps {
   builderArtifact: BuilderArtifactV1
   sessionId?: string | null
   normalSessionId?: string | null
+  voiceAgentSessionId?: string | null
   threadId?: string | null
+  artifactStableIdentity?: string | null
 }
 
 export function CoreviewRealArtifactCanvas({
@@ -32,7 +35,9 @@ export function CoreviewRealArtifactCanvas({
   builderArtifact,
   sessionId = null,
   normalSessionId = null,
+  voiceAgentSessionId = null,
   threadId = null,
+  artifactStableIdentity = null,
 }: CoreviewRealArtifactCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
@@ -40,9 +45,10 @@ export function CoreviewRealArtifactCanvas({
     artifactId,
     source: "builder_metadata",
     text: buildCoreviewBuilderMetadataText(builderArtifact),
-    sessionIds: [sessionId, normalSessionId],
+    sessionIds: [sessionId, normalSessionId, voiceAgentSessionId],
     threadId,
-  }), [artifactId, builderArtifact, normalSessionId, sessionId, threadId])
+    artifactStableIdentity,
+  }), [artifactId, artifactStableIdentity, builderArtifact, normalSessionId, sessionId, threadId, voiceAgentSessionId])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -61,6 +67,8 @@ export function CoreviewRealArtifactCanvas({
       data-artifact-region="true"
       data-coreview-session-id={sessionId ?? undefined}
       data-coreview-normal-session-id={normalSessionId ?? undefined}
+      data-coreview-voice-session-id={voiceAgentSessionId ?? undefined}
+      data-coreview-artifact-stable-identity={artifactStableIdentity ?? undefined}
       data-testid="coreview-real-artifact-canvas"
       className="pointer-events-none absolute h-px w-px overflow-hidden opacity-0"
       style={{ inset: 0 }}
@@ -76,22 +84,12 @@ export function CoreviewRealArtifactCanvas({
         data-coreview-offscreen-render="true"
         data-coreview-session-id={sessionId ?? undefined}
         data-coreview-normal-session-id={normalSessionId ?? undefined}
+        data-coreview-voice-session-id={voiceAgentSessionId ?? undefined}
+        data-coreview-artifact-stable-identity={artifactStableIdentity ?? undefined}
         aria-label="Builder artifact metadata overview canvas"
       />
     </div>
   )
-}
-
-export function buildCoreviewRealArtifactId(builderArtifact: BuilderArtifactV1): string {
-  const normalizedPath = normalizeBuilderArtifactPath(builderArtifact.artifactPath)
-  const source = normalizedPath || builderArtifact.artifactTitle || builderArtifact.artifactType || "builder-artifact"
-  const slug = source
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 72)
-
-  return `coreview-real-artifact-${slug || "builder-artifact"}`
 }
 
 function getCanvasContext(canvas: HTMLCanvasElement): CanvasRenderingContext2D | null {
@@ -128,7 +126,7 @@ function drawBuilderArtifactOverview(
   context.fillStyle = "rgba(255, 255, 255, 0.05)"
   fillRoundedRect(context, 28, 28, width - 56, height - 56, 28)
 
-  drawEyebrow(context, "Coreview real artifact", 56, 72)
+  drawEyebrow(context, "Generated artifact", 56, 72)
   drawBadge(context, typeLabel, 56, 92)
 
   context.fillStyle = "#f7f2ff"

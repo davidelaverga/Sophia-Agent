@@ -14,6 +14,7 @@ import {
   Sparkles,
   Check,
   Download,
+  Eye,
   ExternalLink,
   FileText,
   Loader2
@@ -74,6 +75,8 @@ interface ArtifactsPanelProps {
   contextMode?: ContextMode;
   sessionId?: string;
   threadId?: string;
+  selectedBuilderArtifactPath?: string | null;
+  onSelectedBuilderArtifactPathChange?: (path: string | null) => void;
   isCollapsed?: boolean;
   onToggle?: () => void;
   className?: string;
@@ -499,9 +502,13 @@ function MemoryCard({ memory, category, inlineFeedback, onApprove, onReject }: M
 export function BuilderDeliverableCard({
   builderArtifact,
   threadId,
+  selectedBuilderArtifactPath,
+  onSelectedBuilderArtifactPathChange,
 }: {
   builderArtifact: BuilderArtifactV1;
   threadId?: string;
+  selectedBuilderArtifactPath?: string | null;
+  onSelectedBuilderArtifactPathChange?: (path: string | null) => void;
 }) {
   const files = getBuilderArtifactFiles(builderArtifact);
   const decisions = builderArtifact.decisionsMade?.filter(Boolean) ?? [];
@@ -650,6 +657,7 @@ export function BuilderDeliverableCard({
             {files.map((file) => {
               const openHref = buildThreadArtifactHref(threadId, file.path);
               const downloadHref = buildThreadArtifactHref(threadId, file.path, { download: true });
+              const isSelected = selectedBuilderArtifactPath === file.path;
 
               return (
                 <div
@@ -670,12 +678,34 @@ export function BuilderDeliverableCard({
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
+                    {onSelectedBuilderArtifactPathChange && (
+                      <button
+                        type="button"
+                        aria-label={`View ${file.label} in canvas`}
+                        aria-pressed={isSelected}
+                        className="inline-flex h-8 items-center gap-1.5 rounded-lg border px-3 text-[11px] transition-colors"
+                        style={{
+                          borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
+                          color: 'var(--sophia-purple)',
+                          background: isSelected
+                            ? 'color-mix(in srgb, var(--sophia-purple) 12%, transparent)'
+                            : 'color-mix(in srgb, var(--sophia-purple) 6%, transparent)',
+                        }}
+                        onClick={() => {
+                          haptic('light');
+                          onSelectedBuilderArtifactPathChange(file.path);
+                        }}
+                      >
+                        <Eye className="h-3.5 w-3.5" />
+                        View in canvas
+                      </button>
+                    )}
                     {openHref && (
                       <a
                         href={openHref}
                         target="_blank"
                         rel="noreferrer"
-                        aria-label={`Open ${file.label}`}
+                        aria-label={`Open ${file.label} in new tab`}
                         className="inline-flex h-8 items-center gap-1.5 rounded-lg border px-3 text-[11px] transition-colors"
                         style={{
                           borderColor: 'var(--cosmic-border-soft)',
@@ -684,7 +714,7 @@ export function BuilderDeliverableCard({
                         onClick={() => haptic('light')}
                       >
                         <ExternalLink className="h-3.5 w-3.5" />
-                        Open
+                        Open in new tab
                       </a>
                     )}
                     {downloadHref && (
@@ -723,9 +753,13 @@ export function BuilderDeliverableCard({
 function BuilderDocumentLibrary({
   items,
   threadId,
+  selectedBuilderArtifactPath,
+  onSelectedBuilderArtifactPathChange,
 }: {
   items: BuilderArtifactLibraryItemV1[];
   threadId?: string;
+  selectedBuilderArtifactPath?: string | null;
+  onSelectedBuilderArtifactPathChange?: (path: string | null) => void;
 }) {
   if (items.length === 0) {
     return null;
@@ -758,6 +792,7 @@ function BuilderDocumentLibrary({
           {items.map((item) => {
             const openHref = buildThreadArtifactHref(threadId, item.path);
             const downloadHref = buildThreadArtifactHref(threadId, item.path, { download: true });
+            const isSelected = selectedBuilderArtifactPath === item.path;
             const meta = [formatBuilderArtifactFileSize(item.sizeBytes), item.mimeType]
               .filter(Boolean)
               .join(' • ');
@@ -783,12 +818,34 @@ function BuilderDocumentLibrary({
                   )}
                 </div>
                 <div className="flex items-center gap-2">
+                  {onSelectedBuilderArtifactPathChange && (
+                    <button
+                      type="button"
+                      aria-label={`View ${item.name} in canvas`}
+                      aria-pressed={isSelected}
+                      className="inline-flex h-8 items-center gap-1.5 rounded-lg border px-3 text-[11px] transition-colors"
+                      style={{
+                        borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
+                        color: 'var(--sophia-purple)',
+                        background: isSelected
+                          ? 'color-mix(in srgb, var(--sophia-purple) 12%, transparent)'
+                          : 'color-mix(in srgb, var(--sophia-purple) 6%, transparent)',
+                      }}
+                      onClick={() => {
+                        haptic('light');
+                        onSelectedBuilderArtifactPathChange(item.path);
+                      }}
+                    >
+                      <Eye className="h-3.5 w-3.5" />
+                      View in canvas
+                    </button>
+                  )}
                   {openHref && (
                     <a
                       href={openHref}
                       target="_blank"
                       rel="noreferrer"
-                      aria-label={`Open ${item.name}`}
+                      aria-label={`Open ${item.name} in new tab`}
                       className="inline-flex h-8 items-center gap-1.5 rounded-lg border px-3 text-[11px] transition-colors"
                       style={{
                         borderColor: 'var(--cosmic-border-soft)',
@@ -797,7 +854,7 @@ function BuilderDocumentLibrary({
                       onClick={() => haptic('light')}
                     >
                       <ExternalLink className="h-3.5 w-3.5" />
-                      Open
+                      Open in new tab
                     </a>
                   )}
                   {downloadHref && (
@@ -837,6 +894,8 @@ export function ArtifactsPanel({
   presetType,
   sessionId: _sessionId,
   threadId,
+  selectedBuilderArtifactPath,
+  onSelectedBuilderArtifactPathChange,
   isCollapsed = false,
   className,
   artifactStatus = { takeaway: 'waiting', reflection: 'waiting', memories: 'waiting' },
@@ -896,11 +955,21 @@ export function ArtifactsPanel({
       {!isCollapsed && (
         <div className="flex-1 overflow-y-auto p-3 space-y-2">
           {builderArtifact && (
-            <BuilderDeliverableCard builderArtifact={builderArtifact} threadId={threadId} />
+            <BuilderDeliverableCard
+              builderArtifact={builderArtifact}
+              threadId={threadId}
+              selectedBuilderArtifactPath={selectedBuilderArtifactPath}
+              onSelectedBuilderArtifactPathChange={onSelectedBuilderArtifactPathChange}
+            />
           )}
 
           {builderArtifactLibrary.length > 0 && (
-            <BuilderDocumentLibrary items={builderArtifactLibrary} threadId={threadId} />
+            <BuilderDocumentLibrary
+              items={builderArtifactLibrary}
+              threadId={threadId}
+              selectedBuilderArtifactPath={selectedBuilderArtifactPath}
+              onSelectedBuilderArtifactPathChange={onSelectedBuilderArtifactPathChange}
+            />
           )}
 
           <ArtifactSection

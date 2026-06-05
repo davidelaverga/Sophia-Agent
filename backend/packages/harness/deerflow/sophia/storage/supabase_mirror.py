@@ -16,6 +16,8 @@ import collections
 import hashlib
 import logging
 import os
+import zipfile
+from io import BytesIO
 from pathlib import Path
 
 from deerflow.sophia.storage import supabase_artifact_store
@@ -33,6 +35,26 @@ _MIRROR_ENABLED = os.getenv("SOPHIA_SUPABASE_MIRROR_ALL", "").lower() in ("1", "
 _MirrorHashCache = collections.OrderedDict
 _MIRROR_HASH_CACHE: _MirrorHashCache[tuple[str, str], str] = _MirrorHashCache()
 _MIRROR_CACHE_MAXSIZE = 1000
+_PPTX_MIN_BYTES = 1024
+_PPTX_REQUIRED_ZIP_ENTRIES = frozenset({
+    "[Content_Types].xml",
+    "_rels/.rels",
+    "ppt/presentation.xml",
+})
+
+
+def _pptx_integrity_error(content: bytes) -> str | None:
+    if len(content) < _PPTX_MIN_BYTES:
+        return "pptx_too_small"
+    try:
+        with zipfile.ZipFile(BytesIO(content)) as archive:
+            entries = set(archive.namelist())
+    except zipfile.BadZipFile:
+        return "pptx_not_zip"
+    missing = sorted(_PPTX_REQUIRED_ZIP_ENTRIES - entries)
+    if missing:
+        return f"pptx_missing_entries:{','.join(missing)}"
+    return None
 
 
 def _cache_set(key: tuple[str, str], file_hash: str) -> None:
@@ -93,8 +115,20 @@ def maybe_mirror_file(
         logger.warning("Mirror skipped; read error path=%s error=%s", host_file, exc)
         return
 
-    file_hash = hashlib.sha256(content).hexdigest()
     relative = host_file.relative_to(outputs_root).as_posix()
+    if host_file.suffix.lower() == ".pptx":
+        integrity_error = _pptx_integrity_error(content)
+        if integrity_error is not None:
+            logger.warning(
+                "Mirror skipped; invalid pptx thread_id=%s path=%s reason=%s bytes=%d",
+                thread_id,
+                relative,
+                integrity_error,
+                len(content),
+            )
+            return
+
+    file_hash = hashlib.sha256(content).hexdigest()
     cache_key = (thread_id, relative)
 
     if _MIRROR_HASH_CACHE.get(cache_key) == file_hash:

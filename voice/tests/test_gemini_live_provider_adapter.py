@@ -631,6 +631,34 @@ def test_interruption_resets_output_transcription_buffer() -> None:
                 }
             }
         },
+        {
+            "serverContent": {
+                "outputTranscription": {
+                    "text": "read_artifact_text",
+                }
+            }
+        },
+        {
+            "serverContent": {
+                "outputTranscription": {
+                    "text": "active_goal: Wait for completion",
+                }
+            }
+        },
+        {
+            "serverContent": {
+                "outputTranscription": {
+                    "text": "tool_call_id",
+                }
+            }
+        },
+        {
+            "serverContent": {
+                "outputTranscription": {
+                    "text": "schema",
+                }
+            }
+        },
     ],
 )
 def test_mapper_filters_pseudo_tool_syntax_from_assistant_transcripts(raw_event: dict[str, Any]) -> None:

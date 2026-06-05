@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import zipfile
+
 import pytest
 
 from deerflow.sophia.storage import supabase_artifact_store, supabase_mirror
@@ -21,6 +23,15 @@ def _clear_env_and_cache(monkeypatch):
 def _configure_supabase(monkeypatch) -> None:
     monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-role-key")
+
+
+def _write_minimal_pptx(path) -> None:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types></Types>")
+        archive.writestr("_rels/.rels", "<Relationships></Relationships>")
+        archive.writestr("ppt/presentation.xml", "<p:presentation></p:presentation>")
+        archive.writestr("ppt/slides/slide1.xml", "<p:sld></p:sld>")
+        archive.writestr("ppt/slideLayouts/slideLayout1.xml", "x" * 2048)
 
 
 def test_is_mirror_enabled_false_by_default(monkeypatch) -> None:
@@ -85,6 +96,53 @@ def test_maybe_mirror_uploads_file_when_enabled(monkeypatch, tmp_path) -> None:
     assert captured["thread_id"] == "thread-1"
     assert captured["filename"] == "report.md"
     assert captured["content"] == b"build output"
+
+
+def test_maybe_mirror_skips_invalid_pptx_placeholder(monkeypatch, tmp_path) -> None:
+    _configure_supabase(monkeypatch)
+    monkeypatch.setenv("SOPHIA_SUPABASE_MIRROR_ALL", "1")
+    import importlib
+
+    importlib.reload(supabase_mirror)
+
+    outputs_dir = tmp_path / "outputs"
+    outputs_dir.mkdir()
+    file_path = outputs_dir / "deck.pptx"
+    file_path.write_bytes(b"hello")
+
+    upload_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(supabase_artifact_store, "upload_artifact", lambda **kw: upload_calls.append(kw))
+
+    supabase_mirror.maybe_mirror_file(str(file_path), "thread-1", str(outputs_dir))
+
+    assert upload_calls == []
+
+
+def test_maybe_mirror_uploads_valid_pptx_package(monkeypatch, tmp_path) -> None:
+    _configure_supabase(monkeypatch)
+    monkeypatch.setenv("SOPHIA_SUPABASE_MIRROR_ALL", "1")
+    import importlib
+
+    importlib.reload(supabase_mirror)
+
+    outputs_dir = tmp_path / "outputs"
+    outputs_dir.mkdir()
+    file_path = outputs_dir / "deck.pptx"
+    _write_minimal_pptx(file_path)
+
+    upload_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        supabase_artifact_store,
+        "upload_artifact",
+        lambda thread_id, filename, content, client=None: upload_calls.append(
+            {"thread_id": thread_id, "filename": filename, "content": content}
+        ),
+    )
+
+    supabase_mirror.maybe_mirror_file(str(file_path), "thread-1", str(outputs_dir))
+
+    assert len(upload_calls) == 1
+    assert upload_calls[0]["filename"] == "deck.pptx"
 
 
 def test_maybe_mirror_dedup_on_unchanged_file(monkeypatch, tmp_path) -> None:

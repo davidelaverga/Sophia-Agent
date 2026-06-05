@@ -14,10 +14,17 @@ ArtifactValidator = Callable[[dict[str, Any]], dict[str, Any]]
 _GEMINI_INTERNAL_OUTPUT_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("thought_label", re.compile(r"(^|\n)\s*thought\s*:", re.IGNORECASE)),
     ("spoken_label", re.compile(r"(^|\n)\s*spoken\s*:", re.IGNORECASE)),
+    ("emit_artifact_tool_syntax", re.compile(r"\bemit_artifact\b", re.IGNORECASE)),
     ("emit_artifact_correction", re.compile(r"emit\s+artifact\s+correction\s+attempt", re.IGNORECASE)),
     ("tool_call_label", re.compile(r"(^|\n)\s*tool\s+call\s*:", re.IGNORECASE)),
     ("validation_error", re.compile(r"\bvalidationerror\b", re.IGNORECASE)),
     ("schema_requires", re.compile(r"\bschema\s+requires\b", re.IGNORECASE)),
+    ("schema_word", re.compile(r"^\s*schema\s*$", re.IGNORECASE)),
+    ("read_artifact_text", re.compile(r"\bread_artifact_text\b", re.IGNORECASE)),
+    ("active_goal", re.compile(r"\bactive_goal\s*:", re.IGNORECASE)),
+    ("tool_call_id", re.compile(r"\btool_call_id\b", re.IGNORECASE)),
+    ("tool_schema", re.compile(r"\btool\s+schema\b", re.IGNORECASE)),
+    ("internal_prompt", re.compile(r"\b(?:system|developer|internal)\s+prompt\b", re.IGNORECASE)),
     ("repair_intent", re.compile(r"\bi\s+will\s+correct\s+this\s+by\b", re.IGNORECASE)),
     ("previous_artifact_failed", re.compile(r"\bmy\s+previous\s+artifact\s+call\s+failed\b", re.IGNORECASE)),
     (

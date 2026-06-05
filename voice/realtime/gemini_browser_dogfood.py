@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 import asyncio
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -13,6 +14,10 @@ from voice.realtime.dogfood_session import (
     RealtimeDogfoodConfigurationError,
     RealtimeDogfoodSession,
     RealtimeDogfoodSessionManager,
+)
+from voice.realtime.coreview import (
+    is_coreview_enabled,
+    is_coreview_still_frame_enabled,
 )
 from voice.realtime.events import ProviderEvent, ProviderEventType
 from voice.realtime.gemini_live import DEFAULT_GEMINI_LIVE_MODEL
@@ -36,6 +41,8 @@ from voice.realtime.gemini_tool_loop import (
     gemini_tool_response_client_action,
 )
 from voice.realtime.runtime_selection import VoiceRuntimeMode
+
+logger = logging.getLogger(__name__)
 
 GEMINI_LIVE_API_KEY_ENVS = ("GOOGLE_API_KEY", "GEMINI_API_KEY")
 GEMINI_LIVE_AUTH_TOKEN_URL = "https://generativelanguage.googleapis.com/v1alpha/auth_tokens"
@@ -375,6 +382,8 @@ class GeminiBrowserDogfoodSession:
                 f"{self.dogfood_session.session_id}/provider-events"
             ),
             "public_event_boundary": "SophiaEventNormalizer",
+            "backendCoreviewFlagParsed": is_coreview_enabled(),
+            "backendStillFrameFlagParsed": is_coreview_still_frame_enabled(),
         }
 
 
@@ -604,8 +613,24 @@ class GeminiBrowserDogfoodSessionManager:
         try:
             function_calls = extract_gemini_live_function_calls(validated_event)
         except GeminiDogfoodToolError as exc:
+            logger.warning(
+                "gemini.relay.tool_call_extraction_rejected session_id=%s provider_category=%s relay_correlation_id=%s error_type=%s",
+                dogfood_session.session_id,
+                source_metadata.provider_primary_category if source_metadata else None,
+                source_metadata.relay_correlation_id if source_metadata else None,
+                exc.__class__.__name__,
+            )
             raise GeminiBrowserRelayError(str(exc)) from exc
         diagnostics.record_function_calls(function_calls)
+        if function_calls:
+            logger.info(
+                "gemini.relay.tool_calls session_id=%s provider_category=%s relay_correlation_id=%s tool_names=%s tool_call_ids=%s",
+                dogfood_session.session_id,
+                source_metadata.provider_primary_category if source_metadata else None,
+                source_metadata.relay_correlation_id if source_metadata else None,
+                [call.name for call in function_calls],
+                [call.call_id for call in function_calls],
+            )
 
         cancelled_ids = extract_gemini_tool_call_cancellation_ids(validated_event)
         if cancelled_ids:
@@ -860,6 +885,13 @@ class GeminiBrowserDogfoodSessionManager:
 
             if reliability_diagnostics is not None:
                 reliability_diagnostics.record_tool_execution("started", function_call)
+            if function_call.name in _BUILDER_LIFECYCLE_TOOL_NAMES:
+                logger.info(
+                    "gemini.relay.builder_tool.started session_id=%s tool_name=%s tool_call_id=%s",
+                    dogfood_session.session_id,
+                    function_call.name,
+                    function_call.call_id,
+                )
             inflight_ids.add(function_call.call_id)
             try:
                 execution = await self._tool_executor.execute(
@@ -875,6 +907,14 @@ class GeminiBrowserDogfoodSessionManager:
                     ),
                 )
             except GeminiDogfoodToolError as exc:
+                if function_call.name in _BUILDER_LIFECYCLE_TOOL_NAMES:
+                    logger.warning(
+                        "gemini.relay.builder_tool.rejected session_id=%s tool_name=%s tool_call_id=%s error_type=%s",
+                        dogfood_session.session_id,
+                        function_call.name,
+                        function_call.call_id,
+                        exc.__class__.__name__,
+                    )
                 raise GeminiBrowserRelayError(str(exc)) from exc
             finally:
                 inflight_ids.discard(function_call.call_id)
@@ -907,6 +947,17 @@ class GeminiBrowserDogfoodSessionManager:
                     "the browser must not return this stale toolResponse."
                 )
             tool_diagnostics.append(diagnostic)
+            if function_call.name in _BUILDER_LIFECYCLE_TOOL_NAMES:
+                logger.info(
+                    "gemini.relay.builder_tool.finished session_id=%s tool_name=%s tool_call_id=%s success=%s status=%s task_id=%s run_id=%s",
+                    dogfood_session.session_id,
+                    function_call.name,
+                    function_call.call_id,
+                    execution.success,
+                    execution.response.get("status") if isinstance(execution.response, Mapping) else None,
+                    execution.response.get("task_id") if isinstance(execution.response, Mapping) else None,
+                    execution.response.get("run_id") if isinstance(execution.response, Mapping) else None,
+                )
 
         return executions, tool_diagnostics
 
@@ -1115,9 +1166,9 @@ def categorize_gemini_provider_event(event: Mapping[str, Any]) -> list[str]:
     server_content = _record_value(_value_from_any_key(event, "serverContent", "server_content"))
     if server_content is not None:
         categories.append("serverContent")
-        if _record_value(_value_from_any_key(server_content, "inputTranscription", "input_transcription")) is not None:
+        if _transcription_text_value(server_content, "inputTranscription", "input_transcription"):
             categories.append("inputTranscription")
-        if _record_value(_value_from_any_key(server_content, "outputTranscription", "output_transcription")) is not None:
+        if _transcription_text_value(server_content, "outputTranscription", "output_transcription"):
             categories.append("outputTranscription")
         model_turn = _record_value(_value_from_any_key(server_content, "modelTurn", "model_turn"))
         parts = model_turn.get("parts") if model_turn else None
@@ -1268,6 +1319,17 @@ def _resolve_gemini_api_key() -> tuple[str, str] | None:
 def _string_value(value: Any) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
+    return None
+
+
+def _transcription_text_value(record: Mapping[str, Any], *keys: str) -> str | None:
+    transcription = _value_from_any_key(record, *keys)
+    if isinstance(transcription, str):
+        return _string_value(transcription)
+    if isinstance(transcription, Mapping):
+        return _string_value(transcription.get("text")) or _string_value(
+            transcription.get("transcript")
+        )
     return None
 
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { ArrowUpRight, Download, X } from 'lucide-react';
+import { Download, ExternalLink, Eye, X } from 'lucide-react';
 import type { MouseEvent, MouseEventHandler } from 'react';
 
 import { haptic } from '../../hooks/useHaptics';
@@ -9,6 +9,7 @@ import { cn } from '../../lib/utils';
 type BuilderReadyPillProps = {
   title: string;
   onOpen: () => void;
+  openHref?: string | null;
   downloadHref?: string | null;
   onDownload?: MouseEventHandler<HTMLAnchorElement>;
   onDismiss?: () => void;
@@ -22,6 +23,7 @@ type BuilderReadyPillProps = {
 export function BuilderReadyPill({
   title,
   onOpen,
+  openHref,
   downloadHref,
   onDownload,
   onDismiss,
@@ -42,6 +44,9 @@ export function BuilderReadyPill({
   const handleDownloadClick: MouseEventHandler<HTMLAnchorElement> = (event) => {
     haptic('success');
     onDownload?.(event);
+  };
+  const handleOpenInNewTabClick: MouseEventHandler<HTMLAnchorElement> = () => {
+    haptic('light');
   };
   const showCountBadge = typeof itemCount === 'number' && itemCount > 1;
   return (
@@ -126,7 +131,7 @@ export function BuilderReadyPill({
               }}
             />
             <span className={cn(compact ? 'text-[9px]' : 'text-[10px]', 'tracking-[0.14em] lowercase')} style={{ color: 'var(--cosmic-text-whisper)' }}>
-              {isNew ? 'deliverable complete' : 'deliverable ready'}
+              {isNew ? 'Build complete' : 'Ready'}
             </span>
             <span
               className={cn('rounded-full tracking-[0.1em] lowercase', compact ? 'px-1.5 py-0.5 text-[8px]' : 'px-2 py-0.5 text-[9px]')}
@@ -156,12 +161,13 @@ export function BuilderReadyPill({
           </p>
         </button>
 
-        <div className={cn('flex shrink-0 items-center gap-1.5', compact ? 'pb-1.5' : 'pb-2')}>
+        <div className={cn('flex shrink-0 flex-wrap items-center justify-end gap-1.5', compact ? 'pb-1.5 max-w-[168px]' : 'pb-2 max-w-[220px]')}>
           <button
             type="button"
             onClick={handleOpenClick}
+            aria-label={`View ${title} in canvas`}
             className={cn(
-              'inline-flex items-center gap-1 rounded-full border tracking-[0.08em] lowercase transition-opacity hover:opacity-100',
+              'inline-flex items-center gap-1 rounded-full border tracking-[0.08em] transition-opacity hover:opacity-100',
               compact ? 'px-2 py-0.5 text-[9px]' : 'px-2.5 py-1 text-[10px]',
             )}
             style={{
@@ -170,16 +176,38 @@ export function BuilderReadyPill({
               background: 'color-mix(in srgb, var(--cosmic-panel-soft) 72%, transparent)',
             }}
           >
-            <ArrowUpRight className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
-            open
+            <Eye className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+            View in canvas
           </button>
+
+          {openHref && (
+            <a
+              href={openHref}
+              target="_blank"
+              rel="noreferrer"
+              onClick={handleOpenInNewTabClick}
+              className={cn(
+                'inline-flex items-center gap-1 rounded-full border tracking-[0.08em] transition-opacity hover:opacity-100',
+                compact ? 'px-2 py-0.5 text-[9px]' : 'px-2.5 py-1 text-[10px]',
+              )}
+              style={{
+                borderColor: 'color-mix(in srgb, var(--cosmic-border-soft) 88%, transparent)',
+                color: 'var(--cosmic-text-whisper)',
+                background: 'color-mix(in srgb, var(--cosmic-panel-soft) 52%, transparent)',
+              }}
+              aria-label={`Open ${title} in new tab`}
+            >
+              <ExternalLink className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+              Open in new tab
+            </a>
+          )}
 
           {downloadHref && (
             <a
               href={downloadHref}
               onClick={handleDownloadClick}
               className={cn(
-                'inline-flex items-center gap-1 rounded-full border tracking-[0.08em] lowercase transition-opacity hover:opacity-100',
+                'inline-flex items-center gap-1 rounded-full border tracking-[0.08em] transition-opacity hover:opacity-100',
                 compact ? 'px-2 py-0.5 text-[9px]' : 'px-2.5 py-1 text-[10px]',
               )}
               style={{
@@ -189,7 +217,7 @@ export function BuilderReadyPill({
               }}
             >
               <Download className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
-              download
+              Download
             </a>
           )}
 
@@ -197,7 +225,7 @@ export function BuilderReadyPill({
             <button
               type="button"
               onClick={handleDismissClick}
-              aria-label="Dismiss deliverable"
+              aria-label="Dismiss artifact"
               // Visual footprint stays minimal (compact 20px / regular 24px), but the
               // ::before extends a full 44×44 tap area on touch devices so mobile taps
               // don't miss and accidentally re-open the pill.

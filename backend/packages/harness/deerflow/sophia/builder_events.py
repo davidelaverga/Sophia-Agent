@@ -171,6 +171,41 @@ def _signed_artifact_url(thread_id: str | None, artifact_path: str | None) -> st
         return None
 
 
+_ARTIFACT_PATH_PREFIXES = (
+    ("/mnt/user-data/outputs/", lambda value: value[1:]),
+    ("mnt/user-data/outputs/", lambda value: value),
+    ("/user-data/outputs/", lambda value: f"mnt{value}"),
+    ("user-data/outputs/", lambda value: f"mnt/{value}"),
+    ("/outputs/", lambda value: f"mnt/user-data{value}"),
+    ("outputs/", lambda value: f"mnt/user-data/{value}"),
+)
+
+
+def _canonical_artifact_path(path: Any) -> str | None:
+    if not isinstance(path, str):
+        return None
+    cleaned = path.strip().replace("\\", "/")
+    if cleaned.startswith("file://"):
+        cleaned = cleaned[len("file://") :]
+    if not cleaned:
+        return None
+    for prefix, canonicalize in _ARTIFACT_PATH_PREFIXES:
+        if cleaned.startswith(prefix):
+            return canonicalize(cleaned)
+    user_data_index = cleaned.find("/user-data/outputs/")
+    if user_data_index >= 0:
+        return f"mnt{cleaned[user_data_index:]}"
+    return cleaned.lstrip("/")
+
+
+def _relative_output_artifact_path(path: str | None) -> str | None:
+    prefix = "mnt/user-data/outputs/"
+    if not path or not path.startswith(prefix):
+        return None
+    relative = path[len(prefix) :].strip("/")
+    return relative or None
+
+
 # PR-A: phantom-success detection thresholds.
 #
 # The builder's hard-ceiling fallback (builder_artifact.py:_HARD_CEILING) emits
@@ -196,7 +231,7 @@ def _is_phantom_success(
     - status maps to 'success' (i.e., subagent reported COMPLETED)
     - artifact_url is missing (signed-URL mint failed because the file
       doesn't exist on Supabase) AND artifact_path is missing/empty
-    - confidence is below the phantom threshold
+    - confidence is at or below the phantom threshold
 
     The confidence check matters because a deliberately-text-only artifact
     (no path, but high confidence) is legitimate — only the low-confidence
@@ -216,7 +251,7 @@ def _is_phantom_success(
         # Missing confidence + missing path/url is itself suspicious; treat
         # as phantom so the user gets the failure card with retry.
         return True
-    return confidence_value < _PHANTOM_SUCCESS_CONFIDENCE_THRESHOLD
+    return confidence_value <= _PHANTOM_SUCCESS_CONFIDENCE_THRESHOLD
 
 
 def _post_webhook(payload: dict[str, Any]) -> None:
@@ -440,7 +475,10 @@ def build_completion_payload_from_artifact(
     metadata = runtime_config.get("metadata") or {}
     trace_id = metadata.get("trace_id") if isinstance(metadata, dict) else None
 
-    artifact_path = artifact.get("artifact_path") if isinstance(artifact, dict) else None
+    artifact_path = _canonical_artifact_path(
+        artifact.get("artifact_path") if isinstance(artifact, dict) else None
+    )
+    artifact_storage_path = _relative_output_artifact_path(artifact_path)
     artifact_filename: str | None = None
     if isinstance(artifact_path, str) and artifact_path:
         artifact_filename = artifact_path.rsplit("/", 1)[-1]
@@ -452,7 +490,7 @@ def build_completion_payload_from_artifact(
     # path, the signed URL, and the bytes-download lookup all aligned.
     artifact_url = _signed_artifact_url(
         parent_thread_id or builder_thread_id,
-        artifact_filename,
+        artifact_storage_path or artifact_filename,
     )
 
     task_brief: str | None = None
@@ -509,10 +547,15 @@ def build_completion_payload_from_artifact(
         "status": mapped_status,
         "task_type": task_type,
         "task_brief": task_brief,
+        "artifact_path": artifact_path,
         "artifact_url": artifact_url,
         "artifact_title": artifact.get("artifact_title") if isinstance(artifact, dict) else None,
         "artifact_type": artifact.get("artifact_type") if isinstance(artifact, dict) else None,
         "artifact_filename": artifact_filename,
+        "requested_artifact_ext": artifact.get("requested_artifact_ext") if isinstance(artifact, dict) else None,
+        "artifact_ext": artifact.get("artifact_ext") if isinstance(artifact, dict) else None,
+        "artifact_is_fallback": artifact.get("artifact_is_fallback") if isinstance(artifact, dict) else None,
+        "fallback_reason": artifact.get("fallback_reason") if isinstance(artifact, dict) else None,
         "summary": artifact.get("companion_summary") if isinstance(artifact, dict) else None,
         "user_next_action": artifact.get("user_next_action") if isinstance(artifact, dict) else None,
         "error_message": error_message,

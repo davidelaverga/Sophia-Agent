@@ -119,6 +119,48 @@ _TASK_TYPE_PREFIXES: dict[str, str] = {
     "visual_report": "[visual_report]",
 }
 
+_HTML_OUTPUT_RE = re.compile(
+    r"\b(?:html\s+(?:document|file|report|summary|brief|article|explainer|page|site|website)"
+    r"|(?:document|file|report|summary|brief|article|explainer|page|site|website)\s+(?:as|in)\s+html"
+    r"|(?:build|create|make|generate|produce|write)\s+(?:an?\s+)?html\b"
+    r"|\.html\b)",
+    re.IGNORECASE,
+)
+_PDF_OUTPUT_RE = re.compile(
+    r"\b(?:"
+    r"pdf\s+(?:document|file|report|summary|brief|article|explainer|deliverable|artifact|output)"
+    r"|(?:document|file|report|summary|brief|article|explainer|deliverable|artifact|output|final|export)"
+    r"\s+(?:as|in|to)\s+(?:an?\s+)?pdf"
+    r"|(?:build|create|make|generate|produce|write|render|export)\s+(?:an?\s+)?pdf\b"
+    r"|(?:build|create|make|generate|produce|write|render|export)\s+[^.?!\n]{0,80}?\s+as\s+(?:an?\s+)?pdf\b"
+    r"|\.pdf\b"
+    r")",
+    re.IGNORECASE,
+)
+_REQUESTED_OUTPUT_EXTENSION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("pdf", _PDF_OUTPUT_RE),
+    ("pptx", re.compile(r"\b(?:pptx|powerpoint|slide\s+deck|slides?)\b", re.IGNORECASE)),
+    ("docx", re.compile(r"\b(?:docx|word\s+document)\b", re.IGNORECASE)),
+    ("xlsx", re.compile(r"\b(?:xlsx|spreadsheet|excel)\b", re.IGNORECASE)),
+    ("html", _HTML_OUTPUT_RE),
+    ("md", re.compile(r"\b(?:markdown|md)\b", re.IGNORECASE)),
+    ("csv", re.compile(r"\bcsv\b", re.IGNORECASE)),
+    ("json", re.compile(r"\bjson\b", re.IGNORECASE)),
+)
+_SIMPLE_PRODUCT_REVIEW_RE = re.compile(
+    r"\bproduct\s+review\b",
+    re.IGNORECASE,
+)
+_TASK_TYPE_EXTENSIONS = {
+    "document": "md",
+    "research": "md",
+    "presentation": "pptx",
+    "frontend": "html",
+    "visual_report": "pdf",
+}
+_FALLBACK_TASK_SLUG = "build"
+_MAX_SLUG_SOURCE_CHARS = 60
+
 # File extensions copied from the parent (companion) thread's uploads
 # into the builder's sandbox at dispatch time. Each LangGraph thread gets
 # its own sandbox via ``ThreadDataMiddleware``, so the builder cannot
@@ -202,6 +244,37 @@ _BUILDER_GENERIC_DEMO_MARKERS = (
 
 def _utcnow_iso() -> str:
     return dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _slugify_for_filename(text: str, max_len: int = 40) -> str:
+    if not isinstance(text, str):
+        return _FALLBACK_TASK_SLUG
+    head = text.strip()[:_MAX_SLUG_SOURCE_CHARS]
+    cleaned = re.sub(r"[^a-zA-Z0-9]+", "-", head).strip("-").lower()
+    if not cleaned:
+        return _FALLBACK_TASK_SLUG
+    return cleaned[:max_len].rstrip("-") or _FALLBACK_TASK_SLUG
+
+
+def _requested_output_extension(description: str | None) -> str | None:
+    if not isinstance(description, str) or not description.strip():
+        return None
+    for ext, pattern in _REQUESTED_OUTPUT_EXTENSION_PATTERNS:
+        if pattern.search(description):
+            return ext
+    return None
+
+
+def _suggest_artifact_filename(task_type: str | None, description: str | None) -> str:
+    ext = _requested_output_extension(description) or _TASK_TYPE_EXTENSIONS.get(task_type or "", "md")
+    if ext == "pdf" and isinstance(description, str) and _SIMPLE_PRODUCT_REVIEW_RE.search(description):
+        return "simple-product-review.pdf"
+    slug = _slugify_for_filename(description or _FALLBACK_TASK_SLUG)
+    return f"{slug}.{ext}"
+
+
+def _suggest_artifact_target_path(task_type: str | None, description: str | None) -> str:
+    return f"/mnt/user-data/outputs/{_suggest_artifact_filename(task_type, description)}"
 
 
 def _resolve_thread_id(runtime: ToolRuntime[ContextT, SophiaState] | None) -> str | None:
@@ -473,6 +546,7 @@ def _build_delegation_context(
     *,
     description: str,
     task_type: str,
+    artifact_target_path: str,
     companion_artifact: dict[str, Any],
     memory_snippets: list[str],
     active_ritual: str | None,
@@ -490,6 +564,7 @@ def _build_delegation_context(
     return {
         "task": description,
         "task_type": task_type,
+        "artifact_target_path": artifact_target_path,
         "companion_artifact": companion_artifact,
         "user_identity": None,  # populated by builder's UserIdentityMiddleware
         "relevant_memories": memory_snippets[:5],
@@ -925,6 +1000,7 @@ async def _dispatch_via_asgi(
         "allow_web_research": allow_web_research,
         "explicit_user_urls": explicit_user_urls,
         "builder_web_budget": builder_web_budget,
+        "builder_artifact_target_path": delegation_context.get("artifact_target_path"),
     }
 
     # ``thread_id`` MUST be in configurable so the builder's
@@ -1084,6 +1160,7 @@ async def _start_builder_task_impl(
     allow_web_research = should_allow_builder_web_research(task_type, description)
     explicit_user_urls = extract_explicit_user_urls(description)
     builder_web_budget = make_builder_web_budget(task_type)
+    artifact_target_path = _suggest_artifact_target_path(task_type, description)
 
     parent_thread_id = _resolve_thread_id(runtime)
     parent_model = None
@@ -1103,6 +1180,7 @@ async def _start_builder_task_impl(
     delegation_context = _build_delegation_context(
         description=description,
         task_type=task_type,
+        artifact_target_path=artifact_target_path,
         companion_artifact=companion_artifact,
         memory_snippets=memory_snippets,
         active_ritual=active_ritual,
@@ -1114,7 +1192,10 @@ async def _start_builder_task_impl(
     )
 
     logger.info(
-        "[Builder] start_builder_task dispatching: task_type=%s allow_web_research=%s demo=%s tone=%s ritual=%s parent_thread=%s parent_model=%s user_id=%s user_id_source=%s artifact_source=%s",
+        "[Builder] start_builder_task dispatching: task_type=%s allow_web_research=%s "
+        "demo=%s tone=%s ritual=%s parent_thread=%s parent_model=%s user_id=%s "
+        "user_id_source=%s artifact_source=%s explicit_url_count=%s search_limit=%s "
+        "fetch_limit=%s target_ext=%s",
         task_type,
         allow_web_research,
         demo_mode,
@@ -1125,6 +1206,10 @@ async def _start_builder_task_impl(
         user_id,
         user_id_source,
         artifact_source,
+        len(explicit_user_urls),
+        builder_web_budget.get("search_limit"),
+        builder_web_budget.get("fetch_limit"),
+        Path(artifact_target_path).suffix.lower().lstrip("."),
     )
 
     # Codex P1/P2 PR #132 (latest iteration): the filenames the user
@@ -1168,13 +1253,19 @@ async def _start_builder_task_impl(
         "trace_id": trace_id,
         "task_type": task_type,
         "demo_mode": demo_mode,
+        "artifact_target_path": artifact_target_path,
     }
 
     logger.info(
-        "[Builder] start_builder_task launched: task_id=%s run_id=%s trace=%s",
+        "[Builder] start_builder_task launched: task_id=%s run_id=%s trace=%s allow_web_research=%s explicit_url_count=%s search_limit=%s fetch_limit=%s target_ext=%s",
         task_id,
         run_id,
         trace_id,
+        allow_web_research,
+        len(explicit_user_urls),
+        builder_web_budget.get("search_limit"),
+        builder_web_budget.get("fetch_limit"),
+        Path(artifact_target_path).suffix.lower().lstrip("."),
     )
 
     return Command(

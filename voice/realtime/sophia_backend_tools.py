@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from voice.realtime.coreview import (
+    gemini_coreview_action_function_declarations,
     gemini_read_artifact_text_function_declaration,
     is_coreview_enabled,
 )
@@ -103,6 +104,7 @@ def gemini_sophia_function_declarations(
         include_coreview = is_coreview_enabled()
     if include_coreview:
         declarations.append(gemini_read_artifact_text_function_declaration())
+        declarations.extend(gemini_coreview_action_function_declarations())
     return declarations
 
 

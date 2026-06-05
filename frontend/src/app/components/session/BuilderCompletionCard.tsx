@@ -1,7 +1,9 @@
 'use client';
 
+import { Download, ExternalLink, Eye } from 'lucide-react';
 import { useMemo, type MouseEventHandler } from 'react';
 
+import { buildThreadArtifactHref } from '../../lib/builder-artifacts';
 import { cn } from '../../lib/utils';
 import type { BuilderCompletionEventV1 } from '../../types/builder-completion';
 
@@ -23,6 +25,7 @@ const FAILURE_BODY =
 const TIMEOUT_BODY =
   'The build took longer than expected and was cut short. Want me to try again?';
 const CANCELLED_BODY = 'Build was cancelled. Let me know when you want to pick it up again.';
+const DOWNLOAD_FIRST_EXTENSIONS = new Set(['pptx', 'ppt', 'docx', 'xlsx']);
 
 type BuilderCompletionCardProps = {
   event: BuilderCompletionEventV1;
@@ -77,7 +80,10 @@ function StatusGlyph({ icon, accentVar, compact }: { icon: StatusMeta['icon']; a
 
 function deriveTitle(event: BuilderCompletionEventV1): string {
   if (event.status === 'success') {
-    return event.artifact_title || event.artifact_filename || 'Your file is ready.';
+    if (isFallbackCompletion(event)) {
+      return `${fallbackArtifactLabel(event)} ready.`;
+    }
+    return event.artifact_title || event.artifact_filename || (event.artifact_path || event.artifact_url ? 'Your file is ready.' : 'Artifact delivery is pending.');
   }
   if (event.status === 'timeout') {
     return 'Build timed out';
@@ -90,6 +96,9 @@ function deriveTitle(event: BuilderCompletionEventV1): string {
 
 function deriveBody(event: BuilderCompletionEventV1): string | null {
   if (event.status === 'success') {
+    if (isFallbackCompletion(event)) {
+      return fallbackCompletionBody(event);
+    }
     return event.summary || event.user_next_action || null;
   }
   if (event.status === 'error') {
@@ -99,6 +108,55 @@ function deriveBody(event: BuilderCompletionEventV1): string | null {
     return TIMEOUT_BODY;
   }
   return CANCELLED_BODY;
+}
+
+function artifactExtension(event: BuilderCompletionEventV1): string {
+  if (event.artifact_ext) {
+    return event.artifact_ext.toLowerCase().replace(/^\./u, '');
+  }
+  const candidate = event.artifact_filename || event.artifact_path || event.artifact_url || '';
+  const clean = candidate.split('?')[0]?.split('#')[0] ?? '';
+  const ext = clean.split('.').pop();
+  return ext && ext !== clean ? ext.toLowerCase() : '';
+}
+
+function isDownloadFirstArtifact(event: BuilderCompletionEventV1): boolean {
+  return DOWNLOAD_FIRST_EXTENSIONS.has(artifactExtension(event));
+}
+
+function isFallbackCompletion(event: BuilderCompletionEventV1): boolean {
+  return event.status === 'success' && event.artifact_is_fallback === true;
+}
+
+function fallbackArtifactLabel(event: BuilderCompletionEventV1): string {
+  const ext = artifactExtension(event);
+  if (ext === 'html' || ext === 'htm') {
+    return 'HTML fallback';
+  }
+  if (ext === 'md' || ext === 'markdown') {
+    return 'Markdown fallback';
+  }
+  return `${ext ? ext.toUpperCase() : 'Artifact'} fallback`;
+}
+
+function fallbackCompletionBody(event: BuilderCompletionEventV1): string {
+  const requested = event.requested_artifact_ext?.toLowerCase().replace(/^\./u, '') ?? '';
+  const ext = artifactExtension(event);
+  if (requested === 'pptx' && (ext === 'html' || ext === 'htm')) {
+    return 'I couldn’t finish the PowerPoint package, so I delivered a browser-viewable HTML fallback.';
+  }
+  if (requested === 'pptx' && (ext === 'md' || ext === 'markdown')) {
+    return 'I couldn’t finish the PowerPoint package, so I delivered a Markdown fallback you can open and reuse.';
+  }
+  return event.summary || 'I delivered a usable fallback artifact because the originally requested format could not be completed.';
+}
+
+export function getBuilderCompletionFallbackLabel(event: BuilderCompletionEventV1): string | null {
+  return isFallbackCompletion(event) ? fallbackArtifactLabel(event).toLowerCase() : null;
+}
+
+export function getBuilderCompletionFallbackBody(event: BuilderCompletionEventV1): string | null {
+  return isFallbackCompletion(event) ? fallbackCompletionBody(event) : null;
 }
 
 export function BuilderCompletionCard({
@@ -113,35 +171,22 @@ export function BuilderCompletionCard({
   const meta = STATUS_META[event.status];
   const title = useMemo(() => deriveTitle(event), [event]);
   const body = useMemo(() => deriveBody(event), [event]);
-
-  const showOpen = event.status === 'success' && Boolean(event.artifact_url);
-  // Download is shown alongside Open on success — same signed URL, but
-  // anchors with a ``download`` attribute force browser save instead of
-  // navigation. Matches the BuilderReadyPill UX so users have a familiar
-  // primary (Open) + secondary (Download) action set on success cards.
-  const showDownload = showOpen;
-  const showRetry = event.status === 'error' || event.status === 'timeout';
+  const artifactProxyHref = useMemo(
+    () => buildThreadArtifactHref(event.thread_id, event.artifact_path),
+    [event.artifact_path, event.thread_id],
+  );
+  const artifactProxyDownloadHref = useMemo(
+    () => buildThreadArtifactHref(event.thread_id, event.artifact_path, { download: true }),
+    [event.artifact_path, event.thread_id],
+  );
+  const fallbackLabel = isFallbackCompletion(event) ? fallbackArtifactLabel(event).toLowerCase() : null;
+  const showMissingActionHint = shouldShowMissingActionHint({
+    event,
+    artifactProxyHref,
+    artifactProxyDownloadHref,
+    hasPreviewHandler: Boolean(onOpen),
+  });
   const showDismiss = Boolean(onDismiss);
-
-  const handleOpen: MouseEventHandler<HTMLButtonElement> = (e) => {
-    e.preventDefault();
-    if (event.artifact_url) {
-      window.open(event.artifact_url, '_blank', 'noopener,noreferrer');
-    }
-    onOpen?.(event);
-  };
-
-  // Native anchor click — the ``download`` attribute on the <a> tells the
-  // browser to save the linked URL instead of navigating to it. We don't
-  // call preventDefault because we WANT the browser's default to fire.
-  const handleDownload: MouseEventHandler<HTMLAnchorElement> = () => {
-    onDownload?.(event);
-  };
-
-  const handleRetry: MouseEventHandler<HTMLButtonElement> = (e) => {
-    e.preventDefault();
-    onRetry?.(event);
-  };
 
   const handleDismiss: MouseEventHandler<HTMLButtonElement> = (e) => {
     e.preventDefault();
@@ -186,6 +231,17 @@ export function BuilderCompletionCard({
             >
               builder
             </span>
+            {fallbackLabel && (
+              <span
+                className={cn('rounded-full tracking-[0.1em] lowercase', compact ? 'px-1.5 py-0.5 text-[8px]' : 'px-2 py-0.5 text-[9px]')}
+                style={{
+                  color: 'var(--cosmic-amber)',
+                  background: 'color-mix(in srgb, var(--cosmic-amber) 13%, transparent)',
+                }}
+              >
+                {fallbackLabel}
+              </span>
+            )}
           </div>
 
           <p
@@ -217,67 +273,29 @@ export function BuilderCompletionCard({
               about: {event.task_brief}
             </p>
           )}
+
+          {showMissingActionHint && (
+            <p
+              className={cn(compact ? 'mt-1 text-[9px] leading-4' : 'mt-1.5 text-[10px] leading-4.5')}
+              style={{ color: 'var(--cosmic-text-whisper)' }}
+            >
+              Artifact metadata has not reached this tab yet. I will keep checking the library.
+            </p>
+          )}
         </div>
       </div>
 
       <div className={cn('flex items-center justify-end gap-2', compact ? 'mt-2' : 'mt-2.5')}>
-        {showOpen && event.artifact_url && (
-          <button
-            type="button"
-            onClick={handleOpen}
-            className={cn(
-              'rounded-full border tracking-[0.08em] lowercase transition-all duration-300',
-              compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1 text-[10px]',
-            )}
-            style={{
-              borderColor: `color-mix(in srgb, ${meta.accentVar} 38%, transparent)`,
-              background: `color-mix(in srgb, ${meta.accentVar} 14%, transparent)`,
-              color: meta.accentVar,
-            }}
-          >
-            open
-          </button>
-        )}
-
-        {showDownload && event.artifact_url && (
-          <a
-            href={event.artifact_url}
-            download={event.artifact_filename || true}
-            onClick={handleDownload}
-            className={cn(
-              'rounded-full border tracking-[0.08em] lowercase transition-all duration-300',
-              compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1 text-[10px]',
-            )}
-            style={{
-              borderColor: `color-mix(in srgb, ${meta.accentVar} 28%, transparent)`,
-              background: 'transparent',
-              color: 'var(--cosmic-text-faint)',
-              textDecoration: 'none',
-            }}
-            aria-label="Download artifact"
-          >
-            download
-          </a>
-        )}
-
-        {showRetry && (
-          <button
-            type="button"
-            onClick={handleRetry}
-            className={cn(
-              'rounded-full border tracking-[0.08em] lowercase transition-all duration-300',
-              compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1 text-[10px]',
-            )}
-            style={{
-              borderColor: `color-mix(in srgb, ${meta.accentVar} 38%, transparent)`,
-              background: `color-mix(in srgb, ${meta.accentVar} 14%, transparent)`,
-              color: meta.accentVar,
-            }}
-          >
-            try again
-          </button>
-        )}
-
+        <BuilderCompletionActions
+          event={event}
+          meta={meta}
+          compact={compact}
+          artifactProxyHref={artifactProxyHref}
+          artifactProxyDownloadHref={artifactProxyDownloadHref}
+          onOpen={onOpen}
+          onDownload={onDownload}
+          onRetry={onRetry}
+        />
         {showDismiss && (
           <button
             type="button"
@@ -294,4 +312,225 @@ export function BuilderCompletionCard({
       </div>
     </div>
   );
+}
+
+function BuilderCompletionActions({
+  event,
+  meta,
+  compact,
+  artifactProxyHref,
+  artifactProxyDownloadHref,
+  onOpen,
+  onDownload,
+  onRetry,
+}: {
+  event: BuilderCompletionEventV1;
+  meta: StatusMeta;
+  compact: boolean;
+  artifactProxyHref: string | null;
+  artifactProxyDownloadHref: string | null;
+  onOpen?: (event: BuilderCompletionEventV1) => void;
+  onDownload?: (event: BuilderCompletionEventV1) => void;
+  onRetry?: (event: BuilderCompletionEventV1) => void;
+}) {
+  const openHref = artifactProxyHref || event.artifact_url || null;
+  const downloadHref = artifactProxyDownloadHref || event.artifact_url || null;
+  const downloadFirst = isDownloadFirstArtifact(event);
+
+  return (
+    <>
+      <PreviewAction event={event} href={artifactProxyHref} downloadFirst={downloadFirst} meta={meta} compact={compact} onOpen={onOpen} />
+      <OpenAction event={event} href={openHref} downloadFirst={downloadFirst} meta={meta} compact={compact} />
+      <DownloadAction event={event} href={downloadHref} meta={meta} compact={compact} onDownload={onDownload} />
+      <RetryAction event={event} meta={meta} compact={compact} onRetry={onRetry} />
+    </>
+  );
+}
+
+function PreviewAction({
+  event,
+  href,
+  downloadFirst,
+  meta,
+  compact,
+  onOpen,
+}: {
+  event: BuilderCompletionEventV1;
+  href: string | null;
+  downloadFirst: boolean;
+  meta: StatusMeta;
+  compact: boolean;
+  onOpen?: (event: BuilderCompletionEventV1) => void;
+}) {
+  if (event.status !== 'success' || !href || downloadFirst || !onOpen) {
+    return null;
+  }
+  const handlePreview: MouseEventHandler<HTMLButtonElement> = (e) => {
+    e.preventDefault();
+    onOpen(event);
+  };
+  return (
+    <button
+      type="button"
+      onClick={handlePreview}
+      className={cn(
+        'rounded-full border tracking-[0.08em] transition-all duration-300',
+        compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1 text-[10px]',
+      )}
+      style={{
+        borderColor: `color-mix(in srgb, ${meta.accentVar} 38%, transparent)`,
+        background: `color-mix(in srgb, ${meta.accentVar} 14%, transparent)`,
+        color: meta.accentVar,
+      }}
+    >
+      <span className="inline-flex items-center gap-1">
+        <Eye className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+        View in canvas
+      </span>
+    </button>
+  );
+}
+
+function OpenAction({
+  event,
+  href,
+  downloadFirst,
+  meta,
+  compact,
+}: {
+  event: BuilderCompletionEventV1;
+  href: string | null;
+  downloadFirst: boolean;
+  meta: StatusMeta;
+  compact: boolean;
+}) {
+  if (event.status !== 'success' || !href || downloadFirst) {
+    return null;
+  }
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className={cn(
+        'rounded-full border tracking-[0.08em] transition-all duration-300',
+        compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1 text-[10px]',
+      )}
+      style={{
+        borderColor: `color-mix(in srgb, ${meta.accentVar} 24%, transparent)`,
+        background: 'transparent',
+        color: 'var(--cosmic-text-faint)',
+        textDecoration: 'none',
+      }}
+      aria-label="Open artifact in new tab"
+    >
+      <span className="inline-flex items-center gap-1">
+        <ExternalLink className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+        Open in new tab
+      </span>
+    </a>
+  );
+}
+
+function DownloadAction({
+  event,
+  href,
+  meta,
+  compact,
+  onDownload,
+}: {
+  event: BuilderCompletionEventV1;
+  href: string | null;
+  meta: StatusMeta;
+  compact: boolean;
+  onDownload?: (event: BuilderCompletionEventV1) => void;
+}) {
+  if (event.status !== 'success' || !href) {
+    return null;
+  }
+  const handleDownload: MouseEventHandler<HTMLAnchorElement> = () => {
+    onDownload?.(event);
+  };
+  return (
+    <a
+      href={href}
+      download={event.artifact_filename || true}
+      onClick={handleDownload}
+      className={cn(
+        'rounded-full border tracking-[0.08em] transition-all duration-300',
+        compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1 text-[10px]',
+      )}
+      style={{
+        borderColor: `color-mix(in srgb, ${meta.accentVar} 28%, transparent)`,
+        background: 'transparent',
+        color: 'var(--cosmic-text-faint)',
+        textDecoration: 'none',
+      }}
+      aria-label="Download artifact"
+    >
+      <span className="inline-flex items-center gap-1">
+        <Download className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+        Download
+      </span>
+    </a>
+  );
+}
+
+function RetryAction({
+  event,
+  meta,
+  compact,
+  onRetry,
+}: {
+  event: BuilderCompletionEventV1;
+  meta: StatusMeta;
+  compact: boolean;
+  onRetry?: (event: BuilderCompletionEventV1) => void;
+}) {
+  if (event.status !== 'error' && event.status !== 'timeout') {
+    return null;
+  }
+  const handleRetry: MouseEventHandler<HTMLButtonElement> = (e) => {
+    e.preventDefault();
+    onRetry?.(event);
+  };
+  return (
+    <button
+      type="button"
+      onClick={handleRetry}
+      className={cn(
+        'rounded-full border tracking-[0.08em] lowercase transition-all duration-300',
+        compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1 text-[10px]',
+      )}
+      style={{
+        borderColor: `color-mix(in srgb, ${meta.accentVar} 38%, transparent)`,
+        background: `color-mix(in srgb, ${meta.accentVar} 14%, transparent)`,
+        color: meta.accentVar,
+      }}
+    >
+      try again
+    </button>
+  );
+}
+
+function shouldShowMissingActionHint({
+  event,
+  artifactProxyHref,
+  artifactProxyDownloadHref,
+  hasPreviewHandler,
+}: {
+  event: BuilderCompletionEventV1;
+  artifactProxyHref: string | null;
+  artifactProxyDownloadHref: string | null;
+  hasPreviewHandler: boolean;
+}): boolean {
+  if (event.status !== 'success') {
+    return false;
+  }
+  const downloadFirst = isDownloadFirstArtifact(event);
+  const openHref = artifactProxyHref || event.artifact_url || null;
+  const downloadHref = artifactProxyDownloadHref || event.artifact_url || null;
+  return !(artifactProxyHref && !downloadFirst && hasPreviewHandler)
+    && !(openHref && !downloadFirst)
+    && !downloadHref;
 }
