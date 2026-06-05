@@ -1757,6 +1757,7 @@ function SessionPageContent() {
               sessionId={coReviewSessionId}
               normalSessionId={coReviewSessionId}
               voiceAgentSessionId={coReviewVoiceAgentSessionId}
+              userId={userId}
               threadId={artifactPanelThreadId}
               isVisible={showArtifacts && effectiveShowArtifactsUi}
               onDismiss={handleCloseArtifactsPanelAndCanvasState}
@@ -1998,6 +1999,7 @@ function SessionPageContent() {
               sessionId={coReviewSessionId}
               normalSessionId={coReviewSessionId}
               voiceAgentSessionId={coReviewVoiceAgentSessionId}
+              userId={userId}
               threadId={artifactPanelThreadId}
               isVisible={showArtifacts && effectiveShowArtifactsUi}
               onDismiss={handleCloseArtifactsPanelAndCanvasState}
@@ -2026,6 +2028,7 @@ function SessionPageContent() {
             sessionId={coReviewSessionId}
             normalSessionId={coReviewSessionId}
             voiceAgentSessionId={coReviewVoiceAgentSessionId}
+            userId={userId}
             threadId={artifactPanelThreadId}
             isVisible={showArtifacts && effectiveShowArtifactsUi}
             onDismiss={handleCloseArtifactsPanelAndCanvasState}

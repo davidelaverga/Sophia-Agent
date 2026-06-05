@@ -14,6 +14,7 @@ import {
   initialCoReviewState,
   type CoReviewSessionState,
 } from "../../../app/lib/co-review-transport"
+import { clearCoreviewAnnotationStoreForTests, useCoreviewAnnotationStore } from "../../../app/lib/coreview-annotation-store"
 import {
   clearCoreviewArtifactTextRegistryForTests,
   readCoreviewArtifactTextSideband,
@@ -174,6 +175,51 @@ function seedPersistedAnnotations(
   return identity
 }
 
+function ControlledArtifactStage(props: ComponentProps<typeof ArtifactStage>) {
+  const annotationStore = useCoreviewAnnotationStore(props.artifactStableIdentity ?? null)
+
+  return (
+    <ArtifactStage
+      {...props}
+      annotations={annotationStore.annotations}
+      annotationStoreTelemetry={annotationStore.telemetry}
+      onAddAnnotation={(input) => {
+        const result = annotationStore.addAnnotation({
+          kind: input.kind,
+          pageIndex: input.pageIndex,
+          rect: input.rect,
+          point: input.point,
+          line: input.line,
+          color: input.color,
+          text: input.text,
+          source: input.source,
+        })
+        return {
+          ok: result.ok,
+          annotationId: result.annotation?.id ?? null,
+          blockedReason: result.blockedReason === "identity_unavailable"
+            ? "annotation_target_unavailable"
+            : result.blockedReason === "invalid_annotation"
+              ? input.kind === "highlight" || input.kind === "underline"
+                ? "invalid_rect"
+                : "anchor_not_found"
+              : result.blockedReason === "annotation_not_found"
+                ? "annotation_commit_failed"
+                : null,
+          annotationCount: result.counts.annotationCount,
+          highlightCount: result.counts.highlightCount,
+          commentCount: result.counts.commentCount,
+          underlineCount: result.counts.underlineCount,
+          arrowCount: result.counts.arrowCount,
+          drawPathCount: result.counts.drawPathCount,
+        }
+      }}
+      onUpdateAnnotation={(annotationId, patch) => annotationStore.updateAnnotation(annotationId, patch).ok}
+      onDeleteAnnotation={(annotationId) => annotationStore.deleteAnnotation(annotationId).ok}
+    />
+  )
+}
+
 function renderStage({
   artifact = builderArtifact,
   artifactLibrary = [],
@@ -227,14 +273,18 @@ function renderStage({
 } = {}) {
   const onStartReview = vi.fn()
   const onStopReview = vi.fn()
+  const resolvedArtifactStableIdentity = artifactStableIdentity
+    ?? (artifact.artifactPath?.endsWith(".pdf")
+      ? `user:test-user|thread:thread-1|path:${artifact.artifactPath}|renderer:pdf`
+      : null)
 
   const view = render(
-    <ArtifactStage
+    <ControlledArtifactStage
       builderArtifact={artifact}
       builderArtifactLibrary={artifactLibrary}
       threadId="thread-1"
       artifactId={artifactId}
-      artifactStableIdentity={artifactStableIdentity}
+      artifactStableIdentity={resolvedArtifactStableIdentity}
       sessionId={sessionId}
       normalSessionId={normalSessionId}
       reviewState={{
@@ -280,12 +330,14 @@ function mockAnnotationLayerBounds(layer: HTMLElement, width = 600, height = 800
 beforeEach(() => {
   mockCanvasApis()
   vi.mocked(loadPdfJs).mockReset()
+  clearCoreviewAnnotationStoreForTests()
   window.localStorage.clear()
 })
 
 afterEach(() => {
   vi.restoreAllMocks()
   window.localStorage.clear()
+  clearCoreviewAnnotationStoreForTests()
   clearCoreviewArtifactTextRegistryForTests()
 })
 
@@ -1078,7 +1130,7 @@ describe("ArtifactStage", () => {
     expect(await screen.findByTestId("artifact-highlight-annotation")).toHaveAttribute("data-annotation-id", "hydrated-highlight")
 
     view.rerender(
-      <ArtifactStage
+      <ControlledArtifactStage
         builderArtifact={pdfBuilderArtifact}
         builderArtifactLibrary={[{
           path: pdfBuilderArtifact.artifactPath,
@@ -1275,7 +1327,7 @@ describe("ArtifactStage", () => {
     await userEvent.clear(input)
     await userEvent.type(input, "Edited note")
     fireEvent.keyDown(input, { key: "Delete" })
-    expect(screen.getByDisplayValue("Edited note")).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByDisplayValue("Edited note")).toBeInTheDocument())
     expect(screen.getByTestId("artifact-comment-pin")).toBeInTheDocument()
 
     await userEvent.click(screen.getByTestId("artifact-highlight-annotation"))
@@ -1294,7 +1346,7 @@ describe("ArtifactStage", () => {
     expect(await screen.findByTestId("artifact-comment-pin")).toBeInTheDocument()
     expect(screen.queryByTestId("artifact-highlight-annotation")).not.toBeInTheDocument()
     await userEvent.click(screen.getByTestId("artifact-comment-pin"))
-    expect(screen.getByDisplayValue("Edited note")).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByDisplayValue("Edited note")).toBeInTheDocument())
   })
 
   it("keeps annotation tools sticky and only returns to Select from explicit Select or stage Escape", async () => {
@@ -1377,7 +1429,7 @@ describe("ArtifactStage", () => {
     const onStopReview = vi.fn()
 
     render(
-      <ArtifactStage
+      <ControlledArtifactStage
         builderArtifact={pdfBuilderArtifact}
         threadId="thread-1"
         artifactId="artifact-1"

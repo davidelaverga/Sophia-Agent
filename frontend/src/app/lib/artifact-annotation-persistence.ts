@@ -38,6 +38,7 @@ export interface ArtifactAnnotationWorkspaceStateV1 {
   version: 1
   stableArtifactIdentity: string | null
   annotations: ArtifactAnnotation[]
+  updatedAt?: number
 }
 
 export interface ArtifactAnnotationRestoreResult {
@@ -186,6 +187,7 @@ export function persistArtifactAnnotations(
         version: ARTIFACT_ANNOTATION_STORAGE_VERSION,
         stableArtifactIdentity: normalizeToken(options.stableArtifactIdentity),
         annotations: normalized,
+        updatedAt: Date.now(),
       } satisfies ArtifactAnnotationWorkspaceStateV1))
     }
     return {
@@ -343,7 +345,7 @@ function normalizeLine(value: unknown): NormalizedArtifactLine | null {
 
 function normalizeCommentText(value: unknown): string {
   return typeof value === "string"
-    ? value.replace(/\s+/gu, " ").trim().slice(0, MAX_COMMENT_TEXT_LENGTH)
+    ? value.replace(/[\r\n\t]+/gu, " ").slice(0, MAX_COMMENT_TEXT_LENGTH)
     : ""
 }
 

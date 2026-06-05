@@ -34,6 +34,8 @@ import {
   wasRecentCoreviewToolActionHandled,
   type CoreviewActionBus,
   type CoreviewActionResult,
+  type CoreviewAddAnnotationAdapterInput,
+  type CoreviewAddAnnotationAdapterResult,
   type CoreviewAddAnnotationInput,
   type CoreviewAnnotationAnchor,
   type CoreviewArtifactRebindInput,
@@ -48,6 +50,7 @@ import {
   type CoreviewToolRefreshResult,
   type CoreviewViewReadyResult,
 } from "../../lib/coreview-actions"
+import { useCoreviewAnnotationStore } from "../../lib/coreview-annotation-store"
 import { buildCoreviewArtifactStableIdentity } from "../../lib/coreview-artifact-identity"
 import { recordSophiaCaptureEvent } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
@@ -74,6 +77,7 @@ interface PresenceArtifactPanelProps {
   sessionId?: string | null
   normalSessionId?: string | null
   voiceAgentSessionId?: string | null
+  userId?: string | null
   threadId?: string
   isVisible: boolean
   onDismiss: () => void
@@ -705,6 +709,7 @@ export function PresenceArtifactPanel({
   sessionId,
   normalSessionId,
   voiceAgentSessionId,
+  userId,
   threadId,
   isVisible,
   onDismiss,
@@ -789,12 +794,47 @@ export function PresenceArtifactPanel({
   const artifactStableIdentity = useMemo(() => (
     builderArtifactId
       ? buildCoreviewArtifactStableIdentity({
+          userId: userId ?? null,
           threadId: threadId ?? null,
           artifactPath: stageArtifactPath,
           rendererKind: stageRendererKind,
         }).key
       : null
-  ), [builderArtifactId, stageArtifactPath, stageRendererKind, threadId])
+  ), [builderArtifactId, stageArtifactPath, stageRendererKind, threadId, userId])
+  const coreviewAnnotations = useCoreviewAnnotationStore(artifactStableIdentity)
+  const addCoreviewAnnotation = useCallback((input: CoreviewAddAnnotationAdapterInput): CoreviewAddAnnotationAdapterResult => {
+    const result = coreviewAnnotations.addAnnotation({
+      kind: input.kind,
+      pageIndex: input.pageIndex,
+      rect: input.rect,
+      point: input.point,
+      line: input.line,
+      color: input.color,
+      text: input.text,
+      source: input.source,
+    })
+    const blockedReason = result.blockedReason === "identity_unavailable"
+      ? "annotation_target_unavailable"
+      : result.blockedReason === "invalid_annotation"
+        ? input.kind === "highlight" || input.kind === "underline"
+          ? "invalid_rect"
+          : "anchor_not_found"
+        : result.blockedReason === "annotation_not_found"
+          ? "annotation_commit_failed"
+          : null
+
+    return {
+      ok: result.ok,
+      annotationId: result.annotation?.id ?? null,
+      blockedReason,
+      annotationCount: result.counts.annotationCount,
+      highlightCount: result.counts.highlightCount,
+      commentCount: result.counts.commentCount,
+      underlineCount: result.counts.underlineCount,
+      arrowCount: result.counts.arrowCount,
+      drawPathCount: result.counts.drawPathCount,
+    }
+  }, [coreviewAnnotations])
   const stageUsesMarkdownPreview = stageRendererKind === "markdown"
   const stageUsesPdfPreview = stageRendererKind === "pdf"
   const fallbackBuilderArtifactViewState = useMemo(() => (
@@ -903,13 +943,13 @@ export function PresenceArtifactPanel({
     reviewHasFrame: builderReviewHasFrame,
     exactTextAvailable: builderExactTextAvailable,
     visualFrameFresh: builderReviewHasFrame && !builderReviewStale,
-    annotationOverlayCaptured: builderVoiceCommandTarget?.annotationOverlayCaptured ?? (stageRendererKind === "pdf" ? false : null),
-    annotationCount: builderVoiceCommandTarget?.annotationCounts.annotationCount ?? 0,
-    highlightCount: builderVoiceCommandTarget?.annotationCounts.highlightCount ?? 0,
-    commentCount: builderVoiceCommandTarget?.annotationCounts.commentCount ?? 0,
-    underlineCount: builderVoiceCommandTarget?.annotationCounts.underlineCount ?? 0,
-    arrowCount: builderVoiceCommandTarget?.annotationCounts.arrowCount ?? 0,
-    drawPathCount: builderVoiceCommandTarget?.annotationCounts.drawPathCount ?? 0,
+    annotationOverlayCaptured: builderVoiceCommandTarget?.annotationOverlayCaptured ?? (stageRendererKind === "pdf" ? coreviewAnnotations.counts.annotationCount > 0 : null),
+    annotationCount: builderVoiceCommandTarget?.annotationCounts.annotationCount ?? coreviewAnnotations.counts.annotationCount,
+    highlightCount: builderVoiceCommandTarget?.annotationCounts.highlightCount ?? coreviewAnnotations.counts.highlightCount,
+    commentCount: builderVoiceCommandTarget?.annotationCounts.commentCount ?? coreviewAnnotations.counts.commentCount,
+    underlineCount: builderVoiceCommandTarget?.annotationCounts.underlineCount ?? coreviewAnnotations.counts.underlineCount,
+    arrowCount: builderVoiceCommandTarget?.annotationCounts.arrowCount ?? coreviewAnnotations.counts.arrowCount,
+    drawPathCount: builderVoiceCommandTarget?.annotationCounts.drawPathCount ?? coreviewAnnotations.counts.drawPathCount,
     rebindStatus: "not_attempted",
   }), [
     artifactStableIdentity,
@@ -927,6 +967,12 @@ export function PresenceArtifactPanel({
     builderReviewHasFrame,
     builderReviewStale,
     builderVoiceCommandTarget,
+    coreviewAnnotations.counts.annotationCount,
+    coreviewAnnotations.counts.arrowCount,
+    coreviewAnnotations.counts.commentCount,
+    coreviewAnnotations.counts.drawPathCount,
+    coreviewAnnotations.counts.highlightCount,
+    coreviewAnnotations.counts.underlineCount,
     stageBuilderArtifact?.artifactTitle,
     stageArtifactPath,
     stageRendererKind,
@@ -2470,6 +2516,11 @@ export function PresenceArtifactPanel({
                   normalSessionId={normalSessionId}
                   voiceAgentSessionId={voiceAgentSessionId}
                   artifactStableIdentity={artifactStableIdentity}
+                  annotations={coreviewAnnotations.annotations}
+                  annotationStoreTelemetry={coreviewAnnotations.telemetry}
+                  onAddAnnotation={addCoreviewAnnotation}
+                  onUpdateAnnotation={(annotationId, patch) => coreviewAnnotations.updateAnnotation(annotationId, patch).ok}
+                  onDeleteAnnotation={(annotationId) => coreviewAnnotations.deleteAnnotation(annotationId).ok}
                   reviewState={builderArtifactCoReview.state}
                   transportStatus={builderArtifactCoReview.transportStatus}
                   exactTextAvailable={builderExactTextAvailable}
@@ -2500,6 +2551,11 @@ export function PresenceArtifactPanel({
                   normalSessionId={normalSessionId}
                   voiceAgentSessionId={voiceAgentSessionId}
                   artifactStableIdentity={artifactStableIdentity}
+                  annotations={coreviewAnnotations.annotations}
+                  annotationStoreTelemetry={coreviewAnnotations.telemetry}
+                  onAddAnnotation={addCoreviewAnnotation}
+                  onUpdateAnnotation={(annotationId, patch) => coreviewAnnotations.updateAnnotation(annotationId, patch).ok}
+                  onDeleteAnnotation={(annotationId) => coreviewAnnotations.deleteAnnotation(annotationId).ok}
                   reviewState={builderArtifactCoReview.state}
                   transportStatus={builderArtifactCoReview.transportStatus}
                   exactTextAvailable={builderExactTextAvailable}

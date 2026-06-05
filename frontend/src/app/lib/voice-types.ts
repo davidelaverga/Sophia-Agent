@@ -200,6 +200,12 @@ export type GeminiRuntimeTelemetry = {
   annotationIdentityWriteHash?: string | null
   annotationIdentityReadHash?: string | null
   annotationRestoreOverwrittenCount?: number
+  coreviewAnnotationStoreActive?: boolean
+  coreviewAnnotationStateSource?: string | null
+  annotationPreventedEmptyOverwriteCount?: number
+  annotationMigratedIdentityCount?: number
+  annotationStoreSurvivedCanvasClose?: boolean
+  annotationStoreHydratedArtifactStage?: boolean
   annotationStateClearedReason?: string | null
   builderSnapshotIgnoredForActiveArtifact?: boolean
   builderSnapshotEmptyPassive?: boolean

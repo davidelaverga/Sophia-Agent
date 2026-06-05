@@ -134,6 +134,12 @@ export type CoreviewVisualTelemetry = {
   annotationIdentityWriteHash: string | null
   annotationIdentityReadHash: string | null
   annotationRestoreOverwrittenCount: number
+  coreviewAnnotationStoreActive: boolean
+  coreviewAnnotationStateSource: string | null
+  annotationPreventedEmptyOverwriteCount: number
+  annotationMigratedIdentityCount: number
+  annotationStoreSurvivedCanvasClose: boolean
+  annotationStoreHydratedArtifactStage: boolean
   annotationStateClearedReason: string | null
   builderSnapshotIgnoredForActiveArtifact: boolean
   builderSnapshotEmptyPassive: boolean
@@ -579,6 +585,12 @@ export type GeminiSessionTelemetry = {
     annotationIdentityWriteHash: string | null
     annotationIdentityReadHash: string | null
     annotationRestoreOverwrittenCount: number
+    coreviewAnnotationStoreActive: boolean
+    coreviewAnnotationStateSource: string | null
+    annotationPreventedEmptyOverwriteCount: number
+    annotationMigratedIdentityCount: number
+    annotationStoreSurvivedCanvasClose: boolean
+    annotationStoreHydratedArtifactStage: boolean
     annotationStateClearedReason: string | null
     builderSnapshotIgnoredForActiveArtifact: boolean
     builderSnapshotEmptyPassive: boolean
@@ -1321,6 +1333,12 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       annotationIdentityWriteHash: null,
       annotationIdentityReadHash: null,
       annotationRestoreOverwrittenCount: 0,
+      coreviewAnnotationStoreActive: false,
+      coreviewAnnotationStateSource: null,
+      annotationPreventedEmptyOverwriteCount: 0,
+      annotationMigratedIdentityCount: 0,
+      annotationStoreSurvivedCanvasClose: false,
+      annotationStoreHydratedArtifactStage: false,
       annotationStateClearedReason: null,
       builderSnapshotIgnoredForActiveArtifact: false,
       builderSnapshotEmptyPassive: false,
@@ -1707,6 +1725,12 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.annotationIdentityWriteHash = asString(latestAnnotationState?.annotationIdentityWriteHash)
   visual.annotationIdentityReadHash = asString(latestAnnotationState?.annotationIdentityReadHash)
   visual.annotationRestoreOverwrittenCount = numberFromKeys(latestAnnotationState, ["annotationRestoreOverwrittenCount"]) ?? 0
+  visual.coreviewAnnotationStoreActive = asBoolean(latestAnnotationState?.coreviewAnnotationStoreActive) ?? false
+  visual.coreviewAnnotationStateSource = asString(latestAnnotationState?.coreviewAnnotationStateSource)
+  visual.annotationPreventedEmptyOverwriteCount = numberFromKeys(latestAnnotationState, ["annotationPreventedEmptyOverwriteCount"]) ?? 0
+  visual.annotationMigratedIdentityCount = numberFromKeys(latestAnnotationState, ["annotationMigratedIdentityCount"]) ?? 0
+  visual.annotationStoreSurvivedCanvasClose = asBoolean(latestAnnotationState?.annotationStoreSurvivedCanvasClose) ?? false
+  visual.annotationStoreHydratedArtifactStage = asBoolean(latestAnnotationState?.annotationStoreHydratedArtifactStage) ?? false
   visual.annotationStateClearedReason = asString(latestAnnotationState?.annotationStateClearedReason)
   visual.builderSnapshotIgnoredForActiveArtifact = builderSnapshotProtectionEvents.some((event) => (
     asBoolean(event.builderSnapshotIgnoredForActiveArtifact) === true
@@ -3006,6 +3030,18 @@ function buildSessionTelemetry(params: {
           ?? coreviewTelemetry.visual.annotationIdentityReadHash,
         annotationRestoreOverwrittenCount: hookTelemetry?.annotationRestoreOverwrittenCount
           ?? coreviewTelemetry.visual.annotationRestoreOverwrittenCount,
+        coreviewAnnotationStoreActive: hookTelemetry?.coreviewAnnotationStoreActive
+          ?? coreviewTelemetry.visual.coreviewAnnotationStoreActive,
+        coreviewAnnotationStateSource: hookTelemetry?.coreviewAnnotationStateSource
+          ?? coreviewTelemetry.visual.coreviewAnnotationStateSource,
+        annotationPreventedEmptyOverwriteCount: hookTelemetry?.annotationPreventedEmptyOverwriteCount
+          ?? coreviewTelemetry.visual.annotationPreventedEmptyOverwriteCount,
+        annotationMigratedIdentityCount: hookTelemetry?.annotationMigratedIdentityCount
+          ?? coreviewTelemetry.visual.annotationMigratedIdentityCount,
+        annotationStoreSurvivedCanvasClose: hookTelemetry?.annotationStoreSurvivedCanvasClose
+          ?? coreviewTelemetry.visual.annotationStoreSurvivedCanvasClose,
+        annotationStoreHydratedArtifactStage: hookTelemetry?.annotationStoreHydratedArtifactStage
+          ?? coreviewTelemetry.visual.annotationStoreHydratedArtifactStage,
         annotationStateClearedReason: hookTelemetry?.annotationStateClearedReason
           ?? coreviewTelemetry.visual.annotationStateClearedReason,
         builderSnapshotIgnoredForActiveArtifact: hookTelemetry?.builderSnapshotIgnoredForActiveArtifact
