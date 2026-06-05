@@ -183,6 +183,21 @@ export type GeminiRuntimeTelemetry = {
   annotationCount?: number
   highlightCount?: number
   commentCount?: number
+  underlineCount?: number
+  arrowCount?: number
+  drawPathCount?: number
+  annotationPersistenceStatus?: string | null
+  annotationRestoreCount?: number
+  annotationPersistedCount?: number
+  annotationStorageVersion?: number | null
+  annotationStorageKeyHash?: string | null
+  annotationExportAvailable?: boolean
+  annotationExportResult?: string | null
+  annotationExportKind?: string | null
+  annotationExportPageScope?: string | null
+  annotationDeleteCount?: number
+  annotationEditCount?: number
+  unsupportedAnnotationKind?: string | null
   annotationActionSource?: string | null
   coreviewAnnotationToolCount?: number
   coreviewAnnotationFallbackCount?: number
@@ -245,6 +260,9 @@ export type VoiceStateProps = {
     annotationCount?: number | null
     highlightCount?: number | null
     commentCount?: number | null
+    underlineCount?: number | null
+    arrowCount?: number | null
+    drawPathCount?: number | null
   }) => void
   unlockAudio?: () => void
   resetVoiceState?: () => void

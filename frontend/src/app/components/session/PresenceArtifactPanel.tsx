@@ -87,6 +87,9 @@ interface PresenceArtifactPanelProps {
     annotationCount?: number | null
     highlightCount?: number | null
     commentCount?: number | null
+    underlineCount?: number | null
+    arrowCount?: number | null
+    drawPathCount?: number | null
   }) => void
   onReflectionTap?: (reflection: { prompt: string; why?: string }) => void
   onMemoryApprove?: (index: number) => void
@@ -192,9 +195,23 @@ function buildAppliedVoiceCommandStatus(
     case "focus_anchor":
       return "PDF view updated"
     case "add_annotation":
-      return command.annotationKind === "comment" ? "Comment added" : "Highlight added"
+      return appliedAnnotationStatusText(command.annotationKind)
     default:
       return "Artifact view updated"
+  }
+}
+
+function appliedAnnotationStatusText(kind: ArtifactReviewVoiceCommand["annotationKind"]): string {
+  switch (kind) {
+    case "comment":
+      return "Comment added"
+    case "underline":
+      return "Underline added"
+    case "arrow":
+      return "Arrow added"
+    case "highlight":
+    default:
+      return "Highlight added"
   }
 }
 
@@ -310,6 +327,8 @@ function coreviewBlockedStatusText(reason: CoreviewToolBlockedReason | null): st
       return "Sophia asked for an invalid view change."
     case "annotation_commit_failed":
       return "Sophia could not verify that the annotation was added."
+    case "unsupported_annotation_kind":
+      return "That annotation type is not available yet."
     default:
       return "Sophia could not update this view."
   }
@@ -476,11 +495,11 @@ function coreviewAddAnnotationInputFromVoiceCommand(
   lastFocusedAnchorType: CoreviewAnnotationAnchor["type"] | null,
 ): CoreviewAddAnnotationInput {
   return {
-    kind: command.annotationKind === "comment" ? "comment" : "highlight",
+    kind: command.annotationKind ?? "highlight",
     artifactId: current.artifactId ?? undefined,
     pageIndex: current.pageIndex,
     anchor: coreviewAnchorFromVoiceCommand(command, lastFocusedAnchorType),
-    color: command.color ?? "yellow",
+    color: command.color,
     text: command.commentText,
     source: "sophia",
   }
@@ -497,7 +516,23 @@ function annotationFallbackUtteranceKind(
     return "annotation_compound"
   }
   return command.utteranceKind
-    ?? (command.annotationKind === "comment" ? "annotation_comment" : "annotation_highlight")
+    ?? annotationUtteranceKindForKind(command.annotationKind)
+}
+
+function annotationUtteranceKindForKind(
+  kind: ArtifactReviewVoiceCommand["annotationKind"],
+): ArtifactReviewAnnotationUtteranceKind {
+  switch (kind) {
+    case "comment":
+      return "annotation_comment"
+    case "underline":
+      return "annotation_underline"
+    case "arrow":
+      return "annotation_arrow"
+    case "highlight":
+    default:
+      return "annotation_highlight"
+  }
 }
 
 function coreviewFocusAnchorInputFromVoiceCommand(
@@ -527,7 +562,7 @@ function coreviewAnnotationCommandAlreadyHandled(
     matchResult: (result) => (
       result.ok
       && result.action === "add_annotation"
-      && result.annotation_kind === (command.annotationKind === "comment" ? "comment" : "highlight")
+      && result.annotation_kind === (command.annotationKind ?? "highlight")
       && (
         command.color === undefined
         || result.annotation_color === command.color
@@ -863,6 +898,9 @@ export function PresenceArtifactPanel({
     annotationCount: builderVoiceCommandTarget?.annotationCounts.annotationCount ?? 0,
     highlightCount: builderVoiceCommandTarget?.annotationCounts.highlightCount ?? 0,
     commentCount: builderVoiceCommandTarget?.annotationCounts.commentCount ?? 0,
+    underlineCount: builderVoiceCommandTarget?.annotationCounts.underlineCount ?? 0,
+    arrowCount: builderVoiceCommandTarget?.annotationCounts.arrowCount ?? 0,
+    drawPathCount: builderVoiceCommandTarget?.annotationCounts.drawPathCount ?? 0,
     rebindStatus: "not_attempted",
   }), [
     artifactStableIdentity,
@@ -1148,6 +1186,9 @@ export function PresenceArtifactPanel({
         annotationCount: result.annotation_count,
         highlightCount: result.highlight_count,
         commentCount: result.comment_count,
+        underlineCount: result.underline_count,
+        arrowCount: result.arrow_count,
+        drawPathCount: result.draw_path_count,
       })
     }
 
@@ -1210,6 +1251,10 @@ export function PresenceArtifactPanel({
         annotationCount: result.annotation_count ?? null,
         highlightCount: result.highlight_count ?? null,
         commentCount: result.comment_count ?? null,
+        underlineCount: result.underline_count ?? null,
+        arrowCount: result.arrow_count ?? null,
+        drawPathCount: result.draw_path_count ?? null,
+        unsupportedAnnotationKind: result.unsupported_annotation_kind ?? null,
         annotationActionSource: result.annotation_action_source ?? null,
         artifactStableIdentity: result.artifact_stable_identity ?? artifactStableIdentity,
         artifactRebindAttempted: result.rebind_attempted,
@@ -1386,6 +1431,9 @@ export function PresenceArtifactPanel({
           annotationCount: 0,
           highlightCount: 0,
           commentCount: 0,
+          underlineCount: 0,
+          arrowCount: 0,
+          drawPathCount: 0,
         }
       }
 
@@ -1396,6 +1444,9 @@ export function PresenceArtifactPanel({
         annotationCount: result.annotationCount,
         highlightCount: result.highlightCount,
         commentCount: result.commentCount,
+        underlineCount: result.underlineCount,
+        arrowCount: result.arrowCount,
+        drawPathCount: result.drawPathCount,
       }
       coreviewVisualReadyRef.current = false
       setBuilderVisualCaptureStatus(unavailableCaptureStatus("preview_not_ready"))

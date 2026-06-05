@@ -34,7 +34,7 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
   let refreshes = 0
   let focusCalls = 0
   let staleSignature: string | null = null
-  let annotations: Array<{ kind: "highlight" | "comment" }> = []
+  let annotations: Array<{ kind: "highlight" | "comment" | "underline" | "arrow" }> = []
   let current: CoreviewCurrentView = {
     artifactId: "artifact-1",
     artifactPath: "outputs/report.pdf",
@@ -58,6 +58,9 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
     annotationCount: 0,
     highlightCount: 0,
     commentCount: 0,
+    underlineCount: 0,
+    arrowCount: 0,
+    drawPathCount: 0,
     ...currentOptions,
   }
   current.viewSignature = buildArtifactViewSignature({
@@ -174,23 +177,36 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
           annotationCount: current.annotationCount,
           highlightCount: current.highlightCount,
           commentCount: current.commentCount,
+          underlineCount: current.underlineCount ?? 0,
+          arrowCount: current.arrowCount ?? 0,
+          drawPathCount: current.drawPathCount ?? 0,
         }
       }
       annotations = [...annotations, { kind: input.kind }]
+      const highlightCount = annotations.filter((annotation) => annotation.kind === "highlight").length
+      const commentCount = annotations.filter((annotation) => annotation.kind === "comment").length
+      const underlineCount = annotations.filter((annotation) => annotation.kind === "underline").length
+      const arrowCount = annotations.filter((annotation) => annotation.kind === "arrow").length
       current = {
         ...current,
         annotationOverlayCaptured: annotations.length > 0,
         annotationCount: annotations.length,
-        highlightCount: annotations.filter((annotation) => annotation.kind === "highlight").length,
-        commentCount: annotations.filter((annotation) => annotation.kind === "comment").length,
+        highlightCount,
+        commentCount,
+        underlineCount,
+        arrowCount,
+        drawPathCount: 0,
       }
       return {
         ok: true,
         annotationId: `${input.kind}-${annotations.length}`,
         blockedReason: null,
         annotationCount: annotations.length,
-        highlightCount: annotations.filter((annotation) => annotation.kind === "highlight").length,
-        commentCount: annotations.filter((annotation) => annotation.kind === "comment").length,
+        highlightCount,
+        commentCount,
+        underlineCount,
+        arrowCount,
+        drawPathCount: 0,
       }
     },
     focusAnnotationAnchor: (input) => {
@@ -253,7 +269,7 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
 }
 
 describe("Coreview action bus", () => {
-  it("declares annotation tools with explicit highlight/comment routing guidance", () => {
+  it("declares annotation tools with explicit visual annotation routing guidance", () => {
     const declarations = coreviewGeminiFunctionDeclarations()
     const annotationDeclaration = declarations.find((declaration) => (
       declaration.name === COREVIEW_ADD_ANNOTATION_TOOL_NAME
@@ -263,7 +279,9 @@ describe("Coreview action bus", () => {
     expect(JSON.stringify(declarations)).toContain("Do not say an annotation was added unless this tool returned ok=true")
     expect(JSON.stringify(annotationDeclaration)).toContain("Highlight it yellow")
     expect(JSON.stringify(annotationDeclaration)).toContain("Leave a comment: change the font")
-    expect(JSON.stringify(annotationDeclaration)).toMatch(/highlight|comment|mark|note/u)
+    expect(JSON.stringify(annotationDeclaration)).toContain("Underline the title")
+    expect(JSON.stringify(annotationDeclaration)).toContain("Add an arrow pointing to this")
+    expect(JSON.stringify(annotationDeclaration)).toMatch(/highlight|comment|underline|arrow|mark|note/u)
   })
 
   it("injects review tool declarations without re-exposing artifact creation", () => {
@@ -537,6 +555,91 @@ describe("Coreview action bus", () => {
       preserved_review: true,
     })
     expect(JSON.stringify(result)).not.toContain("change the font")
+  })
+
+  it("adds an underline on the current title through the same annotation bus", async () => {
+    const harness = createHarness()
+
+    const result = await harness.bus.addAnnotation({
+      kind: "underline",
+      anchor: { type: "current_title" },
+      source: "sophia",
+    }, "frontend_fallback")
+
+    expect(result).toMatchObject({
+      ok: true,
+      action: "add_annotation",
+      command_source: "frontend_fallback",
+      annotation_kind: "underline",
+      annotation_anchor_type: "current_title",
+      annotation_color: "purple",
+      annotation_count: 1,
+      highlight_count: 0,
+      comment_count: 0,
+      underline_count: 1,
+      arrow_count: 0,
+      annotation_action_source: "sophia",
+      annotation_commit_verified: true,
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
+    })
+    expect(harness.annotations).toEqual([{ kind: "underline" }])
+    expect(harness.current.underlineCount).toBe(1)
+  })
+
+  it("adds an arrow through the same annotation bus", async () => {
+    const harness = createHarness()
+
+    const result = await harness.bus.addAnnotation({
+      kind: "arrow",
+      anchor: { type: "point", x: 0.58, y: 0.36 },
+      source: "sophia",
+    }, "frontend_fallback")
+
+    expect(result).toMatchObject({
+      ok: true,
+      action: "add_annotation",
+      command_source: "frontend_fallback",
+      annotation_kind: "arrow",
+      annotation_anchor_type: "point",
+      annotation_color: "purple",
+      annotation_count: 1,
+      underline_count: 0,
+      arrow_count: 1,
+      annotation_action_source: "sophia",
+      annotation_commit_verified: true,
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
+    })
+    expect(harness.annotations).toEqual([{ kind: "arrow" }])
+    expect(harness.current.arrowCount).toBe(1)
+  })
+
+  it("returns a safe failure for unsupported annotation kinds", async () => {
+    const harness = createHarness()
+
+    const result = await harness.bus.addAnnotation({
+      kind: "draw",
+      anchor: { type: "current_title" },
+      source: "sophia",
+    }, "gemini_tool")
+
+    expect(result).toMatchObject({
+      ok: false,
+      action: "add_annotation",
+      blocked_reason: "unsupported_annotation_kind",
+      unsupported_annotation_kind: "draw",
+      annotation_kind: null,
+      annotation_count: 0,
+      highlight_count: 0,
+      comment_count: 0,
+      underline_count: 0,
+      arrow_count: 0,
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
+    })
+    expect(harness.annotations).toHaveLength(0)
+    expect(result.result_summary).toContain("not available")
   })
 
   it("keeps an annotation committed when view-ready times out", async () => {

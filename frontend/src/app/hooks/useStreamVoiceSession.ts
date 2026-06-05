@@ -153,6 +153,9 @@ export type StreamVoiceSessionReturn = {
     annotationCount?: number | null
     highlightCount?: number | null
     commentCount?: number | null
+    underlineCount?: number | null
+    arrowCount?: number | null
+    drawPathCount?: number | null
   }) => void
   resetVoiceState: () => void
   /** Always false — Stream handles retries server-side */
@@ -347,6 +350,21 @@ function createGeminiRuntimeTelemetry(params: Partial<Extract<VoiceRuntimeTeleme
     annotationCount: params.annotationCount ?? 0,
     highlightCount: params.highlightCount ?? 0,
     commentCount: params.commentCount ?? 0,
+    underlineCount: params.underlineCount ?? 0,
+    arrowCount: params.arrowCount ?? 0,
+    drawPathCount: params.drawPathCount ?? 0,
+    annotationPersistenceStatus: params.annotationPersistenceStatus ?? null,
+    annotationRestoreCount: params.annotationRestoreCount ?? 0,
+    annotationPersistedCount: params.annotationPersistedCount ?? 0,
+    annotationStorageVersion: params.annotationStorageVersion ?? null,
+    annotationStorageKeyHash: params.annotationStorageKeyHash ?? null,
+    annotationExportAvailable: params.annotationExportAvailable ?? false,
+    annotationExportResult: params.annotationExportResult ?? null,
+    annotationExportKind: params.annotationExportKind ?? null,
+    annotationExportPageScope: params.annotationExportPageScope ?? null,
+    annotationDeleteCount: params.annotationDeleteCount ?? 0,
+    annotationEditCount: params.annotationEditCount ?? 0,
+    unsupportedAnnotationKind: params.unsupportedAnnotationKind ?? null,
     annotationActionSource: params.annotationActionSource ?? null,
     coreviewAnnotationToolCount: params.coreviewAnnotationToolCount ?? 0,
     coreviewAnnotationFallbackCount: params.coreviewAnnotationFallbackCount ?? 0,
@@ -444,6 +462,9 @@ type RecentAnnotationIntentState = {
   annotationCount: number
   highlightCount: number
   commentCount: number
+  underlineCount: number
+  arrowCount: number
+  drawPathCount: number
 }
 
 type RecentAnnotationSuccessState = {
@@ -451,6 +472,9 @@ type RecentAnnotationSuccessState = {
   annotationCount: number
   highlightCount: number
   commentCount: number
+  underlineCount: number
+  arrowCount: number
+  drawPathCount: number
 }
 
 function annotationCommandsFromTranscript(text: string): ArtifactReviewVoiceCommand[] {
@@ -495,6 +519,9 @@ function annotationCountsIncreased(
   return success.annotationCount > baseline.annotationCount
     || success.highlightCount > baseline.highlightCount
     || success.commentCount > baseline.commentCount
+    || success.underlineCount > baseline.underlineCount
+    || success.arrowCount > baseline.arrowCount
+    || success.drawPathCount > baseline.drawPathCount
 }
 
 function annotationSuccessCount(
@@ -1156,15 +1183,21 @@ export function useStreamVoiceSession(
 
     const telemetry = runtimeTelemetryRef.current
     const baseline = telemetry.runtime === "gemini_live"
-      ? {
+        ? {
           annotationCount: telemetry.annotationCount ?? 0,
           highlightCount: telemetry.highlightCount ?? 0,
           commentCount: telemetry.commentCount ?? 0,
+          underlineCount: telemetry.underlineCount ?? 0,
+          arrowCount: telemetry.arrowCount ?? 0,
+          drawPathCount: telemetry.drawPathCount ?? 0,
         }
       : {
           annotationCount: 0,
           highlightCount: 0,
           commentCount: 0,
+          underlineCount: 0,
+          arrowCount: 0,
+          drawPathCount: 0,
         }
     const utteranceKind = annotationUtteranceKindFromCommands(annotationCommands)
     recentAnnotationIntentRef.current = {
@@ -1273,6 +1306,9 @@ export function useStreamVoiceSession(
     annotationCount?: number | null
     highlightCount?: number | null
     commentCount?: number | null
+    underlineCount?: number | null
+    arrowCount?: number | null
+    drawPathCount?: number | null
   }) => {
     const telemetry = runtimeTelemetryRef.current
     const currentCounts = telemetry.runtime === "gemini_live"
@@ -1280,11 +1316,17 @@ export function useStreamVoiceSession(
           annotationCount: telemetry.annotationCount ?? 0,
           highlightCount: telemetry.highlightCount ?? 0,
           commentCount: telemetry.commentCount ?? 0,
+          underlineCount: telemetry.underlineCount ?? 0,
+          arrowCount: telemetry.arrowCount ?? 0,
+          drawPathCount: telemetry.drawPathCount ?? 0,
         }
       : {
           annotationCount: 0,
           highlightCount: 0,
           commentCount: 0,
+          underlineCount: 0,
+          arrowCount: 0,
+          drawPathCount: 0,
         }
     const baseline = recentAnnotationIntentRef.current
     const nextCounts = {
@@ -1294,6 +1336,9 @@ export function useStreamVoiceSession(
       ),
       highlightCount: annotationSuccessCount(counts?.highlightCount, currentCounts.highlightCount),
       commentCount: annotationSuccessCount(counts?.commentCount, currentCounts.commentCount),
+      underlineCount: annotationSuccessCount(counts?.underlineCount, currentCounts.underlineCount),
+      arrowCount: annotationSuccessCount(counts?.arrowCount, currentCounts.arrowCount),
+      drawPathCount: annotationSuccessCount(counts?.drawPathCount, currentCounts.drawPathCount),
     }
     recentAnnotationSuccessRef.current = {
       atMs: Date.now(),
@@ -3208,6 +3253,9 @@ export function useStreamVoiceSession(
             const diagnosticAnnotationCount = diagnosticBackendNumber("annotation_count")
             const diagnosticHighlightCount = diagnosticBackendNumber("highlight_count")
             const diagnosticCommentCount = diagnosticBackendNumber("comment_count")
+            const diagnosticUnderlineCount = diagnosticBackendNumber("underline_count")
+            const diagnosticArrowCount = diagnosticBackendNumber("arrow_count")
+            const diagnosticDrawPathCount = diagnosticBackendNumber("draw_path_count")
             if (
               diagnosticToolName === GEMINI_COREVIEW_ADD_ANNOTATION_TOOL_NAME
               && diagnostic.phase === "tool_response_sent"
@@ -3222,6 +3270,9 @@ export function useStreamVoiceSession(
                 annotationCount: diagnosticAnnotationCount,
                 highlightCount: diagnosticHighlightCount,
                 commentCount: diagnosticCommentCount,
+                underlineCount: diagnosticUnderlineCount ?? 0,
+                arrowCount: diagnosticArrowCount ?? 0,
+                drawPathCount: diagnosticDrawPathCount ?? 0,
               }
             }
 
@@ -3279,6 +3330,9 @@ export function useStreamVoiceSession(
               const annotationCount = backendNumber("annotation_count")
               const highlightCount = backendNumber("highlight_count")
               const commentCount = backendNumber("comment_count")
+              const underlineCount = backendNumber("underline_count")
+              const arrowCount = backendNumber("arrow_count")
+              const drawPathCount = backendNumber("draw_path_count")
               const annotationCommitCountBefore = backendNumber("annotation_commit_count_before")
               const annotationCommitCountAfter = backendNumber("annotation_commit_count_after") ?? annotationCount
               const annotationCommitVerified = Boolean(
@@ -3309,6 +3363,9 @@ export function useStreamVoiceSession(
                   annotationCount: annotationCount ?? current.annotationCount ?? 0,
                   highlightCount: highlightCount ?? current.highlightCount ?? 0,
                   commentCount: commentCount ?? current.commentCount ?? 0,
+                  underlineCount: underlineCount ?? current.underlineCount ?? 0,
+                  arrowCount: arrowCount ?? current.arrowCount ?? 0,
+                  drawPathCount: drawPathCount ?? current.drawPathCount ?? 0,
                 }
               }
               const rejectionReason = typeof diagnostic.rejectionReason === "string"
@@ -3379,6 +3436,10 @@ export function useStreamVoiceSession(
                 annotationCount: annotationCount ?? current.annotationCount,
                 highlightCount: highlightCount ?? current.highlightCount,
                 commentCount: commentCount ?? current.commentCount,
+                underlineCount: underlineCount ?? current.underlineCount,
+                arrowCount: arrowCount ?? current.arrowCount,
+                drawPathCount: drawPathCount ?? current.drawPathCount,
+                unsupportedAnnotationKind: backendString("unsupported_annotation_kind") ?? current.unsupportedAnnotationKind ?? null,
                 annotationActionSource: backendString("annotation_action_source") ?? current.annotationActionSource ?? null,
                 coreviewAnnotationToolCount: coreviewAnnotationResolved
                   ? (current.coreviewAnnotationToolCount ?? 0) + 1

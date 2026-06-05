@@ -113,6 +113,21 @@ export type CoreviewVisualTelemetry = {
   annotationCount: number
   highlightCount: number
   commentCount: number
+  underlineCount: number
+  arrowCount: number
+  drawPathCount: number
+  annotationPersistenceStatus: string | null
+  annotationRestoreCount: number
+  annotationPersistedCount: number
+  annotationStorageVersion: number | null
+  annotationStorageKeyHash: string | null
+  annotationExportAvailable: boolean
+  annotationExportResult: string | null
+  annotationExportKind: string | null
+  annotationExportPageScope: string | null
+  annotationDeleteCount: number
+  annotationEditCount: number
+  unsupportedAnnotationKind: string | null
   annotationActionSource: string | null
   coreviewAnnotationToolCount: number
   coreviewAnnotationFallbackCount: number
@@ -521,6 +536,21 @@ export type GeminiSessionTelemetry = {
     annotationCount: number
     highlightCount: number
     commentCount: number
+    underlineCount: number
+    arrowCount: number
+    drawPathCount: number
+    annotationPersistenceStatus: string | null
+    annotationRestoreCount: number
+    annotationPersistedCount: number
+    annotationStorageVersion: number | null
+    annotationStorageKeyHash: string | null
+    annotationExportAvailable: boolean
+    annotationExportResult: string | null
+    annotationExportKind: string | null
+    annotationExportPageScope: string | null
+    annotationDeleteCount: number
+    annotationEditCount: number
+    unsupportedAnnotationKind: string | null
     annotationActionSource: string | null
     coreviewAnnotationToolCount: number
     coreviewAnnotationFallbackCount: number
@@ -1199,6 +1229,21 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       annotationCount: 0,
       highlightCount: 0,
       commentCount: 0,
+      underlineCount: 0,
+      arrowCount: 0,
+      drawPathCount: 0,
+      annotationPersistenceStatus: null,
+      annotationRestoreCount: 0,
+      annotationPersistedCount: 0,
+      annotationStorageVersion: null,
+      annotationStorageKeyHash: null,
+      annotationExportAvailable: false,
+      annotationExportResult: null,
+      annotationExportKind: null,
+      annotationExportPageScope: null,
+      annotationDeleteCount: 0,
+      annotationEditCount: 0,
+      unsupportedAnnotationKind: null,
       annotationActionSource: null,
       coreviewAnnotationToolCount: 0,
       coreviewAnnotationFallbackCount: 0,
@@ -1333,6 +1378,10 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-annotation-state")
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
+  const annotationExportEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-annotation-export")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
   const annotationNavigationGuardEvents = activeEvents
     .filter((event) => event.name === "session-leave-guard-suppressed-for-annotation")
     .map((event) => event.payloadRecord)
@@ -1373,6 +1422,7 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   const latestAnnotationIntent = annotationIntentEvents.at(-1) ?? null
   const latestPdfTextExtraction = pdfTextExtractionEvents.at(-1) ?? latestSelectedStage
   const latestAnnotationState = annotationStateEvents.at(-1) ?? null
+  const latestAnnotationExport = annotationExportEvents.at(-1) ?? null
   const latestCoreviewTool = coreviewToolEvents.at(-1) ?? null
   const latestAnnotationTool = coreviewToolEvents
     .filter((event) => (numberFromKeys(event, ["coreviewAnnotationToolCount"]) ?? 0) > 0)
@@ -1506,6 +1556,38 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     ?? numberFromKeys(latestCoreviewTool, ["commentCount"])
     ?? numberFromKeys(latestAnnotationState, ["commentCount"])
     ?? 0
+  visual.underlineCount = numberFromKeys(latestAnnotationTool, ["underlineCount", "underline_count"])
+    ?? numberFromKeys(latestCoreviewTool, ["underlineCount", "underline_count"])
+    ?? numberFromKeys(latestAnnotationState, ["underlineCount", "underline_count"])
+    ?? 0
+  visual.arrowCount = numberFromKeys(latestAnnotationTool, ["arrowCount", "arrow_count"])
+    ?? numberFromKeys(latestCoreviewTool, ["arrowCount", "arrow_count"])
+    ?? numberFromKeys(latestAnnotationState, ["arrowCount", "arrow_count"])
+    ?? 0
+  visual.drawPathCount = numberFromKeys(latestAnnotationTool, ["drawPathCount", "draw_path_count"])
+    ?? numberFromKeys(latestCoreviewTool, ["drawPathCount", "draw_path_count"])
+    ?? numberFromKeys(latestAnnotationState, ["drawPathCount", "draw_path_count"])
+    ?? 0
+  visual.annotationPersistenceStatus = asString(latestAnnotationState?.annotationPersistenceStatus)
+  visual.annotationRestoreCount = numberFromKeys(latestAnnotationState, ["annotationRestoreCount"]) ?? 0
+  visual.annotationPersistedCount = numberFromKeys(latestAnnotationState, ["annotationPersistedCount"]) ?? 0
+  visual.annotationStorageVersion = numberFromKeys(latestAnnotationState, ["annotationStorageVersion"])
+  visual.annotationStorageKeyHash = asString(latestAnnotationState?.annotationStorageKeyHash)
+    ?? asString(latestAnnotationExport?.annotationStorageKeyHash)
+  visual.annotationExportAvailable = asBoolean(latestAnnotationExport?.annotationExportAvailable)
+    ?? asBoolean(latestAnnotationState?.annotationExportAvailable)
+    ?? false
+  visual.annotationExportResult = asString(latestAnnotationExport?.annotationExportResult)
+    ?? asString(latestAnnotationState?.annotationExportResult)
+  visual.annotationExportKind = asString(latestAnnotationExport?.annotationExportKind)
+    ?? asString(latestAnnotationState?.annotationExportKind)
+  visual.annotationExportPageScope = asString(latestAnnotationExport?.annotationExportPageScope)
+    ?? asString(latestAnnotationState?.annotationExportPageScope)
+  visual.annotationDeleteCount = numberFromKeys(latestAnnotationState, ["annotationDeleteCount"]) ?? 0
+  visual.annotationEditCount = numberFromKeys(latestAnnotationState, ["annotationEditCount"]) ?? 0
+  visual.unsupportedAnnotationKind = asString(latestAnnotationTool?.unsupportedAnnotationKind)
+    ?? asString(latestAnnotationTool?.unsupported_annotation_kind)
+    ?? asString(latestAnnotationState?.unsupportedAnnotationKind)
   visual.annotationActionSource = asString(latestAnnotationTool?.annotationActionSource)
   visual.coreviewAnnotationToolCount = coreviewToolEvents.reduce((total, event) => (
     total + (numberFromKeys(event, ["coreviewAnnotationToolCount"]) ?? 0)
@@ -2731,6 +2813,36 @@ function buildSessionTelemetry(params: {
           ?? coreviewTelemetry.visual.highlightCount,
         commentCount: hookTelemetry?.commentCount
           ?? coreviewTelemetry.visual.commentCount,
+        underlineCount: hookTelemetry?.underlineCount
+          ?? coreviewTelemetry.visual.underlineCount,
+        arrowCount: hookTelemetry?.arrowCount
+          ?? coreviewTelemetry.visual.arrowCount,
+        drawPathCount: hookTelemetry?.drawPathCount
+          ?? coreviewTelemetry.visual.drawPathCount,
+        annotationPersistenceStatus: hookTelemetry?.annotationPersistenceStatus
+          ?? coreviewTelemetry.visual.annotationPersistenceStatus,
+        annotationRestoreCount: hookTelemetry?.annotationRestoreCount
+          ?? coreviewTelemetry.visual.annotationRestoreCount,
+        annotationPersistedCount: hookTelemetry?.annotationPersistedCount
+          ?? coreviewTelemetry.visual.annotationPersistedCount,
+        annotationStorageVersion: hookTelemetry?.annotationStorageVersion
+          ?? coreviewTelemetry.visual.annotationStorageVersion,
+        annotationStorageKeyHash: hookTelemetry?.annotationStorageKeyHash
+          ?? coreviewTelemetry.visual.annotationStorageKeyHash,
+        annotationExportAvailable: hookTelemetry?.annotationExportAvailable
+          ?? coreviewTelemetry.visual.annotationExportAvailable,
+        annotationExportResult: hookTelemetry?.annotationExportResult
+          ?? coreviewTelemetry.visual.annotationExportResult,
+        annotationExportKind: hookTelemetry?.annotationExportKind
+          ?? coreviewTelemetry.visual.annotationExportKind,
+        annotationExportPageScope: hookTelemetry?.annotationExportPageScope
+          ?? coreviewTelemetry.visual.annotationExportPageScope,
+        annotationDeleteCount: hookTelemetry?.annotationDeleteCount
+          ?? coreviewTelemetry.visual.annotationDeleteCount,
+        annotationEditCount: hookTelemetry?.annotationEditCount
+          ?? coreviewTelemetry.visual.annotationEditCount,
+        unsupportedAnnotationKind: hookTelemetry?.unsupportedAnnotationKind
+          ?? coreviewTelemetry.visual.unsupportedAnnotationKind,
         annotationActionSource: hookTelemetry?.annotationActionSource
           ?? coreviewTelemetry.visual.annotationActionSource,
         coreviewAnnotationToolCount: Math.max(

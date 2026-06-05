@@ -21,7 +21,7 @@ describe("ArtifactToolbar", () => {
 
     expect(screen.getByText("Page 1 of 1")).toBeInTheDocument()
     expect(screen.getByLabelText("Open Launch brief in new tab")).toHaveAttribute("href", "/artifact.md")
-    expect(screen.getByLabelText("Download Launch brief")).toHaveAttribute("download", "artifact.md")
+    expect(screen.getByLabelText("Download original Launch brief")).toHaveAttribute("download", "artifact.md")
     expect(screen.queryByLabelText("Zoom out")).not.toBeInTheDocument()
     expect(screen.queryByLabelText("Zoom in")).not.toBeInTheDocument()
     expect(screen.queryByLabelText("Fit to view")).not.toBeInTheDocument()
@@ -74,10 +74,36 @@ describe("ArtifactToolbar", () => {
     expect(screen.getByLabelText("Select")).toHaveAttribute("aria-pressed", "false")
     expect(screen.getByLabelText("Pan")).toHaveAttribute("aria-pressed", "false")
     expect(screen.getByLabelText("Highlight")).toHaveAttribute("aria-pressed", "true")
+    expect(screen.getByLabelText("Underline")).toHaveAttribute("aria-pressed", "false")
+    expect(screen.getByLabelText("Arrow")).toHaveAttribute("aria-pressed", "false")
     expect(screen.getByLabelText("Comment")).toHaveAttribute("aria-pressed", "false")
 
-    await user.click(screen.getByLabelText("Comment"))
+    await user.click(screen.getByLabelText("Arrow"))
 
-    expect(onToolModeChange).toHaveBeenCalledWith("comment")
+    expect(onToolModeChange).toHaveBeenCalledWith("arrow")
+  })
+
+  it("truthfully separates original download from unavailable annotated export", () => {
+    const onDownloadOriginal = vi.fn()
+    const onExportAnnotated = vi.fn()
+
+    render(
+      <ArtifactToolbar
+        title="Launch PDF"
+        downloadHref="/artifact.pdf?download=true"
+        downloadName="artifact.pdf"
+        supportsAnnotations
+        annotationCount={2}
+        annotationExportAvailable={false}
+        onDownloadOriginal={onDownloadOriginal}
+        onExportAnnotated={onExportAnnotated}
+      />,
+    )
+
+    expect(screen.getByLabelText("Download original Launch PDF")).toHaveTextContent("Download original")
+    const exportButton = screen.getByLabelText("Export annotated copy Launch PDF")
+    expect(exportButton).toBeDisabled()
+    expect(exportButton).toHaveAttribute("title", "Annotated export is not available yet.")
+    expect(exportButton).toHaveAttribute("data-annotation-count", "2")
   })
 })

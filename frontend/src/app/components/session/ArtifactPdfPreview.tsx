@@ -17,6 +17,7 @@ import type {
   ArtifactAnnotationColor,
   ArtifactAnnotation,
   ArtifactToolMode,
+  NormalizedArtifactLine,
   NormalizedArtifactPoint,
   NormalizedArtifactRect,
 } from "../../types/artifact-annotations"
@@ -64,6 +65,8 @@ interface ArtifactPdfPreviewProps {
   selectedAnnotationId?: string | null
   onCreateHighlight?: (rect: NormalizedArtifactRect) => void
   onCreateComment?: (point: NormalizedArtifactPoint) => void
+  onCreateUnderline?: (rect: NormalizedArtifactRect) => void
+  onCreateArrow?: (line: NormalizedArtifactLine) => void
   onSelectAnnotation?: (id: string | null) => void
   onUpdateCommentText?: (id: string, text: string) => void
   focusRequest?: ArtifactPdfFocusRequest | null
@@ -127,6 +130,8 @@ export function ArtifactPdfPreview({
   selectedAnnotationId = null,
   onCreateHighlight,
   onCreateComment,
+  onCreateUnderline,
+  onCreateArrow,
   onSelectAnnotation,
   onUpdateCommentText,
   focusRequest = null,
@@ -144,7 +149,8 @@ export function ArtifactPdfPreview({
   const panDragStateRef = useRef<PdfPanDragState | null>(null)
   const panGestureCountRef = useRef(0)
   const [isPanDragging, setIsPanDragging] = useState(false)
-  const [highlightDraft, setHighlightDraft] = useState<{
+  const [annotationDraft, setAnnotationDraft] = useState<{
+    kind: "highlight" | "underline" | "arrow"
     start: NormalizedArtifactPoint
     current: NormalizedArtifactPoint
   } | null>(null)
@@ -427,14 +433,17 @@ export function ArtifactPdfPreview({
   const selectedAnnotation = useMemo(() => (
     pageAnnotations.find((annotation) => annotation.id === selectedAnnotationId) ?? null
   ), [pageAnnotations, selectedAnnotationId])
-  const highlightDraftRect = highlightDraft
-    ? normalizedRectFromPoints(highlightDraft.start, highlightDraft.current)
+  const annotationDraftRect = annotationDraft?.kind === "highlight"
+    ? normalizedRectFromPoints(annotationDraft.start, annotationDraft.current)
+    : annotationDraft?.kind === "underline"
+      ? normalizedUnderlineRectFromPoints(annotationDraft.start, annotationDraft.current)
+      : null
+  const annotationDraftLine = annotationDraft?.kind === "arrow"
+    ? { start: annotationDraft.start, end: annotationDraft.current }
     : null
   const pageAnnotationSignature = useMemo(() => (
     pageAnnotations
-      .map((annotation) => annotation.kind === "highlight"
-        ? `${annotation.id}:${annotation.kind}:${annotation.color ?? "yellow"}:${annotation.rect.x.toFixed(4)}:${annotation.rect.y.toFixed(4)}:${annotation.rect.width.toFixed(4)}:${annotation.rect.height.toFixed(4)}`
-        : `${annotation.id}:${annotation.kind}:${annotation.point.x.toFixed(4)}:${annotation.point.y.toFixed(4)}:${annotation.text.length}`)
+      .map(pdfAnnotationSignature)
       .join("|")
   ), [pageAnnotations])
 
@@ -679,7 +688,9 @@ export function ArtifactPdfPreview({
       return
     }
 
-    setHighlightDraft({ start: point, current: point })
+    if (toolMode === "highlight" || toolMode === "underline" || toolMode === "arrow") {
+      setAnnotationDraft({ kind: toolMode, start: point, current: point })
+    }
     try {
       event.currentTarget.setPointerCapture(event.pointerId)
     } catch {
@@ -687,39 +698,56 @@ export function ArtifactPdfPreview({
     }
   }, [onCreateComment, onSelectAnnotation, pageSize, showCanvas, toolMode])
   const handleAnnotationLayerPointerMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
-    if (toolMode !== "highlight" || !highlightDraft) {
+    if (toolMode !== annotationDraft?.kind) {
       return
     }
 
     event.preventDefault()
     const point = normalizedPointFromPointerEvent(event, pageSize)
-    setHighlightDraft((current) => (
+    setAnnotationDraft((current) => (
       current
         ? { ...current, current: point }
         : current
     ))
-  }, [highlightDraft, pageSize, toolMode])
-  const finishHighlightDraft = useCallback((event: PointerEvent<HTMLDivElement>) => {
-    if (toolMode !== "highlight" || !highlightDraft) {
+  }, [annotationDraft, pageSize, toolMode])
+  const finishAnnotationDraft = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (toolMode !== annotationDraft?.kind) {
       return
     }
 
     event.preventDefault()
     event.stopPropagation()
-    const rect = normalizedRectFromPoints(highlightDraft.start, normalizedPointFromPointerEvent(event, pageSize))
-    setHighlightDraft(null)
+    const endPoint = normalizedPointFromPointerEvent(event, pageSize)
+    const draft = { ...annotationDraft, current: endPoint }
+    setAnnotationDraft(null)
+
+    if (draft.kind === "arrow") {
+      const line = normalizedLineFromPoints(draft.start, draft.current)
+      if (line) {
+        onCreateArrow?.(line)
+      }
+      return
+    }
+
+    const rect = draft.kind === "underline"
+      ? normalizedUnderlineRectFromPoints(draft.start, draft.current)
+      : normalizedRectFromPoints(draft.start, draft.current)
 
     if (
       rect.width < MIN_NORMALIZED_HIGHLIGHT_SIZE
-      || rect.height < MIN_NORMALIZED_HIGHLIGHT_SIZE
+      || (draft.kind === "highlight" && rect.height < MIN_NORMALIZED_HIGHLIGHT_SIZE)
     ) {
       return
     }
 
-    onCreateHighlight?.(rect)
-  }, [highlightDraft, onCreateHighlight, pageSize, toolMode])
-  const cancelHighlightDraft = useCallback(() => {
-    setHighlightDraft(null)
+    if (draft.kind === "underline") {
+      onCreateUnderline?.(rect)
+    } else {
+      onCreateHighlight?.(rect)
+    }
+  }, [annotationDraft, onCreateArrow, onCreateHighlight, onCreateUnderline, pageSize, toolMode])
+  const cancelAnnotationDraft = useCallback(() => {
+    setAnnotationDraft(null)
   }, [])
   const handleAnnotationSelect = useCallback((id: string) => {
     onSelectAnnotation?.(id)
@@ -828,11 +856,12 @@ export function ArtifactPdfPreview({
                 toolMode={toolMode}
                 annotations={pageAnnotations}
                 selectedAnnotation={selectedAnnotation}
-                draftRect={highlightDraftRect}
+                draftRect={annotationDraftRect}
+                draftLine={annotationDraftLine}
                 onPointerDown={handleAnnotationLayerPointerDown}
                 onPointerMove={handleAnnotationLayerPointerMove}
-                onPointerUp={finishHighlightDraft}
-                onPointerCancel={cancelHighlightDraft}
+                onPointerUp={finishAnnotationDraft}
+                onPointerCancel={cancelAnnotationDraft}
                 onSelectAnnotation={handleAnnotationSelect}
                 onCommentTextChange={handleCommentTextChange}
               />
@@ -865,6 +894,7 @@ function ArtifactPdfAnnotationLayer({
   annotations,
   selectedAnnotation,
   draftRect,
+  draftLine,
   onPointerDown,
   onPointerMove,
   onPointerUp,
@@ -877,6 +907,7 @@ function ArtifactPdfAnnotationLayer({
   annotations: ArtifactAnnotation[]
   selectedAnnotation: ArtifactAnnotation | null
   draftRect: NormalizedArtifactRect | null
+  draftLine: NormalizedArtifactLine | null
   onPointerDown: (event: PointerEvent<HTMLDivElement>) => void
   onPointerMove: (event: PointerEvent<HTMLDivElement>) => void
   onPointerUp: (event: PointerEvent<HTMLDivElement>) => void
@@ -893,6 +924,8 @@ function ArtifactPdfAnnotationLayer({
         "absolute inset-0 z-10",
         toolMode === "pan" ? "pointer-events-none" : "pointer-events-auto",
         toolMode === "highlight" && "cursor-crosshair",
+        toolMode === "underline" && "cursor-crosshair",
+        toolMode === "arrow" && "cursor-crosshair",
         toolMode === "comment" && "cursor-copy",
         toolMode === "select" && "cursor-default",
       )}
@@ -902,33 +935,81 @@ function ArtifactPdfAnnotationLayer({
       onPointerCancel={onPointerCancel}
     >
       {annotations.map((annotation) => (
-        annotation.kind === "highlight" ? (
-          <HighlightAnnotation
-            key={annotation.id}
-            annotation={annotation}
-            selected={selectedAnnotation?.id === annotation.id}
-            onSelect={onSelectAnnotation}
-          />
-        ) : (
-          <CommentAnnotation
-            key={annotation.id}
-            annotation={annotation}
-            selected={selectedAnnotation?.id === annotation.id}
-            onSelect={onSelectAnnotation}
-            onTextChange={onCommentTextChange}
-          />
-        )
+        <PdfAnnotation
+          key={annotation.id}
+          annotation={annotation}
+          selected={selectedAnnotation?.id === annotation.id}
+          onSelect={onSelectAnnotation}
+          onCommentTextChange={onCommentTextChange}
+        />
       ))}
       {draftRect ? (
         <div
-          data-testid="artifact-highlight-draft"
+          data-testid={toolMode === "underline" ? "artifact-underline-draft" : "artifact-highlight-draft"}
           data-annotation-page-index={String(pageIndex)}
-          className="pointer-events-none absolute rounded-[3px] border border-[color:color-mix(in_srgb,var(--sophia-purple)_74%,#facc15)] bg-[color:color-mix(in_srgb,#facc15_32%,var(--sophia-purple)_18%)] shadow-[0_0_0_1px_color-mix(in_srgb,var(--sophia-purple)_22%,transparent)]"
+          className={cn(
+            "pointer-events-none absolute rounded-[3px] border shadow-[0_0_0_1px_color-mix(in_srgb,var(--sophia-purple)_22%,transparent)]",
+            toolMode === "underline"
+              ? "border-transparent bg-transparent"
+              : "border-[color:color-mix(in_srgb,var(--sophia-purple)_74%,#facc15)] bg-[color:color-mix(in_srgb,#facc15_32%,var(--sophia-purple)_18%)]",
+          )}
           style={rectToStyle(draftRect)}
-        />
+        >
+          {toolMode === "underline" ? (
+            <span className="absolute bottom-0 left-0 right-0 h-[3px] rounded-full bg-[color:var(--sophia-purple)] shadow-[0_0_10px_color-mix(in_srgb,var(--sophia-purple)_34%,transparent)]" />
+          ) : null}
+        </div>
+      ) : null}
+      {draftLine ? (
+        <div
+          data-testid="artifact-arrow-draft"
+          data-annotation-page-index={String(pageIndex)}
+          className="pointer-events-none absolute overflow-visible"
+          style={lineBoundsToStyle(draftLine)}
+        >
+          <ArrowAnnotationSvg
+            testId="artifact-arrow-draft-vector"
+            line={draftLine}
+            color="purple"
+            selected={false}
+            pageIndex={pageIndex}
+          />
+        </div>
       ) : null}
     </div>
   )
+}
+
+function PdfAnnotation({
+  annotation,
+  selected,
+  onSelect,
+  onCommentTextChange,
+}: {
+  annotation: ArtifactAnnotation
+  selected: boolean
+  onSelect: (id: string) => void
+  onCommentTextChange: (id: string, value: string) => void
+}) {
+  switch (annotation.kind) {
+    case "highlight":
+      return <HighlightAnnotation annotation={annotation} selected={selected} onSelect={onSelect} />
+    case "comment":
+      return (
+        <CommentAnnotation
+          annotation={annotation}
+          selected={selected}
+          onSelect={onSelect}
+          onTextChange={onCommentTextChange}
+        />
+      )
+    case "underline":
+      return <UnderlineAnnotation annotation={annotation} selected={selected} onSelect={onSelect} />
+    case "arrow":
+      return <ArrowAnnotation annotation={annotation} selected={selected} onSelect={onSelect} />
+    default:
+      return null
+  }
 }
 
 function HighlightAnnotation({
@@ -973,6 +1054,158 @@ function HighlightAnnotation({
         onSelect(annotation.id)
       }}
     />
+  )
+}
+
+function UnderlineAnnotation({
+  annotation,
+  selected,
+  onSelect,
+}: {
+  annotation: Extract<ArtifactAnnotation, { kind: "underline" }>
+  selected: boolean
+  onSelect: (id: string) => void
+}) {
+  return (
+    <button
+      type="button"
+      data-testid="artifact-underline-annotation"
+      data-annotation-id={annotation.id}
+      data-annotation-kind="underline"
+      data-annotation-page-index={String(annotation.pageIndex)}
+      data-annotation-x={formatNormalized(annotation.rect.x)}
+      data-annotation-y={formatNormalized(annotation.rect.y)}
+      data-annotation-width={formatNormalized(annotation.rect.width)}
+      data-annotation-height={formatNormalized(annotation.rect.height)}
+      data-annotation-color={annotation.color ?? "purple"}
+      data-annotation-source={annotation.source ?? "user"}
+      aria-label="Underline annotation"
+      aria-pressed={selected}
+      className={cn(
+        "cosmic-focus-ring absolute rounded-[3px] border bg-transparent transition",
+        selected
+          ? "border-[color:var(--sophia-purple)] shadow-[0_0_0_2px_color-mix(in_srgb,var(--sophia-purple)_30%,transparent)]"
+          : "border-transparent",
+      )}
+      style={rectToStyle(annotation.rect)}
+      onPointerDown={(event) => {
+        event.stopPropagation()
+      }}
+      onClick={(event) => {
+        event.stopPropagation()
+        onSelect(annotation.id)
+      }}
+    >
+      <span className="absolute bottom-0 left-0 right-0 h-[3px] rounded-full bg-[color:var(--sophia-purple)] shadow-[0_0_10px_color-mix(in_srgb,var(--sophia-purple)_30%,transparent)]" />
+    </button>
+  )
+}
+
+function ArrowAnnotation({
+  annotation,
+  selected,
+  onSelect,
+}: {
+  annotation: Extract<ArtifactAnnotation, { kind: "arrow" }>
+  selected: boolean
+  onSelect: (id: string) => void
+}) {
+  return (
+    <button
+      type="button"
+      data-testid="artifact-arrow-annotation"
+      data-annotation-id={annotation.id}
+      data-annotation-kind="arrow"
+      data-annotation-page-index={String(annotation.pageIndex)}
+      data-annotation-start-x={formatNormalized(annotation.line.start.x)}
+      data-annotation-start-y={formatNormalized(annotation.line.start.y)}
+      data-annotation-end-x={formatNormalized(annotation.line.end.x)}
+      data-annotation-end-y={formatNormalized(annotation.line.end.y)}
+      data-annotation-color={annotation.color ?? "purple"}
+      data-annotation-source={annotation.source ?? "user"}
+      aria-label="Arrow annotation"
+      aria-pressed={selected}
+      className={cn(
+        "cosmic-focus-ring absolute overflow-visible rounded-[3px] border bg-transparent p-0 transition",
+        selected
+          ? "border-[color:color-mix(in_srgb,var(--sophia-purple)_42%,transparent)] shadow-[0_0_0_2px_color-mix(in_srgb,var(--sophia-purple)_22%,transparent)]"
+          : "border-transparent",
+      )}
+      style={lineBoundsToStyle(annotation.line)}
+      onPointerDown={(event) => {
+        event.stopPropagation()
+      }}
+      onClick={(event) => {
+        event.stopPropagation()
+        onSelect(annotation.id)
+      }}
+    >
+      <ArrowAnnotationSvg
+        testId="artifact-arrow-vector"
+        line={annotation.line}
+        color={annotation.color ?? "purple"}
+        selected={selected}
+        pageIndex={annotation.pageIndex}
+      />
+    </button>
+  )
+}
+
+function ArrowAnnotationSvg({
+  testId,
+  line,
+  color,
+  selected,
+  pageIndex,
+}: {
+  testId: string
+  line: NormalizedArtifactLine
+  color: ArtifactAnnotationColor
+  selected: boolean
+  pageIndex: number
+}) {
+  const vector = lineVectorToSvg(line)
+  const stroke = color === "yellow"
+    ? "#a16207"
+    : color === "blue"
+      ? "#2563eb"
+      : color === "pink"
+        ? "#be185d"
+        : "#7c4cca"
+  const markerId = `${testId}-${pageIndex}-${Math.round(vector.x1)}-${Math.round(vector.y1)}-${Math.round(vector.x2)}-${Math.round(vector.y2)}`
+  return (
+    <svg
+      data-testid={testId}
+      data-annotation-page-index={String(pageIndex)}
+      viewBox="0 0 100 100"
+      preserveAspectRatio="none"
+      className={cn("pointer-events-none absolute inset-0 overflow-visible", selected && "drop-shadow-[0_0_8px_rgba(124,76,202,0.35)]")}
+      aria-hidden="true"
+    >
+      <defs>
+        <marker
+          id={markerId}
+          markerWidth="8"
+          markerHeight="8"
+          refX="6.8"
+          refY="4"
+          orient="auto"
+          markerUnits="strokeWidth"
+        >
+          <path d="M0,0 L8,4 L0,8 Z" fill={stroke} />
+        </marker>
+      </defs>
+      <line
+        x1={vector.x1}
+        y1={vector.y1}
+        x2={vector.x2}
+        y2={vector.y2}
+        stroke={stroke}
+        strokeWidth={selected ? 4.5 : 3.5}
+        strokeLinecap="round"
+        markerEnd={`url(#${markerId})`}
+      />
+    </svg>
   )
 }
 
@@ -1079,6 +1312,30 @@ function normalizedRectFromPoints(
   }
 }
 
+function normalizedUnderlineRectFromPoints(
+  start: NormalizedArtifactPoint,
+  end: NormalizedArtifactPoint,
+): NormalizedArtifactRect {
+  const rect = normalizedRectFromPoints(start, end)
+  const height = Math.max(rect.height, 0.012)
+  return {
+    x: rect.x,
+    y: Math.min(rect.y, 1 - height),
+    width: rect.width,
+    height,
+  }
+}
+
+function normalizedLineFromPoints(
+  start: NormalizedArtifactPoint,
+  end: NormalizedArtifactPoint,
+): NormalizedArtifactLine | null {
+  if (Math.hypot(end.x - start.x, end.y - start.y) < MIN_NORMALIZED_HIGHLIGHT_SIZE) {
+    return null
+  }
+  return { start, end }
+}
+
 function rectToStyle(rect: NormalizedArtifactRect) {
   return {
     left: `${rect.x * 100}%`,
@@ -1086,6 +1343,74 @@ function rectToStyle(rect: NormalizedArtifactRect) {
     width: `${rect.width * 100}%`,
     height: `${rect.height * 100}%`,
   }
+}
+
+function lineBoundsToStyle(line: NormalizedArtifactLine) {
+  const bounds = lineBounds(line)
+  return {
+    left: `${bounds.x * 100}%`,
+    top: `${bounds.y * 100}%`,
+    width: `${bounds.width * 100}%`,
+    height: `${bounds.height * 100}%`,
+  }
+}
+
+function lineVectorToSvg(line: NormalizedArtifactLine) {
+  const bounds = lineBounds(line)
+  return {
+    x1: ((line.start.x - bounds.x) / bounds.width) * 100,
+    y1: ((line.start.y - bounds.y) / bounds.height) * 100,
+    x2: ((line.end.x - bounds.x) / bounds.width) * 100,
+    y2: ((line.end.y - bounds.y) / bounds.height) * 100,
+  }
+}
+
+function lineBounds(line: NormalizedArtifactLine): NormalizedArtifactRect {
+  const minDimension = 0.012
+  const centerX = (line.start.x + line.end.x) / 2
+  const centerY = (line.start.y + line.end.y) / 2
+  const width = Math.max(Math.abs(line.end.x - line.start.x), minDimension)
+  const height = Math.max(Math.abs(line.end.y - line.start.y), minDimension)
+  const safeWidth = Math.min(width, 1)
+  const safeHeight = Math.min(height, 1)
+  return {
+    x: Math.min(Math.max(0, centerX - safeWidth / 2), 1 - safeWidth),
+    y: Math.min(Math.max(0, centerY - safeHeight / 2), 1 - safeHeight),
+    width: safeWidth,
+    height: safeHeight,
+  }
+}
+
+function pdfAnnotationSignature(annotation: ArtifactAnnotation): string {
+  if (annotation.kind === "highlight" || annotation.kind === "underline") {
+    return [
+      annotation.id,
+      annotation.kind,
+      annotation.color ?? "yellow",
+      annotation.rect.x.toFixed(4),
+      annotation.rect.y.toFixed(4),
+      annotation.rect.width.toFixed(4),
+      annotation.rect.height.toFixed(4),
+    ].join(":")
+  }
+  if (annotation.kind === "arrow") {
+    return [
+      annotation.id,
+      annotation.kind,
+      annotation.color ?? "purple",
+      annotation.line.start.x.toFixed(4),
+      annotation.line.start.y.toFixed(4),
+      annotation.line.end.x.toFixed(4),
+      annotation.line.end.y.toFixed(4),
+    ].join(":")
+  }
+  return [
+    annotation.id,
+    annotation.kind,
+    annotation.point.x.toFixed(4),
+    annotation.point.y.toFixed(4),
+    annotation.text.length,
+  ].join(":")
 }
 
 function pointToStyle(point: NormalizedArtifactPoint) {
@@ -1144,6 +1469,29 @@ function drawPdfCompositeCaptureCanvas(
       context.strokeStyle = palette.captureStroke
       context.lineWidth = Math.max(1, Math.min(dprX, dprY))
       safeStrokeRect(context, x, y, rectWidth, rectHeight)
+      continue
+    }
+    if (annotation.kind === "underline") {
+      const palette = annotationColorPalette(annotation.color ?? "purple")
+      const x = annotation.rect.x * width
+      const y = (annotation.rect.y + annotation.rect.height) * height
+      const rectWidth = annotation.rect.width * width
+      context.strokeStyle = palette.captureStroke
+      context.lineWidth = Math.max(3, Math.round(3 * Math.min(dprX, dprY)))
+      safeBeginPath(context)
+      safeMoveTo(context, x, y)
+      safeLineTo(context, x + rectWidth, y)
+      safeStroke(context)
+      continue
+    }
+    if (annotation.kind === "arrow") {
+      const palette = annotationColorPalette(annotation.color ?? "purple")
+      drawCanvasArrow(context, annotation.line, {
+        width,
+        height,
+        stroke: palette.captureStroke,
+        scale: Math.min(dprX, dprY),
+      })
       continue
     }
 
@@ -1260,6 +1608,18 @@ function safeBeginPath(context: CanvasRenderingContext2D) {
   }
 }
 
+function safeMoveTo(context: CanvasRenderingContext2D, x: number, y: number) {
+  if (typeof context.moveTo === "function") {
+    context.moveTo(x, y)
+  }
+}
+
+function safeLineTo(context: CanvasRenderingContext2D, x: number, y: number) {
+  if (typeof context.lineTo === "function") {
+    context.lineTo(x, y)
+  }
+}
+
 function safeArc(context: CanvasRenderingContext2D, x: number, y: number, radius: number, startAngle: number, endAngle: number) {
   if (typeof context.arc === "function") {
     context.arc(x, y, radius, startAngle, endAngle)
@@ -1282,6 +1642,39 @@ function safeFillText(context: CanvasRenderingContext2D, text: string, x: number
   if (typeof context.fillText === "function") {
     context.fillText(text, x, y)
   }
+}
+
+function drawCanvasArrow(
+  context: CanvasRenderingContext2D,
+  line: NormalizedArtifactLine,
+  input: {
+    width: number
+    height: number
+    stroke: string
+    scale: number
+  },
+) {
+  const startX = line.start.x * input.width
+  const startY = line.start.y * input.height
+  const endX = line.end.x * input.width
+  const endY = line.end.y * input.height
+  const angle = Math.atan2(endY - startY, endX - startX)
+  const headLength = Math.max(10, Math.round(13 * input.scale))
+  const headAngle = Math.PI / 7
+
+  context.strokeStyle = input.stroke
+  context.fillStyle = input.stroke
+  context.lineWidth = Math.max(3, Math.round(3 * input.scale))
+  safeBeginPath(context)
+  safeMoveTo(context, startX, startY)
+  safeLineTo(context, endX, endY)
+  safeStroke(context)
+  safeBeginPath(context)
+  safeMoveTo(context, endX, endY)
+  safeLineTo(context, endX - headLength * Math.cos(angle - headAngle), endY - headLength * Math.sin(angle - headAngle))
+  safeLineTo(context, endX - headLength * Math.cos(angle + headAngle), endY - headLength * Math.sin(angle + headAngle))
+  safeLineTo(context, endX, endY)
+  safeFill(context)
 }
 
 function clampScroll(value: number, max: number): number {

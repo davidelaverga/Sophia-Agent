@@ -38,7 +38,7 @@ describe("artifact review voice command parser", () => {
     })
   })
 
-  it("parses highlight and comment annotation intents", () => {
+  it("parses highlight, underline, arrow, and comment annotation intents", () => {
     expect(parseArtifactReviewVoiceCommand("highlight it yellow")).toEqual({
       kind: "add_annotation",
       annotationKind: "highlight",
@@ -75,6 +75,31 @@ describe("artifact review voice command parser", () => {
       annotationKind: "highlight",
       color: "yellow",
       utteranceKind: "annotation_highlight",
+    })
+    expect(parseArtifactReviewVoiceCommand("underline this")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "underline",
+      color: "purple",
+      utteranceKind: "annotation_underline",
+    })
+    expect(parseArtifactReviewVoiceCommand("underline the title")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "underline",
+      anchorType: "current_title",
+      color: "purple",
+      utteranceKind: "annotation_underline",
+    })
+    expect(parseArtifactReviewVoiceCommand("draw an arrow to this")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "arrow",
+      color: "purple",
+      utteranceKind: "annotation_arrow",
+    })
+    expect(parseArtifactReviewVoiceCommand("add an arrow pointing to the chart")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "arrow",
+      color: "purple",
+      utteranceKind: "annotation_arrow",
     })
     expect(parseArtifactReviewVoiceCommand("leave a comment: change the font")).toEqual({
       kind: "add_annotation",
@@ -175,6 +200,22 @@ describe("artifact review voice command parser", () => {
         utteranceKind: "annotation_comment",
       },
     ])
+
+    expect(parseArtifactReviewVoiceCommands("underline the title then draw an arrow to this")).toEqual([
+      {
+        kind: "add_annotation",
+        annotationKind: "underline",
+        anchorType: "current_title",
+        color: "purple",
+        utteranceKind: "annotation_underline",
+      },
+      {
+        kind: "add_annotation",
+        annotationKind: "arrow",
+        color: "purple",
+        utteranceKind: "annotation_arrow",
+      },
+    ])
   })
 
   it("does not infer unrelated transcript text as an artifact command", () => {
@@ -187,6 +228,8 @@ describe("artifact review voice command parser", () => {
     expect(isArtifactReviewAnnotationIntent("leave a note on the title")).toBe(true)
     expect(isArtifactReviewAnnotationIntent("leave feedback")).toBe(true)
     expect(isArtifactReviewAnnotationIntent("leave a pin")).toBe(true)
+    expect(isArtifactReviewAnnotationIntent("underline the title")).toBe(true)
+    expect(isArtifactReviewAnnotationIntent("draw an arrow to this")).toBe(true)
     expect(isArtifactReviewAnnotationIntent("leave the session")).toBe(false)
     expect(isArtifactReviewAnnotationIntent("go back")).toBe(false)
   })

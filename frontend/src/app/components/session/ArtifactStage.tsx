@@ -4,6 +4,13 @@ import { RefreshCw } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 
 import {
+  ARTIFACT_ANNOTATION_STORAGE_VERSION,
+  buildArtifactAnnotationWorkspaceIdentity,
+  persistArtifactAnnotations,
+  restoreArtifactAnnotations,
+  type ArtifactAnnotationPersistenceStatus,
+} from "../../lib/artifact-annotation-persistence"
+import {
   artifactRendererSupportsPagination,
   artifactRendererSupportsZoom,
   buildArtifactViewSignature,
@@ -43,6 +50,7 @@ import { cn } from "../../lib/utils"
 import type {
   ArtifactAnnotation,
   ArtifactToolMode,
+  NormalizedArtifactLine,
   NormalizedArtifactPoint,
   NormalizedArtifactRect,
 } from "../../types/artifact-annotations"
@@ -111,6 +119,9 @@ export interface ArtifactReviewVoiceCommandTarget {
     annotationCount: number
     highlightCount: number
     commentCount: number
+    underlineCount: number
+    arrowCount: number
+    drawPathCount: number
   }
   annotationOverlayCaptured: boolean | null
 }
@@ -174,9 +185,16 @@ export function ArtifactStage({
   const [toolMode, setToolMode] = useState<ArtifactToolMode>("select")
   const [annotations, setAnnotations] = useState<ArtifactAnnotation[]>([])
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null)
+  const [annotationPersistenceStatus, setAnnotationPersistenceStatus] = useState<ArtifactAnnotationPersistenceStatus>("empty")
+  const [annotationRestoreCount, setAnnotationRestoreCount] = useState(0)
+  const [annotationPersistedCount, setAnnotationPersistedCount] = useState(0)
+  const [annotationDeleteCount, setAnnotationDeleteCount] = useState(0)
+  const [annotationEditCount, setAnnotationEditCount] = useState(0)
   const [pdfTextLayout, setPdfTextLayout] = useState<CoreviewPdfTextLayout | null>(null)
   const [pdfFocusRequest, setPdfFocusRequest] = useState<ArtifactPdfFocusRequest | null>(null)
   const annotationsRef = useRef<ArtifactAnnotation[]>([])
+  const annotationStorageReadyRef = useRef(false)
+  const annotationLastPersistedSignatureRef = useRef<string>("")
   const annotationTelemetrySignatureRef = useRef<string | null>(null)
   const viewportPrimaryFile = primaryFile
     ? {
@@ -197,23 +215,67 @@ export function ArtifactStage({
     } : null
   ), [artifactId, artifactStableIdentity, normalSessionId, sessionId, threadId, voiceAgentSessionId])
   const rendererResetKey = `${primaryFile?.path ?? ""}|${rendererKind}`
+  const annotationWorkspaceIdentity = useMemo(() => buildArtifactAnnotationWorkspaceIdentity({
+    artifactStableIdentity,
+    threadId,
+    artifactId,
+    artifactPath: primaryFile?.path ?? null,
+    rendererKind,
+  }), [artifactId, artifactStableIdentity, primaryFile?.path, rendererKind, threadId])
+  const annotationStorageKey = annotationWorkspaceIdentity.storageKey
+  const annotationStorageKeyHash = annotationWorkspaceIdentity.storageKeyHash
+  const annotationStableArtifactIdentity = annotationWorkspaceIdentity.stableArtifactIdentity
 
   useEffect(() => {
+    annotationStorageReadyRef.current = false
+    const restored = rendererKind === "pdf"
+      ? restoreArtifactAnnotations(annotationStorageKey, annotationStableArtifactIdentity)
+      : {
+          annotations: [],
+          status: "empty" as const,
+          restoreCount: 0,
+          version: ARTIFACT_ANNOTATION_STORAGE_VERSION,
+        }
     setPageIndex(0)
     setPageCount(1)
     setZoom(1)
     setFitMode(rendererKind === "pdf" ? "page" : "custom")
     setToolMode("select")
-    annotationsRef.current = []
-    setAnnotations([])
+    annotationsRef.current = restored.annotations
+    setAnnotations(restored.annotations)
     setSelectedAnnotationId(null)
     setPdfTextLayout(null)
     setPdfFocusRequest(null)
-  }, [artifactId, rendererKind, rendererResetKey])
+    setAnnotationPersistenceStatus(restored.status)
+    setAnnotationRestoreCount(restored.restoreCount)
+    setAnnotationPersistedCount(restored.annotations.length)
+    setAnnotationDeleteCount(0)
+    setAnnotationEditCount(0)
+    annotationLastPersistedSignatureRef.current = artifactAnnotationPersistenceSignature(restored.annotations)
+    annotationStorageReadyRef.current = true
+  }, [annotationStableArtifactIdentity, annotationStorageKey, rendererKind, rendererResetKey])
 
   useEffect(() => {
     annotationsRef.current = annotations
   }, [annotations])
+
+  useEffect(() => {
+    if (!annotationStorageReadyRef.current || rendererKind !== "pdf") {
+      return
+    }
+
+    const signature = artifactAnnotationPersistenceSignature(annotations)
+    if (annotationLastPersistedSignatureRef.current === signature) {
+      return
+    }
+
+    const result = persistArtifactAnnotations(annotationStorageKey, annotations, {
+      stableArtifactIdentity: annotationStableArtifactIdentity,
+    })
+    annotationLastPersistedSignatureRef.current = signature
+    setAnnotationPersistenceStatus(result.status)
+    setAnnotationPersistedCount(result.persistedCount)
+  }, [annotationStableArtifactIdentity, annotationStorageKey, annotations, rendererKind])
 
   useEffect(() => {
     if (rendererKind !== "pdf" && toolMode !== "select") {
@@ -281,46 +343,108 @@ export function ArtifactStage({
     }
 
     const id = nextArtifactAnnotationId("highlight")
+    const now = Date.now()
     const nextAnnotations: ArtifactAnnotation[] = [
       ...annotationsRef.current,
       {
         id,
         kind: "highlight",
+        artifactStableIdentity: annotationStableArtifactIdentity,
         pageIndex,
         rect,
         color: "yellow",
         source: "user",
-        createdAt: Date.now(),
+        createdAt: now,
+        updatedAt: now,
+        version: ARTIFACT_ANNOTATION_STORAGE_VERSION,
       },
     ]
     annotationsRef.current = nextAnnotations
     setAnnotations(nextAnnotations)
     setSelectedAnnotationId(id)
     setToolMode("select")
-  }, [pageIndex, rendererKind])
+  }, [annotationStableArtifactIdentity, pageIndex, rendererKind])
   const handleCreateComment = useCallback((point: NormalizedArtifactPoint) => {
     if (rendererKind !== "pdf") {
       return
     }
 
     const id = nextArtifactAnnotationId("comment")
+    const now = Date.now()
     const nextAnnotations: ArtifactAnnotation[] = [
       ...annotationsRef.current,
       {
         id,
         kind: "comment",
+        artifactStableIdentity: annotationStableArtifactIdentity,
         pageIndex,
         point,
         text: "",
         source: "user",
-        createdAt: Date.now(),
+        createdAt: now,
+        updatedAt: now,
+        version: ARTIFACT_ANNOTATION_STORAGE_VERSION,
       },
     ]
     annotationsRef.current = nextAnnotations
     setAnnotations(nextAnnotations)
     setSelectedAnnotationId(id)
     setToolMode("select")
-  }, [pageIndex, rendererKind])
+  }, [annotationStableArtifactIdentity, pageIndex, rendererKind])
+  const handleCreateUnderline = useCallback((rect: NormalizedArtifactRect) => {
+    if (rendererKind !== "pdf") {
+      return
+    }
+
+    const id = nextArtifactAnnotationId("underline")
+    const now = Date.now()
+    const nextAnnotations: ArtifactAnnotation[] = [
+      ...annotationsRef.current,
+      {
+        id,
+        kind: "underline",
+        artifactStableIdentity: annotationStableArtifactIdentity,
+        pageIndex,
+        rect,
+        color: "purple",
+        source: "user",
+        createdAt: now,
+        updatedAt: now,
+        version: ARTIFACT_ANNOTATION_STORAGE_VERSION,
+      },
+    ]
+    annotationsRef.current = nextAnnotations
+    setAnnotations(nextAnnotations)
+    setSelectedAnnotationId(id)
+    setToolMode("select")
+  }, [annotationStableArtifactIdentity, pageIndex, rendererKind])
+  const handleCreateArrow = useCallback((line: NormalizedArtifactLine) => {
+    if (rendererKind !== "pdf") {
+      return
+    }
+
+    const id = nextArtifactAnnotationId("arrow")
+    const now = Date.now()
+    const nextAnnotations: ArtifactAnnotation[] = [
+      ...annotationsRef.current,
+      {
+        id,
+        kind: "arrow",
+        artifactStableIdentity: annotationStableArtifactIdentity,
+        pageIndex,
+        line,
+        color: "purple",
+        source: "user",
+        createdAt: now,
+        updatedAt: now,
+        version: ARTIFACT_ANNOTATION_STORAGE_VERSION,
+      },
+    ]
+    annotationsRef.current = nextAnnotations
+    setAnnotations(nextAnnotations)
+    setSelectedAnnotationId(id)
+    setToolMode("select")
+  }, [annotationStableArtifactIdentity, pageIndex, rendererKind])
   const handleSelectAnnotation = useCallback((id: string | null) => {
     setSelectedAnnotationId(id)
     if (id) {
@@ -328,29 +452,43 @@ export function ArtifactStage({
     }
   }, [])
   const handleUpdateCommentText = useCallback((id: string, text: string) => {
+    let changed = false
     const nextAnnotations = annotationsRef.current.map((annotation) => (
       annotation.id === id && annotation.kind === "comment"
-        ? { ...annotation, text: text.slice(0, 180) }
+        ? (() => {
+            const nextText = text.slice(0, 180)
+            if (nextText === annotation.text) {
+              return annotation
+            }
+            changed = true
+            return { ...annotation, text: nextText, updatedAt: Date.now(), version: ARTIFACT_ANNOTATION_STORAGE_VERSION }
+          })()
         : annotation
     ))
+    if (changed) {
+      setAnnotationEditCount((current) => current + 1)
+    }
     annotationsRef.current = nextAnnotations
     setAnnotations(nextAnnotations)
   }, [])
+  const handleDeleteSelectedAnnotation = useCallback(() => {
+    const selectedId = selectedAnnotationId
+    if (!selectedId) {
+      return false
+    }
+    const nextAnnotations = annotationsRef.current.filter((annotation) => annotation.id !== selectedId)
+    if (nextAnnotations.length === annotationsRef.current.length) {
+      setSelectedAnnotationId(null)
+      return false
+    }
+    annotationsRef.current = nextAnnotations
+    setAnnotations(nextAnnotations)
+    setSelectedAnnotationId(null)
+    setAnnotationDeleteCount((current) => current + 1)
+    return true
+  }, [selectedAnnotationId])
   const annotationCounts = useMemo(() => {
-    let highlightCount = 0
-    let commentCount = 0
-    for (const annotation of annotations) {
-      if (annotation.kind === "highlight") {
-        highlightCount += 1
-      } else {
-        commentCount += 1
-      }
-    }
-    return {
-      annotationCount: annotations.length,
-      highlightCount,
-      commentCount,
-    }
+    return countAnnotations(annotations)
   }, [annotations])
   const selectedAnnotationKind = useMemo(() => (
     annotations.find((annotation) => annotation.id === selectedAnnotationId)?.kind ?? null
@@ -546,7 +684,7 @@ export function ArtifactStage({
       pdfTextLayout,
       input.anchor,
       input.pageIndex,
-      selected?.kind === "highlight"
+      selected?.kind === "highlight" || selected?.kind === "underline"
         ? { rect: selected.rect }
         : selected?.kind === "comment"
           ? { point: selected.point }
@@ -570,7 +708,23 @@ export function ArtifactStage({
         ...countAnnotations(annotationsRef.current),
       }
     }
+    if (input.kind === "underline" && !input.rect) {
+      return {
+        ok: false,
+        annotationId: null,
+        blockedReason: "invalid_rect",
+        ...countAnnotations(annotationsRef.current),
+      }
+    }
     if (input.kind === "comment" && !input.point) {
+      return {
+        ok: false,
+        annotationId: null,
+        blockedReason: "anchor_not_found",
+        ...countAnnotations(annotationsRef.current),
+      }
+    }
+    if (input.kind === "arrow" && !input.line) {
       return {
         ok: false,
         annotationId: null,
@@ -580,25 +734,58 @@ export function ArtifactStage({
     }
 
     const id = nextArtifactAnnotationId(input.kind)
+    const now = Date.now()
     const annotation: ArtifactAnnotation = input.kind === "highlight"
       ? {
           id,
           kind: "highlight",
+          artifactStableIdentity: annotationStableArtifactIdentity,
           pageIndex: input.pageIndex,
           rect: input.rect,
           color: input.color,
           source: input.source,
-          createdAt: Date.now(),
+          createdAt: now,
+          updatedAt: now,
+          version: ARTIFACT_ANNOTATION_STORAGE_VERSION,
         }
-      : {
-          id,
-          kind: "comment",
-          pageIndex: input.pageIndex,
-          point: input.point,
-          text: input.text ?? "",
-          source: input.source,
-          createdAt: Date.now(),
-        }
+      : input.kind === "underline"
+        ? {
+            id,
+            kind: "underline",
+            artifactStableIdentity: annotationStableArtifactIdentity,
+            pageIndex: input.pageIndex,
+            rect: input.rect,
+            color: input.color ?? "purple",
+            source: input.source,
+            createdAt: now,
+            updatedAt: now,
+            version: ARTIFACT_ANNOTATION_STORAGE_VERSION,
+          }
+        : input.kind === "arrow"
+          ? {
+              id,
+              kind: "arrow",
+              artifactStableIdentity: annotationStableArtifactIdentity,
+              pageIndex: input.pageIndex,
+              line: input.line,
+              color: input.color ?? "purple",
+              source: input.source,
+              createdAt: now,
+              updatedAt: now,
+              version: ARTIFACT_ANNOTATION_STORAGE_VERSION,
+            }
+          : {
+              id,
+              kind: "comment",
+              artifactStableIdentity: annotationStableArtifactIdentity,
+              pageIndex: input.pageIndex,
+              point: input.point,
+              text: input.text ?? "",
+              source: input.source,
+              createdAt: now,
+              updatedAt: now,
+              version: ARTIFACT_ANNOTATION_STORAGE_VERSION,
+            }
     const nextAnnotations = [...annotationsRef.current, annotation]
     annotationsRef.current = nextAnnotations
     setAnnotations(nextAnnotations)
@@ -611,7 +798,7 @@ export function ArtifactStage({
       blockedReason: null,
       ...countAnnotations(nextAnnotations),
     }
-  }, [rendererKind])
+  }, [annotationStableArtifactIdentity, rendererKind])
   const focusCoreviewAnchor = useCallback((input: CoreviewFocusAnchorAdapterInput): CoreviewFocusAnchorAdapterResult => {
     if (rendererKind !== "pdf" || !input.anchor.rect) {
       return {
@@ -665,6 +852,13 @@ export function ArtifactStage({
       return
     }
 
+    if ((event.key === "Delete" || event.key === "Backspace") && selectedAnnotationId) {
+      if (handleDeleteSelectedAnnotation()) {
+        event.preventDefault()
+      }
+      return
+    }
+
     const command = artifactCommandFromKeyboardEvent(event)
     if (!command) {
       return
@@ -700,6 +894,7 @@ export function ArtifactStage({
     onRefreshReview,
     recordArtifactControlTelemetry,
     selectedAnnotationId,
+    handleDeleteSelectedAnnotation,
     toolMode,
   ])
   const artifactViewState = useMemo<ArtifactViewState>(() => ({
@@ -770,6 +965,14 @@ export function ArtifactStage({
       annotationCounts.annotationCount,
       annotationCounts.highlightCount,
       annotationCounts.commentCount,
+      annotationCounts.underlineCount,
+      annotationCounts.arrowCount,
+      annotationCounts.drawPathCount,
+      annotationPersistenceStatus,
+      annotationRestoreCount,
+      annotationPersistedCount,
+      annotationDeleteCount,
+      annotationEditCount,
       selectedAnnotationKind ?? "",
     ].join("|")
 
@@ -790,13 +993,32 @@ export function ArtifactStage({
         annotationPageIndex: pageIndex,
         annotationOverlayCaptured: annotationCounts.annotationCount > 0,
         selectedAnnotationKind,
+        annotationPersistenceStatus,
+        annotationRestoreCount,
+        annotationPersistedCount,
+        annotationStorageVersion: ARTIFACT_ANNOTATION_STORAGE_VERSION,
+        annotationStorageKeyHash,
+        annotationExportAvailable: false,
+        annotationExportResult: "unavailable",
+        annotationExportKind: "annotated",
+        annotationExportPageScope: "unavailable",
+        annotationDeleteCount,
+        annotationEditCount,
+        unsupportedAnnotationKind: null,
         ...annotationCounts,
         rawArtifactTextExcluded: true,
+        rawCommentTextExcluded: true,
         rawFrameExcluded: true,
       },
     })
   }, [
     annotationCounts,
+    annotationDeleteCount,
+    annotationEditCount,
+    annotationPersistedCount,
+    annotationPersistenceStatus,
+    annotationRestoreCount,
+    annotationStorageKeyHash,
     artifactId,
     pageIndex,
     primaryFile?.path,
@@ -804,6 +1026,28 @@ export function ArtifactStage({
     selectedAnnotationKind,
     toolMode,
   ])
+
+  const handleDownloadOriginal = useCallback(() => {
+    recordSophiaCaptureEvent({
+      category: "artifacts-runtime",
+      name: "artifact-annotation-export",
+      payload: {
+        artifactId: artifactId ?? null,
+        artifactPath: primaryFile?.path ?? null,
+        artifactRendererKind: rendererKind,
+        annotationExportAvailable: false,
+        annotationExportResult: "original_download_started",
+        annotationExportKind: "original",
+        annotationExportPageScope: "unavailable",
+        annotationStorageVersion: ARTIFACT_ANNOTATION_STORAGE_VERSION,
+        annotationStorageKeyHash,
+        ...annotationCounts,
+        rawArtifactTextExcluded: true,
+        rawCommentTextExcluded: true,
+        rawFrameExcluded: true,
+      },
+    })
+  }, [annotationCounts, annotationStorageKeyHash, artifactId, primaryFile?.path, rendererKind])
 
   const showReviewStatus = showReviewStatusOverride ?? Boolean(reviewEnabled || exactTextAvailable || visualCaptureStatus)
   const frameConfirmed = hasConfirmedStillFrame(reviewState, transportStatus)
@@ -867,6 +1111,9 @@ export function ArtifactStage({
         openHref={openHref}
         downloadHref={downloadHref}
         downloadName={primaryFile?.name}
+        annotationCount={annotationCounts.annotationCount}
+        annotationExportAvailable={false}
+        onDownloadOriginal={handleDownloadOriginal}
         className="relative z-10 shrink-0"
       />
 
@@ -915,6 +1162,8 @@ export function ArtifactStage({
         selectedAnnotationId={selectedAnnotationId}
         onCreateHighlight={handleCreateHighlight}
         onCreateComment={handleCreateComment}
+        onCreateUnderline={handleCreateUnderline}
+        onCreateArrow={handleCreateArrow}
         onSelectAnnotation={handleSelectAnnotation}
         onUpdateCommentText={handleUpdateCommentText}
         focusRequest={pdfFocusRequest}
@@ -980,21 +1229,76 @@ function countAnnotations(annotations: ArtifactAnnotation[]): {
   annotationCount: number
   highlightCount: number
   commentCount: number
+  underlineCount: number
+  arrowCount: number
+  drawPathCount: number
 } {
   let highlightCount = 0
   let commentCount = 0
+  let underlineCount = 0
+  let arrowCount = 0
   for (const annotation of annotations) {
     if (annotation.kind === "highlight") {
       highlightCount += 1
-    } else {
+    } else if (annotation.kind === "comment") {
       commentCount += 1
+    } else if (annotation.kind === "underline") {
+      underlineCount += 1
+    } else if (annotation.kind === "arrow") {
+      arrowCount += 1
     }
   }
   return {
     annotationCount: annotations.length,
     highlightCount,
     commentCount,
+    underlineCount,
+    arrowCount,
+    drawPathCount: 0,
   }
+}
+
+function artifactAnnotationPersistenceSignature(annotations: ArtifactAnnotation[]): string {
+  return annotations.map((annotation) => {
+    if (annotation.kind === "highlight" || annotation.kind === "underline") {
+      return [
+        annotation.id,
+        annotation.kind,
+        annotation.pageIndex,
+        annotation.color ?? "",
+        annotation.source ?? "",
+        annotation.rect.x.toFixed(4),
+        annotation.rect.y.toFixed(4),
+        annotation.rect.width.toFixed(4),
+        annotation.rect.height.toFixed(4),
+        annotation.updatedAt ?? annotation.createdAt,
+      ].join(":")
+    }
+    if (annotation.kind === "arrow") {
+      return [
+        annotation.id,
+        annotation.kind,
+        annotation.pageIndex,
+        annotation.color ?? "",
+        annotation.source ?? "",
+        annotation.line.start.x.toFixed(4),
+        annotation.line.start.y.toFixed(4),
+        annotation.line.end.x.toFixed(4),
+        annotation.line.end.y.toFixed(4),
+        annotation.updatedAt ?? annotation.createdAt,
+      ].join(":")
+    }
+    return [
+      annotation.id,
+      annotation.kind,
+      annotation.pageIndex,
+      annotation.source ?? "",
+      annotation.point.x.toFixed(4),
+      annotation.point.y.toFixed(4),
+      annotation.text.length,
+      annotation.updatedAt ?? annotation.createdAt,
+    ].join(":")
+  }).join("|")
 }
 
 function artifactCommandFromKeyboardEvent(

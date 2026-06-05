@@ -1,6 +1,6 @@
 "use client"
 
-import { ChevronLeft, ChevronRight, Download, ExternalLink, Hand, Highlighter, Maximize, MessageSquare, Minimize2, MousePointer2, RotateCcw, ZoomIn, ZoomOut } from "lucide-react"
+import { ArrowUpRight, ChevronLeft, ChevronRight, Download, ExternalLink, FileDown, Hand, Highlighter, Maximize, MessageSquare, Minimize2, MousePointer2, RotateCcw, Underline, ZoomIn, ZoomOut } from "lucide-react"
 import type { ReactNode } from "react"
 
 import { haptic } from "../../hooks/useHaptics"
@@ -30,6 +30,10 @@ interface ArtifactToolbarProps {
   openHref?: string | null
   downloadHref?: string | null
   downloadName?: string
+  annotationCount?: number
+  annotationExportAvailable?: boolean
+  onDownloadOriginal?: () => void
+  onExportAnnotated?: () => void
   className?: string
 }
 
@@ -55,6 +59,10 @@ export function ArtifactToolbar({
   openHref,
   downloadHref,
   downloadName,
+  annotationCount = 0,
+  annotationExportAvailable = false,
+  onDownloadOriginal,
+  onExportAnnotated,
   className,
 }: ArtifactToolbarProps) {
   const normalizedPageCount = Math.max(1, pageCount)
@@ -119,6 +127,22 @@ export function ArtifactToolbar({
               onSelect={onToolModeChange}
             >
               <Highlighter className="h-3.5 w-3.5" aria-hidden="true" />
+            </ToolModeButton>
+            <ToolModeButton
+              mode="underline"
+              label="Underline"
+              pressed={toolMode === "underline"}
+              onSelect={onToolModeChange}
+            >
+              <Underline className="h-3.5 w-3.5" aria-hidden="true" />
+            </ToolModeButton>
+            <ToolModeButton
+              mode="arrow"
+              label="Arrow"
+              pressed={toolMode === "arrow"}
+              onSelect={onToolModeChange}
+            >
+              <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
             </ToolModeButton>
             <ToolModeButton
               mode="comment"
@@ -223,13 +247,37 @@ export function ArtifactToolbar({
           <a
             href={downloadHref}
             download={downloadName}
-            aria-label={`Download ${title}`}
+            aria-label={`Download original ${title}`}
+            title="Download original"
             className="cosmic-focus-ring inline-flex h-8 items-center gap-1.5 rounded-md border border-[color:var(--cosmic-border)] bg-[color:color-mix(in_srgb,var(--sophia-purple)_10%,transparent)] px-2.5 text-[11px] font-medium text-[color:var(--sophia-purple)] transition hover:bg-[color:color-mix(in_srgb,var(--sophia-purple)_16%,transparent)]"
-            onClick={() => haptic("medium")}
+            onClick={() => {
+              haptic("medium")
+              onDownloadOriginal?.()
+            }}
           >
             <Download className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Download</span>
+            <span>Download original</span>
           </a>
+        ) : null}
+        {supportsAnnotations ? (
+          <button
+            type="button"
+            aria-label={`Export annotated copy ${title}`}
+            data-annotation-count={String(annotationCount)}
+            title="Annotated export is not available yet."
+            disabled={!annotationExportAvailable}
+            className="cosmic-focus-ring inline-flex h-8 items-center gap-1.5 rounded-md border border-[color:var(--cosmic-border-soft)] px-2.5 text-[11px] font-medium text-[color:var(--cosmic-text-muted)] transition hover:bg-[color:var(--cosmic-panel-soft)] disabled:cursor-not-allowed disabled:opacity-45"
+            onClick={() => {
+              if (!annotationExportAvailable) {
+                return
+              }
+              haptic("medium")
+              onExportAnnotated?.()
+            }}
+          >
+            <FileDown className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Export annotated copy</span>
+          </button>
         ) : null}
       </div>
     </div>

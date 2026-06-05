@@ -8,6 +8,7 @@ import { recordSophiaCaptureEvent } from "../../../app/lib/session-capture"
 import type {
   ArtifactAnnotation,
   ArtifactToolMode,
+  NormalizedArtifactLine,
   NormalizedArtifactPoint,
   NormalizedArtifactRect,
 } from "../../../app/types/artifact-annotations"
@@ -48,9 +49,12 @@ function mockCanvasApis() {
     fill: vi.fn(),
     fillRect: vi.fn(),
     fillText: vi.fn(),
+    lineTo: vi.fn(),
+    moveTo: vi.fn(),
     stroke: vi.fn(),
     strokeRect: vi.fn(),
     beginPath: vi.fn(),
+    closePath: vi.fn(),
     arc: vi.fn(),
     fillStyle: "",
     strokeStyle: "",
@@ -226,6 +230,24 @@ function renderAnnotationPreview({
           setAnnotations((current) => [
             ...current,
             { id, kind: "comment", pageIndex, point, text: "", createdAt: 1 },
+          ])
+          setSelectedAnnotationId(id)
+          setToolMode("select")
+        }}
+        onCreateUnderline={(rect: NormalizedArtifactRect) => {
+          const id = `underline-${annotations.length + 1}`
+          setAnnotations((current) => [
+            ...current,
+            { id, kind: "underline", pageIndex, rect, color: "purple", createdAt: 1 },
+          ])
+          setSelectedAnnotationId(id)
+          setToolMode("select")
+        }}
+        onCreateArrow={(line: NormalizedArtifactLine) => {
+          const id = `arrow-${annotations.length + 1}`
+          setAnnotations((current) => [
+            ...current,
+            { id, kind: "arrow", pageIndex, line, color: "purple", createdAt: 1 },
           ])
           setSelectedAnnotationId(id)
           setToolMode("select")
@@ -561,7 +583,57 @@ describe("ArtifactPdfPreview", () => {
     expect(layer).toHaveAttribute("data-artifact-tool-mode", "select")
   })
 
-  it("keeps highlight and comment overlays visible after a zoom rerender", async () => {
+  it("creates a visible page-scoped underline without creating a highlight or comment", async () => {
+    mockPdfDocument({ pageCount: 2 })
+    renderAnnotationPreview({ initialToolMode: "underline" })
+
+    expect(await screen.findByLabelText("PDF page 1")).toBeInTheDocument()
+    const layer = screen.getByTestId("artifact-pdf-annotation-layer")
+    mockAnnotationLayerBounds(layer)
+
+    fireEvent.pointerDown(layer, { button: 0, clientX: 90, clientY: 180, pointerId: 11 })
+    fireEvent.pointerMove(layer, { button: 0, clientX: 390, clientY: 210, pointerId: 11 })
+    expect(screen.getByTestId("artifact-underline-draft")).toBeInTheDocument()
+    fireEvent.pointerUp(layer, { button: 0, clientX: 390, clientY: 210, pointerId: 11 })
+
+    const underline = await screen.findByTestId("artifact-underline-annotation")
+    expect(underline).toHaveAttribute("data-annotation-page-index", "0")
+    expect(underline).toHaveAttribute("data-annotation-kind", "underline")
+    expect(underline).toHaveAttribute("data-annotation-x", "0.1500")
+    expect(underline).toHaveAttribute("data-annotation-width", "0.5000")
+    expect(underline).toHaveAttribute("aria-pressed", "true")
+    expect(screen.queryByTestId("artifact-highlight-annotation")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("artifact-comment-pin")).not.toBeInTheDocument()
+    expect(layer).toHaveAttribute("data-artifact-tool-mode", "select")
+  })
+
+  it("creates a visible page-scoped arrow without triggering pan or comments", async () => {
+    const onCreateComment = vi.fn()
+    mockPdfDocument({ pageCount: 2 })
+    renderAnnotationPreview({ initialToolMode: "arrow" })
+
+    expect(await screen.findByLabelText("PDF page 1")).toBeInTheDocument()
+    const layer = screen.getByTestId("artifact-pdf-annotation-layer")
+    mockAnnotationLayerBounds(layer)
+
+    fireEvent.pointerDown(layer, { button: 0, clientX: 120, clientY: 160, pointerId: 12 })
+    fireEvent.pointerMove(layer, { button: 0, clientX: 420, clientY: 360, pointerId: 12 })
+    expect(screen.getByTestId("artifact-arrow-draft-vector")).toBeInTheDocument()
+    fireEvent.pointerUp(layer, { button: 0, clientX: 420, clientY: 360, pointerId: 12 })
+
+    const arrow = await screen.findByTestId("artifact-arrow-annotation")
+    expect(arrow).toHaveAttribute("data-annotation-page-index", "0")
+    expect(arrow).toHaveAttribute("data-annotation-kind", "arrow")
+    expect(arrow).toHaveAttribute("data-annotation-start-x", "0.2000")
+    expect(arrow).toHaveAttribute("data-annotation-start-y", "0.2000")
+    expect(arrow).toHaveAttribute("data-annotation-end-x", "0.7000")
+    expect(arrow).toHaveAttribute("data-annotation-end-y", "0.4500")
+    expect(screen.getByTestId("artifact-pdf-pan-layer")).toHaveAttribute("data-pan-dragging", "false")
+    expect(onCreateComment).not.toHaveBeenCalled()
+    expect(layer).toHaveAttribute("data-artifact-tool-mode", "select")
+  })
+
+  it("keeps highlight, comment, underline, and arrow overlays visible after a zoom rerender", async () => {
     mockPdfDocument({ pageCount: 2 })
     const highlightAnnotation = {
       id: "highlight-1",
@@ -578,9 +650,25 @@ describe("ArtifactPdfPreview", () => {
       text: "change the font",
       createdAt: 1,
     } satisfies ArtifactAnnotation
+    const underlineAnnotation = {
+      id: "underline-1",
+      kind: "underline",
+      pageIndex: 0,
+      rect: { x: 0.18, y: 0.42, width: 0.32, height: 0.04 },
+      color: "purple",
+      createdAt: 1,
+    } satisfies ArtifactAnnotation
+    const arrowAnnotation = {
+      id: "arrow-1",
+      kind: "arrow",
+      pageIndex: 0,
+      line: { start: { x: 0.25, y: 0.55 }, end: { x: 0.55, y: 0.68 } },
+      color: "purple",
+      createdAt: 1,
+    } satisfies ArtifactAnnotation
 
     const { rerenderPreview } = renderPreview({
-      annotations: [highlightAnnotation, commentAnnotation],
+      annotations: [highlightAnnotation, commentAnnotation, underlineAnnotation, arrowAnnotation],
       selectedAnnotationId: "highlight-1",
     })
 
@@ -592,9 +680,16 @@ describe("ArtifactPdfPreview", () => {
       height: "18%",
     })
     expect(screen.getByTestId("artifact-comment-pin")).toBeInTheDocument()
+    expect(screen.getByTestId("artifact-underline-annotation")).toHaveStyle({
+      left: "18%",
+      top: "42%",
+      width: "32%",
+      height: "4%",
+    })
+    expect(screen.getByTestId("artifact-arrow-vector")).toBeInTheDocument()
 
     rerenderPreview({
-      annotations: [highlightAnnotation, commentAnnotation],
+      annotations: [highlightAnnotation, commentAnnotation, underlineAnnotation, arrowAnnotation],
       selectedAnnotationId: "highlight-1",
       zoom: 1.8,
     })
@@ -607,6 +702,13 @@ describe("ArtifactPdfPreview", () => {
       height: "18%",
     })
     expect(screen.getByTestId("artifact-comment-pin")).toBeInTheDocument()
+    expect(screen.getByTestId("artifact-underline-annotation")).toHaveStyle({
+      left: "18%",
+      top: "42%",
+      width: "32%",
+      height: "4%",
+    })
+    expect(screen.getByTestId("artifact-arrow-vector")).toBeInTheDocument()
   })
 
   it("creates a page-scoped comment pin with editable local text", async () => {
@@ -777,19 +879,37 @@ describe("ArtifactPdfPreview", () => {
         text: "Second page note",
         createdAt: 1,
       },
+      {
+        id: "underline-page-2",
+        kind: "underline",
+        pageIndex: 1,
+        rect: { x: 0.2, y: 0.65, width: 0.32, height: 0.04 },
+        createdAt: 1,
+      },
+      {
+        id: "arrow-page-1",
+        kind: "arrow",
+        pageIndex: 0,
+        line: { start: { x: 0.24, y: 0.28 }, end: { x: 0.42, y: 0.36 } },
+        createdAt: 1,
+      },
     ]
 
     const { rerenderPreview } = renderPreview({ annotations, pageIndex: 0 })
     expect(await screen.findByTestId("artifact-highlight-annotation")).toHaveAttribute("data-annotation-id", "highlight-page-1")
+    expect(screen.getByTestId("artifact-arrow-annotation")).toHaveAttribute("data-annotation-id", "arrow-page-1")
     expect(screen.queryByTestId("artifact-comment-pin")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("artifact-underline-annotation")).not.toBeInTheDocument()
 
     rerenderPreview({ annotations, pageIndex: 1 })
     await waitFor(() => expect(screen.getByLabelText("PDF page 2")).toHaveAttribute("data-artifact-page-index", "1"))
     expect(screen.queryByTestId("artifact-highlight-annotation")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("artifact-arrow-annotation")).not.toBeInTheDocument()
     expect(screen.getByTestId("artifact-comment-pin")).toBeInTheDocument()
+    expect(screen.getByTestId("artifact-underline-annotation")).toHaveAttribute("data-annotation-id", "underline-page-2")
   })
 
-  it("composites highlight and comment overlays into the still-frame canvas", async () => {
+  it("composites highlight, comment, underline, and arrow overlays into the still-frame canvas", async () => {
     const onRenderStatusChange = vi.fn()
     mockPdfDocument({ pageCount: 1 })
     const annotations: ArtifactAnnotation[] = [
@@ -811,6 +931,24 @@ describe("ArtifactPdfPreview", () => {
         source: "sophia",
         createdAt: 1,
       },
+      {
+        id: "underline-1",
+        kind: "underline",
+        pageIndex: 0,
+        rect: { x: 0.18, y: 0.28, width: 0.32, height: 0.04 },
+        color: "purple",
+        source: "sophia",
+        createdAt: 1,
+      },
+      {
+        id: "arrow-1",
+        kind: "arrow",
+        pageIndex: 0,
+        line: { start: { x: 0.22, y: 0.48 }, end: { x: 0.58, y: 0.62 } },
+        color: "purple",
+        source: "sophia",
+        createdAt: 1,
+      },
     ]
 
     renderPreview({ annotations, onRenderStatusChange })
@@ -825,6 +963,9 @@ describe("ArtifactPdfPreview", () => {
     expect(canvasContext.drawImage).toHaveBeenCalled()
     expect(canvasContext.fillRect).toHaveBeenCalled()
     expect(canvasContext.arc).toHaveBeenCalled()
+    expect(canvasContext.moveTo).toHaveBeenCalled()
+    expect(canvasContext.lineTo).toHaveBeenCalled()
+    expect(canvasContext.stroke).toHaveBeenCalled()
     expect(JSON.stringify(onRenderStatusChange.mock.calls)).not.toContain("change the font")
   })
 })

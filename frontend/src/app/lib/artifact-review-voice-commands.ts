@@ -13,11 +13,13 @@ export type ArtifactReviewVoiceCommandKind =
   | "focus_anchor"
   | "add_annotation"
 
-export type ArtifactReviewAnnotationKind = "highlight" | "comment"
+export type ArtifactReviewAnnotationKind = "highlight" | "comment" | "underline" | "arrow"
 export type ArtifactReviewAnnotationColor = "yellow" | "purple" | "blue" | "pink"
 export type ArtifactReviewAnnotationAnchorType = "current_title" | "current_selection"
 export type ArtifactReviewAnnotationUtteranceKind =
   | "annotation_highlight"
+  | "annotation_underline"
+  | "annotation_arrow"
   | "annotation_comment"
   | "annotation_pin"
   | "annotation_follow_up_comment"
@@ -280,8 +282,41 @@ function parseArtifactReviewVoiceCommandClause(
     commandsWithIndex.push({ index: refreshIndex, command: { kind: "refresh_view" } })
   }
 
+  const underlineIndex = firstMatchedIndex(normalized, [
+    /\bunderline(?:d)?\b/u,
+  ])
+  if (underlineIndex >= 0) {
+    commandsWithIndex.push({
+      index: underlineIndex,
+      command: {
+        kind: "add_annotation",
+        annotationKind: "underline",
+        anchorType: annotationAnchorTypeFromNormalized(normalized),
+        color: annotationColorFromNormalized(normalized) ?? "purple",
+        utteranceKind: "annotation_underline",
+      },
+    })
+  }
+
+  const arrowIndex = firstMatchedIndex(normalized, [
+    /\b(?:draw|add|place|put|make)\s+(?:an?\s+)?arrow\b/u,
+    /\barrow\s+(?:pointing|to|at|toward|towards)\b/u,
+  ])
+  if (arrowIndex >= 0) {
+    commandsWithIndex.push({
+      index: arrowIndex,
+      command: {
+        kind: "add_annotation",
+        annotationKind: "arrow",
+        anchorType: annotationAnchorTypeFromNormalized(normalized),
+        color: annotationColorFromNormalized(normalized) ?? "purple",
+        utteranceKind: "annotation_arrow",
+      },
+    })
+  }
+
   const highlightIndex = firstMatchedIndex(normalized, [
-    /\b(?:highlight(?:ed)?|mark(?:ed)?|underline(?:d)?|flag(?:ged)?|callout)\b/u,
+    /\b(?:highlight(?:ed)?|mark(?:ed)?|flag(?:ged)?|callout)\b/u,
   ])
   if (highlightIndex >= 0) {
     commandsWithIndex.push({

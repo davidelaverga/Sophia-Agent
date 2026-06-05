@@ -116,7 +116,7 @@ describe("VoiceArtifactStage", () => {
     expect(within(voiceStage).getByTestId("artifact-toolbar")).toBeInTheDocument()
     expect(within(voiceStage).queryByLabelText("Highlight")).not.toBeInTheDocument()
     expect(within(voiceStage).getByLabelText("Open Voice launch brief in new tab")).toBeInTheDocument()
-    expect(within(voiceStage).getByLabelText("Download Voice launch brief")).toBeInTheDocument()
+    expect(within(voiceStage).getByLabelText("Download original Voice launch brief")).toBeInTheDocument()
     expect(within(voiceStage).getByRole("button", { name: /stop looking/i })).toBeInTheDocument()
   })
 
@@ -147,7 +147,7 @@ describe("VoiceArtifactStage", () => {
     expect(scrollArea).not.toContainElement(toolbar)
     expect(within(voiceStage).getAllByText("Page 1 of 1")).toHaveLength(1)
     expect(within(voiceStage).getByLabelText("Open Voice launch brief in new tab")).toBeInTheDocument()
-    expect(within(voiceStage).getByLabelText("Download Voice launch brief")).toBeInTheDocument()
+    expect(within(voiceStage).getByLabelText("Download original Voice launch brief")).toBeInTheDocument()
     expect(voiceStage.textContent?.toLowerCase()).not.toMatch(
       /coreview|gemini|websocket|transport|liveframes|fixture|direct video|provider ack/,
     )

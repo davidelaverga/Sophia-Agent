@@ -16,6 +16,7 @@ import { cn } from "../../lib/utils"
 import type {
   ArtifactAnnotation,
   ArtifactToolMode,
+  NormalizedArtifactLine,
   NormalizedArtifactPoint,
   NormalizedArtifactRect,
 } from "../../types/artifact-annotations"
@@ -77,6 +78,8 @@ interface ArtifactCanvasViewportProps {
   selectedAnnotationId?: string | null
   onCreateHighlight?: (rect: NormalizedArtifactRect) => void
   onCreateComment?: (point: NormalizedArtifactPoint) => void
+  onCreateUnderline?: (rect: NormalizedArtifactRect) => void
+  onCreateArrow?: (line: NormalizedArtifactLine) => void
   onSelectAnnotation?: (id: string | null) => void
   onUpdateCommentText?: (id: string, text: string) => void
   focusRequest?: ArtifactPdfFocusRequest | null
@@ -115,6 +118,8 @@ export function ArtifactCanvasViewport({
   selectedAnnotationId = null,
   onCreateHighlight,
   onCreateComment,
+  onCreateUnderline,
+  onCreateArrow,
   onSelectAnnotation,
   onUpdateCommentText,
   focusRequest = null,
@@ -173,9 +178,7 @@ export function ArtifactCanvasViewport({
     fitMode,
     annotations
       .filter((annotation) => annotation.pageIndex === pageIndex)
-      .map((annotation) => annotation.kind === "highlight"
-        ? `${annotation.id}:${annotation.color ?? "yellow"}:${annotation.rect.x.toFixed(4)}:${annotation.rect.y.toFixed(4)}:${annotation.rect.width.toFixed(4)}:${annotation.rect.height.toFixed(4)}`
-        : `${annotation.id}:${annotation.point.x.toFixed(4)}:${annotation.point.y.toFixed(4)}:${annotation.text.length}`)
+      .map(pdfAnnotationSignature)
       .join("|"),
   ].join("::")
   const [pdfCaptureState, setPdfCaptureState] = useState<{
@@ -484,6 +487,8 @@ export function ArtifactCanvasViewport({
               selectedAnnotationId={selectedAnnotationId}
               onCreateHighlight={onCreateHighlight}
               onCreateComment={onCreateComment}
+              onCreateUnderline={onCreateUnderline}
+              onCreateArrow={onCreateArrow}
               onSelectAnnotation={onSelectAnnotation}
               onUpdateCommentText={onUpdateCommentText}
               focusRequest={focusRequest}
@@ -803,6 +808,38 @@ function pdfTextExtractionStatusesEqual(
     && left.truncated === right.truncated
     && left.safeReason === right.safeReason
     && left.text === right.text
+}
+
+function pdfAnnotationSignature(annotation: ArtifactAnnotation): string {
+  if (annotation.kind === "highlight" || annotation.kind === "underline") {
+    return [
+      annotation.id,
+      annotation.kind,
+      annotation.color ?? "yellow",
+      annotation.rect.x.toFixed(4),
+      annotation.rect.y.toFixed(4),
+      annotation.rect.width.toFixed(4),
+      annotation.rect.height.toFixed(4),
+    ].join(":")
+  }
+  if (annotation.kind === "arrow") {
+    return [
+      annotation.id,
+      annotation.kind,
+      annotation.color ?? "purple",
+      annotation.line.start.x.toFixed(4),
+      annotation.line.start.y.toFixed(4),
+      annotation.line.end.x.toFixed(4),
+      annotation.line.end.y.toFixed(4),
+    ].join(":")
+  }
+  return [
+    annotation.id,
+    annotation.kind,
+    annotation.point.x.toFixed(4),
+    annotation.point.y.toFixed(4),
+    annotation.text.length,
+  ].join(":")
 }
 
 function MarkdownDocumentPage({

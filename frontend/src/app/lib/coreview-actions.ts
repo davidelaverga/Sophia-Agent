@@ -47,12 +47,13 @@ export type CoreviewToolBlockedReason =
   | "review_not_active"
   | "tool_unavailable"
   | "invalid_tool_args"
+  | "unsupported_annotation_kind"
   | "anchor_not_found"
   | "invalid_rect"
   | "annotation_commit_failed"
   | "annotation_target_unavailable"
 
-export type CoreviewAnnotationKind = "highlight" | "comment"
+export type CoreviewAnnotationKind = "highlight" | "comment" | "underline" | "arrow"
 export type CoreviewAnnotationColor = "yellow" | "purple" | "blue" | "pink"
 export type CoreviewAnnotationCommitResult =
   | "not_attempted"
@@ -71,6 +72,11 @@ export interface CoreviewNormalizedRect {
 export interface CoreviewNormalizedPoint {
   x: number
   y: number
+}
+
+export interface CoreviewNormalizedLine {
+  start: CoreviewNormalizedPoint
+  end: CoreviewNormalizedPoint
 }
 
 export type CoreviewAnnotationAnchor =
@@ -99,7 +105,7 @@ export interface CoreviewGetCurrentViewInput {
 }
 
 export interface CoreviewAddAnnotationInput {
-  kind: CoreviewAnnotationKind
+  kind: CoreviewAnnotationKind | string
   artifactId?: string
   pageIndex?: number
   pageNumber?: number
@@ -153,6 +159,9 @@ export interface CoreviewCurrentView {
   annotationCount: number
   highlightCount: number
   commentCount: number
+  underlineCount?: number
+  arrowCount?: number
+  drawPathCount?: number
   rebindStatus?: CoreviewArtifactRebindStatus
 }
 
@@ -208,6 +217,7 @@ export interface CoreviewAddAnnotationAdapterInput {
   anchor: CoreviewResolvedAnnotationAnchor
   rect: CoreviewNormalizedRect | null
   point: CoreviewNormalizedPoint | null
+  line: CoreviewNormalizedLine | null
   color: CoreviewAnnotationColor
   text: string | null
   source: "sophia" | "user"
@@ -220,6 +230,9 @@ export interface CoreviewAddAnnotationAdapterResult {
   annotationCount: number
   highlightCount: number
   commentCount: number
+  underlineCount?: number
+  arrowCount?: number
+  drawPathCount?: number
 }
 
 export interface CoreviewFocusAnchorAdapterInput {
@@ -289,6 +302,10 @@ export interface CoreviewActionResult {
   annotation_count?: number | null
   highlight_count?: number | null
   comment_count?: number | null
+  underline_count?: number | null
+  arrow_count?: number | null
+  draw_path_count?: number | null
+  unsupported_annotation_kind?: string | null
   annotation_action_source?: "sophia" | "user" | null
   annotation_commit_attempted?: boolean
   annotation_commit_result?: CoreviewAnnotationCommitResult | null
@@ -585,10 +602,11 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
         viewReadyWaitMs: null,
         viewSignatureBefore: initialBefore.viewSignature,
         viewSignatureAfter: before.viewSignature,
-        annotationKind: input.kind,
+        annotationKind: normalizeAnnotationKindValue(input.kind),
         annotationAnchorType: input.anchor?.type ?? null,
         annotationColor: input.color ?? null,
         annotationActionSource: input.source,
+        unsupportedAnnotationKind: unsupportedAnnotationKindFromValue(input.kind),
         ...resolved.rebind,
       })
     }
@@ -606,10 +624,11 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
         viewReadyWaitMs: null,
         viewSignatureBefore: initialBefore.viewSignature,
         viewSignatureAfter: before.viewSignature,
-        annotationKind: input.kind,
+        annotationKind: normalizeAnnotationKindValue(input.kind),
         annotationAnchorType: input.anchor?.type ?? null,
         annotationColor: input.color ?? null,
         annotationActionSource: input.source,
+        unsupportedAnnotationKind: unsupportedAnnotationKindFromValue(input.kind),
         ...resolved.rebind,
       })
     }
@@ -629,10 +648,17 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
         viewReadyWaitMs: null,
         viewSignatureBefore: initialBefore.viewSignature,
         viewSignatureAfter: before.viewSignature,
-        annotationKind: input.kind,
+        annotationKind: normalizeAnnotationKindValue(input.kind),
+        unsupportedAnnotationKind: normalized.unsupportedAnnotationKind ?? null,
         annotationAnchorType: input.anchor?.type ?? null,
         annotationColor: input.color ?? null,
         annotationActionSource: input.source,
+        annotationCount: before.annotationCount,
+        highlightCount: before.highlightCount,
+        commentCount: before.commentCount,
+        underlineCount: before.underlineCount ?? 0,
+        arrowCount: before.arrowCount ?? 0,
+        drawPathCount: before.drawPathCount ?? 0,
         ...resolved.rebind,
       })
     }
@@ -687,19 +713,20 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
     }
 
     const annotationCountBefore = before.annotationCount
-    const kindCountBefore = normalized.kind === "comment" ? before.commentCount : before.highlightCount
+    const kindCountBefore = annotationKindCount(before, normalized.kind)
     const added = adapter.addAnnotation({
       kind: normalized.kind,
       pageIndex: normalized.pageIndex,
       anchor: resolvedAnchor.anchor,
       rect: annotationTarget.rect,
       point: annotationTarget.point,
+      line: annotationTarget.line,
       color: normalized.color,
       text: normalized.text,
       source: normalized.source,
     })
     const annotationCountAfter = added.annotationCount
-    const kindCountAfter = normalized.kind === "comment" ? added.commentCount : added.highlightCount
+    const kindCountAfter = annotationKindCount(added, normalized.kind)
     const commitVerified = Boolean(
       added.ok
       && added.annotationId
@@ -728,6 +755,9 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
         annotationCount: added.annotationCount,
         highlightCount: added.highlightCount,
         commentCount: added.commentCount,
+        underlineCount: added.underlineCount ?? 0,
+        arrowCount: added.arrowCount ?? 0,
+        drawPathCount: added.drawPathCount ?? 0,
         annotationCommitAttempted: true,
         annotationCommitResult: blockedReason,
         annotationCommitCountBefore: annotationCountBefore,
@@ -807,6 +837,9 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       annotationCount: added.annotationCount,
       highlightCount: added.highlightCount,
       commentCount: added.commentCount,
+      underlineCount: added.underlineCount ?? 0,
+      arrowCount: added.arrowCount ?? 0,
+      drawPathCount: added.drawPathCount ?? 0,
       annotationCommitAttempted: true,
       annotationCommitResult: viewReadyTimedOut ? "partial_success" : "success",
       annotationCommitCountBefore: annotationCountBefore,
@@ -1172,18 +1205,18 @@ export function coreviewGeminiFunctionDeclarations(): Record<string, unknown>[] 
     },
     {
       name: COREVIEW_ADD_ANNOTATION_TOOL_NAME,
-      description: "Required for annotation intents during Review with Sophia. For any user request containing highlight, mark, underline, annotate, note, comment, pin, flag, or callout, call this tool. Do not use coreview_refresh_view as a substitute. Do not say an annotation was added unless this tool returned ok=true. Examples: \"Highlight it yellow\" -> kind=highlight, anchor_type=current_title or current_selection, color=yellow. \"Leave a comment: change the font\" -> kind=comment, anchor_type=current_title, comment_text=\"change the font\". \"Highlight the title yellow and comment change the font\" -> call this tool twice, once for highlight and once for comment.",
+      description: "Required for annotation intents during Review with Sophia. For any user request containing highlight, mark, underline, arrow, annotate, note, comment, pin, flag, or callout, call this tool. Do not use coreview_refresh_view as a substitute. Do not say an annotation was added unless this tool returned ok=true. Examples: \"Highlight it yellow\" -> kind=highlight, anchor_type=current_title or current_selection, color=yellow. \"Underline the title\" -> kind=underline, anchor_type=current_title. \"Add an arrow pointing to this\" -> kind=arrow, anchor_type=current_selection or current_title. \"Leave a comment: change the font\" -> kind=comment, anchor_type=current_title, comment_text=\"change the font\". \"Highlight the title yellow and comment change the font\" -> call this tool twice, once for highlight and once for comment.",
       parameters: {
         type: "OBJECT",
         properties: {
-          kind: { type: "STRING", enum: ["highlight", "comment"], description: "Annotation kind to add. Use highlight for highlight/mark/underline/flag/callout requests; use comment for comment/note/pin text requests." },
+          kind: { type: "STRING", enum: ["highlight", "comment", "underline", "arrow"], description: "Annotation kind to add. Use highlight for highlight/mark/flag/callout requests; underline for underline requests; arrow for arrow/pointer requests; comment for comment/note/pin text requests." },
           anchor_type: { type: "STRING", enum: ["current_title", "current_selection", "text_quote", "rect", "point"], description: "What to attach the annotation to. For \"it\" after focusing or discussing the title, prefer current_title. For selected visible text, use current_selection. Use text_quote only when the user names exact text." },
           artifact_id: { type: "STRING", description: "Optional active artifact id. Omit when using the currently selected artifact." },
           page_number: { type: "NUMBER", description: "Optional one-based user-facing page number." },
           page_index: { type: "NUMBER", description: "Optional zero-based page index." },
           text_quote: { type: "STRING", description: "Text to find when anchor_type is text_quote." },
           occurrence: { type: "NUMBER", description: "One-based occurrence for text_quote; defaults to 1." },
-          color: { type: "STRING", enum: ["yellow", "purple", "blue", "pink"], description: "Highlight color. Defaults to yellow; \"Highlight it yellow\" must pass color=yellow." },
+          color: { type: "STRING", enum: ["yellow", "purple", "blue", "pink"], description: "Annotation color. Defaults to yellow for highlights/comments and purple for underlines/arrows; \"Highlight it yellow\" must pass color=yellow." },
           comment_text: { type: "STRING", description: "Comment text for comment annotations. Required for user requests like \"Leave a comment: change the font\". Do not include raw comment text in telemetry." },
           note: { type: "STRING", description: "Alias for comment_text when the user says note." },
           rect: {
@@ -1471,6 +1504,10 @@ function buildCoreviewResult(params: {
   annotationCount?: number | null
   highlightCount?: number | null
   commentCount?: number | null
+  underlineCount?: number | null
+  arrowCount?: number | null
+  drawPathCount?: number | null
+  unsupportedAnnotationKind?: string | null
   annotationCommitAttempted?: boolean
   annotationCommitResult?: CoreviewAnnotationCommitResult | null
   annotationCommitCountBefore?: number | null
@@ -1530,6 +1567,10 @@ function buildCoreviewResult(params: {
     annotation_count: params.annotationCount ?? null,
     highlight_count: params.highlightCount ?? null,
     comment_count: params.commentCount ?? null,
+    underline_count: params.underlineCount ?? null,
+    arrow_count: params.arrowCount ?? null,
+    draw_path_count: params.drawPathCount ?? null,
+    unsupported_annotation_kind: params.unsupportedAnnotationKind ?? null,
     annotation_action_source: params.annotationActionSource ?? null,
     annotation_commit_attempted: params.annotationCommitAttempted ?? false,
     annotation_commit_result: params.annotationCommitResult ?? null,
@@ -1560,6 +1601,24 @@ function normalizeSetViewRefreshResult(result: CoreviewToolRefreshResult): Corev
     return "unavailable"
   }
   return "failed"
+}
+
+function annotationKindCount(
+  counts: Pick<CoreviewCurrentView, "highlightCount" | "commentCount" | "underlineCount" | "arrowCount" | "drawPathCount">,
+  kind: CoreviewAnnotationKind,
+): number {
+  switch (kind) {
+    case "highlight":
+      return counts.highlightCount
+    case "comment":
+      return counts.commentCount
+    case "underline":
+      return counts.underlineCount ?? 0
+    case "arrow":
+      return counts.arrowCount ?? 0
+    default:
+      return 0
+  }
 }
 
 function pageSummary(current: CoreviewCurrentView): string {
@@ -1598,6 +1657,8 @@ function blockedSummary(reason: CoreviewToolBlockedReason): string {
       return "The Coreview tool bridge is unavailable."
     case "invalid_tool_args":
       return "The Coreview tool arguments were invalid."
+    case "unsupported_annotation_kind":
+      return "That annotation type is not available yet."
     case "anchor_not_found":
       return "Sophia could not find that anchor in the current artifact view."
     case "invalid_rect":
@@ -1678,10 +1739,15 @@ function normalizeAddAnnotationInput(
       text: string | null
       source: "sophia" | "user"
     }
-  | { ok: false; blockedReason: CoreviewToolBlockedReason }
+  | { ok: false; blockedReason: CoreviewToolBlockedReason; unsupportedAnnotationKind?: string | null }
 ) {
-  if (input.kind !== "highlight" && input.kind !== "comment") {
-    return { ok: false, blockedReason: "invalid_tool_args" }
+  const kind = normalizeAnnotationKindValue(input.kind)
+  if (!kind) {
+    return {
+      ok: false,
+      blockedReason: "unsupported_annotation_kind",
+      unsupportedAnnotationKind: typeof input.kind === "string" ? input.kind.slice(0, 40) : null,
+    }
   }
   const pageIndex = normalizePageIndex(input, current)
   if (pageIndex === null) {
@@ -1695,19 +1761,23 @@ function normalizeAddAnnotationInput(
   if (!normalizedAnchor) {
     return { ok: false, blockedReason: anchor.type === "rect" ? "invalid_rect" : "invalid_tool_args" }
   }
-  if (input.kind === "highlight" && normalizedAnchor.type === "point") {
+  if ((kind === "highlight" || kind === "underline") && normalizedAnchor.type === "point") {
     return { ok: false, blockedReason: "invalid_rect" }
   }
 
   return {
     ok: true,
-    kind: input.kind,
+    kind,
     pageIndex,
     anchor: normalizedAnchor,
-    color: input.color ?? "yellow",
+    color: input.color ?? defaultAnnotationColorForKind(kind),
     text: normalizeAnnotationText(input.text ?? input.note),
     source: input.source === "user" ? "user" : "sophia",
   }
+}
+
+function defaultAnnotationColorForKind(kind: CoreviewAnnotationKind): CoreviewAnnotationColor {
+  return kind === "underline" || kind === "arrow" ? "purple" : "yellow"
 }
 
 function normalizeFocusAnchorInput(
@@ -1755,14 +1825,26 @@ function annotationTargetFromResolvedAnchor(
   kind: CoreviewAnnotationKind,
   anchor: CoreviewResolvedAnnotationAnchor,
 ): (
-  | { ok: true; rect: CoreviewNormalizedRect | null; point: CoreviewNormalizedPoint | null }
+  | { ok: true; rect: CoreviewNormalizedRect | null; point: CoreviewNormalizedPoint | null; line: CoreviewNormalizedLine | null }
   | { ok: false; blockedReason: CoreviewToolBlockedReason }
 ) {
-  if (kind === "highlight") {
+  if (kind === "highlight" || kind === "underline") {
     const rect = anchor.rect ? normalizeRect(anchor.rect) : null
     return rect
-      ? { ok: true, rect, point: null }
+      ? { ok: true, rect, point: null, line: null }
       : { ok: false, blockedReason: "invalid_rect" }
+  }
+
+  if (kind === "arrow") {
+    const point = anchor.point
+      ? normalizePoint(anchor.point)
+      : anchor.rect
+        ? pointNearRect(anchor.rect)
+        : null
+    const line = point ? arrowLineToPoint(point) : null
+    return line
+      ? { ok: true, rect: null, point: null, line }
+      : { ok: false, blockedReason: "anchor_not_found" }
   }
 
   const point = anchor.point
@@ -1771,7 +1853,7 @@ function annotationTargetFromResolvedAnchor(
       ? pointNearRect(anchor.rect)
       : null
   return point
-    ? { ok: true, rect: null, point }
+    ? { ok: true, rect: null, point, line: null }
     : { ok: false, blockedReason: "anchor_not_found" }
 }
 
@@ -1788,9 +1870,21 @@ function normalizePageIndex(
   return pageIndex >= 0 && pageIndex < Math.max(1, current.pageCount) ? pageIndex : null
 }
 
-function annotationKindFromArgs(args: Record<string, unknown>): CoreviewAnnotationKind | null {
+function annotationKindFromArgs(args: Record<string, unknown>): string | null {
   const value = stringFromAnyKey(args, "kind")
-  return value === "highlight" || value === "comment" ? value : null
+  return value ? value.toLowerCase().slice(0, 40) : null
+}
+
+function normalizeAnnotationKindValue(value: unknown): CoreviewAnnotationKind | null {
+  return value === "highlight" || value === "comment" || value === "underline" || value === "arrow"
+    ? value
+    : null
+}
+
+function unsupportedAnnotationKindFromValue(value: unknown): string | null {
+  return normalizeAnnotationKindValue(value) ? null : typeof value === "string" && value.trim()
+    ? value.trim().toLowerCase().slice(0, 40)
+    : null
 }
 
 function annotationColorFromArgs(args: Record<string, unknown>): CoreviewAnnotationColor | undefined {
@@ -1903,6 +1997,21 @@ function pointNearRect(rect: CoreviewNormalizedRect): CoreviewNormalizedPoint | 
   }
 }
 
+function arrowLineToPoint(point: CoreviewNormalizedPoint): CoreviewNormalizedLine | null {
+  const end = normalizePoint(point)
+  if (!end) {
+    return null
+  }
+  const start = {
+    x: clampNormalized(end.x - 0.18),
+    y: clampNormalized(end.y + 0.12),
+  }
+  if (Math.hypot(end.x - start.x, end.y - start.y) <= 0.01) {
+    return null
+  }
+  return { start, end }
+}
+
 function normalizeAnnotationText(value: string | null | undefined): string | null {
   if (typeof value !== "string") {
     return null
@@ -1977,6 +2086,9 @@ function emptyCurrentView(): CoreviewCurrentView {
     annotationCount: 0,
     highlightCount: 0,
     commentCount: 0,
+    underlineCount: 0,
+    arrowCount: 0,
+    drawPathCount: 0,
     rebindStatus: "not_attempted",
   }
 }
@@ -2029,6 +2141,12 @@ function annotationSummary(
 ): string {
   if (kind === "highlight") {
     return `Added a ${color} highlight to ${anchorLabel(anchorType)} on page ${pageIndex + 1}.`
+  }
+  if (kind === "underline") {
+    return `Underlined ${anchorLabel(anchorType)} on page ${pageIndex + 1}.`
+  }
+  if (kind === "arrow") {
+    return `Added an arrow to ${anchorLabel(anchorType)} on page ${pageIndex + 1}.`
   }
   return `Added a comment to ${anchorLabel(anchorType)} on page ${pageIndex + 1}.`
 }

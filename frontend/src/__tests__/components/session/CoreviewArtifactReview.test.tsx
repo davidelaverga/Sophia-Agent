@@ -291,6 +291,7 @@ function setCoreviewFlags(enabled: boolean) {
 describe("Coreview artifact still-frame review", () => {
   beforeEach(() => {
     mockCanvasApis()
+    window.localStorage.clear()
     getDisplayMedia = vi.fn()
     setCoreviewFlags(false)
     Object.defineProperty(navigator, "mediaDevices", {
@@ -302,6 +303,7 @@ describe("Coreview artifact still-frame review", () => {
   afterEach(() => {
     window.__sophiaCapture?.disable()
     window.__sophiaCapture?.clear()
+    window.localStorage.clear()
     clearCoreviewArtifactTextRegistryForTests()
     clearCoreviewToolBridgeForTests()
     fetchSpy?.mockRestore()
@@ -652,6 +654,47 @@ describe("Coreview artifact still-frame review", () => {
       expect(serialized).toContain("\"annotationCount\":1")
       expect(serialized).toContain("\"highlightCount\":1")
     }, { timeout: 4000 })
+  })
+
+  it("routes underline and arrow annotation intents through Coreview fallback without emit_artifact", async () => {
+    setCoreviewFlags(true)
+    registerSophiaCaptureBridge()
+    window.__sophiaCapture?.clear()
+    window.__sophiaCapture?.enable()
+    mockPdfPreviewReady({ pageCount: 1, textByPage: ["Q3 Launch Review"] })
+    let routeArtifactCommand: Parameters<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onArtifactReviewVoiceCommandRouteChange"]>>[0] = null
+
+    renderPanel({
+      selectedBuilderArtifactPath: PDF_SELECTED_PATH,
+      onArtifactReviewVoiceCommandRouteChange: (handler) => {
+        routeArtifactCommand = handler
+      },
+    })
+
+    expect(await screen.findByText("Page 1 of 1")).toBeInTheDocument()
+    expect(await screen.findByText("Exact text available")).toBeInTheDocument()
+    await waitFor(() => expect(routeArtifactCommand).not.toBeNull())
+
+    act(() => {
+      expect(routeArtifactCommand?.("underline the title then draw an arrow to this")).toMatchObject({
+        handled: true,
+        applied: true,
+        suppressAssistant: true,
+      })
+    })
+
+    expect(await screen.findByTestId("artifact-underline-annotation", undefined, { timeout: 7000 })).toHaveAttribute("data-annotation-source", "sophia")
+    expect(await screen.findByTestId("artifact-arrow-annotation", undefined, { timeout: 7000 })).toHaveAttribute("data-annotation-source", "sophia")
+    await waitFor(() => {
+      const events = exportSophiaCaptureBundle().events
+      const serialized = JSON.stringify(events)
+      const toolEvents = events.filter((event) => event.name === "coreview-tool-call")
+      expect(toolEvents.some((event) => (event.payload as Record<string, unknown> | undefined)?.coreviewAnnotationKind === "underline")).toBe(true)
+      expect(toolEvents.some((event) => (event.payload as Record<string, unknown> | undefined)?.coreviewAnnotationKind === "arrow")).toBe(true)
+      expect(serialized).toContain("\"underlineCount\":1")
+      expect(serialized).toContain("\"arrowCount\":1")
+      expect(serialized).not.toContain("emit_artifact")
+    }, { timeout: 7000 })
   })
 
   it("routes comment annotation intent through Coreview fallback without logging raw text", async () => {
@@ -1273,7 +1316,7 @@ describe("Coreview artifact still-frame review", () => {
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md",
     )
-    expect(within(artifactRegion).getByLabelText(/download launch-brief\.md/i)).toHaveAttribute(
+    expect(within(artifactRegion).getByLabelText(/download original launch-brief\.md/i)).toHaveAttribute(
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md?download=true",
     )
@@ -1386,7 +1429,7 @@ describe("Coreview artifact still-frame review", () => {
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md",
     )
-    expect(within(voiceStage).getByLabelText(/download launch-brief\.md/i)).toHaveAttribute(
+    expect(within(voiceStage).getByLabelText(/download original launch-brief\.md/i)).toHaveAttribute(
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md?download=true",
     )

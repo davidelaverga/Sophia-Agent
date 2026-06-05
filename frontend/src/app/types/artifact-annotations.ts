@@ -1,6 +1,7 @@
-export type ArtifactToolMode = "select" | "pan" | "highlight" | "comment"
+export type ArtifactToolMode = "select" | "pan" | "highlight" | "comment" | "underline" | "arrow"
 export type ArtifactAnnotationColor = "yellow" | "purple" | "blue" | "pink"
 export type ArtifactAnnotationSource = "sophia" | "user"
+export type ArtifactAnnotationKind = "highlight" | "comment" | "underline" | "arrow"
 
 export interface NormalizedArtifactRect {
   x: number
@@ -14,25 +15,50 @@ export interface NormalizedArtifactPoint {
   y: number
 }
 
+export interface NormalizedArtifactLine {
+  start: NormalizedArtifactPoint
+  end: NormalizedArtifactPoint
+}
+
+interface ArtifactAnnotationBase {
+  id: string
+  kind: ArtifactAnnotationKind
+  artifactStableIdentity?: string | null
+  actorId?: string | null
+  pageIndex: number
+  color?: ArtifactAnnotationColor
+  source?: ArtifactAnnotationSource
+  createdAt: number
+  updatedAt?: number
+  version?: number
+}
+
 export type ArtifactAnnotation =
-  | {
-      id: string
+  | (ArtifactAnnotationBase & {
       kind: "highlight"
-      pageIndex: number
       rect: NormalizedArtifactRect
-      color?: ArtifactAnnotationColor
-      source?: ArtifactAnnotationSource
+      point?: never
+      line?: never
+      text?: never
+    })
+  | (ArtifactAnnotationBase & {
+      kind: "comment"
+      point: NormalizedArtifactPoint
+      rect?: never
+      line?: never
+      text: string
+    })
+  | (ArtifactAnnotationBase & {
+      kind: "underline"
+      rect: NormalizedArtifactRect
+      point?: never
+      line?: never
+      text?: never
+    })
+  | (ArtifactAnnotationBase & {
+      kind: "arrow"
+      line: NormalizedArtifactLine
+      rect?: never
       point?: never
       text?: never
-      createdAt: number
-    }
-  | {
-      id: string
-      kind: "comment"
-      pageIndex: number
-      point: NormalizedArtifactPoint
-      source?: ArtifactAnnotationSource
-      rect?: never
-      text: string
-      createdAt: number
-    }
+    })

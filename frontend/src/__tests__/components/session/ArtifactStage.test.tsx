@@ -5,6 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { ArtifactStage, type ArtifactReviewVoiceCommandTarget } from "../../../app/components/session/ArtifactStage"
 import {
+  buildArtifactAnnotationWorkspaceIdentity,
+  persistArtifactAnnotations,
+} from "../../../app/lib/artifact-annotation-persistence"
+import {
   AudioWebSocketUnsupportedTransport,
   initialCoReviewState,
   type CoReviewSessionState,
@@ -14,6 +18,7 @@ import {
   readCoreviewArtifactTextSideband,
 } from "../../../app/lib/coreview-artifact-text"
 import { loadPdfJs } from "../../../app/lib/pdfjs-loader"
+import type { ArtifactAnnotation } from "../../../app/types/artifact-annotations"
 
 vi.mock("../../../app/hooks/useHaptics", () => ({
   haptic: vi.fn(),
@@ -150,10 +155,29 @@ function textToPdfTextItems(text: string) {
   }))
 }
 
+function seedPersistedAnnotations(
+  stableArtifactIdentity: string,
+  annotations: ArtifactAnnotation[],
+) {
+  const identity = buildArtifactAnnotationWorkspaceIdentity({
+    artifactStableIdentity: stableArtifactIdentity,
+    threadId: "thread-1",
+    artifactId: "artifact-1",
+    artifactPath: pdfBuilderArtifact.artifactPath,
+    rendererKind: "pdf",
+  })
+  const result = persistArtifactAnnotations(identity.storageKey, annotations, {
+    stableArtifactIdentity: identity.stableArtifactIdentity,
+  })
+  expect(result.status).toBe("saved")
+  return identity
+}
+
 function renderStage({
   artifact = builderArtifact,
   artifactLibrary = [],
   artifactId,
+  artifactStableIdentity,
   sessionId,
   normalSessionId,
   state = {},
@@ -181,6 +205,7 @@ function renderStage({
     modifiedAt?: string
   }>
   artifactId?: string | null
+  artifactStableIdentity?: string | null
   sessionId?: string | null
   normalSessionId?: string | null
   state?: Partial<CoReviewSessionState>
@@ -208,6 +233,7 @@ function renderStage({
       builderArtifactLibrary={artifactLibrary}
       threadId="thread-1"
       artifactId={artifactId}
+      artifactStableIdentity={artifactStableIdentity}
       sessionId={sessionId}
       normalSessionId={normalSessionId}
       reviewState={{
@@ -239,10 +265,12 @@ function renderStage({
 beforeEach(() => {
   mockCanvasApis()
   vi.mocked(loadPdfJs).mockReset()
+  window.localStorage.clear()
 })
 
 afterEach(() => {
   vi.restoreAllMocks()
+  window.localStorage.clear()
   clearCoreviewArtifactTextRegistryForTests()
 })
 
@@ -271,7 +299,7 @@ describe("ArtifactStage", () => {
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.docx",
     )
-    expect(screen.getByLabelText("Download Launch brief overview")).toHaveAttribute(
+    expect(screen.getByLabelText("Download original Launch brief overview")).toHaveAttribute(
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.docx?download=true",
     )
@@ -305,16 +333,22 @@ describe("ArtifactStage", () => {
     expect(screen.getByLabelText("Select")).toHaveAttribute("aria-pressed", "true")
     expect(screen.getByLabelText("Pan")).toHaveAttribute("aria-pressed", "false")
     expect(screen.getByLabelText("Highlight")).toHaveAttribute("aria-pressed", "false")
+    expect(screen.getByLabelText("Underline")).toHaveAttribute("aria-pressed", "false")
+    expect(screen.getByLabelText("Arrow")).toHaveAttribute("aria-pressed", "false")
     expect(screen.getByLabelText("Comment")).toHaveAttribute("aria-pressed", "false")
     expect(screen.getByText("Fit page")).toBeInTheDocument()
     expect(screen.getByLabelText("Open Launch brief overview in new tab")).toHaveAttribute(
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.pdf",
     )
-    expect(screen.getByLabelText("Download Launch brief overview")).toHaveAttribute(
+    expect(screen.getByLabelText("Download original Launch brief overview")).toHaveAttribute(
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.pdf?download=true",
     )
+    expect(screen.getByLabelText("Download original Launch brief overview")).toHaveTextContent("Download original")
+    const exportButton = screen.getByLabelText("Export annotated copy Launch brief overview")
+    expect(exportButton).toBeDisabled()
+    expect(exportButton).toHaveAttribute("title", "Annotated export is not available yet.")
     expect(screen.getByText("Exact text unavailable")).toBeInTheDocument()
   })
 
@@ -374,7 +408,7 @@ describe("ArtifactStage", () => {
 
     expect(await screen.findByText("Preview unavailable")).toBeInTheDocument()
     expect(screen.getByLabelText("Open Launch brief overview in new tab")).toBeInTheDocument()
-    expect(screen.getByLabelText("Download Launch brief overview")).toBeInTheDocument()
+    expect(screen.getByLabelText("Download original Launch brief overview")).toBeInTheDocument()
   })
 
   it("navigates PDF pages with real bounds", async () => {
@@ -753,6 +787,7 @@ describe("ArtifactStage", () => {
         anchor: resolvedTitle.anchor,
         rect: resolvedTitle.anchor.rect,
         point: null,
+        line: null,
         color: "yellow",
         text: null,
         source: "sophia",
@@ -770,6 +805,7 @@ describe("ArtifactStage", () => {
         anchor: resolvedTitle.anchor,
         rect: null,
         point: { x: 0.72, y: 0.12 },
+        line: null,
         color: "yellow",
         text: "change the font",
         source: "sophia",
@@ -805,6 +841,248 @@ describe("ArtifactStage", () => {
     await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-zoom", "1.4"))
     await waitFor(() => expect(scrollTo).toHaveBeenCalled())
     expect(screen.getByRole("status", { name: /not looking/i })).toBeInTheDocument()
+  })
+
+  it("restores persisted highlight, comment, and Sophia annotations for the same stable artifact", async () => {
+    const stableIdentity = "user:test-user|thread:thread-1|path:mnt/user-data/outputs/launch-brief.pdf|renderer:pdf"
+    seedPersistedAnnotations(stableIdentity, [
+      {
+        id: "persisted-highlight",
+        kind: "highlight",
+        artifactStableIdentity: stableIdentity,
+        pageIndex: 0,
+        rect: { x: 0.12, y: 0.18, width: 0.34, height: 0.08 },
+        color: "yellow",
+        source: "user",
+        createdAt: 10,
+        updatedAt: 10,
+        version: 1,
+      },
+      {
+        id: "persisted-comment",
+        kind: "comment",
+        artifactStableIdentity: stableIdentity,
+        pageIndex: 0,
+        point: { x: 0.64, y: 0.2 },
+        text: "Persisted note",
+        color: "purple",
+        source: "sophia",
+        createdAt: 11,
+        updatedAt: 12,
+        version: 1,
+      },
+    ])
+    mockPdfDocument({ pageCount: 1 })
+
+    renderStage({
+      artifact: pdfBuilderArtifact,
+      artifactId: "artifact-1",
+      artifactStableIdentity: stableIdentity,
+      exactTextAvailable: false,
+    })
+
+    const highlight = await screen.findByTestId("artifact-highlight-annotation")
+    expect(highlight).toHaveAttribute("data-annotation-id", "persisted-highlight")
+    expect(highlight).toHaveAttribute("data-annotation-source", "user")
+    const pin = screen.getByTestId("artifact-comment-pin")
+    expect(pin).toHaveAttribute("aria-pressed", "false")
+    await userEvent.click(pin)
+    expect(screen.getByDisplayValue("Persisted note")).toBeInTheDocument()
+    expect(screen.getByTestId("artifact-comment-annotation")).toHaveAttribute("data-annotation-source", "sophia")
+  })
+
+  it("does not leak persisted annotations across stable artifact identities", async () => {
+    const firstIdentity = "user:test-user|thread:thread-1|path:first.pdf|renderer:pdf"
+    const secondIdentity = "user:test-user|thread:thread-1|path:second.pdf|renderer:pdf"
+    seedPersistedAnnotations(firstIdentity, [
+      {
+        id: "wrong-artifact-highlight",
+        kind: "highlight",
+        artifactStableIdentity: firstIdentity,
+        pageIndex: 0,
+        rect: { x: 0.2, y: 0.24, width: 0.3, height: 0.08 },
+        source: "user",
+        createdAt: 10,
+        updatedAt: 10,
+        version: 1,
+      },
+    ])
+    mockPdfDocument({ pageCount: 1 })
+
+    renderStage({
+      artifact: pdfBuilderArtifact,
+      artifactId: "artifact-1",
+      artifactStableIdentity: secondIdentity,
+      exactTextAvailable: false,
+    })
+
+    expect(await screen.findByLabelText("PDF page 1")).toBeInTheDocument()
+    expect(screen.queryByTestId("artifact-highlight-annotation")).not.toBeInTheDocument()
+  })
+
+  it("restores only annotations for the active persisted page", async () => {
+    const stableIdentity = "user:test-user|thread:thread-1|path:paged.pdf|renderer:pdf"
+    seedPersistedAnnotations(stableIdentity, [
+      {
+        id: "page-1-highlight",
+        kind: "highlight",
+        artifactStableIdentity: stableIdentity,
+        pageIndex: 0,
+        rect: { x: 0.1, y: 0.1, width: 0.24, height: 0.08 },
+        createdAt: 10,
+        updatedAt: 10,
+        version: 1,
+      },
+      {
+        id: "page-2-underline",
+        kind: "underline",
+        artifactStableIdentity: stableIdentity,
+        pageIndex: 1,
+        rect: { x: 0.2, y: 0.36, width: 0.34, height: 0.04 },
+        color: "purple",
+        source: "sophia",
+        createdAt: 11,
+        updatedAt: 11,
+        version: 1,
+      },
+    ])
+    mockPdfDocument({ pageCount: 2 })
+    renderStage({
+      artifact: pdfBuilderArtifact,
+      artifactId: "artifact-1",
+      artifactStableIdentity: stableIdentity,
+      exactTextAvailable: false,
+    })
+
+    expect(await screen.findByTestId("artifact-highlight-annotation")).toHaveAttribute("data-annotation-id", "page-1-highlight")
+    expect(screen.queryByTestId("artifact-underline-annotation")).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByLabelText("Next page"))
+    expect(await screen.findByText("Page 2 of 2")).toBeInTheDocument()
+    expect(screen.queryByTestId("artifact-highlight-annotation")).not.toBeInTheDocument()
+    expect(screen.getByTestId("artifact-underline-annotation")).toHaveAttribute("data-annotation-id", "page-2-underline")
+  })
+
+  it("fails safely when persisted annotation storage is corrupt", async () => {
+    const stableIdentity = "user:test-user|thread:thread-1|path:corrupt.pdf|renderer:pdf"
+    const identity = buildArtifactAnnotationWorkspaceIdentity({
+      artifactStableIdentity: stableIdentity,
+      threadId: "thread-1",
+      artifactId: "artifact-1",
+      artifactPath: pdfBuilderArtifact.artifactPath,
+      rendererKind: "pdf",
+    })
+    expect(identity.storageKey).toBeTruthy()
+    window.localStorage.setItem(identity.storageKey ?? "", "{not-json")
+    mockPdfDocument({ pageCount: 1 })
+
+    renderStage({
+      artifact: pdfBuilderArtifact,
+      artifactId: "artifact-1",
+      artifactStableIdentity: stableIdentity,
+      exactTextAvailable: false,
+    })
+
+    expect(await screen.findByLabelText("PDF page 1")).toBeInTheDocument()
+    expect(screen.queryByTestId("artifact-highlight-annotation")).not.toBeInTheDocument()
+    expect(window.localStorage.getItem(identity.storageKey ?? "")).toBeNull()
+  })
+
+  it("selects, edits, deletes, and persists annotation management changes", async () => {
+    const stableIdentity = "user:test-user|thread:thread-1|path:manage.pdf|renderer:pdf"
+    seedPersistedAnnotations(stableIdentity, [
+      {
+        id: "manage-highlight",
+        kind: "highlight",
+        artifactStableIdentity: stableIdentity,
+        pageIndex: 0,
+        rect: { x: 0.1, y: 0.12, width: 0.28, height: 0.08 },
+        createdAt: 10,
+        updatedAt: 10,
+        version: 1,
+      },
+      {
+        id: "manage-comment",
+        kind: "comment",
+        artifactStableIdentity: stableIdentity,
+        pageIndex: 0,
+        point: { x: 0.6, y: 0.2 },
+        text: "Old note",
+        source: "sophia",
+        createdAt: 11,
+        updatedAt: 11,
+        version: 1,
+      },
+      {
+        id: "manage-underline",
+        kind: "underline",
+        artifactStableIdentity: stableIdentity,
+        pageIndex: 0,
+        rect: { x: 0.2, y: 0.4, width: 0.3, height: 0.04 },
+        color: "purple",
+        createdAt: 12,
+        updatedAt: 12,
+        version: 1,
+      },
+      {
+        id: "manage-arrow",
+        kind: "arrow",
+        artifactStableIdentity: stableIdentity,
+        pageIndex: 0,
+        line: { start: { x: 0.24, y: 0.55 }, end: { x: 0.54, y: 0.64 } },
+        color: "purple",
+        createdAt: 13,
+        updatedAt: 13,
+        version: 1,
+      },
+    ])
+    mockPdfDocument({ pageCount: 1 })
+
+    const view = renderStage({
+      artifact: pdfBuilderArtifact,
+      artifactId: "artifact-1",
+      artifactStableIdentity: stableIdentity,
+      exactTextAvailable: false,
+    })
+    const stage = await screen.findByRole("region", { name: /generated artifact/i })
+
+    const highlight = await screen.findByTestId("artifact-highlight-annotation")
+    await userEvent.click(highlight)
+    expect(highlight).toHaveAttribute("aria-pressed", "true")
+
+    const underline = screen.getByTestId("artifact-underline-annotation")
+    await userEvent.click(underline)
+    expect(underline).toHaveAttribute("aria-pressed", "true")
+
+    const arrow = screen.getByTestId("artifact-arrow-annotation")
+    await userEvent.click(arrow)
+    expect(arrow).toHaveAttribute("aria-pressed", "true")
+
+    await userEvent.click(screen.getByTestId("artifact-comment-pin"))
+    const input = screen.getByLabelText("Comment text")
+    await userEvent.clear(input)
+    await userEvent.type(input, "Edited note")
+    fireEvent.keyDown(input, { key: "Delete" })
+    expect(screen.getByDisplayValue("Edited note")).toBeInTheDocument()
+    expect(screen.getByTestId("artifact-comment-pin")).toBeInTheDocument()
+
+    await userEvent.click(screen.getByTestId("artifact-highlight-annotation"))
+    fireEvent.keyDown(stage, { key: "Delete" })
+    await waitFor(() => expect(screen.queryByTestId("artifact-highlight-annotation")).not.toBeInTheDocument())
+
+    view.unmount()
+    mockPdfDocument({ pageCount: 1 })
+    renderStage({
+      artifact: pdfBuilderArtifact,
+      artifactId: "artifact-1",
+      artifactStableIdentity: stableIdentity,
+      exactTextAvailable: false,
+    })
+
+    expect(await screen.findByTestId("artifact-comment-pin")).toBeInTheDocument()
+    expect(screen.queryByTestId("artifact-highlight-annotation")).not.toBeInTheDocument()
+    await userEvent.click(screen.getByTestId("artifact-comment-pin"))
+    expect(screen.getByDisplayValue("Edited note")).toBeInTheDocument()
   })
 
   it("reports page and zoom changes through the artifact view state callback", async () => {
@@ -1147,7 +1425,7 @@ describe("ArtifactStage", () => {
     expect(scrollArea).not.toContainElement(toolbar)
     expect(screen.getByRole("button", { name: /review with sophia/i })).toBeInTheDocument()
     expect(screen.getByLabelText("Open Launch brief overview in new tab")).toBeInTheDocument()
-    expect(screen.getByLabelText("Download Launch brief overview")).toBeInTheDocument()
+    expect(screen.getByLabelText("Download original Launch brief overview")).toBeInTheDocument()
   })
 
   it("shows preview unavailable on fetch failure while keeping Open and Download available", async () => {
@@ -1163,7 +1441,7 @@ describe("ArtifactStage", () => {
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md",
     )
-    expect(screen.getByLabelText("Download Launch brief overview")).toHaveAttribute(
+    expect(screen.getByLabelText("Download original Launch brief overview")).toHaveAttribute(
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md?download=true",
     )
