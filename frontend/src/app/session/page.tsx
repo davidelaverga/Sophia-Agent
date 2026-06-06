@@ -79,6 +79,7 @@ import { useUiStore } from '../stores/ui-store';
 import type { BuilderCompletionEventV1 } from '../types/builder-completion';
 
 import { resolveBuilderSurface } from './builderSurfaceArbitration';
+import { suppressSessionLeaveGuardForCoreviewBuilderUpdate } from './session-annotation-navigation-guard';
 import { useSessionBuilderArtifactLibrary } from './useSessionBuilderArtifactLibrary';
 import { useSessionCompanionIntegration } from './useSessionCompanionIntegration';
 import { useSessionConversationArchive } from './useSessionConversationArchive';
@@ -590,6 +591,7 @@ function SessionPageContent() {
     prompt: string;
     updateMode: CoreviewArtifactUpdateMode;
   }): Promise<CoreviewBuilderStartAdapterResult> => {
+    suppressSessionLeaveGuardForCoreviewBuilderUpdate();
     await sendMessage({ text: prompt });
     return {
       ok: true,
@@ -606,6 +608,7 @@ function SessionPageContent() {
     context: CoreviewArtifactUpdateContext | null;
     task: CoreviewBuilderTaskStatus;
   }): Promise<CoreviewBuilderCancelAdapterResult> => {
+    suppressSessionLeaveGuardForCoreviewBuilderUpdate();
     if (!task.taskId || task.phase !== 'running') {
       return {
         ok: false,

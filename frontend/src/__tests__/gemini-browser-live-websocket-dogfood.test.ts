@@ -5,14 +5,14 @@ import {
   registerCoreviewToolBridge,
 } from '../app/lib/coreview-actions';
 import {
-  clearCoreviewBuilderToolBridgeForTests,
-  registerCoreviewBuilderToolBridge,
-} from '../app/lib/coreview-builder-actions';
-import {
   clearCoreviewArtifactTextRegistryForTests,
   registerCoreviewArtifactText,
   registerCoreviewArtifactTextStatus,
 } from '../app/lib/coreview-artifact-text';
+import {
+  clearCoreviewBuilderToolBridgeForTests,
+  registerCoreviewBuilderToolBridge,
+} from '../app/lib/coreview-builder-actions';
 import {
   buildGeminiArtifactFrameRealtimeInput,
   buildGeminiArtifactTextReaderHint,
@@ -2409,6 +2409,101 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       }),
     ]));
     expect(JSON.stringify(toolDiagnostics)).not.toContain('Make a fresh page instead.');
+
+    await connection.close();
+  });
+
+  it('blocks generic update_async_task during selected-artifact review when public transcript is missing', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-coreview-update-redirect',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: {
+              model: 'models/gemini-3.1-flash-live-preview',
+              inputAudioTranscription: {},
+              tools: [{ functionDeclarations: [
+                { name: 'update_async_task' },
+                { name: 'emit_artifact' },
+              ] }],
+            },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-coreview-update-redirect',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202 }));
+    const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      sessionId: 'browser-gemini-coreview-update-redirect',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+      onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
+    });
+
+    expect(readGeminiConfiguredToolNames(connection.setup)).not.toContain('update_async_task');
+    expect(readGeminiConfiguredToolNames(connection.setup)).toContain('coreview_request_artifact_update');
+
+    await connection.sendArtifactFrame({
+      artifactId: 'coreview-real-artifact-site-html',
+      visualSourceKind: 'html_preview_canvas',
+      data: 'AA==',
+      mimeType: 'image/png',
+      byteLength: 1,
+      dimensions: { width: 1, height: 1 },
+      rawFrameExcluded: true,
+    });
+    const fetchCallCountBeforeTool = fetchMock.mock.calls.length;
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          {
+            id: 'generic-update-without-public-transcript',
+            name: 'update_async_task',
+            args: { task_id: 'missing-task', message: 'change the title' },
+          },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => expect(JSON.stringify(websocket?.sent)).toContain('artifact_review_generic_builder_tool_suppressed'));
+    expect(fetchMock).toHaveBeenCalledTimes(fetchCallCountBeforeTool);
+    const sentToolResponse = websocket?.sent
+      .map((payload) => JSON.parse(payload) as Record<string, unknown>)
+      .find((payload) => JSON.stringify(payload).includes('generic-update-without-public-transcript')) as {
+        toolResponse?: { functionResponses?: Array<{ id?: string; name?: string; response?: Record<string, unknown> }> }
+      } | undefined;
+    expect(sentToolResponse?.toolResponse?.functionResponses?.[0]).toMatchObject({
+      id: 'generic-update-without-public-transcript',
+      name: 'update_async_task',
+      response: {
+        ok: false,
+        rejection_reason: 'artifact_review_generic_builder_tool_suppressed',
+        recovery_guidance: 'Use coreview_request_artifact_update for selected-artifact update requests during Review with Sophia.',
+        coreview_builder_update_intent_detected: false,
+        selected_artifact_update_context: true,
+      },
+    });
+    await vi.waitFor(() => expect(toolDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        phase: 'tool_response_sent',
+        toolCall: expect.objectContaining({ name: 'update_async_task' }),
+        rejectionReason: 'artifact_review_generic_builder_tool_suppressed',
+      }),
+    ])));
 
     await connection.close();
   });

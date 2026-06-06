@@ -36,6 +36,7 @@ export type CoreviewBuilderActionResultName =
   | typeof COREVIEW_GET_BUILDER_STATUS_TOOL_NAME
 
 export type CoreviewBuilderBlockedReason =
+  | "coreview_disabled"
   | "no_selected_artifact"
   | "unsupported_renderer"
   | "unsupported_update_mode"
@@ -188,12 +189,72 @@ export interface CoreviewRequestArtifactUpdateInput {
   sourceActor?: CoreviewBuilderSourceActor
 }
 
+export interface CoreviewBuilderActionAvailabilityInput {
+  coreviewEnabled: boolean
+  artifactSelected: boolean
+  artifactPath: string | null
+  rendererKind: ArtifactRendererKind
+  capabilitySummary: CoreviewCurrentViewCapabilitySummary | null
+  requestArtifactUpdateWired: boolean
+  cancelBuilderTaskWired: boolean
+}
+
+export interface CoreviewBuilderActionAvailability {
+  enabled: boolean
+  blockedReason: CoreviewBuilderBlockedReason | string | null
+  supportsArtifactUpdate: boolean
+  supportsVersionedRebuild: boolean
+  unsupportedUpdateReason: string | null
+}
+
 export interface CoreviewBuilderActionBus {
   requestArtifactUpdate(input: CoreviewRequestArtifactUpdateInput): Promise<CoreviewBuilderActionResult>
   cancelBuilderTask(sourceActor?: CoreviewBuilderSourceActor): Promise<CoreviewBuilderActionResult>
   getBuilderStatus(sourceActor?: CoreviewBuilderSourceActor): CoreviewBuilderActionResult
   buildUpdateContext(input: CoreviewRequestArtifactUpdateInput): CoreviewArtifactUpdateContext | null
   handleToolCall(call: CoreviewBuilderToolCallInput): Promise<CoreviewBuilderActionResult>
+}
+
+export function resolveCoreviewBuilderActionAvailability(
+  input: CoreviewBuilderActionAvailabilityInput,
+): CoreviewBuilderActionAvailability {
+  const capabilitySummary = input.capabilitySummary
+  const supportsArtifactUpdate = capabilitySummary?.supportsArtifactUpdate === true
+  const supportsVersionedRebuild = Boolean(
+    capabilitySummary?.supportsVersioning
+      && capabilitySummary.supportsRebuildFromSource,
+  )
+  const unsupportedUpdateReason = capabilitySummary?.unsupportedUpdateReason ?? null
+  const unavailable = (
+    blockedReason: CoreviewBuilderActionAvailability["blockedReason"],
+  ): CoreviewBuilderActionAvailability => ({
+    enabled: false,
+    blockedReason,
+    supportsArtifactUpdate,
+    supportsVersionedRebuild,
+    unsupportedUpdateReason,
+  })
+
+  if (!input.coreviewEnabled) {
+    return unavailable("coreview_disabled")
+  }
+  if (!input.artifactSelected || !input.artifactPath) {
+    return unavailable("no_selected_artifact")
+  }
+  if (!capabilitySummary || (!supportsArtifactUpdate && !supportsVersionedRebuild)) {
+    return unavailable(unsupportedUpdateReason ?? "unsupported_renderer")
+  }
+  if (!input.requestArtifactUpdateWired || !input.cancelBuilderTaskWired) {
+    return unavailable("builder_action_unavailable")
+  }
+
+  return {
+    enabled: true,
+    blockedReason: null,
+    supportsArtifactUpdate,
+    supportsVersionedRebuild,
+    unsupportedUpdateReason,
+  }
 }
 
 export function createCoreviewBuilderActionBus(adapter: CoreviewBuilderActionAdapter): CoreviewBuilderActionBus {

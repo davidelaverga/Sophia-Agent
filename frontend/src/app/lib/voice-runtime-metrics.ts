@@ -83,6 +83,7 @@ export type CoreviewVisualTelemetry = {
   builderWorkspaceEventCount: number
   builderLastWorkspaceEventType: string | null
   coreviewBuilderActionsEnabled: boolean
+  coreviewBuilderActionsBlockedReason: string | null
   coreviewBuilderUpdateIntentDetected: boolean
   coreviewBuilderUpdateAttempted: boolean
   coreviewBuilderUpdateResult: string | null
@@ -1327,6 +1328,7 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       builderWorkspaceEventCount: 0,
       builderLastWorkspaceEventType: null,
       coreviewBuilderActionsEnabled: false,
+      coreviewBuilderActionsBlockedReason: null,
       coreviewBuilderUpdateIntentDetected: false,
       coreviewBuilderUpdateAttempted: false,
       coreviewBuilderUpdateResult: null,
@@ -1755,6 +1757,7 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.coreviewBuilderActionsEnabled = coreviewBuilderActionEvents.some((event) => (
     asBoolean(event.coreviewBuilderActionsEnabled) === true
   )) || setupReviewToolsExposed.some((name) => GEMINI_COREVIEW_BUILDER_TOOL_NAMES.has(name))
+  visual.coreviewBuilderActionsBlockedReason = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewBuilderActionsBlockedReason")
   visual.coreviewBuilderUpdateIntentDetected = coreviewBuilderActionEvents.some((event) => (
     asBoolean(event.coreviewBuilderUpdateIntentDetected) === true
   ))

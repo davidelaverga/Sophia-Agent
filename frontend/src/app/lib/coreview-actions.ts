@@ -8,12 +8,12 @@ import {
   buildCoreviewCapabilitySummary,
   getCoreviewArtifactCapabilities,
 } from "./coreview-artifact-capabilities"
+import { coreviewBuilderGeminiFunctionDeclarations } from "./coreview-builder-actions"
 import {
   COREVIEW_WORKSPACE_CONTRACT_VERSION,
   type CoreviewArtifactCapabilities,
   type CoreviewCurrentViewCapabilitySummary,
 } from "./coreview-workspace-contract"
-import { coreviewBuilderGeminiFunctionDeclarations } from "./coreview-builder-actions"
 
 export const COREVIEW_SET_VIEW_TOOL_NAME = "coreview_set_view"
 export const COREVIEW_REFRESH_VIEW_TOOL_NAME = "coreview_refresh_view"
@@ -1430,8 +1430,8 @@ export function withCoreviewGeminiToolDeclarations(
     isRecord(tool) && Array.isArray(tool.functionDeclarations)
   ))
   const declarations = [
-    ...coreviewGeminiFunctionDeclarations(),
     ...(options.builderActionsEnabled === false ? [] : coreviewBuilderGeminiFunctionDeclarations()),
+    ...coreviewGeminiFunctionDeclarations(),
   ]
 
   if (toolWithDeclarations) {

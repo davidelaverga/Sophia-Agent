@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   clearSessionLeaveGuardAnnotationSuppressionForTests,
   suppressSessionLeaveGuardForAnnotation,
+  suppressSessionLeaveGuardForCoreviewBuilderUpdate,
 } from '../../app/session/session-annotation-navigation-guard';
 import { useSessionExitProtection } from '../../app/session/useSessionExitProtection';
 
@@ -74,5 +75,32 @@ describe('useSessionExitProtection annotation guard', () => {
     expect(event.defaultPrevented).toBe(false);
     expect(updateMessages).not.toHaveBeenCalled();
     expect(openExitConfirm).not.toHaveBeenCalled();
+  });
+
+  it('suppresses leave confirmation while a Coreview builder update starts', () => {
+    const updateMessages = vi.fn();
+    const openExitConfirm = vi.fn();
+    const pushState = vi.spyOn(window.history, 'pushState');
+    vi.spyOn(window.history, 'back').mockImplementation(() => undefined);
+
+    renderHook(() => useSessionExitProtection({
+      sessionId: 'session-1',
+      responseMode: 'voice',
+      isSophiaResponding: true,
+      messages,
+      updateMessages,
+      openExitConfirm,
+    }));
+
+    suppressSessionLeaveGuardForCoreviewBuilderUpdate();
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    const beforeUnload = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
+    const notCanceled = window.dispatchEvent(beforeUnload);
+
+    expect(openExitConfirm).not.toHaveBeenCalled();
+    expect(updateMessages).not.toHaveBeenCalled();
+    expect(pushState).toHaveBeenCalledWith({ sophiaResponding: true }, '');
+    expect(notCanceled).toBe(true);
+    expect(beforeUnload.defaultPrevented).toBe(false);
   });
 });

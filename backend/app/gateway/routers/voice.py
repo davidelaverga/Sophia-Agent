@@ -459,7 +459,14 @@ GEMINI_REVIEW_BLOCKED_TOOL_NAMES = {
     "emit_artifact",
     "start_builder_task",
 }
+GEMINI_REVIEW_GENERIC_BUILDER_REDIRECT_TOOL_NAMES = {
+    "start_builder_task",
+    "update_async_task",
+    "cancel_async_task",
+}
 ARTIFACT_REVIEW_EMIT_SUPPRESSED_REASON = "artifact_review_emit_artifact_suppressed"
+ARTIFACT_REVIEW_GENERIC_BUILDER_SUPPRESSED_REASON = "artifact_review_generic_builder_tool_suppressed"
+ARTIFACT_REVIEW_UPDATE_ONLY_REASON = "update_only_review_request"
 
 
 def _record_from_any_key(value: object, *keys: str) -> dict[str, object] | None:
@@ -502,10 +509,61 @@ def _read_gemini_function_calls(event: dict[str, object]) -> list[dict[str, obje
     return calls
 
 
-def _is_artifact_review_blocked_call(call: object) -> bool:
+def _artifact_review_builder_update_intent(context: dict[str, object] | None) -> bool:
+    return bool(context and context.get("builder_update_intent_detected") is True)
+
+
+def _artifact_review_selected_update_context(context: dict[str, object] | None) -> bool:
+    return bool(
+        _artifact_review_context_active(context)
+        and _artifact_review_context_artifact_id(context)
+        and (
+            context.get("selected_artifact_update_context") is True
+            or _artifact_review_builder_update_intent(context)
+            or _artifact_review_user_intent(context) in {"create_update", "unknown"}
+        )
+    )
+
+
+def _artifact_review_active_builder_task_present(context: dict[str, object] | None) -> bool:
+    return bool(context and context.get("active_builder_task_present") is True)
+
+
+def _artifact_review_generic_builder_redirect(
+    tool_name: str,
+    context: dict[str, object] | None,
+) -> bool:
     return (
-        isinstance(call, dict)
-        and (_string_from_any_key(call, "name") or "") in GEMINI_REVIEW_BLOCKED_TOOL_NAMES
+        tool_name in GEMINI_REVIEW_GENERIC_BUILDER_REDIRECT_TOOL_NAMES
+        and _artifact_review_selected_update_context(context)
+        and not _artifact_review_active_builder_task_present(context)
+    )
+
+
+def _is_artifact_review_blocked_call(
+    call: object,
+    context: dict[str, object] | None,
+) -> bool:
+    if not isinstance(call, dict):
+        return False
+
+    tool_name = _string_from_any_key(call, "name") or ""
+    if tool_name == GEMINI_EMIT_ARTIFACT_TOOL_NAME:
+        return (
+            _artifact_review_user_intent(context) != "create_update"
+            or _artifact_review_builder_update_intent(context)
+        )
+    if tool_name in GEMINI_REVIEW_GENERIC_BUILDER_REDIRECT_TOOL_NAMES:
+        return (
+            _artifact_review_generic_builder_redirect(tool_name, context)
+            or (
+                _artifact_review_user_intent(context) != "create_update"
+                and tool_name in GEMINI_REVIEW_BLOCKED_TOOL_NAMES
+            )
+        )
+    return (
+        _artifact_review_user_intent(context) != "create_update"
+        and tool_name in GEMINI_REVIEW_BLOCKED_TOOL_NAMES
     )
 
 
@@ -728,14 +786,16 @@ def _suppressed_review_tool_calls(
 ) -> list[dict[str, object]]:
     if not _artifact_review_context_active(body.artifact_review_context):
         return []
-    if _artifact_review_user_intent(body.artifact_review_context) == "create_update":
-        return []
 
     function_calls = _read_gemini_function_calls(body.event)
     if not function_calls:
         return []
 
-    blocked_calls = [call for call in function_calls if _is_artifact_review_blocked_call(call)]
+    blocked_calls = [
+        call
+        for call in function_calls
+        if _is_artifact_review_blocked_call(call, body.artifact_review_context)
+    ]
     if not blocked_calls:
         return []
 
@@ -744,17 +804,26 @@ def _suppressed_review_tool_calls(
 
 def _artifact_review_batch_has_allowed_calls(body: GeminiBrowserDogfoodRelayRequest) -> bool:
     function_calls = _read_gemini_function_calls(body.event)
-    return any(not _is_artifact_review_blocked_call(call) for call in function_calls)
+    return any(
+        not _is_artifact_review_blocked_call(call, body.artifact_review_context)
+        for call in function_calls
+    )
 
 
-def _without_blocked_artifact_review_calls(event: dict[str, object]) -> dict[str, object]:
+def _without_blocked_artifact_review_calls(
+    event: dict[str, object],
+    context: dict[str, object] | None,
+) -> dict[str, object]:
     next_event = dict(event)
-    _remove_blocked_top_level_tool_calls(next_event)
-    _remove_blocked_model_turn_tool_calls(next_event)
+    _remove_blocked_top_level_tool_calls(next_event, context)
+    _remove_blocked_model_turn_tool_calls(next_event, context)
     return next_event
 
 
-def _remove_blocked_top_level_tool_calls(event: dict[str, object]) -> None:
+def _remove_blocked_top_level_tool_calls(
+    event: dict[str, object],
+    context: dict[str, object] | None,
+) -> None:
     tool_call_key = _event_key(event, "toolCall", "tool_call")
     raw_tool_call = event.get(tool_call_key) if tool_call_key else None
     if tool_call_key is None or not isinstance(raw_tool_call, dict):
@@ -767,12 +836,15 @@ def _remove_blocked_top_level_tool_calls(event: dict[str, object]) -> None:
 
     next_tool_call = dict(raw_tool_call)
     next_tool_call[function_calls_key] = [
-        call for call in raw_calls if not _is_artifact_review_blocked_call(call)
+        call for call in raw_calls if not _is_artifact_review_blocked_call(call, context)
     ]
     event[tool_call_key] = next_tool_call
 
 
-def _remove_blocked_model_turn_tool_calls(event: dict[str, object]) -> None:
+def _remove_blocked_model_turn_tool_calls(
+    event: dict[str, object],
+    context: dict[str, object] | None,
+) -> None:
     server_content_key = _event_key(event, "serverContent", "server_content")
     raw_server_content = event.get(server_content_key) if server_content_key else None
     if server_content_key is None or not isinstance(raw_server_content, dict):
@@ -789,18 +861,21 @@ def _remove_blocked_model_turn_tool_calls(event: dict[str, object]) -> None:
 
     next_model_turn = dict(raw_model_turn)
     next_model_turn["parts"] = [
-        part for part in parts if not _model_part_has_blocked_artifact_review_call(part)
+        part for part in parts if not _model_part_has_blocked_artifact_review_call(part, context)
     ]
     next_server_content = dict(raw_server_content)
     next_server_content[model_turn_key] = next_model_turn
     event[server_content_key] = next_server_content
 
 
-def _model_part_has_blocked_artifact_review_call(part: object) -> bool:
+def _model_part_has_blocked_artifact_review_call(
+    part: object,
+    context: dict[str, object] | None,
+) -> bool:
     if not isinstance(part, dict):
         return False
     function_call = _record_from_any_key(part, "functionCall", "function_call")
-    return _is_artifact_review_blocked_call(function_call)
+    return _is_artifact_review_blocked_call(function_call, context)
 
 
 def _voice_relay_payload_for_event(
@@ -846,22 +921,55 @@ def _artifact_review_emit_suppression_payload(
     if not blocked_calls:
         return None
 
-    guidance = (
-        "Artifact review is active. Use read_artifact_text for exact artifact text and answer from the "
-        "existing artifact unless the user explicitly asks to create or update an artifact."
-    )
     function_responses: list[dict[str, object]] = []
     tool_diagnostics: list[dict[str, object]] = []
 
     for index, call in enumerate(blocked_calls):
         tool_call_id = _string_from_any_key(call, "id") or f"artifact-review-emit-{index + 1}"
         tool_name = _string_from_any_key(call, "name") or GEMINI_EMIT_ARTIFACT_TOOL_NAME
+        generic_builder_redirect = _artifact_review_generic_builder_redirect(
+            tool_name,
+            body.artifact_review_context,
+        )
+        update_only_review_request = (
+            tool_name == GEMINI_EMIT_ARTIFACT_TOOL_NAME
+            and _artifact_review_builder_update_intent(body.artifact_review_context)
+        )
+        rejection_reason = (
+            ARTIFACT_REVIEW_GENERIC_BUILDER_SUPPRESSED_REASON
+            if generic_builder_redirect
+            else ARTIFACT_REVIEW_EMIT_SUPPRESSED_REASON
+        )
+        safe_reason = (
+            ARTIFACT_REVIEW_UPDATE_ONLY_REASON
+            if update_only_review_request
+            else rejection_reason
+        )
+        guidance = (
+            "Use coreview_request_artifact_update for selected-artifact update requests during Review with Sophia."
+            if generic_builder_redirect or update_only_review_request
+            else (
+                "Artifact review is active. Use read_artifact_text for exact artifact text and answer from the "
+                "existing artifact unless the user explicitly asks to create or update an artifact."
+            )
+        )
         response = {
             "ok": False,
             "status": "rejected",
-            "safe_reason": ARTIFACT_REVIEW_EMIT_SUPPRESSED_REASON,
+            "safe_reason": safe_reason,
+            "rejection_reason": rejection_reason,
             "recovery_guidance": guidance,
+            "suppressed_tool_name": tool_name,
+            "selected_artifact_update_context": _artifact_review_selected_update_context(
+                body.artifact_review_context,
+            ),
+            "coreview_builder_update_intent_detected": _artifact_review_builder_update_intent(
+                body.artifact_review_context,
+            ),
+            "update_only_review_request": update_only_review_request,
             "raw_artifact_text_excluded": True,
+            "raw_comment_text_excluded": True,
+            "raw_frame_excluded": True,
         }
         function_responses.append({
             "id": tool_call_id,
@@ -873,7 +981,7 @@ def _artifact_review_emit_suppression_payload(
             "name": tool_name,
             "success": False,
             "execution_rejected": True,
-            "rejection_reason": ARTIFACT_REVIEW_EMIT_SUPPRESSED_REASON,
+            "rejection_reason": rejection_reason,
             "recovery_guidance": guidance,
             "response": response,
         })
@@ -888,7 +996,7 @@ def _artifact_review_emit_suppression_payload(
                         "functionResponses": function_responses,
                     },
                 },
-                "result_summary": "Review-only emit_artifact call suppressed.",
+                "result_summary": "Review-only artifact/builder tool call suppressed.",
             },
         ],
         "tool_diagnostics": tool_diagnostics,
@@ -896,6 +1004,12 @@ def _artifact_review_emit_suppression_payload(
             "schema": "artifact_review_tool_guard_v1",
             "artifact_review_active": True,
             "artifact_review_user_intent": _artifact_review_user_intent(body.artifact_review_context),
+            "coreview_builder_update_intent_detected": _artifact_review_builder_update_intent(
+                body.artifact_review_context,
+            ),
+            "selected_artifact_update_context": _artifact_review_selected_update_context(
+                body.artifact_review_context,
+            ),
             "review_tool_churn_detected": True,
             "suppressed_tool_count": len(blocked_calls),
             "suppressed_tools": sorted({
@@ -1600,7 +1714,10 @@ async def gemini_browser_dogfood_relay(
         return guard_payload
 
     relay_payload = (
-        _voice_relay_payload_for_event(body, _without_blocked_artifact_review_calls(body.event))
+        _voice_relay_payload_for_event(
+            body,
+            _without_blocked_artifact_review_calls(body.event, body.artifact_review_context),
+        )
         if guard_payload is not None
         else body.voice_relay_payload()
     )
@@ -1725,7 +1842,10 @@ async def gemini_production_relay(
         return guard_payload
 
     relay_payload = (
-        _voice_relay_payload_for_event(body, _without_blocked_artifact_review_calls(body.event))
+        _voice_relay_payload_for_event(
+            body,
+            _without_blocked_artifact_review_calls(body.event, body.artifact_review_context),
+        )
         if guard_payload is not None
         else body.voice_relay_payload()
     )

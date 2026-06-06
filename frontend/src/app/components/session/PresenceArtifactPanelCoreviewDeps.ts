@@ -5,6 +5,7 @@ export type { CoReviewMediaTransport } from "../../lib/co-review-transport"
 export {
   createCoreviewBuilderActionBus,
   registerCoreviewBuilderToolBridge,
+  resolveCoreviewBuilderActionAvailability,
   summarizeRequestedChange,
   type CoreviewArtifactUpdateContext,
   type CoreviewArtifactUpdateMode,
@@ -47,6 +48,7 @@ export {
 } from "../../lib/coreview-actions"
 export { useCoreviewAnnotationStore } from "../../lib/coreview-annotation-store"
 export {
+  buildCoreviewCapabilitySummary,
   coreviewArtifactCapabilityTelemetry,
   getCoreviewArtifactCapabilitiesForFile,
 } from "../../lib/coreview-artifact-capabilities"

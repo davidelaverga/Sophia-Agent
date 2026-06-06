@@ -2,9 +2,23 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
+import type { ArtifactToolMode } from "../../types/artifact-annotations"
+import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../types/builder-artifact"
+import type { BuilderCompletionEventV1 } from "../../types/builder-completion"
+import type { BuilderTaskV1 } from "../../types/builder-task"
+import type { RitualArtifacts } from "../../types/session"
+
+import type { ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
+import {
+  ArtifactReviewBuilderUpdateCard,
+  type ArtifactReviewBuilderUpdateCardStatus,
+} from "./ArtifactReviewBuilderUpdateCard"
+import { ArtifactStage, type ArtifactReviewVoiceCommandTarget } from "./ArtifactStage"
+import { buildCoreviewRealArtifactId, CoreviewRealArtifactCanvas } from "./CoreviewRealArtifactCanvas"
 import {
   appendWorkspaceEvent,
   buildArtifactViewSignature,
+  buildCoreviewCapabilitySummary,
   buildCoreviewArtifactStableIdentity,
   buildCoreviewWorkspaceActor,
   buildCoreviewWorkspaceKey,
@@ -35,6 +49,7 @@ import {
   recordSophiaCaptureEvent,
   registerCoreviewBuilderToolBridge,
   registerCoreviewToolBridge,
+  resolveCoreviewBuilderActionAvailability,
   safeArtifactViewTelemetry,
   useArtifactCoReview,
   useCoreviewAnnotationStore,
@@ -78,19 +93,6 @@ import {
   type CoreviewWorkspaceActor,
   type CoreviewWorkspaceEventType,
 } from "./PresenceArtifactPanelDeps"
-import type { ArtifactToolMode } from "../../types/artifact-annotations"
-import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../types/builder-artifact"
-import type { BuilderCompletionEventV1 } from "../../types/builder-completion"
-import type { BuilderTaskV1 } from "../../types/builder-task"
-import type { RitualArtifacts } from "../../types/session"
-
-import type { ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
-import {
-  ArtifactReviewBuilderUpdateCard,
-  type ArtifactReviewBuilderUpdateCardStatus,
-} from "./ArtifactReviewBuilderUpdateCard"
-import { ArtifactStage, type ArtifactReviewVoiceCommandTarget } from "./ArtifactStage"
-import { buildCoreviewRealArtifactId, CoreviewRealArtifactCanvas } from "./CoreviewRealArtifactCanvas"
 import {
   COREVIEW_COMPANION_ARTIFACT_ID,
   PresenceArtifactSecondarySurfaces,
@@ -795,6 +797,7 @@ export function PresenceArtifactPanel({
   } | null>(null)
   const latestCoreviewBuilderContextRef = useRef<CoreviewArtifactUpdateContext | null>(null)
   const emittedCoreviewBuilderEventSignaturesRef = useRef(new Set<string>())
+  const lastCoreviewBuilderAvailabilitySignatureRef = useRef<string | null>(null)
   const recordCoreviewWorkspaceEventRef = useRef<((input: {
     type: CoreviewWorkspaceEventType
     actor: CoreviewWorkspaceActor
@@ -1372,6 +1375,33 @@ export function PresenceArtifactPanel({
   useEffect(() => {
     coreviewCurrentViewRef.current = coreviewCurrentView
   }, [coreviewCurrentView])
+  const coreviewBuilderCapabilitySummary = useMemo(() => (
+    buildCoreviewCapabilitySummary({
+      capabilities: coreviewCurrentView.capabilities,
+      rendererKind: coreviewCurrentView.rendererKind,
+      pageIndex: coreviewCurrentView.pageIndex,
+      pageCount: coreviewCurrentView.pageCount,
+    })
+  ), [coreviewCurrentView])
+  const coreviewBuilderActionAvailability = useMemo(() => (
+    resolveCoreviewBuilderActionAvailability({
+      coreviewEnabled: coreviewReviewEnabled,
+      artifactSelected: Boolean(builderArtifactId && stageArtifactPath),
+      artifactPath: stageArtifactPath,
+      rendererKind: stageRendererKind,
+      capabilitySummary: coreviewBuilderCapabilitySummary,
+      requestArtifactUpdateWired: Boolean(onCoreviewBuilderUpdateRequest),
+      cancelBuilderTaskWired: Boolean(onCoreviewBuilderCancelRequest),
+    })
+  ), [
+    builderArtifactId,
+    coreviewBuilderCapabilitySummary,
+    coreviewReviewEnabled,
+    onCoreviewBuilderCancelRequest,
+    onCoreviewBuilderUpdateRequest,
+    stageArtifactPath,
+    stageRendererKind,
+  ])
   useEffect(() => {
     coreviewVisualReadyRef.current = builderVisualSourceReady
   }, [builderVisualSourceReady])
@@ -2068,6 +2098,96 @@ export function PresenceArtifactPanel({
     coreviewWorkspaceKey,
     normalSessionId,
     sessionId,
+    stageRendererKind,
+    threadId,
+  ])
+
+  useEffect(() => {
+    if (!isVisible || !builderStageActive) {
+      return
+    }
+
+    const telemetry = getCoreviewWorkspaceEventLogTelemetry(
+      coreviewWorkspaceKey,
+      coreviewArtifactKey,
+      coreviewShareState,
+    )
+    const signature = JSON.stringify({
+      artifactStableIdentity,
+      enabled: coreviewBuilderActionAvailability.enabled,
+      blockedReason: coreviewBuilderActionAvailability.blockedReason,
+      path: stageArtifactPath,
+      renderer: stageRendererKind,
+      supportsArtifactUpdate: coreviewBuilderActionAvailability.supportsArtifactUpdate,
+      supportsVersionedRebuild: coreviewBuilderActionAvailability.supportsVersionedRebuild,
+      unsupportedUpdateReason: coreviewBuilderActionAvailability.unsupportedUpdateReason,
+      updateCallback: Boolean(onCoreviewBuilderUpdateRequest),
+      cancelCallback: Boolean(onCoreviewBuilderCancelRequest),
+    })
+    if (signature === lastCoreviewBuilderAvailabilitySignatureRef.current) {
+      return
+    }
+    lastCoreviewBuilderAvailabilitySignatureRef.current = signature
+
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "coreview-builder-action",
+      payload: {
+        sessionId: sessionId ?? null,
+        normalSessionId: normalSessionId ?? null,
+        threadId: threadId ?? null,
+        coreviewBuilderActionsAvailabilityReported: true,
+        coreviewBuilderActionsEnabled: coreviewBuilderActionAvailability.enabled,
+        coreviewBuilderActionsBlockedReason: coreviewBuilderActionAvailability.blockedReason,
+        coreviewBuilderActionsSupportsArtifactUpdate: coreviewBuilderActionAvailability.supportsArtifactUpdate,
+        coreviewBuilderActionsSupportsVersionedRebuild: coreviewBuilderActionAvailability.supportsVersionedRebuild,
+        coreviewBuilderUpdateIntentDetected: false,
+        coreviewBuilderUpdateAttempted: false,
+        coreviewBuilderUpdateResult: null,
+        coreviewBuilderUpdateBlockedReason: coreviewBuilderActionAvailability.enabled
+          ? null
+          : coreviewBuilderActionAvailability.blockedReason,
+        coreviewBuilderUpdateMode: coreviewBuilderCapabilitySummary.preferredUpdateMode,
+        coreviewBuilderUpdateArtifactContextPresent: Boolean(stageArtifactPath),
+        coreviewBuilderTaskStarted: false,
+        coreviewBuilderTaskIdPresent: false,
+        coreviewBuilderCancelIntentDetected: false,
+        coreviewBuilderCancelAttempted: false,
+        coreviewBuilderCancelResult: null,
+        coreviewBuilderCancelBlockedReason: coreviewBuilderActionAvailability.enabled
+          ? null
+          : coreviewBuilderActionAvailability.blockedReason,
+        coreviewBuilderStatusResult: null,
+        coreviewBuilderPreservedMic: true,
+        coreviewBuilderPreservedReview: true,
+        builderWorkspaceEventCount: telemetry.builderWorkspaceEventCount,
+        builderLastWorkspaceEventType: telemetry.builderLastWorkspaceEventType,
+        artifactStableIdentity,
+        artifactRendererKind: stageRendererKind,
+        ...stageArtifactCapabilityTelemetry,
+        artifactCapabilitySupportsArtifactUpdate: coreviewBuilderActionAvailability.supportsArtifactUpdate,
+        artifactCapabilityUnsupportedUpdateReason: coreviewBuilderActionAvailability.unsupportedUpdateReason,
+        rawTranscriptExcluded: true,
+        rawCommentTextExcluded: true,
+        rawArtifactTextExcluded: true,
+        rawFrameExcluded: true,
+      },
+    })
+  }, [
+    artifactStableIdentity,
+    builderStageActive,
+    coreviewArtifactKey,
+    coreviewBuilderActionAvailability,
+    coreviewBuilderCapabilitySummary.preferredUpdateMode,
+    coreviewShareState,
+    coreviewWorkspaceKey,
+    isVisible,
+    normalSessionId,
+    onCoreviewBuilderCancelRequest,
+    onCoreviewBuilderUpdateRequest,
+    sessionId,
+    stageArtifactCapabilityTelemetry,
+    stageArtifactPath,
     stageRendererKind,
     threadId,
   ])

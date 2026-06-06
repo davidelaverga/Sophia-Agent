@@ -2,10 +2,14 @@ import { describe, expect, it, vi } from "vitest"
 
 import { buildArtifactViewSignature } from "../../app/lib/artifact-renderers"
 import type { CoreviewCurrentView } from "../../app/lib/coreview-actions"
-import { getCoreviewArtifactCapabilities } from "../../app/lib/coreview-artifact-capabilities"
+import {
+  buildCoreviewCapabilitySummary,
+  getCoreviewArtifactCapabilities,
+} from "../../app/lib/coreview-artifact-capabilities"
 import {
   buildCoreviewBuilderUpdatePrompt,
   createCoreviewBuilderActionBus,
+  resolveCoreviewBuilderActionAvailability,
   type CoreviewBuilderActionAdapter,
   type CoreviewBuilderWorkspaceEventInput,
 } from "../../app/lib/coreview-builder-actions"
@@ -123,6 +127,95 @@ function createActiveTask() {
 }
 
 describe("Coreview builder action bus", () => {
+  it("enables builder actions for selected HTML artifacts without annotation support", () => {
+    const view = createView({
+      rendererKind: "html",
+      annotationCount: 0,
+      highlightCount: 0,
+      commentCount: 0,
+    })
+
+    const availability = resolveCoreviewBuilderActionAvailability({
+      coreviewEnabled: true,
+      artifactSelected: true,
+      artifactPath: view.artifactPath,
+      rendererKind: view.rendererKind,
+      capabilitySummary: buildCoreviewCapabilitySummary({
+        capabilities: view.capabilities,
+        rendererKind: view.rendererKind,
+        pageIndex: view.pageIndex,
+        pageCount: view.pageCount,
+      }),
+      requestArtifactUpdateWired: true,
+      cancelBuilderTaskWired: true,
+    })
+
+    expect(view.capabilities.supportsAnnotations).toBe(false)
+    expect(availability).toMatchObject({
+      enabled: true,
+      blockedReason: null,
+      supportsArtifactUpdate: true,
+      supportsVersionedRebuild: true,
+    })
+  })
+
+  it("enables Markdown revisions when a readable source path exists", () => {
+    const view = createView({
+      rendererKind: "markdown",
+      artifactPath: "mnt/user-data/outputs/notes.md",
+      artifactTitle: "notes.md",
+    })
+
+    const availability = resolveCoreviewBuilderActionAvailability({
+      coreviewEnabled: true,
+      artifactSelected: true,
+      artifactPath: view.artifactPath,
+      rendererKind: view.rendererKind,
+      capabilitySummary: buildCoreviewCapabilitySummary({
+        capabilities: view.capabilities,
+        rendererKind: view.rendererKind,
+        pageIndex: view.pageIndex,
+        pageCount: view.pageCount,
+      }),
+      requestArtifactUpdateWired: true,
+      cancelBuilderTaskWired: true,
+    })
+
+    expect(availability).toMatchObject({
+      enabled: true,
+      blockedReason: null,
+      supportsArtifactUpdate: true,
+      supportsVersionedRebuild: true,
+    })
+  })
+
+  it("truthfully disables unsupported PDF native updates", () => {
+    const view = createView({
+      rendererKind: "pdf",
+      artifactPath: "mnt/user-data/outputs/report.pdf",
+      artifactTitle: "report.pdf",
+    })
+
+    const availability = resolveCoreviewBuilderActionAvailability({
+      coreviewEnabled: true,
+      artifactSelected: true,
+      artifactPath: view.artifactPath,
+      rendererKind: view.rendererKind,
+      capabilitySummary: buildCoreviewCapabilitySummary({
+        capabilities: view.capabilities,
+        rendererKind: view.rendererKind,
+        pageIndex: view.pageIndex,
+        pageCount: view.pageCount,
+      }),
+      requestArtifactUpdateWired: true,
+      cancelBuilderTaskWired: true,
+    })
+
+    expect(availability.enabled).toBe(false)
+    expect(availability.blockedReason).toContain("PDF native editing")
+    expect(availability.supportsArtifactUpdate).toBe(false)
+  })
+
   it("coreview_request_artifact_update succeeds with selected artifact context", async () => {
     const harness = createHarness()
 

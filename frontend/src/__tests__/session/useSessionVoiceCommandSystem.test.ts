@@ -6,6 +6,7 @@ import type { InterruptPayload } from '../../app/lib/session-types';
 import {
   clearSessionLeaveGuardAnnotationSuppressionForTests,
   isSessionLeaveGuardSuppressedForAnnotation,
+  isSessionLeaveGuardSuppressedForInSessionActivity,
 } from '../../app/session/session-annotation-navigation-guard';
 import { useSessionVoiceCommandSystem } from '../../app/session/useSessionVoiceCommandSystem';
 
@@ -296,6 +297,44 @@ describe('useSessionVoiceCommandSystem', () => {
     expect(softBargeIn).not.toHaveBeenCalled();
     expect(onUserTranscript).toHaveBeenCalledWith('Sophia leave a note on the title');
     expect(isSessionLeaveGuardSuppressedForAnnotation()).toBe(true);
+  });
+
+  it('suppresses session exit for handled Coreview builder update commands', () => {
+    const routeArtifactReviewCommand = vi.fn(() => ({
+      handled: true,
+      command: {
+        kind: 'builder_update',
+        updateRequest: 'change the title',
+      },
+      applied: true,
+      blockedReason: null,
+      triggeredRefresh: false,
+      refreshResult: 'not_requested',
+      userMessage: null,
+      suppressAssistant: true,
+    } satisfies ArtifactReviewVoiceCommandRouteResult));
+    const {
+      params,
+      onUserTranscript,
+      handleVoiceEndSession,
+      bargeIn,
+      softBargeIn,
+    } = buildParams({
+      pendingInterrupt: null,
+      routeArtifactReviewCommand,
+    });
+
+    const { result } = renderHook(() => useSessionVoiceCommandSystem(params));
+
+    act(() => {
+      result.current.handleVoiceTranscript('Sophia change the title');
+    });
+
+    expect(handleVoiceEndSession).not.toHaveBeenCalled();
+    expect(onUserTranscript).not.toHaveBeenCalled();
+    expect(bargeIn).not.toHaveBeenCalled();
+    expect(softBargeIn).toHaveBeenCalledTimes(1);
+    expect(isSessionLeaveGuardSuppressedForInSessionActivity()).toBe(true);
   });
 
   it('warns for wake-word download command when no builder deliverable is ready', () => {

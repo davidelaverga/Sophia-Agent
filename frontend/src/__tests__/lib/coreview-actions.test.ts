@@ -339,6 +339,7 @@ describe("Coreview action bus", () => {
         { name: "emit_artifact" },
         { name: "start_builder_task" },
         { name: "check_async_task" },
+        { name: "update_async_task" },
       ] }],
     }, true, { allowArtifactCreation: false })
 
@@ -347,6 +348,7 @@ describe("Coreview action bus", () => {
     expect(declarationNames).not.toContain("emit_artifact")
     expect(declarationNames).not.toContain("start_builder_task")
     expect(declarationNames).not.toContain("check_async_task")
+    expect(declarationNames).not.toContain("update_async_task")
   })
 
   it("sets a PDF page by one-based page number, waits for readiness, and refreshes", async () => {

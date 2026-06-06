@@ -266,10 +266,12 @@ export interface GeminiArtifactReviewRelayContext {
   source: 'coreview_still_frame';
   user_intent: GeminiArtifactReviewUserIntent;
   builder_update_intent_detected: boolean;
+  selected_artifact_update_context: boolean;
   last_user_intent_at: string | null;
   expires_at: string | null;
   raw_transcript_excluded: true;
   raw_artifact_text_excluded: true;
+  raw_comment_text_excluded: true;
 }
 
 export type GeminiProviderEventCategoryCounts = Record<GeminiProviderEventCategory, {
@@ -785,6 +787,11 @@ const GEMINI_GENERIC_BUILDER_TOOL_NAMES = new Set([
   'cancel_async_task',
   'list_async_tasks',
 ]);
+const GEMINI_SELECTED_ARTIFACT_REVIEW_REDIRECT_BUILDER_TOOL_NAMES = new Set([
+  'start_builder_task',
+  'update_async_task',
+  'cancel_async_task',
+]);
 const GEMINI_PROVIDER_EVENT_CATEGORIES: GeminiProviderEventCategory[] = [
   'setupComplete',
   'serverContent',
@@ -1078,10 +1085,12 @@ export async function connectGeminiBrowserLiveDogfood(
       source: 'coreview_still_frame',
       user_intent: artifactReviewUserIntent,
       builder_update_intent_detected: artifactReviewBuilderUpdateIntentDetected,
+      selected_artifact_update_context: true,
       last_user_intent_at: artifactReviewUserIntentAt,
       expires_at: new Date(Date.now() + Math.max(0, artifactReviewExpiresAtMs - monotonicNowMs())).toISOString(),
       raw_transcript_excluded: true,
       raw_artifact_text_excluded: true,
+      raw_comment_text_excluded: true,
     };
   };
 
@@ -2215,6 +2224,7 @@ export function buildGeminiArtifactTextReaderHint(artifactId: string): Record<st
         'For simple visibility questions, answer from the fresh artifact frame or safe current-view metadata.',
         'Use exact-text sideband only when exact words, numbers, labels, or table values are needed.',
         'For highlight, mark, underline, annotate, note, comment, pin, flag, or callout requests, use coreview_add_annotation and wait for ok=true before saying it was added. Do not use coreview_refresh_view for annotation requests.',
+        'For selected artifact edit, update, revise, rebuild, restyle, change title, or new-version requests, use the Coreview selected-artifact update action and do not create a fresh companion artifact in this reply.',
         'For zoom or focus on a title, selection, text, or area, use coreview_focus_anchor. Use coreview_refresh_view only when the user asks to refresh your view.',
         'Do not answer this context message.',
       ].join(' '),
@@ -3579,7 +3589,7 @@ function splitFrontendReviewToolCallsFromProviderEvent(
     if (
       typeof name === 'string'
       && GEMINI_GENERIC_BUILDER_TOOL_NAMES.has(name)
-      && shouldSuppressGenericBuilderToolCallForArtifactReviewUpdate(artifactReviewContext)
+      && shouldSuppressGenericBuilderToolCallForArtifactReviewUpdate(artifactReviewContext, name)
     ) {
       suppressedGenericBuilderCalls.push({
         id: stringFromAnyKey(functionCall, 'id'),
@@ -3642,10 +3652,18 @@ function shouldSuppressEmitArtifactToolCallForArtifactReview(
 
 function shouldSuppressGenericBuilderToolCallForArtifactReviewUpdate(
   artifactReviewContext: GeminiArtifactReviewRelayContext | null,
+  toolName: string,
 ): boolean {
   return Boolean(
     artifactReviewContext?.active
-    && artifactReviewContext.builder_update_intent_detected,
+    && artifactReviewContext.artifact_id
+    && GEMINI_SELECTED_ARTIFACT_REVIEW_REDIRECT_BUILDER_TOOL_NAMES.has(toolName)
+    && (
+      artifactReviewContext.selected_artifact_update_context
+      || artifactReviewContext.builder_update_intent_detected
+      || artifactReviewContext.user_intent === 'create_update'
+      || artifactReviewContext.user_intent === 'unknown'
+    ),
   );
 }
 
@@ -3653,16 +3671,22 @@ function suppressedEmitArtifactToolResponse(
   call: GeminiSuppressedEmitArtifactToolCallInput,
   artifactReviewContext: GeminiArtifactReviewRelayContext | null,
 ): Record<string, unknown> {
+  const updateOnlyReviewRequest = artifactReviewContext?.builder_update_intent_detected === true
   return {
     ok: false,
     rejected: true,
     execution_rejected: true,
-    safe_reason: 'artifact_review_emit_artifact_suppressed',
+    safe_reason: updateOnlyReviewRequest ? 'update_only_review_request' : 'artifact_review_emit_artifact_suppressed',
     rejection_reason: 'artifact_review_emit_artifact_suppressed',
+    recovery_guidance: updateOnlyReviewRequest
+      ? 'Use coreview_request_artifact_update for selected-artifact update requests during Review with Sophia.'
+      : 'Use Coreview review tools for selected-artifact review requests.',
     result_summary: 'Review-only emit_artifact call suppressed.',
     artifact_review_active: artifactReviewContext?.active === true,
     artifact_review_user_intent: artifactReviewContext?.user_intent ?? null,
     coreview_builder_update_intent_detected: artifactReviewContext?.builder_update_intent_detected === true,
+    selected_artifact_update_context: artifactReviewContext?.selected_artifact_update_context === true,
+    update_only_review_request: updateOnlyReviewRequest,
     emit_artifact_blocked_for_annotation_intent: artifactReviewContext?.user_intent !== 'create_update',
     emit_artifact_blocked_for_review_update_intent: artifactReviewContext?.builder_update_intent_detected === true,
     raw_transcript_excluded: true,
@@ -3687,6 +3711,7 @@ function suppressedGenericBuilderToolResponse(
     artifact_review_active: artifactReviewContext?.active === true,
     artifact_review_user_intent: artifactReviewContext?.user_intent ?? null,
     coreview_builder_update_intent_detected: artifactReviewContext?.builder_update_intent_detected === true,
+    selected_artifact_update_context: artifactReviewContext?.selected_artifact_update_context === true,
     suppressed_tool_name: call.name,
     raw_transcript_excluded: true,
     raw_comment_text_excluded: true,

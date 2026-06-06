@@ -8,7 +8,10 @@ import { logger } from '../lib/error-logger';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
 import type { InterruptPayload } from '../lib/session-types';
 
-import { suppressSessionLeaveGuardForAnnotation } from './session-annotation-navigation-guard';
+import {
+  suppressSessionLeaveGuardForAnnotation,
+  suppressSessionLeaveGuardForCoreviewBuilderUpdate,
+} from './session-annotation-navigation-guard';
 
 type ReflectionCandidate = {
   prompt?: string;
@@ -418,6 +421,9 @@ export function useSessionVoiceCommandSystem({
 
     if (result.command?.kind === 'add_annotation') {
       suppressSessionLeaveGuardForAnnotation();
+    }
+    if (result.command?.kind === 'builder_update' || result.command?.kind === 'builder_cancel') {
+      suppressSessionLeaveGuardForCoreviewBuilderUpdate();
     }
 
     if (result.suppressAssistant !== false) {

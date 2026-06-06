@@ -1228,6 +1228,7 @@ function buildCoreviewStillFrameDiagnosticsSummary(coreview: CoreviewUsageTeleme
     builderWorkspaceEventCount: coreview.visual.builderWorkspaceEventCount,
     builderLastWorkspaceEventType: coreview.visual.builderLastWorkspaceEventType,
     coreviewBuilderActionsEnabled: coreview.visual.coreviewBuilderActionsEnabled,
+    coreviewBuilderActionsBlockedReason: coreview.visual.coreviewBuilderActionsBlockedReason,
     coreviewBuilderUpdateIntentDetected: coreview.visual.coreviewBuilderUpdateIntentDetected,
     coreviewBuilderUpdateAttempted: coreview.visual.coreviewBuilderUpdateAttempted,
     coreviewBuilderUpdateResult: coreview.visual.coreviewBuilderUpdateResult,
