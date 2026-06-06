@@ -23,6 +23,8 @@ class BuilderArtifactInput(BaseModel):
     artifact_type: Literal[
         "presentation",
         "document",
+        "html",
+        "pdf",
         "webpage",
         "research_report",
         "visual_report",

@@ -120,8 +120,8 @@ _TASK_TYPE_PREFIXES: dict[str, str] = {
 }
 
 _HTML_OUTPUT_RE = re.compile(
-    r"\b(?:html\s+(?:document|file|report|summary|brief|article|explainer|page|site|website)"
-    r"|(?:document|file|report|summary|brief|article|explainer|page|site|website)\s+(?:as|in)\s+html"
+    r"\b(?:html\s+(?:artifact|document|file|report|summary|brief|article|explainer|page|site|website)"
+    r"|(?:artifact|document|file|report|summary|brief|article|explainer|page|site|website)\s+(?:as|in)\s+html"
     r"|(?:build|create|make|generate|produce|write)\s+(?:an?\s+)?html\b"
     r"|\.html\b)",
     re.IGNORECASE,

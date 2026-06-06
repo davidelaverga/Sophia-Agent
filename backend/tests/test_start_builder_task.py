@@ -177,6 +177,17 @@ def test_visual_report_html_request_targets_html_file():
     assert target.endswith(".html")
 
 
+def test_explicit_html_artifact_phrase_targets_html_file():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "document",
+        "Create a real HTML artifact with a polished visual landing page.",
+    )
+
+    assert target.endswith(".html")
+
+
 def test_pdf_request_with_html_charts_still_targets_pdf():
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
 

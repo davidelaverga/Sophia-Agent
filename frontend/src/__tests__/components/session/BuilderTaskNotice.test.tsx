@@ -141,6 +141,8 @@ describe('BuilderTaskNotice', () => {
   });
 
   it('keeps fallback truth copy in the canonical completed state', () => {
+    const onOpenArtifact = vi.fn();
+
     render(
       <BuilderTaskNotice
         task={{
@@ -149,7 +151,7 @@ describe('BuilderTaskNotice', () => {
         }}
         artifactTitle="Deck fallback"
         fallbackLabel="html fallback"
-        onOpenArtifact={vi.fn()}
+        onOpenArtifact={onOpenArtifact}
         openHref="/api/threads/thread-1/artifacts/mnt/user-data/outputs/deck.html"
         downloadHref="/api/threads/thread-1/artifacts/mnt/user-data/outputs/deck.html?download=true"
       />,
@@ -157,6 +159,12 @@ describe('BuilderTaskNotice', () => {
 
     expect(screen.getByText('html fallback')).toBeInTheDocument();
     expect(screen.getByText('I couldn’t finish the PowerPoint package, so I delivered a browser-viewable HTML fallback.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /view deck fallback in canvas/i }));
+    expect(onOpenArtifact).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('link', { name: /open deck fallback in new tab/i })).toHaveAttribute(
+      'href',
+      '/api/threads/thread-1/artifacts/mnt/user-data/outputs/deck.html',
+    );
   });
 
   it('surfaces a stalled builder state explicitly', () => {

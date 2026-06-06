@@ -74,6 +74,25 @@ def test_get_artifact_reads_utf8_text_file_on_windows_locale(tmp_path, monkeypat
     assert response.media_type == "text/plain"
 
 
+def test_get_artifact_serves_local_html_as_text_html(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "sophia-workspace-demo.html"
+    html = "<!doctype html><html><head><title>Demo</title></head><body><h1>Demo</h1></body></html>"
+    artifact_path.write_text(html, encoding="utf-8")
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: artifact_path)
+
+    response = asyncio.run(
+        artifacts_router.get_artifact(
+            "thread-1",
+            "mnt/user-data/outputs/sophia-workspace-demo.html",
+            http_request(),
+        )
+    )
+
+    assert bytes(response.body).decode("utf-8") == html
+    assert response.media_type == "text/html"
+
+
 def test_get_artifact_serves_local_pptx_as_attachment(tmp_path, monkeypatch) -> None:
     artifact_path = tmp_path / "deck.pptx"
     artifact_path.write_bytes(b"pptx-bytes")

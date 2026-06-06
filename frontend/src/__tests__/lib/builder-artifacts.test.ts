@@ -65,6 +65,11 @@ describe("builder artifact utilities", () => {
       name: "deck-fallback.md",
       mimeType: "text/markdown",
     })).toBe(false)
+
+    expect(detectArtifactRendererKind({
+      path: "mnt/user-data/outputs/sophia-workspace-demo.html",
+      name: "sophia-workspace-demo.html",
+    })).toBe("html")
   })
 
   it("builds same-origin artifact hrefs from normalized output paths", () => {

@@ -188,6 +188,7 @@ _PPTX_REQUIRED_ZIP_ENTRIES = frozenset({
     "_rels/.rels",
     "ppt/presentation.xml",
 })
+_HTML_ARTIFACT_SUFFIXES = frozenset({".html", ".htm"})
 _PPTX_MIN_BYTES = 1024
 _PPTX_IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 _HTML_FALLBACK_MIN_BYTES = 128
@@ -410,6 +411,12 @@ def _is_completion_output_candidate(
 
 def _completion_candidate_integrity_error(entry: Path, state: dict[str, Any]) -> str | None:
     suffix = entry.suffix.lower()
+    if _requested_html_artifact(state) and suffix in _HTML_ARTIFACT_SUFFIXES:
+        return _log_completion_candidate_integrity_error(
+            entry,
+            ext="html",
+            reason=_html_fallback_integrity_error_for_file(entry),
+        )
     if suffix == ".pptx":
         return _log_completion_candidate_integrity_error(
             entry,
@@ -452,6 +459,8 @@ def _output_suffix_allowed_for_request(suffix: str, state: dict[str, Any]) -> bo
         return suffix in _allowed_pdf_artifact_suffixes(state)
     if _requested_pptx_artifact(state):
         return suffix in _allowed_pptx_artifact_suffixes(state)
+    if _requested_html_artifact(state):
+        return suffix in _HTML_ARTIFACT_SUFFIXES
     return True
 
 
@@ -460,9 +469,14 @@ def _is_promotable_candidate_path(
     *,
     min_mtime: float | None,
     requested_pptx: bool,
+    requested_html: bool,
 ) -> bool:
     if not _is_recent_promotable_path(path, min_mtime):
         return False
+    if requested_html:
+        if path.suffix.lower() not in _HTML_ARTIFACT_SUFFIXES:
+            return False
+        return _html_fallback_integrity_error_for_file(path) is None
     if path.suffix.lower() == ".pptx":
         return _pptx_integrity_error_for_file(path) is None
     if requested_pptx and path.suffix.lower() in {".html", ".htm"}:
@@ -656,6 +670,10 @@ def _requested_pdf_artifact(state: dict[str, Any]) -> bool:
 
 def _requested_pptx_artifact(state: dict[str, Any]) -> bool:
     return _requested_target_suffix(state) == ".pptx"
+
+
+def _requested_html_artifact(state: dict[str, Any]) -> bool:
+    return _requested_target_suffix(state) in _HTML_ARTIFACT_SUFFIXES
 
 
 def _requested_office_artifact(state: dict[str, Any]) -> bool:
@@ -887,6 +905,44 @@ def _pptx_html_fallback_integrity_rejection_reason(
             content, _mime = result
             return _html_fallback_integrity_error_for_bytes(content)
     return "html_fallback_missing"
+
+
+def _html_artifact_path_rejection_reason(path: Any) -> str | None:
+    canonical = _canonical_outputs_artifact_path(path)
+    if canonical is None:
+        return "html_artifact_path_not_under_outputs"
+    suffix = PurePosixPath(canonical).suffix.lower()
+    if suffix not in _HTML_ARTIFACT_SUFFIXES:
+        return f"html_invalid_artifact_extension:{suffix or 'none'}"
+    return None
+
+
+def _html_artifact_integrity_rejection_reason(
+    canonical: str,
+    state: dict[str, Any],
+    runtime: Runtime,
+) -> str | None:
+    relative = _extract_output_relative_path(canonical)
+    if relative is None:
+        return "html_artifact_path_not_under_outputs"
+    outputs_host_path = _outputs_host_path_from_state(state)
+    if outputs_host_path:
+        host_file = Path(outputs_host_path) / relative
+        if host_file.is_file():
+            return _html_fallback_integrity_error_for_file(host_file)
+    for thread_id in _artifact_remote_thread_ids(state, runtime):
+        try:
+            result = supabase_artifact_store.download_artifact(thread_id, relative)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "BuilderArtifact: html artifact remote integrity check failed error_type=%s",
+                exc.__class__.__name__,
+            )
+            continue
+        if result is not None:
+            content, _mime = result
+            return _html_fallback_integrity_error_for_bytes(content)
+    return "html_artifact_missing"
 
 
 def _pptx_path_integrity_rejection_reason(
@@ -2104,6 +2160,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         *,
         requested_pdf: bool,
         requested_pptx: bool,
+        requested_html: bool,
     ) -> list[Path]:
         outputs_host_path = _outputs_host_path_from_state(state)
         if not outputs_host_path:
@@ -2119,6 +2176,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 p,
                 min_mtime=min_mtime,
                 requested_pptx=requested_pptx,
+                requested_html=requested_html,
             )
         ]
         candidates = BuilderArtifactMiddleware._target_promotable_candidates(
@@ -2126,6 +2184,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             state,
             requested_pdf=requested_pdf,
             requested_pptx=requested_pptx,
+            requested_html=requested_html,
         )
         candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return candidates
@@ -2137,6 +2196,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         *,
         requested_pdf: bool,
         requested_pptx: bool,
+        requested_html: bool,
     ) -> list[Path]:
         if requested_pdf:
             return BuilderArtifactMiddleware._preferred_suffix_candidates(
@@ -2151,6 +2211,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 primary_suffix=".pptx",
                 fallback_suffix=_pptx_fallback_suffix(state),
             )
+        if requested_html:
+            return [
+                path for path in candidates
+                if path.suffix.lower() in _HTML_ARTIFACT_SUFFIXES
+            ]
         return candidates
 
     @staticmethod
@@ -2201,6 +2266,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         *,
         requested_pdf: bool,
         requested_pptx: bool,
+        requested_html: bool,
         reason: str,
     ) -> tuple[str | None, str]:
         try:
@@ -2208,6 +2274,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 state,
                 requested_pdf=requested_pdf,
                 requested_pptx=requested_pptx,
+                requested_html=requested_html,
             )
         except Exception as exc:  # noqa: BLE001 — best-effort only
             logger.warning(
@@ -2230,6 +2297,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         *,
         requested_pdf: bool,
         requested_pptx: bool,
+        requested_html: bool,
         reason: str,
     ) -> str | None:
         try:
@@ -2259,6 +2327,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             logger.warning(
                 "BuilderArtifact: PPTX fallback refusing generator script %s "
                 "(reason=%s, no valid deck_or_fallback deliverable found)",
+                promoted_path,
+                reason,
+            )
+            return None
+        if requested_html:
+            logger.warning(
+                "BuilderArtifact: HTML fallback refusing generator script %s "
+                "(reason=%s, no valid html deliverable found)",
                 promoted_path,
                 reason,
             )
@@ -2363,6 +2439,27 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         }
 
     @staticmethod
+    def _html_no_deliverable_fallback(*, steps_completed: int) -> dict[str, Any]:
+        return {
+            "artifact_path": None,
+            "artifact_type": "html",
+            "artifact_title": "HTML artifact did not complete",
+            "steps_completed": steps_completed,
+            "decisions_made": [],
+            "companion_summary": (
+                "The builder could not produce a valid standalone HTML artifact. "
+                "I did not surface Markdown or a broken HTML file as completed."
+            ),
+            "companion_tone_hint": (
+                "Apologetic and direct — HTML generation did not produce a "
+                "valid deliverable; offer to retry."
+            ),
+            "user_next_action": "Ask me to retry the HTML artifact build.",
+            "confidence": 0.2,
+            "fallback_reason": "html_generation_failed",
+        }
+
+    @staticmethod
     def _generic_no_deliverable_fallback(*, steps_completed: int) -> dict[str, Any]:
         return {
             "artifact_path": None,
@@ -2431,10 +2528,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         """
         requested_pdf = _requested_pdf_artifact(state)
         requested_pptx = _requested_pptx_artifact(state)
+        requested_html = _requested_html_artifact(state)
         promoted_path, promoted_type = BuilderArtifactMiddleware._promoted_deliverable_from_outputs(
             state,
             requested_pdf=requested_pdf,
             requested_pptx=requested_pptx,
+            requested_html=requested_html,
             reason=reason,
         )
         if promoted_path:
@@ -2452,6 +2551,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             state,
             requested_pdf=requested_pdf,
             requested_pptx=requested_pptx,
+            requested_html=requested_html,
             reason=reason,
         )
         if promoted_generator_path:
@@ -2470,6 +2570,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 steps_completed=steps_completed,
             )
             return _apply_artifact_request_metadata(fallback, state, fallback_reason=reason)
+        if requested_html:
+            fallback = BuilderArtifactMiddleware._html_no_deliverable_fallback(
+                steps_completed=steps_completed,
+            )
+            return _apply_artifact_request_metadata(fallback, state, fallback_reason="html_generation_failed")
         return BuilderArtifactMiddleware._generic_no_deliverable_fallback(
             steps_completed=steps_completed,
         )
@@ -2608,6 +2713,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return False
         if _requested_pptx_artifact(state) and not cls._pptx_artifact_args_valid(artifact_args, state, runtime):
             return False
+        if _requested_html_artifact(state) and not cls._html_artifact_args_valid(artifact_args, state, runtime):
+            return False
         candidates = _emit_candidate_paths(artifact_args)
         if not candidates:
             # Reject empty artifact_path under EITHER turn-count pressure
@@ -2701,6 +2808,51 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         logger.warning(
             "BuilderArtifact: rejecting PPTX artifact path reason=%s "
             "requested_ext=pptx rejected_ext=%s",
+            rejection_reason,
+            rejected_ext,
+        )
+
+    @staticmethod
+    def _html_artifact_args_valid(
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> bool:
+        primary = artifact_args.get("artifact_path")
+        rejection_reason = _html_artifact_path_rejection_reason(primary)
+        if rejection_reason is not None:
+            BuilderArtifactMiddleware._log_html_artifact_rejection(primary, rejection_reason)
+            return False
+        canonical_primary = _canonical_outputs_artifact_path(primary)
+        if canonical_primary is None:
+            return False
+        integrity_rejection = _html_artifact_integrity_rejection_reason(
+            canonical_primary,
+            state,
+            runtime,
+        )
+        if integrity_rejection is not None:
+            BuilderArtifactMiddleware._log_html_artifact_rejection(primary, integrity_rejection)
+            return False
+        artifact_args["artifact_path"] = canonical_primary
+        _apply_artifact_request_metadata(
+            artifact_args,
+            state,
+            fallback_reason="html_generation_failed",
+        )
+        if (
+            not artifact_args.get("artifact_type")
+            or str(artifact_args.get("artifact_type")).lower() in {"document", "unknown"}
+        ):
+            artifact_args["artifact_type"] = "html"
+        return True
+
+    @staticmethod
+    def _log_html_artifact_rejection(primary: object, rejection_reason: str) -> None:
+        rejected_ext = PurePosixPath(str(primary or "")).suffix.lower().lstrip(".") or None
+        logger.warning(
+            "BuilderArtifact: rejecting HTML artifact path reason=%s "
+            "requested_ext=html rejected_ext=%s",
             rejection_reason,
             rejected_ext,
         )
@@ -2817,6 +2969,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "If using HTML fallback, write a complete standalone HTML document "
                 "with <!doctype html>, <html>, <head>, and <body>; do not wrap it "
                 "in Markdown fences and do not HTML-escape the document source."
+            )
+        if _requested_html_artifact(state):
+            return (
+                "Error: emit_builder_artifact rejected — this is an HTML request. "
+                "The final artifact must be a complete standalone .html/.htm file "
+                "under /mnt/user-data/outputs/ with <!doctype html>, <html>, "
+                "<head>, and <body>. Do not emit Markdown, code fences, escaped "
+                "HTML text, generator scripts, bare paths, or files outside outputs "
+                "as the user-ready HTML artifact."
             )
         recovery_hint = cls._missing_artifact_recovery_hint(artifact_args, state)
         return (
@@ -2984,6 +3145,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return [
                 path for path in paths
                 if PurePosixPath(path).suffix.lower() in _allowed_pptx_artifact_suffixes(state)
+            ]
+        if _requested_html_artifact(state):
+            return [
+                path for path in paths
+                if PurePosixPath(path).suffix.lower() in _HTML_ARTIFACT_SUFFIXES
             ]
         return paths
 
