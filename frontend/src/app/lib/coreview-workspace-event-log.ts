@@ -24,6 +24,11 @@ export type CoreviewWorkspaceEventAppendInput = {
   actor: CoreviewWorkspaceActor
   createdAt?: string | null
   payload?: Record<string, unknown> | null
+  artifactId?: string | null
+  artifactStableIdentity?: string | null
+  threadId?: string | null
+  builderTaskId?: string | null
+  builderRunId?: string | null
 }
 
 export type CoreviewWorkspaceEventCounts = {
@@ -33,6 +38,8 @@ export type CoreviewWorkspaceEventCounts = {
   lastActorKind: CoreviewWorkspaceActorKind | null
   annotationEventsCreatedCount: number
   viewChangedEventCount: number
+  builderWorkspaceEventCount: number
+  builderLastWorkspaceEventType: CoreviewWorkspaceEventType | null
 }
 
 export type CoreviewWorkspaceEventLogTelemetry = {
@@ -47,6 +54,8 @@ export type CoreviewWorkspaceEventLogTelemetry = {
   workspaceEventLogRestoreCount: number
   annotationEventsCreatedCount: number
   viewChangedEventCount: number
+  builderWorkspaceEventCount: number
+  builderLastWorkspaceEventType: CoreviewWorkspaceEventType | null
   rawCommentTextExcluded: true
   rawArtifactTextExcluded: true
   rawFrameExcluded: true
@@ -132,6 +141,8 @@ export function getWorkspaceEventCounts(
     lastActorKind: latest?.actor.kind ?? null,
     annotationEventsCreatedCount: typeCounts["annotation.created"] ?? 0,
     viewChangedEventCount: typeCounts["view.changed"] ?? 0,
+    builderWorkspaceEventCount: events.filter((event) => isBuilderWorkspaceEventType(event.type)).length,
+    builderLastWorkspaceEventType: [...events].reverse().find((event) => isBuilderWorkspaceEventType(event.type))?.type ?? null,
   }
 }
 
@@ -156,6 +167,8 @@ export function getCoreviewWorkspaceEventLogTelemetry(
     workspaceEventLogRestoreCount: meta?.restoreCount ?? 0,
     annotationEventsCreatedCount: counts.annotationEventsCreatedCount,
     viewChangedEventCount: counts.viewChangedEventCount,
+    builderWorkspaceEventCount: counts.builderWorkspaceEventCount,
+    builderLastWorkspaceEventType: counts.builderLastWorkspaceEventType,
     rawCommentTextExcluded: true,
     rawArtifactTextExcluded: true,
     rawFrameExcluded: true,
@@ -208,6 +221,11 @@ function normalizeAppendInput(
     createdAt: normalizeIsoDate(input.createdAt) ?? new Date().toISOString(),
     version: 1,
     payload: sanitizeWorkspaceEventPayload(input.payload ?? {}),
+    artifactId: normalizeToken(input.artifactId),
+    artifactStableIdentity: normalizeToken(input.artifactStableIdentity),
+    threadId: normalizeToken(input.threadId),
+    builderTaskId: normalizeToken(input.builderTaskId),
+    builderRunId: normalizeToken(input.builderRunId),
   }
 }
 
@@ -335,6 +353,11 @@ function eventFromStorageEntry(value: unknown, expectedWorkspaceKey: string): Co
     createdAt,
     version: 1,
     payload: sanitizeWorkspaceEventPayload(isRecord(value.payload) ? value.payload : {}),
+    artifactId: normalizeToken(value.artifactId),
+    artifactStableIdentity: normalizeToken(value.artifactStableIdentity),
+    threadId: normalizeToken(value.threadId),
+    builderTaskId: normalizeToken(value.builderTaskId),
+    builderRunId: normalizeToken(value.builderRunId),
   }
 }
 
@@ -464,6 +487,10 @@ function isRawCommentTextKey(key: string): boolean {
 
 function isRawArtifactTextKey(key: string): boolean {
   return /^(content|artifactText|artifact_text|rawArtifactText|raw_artifact_text|documentText|document_text)$/u.test(key)
+}
+
+function isBuilderWorkspaceEventType(type: CoreviewWorkspaceEventType): boolean {
+  return type.startsWith("builder.") || type.startsWith("artifact.version_")
 }
 
 function normalizeToken(value: unknown): string | null {

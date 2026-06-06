@@ -65,6 +65,17 @@ export interface CoreviewArtifactCapabilities {
   supportsOCR: boolean
   requiresOCR: boolean
   supportsPptxNativeRender: boolean
+  supportsArtifactUpdate: boolean
+  supportsScopedEdit: boolean
+  supportsVersioning: boolean
+  supportsOverwrite: boolean
+  supportsSourceRead: boolean
+  supportsNativeEdit: boolean
+  supportsRebuildFromSource: boolean
+  requiresFullRebuild: boolean
+  requiresConversion: boolean
+  unsupportedUpdateReason?: string | null
+  preferredUpdateMode?: "create_new" | "update_existing" | "revise_version" | "convert_format" | "repair_artifact" | null
   fallbackReason?: CoreviewArtifactFallbackReason | null
   userFacingTruth?: string | null
 }
@@ -85,6 +96,17 @@ export interface CoreviewCurrentViewCapabilitySummary {
   supportsOCR: boolean
   requiresOCR: boolean
   supportsPptxNativeRender: boolean
+  supportsArtifactUpdate: boolean
+  supportsScopedEdit: boolean
+  supportsVersioning: boolean
+  supportsOverwrite: boolean
+  supportsSourceRead: boolean
+  supportsNativeEdit: boolean
+  supportsRebuildFromSource: boolean
+  requiresFullRebuild: boolean
+  requiresConversion: boolean
+  unsupportedUpdateReason: string | null
+  preferredUpdateMode: "create_new" | "update_existing" | "revise_version" | "convert_format" | "repair_artifact" | null
   fallbackReason: CoreviewArtifactFallbackReason | null
   userFacingTruth: string | null
 }

@@ -80,6 +80,24 @@ export type CoreviewVisualTelemetry = {
   workspaceEventLogRestoreCount: number
   annotationEventsCreatedCount: number
   viewChangedEventCount: number
+  builderWorkspaceEventCount: number
+  builderLastWorkspaceEventType: string | null
+  coreviewBuilderActionsEnabled: boolean
+  coreviewBuilderUpdateIntentDetected: boolean
+  coreviewBuilderUpdateAttempted: boolean
+  coreviewBuilderUpdateResult: string | null
+  coreviewBuilderUpdateBlockedReason: string | null
+  coreviewBuilderUpdateMode: string | null
+  coreviewBuilderUpdateArtifactContextPresent: boolean
+  coreviewBuilderTaskStarted: boolean
+  coreviewBuilderTaskIdPresent: boolean
+  coreviewBuilderCancelIntentDetected: boolean
+  coreviewBuilderCancelAttempted: boolean
+  coreviewBuilderCancelResult: string | null
+  coreviewBuilderCancelBlockedReason: string | null
+  coreviewBuilderStatusResult: string | null
+  coreviewBuilderPreservedMic: boolean | null
+  coreviewBuilderPreservedReview: boolean | null
   artifactRebindAttempted: boolean
   artifactRebindResult: string | null
   artifactRebindReason: string | null
@@ -1301,6 +1319,24 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       workspaceEventLogRestoreCount: 0,
       annotationEventsCreatedCount: 0,
       viewChangedEventCount: 0,
+      builderWorkspaceEventCount: 0,
+      builderLastWorkspaceEventType: null,
+      coreviewBuilderActionsEnabled: false,
+      coreviewBuilderUpdateIntentDetected: false,
+      coreviewBuilderUpdateAttempted: false,
+      coreviewBuilderUpdateResult: null,
+      coreviewBuilderUpdateBlockedReason: null,
+      coreviewBuilderUpdateMode: null,
+      coreviewBuilderUpdateArtifactContextPresent: false,
+      coreviewBuilderTaskStarted: false,
+      coreviewBuilderTaskIdPresent: false,
+      coreviewBuilderCancelIntentDetected: false,
+      coreviewBuilderCancelAttempted: false,
+      coreviewBuilderCancelResult: null,
+      coreviewBuilderCancelBlockedReason: null,
+      coreviewBuilderStatusResult: null,
+      coreviewBuilderPreservedMic: null,
+      coreviewBuilderPreservedReview: null,
       artifactRebindAttempted: false,
       artifactRebindResult: null,
       artifactRebindReason: null,
@@ -1573,6 +1609,11 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
   const latestWorkspaceEvent = workspaceEvents.at(-1) ?? null
+  const coreviewBuilderActionEvents = activeEvents
+    .filter((event) => event.category === "voice-session" && event.name === "coreview-builder-action")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const latestCoreviewBuilderAction = coreviewBuilderActionEvents.at(-1) ?? null
   const assistantAnnotationClaimSuppressedEvents = activeEvents
     .filter((event) => event.category === "voice-session" && event.name === "assistant-annotation-claim-suppressed")
   const coreviewToolDiagnostics = activeEvents.filter((event) => (
@@ -1696,6 +1737,47 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     ?? workspaceEvents.filter((event) => asString(event.workspaceEventType) === "annotation.created").length
   visual.viewChangedEventCount = numberFromKeys(latestWorkspaceEvent, ["viewChangedEventCount"])
     ?? workspaceEvents.filter((event) => asString(event.workspaceEventType) === "view.changed").length
+  visual.builderWorkspaceEventCount = numberFromKeys(latestCoreviewBuilderAction, ["builderWorkspaceEventCount"])
+    ?? numberFromKeys(latestWorkspaceEvent, ["builderWorkspaceEventCount"])
+    ?? workspaceEvents.filter((event) => {
+      const type = asString(event.workspaceEventType) ?? ""
+      return type.startsWith("builder.") || type.startsWith("artifact.version_")
+    }).length
+  visual.builderLastWorkspaceEventType = asString(latestCoreviewBuilderAction?.builderLastWorkspaceEventType)
+    ?? asString(latestWorkspaceEvent?.builderLastWorkspaceEventType)
+    ?? null
+  visual.coreviewBuilderActionsEnabled = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewBuilderActionsEnabled) === true
+  ))
+  visual.coreviewBuilderUpdateIntentDetected = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewBuilderUpdateIntentDetected) === true
+  ))
+  visual.coreviewBuilderUpdateAttempted = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewBuilderUpdateAttempted) === true
+  ))
+  visual.coreviewBuilderUpdateResult = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewBuilderUpdateResult")
+  visual.coreviewBuilderUpdateBlockedReason = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewBuilderUpdateBlockedReason")
+  visual.coreviewBuilderUpdateMode = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewBuilderUpdateMode")
+  visual.coreviewBuilderUpdateArtifactContextPresent = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewBuilderUpdateArtifactContextPresent) === true
+  ))
+  visual.coreviewBuilderTaskStarted = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewBuilderTaskStarted) === true
+  ))
+  visual.coreviewBuilderTaskIdPresent = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewBuilderTaskIdPresent) === true
+  ))
+  visual.coreviewBuilderCancelIntentDetected = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewBuilderCancelIntentDetected) === true
+  ))
+  visual.coreviewBuilderCancelAttempted = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewBuilderCancelAttempted) === true
+  ))
+  visual.coreviewBuilderCancelResult = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewBuilderCancelResult")
+  visual.coreviewBuilderCancelBlockedReason = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewBuilderCancelBlockedReason")
+  visual.coreviewBuilderStatusResult = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewBuilderStatusResult")
+  visual.coreviewBuilderPreservedMic = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewBuilderPreservedMic")
+  visual.coreviewBuilderPreservedReview = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewBuilderPreservedReview")
   visual.artifactRebindAttempted = latestRebindEvent !== null
   visual.artifactRebindResult = asString(latestRebindEvent?.artifactRebindResult)
   visual.artifactRebindReason = asString(latestRebindEvent?.artifactRebindReason)

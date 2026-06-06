@@ -3,6 +3,21 @@
 export { coreviewFlagDiagnostics, isCoreviewStillFrameReviewEnabled } from "../../lib/co-review-flags"
 export type { CoReviewMediaTransport } from "../../lib/co-review-transport"
 export {
+  createCoreviewBuilderActionBus,
+  summarizeRequestedChange,
+  type CoreviewArtifactUpdateContext,
+  type CoreviewArtifactUpdateMode,
+  type CoreviewBuilderActionResult,
+  type CoreviewBuilderActionBus,
+  type CoreviewBuilderCancelAdapterResult,
+  type CoreviewBuilderStartAdapterResult,
+  type CoreviewBuilderTaskStatus,
+  type CoreviewBuilderOutputStatus,
+  type CoreviewBuilderWorkspaceEventInput,
+  type CoreviewRequestArtifactUpdateInput,
+  type CoreviewBuilderSourceActor,
+} from "../../lib/coreview-builder-actions"
+export {
   COREVIEW_ADD_ANNOTATION_TOOL_NAME,
   COREVIEW_FOCUS_ANCHOR_TOOL_NAME,
   COREVIEW_REFRESH_VIEW_TOOL_NAME,

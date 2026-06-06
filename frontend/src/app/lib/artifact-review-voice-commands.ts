@@ -12,6 +12,8 @@ export type ArtifactReviewVoiceCommandKind =
   | "refresh_view"
   | "focus_anchor"
   | "add_annotation"
+  | "builder_update"
+  | "builder_cancel"
 
 export type ArtifactReviewAnnotationKind = "highlight" | "comment" | "underline" | "arrow"
 export type ArtifactReviewAnnotationColor = "yellow" | "purple" | "blue" | "pink"
@@ -31,6 +33,8 @@ export type ArtifactReviewVoiceCommandBlockedReason =
   | "no_multipage_artifact_selected"
   | "requested_page_out_of_bounds"
   | "visual_refresh_unavailable"
+  | "unsupported_update_mode"
+  | "no_active_builder_task"
 
 export type ArtifactReviewVoiceCommandRefreshResult =
   | "not_requested"
@@ -47,6 +51,8 @@ export interface ArtifactReviewVoiceCommand {
   anchorType?: ArtifactReviewAnnotationAnchorType
   color?: ArtifactReviewAnnotationColor
   commentText?: string
+  updateRequest?: string
+  updateMode?: "create_new" | "update_existing" | "revise_version" | "convert_format" | "repair_artifact"
   zoomDelta?: number
   utteranceKind?: ArtifactReviewAnnotationUtteranceKind
 }
@@ -157,6 +163,20 @@ const COMMENT_TEXT_PATTERNS = [
   /\b(?:comment|note|feedback|pin)\s+(?!on\b|the\b|current\b|title\b|it\b|this\b)(.+)$/iu,
   /\b(?:comment|note|feedback|pin)\s*:\s*(.+)$/iu,
 ]
+const BUILDER_CANCEL_PATTERNS = [
+  /\b(?:cancel|stop|abort)\s+(?:the\s+)?(?:builder\s+)?(?:task|build|update)\b/u,
+  /\b(?:cancel|stop|abort)\s+this\s+(?:builder\s+)?(?:task|build|update)\b/u,
+  /\bstop\s+the\s+build\b/u,
+]
+const BUILDER_UPDATE_PATTERNS = [
+  /\bupdate\s+(?:this|the)\s+(?:file|artifact|document|page|canvas)\b/u,
+  /\b(?:edit|revise|rewrite)\s+(?:this|the)\s+(?:file|artifact|document|page|canvas)\b/u,
+  /\bchange\s+(?:the\s+)?(?:title|heading|headline|background|layout|copy|text|tone|color|colour|section|hero|cards?)\b/u,
+  /\bmake\s+(?:the\s+)?(?:background|layout|copy|text|title|heading|headline|section|hero|cards?)\s+(?:more|less|darker|lighter|brighter|premium|polished|compact|spacious|clear|modern)\b/u,
+  /\bapply\s+(?:this|the)\s+(?:comment|feedback|note|annotation)\b/u,
+  /\bmake\s+(?:a\s+)?new\s+version\b/u,
+  /\brebuild\s+(?:this|the)\s+(?:file|artifact|document|page|canvas)?(?:\s+as\s+(?:html|markdown|pdf|pptx|docx))?\b/u,
+]
 
 const PAGE_NUMBER_PATTERN = [
   "\\d+",
@@ -243,6 +263,7 @@ function parseArtifactReviewVoiceCommandClause(
     return []
   }
   const commandsWithIndex: IndexedArtifactReviewCommand[] = [
+    ...parseArtifactBuilderCommands(transcript, normalized),
     ...parseArtifactPageCommands(normalized),
     ...parseArtifactViewCommands(normalized),
     ...parseArtifactRefreshCommands(normalized),
@@ -322,6 +343,48 @@ function parseArtifactRefreshCommands(normalized: string): IndexedArtifactReview
   return refreshIndex >= 0
     ? [{ index: refreshIndex, command: { kind: "refresh_view" } }]
     : []
+}
+
+function parseArtifactBuilderCommands(
+  transcript: string,
+  normalized: string,
+): IndexedArtifactReviewCommand[] {
+  const cancelIndex = firstMatchedIndex(normalized, BUILDER_CANCEL_PATTERNS)
+  if (cancelIndex >= 0) {
+    return [{
+      index: cancelIndex,
+      command: {
+        kind: "builder_cancel",
+      },
+    }]
+  }
+
+  const updateIndex = firstMatchedIndex(normalized, BUILDER_UPDATE_PATTERNS)
+  if (updateIndex < 0) {
+    return []
+  }
+  return [{
+    index: updateIndex,
+    command: {
+      kind: "builder_update",
+      updateRequest: cleanUpdateRequest(transcript),
+      updateMode: updateModeFromNormalized(normalized),
+    },
+  }]
+}
+
+function updateModeFromNormalized(
+  normalized: string,
+): ArtifactReviewVoiceCommand["updateMode"] {
+  if (/\bnew\s+version\b/u.test(normalized)) {
+    return "revise_version"
+  }
+  if (/\brebuild\b/u.test(normalized)) {
+    return /\bas\s+(?:html|markdown|pdf|pptx|docx)\b/u.test(normalized)
+      ? "convert_format"
+      : "revise_version"
+  }
+  return undefined
 }
 
 function parseArtifactAnnotationCommands(
@@ -488,6 +551,14 @@ function cleanCommentText(value: string | undefined): string | undefined {
   if (/^(?:on\s+)?(?:the\s+)?(?:current\s+)?(?:title|it|this)$/iu.test(cleaned ?? "")) {
     return undefined
   }
+  return cleaned || undefined
+}
+
+function cleanUpdateRequest(value: string | undefined): string | undefined {
+  const cleaned = stripWakeWord(value ?? "")
+    .replace(/\s+/gu, " ")
+    .replace(/[.!?]+$/gu, "")
+    .trim()
   return cleaned || undefined
 }
 

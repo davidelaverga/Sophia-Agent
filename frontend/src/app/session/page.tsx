@@ -64,6 +64,13 @@ import type { ArtifactReviewVoiceCommandRouter } from '../lib/artifact-review-vo
 import { buildThreadArtifactHref, getBuilderArtifactFiles, normalizeBuilderArtifactPath } from '../lib/builder-artifacts';
 import { GeminiStillFrameTransport } from '../lib/co-review-still-frame-transport';
 import { buildCoreviewArtifactStableIdentity } from '../lib/coreview-artifact-identity';
+import type {
+  CoreviewArtifactUpdateContext,
+  CoreviewArtifactUpdateMode,
+  CoreviewBuilderCancelAdapterResult,
+  CoreviewBuilderStartAdapterResult,
+  CoreviewBuilderTaskStatus,
+} from '../lib/coreview-builder-actions';
 import { debugLog } from '../lib/debug-logger';
 import { errorCopy } from '../lib/error-copy';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
@@ -574,6 +581,64 @@ function SessionPageContent() {
   const routeArtifactReviewVoiceCommand = useCallback<ArtifactReviewVoiceCommandRouter>((text) => (
     artifactReviewVoiceCommandRouterRef.current?.(text) ?? { handled: false }
   ), []);
+  const handleCoreviewBuilderUpdateRequest = useCallback(async ({
+    context,
+    prompt,
+    updateMode,
+  }: {
+    context: CoreviewArtifactUpdateContext;
+    prompt: string;
+    updateMode: CoreviewArtifactUpdateMode;
+  }): Promise<CoreviewBuilderStartAdapterResult> => {
+    await sendMessage({ text: prompt });
+    return {
+      ok: true,
+      taskId: builderTask?.taskId ?? null,
+      runId: builderTask?.runId ?? null,
+      userFacingMessage: updateMode === 'revise_version'
+        ? `Sophia is preparing a new version of ${context.artifactTitle ?? 'this artifact'}.`
+        : `Sophia is updating ${context.artifactTitle ?? 'this artifact'}.`,
+    };
+  }, [builderTask?.runId, builderTask?.taskId, sendMessage]);
+  const handleCoreviewBuilderCancelRequest = useCallback(async ({
+    task,
+  }: {
+    context: CoreviewArtifactUpdateContext | null;
+    task: CoreviewBuilderTaskStatus;
+  }): Promise<CoreviewBuilderCancelAdapterResult> => {
+    if (!task.taskId || task.phase !== 'running') {
+      return {
+        ok: false,
+        taskId: task.taskId,
+        runId: task.runId,
+        status: task.phase,
+        blockedReason: 'no_active_builder_task',
+        userFacingMessage: 'There is no active builder update to cancel.',
+      };
+    }
+    const response = await cancelBuilderTask();
+    if (!response) {
+      return {
+        ok: false,
+        taskId: task.taskId,
+        runId: task.runId,
+        status: 'idle',
+        blockedReason: 'no_active_builder_task',
+        userFacingMessage: 'There is no active builder update to cancel.',
+      };
+    }
+    const status = response.status ?? 'cancelled';
+    return {
+      ok: status !== 'failed',
+      taskId: response.task_id ?? task.taskId,
+      runId: response.run_id ?? task.runId,
+      status,
+      blockedReason: status === 'failed' ? 'builder_cancel_failed' : null,
+      userFacingMessage: response.detail ?? (status === 'cancelled'
+        ? 'The artifact update was cancelled.'
+        : 'Builder cancellation was requested.'),
+    };
+  }, [cancelBuilderTask]);
   const builderArtifactLibraryRef = useRef(builderArtifactLibrary);
 
   useEffect(() => {
@@ -1034,6 +1099,15 @@ function SessionPageContent() {
     const persistedPath = persistSelectedBuilderCanvasState(normalizedPath, 'view_in_canvas');
     setSelectedBuilderArtifactPath(persistedPath ?? normalizedPath);
   }, [clearSelectedBuilderCanvasState, persistSelectedBuilderCanvasState]);
+  const handleViewCoreviewBuilderUpdatedVersion = useCallback((path: string | null) => {
+    const normalizedPath = normalizeBuilderArtifactPath(path);
+    if (!normalizedPath) {
+      return;
+    }
+    handleSelectBuilderArtifactPath(normalizedPath);
+    setShowArtifacts(true);
+    setUserOpenedArtifacts(true);
+  }, [handleSelectBuilderArtifactPath, setShowArtifacts, setUserOpenedArtifacts]);
 
   useEffect(() => {
     if (!showArtifacts || !effectiveShowArtifactsUi) {
@@ -1752,8 +1826,14 @@ function SessionPageContent() {
               artifacts={artifacts}
               builderArtifact={builderArtifact}
               builderArtifactLibrary={builderArtifactLibrary}
+              builderTask={builderTask}
+              builderCompletion={builderCompletion}
+              isCancellingBuilderTask={isCancellingBuilderTask}
               selectedBuilderArtifactPath={selectedBuilderArtifactPath}
               onSelectedBuilderArtifactPathChange={handleSelectBuilderArtifactPath}
+              onCoreviewBuilderUpdateRequest={handleCoreviewBuilderUpdateRequest}
+              onCoreviewBuilderCancelRequest={handleCoreviewBuilderCancelRequest}
+              onCoreviewBuilderViewUpdatedVersion={handleViewCoreviewBuilderUpdatedVersion}
               sessionId={coReviewSessionId}
               normalSessionId={coReviewSessionId}
               voiceAgentSessionId={coReviewVoiceAgentSessionId}
@@ -1994,8 +2074,14 @@ function SessionPageContent() {
               artifacts={artifacts}
               builderArtifact={builderArtifact}
               builderArtifactLibrary={builderArtifactLibrary}
+              builderTask={builderTask}
+              builderCompletion={builderCompletion}
+              isCancellingBuilderTask={isCancellingBuilderTask}
               selectedBuilderArtifactPath={selectedBuilderArtifactPath}
               onSelectedBuilderArtifactPathChange={handleSelectBuilderArtifactPath}
+              onCoreviewBuilderUpdateRequest={handleCoreviewBuilderUpdateRequest}
+              onCoreviewBuilderCancelRequest={handleCoreviewBuilderCancelRequest}
+              onCoreviewBuilderViewUpdatedVersion={handleViewCoreviewBuilderUpdatedVersion}
               sessionId={coReviewSessionId}
               normalSessionId={coReviewSessionId}
               voiceAgentSessionId={coReviewVoiceAgentSessionId}
@@ -2023,8 +2109,14 @@ function SessionPageContent() {
             artifacts={artifacts}
             builderArtifact={builderArtifact}
             builderArtifactLibrary={builderArtifactLibrary}
+            builderTask={builderTask}
+            builderCompletion={builderCompletion}
+            isCancellingBuilderTask={isCancellingBuilderTask}
             selectedBuilderArtifactPath={selectedBuilderArtifactPath}
             onSelectedBuilderArtifactPathChange={handleSelectBuilderArtifactPath}
+            onCoreviewBuilderUpdateRequest={handleCoreviewBuilderUpdateRequest}
+            onCoreviewBuilderCancelRequest={handleCoreviewBuilderCancelRequest}
+            onCoreviewBuilderViewUpdatedVersion={handleViewCoreviewBuilderUpdatedVersion}
             sessionId={coReviewSessionId}
             normalSessionId={coReviewSessionId}
             voiceAgentSessionId={coReviewVoiceAgentSessionId}

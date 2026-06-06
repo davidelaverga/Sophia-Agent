@@ -94,6 +94,10 @@ const SELECTED_PDF_ARTIFACT = {
   userNextAction: "Open or download the artifact if the in-canvas preview is unavailable.",
 }
 
+type ArtifactReviewVoiceCommandRouteHandler = Parameters<
+  NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onArtifactReviewVoiceCommandRouteChange"]>
+>[0]
+
 const COMPANION_ARTIFACTS: NonNullable<ComponentProps<typeof PresenceArtifactPanel>["artifacts"]> = {
   takeaway: "Focus on the big picture first.",
   reflection_candidate: {
@@ -113,10 +117,16 @@ function renderPanel({
   artifacts = null,
   builderArtifact = null,
   builderArtifactLibrary = [],
+  builderTask = null,
+  builderCompletion = null,
+  isCancellingBuilderTask = false,
   selectedBuilderArtifactPath,
   isVoiceMode = false,
   pendingBuilderArtifactReview = false,
   voiceAgentSessionId = null,
+  onCoreviewBuilderUpdateRequest,
+  onCoreviewBuilderCancelRequest,
+  onCoreviewBuilderViewUpdatedVersion,
   onStartVoiceBuilderArtifactReview,
   onPendingBuilderArtifactReviewConsumed,
   onArtifactReviewVoiceCommandRouteChange,
@@ -138,10 +148,16 @@ function renderPanel({
   artifacts?: ComponentProps<typeof PresenceArtifactPanel>["artifacts"]
   builderArtifact?: ComponentProps<typeof PresenceArtifactPanel>["builderArtifact"]
   builderArtifactLibrary?: NonNullable<ComponentProps<typeof PresenceArtifactPanel>["builderArtifactLibrary"]>
+  builderTask?: ComponentProps<typeof PresenceArtifactPanel>["builderTask"]
+  builderCompletion?: ComponentProps<typeof PresenceArtifactPanel>["builderCompletion"]
+  isCancellingBuilderTask?: ComponentProps<typeof PresenceArtifactPanel>["isCancellingBuilderTask"]
   selectedBuilderArtifactPath?: ComponentProps<typeof PresenceArtifactPanel>["selectedBuilderArtifactPath"]
   isVoiceMode?: boolean
   pendingBuilderArtifactReview?: ComponentProps<typeof PresenceArtifactPanel>["pendingBuilderArtifactReview"]
   voiceAgentSessionId?: ComponentProps<typeof PresenceArtifactPanel>["voiceAgentSessionId"]
+  onCoreviewBuilderUpdateRequest?: ComponentProps<typeof PresenceArtifactPanel>["onCoreviewBuilderUpdateRequest"]
+  onCoreviewBuilderCancelRequest?: ComponentProps<typeof PresenceArtifactPanel>["onCoreviewBuilderCancelRequest"]
+  onCoreviewBuilderViewUpdatedVersion?: ComponentProps<typeof PresenceArtifactPanel>["onCoreviewBuilderViewUpdatedVersion"]
   onStartVoiceBuilderArtifactReview?: ComponentProps<typeof PresenceArtifactPanel>["onStartVoiceBuilderArtifactReview"]
   onPendingBuilderArtifactReviewConsumed?: ComponentProps<typeof PresenceArtifactPanel>["onPendingBuilderArtifactReviewConsumed"]
   onArtifactReviewVoiceCommandRouteChange?: ComponentProps<typeof PresenceArtifactPanel>["onArtifactReviewVoiceCommandRouteChange"]
@@ -152,7 +168,13 @@ function renderPanel({
       artifacts={artifacts}
       builderArtifact={builderArtifact}
       builderArtifactLibrary={builderArtifactLibrary}
+      builderTask={builderTask}
+      builderCompletion={builderCompletion}
+      isCancellingBuilderTask={isCancellingBuilderTask}
       selectedBuilderArtifactPath={selectedBuilderArtifactPath}
+      onCoreviewBuilderUpdateRequest={onCoreviewBuilderUpdateRequest}
+      onCoreviewBuilderCancelRequest={onCoreviewBuilderCancelRequest}
+      onCoreviewBuilderViewUpdatedVersion={onCoreviewBuilderViewUpdatedVersion}
       sessionId="session-1"
       normalSessionId="normal-1"
       voiceAgentSessionId={voiceAgentSessionId}
@@ -894,6 +916,234 @@ describe("Coreview artifact still-frame review", () => {
       expect(serialized).toContain("comment")
       expect(serialized).not.toContain("change the font")
     }, { timeout: 4000 })
+  })
+
+  it("routes voice artifact update intents through Coreview builder actions without emit_artifact", async () => {
+    setCoreviewFlags(true)
+    registerSophiaCaptureBridge()
+    window.__sophiaCapture?.clear()
+    window.__sophiaCapture?.enable()
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("# Launch Brief\n\nCurrent title.", {
+        status: 200,
+        headers: { "Content-Type": "text/markdown" },
+      }),
+    )
+    let routeArtifactCommand: ArtifactReviewVoiceCommandRouteHandler = null
+    const onCoreviewBuilderUpdateRequest = vi.fn<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onCoreviewBuilderUpdateRequest"]>>(async () => ({
+      ok: true,
+      taskId: "task-coreview-1",
+      runId: "run-coreview-1",
+      userFacingMessage: "Sophia is updating this artifact.",
+    }))
+
+    renderPanel({
+      builderArtifact: MARKDOWN_BUILDER_ARTIFACT,
+      builderArtifactLibrary: MARKDOWN_LIBRARY,
+      selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.md",
+      builderTask: {
+        phase: "running",
+        taskId: "task-coreview-1",
+        runId: "run-coreview-1",
+        activeStepTitle: "Updating the artifact source",
+      },
+      onCoreviewBuilderUpdateRequest,
+      onArtifactReviewVoiceCommandRouteChange: (handler) => {
+        routeArtifactCommand = handler
+      },
+    })
+
+    expect(await screen.findByRole("heading", { name: "Launch Brief" })).toBeInTheDocument()
+    await waitFor(() => expect(routeArtifactCommand).not.toBeNull())
+
+    let routeResult: ReturnType<NonNullable<ArtifactReviewVoiceCommandRouteHandler>> | undefined
+    act(() => {
+      routeResult = routeArtifactCommand?.("change the title")
+    })
+
+    expect(routeResult).toMatchObject({
+      handled: true,
+      applied: true,
+      suppressAssistant: true,
+      triggeredRefresh: false,
+      refreshResult: "not_requested",
+    })
+    await waitFor(() => expect(onCoreviewBuilderUpdateRequest).toHaveBeenCalledTimes(1))
+
+    const request = onCoreviewBuilderUpdateRequest.mock.calls[0]?.[0]
+    expect(request).toBeDefined()
+    if (!request) throw new Error("expected Coreview builder update request")
+    expect(request.context).toMatchObject({
+      artifactPath: "mnt/user-data/outputs/launch-brief.md",
+      artifactTitle: "launch-brief.md",
+      rendererKind: "markdown",
+      userUpdateRequest: "change the title",
+      updateMode: "revise_version",
+      sourceActor: "user",
+      rawArtifactTextExcluded: true,
+      rawFrameExcluded: true,
+      rawCommentTextExcluded: true,
+    })
+    expect(request.context.capabilitySummary).toMatchObject({
+      supportsArtifactUpdate: true,
+      supportsVersioning: true,
+      supportsSourceRead: true,
+      supportsRebuildFromSource: true,
+      supportsNativeEdit: false,
+      preferredUpdateMode: "revise_version",
+    })
+    expect(request.prompt).toContain("Use start_builder_task")
+    expect(request.prompt).toContain("Do not call emit_artifact")
+
+    await waitFor(() => {
+      const eventTypes = getWorkspaceEvents(WORKSPACE_KEY).map((event) => event.type)
+      expect(eventTypes).toEqual(expect.arrayContaining([
+        "builder.update_requested",
+        "builder.task_started",
+      ]))
+    })
+    const updateEvent = getWorkspaceEvents(WORKSPACE_KEY).find((event) => event.type === "builder.update_requested")
+    expect(updateEvent?.payload).toMatchObject({
+      workspaceKey: WORKSPACE_KEY,
+      rendererKind: "markdown",
+      requestedChangeSummary: "change the title",
+      rawArtifactTextExcluded: true,
+      rawFrameExcluded: true,
+      rawCommentTextExcluded: true,
+    })
+    const startedEvent = getWorkspaceEvents(WORKSPACE_KEY).find((event) => event.type === "builder.task_started")
+    expect(startedEvent).toMatchObject({
+      builderTaskId: "task-coreview-1",
+      builderRunId: "run-coreview-1",
+    })
+
+    const updateCard = await screen.findByTestId("artifact-review-builder-update-card")
+    expect(updateCard).toHaveAttribute("data-coreview-builder-update-status", "updating")
+    expect(within(updateCard).getByText("Updating artifact")).toBeInTheDocument()
+    expect(within(updateCard).getByText("change the title")).toBeInTheDocument()
+    expect(within(updateCard).getByText("Updating the artifact source")).toBeInTheDocument()
+    expect(within(updateCard).getByRole("button", { name: /cancel update/i })).toBeInTheDocument()
+    expect(screen.queryByTestId("builder-task-notice")).not.toBeInTheDocument()
+    expect(screen.getByRole("region", { name: /generated artifact/i })).toBeInTheDocument()
+    expect(screen.getByTestId("artifact-canvas-viewport")).toBeInTheDocument()
+
+    await waitFor(() => {
+      const serialized = JSON.stringify(exportSophiaCaptureBundle().events)
+      expect(serialized).toContain("coreviewBuilderUpdateIntentDetected")
+      expect(serialized).toContain("coreviewBuilderPreservedMic")
+      expect(serialized).toContain("coreviewBuilderPreservedReview")
+      expect(serialized).not.toContain("\"coreviewToolName\":\"emit_artifact\"")
+    })
+  })
+
+  it("routes voice builder cancellation through Coreview cancel actions", async () => {
+    setCoreviewFlags(true)
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("# Launch Brief\n\nCurrent title.", {
+        status: 200,
+        headers: { "Content-Type": "text/markdown" },
+      }),
+    )
+    let routeArtifactCommand: ArtifactReviewVoiceCommandRouteHandler = null
+    const onCoreviewBuilderCancelRequest = vi.fn<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onCoreviewBuilderCancelRequest"]>>(async () => ({
+      ok: true,
+      taskId: "task-coreview-2",
+      runId: "run-coreview-2",
+      status: "cancelled",
+      userFacingMessage: "The artifact update was cancelled.",
+    }))
+
+    renderPanel({
+      builderArtifact: MARKDOWN_BUILDER_ARTIFACT,
+      builderArtifactLibrary: MARKDOWN_LIBRARY,
+      selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.md",
+      builderTask: {
+        phase: "running",
+        taskId: "task-coreview-2",
+        runId: "run-coreview-2",
+        activeStepTitle: "Rebuilding artifact",
+      },
+      onCoreviewBuilderCancelRequest,
+      onArtifactReviewVoiceCommandRouteChange: (handler) => {
+        routeArtifactCommand = handler
+      },
+    })
+
+    expect(await screen.findByRole("heading", { name: "Launch Brief" })).toBeInTheDocument()
+    await waitFor(() => expect(routeArtifactCommand).not.toBeNull())
+
+    let routeResult: ReturnType<NonNullable<ArtifactReviewVoiceCommandRouteHandler>> | undefined
+    act(() => {
+      routeResult = routeArtifactCommand?.("cancel the builder task")
+    })
+
+    expect(routeResult).toMatchObject({
+      handled: true,
+      applied: true,
+      suppressAssistant: true,
+      triggeredRefresh: false,
+      refreshResult: "not_requested",
+    })
+    await waitFor(() => expect(onCoreviewBuilderCancelRequest).toHaveBeenCalledTimes(1))
+    const cancelRequest = onCoreviewBuilderCancelRequest.mock.calls[0]?.[0]
+    expect(cancelRequest).toBeDefined()
+    if (!cancelRequest) throw new Error("expected Coreview builder cancel request")
+    expect(cancelRequest).toMatchObject({
+      task: {
+        taskId: "task-coreview-2",
+        runId: "run-coreview-2",
+        phase: "running",
+        cancellable: true,
+      },
+    })
+
+    await waitFor(() => {
+      const eventTypes = getWorkspaceEvents(WORKSPACE_KEY).map((event) => event.type)
+      expect(eventTypes).toEqual(expect.arrayContaining([
+        "builder.task_cancel_requested",
+        "builder.task_cancelled",
+      ]))
+    })
+    const updateCard = await screen.findByTestId("artifact-review-builder-update-card")
+    expect(updateCard).toHaveAttribute("data-coreview-builder-update-status", "cancelled")
+    expect(within(updateCard).getByText("Cancelled")).toBeInTheDocument()
+    expect(screen.getByRole("region", { name: /generated artifact/i })).toBeInTheDocument()
+  })
+
+  it("displays a truthful unsupported Coreview builder update state for PDFs", async () => {
+    setCoreviewFlags(true)
+    mockPdfPreviewReady({ pageCount: 1, textByPage: ["Q3 Launch Review"] })
+    let routeArtifactCommand: ArtifactReviewVoiceCommandRouteHandler = null
+    const onCoreviewBuilderUpdateRequest = vi.fn()
+
+    renderPanel({
+      selectedBuilderArtifactPath: PDF_SELECTED_PATH,
+      onCoreviewBuilderUpdateRequest,
+      onArtifactReviewVoiceCommandRouteChange: (handler) => {
+        routeArtifactCommand = handler
+      },
+    })
+
+    expect(await screen.findByText("Page 1 of 1")).toBeInTheDocument()
+    await waitFor(() => expect(routeArtifactCommand).not.toBeNull())
+
+    act(() => {
+      expect(routeArtifactCommand?.("change the title")).toMatchObject({
+        handled: true,
+        applied: true,
+        suppressAssistant: true,
+      })
+    })
+
+    await waitFor(() => {
+      const updateCard = screen.getByTestId("artifact-review-builder-update-card")
+      expect(updateCard).toHaveAttribute("data-coreview-builder-update-status", "unsupported")
+      expect(within(updateCard).getByText("Unsupported")).toBeInTheDocument()
+      expect(within(updateCard).getByText("change the title")).toBeInTheDocument()
+      expect(within(updateCard).getByText(/PDF native editing is not available/i)).toBeInTheDocument()
+    })
+    expect(onCoreviewBuilderUpdateRequest).not.toHaveBeenCalled()
+    expect(getWorkspaceEvents(WORKSPACE_KEY).some((event) => event.type === "builder.update_requested")).toBe(false)
   })
 
   it("keeps the artifact review room mounted and interactive after annotation refresh timeout", async () => {

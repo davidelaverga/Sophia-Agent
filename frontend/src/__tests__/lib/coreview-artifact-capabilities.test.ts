@@ -43,7 +43,10 @@ describe("Coreview artifact capability matrix", () => {
       supportsOriginalDownload: true,
       supportsOCR: false,
       requiresOCR: false,
+      supportsArtifactUpdate: false,
+      supportsNativeEdit: false,
     })
+    expect(capabilities.unsupportedUpdateReason).toContain("PDF native editing")
   })
 
   it("returns truthful PPTX metadata fallback capabilities", () => {
@@ -63,8 +66,11 @@ describe("Coreview artifact capability matrix", () => {
       supportsPptxNativeRender: false,
       supportsOriginalDownload: true,
       supportsAnnotatedExport: false,
+      supportsArtifactUpdate: false,
+      supportsNativeEdit: false,
       fallbackReason: "pptx_native_renderer_unavailable",
     })
+    expect(capabilities.unsupportedUpdateReason).toContain("PPTX native editing")
     expect(capabilities.userFacingTruth).toBe("PPTX native canvas rendering is not available yet. Open or download the file to review it.")
   })
 
@@ -82,8 +88,11 @@ describe("Coreview artifact capability matrix", () => {
       supportsTextExtraction: false,
       supportsOriginalDownload: true,
       supportsAnnotatedExport: false,
+      supportsArtifactUpdate: false,
+      supportsNativeEdit: false,
       fallbackReason: "docx_native_renderer_unavailable",
     })
+    expect(capabilities.unsupportedUpdateReason).toContain("Word document native canvas updates")
     expect(capabilities.userFacingTruth).toContain("Word documents can be opened or downloaded")
   })
 
@@ -102,6 +111,12 @@ describe("Coreview artifact capability matrix", () => {
       supportsAnnotations: false,
       supportsStillFrame: true,
       supportsOriginalDownload: true,
+      supportsArtifactUpdate: true,
+      supportsVersioning: true,
+      supportsSourceRead: true,
+      supportsRebuildFromSource: true,
+      requiresFullRebuild: true,
+      preferredUpdateMode: "revise_version",
     })
   })
 
@@ -120,6 +135,14 @@ describe("Coreview artifact capability matrix", () => {
       supportsAnnotations: false,
       supportsStillFrame: true,
       supportsOriginalDownload: true,
+      supportsArtifactUpdate: true,
+      supportsScopedEdit: true,
+      supportsVersioning: true,
+      supportsSourceRead: true,
+      supportsRebuildFromSource: true,
+      supportsNativeEdit: false,
+      supportsOverwrite: false,
+      preferredUpdateMode: "revise_version",
     })
   })
 
@@ -135,7 +158,9 @@ describe("Coreview artifact capability matrix", () => {
       supportsOCR: false,
       requiresOCR: true,
       fallbackReason: "image_ocr_unavailable",
+      supportsArtifactUpdate: false,
     })
+    expect(capabilities.unsupportedUpdateReason).toContain("OCR")
     expect(capabilities.userFacingTruth).toContain("OCR is not available yet")
   })
 
@@ -156,6 +181,8 @@ describe("Coreview artifact capability matrix", () => {
       artifactCapabilitySupportsOCR: false,
       artifactCapabilitySupportsPptxNativeRender: false,
       artifactCapabilitySupportsAnnotatedExport: false,
+      artifactCapabilitySupportsArtifactUpdate: false,
+      artifactCapabilitySupportsNativeEdit: false,
     })
 
     for (const capabilities of cases) {

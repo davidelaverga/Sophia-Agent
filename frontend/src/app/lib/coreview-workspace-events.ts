@@ -1,10 +1,18 @@
 export type CoreviewWorkspaceEventType =
   | "artifact.opened"
   | "artifact.closed"
+  | "artifact.version_created"
+  | "artifact.version_selected"
   | "view.changed"
   | "annotation.created"
   | "annotation.updated"
   | "annotation.deleted"
+  | "builder.update_requested"
+  | "builder.task_started"
+  | "builder.task_cancel_requested"
+  | "builder.task_cancelled"
+  | "builder.task_failed"
+  | "builder.task_completed"
   | "tool.changed"
   | "export.requested"
   | "share.requested"
@@ -33,15 +41,24 @@ export interface CoreviewWorkspaceEvent {
   artifactStableIdentity?: string | null
   threadId?: string | null
   builderTaskId?: string | null
+  builderRunId?: string | null
 }
 
 export const COREVIEW_WORKSPACE_EVENT_TYPES: readonly CoreviewWorkspaceEventType[] = [
   "artifact.opened",
   "artifact.closed",
+  "artifact.version_created",
+  "artifact.version_selected",
   "view.changed",
   "annotation.created",
   "annotation.updated",
   "annotation.deleted",
+  "builder.update_requested",
+  "builder.task_started",
+  "builder.task_cancel_requested",
+  "builder.task_cancelled",
+  "builder.task_failed",
+  "builder.task_completed",
   "tool.changed",
   "export.requested",
   "share.requested",

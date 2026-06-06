@@ -46,6 +46,17 @@ export type CoreviewArtifactCapabilityTelemetry = {
   artifactCapabilitySupportsPptxNativeRender: boolean
   artifactCapabilitySupportsAnnotatedExport: boolean
   artifactCapabilityFallbackReason: CoreviewArtifactFallbackReason | null
+  artifactCapabilitySupportsArtifactUpdate: boolean
+  artifactCapabilitySupportsScopedEdit: boolean
+  artifactCapabilitySupportsVersioning: boolean
+  artifactCapabilitySupportsOverwrite: boolean
+  artifactCapabilitySupportsSourceRead: boolean
+  artifactCapabilitySupportsNativeEdit: boolean
+  artifactCapabilitySupportsRebuildFromSource: boolean
+  artifactCapabilityRequiresFullRebuild: boolean
+  artifactCapabilityRequiresConversion: boolean
+  artifactCapabilityUnsupportedUpdateReason: string | null
+  artifactCapabilityPreferredUpdateMode: string | null
 }
 
 const MARKDOWN_TRUTH = "Markdown preview is available. Visual annotations are not available for this format yet."
@@ -56,6 +67,11 @@ const IMAGE_TRUTH = "Image files can be opened or downloaded. OCR is not availab
 const METADATA_TRUTH = "A metadata preview is available. Rich artifact rendering is not available for this file yet."
 const UNSUPPORTED_TRUTH = "This file can be opened or downloaded, but in-canvas rendering is not available yet."
 const PDF_OCR_TRUTH = "Exact text is unavailable for this PDF. OCR is not available yet."
+const PDF_UPDATE_UNSUPPORTED = "PDF native editing is not available yet. Revisions need an editable source artifact."
+const PPTX_UPDATE_UNSUPPORTED = "PPTX native editing is not available yet."
+const DOCX_UPDATE_UNSUPPORTED = "Word document native canvas updates are not available yet."
+const OCR_UPDATE_UNSUPPORTED = "OCR-based artifact updates are not available yet."
+const UNSUPPORTED_UPDATE_TRUTH = "This artifact format cannot be updated from Coreview yet."
 
 export function getCoreviewArtifactCapabilities(
   input: CoreviewArtifactCapabilityInput,
@@ -95,6 +111,10 @@ export function getCoreviewArtifactCapabilities(
         supportsOCR: false,
         requiresOCR,
         supportsPptxNativeRender: false,
+        supportsArtifactUpdate: false,
+        supportsSourceRead: false,
+        supportsRebuildFromSource: false,
+        unsupportedUpdateReason: requiresOCR ? OCR_UPDATE_UNSUPPORTED : PDF_UPDATE_UNSUPPORTED,
         fallbackReason: requiresOCR ? "pdf_text_unavailable" : null,
         userFacingTruth: requiresOCR ? PDF_OCR_TRUTH : null,
       })
@@ -107,6 +127,15 @@ export function getCoreviewArtifactCapabilities(
         supportsStillFrame: true,
         supportsOriginalDownload: downloadAvailable,
         supportsOpenInNewTab: openAvailable,
+        supportsArtifactUpdate: Boolean(input.artifactPath),
+        supportsVersioning: Boolean(input.artifactPath),
+        supportsSourceRead: Boolean(input.artifactPath),
+        supportsRebuildFromSource: Boolean(input.artifactPath),
+        requiresFullRebuild: Boolean(input.artifactPath),
+        unsupportedUpdateReason: input.artifactPath
+          ? null
+          : "Markdown revisions need a readable source artifact path.",
+        preferredUpdateMode: input.artifactPath ? "revise_version" : null,
         userFacingTruth: MARKDOWN_TRUTH,
       })
     case "html":
@@ -117,6 +146,15 @@ export function getCoreviewArtifactCapabilities(
         supportsStillFrame: true,
         supportsOriginalDownload: downloadAvailable,
         supportsOpenInNewTab: openAvailable,
+        supportsArtifactUpdate: Boolean(input.artifactPath),
+        supportsScopedEdit: Boolean(input.artifactPath),
+        supportsVersioning: Boolean(input.artifactPath),
+        supportsSourceRead: Boolean(input.artifactPath),
+        supportsRebuildFromSource: Boolean(input.artifactPath),
+        unsupportedUpdateReason: input.artifactPath
+          ? null
+          : "HTML revisions need a readable source artifact path.",
+        preferredUpdateMode: input.artifactPath ? "revise_version" : null,
         userFacingTruth: HTML_TRUTH,
       })
     case "image":
@@ -128,6 +166,7 @@ export function getCoreviewArtifactCapabilities(
         supportsOpenInNewTab: openAvailable,
         requiresOCR: true,
         fallbackReason: "image_ocr_unavailable",
+        unsupportedUpdateReason: OCR_UPDATE_UNSUPPORTED,
         userFacingTruth: IMAGE_TRUTH,
       })
     case "download_only":
@@ -140,6 +179,7 @@ export function getCoreviewArtifactCapabilities(
           supportsOpenInNewTab: openAvailable,
           supportsPptxNativeRender: false,
           fallbackReason: "pptx_native_renderer_unavailable",
+          unsupportedUpdateReason: PPTX_UPDATE_UNSUPPORTED,
           userFacingTruth: PPTX_TRUTH,
         })
       }
@@ -151,6 +191,7 @@ export function getCoreviewArtifactCapabilities(
           supportsOriginalDownload: downloadAvailable,
           supportsOpenInNewTab: openAvailable,
           fallbackReason: "docx_native_renderer_unavailable",
+          unsupportedUpdateReason: DOCX_UPDATE_UNSUPPORTED,
           userFacingTruth: DOCX_TRUTH,
         })
       }
@@ -161,6 +202,7 @@ export function getCoreviewArtifactCapabilities(
         supportsOriginalDownload: downloadAvailable,
         supportsOpenInNewTab: openAvailable,
         fallbackReason: "download_only",
+        unsupportedUpdateReason: UNSUPPORTED_UPDATE_TRUTH,
         userFacingTruth: UNSUPPORTED_TRUTH,
       })
     case "metadata":
@@ -171,6 +213,7 @@ export function getCoreviewArtifactCapabilities(
         supportsStillFrame: true,
         supportsOriginalDownload: downloadAvailable,
         supportsOpenInNewTab: openAvailable,
+        unsupportedUpdateReason: UNSUPPORTED_UPDATE_TRUTH,
         userFacingTruth: METADATA_TRUTH,
       })
     case "unsupported":
@@ -181,6 +224,7 @@ export function getCoreviewArtifactCapabilities(
         supportsOriginalDownload: downloadAvailable,
         supportsOpenInNewTab: openAvailable,
         fallbackReason: "unsupported_renderer",
+        unsupportedUpdateReason: UNSUPPORTED_UPDATE_TRUTH,
         userFacingTruth: UNSUPPORTED_TRUTH,
       })
   }
@@ -244,6 +288,17 @@ export function buildCoreviewCapabilitySummary({
     supportsOCR: capabilities.supportsOCR,
     requiresOCR: capabilities.requiresOCR,
     supportsPptxNativeRender: capabilities.supportsPptxNativeRender,
+    supportsArtifactUpdate: capabilities.supportsArtifactUpdate,
+    supportsScopedEdit: capabilities.supportsScopedEdit,
+    supportsVersioning: capabilities.supportsVersioning,
+    supportsOverwrite: capabilities.supportsOverwrite,
+    supportsSourceRead: capabilities.supportsSourceRead,
+    supportsNativeEdit: capabilities.supportsNativeEdit,
+    supportsRebuildFromSource: capabilities.supportsRebuildFromSource,
+    requiresFullRebuild: capabilities.requiresFullRebuild,
+    requiresConversion: capabilities.requiresConversion,
+    unsupportedUpdateReason: capabilities.unsupportedUpdateReason ?? null,
+    preferredUpdateMode: capabilities.preferredUpdateMode ?? null,
     fallbackReason: capabilities.fallbackReason ?? null,
     userFacingTruth: capabilities.userFacingTruth ?? null,
   }
@@ -266,6 +321,17 @@ export function coreviewArtifactCapabilityTelemetry(
     artifactCapabilitySupportsPptxNativeRender: capabilities.supportsPptxNativeRender,
     artifactCapabilitySupportsAnnotatedExport: capabilities.supportsAnnotatedExport,
     artifactCapabilityFallbackReason: capabilities.fallbackReason ?? null,
+    artifactCapabilitySupportsArtifactUpdate: capabilities.supportsArtifactUpdate,
+    artifactCapabilitySupportsScopedEdit: capabilities.supportsScopedEdit,
+    artifactCapabilitySupportsVersioning: capabilities.supportsVersioning,
+    artifactCapabilitySupportsOverwrite: capabilities.supportsOverwrite,
+    artifactCapabilitySupportsSourceRead: capabilities.supportsSourceRead,
+    artifactCapabilitySupportsNativeEdit: capabilities.supportsNativeEdit,
+    artifactCapabilitySupportsRebuildFromSource: capabilities.supportsRebuildFromSource,
+    artifactCapabilityRequiresFullRebuild: capabilities.requiresFullRebuild,
+    artifactCapabilityRequiresConversion: capabilities.requiresConversion,
+    artifactCapabilityUnsupportedUpdateReason: capabilities.unsupportedUpdateReason ?? null,
+    artifactCapabilityPreferredUpdateMode: capabilities.preferredUpdateMode ?? null,
   }
 }
 
@@ -293,6 +359,17 @@ function buildCapabilities(
     supportsOCR: false,
     requiresOCR: false,
     supportsPptxNativeRender: false,
+    supportsArtifactUpdate: false,
+    supportsScopedEdit: false,
+    supportsVersioning: false,
+    supportsOverwrite: false,
+    supportsSourceRead: false,
+    supportsNativeEdit: false,
+    supportsRebuildFromSource: false,
+    requiresFullRebuild: false,
+    requiresConversion: false,
+    unsupportedUpdateReason: null,
+    preferredUpdateMode: null,
     fallbackReason: null,
     userFacingTruth: null,
     ...overrides,

@@ -38,6 +38,42 @@ describe("artifact review voice command parser", () => {
     })
   })
 
+  it("parses Coreview builder update and cancel intents without stealing comments", () => {
+    expect(parseArtifactReviewVoiceCommand("update this file")).toEqual({
+      kind: "builder_update",
+      updateRequest: "update this file",
+    })
+    expect(parseArtifactReviewVoiceCommand("change the title")).toEqual({
+      kind: "builder_update",
+      updateRequest: "change the title",
+    })
+    expect(parseArtifactReviewVoiceCommand("make the background darker")).toEqual({
+      kind: "builder_update",
+      updateRequest: "make the background darker",
+    })
+    expect(parseArtifactReviewVoiceCommand("make a new version")).toEqual({
+      kind: "builder_update",
+      updateMode: "revise_version",
+      updateRequest: "make a new version",
+    })
+    expect(parseArtifactReviewVoiceCommand("rebuild this as HTML")).toEqual({
+      kind: "builder_update",
+      updateMode: "convert_format",
+      updateRequest: "rebuild this as HTML",
+    })
+    expect(parseArtifactReviewVoiceCommand("cancel the builder task")).toEqual({
+      kind: "builder_cancel",
+    })
+    expect(parseArtifactReviewVoiceCommand("stop the build")).toEqual({
+      kind: "builder_cancel",
+    })
+    expect(parseArtifactReviewVoiceCommand("add a comment")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "comment",
+      utteranceKind: "annotation_comment",
+    })
+  })
+
   it("parses highlight, underline, arrow, and comment annotation intents", () => {
     expect(parseArtifactReviewVoiceCommand("highlight it yellow")).toEqual({
       kind: "add_annotation",
