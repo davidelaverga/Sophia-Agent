@@ -16,7 +16,9 @@ Use this card only for requested `.pptx` or slide-deck builds.
 5. Compose the deck with
    `/mnt/skills/public/ppt-generation/scripts/generate.py`, passing the plan,
    all slide images in order, and an output path under `/mnt/user-data/outputs/`.
-6. Emit only after the `.pptx` exists and passes structural validation.
+6. Emit only after the `.pptx` exists and passes structural validation. If a
+   valid `.pptx` exists, it is authoritative; do not emit an HTML or Markdown
+   fallback instead.
 
 Reading the skill is not completion. Writing ad hoc `python-pptx` code,
 generic `.py` files, or HTML before trying the skill workflow is drift.
@@ -26,5 +28,7 @@ generic `.py` files, or HTML before trying the skill workflow is drift.
 If image generation or deck composition fails after one correction, create a
 real `.html` fallback for visual/chart/diagram decks or `.md` fallback for
 mostly text decks. The fallback must be under `/mnt/user-data/outputs/`,
-browser-readable if HTML, and emitted with fallback metadata. Never emit a
+browser-readable if HTML, and emitted with explicit fallback metadata:
+`requested_artifact_ext="pptx"`, `artifact_is_fallback=true`, and a safe
+`fallback_reason` such as `pptx_generation_not_completed`. Never emit a
 tiny/corrupt `.pptx`, `.py`, helper script, or test file as a slide deck.
