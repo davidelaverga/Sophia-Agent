@@ -13,8 +13,9 @@ def test_builder_obligations_declares_universal_builder_web_research() -> None:
 
     assert "Web research is available for every builder task type" in contract
     assert "including `frontend`" in contract
-    assert "Before the first substantive write/edit/emit step" in contract
+    assert "For fresh builds, before the first substantive write/edit/emit step" in contract
     assert "`builder_web_search` or `builder_web_fetch`" in contract
+    assert "Pure local edits do not require web research" in contract
 
 
 def test_builder_obligations_update_guidance_does_not_ban_research() -> None:
@@ -46,5 +47,8 @@ def test_pptx_workflow_card_requires_deerflow_native_sequence() -> None:
 
     assert "image-generation/scripts/generate.py" in card
     assert "ppt-generation/scripts/generate.py" in card
-    assert "previous slide image" in card
+    assert "generated raster images are not" in card
+    assert "mandatory" in card
+    assert "no-image" in card
+    assert "PPTX" in card
     assert "passes structural validation" in card

@@ -457,6 +457,7 @@ GEMINI_EMIT_ARTIFACT_TOOL_NAME = "emit_artifact"
 GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = "read_artifact_text"
 GEMINI_REVIEW_BLOCKED_TOOL_NAMES = {
     "emit_artifact",
+    "edit_builder_artifact",
     "start_builder_task",
 }
 GEMINI_REVIEW_GENERIC_BUILDER_REDIRECT_TOOL_NAMES = {

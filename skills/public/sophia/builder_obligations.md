@@ -26,9 +26,9 @@ You may call `write_todos` first for planning and progress UI. You may use
 safe inspection tools such as `ls`, `read_file`, and read-only shell commands
 before browsing.
 
-Before the first substantive write/edit/emit step, attempt at least one
-`builder_web_search` or `builder_web_fetch`. Substantive artifact creation
-includes `write_file`, `str_replace`, artifact-generating `bash`, and
+For fresh builds, before the first substantive write/edit/emit step, attempt
+at least one `builder_web_search` or `builder_web_fetch`. Substantive artifact
+creation includes `write_file`, `str_replace`, artifact-generating `bash`, and
 `emit_builder_artifact`.
 
 If `builder_web_search` returns useful factual URLs, fetch at least one
@@ -36,6 +36,22 @@ approved result with `builder_web_fetch` before final source writing. Failed,
 empty, or weak web-tool attempts still satisfy the gate; continue the build
 with the best available context rather than failing only because browsing was
 weak.
+
+## Edit Existing Artifact Mode
+
+When `delegation_context.edit_context.mode == "edit_existing_artifact"`, the
+runtime has copied the source artifact into
+`/mnt/user-data/workspace/source_artifact/`.
+
+- Read the materialized source artifact before writing or emitting.
+- Preserve unrelated content. Make the requested local change, not a broad
+  rewrite, unless the user explicitly asks for a rewrite.
+- Write a versioned revised artifact under `/mnt/user-data/outputs/`; do not
+  overwrite the source artifact.
+- Pure local edits do not require web research.
+- If the edit introduces a new URL, named project, paper, framework, company,
+  market, factual topic, or source requirement, search/fetch that new material
+  before changing the deliverable.
 
 For mid-build updates, reuse prior research, but if the update introduces a
 new URL, named project, paper, framework, company, market, factual topic, or

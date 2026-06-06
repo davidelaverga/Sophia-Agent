@@ -827,6 +827,18 @@ def _artifact_ext_from_path(path: Any) -> str | None:
     return suffix or None
 
 
+def _apply_edit_context_metadata(artifact: dict[str, Any], state: dict[str, Any]) -> None:
+    delegation = state.get("delegation_context")
+    edit_context = delegation.get("edit_context") if isinstance(delegation, dict) else None
+    if not isinstance(edit_context, dict) or edit_context.get("mode") != "edit_existing_artifact":
+        return
+    source_path = edit_context.get("source_artifact_path")
+    if not isinstance(source_path, str) or not source_path.strip():
+        return
+    artifact.setdefault("source_artifact_path", source_path)
+    artifact.setdefault("revision_of_artifact_path", source_path)
+
+
 def _apply_artifact_request_metadata(
     artifact: dict[str, Any],
     state: dict[str, Any],
@@ -835,6 +847,7 @@ def _apply_artifact_request_metadata(
 ) -> dict[str, Any]:
     requested_ext = _requested_artifact_ext(state)
     artifact_ext = _artifact_ext_from_path(artifact.get("artifact_path"))
+    _apply_edit_context_metadata(artifact, state)
     if requested_ext:
         artifact["requested_artifact_ext"] = requested_ext
     if artifact_ext:
@@ -1580,12 +1593,13 @@ def _pptx_skill_correction_message(state: dict[str, Any]) -> str:
         "`read_file(path='/mnt/skills/public/ppt-generation/SKILL.md')`.\n"
         "2. Create the slide plan/assets the skill expects under "
         "`/mnt/user-data/workspace/`.\n"
-        "3. Generate slide images with "
-        "`/mnt/skills/public/image-generation/scripts/generate.py`.\n"
-        "4. Compose the deck by running "
+        "3. Compose the deck by running "
         "`/mnt/skills/public/ppt-generation/scripts/generate.py`.\n"
+        "4. Use `/mnt/skills/public/image-generation/scripts/generate.py` only if the "
+        "user explicitly requested generated images or illustrations. If image generation "
+        "fails, continue with a no-image PPTX.\n"
         "5. Emit only after the `.pptx` exists and is a valid PowerPoint package.\n\n"
-        "If image/deck generation cannot complete after this correction, create a real "
+        "If deck composition or validation cannot complete after this correction, create a real "
         f"{fallback_suffix} fallback under `/mnt/user-data/outputs/` with "
         "`write_file(description='fallback deck outline', path='/mnt/user-data/outputs/deck"
         f"{fallback_suffix}', content='...', append=False)`, then emit that "
@@ -1675,6 +1689,24 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return False
 
     @staticmethod
+    def _is_edit_existing_artifact_state(state: BuilderArtifactState) -> bool:
+        delegation = state.get("delegation_context")
+        edit_context = delegation.get("edit_context") if isinstance(delegation, dict) else None
+        return isinstance(edit_context, dict) and edit_context.get("mode") == "edit_existing_artifact"
+
+    @staticmethod
+    def _has_required_edit_research_input(state: BuilderArtifactState) -> bool:
+        explicit_urls = state.get("explicit_user_urls") or []
+        required_urls = state.get("builder_update_required_urls") or []
+        return any(str(url).strip() for url in (*explicit_urls, *required_urls))
+
+    @staticmethod
+    def _edit_state_requires_research(state: BuilderArtifactState) -> bool:
+        if not BuilderArtifactMiddleware._is_edit_existing_artifact_state(state):
+            return True
+        return BuilderArtifactMiddleware._has_required_edit_research_input(state)
+
+    @staticmethod
     def _research_attempted(state: BuilderArtifactState) -> bool:
         return _builder_web_attempt_count(state) > 0 or _has_builder_search_source(state)
 
@@ -1693,6 +1725,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     def _should_force_research_tool(cls, state: BuilderArtifactState) -> bool:
         return (
             cls._allow_web_research(state)
+            and cls._edit_state_requires_research(state)
             and cls._planning_completed(state)
             and not cls._research_attempted(state)
         )
@@ -1701,15 +1734,28 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     def _should_force_fetch_tool(cls, state: BuilderArtifactState) -> bool:
         return (
             cls._allow_web_research(state)
+            and cls._edit_state_requires_research(state)
             and cls._planning_completed(state)
             and _needs_fetch_before_write(state)
         )
 
     @classmethod
-    def _is_substantive_before_research_tool(cls, state: BuilderArtifactState, tool_call: dict[str, Any]) -> bool:
+    def _research_gate_active(cls, state: BuilderArtifactState) -> bool:
         if not cls._allow_web_research(state):
             return False
-        if cls._research_attempted(state) and not cls._should_force_fetch_tool(state):
+        if not cls._edit_state_requires_research(state):
+            return False
+        return not (cls._research_attempted(state) and not cls._should_force_fetch_tool(state))
+
+    @staticmethod
+    def _bash_is_substantive_before_research(tool_call: dict[str, Any]) -> bool:
+        args = tool_call.get("args") or {}
+        command = args.get("command") if isinstance(args, dict) else None
+        return not _is_safe_pre_research_bash(command)
+
+    @classmethod
+    def _is_substantive_before_research_tool(cls, state: BuilderArtifactState, tool_call: dict[str, Any]) -> bool:
+        if not cls._research_gate_active(state):
             return False
         name = tool_call.get("name")
         if name in _BUILDER_SUBSTANTIVE_TOOL_NAMES:
@@ -1717,9 +1763,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if name == _SIMPLE_PDF_TOOL_NAME:
             return not _requested_simple_pdf_artifact(state)
         if name in {"bash", "bash_tool"}:
-            args = tool_call.get("args") or {}
-            command = args.get("command") if isinstance(args, dict) else None
-            return not _is_safe_pre_research_bash(command)
+            return cls._bash_is_substantive_before_research(tool_call)
         return False
 
     @staticmethod
@@ -3822,6 +3866,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         }
 
     def _maybe_inject_pptx_fallback_after_image_failure(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        # Image generation is optional for slide decks unless the user
+        # explicitly asked for generated images. Do not turn image failures
+        # into HTML fallback by themselves; the builder should continue with a
+        # no-image PPTX and fall back only if deck composition/validation fails.
+        return None
         if not _requested_pptx_artifact(state):
             return None
         if state.get("builder_pptx_fallback_directive_emitted"):

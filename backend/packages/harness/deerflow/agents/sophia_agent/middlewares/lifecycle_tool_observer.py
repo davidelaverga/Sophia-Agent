@@ -5,6 +5,7 @@ Logs one structured ``lifecycle_tool_call`` line every time the model emits a
 tool_call for any of:
 
 - ``start_builder_task``
+- ``edit_builder_artifact``
 - ``update_async_task``
 - ``check_async_task``
 - ``cancel_async_task``
@@ -33,6 +34,7 @@ logger = logging.getLogger("sophia.lifecycle_tool_observer")
 
 _LIFECYCLE_TOOLS = frozenset({
     "start_builder_task",
+    "edit_builder_artifact",
     "update_async_task",
     "check_async_task",
     "cancel_async_task",

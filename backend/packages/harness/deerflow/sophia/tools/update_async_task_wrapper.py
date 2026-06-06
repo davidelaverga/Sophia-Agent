@@ -279,29 +279,24 @@ def _canonical_task_id(task_id: str, tracked: dict[str, Any]) -> str:
 _SUCCESSFUL_TERMINAL_STATUSES = frozenset({"success", "completed"})
 
 
-def _success_v2_strategy(task_type: str, prior_path: str | None) -> str:
-    """v2-build strategy for SUCCESSFUL terminal builds — the user got
-    the prior artifact and now wants edits / additions."""
+def _success_v2_strategy(task_type: str, prior_path: str | None, task_id: str) -> str:
+    """Edit strategy for SUCCESSFUL terminal builds — the user got the prior
+    artifact and now wants edits / additions."""
     if prior_path:
         return (
             f"The prior artifact lives at `{prior_path}`. Your NEXT tool call "
-            f"MUST be start_builder_task(description=..., "
-            f"task_type=\"{task_type}\") with a brief that instructs the "
-            f"builder to:\n"
-            f"  1. READ the existing artifact at `{prior_path}` first.\n"
-            f"  2. APPLY the requested change in-place (or write the updated "
-            f"version to a NEW filename under `/mnt/user-data/outputs/` to "
-            f"preserve the original — the user already has the prior copy).\n"
-            f"  3. Do NOT re-research from scratch — build on what's already "
-            f"there. Only fetch new sources for the specific addition the user "
-            f"asked for.\n"
-            f"This is materially faster than a full rebuild for small edits."
+            f"MUST be edit_builder_artifact(message=..., "
+            f"artifact_path=\"{prior_path}\", task_id=\"{task_id}\"). The edit "
+            f"tool materializes the existing artifact into a new builder sandbox, "
+            f"requires the builder to read it, build on what's already there, "
+            f"preserves unrelated content, and emits a versioned revised artifact."
         )
     return (
-        f"Your NEXT tool call MUST be start_builder_task(description=..., "
-        f"task_type=\"{task_type}\") with a complete brief that references "
-        f"the prior artifact's contents inline (e.g. \"Building on the "
-        f"prior <artifact name>, add a section on <X>...\")."
+        f"Your NEXT tool call MUST be edit_builder_artifact(message=..., "
+        f"task_id=\"{task_id}\"). The tool will resolve the latest durable "
+        f"artifact metadata from trusted session state. If it reports that no "
+        f"source artifact is available, tell the user plainly and ask which file "
+        f"to edit."
     )
 
 
@@ -318,6 +313,41 @@ def _failed_v2_strategy(task_type: str, status: str) -> str:
         f"task_type=\"{task_type}\") with a COMPLETE brief that re-states the "
         f"user's original requirements PLUS the addition / change they just "
         f"asked for. The new build starts from a clean slate."
+    )
+
+
+def _prior_artifact_path_from_tracked(tracked: dict[str, Any]) -> str | None:
+    prior_path = tracked.get("artifact_path")
+    if isinstance(prior_path, str) and prior_path.strip():
+        return prior_path
+    builder_result = tracked.get("builder_result")
+    if not isinstance(builder_result, dict):
+        return None
+    candidate = builder_result.get("artifact_path")
+    return candidate if isinstance(candidate, str) and candidate.strip() else None
+
+
+def _terminal_redirect_parts(
+    *,
+    status: str,
+    task_type: str,
+    prior_path: str | None,
+    canonical_id: str,
+) -> tuple[str, str, str]:
+    if status in _SUCCESSFUL_TERMINAL_STATUSES:
+        return (
+            f"The previous {task_type} artifact has already been delivered to "
+            f"the user (Telegram / web). The user has it.",
+            _success_v2_strategy(task_type, prior_path, canonical_id),
+            "Got it — revising the delivered artifact now.",
+        )
+    return (
+        f"The previous attempt is in `{status}` state — NO artifact was "
+        f"delivered to the user. Do NOT tell the user they have the prior "
+        f"version; they don't.",
+        _failed_v2_strategy(task_type, status),
+        "Got it — the previous build didn't complete. Starting a fresh "
+        "one with your request included.",
     )
 
 
@@ -358,34 +388,12 @@ def _terminal_redirect_message(
     status = tracked.get("status", "unknown")
     task_type = _safe_task_type(tracked, delegation_context)
     canonical_id = _canonical_task_id(task_id, tracked)
-    prior_path = (
-        tracked.get("artifact_path")
-        if isinstance(tracked.get("artifact_path"), str)
-        else None
+    delivery_line, v2_strategy, ack_example = _terminal_redirect_parts(
+        status=status,
+        task_type=task_type,
+        prior_path=_prior_artifact_path_from_tracked(tracked),
+        canonical_id=canonical_id,
     )
-
-    is_successful = status in _SUCCESSFUL_TERMINAL_STATUSES
-    if is_successful:
-        delivery_line = (
-            f"The previous {task_type} artifact has already been delivered to "
-            f"the user (Telegram / web). The user has it."
-        )
-        v2_strategy = _success_v2_strategy(task_type, prior_path)
-        ack_example = (
-            "Got it — kicking off a fresh build that adds X to the previous "
-            "version."
-        )
-    else:
-        delivery_line = (
-            f"The previous attempt is in `{status}` state — NO artifact was "
-            f"delivered to the user. Do NOT tell the user they have the prior "
-            f"version; they don't."
-        )
-        v2_strategy = _failed_v2_strategy(task_type, status)
-        ack_example = (
-            "Got it — the previous build didn't complete. Starting a fresh "
-            "one with your request included."
-        )
 
     return (
         f"The builder task (task_id={canonical_id}) has already reached terminal "
@@ -550,7 +558,7 @@ def _safe_task_type(
 
     Critical: the prior ``tracked.get("task_type") or "build"`` default
     produced ``"build"``, which is NOT in the canonical set —
-    ``start_builder_task`` would reject the follow-up relaunch with a
+    ``start_builder_task`` would reject failed-run retries with a
     validation error.
 
     Importantly, if ``tracked["task_type"]`` is a non-canonical value
@@ -637,10 +645,11 @@ def _file_target_directive_block(target_path: str, task_type: str | None) -> str
             "\n"
             "HARD rules:\n"
             "  - Read `/mnt/skills/public/ppt-generation/SKILL.md` if needed, "
-            "then generate slide images with "
-            "`/mnt/skills/public/image-generation/scripts/generate.py` and "
-            "compose the deck with "
+            "then compose the deck with "
             "`/mnt/skills/public/ppt-generation/scripts/generate.py`.\n"
+            "  - Use `/mnt/skills/public/image-generation/scripts/generate.py` "
+            "only if the user explicitly requested generated images or illustrations. "
+            "If image generation fails, continue with a no-image PPTX.\n"
             "  - Do NOT call `write_file` to author the PPTX binary and do NOT "
             "create Python deck scripts as the user-ready artifact.\n"
             "  - Emit only after a valid `.pptx` exists under "
@@ -784,7 +793,7 @@ def _cache_redirect_if_terminal(task_id: str, state: dict | None) -> str | None:
         return None
     logger.info(
         "[Builder] update_async_task redirected: task_id=%s "
-        "status=%s (terminal — directing model to start_builder_task)",
+        "status=%s (terminal — directing model to edit_builder_artifact/start_builder_task by outcome)",
         task_id,
         tracked.get("status"),
     )
@@ -803,10 +812,10 @@ async def _live_terminal_redirect(
     Returns:
         - ``(redirect_msg, async_tasks_update)`` tuple when the live status
           is terminal but the cached status was not. The caller MUST persist
-          the state update — otherwise the model's follow-up
-          ``start_builder_task`` call will read the stale non-terminal cache
-          via ``_has_active_builder_task`` and reject the relaunch as a
-          duplicate (codex P1 review, 2026-05-21).
+          the state update — otherwise the model's follow-up lifecycle call
+          will read the stale non-terminal cache via
+          ``_has_active_builder_task`` and reject the revision or relaunch as
+          a duplicate (codex P1 review, 2026-05-21).
         - ``None`` when there is nothing to redirect: no tracked task,
           cache already terminal (handled by the cache-only helper), live
           status is non-terminal, or the SDK call failed (fail-open).
@@ -912,9 +921,9 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
 
         # Cache-only first: if the cached status is already terminal,
         # ``start_builder_task._has_active_builder_task`` will return None
-        # on the follow-up call (because terminal statuses are filtered),
-        # so the model can relaunch without us touching state here. Plain
-        # string return is sufficient.
+        # on the follow-up lifecycle call (because terminal statuses are
+        # filtered), so the model can revise or retry without us touching
+        # state here. Plain string return is sufficient.
         cache_redirect = _cache_redirect_if_terminal(task_id, state)
         if cache_redirect is not None:
             return cache_redirect
@@ -922,9 +931,9 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
         # Live SDK re-check: the cache may be ~10s stale plus model
         # decision latency. If live status is terminal but cached is not,
         # we MUST persist the fresh status into ``async_tasks`` —
-        # otherwise the model's follow-up ``start_builder_task`` reads
-        # the stale cache via ``_has_active_builder_task`` and rejects
-        # the relaunch as a duplicate (codex P1 review 2026-05-21).
+        # otherwise the model's follow-up lifecycle tool reads the stale
+        # cache via ``_has_active_builder_task`` and rejects the revision
+        # or retry as a duplicate (codex P1 review 2026-05-21).
         live_result = await _live_terminal_redirect(task_id, state)
         if live_result is not None:
             redirect_msg, async_tasks_update = live_result
@@ -941,14 +950,14 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
             # Degraded fallback when tool_call_id is unavailable (rare —
             # only in synthetic / test contexts). The redirect text still
             # reaches the model via the tool's normal return path, but the
-            # state update is lost; the follow-up start_builder_task may
-            # then reject the relaunch as a duplicate. Production always
+            # state update is lost; the follow-up lifecycle tool may then
+            # reject the revision or retry as a duplicate. Production always
             # provides tool_call_id (set by the LangGraph tool executor).
             logger.warning(
                 "[Builder] live-terminal redirect could not persist state "
-                "update (no tool_call_id on runtime); start_builder_task "
-                "may reject the relaunch on stale cache."
-            )
+                    "update (no tool_call_id on runtime); edit_builder_artifact "
+                    "may reject the revision on stale cache."
+                )
             return redirect_msg
 
         if native_coroutine is None:

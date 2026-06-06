@@ -233,6 +233,7 @@ class SophiaState(AgentState):
     # Builder
     builder_task: NotRequired[dict | None]
     builder_result: NotRequired[dict | None]
+    last_builder_artifact: NotRequired[dict | None]
     delegation_context: NotRequired[dict | None]
     async_tasks: Annotated[NotRequired[dict[str, dict]], merge_async_tasks]
     builder_non_artifact_turns: NotRequired[int]

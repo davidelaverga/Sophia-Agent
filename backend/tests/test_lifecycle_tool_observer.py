@@ -145,18 +145,19 @@ def test_observer_no_op_when_no_messages(caplog):
     assert records == []
 
 
-def test_observer_covers_all_five_lifecycle_tools(caplog):
-    """Each of the five lifecycle-tool names must trigger a log line so
+def test_observer_covers_all_lifecycle_tools(caplog):
+    """Each lifecycle-tool name must trigger a log line so
     post-deploy monitoring can measure the full distribution."""
     caplog.set_level(logging.INFO, logger="sophia.lifecycle_tool_observer")
     mw = LifecycleToolObserverMiddleware()
     state = _state_with(
         [
             {"name": "start_builder_task", "args": {"description": "..."}, "id": "1"},
-            {"name": "update_async_task", "args": {"task_id": "t"}, "id": "2"},
-            {"name": "check_async_task", "args": {"task_id": "t"}, "id": "3"},
-            {"name": "cancel_async_task", "args": {"task_id": "t"}, "id": "4"},
-            {"name": "list_async_tasks", "args": {}, "id": "5"},
+            {"name": "edit_builder_artifact", "args": {"message": "edit it"}, "id": "2"},
+            {"name": "update_async_task", "args": {"task_id": "t"}, "id": "3"},
+            {"name": "check_async_task", "args": {"task_id": "t"}, "id": "4"},
+            {"name": "cancel_async_task", "args": {"task_id": "t"}, "id": "5"},
+            {"name": "list_async_tasks", "args": {}, "id": "6"},
         ]
     )
     mw.after_model(state, runtime=_runtime())  # type: ignore[arg-type]
@@ -166,6 +167,7 @@ def test_observer_covers_all_five_lifecycle_tools(caplog):
     assert names == sorted(
         [
             "start_builder_task",
+            "edit_builder_artifact",
             "update_async_task",
             "check_async_task",
             "cancel_async_task",

@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import html
 import logging
-import os
 import re
 import time
 from pathlib import Path
@@ -43,14 +42,6 @@ logger = logging.getLogger(__name__)
 # scratch files; the model only needs the most recently-modified
 # candidates to pick a path.
 _ENDGAME_MAX_FILES = 10
-
-# Task types that hit the image-generation skill (directly or via the
-# ppt-generation orchestration). When OPENAI_API_KEY is missing, builds of
-# these types loop for ~21 minutes until the hard turn cap fires; the
-# pre-flight gate below short-circuits to a clean missing-capability emit
-# within ~1 turn instead.
-_VISUAL_TASK_TYPES = frozenset({"presentation", "visual_report"})
-
 
 def _list_outputs_for_prompt(state: BuilderTaskState) -> list[dict[str, Any]]:
     """Return up to ``_ENDGAME_MAX_FILES`` recent files in the builder's
@@ -490,32 +481,6 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             )
         )
 
-        # Pre-flight gate: when this build will need image-generation but the
-        # required API key isn't configured, tell the model to STOP rather
-        # than burning 30 turns on a doomed loop. Spec-aligned per
-        # builder_obligations.md: when a required capability is missing,
-        # stop cleanly instead of looping on the same doomed command.
-        api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
-        if task_type in _VISUAL_TASK_TYPES and not api_key:
-            sections.append(
-                "<missing_capability>\n"
-                "OPENAI_API_KEY is not set in this environment. The image-generation skill "
-                "(used directly and by ppt-generation) cannot run. DO NOT attempt to write "
-                "your own python-pptx / matplotlib / Pillow code as a workaround — that path "
-                "consumes the turn budget without producing a viable deliverable.\n"
-                "STOP IMMEDIATELY. On your NEXT tool call, emit_builder_artifact with:\n"
-                "- artifact_path: the most useful intermediate file you have on disk if any "
-                "(e.g. a JSON plan or markdown outline under /mnt/user-data/outputs/), or "
-                "an empty plan written in this turn.\n"
-                "- artifact_type: 'document'.\n"
-                "- confidence: 0.1 (capability missing, not your fault).\n"
-                "- companion_summary: tell the user plainly that visual generation isn't "
-                "configured and offer alternatives (text/markdown summary, or wait until "
-                "the operator sets OPENAI_API_KEY).\n"
-                "- companion_tone_hint: 'apologetic-pragmatic'.\n"
-                "</missing_capability>"
-            )
-
         sections.append(
             "<output_contract>\n"
             "- Write every user-facing deliverable and supporting file under /mnt/user-data/outputs/ using absolute paths.\n"
@@ -531,6 +496,22 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 "- Reuse this path across update/resume runs unless you have already written exactly one stronger deliverable candidate under /mnt/user-data/outputs/.\n"
                 "- emit_builder_artifact.artifact_path should point to this target or that single verified candidate, never to an unwritten placeholder.\n"
                 "</artifact_target>"
+            )
+
+        edit_context = delegation_context.get("edit_context")
+        if isinstance(edit_context, dict) and edit_context.get("mode") == "edit_existing_artifact":
+            materialized_source = edit_context.get("materialized_source_path")
+            source_artifact = edit_context.get("source_artifact_path")
+            revision_target = edit_context.get("revision_artifact_path") or artifact_target_path
+            sections.append(
+                "<edit_existing_artifact>\n"
+                f"- Source artifact path: `{html.escape(str(source_artifact or ''), quote=True)}`.\n"
+                f"- Materialized source inside this sandbox: `{html.escape(str(materialized_source or ''), quote=True)}`.\n"
+                f"- Revised artifact target: `{html.escape(str(revision_target or ''), quote=True)}`.\n"
+                "- Read the materialized source before writing. Preserve unrelated content and make only the requested edit unless the user asked for a broad rewrite.\n"
+                "- Pure local edits do not require web research. If the edit introduces new URLs or new factual scope, search/fetch that new material before editing.\n"
+                "- Emit the revised artifact, not the source artifact.\n"
+                "</edit_existing_artifact>"
             )
 
         # PR Phase B (2026-04-29): inject the skills inventory so the
@@ -607,7 +588,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             f"{wall_clock_line}"
             "BEFORE planning, check <skill_system> above. If a listed skill matches "
             "the deliverable type (e.g. chart-visualization for any chart, "
-            "ppt-generation for slide decks, image-generation for standalone "
+            "ppt-generation for slide decks, image-generation for explicit generated "
             "images, data-analysis for tabular data), USE IT — read its SKILL.md "
             "via read_file_tool and follow its workflow. Workflow cards are authoritative "
             "for PDF, PPTX, HTML, and research tasks. Do not replace them with ad hoc "
@@ -642,7 +623,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "    * **PDF**: follow the PDF workflow card. A valid render is terminal-ready; emit immediately "
             "unless Sophia asks for one layout repair.\n"
             "    * **PPTX / presentation**: follow the PPTX workflow card. Reading SKILL.md alone is not "
-            "completion; normal success requires image generation, deck composition, and a valid .pptx.\n"
+            "completion; normal success requires deck composition and a valid .pptx. Use image-generation "
+            "only when the user explicitly requested generated images/illustrations or the workflow truly depends on raster assets.\n"
             "    * **HTML**: follow the HTML workflow card. Standalone browser-renderable HTML is a text "
             "deliverable, not a frontend app unless the user requested app behavior.\n"
             "    * **Standalone chart / image**: use the chart-visualization or image-generation skill. The "

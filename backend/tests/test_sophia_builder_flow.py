@@ -321,6 +321,7 @@ def test_async_subagent_middleware_after_builder_command(monkeypatch):
 
 _LIFECYCLE_TOOLS_WITH_ACK = [
     ("start_builder_task", "Starting the build now"),
+    ("edit_builder_artifact", "revising the delivered artifact"),
     ("update_async_task", "updating the build"),
     ("check_async_task", "Let me check on it"),
     ("cancel_async_task", "cancelling the build"),
@@ -329,7 +330,7 @@ _LIFECYCLE_TOOLS_WITH_ACK = [
 
 
 @pytest.mark.parametrize("tool_name,ack_marker", _LIFECYCLE_TOOLS_WITH_ACK)
-def test_async_builder_system_prompt_covers_all_five_lifecycle_tools_with_ack_example(
+def test_async_builder_system_prompt_covers_all_lifecycle_tools_with_ack_example(
     tool_name, ack_marker
 ):
     """The companion's async-subagent preamble must teach every lifecycle
@@ -411,18 +412,17 @@ def test_update_async_task_wrapped_with_terminal_guard(monkeypatch):
 
 def test_async_builder_system_prompt_names_terminal_redirect_rule():
     """The system-prompt preamble must explicitly tell the model that
-    update_async_task is for ACTIVE builds only, and that terminal builds
-    require start_builder_task with a brief that references the prior
-    artifact."""
+    update_async_task is for ACTIVE builds only, and that targeted edits to
+    terminal builds require edit_builder_artifact."""
     module = importlib.import_module("deerflow.agents.sophia_agent.agent")
     prompt = module._ASYNC_BUILDER_SYSTEM_PROMPT
     # Active-only language for update_async_task.
     assert "RUNNING" in prompt or "running" in prompt.lower()
     # Terminal-status language.
     assert "TERMINAL" in prompt or "terminal" in prompt.lower()
-    # The directive: terminal modify cues → start_builder_task with
-    # prior-artifact-referencing brief.
-    assert "start_builder_task" in prompt
+    # The directive: terminal modify cues → edit_builder_artifact with
+    # prior-artifact identity.
+    assert "edit_builder_artifact" in prompt
     assert "prior artifact" in prompt.lower() or "previous version" in prompt.lower()
 
 

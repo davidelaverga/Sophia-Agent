@@ -52,7 +52,7 @@ from deerflow.models import create_chat_model
 from deerflow.sophia.tools.emit_artifact import emit_artifact
 from deerflow.sophia.tools.read_user_document import read_user_document
 from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
-from deerflow.sophia.tools.start_builder_task import make_start_builder_task_tool
+from deerflow.sophia.tools.start_builder_task import make_edit_builder_artifact_tool, make_start_builder_task_tool
 from deerflow.sophia.tools.view_user_image import view_user_image
 
 logger = logging.getLogger(__name__)
@@ -89,12 +89,18 @@ _ASYNC_BUILDER_SYSTEM_PROMPT = (
     "not 5\".\n"
     "  Ack like: \"Got it, updating the build to include X.\"\n"
     "  NEVER call update_async_task on a TERMINAL build (status in {success, "
-    "completed, error, failed, cancelled, timeout, timed_out}). The wrapper "
-    "rejects this and redirects to start_builder_task. For post-build "
-    "modifications, call start_builder_task with a brief that references the "
-    "prior artifact inline (e.g. \"Building on the prior <artifact>, add a "
-    "section on X...\"). Ack like \"Got it — kicking off a fresh build that "
-    "adds X to the previous version.\"\n"
+    "completed, error, failed, cancelled, timeout, timed_out}). For post-build "
+    "targeted modifications to the delivered file, call edit_builder_artifact "
+    "with the user's edit and any known artifact_path/task_id. Ack like "
+    "\"Got it, revising the delivered artifact now.\"\n"
+    "\n"
+    "- `edit_builder_artifact(message, artifact_path?, task_id?)` — user asks "
+    "to change/refine/add/remove part of a COMPLETED builder artifact. This "
+    "materializes the prior artifact into a new builder sandbox and creates a "
+    "versioned revised artifact. Use this for \"change this paragraph\", "
+    "\"add one slide\", \"make the title shorter\", or artifact co-review edits. "
+    "Do NOT use it while a build is active; active modifications use "
+    "update_async_task.\n"
     "\n"
     "- `check_async_task(task_id)` — user asks about progress. Cues: \"how's "
     'it going?", "any update?", "status?", "is it done?", "where are we?".\n'
@@ -126,6 +132,8 @@ _ASYNC_BUILDER_SYSTEM_PROMPT = (
     "that change through right now — let me know if you want me to start "
     "over with a tighter brief\") and STOP. Do NOT call `start_builder_task` "
     "as a workaround.\n"
+    "6. Fresh/new deliverables use `start_builder_task`; targeted edits to a "
+    "completed delivered artifact use `edit_builder_artifact`.\n"
 )
 
 
@@ -346,7 +354,7 @@ def make_sophia_agent(config: RunnableConfig):
         # with skill routing or memory retrieval.
         BuildAwarenessMiddleware(),
         # 13c. Lifecycle-tool observability — emits one structured log line per
-        # tool_call for any of the five lifecycle tools so we can measure
+        # tool_call for any lifecycle tool so we can measure
         # tool-selection health post-deploy. Positioned after BuildAwareness
         # (so the active-build block has shaped this turn) and before
         # ArtifactMiddleware. Purely observational; never mutates state.
@@ -426,9 +434,11 @@ def make_sophia_agent(config: RunnableConfig):
 
     retrieve_memories = make_retrieve_memories_tool(user_id)
     start_builder_task = make_start_builder_task_tool(user_id)
+    edit_builder_artifact = make_edit_builder_artifact_tool(user_id)
     tools = [
         emit_artifact,
         start_builder_task,
+        edit_builder_artifact,
         retrieve_memories,
         # view_user_image is gated on the same `vision_enabled` decision
         # that governs SophiaViewImageMiddleware. Without the middleware,

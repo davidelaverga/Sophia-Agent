@@ -101,6 +101,10 @@ def _redirect_text(response):
     return ""
 
 
+def _expected_terminal_redirect_tool(status: str) -> str:
+    return "edit_builder_artifact" if status in {"success", "completed"} else "start_builder_task"
+
+
 # ---- E.3: terminal-redirect uses prior artifact_path ----------------------
 
 
@@ -131,8 +135,8 @@ def test_terminal_redirect_includes_prior_artifact_path_when_present():
     lower = response.lower()
     assert "read" in lower
     assert "do not re-research" in lower or "build on what's already there" in lower
-    # Still names start_builder_task as the tool to call next.
-    assert "start_builder_task" in response
+    # Names the edit tool as the tool to call next.
+    assert "edit_builder_artifact" in response
 
 
 def test_terminal_redirect_falls_back_when_no_prior_artifact_path():
@@ -179,7 +183,7 @@ def test_terminal_redirect_artifact_path_handles_non_string_safely():
         )
         response = wrapped.func(task_id="task-1", message="add Y", runtime=runtime)
         assert isinstance(response, str)
-        assert "start_builder_task" in response
+        assert "edit_builder_artifact" in response
 
 
 # ---- Codex P1: terminal-redirect must emit a VALID task_type --------------
@@ -194,9 +198,9 @@ def test_terminal_redirect_falls_back_to_canonical_task_type_when_tracked_missin
     visual_report}. The follow-up start_builder_task call would then
     fail validation.
 
-    Fix: ``_safe_task_type`` falls back to delegation_context, then to
-    "document" (canonical). The redirect prose must NEVER emit
-    ``task_type="build"`` or any other non-canonical value.
+    Successful terminal edits now route by task/artifact identity instead of
+    task_type. The redirect prose must still NEVER emit ``task_type="build"``
+    or any other non-canonical value.
     """
     native, _, _ = _make_native_tool()
     wrapped = make_update_async_task_wrapper(native)
@@ -215,10 +219,10 @@ def test_terminal_redirect_falls_back_to_canonical_task_type_when_tracked_missin
         },
         tool_call_id="tc-x",
     )
-    response = wrapped.func(task_id="t1", message="add X", runtime=runtime)
-    # Recovered from delegation_context.
-    assert 'task_type="research"' in response
-    # Forbidden values must not appear.
+    response = wrapped.func(task_id="t1", message="retry", runtime=runtime)
+    # Successful terminal edits no longer need a task_type; they route to
+    # edit_builder_artifact by task/artifact identity.
+    assert "edit_builder_artifact" in response
     assert 'task_type="build"' not in response
 
 
@@ -247,7 +251,7 @@ def test_terminal_redirect_defaults_to_document_when_nothing_available():
     assert 'task_type="build"' not in response
 
 
-def test_terminal_redirect_rejects_invalid_task_type_from_tracked():
+def test_failed_terminal_redirect_rejects_invalid_task_type_from_tracked():
     """Defensive: if `tracked["task_type"]` somehow contains a value
     outside the canonical set (state corruption, schema drift), fall
     back to delegation_context / document — don't emit the bad value."""
@@ -259,7 +263,7 @@ def test_terminal_redirect_rejects_invalid_task_type_from_tracked():
                 "t1": {
                     "task_id": "t1",
                     "agent_name": "sophia_builder",
-                    "status": "success",
+                        "status": "error",
                     "task_type": "garbage_invalid_value",
                 },
             },
@@ -267,7 +271,7 @@ def test_terminal_redirect_rejects_invalid_task_type_from_tracked():
         },
         tool_call_id="tc-x",
     )
-    response = wrapped.func(task_id="t1", message="add X", runtime=runtime)
+    response = wrapped.func(task_id="t1", message="retry", runtime=runtime)
     assert 'task_type="presentation"' in response
     assert "garbage_invalid_value" not in response
 
@@ -275,9 +279,9 @@ def test_terminal_redirect_rejects_invalid_task_type_from_tracked():
 @pytest.mark.parametrize(
     "canonical", ["document", "research", "presentation", "frontend", "visual_report"]
 )
-def test_terminal_redirect_passes_through_canonical_task_types(canonical):
-    """When tracked has a canonical task_type, that exact value is used.
-    Parametrized over all 5 valid values to lock the canonical set."""
+def test_failed_terminal_redirect_passes_through_canonical_task_types(canonical):
+    """When failed terminal retries need a fresh build, the canonical
+    task_type is preserved for start_builder_task."""
     native, _, _ = _make_native_tool()
     wrapped = make_update_async_task_wrapper(native)
     runtime = _runtime(
@@ -285,12 +289,12 @@ def test_terminal_redirect_passes_through_canonical_task_types(canonical):
             "t1": {
                 "task_id": "t1",
                 "agent_name": "sophia_builder",
-                "status": "success",
+                "status": "failed",
                 "task_type": canonical,
             }
         }
     )
-    response = wrapped.func(task_id="t1", message="add X", runtime=runtime)
+    response = wrapped.func(task_id="t1", message="retry", runtime=runtime)
     assert f'task_type="{canonical}"' in response
 
 
@@ -1083,9 +1087,9 @@ def test_wrapper_rejects_terminal_target_sync(terminal_status):
 
     assert isinstance(response, str)
     # Directive content checks: model is told NOT to call update again and
-    # IS told to call start_builder_task with the prior artifact in scope.
+    # is routed by terminal outcome.
     assert "terminal" in response.lower() or terminal_status in response
-    assert "start_builder_task" in response
+    assert _expected_terminal_redirect_tool(terminal_status) in response
     assert "task-1" in response
     # Native must not have been called.
     assert sync_calls == []
@@ -1114,7 +1118,7 @@ def test_wrapper_rejects_terminal_target_async(terminal_status):
     )
 
     assert isinstance(response, str)
-    assert "start_builder_task" in response
+    assert _expected_terminal_redirect_tool(terminal_status) in response
     assert async_calls == []
 
 
@@ -1152,8 +1156,8 @@ def test_async_live_check_redirects_when_cache_stale_but_live_terminal(monkeypat
     """The cache says 'running' but the live SDK says 'success' — the
     wrapper MUST return a Command that carries BOTH the redirect prose
     AND a state update flipping the cached status to terminal. Returning
-    a plain string would let the model's follow-up start_builder_task
-    read the stale cache and reject the relaunch (codex P1 review)."""
+    a plain string would let the model's follow-up lifecycle call read the
+    stale cache and reject the revision or relaunch (codex P1 review)."""
     native, _sync_calls, async_calls = _make_native_tool()
     wrapped = make_update_async_task_wrapper(native)
     calls = _stub_sdk_client(monkeypatch, run_status="success")
@@ -1179,11 +1183,11 @@ def test_async_live_check_redirects_when_cache_stale_but_live_terminal(monkeypat
     # Wrapper redirected via Command, not plain string.
     assert isinstance(response, Command), (
         "live-terminal redirect must return Command so async_tasks state "
-        "update is persisted before the model calls start_builder_task"
+        "update is persisted before the model calls edit_builder_artifact"
     )
     # ToolMessage carries the redirect prose.
     text = _redirect_text(response)
-    assert "start_builder_task" in text
+    assert "edit_builder_artifact" in text
     assert "task-1" in text
     # async_tasks update carries the FRESH terminal status.
     updated_tasks = response.update.get("async_tasks")
@@ -1220,21 +1224,21 @@ def test_async_live_check_redirects_for_all_terminal_statuses(monkeypatch, live_
     )
     assert isinstance(response, Command)
     assert response.update["async_tasks"]["task-1"]["status"] == live_terminal_status
-    assert "start_builder_task" in _redirect_text(response)
+    assert _expected_terminal_redirect_tool(live_terminal_status) in _redirect_text(response)
     assert async_calls == []
 
 
 def test_live_terminal_redirect_unblocks_start_builder_task_duplicate_guard(monkeypatch):
     """End-to-end P1 regression: after the wrapper returns Command with
     the async_tasks state update, simulate langgraph applying that update
-    to state, then call start_builder_task._has_active_builder_task on
-    the updated state. It MUST return None — confirming that the model's
-    follow-up start_builder_task on the SAME turn will NOT be rejected
+    to state, then call start_builder_task._has_active_builder_task on the
+    updated state. It MUST return None — confirming that the model's
+    follow-up lifecycle call on the SAME turn will NOT be rejected
     as a duplicate.
 
     The 2026-05-21 codex P1 review flagged exactly this failure mode:
     without persisting the live terminal status, _has_active_builder_task
-    sees the stale non-terminal cache and rejects the relaunch.
+    sees the stale non-terminal cache and rejects the follow-up lifecycle call.
     """
     native, _, _ = _make_native_tool()
     wrapped = make_update_async_task_wrapper(native)
@@ -1264,9 +1268,10 @@ def test_live_terminal_redirect_unblocks_start_builder_task_duplicate_guard(monk
     updated_state = {
         "async_tasks": {**pre_state_async_tasks, **response.update["async_tasks"]},
     }
-    # start_builder_task now sees the fresh terminal status → no active task → not a duplicate.
+    # Active-build duplicate guard now sees the fresh terminal status → no
+    # active task → not a duplicate.
     assert _has_active_builder_task(updated_state) is None, (
-        "start_builder_task would reject the relaunch as a duplicate; "
+        "the follow-up lifecycle call would be rejected as a duplicate; "
         "the live-terminal redirect Command failed to update async_tasks state."
     )
 
@@ -1283,7 +1288,7 @@ def test_live_terminal_redirect_writes_state_under_canonical_task_id(monkeypatch
     by the RAW input, the reducer merges a phantom whitespace-keyed
     entry alongside the still-non-terminal canonical entry, and
     ``_has_active_builder_task`` then sees the canonical entry as still
-    active → rejects the follow-up ``start_builder_task`` → recovery
+    active → rejects the follow-up lifecycle call → recovery
     path is broken in exactly the whitespace-tolerance case the wrapper
     is meant to handle.
 
@@ -1337,8 +1342,8 @@ def test_live_terminal_redirect_writes_state_under_canonical_task_id(monkeypatch
 def test_live_terminal_redirect_message_uses_canonical_task_id_in_prose(monkeypatch):
     """The interpolated task_id in the redirect prose is normalized to
     the canonical form. Otherwise the model may copy the
-    whitespace-padded id into a follow-up start_builder_task description,
-    which is at best ugly and at worst a future bug."""
+    whitespace-padded id into a follow-up lifecycle tool call, which is at best
+    ugly and at worst a future bug."""
     native, _, _ = _make_native_tool()
     wrapped = make_update_async_task_wrapper(native)
     _stub_sdk_client(monkeypatch, run_status="success")
@@ -1391,7 +1396,7 @@ def test_live_terminal_redirect_degrades_to_string_when_tool_call_id_missing(mon
         wrapped.coroutine(task_id="task-1", message="add X", runtime=runtime)
     )
     assert isinstance(response, str)
-    assert "start_builder_task" in response
+    assert "edit_builder_artifact" in response
     assert any("could not persist state update" in r.message for r in caplog.records)
 
 
@@ -1503,7 +1508,7 @@ def test_async_terminal_cache_skips_live_check(monkeypatch):
     # Cache-only path: live check skipped.
     assert calls == []
     assert isinstance(response, str)
-    assert "start_builder_task" in response
+    assert "edit_builder_artifact" in response
     assert async_calls == []
 
 

@@ -1,7 +1,9 @@
-"""Pre-flight gate test: when ``OPENAI_API_KEY`` is missing and the task
-will hit the image-generation skill, ``BuilderTaskMiddleware`` injects a
-``<missing_capability>`` block telling the model to STOP rather than
-loop. Spec-aligned per ``skills/public/sophia/builder_obligations.md``.
+"""Visual capability prompt tests.
+
+Image generation is now opt-in for builder tasks. Presentation and visual
+report tasks should not hard-stop when ``OPENAI_API_KEY`` is missing; the
+builder should create no-image PPTX/PDF/HTML deliverables unless the user
+explicitly asks for generated raster images.
 """
 
 from __future__ import annotations
@@ -36,25 +38,25 @@ def _briefing(result: dict) -> str:
     return result["system_prompt_blocks"][-1]
 
 
-class TestVisualPreflightGate:
-    def test_presentation_without_openai_key_injects_missing_capability(
+class TestVisualCapabilityPrompt:
+    def test_presentation_without_openai_key_does_not_inject_missing_capability(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         result = BuilderTaskMiddleware().before_agent(_make_state("presentation"), _make_runtime())
         assert result is not None
         briefing = _briefing(result)
-        assert "<missing_capability>" in briefing
-        assert "OPENAI_API_KEY is not set" in briefing
-        assert "STOP IMMEDIATELY" in briefing
+        assert "<missing_capability>" not in briefing
+        assert "OPENAI_API_KEY is not set" not in briefing
+        assert "STOP IMMEDIATELY" not in briefing
 
-    def test_visual_report_without_openai_key_injects_missing_capability(
+    def test_visual_report_without_openai_key_does_not_inject_missing_capability(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         result = BuilderTaskMiddleware().before_agent(_make_state("visual_report"), _make_runtime())
         briefing = _briefing(result)
-        assert "<missing_capability>" in briefing
+        assert "<missing_capability>" not in briefing
 
     def test_presentation_with_openai_key_does_not_inject(
         self, monkeypatch: pytest.MonkeyPatch
@@ -96,12 +98,12 @@ class TestVisualPreflightGate:
     def test_empty_string_key_treated_as_missing(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Render env vars set to empty string should behave the same as
-        # absent — guard against silent misconfiguration.
+        # Empty Render env vars should not block presentation builds because
+        # generated images are optional.
         monkeypatch.setenv("OPENAI_API_KEY", "")
         result = BuilderTaskMiddleware().before_agent(_make_state("presentation"), _make_runtime())
         briefing = _briefing(result)
-        assert "<missing_capability>" in briefing
+        assert "<missing_capability>" not in briefing
 
     def test_whitespace_only_key_treated_as_missing(
         self, monkeypatch: pytest.MonkeyPatch
@@ -109,4 +111,4 @@ class TestVisualPreflightGate:
         monkeypatch.setenv("OPENAI_API_KEY", "   ")
         result = BuilderTaskMiddleware().before_agent(_make_state("presentation"), _make_runtime())
         briefing = _briefing(result)
-        assert "<missing_capability>" in briefing
+        assert "<missing_capability>" not in briefing

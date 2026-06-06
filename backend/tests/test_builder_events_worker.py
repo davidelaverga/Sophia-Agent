@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -157,6 +158,57 @@ async def test_internal_post_accepts_event_and_publishes(app: FastAPI, client: h
     assert response.status_code == 202
     body = response.json()
     assert body["delivered_subscribers"] == 0  # nothing subscribed yet
+
+
+@pytest.mark.anyio
+async def test_internal_post_persists_terminal_builder_state(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    monkeypatch,
+):
+    captured: dict = {}
+    fake_threads = MagicMock()
+
+    async def _update_state(thread_id: str, values: dict):
+        captured["thread_id"] = thread_id
+        captured["values"] = values
+
+    fake_threads.update_state = AsyncMock(side_effect=_update_state)
+    fake_client = MagicMock()
+    fake_client.threads = fake_threads
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+
+    async with client:
+        response = await client.post(
+            "/internal/builder-events",
+            json={
+                "thread_id": "parent-thread",
+                "task_id": "builder-task",
+                "run_id": "run-1",
+                "status": "success",
+                "agent_name": "sophia_builder",
+                "task_type": "document",
+                "artifact_path": "mnt/user-data/outputs/brief.md",
+                "artifact_url": "https://signed.example/temporary",
+                "artifact_ext": "md",
+                "source_artifact_path": "mnt/user-data/outputs/source.md",
+                "revision_of_artifact_path": "mnt/user-data/outputs/source.md",
+            },
+        )
+
+    assert response.status_code == 202
+    assert captured["thread_id"] == "parent-thread"
+    values = captured["values"]
+    task_update = values["async_tasks"]["builder-task"]
+    assert task_update["status"] == "success"
+    assert task_update["artifact_path"] == "mnt/user-data/outputs/brief.md"
+    assert task_update["builder_result"]["artifact_path"] == "mnt/user-data/outputs/brief.md"
+    assert task_update["builder_result"]["source_artifact_path"] == (
+        "mnt/user-data/outputs/source.md"
+    )
+    assert "artifact_url" not in task_update["builder_result"]
+    assert values["last_builder_artifact"]["artifact_path"] == "mnt/user-data/outputs/brief.md"
+    assert "artifact_url" not in values["last_builder_artifact"]
 
 
 @pytest.mark.anyio
