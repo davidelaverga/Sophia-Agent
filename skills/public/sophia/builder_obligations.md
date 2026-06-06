@@ -49,9 +49,12 @@ deliverable.
 - For requested slide decks, normal success requires a structurally valid
   `.pptx`. HTML or Markdown may be emitted only as degraded fallback with
   `requested_artifact_ext="pptx"`, `artifact_is_fallback=true`, and a safe
-  `fallback_reason`.
+  `fallback_reason`. If a valid `.pptx` exists, it wins over any fallback.
 - For requested PDFs, normal success requires a real `.pdf`. Markdown or HTML
-  fallback is allowed only when rendering failed or was unavailable.
+  fallback is allowed only when rendering failed, was unavailable, or produced
+  an unusable PDF after the bounded repair. PDF fallback must use
+  `requested_artifact_ext="pdf"`, `artifact_is_fallback=true`, and a safe
+  `fallback_reason`. If a valid `.pdf` exists, it wins over any fallback.
 - If a required capability is missing, stop cleanly. Do not loop on the same
   failing command. Emit the best verified fallback if one exists; otherwise
   surface a failed terminal artifact with a clear safe reason.

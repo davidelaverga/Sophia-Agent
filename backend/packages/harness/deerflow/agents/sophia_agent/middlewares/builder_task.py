@@ -277,14 +277,15 @@ def _artifact_target_extension(artifact_target_path: object) -> str:
 def _critical_emit_guidance(artifact_target_ext: str) -> str:
     if artifact_target_ext == ".pdf":
         return (
-            "for this PDF target, prefer the .pdf if it exists, otherwise emit "
-            "the approved Markdown fallback for mostly-text documents or HTML "
-            "fallback for visual/chart/diagram documents with confidence<=0.5. "
-            "Do NOT emit a generator .py as a PDF fallback.\n"
+            "for this PDF target, emit the valid .pdf if it exists. Only if no "
+            "usable PDF exists may you emit an approved Markdown/HTML fallback "
+            "with explicit fallback metadata. Do NOT emit a generator .py as a "
+            "PDF fallback.\n"
         )
     return (
-        "if only a generator .py exists, emit that with confidence<=0.4 and "
-        "explain in companion_tone_hint.\n"
+        "if no user-facing deliverable exists, do NOT emit a generator script "
+        "unless the user explicitly requested source code. Emit a verified "
+        "fallback or fail cleanly with a safe companion_tone_hint.\n"
     )
 
 
@@ -292,9 +293,9 @@ def _critical_pick_guidance(artifact_target_ext: str) -> str:
     if artifact_target_ext == ".pdf":
         return (
             "first file marked 'deliverable'. If only generator files exist, "
-            "accept the force-stop fallback.\n"
+            "do not emit them; create a verified .md/.html fallback or fail cleanly.\n"
         )
-    return "first file marked 'deliverable' (or 'generator' if no deliverable exists) "
+    return "first file marked 'deliverable'. Do not choose generator scripts as user-facing artifacts. "
 
 
 def _generator_listing_tag(
@@ -306,7 +307,7 @@ def _generator_listing_tag(
     if artifact_target_ext == ".pdf":
         return "(generator script — do NOT emit for PDF; use .pdf or approved .md/.html fallback instead)", has_generator
     if not has_deliverable and has_generator:
-        return "(generator script — emit with confidence<=0.4 if no deliverable works)", False
+        return "(generator script — do NOT emit unless the user explicitly asked for source code)", False
     return "(generator script)", has_generator
 
 
@@ -556,7 +557,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
 
         sections.append(
             "<preinstalled_libraries>\n"
-            "The sandbox already has these Python libraries installed. Import them directly — do NOT run pip install:\n"
+            "The sandbox already has these Python libraries installed for inspection, validation, and "
+            "supporting work. Import them directly only when the workflow card allows it — do NOT run pip install:\n"
             "- PDF: reportlab, fpdf2 (fpdf), pypdf\n"
             "- Office: python-pptx (pptx), python-docx (docx), openpyxl\n"
             "- Images: pillow (PIL)\n"
@@ -564,9 +566,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "- Other: markdown, requests, httpx\n"
             "If you ever see ModuleNotFoundError for one of these, the import path is wrong — check the module name above. "
             "Never call `pip install` via bash_tool; it wastes your turn budget.\n"
-            "Note: prefer skills (above) over writing your own generator code "
-            "for PDF/PPTX/charts/data-analysis. The skills wrap pre-tested "
-            "generators that handle font/encoding/embedding correctly.\n"
+            "Important: these libraries do NOT replace target workflow cards. For PDF, use "
+            "render_markdown_to_pdf instead of reportlab/fpdf scripts. For PPTX, use the "
+            "ppt-generation skill instead of python-pptx scripts. Skills wrap pre-tested "
+            "generators that handle font, encoding, embedding, and validation correctly.\n"
             "</preinstalled_libraries>"
         )
 
@@ -606,10 +609,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "the deliverable type (e.g. chart-visualization for any chart, "
             "ppt-generation for slide decks, image-generation for standalone "
             "images, data-analysis for tabular data), USE IT — read its SKILL.md "
-            "via read_file_tool and follow its workflow. ONLY if no listed skill "
-            "applies should you write a _generate_<name>.py script from scratch. "
-            "Writing your own matplotlib/reportlab/python-pptx code is the "
-            "fragile path PR #93/#94 spent recovery machinery on.\n"
+            "via read_file_tool and follow its workflow. Workflow cards are authoritative "
+            "for PDF, PPTX, HTML, and research tasks. Do not replace them with ad hoc "
+            "matplotlib/reportlab/python-pptx generator code; that is the fragile path "
+            "PR #93/#94 spent recovery machinery on.\n"
             "Plan your work to fit within this budget:\n"
             "- Turn 1: call write_todos with a short plan (3–5 steps) so the UI can track progress.\n"
             "- For text deliverables (markdown, html, plain text, code): use the exposed `write_file` tool "
@@ -649,16 +652,17 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "    * **xlsx / docx / other formats not covered by a skill**: as a LAST RESORT, write a short "
             "generator script to /mnt/user-data/outputs/_generate_<name>.py and bash-run it. This path is "
             "fragile. Prefer a skill if at all possible. If you must use a generator script: keep it under "
-            "120 lines, run it with bash_tool, verify with ls_tool, and at most 2 fix-and-retry cycles before "
-            "shipping the .py with confidence<=0.4.\n"
+            "120 lines, run it with bash_tool, verify the real requested output with ls_tool, and at most "
+            "2 fix-and-retry cycles. Never ship the generator script as the artifact unless the user "
+            "explicitly asked for code; emit a verified fallback or fail cleanly.\n"
             "    Libraries listed in <preinstalled_libraries> are already available — do NOT pip install.\n"
             "- After each meaningful step (write_file, successful skill invocation, render_markdown_to_pdf), "
             "call write_todos again to mark the corresponding item 'completed' or 'in-progress'. This is how "
             "the user sees the progress bar advance — skipping these updates leaves the UI stuck.\n"
             "- Make targeted edits only if critical fixes are needed.\n"
             "- Final turn: Call ONLY emit_builder_artifact pointing artifact_path at the FINAL DELIVERABLE "
-            "(the .pdf, .pptx, .png, .md, etc. — never a generator .py for PDFs, and only a generator .py "
-            "for non-PDF formats when that is the explicit fallback above). Do NOT pair emit_builder_artifact with any other tool call on the same turn — not "
+            "(the .pdf, .pptx, .png, .md, etc. — never a generator .py unless the user explicitly "
+            "asked for source code). Do NOT pair emit_builder_artifact with any other tool call on the same turn — not "
             "write_todos, not bash, not write_file, not anything. The artifact card surfaces the file to "
             "the user automatically once emit_builder_artifact is captured; you do not need to flag the "
             "file separately. emit_builder_artifact alone is MANDATORY — without it your work is lost.\n"
