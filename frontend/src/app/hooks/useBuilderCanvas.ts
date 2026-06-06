@@ -201,9 +201,15 @@ function reconcileDifferentRunSnapshot(
   };
 }
 
-function applySnapshot(current: BuilderCanvasState, snapshot: BuilderCanvasSnapshotV1): BuilderCanvasState {
+function applySnapshot(
+  current: BuilderCanvasState,
+  snapshot: BuilderCanvasSnapshotV1,
+  options?: { artifactReviewActive?: boolean },
+): BuilderCanvasState {
   if (isEmptyPassiveSnapshot(snapshot)) {
-    return { ...current, reconnecting: false };
+    return options?.artifactReviewActive
+      ? { ...current, reconnecting: false }
+      : { ...EMPTY_STATE };
   }
 
   const snapshotState = stateFromSnapshot(snapshot);
@@ -338,7 +344,7 @@ export function useBuilderCanvas(
           });
         }
         setState((current) => {
-          const next = applySnapshot(current, snapshot);
+          const next = applySnapshot(current, snapshot, { artifactReviewActive: activeArtifactReview });
           if (emptyPassiveSnapshot) {
             const protectedExistingState = Boolean(current.activeTask || current.completion || current.recentEvents.length > 0);
             const signature = [
