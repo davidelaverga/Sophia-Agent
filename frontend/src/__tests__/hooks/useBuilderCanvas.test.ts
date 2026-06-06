@@ -545,7 +545,41 @@ describe('useBuilderCanvas', () => {
     expect(result.current.completion?.status).toBe('success');
   });
 
-  it('treats empty snapshots as passive and keeps active canvas state', async () => {
+  it('clears stale terminal canvas state when an empty snapshot is not artifact-review protected', async () => {
+    mockFetchSnapshots(
+      {
+        version: 1,
+        active_task: {
+          parent_thread_id: 'thread-1',
+          task_id: 'task-1',
+          run_id: 'run-1',
+          status: 'completed',
+          completion: { thread_id: 'thread-1', task_id: 'task-1', run_id: 'run-1', status: 'success' },
+        },
+        recent_events: [],
+      },
+      {
+        version: 1,
+        active_task: null,
+        recent_events: [],
+      },
+    );
+
+    const { result } = renderHook(() => useBuilderCanvas('thread-1'));
+    await waitFor(() => expect(result.current.activeTask?.status).toBe('completed'));
+    expect(result.current.completion?.status).toBe('success');
+
+    act(() => {
+      FakeEventSource.instances[0].onerror?.();
+    });
+
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.activeTask).toBeNull());
+    expect(result.current.completion).toBeNull();
+    expect(result.current.recentEvents).toHaveLength(0);
+  });
+
+  it('treats empty snapshots as passive during artifact review and keeps active canvas state', async () => {
     mockFetchSnapshots(SNAPSHOT, {
       version: 1,
       active_task: null,
