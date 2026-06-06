@@ -9,6 +9,12 @@ import {
 } from "../../../app/components/session/CoreviewCompanionArtifactCanvas"
 import { buildCoreviewRealArtifactId } from "../../../app/components/session/CoreviewRealArtifactCanvas"
 import { PresenceArtifactPanel } from "../../../app/components/session/PresenceArtifactPanel"
+import type {
+  ArtifactReviewBuilderActionResult,
+  ArtifactReviewBuilderCancelRequest,
+  ArtifactReviewBuilderUpdateRequest,
+  ArtifactReviewVoiceCommandRouter,
+} from "../../../app/lib/artifact-review-voice-commands"
 import type { ArtifactFrameSender } from "../../../app/lib/co-review-still-frame-transport"
 import { GeminiStillFrameTransport } from "../../../app/lib/co-review-still-frame-transport"
 import {
@@ -120,6 +126,11 @@ function renderPanel({
   onStartVoiceBuilderArtifactReview,
   onPendingBuilderArtifactReviewConsumed,
   onArtifactReviewVoiceCommandRouteChange,
+  onStartBuilderUpdateFromReview,
+  onCancelBuilderTaskFromReview,
+  activeBuilderTaskId,
+  activeBuilderRunId,
+  activeBuilderTaskPhase,
   transport = new GeminiStillFrameTransport({
     sendArtifactFrame: vi.fn((frame) => ({
       ok: true,
@@ -145,6 +156,11 @@ function renderPanel({
   onStartVoiceBuilderArtifactReview?: ComponentProps<typeof PresenceArtifactPanel>["onStartVoiceBuilderArtifactReview"]
   onPendingBuilderArtifactReviewConsumed?: ComponentProps<typeof PresenceArtifactPanel>["onPendingBuilderArtifactReviewConsumed"]
   onArtifactReviewVoiceCommandRouteChange?: ComponentProps<typeof PresenceArtifactPanel>["onArtifactReviewVoiceCommandRouteChange"]
+  onStartBuilderUpdateFromReview?: ComponentProps<typeof PresenceArtifactPanel>["onStartBuilderUpdateFromReview"]
+  onCancelBuilderTaskFromReview?: ComponentProps<typeof PresenceArtifactPanel>["onCancelBuilderTaskFromReview"]
+  activeBuilderTaskId?: ComponentProps<typeof PresenceArtifactPanel>["activeBuilderTaskId"]
+  activeBuilderRunId?: ComponentProps<typeof PresenceArtifactPanel>["activeBuilderRunId"]
+  activeBuilderTaskPhase?: ComponentProps<typeof PresenceArtifactPanel>["activeBuilderTaskPhase"]
   transport?: GeminiStillFrameTransport
 }) {
   return render(
@@ -165,6 +181,11 @@ function renderPanel({
       onStartVoiceBuilderArtifactReview={onStartVoiceBuilderArtifactReview}
       onPendingBuilderArtifactReviewConsumed={onPendingBuilderArtifactReviewConsumed}
       onArtifactReviewVoiceCommandRouteChange={onArtifactReviewVoiceCommandRouteChange}
+      onStartBuilderUpdateFromReview={onStartBuilderUpdateFromReview}
+      onCancelBuilderTaskFromReview={onCancelBuilderTaskFromReview}
+      activeBuilderTaskId={activeBuilderTaskId}
+      activeBuilderRunId={activeBuilderRunId}
+      activeBuilderTaskPhase={activeBuilderTaskPhase}
     />,
   )
 }
@@ -1598,6 +1619,198 @@ describe("Coreview artifact still-frame review", () => {
     )
     expect(screen.getAllByRole("region", { name: /generated artifact/i })).toHaveLength(1)
     expect(screen.queryByText(/coreview|gemini|websocket|transport|liveframes|fixture|direct video|provider ack/i)).not.toBeInTheDocument()
+  })
+
+  it("routes a voice artifact update into a fresh builder task with selected context", async () => {
+    setCoreviewFlags(true)
+    registerSophiaCaptureBridge()
+    window.__sophiaCapture?.enable()
+    window.__sophiaCapture?.clear()
+    let route: ArtifactReviewVoiceCommandRouter | null = null
+    const onStartBuilderUpdateFromReview = vi.fn((
+      _request: ArtifactReviewBuilderUpdateRequest,
+    ): ArtifactReviewBuilderActionResult => ({
+      ok: true,
+      taskId: "builder-task-2",
+      runId: "run-2",
+      status: "running",
+      detail: "Builder task start requested.",
+    }))
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("# Launch Brief\n\nShared preview source in voice mode.", {
+        status: 200,
+        headers: { "Content-Type": "text/markdown" },
+      }),
+    )
+
+    renderPanel({
+      builderArtifact: MARKDOWN_BUILDER_ARTIFACT,
+      builderArtifactLibrary: MARKDOWN_LIBRARY,
+      selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.md",
+      isVoiceMode: true,
+      voiceAgentSessionId: "voice-1",
+      onArtifactReviewVoiceCommandRouteChange: (handler) => {
+        route = handler
+      },
+      onStartBuilderUpdateFromReview,
+    })
+
+    expect(await screen.findByRole("heading", { name: "Launch Brief" })).toBeInTheDocument()
+    await waitFor(() => expect(route).not.toBeNull())
+
+    let result: ReturnType<ArtifactReviewVoiceCommandRouter> | null = null
+    act(() => {
+      result = route?.("change the title to Q4 Launch") ?? null
+    })
+
+    expect(result).toMatchObject({
+      handled: true,
+      applied: true,
+      command: {
+        kind: "builder_update",
+        requestedChange: "change the title to Q4 Launch",
+      },
+      suppressAssistant: true,
+    })
+    await waitFor(() => expect(onStartBuilderUpdateFromReview).toHaveBeenCalledTimes(1))
+    expect(onStartBuilderUpdateFromReview.mock.calls[0]?.[0]).toMatchObject({
+      requestedChange: "change the title to Q4 Launch",
+      context: {
+        selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.md",
+        artifactPath: "mnt/user-data/outputs/launch-brief.md",
+        artifactTitle: "launch-brief.md",
+        rendererKind: "markdown",
+        currentPageIndex: 0,
+        currentPageCount: 1,
+        originalArtifactHref: "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md",
+        annotationCount: 0,
+        commentCount: 0,
+        voiceAgentSessionId: "voice-1",
+      },
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId("artifact-voice-command-status")).toHaveTextContent("Builder task started.")
+    })
+    const events = exportSophiaCaptureBundle().events.filter((event) => event.name === "voice-builder-update")
+    expect(events.some((event) => {
+      const payload = event.payload as Record<string, unknown>
+      return payload.voiceBuilderUpdateIntentDetected === true
+        && payload.voiceBuilderUpdateAttempted === true
+        && payload.voiceBuilderUpdatePreservedReview === true
+        && payload.voiceBuilderUpdatePreservedMic === true
+        && payload.voiceBuilderUpdateArtifactContextPresent === true
+        && payload.rawArtifactTextExcluded === true
+        && payload.rawCommentTextExcluded === true
+    })).toBe(true)
+  })
+
+  it("routes voice builder cancel without closing review and reports no active task safely", async () => {
+    setCoreviewFlags(true)
+    let route: ArtifactReviewVoiceCommandRouter | null = null
+    const onCancelBuilderTaskFromReview = vi.fn()
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("# Launch Brief\n\nShared preview source in voice mode.", {
+        status: 200,
+        headers: { "Content-Type": "text/markdown" },
+      }),
+    )
+
+    renderPanel({
+      builderArtifact: MARKDOWN_BUILDER_ARTIFACT,
+      builderArtifactLibrary: MARKDOWN_LIBRARY,
+      selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.md",
+      isVoiceMode: true,
+      onArtifactReviewVoiceCommandRouteChange: (handler) => {
+        route = handler
+      },
+      onCancelBuilderTaskFromReview,
+    })
+
+    expect(await screen.findByRole("heading", { name: "Launch Brief" })).toBeInTheDocument()
+    await waitFor(() => expect(route).not.toBeNull())
+
+    let result: ReturnType<ArtifactReviewVoiceCommandRouter> | null = null
+    act(() => {
+      result = route?.("cancel the builder") ?? null
+    })
+
+    expect(result).toMatchObject({
+      handled: true,
+      applied: false,
+      command: { kind: "builder_cancel" },
+      blockedReason: "no_active_builder_task",
+      suppressAssistant: true,
+    })
+    expect(onCancelBuilderTaskFromReview).not.toHaveBeenCalled()
+    expect(screen.getByTestId("artifact-voice-command-status")).toHaveTextContent("No active builder task.")
+    expect(screen.getByTestId("voice-artifact-stage")).toBeInTheDocument()
+  })
+
+  it("routes voice builder cancel to the active task/run", async () => {
+    setCoreviewFlags(true)
+    registerSophiaCaptureBridge()
+    window.__sophiaCapture?.enable()
+    window.__sophiaCapture?.clear()
+    let route: ArtifactReviewVoiceCommandRouter | null = null
+    const onCancelBuilderTaskFromReview = vi.fn((
+      _request: ArtifactReviewBuilderCancelRequest,
+    ): ArtifactReviewBuilderActionResult => ({
+      ok: true,
+      taskId: "builder-task-1",
+      runId: "run-1",
+      status: "cancelled",
+      detail: "Builder was cancelled before finishing the deliverable.",
+    }))
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("# Launch Brief\n\nShared preview source in voice mode.", {
+        status: 200,
+        headers: { "Content-Type": "text/markdown" },
+      }),
+    )
+
+    renderPanel({
+      builderArtifact: MARKDOWN_BUILDER_ARTIFACT,
+      builderArtifactLibrary: MARKDOWN_LIBRARY,
+      selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.md",
+      isVoiceMode: true,
+      activeBuilderTaskId: "builder-task-1",
+      activeBuilderRunId: "run-1",
+      activeBuilderTaskPhase: "running",
+      onArtifactReviewVoiceCommandRouteChange: (handler) => {
+        route = handler
+      },
+      onCancelBuilderTaskFromReview,
+    })
+
+    expect(await screen.findByRole("heading", { name: "Launch Brief" })).toBeInTheDocument()
+    await waitFor(() => expect(route).not.toBeNull())
+
+    act(() => {
+      route?.("stop updating the file")
+    })
+
+    await waitFor(() => expect(onCancelBuilderTaskFromReview).toHaveBeenCalledTimes(1))
+    expect(onCancelBuilderTaskFromReview.mock.calls[0]?.[0]).toMatchObject({
+      activeBuilderTaskId: "builder-task-1",
+      activeBuilderRunId: "run-1",
+      context: {
+        selectedBuilderArtifactPath: "mnt/user-data/outputs/launch-brief.md",
+        artifactPath: "mnt/user-data/outputs/launch-brief.md",
+      },
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId("artifact-voice-command-status")).toHaveTextContent("Builder cancelled.")
+    })
+    const events = exportSophiaCaptureBundle().events.filter((event) => event.name === "voice-builder-cancel")
+    expect(events.some((event) => {
+      const payload = event.payload as Record<string, unknown>
+      return payload.voiceBuilderCancelIntentDetected === true
+        && payload.voiceBuilderCancelAttempted === true
+        && payload.voiceBuilderCancelPreservedReview === true
+        && payload.voiceBuilderCancelPreservedMic === true
+        && payload.activeBuilderTaskId === "builder-task-1"
+        && payload.activeBuilderRunId === "run-1"
+    })).toBe(true)
   })
 
   it("Review with Sophia sends the selected markdown artifact frame and keeps exact text available", async () => {

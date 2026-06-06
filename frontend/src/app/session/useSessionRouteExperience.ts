@@ -289,7 +289,11 @@ export function useSessionRouteExperience({
 
   const cancelBuilderTask = useCallback(async () => {
     if (!activeThreadId || !builderTask?.taskId || builderTask.phase !== 'running' || isCancellingBuilderTask) {
-      return;
+      return {
+        ok: false,
+        safeReason: 'no_active_builder_task' as const,
+        detail: 'No active builder task.',
+      };
     }
 
     const runId = builderTask.runId
@@ -338,12 +342,26 @@ export function useSessionRouteExperience({
         variant: 'info',
         durationMs: 2400,
       });
+      return {
+        ok: response.status === 'cancelled',
+        taskId: response.task_id ?? builderTask.taskId,
+        runId: responseRunId ?? null,
+        status: response.status,
+        detail: response.detail ?? null,
+        safeReason: response.status === 'cancelled' ? null : 'builder_cancel_failed' as const,
+      };
     } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Could not cancel Builder right now.';
       showToast({
-        message: error instanceof Error ? error.message : 'Could not cancel Builder right now.',
+        message: detail,
         variant: 'warning',
         durationMs: 3200,
       });
+      return {
+        ok: false,
+        safeReason: 'builder_cancel_failed' as const,
+        detail,
+      };
     } finally {
       setIsCancellingBuilderTask(false);
     }

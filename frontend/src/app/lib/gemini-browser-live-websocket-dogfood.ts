@@ -4458,12 +4458,21 @@ export function classifyArtifactReviewUserIntent(text: string): GeminiArtifactRe
     return 'unknown';
   }
 
+  const appliesReviewFeedback = /\bapply\s+(?:this\s+)?(?:comment|feedback|change|note)\b/u.test(normalized);
+  const annotationRequest =
+    /\b(?:leave|add|make|put)\s+(?:a\s+)?(?:comment|note|feedback|pin)\b/u.test(normalized)
+    || /\b(?:comment|note|feedback|pin)\s+(?:on\s+)?(?:the\s+)?(?:title|it|this|current)\b/u.test(normalized);
+  if (annotationRequest && !appliesReviewFeedback) {
+    return 'analysis';
+  }
+
   const createOrUpdate =
     /\b(create|make|write|draft|generate|update|edit|revise|rewrite|change|save|add|remove|replace)\b/u.test(normalized)
-    && /\b(artifact|document|doc|summary|brief|report|file|canvas|it|this)\b/u.test(normalized);
+    && /\b(artifact|document|doc|summary|brief|report|file|canvas|it|this|title|headline|heading|background|section|layout|color|colors|colour|copy|text|slide|page|version|html)\b/u.test(normalized);
   if (
     createOrUpdate
-    || /\b(turn this into|save this as|make this into|new artifact|new version)\b/u.test(normalized)
+    || appliesReviewFeedback
+    || /\b(turn this into|save this as|make this into|new artifact|new version|fresh builder task|rebuild this as html|convert this to html)\b/u.test(normalized)
   ) {
     return 'create_update';
   }

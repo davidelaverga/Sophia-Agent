@@ -12,6 +12,8 @@ export type ArtifactReviewVoiceCommandKind =
   | "refresh_view"
   | "focus_anchor"
   | "add_annotation"
+  | "builder_update"
+  | "builder_cancel"
 
 export type ArtifactReviewAnnotationKind = "highlight" | "comment" | "underline" | "arrow"
 export type ArtifactReviewAnnotationColor = "yellow" | "purple" | "blue" | "pink"
@@ -28,9 +30,13 @@ export type ArtifactReviewAnnotationUtteranceKind =
 export type ArtifactReviewVoiceCommandBlockedReason =
   | "not_artifact_review_context"
   | "no_artifact_selected"
+  | "no_selected_artifact"
+  | "no_active_builder_task"
   | "no_multipage_artifact_selected"
   | "requested_page_out_of_bounds"
   | "visual_refresh_unavailable"
+  | "builder_start_failed"
+  | "builder_cancel_failed"
 
 export type ArtifactReviewVoiceCommandRefreshResult =
   | "not_requested"
@@ -49,6 +55,7 @@ export interface ArtifactReviewVoiceCommand {
   commentText?: string
   zoomDelta?: number
   utteranceKind?: ArtifactReviewAnnotationUtteranceKind
+  requestedChange?: string
 }
 
 export interface ArtifactReviewVoiceCommandRouteResult {
@@ -74,6 +81,54 @@ export interface ArtifactReviewVoiceCommandApplyResult {
   blockedReason: ArtifactReviewVoiceCommandBlockedReason | null
   artifactCurrentPageIndex: number
   artifactCurrentPageCount: number
+}
+
+export type ArtifactReviewBuilderBlockedReason =
+  | "no_selected_artifact"
+  | "no_active_builder_task"
+  | "builder_start_failed"
+  | "builder_cancel_failed"
+
+export interface ArtifactReviewBuilderContext {
+  selectedBuilderArtifactPath: string | null
+  artifactPath: string | null
+  artifactTitle: string | null
+  rendererKind: string | null
+  currentPageIndex: number | null
+  currentPageCount: number | null
+  viewSignature: string | null
+  annotationCount: number
+  highlightCount: number
+  commentCount: number
+  underlineCount: number
+  arrowCount: number
+  drawPathCount: number
+  originalArtifactHref: string | null
+  artifactStableIdentity: string | null
+  sessionId: string | null
+  normalSessionId: string | null
+  voiceAgentSessionId: string | null
+  threadId: string | null
+}
+
+export interface ArtifactReviewBuilderUpdateRequest {
+  requestedChange: string
+  context: ArtifactReviewBuilderContext
+}
+
+export interface ArtifactReviewBuilderCancelRequest {
+  activeBuilderTaskId: string | null
+  activeBuilderRunId: string | null
+  context: ArtifactReviewBuilderContext
+}
+
+export interface ArtifactReviewBuilderActionResult {
+  ok: boolean
+  taskId?: string | null
+  runId?: string | null
+  status?: string | null
+  detail?: string | null
+  safeReason?: ArtifactReviewBuilderBlockedReason | null
 }
 
 const PAGE_NUMBER_WORDS = new Map<string, number>([
@@ -150,6 +205,21 @@ const COMMENT_PATTERNS = [
 const FONT_FOLLOW_UP_PATTERNS = [
   /\bchange\s+(?:the\s+)?font\b/u,
   /\bfont\s+(?:needs|should|must)\s+(?:to\s+)?(?:change|be\s+changed)\b/u,
+]
+const BUILDER_CANCEL_PATTERNS = [
+  /\b(?:cancel|stop|abort)\s+(?:the\s+)?(?:builder|build|artifact\s+update|file\s+update|update|task)\b/u,
+  /\b(?:cancel|stop|abort)\s+this\s+(?:builder\s+)?task\b/u,
+  /\b(?:stop|cancel)\s+updating\s+(?:the\s+)?(?:file|artifact|document)\b/u,
+]
+const BUILDER_UPDATE_PATTERNS = [
+  /\b(?:update|edit|revise|rewrite|rebuild)\s+(?:the\s+)?(?:current\s+)?(?:artifact|file|document|doc|canvas|version|this|it)\b/u,
+  /\b(?:change|replace|remove)\s+(?:the\s+)?(?:title|headline|heading|background|section|layout|colors?|colour|copy|text|slide|page)\b/u,
+  /\bmake\s+(?:the\s+)?(?:background|title|headline|heading|section|layout|colors?|colour|copy|text|slide|page)\b/u,
+  /\bapply\s+(?:this\s+)?(?:comment|feedback|change|note)\b/u,
+  /\bmake\s+(?:a\s+)?new\s+version\b/u,
+  /\b(?:new|fresh)\s+builder\s+task\b/u,
+  /\bcreate\s+(?:a\s+)?fresh\s+builder\s+task\b/u,
+  /\b(?:turn|convert|rebuild)\s+this\s+(?:as|into)\s+(?:an?\s+)?html\b/u,
 ]
 const COMMENT_TEXT_PATTERNS = [
   /\b(?:leave|add|make|put)\s+(?:a\s+)?(?:comment|note|feedback|pin)(?:\s+on\s+(?:the\s+)?(?:current\s+)?(?:title|it|this))?\s*(?:saying|that\s+says|to\s+say|:)?\s+(.+)$/iu,
@@ -243,6 +313,7 @@ function parseArtifactReviewVoiceCommandClause(
     return []
   }
   const commandsWithIndex: IndexedArtifactReviewCommand[] = [
+    ...parseBuilderLifecycleCommands(transcript, normalized),
     ...parseArtifactPageCommands(normalized),
     ...parseArtifactViewCommands(normalized),
     ...parseArtifactRefreshCommands(normalized),
@@ -285,6 +356,29 @@ function parseArtifactPageCommands(normalized: string): IndexedArtifactReviewCom
   }
   commands.push(...indexedCommand(normalized, PREVIOUS_PAGE_PATTERNS, { kind: "previous_page" }))
   return commands
+}
+
+function parseBuilderLifecycleCommands(
+  transcript: string,
+  normalized: string,
+): IndexedArtifactReviewCommand[] {
+  const cancelIndex = firstMatchedIndex(normalized, BUILDER_CANCEL_PATTERNS)
+  if (cancelIndex >= 0) {
+    return [{ index: cancelIndex, command: { kind: "builder_cancel" } }]
+  }
+
+  const updateIndex = firstMatchedIndex(normalized, BUILDER_UPDATE_PATTERNS)
+  if (updateIndex < 0) {
+    return []
+  }
+
+  return [{
+    index: updateIndex,
+    command: {
+      kind: "builder_update",
+      requestedChange: cleanBuilderRequestedChange(transcript),
+    },
+  }]
 }
 
 function parseArtifactViewCommands(normalized: string): IndexedArtifactReviewCommand[] {
@@ -400,6 +494,13 @@ function followUpCommentCommand(
       utteranceKind: "annotation_follow_up_comment",
     },
   }
+}
+
+function cleanBuilderRequestedChange(value: string): string {
+  return stripWakeWord(value)
+    .replace(/\s+/gu, " ")
+    .replace(/[.!?]+$/gu, "")
+    .trim()
 }
 
 export function normalizeArtifactReviewVoiceCommand(value: string): string {

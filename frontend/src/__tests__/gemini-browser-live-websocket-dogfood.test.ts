@@ -231,12 +231,17 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(classifyArtifactReviewUserIntent('what would you improve visually?')).toBe('analysis');
     expect(classifyArtifactReviewUserIntent('what exact title does it show?')).toBe('analysis');
     expect(classifyArtifactReviewUserIntent('go one by one')).toBe('analysis');
+    expect(classifyArtifactReviewUserIntent('add a comment to this title')).toBe('analysis');
     expect(classifyArtifactReviewUserIntent('create a new artifact')).toBe('create_update');
     expect(classifyArtifactReviewUserIntent('rewrite this artifact')).toBe('create_update');
     expect(classifyArtifactReviewUserIntent('save this as a new version')).toBe('create_update');
     expect(classifyArtifactReviewUserIntent('update the document')).toBe('create_update');
     expect(classifyArtifactReviewUserIntent('Please update this artifact with the revised summary.')).toBe('create_update');
     expect(classifyArtifactReviewUserIntent('Turn this into a document I can save.')).toBe('create_update');
+    expect(classifyArtifactReviewUserIntent('Change the title to Q4 Launch.')).toBe('create_update');
+    expect(classifyArtifactReviewUserIntent('Make the background darker.')).toBe('create_update');
+    expect(classifyArtifactReviewUserIntent('Apply this comment.')).toBe('create_update');
+    expect(classifyArtifactReviewUserIntent('Rebuild this as HTML.')).toBe('create_update');
     expect(classifyArtifactReviewUserIntent('   ')).toBe('unknown');
   });
 

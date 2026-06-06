@@ -144,6 +144,31 @@ describe("artifact review voice command parser", () => {
     })
   })
 
+  it("parses builder update and cancel intents during artifact review", () => {
+    expect(parseArtifactReviewVoiceCommand("Update this file with the new title")).toEqual({
+      kind: "builder_update",
+      requestedChange: "Update this file with the new title",
+    })
+    expect(parseArtifactReviewVoiceCommand("change the title to Q4 Launch")).toEqual({
+      kind: "builder_update",
+      requestedChange: "change the title to Q4 Launch",
+    })
+    expect(parseArtifactReviewVoiceCommand("make the background darker")).toEqual({
+      kind: "builder_update",
+      requestedChange: "make the background darker",
+    })
+    expect(parseArtifactReviewVoiceCommand("apply this comment")).toEqual({
+      kind: "builder_update",
+      requestedChange: "apply this comment",
+    })
+    expect(parseArtifactReviewVoiceCommand("cancel the builder")).toEqual({
+      kind: "builder_cancel",
+    })
+    expect(parseArtifactReviewVoiceCommand("stop updating the file")).toEqual({
+      kind: "builder_cancel",
+    })
+  })
+
   it("splits compound focus, highlight, and comment review commands in order", () => {
     expect(parseArtifactReviewVoiceCommands(
       "Sophia, zoom in on the current title. Highlight it yellow. Leave a comment: change the font.",

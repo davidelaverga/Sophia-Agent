@@ -60,7 +60,12 @@ import {
   type ArtifactCanvasRestoreContext,
 } from '../lib/artifact-canvas-restore-state';
 import { detectArtifactRendererKind } from '../lib/artifact-renderers';
-import type { ArtifactReviewVoiceCommandRouter } from '../lib/artifact-review-voice-commands';
+import type {
+  ArtifactReviewBuilderActionResult,
+  ArtifactReviewBuilderCancelRequest,
+  ArtifactReviewBuilderUpdateRequest,
+  ArtifactReviewVoiceCommandRouter,
+} from '../lib/artifact-review-voice-commands';
 import { buildThreadArtifactHref, getBuilderArtifactFiles, normalizeBuilderArtifactPath } from '../lib/builder-artifacts';
 import { GeminiStillFrameTransport } from '../lib/co-review-still-frame-transport';
 import { buildCoreviewArtifactStableIdentity } from '../lib/coreview-artifact-identity';
@@ -95,6 +100,7 @@ import { useSessionVoiceCommandSystem } from './useSessionVoiceCommandSystem';
 
 const MISSING_BUILDER_DELIVERABLE_ERROR = 'Builder finished without a deliverable artifact.';
 const MISSING_BUILDER_DELIVERABLE_RETRY_MESSAGE = `${MISSING_BUILDER_DELIVERABLE_ERROR} Please try again.`;
+const VISUAL_UPDATE_RENDERERS = new Set(['html', 'markdown', 'pdf', 'pptx', 'presentation']);
 
 // ============================================================================
 // PROTECTED SESSION PAGE WRAPPER
@@ -146,6 +152,61 @@ function ComposerAttachButton({
 
 function getBuilderArtifactFilename(path: string): string {
   return path.split('/').filter(Boolean).pop() || 'Builder deliverable';
+}
+
+function buildVoiceBuilderUpdatePrompt(request: ArtifactReviewBuilderUpdateRequest): string {
+  const { context } = request;
+  const taskType = inferVoiceBuilderTaskType(context);
+  const pageNumber = typeof context.currentPageIndex === 'number' ? context.currentPageIndex + 1 : null;
+  const pageSummary = pageNumber && context.currentPageCount
+    ? `${pageNumber} of ${context.currentPageCount}`
+    : 'not available';
+  const visualOrHtml = context.rendererKind ? VISUAL_UPDATE_RENDERERS.has(context.rendererKind) : false;
+  const nativeReliabilityNote = context.rendererKind === 'pdf' || context.rendererKind === 'pptx' || context.rendererKind === 'presentation'
+    ? 'If native PDF or slide editing is unreliable, be truthful in the builder summary and produce the safest buildable updated version.'
+    : 'Keep the output format aligned with the selected artifact unless the user asked for a different format.';
+
+  return [
+    'Sophia, start a fresh builder task for this co-review artifact update.',
+    `Use start_builder_task with task_type="${taskType}". Do not use emit_artifact as the deliverable mechanism for this voice review turn.`,
+    '',
+    'User requested change:',
+    request.requestedChange.trim(),
+    '',
+    'Selected artifact context:',
+    `- selectedBuilderArtifactPath: ${context.selectedBuilderArtifactPath ?? 'unknown'}`,
+    `- artifactPath: ${context.artifactPath ?? 'unknown'}`,
+    `- artifactTitle: ${context.artifactTitle ?? 'Builder artifact'}`,
+    `- rendererKind: ${context.rendererKind ?? 'unknown'}`,
+    `- currentPage: ${pageSummary}`,
+    `- viewSignature: ${context.viewSignature ?? 'unknown'}`,
+    `- originalArtifactHref: ${context.originalArtifactHref ?? 'unknown'}`,
+    `- sessionId: ${context.sessionId ?? 'unknown'}`,
+    `- normalSessionId: ${context.normalSessionId ?? 'unknown'}`,
+    `- voiceAgentSessionId: ${context.voiceAgentSessionId ?? 'unknown'}`,
+    `- threadId: ${context.threadId ?? 'unknown'}`,
+    `- annotations: total=${context.annotationCount}; highlights=${context.highlightCount}; comments=${context.commentCount}; underlines=${context.underlineCount}; arrows=${context.arrowCount}; drawings=${context.drawPathCount}.`,
+    '',
+    'Builder instructions:',
+    '- Preserve the existing artifact unless the requested change requires a rewrite.',
+    '- Make a scoped update or new version; do not blindly rebuild unrelated content.',
+    '- Use the selected artifact path/title as the source context and name the updated version clearly.',
+    visualOrHtml ? '- Preserve HTML or visual output intent where possible.' : '- Preserve document output intent where possible.',
+    `- ${nativeReliabilityNote}`,
+    '- Do not include raw artifact text, raw comments, screenshots, or frames in telemetry.',
+  ].join('\n');
+}
+
+function inferVoiceBuilderTaskType(context: ArtifactReviewBuilderUpdateRequest['context']): 'document' | 'presentation' | 'frontend' {
+  const rendererKind = context.rendererKind?.toLowerCase() ?? '';
+  const path = context.artifactPath?.toLowerCase() ?? context.selectedBuilderArtifactPath?.toLowerCase() ?? '';
+  if (rendererKind === 'html' || path.endsWith('.html') || path.endsWith('.htm')) {
+    return 'frontend';
+  }
+  if (rendererKind === 'pptx' || rendererKind === 'presentation' || path.endsWith('.pptx')) {
+    return 'presentation';
+  }
+  return 'document';
 }
 
 function SessionPageContent() {
@@ -1082,6 +1143,81 @@ function SessionPageContent() {
     return true;
   }, [builderDownloadHref, builderPrimaryFile?.name, clearBuilderTask]);
 
+  const handleStartBuilderUpdateFromReview = useCallback(async (
+    request: ArtifactReviewBuilderUpdateRequest,
+  ): Promise<ArtifactReviewBuilderActionResult> => {
+    const prompt = buildVoiceBuilderUpdatePrompt(request);
+    recordSophiaCaptureEvent({
+      category: 'voice-session',
+      name: 'voice-builder-update-dispatched',
+      payload: {
+        sessionId: request.context.sessionId,
+        normalSessionId: request.context.normalSessionId,
+        voiceAgentSessionId: request.context.voiceAgentSessionId,
+        threadId: request.context.threadId,
+        voiceBuilderUpdateAttempted: true,
+        voiceBuilderUpdateResult: 'dispatched',
+        voiceBuilderUpdateArtifactContextPresent: Boolean(request.context.artifactPath || request.context.selectedBuilderArtifactPath),
+        voiceBuilderUpdatePreservedMic: true,
+        voiceBuilderUpdatePreservedReview: true,
+        voiceBuilderUpdateRequestedChangeLength: request.requestedChange.length,
+        selectedBuilderArtifactPath: request.context.selectedBuilderArtifactPath,
+        artifactPath: request.context.artifactPath,
+        artifactTitle: request.context.artifactTitle,
+        artifactRendererKind: request.context.rendererKind,
+        artifactCurrentPageIndex: request.context.currentPageIndex,
+        artifactCurrentPageCount: request.context.currentPageCount,
+        artifactViewSignature: request.context.viewSignature,
+        annotationCount: request.context.annotationCount,
+        commentCount: request.context.commentCount,
+        rawTranscriptExcluded: true,
+        rawCommentTextExcluded: true,
+        rawArtifactTextExcluded: true,
+        rawFrameExcluded: true,
+      },
+    });
+
+    try {
+      await sendMessage({ text: prompt });
+      return {
+        ok: true,
+        status: 'dispatched',
+        detail: 'Builder task start requested.',
+      };
+    } catch (error) {
+      recordSophiaCaptureEvent({
+        category: 'voice-session',
+        name: 'voice-builder-update-dispatch-failed',
+        payload: {
+          sessionId: request.context.sessionId,
+          threadId: request.context.threadId,
+          voiceBuilderUpdateAttempted: true,
+          voiceBuilderUpdateResult: 'failed',
+          voiceBuilderUpdateBlockedReason: 'builder_start_failed',
+          voiceBuilderUpdatePreservedMic: true,
+          voiceBuilderUpdatePreservedReview: true,
+          error: error instanceof Error ? error.message.slice(0, 160) : 'Unknown builder dispatch failure.',
+          rawTranscriptExcluded: true,
+          rawCommentTextExcluded: true,
+          rawArtifactTextExcluded: true,
+          rawFrameExcluded: true,
+        },
+      });
+      return {
+        ok: false,
+        status: 'failed',
+        safeReason: 'builder_start_failed',
+        detail: error instanceof Error ? error.message.slice(0, 160) : 'Builder update could not start.',
+      };
+    }
+  }, [sendMessage]);
+
+  const handleCancelBuilderTaskFromReview = useCallback(async (
+    _request: ArtifactReviewBuilderCancelRequest,
+  ): Promise<ArtifactReviewBuilderActionResult> => {
+    return cancelBuilderTask();
+  }, [cancelBuilderTask]);
+
   useEffect(() => {
     const previousCount = previousArtifactCountRef.current;
     const previousReady = previousReadyCountRef.current;
@@ -1767,6 +1903,11 @@ function SessionPageContent() {
               onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}
               onPendingBuilderArtifactReviewConsumed={handlePendingBuilderArtifactReviewConsumed}
               onArtifactReviewVoiceCommandRouteChange={handleArtifactReviewVoiceCommandRouteChange}
+              onStartBuilderUpdateFromReview={handleStartBuilderUpdateFromReview}
+              onCancelBuilderTaskFromReview={handleCancelBuilderTaskFromReview}
+              activeBuilderTaskId={builderTask?.taskId ?? null}
+              activeBuilderRunId={builderTask?.runId ?? null}
+              activeBuilderTaskPhase={builderTask?.phase ?? null}
               onAnnotationActionSucceeded={voiceState.markAnnotationActionSucceeded}
               onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
               onMemoryApprove={handleMemoryApprove}
@@ -2009,6 +2150,11 @@ function SessionPageContent() {
               onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}
               onPendingBuilderArtifactReviewConsumed={handlePendingBuilderArtifactReviewConsumed}
               onArtifactReviewVoiceCommandRouteChange={handleArtifactReviewVoiceCommandRouteChange}
+              onStartBuilderUpdateFromReview={handleStartBuilderUpdateFromReview}
+              onCancelBuilderTaskFromReview={handleCancelBuilderTaskFromReview}
+              activeBuilderTaskId={builderTask?.taskId ?? null}
+              activeBuilderRunId={builderTask?.runId ?? null}
+              activeBuilderTaskPhase={builderTask?.phase ?? null}
               onAnnotationActionSucceeded={voiceState.markAnnotationActionSucceeded}
               onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
               onMemoryApprove={handleMemoryApprove}
@@ -2038,6 +2184,11 @@ function SessionPageContent() {
             onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}
             onPendingBuilderArtifactReviewConsumed={handlePendingBuilderArtifactReviewConsumed}
             onArtifactReviewVoiceCommandRouteChange={handleArtifactReviewVoiceCommandRouteChange}
+            onStartBuilderUpdateFromReview={handleStartBuilderUpdateFromReview}
+            onCancelBuilderTaskFromReview={handleCancelBuilderTaskFromReview}
+            activeBuilderTaskId={builderTask?.taskId ?? null}
+            activeBuilderRunId={builderTask?.runId ?? null}
+            activeBuilderTaskPhase={builderTask?.phase ?? null}
             onAnnotationActionSucceeded={voiceState.markAnnotationActionSucceeded}
             onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
             onMemoryApprove={handleMemoryApprove}

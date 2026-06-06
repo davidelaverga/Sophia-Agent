@@ -2,9 +2,17 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
+import type { ArtifactToolMode } from "../../types/artifact-annotations"
+import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../types/builder-artifact"
+import type { RitualArtifacts } from "../../types/session"
+
+import type { ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
+import { ArtifactStage, type ArtifactReviewVoiceCommandTarget } from "./ArtifactStage"
+import { buildCoreviewRealArtifactId, CoreviewRealArtifactCanvas } from "./CoreviewRealArtifactCanvas"
 import {
   appendWorkspaceEvent,
   buildArtifactViewSignature,
+  buildThreadArtifactHref,
   buildCoreviewArtifactStableIdentity,
   buildCoreviewWorkspaceActor,
   buildCoreviewWorkspaceKey,
@@ -38,6 +46,10 @@ import {
   useCoreviewAnnotationStore,
   usePresenceStore,
   wasRecentCoreviewToolActionHandled,
+  type ArtifactReviewBuilderActionResult,
+  type ArtifactReviewBuilderCancelRequest,
+  type ArtifactReviewBuilderContext,
+  type ArtifactReviewBuilderUpdateRequest,
   type ArtifactReviewAnnotationKind,
   type ArtifactReviewAnnotationUtteranceKind,
   type ArtifactReviewVoiceCommand,
@@ -66,13 +78,6 @@ import {
   type CoreviewWorkspaceActor,
   type CoreviewWorkspaceEventType,
 } from "./PresenceArtifactPanelDeps"
-import type { ArtifactToolMode } from "../../types/artifact-annotations"
-import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../types/builder-artifact"
-import type { RitualArtifacts } from "../../types/session"
-
-import type { ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
-import { ArtifactStage, type ArtifactReviewVoiceCommandTarget } from "./ArtifactStage"
-import { buildCoreviewRealArtifactId, CoreviewRealArtifactCanvas } from "./CoreviewRealArtifactCanvas"
 import {
   COREVIEW_COMPANION_ARTIFACT_ID,
   PresenceArtifactSecondarySurfaces,
@@ -98,6 +103,11 @@ interface PresenceArtifactPanelProps {
   onStartVoiceBuilderArtifactReview?: () => void
   onPendingBuilderArtifactReviewConsumed?: () => void
   onArtifactReviewVoiceCommandRouteChange?: (handler: ArtifactReviewVoiceCommandRouter | null) => void
+  onStartBuilderUpdateFromReview?: (request: ArtifactReviewBuilderUpdateRequest) => Promise<ArtifactReviewBuilderActionResult> | ArtifactReviewBuilderActionResult
+  onCancelBuilderTaskFromReview?: (request: ArtifactReviewBuilderCancelRequest) => Promise<ArtifactReviewBuilderActionResult> | ArtifactReviewBuilderActionResult
+  activeBuilderTaskId?: string | null
+  activeBuilderRunId?: string | null
+  activeBuilderTaskPhase?: string | null
   onAnnotationActionSucceeded?: (counts: {
     annotationCount?: number | null
     highlightCount?: number | null
@@ -526,6 +536,40 @@ function coreviewFocusCommandAlreadyHandled(sinceMs: number): boolean {
   })
 }
 
+function artifactReviewBuilderContextPresent(context: ArtifactReviewBuilderContext): boolean {
+  return Boolean(context.artifactPath || context.selectedBuilderArtifactPath)
+}
+
+function builderActionResultLabel(result: ArtifactReviewBuilderActionResult): "started" | "cancelled" | "blocked" | "failed" {
+  if (!result.ok) {
+    return result.safeReason === "no_active_builder_task" || result.safeReason === "no_selected_artifact"
+      ? "blocked"
+      : "failed"
+  }
+  return result.status === "cancelled" ? "cancelled" : "started"
+}
+
+function builderContextTelemetry(context: ArtifactReviewBuilderContext) {
+  return {
+    selectedBuilderArtifactPath: context.selectedBuilderArtifactPath,
+    artifactPath: context.artifactPath,
+    artifactTitle: context.artifactTitle,
+    artifactRendererKind: context.rendererKind,
+    artifactCurrentPageIndex: context.currentPageIndex,
+    artifactCurrentPageCount: context.currentPageCount,
+    artifactViewSignature: context.viewSignature,
+    annotationCount: context.annotationCount,
+    highlightCount: context.highlightCount,
+    commentCount: context.commentCount,
+    underlineCount: context.underlineCount,
+    arrowCount: context.arrowCount,
+    drawPathCount: context.drawPathCount,
+    originalArtifactHref: context.originalArtifactHref,
+    artifactStableIdentity: context.artifactStableIdentity,
+    voiceAgentSessionId: context.voiceAgentSessionId,
+  }
+}
+
 function buildSelectedArtifactFromExisting(builderArtifact: BuilderArtifactV1, path: string): BuilderArtifactV1 | null {
   const files = getBuilderArtifactFiles(builderArtifact)
   const selectedFile = files.find((file) => file.path === path)
@@ -661,6 +705,11 @@ export function PresenceArtifactPanel({
   onStartVoiceBuilderArtifactReview,
   onPendingBuilderArtifactReviewConsumed,
   onArtifactReviewVoiceCommandRouteChange,
+  onStartBuilderUpdateFromReview,
+  onCancelBuilderTaskFromReview,
+  activeBuilderTaskId = null,
+  activeBuilderRunId = null,
+  activeBuilderTaskPhase = null,
   onAnnotationActionSucceeded,
   onReflectionTap,
   onMemoryApprove,
@@ -1893,6 +1942,111 @@ export function PresenceArtifactPanel({
     ))
   }, [builderStageActive, isVisible, runCoreviewAction])
 
+  const buildArtifactReviewBuilderContext = useCallback((currentView: CoreviewCurrentView): ArtifactReviewBuilderContext => {
+    const artifactPath = normalizeBuilderArtifactPath(currentView.artifactPath ?? stageArtifactPath)
+    const selectedPath = normalizedSelectedBuilderArtifactPath ?? artifactPath
+    return {
+      selectedBuilderArtifactPath: selectedPath,
+      artifactPath,
+      artifactTitle: currentView.artifactTitle ?? stageBuilderArtifact?.artifactTitle ?? null,
+      rendererKind: currentView.rendererKind ?? stageRendererKind,
+      currentPageIndex: Number.isFinite(currentView.pageIndex) ? currentView.pageIndex : null,
+      currentPageCount: Number.isFinite(currentView.pageCount) ? Math.max(1, currentView.pageCount) : null,
+      viewSignature: currentView.viewSignature ?? builderArtifactViewSignature ?? null,
+      annotationCount: currentView.annotationCount,
+      highlightCount: currentView.highlightCount,
+      commentCount: currentView.commentCount,
+      underlineCount: currentView.underlineCount,
+      arrowCount: currentView.arrowCount,
+      drawPathCount: currentView.drawPathCount,
+      originalArtifactHref: buildThreadArtifactHref(threadId, artifactPath),
+      artifactStableIdentity,
+      sessionId: sessionId ?? null,
+      normalSessionId: normalSessionId ?? null,
+      voiceAgentSessionId: voiceAgentSessionId ?? null,
+      threadId: threadId ?? null,
+    }
+  }, [
+    artifactStableIdentity,
+    builderArtifactViewSignature,
+    normalSessionId,
+    normalizedSelectedBuilderArtifactPath,
+    sessionId,
+    stageArtifactPath,
+    stageBuilderArtifact?.artifactTitle,
+    stageRendererKind,
+    threadId,
+    voiceAgentSessionId,
+  ])
+
+  const recordVoiceBuilderUpdateTelemetry = useCallback((details: {
+    context: ArtifactReviewBuilderContext
+    attempted: boolean
+    result: "started" | "blocked" | "failed"
+    blockedReason?: string | null
+    taskId?: string | null
+    runId?: string | null
+    requestedChangeLength?: number | null
+  }) => {
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "voice-builder-update",
+      payload: {
+        sessionId: sessionId ?? null,
+        normalSessionId: normalSessionId ?? null,
+        threadId: threadId ?? null,
+        voiceBuilderUpdateIntentDetected: true,
+        voiceBuilderUpdateAttempted: details.attempted,
+        voiceBuilderUpdateResult: details.result,
+        voiceBuilderUpdateBlockedReason: details.blockedReason ?? null,
+        voiceBuilderUpdateStartedTaskId: details.taskId ?? null,
+        voiceBuilderUpdateStartedRunId: details.runId ?? null,
+        voiceBuilderUpdatePreservedReview: true,
+        voiceBuilderUpdatePreservedMic: true,
+        voiceBuilderUpdateArtifactContextPresent: artifactReviewBuilderContextPresent(details.context),
+        voiceBuilderUpdateRequestedChangeLength: details.requestedChangeLength ?? null,
+        ...builderContextTelemetry(details.context),
+        rawTranscriptExcluded: true,
+        rawCommentTextExcluded: true,
+        rawArtifactTextExcluded: true,
+        rawFrameExcluded: true,
+      },
+    })
+  }, [normalSessionId, sessionId, threadId])
+
+  const recordVoiceBuilderCancelTelemetry = useCallback((details: {
+    context: ArtifactReviewBuilderContext
+    attempted: boolean
+    result: "cancelled" | "blocked" | "failed"
+    blockedReason?: string | null
+    taskId?: string | null
+    runId?: string | null
+  }) => {
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "voice-builder-cancel",
+      payload: {
+        sessionId: sessionId ?? null,
+        normalSessionId: normalSessionId ?? null,
+        threadId: threadId ?? null,
+        voiceBuilderCancelIntentDetected: true,
+        voiceBuilderCancelAttempted: details.attempted,
+        voiceBuilderCancelResult: details.result,
+        voiceBuilderCancelBlockedReason: details.blockedReason ?? null,
+        voiceBuilderCancelPreservedReview: true,
+        voiceBuilderCancelPreservedMic: true,
+        activeBuilderTaskId: details.taskId ?? activeBuilderTaskId ?? null,
+        activeBuilderRunId: details.runId ?? activeBuilderRunId ?? null,
+        activeBuilderTaskPhase: activeBuilderTaskPhase ?? null,
+        ...builderContextTelemetry(details.context),
+        rawTranscriptExcluded: true,
+        rawCommentTextExcluded: true,
+        rawArtifactTextExcluded: true,
+        rawFrameExcluded: true,
+      },
+    })
+  }, [activeBuilderRunId, activeBuilderTaskId, activeBuilderTaskPhase, normalSessionId, sessionId, threadId])
+
   const routeArtifactReviewVoiceCommand = useCallback((transcript: string): ArtifactReviewVoiceCommandRouteResult => {
     if (!isVisible || !builderStageActive) {
       return { handled: false }
@@ -1910,12 +2064,196 @@ export function PresenceArtifactPanel({
     const currentPageIndex = currentView.pageIndex
     const currentPageCount = Math.max(1, currentView.pageCount)
     const transportStateBefore = builderArtifactCoReview.transportStatus.statusText
-    const toolName = coreviewToolNameFromVoiceCommand(command)
     const nativeToolsPrimary = Boolean(
       isVoiceMode
         && builderArtifactCoReview.state.state === "co_review_live"
         && builderArtifactCoReview.transportStatus.toolsSupportedInCoReview
     )
+
+    if (command.kind === "builder_update") {
+      const context = buildArtifactReviewBuilderContext(currentView)
+      const requestedChange = command.requestedChange?.trim() || transcript.trim()
+      const requestedChangeLength = requestedChange.length
+
+      if (!onStartBuilderUpdateFromReview) {
+        return { handled: false }
+      }
+
+      if (!currentView.artifactId || !artifactReviewBuilderContextPresent(context)) {
+        setVoiceCommandStatus({
+          text: "No artifact is selected.",
+          tone: "warn",
+        })
+        recordVoiceBuilderUpdateTelemetry({
+          context,
+          attempted: false,
+          result: "blocked",
+          blockedReason: "no_selected_artifact",
+          requestedChangeLength,
+        })
+        return {
+          handled: true,
+          command,
+          applied: false,
+          blockedReason: "no_selected_artifact",
+          triggeredRefresh: false,
+          refreshResult: "not_requested",
+          userMessage: null,
+          suppressAssistant: true,
+        }
+      }
+
+      setVoiceCommandStatus({
+        text: "Starting builder update...",
+        tone: "pending",
+      })
+      recordVoiceBuilderUpdateTelemetry({
+        context,
+        attempted: true,
+        result: "started",
+        blockedReason: null,
+        requestedChangeLength,
+      })
+
+      void Promise.resolve(onStartBuilderUpdateFromReview({
+        requestedChange,
+        context,
+      }))
+        .then((result) => {
+          const resultLabel = builderActionResultLabel(result)
+          setVoiceCommandStatus({
+            text: result.ok ? "Builder task started." : result.detail ?? "Builder update could not start.",
+            tone: result.ok ? "success" : "warn",
+          })
+          recordVoiceBuilderUpdateTelemetry({
+            context,
+            attempted: true,
+            result: resultLabel === "started" ? "started" : resultLabel === "blocked" ? "blocked" : "failed",
+            blockedReason: result.safeReason ?? null,
+            taskId: result.taskId ?? null,
+            runId: result.runId ?? null,
+            requestedChangeLength,
+          })
+        })
+        .catch(() => {
+          setVoiceCommandStatus({
+            text: "Builder update could not start.",
+            tone: "warn",
+          })
+          recordVoiceBuilderUpdateTelemetry({
+            context,
+            attempted: true,
+            result: "failed",
+            blockedReason: "builder_start_failed",
+            requestedChangeLength,
+          })
+        })
+
+      return {
+        handled: true,
+        command,
+        applied: true,
+        blockedReason: null,
+        triggeredRefresh: false,
+        refreshResult: "not_requested",
+        userMessage: null,
+        suppressAssistant: true,
+      }
+    }
+
+    if (command.kind === "builder_cancel") {
+      const context = buildArtifactReviewBuilderContext(currentView)
+
+      if (!onCancelBuilderTaskFromReview) {
+        return { handled: false }
+      }
+
+      if (!activeBuilderTaskId || activeBuilderTaskPhase !== "running") {
+        setVoiceCommandStatus({
+          text: "No active builder task.",
+          tone: "warn",
+        })
+        recordVoiceBuilderCancelTelemetry({
+          context,
+          attempted: false,
+          result: "blocked",
+          blockedReason: "no_active_builder_task",
+          taskId: activeBuilderTaskId,
+          runId: activeBuilderRunId,
+        })
+        return {
+          handled: true,
+          command,
+          applied: false,
+          blockedReason: "no_active_builder_task",
+          triggeredRefresh: false,
+          refreshResult: "not_requested",
+          userMessage: null,
+          suppressAssistant: true,
+        }
+      }
+
+      setVoiceCommandStatus({
+        text: "Cancelling builder...",
+        tone: "pending",
+      })
+      recordVoiceBuilderCancelTelemetry({
+        context,
+        attempted: true,
+        result: "cancelled",
+        blockedReason: null,
+        taskId: activeBuilderTaskId,
+        runId: activeBuilderRunId,
+      })
+
+      void Promise.resolve(onCancelBuilderTaskFromReview({
+        activeBuilderTaskId,
+        activeBuilderRunId,
+        context,
+      }))
+        .then((result) => {
+          const resultLabel = builderActionResultLabel(result)
+          setVoiceCommandStatus({
+            text: result.ok ? "Builder cancelled." : result.detail ?? "No active builder task.",
+            tone: result.ok ? "success" : "warn",
+          })
+          recordVoiceBuilderCancelTelemetry({
+            context,
+            attempted: true,
+            result: resultLabel === "cancelled" ? "cancelled" : resultLabel === "blocked" ? "blocked" : "failed",
+            blockedReason: result.safeReason ?? null,
+            taskId: result.taskId ?? activeBuilderTaskId,
+            runId: result.runId ?? activeBuilderRunId,
+          })
+        })
+        .catch(() => {
+          setVoiceCommandStatus({
+            text: "Builder cancellation failed.",
+            tone: "warn",
+          })
+          recordVoiceBuilderCancelTelemetry({
+            context,
+            attempted: true,
+            result: "failed",
+            blockedReason: "builder_cancel_failed",
+            taskId: activeBuilderTaskId,
+            runId: activeBuilderRunId,
+          })
+        })
+
+      return {
+        handled: true,
+        command,
+        applied: true,
+        blockedReason: null,
+        triggeredRefresh: false,
+        refreshResult: "not_requested",
+        userMessage: null,
+        suppressAssistant: true,
+      }
+    }
+
+    const toolName = coreviewToolNameFromVoiceCommand(command)
 
     if (annotationOrFocusCommands.length > 0) {
       const allNativeCommandsAlreadyHandled = annotationOrFocusCommands.every((candidate) => (
@@ -2339,6 +2677,10 @@ export function PresenceArtifactPanel({
       userMessage: null,
     }
   }, [
+    activeBuilderRunId,
+    activeBuilderTaskId,
+    activeBuilderTaskPhase,
+    buildArtifactReviewBuilderContext,
     builderArtifactCoReview.state.state,
     builderArtifactCoReview.transportStatus.statusText,
     builderArtifactCoReview.transportStatus.stillFramesSupported,
@@ -2349,7 +2691,11 @@ export function PresenceArtifactPanel({
     coreviewCurrentView,
     isVoiceMode,
     isVisible,
+    onCancelBuilderTaskFromReview,
+    onStartBuilderUpdateFromReview,
     recordReviewVoiceCommandTelemetry,
+    recordVoiceBuilderCancelTelemetry,
+    recordVoiceBuilderUpdateTelemetry,
     runCoreviewAction,
   ])
 
