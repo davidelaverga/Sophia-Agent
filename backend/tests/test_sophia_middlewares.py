@@ -3153,6 +3153,109 @@ class TestBuilderArtifactMiddleware:
         assert recovered is not None
         assert recovered["artifact_path"] == "/mnt/user-data/outputs/report.pdf"
 
+    @pytest.mark.parametrize("fallback_name", ["report.html", "report.md"])
+    def test_successful_pdf_render_overrides_existing_fallback_emit(self, tmp_path, fallback_name):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.pdf").write_bytes(b"%PDF-1.4 fake")
+        if fallback_name.endswith(".html"):
+            (outputs_dir / fallback_name).write_text("<!doctype html><html><body>Fallback</body></html>")
+        else:
+            (outputs_dir / fallback_name).write_text("# Fallback")
+
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+            "delegation_context": {"task": "Build a visual PDF report with charts"},
+            "builder_tool_turn_summaries": [
+                {"tool_names": ["builder_web_search"]},
+                {"tool_names": ["builder_web_fetch"]},
+                {"tool_names": ["render_markdown_to_pdf"]},
+            ],
+            "builder_web_budget": {"search_calls": 1, "fetch_calls": 1},
+            "builder_pdf_render_result": {
+                "success": True,
+                "pdf_path": "/mnt/user-data/outputs/report.pdf",
+                "layout_quality": "ok",
+            },
+        }
+        stale_args = {
+            "artifact_path": f"/mnt/user-data/outputs/{fallback_name}",
+            "requested_artifact_ext": "pdf",
+            "artifact_ext": fallback_name.rsplit(".", 1)[-1],
+            "artifact_is_fallback": True,
+            "fallback_reason": "pdf_generation_not_completed",
+            "artifact_type": "webpage",
+        }
+
+        recovered = BuilderArtifactMiddleware._recover_missing_emit_args_if_possible(
+            stale_args,
+            state,
+            _make_runtime(thread_id="thread-x"),
+        )
+
+        assert recovered["artifact_path"] == "/mnt/user-data/outputs/report.pdf"
+        assert recovered["requested_artifact_ext"] == "pdf"
+        assert recovered["artifact_ext"] == "pdf"
+        assert recovered["artifact_is_fallback"] is False
+        assert recovered["fallback_reason"] is None
+        assert recovered["artifact_type"] == "pdf"
+
+    def test_wrap_tool_call_overrides_existing_pdf_fallback_before_accepting(self, tmp_path):
+        from types import SimpleNamespace
+
+        from langchain_core.messages import ToolMessage
+
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.pdf").write_bytes(b"%PDF-1.4 fake")
+        (outputs_dir / "report.html").write_text("<!doctype html><html><body>Fallback</body></html>")
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+            "delegation_context": {"task": "Build a visual PDF report with charts"},
+            "builder_tool_turn_summaries": [
+                {"tool_names": ["builder_web_search"]},
+                {"tool_names": ["builder_web_fetch"]},
+                {"tool_names": ["render_markdown_to_pdf"]},
+            ],
+            "builder_web_budget": {"search_calls": 1, "fetch_calls": 1},
+            "builder_pdf_render_result": {
+                "success": True,
+                "pdf_path": "/mnt/user-data/outputs/report.pdf",
+                "layout_quality": "ok",
+            },
+        }
+        request = SimpleNamespace(
+            tool_call={
+                "id": "emit-1",
+                "name": "emit_builder_artifact",
+                "args": {
+                    "artifact_path": "/mnt/user-data/outputs/report.html",
+                    "requested_artifact_ext": "pdf",
+                    "artifact_ext": "html",
+                    "artifact_is_fallback": True,
+                    "fallback_reason": "pdf_generation_not_completed",
+                },
+            },
+            state=state,
+            runtime=_make_runtime(thread_id="thread-x"),
+        )
+
+        def handler(seen_request):
+            assert seen_request.tool_call["args"]["artifact_path"] == "/mnt/user-data/outputs/report.pdf"
+            assert seen_request.tool_call["args"]["artifact_ext"] == "pdf"
+            assert seen_request.tool_call["args"]["artifact_is_fallback"] is False
+            return ToolMessage(content="OK", tool_call_id="emit-1", name="emit_builder_artifact")
+
+        result = BuilderArtifactMiddleware().wrap_tool_call(request, handler)
+
+        assert isinstance(result, ToolMessage)
+
     def test_force_choice_prefers_emit_over_bash_when_binary_exists(self, tmp_path):
         """If a real binary AND a generator both exist, stage 1 (emit)
         wins — we don't waste a turn re-running the generator.

@@ -712,10 +712,12 @@ def fire_completion_webhook_from_artifact(
     # whether the gateway saw the matching POST.
     logger.info(
         "[Builder] fire_completion_webhook: dispatching task_id=%s "
-        "parent_thread_id=%s status=%s artifact_path=%r artifact_url_present=%s",
+        "parent_thread_id=%s status=%s artifact_path=%r artifact_filename=%r "
+        "artifact_url_present=%s",
         task_id,
         payload.get("thread_id"),
         payload.get("status"),
+        payload.get("artifact_path"),
         payload.get("artifact_filename"),
         bool(payload.get("artifact_url")),
     )

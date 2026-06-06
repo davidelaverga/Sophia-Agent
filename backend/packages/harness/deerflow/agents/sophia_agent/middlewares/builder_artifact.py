@@ -2851,6 +2851,35 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return recovered_args
 
     @classmethod
+    def _authoritative_pdf_emit_args(
+        cls,
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> dict[str, Any] | None:
+        pdf_path = cls._preferred_successful_pdf_render_path(state, runtime)
+        if not pdf_path:
+            return None
+        current_path = _canonical_outputs_artifact_path(artifact_args.get("artifact_path"))
+        current_ext = _artifact_ext_from_path(current_path or artifact_args.get("artifact_path"))
+        if current_path == pdf_path and current_ext == "pdf":
+            return None
+        authoritative_args = dict(artifact_args)
+        authoritative_args["artifact_path"] = pdf_path
+        authoritative_args["requested_artifact_ext"] = "pdf"
+        authoritative_args["artifact_ext"] = "pdf"
+        authoritative_args["artifact_is_fallback"] = False
+        authoritative_args["fallback_reason"] = None
+        authoritative_args["artifact_type"] = "pdf"
+        logger.warning(
+            "BuilderArtifact: pdf_emit_overrode_stale_fallback "
+            "requested_ext=pdf emitted_ext=%s layout_quality=%s",
+            current_ext,
+            _pdf_render_layout_quality(state),
+        )
+        return authoritative_args
+
+    @classmethod
     def _preferred_successful_pdf_render_path(
         cls,
         state: BuilderArtifactState,
@@ -3030,6 +3059,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         state: BuilderArtifactState,
         runtime: Runtime,
     ) -> dict[str, Any]:
+        authoritative_pdf = cls._authoritative_pdf_emit_args(artifact_args, state, runtime)
+        if authoritative_pdf is not None:
+            return authoritative_pdf
         if cls._artifact_files_exist(artifact_args, state, runtime):
             return artifact_args
         return cls._recover_emit_args_from_last_write(artifact_args, state, runtime) or artifact_args
@@ -4103,6 +4135,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return self._tool_result_command(request, handler(request))
 
         args = request.tool_call.get("args", {})
+        authoritative_pdf_args = self._authoritative_pdf_emit_args(args, request.state, request.runtime)
+        if authoritative_pdf_args is not None:
+            request.tool_call["args"] = authoritative_pdf_args
+            return handler(request)
         if self._artifact_files_exist(args, request.state, request.runtime):
             return handler(request)
         recovered_args = self._recover_emit_args_from_last_write(args, request.state, request.runtime)
@@ -4145,6 +4181,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return self._tool_result_command(request, await handler(request))
 
         args = request.tool_call.get("args", {})
+        authoritative_pdf_args = self._authoritative_pdf_emit_args(args, request.state, request.runtime)
+        if authoritative_pdf_args is not None:
+            request.tool_call["args"] = authoritative_pdf_args
+            return await handler(request)
         if self._artifact_files_exist(args, request.state, request.runtime):
             return await handler(request)
         recovered_args = self._recover_emit_args_from_last_write(args, request.state, request.runtime)
