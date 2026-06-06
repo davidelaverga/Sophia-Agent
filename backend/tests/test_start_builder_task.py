@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -72,6 +73,18 @@ def _make_fake_sdk_client(
     return client, captured
 
 
+class _FakeThreadPaths:
+    def __init__(self, root: Path):
+        self.root = root
+
+    def ensure_thread_dirs(self, thread_id: str) -> None:
+        (self.root / thread_id / "workspace").mkdir(parents=True, exist_ok=True)
+        (self.root / thread_id / "outputs").mkdir(parents=True, exist_ok=True)
+
+    def sandbox_work_dir(self, thread_id: str) -> Path:
+        return self.root / thread_id / "workspace"
+
+
 # ---------- dispatch shape ---------------------------------------------------
 
 
@@ -131,6 +144,110 @@ def test_start_builder_task_dispatches_via_asgi(monkeypatch):
     # server-side for logging but does NOT guarantee it appears in
     # runtime.config["configurable"] at tool-execution time.
     assert config_payload["configurable"]["graph_id"] == "sophia_builder"
+
+
+def test_edit_source_resolves_last_builder_artifact():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+    source = module._resolve_edit_source_artifact(
+        {
+            "last_builder_artifact": {
+                "artifact_path": "mnt/user-data/outputs/final-report.html",
+                "task_id": "task-old",
+                "run_id": "run-old",
+                "task_type": "frontend",
+            }
+        },
+        artifact_path=None,
+        task_id=None,
+    )
+
+    assert source is not None
+    assert source["artifact_path"] == "/mnt/user-data/outputs/final-report.html"
+    assert source["artifact_ext"] == "html"
+    assert source["source"] == "last_builder_artifact"
+
+
+def test_edit_source_materializes_from_parent_supabase(monkeypatch, tmp_path):
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+    calls: list[tuple[str, str]] = []
+
+    def _download(thread_id: str, relative_path: str):
+        calls.append((thread_id, relative_path))
+        return b"<!doctype html><html><body>Base</body></html>", "text/html"
+
+    monkeypatch.setattr(
+        "deerflow.sophia.storage.supabase_artifact_store.download_artifact",
+        _download,
+    )
+    monkeypatch.setattr(
+        "deerflow.config.paths.get_paths",
+        lambda: _FakeThreadPaths(tmp_path),
+    )
+
+    result = module._materialize_edit_source_artifact(
+        parent_thread_id="parent-thread",
+        builder_thread_id="builder-thread",
+        edit_context={"source_artifact_path": "mnt/user-data/outputs/final-report.html"},
+    )
+
+    assert calls == [("parent-thread", "final-report.html")]
+    assert result["source_artifact_path"] == "/mnt/user-data/outputs/final-report.html"
+    assert result["materialized_source_path"] == (
+        "/mnt/user-data/workspace/source_artifact/final-report.html"
+    )
+    materialized = tmp_path / "builder-thread" / "workspace" / "source_artifact" / "final-report.html"
+    assert materialized.read_bytes() == b"<!doctype html><html><body>Base</body></html>"
+
+
+def test_edit_builder_artifact_dispatch_materializes_source(monkeypatch, tmp_path):
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+    fake_client, captured = _make_fake_sdk_client(thread_id="edit-builder", run_id="run-edit")
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+    monkeypatch.setattr(
+        "deerflow.sophia.storage.supabase_artifact_store.download_artifact",
+        lambda thread_id, relative_path: (b"# Base\n\nKeep this.", "text/markdown"),
+    )
+    monkeypatch.setattr(
+        "deerflow.config.paths.get_paths",
+        lambda: _FakeThreadPaths(tmp_path),
+    )
+
+    runtime = _make_runtime(
+        {
+            "user_id": "alice",
+            "last_builder_artifact": {
+                "artifact_path": "mnt/user-data/outputs/brief.md",
+                "task_id": "source-task",
+                "run_id": "source-run",
+                "task_type": "document",
+            },
+        },
+        thread_id="parent-thread",
+    )
+
+    response = asyncio.run(
+        module.edit_builder_artifact.coroutine(
+            message="Change the conclusion only.",
+            runtime=runtime,
+        )
+    )
+
+    assert isinstance(response, Command)
+    update = response.update
+    assert "edit-builder" in update["async_tasks"]
+    task = update["async_tasks"]["edit-builder"]
+    assert task["edit_mode"] == "edit_existing_artifact"
+    assert task["source_artifact_path"] == "/mnt/user-data/outputs/brief.md"
+    assert task["artifact_target_path"].endswith(".md")
+
+    run_input = captured["run_kwargs"]["input"]
+    edit_context = run_input["delegation_context"]["edit_context"]
+    assert edit_context["mode"] == "edit_existing_artifact"
+    assert edit_context["source_artifact_path"] == "/mnt/user-data/outputs/brief.md"
+    assert edit_context["materialized_source_path"] == "/mnt/user-data/workspace/source_artifact/brief.md"
+    assert "Change the conclusion only." in run_input["messages"][0]["content"]
+    materialized = tmp_path / "edit-builder" / "workspace" / "source_artifact" / "brief.md"
+    assert materialized.read_text() == "# Base\n\nKeep this."
 
 
 def test_dispatch_sets_stream_resumable_true(monkeypatch):

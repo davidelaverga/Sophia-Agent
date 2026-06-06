@@ -488,6 +488,14 @@ def _requested_ext_from_task_or_artifact(task: dict[str, Any], artifact: dict[st
     return _artifact_ext_from_path(target_path)
 
 
+def _completion_provenance_path(
+    task: dict[str, Any],
+    artifact: dict[str, Any],
+    key: str,
+) -> Any:
+    return artifact.get(key) or task.get(key)
+
+
 def _completion_from_terminal_task(
     parent_thread_id: str,
     task: dict[str, Any],
@@ -520,6 +528,8 @@ def _completion_from_terminal_task(
         "artifact_type": artifact.get("artifact_type"),
         "artifact_filename": artifact_filename,
         **fallback,
+        "source_artifact_path": _completion_provenance_path(task, artifact, "source_artifact_path"),
+        "revision_of_artifact_path": _completion_provenance_path(task, artifact, "revision_of_artifact_path"),
         "summary": artifact.get("companion_summary") or artifact.get("summary"),
         "user_next_action": artifact.get("user_next_action"),
         "error_message": error_message_override or task.get("error_message") or task.get("error"),

@@ -508,6 +508,8 @@ def _artifact_completion_fields(
         "artifact_ext": artifact.get("artifact_ext"),
         "artifact_is_fallback": artifact.get("artifact_is_fallback"),
         "fallback_reason": artifact.get("fallback_reason"),
+        "source_artifact_path": artifact.get("source_artifact_path"),
+        "revision_of_artifact_path": artifact.get("revision_of_artifact_path"),
         "summary": artifact.get("companion_summary"),
         "user_next_action": artifact.get("user_next_action"),
     }

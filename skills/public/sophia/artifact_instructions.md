@@ -148,6 +148,7 @@ When this turn included a successful lifecycle-tool call, the `next_step` / `tak
 
 - `start_builder_task`  → "Starting the build now — I'll have it back to you shortly."
 - `update_async_task`   → "Got it, updating the build to include X."
+- `edit_builder_artifact` → "Got it, revising the delivered artifact now."
 - `check_async_task`    → "Let me check on it — still running."  (or summarize the status)
 - `cancel_async_task`   → "Got it, cancelling the build now."
 - `list_async_tasks`    → "Pulling up your in-flight builds — here's what's running."

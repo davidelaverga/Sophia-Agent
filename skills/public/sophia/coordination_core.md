@@ -30,9 +30,17 @@ Routing rule: short reflection artifact -> `emit_artifact`; document/file/report
 
 If the user asks to test artifact functionality, use `emit_artifact` and do not start Builder unless they explicitly ask for a document, file, report, deck, frontend, or other downloadable deliverable. Use Builder only when the user explicitly asks for a document or other user-facing deliverable that requires async creation.
 
-## Delegation Call
+## Builder Lifecycle Calls
 
-The companion invokes the builder through `start_builder_task`:
+The companion uses three different paths. Do not collapse them:
+
+- Fresh/new deliverable -> `start_builder_task`.
+- Active build modification while the builder is still running ->
+  `update_async_task`.
+- Completed artifact edit after a successful/fallback-successful build ->
+  `edit_builder_artifact`.
+
+Fresh builder launch:
 
 ```text
 start_builder_task(
@@ -42,10 +50,21 @@ start_builder_task(
 )
 ```
 
+Completed artifact edit:
+
+```text
+edit_builder_artifact(
+  message: str,
+  artifact_path: str | None = None,
+  task_id: str | None = None,
+  user_id: str | None = None
+)
+```
+
 The trusted runtime, not the model-provided `user_id`, owns authorization.
-The wrapper enriches the description with relevant memories, tone, active
+The wrappers enrich the builder run with relevant memories, tone, active
 ritual, uploaded file context, explicit URLs, artifact target, parent thread,
-and web-research policy.
+web-research policy, and when editing, the materialized source artifact path.
 
 ## Async Task Shape
 
@@ -62,13 +81,20 @@ After delegation, the runtime tracks the build in `state["async_tasks"][task_id]
   "last_checked_at": "ISO-8601 UTC",
   "last_updated_at": "ISO-8601 UTC",
   "task_type": "document | research | presentation | frontend | visual_report",
-  "trace_id": "optional trace id"
+  "trace_id": "optional trace id",
+  "builder_result": "optional durable result metadata after terminal completion",
+  "artifact_path": "optional durable artifact path after terminal completion"
 }
 ```
 
 Terminal statuses are `success`, `completed`, `error`, `failed`, `cancelled`,
 `timeout`, and `timed_out`. Anything else is treated as active by default for
 forward compatibility.
+
+After successful or fallback-successful builder completion, the runtime may also
+persist `state["last_builder_artifact"]`. That field stores durable metadata
+such as `artifact_path`, `artifact_ext`, task/run ids, fallback flags, and
+timestamps. It must not store temporary signed URLs as truth.
 
 ## Non-Crossover Invariants
 

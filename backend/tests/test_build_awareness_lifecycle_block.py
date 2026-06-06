@@ -140,25 +140,18 @@ def test_terminal_block_recall_defers_check_to_next_turn_no_chaining():
     assert "never chain" in lower or "one lifecycle tool per turn" in lower
 
 
-def test_terminal_block_teaches_start_builder_task_for_modify_cues():
-    """Phase 2B: when the latest build is in terminal status (success here),
-    the terminal block must teach the model to call start_builder_task —
-    NOT update_async_task — for modification cues. update_async_task on a
-    terminal thread caused the dangling-tool loop in production at
-    2026-05-20 19:53–19:57 UTC."""
+def test_terminal_block_teaches_edit_builder_artifact_for_modify_cues():
+    """When the latest build succeeded, targeted modification cues should edit
+    the delivered artifact, not update the terminal builder thread or start a
+    vague fresh build."""
     block = _render_terminal_block(_terminal_task("success"))
-    # Modify-cue branch must name start_builder_task.
-    assert "start_builder_task" in block
+    # Modify-cue branch must name edit_builder_artifact.
+    assert "edit_builder_artifact" in block
     # And must explicitly tell the model NOT to call update_async_task.
     lower = block.lower()
     assert "update_async_task" in block, "block should mention the anti-pattern by name"
     assert "do not call update_async_task" in lower or "not call update_async_task" in lower
-    # Must surface the task_type so the model composes a matching v2 brief.
-    assert "success" not in block or "task_type" not in block or True  # cosmetic, see below
-    # task_type appears in the active task fixture as 'presentation' (active) /
-    # missing (terminal). For the terminal fixture, _terminal_task uses no
-    # task_type, so default 'build' should appear.
-    assert "build" in block.lower() or "research" in block.lower() or "document" in block.lower()
+    assert "start_builder_task" in block
 
 
 def test_terminal_block_modify_branch_carries_full_task_id():

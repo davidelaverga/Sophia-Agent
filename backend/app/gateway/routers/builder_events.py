@@ -22,6 +22,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Request, Response, status
@@ -33,6 +35,132 @@ from app.gateway.workers.builder_events import get_builder_events_worker
 from app.gateway.workers.companion_wakeup import get_companion_wakeup_or_none
 
 logger = logging.getLogger(__name__)
+
+_SUCCESSFUL_BUILDER_STATUSES = {"success", "completed"}
+_TERMINAL_TASK_OPTIONAL_FIELDS = (
+    "artifact_path",
+    "artifact_ext",
+    "artifact_title",
+    "requested_artifact_ext",
+    "artifact_is_fallback",
+    "fallback_reason",
+    "error_message",
+    "trace_id",
+)
+
+
+def _langgraph_url() -> str:
+    return (
+        os.getenv("SOPHIA_LANGGRAPH_BASE_URL")
+        or os.getenv("LANGGRAPH_URL")
+        or os.getenv("SOPHIA_BACKEND_BASE_URL")
+        or "http://127.0.0.1:2024"
+    ).strip().rstrip("/")
+
+
+def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
+    result_keys = (
+        "task_id",
+        "run_id",
+        "trace_id",
+        "agent_name",
+        "status",
+        "task_type",
+        "task_brief",
+        "artifact_path",
+        "artifact_title",
+        "artifact_type",
+        "artifact_filename",
+        "requested_artifact_ext",
+        "artifact_ext",
+        "artifact_is_fallback",
+        "fallback_reason",
+        "source_artifact_path",
+        "revision_of_artifact_path",
+        "summary",
+        "user_next_action",
+        "error_message",
+        "completed_at",
+        "source",
+    )
+    return {key: payload.get(key) for key in result_keys if payload.get(key) is not None}
+
+
+def _present_payload_fields(payload: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    return {key: payload.get(key) for key in keys if payload.get(key) is not None}
+
+
+def _terminal_async_task_update(payload: dict[str, Any]) -> dict[str, Any]:
+    completed_at = (
+        payload.get("completed_at")
+        if isinstance(payload.get("completed_at"), str)
+        else datetime.now(UTC).isoformat()
+    )
+    task_id = str(payload.get("task_id") or "")
+    run_id = payload.get("run_id")
+    result = _durable_builder_result(payload)
+    status = str(payload.get("status") or "error")
+    update: dict[str, Any] = {
+        "task_id": task_id,
+        "agent_name": payload.get("agent_name") or "sophia_builder",
+        "thread_id": task_id,
+        "run_id": run_id,
+        "status": status,
+        "task_type": payload.get("task_type"),
+        "task_brief": payload.get("task_brief"),
+        "builder_result": result,
+        "completed_at": completed_at,
+        "last_checked_at": completed_at,
+        "last_updated_at": completed_at,
+        "updated_at": completed_at,
+    }
+    update.update(_present_payload_fields(payload, _TERMINAL_TASK_OPTIONAL_FIELDS))
+    return update
+
+
+def _terminal_identity(payload: dict[str, Any]) -> tuple[str, str] | None:
+    parent_thread_id = payload.get("thread_id")
+    task_id = payload.get("task_id")
+    if not isinstance(parent_thread_id, str) or not parent_thread_id:
+        return None
+    if not isinstance(task_id, str) or not task_id:
+        return None
+    return parent_thread_id, task_id
+
+
+def _should_persist_last_builder_artifact(payload: dict[str, Any]) -> bool:
+    artifact_path = payload.get("artifact_path")
+    return (
+        str(payload.get("status") or "").lower() in _SUCCESSFUL_BUILDER_STATUSES
+        and isinstance(artifact_path, str)
+        and bool(artifact_path.strip())
+    )
+
+
+async def _persist_builder_terminal_state(payload: dict[str, Any]) -> None:
+    identity = _terminal_identity(payload)
+    if identity is None:
+        return
+    parent_thread_id, task_id = identity
+
+    task_update = _terminal_async_task_update(payload)
+    values: dict[str, Any] = {"async_tasks": {task_id: task_update}}
+    if _should_persist_last_builder_artifact(payload):
+        values["last_builder_artifact"] = _durable_builder_result(payload)
+
+    try:
+        from langgraph_sdk import get_client
+
+        client = get_client(url=_langgraph_url())
+        await client.threads.update_state(parent_thread_id, values)
+    except Exception:
+        logger.warning(
+            "Builder terminal state persistence failed parent_thread_id=%s task_id=%s run_id=%s",
+            str(parent_thread_id)[:12],
+            str(task_id)[:12],
+            str(payload.get("run_id") or "")[:12],
+            exc_info=True,
+        )
 
 
 # ---- Request model ---------------------------------------------------------
@@ -72,6 +200,8 @@ class BuilderCompletionEvent(BaseModel):
     artifact_ext: str | None = None
     artifact_is_fallback: bool | None = None
     fallback_reason: str | None = None
+    source_artifact_path: str | None = None
+    revision_of_artifact_path: str | None = None
     summary: str | None = None
     user_next_action: str | None = None
     error_message: str | None = None
@@ -137,6 +267,7 @@ async def receive_builder_event(event: BuilderCompletionEvent, request: Request)
     adapters can deliver a card to the originating chat.
     """
     payload = event.model_dump()
+    await _persist_builder_terminal_state(payload)
     worker = get_builder_events_worker(request.app)
     delivered = await worker.publish(payload)
     try:

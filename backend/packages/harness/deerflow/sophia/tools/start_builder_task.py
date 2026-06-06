@@ -81,6 +81,8 @@ def _validate_user_id(user_id: str) -> str:
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "edit_builder_artifact",
+    "make_edit_builder_artifact_tool",
     "make_start_builder_task_tool",
     "start_builder_task",
 ]
@@ -118,6 +120,14 @@ _TASK_TYPE_PREFIXES: dict[str, str] = {
     "frontend": "[frontend]",
     "visual_report": "[visual_report]",
 }
+_OUTPUT_PATH_PREFIX_REWRITES = (
+    ("/mnt/user-data/outputs/", "/mnt/user-data/outputs/"),
+    ("mnt/user-data/outputs/", "/mnt/user-data/outputs/"),
+    ("/user-data/outputs/", "/mnt/user-data/outputs/"),
+    ("user-data/outputs/", "/mnt/user-data/outputs/"),
+    ("/outputs/", "/mnt/user-data/outputs/"),
+    ("outputs/", "/mnt/user-data/outputs/"),
+)
 
 _HTML_OUTPUT_RE = re.compile(
     r"\b(?:html\s+(?:document|file|report|summary|brief|article|explainer|page|site|website)"
@@ -277,6 +287,306 @@ def _suggest_artifact_target_path(task_type: str | None, description: str | None
     return f"/mnt/user-data/outputs/{_suggest_artifact_filename(task_type, description)}"
 
 
+def _rewrite_output_artifact_prefix(cleaned: str) -> str | None:
+    for prefix, canonical_prefix in _OUTPUT_PATH_PREFIX_REWRITES:
+        if cleaned.startswith(prefix):
+            return f"{canonical_prefix}{cleaned[len(prefix):]}"
+    return None
+
+
+def _canonical_output_artifact_path(path: Any) -> str | None:
+    if not isinstance(path, str):
+        return None
+    cleaned = path.strip().replace("\\", "/")
+    cleaned = cleaned.removeprefix("file://").strip()
+    if not cleaned:
+        return None
+    rewritten = _rewrite_output_artifact_prefix(cleaned)
+    if rewritten is not None:
+        return rewritten
+    if "/" not in cleaned and "\\" not in cleaned:
+        return f"/mnt/user-data/outputs/{cleaned}"
+    return None
+
+
+def _relative_output_artifact_path(path: str | None) -> str | None:
+    canonical = _canonical_output_artifact_path(path)
+    prefix = "/mnt/user-data/outputs/"
+    if not canonical or not canonical.startswith(prefix):
+        return None
+    relative = canonical[len(prefix) :].strip("/")
+    if not relative or ".." in relative.split("/"):
+        return None
+    return relative
+
+
+def _artifact_ext_from_path(path: str | None) -> str | None:
+    name = Path(str(path or "")).name
+    suffix = Path(name).suffix.lower().lstrip(".")
+    return suffix or None
+
+
+def _safe_materialized_filename(path: str) -> str:
+    name = Path(path.replace("\\", "/")).name.strip()
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip(".-")
+    return cleaned or "source-artifact"
+
+
+def _revision_artifact_path(source_artifact_path: str, message: str) -> str:
+    canonical = _canonical_output_artifact_path(source_artifact_path) or source_artifact_path
+    source_name = Path(canonical).name
+    stem = Path(source_name).stem or _slugify_for_filename(message or "revision")
+    suffix = Path(source_name).suffix or ".md"
+    revision_id = str(uuid.uuid4())[:8]
+    safe_stem = _slugify_for_filename(stem, max_len=48)
+    return f"/mnt/user-data/outputs/{safe_stem}-revision-{revision_id}{suffix}"
+
+
+def _builder_artifact_payload_from_task(task: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("builder_result", "artifact"):
+        payload = task.get(key)
+        if isinstance(payload, dict) and payload:
+            return payload
+    return _direct_artifact_payload_from_task(task)
+
+
+def _direct_artifact_payload_from_task(task: dict[str, Any]) -> dict[str, Any] | None:
+    artifact_path = task.get("artifact_path") or task.get("artifact_target_path")
+    if isinstance(artifact_path, str) and artifact_path.strip():
+        return {
+            "artifact_path": artifact_path,
+            "artifact_ext": _artifact_ext_from_path(artifact_path),
+            "artifact_title": task.get("artifact_title") or task.get("task_brief"),
+        }
+    return None
+
+
+def _builder_task_candidate_ids(
+    tasks: dict[Any, Any],
+    requested_task_id: str | None,
+) -> list[str]:
+    task_ids = [requested_task_id] if requested_task_id else []
+    task_ids.extend(
+        str(key)
+        for key, value in tasks.items()
+        if isinstance(value, dict)
+        and value.get("agent_name") == _ASYNC_BUILDER_AGENT_NAME
+        and str(key) not in task_ids
+    )
+    return [candidate for candidate in task_ids if candidate]
+
+
+def _artifact_candidates_from_tasks(
+    tasks: Any,
+    requested_task_id: str | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(tasks, dict):
+        return []
+    candidates: list[dict[str, Any]] = []
+    for candidate_task_id in _builder_task_candidate_ids(tasks, requested_task_id):
+        task = tasks.get(candidate_task_id)
+        if not isinstance(task, dict):
+            continue
+        payload = _builder_artifact_payload_from_task(task)
+        if not payload:
+            continue
+        candidates.append(
+            {
+                **payload,
+                "source": "async_task",
+                "source_task_id": task.get("task_id") or candidate_task_id,
+                "source_run_id": task.get("run_id"),
+                "task_type": task.get("task_type"),
+            }
+        )
+    return candidates
+
+
+def _artifact_candidates_from_state_fields(state: SophiaState) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for key in ("last_builder_artifact", "builder_result", "current_artifact", "previous_artifact"):
+        payload = state.get(key)
+        if isinstance(payload, dict) and payload.get("artifact_path"):
+            candidates.append({**payload, "source": key})
+    return candidates
+
+
+def _iter_builder_artifact_candidates(
+    state: SophiaState,
+    *,
+    artifact_path: str | None,
+    task_id: str | None,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    if artifact_path:
+        candidates.append({"artifact_path": artifact_path, "source": "explicit_artifact_path"})
+    candidates.extend(_artifact_candidates_from_tasks(state.get("async_tasks"), task_id))
+    candidates.extend(_artifact_candidates_from_state_fields(state))
+    return candidates
+
+
+def _resolve_edit_source_artifact(
+    state: SophiaState,
+    *,
+    artifact_path: str | None,
+    task_id: str | None,
+) -> dict[str, Any] | None:
+    for candidate in _iter_builder_artifact_candidates(
+        state,
+        artifact_path=artifact_path,
+        task_id=task_id,
+    ):
+        canonical = _canonical_output_artifact_path(candidate.get("artifact_path"))
+        if not canonical:
+            continue
+        return {
+            **candidate,
+            "artifact_path": canonical,
+            "artifact_ext": candidate.get("artifact_ext") or _artifact_ext_from_path(canonical),
+        }
+    return None
+
+
+class ArtifactMaterializationError(RuntimeError):
+    """Raised when an edit run cannot access the source artifact bytes."""
+
+
+def _download_parent_supabase_artifact(
+    parent_thread_id: str | None,
+    relative_path: str,
+    source_artifact_path: str,
+) -> tuple[bytes, str] | None:
+    if not parent_thread_id:
+        return None
+    try:
+        from deerflow.sophia.storage import supabase_artifact_store
+
+        return supabase_artifact_store.download_artifact(parent_thread_id, relative_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[BuilderEdit] Supabase materialization failed parent_thread=%s artifact=%s: %s",
+            parent_thread_id,
+            source_artifact_path,
+            exc,
+        )
+        return None
+
+
+def _read_local_source_artifact(
+    *,
+    parent_thread_id: str | None,
+    source_task_id: str | None,
+    source_artifact_path: str,
+) -> tuple[bytes, str] | None:
+    from deerflow.config.paths import get_paths
+
+    paths = get_paths()
+    thread_ids = [thread for thread in (parent_thread_id, source_task_id) if thread]
+    for thread_id in thread_ids:
+        try:
+            local_path = paths.resolve_virtual_path(str(thread_id), source_artifact_path)
+        except Exception:
+            continue
+        if local_path.is_file():
+            return local_path.read_bytes(), "application/octet-stream"
+    return None
+
+
+def _download_source_artifact_bytes(
+    *,
+    parent_thread_id: str | None,
+    source_task_id: str | None,
+    source_artifact_path: str,
+) -> tuple[bytes, str]:
+    relative = _relative_output_artifact_path(source_artifact_path)
+    if not relative:
+        raise ArtifactMaterializationError("Source artifact path is not an output artifact.")
+    result = _download_parent_supabase_artifact(parent_thread_id, relative, source_artifact_path)
+    if result is not None:
+        return result
+    result = _read_local_source_artifact(
+        parent_thread_id=parent_thread_id,
+        source_task_id=source_task_id,
+        source_artifact_path=source_artifact_path,
+    )
+    if result is not None:
+        return result
+    raise ArtifactMaterializationError("Source artifact could not be found in durable storage.")
+
+
+def _materialize_edit_source_artifact(
+    *,
+    parent_thread_id: str | None,
+    builder_thread_id: str,
+    edit_context: dict[str, Any],
+) -> dict[str, Any]:
+    source_path = _canonical_output_artifact_path(edit_context.get("source_artifact_path"))
+    if not source_path:
+        raise ArtifactMaterializationError("No valid source artifact path was provided.")
+    content, content_type = _download_source_artifact_bytes(
+        parent_thread_id=parent_thread_id,
+        source_task_id=edit_context.get("source_task_id"),
+        source_artifact_path=source_path,
+    )
+    from deerflow.config.paths import get_paths
+
+    paths = get_paths()
+    paths.ensure_thread_dirs(builder_thread_id)
+    dest_dir = paths.sandbox_work_dir(builder_thread_id) / "source_artifact"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_dir.chmod(0o777)
+    dest = dest_dir / _safe_materialized_filename(source_path)
+    dest.write_bytes(content)
+    dest.chmod(0o666)
+    materialized_path = f"/mnt/user-data/workspace/source_artifact/{dest.name}"
+    logger.info(
+        "[BuilderEdit] materialized source artifact parent_thread=%s builder_thread=%s source_ext=%s bytes=%d",
+        parent_thread_id,
+        builder_thread_id,
+        _artifact_ext_from_path(source_path),
+        len(content),
+    )
+    return {
+        **edit_context,
+        "source_artifact_path": source_path,
+        "materialized_source_path": materialized_path,
+        "materialized_source_bytes": len(content),
+        "materialized_source_content_type": content_type,
+    }
+
+
+def _task_type_for_edit_source(source: dict[str, Any]) -> str:
+    task_type = source.get("task_type")
+    if task_type in _TASK_TYPE_PREFIXES:
+        return str(task_type)
+    ext = str(source.get("artifact_ext") or "").lower().lstrip(".")
+    if ext == "pptx":
+        return "presentation"
+    if ext in {"pdf", "html"}:
+        return "visual_report" if ext == "pdf" else "document"
+    return "document"
+
+
+def _build_edit_existing_artifact_description(
+    *,
+    message: str,
+    source_artifact_path: str,
+    revision_artifact_path: str,
+) -> str:
+    return (
+        "Edit an existing completed builder artifact, preserving unrelated content.\n\n"
+        f"Source artifact path: {source_artifact_path}\n"
+        f"Revised artifact target path: {revision_artifact_path}\n\n"
+        "The runtime will materialize the source artifact into the new builder sandbox. "
+        "Read the materialized source artifact before making changes. Do not rebuild from "
+        "scratch unless the user's edit explicitly asks for a full rewrite. For pure local "
+        "wording/layout/content edits, web research is optional; if the edit introduces new "
+        "URLs, named projects, papers, frameworks, companies, factual topics, or source "
+        "requirements, search/fetch that new material before editing.\n\n"
+        f"User edit request:\n{message}"
+    )
+
+
 def _resolve_thread_id(runtime: ToolRuntime[ContextT, SophiaState] | None) -> str | None:
     """Resolve thread_id from runtime context/configurable with contextvar fallback."""
     if runtime is not None:
@@ -332,28 +642,32 @@ def _latest_emit_artifact_payload(messages: list[Any]) -> dict[str, Any] | None:
     return None
 
 
+def _artifact_payload_present(value: Any) -> bool:
+    return isinstance(value, dict) and bool(value)
+
+
 def _resolve_companion_artifact(
     state: SophiaState,
 ) -> tuple[dict[str, Any], str, dict[str, bool]]:
     """Resolve freshest companion artifact and provenance diagnostics."""
-    latest_emit_artifact = _latest_emit_artifact_payload(state.get("messages", []) or [])
-    current_artifact = state.get("current_artifact")
-    previous_artifact = state.get("previous_artifact")
+    artifacts = (
+        (
+            "latest_emit_artifact",
+            _latest_emit_artifact_payload(state.get("messages", []) or []),
+            "latest_emit_artifact_tool_call",
+        ),
+        ("last_builder_artifact", state.get("last_builder_artifact"), "last_builder_artifact_state"),
+        ("current_artifact", state.get("current_artifact"), "current_artifact_state"),
+        ("previous_artifact", state.get("previous_artifact"), "previous_artifact_state"),
+    )
 
     diagnostics = {
-        "latest_emit_artifact_present": isinstance(latest_emit_artifact, dict) and bool(latest_emit_artifact),
-        "current_artifact_present": isinstance(current_artifact, dict) and bool(current_artifact),
-        "previous_artifact_present": isinstance(previous_artifact, dict) and bool(previous_artifact),
+        f"{name}_present": _artifact_payload_present(payload)
+        for name, payload, _source in artifacts
     }
-    if latest_emit_artifact:
-        return latest_emit_artifact, "latest_emit_artifact_tool_call", diagnostics
-
-    if isinstance(current_artifact, dict) and current_artifact:
-        return current_artifact, "current_artifact_state", diagnostics
-
-    if isinstance(previous_artifact, dict) and previous_artifact:
-        return previous_artifact, "previous_artifact_state", diagnostics
-
+    for _name, payload, source in artifacts:
+        if _artifact_payload_present(payload):
+            return payload, source, diagnostics
     return {}, "default_empty", diagnostics
 
 
@@ -957,6 +1271,7 @@ async def _dispatch_via_asgi(
     parent_thread_id: str | None,
     parent_model: str | None,
     current_turn_attachments: frozenset[str],
+    edit_context: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """Create a builder thread + run via LangGraph SDK ASGI in-process.
 
@@ -978,6 +1293,20 @@ async def _dispatch_via_asgi(
         builder_thread_id=thread_id,
         current_turn_attachments=current_turn_attachments,
     )
+    materialized_edit_context: dict[str, Any] | None = None
+    if edit_context is not None:
+        materialized_edit_context = _materialize_edit_source_artifact(
+            parent_thread_id=parent_thread_id,
+            builder_thread_id=thread_id,
+            edit_context=edit_context,
+        )
+        description = (
+            f"{description}\n\n"
+            "[Runtime materialization]\n"
+            f"The source artifact is available inside this builder sandbox at "
+            f"`{materialized_edit_context['materialized_source_path']}`. "
+            "Read that file before writing the revised deliverable."
+        )
 
     # ``parent_thread_id`` and ``parent_user_id`` are also embedded in
     # ``delegation_context`` (state) because langgraph-api 0.8.1 forwards
@@ -993,6 +1322,8 @@ async def _dispatch_via_asgi(
         "parent_user_id": user_id,
         "uploaded_image_paths": uploaded_image_paths,
     }
+    if materialized_edit_context is not None:
+        delegation_with_parent["edit_context"] = materialized_edit_context
 
     run_input: dict[str, Any] = {
         "messages": [{"role": "user", "content": description}],
@@ -1002,6 +1333,8 @@ async def _dispatch_via_asgi(
         "builder_web_budget": builder_web_budget,
         "builder_artifact_target_path": delegation_context.get("artifact_target_path"),
     }
+    if materialized_edit_context is not None:
+        run_input["builder_edit_context"] = materialized_edit_context
 
     # ``thread_id`` MUST be in configurable so the builder's
     # ``ThreadDataMiddleware.before_agent`` can locate the per-thread
@@ -1056,6 +1389,79 @@ async def _dispatch_via_asgi(
     return thread_id, run["run_id"]
 
 
+def _runtime_trace_id(runtime: ToolRuntime[ContextT, SophiaState] | None) -> str:
+    trace_id = str(uuid.uuid4())[:8]
+    if runtime is None or not runtime.config:
+        return trace_id
+    metadata = runtime.config.get("metadata", {}) or {}
+    return metadata.get("trace_id") or trace_id
+
+
+def _runtime_parent_model(runtime: ToolRuntime[ContextT, SophiaState] | None) -> str | None:
+    if runtime is None or not runtime.config:
+        return None
+    return (runtime.config.get("metadata", {}) or {}).get("model_name")
+
+
+def _normalize_launch_request(
+    *,
+    description: str,
+    task_type: str,
+    edit_context: dict[str, Any] | None,
+    companion_artifact: dict[str, Any],
+) -> tuple[str, str, bool]:
+    if edit_context is not None:
+        return description, task_type, False
+    return _normalize_request(description, task_type, companion_artifact)
+
+
+def _attach_edit_context(
+    delegation_context: dict[str, Any],
+    edit_context: dict[str, Any] | None,
+    artifact_target_path: str,
+) -> dict[str, Any] | None:
+    if edit_context is None:
+        return None
+    materialization_context = {
+        **edit_context,
+        "revision_artifact_path": artifact_target_path,
+    }
+    delegation_context["edit_context"] = materialization_context
+    return materialization_context
+
+
+def _build_async_task_record(
+    *,
+    task_id: str,
+    run_id: str,
+    trace_id: str,
+    task_type: str,
+    demo_mode: bool,
+    artifact_target_path: str,
+    edit_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    now = _utcnow_iso()
+    async_task: dict[str, Any] = {
+        "task_id": task_id,
+        "agent_name": _ASYNC_BUILDER_AGENT_NAME,
+        "thread_id": task_id,
+        "run_id": run_id,
+        "status": "running",
+        "created_at": now,
+        "last_checked_at": now,
+        "last_updated_at": now,
+        "trace_id": trace_id,
+        "task_type": task_type,
+        "demo_mode": demo_mode,
+        "artifact_target_path": artifact_target_path,
+    }
+    if edit_context is not None:
+        async_task["edit_mode"] = "edit_existing_artifact"
+        async_task["revision_of_artifact_path"] = edit_context.get("source_artifact_path")
+        async_task["source_artifact_path"] = edit_context.get("source_artifact_path")
+    return async_task
+
+
 async def _start_builder_task_impl(
     description: str,
     task_type: str,
@@ -1063,6 +1469,9 @@ async def _start_builder_task_impl(
     *,
     configured_user_id: str | None = None,
     user_id_arg: str | None = None,
+    tool_name: str = "start_builder_task",
+    edit_context: dict[str, Any] | None = None,
+    artifact_target_path_override: str | None = None,
 ) -> str | Command:
     """Async implementation. Mirrors ``switch_to_builder``'s shape but dispatches
     via deepagents-native ASGI transport instead of ``SubagentExecutor``.
@@ -1090,8 +1499,9 @@ async def _start_builder_task_impl(
     )
     if not tool_call_id:
         logger.error(
-            "[Builder] start_builder_task invoked without tool_call_id "
+            "[Builder] %s invoked without tool_call_id "
             "(runtime=%s); refusing to launch (would orphan the builder run).",
+            tool_name,
             "missing" if runtime is None else "runtime present but tool_call_id empty",
         )
         return (
@@ -1104,10 +1514,7 @@ async def _start_builder_task_impl(
     if state is None:
         state = {}  # type: ignore[assignment]
 
-    trace_id = str(uuid.uuid4())[:8]
-    if runtime is not None and runtime.config:
-        metadata = runtime.config.get("metadata", {}) or {}
-        trace_id = metadata.get("trace_id") or trace_id
+    trace_id = _runtime_trace_id(runtime)
 
     # Duplicate-launch protection — read from native ``async_tasks`` channel.
     existing_task_id = _has_active_builder_task(state)
@@ -1153,19 +1560,23 @@ async def _start_builder_task_impl(
     ritual_phase = state.get("ritual_phase")
     memory_snippets = _resolve_memory_snippets(state)
 
-    # Demo-prompt normalization preserves the deterministic small-deliverable
-    # path users rely on for "test builder, make anything" smoke tests.
-    description, task_type, demo_mode = _normalize_request(description, task_type, companion_artifact)
+    description, task_type, demo_mode = _normalize_launch_request(
+        description=description,
+        task_type=task_type,
+        edit_context=edit_context,
+        companion_artifact=companion_artifact,
+    )
 
     allow_web_research = should_allow_builder_web_research(task_type, description)
     explicit_user_urls = extract_explicit_user_urls(description)
     builder_web_budget = make_builder_web_budget(task_type)
-    artifact_target_path = _suggest_artifact_target_path(task_type, description)
+    artifact_target_path = (
+        _canonical_output_artifact_path(artifact_target_path_override)
+        or _suggest_artifact_target_path(task_type, description)
+    )
 
     parent_thread_id = _resolve_thread_id(runtime)
-    parent_model = None
-    if runtime is not None and runtime.config:
-        parent_model = (runtime.config.get("metadata", {}) or {}).get("model_name")
+    parent_model = _runtime_parent_model(runtime)
 
     enriched_description = _build_enriched_description(
         description,
@@ -1189,6 +1600,11 @@ async def _start_builder_task_impl(
         explicit_user_urls=explicit_user_urls,
         builder_web_budget=builder_web_budget,
         handoff_resolution=handoff_resolution,
+    )
+    dispatch_edit_context = _attach_edit_context(
+        delegation_context,
+        edit_context,
+        artifact_target_path,
     )
 
     logger.info(
@@ -1232,29 +1648,21 @@ async def _start_builder_task_impl(
             parent_thread_id=parent_thread_id,
             parent_model=parent_model,
             current_turn_attachments=current_turn_attachments,
+            edit_context=dispatch_edit_context,
         )
     except Exception as exc:  # noqa: BLE001 — LangGraph SDK raises untyped errors
         logger.warning("[Builder] ASGI dispatch failed: %s (trace=%s)", exc, trace_id)
         return f"Failed to launch builder task: {exc}. The user can retry; no background work was started."
 
-    now = _utcnow_iso()
-    async_task: dict[str, Any] = {
-        "task_id": task_id,
-        "agent_name": _ASYNC_BUILDER_AGENT_NAME,
-        "thread_id": task_id,
-        "run_id": run_id,
-        "status": "running",
-        "created_at": now,
-        "last_checked_at": now,
-        "last_updated_at": now,
-        # Phase-1 extensions (not consumed by deepagents but useful for
-        # debugging and Phase-3 BuildAwareness): preserve trace_id and
-        # task_type alongside the canonical AsyncTask fields.
-        "trace_id": trace_id,
-        "task_type": task_type,
-        "demo_mode": demo_mode,
-        "artifact_target_path": artifact_target_path,
-    }
+    async_task = _build_async_task_record(
+        task_id=task_id,
+        run_id=run_id,
+        trace_id=trace_id,
+        task_type=task_type,
+        demo_mode=demo_mode,
+        artifact_target_path=artifact_target_path,
+        edit_context=edit_context,
+    )
 
     logger.info(
         "[Builder] start_builder_task launched: task_id=%s run_id=%s trace=%s allow_web_research=%s explicit_url_count=%s search_limit=%s fetch_limit=%s target_ext=%s",
@@ -1274,7 +1682,7 @@ async def _start_builder_task_impl(
                 ToolMessage(
                     content=(f"Launched builder task. task_id: {task_id}. It runs in the background — keep talking to the user. Use check_async_task only when the user asks."),
                     tool_call_id=tool_call_id,
-                    name="start_builder_task",
+                    name=tool_name,
                 )
             ],
             "async_tasks": {task_id: async_task},
@@ -1348,3 +1756,132 @@ def make_start_builder_task_tool(configured_user_id: str):
         )
 
     return configured_start_builder_task
+
+
+async def _edit_builder_artifact_impl(
+    *,
+    message: str,
+    runtime: ToolRuntime[ContextT, SophiaState] | None,
+    configured_user_id: str | None = None,
+    user_id_arg: str | None = None,
+    artifact_path: str | None = None,
+    task_id: str | None = None,
+) -> str | Command:
+    state: SophiaState = runtime.state if runtime is not None else {}  # type: ignore[assignment]
+    if state is None:
+        state = {}  # type: ignore[assignment]
+
+    existing_task_id = _has_active_builder_task(state)
+    if existing_task_id:
+        return (
+            f"A builder task is still active (task_id={existing_task_id}). "
+            "For an active build modification, call update_async_task with that task_id. "
+            "edit_builder_artifact is only for completed artifacts."
+        )
+
+    source = _resolve_edit_source_artifact(
+        state,
+        artifact_path=artifact_path,
+        task_id=task_id,
+    )
+    if source is None:
+        return (
+            "Cannot edit a completed builder artifact yet because no durable source artifact "
+            "path is available in this session. Ask the user which file to edit, or start a "
+            "fresh build only if they clearly want a rebuild."
+        )
+
+    source_path = str(source["artifact_path"])
+    revision_path = _revision_artifact_path(source_path, message)
+    task_type = _task_type_for_edit_source(source)
+    edit_context = {
+        "mode": "edit_existing_artifact",
+        "source_artifact_path": source_path,
+        "source_task_id": source.get("source_task_id") or task_id,
+        "source_run_id": source.get("source_run_id"),
+        "revision_of_artifact_path": source_path,
+        "revision_artifact_path": revision_path,
+        "requested_artifact_ext": _artifact_ext_from_path(revision_path),
+        "artifact_ext": _artifact_ext_from_path(revision_path),
+    }
+    description = _build_edit_existing_artifact_description(
+        message=message,
+        source_artifact_path=source_path,
+        revision_artifact_path=revision_path,
+    )
+    return await _start_builder_task_impl(
+        description=description,
+        task_type=task_type,
+        runtime=runtime,
+        configured_user_id=configured_user_id,
+        user_id_arg=user_id_arg,
+        tool_name="edit_builder_artifact",
+        edit_context=edit_context,
+        artifact_target_path_override=revision_path,
+    )
+
+
+@tool("edit_builder_artifact", parse_docstring=True)
+async def edit_builder_artifact(
+    runtime: ToolRuntime,
+    message: str,
+    artifact_path: str | None = None,
+    task_id: str | None = None,
+    user_id: str | None = None,
+) -> str | Command:
+    """Edit a completed Sophia builder artifact by materializing its source.
+
+    Use after a builder task is terminal and the user asks to change, refine,
+    add, remove, or adjust the delivered artifact. Do not use while a build is
+    still active; use update_async_task for active build modifications.
+
+    Args:
+        message: The user's requested edit. Preserve unrelated artifact content.
+        artifact_path: Optional exact /mnt/user-data/outputs/... artifact path to edit.
+        task_id: Optional completed builder task_id whose artifact should be edited.
+        user_id: Diagnostic hint only. Leave None in normal operation; trusted runtime identity always wins.
+    """
+    return await _edit_builder_artifact_impl(
+        message=message,
+        runtime=runtime,
+        artifact_path=artifact_path,
+        task_id=task_id,
+        user_id_arg=user_id,
+    )
+
+
+def make_edit_builder_artifact_tool(configured_user_id: str):
+    """Build an ``edit_builder_artifact`` tool with ``user_id`` bound."""
+    bound_user_id = _validate_user_id(configured_user_id)
+
+    @tool("edit_builder_artifact", parse_docstring=True)
+    async def configured_edit_builder_artifact(
+        runtime: ToolRuntime,
+        message: str,
+        artifact_path: str | None = None,
+        task_id: str | None = None,
+        user_id: str | None = None,
+    ) -> str | Command:
+        """Edit a completed Sophia builder artifact by materializing its source.
+
+        Use after a builder task is terminal and the user asks to change,
+        refine, add, remove, or adjust the delivered artifact. Do not use while
+        a build is still active; use update_async_task for active build
+        modifications.
+
+        Args:
+            message: The user's requested edit. Preserve unrelated artifact content.
+            artifact_path: Optional exact /mnt/user-data/outputs/... artifact path to edit.
+            task_id: Optional completed builder task_id whose artifact should be edited.
+            user_id: Diagnostic hint only. Leave None in normal operation; trusted runtime identity always wins.
+        """
+        return await _edit_builder_artifact_impl(
+            message=message,
+            runtime=runtime,
+            configured_user_id=bound_user_id,
+            artifact_path=artifact_path,
+            task_id=task_id,
+            user_id_arg=user_id,
+        )
+
+    return configured_edit_builder_artifact

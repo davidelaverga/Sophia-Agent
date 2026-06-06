@@ -43,6 +43,8 @@ class BuilderArtifactInput(BaseModel):
     companion_summary: str = Field(description="One sentence for the companion to paraphrase in Sophia's voice.")
     companion_tone_hint: str = Field(description="How the companion should present the result given the user's emotional state.")
     user_next_action: str | None = Field(default=None, description="What the user should do with the deliverable.")
+    source_artifact_path: str | None = Field(default=None, description="Optional original artifact path when this output revises a completed builder artifact.")
+    revision_of_artifact_path: str | None = Field(default=None, description="Optional original artifact path that this output revises.")
     confidence: float = Field(ge=0.0, le=1.0, description="Self-assessed quality confidence (0.0-1.0).")
 
 

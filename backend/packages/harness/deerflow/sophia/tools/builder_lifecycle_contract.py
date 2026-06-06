@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 ASYNC_BUILDER_AGENT_NAME = "sophia_builder"
 
 START_BUILDER_TASK_TOOL_NAME = "start_builder_task"
+EDIT_BUILDER_ARTIFACT_TOOL_NAME = "edit_builder_artifact"
 CHECK_ASYNC_TASK_TOOL_NAME = "check_async_task"
 UPDATE_ASYNC_TASK_TOOL_NAME = "update_async_task"
 CANCEL_ASYNC_TASK_TOOL_NAME = "cancel_async_task"
@@ -22,6 +23,7 @@ LIST_ASYNC_TASKS_TOOL_NAME = "list_async_tasks"
 
 BUILDER_LIFECYCLE_TOOL_ORDER = (
     START_BUILDER_TASK_TOOL_NAME,
+    EDIT_BUILDER_ARTIFACT_TOOL_NAME,
     CHECK_ASYNC_TASK_TOOL_NAME,
     UPDATE_ASYNC_TASK_TOOL_NAME,
     CANCEL_ASYNC_TASK_TOOL_NAME,
@@ -76,6 +78,30 @@ class StartBuilderTaskInput(BaseModel):
     )
     task_type: BuilderTaskType = Field(
         description="Type of deliverable: document, research, presentation, frontend, or visual_report."
+    )
+    user_id: str | None = Field(
+        default=None,
+        description=(
+            "Diagnostic-only hint. Never overrides the trusted runtime user; "
+            "leave null in normal operation."
+        ),
+    )
+
+
+class EditBuilderArtifactInput(BaseModel):
+    message: str = Field(
+        min_length=1,
+        description=(
+            "Targeted edit request for a completed builder artifact. Preserve unrelated content."
+        ),
+    )
+    artifact_path: str | None = Field(
+        default=None,
+        description="Optional exact /mnt/user-data/outputs/... path for the completed artifact to edit.",
+    )
+    task_id: str | None = Field(
+        default=None,
+        description="Optional completed builder task_id whose delivered artifact should be revised.",
     )
     user_id: str | None = Field(
         default=None,
@@ -141,6 +167,13 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "instead of starting Builder. This is the FIRST builder tool for an explicit fresh builder "
         "request. Returns the real task_id to use later; keep talking to the user."
     ),
+    EDIT_BUILDER_ARTIFACT_TOOL_NAME: (
+        "Edit a completed Sophia builder artifact. Use only after a build is terminal and "
+        "the user asks to change, refine, add, remove, or adjust the delivered artifact. "
+        "Pass a real artifact_path or task_id when available; otherwise the tool resolves "
+        "the latest successful builder artifact from trusted session state. Do not use for "
+        "active builds; use update_async_task while a builder task is still running."
+    ),
     CHECK_ASYNC_TASK_TOOL_NAME: (
         "Check the status of an existing async builder task. Use ONLY with a real task_id "
         "previously returned by start_builder_task or list_async_tasks in the current trusted session. "
@@ -166,6 +199,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
 
 TOOL_INPUT_MODELS: dict[str, type[BaseModel]] = {
     START_BUILDER_TASK_TOOL_NAME: StartBuilderTaskInput,
+    EDIT_BUILDER_ARTIFACT_TOOL_NAME: EditBuilderArtifactInput,
     CHECK_ASYNC_TASK_TOOL_NAME: CheckAsyncTaskInput,
     UPDATE_ASYNC_TASK_TOOL_NAME: UpdateAsyncTaskInput,
     CANCEL_ASYNC_TASK_TOOL_NAME: CancelAsyncTaskInput,
