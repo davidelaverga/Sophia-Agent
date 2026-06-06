@@ -13,6 +13,7 @@ import {
   type CoreviewArtifactCapabilities,
   type CoreviewCurrentViewCapabilitySummary,
 } from "./coreview-workspace-contract"
+import { coreviewBuilderGeminiFunctionDeclarations } from "./coreview-builder-actions"
 
 export const COREVIEW_SET_VIEW_TOOL_NAME = "coreview_set_view"
 export const COREVIEW_REFRESH_VIEW_TOOL_NAME = "coreview_refresh_view"
@@ -27,6 +28,14 @@ export const COREVIEW_TOOL_NAMES = [
   COREVIEW_ADD_ANNOTATION_TOOL_NAME,
   COREVIEW_FOCUS_ANCHOR_TOOL_NAME,
 ] as const
+
+const GEMINI_GENERIC_BUILDER_TOOL_NAMES = new Set([
+  "start_builder_task",
+  "check_async_task",
+  "update_async_task",
+  "cancel_async_task",
+  "list_async_tasks",
+])
 
 export type CoreviewToolName = typeof COREVIEW_TOOL_NAMES[number]
 export type CoreviewActionName = "set_view" | "refresh_view" | "get_current_view" | "add_annotation" | "focus_anchor"
@@ -1377,7 +1386,11 @@ export function coreviewGeminiFunctionDeclarations(): Record<string, unknown>[] 
 export function withCoreviewGeminiToolDeclarations(
   setup: Record<string, unknown>,
   enabled: boolean,
-  options: { allowArtifactCreation?: boolean } = {},
+  options: {
+    allowArtifactCreation?: boolean
+    builderActionsEnabled?: boolean
+    allowGenericBuilderTools?: boolean
+  } = {},
 ): Record<string, unknown> {
   if (!enabled) {
     return setup
@@ -1400,10 +1413,26 @@ export function withCoreviewGeminiToolDeclarations(
       }
     }
   }
+  if (options.builderActionsEnabled !== false && options.allowGenericBuilderTools !== true) {
+    for (const tool of nextTools) {
+      if (!isRecord(tool)) {
+        continue
+      }
+      if (Array.isArray(tool.functionDeclarations)) {
+        tool.functionDeclarations = filterGenericBuilderDeclarations(tool.functionDeclarations)
+      }
+      if (Array.isArray(tool.function_declarations)) {
+        tool.function_declarations = filterGenericBuilderDeclarations(tool.function_declarations)
+      }
+    }
+  }
   const toolWithDeclarations = nextTools.find((tool): tool is Record<string, unknown> => (
     isRecord(tool) && Array.isArray(tool.functionDeclarations)
   ))
-  const declarations = coreviewGeminiFunctionDeclarations()
+  const declarations = [
+    ...coreviewGeminiFunctionDeclarations(),
+    ...(options.builderActionsEnabled === false ? [] : coreviewBuilderGeminiFunctionDeclarations()),
+  ]
 
   if (toolWithDeclarations) {
     const functionDeclarations = Array.isArray(toolWithDeclarations.functionDeclarations)
@@ -2331,5 +2360,13 @@ function filterArtifactCreationDeclarations(declarations: unknown[]): unknown[] 
     isRecord(declaration)
     && typeof declaration.name === "string"
     && declaration.name === "emit_artifact"
+  ))
+}
+
+function filterGenericBuilderDeclarations(declarations: unknown[]): unknown[] {
+  return declarations.filter((declaration) => !(
+    isRecord(declaration)
+    && typeof declaration.name === "string"
+    && GEMINI_GENERIC_BUILDER_TOOL_NAMES.has(declaration.name)
   ))
 }

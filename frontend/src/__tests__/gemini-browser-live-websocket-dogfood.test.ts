@@ -5,6 +5,10 @@ import {
   registerCoreviewToolBridge,
 } from '../app/lib/coreview-actions';
 import {
+  clearCoreviewBuilderToolBridgeForTests,
+  registerCoreviewBuilderToolBridge,
+} from '../app/lib/coreview-builder-actions';
+import {
   clearCoreviewArtifactTextRegistryForTests,
   registerCoreviewArtifactText,
   registerCoreviewArtifactTextStatus,
@@ -178,6 +182,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
   afterEach(() => {
     clearCoreviewArtifactTextRegistryForTests();
     clearCoreviewToolBridgeForTests();
+    clearCoreviewBuilderToolBridgeForTests();
   });
 
   it('builds the constrained Live WebSocket URL with only the ephemeral token', () => {
@@ -2094,6 +2099,9 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       'coreview_get_current_view',
       'coreview_add_annotation',
       'coreview_focus_anchor',
+      'coreview_request_artifact_update',
+      'coreview_cancel_builder_task',
+      'coreview_get_builder_status',
     ]));
     expect(readGeminiConfiguredToolNames(connection.setup)).not.toContain('emit_artifact');
     const fetchCallCountBeforeTool = fetchMock.mock.calls.length;
@@ -2198,6 +2206,209 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       && diagnostic.backendResponse?.raw_comment_text_excluded === true
     ))).toBe(true));
     expect(JSON.stringify(toolDiagnostics)).not.toContain('change the font');
+
+    await connection.close();
+  });
+
+  it('exposes Coreview builder actions and suppresses generic builder tools for selected artifact updates', async () => {
+    registerCoreviewBuilderToolBridge(async (call) => ({
+      ok: true,
+      action: call.name,
+      result: 'task_started',
+      taskId: 'task-coreview-update-1',
+      runId: 'run-coreview-update-1',
+      userFacingMessage: 'Sophia is updating this artifact.',
+      updateMode: 'revise_version',
+      rendererKind: 'html',
+      requestedChangeSummary: 'make it darker',
+      context: {
+        workspaceKey: 'user:unknown|thread:thread-1',
+        artifactStableIdentity: 'user:unknown|thread:thread-1|path:mnt/user-data/outputs/site.html|renderer:html',
+        artifactPath: 'mnt/user-data/outputs/site.html',
+        artifactTitle: 'site.html',
+        rendererKind: 'html',
+        capabilitySummary: {
+          rendererKind: 'html',
+          renderMode: 'html',
+          supportsPages: false,
+          supportsPageRail: false,
+          currentPage: null,
+          pageCount: null,
+          supportsTextExtraction: true,
+          supportsLayoutAnchors: false,
+          supportsAnnotations: false,
+          supportsZoom: false,
+          supportsPan: false,
+          supportsAnnotatedExport: false,
+          supportsOCR: false,
+          requiresOCR: false,
+          supportsPptxNativeRender: false,
+          supportsArtifactUpdate: true,
+          supportsScopedEdit: true,
+          supportsVersioning: true,
+          supportsOverwrite: false,
+          supportsSourceRead: true,
+          supportsNativeEdit: false,
+          supportsRebuildFromSource: true,
+          requiresFullRebuild: false,
+          requiresConversion: false,
+          unsupportedUpdateReason: null,
+          preferredUpdateMode: 'revise_version',
+          fallbackReason: null,
+          userFacingTruth: 'HTML preview is available.',
+        },
+        currentPage: null,
+        pageCount: null,
+        viewSignature: 'artifact:site|path:mnt/user-data/outputs/site.html|renderer:html|page:0|zoom:1.00|fit:custom',
+        annotationCounts: {
+          annotationCount: 0,
+          highlightCount: 0,
+          commentCount: 0,
+          underlineCount: 0,
+          arrowCount: 0,
+          drawPathCount: 0,
+        },
+        selectedAnnotationIds: [],
+        userUpdateRequest: 'make it darker',
+        requestedChangeSummary: 'make it darker',
+        updateMode: 'revise_version',
+        sourceActor: 'sophia',
+        sessionId: 'browser-gemini-coreview-builder-actions',
+        threadId: 'thread-1',
+        parentThreadId: 'thread-1',
+        originalArtifactHref: '/api/threads/thread-1/artifacts/mnt/user-data/outputs/site.html',
+        rawArtifactTextExcluded: true,
+        rawFrameExcluded: true,
+        rawCommentTextExcluded: true,
+      },
+      preservedMic: true,
+      preservedReview: true,
+      rawArtifactTextExcluded: true,
+      rawFrameExcluded: true,
+      rawCommentTextExcluded: true,
+    }));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-coreview-builder-actions',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: {
+              model: 'models/gemini-3.1-flash-live-preview',
+              inputAudioTranscription: {},
+              tools: [{ functionDeclarations: [
+                { name: 'emit_artifact' },
+                { name: 'start_builder_task' },
+                { name: 'check_async_task' },
+              ] }],
+            },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-coreview-builder-actions',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202 }));
+    const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      sessionId: 'browser-gemini-coreview-builder-actions',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+      onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
+    });
+
+    expect(readGeminiConfiguredToolNames(connection.setup)).toEqual(expect.arrayContaining([
+      'coreview_request_artifact_update',
+      'coreview_cancel_builder_task',
+      'coreview_get_builder_status',
+    ]));
+    expect(readGeminiConfiguredToolNames(connection.setup)).not.toContain('emit_artifact');
+    expect(readGeminiConfiguredToolNames(connection.setup)).not.toContain('start_builder_task');
+    expect(readGeminiConfiguredToolNames(connection.setup)).not.toContain('check_async_task');
+
+    await connection.sendArtifactFrame({
+      artifactId: 'coreview-real-artifact-site-html',
+      visualSourceKind: 'html_preview_canvas',
+      data: 'AA==',
+      mimeType: 'image/png',
+      byteLength: 1,
+      dimensions: { width: 1, height: 1 },
+      rawFrameExcluded: true,
+    });
+    connection.sendText('make it darker');
+    const fetchCallCountBeforeTool = fetchMock.mock.calls.length;
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          {
+            id: 'coreview-builder-update-1',
+            name: 'coreview_request_artifact_update',
+            args: { user_update_request: 'make it darker' },
+          },
+          {
+            id: 'generic-builder-bypass-1',
+            name: 'start_builder_task',
+            args: { description: 'Make a fresh page instead.' },
+          },
+          {
+            id: 'emit-artifact-bypass-1',
+            name: 'emit_artifact',
+            args: emitArtifactArgs,
+          },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => expect(JSON.stringify(websocket?.sent)).toContain('coreview_request_artifact_update'));
+    await vi.waitFor(() => expect(JSON.stringify(websocket?.sent)).toContain('artifact_review_generic_builder_tool_suppressed'));
+    await vi.waitFor(() => expect(JSON.stringify(websocket?.sent)).toContain('emit_artifact_blocked_for_review_update_intent'));
+    expect(fetchMock).toHaveBeenCalledTimes(fetchCallCountBeforeTool);
+    const sentToolResponse = websocket?.sent
+      .map((payload) => JSON.parse(payload) as Record<string, unknown>)
+      .find((payload) => JSON.stringify(payload).includes('generic-builder-bypass-1')) as {
+        toolResponse?: { functionResponses?: Array<{ id?: string; name?: string; response?: Record<string, unknown> }> }
+      } | undefined;
+    expect(sentToolResponse?.toolResponse?.functionResponses).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'coreview-builder-update-1',
+        name: 'coreview_request_artifact_update',
+        response: expect.objectContaining({
+          ok: true,
+          result: 'task_started',
+          rawArtifactTextExcluded: true,
+          rawFrameExcluded: true,
+        }),
+      }),
+      expect.objectContaining({
+        id: 'generic-builder-bypass-1',
+        name: 'start_builder_task',
+        response: expect.objectContaining({
+          ok: false,
+          rejection_reason: 'artifact_review_generic_builder_tool_suppressed',
+        }),
+      }),
+      expect.objectContaining({
+        id: 'emit-artifact-bypass-1',
+        name: 'emit_artifact',
+        response: expect.objectContaining({
+          ok: false,
+          rejection_reason: 'artifact_review_emit_artifact_suppressed',
+          emit_artifact_blocked_for_review_update_intent: true,
+        }),
+      }),
+    ]));
+    expect(JSON.stringify(toolDiagnostics)).not.toContain('Make a fresh page instead.');
 
     await connection.close();
   });

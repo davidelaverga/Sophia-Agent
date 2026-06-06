@@ -887,6 +887,11 @@ const GEMINI_COREVIEW_TOOL_NAMES = new Set([
   "coreview_add_annotation",
   "coreview_focus_anchor",
 ])
+const GEMINI_COREVIEW_BUILDER_TOOL_NAMES = new Set([
+  "coreview_request_artifact_update",
+  "coreview_cancel_builder_task",
+  "coreview_get_builder_status",
+])
 const GEMINI_BUILDER_TOOL_NAMES = new Set([
   "start_builder_task",
   "check_async_task",
@@ -1624,6 +1629,8 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((event) => event.name === "gemini-setup-tools")
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
+  const latestSetupTools = setupToolEvents.at(-1) ?? null
+  const setupReviewToolsExposed = asStringArray(latestSetupTools?.reviewToolsExposed) ?? []
   const keyboardShortcutEvents = activeEvents
     .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-keyboard-shortcut")
     .map((event) => event.payloadRecord)
@@ -1663,7 +1670,6 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   const latestRebindEvent = [...selectedStageEvents, ...coreviewToolEvents]
     .filter((event) => asBoolean(event.artifactRebindAttempted) === true)
     .at(-1) ?? null
-  const latestSetupTools = setupToolEvents.at(-1) ?? null
   const latestKeyboardShortcut = keyboardShortcutEvents.at(-1) ?? null
   const latestPanGesture = panGestureEvents.at(-1) ?? null
   const firstFrameSeq = frameEvents.find((event) => {
@@ -1748,7 +1754,7 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     ?? null
   visual.coreviewBuilderActionsEnabled = coreviewBuilderActionEvents.some((event) => (
     asBoolean(event.coreviewBuilderActionsEnabled) === true
-  ))
+  )) || setupReviewToolsExposed.some((name) => GEMINI_COREVIEW_BUILDER_TOOL_NAMES.has(name))
   visual.coreviewBuilderUpdateIntentDetected = coreviewBuilderActionEvents.some((event) => (
     asBoolean(event.coreviewBuilderUpdateIntentDetected) === true
   ))
@@ -2043,7 +2049,7 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     ?? asString(latestCoreviewTool?.coreviewToolResult)
   visual.coreviewToolRefreshResult = asString(latestCoreviewTool?.coreviewToolRefreshResult)
   visual.coreviewToolVisualFreshAfterResult = asBoolean(latestCoreviewTool?.coreviewToolVisualFreshAfterResult)
-  visual.reviewToolsExposed = asStringArray(latestSetupTools?.reviewToolsExposed) ?? []
+  visual.reviewToolsExposed = setupReviewToolsExposed
   visual.emitArtifactExposedDuringReview = asBoolean(latestSetupTools?.emitArtifactExposedDuringReview)
     ?? visual.reviewToolsExposed.includes(GEMINI_EMIT_ARTIFACT_TOOL_NAME)
   const reviewToolTimeoutDiagnostics = activeEvents.filter((event) => {

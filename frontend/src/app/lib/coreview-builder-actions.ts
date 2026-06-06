@@ -17,6 +17,12 @@ export const COREVIEW_BUILDER_TOOL_NAMES = [
 
 export type CoreviewBuilderToolName = typeof COREVIEW_BUILDER_TOOL_NAMES[number]
 
+export interface CoreviewBuilderToolCallInput {
+  id: string | null
+  name: CoreviewBuilderToolName
+  args: Record<string, unknown>
+}
+
 export type CoreviewArtifactUpdateMode =
   | "create_new"
   | "update_existing"
@@ -187,6 +193,7 @@ export interface CoreviewBuilderActionBus {
   cancelBuilderTask(sourceActor?: CoreviewBuilderSourceActor): Promise<CoreviewBuilderActionResult>
   getBuilderStatus(sourceActor?: CoreviewBuilderSourceActor): CoreviewBuilderActionResult
   buildUpdateContext(input: CoreviewRequestArtifactUpdateInput): CoreviewArtifactUpdateContext | null
+  handleToolCall(call: CoreviewBuilderToolCallInput): Promise<CoreviewBuilderActionResult>
 }
 
 export function createCoreviewBuilderActionBus(adapter: CoreviewBuilderActionAdapter): CoreviewBuilderActionBus {
@@ -388,19 +395,126 @@ export function createCoreviewBuilderActionBus(adapter: CoreviewBuilderActionAda
     })
   }
 
+  const handleToolCall = async (
+    call: CoreviewBuilderToolCallInput,
+  ): Promise<CoreviewBuilderActionResult> => {
+    if (call.name === COREVIEW_REQUEST_ARTIFACT_UPDATE_TOOL_NAME) {
+      return requestArtifactUpdate(coreviewRequestArtifactUpdateInputFromArgs(call.args))
+    }
+    if (call.name === COREVIEW_CANCEL_BUILDER_TASK_TOOL_NAME) {
+      return cancelBuilderTask(sourceActorFromArgs(call.args) ?? "sophia")
+    }
+    return getBuilderStatus(sourceActorFromArgs(call.args) ?? "sophia")
+  }
+
   return {
     requestArtifactUpdate,
     cancelBuilderTask,
     getBuilderStatus,
     buildUpdateContext,
+    handleToolCall,
   }
 }
 
+export type CoreviewBuilderToolBridgeHandler = (
+  call: CoreviewBuilderToolCallInput
+) => Promise<CoreviewBuilderActionResult> | CoreviewBuilderActionResult
+
+let activeBuilderToolBridge: CoreviewBuilderToolBridgeHandler | null = null
+
+export function registerCoreviewBuilderToolBridge(handler: CoreviewBuilderToolBridgeHandler): () => void {
+  activeBuilderToolBridge = handler
+  return () => {
+    if (activeBuilderToolBridge === handler) {
+      activeBuilderToolBridge = null
+    }
+  }
+}
+
+export async function executeCoreviewBuilderToolBridgeCall(
+  call: CoreviewBuilderToolCallInput,
+): Promise<CoreviewBuilderActionResult> {
+  if (!activeBuilderToolBridge) {
+    return unavailableBuilderToolResult(call.name)
+  }
+  return activeBuilderToolBridge(call)
+}
+
+export function clearCoreviewBuilderToolBridgeForTests(): void {
+  activeBuilderToolBridge = null
+}
+
+export function isCoreviewBuilderToolName(name: string | null | undefined): name is CoreviewBuilderToolName {
+  return COREVIEW_BUILDER_TOOL_NAMES.includes(name as CoreviewBuilderToolName)
+}
+
+export function coreviewBuilderGeminiFunctionDeclarations(): Record<string, unknown>[] {
+  return [
+    {
+      name: COREVIEW_REQUEST_ARTIFACT_UPDATE_TOOL_NAME,
+      description: "Required during Review with Sophia for user requests to update, revise, edit, change, rebuild, restyle, or make a new version of the currently selected artifact. Use this instead of start_builder_task, update_async_task, or emit_artifact for selected-artifact updates. The browser will preserve the selected artifact path, renderer, stable identity, current view, source href, capability summary, annotations, and session/thread ids.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          user_update_request: { type: "STRING", description: "Short summary of the user's requested change. Do not include raw artifact text." },
+          update_mode: {
+            type: "STRING",
+            enum: ["create_new", "update_existing", "revise_version", "convert_format", "repair_artifact"],
+            description: "Use revise_version for normal updates. Use convert_format only when the user explicitly asks to convert formats, such as Markdown to HTML.",
+          },
+        },
+        required: ["user_update_request"],
+      },
+    },
+    {
+      name: COREVIEW_CANCEL_BUILDER_TASK_TOOL_NAME,
+      description: "Cancel the active Coreview-native builder update for the selected artifact during Review with Sophia. Use this for requests like cancel the builder task, stop this update, or abort the build.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          reason: { type: "STRING", description: "Short safe reason for cancellation." },
+        },
+        required: [],
+      },
+    },
+    {
+      name: COREVIEW_GET_BUILDER_STATUS_TOOL_NAME,
+      description: "Get safe status for the active Coreview-native builder update without raw artifact text or frames.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          reason: { type: "STRING", description: "Short safe reason for checking status." },
+        },
+        required: [],
+      },
+    },
+  ]
+}
+
+export function coreviewBuilderToolExceptionResult(
+  call: CoreviewBuilderToolCallInput,
+  error: unknown,
+): CoreviewBuilderActionResult {
+  return builderResult({
+    ok: false,
+    action: call.name,
+    result: "failed",
+    blockedReason: call.name === COREVIEW_CANCEL_BUILDER_TASK_TOOL_NAME
+      ? "builder_cancel_failed"
+      : "builder_action_unavailable",
+    userFacingMessage: error instanceof Error
+      ? `Coreview builder action failed: ${error.message}`
+      : "Coreview builder action failed.",
+  })
+}
+
 export function buildCoreviewBuilderUpdatePrompt(context: CoreviewArtifactUpdateContext): string {
+  const capabilitySummary = JSON.stringify(context.capabilitySummary)
   const lines = [
     "Coreview artifact update request.",
     "",
     `User request: ${context.userUpdateRequest}`,
+    `Requested change summary: ${context.requestedChangeSummary}`,
     `Update mode: ${context.updateMode}`,
     `Artifact title: ${context.artifactTitle ?? "Untitled artifact"}`,
     `Artifact path: ${context.artifactPath ?? "unavailable"}`,
@@ -409,15 +523,28 @@ export function buildCoreviewBuilderUpdatePrompt(context: CoreviewArtifactUpdate
     context.artifactStableIdentity ? `Stable artifact identity: ${context.artifactStableIdentity}` : null,
     context.currentPage ? `Current page: ${context.currentPage} of ${context.pageCount ?? context.currentPage}` : null,
     context.viewSignature ? `Current view signature: ${context.viewSignature}` : null,
+    context.originalArtifactHref ? `Original artifact href: ${context.originalArtifactHref}` : null,
+    `Session id: ${context.sessionId ?? "unavailable"}`,
+    `Thread id: ${context.threadId ?? "unavailable"}`,
     `Annotations: ${context.annotationCounts.annotationCount} total, ${context.annotationCounts.commentCount} comments, ${context.annotationCounts.highlightCount} highlights.`,
+    `Selected annotation count: ${context.selectedAnnotationIds?.length ?? 0}`,
+    `Capability summary: ${capabilitySummary}`,
     "",
     "Builder instructions:",
-    "- Use start_builder_task for the artifact update path when starting work.",
+    "- This is a revise current artifact request, not an unrelated new document request.",
+    "- Use start_builder_task with this brief for the Coreview artifact update path when starting work.",
     "- Do not call emit_artifact for this co-review update.",
+    "- Update/revise the current artifact identified by the selected artifact path and stable identity.",
     "- Preserve the current artifact when possible.",
     "- Prefer creating a new version instead of silently overwriting the original.",
     "- Keep the original artifact accessible.",
+    "- Represent the result as an update or new version of the selected artifact, not a fresh unrelated document.",
+    "- Keep the same format if the selected renderer supports it.",
+    "- If the selected artifact is HTML, preserve an HTML target and write the updated version as HTML.",
+    "- If the selected artifact is Markdown, revise Markdown unless the user explicitly requested conversion.",
+    "- If this is a Markdown fallback from an HTML request, do not pretend it is HTML; convert to HTML only when explicitly requested or truthfully report the unsupported/fallback path.",
     "- Use the artifact path and renderer capability summary as the source context.",
+    "- Do not include raw artifact text, raw frames, or raw comment text in status/telemetry.",
   ].filter(Boolean)
 
   return lines.join("\n")
@@ -463,8 +590,58 @@ function updateUnsupportedReason(context: CoreviewArtifactUpdateContext): string
     return context.capabilitySummary.unsupportedUpdateReason
       ?? "This artifact can only be rebuilt as a new version right now."
   }
-  if (context.updateMode === "convert_format" && !context.capabilitySummary.requiresConversion) {
+  if (
+    context.updateMode === "convert_format"
+    && !context.capabilitySummary.requiresConversion
+    && !context.capabilitySummary.supportsSourceRead
+  ) {
     return "This artifact does not have a supported conversion path from Coreview yet."
+  }
+  return null
+}
+
+function coreviewRequestArtifactUpdateInputFromArgs(
+  args: Record<string, unknown>,
+): CoreviewRequestArtifactUpdateInput {
+  return {
+    userUpdateRequest: stringFromAnyKey(
+      args,
+      "user_update_request",
+      "userUpdateRequest",
+      "requested_change_summary",
+      "requestedChangeSummary",
+      "change_summary",
+      "changeSummary",
+      "request",
+      "summary",
+    ) ?? "Update this artifact.",
+    updateMode: updateModeFromArgs(args),
+    sourceActor: sourceActorFromArgs(args) ?? "sophia",
+  }
+}
+
+function updateModeFromArgs(args: Record<string, unknown>): CoreviewArtifactUpdateMode | null {
+  const value = stringFromAnyKey(args, "update_mode", "updateMode")
+  return value === "create_new"
+    || value === "update_existing"
+    || value === "revise_version"
+    || value === "convert_format"
+    || value === "repair_artifact"
+    ? value
+    : null
+}
+
+function sourceActorFromArgs(args: Record<string, unknown>): CoreviewBuilderSourceActor | null {
+  const value = stringFromAnyKey(args, "source_actor", "sourceActor")
+  return value === "user" || value === "sophia" || value === "system" ? value : null
+}
+
+function stringFromAnyKey(value: Record<string, unknown>, ...keys: string[]): string | null {
+  for (const key of keys) {
+    const candidate = value[key]
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim()
+    }
   }
   return null
 }
@@ -504,4 +681,16 @@ function builderResult(
     rawFrameExcluded: true,
     rawCommentTextExcluded: true,
   }
+}
+
+function unavailableBuilderToolResult(toolName: CoreviewBuilderToolName): CoreviewBuilderActionResult {
+  return builderResult({
+    ok: false,
+    action: toolName,
+    result: toolName === COREVIEW_CANCEL_BUILDER_TASK_TOOL_NAME
+      ? "no_active_builder_task"
+      : "failed",
+    blockedReason: "builder_action_unavailable",
+    userFacingMessage: "Coreview builder actions are unavailable right now.",
+  })
 }

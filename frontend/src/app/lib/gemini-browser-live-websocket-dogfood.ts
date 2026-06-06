@@ -13,6 +13,12 @@ import {
 import {
   readCoreviewArtifactTextSideband,
 } from './coreview-artifact-text';
+import {
+  coreviewBuilderToolExceptionResult,
+  executeCoreviewBuilderToolBridgeCall,
+  isCoreviewBuilderToolName,
+  type CoreviewBuilderToolCallInput,
+} from './coreview-builder-actions';
 
 export type GeminiBrowserLiveDogfoodStage =
   | 'starting_backend_session'
@@ -259,6 +265,7 @@ export interface GeminiArtifactReviewRelayContext {
   artifact_id: string | null;
   source: 'coreview_still_frame';
   user_intent: GeminiArtifactReviewUserIntent;
+  builder_update_intent_detected: boolean;
   last_user_intent_at: string | null;
   expires_at: string | null;
   raw_transcript_excluded: true;
@@ -762,7 +769,22 @@ type GeminiSuppressedEmitArtifactToolCallInput = {
   name: typeof GEMINI_EMIT_ARTIFACT_TOOL_NAME;
   args: Record<string, unknown>;
 };
-type GeminiFrontendReviewToolCallInput = CoreviewToolCallInput | GeminiReadArtifactTextToolCallInput;
+type GeminiSuppressedGenericBuilderToolCallInput = {
+  id: string | null;
+  name: string;
+  args: Record<string, unknown>;
+};
+type GeminiFrontendReviewToolCallInput =
+  | CoreviewToolCallInput
+  | CoreviewBuilderToolCallInput
+  | GeminiReadArtifactTextToolCallInput;
+const GEMINI_GENERIC_BUILDER_TOOL_NAMES = new Set([
+  'start_builder_task',
+  'check_async_task',
+  'update_async_task',
+  'cancel_async_task',
+  'list_async_tasks',
+]);
 const GEMINI_PROVIDER_EVENT_CATEGORIES: GeminiProviderEventCategory[] = [
   'setupComplete',
   'serverContent',
@@ -872,6 +894,7 @@ export async function connectGeminiBrowserLiveDogfood(
   let artifactReviewArtifactId: string | null = null;
   let artifactReviewExpiresAtMs: number | null = null;
   let artifactReviewUserIntent: GeminiArtifactReviewUserIntent = 'unknown';
+  let artifactReviewBuilderUpdateIntentDetected = false;
   let artifactReviewUserIntentAt: string | null = null;
   const artifactReviewSafeResponseIds = new Set<string>();
   const artifactReviewSuppressedResponseIds = new Set<string>();
@@ -1029,6 +1052,7 @@ export async function connectGeminiBrowserLiveDogfood(
       return;
     }
     artifactReviewUserIntent = nextIntent;
+    artifactReviewBuilderUpdateIntentDetected = isArtifactReviewSelectedArtifactUpdateIntent(text);
     artifactReviewUserIntentAt = new Date().toISOString();
   };
 
@@ -1040,6 +1064,7 @@ export async function connectGeminiBrowserLiveDogfood(
       artifactReviewArtifactId = null;
       artifactReviewExpiresAtMs = null;
       artifactReviewUserIntent = 'unknown';
+      artifactReviewBuilderUpdateIntentDetected = false;
       artifactReviewUserIntentAt = null;
       artifactReviewSafeResponseIds.clear();
       artifactReviewSuppressedResponseIds.clear();
@@ -1052,6 +1077,7 @@ export async function connectGeminiBrowserLiveDogfood(
       artifact_id: artifactReviewArtifactId,
       source: 'coreview_still_frame',
       user_intent: artifactReviewUserIntent,
+      builder_update_intent_detected: artifactReviewBuilderUpdateIntentDetected,
       last_user_intent_at: artifactReviewUserIntentAt,
       expires_at: new Date(Date.now() + Math.max(0, artifactReviewExpiresAtMs - monotonicNowMs())).toISOString(),
       raw_transcript_excluded: true,
@@ -1668,7 +1694,7 @@ export async function connectGeminiBrowserLiveDogfood(
 
   const noteToolResponseSent = (functionResponse: Record<string, unknown>, timestamp: string) => {
     const toolName = stringFromAnyKey(functionResponse, 'name');
-    if (!isCoreviewToolName(toolName)) {
+    if (!isCoreviewToolName(toolName) && !isCoreviewBuilderToolName(toolName)) {
       return;
     }
     const parsedTimestampMs = Date.parse(timestamp);
@@ -2108,6 +2134,7 @@ export async function connectGeminiBrowserLiveDogfood(
         if (result.ok && result.websocketSendAccepted && result.artifactId) {
           if (artifactReviewArtifactId !== result.artifactId) {
             artifactReviewUserIntent = 'unknown';
+            artifactReviewBuilderUpdateIntentDetected = false;
             artifactReviewUserIntentAt = null;
             artifactReviewSafeResponseIds.clear();
             artifactReviewSuppressedResponseIds.clear();
@@ -3182,7 +3209,11 @@ async function handleGeminiFrontendCoreviewToolEvent(options: {
     options.event,
     options.artifactReviewContext ?? null,
   );
-  if (split.frontendCalls.length === 0 && split.suppressedEmitArtifactCalls.length === 0) {
+  if (
+    split.frontendCalls.length === 0
+    && split.suppressedEmitArtifactCalls.length === 0
+    && split.suppressedGenericBuilderCalls.length === 0
+  ) {
     return options.event;
   }
 
@@ -3197,6 +3228,24 @@ async function handleGeminiFrontendCoreviewToolEvent(options: {
       response,
     });
     toolDiagnostics.push(suppressedEmitArtifactToolDiagnostic(call, response));
+    emitToolCallLedgerEntry(
+      options.toolCallLedger,
+      call.id,
+      {
+        toolName: call.name,
+        toolResponsePreparedAt: preparedAt,
+      },
+      options.onToolCallLedgerUpdate,
+    );
+  }
+  for (const call of split.suppressedGenericBuilderCalls) {
+    const response = suppressedGenericBuilderToolResponse(call, options.artifactReviewContext ?? null);
+    functionResponses.push({
+      ...(call.id ? { id: call.id } : {}),
+      name: call.name,
+      response,
+    });
+    toolDiagnostics.push(suppressedGenericBuilderToolDiagnostic(call, response));
     emitToolCallLedgerEntry(
       options.toolCallLedger,
       call.id,
@@ -3285,13 +3334,19 @@ async function executeFrontendReviewToolCallWithTimeout(
           startedAtMs,
         });
       }
-      return { ...(await executeCoreviewToolBridgeCall(call)) };
+      if (isCoreviewBuilderToolName(call.name)) {
+        return { ...(await executeCoreviewBuilderToolBridgeCall(call as CoreviewBuilderToolCallInput)) };
+      }
+      return { ...(await executeCoreviewToolBridgeCall(call as CoreviewToolCallInput)) };
     } catch (error) {
-      return !isReadArtifactTextToolCall(call)
-        ? { ...coreviewToolExceptionResult(call, error) }
-        : readArtifactTextFailureResponse(call, 'unavailable', error instanceof Error
+      if (isReadArtifactTextToolCall(call)) {
+        return readArtifactTextFailureResponse(call, 'unavailable', error instanceof Error
           ? error.message
           : 'Trusted artifact text is unavailable.');
+      }
+      return isCoreviewBuilderToolName(call.name)
+        ? { ...coreviewBuilderToolExceptionResult(call as CoreviewBuilderToolCallInput, error) }
+        : { ...coreviewToolExceptionResult(call as CoreviewToolCallInput, error) };
     }
   })();
   const timeout = new Promise<Record<string, unknown>>((resolve) => {
@@ -3381,6 +3436,27 @@ function reviewToolTimeoutResult(
     };
   }
 
+  if (isCoreviewBuilderToolName(call.name)) {
+    return {
+      ok: false,
+      action: call.name,
+      result: 'failed',
+      blockedReason: 'builder_action_unavailable',
+      userFacingMessage: `${call.name} timed out before the voice response deadline.`,
+      preservedMic: true,
+      preservedReview: true,
+      rawArtifactTextExcluded: true,
+      rawFrameExcluded: true,
+      rawCommentTextExcluded: true,
+      review_tool_timed_out: true,
+      review_tool_timeout_name: call.name,
+      review_tool_timeout_result_sent: true,
+      raw_comment_text_excluded: true,
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
+    };
+  }
+
   const action = call.name === COREVIEW_REFRESH_VIEW_TOOL_NAME
     ? 'refresh_view'
     : call.name === COREVIEW_GET_CURRENT_VIEW_TOOL_NAME
@@ -3448,6 +3524,7 @@ function splitFrontendReviewToolCallsFromProviderEvent(
 ): {
   frontendCalls: GeminiFrontendReviewToolCallInput[];
   suppressedEmitArtifactCalls: GeminiSuppressedEmitArtifactToolCallInput[];
+  suppressedGenericBuilderCalls: GeminiSuppressedGenericBuilderToolCallInput[];
   relayEvent: Record<string, unknown> | null;
 } {
   const toolCallKey = isRecord(event.toolCall)
@@ -3456,12 +3533,12 @@ function splitFrontendReviewToolCallsFromProviderEvent(
       ? 'tool_call'
       : null;
   if (!toolCallKey) {
-    return { frontendCalls: [], suppressedEmitArtifactCalls: [], relayEvent: event };
+    return { frontendCalls: [], suppressedEmitArtifactCalls: [], suppressedGenericBuilderCalls: [], relayEvent: event };
   }
 
   const toolCall = event[toolCallKey];
   if (!isRecord(toolCall)) {
-    return { frontendCalls: [], suppressedEmitArtifactCalls: [], relayEvent: event };
+    return { frontendCalls: [], suppressedEmitArtifactCalls: [], suppressedGenericBuilderCalls: [], relayEvent: event };
   }
 
   const functionCallsKey = Array.isArray(toolCall.functionCalls)
@@ -3470,16 +3547,17 @@ function splitFrontendReviewToolCallsFromProviderEvent(
       ? 'function_calls'
       : null;
   if (!functionCallsKey) {
-    return { frontendCalls: [], suppressedEmitArtifactCalls: [], relayEvent: event };
+    return { frontendCalls: [], suppressedEmitArtifactCalls: [], suppressedGenericBuilderCalls: [], relayEvent: event };
   }
 
   const functionCalls = toolCall[functionCallsKey];
   if (!Array.isArray(functionCalls)) {
-    return { frontendCalls: [], suppressedEmitArtifactCalls: [], relayEvent: event };
+    return { frontendCalls: [], suppressedEmitArtifactCalls: [], suppressedGenericBuilderCalls: [], relayEvent: event };
   }
 
   const frontendCalls: GeminiFrontendReviewToolCallInput[] = [];
   const suppressedEmitArtifactCalls: GeminiSuppressedEmitArtifactToolCallInput[] = [];
+  const suppressedGenericBuilderCalls: GeminiSuppressedGenericBuilderToolCallInput[] = [];
   const relayFunctionCalls: unknown[] = [];
   for (const functionCall of functionCalls) {
     if (!isRecord(functionCall)) {
@@ -3498,7 +3576,19 @@ function splitFrontendReviewToolCallsFromProviderEvent(
       });
       continue;
     }
-    if (!isCoreviewToolName(name) && name !== GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
+    if (
+      typeof name === 'string'
+      && GEMINI_GENERIC_BUILDER_TOOL_NAMES.has(name)
+      && shouldSuppressGenericBuilderToolCallForArtifactReviewUpdate(artifactReviewContext)
+    ) {
+      suppressedGenericBuilderCalls.push({
+        id: stringFromAnyKey(functionCall, 'id'),
+        name,
+        args: readGeminiFunctionCallArgs(functionCall) ?? {},
+      });
+      continue;
+    }
+    if (!isCoreviewToolName(name) && !isCoreviewBuilderToolName(name) && name !== GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
       relayFunctionCalls.push(functionCall);
       continue;
     }
@@ -3509,14 +3599,15 @@ function splitFrontendReviewToolCallsFromProviderEvent(
     } as GeminiFrontendReviewToolCallInput);
   }
 
-  if (frontendCalls.length === 0 && suppressedEmitArtifactCalls.length === 0) {
-    return { frontendCalls, suppressedEmitArtifactCalls, relayEvent: event };
+  if (frontendCalls.length === 0 && suppressedEmitArtifactCalls.length === 0 && suppressedGenericBuilderCalls.length === 0) {
+    return { frontendCalls, suppressedEmitArtifactCalls, suppressedGenericBuilderCalls, relayEvent: event };
   }
 
   if (relayFunctionCalls.length > 0) {
     return {
       frontendCalls,
       suppressedEmitArtifactCalls,
+      suppressedGenericBuilderCalls,
       relayEvent: {
         ...event,
         [toolCallKey]: {
@@ -3532,6 +3623,7 @@ function splitFrontendReviewToolCallsFromProviderEvent(
   return {
     frontendCalls,
     suppressedEmitArtifactCalls,
+    suppressedGenericBuilderCalls,
     relayEvent: Object.keys(relayEvent).length > 0 ? relayEvent : null,
   };
 }
@@ -3541,7 +3633,19 @@ function shouldSuppressEmitArtifactToolCallForArtifactReview(
 ): boolean {
   return Boolean(
     artifactReviewContext?.active
-    && artifactReviewContext.user_intent !== 'create_update',
+    && (
+      artifactReviewContext.builder_update_intent_detected
+      || artifactReviewContext.user_intent !== 'create_update'
+    ),
+  );
+}
+
+function shouldSuppressGenericBuilderToolCallForArtifactReviewUpdate(
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null,
+): boolean {
+  return Boolean(
+    artifactReviewContext?.active
+    && artifactReviewContext.builder_update_intent_detected,
   );
 }
 
@@ -3558,7 +3662,32 @@ function suppressedEmitArtifactToolResponse(
     result_summary: 'Review-only emit_artifact call suppressed.',
     artifact_review_active: artifactReviewContext?.active === true,
     artifact_review_user_intent: artifactReviewContext?.user_intent ?? null,
+    coreview_builder_update_intent_detected: artifactReviewContext?.builder_update_intent_detected === true,
     emit_artifact_blocked_for_annotation_intent: artifactReviewContext?.user_intent !== 'create_update',
+    emit_artifact_blocked_for_review_update_intent: artifactReviewContext?.builder_update_intent_detected === true,
+    raw_transcript_excluded: true,
+    raw_comment_text_excluded: true,
+    raw_artifact_text_excluded: true,
+    raw_frame_excluded: true,
+  };
+}
+
+function suppressedGenericBuilderToolResponse(
+  call: GeminiSuppressedGenericBuilderToolCallInput,
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null,
+): Record<string, unknown> {
+  return {
+    ok: false,
+    rejected: true,
+    execution_rejected: true,
+    safe_reason: 'artifact_review_generic_builder_tool_suppressed',
+    rejection_reason: 'artifact_review_generic_builder_tool_suppressed',
+    recovery_guidance: 'Use coreview_request_artifact_update for selected-artifact update requests during Review with Sophia.',
+    result_summary: 'Generic builder tool suppressed for selected-artifact review update.',
+    artifact_review_active: artifactReviewContext?.active === true,
+    artifact_review_user_intent: artifactReviewContext?.user_intent ?? null,
+    coreview_builder_update_intent_detected: artifactReviewContext?.builder_update_intent_detected === true,
+    suppressed_tool_name: call.name,
     raw_transcript_excluded: true,
     raw_comment_text_excluded: true,
     raw_artifact_text_excluded: true,
@@ -3578,6 +3707,22 @@ function suppressedEmitArtifactToolDiagnostic(
     rejection_reason: 'artifact_review_emit_artifact_suppressed',
     recovery_guidance: 'Use Coreview review tools for annotation, highlight, comment, note, or pin requests.',
     result_summary: 'Review-only emit_artifact call suppressed.',
+    response,
+  };
+}
+
+function suppressedGenericBuilderToolDiagnostic(
+  call: GeminiSuppressedGenericBuilderToolCallInput,
+  response: Record<string, unknown>,
+): GeminiRelayToolDiagnosticPayload {
+  return {
+    id: call.id ?? undefined,
+    name: call.name,
+    success: false,
+    execution_rejected: true,
+    rejection_reason: 'artifact_review_generic_builder_tool_suppressed',
+    recovery_guidance: 'Use coreview_request_artifact_update for selected-artifact update requests during Review with Sophia.',
+    result_summary: 'Generic builder tool suppressed for selected-artifact review update.',
     response,
   };
 }
@@ -4415,6 +4560,7 @@ function promptOrToolLeakageMarker(text: string): string | null {
   if (!normalized) return null;
   if (/\bemit_artifact\b/u.test(normalized)) return 'emit_artifact';
   if (/\bread_artifact_text\b/u.test(normalized)) return 'read_artifact_text';
+  if (/\bcoreview_request_artifact_update\b/u.test(normalized)) return 'coreview_request_artifact_update';
   if (/\bartifact_id\b/u.test(normalized)) return 'artifact_id';
   if (/\bactive_goal\s*:/u.test(normalized)) return 'active_goal';
   if (/\btool_call_id\b/u.test(normalized)) return 'tool_call_id';
@@ -4469,6 +4615,19 @@ export function classifyArtifactReviewUserIntent(text: string): GeminiArtifactRe
   }
 
   return 'analysis';
+}
+
+function isArtifactReviewSelectedArtifactUpdateIntent(text: string): boolean {
+  const normalized = normalizeTranscriptionForIntent(text);
+  if (!normalized) {
+    return false;
+  }
+  return (
+    /\b(?:update|edit|revise|rewrite|change|rebuild|repair)\s+(?:this|the|that)?\s*(?:file|artifact|document|doc|page|canvas|it|this|that)?\b/u.test(normalized)
+    || /\bchange\s+(?:the\s+)?(?:title|heading|headline|background|layout|copy|text|tone|color|colour|section|hero|cards?)\b/u.test(normalized)
+    || /\bmake\s+(?:it|this|that|the|those)?\s*(?:background|layout|copy|text|title|heading|headline|section|hero|cards?)?\s*(?:more|less|darker|lighter|brighter|premium|polished|compact|spacious|clear|modern)\b/u.test(normalized)
+    || /\b(?:new version|revise version|updated version)\b/u.test(normalized)
+  );
 }
 
 function isConfirmableProviderInputTranscription(text: string): boolean {
@@ -4890,6 +5049,13 @@ function responseSummaryFromFunctionResponse(functionResponse: Record<string, un
     const status = response.ok === true ? 'success' : stringFromAnyKey(response, 'blocked_reason', 'blockedReason') ?? 'blocked';
     return `${toolName} returned ${status}.`;
   }
+  if (isCoreviewBuilderToolName(toolName)) {
+    const message = stringFromAnyKey(response, 'userFacingMessage', 'user_facing_message', 'result_summary', 'resultSummary');
+    if (message) {
+      return message;
+    }
+    return `${toolName} returned ${stringFromAnyKey(response, 'result') ?? (response.ok === true ? 'ok' : 'blocked')}.`;
+  }
   if (toolName === GEMINI_RETRIEVE_MEMORIES_TOOL_NAME) {
     const status = stringFromAnyKey(response, 'status') ?? 'unknown';
     const count = numberFromAnyKey(response, 'count') ?? 0;
@@ -4944,6 +5110,30 @@ function redactToolCallArgsForTelemetry(
     };
   }
 
+  if (isCoreviewBuilderToolName(toolName) && args) {
+    const request = stringFromAnyKey(
+      args,
+      'user_update_request',
+      'userUpdateRequest',
+      'requested_change_summary',
+      'requestedChangeSummary',
+      'request',
+      'summary',
+    );
+    const reason = stringFromAnyKey(args, 'reason');
+    return {
+      user_update_request_length: request?.length ?? 0,
+      user_update_request_fingerprint: request ? telemetryTextFingerprint(request) : null,
+      update_mode: stringFromAnyKey(args, 'update_mode', 'updateMode'),
+      reason_length: reason?.length ?? 0,
+      raw_user_update_request_excluded: true,
+      raw_reason_excluded: true,
+      raw_comment_text_excluded: true,
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
+    };
+  }
+
   if (toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME && args) {
     const query = stringFromAnyKey(args, 'query');
     const reason = stringFromAnyKey(args, 'reason');
@@ -4953,6 +5143,26 @@ function redactToolCallArgsForTelemetry(
       query_fingerprint: query ? telemetryTextFingerprint(query) : null,
       reason_length: reason?.length ?? 0,
       raw_query_excluded: true,
+    };
+  }
+
+  if (toolName && GEMINI_GENERIC_BUILDER_TOOL_NAMES.has(toolName) && args) {
+    const description = stringFromAnyKey(args, 'description', 'task', 'brief');
+    const taskId = stringFromAnyKey(args, 'task_id', 'taskId');
+    const runId = stringFromAnyKey(args, 'run_id', 'runId');
+    return {
+      description_length: description?.length ?? 0,
+      description_fingerprint: description ? telemetryTextFingerprint(description) : null,
+      task_type: stringFromAnyKey(args, 'task_type', 'taskType'),
+      task_id: taskId,
+      taskId,
+      task_id_present: Boolean(taskId),
+      run_id: runId,
+      runId,
+      run_id_present: Boolean(runId),
+      raw_description_excluded: true,
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
     };
   }
 
@@ -4976,6 +5186,10 @@ function redactBackendResponseForToolTelemetry(
 ): Record<string, unknown> | null {
   if (isCoreviewToolName(toolName) && response) {
     return redactCoreviewActionResponseForTelemetry(response);
+  }
+
+  if (isCoreviewBuilderToolName(toolName) && response) {
+    return redactCoreviewBuilderActionResponseForTelemetry(response);
   }
 
   if (toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME && response) {
@@ -5057,6 +5271,51 @@ function redactCoreviewActionResponseForTelemetry(
     review_tool_timed_out: response.review_tool_timed_out === true || response.reviewToolTimedOut === true,
     review_tool_timeout_name: stringFromAnyKey(response, 'review_tool_timeout_name', 'reviewToolTimeoutName'),
     review_tool_timeout_result_sent: response.review_tool_timeout_result_sent === true || response.reviewToolTimeoutResultSent === true,
+    raw_artifact_text_excluded: true,
+    raw_frame_excluded: true,
+  };
+}
+
+function redactCoreviewBuilderActionResponseForTelemetry(
+  response: Record<string, unknown>,
+): Record<string, unknown> {
+  const context = recordFromAnyKey(response, 'context');
+  const status = recordFromAnyKey(response, 'status');
+  const latestOutput = recordFromAnyKey(response, 'latestOutput', 'latest_output');
+  const capabilitySummary = recordFromAnyKey(context, 'capabilitySummary', 'capability_summary');
+  return {
+    ok: response.ok === true,
+    action: stringFromAnyKey(response, 'action'),
+    result: stringFromAnyKey(response, 'result'),
+    task_id_present: Boolean(stringFromAnyKey(response, 'taskId', 'task_id')),
+    run_id_present: Boolean(stringFromAnyKey(response, 'runId', 'run_id')),
+    blocked_reason: stringFromAnyKey(response, 'blockedReason', 'blocked_reason'),
+    update_mode: stringFromAnyKey(response, 'updateMode', 'update_mode'),
+    renderer_kind: stringFromAnyKey(response, 'rendererKind', 'renderer_kind')
+      ?? stringFromAnyKey(context, 'rendererKind', 'renderer_kind'),
+    requested_change_summary_length: stringFromAnyKey(response, 'requestedChangeSummary', 'requested_change_summary')?.length
+      ?? stringFromAnyKey(context, 'requestedChangeSummary', 'requested_change_summary')?.length
+      ?? 0,
+    context_present: Boolean(context),
+    artifact_path_present: Boolean(stringFromAnyKey(context, 'artifactPath', 'artifact_path')),
+    artifact_stable_identity_present: Boolean(stringFromAnyKey(context, 'artifactStableIdentity', 'artifact_stable_identity')),
+    original_artifact_href_present: Boolean(stringFromAnyKey(context, 'originalArtifactHref', 'original_artifact_href')),
+    current_page: numberFromAnyKey(context, 'currentPage', 'current_page'),
+    page_count: numberFromAnyKey(context, 'pageCount', 'page_count'),
+    annotation_count: numberFromAnyKey(recordFromAnyKey(context, 'annotationCounts', 'annotation_counts'), 'annotationCount', 'annotation_count'),
+    capability_supports_artifact_update: capabilitySummary?.supportsArtifactUpdate === true || capabilitySummary?.supports_artifact_update === true,
+    capability_supports_versioning: capabilitySummary?.supportsVersioning === true || capabilitySummary?.supports_versioning === true,
+    capability_supports_source_read: capabilitySummary?.supportsSourceRead === true || capabilitySummary?.supports_source_read === true,
+    status_phase: stringFromAnyKey(status, 'phase'),
+    status_cancellable: status?.cancellable === true,
+    latest_output_path_present: Boolean(stringFromAnyKey(latestOutput, 'artifactPath', 'artifact_path')),
+    preserved_mic: response.preservedMic === true || response.preserved_mic === true,
+    preserved_review: response.preservedReview === true || response.preserved_review === true,
+    review_tool_timed_out: response.review_tool_timed_out === true || response.reviewToolTimedOut === true,
+    review_tool_timeout_name: stringFromAnyKey(response, 'review_tool_timeout_name', 'reviewToolTimeoutName'),
+    review_tool_timeout_result_sent: response.review_tool_timeout_result_sent === true || response.reviewToolTimeoutResultSent === true,
+    raw_user_update_request_excluded: true,
+    raw_comment_text_excluded: true,
     raw_artifact_text_excluded: true,
     raw_frame_excluded: true,
   };

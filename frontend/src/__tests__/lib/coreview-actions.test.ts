@@ -287,6 +287,23 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
   }
 }
 
+function readFunctionDeclarationNames(setup: Record<string, unknown>): string[] {
+  const tools = Array.isArray(setup.tools) ? setup.tools : []
+  return tools.flatMap((tool) => {
+    if (!tool || typeof tool !== "object" || Array.isArray(tool)) return []
+    const record = tool as Record<string, unknown>
+    const declarations = [
+      ...(Array.isArray(record.functionDeclarations) ? record.functionDeclarations : []),
+      ...(Array.isArray(record.function_declarations) ? record.function_declarations : []),
+    ]
+    return declarations.flatMap((declaration) => {
+      if (!declaration || typeof declaration !== "object" || Array.isArray(declaration)) return []
+      const name = (declaration as Record<string, unknown>).name
+      return typeof name === "string" ? [name] : []
+    })
+  })
+}
+
 describe("Coreview action bus", () => {
   it("declares annotation tools with explicit visual annotation routing guidance", () => {
     const declarations = coreviewGeminiFunctionDeclarations()
@@ -307,9 +324,29 @@ describe("Coreview action bus", () => {
     const setup = withCoreviewGeminiToolDeclarations({
       tools: [{ functionDeclarations: [{ name: "emit_artifact" }] }],
     }, true, { allowArtifactCreation: false })
+    const declarationNames = readFunctionDeclarationNames(setup)
 
     expect(JSON.stringify(setup)).toContain(COREVIEW_ADD_ANNOTATION_TOOL_NAME)
-    expect(JSON.stringify(setup)).not.toContain("emit_artifact")
+    expect(declarationNames).toContain("coreview_request_artifact_update")
+    expect(declarationNames).toContain("coreview_cancel_builder_task")
+    expect(declarationNames).toContain("coreview_get_builder_status")
+    expect(declarationNames).not.toContain("emit_artifact")
+  })
+
+  it("filters generic builder tools when Coreview builder actions are exposed for review", () => {
+    const setup = withCoreviewGeminiToolDeclarations({
+      tools: [{ functionDeclarations: [
+        { name: "emit_artifact" },
+        { name: "start_builder_task" },
+        { name: "check_async_task" },
+      ] }],
+    }, true, { allowArtifactCreation: false })
+
+    const declarationNames = readFunctionDeclarationNames(setup)
+    expect(declarationNames).toContain("coreview_request_artifact_update")
+    expect(declarationNames).not.toContain("emit_artifact")
+    expect(declarationNames).not.toContain("start_builder_task")
+    expect(declarationNames).not.toContain("check_async_task")
   })
 
   it("sets a PDF page by one-based page number, waits for readiness, and refreshes", async () => {

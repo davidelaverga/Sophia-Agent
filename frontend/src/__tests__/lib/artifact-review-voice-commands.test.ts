@@ -51,6 +51,14 @@ describe("artifact review voice command parser", () => {
       kind: "builder_update",
       updateRequest: "make the background darker",
     })
+    expect(parseArtifactReviewVoiceCommand("make it darker")).toEqual({
+      kind: "builder_update",
+      updateRequest: "make it darker",
+    })
+    expect(parseArtifactReviewVoiceCommand("make those cards darker")).toEqual({
+      kind: "builder_update",
+      updateRequest: "make those cards darker",
+    })
     expect(parseArtifactReviewVoiceCommand("make a new version")).toEqual({
       kind: "builder_update",
       updateMode: "revise_version",

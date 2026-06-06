@@ -6,6 +6,7 @@ import { getCoreviewArtifactCapabilities } from "../../app/lib/coreview-artifact
 import {
   buildCoreviewBuilderUpdatePrompt,
   createCoreviewBuilderActionBus,
+  type CoreviewBuilderActionAdapter,
   type CoreviewBuilderWorkspaceEventInput,
 } from "../../app/lib/coreview-builder-actions"
 
@@ -74,13 +75,13 @@ function createHarness(options: {
   cancelOk?: boolean
 } = {}) {
   const events: CoreviewBuilderWorkspaceEventInput[] = []
-  const start = vi.fn(() => ({
+  const start = vi.fn<CoreviewBuilderActionAdapter["startBuilderTask"]>(() => ({
     ok: options.startOk ?? true,
     taskId: options.startTaskId ?? "task-1",
     runId: "run-1",
     userFacingMessage: "Sophia is updating this artifact.",
   }))
-  const cancel = vi.fn(() => ({
+  const cancel = vi.fn<CoreviewBuilderActionAdapter["cancelBuilderTask"]>(() => ({
     ok: options.cancelOk ?? true,
     taskId: options.activeTask?.taskId ?? "task-1",
     runId: options.activeTask?.runId ?? "run-1",
@@ -156,6 +157,9 @@ describe("Coreview builder action bus", () => {
       requestedChangeSummary: "make the cards more premium",
     })
     expect(harness.start).toHaveBeenCalledTimes(1)
+    expect(harness.start.mock.calls[0]?.[0].prompt).toContain("revise current artifact")
+    expect(harness.start.mock.calls[0]?.[0].prompt).toContain("Artifact path: mnt/user-data/outputs/site.html")
+    expect(harness.start.mock.calls[0]?.[0].prompt).toContain("Stable artifact identity")
     expect(harness.events.map((event) => event.type)).toEqual([
       "builder.update_requested",
       "builder.task_started",
@@ -272,7 +276,64 @@ describe("Coreview builder action bus", () => {
     if (!context) throw new Error("expected update context")
     const prompt = buildCoreviewBuilderUpdatePrompt(context)
     expect(prompt).toContain("start_builder_task")
+    expect(prompt).toContain("revise current artifact")
     expect(prompt).toContain("Do not call emit_artifact")
     expect(prompt).toContain("Prefer creating a new version")
+    expect(prompt).toContain("If the selected artifact is HTML")
+    expect(prompt).toContain("If the selected artifact is Markdown")
+  })
+
+  it("allows explicit Markdown-to-HTML conversion requests through versioned rebuild", async () => {
+    const current = createView({
+      rendererKind: "markdown",
+      artifactPath: "mnt/user-data/outputs/site-fallback.md",
+      artifactTitle: "site-fallback.md",
+      artifactStableIdentity: "user:unknown|thread:thread-1|path:mnt/user-data/outputs/site-fallback.md|renderer:markdown",
+    })
+    const harness = createHarness({ current })
+
+    const result = await harness.bus.requestArtifactUpdate({
+      userUpdateRequest: "rebuild this as HTML",
+      updateMode: "convert_format",
+    })
+
+    expect(result).toMatchObject({
+      ok: true,
+      action: "coreview_request_artifact_update",
+      result: "task_started",
+      updateMode: "convert_format",
+      rendererKind: "markdown",
+    })
+    expect(harness.start).toHaveBeenCalledTimes(1)
+    const request = harness.start.mock.calls[0]?.[0]
+    expect(request?.context).toMatchObject({
+      artifactPath: "mnt/user-data/outputs/site-fallback.md",
+      rendererKind: "markdown",
+      updateMode: "convert_format",
+    })
+    expect(request?.prompt).toContain("Renderer: markdown")
+    expect(request?.prompt).toContain("do not pretend it is HTML")
+  })
+
+  it("preserves an HTML target when the selected artifact renderer is HTML", async () => {
+    const harness = createHarness({
+      current: createView({
+        rendererKind: "html",
+        artifactPath: "mnt/user-data/outputs/current-site.html",
+        artifactTitle: "current-site.html",
+        artifactStableIdentity: "user:unknown|thread:thread-1|path:mnt/user-data/outputs/current-site.html|renderer:html",
+      }),
+    })
+
+    await harness.bus.requestArtifactUpdate({
+      userUpdateRequest: "make the cards darker",
+    })
+
+    const request = harness.start.mock.calls[0]?.[0]
+    expect(request?.context).toMatchObject({
+      artifactPath: "mnt/user-data/outputs/current-site.html",
+      rendererKind: "html",
+    })
+    expect(request?.prompt).toContain("If the selected artifact is HTML, preserve an HTML target")
   })
 })

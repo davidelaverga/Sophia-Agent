@@ -993,6 +993,8 @@ describe("Coreview artifact still-frame review", () => {
       preferredUpdateMode: "revise_version",
     })
     expect(request.prompt).toContain("Use start_builder_task")
+    expect(request.prompt).toContain("revise current artifact")
+    expect(request.prompt).toContain("Artifact path: mnt/user-data/outputs/launch-brief.md")
     expect(request.prompt).toContain("Do not call emit_artifact")
 
     await waitFor(() => {

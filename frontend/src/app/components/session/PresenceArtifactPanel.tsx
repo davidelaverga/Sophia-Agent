@@ -33,6 +33,7 @@ import {
   parseArtifactReviewVoiceCommand,
   parseArtifactReviewVoiceCommands,
   recordSophiaCaptureEvent,
+  registerCoreviewBuilderToolBridge,
   registerCoreviewToolBridge,
   safeArtifactViewTelemetry,
   useArtifactCoReview,
@@ -57,6 +58,7 @@ import {
   type CoreviewBuilderOutputStatus,
   type CoreviewBuilderStartAdapterResult,
   type CoreviewBuilderTaskStatus,
+  type CoreviewBuilderToolCallInput,
   type CoreviewBuilderWorkspaceEventInput,
   type CoreviewAddAnnotationAdapterInput,
   type CoreviewAddAnnotationAdapterResult,
@@ -2291,10 +2293,31 @@ export function PresenceArtifactPanel({
       return
     }
 
-    return registerCoreviewToolBridge((call: CoreviewToolCallInput) => (
+    const unregisterCoreviewToolBridge = registerCoreviewToolBridge((call: CoreviewToolCallInput) => (
       runCoreviewAction((bus) => bus.handleToolCall(call))
     ))
-  }, [builderStageActive, isVisible, runCoreviewAction])
+    const unregisterCoreviewBuilderToolBridge = registerCoreviewBuilderToolBridge(async (call: CoreviewBuilderToolCallInput) => {
+      const result = await coreviewBuilderActionBus.handleToolCall(call)
+      if (call.name === "coreview_get_builder_status") {
+        recordCoreviewBuilderTelemetry(result)
+      } else {
+        applyCoreviewBuilderResult(result)
+      }
+      return result
+    })
+
+    return () => {
+      unregisterCoreviewToolBridge()
+      unregisterCoreviewBuilderToolBridge()
+    }
+  }, [
+    applyCoreviewBuilderResult,
+    builderStageActive,
+    coreviewBuilderActionBus,
+    isVisible,
+    recordCoreviewBuilderTelemetry,
+    runCoreviewAction,
+  ])
 
   const routeArtifactReviewVoiceCommand = useCallback((transcript: string): ArtifactReviewVoiceCommandRouteResult => {
     if (!isVisible || !builderStageActive) {
