@@ -367,8 +367,21 @@ export function ArtifactPdfPreview({
         return
       }
 
+      const canvasContext = canvas.getContext("2d")
+      if (!canvasContext) {
+        setPageRenderState("failed")
+        onRenderStatusChangeRef.current?.({
+          ready: false,
+          reason: "capture_failed",
+          source: "pdf_page_canvas",
+          exactTextAvailable: false,
+          annotationOverlayCaptured: false,
+        })
+        return
+      }
+
       const renderTask = page.render({
-        canvas,
+        canvasContext,
         viewport,
         transform: devicePixelRatio === 1 ? undefined : [devicePixelRatio, 0, 0, devicePixelRatio, 0, 0],
       })

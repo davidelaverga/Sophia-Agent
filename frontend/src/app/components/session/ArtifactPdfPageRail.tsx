@@ -118,8 +118,14 @@ function ArtifactPdfPageThumbnail({
         return
       }
 
+      const canvasContext = canvas.getContext("2d")
+      if (!canvasContext) {
+        setRenderState("failed")
+        return
+      }
+
       renderTask = page.render({
-        canvas,
+        canvasContext,
         viewport,
         transform: devicePixelRatio === 1 ? undefined : [devicePixelRatio, 0, 0, devicePixelRatio, 0, 0],
       })
