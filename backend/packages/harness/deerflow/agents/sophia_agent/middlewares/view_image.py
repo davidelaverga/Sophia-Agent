@@ -16,9 +16,10 @@ injection format, completion detection, idempotency) is inherited
 unchanged from upstream so future fixes to the injection logic flow
 through automatically.
 
-The builder uses upstream ``ViewImageMiddleware`` directly because it
-exposes ``view_image_tool`` under its native name — see
-``builder_middlewares.py`` for that wiring.
+The builder exposes ``view_image_tool`` under its native name and uses
+``ClearOnInjectViewImageMiddleware`` so repeated image views replace
+stale base64-bearing messages — see ``builder_middlewares.py`` for that
+wiring.
 """
 
 from __future__ import annotations

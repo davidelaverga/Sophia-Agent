@@ -24,6 +24,10 @@ services:
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false
+      # Required by builder visual skills. The image-generation skill and
+      # ppt-generation workflow execute inside sophia-langgraph, not gateway.
+      - key: OPENAI_API_KEY
+        sync: false
       - key: MEM0_API_KEY
         sync: false
       - key: SOPHIA_SESSION_STORE

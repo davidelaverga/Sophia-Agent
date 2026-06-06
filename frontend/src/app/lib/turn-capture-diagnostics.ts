@@ -193,8 +193,11 @@ export type TurnCaptureDiagnostics = {
       publicSseState: string | null;
       artifactCount: number | null;
       artifactPublicEventCount: number | null;
+      artifactRuntimeIngestCount: number | null;
+      artifactSelectedStageCount: number | null;
       artifactRenderedCount: number | null;
       artifactCountSource: string | null;
+      artifactCountMismatchReason: string | null;
     };
   };
 };
@@ -837,8 +840,11 @@ export function buildTurnCaptureDiagnostics(
         publicSseState: stringValue(geminiTelemetry?.publicSseState) ?? publicSseState,
         artifactCount: numericValue(metricCounts?.artifacts),
         artifactPublicEventCount: numericValue(metricCounts?.artifactPublicEventCount),
+        artifactRuntimeIngestCount: numericValue(metricCounts?.artifactRuntimeIngestCount),
+        artifactSelectedStageCount: numericValue(metricCounts?.artifactSelectedStageCount),
         artifactRenderedCount: numericValue(metricCounts?.artifactRenderedCount),
         artifactCountSource: stringValue(metricCounts?.artifactCountSource),
+        artifactCountMismatchReason: stringValue(metricCounts?.artifactCountMismatchReason),
       },
     },
   };

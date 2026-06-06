@@ -46,11 +46,23 @@ def test_gateway_app_mounts_sessions_and_bootstrap_routes(tmp_path, monkeypatch)
     }
 
 
+def test_gateway_does_not_mount_legacy_public_builder_completion_stream():
+    from app.gateway.app import create_app
+
+    app = create_app()
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/builder-events/last")
+
+    assert response.status_code == 404
+
+
 def test_gateway_app_mounts_voice_connect_route(monkeypatch):
     from app.gateway.app import create_app
 
     monkeypatch.setenv("STREAM_API_KEY", "test-api-key")
     monkeypatch.setenv("STREAM_API_SECRET", "test-api-secret")
+    monkeypatch.setenv("SOPHIA_VOICE_RUNTIME_MODE", "legacy_cascade")
+    monkeypatch.setenv("SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED", "false")
 
     app = create_app()
     app.dependency_overrides[require_authorized_user_scope] = lambda: "test_user"

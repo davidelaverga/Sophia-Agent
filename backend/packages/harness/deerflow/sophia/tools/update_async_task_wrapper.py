@@ -40,6 +40,8 @@ model's tool-selection from PR #129 remains valid.
 
 import logging
 import re
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from langchain.tools import ToolRuntime
@@ -48,6 +50,7 @@ from langchain_core.tools import StructuredTool
 from langchain_core.tools.base import ToolException
 from langgraph.types import Command
 
+from deerflow.sophia.builder_web_policy import extract_explicit_user_urls
 from deerflow.sophia.tools.start_builder_task import _TERMINAL_TASK_STATUSES
 
 # NOTE: this module deliberately does NOT use `from __future__ import
@@ -62,6 +65,149 @@ from deerflow.sophia.tools.start_builder_task import _TERMINAL_TASK_STATUSES
 # 2026-05-21 19:28 UTC. Keep annotations evaluated at runtime here.
 
 logger = logging.getLogger(__name__)
+
+
+def _unique_urls(urls: list[str] | tuple[str, ...] | None) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for url in urls or []:
+        normalized = str(url).strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
+
+
+def _update_run_input(message: str, explicit_update_urls: list[str]) -> dict[str, Any]:
+    run_input: dict[str, Any] = {"messages": [{"role": "user", "content": message}]}
+    urls = _unique_urls(explicit_update_urls)
+    if urls:
+        run_input["explicit_user_urls"] = urls
+        run_input["builder_allowed_urls"] = urls
+        run_input["builder_update_required_urls"] = urls
+    return run_input
+
+
+def _native_update_context(native_callable: Any) -> tuple[dict[str, Any], Any] | None:
+    closure = getattr(native_callable, "__closure__", None)
+    names = getattr(getattr(native_callable, "__code__", None), "co_freevars", ())
+    if not closure or not names:
+        return None
+    nonlocals = {
+        name: cell.cell_contents
+        for name, cell in zip(names, closure, strict=False)
+    }
+    agent_map = nonlocals.get("agent_map")
+    clients = nonlocals.get("clients")
+    if isinstance(agent_map, dict) and clients is not None:
+        return agent_map, clients
+    return None
+
+
+def _updated_task_entry(tracked: dict[str, Any], run_id: str) -> dict[str, Any]:
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    task_id = str(tracked.get("task_id") or tracked.get("thread_id") or "")
+    return {
+        "task_id": task_id,
+        "agent_name": tracked["agent_name"],
+        "thread_id": tracked["thread_id"],
+        "run_id": run_id,
+        "status": "running",
+        "created_at": str(tracked.get("created_at") or now),
+        "last_checked_at": str(tracked.get("last_checked_at") or now),
+        "last_updated_at": now,
+    }
+
+
+def _update_task_command(
+    tracked: dict[str, Any],
+    run_id: str,
+    tool_call_id: str | None,
+) -> Command:
+    task = _updated_task_entry(tracked, run_id)
+    msg = f"Updated async subagent. task_id: {tracked['task_id']}"
+    return Command(
+        update={
+            "messages": [ToolMessage(msg, tool_call_id=tool_call_id)],
+            "async_tasks": {tracked["task_id"]: task},
+        }
+    )
+
+
+def _update_run_config(runtime: ToolRuntime | None, tracked: dict[str, Any]) -> dict[str, Any]:
+    configurable: dict[str, Any] = {
+        "thread_id": tracked["thread_id"],
+        "graph_id": tracked["agent_name"],
+    }
+    runtime_config = getattr(runtime, "config", None)
+    if isinstance(runtime_config, dict):
+        source = runtime_config.get("configurable")
+        if isinstance(source, dict):
+            for key in ("user_id", "parent_thread_id", "model_name"):
+                value = source.get(key)
+                if isinstance(value, str) and value:
+                    configurable[key] = value
+    return {"configurable": configurable}
+
+
+def _dispatch_update_with_url_state_sync(
+    *,
+    native_func: Any,
+    task_id: str,
+    message: str,
+    explicit_update_urls: list[str],
+    runtime: ToolRuntime,
+    state: dict[str, Any] | None,
+) -> Command | str | None:
+    context = _native_update_context(native_func)
+    tracked = _resolve_tracked(state, task_id)
+    if context is None or tracked is None:
+        return None
+    agent_map, clients = context
+    try:
+        spec = agent_map[tracked["agent_name"]]
+        client = clients.get_sync(tracked["agent_name"])
+        run = client.runs.create(
+            thread_id=tracked["thread_id"],
+            assistant_id=spec["graph_id"],
+            input=_update_run_input(message, explicit_update_urls),
+            config=_update_run_config(runtime, tracked),
+            multitask_strategy="interrupt",
+        )
+    except Exception as exc:  # noqa: BLE001 - match native tool failure semantics.
+        logger.warning("Failed to update async subagent '%s': %s", tracked.get("agent_name"), exc)
+        return f"Failed to update async subagent: {exc}"
+    return _update_task_command(tracked, run["run_id"], runtime.tool_call_id)
+
+
+async def _dispatch_update_with_url_state_async(
+    *,
+    native_coroutine: Any,
+    task_id: str,
+    message: str,
+    explicit_update_urls: list[str],
+    runtime: ToolRuntime,
+    state: dict[str, Any] | None,
+) -> Command | str | None:
+    context = _native_update_context(native_coroutine)
+    tracked = _resolve_tracked(state, task_id)
+    if context is None or tracked is None:
+        return None
+    agent_map, clients = context
+    try:
+        spec = agent_map[tracked["agent_name"]]
+        client = clients.get_async(tracked["agent_name"])
+        run = await client.runs.create(
+            thread_id=tracked["thread_id"],
+            assistant_id=spec["graph_id"],
+            input=_update_run_input(message, explicit_update_urls),
+            config=_update_run_config(runtime, tracked),
+            multitask_strategy="interrupt",
+        )
+    except Exception as exc:  # noqa: BLE001 - match native tool failure semantics.
+        logger.warning("Failed to update async subagent '%s': %s", tracked.get("agent_name"), exc)
+        return f"Failed to update async subagent: {exc}"
+    return _update_task_command(tracked, run["run_id"], runtime.tool_call_id)
 
 
 async def _fetch_live_status(tracked: dict[str, Any]) -> str | None:
@@ -277,6 +423,21 @@ _TASK_TYPE_EXTENSIONS = {
     "visual_report": "pdf",
 }
 
+_HTML_OUTPUT_RE = re.compile(
+    r"\bhtml\b|\bhtml\s+(?:document|file|report|summary|brief|article|explainer)\b",
+    re.IGNORECASE,
+)
+_REQUESTED_OUTPUT_EXTENSION_PATTERNS = (
+    ("html", _HTML_OUTPUT_RE),
+    ("md", re.compile(r"\b(?:markdown|md)\b", re.IGNORECASE)),
+    ("pdf", re.compile(r"\bpdf\b", re.IGNORECASE)),
+    ("pptx", re.compile(r"\b(?:pptx|powerpoint|slide\s+deck|slides?)\b", re.IGNORECASE)),
+    ("docx", re.compile(r"\b(?:docx|word\s+document)\b", re.IGNORECASE)),
+    ("xlsx", re.compile(r"\b(?:xlsx|spreadsheet|excel)\b", re.IGNORECASE)),
+    ("csv", re.compile(r"\bcsv\b", re.IGNORECASE)),
+    ("json", re.compile(r"\bjson\b", re.IGNORECASE)),
+)
+
 _FALLBACK_TASK_SLUG = "build"
 _MAX_SLUG_SOURCE_CHARS = 60
 
@@ -300,6 +461,15 @@ def _slugify_for_filename(text: str, max_len: int = 40) -> str:
     return cleaned[:max_len].rstrip("-") or _FALLBACK_TASK_SLUG
 
 
+def _requested_output_extension(description: str | None) -> str | None:
+    if not isinstance(description, str) or not description.strip():
+        return None
+    for ext, pattern in _REQUESTED_OUTPUT_EXTENSION_PATTERNS:
+        if pattern.search(description):
+            return ext
+    return None
+
+
 def _suggest_artifact_filename(
     task_type: str | None, description: str | None
 ) -> str:
@@ -309,7 +479,7 @@ def _suggest_artifact_filename(
     the model can converge on the same target across retries. Falls back to
     ``build.md`` when both inputs are missing.
     """
-    ext = _TASK_TYPE_EXTENSIONS.get(task_type or "", "md")
+    ext = _requested_output_extension(description) or _TASK_TYPE_EXTENSIONS.get(task_type or "", "md")
     slug = _slugify_for_filename(description or _FALLBACK_TASK_SLUG)
     return f"{slug}.{ext}"
 
@@ -324,10 +494,33 @@ def _extract_str(d: dict[str, Any] | None, key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-# Codex P1 review 2026-05-22: gate write_file_tool prescription by
-# task_type so binary deliverables (.pptx / .pdf) don't get told to
-# use write_file_tool — they need a generator script run via bash.
+# Codex P1 review 2026-05-22: binary deliverables (.pptx / .pdf) don't get
+# told to use write_file_tool — they need a generator script run via bash.
+# 2026-05-30 update: branch on the concrete target extension, not task_type,
+# because visual_report can still be an HTML deliverable.
 _BINARY_OUTPUT_TASK_TYPES = frozenset({"presentation", "visual_report"})
+_TEXT_TARGET_EXTENSIONS = frozenset({
+    "html",
+    "htm",
+    "md",
+    "txt",
+    "json",
+    "csv",
+    "yaml",
+    "yml",
+    "js",
+    "ts",
+    "css",
+})
+_BINARY_TARGET_EXTENSIONS = frozenset({
+    "pdf",
+    "pptx",
+    "docx",
+    "xlsx",
+    "png",
+    "jpg",
+    "jpeg",
+})
 
 # Canonical task_type values accepted by ``start_builder_task``'s
 # ``StartBuilderTaskInput`` schema. The terminal-redirect prose must
@@ -392,33 +585,74 @@ def _resolve_target_path(
     Priority:
       1. ``tracked["artifact_path"]`` — the prior run delivered something
          on disk; continue editing exactly that.
-      2. Derived ``/mnt/user-data/outputs/<slug>.<ext>`` from the
+      2. ``tracked["artifact_target_path"]`` or
+         ``delegation_context["artifact_target_path"]`` — the canonical
+         target selected at initial launch before any deliverable existed.
+      3. Derived ``/mnt/user-data/outputs/<slug>.<ext>`` from the
          delegation_context's original task brief + task_type.
     """
     prior_path = _extract_str(tracked, "artifact_path")
     if prior_path:
         return prior_path
+    tracked_target = _extract_str(tracked, "artifact_target_path")
+    if tracked_target:
+        return tracked_target
+    delegated_target = _extract_str(delegation_context, "artifact_target_path")
+    if delegated_target:
+        return delegated_target
     task_type = _resolve_effective_task_type(tracked, delegation_context)
     description = _extract_str(delegation_context, "task")
     suggested = _suggest_artifact_filename(task_type, description)
     return f"/mnt/user-data/outputs/{suggested}"
 
 
+def _target_extension(target_path: str | None) -> str:
+    return Path(target_path or "").suffix.lower().lstrip(".")
+
+
+def _target_uses_text_writer(target_path: str, task_type: str | None) -> bool:
+    ext = _target_extension(target_path)
+    if ext in _TEXT_TARGET_EXTENSIONS:
+        return True
+    if ext in _BINARY_TARGET_EXTENSIONS:
+        return False
+    return task_type not in _BINARY_OUTPUT_TASK_TYPES
+
+
 def _file_target_directive_block(target_path: str, task_type: str | None) -> str:
-    """Build the "Concrete file target" + HARD rules block, branched by
-    task_type. Binary deliverables (.pptx via presentation, .pdf via
-    visual_report) cannot be authored by ``write_file_tool`` directly
-    (it writes text bytes only) — the model must produce a generator
-    script and invoke it via ``bash_tool``. Text deliverables get the
-    canonical write_file_tool guidance.
+    """Build the "Concrete file target" + HARD rules block, branched by the
+    concrete target extension. Binary deliverables (.pptx/.pdf) cannot be
+    authored by ``write_file_tool`` directly (it writes text bytes only), while
+    HTML reports remain text deliverables even when task_type is visual_report.
 
     Codex P1 review 2026-05-22: the prior universal "MUST use
     write_file_tool" rule was incompatible with binary task_types.
     """
-    if task_type in _BINARY_OUTPUT_TASK_TYPES:
+    target_ext = _target_extension(target_path)
+    if target_ext == "pptx":
+        return (
+            f"Concrete file target: `{target_path}`. This is a PPTX slide-deck "
+            "update. The deliverable must come from the bundled presentation "
+            "skill workflow, not ad hoc python-pptx/write_file loops.\n"
+            "\n"
+            "HARD rules:\n"
+            "  - Read `/mnt/skills/public/ppt-generation/SKILL.md` if needed, "
+            "then generate slide images with "
+            "`/mnt/skills/public/image-generation/scripts/generate.py` and "
+            "compose the deck with "
+            "`/mnt/skills/public/ppt-generation/scripts/generate.py`.\n"
+            "  - Do NOT call `write_file` to author the PPTX binary and do NOT "
+            "create Python deck scripts as the user-ready artifact.\n"
+            "  - Emit only after a valid `.pptx` exists under "
+            "`/mnt/user-data/outputs/`. If the skill cannot complete after one "
+            "correction, write a real Markdown or HTML fallback with "
+            "`write_file(description=..., path=..., content=..., append=False)` "
+            "and emit that degraded file."
+        )
+    if not _target_uses_text_writer(target_path, task_type):
         return (
             f"Concrete file target: `{target_path}`. The deliverable for "
-            f"`{task_type}` is a BINARY file — author a generator script "
+            f"`{task_type or 'this task'}` is a BINARY file — author a generator script "
             f"(e.g. Python with python-pptx, reportlab, weasyprint, or the "
             f"chart-visualization / ppt-generation skill scripts) and run "
             f"it via `bash_tool`. The script may live anywhere; only the "
@@ -427,7 +661,7 @@ def _file_target_directive_block(target_path: str, task_type: str | None) -> str
             f"HARD rules:\n"
             f"  - The final deliverable path MUST be under "
             f"`/mnt/user-data/outputs/`.\n"
-            f"  - DO NOT call `write_file_tool` to author the binary "
+            f"  - DO NOT call `write_file` to author the binary "
             f"content directly — that tool writes text bytes only. Use it "
             f"for the generator SCRIPT, not the binary output.\n"
             f"  - After the binary file is on disk under "
@@ -437,11 +671,15 @@ def _file_target_directive_block(target_path: str, task_type: str | None) -> str
     return (
         f"Concrete file target: `{target_path}`. Write the final document to "
         f"that exact path (or, for very long documents, open with "
-        f"`write_file_tool(path, content, append=False)` and extend via "
+        f"`write_file(description=..., path=..., content=..., append=False)` and extend via "
         f"`append=True` chunks — same path each time).\n"
         f"\n"
+        f"If the target is HTML, charts and diagrams should be embedded or "
+        f"linked from supporting files, but the final artifact is still the "
+        f"HTML file named above.\n"
+        f"\n"
         f"HARD rules:\n"
-        f"  - All `write_file_tool` paths MUST start with "
+        f"  - All `write_file` paths MUST start with "
         f"`/mnt/user-data/outputs/`.\n"
         f"  - DO NOT create `test.md`, `test2.md`, or any scratch filename.\n"
         f"  - After the file is complete, call `emit_builder_artifact` with "
@@ -477,13 +715,27 @@ def _augment_update_message(
     target_path = _resolve_target_path(tracked, delegation_context)
     task_type = _resolve_effective_task_type(tracked, delegation_context)
     target_block = _file_target_directive_block(target_path, task_type)
+    explicit_update_urls = extract_explicit_user_urls(message)
+    if explicit_update_urls:
+        research_block = (
+            "This update contains explicit URL(s). They are approved fetch "
+            "targets. Before editing the deliverable, use builder_web_fetch "
+            "on the exact new URL(s), or builder_web_search if fetch is "
+            "unavailable, then incorporate the findings.\n"
+        )
+    else:
+        research_block = (
+            "Preserve and reuse prior research from the message history above. "
+            "If this update introduces a new named project, paper, framework, "
+            "company, market, factual topic, or source requirement, call "
+            "builder_web_search or builder_web_fetch for that new material "
+            "before editing the deliverable.\n"
+        )
 
     directive = (
         f"{_FILE_TARGET_HINT_MARKER}\n"
         f"You are RESUMING (not restarting) a build that was interrupted by "
-        f"this update message. Your prior research is in the message history "
-        f"above — TRUST it and DO NOT re-run web_search / web_fetch on the "
-        f"same topic.\n"
+        f"this update message. {research_block}"
         f"\n"
         f"{target_block}\n"
         f"\n"
@@ -637,6 +889,18 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
             _resolve_tracked(state, task_id),
             state.get("delegation_context") if isinstance(state, dict) else None,
         )
+        explicit_update_urls = extract_explicit_user_urls(message)
+        if explicit_update_urls:
+            url_state_result = _dispatch_update_with_url_state_sync(
+                native_func=native_func,
+                task_id=task_id,
+                message=augmented,
+                explicit_update_urls=explicit_update_urls,
+                runtime=runtime,
+                state=state,
+            )
+            if url_state_result is not None:
+                return url_state_result
         return native_func(task_id=task_id, message=augmented, runtime=runtime)
 
     async def aupdate_async_task(
@@ -701,6 +965,18 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
             _resolve_tracked(state, task_id),
             state.get("delegation_context") if isinstance(state, dict) else None,
         )
+        explicit_update_urls = extract_explicit_user_urls(message)
+        if explicit_update_urls:
+            url_state_result = await _dispatch_update_with_url_state_async(
+                native_coroutine=native_coroutine,
+                task_id=task_id,
+                message=augmented,
+                explicit_update_urls=explicit_update_urls,
+                runtime=runtime,
+                state=state,
+            )
+            if url_state_result is not None:
+                return url_state_result
         return await native_coroutine(
             task_id=task_id, message=augmented, runtime=runtime
         )

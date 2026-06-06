@@ -14,6 +14,9 @@ import logging
 import mimetypes
 import os
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -22,6 +25,20 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BUCKET = "sophia_builder"
 _REQUEST_TIMEOUT_SECONDS = 15.0
+_MAX_LIST_DEPTH = 8
+
+# Keyspace separation (Codex P1 PR #132). User UPLOADS mirror under
+# ``{thread_id}/uploads/{name}``; builder OUTPUTS mirror under
+# ``{thread_id}/{output_relative_path}`` (see ``supabase_mirror.py``).
+# Without this prefix a user upload and a builder artifact with the same
+# basename (e.g. ``report.pdf``) would overwrite each other in the same
+# bucket folder — whichever ran last would win, and a later local miss in
+# view_user_image / read_user_document could materialize the wrong bytes
+# (or a completion-card signed URL could point at an upload instead of the
+# builder deliverable). ``uploads_object_name`` is the SINGLE source of
+# truth for the upload prefix, shared by the gateway upload mirror AND the
+# companion read tools so both address the exact same object.
+UPLOADS_PREFIX = "uploads/"
 
 
 @dataclass(frozen=True)
@@ -29,6 +46,14 @@ class SupabaseConfig:
     url: str
     service_role_key: str
     bucket: str
+
+
+@dataclass(frozen=True)
+class SupabaseArtifactInfo:
+    filename: str
+    size_bytes: int
+    modified_at: str
+    content_type: str | None = None
 
 
 def _load_config() -> SupabaseConfig | None:
@@ -48,8 +73,15 @@ def is_configured() -> bool:
 
 
 def _object_url(config: SupabaseConfig, object_path: str) -> str:
-    # Path segments stay as-is; Supabase Storage accepts raw file names.
-    return f"{config.url}/storage/v1/object/{config.bucket}/{object_path}"
+    return f"{config.url}/storage/v1/object/{config.bucket}/{_encoded_object_path(object_path)}"
+
+
+def _encoded_object_path(object_path: str) -> str:
+    return "/".join(quote(segment, safe="") for segment in object_path.split("/"))
+
+
+def _list_url(config: SupabaseConfig) -> str:
+    return f"{config.url}/storage/v1/object/list/{config.bucket}"
 
 
 def _object_path(thread_id: str, filename: str) -> str:
@@ -60,18 +92,115 @@ def _object_path(thread_id: str, filename: str) -> str:
     return f"{safe_thread}/{safe_name}"
 
 
-# Keyspace separation (Codex P1 PR #132). User UPLOADS mirror under
-# ``{thread_id}/uploads/{name}``; builder OUTPUTS mirror under
-# ``{thread_id}/{output_relative_path}`` (see ``supabase_mirror.py``).
-# Without this prefix a user upload and a builder artifact with the same
-# basename (e.g. ``report.pdf``) would overwrite each other in the same
-# bucket folder — whichever ran last would win, and a later local miss in
-# view_user_image / read_user_document could materialize the wrong bytes
-# (or a completion-card signed URL could point at an upload instead of the
-# builder deliverable). ``uploads_object_name`` is the SINGLE source of
-# truth for the upload prefix, shared by the gateway upload mirror AND the
-# companion read tools so both address the exact same object.
-UPLOADS_PREFIX = "uploads/"
+def _thread_prefix(thread_id: str) -> str:
+    safe_thread = thread_id.strip().strip("/")
+    if not safe_thread:
+        raise ValueError("thread_id is required")
+    return f"{safe_thread}/"
+
+
+def _metadata_value(record: dict[str, Any], *keys: str) -> Any:
+    metadata = record.get("metadata")
+    for key in keys:
+        if key in record:
+            return record[key]
+        if isinstance(metadata, dict) and key in metadata:
+            return metadata[key]
+    return None
+
+
+def _coerce_size(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return number if number >= 0 else 0
+
+
+def _coerce_modified_at(value: Any) -> str:
+    if isinstance(value, str) and value:
+        return value
+    return datetime.now(UTC).isoformat()
+
+
+def _is_folder_record(record: dict[str, Any]) -> bool:
+    if record.get("id") is not None:
+        return False
+    metadata = record.get("metadata")
+    if isinstance(metadata, dict) and metadata:
+        return False
+    return _metadata_value(record, "size", "contentLength", "content_length") is None
+
+
+def _relative_list_name(root_prefix: str, current_prefix: str, raw_name: str) -> str:
+    if raw_name.startswith(root_prefix):
+        return raw_name[len(root_prefix) :]
+    if raw_name.startswith(current_prefix):
+        return raw_name[len(root_prefix) :]
+    current_relative = current_prefix[len(root_prefix) :] if current_prefix.startswith(root_prefix) else ""
+    return f"{current_relative}{raw_name}"
+
+
+def _folder_prefix_from_list_record(root_prefix: str, current_prefix: str, record: dict[str, Any]) -> str | None:
+    raw_name = record.get("name")
+    if not isinstance(raw_name, str) or not raw_name.strip():
+        return None
+    relative = _relative_list_name(root_prefix, current_prefix, raw_name).strip().strip("/")
+    if not relative:
+        return None
+    if _is_uploads_relative_name(relative):
+        return None
+    return f"{root_prefix}{relative}/"
+
+
+def _is_uploads_relative_name(filename: str) -> bool:
+    normalized = filename.strip().lstrip("/")
+    return normalized == UPLOADS_PREFIX.rstrip("/") or normalized.startswith(UPLOADS_PREFIX)
+
+
+def _record_name(record: Any) -> str | None:
+    raw_name = record.get("name") if isinstance(record, dict) else None
+    return raw_name if isinstance(raw_name, str) and raw_name else None
+
+
+def _record_content_type(record: dict[str, Any]) -> str | None:
+    content_type = _metadata_value(record, "mimetype", "mimeType", "contentType", "content_type")
+    return content_type if isinstance(content_type, str) and content_type else None
+
+
+def _record_modified_at(record: dict[str, Any]) -> str:
+    return _coerce_modified_at(
+        record.get("updated_at") or record.get("created_at") or record.get("last_accessed_at")
+    )
+
+
+def _info_from_list_record(
+    root_prefix: str,
+    record: Any,
+    *,
+    current_prefix: str | None = None,
+) -> SupabaseArtifactInfo | None:
+    if not isinstance(record, dict):
+        return None
+    raw_name = _record_name(record)
+    if raw_name is None:
+        return None
+    current = current_prefix or root_prefix
+    if _is_folder_record(record):
+        return None
+    filename = _relative_list_name(root_prefix, current, raw_name)
+    filename = filename.strip().lstrip("/")
+    if not filename or filename.endswith("/"):
+        return None
+    if _is_uploads_relative_name(filename):
+        return None
+    size = _coerce_size(_metadata_value(record, "size", "contentLength", "content_length"))
+    return SupabaseArtifactInfo(
+        filename=filename,
+        size_bytes=size,
+        modified_at=_record_modified_at(record),
+        content_type=_record_content_type(record),
+    )
 
 
 def uploads_object_name(filename: str) -> str:
@@ -132,6 +261,148 @@ def upload_artifact(
         len(content),
     )
     return object_path
+
+
+def _list_page(
+    http: httpx.Client,
+    *,
+    url: str,
+    headers: dict[str, str],
+    prefix: str,
+    page_size: int,
+    offset: int,
+) -> list[Any] | None:
+    response = http.post(
+        url,
+        headers=headers,
+        json={
+            "prefix": prefix,
+            "limit": page_size,
+            "offset": offset,
+            "sortBy": {"column": "updated_at", "order": "desc"},
+        },
+    )
+    response.raise_for_status()
+    data = response.json()
+    return data if isinstance(data, list) else None
+
+
+def _extend_artifact_list(
+    artifacts: list[SupabaseArtifactInfo],
+    item: Any,
+    *,
+    root_prefix: str,
+    current_prefix: str,
+) -> str | None:
+    if isinstance(item, dict) and _is_folder_record(item):
+        return _folder_prefix_from_list_record(root_prefix, current_prefix, item)
+    if info := _info_from_list_record(root_prefix, item, current_prefix=current_prefix):
+        artifacts.append(info)
+    return None
+
+
+def _list_prefix_artifacts(
+    http: httpx.Client,
+    *,
+    url: str,
+    headers: dict[str, str],
+    root_prefix: str,
+    current_prefix: str,
+    page_size: int,
+    thread_id: str,
+    depth: int,
+    visited: set[str],
+) -> list[SupabaseArtifactInfo]:
+    if current_prefix in visited or depth > _MAX_LIST_DEPTH:
+        return []
+    visited.add(current_prefix)
+    offset = 0
+    artifacts: list[SupabaseArtifactInfo] = []
+    while True:
+        data = _list_page(
+            http,
+            url=url,
+            headers=headers,
+            prefix=current_prefix,
+            page_size=page_size,
+            offset=offset,
+        )
+        if data is None:
+            logger.warning(
+                "Supabase artifact list returned non-list payload for thread_id=%s prefix=%s",
+                thread_id,
+                current_prefix,
+            )
+            return artifacts
+        for item in data:
+            child_prefix = _extend_artifact_list(
+                artifacts,
+                item,
+                root_prefix=root_prefix,
+                current_prefix=current_prefix,
+            )
+            if child_prefix:
+                artifacts.extend(
+                    _list_prefix_artifacts(
+                        http,
+                        url=url,
+                        headers=headers,
+                        root_prefix=root_prefix,
+                        current_prefix=child_prefix,
+                        page_size=page_size,
+                        thread_id=thread_id,
+                        depth=depth + 1,
+                        visited=visited,
+                    )
+                )
+        if len(data) < page_size:
+            return artifacts
+        offset += page_size
+
+
+def list_artifacts(
+    thread_id: str,
+    *,
+    client: httpx.Client | None = None,
+    limit: int = 1000,
+) -> list[SupabaseArtifactInfo]:
+    """List artifacts stored under ``sophia_builder/{thread_id}/``.
+
+    Returns an empty list when Supabase is not configured or the prefix has no
+    objects. Raises :class:`httpx.HTTPError` for transport or unexpected HTTP
+    failures so gateway callers can log the failure without hiding local files.
+    """
+    config = _load_config()
+    if config is None:
+        return []
+
+    prefix = _thread_prefix(thread_id)
+    url = _list_url(config)
+    headers = {
+        "Authorization": f"Bearer {config.service_role_key}",
+        "apikey": config.service_role_key,
+        "Content-Type": "application/json",
+    }
+    page_size = max(1, min(int(limit), 1000))
+
+    owns_client = client is None
+    http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
+
+    try:
+        return _list_prefix_artifacts(
+            http,
+            url=url,
+            headers=headers,
+            root_prefix=prefix,
+            current_prefix=prefix,
+            page_size=page_size,
+            thread_id=thread_id,
+            depth=0,
+            visited=set(),
+        )
+    finally:
+        if owns_client:
+            http.close()
 
 
 def check_artifact_exists(
@@ -210,7 +481,7 @@ def create_signed_url(
         return None
 
     object_path = _object_path(thread_id, filename)
-    sign_url = f"{config.url}/storage/v1/object/sign/{config.bucket}/{object_path}"
+    sign_url = f"{config.url}/storage/v1/object/sign/{config.bucket}/{_encoded_object_path(object_path)}"
     headers = {
         "Authorization": f"Bearer {config.service_role_key}",
         "apikey": config.service_role_key,

@@ -15,6 +15,7 @@ interface UseSessionUiInteractionsParams {
   setShowScaffold: (show: boolean) => void;
   triggerLightHaptic: () => void;
   onBaseMicClick: () => void;
+  protectArtifactStageOpen?: boolean;
 }
 
 export function useSessionUiInteractions({
@@ -30,6 +31,7 @@ export function useSessionUiInteractions({
   setShowScaffold,
   triggerLightHaptic,
   onBaseMicClick,
+  protectArtifactStageOpen = false,
 }: UseSessionUiInteractionsParams) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -90,10 +92,10 @@ export function useSessionUiInteractions({
   }, [isReadOnly]);
 
   useEffect(() => {
-    if (!showArtifactsUi && showArtifacts) {
+    if (!showArtifactsUi && showArtifacts && !protectArtifactStageOpen) {
       setShowArtifacts(false);
     }
-  }, [showArtifactsUi, showArtifacts, setShowArtifacts]);
+  }, [protectArtifactStageOpen, showArtifactsUi, showArtifacts, setShowArtifacts]);
 
   const handleMicClick = useCallback(() => {
     if (isReadOnly) return;

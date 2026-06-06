@@ -78,7 +78,7 @@ export function VoiceFirstComposer({
   justSent = false,
   voiceStatus = 'ready',
   isTyping = false,
-  statusText: _statusText,
+  statusText,
   isOffline: _isOffline = false,
   isConnecting: _isConnecting = false,
   focusRequestToken,
@@ -325,6 +325,17 @@ export function VoiceFirstComposer({
               </p>
             )}
           </div>
+          )}
+
+          {!textOnly && statusText && (
+            <p
+              role="status"
+              aria-live="polite"
+              className="max-w-[240px] text-center text-[11px] font-medium leading-relaxed"
+              style={{ color: 'var(--cosmic-text-whisper)' }}
+            >
+              {statusText}
+            </p>
           )}
 
           {/* Text Input Toggle & Collapsible Area — text mode only */}

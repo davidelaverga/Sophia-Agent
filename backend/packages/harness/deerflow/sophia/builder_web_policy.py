@@ -6,21 +6,6 @@ import re
 
 _EXPLICIT_URL_RE = re.compile(r"https?://[^\s<>\]\)\"']+")
 _TRAILING_URL_PUNCTUATION = ".,;:!?)]}\"'"
-_PRESENTATION_OR_DOCUMENT_TYPES = {"presentation", "document", "visual_report"}
-_DISALLOWED_TASK_TYPES = {"frontend"}
-_FRESHNESS_CUES = (
-    "latest",
-    "current",
-    "today",
-    "recent",
-    "verify",
-    "research",
-    "compare",
-    "market",
-    "competitor",
-    "pricing",
-    "trend",
-)
 
 
 def normalize_builder_web_url(url: str) -> str:
@@ -42,36 +27,13 @@ def extract_explicit_user_urls(text: str) -> list[str]:
 
 
 def should_allow_builder_web_research(task_type: str, task: str) -> bool:
-    """Gate autonomous browsing for the builder's phase-1 rollout.
+    """Return whether browser tools are available to the builder.
 
-    PR-C F5 (2026-04-24): ``document`` task types default to research-ON
-    because users typically request docs that require researched content
-    (reports, summaries, competitor analyses, briefs). This removes the
-    freshness-cue heuristic for documents — the gate was too restrictive
-    and frequently left doc builds without any sources. ``presentation``
-    and ``visual_report`` keep the freshness-cue heuristic; ``frontend``
-    (code) stays off; ``research`` stays on.
+    Web research is a capability, not a task-type mode. The builder prompt
+    decides when browsing is required before writing; task_type should never
+    remove the tools from a build that may need external facts or URLs.
     """
-    normalized_type = (task_type or "").strip().lower()
-    task_text = (task or "").lower()
-
-    if normalized_type == "research":
-        return True
-    if normalized_type in _DISALLOWED_TASK_TYPES:
-        return False
-
-    # Documents always default to research-on (PR-C F5).
-    if normalized_type == "document":
-        return True
-
-    explicit_urls = extract_explicit_user_urls(task)
-    if explicit_urls:
-        return True
-
-    if normalized_type in _PRESENTATION_OR_DOCUMENT_TYPES:
-        return any(cue in task_text for cue in _FRESHNESS_CUES)
-
-    return False
+    return True
 
 
 def make_builder_web_budget(task_type: str) -> dict[str, int]:

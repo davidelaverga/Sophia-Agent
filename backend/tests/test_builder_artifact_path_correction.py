@@ -111,6 +111,57 @@ def test_correction_injected_after_three_errors():
     assert "/mnt/user-data/outputs/" in msg.content
 
 
+def test_runtime_write_errors_fail_fast_instead_of_path_correction():
+    mw = BuilderArtifactMiddleware()
+    state = {
+        "messages": [
+            HumanMessage(content="brief"),
+            _ai(), _wf_error("Error: Thread ID not available in runtime context"),
+            _ai(), _wf_error("Error: Thread ID not available in runtime context"),
+            _ai(), _wf_error("Error: Thread ID not available in runtime context"),
+        ],
+        "builder_write_diagnostics": {
+            "error_count": 3,
+            "last_error_class": "missing_thread_id",
+        },
+    }
+
+    result = mw.before_model(state, runtime=None)
+
+    assert result is not None
+    assert result["jump_to"] == "end"
+    assert result["builder_runtime_write_failure_emitted"] is True
+    assert result["builder_result"]["artifact_path"] is None
+    assert "messages" not in result
+
+
+def test_missing_required_tool_arg_gets_argument_correction_not_path_correction():
+    mw = BuilderArtifactMiddleware()
+    missing_content = "Error: 1 validation error for write_file\ncontent\n  Field required [type=missing]"
+    state = {
+        "messages": [
+            HumanMessage(content="brief"),
+            _ai(), _wf_error(missing_content),
+            _ai(), _wf_error(missing_content),
+            _ai(), _wf_error(missing_content),
+        ],
+        "builder_write_diagnostics": {
+            "error_count": 3,
+            "last_error_class": "missing_required_tool_arg",
+        },
+    }
+
+    result = mw.before_model(state, runtime=None)
+
+    assert result is not None
+    assert result.get("builder_tool_argument_correction_emitted") is True
+    assert result.get("builder_path_correction_emitted") is not True
+    content = result["messages"][0].content
+    assert "[Sophia/tool-argument correction]" in content
+    assert "`description`, `path`, and `content`" in content
+    assert "write_file(description=" in content
+
+
 def test_no_correction_below_threshold():
     mw = BuilderArtifactMiddleware()
     state = {

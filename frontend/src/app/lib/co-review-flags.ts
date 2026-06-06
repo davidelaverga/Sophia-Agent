@@ -1,12 +1,19 @@
 export const COREVIEW_FEATURE_FLAG = "NEXT_PUBLIC_SOPHIA_COREVIEW_ENABLED"
 export const COREVIEW_STILL_FRAME_FEATURE_FLAG = "NEXT_PUBLIC_SOPHIA_COREVIEW_STILL_FRAME_ENABLED"
-export const COREVIEW_FIXTURE_FEATURE_FLAG = "NEXT_PUBLIC_SOPHIA_COREVIEW_FIXTURE_ENABLED"
-export const COREVIEW_REAL_ARTIFACT_FEATURE_FLAG = "NEXT_PUBLIC_SOPHIA_COREVIEW_REAL_ARTIFACT_ENABLED"
-export const COREVIEW_VIDEO_PROBE_FEATURE_FLAG = "NEXT_PUBLIC_SOPHIA_COREVIEW_VIDEO_PROBE_ENABLED"
 export const SERVER_COREVIEW_STILL_FRAME_FEATURE_FLAG = "SOPHIA_GEMINI_COREVIEW_STILL_FRAME_ENABLED"
-export const LEGACY_SCREENSHARE_COREVIEW_FEATURE_FLAG = "SOPHIA_GEMINI_SCREENSHARE_COREVIEW_ENABLED"
 
 const TRUE_VALUES = new Set(["1", "true", "yes", "on"])
+
+export type CoreviewDisabledReason =
+  | "frontend_coreview_flag_disabled"
+  | "frontend_still_frame_flag_disabled"
+  | null
+
+export interface CoreviewFlagDiagnostics {
+  frontendCoreviewFlagParsed: boolean
+  frontendStillFrameFlagParsed: boolean
+  coreviewDisabledReason: CoreviewDisabledReason
+}
 
 export function isCoReviewEnabled(value = process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_ENABLED): boolean {
   return TRUE_VALUES.has(String(value ?? "").trim().toLowerCase())
@@ -19,36 +26,35 @@ export function isCoReviewStillFrameEnabled(
   return TRUE_VALUES.has(String(value ?? "").trim().toLowerCase())
 }
 
-export function isCoReviewFixtureEnabled({
+export function isCoreviewStillFrameReviewEnabled({
   coReview = process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_ENABLED,
   stillFrame = process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_STILL_FRAME_ENABLED,
-  fixture = process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_FIXTURE_ENABLED,
 }: {
   coReview?: string
   stillFrame?: string
-  fixture?: string
 } = {}): boolean {
   if (!isCoReviewEnabled(coReview)) return false
-  if (!isCoReviewStillFrameEnabled(stillFrame)) return false
-  return TRUE_VALUES.has(String(fixture).trim().toLowerCase())
+  return isCoReviewStillFrameEnabled(stillFrame)
 }
 
-export function isCoReviewRealArtifactEnabled({
+export function coreviewFlagDiagnostics({
   coReview = process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_ENABLED,
   stillFrame = process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_STILL_FRAME_ENABLED,
-  realArtifact = process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_REAL_ARTIFACT_ENABLED,
 }: {
   coReview?: string
   stillFrame?: string
-  realArtifact?: string
-} = {}): boolean {
-  if (!isCoReviewEnabled(coReview)) return false
-  if (!isCoReviewStillFrameEnabled(stillFrame)) return false
-  return TRUE_VALUES.has(String(realArtifact).trim().toLowerCase())
-}
+} = {}): CoreviewFlagDiagnostics {
+  const frontendCoreviewFlagParsed = isCoReviewEnabled(coReview)
+  const frontendStillFrameFlagParsed = isCoReviewStillFrameEnabled(stillFrame)
+  const coreviewDisabledReason = !frontendCoreviewFlagParsed
+    ? "frontend_coreview_flag_disabled"
+    : !frontendStillFrameFlagParsed
+      ? "frontend_still_frame_flag_disabled"
+      : null
 
-export function isCoReviewVideoProbeEnabled(
-  value = process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_VIDEO_PROBE_ENABLED,
-): boolean {
-  return TRUE_VALUES.has(String(value ?? "").trim().toLowerCase())
+  return {
+    frontendCoreviewFlagParsed,
+    frontendStillFrameFlagParsed,
+    coreviewDisabledReason,
+  }
 }

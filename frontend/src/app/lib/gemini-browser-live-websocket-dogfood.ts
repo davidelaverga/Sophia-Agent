@@ -1,5 +1,16 @@
 import { isCoReviewStillFrameEnabled } from './co-review-flags';
 import {
+  COREVIEW_ADD_ANNOTATION_TOOL_NAME,
+  COREVIEW_FOCUS_ANCHOR_TOOL_NAME,
+  COREVIEW_GET_CURRENT_VIEW_TOOL_NAME,
+  COREVIEW_REFRESH_VIEW_TOOL_NAME,
+  executeCoreviewToolBridgeCall,
+  isCoreviewToolName,
+  withCoreviewGeminiToolDeclarations,
+  type CoreviewActionResult,
+  type CoreviewToolCallInput,
+} from './coreview-actions';
+import {
   readCoreviewArtifactTextSideband,
 } from './coreview-artifact-text';
 
@@ -17,6 +28,8 @@ export type GeminiBrowserLiveDogfoodStage =
 export type GeminiBrowserLiveDogfoodRelayStatus = 'disconnected' | 'active' | 'degraded' | 'terminal_error';
 
 export type GeminiTranscriptCoalescingDisabledReason = 'provider_output_transcription_is_delta_like';
+
+export type GeminiArtifactReviewUserIntent = 'unknown' | 'analysis' | 'create_update';
 
 export interface GeminiBrowserLiveDogfoodRelayDiagnostic {
   timestamp: string;
@@ -100,6 +113,7 @@ export type GeminiBargeInConfirmationSource =
   | 'none'
   | 'provider_interruption'
   | 'provider_input_transcription'
+  | 'coreview_tool_follow_up'
   | 'manual_interrupt'
   | 'sustained_speech';
 
@@ -240,6 +254,17 @@ export interface GeminiProviderReceiveMetadata {
   providerCategories: GeminiProviderEventCategory[];
 }
 
+export interface GeminiArtifactReviewRelayContext {
+  active: true;
+  artifact_id: string | null;
+  source: 'coreview_still_frame';
+  user_intent: GeminiArtifactReviewUserIntent;
+  last_user_intent_at: string | null;
+  expires_at: string | null;
+  raw_transcript_excluded: true;
+  raw_artifact_text_excluded: true;
+}
+
 export type GeminiProviderEventCategoryCounts = Record<GeminiProviderEventCategory, {
   count: number;
   lastAt: string | null;
@@ -364,6 +389,9 @@ export interface GeminiBrowserLiveDogfoodToolLoopDiagnostic {
   backendResponse: Record<string, unknown> | null;
   errorText: string | null;
   suppressionReason?: string | null;
+  reviewToolTimedOut?: boolean | null;
+  reviewToolTimeoutName?: string | null;
+  reviewToolTimeoutResultSent?: boolean | null;
 }
 
 export type GeminiToolCallLedgerFinalState =
@@ -407,12 +435,14 @@ interface WebSocketLike {
 export interface GeminiBrowserLiveDogfoodConnectOptions {
   userId: string;
   sessionId?: string;
+  threadId?: string | null;
   bootstrapPayload?: GeminiBrowserLiveSessionBootstrap;
   fetchFn?: FetchLike;
   webSocketFactory?: WebSocketFactory;
   getUserMedia?: GetUserMediaLike;
   audioContextFactory?: AudioContextFactory;
   coreviewStillFrameEnabled?: boolean;
+  reviewToolTimeoutMs?: number;
   onStage?: (stage: GeminiBrowserLiveDogfoodStage) => void;
   onProviderEvent?: (event: unknown) => void;
   onOutputAudio?: () => void;
@@ -475,7 +505,7 @@ export interface GeminiArtifactFramePayload {
 }
 
 export interface GeminiArtifactFrameSendContext {
-  coreviewSendStage?: 'start' | 'refresh' | 'repeated_probe' | null;
+  coreviewSendStage?: 'start' | 'refresh' | null;
 }
 
 export interface GeminiUsageMetadataTelemetry {
@@ -498,7 +528,7 @@ export interface GeminiArtifactFrameTransportStatusSnapshot {
 }
 
 export interface GeminiArtifactFrameSendResult {
-  coreviewSendStage: 'start' | 'refresh' | 'repeated_probe' | null;
+  coreviewSendStage: 'start' | 'refresh' | null;
   artifactId: string | null;
   ok: boolean;
   supported: boolean;
@@ -553,6 +583,8 @@ interface BrowserSessionPayload {
   public_event_boundary?: unknown;
   transport?: unknown;
   disconnect_url?: unknown;
+  backendCoreviewFlagParsed?: unknown;
+  backendStillFrameFlagParsed?: unknown;
 }
 
 export type GeminiBrowserLiveSessionBootstrap = BrowserSessionPayload;
@@ -694,9 +726,12 @@ const GEMINI_TRANSCRIPT_COALESCING_DISABLED_REASON: GeminiTranscriptCoalescingDi
 const WEBSOCKET_OPEN = 1;
 const GEMINI_ARTIFACT_FRAME_PAYLOAD_SCHEMA_VERSION = 'realtimeInput.video.v1';
 const ARTIFACT_FRAME_SEND_SETTLE_MS = 125;
+const ARTIFACT_REVIEW_RELAY_CONTEXT_TTL_MS = 10 * 60 * 1000;
+const GEMINI_REVIEW_TOOL_TIMEOUT_MS = 1_000;
 const MAX_SAFE_DIAGNOSTIC_TEXT_CHARS = 180;
 const BARGE_IN_CANDIDATE_DECAY_MS = 650;
 const PROVIDER_INPUT_TRANSCRIPTION_CONFIRMATION_DELAY_MS = 350;
+const COREVIEW_FOLLOW_UP_TRANSCRIPT_WINDOW_MS = 15_000;
 const RELAYABLE_GEMINI_PROVIDER_EVENT_KEYS = new Set([
   'setupComplete',
   'setup_complete',
@@ -715,7 +750,19 @@ const RELAYABLE_GEMINI_PROVIDER_EVENT_KEYS = new Set([
   'error',
 ]);
 const ZERO_FIELD_GEMINI_PROVIDER_EVENT_KEYS = new Set(['setupComplete', 'setup_complete']);
+const GEMINI_EMIT_ARTIFACT_TOOL_NAME = 'emit_artifact';
 const GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = 'read_artifact_text';
+type GeminiReadArtifactTextToolCallInput = {
+  id: string | null;
+  name: typeof GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME;
+  args: Record<string, unknown>;
+};
+type GeminiSuppressedEmitArtifactToolCallInput = {
+  id: string | null;
+  name: typeof GEMINI_EMIT_ARTIFACT_TOOL_NAME;
+  args: Record<string, unknown>;
+};
+type GeminiFrontendReviewToolCallInput = CoreviewToolCallInput | GeminiReadArtifactTextToolCallInput;
 const GEMINI_PROVIDER_EVENT_CATEGORIES: GeminiProviderEventCategory[] = [
   'setupComplete',
   'serverContent',
@@ -821,6 +868,17 @@ export async function connectGeminiBrowserLiveDogfood(
   let bargeInNewTurnDispatchCount = 0;
   let bargeInNewTurnDispatchBlockedReason: GeminiBargeInNewTurnDispatchBlockedReason = 'none';
   const promotedBargeInTranscriptFingerprints: string[] = [];
+  let lastCoreviewToolResponseSentAtMs: number | null = null;
+  let artifactReviewArtifactId: string | null = null;
+  let artifactReviewExpiresAtMs: number | null = null;
+  let artifactReviewUserIntent: GeminiArtifactReviewUserIntent = 'unknown';
+  let artifactReviewUserIntentAt: string | null = null;
+  const artifactReviewSafeResponseIds = new Set<string>();
+  const artifactReviewSuppressedResponseIds = new Set<string>();
+  const pendingArtifactReviewAudio = new Map<string, Array<{
+    event: Record<string, unknown>;
+    receiveMetadata: GeminiProviderReceiveMetadata;
+  }>>();
 
   const relayQueueOldestQueuedAgeMs = () => {
     const oldestQueuedAtMs = orderedRelayQueue[0]?.queuedAtMs;
@@ -960,6 +1018,105 @@ export async function connectGeminiBrowserLiveDogfood(
       websocketCloseAt: lastWebSocketClose?.at ?? null,
       error: websocketOpen ? null : 'gemini_live_websocket_not_open',
     };
+  };
+
+  const rememberArtifactReviewUserIntent = (text: string | null | undefined) => {
+    if (!text) {
+      return;
+    }
+    const nextIntent = classifyArtifactReviewUserIntent(text);
+    if (nextIntent === 'unknown') {
+      return;
+    }
+    artifactReviewUserIntent = nextIntent;
+    artifactReviewUserIntentAt = new Date().toISOString();
+  };
+
+  const snapshotArtifactReviewRelayContext = (): GeminiArtifactReviewRelayContext | null => {
+    if (!artifactReviewArtifactId || artifactReviewExpiresAtMs === null) {
+      return null;
+    }
+    if (monotonicNowMs() > artifactReviewExpiresAtMs) {
+      artifactReviewArtifactId = null;
+      artifactReviewExpiresAtMs = null;
+      artifactReviewUserIntent = 'unknown';
+      artifactReviewUserIntentAt = null;
+      artifactReviewSafeResponseIds.clear();
+      artifactReviewSuppressedResponseIds.clear();
+      pendingArtifactReviewAudio.clear();
+      return null;
+    }
+
+    return {
+      active: true,
+      artifact_id: artifactReviewArtifactId,
+      source: 'coreview_still_frame',
+      user_intent: artifactReviewUserIntent,
+      last_user_intent_at: artifactReviewUserIntentAt,
+      expires_at: new Date(Date.now() + Math.max(0, artifactReviewExpiresAtMs - monotonicNowMs())).toISOString(),
+      raw_transcript_excluded: true,
+      raw_artifact_text_excluded: true,
+    };
+  };
+
+  const prunePendingArtifactReviewAudio = () => {
+    while (pendingArtifactReviewAudio.size > 25) {
+      const oldest = pendingArtifactReviewAudio.keys().next().value;
+      if (typeof oldest !== 'string') {
+        return;
+      }
+      pendingArtifactReviewAudio.delete(oldest);
+    }
+  };
+
+  const playGeminiOutputAudio = (
+    event: Record<string, unknown>,
+    receiveMetadata: GeminiProviderReceiveMetadata,
+  ) => {
+    const audioChunks = readGeminiOutputAudioChunks(event);
+    if (!audioChunks.length) {
+      return 0;
+    }
+    options.onOutputAudio?.();
+    return outputAudioPlayer?.playEvent(event, receiveMetadata) ?? 0;
+  };
+
+  const dropBufferedArtifactReviewAudio = (responseId: string | null) => {
+    if (!responseId) {
+      return;
+    }
+    pendingArtifactReviewAudio.delete(responseId);
+    artifactReviewSafeResponseIds.delete(responseId);
+  };
+
+  const bufferArtifactReviewAudio = (
+    responseId: string,
+    event: Record<string, unknown>,
+    receiveMetadata: GeminiProviderReceiveMetadata,
+  ) => {
+    const queued = pendingArtifactReviewAudio.get(responseId) ?? [];
+    queued.push({ event, receiveMetadata });
+    pendingArtifactReviewAudio.set(responseId, queued);
+    prunePendingArtifactReviewAudio();
+  };
+
+  const markArtifactReviewResponseSafe = (responseId: string | null) => {
+    if (!responseId) {
+      return;
+    }
+    artifactReviewSafeResponseIds.add(responseId);
+    pruneStringSet(artifactReviewSafeResponseIds, 50);
+    const queued = pendingArtifactReviewAudio.get(responseId);
+    if (!queued) {
+      return;
+    }
+    pendingArtifactReviewAudio.delete(responseId);
+    if (artifactReviewSuppressedResponseIds.has(responseId)) {
+      return;
+    }
+    queued.forEach(({ event, receiveMetadata }) => {
+      playGeminiOutputAudio(event, receiveMetadata);
+    });
   };
 
   const recordWebSocketDiagnostic = (
@@ -1153,6 +1310,10 @@ export async function connectGeminiBrowserLiveDogfood(
     if (!text) {
       return { confirmed: false, reason: 'empty_provider_input_transcription' };
     }
+    const coreviewFollowUp = coreviewFollowUpTranscriptionConfirmation(text, receiveMetadata);
+    if (coreviewFollowUp.confirmed) {
+      return coreviewFollowUp;
+    }
     if (assistantOutputStartedAtMs === null) {
       return { confirmed: false, reason: 'provider_input_transcription_before_assistant_output' };
     }
@@ -1171,6 +1332,30 @@ export async function connectGeminiBrowserLiveDogfood(
     }
     return { confirmed: true, reason: 'provider_input_transcription_after_assistant_output_with_text' };
   };
+
+  function coreviewFollowUpTranscriptionConfirmation(
+    text: string,
+    receiveMetadata: GeminiProviderReceiveMetadata,
+  ): { confirmed: boolean; reason: string } {
+    if (lastCoreviewToolResponseSentAtMs === null) {
+      return { confirmed: false, reason: 'no_recent_coreview_tool_response' };
+    }
+    const providerReceivedAtMs = Date.parse(receiveMetadata.providerReceivedAt);
+    if (!Number.isFinite(providerReceivedAtMs)) {
+      return { confirmed: false, reason: 'provider_input_transcription_missing_timestamp' };
+    }
+    const ageMs = providerReceivedAtMs - lastCoreviewToolResponseSentAtMs;
+    if (ageMs < 0 || ageMs > COREVIEW_FOLLOW_UP_TRANSCRIPT_WINDOW_MS) {
+      return { confirmed: false, reason: 'provider_input_transcription_outside_coreview_follow_up_window' };
+    }
+    if (!isConfirmableProviderInputTranscription(text)) {
+      return { confirmed: false, reason: 'provider_input_transcription_trivial_or_noise' };
+    }
+    if (isLikelyAssistantEcho(text, latestAssistantOutputTranscriptText)) {
+      return { confirmed: false, reason: 'provider_input_transcription_likely_echo' };
+    }
+    return { confirmed: true, reason: 'provider_input_transcription_after_coreview_tool' };
+  }
 
   const rememberPromotedBargeInTranscriptFingerprint = (fingerprint: string) => {
     promotedBargeInTranscriptFingerprints.push(fingerprint);
@@ -1269,7 +1454,10 @@ export async function connectGeminiBrowserLiveDogfood(
     }
 
     if (!staleOutputSuppressionActive && confirmation.confirmed) {
-      confirmBargeIn('provider_input_transcription', receiveMetadata.providerReceivedAt, {
+      const confirmationSource: GeminiBargeInConfirmationSource = confirmation.reason === 'provider_input_transcription_after_coreview_tool'
+        ? 'coreview_tool_follow_up'
+        : 'provider_input_transcription';
+      confirmBargeIn(confirmationSource, receiveMetadata.providerReceivedAt, {
         stopPlayback: false,
         reason: confirmation.reason,
       });
@@ -1478,6 +1666,15 @@ export async function connectGeminiBrowserLiveDogfood(
     return next;
   };
 
+  const noteToolResponseSent = (functionResponse: Record<string, unknown>, timestamp: string) => {
+    const toolName = stringFromAnyKey(functionResponse, 'name');
+    if (!isCoreviewToolName(toolName)) {
+      return;
+    }
+    const parsedTimestampMs = Date.parse(timestamp);
+    lastCoreviewToolResponseSentAtMs = Number.isFinite(parsedTimestampMs) ? parsedTimestampMs : Date.now();
+  };
+
   const cleanup = async () => {
     notifyStage('closing');
     outputAudioPlayer?.stop();
@@ -1509,6 +1706,10 @@ export async function connectGeminiBrowserLiveDogfood(
       : await startBrowserDogfoodSession(fetchFn, options);
     dogfoodSessionId = browserSession.sessionId;
     disconnectTargetPath = browserSession.disconnectUrl ?? DISCONNECT_TARGET_PATH;
+    const coreviewToolsEnabled = options.coreviewStillFrameEnabled ?? isCoReviewStillFrameEnabled();
+    const sessionSetup = withCoreviewGeminiToolDeclarations(browserSession.setup, coreviewToolsEnabled, {
+      allowArtifactCreation: false,
+    });
 
     notifyStage('requesting_microphone');
     localStream = await getUserMedia({ audio: true });
@@ -1552,6 +1753,19 @@ export async function connectGeminiBrowserLiveDogfood(
           updateToolCallLedger(cancelledId, { cancelledAt: timestamp });
         }
       },
+      onFrontendToolEvent: (event) => handleGeminiFrontendCoreviewToolEvent({
+        event,
+        websocket,
+        sessionId: browserSession.sessionId,
+        threadId: options.threadId ?? null,
+        activeArtifactId: artifactReviewArtifactId,
+        artifactReviewContext: snapshotArtifactReviewRelayContext(),
+        reviewToolTimeoutMs: options.reviewToolTimeoutMs,
+        toolCallLedger,
+        onToolCallLedgerUpdate: notifyToolCallLedgerUpdate,
+        onToolLoopDiagnostic: options.onToolLoopDiagnostic,
+        onToolResponseSent: noteToolResponseSent,
+      }),
       onProviderEventReceived: (event) => buildGeminiProviderReceiveMetadata(
         event,
         providerReceiveSequence += 1,
@@ -1564,14 +1778,43 @@ export async function connectGeminiBrowserLiveDogfood(
         const categories = classification.categories;
         markAssistantOutputStarted(event, categories, receiveMetadata);
         if (categories.includes('inputTranscription')) {
+          rememberArtifactReviewUserIntent(readTranscriptionText(event, 'inputTranscription', 'input_transcription'));
           const confirmation = providerInputTranscriptionConfirmation(event, receiveMetadata);
           promoteBargeInInputTranscription(event, receiveMetadata, confirmation);
+        }
+        const artifactReviewContext = snapshotArtifactReviewRelayContext();
+        const leakageMarker = artifactReviewAssistantLeakageMarker(event, categories, artifactReviewContext);
+        const responseId = readGeminiResponseId(event);
+        if (leakageMarker) {
+          if (responseId) {
+            artifactReviewSuppressedResponseIds.add(responseId);
+            pruneStringSet(artifactReviewSuppressedResponseIds, 50);
+          }
+          dropBufferedArtifactReviewAudio(responseId);
+          if (categories.includes('outputTranscription') || categories.includes('modelTurnText')) {
+            relayThroughputMetrics.transcriptPartialsDropped += 1;
+          }
+          return;
+        }
+        if (
+          artifactReviewContext?.active
+          && responseId
+          && (categories.includes('outputTranscription') || categories.includes('modelTurnText'))
+        ) {
+          markArtifactReviewResponseSafe(responseId);
         }
         const transcriptSuppressionReason = staleOutputSuppressionReason(event, categories, receiveMetadata);
         if (transcriptSuppressionReason && (categories.includes('outputTranscription') || categories.includes('modelTurnText'))) {
           relayThroughputMetrics.transcriptPartialsDropped += 1;
           emitStaleOutputSuppression(event, receiveMetadata, 'transcript', transcriptSuppressionReason);
           return;
+        }
+        if (
+          responseId
+          && (hasGeminiServerContentTurnBoundary(event) || isGeminiServerInterruptedEvent(event))
+          && !artifactReviewSafeResponseIds.has(responseId)
+        ) {
+          dropBufferedArtifactReviewAudio(responseId);
         }
         if (hasGeminiServerContentTurnBoundary(event) && !isGeminiServerInterruptedEvent(event)) {
           if (staleOutputSuppressionActive) {
@@ -1595,9 +1838,10 @@ export async function connectGeminiBrowserLiveDogfood(
         }
         const useOrderedLane = shouldUseOrderedRelayLane(classification);
         dispatchRelay(async (queueDepth, oldestQueuedAgeMs) => {
+          const nextProviderRelaySequence = providerRelaySequence + 1;
           const relayMetadata: GeminiProviderReceiveMetadata = {
             ...receiveMetadata,
-            providerRelaySequence: providerRelaySequence += 1,
+            providerRelaySequence: nextProviderRelaySequence,
           };
           const relayStartedAt = new Date().toISOString();
           const relayStartMs = monotonicNowMs();
@@ -1621,8 +1865,10 @@ export async function connectGeminiBrowserLiveDogfood(
             event,
             relayMetadata,
             browserSession.relayTargetPath ?? RELAY_TARGET_PATH,
+            artifactReviewContext,
           )
           .then((relayResponse) => {
+            providerRelaySequence = Math.max(providerRelaySequence, nextProviderRelaySequence);
             const relayCompletedAt = new Date().toISOString();
             const transcriptRelayLatencyMs = categories.includes('outputTranscription')
               ? latencyMsFromIso(receiveMetadata.providerReceivedAt, relayCompletedAt)
@@ -1689,9 +1935,11 @@ export async function connectGeminiBrowserLiveDogfood(
               relayResponse,
               websocket,
               sessionId: browserSession.sessionId,
+              threadId: options.threadId ?? null,
               toolCallLedger,
               onToolCallLedgerUpdate: notifyToolCallLedgerUpdate,
               onToolLoopDiagnostic: options.onToolLoopDiagnostic,
+              onToolResponseSent: noteToolResponseSent,
             });
           })
           .catch((error) => {
@@ -1760,10 +2008,20 @@ export async function connectGeminiBrowserLiveDogfood(
           emitStaleOutputSuppression(event, receiveMetadata, 'audio', audioSuppressionReason);
           return;
         }
-        if (audioChunks.length) {
-          options.onOutputAudio?.();
+        const responseId = readGeminiResponseId(event);
+        if (responseId && artifactReviewSuppressedResponseIds.has(responseId)) {
+          return;
         }
-        outputAudioPlayer?.playEvent(event, receiveMetadata);
+        const artifactReviewContext = snapshotArtifactReviewRelayContext();
+        if (
+          artifactReviewContext?.active
+          && responseId
+          && !artifactReviewSafeResponseIds.has(responseId)
+        ) {
+          bufferArtifactReviewAudio(responseId, event, receiveMetadata);
+          return;
+        }
+        playGeminiOutputAudio(event, receiveMetadata);
       },
       onInterruption: (event) => {
         const responseId = readGeminiResponseId(event);
@@ -1803,7 +2061,7 @@ export async function connectGeminiBrowserLiveDogfood(
     });
 
     notifyStage('sending_setup');
-    websocket.send(JSON.stringify({ setup: browserSession.setup }));
+    websocket.send(JSON.stringify({ setup: sessionSetup }));
 
     notifyStage('waiting_setup_complete');
     await setupComplete;
@@ -1825,7 +2083,7 @@ export async function connectGeminiBrowserLiveDogfood(
       relayUrl: browserSession.relayUrl,
       publicEventBoundary: browserSession.publicEventBoundary,
       transport: browserSession.transport,
-      setup: browserSession.setup,
+      setup: sessionSetup,
       setupComplete: true,
       websocket,
       localStream,
@@ -1833,6 +2091,7 @@ export async function connectGeminiBrowserLiveDogfood(
         if (websocket?.readyState !== WEBSOCKET_OPEN) {
           throw new Error('Gemini Live WebSocket is not open.');
         }
+        rememberArtifactReviewUserIntent(text);
         websocket.send(JSON.stringify({ realtimeInput: { text } }));
       },
       sendArtifactFrame: (
@@ -1842,9 +2101,22 @@ export async function connectGeminiBrowserLiveDogfood(
         websocket,
         frame,
         context,
-        enabled: options.coreviewStillFrameEnabled ?? isCoReviewStillFrameEnabled(),
+        enabled: coreviewToolsEnabled,
         providerSnapshot: snapshotArtifactFrameProviderState,
         transportSnapshot: snapshotArtifactFrameTransportStatus,
+      }).then((result) => {
+        if (result.ok && result.websocketSendAccepted && result.artifactId) {
+          if (artifactReviewArtifactId !== result.artifactId) {
+            artifactReviewUserIntent = 'unknown';
+            artifactReviewUserIntentAt = null;
+            artifactReviewSafeResponseIds.clear();
+            artifactReviewSuppressedResponseIds.clear();
+            pendingArtifactReviewAudio.clear();
+          }
+          artifactReviewArtifactId = result.artifactId;
+          artifactReviewExpiresAtMs = monotonicNowMs() + ARTIFACT_REVIEW_RELAY_CONTEXT_TTL_MS;
+        }
+        return result;
       }),
       getArtifactFrameTransportStatus: snapshotArtifactFrameTransportStatus,
       setMicrophoneMuted: (muted: boolean) => {
@@ -1911,9 +2183,13 @@ export function buildGeminiArtifactTextReaderHint(artifactId: string): Record<st
   return {
     realtimeInput: {
       text: [
-        `Coreview active artifact_id: ${artifactId}.`,
-        'For exact words, numbers, table values, labels, or fine print, call read_artifact_text with this artifact_id before answering.',
-        'Use the visual frame only for layout, composition, color, and spatial structure.',
+        'App context: artifact review is active for the selected artifact.',
+        `artifact_id: ${artifactId}.`,
+        'For simple visibility questions, answer from the fresh artifact frame or safe current-view metadata.',
+        'Use exact-text sideband only when exact words, numbers, labels, or table values are needed.',
+        'For highlight, mark, underline, annotate, note, comment, pin, flag, or callout requests, use coreview_add_annotation and wait for ok=true before saying it was added. Do not use coreview_refresh_view for annotation requests.',
+        'For zoom or focus on a title, selection, text, or area, use coreview_focus_anchor. Use coreview_refresh_view only when the user asks to refresh your view.',
+        'Do not answer this context message.',
       ].join(' '),
     },
   };
@@ -2036,9 +2312,6 @@ async function sendGeminiArtifactFrameOverWebSocket({
   }
 
   try {
-    if (frame.artifactId) {
-      websocket.send(JSON.stringify(buildGeminiArtifactTextReaderHint(frame.artifactId)));
-    }
     websocket.send(JSON.stringify(buildGeminiArtifactFrameRealtimeInput(frame)));
   } catch (error) {
     const providerAfter = providerSnapshot();
@@ -2216,10 +2489,10 @@ export function categorizeGeminiProviderEvent(event: unknown): GeminiProviderEve
   const serverContent = recordFromAnyKey(event, 'serverContent', 'server_content');
   if (isRecord(serverContent)) {
     categories.add('serverContent');
-    if (isRecord(recordFromAnyKey(serverContent, 'inputTranscription', 'input_transcription'))) {
+    if (hasTranscriptionText(event, 'inputTranscription', 'input_transcription')) {
       categories.add('inputTranscription');
     }
-    if (isRecord(recordFromAnyKey(serverContent, 'outputTranscription', 'output_transcription'))) {
+    if (hasTranscriptionText(event, 'outputTranscription', 'output_transcription')) {
       categories.add('outputTranscription');
     }
     const modelTurn = recordFromAnyKey(serverContent, 'modelTurn', 'model_turn');
@@ -2585,6 +2858,7 @@ async function relayGeminiProviderEvent(
   event: Record<string, unknown>,
   receiveMetadata: GeminiProviderReceiveMetadata,
   relayTargetPath = RELAY_TARGET_PATH,
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null = null,
 ): Promise<GeminiBrowserLiveDogfoodRelayResponse> {
   const body = JSON.stringify({
     session_id: sessionId,
@@ -2595,6 +2869,7 @@ async function relayGeminiProviderEvent(
     relay_correlation_id: receiveMetadata.relayCorrelationId,
     provider_primary_category: receiveMetadata.providerPrimaryCategory,
     provider_categories: receiveMetadata.providerCategories,
+    ...(artifactReviewContext ? { artifact_review_context: artifactReviewContext } : {}),
   });
   const eventType = describeGeminiProviderEventType(event);
   const requestBodyBytes = textByteLength(body);
@@ -2710,9 +2985,11 @@ function handleGeminiRelayClientActions(options: {
   relayResponse: GeminiBrowserLiveDogfoodRelayResponse;
   websocket: WebSocketLike | null;
   sessionId: string;
+  threadId?: string | null;
   toolCallLedger: Map<string, GeminiBrowserLiveToolCallLedgerEntry>;
   onToolCallLedgerUpdate?: (entry: GeminiBrowserLiveToolCallLedgerEntry) => void;
   onToolLoopDiagnostic?: (diagnostic: GeminiBrowserLiveDogfoodToolLoopDiagnostic) => void;
+  onToolResponseSent?: (functionResponse: Record<string, unknown>, timestamp: string) => void;
 }): void {
   for (const diagnostic of options.relayResponse.toolDiagnostics) {
     const rawBackendResponse = recordFromAnyKey(diagnostic, 'response');
@@ -2745,6 +3022,9 @@ function handleGeminiRelayClientActions(options: {
       backendResponse,
       errorText: stringFromAnyKey(diagnostic, 'error_text', 'errorText')
         ?? (executionRejected ? stringFromAnyKey(backendResponse, 'error_message', 'errorMessage') : null),
+      reviewToolTimedOut: backendResponse?.review_tool_timed_out === true,
+      reviewToolTimeoutName: stringFromAnyKey(backendResponse, 'review_tool_timeout_name', 'reviewToolTimeoutName'),
+      reviewToolTimeoutResultSent: backendResponse?.review_tool_timeout_result_sent === true,
     });
   }
 
@@ -2754,7 +3034,10 @@ function handleGeminiRelayClientActions(options: {
     }
 
     const functionResponses = readGeminiFunctionResponsesFromToolResponse(action.payload)
-      .map((functionResponse) => applyCoreviewReadArtifactTextSideband(functionResponse, options.sessionId));
+      .map((functionResponse) => applyCoreviewReadArtifactTextSideband(functionResponse, {
+        sessionId: options.sessionId,
+        threadId: options.threadId ?? null,
+      }));
     const fallbackSummary = stringFromAnyKey(action, 'result_summary', 'resultSummary');
     const activeFunctionResponses: Record<string, unknown>[] = [];
     const suppressedFunctionResponses: Record<string, unknown>[] = [];
@@ -2812,6 +3095,7 @@ function handleGeminiRelayClientActions(options: {
       options.websocket.send(JSON.stringify(payloadToSend));
       for (const functionResponse of activeFunctionResponses.length ? activeFunctionResponses : functionResponses) {
         const timestamp = new Date().toISOString();
+        options.onToolResponseSent?.(functionResponse, timestamp);
         emitToolCallLedgerEntry(
           options.toolCallLedger,
           stringFromAnyKey(functionResponse, 'id'),
@@ -2827,19 +3111,25 @@ function handleGeminiRelayClientActions(options: {
           stringFromAnyKey(functionResponse, 'name'),
           rawBackendResponse,
         );
+        const responseRejected = backendResponse?.ok === false
+          || backendResponse?.rejected === true
+          || backendResponse?.execution_rejected === true;
         options.onToolLoopDiagnostic?.({
           timestamp,
           phase: 'tool_response_sent',
           toolCall: toolCallSummaryFromFunctionResponse(functionResponse),
-          success: true,
+          success: !responseRejected,
           resultSummary: responseSummaryFromFunctionResponse(functionResponse) ?? fallbackSummary,
           taskId: taskIdFromResponseRecord(backendResponse),
           taskStatus: taskStatusFromResponseRecord(backendResponse),
           trackedTaskIds: trackedTaskIdsFromResponseRecord(backendResponse),
-          rejectionReason: stringFromAnyKey(backendResponse, 'error_type', 'errorType'),
+          rejectionReason: stringFromAnyKey(backendResponse, 'error_type', 'errorType', 'rejection_reason', 'rejectionReason', 'safe_reason', 'safeReason'),
           recoveryGuidance: stringFromAnyKey(backendResponse, 'recovery_guidance', 'recoveryGuidance'),
           backendResponse,
           errorText: null,
+          reviewToolTimedOut: backendResponse?.review_tool_timed_out === true,
+          reviewToolTimeoutName: stringFromAnyKey(backendResponse, 'review_tool_timeout_name', 'reviewToolTimeoutName'),
+          reviewToolTimeoutResultSent: backendResponse?.review_tool_timeout_result_sent === true,
         });
       }
     } catch (error) {
@@ -2866,10 +3156,485 @@ function handleGeminiRelayClientActions(options: {
               )
             : null,
           errorText,
+          reviewToolTimedOut: false,
+          reviewToolTimeoutName: null,
+          reviewToolTimeoutResultSent: false,
         });
       }
     }
   }
+}
+
+async function handleGeminiFrontendCoreviewToolEvent(options: {
+  event: Record<string, unknown>;
+  websocket: WebSocketLike | null;
+  sessionId: string;
+  threadId?: string | null;
+  activeArtifactId?: string | null;
+  artifactReviewContext?: GeminiArtifactReviewRelayContext | null;
+  reviewToolTimeoutMs?: number;
+  toolCallLedger: Map<string, GeminiBrowserLiveToolCallLedgerEntry>;
+  onToolCallLedgerUpdate?: (entry: GeminiBrowserLiveToolCallLedgerEntry) => void;
+  onToolLoopDiagnostic?: (diagnostic: GeminiBrowserLiveDogfoodToolLoopDiagnostic) => void;
+  onToolResponseSent?: (functionResponse: Record<string, unknown>, timestamp: string) => void;
+}): Promise<Record<string, unknown> | null> {
+  const split = splitFrontendReviewToolCallsFromProviderEvent(
+    options.event,
+    options.artifactReviewContext ?? null,
+  );
+  if (split.frontendCalls.length === 0 && split.suppressedEmitArtifactCalls.length === 0) {
+    return options.event;
+  }
+
+  const preparedAt = new Date().toISOString();
+  const functionResponses: Record<string, unknown>[] = [];
+  const toolDiagnostics: GeminiRelayToolDiagnosticPayload[] = [];
+  for (const call of split.suppressedEmitArtifactCalls) {
+    const response = suppressedEmitArtifactToolResponse(call, options.artifactReviewContext ?? null);
+    functionResponses.push({
+      ...(call.id ? { id: call.id } : {}),
+      name: call.name,
+      response,
+    });
+    toolDiagnostics.push(suppressedEmitArtifactToolDiagnostic(call, response));
+    emitToolCallLedgerEntry(
+      options.toolCallLedger,
+      call.id,
+      {
+        toolName: call.name,
+        toolResponsePreparedAt: preparedAt,
+      },
+      options.onToolCallLedgerUpdate,
+    );
+  }
+  for (const call of split.frontendCalls) {
+    const response = await executeFrontendReviewToolCallWithTimeout(call, {
+      sessionId: options.sessionId,
+      threadId: options.threadId ?? null,
+      activeArtifactId: options.activeArtifactId ?? null,
+      timeoutMs: options.reviewToolTimeoutMs,
+    });
+    functionResponses.push({
+      ...(call.id ? { id: call.id } : {}),
+      name: call.name,
+      response,
+    });
+    emitToolCallLedgerEntry(
+      options.toolCallLedger,
+      call.id,
+      {
+        toolName: call.name,
+        toolResponsePreparedAt: preparedAt,
+      },
+      options.onToolCallLedgerUpdate,
+    );
+  }
+
+  handleGeminiRelayClientActions({
+    relayResponse: {
+      accepted: true,
+      clientActions: [{
+        type: 'gemini_tool_response',
+        payload: {
+          toolResponse: {
+            functionResponses,
+          },
+        },
+        result_summary: functionResponses
+          .map((functionResponse) => responseSummaryFromFunctionResponse(functionResponse))
+          .filter((summary): summary is string => Boolean(summary))
+          .join(' '),
+      }],
+      toolDiagnostics,
+      statusCode: null,
+      statusText: null,
+      responseKind: 'client_actions',
+      backendDiagnostics: null,
+    },
+    websocket: options.websocket,
+    sessionId: options.sessionId,
+    threadId: options.threadId ?? null,
+    toolCallLedger: options.toolCallLedger,
+    onToolCallLedgerUpdate: options.onToolCallLedgerUpdate,
+    onToolLoopDiagnostic: options.onToolLoopDiagnostic,
+    onToolResponseSent: options.onToolResponseSent,
+  });
+
+  return split.relayEvent;
+}
+
+async function executeFrontendReviewToolCallWithTimeout(
+  call: GeminiFrontendReviewToolCallInput,
+  options: {
+    sessionId: string;
+    threadId?: string | null;
+    activeArtifactId: string | null;
+    timeoutMs?: number;
+  },
+): Promise<Record<string, unknown>> {
+  const timeoutMs = normalizeReviewToolTimeoutMs(options.timeoutMs);
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const startedAtMs = monotonicNowMs();
+  const execution = (async () => {
+    try {
+      if (isReadArtifactTextToolCall(call)) {
+        return executeBrowserReadArtifactTextToolCall(call, {
+          sessionId: options.sessionId,
+          threadId: options.threadId ?? null,
+          activeArtifactId: options.activeArtifactId,
+          startedAtMs,
+        });
+      }
+      return { ...(await executeCoreviewToolBridgeCall(call)) };
+    } catch (error) {
+      return !isReadArtifactTextToolCall(call)
+        ? { ...coreviewToolExceptionResult(call, error) }
+        : readArtifactTextFailureResponse(call, 'unavailable', error instanceof Error
+          ? error.message
+          : 'Trusted artifact text is unavailable.');
+    }
+  })();
+  const timeout = new Promise<Record<string, unknown>>((resolve) => {
+    timeoutId = setTimeout(() => {
+      resolve(reviewToolTimeoutResult(call, {
+        activeArtifactId: options.activeArtifactId,
+        timeoutMs,
+      }));
+    }, timeoutMs);
+  });
+
+  const result = await Promise.race([execution, timeout]);
+  if (timeoutId) {
+    clearTimeout(timeoutId);
+  }
+  return result;
+}
+
+function isReadArtifactTextToolCall(
+  call: GeminiFrontendReviewToolCallInput,
+): call is GeminiReadArtifactTextToolCallInput {
+  return call.name === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME;
+}
+
+function executeBrowserReadArtifactTextToolCall(
+  call: GeminiReadArtifactTextToolCallInput,
+  options: {
+    sessionId: string;
+    threadId?: string | null;
+    activeArtifactId: string | null;
+    startedAtMs: number;
+  },
+): Record<string, unknown> {
+  const artifactId = stringFromAnyKey(call.args, 'artifact_id', 'artifactId') ?? options.activeArtifactId;
+  const latencyMs = elapsedMs(options.startedAtMs);
+  if (!artifactId) {
+    return {
+      ...readArtifactTextFailureResponse(call, 'no_selected_artifact', 'No artifact is selected for trusted text reading.'),
+      latency_ms: latencyMs,
+    };
+  }
+
+  return {
+    ...readCoreviewArtifactTextSideband({
+      artifactId,
+      sessionId: options.sessionId,
+      threadId: options.threadId ?? null,
+    }),
+    latency_ms: latencyMs,
+    raw_artifact_text_excluded: true,
+  };
+}
+
+function readArtifactTextFailureResponse(
+  call: GeminiReadArtifactTextToolCallInput,
+  status: string,
+  safeReason: string,
+): Record<string, unknown> {
+  return {
+    ok: false,
+    artifact_id: stringFromAnyKey(call.args, 'artifact_id', 'artifactId') ?? null,
+    status,
+    safe_reason: safeReason,
+    raw_artifact_text_excluded: true,
+  };
+}
+
+function reviewToolTimeoutResult(
+  call: GeminiFrontendReviewToolCallInput,
+  options: {
+    activeArtifactId: string | null;
+    timeoutMs: number;
+  },
+): Record<string, unknown> {
+  if (call.name === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
+    return {
+      ...readArtifactTextFailureResponse(
+        call,
+        'timeout',
+        'Trusted artifact text read timed out before the voice response deadline.',
+      ),
+      artifact_id: stringFromAnyKey(call.args, 'artifact_id', 'artifactId') ?? options.activeArtifactId,
+      latency_ms: options.timeoutMs,
+      review_tool_timed_out: true,
+      review_tool_timeout_name: call.name,
+      review_tool_timeout_result_sent: true,
+    };
+  }
+
+  const action = call.name === COREVIEW_REFRESH_VIEW_TOOL_NAME
+    ? 'refresh_view'
+    : call.name === COREVIEW_GET_CURRENT_VIEW_TOOL_NAME
+      ? 'get_current_view'
+      : call.name === COREVIEW_ADD_ANNOTATION_TOOL_NAME
+        ? 'add_annotation'
+        : call.name === COREVIEW_FOCUS_ANCHOR_TOOL_NAME
+          ? 'focus_anchor'
+          : 'set_view';
+  return {
+    ok: false,
+    action,
+    artifact_id: stringFromAnyKey(call.args, 'artifact_id', 'artifactId') ?? options.activeArtifactId,
+    artifact_path: null,
+    artifact_title: null,
+    renderer_kind: null,
+    page_index: null,
+    page_number: null,
+    page_count: null,
+    zoom: null,
+    fit_mode: null,
+    view_signature: null,
+    stale: false,
+    refresh_attempted: false,
+    refresh_result: 'not_requested',
+    blocked_reason: 'tool_unavailable',
+    result_summary: `${call.name} timed out before the voice response deadline.`,
+    command_source: 'gemini_tool',
+    preserved_mic: true,
+    preserved_review: true,
+    view_ready_wait_ms: options.timeoutMs,
+    view_signature_before: null,
+    view_signature_after: null,
+    exact_text_available: false,
+    visual_frame_fresh: false,
+    visual_fresh: false,
+    frame_sent: false,
+    review_active: true,
+    current_view_summary: 'Coreview tool timed out.',
+    annotation_overlay_captured: null,
+    artifact_stable_identity: null,
+    rebind_status: 'not_attempted',
+    rebind_attempted: false,
+    rebind_result: 'not_attempted',
+    rebind_reason: null,
+    review_tool_timed_out: true,
+    review_tool_timeout_name: call.name,
+    review_tool_timeout_result_sent: true,
+    raw_comment_text_excluded: true,
+    raw_artifact_text_excluded: true,
+    raw_frame_excluded: true,
+  };
+}
+
+function normalizeReviewToolTimeoutMs(value: number | null | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return GEMINI_REVIEW_TOOL_TIMEOUT_MS;
+  }
+  return Math.min(1_500, Math.max(25, Math.floor(value)));
+}
+
+function splitFrontendReviewToolCallsFromProviderEvent(
+  event: Record<string, unknown>,
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null = null,
+): {
+  frontendCalls: GeminiFrontendReviewToolCallInput[];
+  suppressedEmitArtifactCalls: GeminiSuppressedEmitArtifactToolCallInput[];
+  relayEvent: Record<string, unknown> | null;
+} {
+  const toolCallKey = isRecord(event.toolCall)
+    ? 'toolCall'
+    : isRecord(event.tool_call)
+      ? 'tool_call'
+      : null;
+  if (!toolCallKey) {
+    return { frontendCalls: [], suppressedEmitArtifactCalls: [], relayEvent: event };
+  }
+
+  const toolCall = event[toolCallKey];
+  if (!isRecord(toolCall)) {
+    return { frontendCalls: [], suppressedEmitArtifactCalls: [], relayEvent: event };
+  }
+
+  const functionCallsKey = Array.isArray(toolCall.functionCalls)
+    ? 'functionCalls'
+    : Array.isArray(toolCall.function_calls)
+      ? 'function_calls'
+      : null;
+  if (!functionCallsKey) {
+    return { frontendCalls: [], suppressedEmitArtifactCalls: [], relayEvent: event };
+  }
+
+  const functionCalls = toolCall[functionCallsKey];
+  if (!Array.isArray(functionCalls)) {
+    return { frontendCalls: [], suppressedEmitArtifactCalls: [], relayEvent: event };
+  }
+
+  const frontendCalls: GeminiFrontendReviewToolCallInput[] = [];
+  const suppressedEmitArtifactCalls: GeminiSuppressedEmitArtifactToolCallInput[] = [];
+  const relayFunctionCalls: unknown[] = [];
+  for (const functionCall of functionCalls) {
+    if (!isRecord(functionCall)) {
+      relayFunctionCalls.push(functionCall);
+      continue;
+    }
+    const name = stringFromAnyKey(functionCall, 'name');
+    if (
+      name === GEMINI_EMIT_ARTIFACT_TOOL_NAME
+      && shouldSuppressEmitArtifactToolCallForArtifactReview(artifactReviewContext)
+    ) {
+      suppressedEmitArtifactCalls.push({
+        id: stringFromAnyKey(functionCall, 'id'),
+        name,
+        args: readGeminiFunctionCallArgs(functionCall) ?? {},
+      });
+      continue;
+    }
+    if (!isCoreviewToolName(name) && name !== GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
+      relayFunctionCalls.push(functionCall);
+      continue;
+    }
+    frontendCalls.push({
+      id: stringFromAnyKey(functionCall, 'id'),
+      name,
+      args: readGeminiFunctionCallArgs(functionCall) ?? {},
+    } as GeminiFrontendReviewToolCallInput);
+  }
+
+  if (frontendCalls.length === 0 && suppressedEmitArtifactCalls.length === 0) {
+    return { frontendCalls, suppressedEmitArtifactCalls, relayEvent: event };
+  }
+
+  if (relayFunctionCalls.length > 0) {
+    return {
+      frontendCalls,
+      suppressedEmitArtifactCalls,
+      relayEvent: {
+        ...event,
+        [toolCallKey]: {
+          ...toolCall,
+          [functionCallsKey]: relayFunctionCalls,
+        },
+      },
+    };
+  }
+
+  const relayEvent = { ...event };
+  delete relayEvent[toolCallKey];
+  return {
+    frontendCalls,
+    suppressedEmitArtifactCalls,
+    relayEvent: Object.keys(relayEvent).length > 0 ? relayEvent : null,
+  };
+}
+
+function shouldSuppressEmitArtifactToolCallForArtifactReview(
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null,
+): boolean {
+  return Boolean(
+    artifactReviewContext?.active
+    && artifactReviewContext.user_intent !== 'create_update',
+  );
+}
+
+function suppressedEmitArtifactToolResponse(
+  call: GeminiSuppressedEmitArtifactToolCallInput,
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null,
+): Record<string, unknown> {
+  return {
+    ok: false,
+    rejected: true,
+    execution_rejected: true,
+    safe_reason: 'artifact_review_emit_artifact_suppressed',
+    rejection_reason: 'artifact_review_emit_artifact_suppressed',
+    result_summary: 'Review-only emit_artifact call suppressed.',
+    artifact_review_active: artifactReviewContext?.active === true,
+    artifact_review_user_intent: artifactReviewContext?.user_intent ?? null,
+    emit_artifact_blocked_for_annotation_intent: artifactReviewContext?.user_intent !== 'create_update',
+    raw_transcript_excluded: true,
+    raw_comment_text_excluded: true,
+    raw_artifact_text_excluded: true,
+    raw_frame_excluded: true,
+  };
+}
+
+function suppressedEmitArtifactToolDiagnostic(
+  call: GeminiSuppressedEmitArtifactToolCallInput,
+  response: Record<string, unknown>,
+): GeminiRelayToolDiagnosticPayload {
+  return {
+    id: call.id ?? undefined,
+    name: call.name,
+    success: false,
+    execution_rejected: true,
+    rejection_reason: 'artifact_review_emit_artifact_suppressed',
+    recovery_guidance: 'Use Coreview review tools for annotation, highlight, comment, note, or pin requests.',
+    result_summary: 'Review-only emit_artifact call suppressed.',
+    response,
+  };
+}
+
+function coreviewToolExceptionResult(
+  call: CoreviewToolCallInput,
+  error: unknown,
+): CoreviewActionResult {
+  const action = call.name === COREVIEW_REFRESH_VIEW_TOOL_NAME
+    ? 'refresh_view'
+    : call.name === COREVIEW_GET_CURRENT_VIEW_TOOL_NAME
+      ? 'get_current_view'
+      : call.name === COREVIEW_ADD_ANNOTATION_TOOL_NAME
+        ? 'add_annotation'
+        : call.name === COREVIEW_FOCUS_ANCHOR_TOOL_NAME
+          ? 'focus_anchor'
+          : 'set_view';
+  return {
+    ok: false,
+    action,
+    artifact_id: null,
+    artifact_path: null,
+    artifact_title: null,
+    renderer_kind: null,
+    page_index: null,
+    page_number: null,
+    page_count: null,
+    zoom: null,
+    fit_mode: null,
+    view_signature: null,
+    stale: false,
+    refresh_attempted: false,
+    refresh_result: 'not_requested',
+    blocked_reason: 'tool_unavailable',
+    result_summary: error instanceof Error
+      ? `Coreview tool failed: ${error.message}`
+      : 'Coreview tool failed.',
+    command_source: 'gemini_tool',
+    preserved_mic: true,
+    preserved_review: true,
+    view_ready_wait_ms: null,
+    view_signature_before: null,
+    view_signature_after: null,
+    exact_text_available: false,
+    visual_frame_fresh: false,
+    visual_fresh: false,
+    review_active: false,
+    annotation_overlay_captured: null,
+    artifact_stable_identity: null,
+    rebind_status: 'not_attempted',
+    rebind_attempted: false,
+    rebind_result: 'not_attempted',
+    rebind_reason: null,
+    raw_comment_text_excluded: true,
+    raw_artifact_text_excluded: true,
+    raw_frame_excluded: true,
+  };
 }
 
 function waitForWebSocketOpen(websocket: WebSocketLike): Promise<void> {
@@ -2891,6 +3656,7 @@ function waitForGeminiSetupComplete(
     onProviderEvent?: (event: unknown) => void;
     onProviderEventTelemetry?: (event: unknown, receiveMetadata: GeminiProviderReceiveMetadata) => void;
     onProviderToolEvent?: (event: Record<string, unknown>) => void;
+    onFrontendToolEvent?: (event: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
     onRelayEvent: (event: Record<string, unknown>, receiveMetadata: GeminiProviderReceiveMetadata) => void;
     onOutputAudio: (event: Record<string, unknown>, receiveMetadata: GeminiProviderReceiveMetadata) => void;
     onInterruption: (event: Record<string, unknown>) => void;
@@ -2917,7 +3683,12 @@ function waitForGeminiSetupComplete(
       if (interrupted) {
         handlers.onInterruption(parsed);
       }
-      handlers.onRelayEvent(parsed, receiveMetadata);
+      const relayEvent = handlers.onFrontendToolEvent
+        ? await handlers.onFrontendToolEvent(parsed)
+        : parsed;
+      if (relayEvent) {
+        handlers.onRelayEvent(relayEvent, receiveMetadata);
+      }
       if (!interrupted) {
         handlers.onOutputAudio(parsed, receiveMetadata);
       }
@@ -3473,10 +4244,10 @@ function describeGeminiProviderEventType(event: Record<string, unknown>): string
     })) {
       return 'serverContent.modelTurn.inlineData.audio';
     }
-    if (isRecord(recordFromAnyKey(serverContent, 'outputTranscription', 'output_transcription'))) {
+    if (hasTranscriptionText(event, 'outputTranscription', 'output_transcription')) {
       return 'serverContent.outputTranscription';
     }
-    if (isRecord(recordFromAnyKey(serverContent, 'inputTranscription', 'input_transcription'))) {
+    if (hasTranscriptionText(event, 'inputTranscription', 'input_transcription')) {
       return 'serverContent.inputTranscription';
     }
     return 'serverContent';
@@ -3602,17 +4373,66 @@ function isGeminiModelTurnAudioPart(part: unknown): boolean {
 }
 
 function hasTranscriptionText(event: unknown, ...transcriptionKeys: string[]): boolean {
-  const serverContent = recordFromAnyKey(event, 'serverContent', 'server_content');
-  const transcription = recordFromAnyKey(serverContent, ...transcriptionKeys);
-  const text = stringFromAnyKey(transcription, 'text');
-  return Boolean(text?.trim());
+  return Boolean(readTranscriptionText(event, ...transcriptionKeys));
 }
 
 function readTranscriptionText(event: unknown, ...transcriptionKeys: string[]): string | null {
   const serverContent = recordFromAnyKey(event, 'serverContent', 'server_content');
-  const transcription = recordFromAnyKey(serverContent, ...transcriptionKeys);
-  const text = stringFromAnyKey(transcription, 'text')?.replace(/\s+/g, ' ').trim();
-  return text || null;
+  const transcription = valueFromAnyKey(serverContent, ...transcriptionKeys);
+  const text = typeof transcription === 'string'
+    ? transcription
+    : stringFromAnyKey(transcription, 'text', 'transcript');
+  const normalized = text?.replace(/\s+/g, ' ').trim();
+  return normalized || null;
+}
+
+function artifactReviewAssistantLeakageMarker(
+  event: Record<string, unknown>,
+  categories: GeminiProviderEventCategory[],
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null,
+): string | null {
+  if (!artifactReviewContext?.active) {
+    return null;
+  }
+  if (!categories.includes('outputTranscription') && !categories.includes('modelTurnText')) {
+    return null;
+  }
+
+  const candidates = [
+    readTranscriptionText(event, 'outputTranscription', 'output_transcription'),
+    ...readGeminiModelTurnTextParts(event),
+  ].filter((text): text is string => Boolean(text));
+
+  for (const text of candidates) {
+    const marker = promptOrToolLeakageMarker(text);
+    if (marker) return marker;
+  }
+  return null;
+}
+
+function promptOrToolLeakageMarker(text: string): string | null {
+  const normalized = text.replace(/\s+/g, ' ').trim().toLowerCase();
+  if (!normalized) return null;
+  if (/\bemit_artifact\b/u.test(normalized)) return 'emit_artifact';
+  if (/\bread_artifact_text\b/u.test(normalized)) return 'read_artifact_text';
+  if (/\bartifact_id\b/u.test(normalized)) return 'artifact_id';
+  if (/\bactive_goal\s*:/u.test(normalized)) return 'active_goal';
+  if (/\btool_call_id\b/u.test(normalized)) return 'tool_call_id';
+  if (/^(?:tool\s+)?schema$/u.test(normalized) || /\btool\s+schema\b/u.test(normalized)) return 'tool_schema';
+  if (/\b(?:system|developer|internal)\s+prompt\b/u.test(normalized)) return 'internal_prompt';
+  if (/\bdeveloper\s+instructions\b/u.test(normalized)) return 'internal_prompt';
+  if (/\bfunction\s*declarations?\b|\bfunctiondeclarations\b|\btool\s+payload\b/u.test(normalized)) return 'tool_schema';
+  return null;
+}
+
+function readGeminiModelTurnTextParts(event: Record<string, unknown>): string[] {
+  const serverContent = recordFromAnyKey(event, 'serverContent', 'server_content');
+  const modelTurn = recordFromAnyKey(serverContent, 'modelTurn', 'model_turn');
+  const parts = arrayFromAnyKey(modelTurn, 'parts') ?? [];
+  return parts
+    .filter(isRecord)
+    .map((part) => stringFromAnyKey(part, 'text')?.replace(/\s+/g, ' ').trim())
+    .filter((text): text is string => Boolean(text));
 }
 
 function normalizeTranscriptionForIntent(text: string): string {
@@ -3622,6 +4442,33 @@ function normalizeTranscriptionForIntent(text: string): string {
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim()
     .replace(/\s+/g, ' ');
+}
+
+function pruneStringSet(values: Set<string>, maxSize: number): void {
+  while (values.size > maxSize) {
+    const first = values.values().next().value;
+    if (typeof first !== 'string') return;
+    values.delete(first);
+  }
+}
+
+export function classifyArtifactReviewUserIntent(text: string): GeminiArtifactReviewUserIntent {
+  const normalized = normalizeTranscriptionForIntent(text);
+  if (!normalized) {
+    return 'unknown';
+  }
+
+  const createOrUpdate =
+    /\b(create|make|write|draft|generate|update|edit|revise|rewrite|change|save|add|remove|replace)\b/u.test(normalized)
+    && /\b(artifact|document|doc|summary|brief|report|file|canvas|it|this)\b/u.test(normalized);
+  if (
+    createOrUpdate
+    || /\b(turn this into|save this as|make this into|new artifact|new version)\b/u.test(normalized)
+  ) {
+    return 'create_update';
+  }
+
+  return 'analysis';
 }
 
 function isConfirmableProviderInputTranscription(text: string): boolean {
@@ -3649,9 +4496,7 @@ function isLikelyAssistantEcho(inputText: string, assistantText: string | null):
 }
 
 function readTranscriptionTextPreview(event: unknown, ...transcriptionKeys: string[]): string | null {
-  const serverContent = recordFromAnyKey(event, 'serverContent', 'server_content');
-  const transcription = recordFromAnyKey(serverContent, ...transcriptionKeys);
-  const text = stringFromAnyKey(transcription, 'text')?.replace(/\s+/g, ' ').trim();
+  const text = readTranscriptionText(event, ...transcriptionKeys);
   if (!text) {
     return null;
   }
@@ -3941,7 +4786,7 @@ function readGeminiFunctionResponsesFromToolResponse(payload: Record<string, unk
 
 function applyCoreviewReadArtifactTextSideband(
   functionResponse: Record<string, unknown>,
-  sessionId: string,
+  scope: { sessionId: string; threadId?: string | null },
 ): Record<string, unknown> {
   if (stringFromAnyKey(functionResponse, 'name') !== GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
     return functionResponse;
@@ -3958,7 +4803,11 @@ function applyCoreviewReadArtifactTextSideband(
   }
 
   const startedAtMs = monotonicNowMs();
-  const sidebandResponse = readCoreviewArtifactTextSideband({ artifactId, sessionId });
+  const sidebandResponse = readCoreviewArtifactTextSideband({
+    artifactId,
+    sessionId: scope.sessionId,
+    threadId: scope.threadId ?? null,
+  });
   const latencyMs = elapsedMs(startedAtMs);
   if (!sidebandResponse.ok) {
     return {
@@ -4032,12 +4881,21 @@ function responseSummaryFromFunctionResponse(functionResponse: Record<string, un
   if (!response) {
     return null;
   }
-  if (stringFromAnyKey(functionResponse, 'name') === GEMINI_RETRIEVE_MEMORIES_TOOL_NAME) {
+  const toolName = stringFromAnyKey(functionResponse, 'name');
+  if (isCoreviewToolName(toolName)) {
+    const summary = stringFromAnyKey(response, 'result_summary', 'resultSummary');
+    if (summary) {
+      return summary;
+    }
+    const status = response.ok === true ? 'success' : stringFromAnyKey(response, 'blocked_reason', 'blockedReason') ?? 'blocked';
+    return `${toolName} returned ${status}.`;
+  }
+  if (toolName === GEMINI_RETRIEVE_MEMORIES_TOOL_NAME) {
     const status = stringFromAnyKey(response, 'status') ?? 'unknown';
     const count = numberFromAnyKey(response, 'count') ?? 0;
     return `retrieve_memories returned ${status} with ${count} snippet(s).`;
   }
-  if (stringFromAnyKey(functionResponse, 'name') === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
+  if (toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
     if (response.ok === true) {
       const source = stringFromAnyKey(response, 'source') ?? 'unknown';
       const charCount = numberFromAnyKey(response, 'char_count', 'charCount') ?? 0;
@@ -4056,6 +4914,36 @@ function redactToolCallArgsForTelemetry(
   toolName: string | null,
   args: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
+  if (isCoreviewToolName(toolName) && args) {
+    const reason = stringFromAnyKey(args, 'reason');
+    const commentText = stringFromAnyKey(args, 'comment_text', 'commentText', 'note', 'text');
+    const textQuote = stringFromAnyKey(args, 'text_quote', 'textQuote');
+    return {
+      artifact_id: stringFromAnyKey(args, 'artifact_id', 'artifactId'),
+      page_index: numberFromAnyKey(args, 'page_index', 'pageIndex'),
+      page_number: numberFromAnyKey(args, 'page_number', 'pageNumber'),
+      page_label_present: Boolean(stringFromAnyKey(args, 'page_label', 'pageLabel')),
+      zoom: numberFromAnyKey(args, 'zoom'),
+      zoom_delta: numberFromAnyKey(args, 'zoom_delta', 'zoomDelta'),
+      fit_mode: stringFromAnyKey(args, 'fit_mode', 'fitMode'),
+      kind: stringFromAnyKey(args, 'kind'),
+      anchor_type: stringFromAnyKey(args, 'anchor_type', 'anchorType'),
+      color: stringFromAnyKey(args, 'color'),
+      occurrence: numberFromAnyKey(args, 'occurrence'),
+      rect_present: Boolean(recordFromAnyKey(args, 'rect')),
+      point_present: Boolean(recordFromAnyKey(args, 'point')),
+      comment_text_length: commentText?.length ?? 0,
+      text_quote_length: textQuote?.length ?? 0,
+      text_quote_fingerprint: textQuote ? telemetryTextFingerprint(textQuote) : null,
+      reason_length: reason?.length ?? 0,
+      raw_reason_excluded: true,
+      raw_comment_text_excluded: true,
+      raw_text_quote_excluded: true,
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
+    };
+  }
+
   if (toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME && args) {
     const query = stringFromAnyKey(args, 'query');
     const reason = stringFromAnyKey(args, 'reason');
@@ -4086,6 +4974,10 @@ function redactBackendResponseForToolTelemetry(
   toolName: string | null,
   response: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
+  if (isCoreviewToolName(toolName) && response) {
+    return redactCoreviewActionResponseForTelemetry(response);
+  }
+
   if (toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME && response) {
     return redactReadArtifactTextResponseForTelemetry(response);
   }
@@ -4115,6 +5007,61 @@ function redactBackendResponseForToolTelemetry(
   };
 }
 
+function redactCoreviewActionResponseForTelemetry(
+  response: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ok: response.ok === true,
+    action: stringFromAnyKey(response, 'action'),
+    artifact_id: stringFromAnyKey(response, 'artifact_id', 'artifactId'),
+    renderer_kind: stringFromAnyKey(response, 'renderer_kind', 'rendererKind'),
+    page_index: numberFromAnyKey(response, 'page_index', 'pageIndex'),
+    page_number: numberFromAnyKey(response, 'page_number', 'pageNumber'),
+    page_count: numberFromAnyKey(response, 'page_count', 'pageCount'),
+    zoom: numberFromAnyKey(response, 'zoom'),
+    fit_mode: stringFromAnyKey(response, 'fit_mode', 'fitMode'),
+    stale: response.stale === true,
+    refresh_attempted: response.refresh_attempted === true || response.refreshAttempted === true,
+    refresh_result: stringFromAnyKey(response, 'refresh_result', 'refreshResult'),
+    blocked_reason: stringFromAnyKey(response, 'blocked_reason', 'blockedReason'),
+    result_summary: stringFromAnyKey(response, 'result_summary', 'resultSummary'),
+    command_source: stringFromAnyKey(response, 'command_source', 'commandSource'),
+    preserved_mic: response.preserved_mic === true || response.preservedMic === true,
+    preserved_review: response.preserved_review === true || response.preservedReview === true,
+    view_ready_wait_ms: numberFromAnyKey(response, 'view_ready_wait_ms', 'viewReadyWaitMs'),
+    view_signature_before_present: Boolean(stringFromAnyKey(response, 'view_signature_before', 'viewSignatureBefore')),
+    view_signature_after_present: Boolean(stringFromAnyKey(response, 'view_signature_after', 'viewSignatureAfter')),
+    exact_text_available: response.exact_text_available === true || response.exactTextAvailable === true,
+    visual_frame_fresh: response.visual_frame_fresh === true || response.visualFrameFresh === true,
+    visual_fresh: response.visual_fresh === true || response.visualFresh === true || response.visual_frame_fresh === true || response.visualFrameFresh === true,
+    frame_sent: response.frame_sent === true || response.frameSent === true,
+    review_active: response.review_active === true || response.reviewActive === true,
+    current_view_summary: stringFromAnyKey(response, 'current_view_summary', 'currentViewSummary'),
+    annotation_overlay_captured: response.annotation_overlay_captured === true || response.annotationOverlayCaptured === true
+      ? true
+      : response.annotation_overlay_captured === false || response.annotationOverlayCaptured === false
+        ? false
+        : null,
+    annotation_id_present: Boolean(stringFromAnyKey(response, 'annotation_id', 'annotationId')),
+    annotation_kind: stringFromAnyKey(response, 'annotation_kind', 'annotationKind'),
+    annotation_anchor_type: stringFromAnyKey(response, 'annotation_anchor_type', 'annotationAnchorType'),
+    annotation_color: stringFromAnyKey(response, 'annotation_color', 'annotationColor'),
+    annotation_page_index: numberFromAnyKey(response, 'annotation_page_index', 'annotationPageIndex'),
+    annotation_count: numberFromAnyKey(response, 'annotation_count', 'annotationCount'),
+    highlight_count: numberFromAnyKey(response, 'highlight_count', 'highlightCount'),
+    comment_count: numberFromAnyKey(response, 'comment_count', 'commentCount'),
+    annotation_action_source: stringFromAnyKey(response, 'annotation_action_source', 'annotationActionSource'),
+    focus_anchor_type: stringFromAnyKey(response, 'focus_anchor_type', 'focusAnchorType'),
+    focused_rect_present: Boolean(recordFromAnyKey(response, 'focused_rect', 'focusedRect')),
+    raw_comment_text_excluded: true,
+    review_tool_timed_out: response.review_tool_timed_out === true || response.reviewToolTimedOut === true,
+    review_tool_timeout_name: stringFromAnyKey(response, 'review_tool_timeout_name', 'reviewToolTimeoutName'),
+    review_tool_timeout_result_sent: response.review_tool_timeout_result_sent === true || response.reviewToolTimeoutResultSent === true,
+    raw_artifact_text_excluded: true,
+    raw_frame_excluded: true,
+  };
+}
+
 function redactReadArtifactTextResponseForTelemetry(
   response: Record<string, unknown>,
 ): Record<string, unknown> {
@@ -4123,10 +5070,14 @@ function redactReadArtifactTextResponseForTelemetry(
     artifact_id: stringFromAnyKey(response, 'artifact_id', 'artifactId'),
     source: stringFromAnyKey(response, 'source'),
     char_count: numberFromAnyKey(response, 'char_count', 'charCount') ?? 0,
+    page_count: numberFromAnyKey(response, 'page_count', 'pageCount'),
     truncated: response.truncated === true,
     status: response.ok === true ? 'success' : stringFromAnyKey(response, 'status'),
     safe_reason: response.ok === true ? null : stringFromAnyKey(response, 'safe_reason', 'safeReason'),
     latency_ms: numberFromAnyKey(response, 'latency_ms', 'latencyMs'),
+    review_tool_timed_out: response.review_tool_timed_out === true || response.reviewToolTimedOut === true,
+    review_tool_timeout_name: stringFromAnyKey(response, 'review_tool_timeout_name', 'reviewToolTimeoutName'),
+    review_tool_timeout_result_sent: response.review_tool_timeout_result_sent === true || response.reviewToolTimeoutResultSent === true,
     raw_artifact_text_excluded: true,
   };
 }
@@ -4316,6 +5267,20 @@ function recordFromAnyKey(value: unknown, ...keys: string[]): Record<string, unk
     const candidate = value[key];
     if (isRecord(candidate)) {
       return candidate;
+    }
+  }
+
+  return null;
+}
+
+function valueFromAnyKey(value: unknown, ...keys: string[]): unknown {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      return value[key];
     }
   }
 

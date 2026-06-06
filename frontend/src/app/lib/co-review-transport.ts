@@ -14,7 +14,7 @@ export const CO_REVIEW_STATES = [
 export type CoReviewStateName = (typeof CO_REVIEW_STATES)[number]
 export type VisualInputStatus = "inactive" | "unsupported" | "connecting" | "live" | "stopped" | "error"
 export type ToolAvailability = "unknown" | "available" | "sideband_only" | "unavailable"
-export type VideoOrFrameMode = "none" | "continuous_video" | "still_frame"
+export type VideoOrFrameMode = "none" | "still_frame"
 export type RefreshFrameResult = "idle" | "refreshing" | "success" | "error" | "blocked"
 
 export interface CoreviewUsageMetadataAfterFrame {
@@ -53,6 +53,10 @@ export interface CoReviewSessionState {
   estimatedVisualCost: number | null
   frameSentCount: number
   initialFrameSent: boolean
+  lastFrameSentAt: string | null
+  visualFresh: boolean
+  visualFreshForTurn: boolean
+  exactTextAvailable: boolean
   refreshFrameCount: number
   frameBytes: number | null
   frameDimensions: ArtifactFrameDimensions | null
@@ -89,6 +93,7 @@ export interface CoReviewStartInput {
   threadId: string
   artifactId: string
   visualSource: ArtifactVisualSource
+  exactTextAvailable?: boolean
 }
 
 export interface CoReviewStartResult {
@@ -148,7 +153,6 @@ export interface CoReviewTransportStatus {
   kind: string
   visualTransportSupported: boolean
   toolsSupportedInCoReview: boolean
-  continuousVideoSupported: boolean
   stillFramesSupported: boolean
   statusText: string
 }
@@ -158,11 +162,8 @@ export interface CoReviewMediaTransport {
   startCoReview(input: CoReviewStartInput): Promise<CoReviewStartResult>
   refreshCoReview(input: CoReviewRefreshInput): Promise<CoReviewRefreshResult>
   stopCoReview(): Promise<CoReviewStopResult>
-  sendFrame?(frame: Blob): Promise<void>
-  attachVideoTrack?(track: MediaStreamTrack): Promise<void>
   status(): CoReviewTransportStatus
   supportsTools(): boolean
-  supportsContinuousVideo(): boolean
   supportsStillFrames(): boolean
 }
 
@@ -211,17 +212,12 @@ export class AudioWebSocketUnsupportedTransport implements CoReviewMediaTranspor
       kind: this.kind,
       visualTransportSupported: false,
       toolsSupportedInCoReview: false,
-      continuousVideoSupported: false,
       stillFramesSupported: false,
-      statusText: "continuous unsupported",
+      statusText: "still-frame unavailable",
     }
   }
 
   supportsTools(): boolean {
-    return false
-  }
-
-  supportsContinuousVideo(): boolean {
     return false
   }
 
@@ -271,6 +267,7 @@ export class CoReviewSessionMachine {
       coReviewSessionId: null,
       visualInputStatus: "connecting",
       toolAvailability: "unknown",
+      exactTextAvailable: Boolean(input.exactTextAvailable),
       startedAt,
       stoppedAt: null,
       error: null,
@@ -284,6 +281,9 @@ export class CoReviewSessionMachine {
       lastRefreshAt: null,
       lastFrameBytes: null,
       lastFrameDimensions: null,
+      lastFrameSentAt: null,
+      visualFresh: false,
+      visualFreshForTurn: false,
       initialFrameSent: false,
       refreshFrameCount: 0,
       totalFrameBytes: 0,
@@ -347,6 +347,9 @@ export class CoReviewSessionMachine {
         lastFrameSendFailureReason: result.error ?? "co_review_transport_start_failed",
         lastFrameBytes: result.frameBytes ?? this.current.lastFrameBytes,
         lastFrameDimensions: result.frameDimensions ?? this.current.lastFrameDimensions,
+        lastFrameSentAt: null,
+        visualFresh: false,
+        visualFreshForTurn: false,
         websocketClosedAfterFrameCount: this.current.websocketClosedAfterFrameCount + (result.websocketClosedAfterFrameSend ? 1 : 0),
         providerUsageImageCount: result.imageCountAfterFrame ?? this.current.providerUsageImageCount,
         providerUsageVideoDurationSeconds: readUsageDurationSeconds(result.usageMetadataAfterFrame ?? null, "video"),
@@ -375,6 +378,9 @@ export class CoReviewSessionMachine {
       frameDimensions: result.frameDimensions ?? this.current.frameDimensions,
       frameSendLatencyMs: result.frameSendLatencyMs ?? this.current.frameSendLatencyMs,
       initialFrameSent: (result.frameSentCount ?? 0) > 0,
+      lastFrameSentAt: (result.frameSentCount ?? 0) > 0 ? new Date().toISOString() : null,
+      visualFresh: (result.frameSentCount ?? 0) > 0,
+      visualFreshForTurn: (result.frameSentCount ?? 0) > 0,
       totalFrameBytes: result.frameBytes ?? 0,
       maxFrameSendLatencyMs: maxNullable(this.current.maxFrameSendLatencyMs, result.frameSendLatencyMs ?? null),
       lastFrameBytes: result.frameBytes ?? this.current.lastFrameBytes,
@@ -415,6 +421,8 @@ export class CoReviewSessionMachine {
       normalVoicePaused: false,
       videoOrFrameMode: "none",
       visualResponseObserved: false,
+      visualFresh: false,
+      visualFreshForTurn: false,
       refreshFrameInProgress: false,
     })
     return this.state()
@@ -440,6 +448,8 @@ export class CoReviewSessionMachine {
       videoOrFrameMode: "none",
       visualResponseObserved: false,
       toolCallStillWorks: null,
+      visualFresh: false,
+      visualFreshForTurn: false,
       refreshFrameInProgress: false,
     })
     return this.state()
@@ -503,14 +513,13 @@ export class CoReviewSessionMachine {
     const refreshFrameLatencyMs = elapsedMs(this.clock(), refreshMark)
     if (!result.ok) {
       this.update({
-        state: "co_review_error",
-        visualInputStatus: result.visualInputStatus,
-        toolAvailability: result.toolAvailability,
-        coReviewSessionId: null,
+        state: "co_review_live",
+        visualInputStatus: this.current.visualInputStatus,
+        toolAvailability: this.current.toolAvailability,
         error: result.error ?? "artifact_frame_refresh_failed",
-        videoOrFrameMode: "none",
-        normalVoicePaused: false,
-        normalVoiceRestored: true,
+        videoOrFrameMode: this.current.videoOrFrameMode,
+        normalVoicePaused: this.current.normalVoicePaused,
+        normalVoiceRestored: this.current.normalVoiceRestored,
         refreshFrameInProgress: false,
         refreshFrameLatencyMs,
         refreshFrameResult: "error",
@@ -527,11 +536,13 @@ export class CoReviewSessionMachine {
         lastFrameSendFailureReason: result.error ?? "artifact_frame_refresh_failed",
         lastFrameBytes: result.frameBytes ?? this.current.lastFrameBytes,
         lastFrameDimensions: result.frameDimensions ?? this.current.lastFrameDimensions,
+        visualFresh: false,
+        visualFreshForTurn: false,
         providerUsageImageCount: result.imageCountAfterFrame ?? this.current.providerUsageImageCount,
         providerUsageVideoDurationSeconds: readUsageDurationSeconds(result.usageMetadataAfterFrame ?? null, "video") ?? this.current.providerUsageVideoDurationSeconds,
         providerUsageAudioDurationSeconds: readUsageDurationSeconds(result.usageMetadataAfterFrame ?? null, "audio") ?? this.current.providerUsageAudioDurationSeconds,
-        providerAcceptedFrame: result.providerAcceptedFrame ?? false,
-        visualResponseObserved: result.visualResponseObserved ?? false,
+        providerAcceptedFrame: result.providerAcceptedFrame ?? this.current.providerAcceptedFrame,
+        visualResponseObserved: result.visualResponseObserved ?? this.current.visualResponseObserved,
         estimatedVisualCost: result.estimatedVisualCost ?? this.current.estimatedVisualCost,
       })
       return this.state()
@@ -559,6 +570,9 @@ export class CoReviewSessionMachine {
       frameDimensions: result.frameDimensions ?? this.current.frameDimensions,
       frameSendLatencyMs: result.frameSendLatencyMs ?? this.current.frameSendLatencyMs,
       totalFrameBytes: this.current.totalFrameBytes + (result.frameBytes ?? 0),
+      lastFrameSentAt: new Date().toISOString(),
+      visualFresh: true,
+      visualFreshForTurn: true,
       maxFrameSendLatencyMs: maxNullable(this.current.maxFrameSendLatencyMs, result.frameSendLatencyMs ?? null),
       lastFrameBytes: result.frameBytes ?? this.current.lastFrameBytes,
       lastFrameDimensions: result.frameDimensions ?? this.current.lastFrameDimensions,
@@ -608,6 +622,10 @@ export function initialCoReviewState(transportKind = "none"): CoReviewSessionSta
     estimatedVisualCost: null,
     frameSentCount: 0,
     initialFrameSent: false,
+    lastFrameSentAt: null,
+    visualFresh: false,
+    visualFreshForTurn: false,
+    exactTextAvailable: false,
     refreshFrameCount: 0,
     frameBytes: null,
     frameDimensions: null,
@@ -647,7 +665,7 @@ export function safeCoReviewTelemetryFromState(
   return {
     normalVoiceSessionId: state.normalSessionId,
     coReviewSessionId: state.coReviewSessionId,
-    coreviewSessionActive: state.state === "co_review_live" && state.visualInputStatus === "live",
+    coreviewSessionActive: state.state === "co_review_live" && state.visualInputStatus === "live" && state.frameSentCount > 0,
     coreviewArtifactId: state.artifactId,
     visualSourceKind: state.visualSourceKind,
     transportKind: state.transportKind,
@@ -662,6 +680,10 @@ export function safeCoReviewTelemetryFromState(
     frameCount: state.frameCount,
     frameSentCount: state.frameSentCount,
     initialFrameSent: state.initialFrameSent,
+    lastFrameSentAt: state.lastFrameSentAt,
+    visualFresh: state.visualFresh,
+    visualFreshForTurn: state.visualFreshForTurn,
+    exactTextAvailable: state.exactTextAvailable,
     refreshFrameCount: state.refreshFrameCount,
     frameBytes: state.frameBytes,
     frameDimensions: state.frameDimensions,
@@ -685,6 +707,8 @@ export function safeCoReviewTelemetryFromState(
     providerUsageVideoDurationSeconds: state.providerUsageVideoDurationSeconds,
     providerUsageAudioDurationSeconds: state.providerUsageAudioDurationSeconds,
     rawFrameExcluded: true,
+    rawProviderPayloadExcluded: true,
+    rawArtifactTextExcluded: true,
     providerAcceptedFrame: state.providerAcceptedFrame,
     visualResponseObserved: state.visualResponseObserved,
     toolCallStillWorks: state.toolCallStillWorks,

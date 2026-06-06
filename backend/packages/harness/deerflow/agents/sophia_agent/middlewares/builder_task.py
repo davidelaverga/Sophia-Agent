@@ -32,6 +32,7 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
+from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.utils import log_middleware
 
 logger = logging.getLogger(__name__)
@@ -267,11 +268,91 @@ def _format_age(now_s: float, mtime: float) -> str:
     return f"{int(delta / 3600)}h ago"
 
 
+def _artifact_target_extension(artifact_target_path: object) -> str:
+    if not isinstance(artifact_target_path, str):
+        return ""
+    return Path(artifact_target_path).suffix.lower()
+
+
+def _critical_emit_guidance(artifact_target_ext: str) -> str:
+    if artifact_target_ext == ".pdf":
+        return (
+            "for this PDF target, prefer the .pdf if it exists, otherwise emit "
+            "the approved Markdown fallback for mostly-text documents or HTML "
+            "fallback for visual/chart/diagram documents with confidence<=0.5. "
+            "Do NOT emit a generator .py as a PDF fallback.\n"
+        )
+    return (
+        "if only a generator .py exists, emit that with confidence<=0.4 and "
+        "explain in companion_tone_hint.\n"
+    )
+
+
+def _critical_pick_guidance(artifact_target_ext: str) -> str:
+    if artifact_target_ext == ".pdf":
+        return (
+            "first file marked 'deliverable'. If only generator files exist, "
+            "accept the force-stop fallback.\n"
+        )
+    return "first file marked 'deliverable' (or 'generator' if no deliverable exists) "
+
+
+def _generator_listing_tag(
+    *,
+    artifact_target_ext: str,
+    has_deliverable: bool,
+    has_generator: bool,
+) -> tuple[str, bool]:
+    if artifact_target_ext == ".pdf":
+        return "(generator script — do NOT emit for PDF; use .pdf or approved .md/.html fallback instead)", has_generator
+    if not has_deliverable and has_generator:
+        return "(generator script — emit with confidence<=0.4 if no deliverable works)", False
+    return "(generator script)", has_generator
+
+
+def _workflow_card(name: str) -> str | None:
+    path = SKILLS_PATH / "builder_workflows" / f"{name}.md"
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        logger.warning("BuilderTask: workflow card missing/unreadable name=%s path=%s", name, path)
+        return None
+
+
+def _builder_workflow_sections(
+    *,
+    artifact_target_ext: str,
+    task_type: str,
+    allow_web_research: bool,
+) -> list[str]:
+    cards: list[str] = []
+    if allow_web_research:
+        cards.append("research")
+    if artifact_target_ext == ".pptx":
+        cards.append("pptx")
+    elif artifact_target_ext == ".pdf":
+        cards.append("pdf")
+    elif artifact_target_ext in {".html", ".htm"}:
+        cards.append("html")
+
+    sections: list[str] = []
+    for name in dict.fromkeys(cards):
+        content = _workflow_card(name)
+        if content:
+            sections.append(
+                f"<builder_workflow_card name=\"{name}\" task_type=\"{html.escape(task_type, quote=True)}\">\n"
+                f"{content}\n"
+                "</builder_workflow_card>"
+            )
+    return sections
+
+
 class BuilderTaskState(AgentState):
     system_prompt_blocks: NotRequired[list[str]]
     delegation_context: NotRequired[dict | None]
     builder_non_artifact_turns: NotRequired[int]
     builder_last_tool_names: NotRequired[list[str]]
+    builder_artifact_target_path: NotRequired[str]
     # NOTE: builder_search_sources is NOT redeclared here. SophiaState already
     # declares it with the `_merge_search_sources` reducer; redeclaring it as
     # plain `NotRequired[list[dict]]` would shadow that reducer via
@@ -323,9 +404,12 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         relevant_memories: list[str] = delegation_context.get("relevant_memories") or []
         active_ritual: str | None = delegation_context.get("active_ritual")
         ritual_phase: str | None = delegation_context.get("ritual_phase")
-        allow_web_research = bool(
-            state.get("allow_web_research", delegation_context.get("allow_web_research", False))
+        allow_web_research = True
+        artifact_target_path = (
+            state.get("builder_artifact_target_path")
+            or delegation_context.get("artifact_target_path")
         )
+        artifact_target_ext = _artifact_target_extension(artifact_target_path)
         tracked_sources = [
             source for source in (state.get("builder_search_sources") or []) if isinstance(source, dict)
         ]
@@ -408,10 +492,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         # Pre-flight gate: when this build will need image-generation but the
         # required API key isn't configured, tell the model to STOP rather
         # than burning 30 turns on a doomed loop. Spec-aligned per
-        # AGENTS.md: "When the task cannot be completed because a required
-        # capability is missing, STOP — do not loop retrying the same
-        # command. Call emit_builder_artifact with low confidence and
-        # explain the missing capability in companion_summary."
+        # builder_obligations.md: when a required capability is missing,
+        # stop cleanly instead of looping on the same doomed command.
         api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
         if task_type in _VISUAL_TASK_TYPES and not api_key:
             sections.append(
@@ -440,6 +522,15 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "- When you call emit_builder_artifact, artifact_path and supporting_files must use the same /mnt/user-data/outputs/... absolute paths.\n"
             "</output_contract>"
         )
+        if isinstance(artifact_target_path, str) and artifact_target_path.startswith("/mnt/user-data/outputs/"):
+            sections.append(
+                "<artifact_target>\n"
+                f"- Canonical target path for this build: `{html.escape(artifact_target_path, quote=True)}`.\n"
+                "- The target file extension is authoritative for the final output format. If this path ends in .html, deliver an HTML file even if the task type is visual_report.\n"
+                "- Reuse this path across update/resume runs unless you have already written exactly one stronger deliverable candidate under /mnt/user-data/outputs/.\n"
+                "- emit_builder_artifact.artifact_path should point to this target or that single verified candidate, never to an unwritten placeholder.\n"
+                "</artifact_target>"
+            )
 
         # PR Phase B (2026-04-29): inject the skills inventory so the
         # builder knows the pre-tested generation workflows
@@ -450,6 +541,18 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         skills_block = self._build_skills_inventory_block()
         if skills_block:
             sections.append(skills_block)
+
+        workflow_sections = _builder_workflow_sections(
+            artifact_target_ext=artifact_target_ext,
+            task_type=task_type,
+            allow_web_research=allow_web_research,
+        )
+        if workflow_sections:
+            sections.append(
+                "<builder_target_workflows>\n"
+                + "\n\n".join(workflow_sections)
+                + "\n</builder_target_workflows>"
+            )
 
         sections.append(
             "<preinstalled_libraries>\n"
@@ -466,22 +569,6 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "generators that handle font/encoding/embedding correctly.\n"
             "</preinstalled_libraries>"
         )
-
-        if task_type == "research":
-            sections.append(
-                "<research_output_requirements>\n"
-                "- For factual claims from external sources, use inline citations in the format [citation:Title](URL).\n"
-                "- End the report with a Sources section using [Title](URL) - note format.\n"
-                "- emit_builder_artifact.sources_used must include structured {title, url} entries for the sources you actually used.\n"
-                "</research_output_requirements>"
-            )
-        elif allow_web_research:
-            sections.append(
-                "<source_output_requirements>\n"
-                "- If you use external sources, include a concise Sources appendix in the deliverable or create a small sidecar markdown file.\n"
-                "- emit_builder_artifact.sources_used must include structured {title, url} entries for the sources you actually used.\n"
-                "</source_output_requirements>"
-            )
 
         if tracked_sources:
             source_lines = [
@@ -525,63 +612,53 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "fragile path PR #93/#94 spent recovery machinery on.\n"
             "Plan your work to fit within this budget:\n"
             "- Turn 1: call write_todos with a short plan (3–5 steps) so the UI can track progress.\n"
-            "- For text deliverables (markdown, html, plain text, code): use write_file_tool to author the file. "
-            "PREFERRED path is ONE write_file_tool(path, content) call with the complete document. "
-            "For LONG documents that won't fit in a single model output (>~5000 words): use write_file_tool "
+            "- For text deliverables (markdown, html, plain text, code): use the exposed `write_file` tool "
+            "with `description`, `path`, and `content` to author the file. PREFERRED path is ONE "
+            "`write_file(description='write final document', path='/mnt/user-data/outputs/name.ext', "
+            "content='...', append=False)` call with the complete document. "
+            "For LONG documents that won't fit in a single model output (>~5000 words): use `write_file` "
             "MULTIPLE times to the SAME path — the FIRST call writes the opening chunk (omit append or pass "
             "append=False), then SUBSEQUENT calls extend the file with append=True. Each chunk costs ~one turn; "
-            "building a 12k-word document in 2-3 chunked write_file_tool(append=True) calls is the correct "
+            "building a 12k-word document in 2-3 chunked `write_file(..., append=True)` calls is the correct "
             "pattern. Use str_replace_tool for targeted edits to existing content.\n"
             "NEVER use bash_tool to author text file content. The following bash patterns are FORBIDDEN as "
-            "substitutes for write_file_tool:\n"
+            "substitutes for write_file:\n"
             "    * cat > file.md << 'EOF' ... EOF  (heredoc redirect)\n"
             "    * python -c \"with open('/path', 'w') as f: f.write('...')\"\n"
             "    * python - << 'PYEOF' ... PYEOF\n"
             "    * echo '...' > file.md  /  printf '...' > file.md\n"
             "bash_tool is for EXECUTION (running generator scripts that produce binaries, ls/cat for "
             "verification, pip-free shell commands), NOT for authoring text. If you find yourself reaching "
-            "for bash to write file content, STOP and use write_file_tool(append=True) instead. The "
+            "for bash to write file content, STOP and use `write_file(..., append=True)` instead. The "
             "bash-heredoc path leads to truncation, encoding bugs, and a turn-budget-burning loop where "
             "each turn regenerates the entire document.\n"
             "- For binary deliverables (pdf, pptx, docx, xlsx, png, charts): the DELIVERABLE IS THE BINARY. "
             "**Use skills and tools that wrap pre-tested generators — do NOT write your own matplotlib / "
-            "reportlab / python-pptx code.** Past attempts failed repeatedly on font/encoding/image-embedding "
-            "errors. Picks by deliverable shape:\n"
-            "    * **PDF** (technical report, document with diagrams):\n"
-            "      1. For each diagram or chart, use the chart-visualization skill (read its SKILL.md, then "
-            "         invoke the appropriate generate_*_chart script via bash_tool). The skill outputs PNG/SVG "
-            "         to a path under /mnt/user-data/outputs/.\n"
-            "      2. Compose a Markdown source file in /mnt/user-data/outputs/<name>.md with image embeds "
-            "         pointing to the chart files. Write it once with write_file_tool — single call.\n"
-            "      3. Call render_markdown_to_pdf(markdown_path=<.md>, pdf_path=<.pdf>) to produce the binary. "
-            "         This tool wraps pandoc and handles fonts/unicode/embedding correctly.\n"
-            "      4. emit_builder_artifact.artifact_path = the .pdf path.\n"
-            "      If render_markdown_to_pdf returns success=false with error_type='pandoc_missing' or "
-            "      'pandoc_error', SHIP THE MARKDOWN as the artifact instead (artifact_type='document', "
-            "      artifact_path = the .md file) with confidence<=0.5 and explain in companion_tone_hint.\n"
-            "    * **PPTX / presentation**: use the ppt-generation skill (read its SKILL.md). The skill "
-            "      orchestrates image-generation per slide and composes them into a PPTX. Do not write your own "
-            "      python-pptx code.\n"
+            "reportlab / python-pptx code.** Follow the matching <builder_workflow_card> above when one is "
+            "present. If no workflow card covers the requested format, use the closest listed skill first.\n"
+            "    * **PDF**: follow the PDF workflow card. A valid render is terminal-ready; emit immediately "
+            "unless Sophia asks for one layout repair.\n"
+            "    * **PPTX / presentation**: follow the PPTX workflow card. Reading SKILL.md alone is not "
+            "completion; normal success requires image generation, deck composition, and a valid .pptx.\n"
+            "    * **HTML**: follow the HTML workflow card. Standalone browser-renderable HTML is a text "
+            "deliverable, not a frontend app unless the user requested app behavior.\n"
             "    * **Standalone chart / image**: use the chart-visualization or image-generation skill. The "
-            "      generated PNG/SVG is the deliverable.\n"
+            "generated PNG/SVG is the deliverable.\n"
             "    * **Data analysis / spreadsheet**: use the data-analysis skill (DuckDB-based) for SQL over "
-            "      tabular data. Output CSV/JSON/Markdown directly.\n"
+            "tabular data. Output CSV/JSON/Markdown directly.\n"
             "    * **xlsx / docx / other formats not covered by a skill**: as a LAST RESORT, write a short "
-            "      generator script to /mnt/user-data/outputs/_generate_<name>.py and bash-run it. This path "
-            "      is fragile (the very pattern PR #93/#94 spent recovery machinery on). Prefer a skill if at "
-            "      all possible. If you must use a generator script: keep it under 120 lines, run it with "
-            "      bash_tool, verify with ls_tool, and at most 2 fix-and-retry cycles before shipping the .py "
-            "      with confidence<=0.4.\n"
-            "    Libraries listed in <preinstalled_libraries> are already available — do NOT pip install. "
-            "    The render_markdown_to_pdf tool encapsulates the PDF rendering pipeline; you do not need to "
-            "    install anything to use it.\n"
+            "generator script to /mnt/user-data/outputs/_generate_<name>.py and bash-run it. This path is "
+            "fragile. Prefer a skill if at all possible. If you must use a generator script: keep it under "
+            "120 lines, run it with bash_tool, verify with ls_tool, and at most 2 fix-and-retry cycles before "
+            "shipping the .py with confidence<=0.4.\n"
+            "    Libraries listed in <preinstalled_libraries> are already available — do NOT pip install.\n"
             "- After each meaningful step (write_file, successful skill invocation, render_markdown_to_pdf), "
             "call write_todos again to mark the corresponding item 'completed' or 'in-progress'. This is how "
             "the user sees the progress bar advance — skipping these updates leaves the UI stuck.\n"
             "- Make targeted edits only if critical fixes are needed.\n"
             "- Final turn: Call ONLY emit_builder_artifact pointing artifact_path at the FINAL DELIVERABLE "
-            "(the .pdf, .pptx, .png, .md, etc. — never a generator .py unless that is the explicit fallback "
-            "above). Do NOT pair emit_builder_artifact with any other tool call on the same turn — not "
+            "(the .pdf, .pptx, .png, .md, etc. — never a generator .py for PDFs, and only a generator .py "
+            "for non-PDF formats when that is the explicit fallback above). Do NOT pair emit_builder_artifact with any other tool call on the same turn — not "
             "write_todos, not bash, not write_file, not anything. The artifact card surfaces the file to "
             "the user automatically once emit_builder_artifact is captured; you do not need to flag the "
             "file separately. emit_builder_artifact alone is MANDATORY — without it your work is lost.\n"
@@ -623,11 +700,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                     "write_file, bash_tool, or any other tool on this turn. "
                     "Ship what you have NOW, even if partial. "
                     "Use artifact_path pointing to the best file that exists on disk; "
-                    "if only a generator .py exists, emit that with confidence<=0.4 and "
-                    "explain in companion_tone_hint.\n"
-                    "Do NOT emit with artifact_path=null. If you cannot decide, pick the "
-                    "first file marked 'deliverable' (or 'generator' if no deliverable exists) "
-                    "from the list below.\n"
+                    + _critical_emit_guidance(artifact_target_ext)
+                    + "Do NOT emit with artifact_path=null. If you cannot decide, pick the "
+                    + _critical_pick_guidance(artifact_target_ext)
+                    + "from the list below.\n"
                 )
                 # PR #94: enumerate actual files in outputs/ so the model
                 # can pick a real path under tool_choice pressure instead
@@ -657,11 +733,11 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                             else:
                                 tag = "(another deliverable)"
                         elif item["category"] == "generator":
-                            if not has_deliverable and has_generator:
-                                tag = "(generator script — emit with confidence<=0.4 if no deliverable works)"
-                                has_generator = False
-                            else:
-                                tag = "(generator script)"
+                            tag, has_generator = _generator_listing_tag(
+                                artifact_target_ext=artifact_target_ext,
+                                has_deliverable=has_deliverable,
+                                has_generator=has_generator,
+                            )
                         else:
                             tag = "(intermediate — do NOT emit as final)"
                         file_lines.append(

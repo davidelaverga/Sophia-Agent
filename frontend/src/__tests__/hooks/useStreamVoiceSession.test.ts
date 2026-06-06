@@ -54,6 +54,7 @@ const mockConnectGeminiBrowserLiveFromBootstrap = vi.fn().mockResolvedValue(mock
 
 vi.mock("../../app/lib/gemini-browser-live-websocket-dogfood", () => ({
   connectGeminiBrowserLiveFromBootstrap: (...args: unknown[]) => mockConnectGeminiBrowserLiveFromBootstrap(...args),
+  readGeminiConfiguredToolNames: () => [],
 }))
 
 // ---------------------------------------------------------------------------
@@ -1031,6 +1032,182 @@ describe("useStreamVoiceSession", () => {
     expect(onAssistantResponse).toHaveBeenCalledTimes(1)
     expect(onAssistantResponse).toHaveBeenCalledWith("Hey Luis, I'm here.")
     expect(result.current.finalReply).toBe("Hey Luis, I'm here.")
+  })
+
+  it("replaces assistant annotation success claims when no annotation count changed", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve(makeGeminiBootstrap("gemini-prod-claim-guard-1")),
+      text: () => Promise.resolve(""),
+    })
+    const onAssistantResponse = vi.fn()
+    mockConnectGeminiBrowserLiveFromBootstrap.mockResolvedValueOnce({
+      ...mockGeminiConnection,
+      sessionId: "gemini-prod-claim-guard-1",
+      streamUrl: "/api/sophia/voice/gemini/events?session_id=gemini-prod-claim-guard-1",
+    })
+    const { result } = renderHook(() => useStreamVoiceSession("user-1", { onAssistantResponse }))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    act(() => {
+      MockEventSource.latest?.emit("sophia.user_transcript", {
+        type: "sophia.user_transcript",
+        data: {
+          text: "highlight it yellow",
+          utterance_id: "claim-guard-user-1",
+        },
+      })
+      MockEventSource.latest?.emit("sophia.transcript", {
+        type: "sophia.transcript",
+        data: {
+          text: "I highlighted it.",
+          is_final: true,
+          response_id: "claim-guard-assistant-1",
+          source_sequence: 1,
+          assistant_transcript_source: "provider_output_transcription",
+        },
+      })
+    })
+
+    expect(onAssistantResponse).toHaveBeenCalledWith("I have not added that annotation yet.")
+    expect(result.current.finalReply).toBe("I have not added that annotation yet.")
+    const telemetry = result.current.runtimeTelemetry
+    expect(telemetry.runtime).toBe("gemini_live")
+    if (telemetry.runtime !== "gemini_live") throw new Error("Expected Gemini telemetry")
+    expect(telemetry.annotationIntentDetectedCount).toBe(1)
+    expect(telemetry.annotationIntentSource).toBe("public_user_transcript")
+    expect(telemetry.assistantAnnotationClaimSuppressedCount).toBe(1)
+    expect(telemetry.recentAnnotationActionSucceeded).toBe(false)
+  })
+
+  it("allows assistant annotation acknowledgements after a Coreview annotation success", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve(makeGeminiBootstrap("gemini-prod-claim-guard-2")),
+      text: () => Promise.resolve(""),
+    })
+    const onAssistantResponse = vi.fn()
+    mockConnectGeminiBrowserLiveFromBootstrap.mockResolvedValueOnce({
+      ...mockGeminiConnection,
+      sessionId: "gemini-prod-claim-guard-2",
+      streamUrl: "/api/sophia/voice/gemini/events?session_id=gemini-prod-claim-guard-2",
+    })
+    const { result } = renderHook(() => useStreamVoiceSession("user-1", { onAssistantResponse }))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    const connectOptions = mockConnectGeminiBrowserLiveFromBootstrap.mock.calls.at(-1)?.[0] as {
+      onToolLoopDiagnostic?: (diagnostic: Record<string, unknown>) => void
+    }
+
+    act(() => {
+      MockEventSource.latest?.emit("sophia.user_transcript", {
+        type: "sophia.user_transcript",
+        data: {
+          text: "highlight it yellow",
+          utterance_id: "claim-guard-user-2",
+        },
+      })
+      connectOptions.onToolLoopDiagnostic?.({
+        timestamp: new Date().toISOString(),
+        phase: "tool_response_sent",
+        toolCall: { id: "annotation-1", name: "coreview_add_annotation", args: null, argsPreview: "{}" },
+        success: true,
+        resultSummary: "Added a yellow highlight.",
+        backendResponse: {
+          ok: true,
+          action: "add_annotation",
+          command_source: "gemini_tool",
+          annotation_kind: "highlight",
+          annotation_color: "yellow",
+          annotation_page_index: 0,
+          annotation_count: 1,
+          highlight_count: 1,
+          comment_count: 0,
+          annotation_overlay_captured: true,
+          raw_comment_text_excluded: true,
+          raw_artifact_text_excluded: true,
+          raw_frame_excluded: true,
+        },
+      })
+      MockEventSource.latest?.emit("sophia.transcript", {
+        type: "sophia.transcript",
+        data: {
+          text: "I highlighted it.",
+          is_final: true,
+          response_id: "claim-guard-assistant-2",
+          source_sequence: 1,
+          assistant_transcript_source: "provider_output_transcription",
+        },
+      })
+    })
+
+    expect(onAssistantResponse).toHaveBeenCalledWith("I highlighted it.")
+    expect(result.current.finalReply).toBe("I highlighted it.")
+    const telemetry = result.current.runtimeTelemetry
+    expect(telemetry.runtime).toBe("gemini_live")
+    if (telemetry.runtime !== "gemini_live") throw new Error("Expected Gemini telemetry")
+    expect(telemetry.recentAnnotationActionSucceeded).toBe(true)
+    expect(telemetry.assistantAnnotationClaimSuppressedCount).toBe(0)
+  })
+
+  it("allows assistant annotation acknowledgements after a local fallback annotation success", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve(makeGeminiBootstrap("gemini-prod-claim-guard-3")),
+      text: () => Promise.resolve(""),
+    })
+    const onAssistantResponse = vi.fn()
+    mockConnectGeminiBrowserLiveFromBootstrap.mockResolvedValueOnce({
+      ...mockGeminiConnection,
+      sessionId: "gemini-prod-claim-guard-3",
+      streamUrl: "/api/sophia/voice/gemini/events?session_id=gemini-prod-claim-guard-3",
+    })
+    const { result } = renderHook(() => useStreamVoiceSession("user-1", { onAssistantResponse }))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    act(() => {
+      MockEventSource.latest?.emit("sophia.user_transcript", {
+        type: "sophia.user_transcript",
+        data: {
+          text: "highlighted in yellow",
+          utterance_id: "claim-guard-user-3",
+        },
+      })
+      result.current.markAnnotationActionSucceeded({
+        annotationCount: 1,
+        highlightCount: 1,
+        commentCount: 0,
+      })
+      MockEventSource.latest?.emit("sophia.transcript", {
+        type: "sophia.transcript",
+        data: {
+          text: "I highlighted it.",
+          is_final: true,
+          response_id: "claim-guard-assistant-3",
+          source_sequence: 1,
+          assistant_transcript_source: "provider_output_transcription",
+        },
+      })
+    })
+
+    expect(onAssistantResponse).toHaveBeenCalledWith("I highlighted it.")
+    expect(result.current.finalReply).toBe("I highlighted it.")
+    const telemetry = result.current.runtimeTelemetry
+    expect(telemetry.runtime).toBe("gemini_live")
+    if (telemetry.runtime !== "gemini_live") throw new Error("Expected Gemini telemetry")
+    expect(telemetry.recentAnnotationActionSucceeded).toBe(true)
+    expect(telemetry.annotationCount).toBe(1)
+    expect(telemetry.highlightCount).toBe(1)
+    expect(telemetry.assistantAnnotationClaimSuppressedCount).toBe(0)
   })
 
   it("disconnects expired Gemini preconnect and falls back to normal connect", async () => {

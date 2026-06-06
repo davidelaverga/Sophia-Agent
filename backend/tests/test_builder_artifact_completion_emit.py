@@ -160,27 +160,81 @@ def test_build_completion_payload_from_artifact_success_shape():
             state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
         )
 
-    # ``thread_id`` in webhook = COMPANION thread (where Telegram chat lives).
-    assert payload["thread_id"] == "t-parent"
-    # ``task_id`` = builder thread (also key in async_tasks dict).
-    assert payload["task_id"] == "t-build"
-    # ``run_id`` = LangGraph run id of the terminating run. Phase 4I
-    # post-review (codex P1): plumbed through so the gateway's
-    # ``_on_builder_completion`` can validate run_id matching.
-    assert payload["run_id"] == "r-1"
-    assert payload["agent_name"] == "sophia_builder"
-    assert payload["status"] == "success"  # _map_status normalizes "completed" -> "success"
-    assert payload["task_type"] == "document"
-    assert payload["task_brief"] == "Build a brief about X"
-    assert payload["artifact_url"] == "https://supabase.test/foo.md"
+    _assert_success_completion_payload_shape(payload)
+
+
+def _assert_success_completion_payload_shape(payload: dict) -> None:
+    expected = {
+        "thread_id": "t-parent",
+        "task_id": "t-build",
+        "run_id": "r-1",
+        "agent_name": "sophia_builder",
+        "status": "success",
+        "task_type": "document",
+        "task_brief": "Build a brief about X",
+        "artifact_path": "mnt/user-data/outputs/foo.md",
+        "artifact_url": "https://supabase.test/foo.md",
+        "artifact_filename": "foo.md",
+        "artifact_title": "Foo One-Pager",
+        "summary": "Wrote the one-pager you asked for.",
+        "user_next_action": "Open or download to review.",
+        "error_message": None,
+        "user_id": "alice",
+        "source": "builder_artifact_middleware",
+        "trace_id": "trace-1",
+    }
+    for key, value in expected.items():
+        assert payload[key] == value
+
+
+def test_completion_payload_preserves_artifact_path_when_signed_url_missing():
+    runtime = _make_runtime(
+        builder_thread_id="t-build",
+        builder_run_id="r-1",
+        parent_thread_id="t-parent",
+    )
+    state = _make_state(task_brief="Build a brief about X", task_type="document")
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    assert payload["status"] == "success"
+    assert payload["artifact_path"] == "mnt/user-data/outputs/foo.md"
     assert payload["artifact_filename"] == "foo.md"
-    assert payload["artifact_title"] == "Foo One-Pager"
-    assert payload["summary"] == "Wrote the one-pager you asked for."
-    assert payload["user_next_action"] == "Open or download to review."
-    assert payload["error_message"] is None
-    assert payload["user_id"] == "alice"
-    assert payload["source"] == "builder_artifact_middleware"
-    assert payload["trace_id"] == "trace-1"
+    assert payload["artifact_url"] is None
+
+
+def test_completion_payload_preserves_fallback_metadata():
+    runtime = _make_runtime(
+        builder_thread_id="t-build",
+        builder_run_id="r-1",
+        parent_thread_id="t-parent",
+    )
+    state = _make_state(task_brief="Build a slide deck", task_type="presentation")
+    artifact = _success_artifact(
+        artifact_path="/mnt/user-data/outputs/deck.html",
+        artifact_type="webpage",
+        artifact_title="Deck fallback",
+        requested_artifact_ext="pptx",
+        artifact_ext="html",
+        artifact_is_fallback=True,
+        fallback_reason="pptx_generation_not_completed",
+    )
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=artifact, status="completed"
+        )
+
+    assert payload["status"] == "success"
+    assert payload["artifact_path"] == "mnt/user-data/outputs/deck.html"
+    assert payload["artifact_type"] == "webpage"
+    assert payload["requested_artifact_ext"] == "pptx"
+    assert payload["artifact_ext"] == "html"
+    assert payload["artifact_is_fallback"] is True
+    assert payload["fallback_reason"] == "pptx_generation_not_completed"
 
 
 def test_build_completion_payload_run_id_is_none_when_runtime_missing_it():
@@ -264,6 +318,36 @@ def test_phantom_success_coerces_to_error():
     assert payload["status"] == "error"
     assert payload["error_message"] is not None
     assert "try again" in payload["error_message"].lower()
+
+
+def test_phantom_success_threshold_includes_point_three_confidence():
+    runtime = _make_runtime()
+    state = _make_state()
+    artifact = _phantom_artifact()
+    artifact["confidence"] = 0.3
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=artifact, status="completed"
+        )
+
+    assert payload["status"] == "error"
+    assert payload["error_message"] is not None
+
+
+def test_phantom_success_missing_confidence_coerces_to_error():
+    runtime = _make_runtime()
+    state = _make_state()
+    artifact = _phantom_artifact()
+    artifact.pop("confidence", None)
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=artifact, status="completed"
+        )
+
+    assert payload["status"] == "error"
+    assert payload["error_message"] is not None
 
 
 def test_failed_status_passes_through():

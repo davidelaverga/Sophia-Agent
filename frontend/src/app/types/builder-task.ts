@@ -46,13 +46,18 @@ export type BuilderActivityEntryV1 = {
   type: 'tool_call' | 'thinking';
   title: string;
   tool?: string;
+  action?: string;
   detail?: string;
+  sourceDomain?: string;
+  sourceTitle?: string;
+  count?: number;
   status?: 'running' | 'done' | 'error';
 };
 
 export type BuilderTaskV1 = {
   phase: BuilderTaskPhaseV1;
   taskId?: string;
+  runId?: string;
   label?: string;
   detail?: string;
   messageIndex?: number;
@@ -77,4 +82,5 @@ export type BuilderTaskV1 = {
   heartbeat?: boolean;
   pollCount?: number;
   activityLog?: BuilderActivityEntryV1[];
+  canvasStreamed?: boolean;
 };

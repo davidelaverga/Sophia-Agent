@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import get_type_hints
 
-from deerflow.agents.sophia_agent.state import SophiaState
+from deerflow.agents.sophia_agent.state import SophiaState, _merge_builder_write_diagnostics
 
 
 def test_sophia_state_has_messages():
@@ -39,6 +39,31 @@ def test_system_prompt_blocks_does_not_use_add_reducer():
     hints = get_type_hints(SophiaState, include_extras=True)
     annotation = hints["system_prompt_blocks"]
     assert not hasattr(annotation, "__metadata__")
+
+
+def test_builder_write_diagnostics_merges_deliverable_paths():
+    current = {
+        "success_count": 1,
+        "successful_output_paths": ["/mnt/user-data/outputs/report.html"],
+        "successful_deliverable_output_paths": ["/mnt/user-data/outputs/report.html"],
+    }
+    update = {
+        "success_count": 1,
+        "successful_output_paths": ["/mnt/user-data/outputs/deck.md"],
+        "successful_deliverable_output_paths": ["/mnt/user-data/outputs/deck.md"],
+    }
+
+    merged = _merge_builder_write_diagnostics(current, update)
+
+    assert merged["success_count"] == 2
+    assert merged["successful_output_paths"] == [
+        "/mnt/user-data/outputs/report.html",
+        "/mnt/user-data/outputs/deck.md",
+    ]
+    assert merged["successful_deliverable_output_paths"] == [
+        "/mnt/user-data/outputs/report.html",
+        "/mnt/user-data/outputs/deck.md",
+    ]
 
 
 def test_skills_reorganized():

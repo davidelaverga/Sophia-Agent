@@ -171,6 +171,41 @@ def _signed_artifact_url(thread_id: str | None, artifact_path: str | None) -> st
         return None
 
 
+_ARTIFACT_PATH_PREFIXES = (
+    ("/mnt/user-data/outputs/", lambda value: value[1:]),
+    ("mnt/user-data/outputs/", lambda value: value),
+    ("/user-data/outputs/", lambda value: f"mnt{value}"),
+    ("user-data/outputs/", lambda value: f"mnt/{value}"),
+    ("/outputs/", lambda value: f"mnt/user-data{value}"),
+    ("outputs/", lambda value: f"mnt/user-data/{value}"),
+)
+
+
+def _canonical_artifact_path(path: Any) -> str | None:
+    if not isinstance(path, str):
+        return None
+    cleaned = path.strip().replace("\\", "/")
+    if cleaned.startswith("file://"):
+        cleaned = cleaned[len("file://") :]
+    if not cleaned:
+        return None
+    for prefix, canonicalize in _ARTIFACT_PATH_PREFIXES:
+        if cleaned.startswith(prefix):
+            return canonicalize(cleaned)
+    user_data_index = cleaned.find("/user-data/outputs/")
+    if user_data_index >= 0:
+        return f"mnt{cleaned[user_data_index:]}"
+    return cleaned.lstrip("/")
+
+
+def _relative_output_artifact_path(path: str | None) -> str | None:
+    prefix = "mnt/user-data/outputs/"
+    if not path or not path.startswith(prefix):
+        return None
+    relative = path[len(prefix) :].strip("/")
+    return relative or None
+
+
 # PR-A: phantom-success detection thresholds.
 #
 # The builder's hard-ceiling fallback (builder_artifact.py:_HARD_CEILING) emits
@@ -196,7 +231,7 @@ def _is_phantom_success(
     - status maps to 'success' (i.e., subagent reported COMPLETED)
     - artifact_url is missing (signed-URL mint failed because the file
       doesn't exist on Supabase) AND artifact_path is missing/empty
-    - confidence is below the phantom threshold
+    - confidence is at or below the phantom threshold
 
     The confidence check matters because a deliberately-text-only artifact
     (no path, but high confidence) is legitimate — only the low-confidence
@@ -216,7 +251,7 @@ def _is_phantom_success(
         # Missing confidence + missing path/url is itself suspicious; treat
         # as phantom so the user gets the failure card with retry.
         return True
-    return confidence_value < _PHANTOM_SUCCESS_CONFIDENCE_THRESHOLD
+    return confidence_value <= _PHANTOM_SUCCESS_CONFIDENCE_THRESHOLD
 
 
 def _post_webhook(payload: dict[str, Any]) -> None:
@@ -349,6 +384,135 @@ def _resolve_runtime_run_id(runtime: Any) -> str | None:
     return None
 
 
+def _runtime_config_dict(runtime: Any) -> dict[str, Any]:
+    if runtime is None:
+        return {}
+    try:
+        raw = getattr(runtime, "config", None)
+    except Exception:  # pragma: no cover - defensive
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _runtime_configurable(runtime_config: dict[str, Any]) -> dict[str, Any]:
+    cfg = runtime_config.get("configurable")
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _state_dict(value: dict[str, Any] | Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _delegation_dict(state: dict[str, Any]) -> dict[str, Any]:
+    delegation = state.get("delegation_context")
+    return delegation if isinstance(delegation, dict) else {}
+
+
+def _trace_id(runtime_config: dict[str, Any]) -> Any:
+    metadata = runtime_config.get("metadata")
+    return metadata.get("trace_id") if isinstance(metadata, dict) else None
+
+
+def _parent_thread_id(delegation: dict[str, Any], cfg: dict[str, Any]) -> Any:
+    return delegation.get("parent_thread_id") or cfg.get("parent_thread_id")
+
+
+def _parent_user_id(delegation: dict[str, Any], cfg: dict[str, Any]) -> str | None:
+    user_id = (
+        delegation.get("parent_user_id")
+        or cfg.get("parent_user_id")
+        or cfg.get("user_id")
+    )
+    return user_id if isinstance(user_id, str) and user_id else None
+
+
+def _task_brief(delegation: dict[str, Any]) -> str | None:
+    task = delegation.get("task")
+    return task.strip() if isinstance(task, str) and task.strip() else None
+
+
+def _task_type(state: dict[str, Any], delegation: dict[str, Any]) -> Any:
+    builder_task = state.get("builder_task")
+    if isinstance(builder_task, dict) and builder_task.get("task_type"):
+        return builder_task.get("task_type")
+    return delegation.get("task_type")
+
+
+def _artifact_filename(artifact_path: str | None) -> str | None:
+    if isinstance(artifact_path, str) and artifact_path:
+        return artifact_path.rsplit("/", 1)[-1]
+    return None
+
+
+def _artifact_signed_url(
+    *,
+    parent_thread_id: Any,
+    builder_thread_id: str | None,
+    artifact_storage_path: str | None,
+    artifact_filename: str | None,
+) -> str | None:
+    # Sign against the SAME thread_id ``BuilderArtifactMiddleware`` uploads
+    # to: parent_thread_id (the conversation thread). The channel adapter's
+    # download path keys off the webhook payload's ``thread_id`` field
+    # (which is also parent_thread_id below), so this keeps the storage
+    # path, the signed URL, and the bytes-download lookup all aligned.
+    return _signed_artifact_url(
+        parent_thread_id or builder_thread_id,
+        artifact_storage_path or artifact_filename,
+    )
+
+
+def _coerce_phantom_success(
+    *,
+    mapped_status: str,
+    artifact_path: str | None,
+    artifact_url: str | None,
+    artifact: dict[str, Any],
+    builder_thread_id: str | None,
+    error_message: str | None,
+) -> tuple[str, str | None]:
+    if not _is_phantom_success(
+        status=mapped_status,
+        artifact_path=artifact_path,
+        artifact_url=artifact_url,
+        confidence=artifact.get("confidence"),
+    ):
+        return mapped_status, error_message
+    logger.warning(
+        "Builder-events: coercing phantom-success to error for task_id=%s "
+        "confidence=%s artifact_path=%r — builder reported success but "
+        "produced no deliverable.",
+        builder_thread_id,
+        artifact.get("confidence"),
+        artifact_path,
+    )
+    return "error", error_message or (
+        "Builder finished but couldn't produce a deliverable. "
+        "Want me to try again?"
+    )
+
+
+def _artifact_completion_fields(
+    artifact: dict[str, Any],
+    artifact_path: str | None,
+    artifact_url: str | None,
+    artifact_filename: str | None,
+) -> dict[str, Any]:
+    return {
+        "artifact_path": artifact_path,
+        "artifact_url": artifact_url,
+        "artifact_title": artifact.get("artifact_title"),
+        "artifact_type": artifact.get("artifact_type"),
+        "artifact_filename": artifact_filename,
+        "requested_artifact_ext": artifact.get("requested_artifact_ext"),
+        "artifact_ext": artifact.get("artifact_ext"),
+        "artifact_is_fallback": artifact.get("artifact_is_fallback"),
+        "fallback_reason": artifact.get("fallback_reason"),
+        "summary": artifact.get("companion_summary"),
+        "user_next_action": artifact.get("user_next_action"),
+    }
+
+
 # --- Native deepagents-dispatch path -----------------------------------------
 #
 # Post Phase-1 migration the builder runs as a native LangGraph subagent
@@ -397,25 +561,11 @@ def build_completion_payload_from_artifact(
             ceiling-fallback path so the Telegram card surfaces a retry.
         error_message: Free-form error string for non-completed paths.
     """
-    # Pull the runtime config dict ONCE, defensively. ``langgraph.runtime.Runtime``
-    # in production (langgraph >= 1.0) does NOT expose ``.config`` directly —
-    # that attribute lives on ``ToolRuntime`` / ``RunnableConfig`` paths.
-    # Production traceback (2026-05-06):
-    #   File ".../sophia/builder_events.py", line 575, in build_completion_payload_from_artifact
-    #   AttributeError: 'Runtime' object has no attribute 'config'
-    # Use ``getattr`` with default so we never assume the attribute exists.
-    runtime_config: dict[str, Any] = {}
-    if runtime is not None:
-        try:
-            raw = getattr(runtime, "config", None)
-            if isinstance(raw, dict):
-                runtime_config = raw
-        except Exception:  # pragma: no cover - defensive
-            runtime_config = {}
-    cfg: dict[str, Any] = runtime_config.get("configurable") or {}
-
-    delegation = state.get("delegation_context") if isinstance(state, dict) else None
-    delegation_dict = delegation if isinstance(delegation, dict) else {}
+    state_dict = _state_dict(state)
+    artifact_dict = _state_dict(artifact)
+    runtime_config = _runtime_config_dict(runtime)
+    cfg = _runtime_configurable(runtime_config)
+    delegation = _delegation_dict(state_dict)
 
     # Read the builder's own thread_id via the canonical execution_info-first
     # pattern (see ``_resolve_runtime_thread_id``).
@@ -431,62 +581,34 @@ def build_completion_payload_from_artifact(
     builder_run_id = _resolve_runtime_run_id(runtime)
     # State-first, config-fallback. State always reaches the running graph;
     # configurable propagation is langgraph-api-version-dependent.
-    parent_thread_id = delegation_dict.get("parent_thread_id") or cfg.get("parent_thread_id")
-    user_id = (
-        delegation_dict.get("parent_user_id")
-        or cfg.get("parent_user_id")
-        or cfg.get("user_id")
+    parent_thread_id = _parent_thread_id(delegation, cfg)
+    user_id = _parent_user_id(delegation, cfg)
+    trace_id = _trace_id(runtime_config)
+
+    artifact_path = _canonical_artifact_path(
+        artifact_dict.get("artifact_path")
     )
-    metadata = runtime_config.get("metadata") or {}
-    trace_id = metadata.get("trace_id") if isinstance(metadata, dict) else None
-
-    artifact_path = artifact.get("artifact_path") if isinstance(artifact, dict) else None
-    artifact_filename: str | None = None
-    if isinstance(artifact_path, str) and artifact_path:
-        artifact_filename = artifact_path.rsplit("/", 1)[-1]
-
-    # Sign against the SAME thread_id ``BuilderArtifactMiddleware`` uploads
-    # to: parent_thread_id (the conversation thread). The channel adapter's
-    # download path keys off the webhook payload's ``thread_id`` field
-    # (which is also parent_thread_id below), so this keeps the storage
-    # path, the signed URL, and the bytes-download lookup all aligned.
-    artifact_url = _signed_artifact_url(
-        parent_thread_id or builder_thread_id,
-        artifact_filename,
+    artifact_storage_path = _relative_output_artifact_path(artifact_path)
+    artifact_filename = _artifact_filename(artifact_path)
+    artifact_url = _artifact_signed_url(
+        parent_thread_id=parent_thread_id,
+        builder_thread_id=builder_thread_id,
+        artifact_storage_path=artifact_storage_path,
+        artifact_filename=artifact_filename,
     )
 
-    task_brief: str | None = None
-    task = delegation_dict.get("task")
-    if isinstance(task, str) and task.strip():
-        task_brief = task.strip()
-
-    builder_task = state.get("builder_task") if isinstance(state, dict) else None
-    task_type = builder_task.get("task_type") if isinstance(builder_task, dict) else None
-    if not task_type:
-        task_type = delegation_dict.get("task_type")
+    task_brief = _task_brief(delegation)
+    task_type = _task_type(state_dict, delegation)
 
     mapped_status = _map_status(status)
-
-    if _is_phantom_success(
-        status=mapped_status,
+    mapped_status, error_message = _coerce_phantom_success(
+        mapped_status=mapped_status,
         artifact_path=artifact_path,
         artifact_url=artifact_url,
-        confidence=artifact.get("confidence") if isinstance(artifact, dict) else None,
-    ):
-        logger.warning(
-            "Builder-events: coercing phantom-success to error for task_id=%s "
-            "confidence=%s artifact_path=%r — builder reported success but "
-            "produced no deliverable.",
-            builder_thread_id,
-            artifact.get("confidence") if isinstance(artifact, dict) else None,
-            artifact_path,
-        )
-        mapped_status = "error"
-        if not error_message:
-            error_message = (
-                "Builder finished but couldn't produce a deliverable. "
-                "Want me to try again?"
-            )
+        artifact=artifact_dict,
+        builder_thread_id=builder_thread_id,
+        error_message=error_message,
+    )
 
     return {
         # ``thread_id`` in the webhook payload is the COMPANION thread (where
@@ -509,16 +631,16 @@ def build_completion_payload_from_artifact(
         "status": mapped_status,
         "task_type": task_type,
         "task_brief": task_brief,
-        "artifact_url": artifact_url,
-        "artifact_title": artifact.get("artifact_title") if isinstance(artifact, dict) else None,
-        "artifact_type": artifact.get("artifact_type") if isinstance(artifact, dict) else None,
-        "artifact_filename": artifact_filename,
-        "summary": artifact.get("companion_summary") if isinstance(artifact, dict) else None,
-        "user_next_action": artifact.get("user_next_action") if isinstance(artifact, dict) else None,
+        **_artifact_completion_fields(
+            artifact_dict,
+            artifact_path,
+            artifact_url,
+            artifact_filename,
+        ),
         "error_message": error_message,
         "completed_at": _iso(datetime.now(UTC)),
         "source": "builder_artifact_middleware",
-        "user_id": user_id if isinstance(user_id, str) and user_id else None,
+        "user_id": user_id,
     }
 
 
@@ -590,10 +712,12 @@ def fire_completion_webhook_from_artifact(
     # whether the gateway saw the matching POST.
     logger.info(
         "[Builder] fire_completion_webhook: dispatching task_id=%s "
-        "parent_thread_id=%s status=%s artifact_path=%r artifact_url_present=%s",
+        "parent_thread_id=%s status=%s artifact_path=%r artifact_filename=%r "
+        "artifact_url_present=%s",
         task_id,
         payload.get("thread_id"),
         payload.get("status"),
+        payload.get("artifact_path"),
         payload.get("artifact_filename"),
         bool(payload.get("artifact_url")),
     )

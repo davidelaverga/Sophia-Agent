@@ -6,6 +6,20 @@ import type {
 } from "./session-capture"
 import type { SessionRuntime, VoiceRuntimeTelemetry, VoiceStage } from "./voice-types"
 
+type BuilderSurfaceMode =
+  | "active_build_steps"
+  | "artifact_review_room"
+  | "canonical_completed_builder"
+  | "legacy_completion_hidden"
+  | "legacy_completion_fallback"
+
+type CanonicalBuilderSurface =
+  | BuilderSurfaceMode
+  | "secondary_file_library_rows"
+  | "none"
+
+type CompletedBuilderEntryPlacement = "corner" | "inline" | "hidden"
+
 export type VoiceCaptureEvent = {
   seq: number
   recordedAt: string
@@ -18,26 +32,74 @@ export type VoiceMetricsHealthLevel = "good" | "warn" | "bad" | "neutral"
 
 export type VoiceTransportSource = "sse" | "custom" | "pending"
 
-export type VoiceArtifactCountSource = "public_event" | "runtime_ingest" | "rendered_state" | "none"
+export type VoiceArtifactCountSource = "public_event" | "runtime_ingest" | "selected_stage_artifact" | "rendered_state" | "none"
 
 export type VoiceArtifactTelemetryCounts = {
   artifactCount: number
   artifactPublicEventCount: number
   artifactRuntimeIngestCount: number
+  artifactSelectedStageCount: number
   artifactRenderedCount: number
   artifactCountSource: VoiceArtifactCountSource
   artifactCountMismatch: boolean
+  artifactCountMismatchReason: string | null
 }
 
-export type CoreviewExactTextSource = "fixture" | "builder_metadata" | "artifact_store" | "unsupported"
+export type CoreviewExactTextSource = "fixture" | "builder_metadata" | "builder_file" | "pdf_text_extraction" | "artifact_store" | "unsupported"
 
 export type CoreviewVisualTelemetry = {
   coreviewEnabled: boolean
+  frontendCoreviewFlagParsed: boolean | null
+  frontendStillFrameFlagParsed: boolean | null
+  backendCoreviewFlagParsed: boolean | null
+  backendStillFrameFlagParsed: boolean | null
+  coreviewDisabledReason: string | null
+  reviewStartBlockedReason: string | null
   coreviewSessionActive: boolean
   coreviewArtifactId: string | null
+  coreviewWorkspaceContractVersion: number | null
+  artifactStableIdentity: string | null
+  artifactCapabilityRendererKind: string | null
+  artifactCapabilityRenderMode: string | null
+  artifactCapabilitySupportsPages: boolean | null
+  artifactCapabilitySupportsAnnotations: boolean | null
+  artifactCapabilitySupportsTextExtraction: boolean | null
+  artifactCapabilitySupportsLayoutAnchors: boolean | null
+  artifactCapabilitySupportsOCR: boolean | null
+  artifactCapabilityRequiresOCR: boolean | null
+  artifactCapabilitySupportsPptxNativeRender: boolean | null
+  artifactCapabilitySupportsAnnotatedExport: boolean | null
+  artifactCapabilityFallbackReason: string | null
+  coreviewWorkspaceEventLogActive: boolean
+  coreviewWorkspaceEventCount: number
+  coreviewWorkspaceLastEventType: string | null
+  coreviewWorkspaceActorKind: string | null
+  coreviewWorkspaceHasShareReadyMetadata: boolean
+  coreviewShareStatus: string | null
+  workspaceEventLogPersistResult: string | null
+  workspaceEventLogRestoreCount: number
+  annotationEventsCreatedCount: number
+  viewChangedEventCount: number
+  artifactRebindAttempted: boolean
+  artifactRebindResult: string | null
+  artifactRebindReason: string | null
+  artifactReboundFromRenderedState: boolean
+  artifactRebindSource: string | null
+  exactTextRehydrated: boolean
+  exactTextRehydrateResult: string | null
+  currentRunSelectedStageEvents: number
+  longLivedSelectedStageState: boolean
+  telemetryScopeMode: string | null
+  canvasRestoreAttempted: boolean
+  canvasRestoreResult: string | null
+  canvasRestoreSource: string | null
+  canvasRestoredArtifactIdentityHash: string | null
   visualSourceKind: string | null
   frameSentCount: number
   initialFrameSent: boolean
+  visualFresh: boolean
+  visualFreshForTurn: boolean
+  exactTextAvailable: boolean
   refreshFrameCount: number
   lastFrameBytes: number | null
   lastFrameDimensions: { width: number; height: number } | null
@@ -52,11 +114,149 @@ export type CoreviewVisualTelemetry = {
   providerUsageAudioDurationSeconds: number | null
   visualResponseObserved: boolean
   toolCallAfterFrameObserved: boolean
+  reviewCommandPreservedMic: boolean | null
+  reviewCommandPreservedReview: boolean | null
+  reviewCommandAutoRefreshAttempted: boolean
+  reviewCommandAutoRefreshResult: string | null
+  reviewCommandStaleAfterPageChange: boolean
+  reviewCommandStaleAfterViewChange: boolean
+  reviewVoiceCommandTransportStateBefore: string | null
+  reviewVoiceCommandTransportStateAfter: string | null
+  reviewVoiceCommandDidHardIntercept: boolean | null
+  reviewVoiceCommandWaitedForViewReady: boolean | null
+  reviewVoiceCommandAutoRefreshTiming: string | null
+  reviewVoiceCommandAutoRefreshBlockedReason: string | null
+  telemetryExportAfterCommandSucceeded: boolean
+  lastReviewVoiceCommandKind: string | null
+  lastReviewVoiceCommandApplied: boolean | null
+  lastReviewVoiceCommandUiMode: string | null
+  lastReviewVoiceCommands: ReviewVoiceCommandTelemetrySummary[]
+  pdfTextExtractionStatus: string | null
+  pdfTextExtractionPageCount: number | null
+  pdfTextExtractionCharCount: number | null
+  pdfTextExtractionSource: string | null
+  annotationOverlayCaptured: boolean | null
+  annotationCount: number
+  highlightCount: number
+  commentCount: number
+  underlineCount: number
+  arrowCount: number
+  drawPathCount: number
+  annotationPersistenceStatus: string | null
+  annotationRestoreAttempted: boolean
+  annotationRestoreResult: string | null
+  annotationRestoreCount: number
+  annotationRestoreSource: string | null
+  annotationPersistAttempted: boolean
+  annotationPersistResult: string | null
+  annotationPersistCount: number
+  annotationPersistedCount: number
+  annotationStorageVersion: number | null
+  annotationStorageKeyHash: string | null
+  annotationIdentityWriteHash: string | null
+  annotationIdentityReadHash: string | null
+  annotationRestoreOverwrittenCount: number
+  coreviewAnnotationStoreActive: boolean
+  coreviewAnnotationStateSource: string | null
+  annotationPreventedEmptyOverwriteCount: number
+  annotationMigratedIdentityCount: number
+  annotationStoreSurvivedCanvasClose: boolean
+  annotationStoreHydratedArtifactStage: boolean
+  annotationStateClearedReason: string | null
+  builderSnapshotIgnoredForActiveArtifact: boolean
+  builderSnapshotEmptyPassive: boolean
+  artifactStageProtectedFromSnapshot: boolean
+  artifactStageUnmountPrevented: boolean
+  thumbnailAnnotationIndicatorMode: string | null
+  thumbnailAnnotationPageCounts: Array<{ annotationPageIndex: number; annotationCount: number }>
+  thumbnailAnnotationRefreshCount: number
+  canvasPointerBlockedAfterAnnotation: boolean | null
+  stickyToolModeEnabled: boolean
+  lastToolModeBeforeAction: string | null
+  lastToolModeAfterAction: string | null
+  toolModeResetReason: string | null
+  annotationExportAvailable: boolean
+  annotationExportResult: string | null
+  annotationExportKind: string | null
+  annotationExportPageScope: string | null
+  annotationDeleteCount: number
+  annotationEditCount: number
+  unsupportedAnnotationKind: string | null
+  annotationActionSource: string | null
+  coreviewAnnotationToolCount: number
+  coreviewAnnotationFallbackCount: number
+  coreviewAnnotationCommandSource: string | null
+  coreviewAnnotationToolResult: string | null
+  coreviewAnnotationFallbackResult: string | null
+  coreviewAnnotationKind: string | null
+  coreviewAnnotationAnchorType: string | null
+  coreviewAnnotationColor: string | null
+  coreviewAnnotationPageIndex: number | null
+  coreviewAnnotationBlockedReason: string | null
+  annotationIntentDetectedCount: number
+  annotationIntentSource: string | null
+  annotationFallbackAttempted: boolean
+  annotationFallbackResult: string | null
+  annotationFallbackBlockedReason: string | null
+  annotationFallbackUtteranceKind: string | null
+  recentAnnotationActionSucceeded: boolean
+  annotationCommitAttempted: boolean
+  annotationCommitResult: string | null
+  annotationCommitCountBefore: number | null
+  annotationCommitCountAfter: number | null
+  annotationCommitVerified: boolean
+  annotationCommandPreventedNavigation: boolean
+  annotationCommandKeptArtifactMounted: boolean
+  annotationViewReadyTimedOut: boolean
+  annotationPartialSuccess: boolean
+  sessionLeaveGuardSuppressedForAnnotation: boolean
+  assistantAnnotationClaimSuppressedCount: number
+  coreviewFocusAnchorCount: number
+  coreviewFocusAnchorResult: string | null
+  coreviewFocusAnchorType: string | null
+  keyboardArtifactShortcutUsed: string | null
+  pinchZoomUsed: boolean
+  panModeActive: boolean
+  panGestureCount: number
+  panGestureResult: string | null
+  panScrollDeltaX: number | null
+  panScrollDeltaY: number | null
+  coreviewToolCompletedCount: number
+  coreviewToolUnresolvedCount: number
+  coreviewToolLastResult: string | null
+  coreviewToolRefreshResult: string | null
+  coreviewToolVisualFreshAfterResult: boolean | null
+  reviewToolsExposed: string[]
+  emitArtifactExposedDuringReview: boolean
+  reviewToolTimedOut: boolean
+  reviewToolTimeoutName: string | null
+  reviewToolTimeoutResultSent: boolean
+  coreviewGetCurrentViewCount: number
+  coreviewGetCurrentViewResult: string | null
+  providerToPublicTranscriptGapAfterCoreviewTool: number | null
+  followUpTurnDispatchedAfterCoreviewTool: boolean
+  emitArtifactBlockedDuringReviewCount: number
+  emitArtifactBlockedForAnnotationIntentCount: number
   rawFrameExcluded: true
+  rawProviderPayloadExcluded: true
+}
+
+export type ReviewVoiceCommandTelemetrySummary = {
+  kind: string | null
+  applied: boolean | null
+  uiMode: string | null
+  refreshResult: string | null
+  autoRefreshBlockedReason: string | null
+  waitedForViewReady: boolean | null
+  didHardIntercept: boolean | null
+  artifactCurrentPageIndex: number | null
+  artifactCurrentPageCount: number | null
+  rawTranscriptExcluded: true
 }
 
 export type CoreviewExactTextTelemetry = {
   exactTextCallCount: number
+  readArtifactTextCallCount: number
   exactTextSuccessCount: number
   exactTextFailureCount: number
   exactTextSources: Record<CoreviewExactTextSource, number>
@@ -65,6 +265,12 @@ export type CoreviewExactTextTelemetry = {
   lastExactTextCharCount: number | null
   lastExactTextTruncated: boolean | null
   lastExactTextLatencyMs: number | null
+  readArtifactTextResolvedCount: number
+  readArtifactTextUnresolvedCount: number
+  readArtifactTextTimeoutCount: number
+  readArtifactTextLastStatus: string | null
+  readArtifactTextPdfExtractionStatus: string | null
+  exactTextRegistrySource: CoreviewExactTextSource | null
   rawArtifactTextExcluded: true
   rawQueryExcluded: true
 }
@@ -211,6 +417,15 @@ export type VoiceTelemetrySummary = {
   builderPhase: BuilderTaskV1["phase"] | null
   builderProgressPercent: number | null
   builderStuck: boolean
+  builderSurfaceMode: BuilderSurfaceMode | null
+  canonicalBuilderSurface: CanonicalBuilderSurface
+  legacyBuilderSurfaceHidden: boolean
+  builderReadyPillSuppressed: boolean
+  duplicateBuilderSurfaceSuppressed: boolean
+  resumedBuilderSurfaceResolved: boolean
+  completedBuilderEntryPlacement: CompletedBuilderEntryPlacement | null
+  completedBuilderEntryOverlapsControls: boolean | null
+  completedBuilderEntryHiddenForStage: boolean
 }
 
 export type LegacySessionTelemetry = {
@@ -257,6 +472,18 @@ export type GeminiSessionTelemetry = {
     lastProviderEventAt: string | null
     lastProviderEventType: string | null
     providerCategoryCounts: Record<string, { count: number; lastAt: string | null }>
+    reviewVoiceReady: boolean
+    reviewMicAudioDetected: boolean
+    reviewUserSpeechDetected: boolean
+    reviewProviderTranscriptObserved: boolean
+    reviewPublicTranscriptObserved: boolean
+    reviewTranscriptPromotionBlockedReason: string | null
+    providerInputTranscriptCount: number
+    publicUserTranscriptCount: number
+    providerToPublicTranscriptGap: number
+    firstProviderTranscriptAt: string | null
+    firstPublicUserTranscriptAt: string | null
+    transcriptPromotionLatencyMs: number | null
     outputAudioEventCount: number
     lastOutputAudioAt: string | null
     assistantTranscriptSource: string | null
@@ -341,6 +568,111 @@ export type GeminiSessionTelemetry = {
     artifactToolCallCount: number
     artifactToolCallUnknownCount: number
     builderToolCallCount: number
+    coreviewToolCompletedCount: number
+    coreviewToolUnresolvedCount: number
+    coreviewToolLastResult: string | null
+    coreviewToolRefreshResult: string | null
+    coreviewToolVisualFreshAfterResult: boolean | null
+    reviewToolsExposed: string[]
+    emitArtifactExposedDuringReview: boolean
+    reviewToolTimedOut: boolean
+    reviewToolTimeoutName: string | null
+    reviewToolTimeoutResultSent: boolean
+    coreviewGetCurrentViewCount: number
+    coreviewGetCurrentViewResult: string | null
+    readArtifactTextResolvedCount: number
+    readArtifactTextUnresolvedCount: number
+    readArtifactTextTimeoutCount: number
+    readArtifactTextLastStatus: string | null
+    readArtifactTextPdfExtractionStatus: string | null
+    exactTextRegistrySource: CoreviewExactTextSource | null
+    annotationOverlayCaptured: boolean | null
+    annotationCount: number
+    highlightCount: number
+    commentCount: number
+    underlineCount: number
+    arrowCount: number
+    drawPathCount: number
+    annotationPersistenceStatus: string | null
+    annotationRestoreAttempted: boolean
+    annotationRestoreResult: string | null
+    annotationRestoreCount: number
+    annotationRestoreSource: string | null
+    annotationPersistAttempted: boolean
+    annotationPersistResult: string | null
+    annotationPersistCount: number
+    annotationPersistedCount: number
+    annotationStorageVersion: number | null
+    annotationStorageKeyHash: string | null
+    annotationIdentityWriteHash: string | null
+    annotationIdentityReadHash: string | null
+    annotationRestoreOverwrittenCount: number
+    coreviewAnnotationStoreActive: boolean
+    coreviewAnnotationStateSource: string | null
+    annotationPreventedEmptyOverwriteCount: number
+    annotationMigratedIdentityCount: number
+    annotationStoreSurvivedCanvasClose: boolean
+    annotationStoreHydratedArtifactStage: boolean
+    annotationStateClearedReason: string | null
+    builderSnapshotIgnoredForActiveArtifact: boolean
+    builderSnapshotEmptyPassive: boolean
+    artifactStageProtectedFromSnapshot: boolean
+    artifactStageUnmountPrevented: boolean
+    thumbnailAnnotationIndicatorMode: string | null
+    thumbnailAnnotationPageCounts: Array<{ annotationPageIndex: number; annotationCount: number }>
+    thumbnailAnnotationRefreshCount: number
+    canvasPointerBlockedAfterAnnotation: boolean | null
+    canvasRestoreAttempted: boolean
+    canvasRestoreResult: string | null
+    canvasRestoreSource: string | null
+    canvasRestoredArtifactIdentityHash: string | null
+    stickyToolModeEnabled: boolean
+    lastToolModeBeforeAction: string | null
+    lastToolModeAfterAction: string | null
+    toolModeResetReason: string | null
+    annotationExportAvailable: boolean
+    annotationExportResult: string | null
+    annotationExportKind: string | null
+    annotationExportPageScope: string | null
+    annotationDeleteCount: number
+    annotationEditCount: number
+    unsupportedAnnotationKind: string | null
+    annotationActionSource: string | null
+    coreviewAnnotationToolCount: number
+    coreviewAnnotationFallbackCount: number
+    coreviewAnnotationCommandSource: string | null
+    coreviewAnnotationToolResult: string | null
+    coreviewAnnotationFallbackResult: string | null
+    coreviewAnnotationKind: string | null
+    coreviewAnnotationAnchorType: string | null
+    coreviewAnnotationColor: string | null
+    coreviewAnnotationPageIndex: number | null
+    coreviewAnnotationBlockedReason: string | null
+    annotationIntentDetectedCount: number
+    annotationIntentSource: string | null
+    annotationFallbackAttempted: boolean
+    annotationFallbackResult: string | null
+    annotationFallbackBlockedReason: string | null
+    annotationFallbackUtteranceKind: string | null
+    recentAnnotationActionSucceeded: boolean
+    annotationCommitAttempted: boolean
+    annotationCommitResult: string | null
+    annotationCommitCountBefore: number | null
+    annotationCommitCountAfter: number | null
+    annotationCommitVerified: boolean
+    annotationCommandPreventedNavigation: boolean
+    annotationCommandKeptArtifactMounted: boolean
+    annotationViewReadyTimedOut: boolean
+    annotationPartialSuccess: boolean
+    sessionLeaveGuardSuppressedForAnnotation: boolean
+    assistantAnnotationClaimSuppressedCount: number
+    coreviewFocusAnchorCount: number
+    coreviewFocusAnchorResult: string | null
+    coreviewFocusAnchorType: string | null
+    providerToPublicTranscriptGapAfterCoreviewTool: number | null
+    followUpTurnDispatchedAfterCoreviewTool: boolean
+    emitArtifactBlockedDuringReviewCount: number
+    emitArtifactBlockedForAnnotationIntentCount: number
     unresolvedToolCallCount: number
     oldestUnresolvedToolCallAgeMs: number | null
     lastToolPhase: string | null
@@ -351,9 +683,11 @@ export type GeminiSessionTelemetry = {
     artifactCount: number
     artifactPublicEventCount: number
     artifactRuntimeIngestCount: number
+    artifactSelectedStageCount: number
     artifactRenderedCount: number
     artifactCountSource: VoiceArtifactCountSource
     artifactCountMismatch: boolean
+    artifactCountMismatchReason: string | null
     publicDiagnosticCount: number
     lastUserTranscriptAt: string | null
     lastAssistantTranscriptAt: string | null
@@ -386,9 +720,11 @@ export type VoiceDeveloperMetrics = {
     artifacts: number
     artifactPublicEventCount: number
     artifactRuntimeIngestCount: number
+    artifactSelectedStageCount: number
     artifactRenderedCount: number
     artifactCountSource: VoiceArtifactCountSource
     artifactCountMismatch: boolean
+    artifactCountMismatchReason: string | null
     diagnostics: number
     builderEvents: number
   }
@@ -451,6 +787,15 @@ export type VoiceDeveloperMetrics = {
     idleMs: number | null
     stuck: boolean
     stuckReason: string | null
+    builderSurfaceMode: BuilderSurfaceMode | null
+    canonicalBuilderSurface: CanonicalBuilderSurface
+    legacyBuilderSurfaceHidden: boolean
+    builderReadyPillSuppressed: boolean
+    duplicateBuilderSurfaceSuppressed: boolean
+    resumedBuilderSurfaceResolved: boolean
+    completedBuilderEntryPlacement: CompletedBuilderEntryPlacement | null
+    completedBuilderEntryOverlapsControls: boolean | null
+    completedBuilderEntryHiddenForStage: boolean
   }
   health: {
     level: VoiceMetricsHealthLevel
@@ -517,6 +862,13 @@ const DEFAULT_MICROPHONE: VoiceDeveloperMetrics["microphone"] = {
 
 const GEMINI_EMIT_ARTIFACT_TOOL_NAME = "emit_artifact"
 const GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = "read_artifact_text"
+const GEMINI_COREVIEW_TOOL_NAMES = new Set([
+  "coreview_set_view",
+  "coreview_refresh_view",
+  "coreview_get_current_view",
+  "coreview_add_annotation",
+  "coreview_focus_anchor",
+])
 const GEMINI_BUILDER_TOOL_NAMES = new Set([
   "start_builder_task",
   "check_async_task",
@@ -527,6 +879,8 @@ const GEMINI_BUILDER_TOOL_NAMES = new Set([
 const COREVIEW_EXACT_TEXT_SOURCES: CoreviewExactTextSource[] = [
   "fixture",
   "builder_metadata",
+  "builder_file",
+  "pdf_text_extraction",
   "artifact_store",
   "unsupported",
 ]
@@ -566,6 +920,14 @@ function asBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null
 }
 
+function latestBooleanFromRecords(records: Record<string, unknown>[], key: string): boolean | null {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const parsed = asBoolean(records[index]?.[key])
+    if (parsed !== null) return parsed
+  }
+  return null
+}
+
 function numberFromKeys(record: Record<string, unknown> | null | undefined, keys: string[]): number | null {
   if (!record) return null
   for (const key of keys) {
@@ -573,6 +935,54 @@ function numberFromKeys(record: Record<string, unknown> | null | undefined, keys
     if (value !== null) return value
   }
   return null
+}
+
+function annotationPageCountsFromPayload(value: unknown): Array<{ annotationPageIndex: number; annotationCount: number }> {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((entry) => {
+      const record = asRecord(entry)
+      if (!record) return null
+      const annotationPageIndex = numberFromKeys(record, ["annotationPageIndex", "pageIndex"])
+      const annotationCount = numberFromKeys(record, ["annotationCount", "count"])
+      if (annotationPageIndex === null || annotationCount === null || annotationCount <= 0) {
+        return null
+      }
+      return {
+        annotationPageIndex: Math.floor(annotationPageIndex),
+        annotationCount: Math.floor(annotationCount),
+      }
+    })
+    .filter((entry): entry is { annotationPageIndex: number; annotationCount: number } => entry !== null)
+}
+
+function annotationCommitStateChanged(record: Record<string, unknown> | null | undefined): boolean {
+  if (!record) return false
+  const before = numberFromKeys(record, ["annotationCommitCountBefore", "annotation_commit_count_before"])
+  const after = numberFromKeys(record, [
+    "annotationCommitCountAfter",
+    "annotation_commit_count_after",
+    "annotationCount",
+    "annotation_count",
+  ])
+  if (before !== null && after !== null) {
+    return after > before
+  }
+  if (asBoolean(record.annotationCommitVerified) === true || asBoolean(record.annotation_commit_verified) === true) {
+    return (numberFromKeys(record, ["annotationCount", "annotation_count"]) ?? 0) > 0
+  }
+  return false
+}
+
+function annotationResultFromState(
+  record: Record<string, unknown> | null | undefined,
+  keys: string[],
+): string | null {
+  const raw = keys.reduce<string | null>((current, key) => current ?? asString(record?.[key]), null)
+  if (raw === "success" && !annotationCommitStateChanged(record)) {
+    return "annotation_commit_failed"
+  }
+  return raw
 }
 
 function asRealArtifactString(value: unknown): string | null {
@@ -620,6 +1030,38 @@ function hasArtifactsRuntimeIngestContent(event: NormalizedVoiceCaptureEvent): b
   return hasArtifactContent(payload?.merged) || hasArtifactContent(payload?.incoming)
 }
 
+function artifactSelectionEvidenceKey(event: NormalizedVoiceCaptureEvent): string | null {
+  if (event.category === "artifacts-runtime" && event.name === "select-stage-artifact") {
+    const payload = event.payloadRecord
+    return asString(payload?.artifactId)
+      ?? asString(payload?.artifactPath)
+      ?? asString(payload?.artifactTitle)
+  }
+
+  if (event.name === "coreview-state") {
+    const coreview = asRecord(eventData(event)?.coreview)
+    return asString(coreview?.coreviewArtifactId)
+  }
+
+  if (event.name === "gemini-artifact-frame-send") {
+    const result = coreviewFrameResult(event)
+    return asString(result?.artifactId) ?? asString(result?.artifact_id)
+  }
+
+  return null
+}
+
+function countSelectedStageArtifacts(events: NormalizedVoiceCaptureEvent[]): number {
+  const keys = new Set<string>()
+  for (const event of events) {
+    const key = artifactSelectionEvidenceKey(event)
+    if (key) {
+      keys.add(key)
+    }
+  }
+  return keys.size
+}
+
 function hasRenderedArtifactSnapshot(snapshot: SophiaCaptureSnapshot | null | undefined): boolean {
   if (!snapshot) return false
   if (hasArtifactContent(snapshot.artifacts.sessionArtifacts)) return true
@@ -634,18 +1076,57 @@ function hasRenderedArtifactSnapshot(snapshot: SophiaCaptureSnapshot | null | un
 
 function resolveArtifactCountSource({
   artifactPublicEventCount,
-  artifactRuntimeIngestCount,
+  artifactRuntimeEventCount,
+  artifactSelectedStageCount,
   artifactRenderedCount,
 }: {
   artifactPublicEventCount: number
-  artifactRuntimeIngestCount: number
+  artifactRuntimeEventCount: number
+  artifactSelectedStageCount: number
   artifactRenderedCount: number
 }): VoiceArtifactCountSource {
-  const maxCount = Math.max(artifactPublicEventCount, artifactRuntimeIngestCount, artifactRenderedCount)
+  const maxCount = Math.max(
+    artifactPublicEventCount,
+    artifactRuntimeEventCount,
+    artifactSelectedStageCount,
+    artifactRenderedCount,
+  )
   if (maxCount <= 0) return "none"
   if (artifactPublicEventCount === maxCount) return "public_event"
-  if (artifactRuntimeIngestCount === maxCount) return "runtime_ingest"
+  if (artifactRuntimeEventCount === maxCount) return "runtime_ingest"
+  if (artifactSelectedStageCount === maxCount) return "selected_stage_artifact"
   return "rendered_state"
+}
+
+function resolveArtifactCountMismatchReason({
+  artifactCount,
+  artifactPublicEventCount,
+  artifactRuntimeEventCount,
+  artifactSelectedStageCount,
+  artifactRenderedCount,
+}: {
+  artifactCount: number
+  artifactPublicEventCount: number
+  artifactRuntimeEventCount: number
+  artifactSelectedStageCount: number
+  artifactRenderedCount: number
+}): string | null {
+  if (artifactCount === artifactPublicEventCount) {
+    return null
+  }
+  if (artifactSelectedStageCount > 0 && artifactSelectedStageCount === artifactCount) {
+    return "selected_stage_artifact_not_public_event"
+  }
+  if (artifactRuntimeEventCount > 0 && artifactRuntimeEventCount === artifactCount) {
+    return "runtime_ingest_not_public_event"
+  }
+  if (artifactRenderedCount > 0 && artifactRuntimeEventCount === 0 && artifactSelectedStageCount === 0) {
+    return "rendered_state_without_runtime_ingest"
+  }
+  if (artifactRenderedCount > 0) {
+    return "rendered_state_not_public_event"
+  }
+  return "artifact_count_not_public_event"
 }
 
 function getBuilderDebugDetail(payload: Record<string, unknown> | null | undefined): string | null {
@@ -740,12 +1221,22 @@ function buildArtifactTelemetryCountsFromEvents(
   snapshot: SophiaCaptureSnapshot | null | undefined,
 ): VoiceArtifactTelemetryCounts {
   const artifactPublicEventCount = countWhere(activeEvents, (event) => event.name === "sophia.artifact")
-  const artifactRuntimeIngestCount = countWhere(activeEvents, hasArtifactsRuntimeIngestContent)
+  const artifactRuntimeEventCount = countWhere(activeEvents, hasArtifactsRuntimeIngestContent)
+  const artifactSelectedStageCount = countSelectedStageArtifacts(activeEvents)
+  const artifactRuntimeIngestCount = Math.max(artifactRuntimeEventCount, artifactSelectedStageCount)
   const artifactRenderedCount = hasRenderedArtifactSnapshot(snapshot) ? 1 : 0
   const artifactCount = Math.max(artifactPublicEventCount, artifactRuntimeIngestCount, artifactRenderedCount)
   const artifactCountSource = resolveArtifactCountSource({
     artifactPublicEventCount,
-    artifactRuntimeIngestCount,
+    artifactRuntimeEventCount,
+    artifactSelectedStageCount,
+    artifactRenderedCount,
+  })
+  const artifactCountMismatchReason = resolveArtifactCountMismatchReason({
+    artifactCount,
+    artifactPublicEventCount,
+    artifactRuntimeEventCount,
+    artifactSelectedStageCount,
     artifactRenderedCount,
   })
 
@@ -753,9 +1244,11 @@ function buildArtifactTelemetryCountsFromEvents(
     artifactCount,
     artifactPublicEventCount,
     artifactRuntimeIngestCount,
+    artifactSelectedStageCount,
     artifactRenderedCount,
     artifactCountSource,
     artifactCountMismatch: artifactCount !== artifactPublicEventCount,
+    artifactCountMismatchReason,
   }
 }
 
@@ -777,11 +1270,57 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
   return {
     visual: {
       coreviewEnabled: false,
+      frontendCoreviewFlagParsed: null,
+      frontendStillFrameFlagParsed: null,
+      backendCoreviewFlagParsed: null,
+      backendStillFrameFlagParsed: null,
+      coreviewDisabledReason: null,
+      reviewStartBlockedReason: null,
       coreviewSessionActive: false,
       coreviewArtifactId: null,
+      coreviewWorkspaceContractVersion: null,
+      artifactStableIdentity: null,
+      artifactCapabilityRendererKind: null,
+      artifactCapabilityRenderMode: null,
+      artifactCapabilitySupportsPages: null,
+      artifactCapabilitySupportsAnnotations: null,
+      artifactCapabilitySupportsTextExtraction: null,
+      artifactCapabilitySupportsLayoutAnchors: null,
+      artifactCapabilitySupportsOCR: null,
+      artifactCapabilityRequiresOCR: null,
+      artifactCapabilitySupportsPptxNativeRender: null,
+      artifactCapabilitySupportsAnnotatedExport: null,
+      artifactCapabilityFallbackReason: null,
+      coreviewWorkspaceEventLogActive: false,
+      coreviewWorkspaceEventCount: 0,
+      coreviewWorkspaceLastEventType: null,
+      coreviewWorkspaceActorKind: null,
+      coreviewWorkspaceHasShareReadyMetadata: false,
+      coreviewShareStatus: null,
+      workspaceEventLogPersistResult: null,
+      workspaceEventLogRestoreCount: 0,
+      annotationEventsCreatedCount: 0,
+      viewChangedEventCount: 0,
+      artifactRebindAttempted: false,
+      artifactRebindResult: null,
+      artifactRebindReason: null,
+      artifactReboundFromRenderedState: false,
+      artifactRebindSource: null,
+      exactTextRehydrated: false,
+      exactTextRehydrateResult: null,
+      currentRunSelectedStageEvents: 0,
+      longLivedSelectedStageState: false,
+      telemetryScopeMode: null,
+      canvasRestoreAttempted: false,
+      canvasRestoreResult: null,
+      canvasRestoreSource: null,
+      canvasRestoredArtifactIdentityHash: null,
       visualSourceKind: null,
       frameSentCount: 0,
       initialFrameSent: false,
+      visualFresh: false,
+      visualFreshForTurn: false,
+      exactTextAvailable: false,
       refreshFrameCount: 0,
       lastFrameBytes: null,
       lastFrameDimensions: null,
@@ -796,10 +1335,135 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       providerUsageAudioDurationSeconds: null,
       visualResponseObserved: false,
       toolCallAfterFrameObserved: false,
+      reviewCommandPreservedMic: null,
+      reviewCommandPreservedReview: null,
+      reviewCommandAutoRefreshAttempted: false,
+      reviewCommandAutoRefreshResult: null,
+      reviewCommandStaleAfterPageChange: false,
+      reviewCommandStaleAfterViewChange: false,
+      reviewVoiceCommandTransportStateBefore: null,
+      reviewVoiceCommandTransportStateAfter: null,
+      reviewVoiceCommandDidHardIntercept: null,
+      reviewVoiceCommandWaitedForViewReady: null,
+      reviewVoiceCommandAutoRefreshTiming: null,
+      reviewVoiceCommandAutoRefreshBlockedReason: null,
+      telemetryExportAfterCommandSucceeded: false,
+      lastReviewVoiceCommandKind: null,
+      lastReviewVoiceCommandApplied: null,
+      lastReviewVoiceCommandUiMode: null,
+      lastReviewVoiceCommands: [],
+      pdfTextExtractionStatus: null,
+      pdfTextExtractionPageCount: null,
+      pdfTextExtractionCharCount: null,
+      pdfTextExtractionSource: null,
+      annotationOverlayCaptured: null,
+      annotationCount: 0,
+      highlightCount: 0,
+      commentCount: 0,
+      underlineCount: 0,
+      arrowCount: 0,
+      drawPathCount: 0,
+      annotationPersistenceStatus: null,
+      annotationRestoreAttempted: false,
+      annotationRestoreResult: null,
+      annotationRestoreCount: 0,
+      annotationRestoreSource: null,
+      annotationPersistAttempted: false,
+      annotationPersistResult: null,
+      annotationPersistCount: 0,
+      annotationPersistedCount: 0,
+      annotationStorageVersion: null,
+      annotationStorageKeyHash: null,
+      annotationIdentityWriteHash: null,
+      annotationIdentityReadHash: null,
+      annotationRestoreOverwrittenCount: 0,
+      coreviewAnnotationStoreActive: false,
+      coreviewAnnotationStateSource: null,
+      annotationPreventedEmptyOverwriteCount: 0,
+      annotationMigratedIdentityCount: 0,
+      annotationStoreSurvivedCanvasClose: false,
+      annotationStoreHydratedArtifactStage: false,
+      annotationStateClearedReason: null,
+      builderSnapshotIgnoredForActiveArtifact: false,
+      builderSnapshotEmptyPassive: false,
+      artifactStageProtectedFromSnapshot: false,
+      artifactStageUnmountPrevented: false,
+      thumbnailAnnotationIndicatorMode: "none",
+      thumbnailAnnotationPageCounts: [],
+      thumbnailAnnotationRefreshCount: 0,
+      canvasPointerBlockedAfterAnnotation: null,
+      stickyToolModeEnabled: false,
+      lastToolModeBeforeAction: null,
+      lastToolModeAfterAction: null,
+      toolModeResetReason: null,
+      annotationExportAvailable: false,
+      annotationExportResult: null,
+      annotationExportKind: null,
+      annotationExportPageScope: null,
+      annotationDeleteCount: 0,
+      annotationEditCount: 0,
+      unsupportedAnnotationKind: null,
+      annotationActionSource: null,
+      coreviewAnnotationToolCount: 0,
+      coreviewAnnotationFallbackCount: 0,
+      coreviewAnnotationCommandSource: null,
+      coreviewAnnotationToolResult: null,
+      coreviewAnnotationFallbackResult: null,
+      coreviewAnnotationKind: null,
+      coreviewAnnotationAnchorType: null,
+      coreviewAnnotationColor: null,
+      coreviewAnnotationPageIndex: null,
+      coreviewAnnotationBlockedReason: null,
+      annotationIntentDetectedCount: 0,
+      annotationIntentSource: null,
+      annotationFallbackAttempted: false,
+      annotationFallbackResult: null,
+      annotationFallbackBlockedReason: null,
+      annotationFallbackUtteranceKind: null,
+      recentAnnotationActionSucceeded: false,
+      annotationCommitAttempted: false,
+      annotationCommitResult: null,
+      annotationCommitCountBefore: null,
+      annotationCommitCountAfter: null,
+      annotationCommitVerified: false,
+      annotationCommandPreventedNavigation: false,
+      annotationCommandKeptArtifactMounted: false,
+      annotationViewReadyTimedOut: false,
+      annotationPartialSuccess: false,
+      sessionLeaveGuardSuppressedForAnnotation: false,
+      assistantAnnotationClaimSuppressedCount: 0,
+      coreviewFocusAnchorCount: 0,
+      coreviewFocusAnchorResult: null,
+      coreviewFocusAnchorType: null,
+      keyboardArtifactShortcutUsed: null,
+      pinchZoomUsed: false,
+      panModeActive: false,
+      panGestureCount: 0,
+      panGestureResult: null,
+      panScrollDeltaX: null,
+      panScrollDeltaY: null,
+      coreviewToolCompletedCount: 0,
+      coreviewToolUnresolvedCount: 0,
+      coreviewToolLastResult: null,
+      coreviewToolRefreshResult: null,
+      coreviewToolVisualFreshAfterResult: null,
+      reviewToolsExposed: [],
+      emitArtifactExposedDuringReview: false,
+      reviewToolTimedOut: false,
+      reviewToolTimeoutName: null,
+      reviewToolTimeoutResultSent: false,
+      coreviewGetCurrentViewCount: 0,
+      coreviewGetCurrentViewResult: null,
+      providerToPublicTranscriptGapAfterCoreviewTool: null,
+      followUpTurnDispatchedAfterCoreviewTool: false,
+      emitArtifactBlockedDuringReviewCount: 0,
+      emitArtifactBlockedForAnnotationIntentCount: 0,
       rawFrameExcluded: true,
+      rawProviderPayloadExcluded: true,
     },
     exactText: {
       exactTextCallCount: 0,
+      readArtifactTextCallCount: 0,
       exactTextSuccessCount: 0,
       exactTextFailureCount: 0,
       exactTextSources: defaultExactTextSources(),
@@ -808,6 +1472,12 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       lastExactTextCharCount: null,
       lastExactTextTruncated: null,
       lastExactTextLatencyMs: null,
+      readArtifactTextResolvedCount: 0,
+      readArtifactTextUnresolvedCount: 0,
+      readArtifactTextTimeoutCount: 0,
+      readArtifactTextLastStatus: null,
+      readArtifactTextPdfExtractionStatus: null,
+      exactTextRegistrySource: null,
       rawArtifactTextExcluded: true,
       rawQueryExcluded: true,
     },
@@ -815,9 +1485,14 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
 }
 
 function buildCoreviewUsageTelemetry(activeEvents: NormalizedVoiceCaptureEvent[]): CoreviewUsageTelemetry {
+  const visual = buildCoreviewVisualTelemetry(activeEvents)
+  const exactText = buildCoreviewExactTextTelemetry(activeEvents)
+  visual.exactTextAvailable = visual.exactTextAvailable
+    || exactText.exactTextSuccessCount > 0
+
   return {
-    visual: buildCoreviewVisualTelemetry(activeEvents),
-    exactText: buildCoreviewExactTextTelemetry(activeEvents),
+    visual,
+    exactText,
   }
 }
 
@@ -828,16 +1503,226 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((event) => event.name === "coreview-state")
     .map((event) => asRecord(eventData(event)?.coreview))
     .filter((value): value is Record<string, unknown> => value !== null)
+  const selectedStageEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "select-stage-artifact")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const artifactCommandEvents = activeEvents
+    .filter((event) => event.name === "artifact-review-voice-command")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const annotationIntentEvents = activeEvents
+    .filter((event) => (
+      event.name === "annotation-intent-detected"
+      || (
+        event.name === "artifact-review-voice-command"
+        && asBoolean(event.payloadRecord?.annotationIntentDetected) === true
+      )
+      || (
+        event.name === "coreview-tool-call"
+        && (numberFromKeys(event.payloadRecord, ["annotationIntentDetectedCount"]) ?? 0) > 0
+      )
+    ))
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const telemetryExportEvents = activeEvents
+    .filter((event) => event.name === "voice-telemetry-export")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const pdfTextExtractionEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "pdf-text-extraction")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const annotationStateEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-annotation-state")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const annotationExportEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-annotation-export")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const canvasRestoreEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-canvas-restore")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const builderSnapshotProtectionEvents = activeEvents
+    .filter((event) => (
+      event.category === "builder-ui"
+      && (
+        event.name === "builder-canvas-snapshot-hydration"
+        || event.name === "artifact-stage-protected-from-snapshot"
+        || event.name === "artifact-stage-unmount-prevented"
+      )
+    ))
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const thumbnailAnnotationEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-thumbnail-annotation-state")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const annotationNavigationGuardEvents = activeEvents
+    .filter((event) => event.name === "session-leave-guard-suppressed-for-annotation")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const coreviewToolEvents = activeEvents
+    .filter((event) => event.category === "voice-session" && event.name === "coreview-tool-call")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const workspaceEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "coreview-workspace-event")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const latestWorkspaceEvent = workspaceEvents.at(-1) ?? null
+  const assistantAnnotationClaimSuppressedEvents = activeEvents
+    .filter((event) => event.category === "voice-session" && event.name === "assistant-annotation-claim-suppressed")
+  const coreviewToolDiagnostics = activeEvents.filter((event) => (
+    event.name === "gemini-tool-loop-diagnostic"
+    && GEMINI_COREVIEW_TOOL_NAMES.has(geminiToolName(event) ?? "")
+  ))
+  const setupToolEvents = activeEvents
+    .filter((event) => event.name === "gemini-setup-tools")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const keyboardShortcutEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-keyboard-shortcut")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const pinchZoomEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-pinch-zoom")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const panGestureEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-pan-gesture")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const flagDiagnosticEvents = activeEvents
+    .filter((event) => event.name === "coreview-flag-diagnostics" || event.name === "credentials-received")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
   const latestState = stateEvents.at(-1) ?? null
+  const latestSelectedStage = selectedStageEvents.at(-1) ?? null
+  const latestArtifactCommand = artifactCommandEvents.at(-1) ?? null
+  const latestAnnotationIntent = annotationIntentEvents.at(-1) ?? null
+  const latestPdfTextExtraction = pdfTextExtractionEvents.at(-1) ?? latestSelectedStage
+  const latestAnnotationState = annotationStateEvents.at(-1) ?? null
+  const latestAnnotationExport = annotationExportEvents.at(-1) ?? null
+  const latestCanvasRestore = canvasRestoreEvents.at(-1) ?? null
+  const latestThumbnailAnnotation = thumbnailAnnotationEvents.at(-1) ?? null
+  const latestCoreviewTool = coreviewToolEvents.at(-1) ?? null
+  const latestAnnotationTool = coreviewToolEvents
+    .filter((event) => (numberFromKeys(event, ["coreviewAnnotationToolCount"]) ?? 0) > 0)
+    .at(-1) ?? null
+  const latestAnnotationFallback = [
+    ...artifactCommandEvents.filter((event) => asBoolean(event.annotationFallbackAttempted) === true),
+    ...coreviewToolEvents.filter((event) => asBoolean(event.annotationFallbackAttempted) === true),
+  ].at(-1) ?? null
+  const latestFocusTool = coreviewToolEvents
+    .filter((event) => (numberFromKeys(event, ["coreviewFocusAnchorCount"]) ?? 0) > 0)
+    .at(-1) ?? null
+  const latestRebindEvent = [...selectedStageEvents, ...coreviewToolEvents]
+    .filter((event) => asBoolean(event.artifactRebindAttempted) === true)
+    .at(-1) ?? null
+  const latestSetupTools = setupToolEvents.at(-1) ?? null
+  const latestKeyboardShortcut = keyboardShortcutEvents.at(-1) ?? null
+  const latestPanGesture = panGestureEvents.at(-1) ?? null
   const firstFrameSeq = frameEvents.find((event) => {
     const result = coreviewFrameResult(event)
     return result !== null && frameWasSent(result)
   })?.seq ?? null
 
-  visual.coreviewEnabled = stateEvents.some((entry) => asBoolean(entry.coreviewEnabled) === true) || frameEvents.length > 0
+  visual.frontendCoreviewFlagParsed = latestBooleanFromRecords(
+    [...flagDiagnosticEvents, ...stateEvents, ...selectedStageEvents],
+    "frontendCoreviewFlagParsed",
+  )
+  visual.frontendStillFrameFlagParsed = latestBooleanFromRecords(
+    [...flagDiagnosticEvents, ...stateEvents, ...selectedStageEvents],
+    "frontendStillFrameFlagParsed",
+  )
+  visual.backendCoreviewFlagParsed = latestBooleanFromRecords(
+    [...flagDiagnosticEvents, ...stateEvents, ...selectedStageEvents],
+    "backendCoreviewFlagParsed",
+  )
+  visual.backendStillFrameFlagParsed = latestBooleanFromRecords(
+    [...flagDiagnosticEvents, ...stateEvents, ...selectedStageEvents],
+    "backendStillFrameFlagParsed",
+  )
+  visual.coreviewDisabledReason = asString(latestState?.coreviewDisabledReason)
+    ?? asString(latestSelectedStage?.coreviewDisabledReason)
+    ?? asString(flagDiagnosticEvents.at(-1)?.coreviewDisabledReason)
+  visual.reviewStartBlockedReason = asString(latestState?.reviewStartBlockedReason)
+
+  const selectedStageReviewEnabled = selectedStageEvents.some((entry) => asBoolean(entry.reviewFeatureEnabled) === true)
+  const frontendFlagsEnabled = visual.frontendCoreviewFlagParsed === true && visual.frontendStillFrameFlagParsed === true
+  visual.coreviewEnabled = stateEvents.some((entry) => asBoolean(entry.coreviewEnabled) === true)
+    || selectedStageReviewEnabled
+    || frontendFlagsEnabled
+    || frameEvents.length > 0
   visual.coreviewSessionActive = asBoolean(latestState?.coreviewSessionActive) ?? false
   visual.coreviewArtifactId = asString(latestState?.coreviewArtifactId)
+    ?? asString(latestSelectedStage?.coreviewArtifactId)
+    ?? asString(latestSelectedStage?.artifactId)
+  visual.artifactStableIdentity = asString(latestSelectedStage?.artifactStableIdentity)
+    ?? asString(latestRebindEvent?.artifactStableIdentity)
+    ?? asString(latestCoreviewTool?.artifactStableIdentity)
+  const capabilityEvents = [
+    ...selectedStageEvents,
+    ...annotationStateEvents,
+    ...annotationExportEvents,
+    ...workspaceEvents,
+    ...coreviewToolEvents,
+  ]
+  visual.coreviewWorkspaceContractVersion = latestFiniteFromRecords(capabilityEvents, "coreviewWorkspaceContractVersion")
+  visual.artifactCapabilityRendererKind = latestStringFromRecords(capabilityEvents, "artifactCapabilityRendererKind")
+  visual.artifactCapabilityRenderMode = latestStringFromRecords(capabilityEvents, "artifactCapabilityRenderMode")
+  visual.artifactCapabilitySupportsPages = latestBooleanFromRecords(capabilityEvents, "artifactCapabilitySupportsPages")
+  visual.artifactCapabilitySupportsAnnotations = latestBooleanFromRecords(capabilityEvents, "artifactCapabilitySupportsAnnotations")
+  visual.artifactCapabilitySupportsTextExtraction = latestBooleanFromRecords(capabilityEvents, "artifactCapabilitySupportsTextExtraction")
+  visual.artifactCapabilitySupportsLayoutAnchors = latestBooleanFromRecords(capabilityEvents, "artifactCapabilitySupportsLayoutAnchors")
+  visual.artifactCapabilitySupportsOCR = latestBooleanFromRecords(capabilityEvents, "artifactCapabilitySupportsOCR")
+  visual.artifactCapabilityRequiresOCR = latestBooleanFromRecords(capabilityEvents, "artifactCapabilityRequiresOCR")
+  visual.artifactCapabilitySupportsPptxNativeRender = latestBooleanFromRecords(capabilityEvents, "artifactCapabilitySupportsPptxNativeRender")
+  visual.artifactCapabilitySupportsAnnotatedExport = latestBooleanFromRecords(capabilityEvents, "artifactCapabilitySupportsAnnotatedExport")
+  visual.artifactCapabilityFallbackReason = latestStringFromRecords(capabilityEvents, "artifactCapabilityFallbackReason")
+  visual.coreviewWorkspaceEventLogActive = asBoolean(latestWorkspaceEvent?.coreviewWorkspaceEventLogActive) ?? false
+  visual.coreviewWorkspaceEventCount = numberFromKeys(latestWorkspaceEvent, ["coreviewWorkspaceEventCount"]) ?? workspaceEvents.length
+  visual.coreviewWorkspaceLastEventType = asString(latestWorkspaceEvent?.coreviewWorkspaceLastEventType)
+    ?? asString(latestWorkspaceEvent?.workspaceEventType)
+  visual.coreviewWorkspaceActorKind = asString(latestWorkspaceEvent?.coreviewWorkspaceActorKind)
+  visual.coreviewWorkspaceHasShareReadyMetadata = asBoolean(latestWorkspaceEvent?.coreviewWorkspaceHasShareReadyMetadata) ?? false
+  visual.coreviewShareStatus = asString(latestWorkspaceEvent?.coreviewShareStatus)
+  visual.workspaceEventLogPersistResult = asString(latestWorkspaceEvent?.workspaceEventLogPersistResult)
+  visual.workspaceEventLogRestoreCount = numberFromKeys(latestWorkspaceEvent, ["workspaceEventLogRestoreCount"]) ?? 0
+  visual.annotationEventsCreatedCount = numberFromKeys(latestWorkspaceEvent, ["annotationEventsCreatedCount"])
+    ?? workspaceEvents.filter((event) => asString(event.workspaceEventType) === "annotation.created").length
+  visual.viewChangedEventCount = numberFromKeys(latestWorkspaceEvent, ["viewChangedEventCount"])
+    ?? workspaceEvents.filter((event) => asString(event.workspaceEventType) === "view.changed").length
+  visual.artifactRebindAttempted = latestRebindEvent !== null
+  visual.artifactRebindResult = asString(latestRebindEvent?.artifactRebindResult)
+  visual.artifactRebindReason = asString(latestRebindEvent?.artifactRebindReason)
+  visual.artifactReboundFromRenderedState = asBoolean(latestRebindEvent?.artifactReboundFromRenderedState) ?? false
+  visual.artifactRebindSource = asString(latestRebindEvent?.artifactRebindSource)
+  visual.exactTextRehydrated = selectedStageEvents.some((event) => asBoolean(event.exactTextRehydrated) === true)
+  visual.exactTextRehydrateResult = asString(latestRebindEvent?.exactTextRehydrateResult)
+    ?? asString(latestSelectedStage?.exactTextRehydrateResult)
+  visual.currentRunSelectedStageEvents = selectedStageEvents.length
+  visual.longLivedSelectedStageState = selectedStageEvents.some((event) => (
+    asBoolean(event.longLivedSelectedStageState) === true
+  ))
+  visual.telemetryScopeMode = asString(latestRebindEvent?.telemetryScopeMode)
+    ?? asString(latestSelectedStage?.telemetryScopeMode)
+    ?? (selectedStageEvents.length > 0 ? "current_run_selected_stage" : null)
+  visual.canvasRestoreAttempted = canvasRestoreEvents.some((event) => (
+    asBoolean(event.canvasRestoreAttempted) === true
+  ))
+  visual.canvasRestoreResult = asString(latestCanvasRestore?.canvasRestoreResult)
+  visual.canvasRestoreSource = asString(latestCanvasRestore?.canvasRestoreSource)
+  visual.canvasRestoredArtifactIdentityHash = asString(latestCanvasRestore?.canvasRestoredArtifactIdentityHash)
   visual.visualSourceKind = asString(latestState?.visualSourceKind)
+  visual.visualFresh = asBoolean(latestState?.visualFresh) ?? false
+  visual.visualFreshForTurn = asBoolean(latestState?.visualFreshForTurn) ?? false
+  visual.exactTextAvailable = asBoolean(latestState?.exactTextAvailable)
+    ?? asBoolean(latestSelectedStage?.exactTextAvailable)
+    ?? false
   const stateFrameSentCount = numberFromKeys(latestState, ["frameSentCount"]) ?? 0
   const stateRefreshFrameCount = numberFromKeys(latestState, ["refreshFrameCount"]) ?? 0
   const stateTotalFrameBytes = numberFromKeys(latestState, ["totalFrameBytes"]) ?? 0
@@ -854,6 +1739,284 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.providerUsageAudioDurationSeconds = numberFromKeys(latestState, ["providerUsageAudioDurationSeconds"])
   visual.visualResponseObserved = asBoolean(latestState?.visualResponseObserved) ?? false
   visual.toolCallAfterFrameObserved = asBoolean(latestState?.toolCallAfterFrameObserved) ?? false
+  visual.reviewCommandPreservedMic = asBoolean(latestArtifactCommand?.reviewCommandPreservedMic)
+  visual.reviewCommandPreservedReview = asBoolean(latestArtifactCommand?.reviewCommandPreservedReview)
+  visual.reviewCommandAutoRefreshAttempted = asBoolean(latestArtifactCommand?.reviewCommandAutoRefreshAttempted) ?? false
+  visual.reviewCommandAutoRefreshResult = asString(latestArtifactCommand?.reviewCommandAutoRefreshResult)
+  visual.reviewCommandStaleAfterPageChange = asBoolean(latestArtifactCommand?.reviewCommandStaleAfterPageChange) ?? false
+  visual.reviewCommandStaleAfterViewChange = asBoolean(latestArtifactCommand?.reviewCommandStaleAfterViewChange)
+    ?? visual.reviewCommandStaleAfterPageChange
+  visual.reviewVoiceCommandTransportStateBefore = asString(latestArtifactCommand?.reviewVoiceCommandTransportStateBefore)
+  visual.reviewVoiceCommandTransportStateAfter = asString(latestArtifactCommand?.reviewVoiceCommandTransportStateAfter)
+  visual.reviewVoiceCommandDidHardIntercept = asBoolean(latestArtifactCommand?.reviewVoiceCommandDidHardIntercept)
+  visual.reviewVoiceCommandWaitedForViewReady = asBoolean(latestArtifactCommand?.reviewVoiceCommandWaitedForViewReady)
+  visual.reviewVoiceCommandAutoRefreshTiming = asString(latestArtifactCommand?.reviewVoiceCommandAutoRefreshTiming)
+  visual.reviewVoiceCommandAutoRefreshBlockedReason = asString(latestArtifactCommand?.reviewVoiceCommandAutoRefreshBlockedReason)
+  visual.telemetryExportAfterCommandSucceeded = telemetryExportEvents.some(
+    (event) => asBoolean(event.telemetryExportAfterCommandSucceeded) === true,
+  )
+  visual.lastReviewVoiceCommands = artifactCommandEvents.slice(-5).map(safeReviewVoiceCommandSummary)
+  const latestReviewVoiceCommand = visual.lastReviewVoiceCommands.at(-1) ?? null
+  visual.lastReviewVoiceCommandKind = latestReviewVoiceCommand?.kind ?? asString(latestArtifactCommand?.lastReviewVoiceCommandKind)
+  visual.lastReviewVoiceCommandApplied = latestReviewVoiceCommand?.applied ?? asBoolean(latestArtifactCommand?.lastReviewVoiceCommandApplied)
+  visual.lastReviewVoiceCommandUiMode = latestReviewVoiceCommand?.uiMode ?? asString(latestArtifactCommand?.lastReviewVoiceCommandUiMode)
+  visual.pdfTextExtractionStatus = asString(latestPdfTextExtraction?.pdfTextExtractionStatus)
+  visual.pdfTextExtractionPageCount = numberFromKeys(latestPdfTextExtraction, ["pdfTextExtractionPageCount"])
+  visual.pdfTextExtractionCharCount = numberFromKeys(latestPdfTextExtraction, ["pdfTextExtractionCharCount"])
+  visual.pdfTextExtractionSource = asString(latestPdfTextExtraction?.pdfTextExtractionSource)
+  visual.annotationOverlayCaptured = asBoolean(latestCoreviewTool?.annotationOverlayCaptured)
+    ?? asBoolean(latestAnnotationState?.annotationOverlayCaptured)
+    ?? null
+  visual.annotationCount = numberFromKeys(latestAnnotationTool, ["annotationCount"])
+    ?? numberFromKeys(latestCoreviewTool, ["annotationCount"])
+    ?? numberFromKeys(latestAnnotationState, ["annotationCount"])
+    ?? 0
+  visual.highlightCount = numberFromKeys(latestAnnotationTool, ["highlightCount"])
+    ?? numberFromKeys(latestCoreviewTool, ["highlightCount"])
+    ?? numberFromKeys(latestAnnotationState, ["highlightCount"])
+    ?? 0
+  visual.commentCount = numberFromKeys(latestAnnotationTool, ["commentCount"])
+    ?? numberFromKeys(latestCoreviewTool, ["commentCount"])
+    ?? numberFromKeys(latestAnnotationState, ["commentCount"])
+    ?? 0
+  visual.underlineCount = numberFromKeys(latestAnnotationTool, ["underlineCount", "underline_count"])
+    ?? numberFromKeys(latestCoreviewTool, ["underlineCount", "underline_count"])
+    ?? numberFromKeys(latestAnnotationState, ["underlineCount", "underline_count"])
+    ?? 0
+  visual.arrowCount = numberFromKeys(latestAnnotationTool, ["arrowCount", "arrow_count"])
+    ?? numberFromKeys(latestCoreviewTool, ["arrowCount", "arrow_count"])
+    ?? numberFromKeys(latestAnnotationState, ["arrowCount", "arrow_count"])
+    ?? 0
+  visual.drawPathCount = numberFromKeys(latestAnnotationTool, ["drawPathCount", "draw_path_count"])
+    ?? numberFromKeys(latestCoreviewTool, ["drawPathCount", "draw_path_count"])
+    ?? numberFromKeys(latestAnnotationState, ["drawPathCount", "draw_path_count"])
+    ?? 0
+  visual.annotationPersistenceStatus = asString(latestAnnotationState?.annotationPersistenceStatus)
+  visual.annotationRestoreAttempted = asBoolean(latestAnnotationState?.annotationRestoreAttempted) ?? false
+  visual.annotationRestoreResult = asString(latestAnnotationState?.annotationRestoreResult)
+  visual.annotationRestoreCount = numberFromKeys(latestAnnotationState, ["annotationRestoreCount"]) ?? 0
+  visual.annotationRestoreSource = asString(latestAnnotationState?.annotationRestoreSource)
+  visual.annotationPersistAttempted = asBoolean(latestAnnotationState?.annotationPersistAttempted) ?? false
+  visual.annotationPersistResult = asString(latestAnnotationState?.annotationPersistResult)
+  visual.annotationPersistCount = numberFromKeys(latestAnnotationState, ["annotationPersistCount"]) ?? 0
+  visual.annotationPersistedCount = numberFromKeys(latestAnnotationState, ["annotationPersistedCount"]) ?? 0
+  visual.annotationStorageVersion = numberFromKeys(latestAnnotationState, ["annotationStorageVersion"])
+  visual.annotationStorageKeyHash = asString(latestAnnotationState?.annotationStorageKeyHash)
+    ?? asString(latestAnnotationExport?.annotationStorageKeyHash)
+  visual.annotationIdentityWriteHash = asString(latestAnnotationState?.annotationIdentityWriteHash)
+  visual.annotationIdentityReadHash = asString(latestAnnotationState?.annotationIdentityReadHash)
+  visual.annotationRestoreOverwrittenCount = numberFromKeys(latestAnnotationState, ["annotationRestoreOverwrittenCount"]) ?? 0
+  visual.coreviewAnnotationStoreActive = asBoolean(latestAnnotationState?.coreviewAnnotationStoreActive) ?? false
+  visual.coreviewAnnotationStateSource = asString(latestAnnotationState?.coreviewAnnotationStateSource)
+  visual.annotationPreventedEmptyOverwriteCount = numberFromKeys(latestAnnotationState, ["annotationPreventedEmptyOverwriteCount"]) ?? 0
+  visual.annotationMigratedIdentityCount = numberFromKeys(latestAnnotationState, ["annotationMigratedIdentityCount"]) ?? 0
+  visual.annotationStoreSurvivedCanvasClose = asBoolean(latestAnnotationState?.annotationStoreSurvivedCanvasClose) ?? false
+  visual.annotationStoreHydratedArtifactStage = asBoolean(latestAnnotationState?.annotationStoreHydratedArtifactStage) ?? false
+  visual.annotationStateClearedReason = asString(latestAnnotationState?.annotationStateClearedReason)
+  visual.builderSnapshotIgnoredForActiveArtifact = builderSnapshotProtectionEvents.some((event) => (
+    asBoolean(event.builderSnapshotIgnoredForActiveArtifact) === true
+  ))
+  visual.builderSnapshotEmptyPassive = builderSnapshotProtectionEvents.some((event) => (
+    asBoolean(event.builderSnapshotEmptyPassive) === true
+  ))
+  visual.artifactStageProtectedFromSnapshot = builderSnapshotProtectionEvents.some((event) => (
+    asBoolean(event.artifactStageProtectedFromSnapshot) === true
+  ))
+  visual.artifactStageUnmountPrevented = builderSnapshotProtectionEvents.some((event) => (
+    asBoolean(event.artifactStageUnmountPrevented) === true
+  ))
+  visual.thumbnailAnnotationIndicatorMode = asString(latestThumbnailAnnotation?.thumbnailAnnotationIndicatorMode)
+    ?? visual.thumbnailAnnotationIndicatorMode
+  visual.thumbnailAnnotationPageCounts = annotationPageCountsFromPayload(
+    latestThumbnailAnnotation?.thumbnailAnnotationPageCounts,
+  )
+  visual.thumbnailAnnotationRefreshCount = numberFromKeys(latestThumbnailAnnotation, ["thumbnailAnnotationRefreshCount"]) ?? 0
+  visual.canvasPointerBlockedAfterAnnotation = asBoolean(latestThumbnailAnnotation?.canvasPointerBlockedAfterAnnotation)
+    ?? asBoolean(latestAnnotationState?.canvasPointerBlockedAfterAnnotation)
+    ?? null
+  visual.stickyToolModeEnabled = asBoolean(latestAnnotationState?.stickyToolModeEnabled) ?? false
+  visual.lastToolModeBeforeAction = asString(latestAnnotationState?.lastToolModeBeforeAction)
+  visual.lastToolModeAfterAction = asString(latestAnnotationState?.lastToolModeAfterAction)
+  visual.toolModeResetReason = asString(latestAnnotationState?.toolModeResetReason)
+  visual.annotationExportAvailable = asBoolean(latestAnnotationExport?.annotationExportAvailable)
+    ?? asBoolean(latestAnnotationState?.annotationExportAvailable)
+    ?? false
+  visual.annotationExportResult = asString(latestAnnotationExport?.annotationExportResult)
+    ?? asString(latestAnnotationState?.annotationExportResult)
+  visual.annotationExportKind = asString(latestAnnotationExport?.annotationExportKind)
+    ?? asString(latestAnnotationState?.annotationExportKind)
+  visual.annotationExportPageScope = asString(latestAnnotationExport?.annotationExportPageScope)
+    ?? asString(latestAnnotationState?.annotationExportPageScope)
+  visual.annotationDeleteCount = numberFromKeys(latestAnnotationState, ["annotationDeleteCount"]) ?? 0
+  visual.annotationEditCount = numberFromKeys(latestAnnotationState, ["annotationEditCount"]) ?? 0
+  visual.unsupportedAnnotationKind = asString(latestAnnotationTool?.unsupportedAnnotationKind)
+    ?? asString(latestAnnotationTool?.unsupported_annotation_kind)
+    ?? asString(latestAnnotationState?.unsupportedAnnotationKind)
+  visual.annotationActionSource = asString(latestAnnotationTool?.annotationActionSource)
+  visual.coreviewAnnotationToolCount = coreviewToolEvents.reduce((total, event) => (
+    total + (numberFromKeys(event, ["coreviewAnnotationToolCount"]) ?? 0)
+  ), 0)
+  visual.coreviewAnnotationFallbackCount = coreviewToolEvents.reduce((total, event) => (
+    total + (numberFromKeys(event, ["coreviewAnnotationFallbackCount"]) ?? 0)
+  ), 0)
+  visual.coreviewAnnotationCommandSource = asString(latestAnnotationTool?.coreviewAnnotationCommandSource)
+  visual.coreviewAnnotationToolResult = annotationResultFromState(latestAnnotationTool, ["coreviewAnnotationToolResult"])
+  visual.coreviewAnnotationFallbackResult = annotationResultFromState(latestAnnotationTool, ["coreviewAnnotationFallbackResult"])
+  visual.coreviewAnnotationKind = asString(latestAnnotationTool?.coreviewAnnotationKind)
+  visual.coreviewAnnotationAnchorType = asString(latestAnnotationTool?.coreviewAnnotationAnchorType)
+  visual.coreviewAnnotationColor = asString(latestAnnotationTool?.coreviewAnnotationColor)
+  visual.coreviewAnnotationPageIndex = numberFromKeys(latestAnnotationTool, ["coreviewAnnotationPageIndex"])
+  visual.coreviewAnnotationBlockedReason = asString(latestAnnotationTool?.coreviewAnnotationBlockedReason)
+  visual.annotationIntentDetectedCount = annotationIntentEvents.reduce((total, event) => (
+    total + (numberFromKeys(event, ["annotationIntentDetectedCount"]) ?? 1)
+  ), 0)
+  visual.annotationIntentSource = asString(latestAnnotationIntent?.annotationIntentSource)
+    ?? asString(latestAnnotationIntent?.source)
+  visual.annotationFallbackAttempted = asBoolean(latestAnnotationFallback?.annotationFallbackAttempted) ?? false
+  visual.annotationFallbackResult = annotationResultFromState(latestAnnotationFallback, ["annotationFallbackResult"])
+  visual.annotationFallbackBlockedReason = asString(latestAnnotationFallback?.annotationFallbackBlockedReason)
+  visual.annotationFallbackUtteranceKind = asString(latestAnnotationFallback?.annotationFallbackUtteranceKind)
+    ?? asString(latestAnnotationIntent?.annotationFallbackUtteranceKind)
+  visual.recentAnnotationActionSucceeded = coreviewToolEvents.some(annotationCommitStateChanged)
+  visual.annotationCommitAttempted = coreviewToolEvents.some((event) => (
+    asBoolean(event.annotationCommitAttempted) === true
+    || asBoolean(event.annotation_commit_attempted) === true
+  ))
+  visual.annotationCommitResult = annotationResultFromState(latestAnnotationTool, [
+    "annotationCommitResult",
+    "annotation_commit_result",
+  ]) ?? annotationResultFromState(latestAnnotationFallback, [
+    "annotationCommitResult",
+    "annotation_commit_result",
+  ])
+  visual.annotationCommitCountBefore = numberFromKeys(latestAnnotationTool, [
+    "annotationCommitCountBefore",
+    "annotation_commit_count_before",
+  ]) ?? numberFromKeys(latestAnnotationFallback, [
+    "annotationCommitCountBefore",
+    "annotation_commit_count_before",
+  ])
+  visual.annotationCommitCountAfter = numberFromKeys(latestAnnotationTool, [
+    "annotationCommitCountAfter",
+    "annotation_commit_count_after",
+  ]) ?? numberFromKeys(latestAnnotationFallback, [
+    "annotationCommitCountAfter",
+    "annotation_commit_count_after",
+  ])
+  visual.annotationCommitVerified = coreviewToolEvents.some(annotationCommitStateChanged)
+  visual.annotationCommandPreventedNavigation = coreviewToolEvents.some((event) => (
+    asBoolean(event.annotationCommandPreventedNavigation) === true
+    || asBoolean(event.annotation_command_prevented_navigation) === true
+  ))
+  visual.annotationCommandKeptArtifactMounted = coreviewToolEvents.some((event) => (
+    asBoolean(event.annotationCommandKeptArtifactMounted) === true
+    || asBoolean(event.annotation_command_kept_artifact_mounted) === true
+  ))
+  visual.annotationViewReadyTimedOut = coreviewToolEvents.some((event) => (
+    asBoolean(event.annotationViewReadyTimedOut) === true
+    || asBoolean(event.annotation_view_ready_timed_out) === true
+  ))
+  visual.annotationPartialSuccess = coreviewToolEvents.some((event) => (
+    asBoolean(event.annotationPartialSuccess) === true
+    || asBoolean(event.annotation_partial_success) === true
+  ))
+  visual.sessionLeaveGuardSuppressedForAnnotation = coreviewToolEvents.some((event) => (
+    asBoolean(event.sessionLeaveGuardSuppressedForAnnotation) === true
+    || asBoolean(event.session_leave_guard_suppressed_for_annotation) === true
+  )) || annotationNavigationGuardEvents.some((event) => (
+    asBoolean(event.sessionLeaveGuardSuppressedForAnnotation) === true
+    || asBoolean(event.session_leave_guard_suppressed_for_annotation) === true
+  ))
+  visual.assistantAnnotationClaimSuppressedCount = assistantAnnotationClaimSuppressedEvents.length
+  visual.coreviewFocusAnchorCount = coreviewToolEvents.reduce((total, event) => (
+    total + (numberFromKeys(event, ["coreviewFocusAnchorCount"]) ?? 0)
+  ), 0)
+  visual.coreviewFocusAnchorResult = asString(latestFocusTool?.coreviewFocusAnchorResult)
+  visual.coreviewFocusAnchorType = asString(latestFocusTool?.coreviewFocusAnchorType)
+  visual.keyboardArtifactShortcutUsed = asString(latestKeyboardShortcut?.keyboardArtifactShortcutUsed)
+  visual.pinchZoomUsed = pinchZoomEvents.some((event) => asBoolean(event.pinchZoomUsed) === true)
+  visual.panModeActive = asBoolean(latestPanGesture?.panModeActive)
+    ?? asBoolean(latestAnnotationState?.panModeActive)
+    ?? asString(latestAnnotationState?.artifactToolMode) === "pan"
+  visual.panGestureCount = Math.max(
+    panGestureEvents.length,
+    ...panGestureEvents.map((event) => numberFromKeys(event, ["panGestureCount"]) ?? 0),
+  )
+  visual.panGestureResult = asString(latestPanGesture?.panGestureResult)
+  visual.panScrollDeltaX = numberFromKeys(latestPanGesture, ["panScrollDeltaX"])
+  visual.panScrollDeltaY = numberFromKeys(latestPanGesture, ["panScrollDeltaY"])
+  const coreviewToolReceivedCount = countWhere(coreviewToolDiagnostics, (event) => asString(eventData(event)?.phase) === "tool_call_received")
+  const coreviewToolResolvedCount = countWhere(coreviewToolDiagnostics, (event) => {
+    const phase = asString(eventData(event)?.phase)
+    return phase === "tool_response_sent"
+      || phase === "tool_execution_rejected"
+      || phase === "tool_response_send_suppressed"
+  })
+  visual.coreviewToolCompletedCount = Math.max(
+    countWhere(coreviewToolEvents, (event) => (numberFromKeys(event, ["coreviewToolCompletedCount"]) ?? 1) > 0),
+    coreviewToolResolvedCount,
+  )
+  visual.coreviewToolUnresolvedCount = Math.max(coreviewToolReceivedCount - coreviewToolResolvedCount, 0)
+  visual.coreviewToolLastResult = asString(latestCoreviewTool?.coreviewToolLastResult)
+    ?? asString(latestCoreviewTool?.coreviewToolResult)
+  visual.coreviewToolRefreshResult = asString(latestCoreviewTool?.coreviewToolRefreshResult)
+  visual.coreviewToolVisualFreshAfterResult = asBoolean(latestCoreviewTool?.coreviewToolVisualFreshAfterResult)
+  visual.reviewToolsExposed = asStringArray(latestSetupTools?.reviewToolsExposed) ?? []
+  visual.emitArtifactExposedDuringReview = asBoolean(latestSetupTools?.emitArtifactExposedDuringReview)
+    ?? visual.reviewToolsExposed.includes(GEMINI_EMIT_ARTIFACT_TOOL_NAME)
+  const reviewToolTimeoutDiagnostics = activeEvents.filter((event) => {
+    if (event.name !== "gemini-tool-loop-diagnostic") return false
+    const diagnostic = asRecord(eventData(event)?.diagnostic)
+    const backendResponse = toolBackendResponseFromDiagnostic(diagnostic)
+    return asBoolean(diagnostic?.reviewToolTimedOut) === true
+      || asBoolean(backendResponse?.review_tool_timed_out) === true
+  })
+  const latestReviewToolTimeout = reviewToolTimeoutDiagnostics.at(-1) ?? null
+  const latestReviewToolTimeoutDiagnostic = latestReviewToolTimeout
+    ? asRecord(eventData(latestReviewToolTimeout)?.diagnostic)
+    : null
+  const latestReviewToolTimeoutResponse = toolBackendResponseFromDiagnostic(latestReviewToolTimeoutDiagnostic)
+  visual.reviewToolTimedOut = reviewToolTimeoutDiagnostics.length > 0
+  visual.reviewToolTimeoutName = asString(latestReviewToolTimeoutDiagnostic?.reviewToolTimeoutName)
+    ?? asString(latestReviewToolTimeoutResponse?.review_tool_timeout_name)
+    ?? (latestReviewToolTimeout ? geminiToolName(latestReviewToolTimeout) : null)
+  visual.reviewToolTimeoutResultSent = reviewToolTimeoutDiagnostics.some((event) => {
+    const diagnostic = asRecord(eventData(event)?.diagnostic)
+    const backendResponse = toolBackendResponseFromDiagnostic(diagnostic)
+    return asBoolean(diagnostic?.reviewToolTimeoutResultSent) === true
+      || asBoolean(backendResponse?.review_tool_timeout_result_sent) === true
+  })
+  const currentViewDiagnostics = coreviewToolDiagnostics.filter((event) => (
+    geminiToolName(event) === "coreview_get_current_view"
+    && asString(eventData(event)?.phase) === "tool_response_sent"
+  ))
+  visual.coreviewGetCurrentViewCount = currentViewDiagnostics.length
+  const latestCurrentViewDiagnostic = currentViewDiagnostics.at(-1) ?? null
+  const latestCurrentViewResponse = toolBackendResponseFromDiagnostic(
+    latestCurrentViewDiagnostic ? asRecord(eventData(latestCurrentViewDiagnostic)?.diagnostic) : null,
+  )
+  visual.coreviewGetCurrentViewResult = asString(latestCurrentViewResponse?.current_view_summary)
+    ?? asString(latestCurrentViewResponse?.result_summary)
+    ?? asString(latestCurrentViewResponse?.blocked_reason)
+  visual.emitArtifactBlockedDuringReviewCount = countWhere(activeEvents, isReviewEmitArtifactSuppressedDiagnostic)
+  visual.emitArtifactBlockedForAnnotationIntentCount = countWhere(activeEvents, isReviewEmitArtifactSuppressedForAnnotationIntentDiagnostic)
+  visual.followUpTurnDispatchedAfterCoreviewTool = activeEvents.some((event) => {
+    if (event.name !== "gemini-barge-in-transcript-handoff") return false
+    const diagnostic = asRecord(eventData(event)?.diagnostic)
+    return asBoolean(diagnostic?.newTurnDispatched) === true
+      && (
+        asString(diagnostic?.bargeInConfirmationSource) === "coreview_tool_follow_up"
+        || asString(diagnostic?.bargeInConfirmationReason) === "provider_input_transcription_after_coreview_tool"
+      )
+  })
+  if (visual.coreviewToolCompletedCount > 0) {
+    const providerInputTranscriptCount = geminiProviderCategoryCount(activeEvents, null, "inputTranscription")
+    const publicUserTranscriptCount = countWhere(activeEvents, (event) => event.name === "sophia.user_transcript")
+    visual.providerToPublicTranscriptGapAfterCoreviewTool = Math.max(
+      providerInputTranscriptCount - publicUserTranscriptCount,
+      0,
+    )
+  }
 
   for (const event of frameEvents) {
     const result = coreviewFrameResult(event)
@@ -866,6 +2029,12 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     const stage = asString(result.coreviewSendStage)
 
     visual.coreviewEnabled = true
+    visual.frontendCoreviewFlagParsed = asBoolean(result.frontendCoreviewFlagParsed) ?? visual.frontendCoreviewFlagParsed
+    visual.frontendStillFrameFlagParsed = asBoolean(result.frontendStillFrameFlagParsed) ?? visual.frontendStillFrameFlagParsed
+    visual.backendCoreviewFlagParsed = asBoolean(result.backendCoreviewFlagParsed) ?? visual.backendCoreviewFlagParsed
+    visual.backendStillFrameFlagParsed = asBoolean(result.backendStillFrameFlagParsed) ?? visual.backendStillFrameFlagParsed
+    visual.coreviewDisabledReason = asString(result.coreviewDisabledReason) ?? visual.coreviewDisabledReason
+    visual.reviewStartBlockedReason = asString(result.reviewStartBlockedReason) ?? visual.reviewStartBlockedReason
     visual.coreviewArtifactId = visual.coreviewArtifactId ?? asString(result.artifactId) ?? asString(result.artifact_id)
     visual.visualSourceKind = asString(result.visualSourceKind) ?? visual.visualSourceKind
     if (sent) {
@@ -873,6 +2042,8 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
       visual.totalFrameBytes += bytes ?? 0
       visual.lastFrameBytes = bytes ?? visual.lastFrameBytes
       visual.lastFrameDimensions = asFrameDimensions(result.frameDimensions) ?? visual.lastFrameDimensions
+      visual.visualFresh = true
+      visual.visualFreshForTurn = true
       if (stage === "refresh") {
         visual.refreshFrameCount += 1
       } else if (stage === "start") {
@@ -923,7 +2094,24 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.frameSendFailureCount = Math.max(visual.frameSendFailureCount, stateFrameSendFailureCount)
   visual.websocketClosedAfterFrameCount = Math.max(visual.websocketClosedAfterFrameCount, stateWebsocketClosedAfterFrameCount)
   visual.initialFrameSent = visual.initialFrameSent || (visual.frameSentCount > 0 && visual.refreshFrameCount < visual.frameSentCount)
+  visual.visualFresh = visual.visualFresh || visual.frameSentCount > 0
+  visual.visualFreshForTurn = visual.visualFreshForTurn || visual.initialFrameSent
   return visual
+}
+
+function safeReviewVoiceCommandSummary(record: Record<string, unknown>): ReviewVoiceCommandTelemetrySummary {
+  return {
+    kind: asString(record.reviewVoiceCommandKind) ?? asString(record.lastReviewVoiceCommandKind),
+    applied: asBoolean(record.reviewVoiceCommandApplied) ?? asBoolean(record.lastReviewVoiceCommandApplied),
+    uiMode: asString(record.lastReviewVoiceCommandUiMode),
+    refreshResult: asString(record.reviewVoiceCommandRefreshResult),
+    autoRefreshBlockedReason: asString(record.reviewVoiceCommandAutoRefreshBlockedReason),
+    waitedForViewReady: asBoolean(record.reviewVoiceCommandWaitedForViewReady),
+    didHardIntercept: asBoolean(record.reviewVoiceCommandDidHardIntercept),
+    artifactCurrentPageIndex: numberFromKeys(record, ["artifactCurrentPageIndex"]),
+    artifactCurrentPageCount: numberFromKeys(record, ["artifactCurrentPageCount"]),
+    rawTranscriptExcluded: true,
+  }
 }
 
 function buildCoreviewExactTextTelemetry(activeEvents: NormalizedVoiceCaptureEvent[]): CoreviewExactTextTelemetry {
@@ -933,6 +2121,7 @@ function buildCoreviewExactTextTelemetry(activeEvents: NormalizedVoiceCaptureEve
     && geminiToolName(event) === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME
   ))
   const finalPhases = new Set(["tool_response_sent", "tool_response_send_failed", "tool_response_send_suppressed", "tool_execution_rejected"])
+  const resolvedPhases = new Set(["tool_response_sent", "tool_response_send_suppressed", "tool_execution_rejected"])
 
   exactText.exactTextCallCount = countWhere(readEvents, (event) => asString(eventData(event)?.phase) === "tool_call_received")
 
@@ -956,18 +2145,75 @@ function buildCoreviewExactTextTelemetry(activeEvents: NormalizedVoiceCaptureEve
     } else {
       exactText.exactTextFailureCount += 1
     }
+    if (
+      status === "timeout"
+      || asBoolean(backendResponse?.review_tool_timed_out) === true
+      || asBoolean(diagnostic?.reviewToolTimedOut) === true
+    ) {
+      exactText.readArtifactTextTimeoutCount += 1
+    }
     exactText.exactTextSources[source] += 1
     exactText.lastExactTextStatus = status
     exactText.lastExactTextSource = source
+    exactText.readArtifactTextLastStatus = status
+    exactText.exactTextRegistrySource = success ? source : exactText.exactTextRegistrySource
     exactText.lastExactTextCharCount = numberFromKeys(backendResponse, ["char_count", "charCount"]) ?? 0
     exactText.lastExactTextTruncated = asBoolean(backendResponse?.truncated) ?? false
     exactText.lastExactTextLatencyMs = latency
+    if (
+      asString(backendResponse?.source) === "pdf_text_extraction"
+      || status === "extraction_pending"
+      || status === "extraction_unavailable"
+      || status === "extraction_failed"
+    ) {
+      exactText.readArtifactTextPdfExtractionStatus = status
+    }
   }
 
   exactText.exactTextCallCount = Math.max(
     exactText.exactTextCallCount,
     exactText.exactTextSuccessCount + exactText.exactTextFailureCount,
   )
+  exactText.readArtifactTextCallCount = exactText.exactTextCallCount
+  exactText.readArtifactTextResolvedCount = countWhere(readEvents, (event) => resolvedPhases.has(asString(eventData(event)?.phase) ?? ""))
+  exactText.readArtifactTextUnresolvedCount = Math.max(
+    exactText.readArtifactTextCallCount - exactText.readArtifactTextResolvedCount,
+    0,
+  )
+  const latestPdfTextExtraction = activeEvents
+    .filter((event) => (
+      (event.category === "artifacts-runtime" && event.name === "pdf-text-extraction")
+      || event.name === "select-stage-artifact"
+    ))
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+    .at(-1)
+  exactText.readArtifactTextPdfExtractionStatus = exactText.readArtifactTextPdfExtractionStatus
+    ?? asString(latestPdfTextExtraction?.pdfTextExtractionStatus)
+  const latestPdfTextExtractionStatus = asString(latestPdfTextExtraction?.pdfTextExtractionStatus)
+  const latestPdfTextExtractionSource = normalizeCoreviewExactTextSource(
+    asString(latestPdfTextExtraction?.pdfTextExtractionSource),
+    latestPdfTextExtractionStatus === "success",
+  )
+  if (
+    latestPdfTextExtractionStatus === "success"
+    && latestPdfTextExtractionSource === "pdf_text_extraction"
+  ) {
+    if (exactText.exactTextSources.pdf_text_extraction === 0) {
+      exactText.exactTextSources.pdf_text_extraction += 1
+    }
+    exactText.exactTextSuccessCount = Math.max(exactText.exactTextSuccessCount, 1)
+    exactText.lastExactTextStatus = exactText.lastExactTextStatus ?? "success"
+    exactText.lastExactTextSource = exactText.lastExactTextSource ?? "pdf_text_extraction"
+    exactText.lastExactTextCharCount = exactText.lastExactTextCharCount
+      ?? numberFromKeys(latestPdfTextExtraction, ["pdfTextExtractionCharCount"])
+    exactText.lastExactTextTruncated = exactText.lastExactTextTruncated
+      ?? asBoolean(latestPdfTextExtraction?.pdfTextExtractionTruncated)
+    exactText.exactTextRegistrySource = exactText.exactTextRegistrySource ?? "pdf_text_extraction"
+  }
+  exactText.readArtifactTextLastStatus = exactText.readArtifactTextLastStatus
+    ?? exactText.lastExactTextStatus
+    ?? latestPdfTextExtractionStatus
 
   return exactText
 }
@@ -997,13 +2243,25 @@ function normalizeCoreviewExactTextSource(
   success: boolean,
 ): CoreviewExactTextSource {
   if (!success) return "unsupported"
-  if (source === "fixture" || source === "builder_metadata" || source === "artifact_store") {
+  if (
+    source === "fixture"
+    || source === "builder_metadata"
+    || source === "builder_file"
+    || source === "pdf_text_extraction"
+    || source === "artifact_store"
+  ) {
     return source
   }
   return "unsupported"
 }
 
 function coreviewReadArtifactTextResponse(
+  diagnostic: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  return toolBackendResponseFromDiagnostic(diagnostic)
+}
+
+function toolBackendResponseFromDiagnostic(
   diagnostic: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
   if (!diagnostic) return null
@@ -1026,6 +2284,32 @@ function geminiToolName(event: NormalizedVoiceCaptureEvent): string | null {
   const diagnostic = asRecord(data?.diagnostic)
   const toolCall = asRecord(diagnostic?.toolCall)
   return asString(data?.toolName) ?? asString(toolCall?.name)
+}
+
+function isReviewEmitArtifactSuppressedDiagnostic(event: NormalizedVoiceCaptureEvent): boolean {
+  if (event.name !== "gemini-tool-loop-diagnostic") {
+    return false
+  }
+  const data = eventData(event)
+  const diagnostic = asRecord(data?.diagnostic)
+  const backendResponse = toolBackendResponseFromDiagnostic(diagnostic)
+  const rejectionReason = asString(data?.rejectionReason)
+    ?? asString(diagnostic?.rejectionReason)
+    ?? asString(diagnostic?.rejection_reason)
+    ?? asString(backendResponse?.rejection_reason)
+    ?? asString(backendResponse?.safe_reason)
+  return asString(data?.phase) === "tool_execution_rejected"
+    && geminiToolName(event) === GEMINI_EMIT_ARTIFACT_TOOL_NAME
+    && rejectionReason === "artifact_review_emit_artifact_suppressed"
+}
+
+function isReviewEmitArtifactSuppressedForAnnotationIntentDiagnostic(event: NormalizedVoiceCaptureEvent): boolean {
+  if (!isReviewEmitArtifactSuppressedDiagnostic(event)) {
+    return false
+  }
+  const diagnostic = asRecord(eventData(event)?.diagnostic)
+  const backendResponse = toolBackendResponseFromDiagnostic(diagnostic)
+  return asBoolean(backendResponse?.emit_artifact_blocked_for_annotation_intent) === true
 }
 
 function asVoiceStage(value: string | null): VoiceStage | null {
@@ -1120,6 +2404,21 @@ function latestNestedDiagnostic(events: NormalizedVoiceCaptureEvent[], name: str
 
 function latestEventAt(events: NormalizedVoiceCaptureEvent[], name: string): string | null {
   return findLast(events, (event) => event.name === name)?.recordedAt ?? null
+}
+
+function firstGeminiProviderTranscriptAt(events: NormalizedVoiceCaptureEvent[]): string | null {
+  const event = findFirst(events, (entry) => {
+    if (entry.name !== "gemini-provider-event-correlation") {
+      return false
+    }
+    const telemetry = asRecord(eventData(entry)?.telemetry)
+    if (asBoolean(telemetry?.hasInputTranscriptionText) === true) {
+      return true
+    }
+    const categoryCounts = asGeminiCategoryCounts(telemetry?.categoryCounts)
+    return (categoryCounts.inputTranscription?.count ?? 0) > 0
+  })
+  return event?.recordedAt ?? null
 }
 
 function latestGeminiToolCallLedger(events: NormalizedVoiceCaptureEvent[]): Array<Record<string, unknown>> {
@@ -1283,9 +2582,10 @@ function buildSessionTelemetry(params: {
   timings: VoiceDeveloperMetrics["timings"]
   counts: VoiceDeveloperMetrics["counts"]
   lastTurn: VoiceDeveloperMetrics["lastTurn"]
+  microphone: VoiceDeveloperMetrics["microphone"]
   nowMs: number
 }): VoiceSessionTelemetry {
-  const { runtimeTelemetry, activeEvents, sessionIds, transport, timings, counts, lastTurn, nowMs } = params
+  const { runtimeTelemetry, activeEvents, sessionIds, transport, timings, counts, lastTurn, microphone, nowMs } = params
   const captureRuntime = latestRuntimeFromCapture(activeEvents)
   const preferCaptureRuntime = Boolean(
     captureRuntime
@@ -1488,6 +2788,39 @@ function buildSessionTelemetry(params: {
       hookTelemetry?.outputAudioEventCount ?? 0,
       countWhere(activeEvents, (event) => event.name === "gemini-output-audio-started"),
     )
+    const providerInputTranscriptCount = Math.max(
+      hookTelemetry?.providerInputTranscriptCount ?? 0,
+      geminiProviderCategoryCount(activeEvents, runtimeTelemetry, "inputTranscription"),
+    )
+    const publicUserTranscriptCount = Math.max(
+      hookTelemetry?.publicUserTranscriptCount ?? 0,
+      counts.userTranscripts,
+    )
+    const providerToPublicTranscriptGap = Math.max(providerInputTranscriptCount - publicUserTranscriptCount, 0)
+    const firstProviderTranscriptAt = hookTelemetry?.firstProviderTranscriptAt
+      ?? firstGeminiProviderTranscriptAt(activeEvents)
+    const firstPublicUserTranscriptAt = hookTelemetry?.firstPublicUserTranscriptAt
+      ?? findFirst(activeEvents, (event) => event.name === "sophia.user_transcript")?.recordedAt
+      ?? null
+    const reviewMicAudioDetected = hookTelemetry?.reviewMicAudioDetected === true || microphone.detectedAudio
+    const reviewUserSpeechDetected = hookTelemetry?.reviewUserSpeechDetected === true
+      || microphone.detectedAudio
+      || inputAudioDiagnostics.some((diagnostic) => asString(diagnostic.eventType) === "input_audio_frame_sent")
+      || bargeInCandidateFrameCount > 0
+    const reviewProviderTranscriptObserved = hookTelemetry?.reviewProviderTranscriptObserved === true
+      || providerInputTranscriptCount > 0
+    const reviewPublicTranscriptObserved = hookTelemetry?.reviewPublicTranscriptObserved === true
+      || publicUserTranscriptCount > 0
+    const reviewTranscriptPromotionBlockedReason = reviewProviderTranscriptObserved && !reviewPublicTranscriptObserved && providerToPublicTranscriptGap > 0
+      ? "provider_transcript_not_surfaced"
+      : reviewUserSpeechDetected && !reviewProviderTranscriptObserved && !reviewPublicTranscriptObserved
+        ? "voice_input_detected_waiting_for_transcript"
+        : hookTelemetry?.reviewTranscriptPromotionBlockedReason ?? null
+    const transcriptPromotionLatencyMs = hookTelemetry?.transcriptPromotionLatencyMs
+      ?? diffMs(
+        parseTimestampMs(firstProviderTranscriptAt),
+        parseTimestampMs(firstPublicUserTranscriptAt),
+      )
     const interruptionCount = Math.max(
       hookTelemetry?.interruptionCount ?? 0,
       countWhere(activeEvents, (event) => event.name === "gemini-interruption"),
@@ -1554,6 +2887,7 @@ function buildSessionTelemetry(params: {
       hookTelemetry?.oldestUnresolvedToolCallAgeMs ?? 0,
       oldestUnresolvedToolCallAtMs === null ? 0 : Math.max(0, nowMs - oldestUnresolvedToolCallAtMs),
     ) || null
+    const coreviewTelemetry = buildCoreviewUsageTelemetry(activeEvents)
 
     return {
       runtime: "gemini_live",
@@ -1581,6 +2915,18 @@ function buildSessionTelemetry(params: {
         lastProviderEventAt: hookTelemetry?.lastProviderEventAt ?? latestEventAt(activeEvents, "gemini-provider-event"),
         lastProviderEventType: hookTelemetry?.lastProviderEventType ?? asString(providerPayload?.eventType),
         providerCategoryCounts: hookTelemetry?.providerCategoryCounts ?? asGeminiCategoryCounts(providerTelemetry?.categoryCounts),
+        reviewVoiceReady: reviewTranscriptPromotionBlockedReason === null,
+        reviewMicAudioDetected,
+        reviewUserSpeechDetected,
+        reviewProviderTranscriptObserved,
+        reviewPublicTranscriptObserved,
+        reviewTranscriptPromotionBlockedReason,
+        providerInputTranscriptCount,
+        publicUserTranscriptCount,
+        providerToPublicTranscriptGap,
+        firstProviderTranscriptAt,
+        firstPublicUserTranscriptAt,
+        transcriptPromotionLatencyMs,
         outputAudioEventCount,
         lastOutputAudioAt: hookTelemetry?.lastOutputAudioAt ?? latestEventAt(activeEvents, "gemini-output-audio-started"),
         assistantTranscriptSource: hookTelemetry?.assistantTranscriptSource
@@ -1685,6 +3031,230 @@ function buildSessionTelemetry(params: {
         artifactToolCallCount,
         artifactToolCallUnknownCount,
         builderToolCallCount,
+        coreviewToolCompletedCount: hookTelemetry?.coreviewToolCompletedCount
+          ?? coreviewTelemetry.visual.coreviewToolCompletedCount,
+        coreviewToolUnresolvedCount: hookTelemetry?.coreviewToolUnresolvedCount
+          ?? coreviewTelemetry.visual.coreviewToolUnresolvedCount,
+        coreviewToolLastResult: hookTelemetry?.coreviewToolLastResult
+          ?? coreviewTelemetry.visual.coreviewToolLastResult,
+        coreviewToolRefreshResult: hookTelemetry?.coreviewToolRefreshResult
+          ?? coreviewTelemetry.visual.coreviewToolRefreshResult,
+        coreviewToolVisualFreshAfterResult: hookTelemetry?.coreviewToolVisualFreshAfterResult
+          ?? coreviewTelemetry.visual.coreviewToolVisualFreshAfterResult,
+        reviewToolsExposed: hookTelemetry?.reviewToolsExposed
+          ?? coreviewTelemetry.visual.reviewToolsExposed,
+        emitArtifactExposedDuringReview: hookTelemetry?.emitArtifactExposedDuringReview
+          ?? coreviewTelemetry.visual.emitArtifactExposedDuringReview,
+        reviewToolTimedOut: hookTelemetry?.reviewToolTimedOut
+          ?? coreviewTelemetry.visual.reviewToolTimedOut,
+        reviewToolTimeoutName: hookTelemetry?.reviewToolTimeoutName
+          ?? coreviewTelemetry.visual.reviewToolTimeoutName,
+        reviewToolTimeoutResultSent: hookTelemetry?.reviewToolTimeoutResultSent
+          ?? coreviewTelemetry.visual.reviewToolTimeoutResultSent,
+        coreviewGetCurrentViewCount: hookTelemetry?.coreviewGetCurrentViewCount
+          ?? coreviewTelemetry.visual.coreviewGetCurrentViewCount,
+        coreviewGetCurrentViewResult: hookTelemetry?.coreviewGetCurrentViewResult
+          ?? coreviewTelemetry.visual.coreviewGetCurrentViewResult,
+        readArtifactTextResolvedCount: hookTelemetry?.readArtifactTextResolvedCount
+          ?? coreviewTelemetry.exactText.readArtifactTextResolvedCount,
+        readArtifactTextUnresolvedCount: hookTelemetry?.readArtifactTextUnresolvedCount
+          ?? coreviewTelemetry.exactText.readArtifactTextUnresolvedCount,
+        readArtifactTextTimeoutCount: hookTelemetry?.readArtifactTextTimeoutCount
+          ?? coreviewTelemetry.exactText.readArtifactTextTimeoutCount,
+        readArtifactTextLastStatus: hookTelemetry?.readArtifactTextLastStatus
+          ?? coreviewTelemetry.exactText.readArtifactTextLastStatus,
+        readArtifactTextPdfExtractionStatus: hookTelemetry?.readArtifactTextPdfExtractionStatus
+          ?? coreviewTelemetry.exactText.readArtifactTextPdfExtractionStatus,
+        exactTextRegistrySource: (() => {
+          const source = hookTelemetry?.exactTextRegistrySource ?? coreviewTelemetry.exactText.exactTextRegistrySource
+          return source ? normalizeCoreviewExactTextSource(source, true) : null
+        })(),
+        annotationOverlayCaptured: hookTelemetry?.annotationOverlayCaptured
+          ?? coreviewTelemetry.visual.annotationOverlayCaptured,
+        annotationCount: hookTelemetry?.annotationCount
+          ?? coreviewTelemetry.visual.annotationCount,
+        highlightCount: hookTelemetry?.highlightCount
+          ?? coreviewTelemetry.visual.highlightCount,
+        commentCount: hookTelemetry?.commentCount
+          ?? coreviewTelemetry.visual.commentCount,
+        underlineCount: hookTelemetry?.underlineCount
+          ?? coreviewTelemetry.visual.underlineCount,
+        arrowCount: hookTelemetry?.arrowCount
+          ?? coreviewTelemetry.visual.arrowCount,
+        drawPathCount: hookTelemetry?.drawPathCount
+          ?? coreviewTelemetry.visual.drawPathCount,
+        annotationPersistenceStatus: hookTelemetry?.annotationPersistenceStatus
+          ?? coreviewTelemetry.visual.annotationPersistenceStatus,
+        annotationRestoreAttempted: hookTelemetry?.annotationRestoreAttempted
+          ?? coreviewTelemetry.visual.annotationRestoreAttempted,
+        annotationRestoreResult: hookTelemetry?.annotationRestoreResult
+          ?? coreviewTelemetry.visual.annotationRestoreResult,
+        annotationRestoreCount: hookTelemetry?.annotationRestoreCount
+          ?? coreviewTelemetry.visual.annotationRestoreCount,
+        annotationRestoreSource: hookTelemetry?.annotationRestoreSource
+          ?? coreviewTelemetry.visual.annotationRestoreSource,
+        annotationPersistAttempted: hookTelemetry?.annotationPersistAttempted
+          ?? coreviewTelemetry.visual.annotationPersistAttempted,
+        annotationPersistResult: hookTelemetry?.annotationPersistResult
+          ?? coreviewTelemetry.visual.annotationPersistResult,
+        annotationPersistCount: hookTelemetry?.annotationPersistCount
+          ?? coreviewTelemetry.visual.annotationPersistCount,
+        annotationPersistedCount: hookTelemetry?.annotationPersistedCount
+          ?? coreviewTelemetry.visual.annotationPersistedCount,
+        annotationStorageVersion: hookTelemetry?.annotationStorageVersion
+          ?? coreviewTelemetry.visual.annotationStorageVersion,
+        annotationStorageKeyHash: hookTelemetry?.annotationStorageKeyHash
+          ?? coreviewTelemetry.visual.annotationStorageKeyHash,
+        annotationIdentityWriteHash: hookTelemetry?.annotationIdentityWriteHash
+          ?? coreviewTelemetry.visual.annotationIdentityWriteHash,
+        annotationIdentityReadHash: hookTelemetry?.annotationIdentityReadHash
+          ?? coreviewTelemetry.visual.annotationIdentityReadHash,
+        annotationRestoreOverwrittenCount: hookTelemetry?.annotationRestoreOverwrittenCount
+          ?? coreviewTelemetry.visual.annotationRestoreOverwrittenCount,
+        coreviewAnnotationStoreActive: hookTelemetry?.coreviewAnnotationStoreActive
+          ?? coreviewTelemetry.visual.coreviewAnnotationStoreActive,
+        coreviewAnnotationStateSource: hookTelemetry?.coreviewAnnotationStateSource
+          ?? coreviewTelemetry.visual.coreviewAnnotationStateSource,
+        annotationPreventedEmptyOverwriteCount: hookTelemetry?.annotationPreventedEmptyOverwriteCount
+          ?? coreviewTelemetry.visual.annotationPreventedEmptyOverwriteCount,
+        annotationMigratedIdentityCount: hookTelemetry?.annotationMigratedIdentityCount
+          ?? coreviewTelemetry.visual.annotationMigratedIdentityCount,
+        annotationStoreSurvivedCanvasClose: hookTelemetry?.annotationStoreSurvivedCanvasClose
+          ?? coreviewTelemetry.visual.annotationStoreSurvivedCanvasClose,
+        annotationStoreHydratedArtifactStage: hookTelemetry?.annotationStoreHydratedArtifactStage
+          ?? coreviewTelemetry.visual.annotationStoreHydratedArtifactStage,
+        annotationStateClearedReason: hookTelemetry?.annotationStateClearedReason
+          ?? coreviewTelemetry.visual.annotationStateClearedReason,
+        builderSnapshotIgnoredForActiveArtifact: hookTelemetry?.builderSnapshotIgnoredForActiveArtifact
+          ?? coreviewTelemetry.visual.builderSnapshotIgnoredForActiveArtifact,
+        builderSnapshotEmptyPassive: hookTelemetry?.builderSnapshotEmptyPassive
+          ?? coreviewTelemetry.visual.builderSnapshotEmptyPassive,
+        artifactStageProtectedFromSnapshot: hookTelemetry?.artifactStageProtectedFromSnapshot
+          ?? coreviewTelemetry.visual.artifactStageProtectedFromSnapshot,
+        artifactStageUnmountPrevented: hookTelemetry?.artifactStageUnmountPrevented
+          ?? coreviewTelemetry.visual.artifactStageUnmountPrevented,
+        thumbnailAnnotationIndicatorMode: hookTelemetry?.thumbnailAnnotationIndicatorMode
+          ?? coreviewTelemetry.visual.thumbnailAnnotationIndicatorMode,
+        thumbnailAnnotationPageCounts: hookTelemetry?.thumbnailAnnotationPageCounts
+          ?? coreviewTelemetry.visual.thumbnailAnnotationPageCounts,
+        thumbnailAnnotationRefreshCount: hookTelemetry?.thumbnailAnnotationRefreshCount
+          ?? coreviewTelemetry.visual.thumbnailAnnotationRefreshCount,
+        canvasPointerBlockedAfterAnnotation: hookTelemetry?.canvasPointerBlockedAfterAnnotation
+          ?? coreviewTelemetry.visual.canvasPointerBlockedAfterAnnotation,
+        canvasRestoreAttempted: hookTelemetry?.canvasRestoreAttempted
+          ?? coreviewTelemetry.visual.canvasRestoreAttempted,
+        canvasRestoreResult: hookTelemetry?.canvasRestoreResult
+          ?? coreviewTelemetry.visual.canvasRestoreResult,
+        canvasRestoreSource: hookTelemetry?.canvasRestoreSource
+          ?? coreviewTelemetry.visual.canvasRestoreSource,
+        canvasRestoredArtifactIdentityHash: hookTelemetry?.canvasRestoredArtifactIdentityHash
+          ?? coreviewTelemetry.visual.canvasRestoredArtifactIdentityHash,
+        stickyToolModeEnabled: hookTelemetry?.stickyToolModeEnabled
+          ?? coreviewTelemetry.visual.stickyToolModeEnabled,
+        lastToolModeBeforeAction: hookTelemetry?.lastToolModeBeforeAction
+          ?? coreviewTelemetry.visual.lastToolModeBeforeAction,
+        lastToolModeAfterAction: hookTelemetry?.lastToolModeAfterAction
+          ?? coreviewTelemetry.visual.lastToolModeAfterAction,
+        toolModeResetReason: hookTelemetry?.toolModeResetReason
+          ?? coreviewTelemetry.visual.toolModeResetReason,
+        annotationExportAvailable: hookTelemetry?.annotationExportAvailable
+          ?? coreviewTelemetry.visual.annotationExportAvailable,
+        annotationExportResult: hookTelemetry?.annotationExportResult
+          ?? coreviewTelemetry.visual.annotationExportResult,
+        annotationExportKind: hookTelemetry?.annotationExportKind
+          ?? coreviewTelemetry.visual.annotationExportKind,
+        annotationExportPageScope: hookTelemetry?.annotationExportPageScope
+          ?? coreviewTelemetry.visual.annotationExportPageScope,
+        annotationDeleteCount: hookTelemetry?.annotationDeleteCount
+          ?? coreviewTelemetry.visual.annotationDeleteCount,
+        annotationEditCount: hookTelemetry?.annotationEditCount
+          ?? coreviewTelemetry.visual.annotationEditCount,
+        unsupportedAnnotationKind: hookTelemetry?.unsupportedAnnotationKind
+          ?? coreviewTelemetry.visual.unsupportedAnnotationKind,
+        annotationActionSource: hookTelemetry?.annotationActionSource
+          ?? coreviewTelemetry.visual.annotationActionSource,
+        coreviewAnnotationToolCount: Math.max(
+          hookTelemetry?.coreviewAnnotationToolCount ?? 0,
+          coreviewTelemetry.visual.coreviewAnnotationToolCount,
+        ),
+        coreviewAnnotationFallbackCount: Math.max(
+          hookTelemetry?.coreviewAnnotationFallbackCount ?? 0,
+          coreviewTelemetry.visual.coreviewAnnotationFallbackCount,
+        ),
+        coreviewAnnotationCommandSource: hookTelemetry?.coreviewAnnotationCommandSource
+          ?? coreviewTelemetry.visual.coreviewAnnotationCommandSource,
+        coreviewAnnotationToolResult: annotationResultFromState(asRecord(hookTelemetry), ["coreviewAnnotationToolResult"])
+          ?? coreviewTelemetry.visual.coreviewAnnotationToolResult,
+        coreviewAnnotationFallbackResult: annotationResultFromState(asRecord(hookTelemetry), ["coreviewAnnotationFallbackResult"])
+          ?? coreviewTelemetry.visual.coreviewAnnotationFallbackResult,
+        coreviewAnnotationKind: hookTelemetry?.coreviewAnnotationKind
+          ?? coreviewTelemetry.visual.coreviewAnnotationKind,
+        coreviewAnnotationAnchorType: hookTelemetry?.coreviewAnnotationAnchorType
+          ?? coreviewTelemetry.visual.coreviewAnnotationAnchorType,
+        coreviewAnnotationColor: hookTelemetry?.coreviewAnnotationColor
+          ?? coreviewTelemetry.visual.coreviewAnnotationColor,
+        coreviewAnnotationPageIndex: hookTelemetry?.coreviewAnnotationPageIndex
+          ?? coreviewTelemetry.visual.coreviewAnnotationPageIndex,
+        coreviewAnnotationBlockedReason: hookTelemetry?.coreviewAnnotationBlockedReason
+          ?? coreviewTelemetry.visual.coreviewAnnotationBlockedReason,
+        annotationIntentDetectedCount: Math.max(
+          hookTelemetry?.annotationIntentDetectedCount ?? 0,
+          coreviewTelemetry.visual.annotationIntentDetectedCount,
+        ),
+        annotationIntentSource: hookTelemetry?.annotationIntentSource
+          ?? coreviewTelemetry.visual.annotationIntentSource,
+        annotationFallbackAttempted: hookTelemetry?.annotationFallbackAttempted
+          ?? coreviewTelemetry.visual.annotationFallbackAttempted,
+        annotationFallbackResult: annotationResultFromState(asRecord(hookTelemetry), ["annotationFallbackResult"])
+          ?? coreviewTelemetry.visual.annotationFallbackResult,
+        annotationFallbackBlockedReason: hookTelemetry?.annotationFallbackBlockedReason
+          ?? coreviewTelemetry.visual.annotationFallbackBlockedReason,
+        annotationFallbackUtteranceKind: hookTelemetry?.annotationFallbackUtteranceKind
+          ?? coreviewTelemetry.visual.annotationFallbackUtteranceKind,
+        recentAnnotationActionSucceeded: annotationCommitStateChanged(asRecord(hookTelemetry))
+          || coreviewTelemetry.visual.recentAnnotationActionSucceeded,
+        annotationCommitAttempted: hookTelemetry?.annotationCommitAttempted
+          ?? coreviewTelemetry.visual.annotationCommitAttempted,
+        annotationCommitResult: annotationResultFromState(asRecord(hookTelemetry), ["annotationCommitResult"])
+          ?? coreviewTelemetry.visual.annotationCommitResult,
+        annotationCommitCountBefore: hookTelemetry?.annotationCommitCountBefore
+          ?? coreviewTelemetry.visual.annotationCommitCountBefore,
+        annotationCommitCountAfter: hookTelemetry?.annotationCommitCountAfter
+          ?? coreviewTelemetry.visual.annotationCommitCountAfter,
+        annotationCommitVerified: annotationCommitStateChanged(asRecord(hookTelemetry))
+          || coreviewTelemetry.visual.annotationCommitVerified,
+        annotationCommandPreventedNavigation: hookTelemetry?.annotationCommandPreventedNavigation
+          ?? coreviewTelemetry.visual.annotationCommandPreventedNavigation,
+        annotationCommandKeptArtifactMounted: hookTelemetry?.annotationCommandKeptArtifactMounted
+          ?? coreviewTelemetry.visual.annotationCommandKeptArtifactMounted,
+        annotationViewReadyTimedOut: hookTelemetry?.annotationViewReadyTimedOut
+          ?? coreviewTelemetry.visual.annotationViewReadyTimedOut,
+        annotationPartialSuccess: hookTelemetry?.annotationPartialSuccess
+          ?? coreviewTelemetry.visual.annotationPartialSuccess,
+        sessionLeaveGuardSuppressedForAnnotation: hookTelemetry?.sessionLeaveGuardSuppressedForAnnotation
+          ?? coreviewTelemetry.visual.sessionLeaveGuardSuppressedForAnnotation,
+        assistantAnnotationClaimSuppressedCount: Math.max(
+          hookTelemetry?.assistantAnnotationClaimSuppressedCount ?? 0,
+          coreviewTelemetry.visual.assistantAnnotationClaimSuppressedCount,
+        ),
+        coreviewFocusAnchorCount: hookTelemetry?.coreviewFocusAnchorCount
+          ?? coreviewTelemetry.visual.coreviewFocusAnchorCount,
+        coreviewFocusAnchorResult: hookTelemetry?.coreviewFocusAnchorResult
+          ?? coreviewTelemetry.visual.coreviewFocusAnchorResult,
+        coreviewFocusAnchorType: hookTelemetry?.coreviewFocusAnchorType
+          ?? coreviewTelemetry.visual.coreviewFocusAnchorType,
+        providerToPublicTranscriptGapAfterCoreviewTool: hookTelemetry?.providerToPublicTranscriptGapAfterCoreviewTool
+          ?? (
+            coreviewTelemetry.visual.coreviewToolCompletedCount > 0
+              ? providerToPublicTranscriptGap
+              : null
+          ),
+        followUpTurnDispatchedAfterCoreviewTool: hookTelemetry?.followUpTurnDispatchedAfterCoreviewTool
+          ?? coreviewTelemetry.visual.followUpTurnDispatchedAfterCoreviewTool,
+        emitArtifactBlockedDuringReviewCount: hookTelemetry?.emitArtifactBlockedDuringReviewCount
+          ?? coreviewTelemetry.visual.emitArtifactBlockedDuringReviewCount,
+        emitArtifactBlockedForAnnotationIntentCount: hookTelemetry?.emitArtifactBlockedForAnnotationIntentCount
+          ?? coreviewTelemetry.visual.emitArtifactBlockedForAnnotationIntentCount,
         unresolvedToolCallCount,
         oldestUnresolvedToolCallAgeMs,
         lastToolPhase: hookTelemetry?.lastToolPhase ?? asString(toolDiagnostic?.phase),
@@ -1695,9 +3265,11 @@ function buildSessionTelemetry(params: {
         artifactCount: counts.artifacts,
         artifactPublicEventCount: counts.artifactPublicEventCount,
         artifactRuntimeIngestCount: counts.artifactRuntimeIngestCount,
+        artifactSelectedStageCount: counts.artifactSelectedStageCount,
         artifactRenderedCount: counts.artifactRenderedCount,
         artifactCountSource: counts.artifactCountSource,
         artifactCountMismatch: counts.artifactCountMismatch,
+        artifactCountMismatchReason: counts.artifactCountMismatchReason,
         publicDiagnosticCount: counts.diagnostics,
         lastUserTranscriptAt: lastTurn.lastUserTranscriptAt,
         lastAssistantTranscriptAt: lastTurn.lastAssistantTranscriptAt,
@@ -2109,9 +3681,65 @@ function buildEventCounters(events: NormalizedVoiceCaptureEvent[]): VoiceEventCo
   }
 }
 
+function asBuilderSurfaceMode(value: string | null): BuilderSurfaceMode | null {
+  switch (value) {
+    case "active_build_steps":
+    case "artifact_review_room":
+    case "canonical_completed_builder":
+    case "legacy_completion_hidden":
+    case "legacy_completion_fallback":
+      return value
+    case "completed_artifact_entry":
+      return "canonical_completed_builder"
+    default:
+      return null
+  }
+}
+
+function asCanonicalBuilderSurface(value: string | null): CanonicalBuilderSurface {
+  return asBuilderSurfaceMode(value)
+    ?? (value === "secondary_file_library_rows" || value === "none" ? value : "none")
+}
+
+function asCompletedBuilderEntryPlacement(value: string | null): CompletedBuilderEntryPlacement | null {
+  return value === "corner" || value === "inline" || value === "hidden" ? value : null
+}
+
+function buildBuilderSurfaceMetrics(events: NormalizedVoiceCaptureEvent[]): Pick<
+  VoiceDeveloperMetrics["builder"],
+  | "builderSurfaceMode"
+  | "canonicalBuilderSurface"
+  | "legacyBuilderSurfaceHidden"
+  | "builderReadyPillSuppressed"
+  | "duplicateBuilderSurfaceSuppressed"
+  | "resumedBuilderSurfaceResolved"
+  | "completedBuilderEntryPlacement"
+  | "completedBuilderEntryOverlapsControls"
+  | "completedBuilderEntryHiddenForStage"
+> {
+  const latestSurfaceEvent = findLast(
+    events,
+    (event) => event.category === "builder-ui" && event.name === "builder-surface-resolved",
+  )
+  const payload = latestSurfaceEvent ? eventData(latestSurfaceEvent) : null
+
+  return {
+    builderSurfaceMode: asBuilderSurfaceMode(asString(payload?.builderSurfaceMode)),
+    canonicalBuilderSurface: asCanonicalBuilderSurface(asString(payload?.canonicalBuilderSurface)),
+    legacyBuilderSurfaceHidden: asBoolean(payload?.legacyBuilderSurfaceHidden) ?? false,
+    builderReadyPillSuppressed: asBoolean(payload?.builderReadyPillSuppressed) ?? false,
+    duplicateBuilderSurfaceSuppressed: asBoolean(payload?.duplicateBuilderSurfaceSuppressed) ?? false,
+    resumedBuilderSurfaceResolved: asBoolean(payload?.resumedBuilderSurfaceResolved) ?? false,
+    completedBuilderEntryPlacement: asCompletedBuilderEntryPlacement(asString(payload?.completedBuilderEntryPlacement)),
+    completedBuilderEntryOverlapsControls: asBoolean(payload?.completedBuilderEntryOverlapsControls),
+    completedBuilderEntryHiddenForStage: asBoolean(payload?.completedBuilderEntryHiddenForStage) ?? false,
+  }
+}
+
 function buildBuilderMetrics(events: NormalizedVoiceCaptureEvent[], nowMs: number): VoiceDeveloperMetrics["builder"] {
   const isBuilderSignalEvent = (event: NormalizedVoiceCaptureEvent) => event.category === "builder" || event.name === "sophia.builder_task"
   const latestBuilderEvent = findLast(events, isBuilderSignalEvent)
+  const surfaceMetrics = buildBuilderSurfaceMetrics(events)
   const payload = latestBuilderEvent
     ? latestBuilderEvent.category === "builder"
       ? latestBuilderEvent.payloadRecord
@@ -2177,6 +3805,7 @@ function buildBuilderMetrics(events: NormalizedVoiceCaptureEvent[], nowMs: numbe
     idleMs,
     stuck,
     stuckReason,
+    ...surfaceMetrics,
   }
 }
 
@@ -2630,6 +4259,15 @@ export function buildVoiceTelemetrySummary(metrics: VoiceDeveloperMetrics): Voic
     builderPhase: metrics.builder.phase,
     builderProgressPercent: metrics.builder.progressPercent,
     builderStuck: metrics.builder.stuck,
+    builderSurfaceMode: metrics.builder.builderSurfaceMode,
+    canonicalBuilderSurface: metrics.builder.canonicalBuilderSurface,
+    legacyBuilderSurfaceHidden: metrics.builder.legacyBuilderSurfaceHidden,
+    builderReadyPillSuppressed: metrics.builder.builderReadyPillSuppressed,
+    duplicateBuilderSurfaceSuppressed: metrics.builder.duplicateBuilderSurfaceSuppressed,
+    resumedBuilderSurfaceResolved: metrics.builder.resumedBuilderSurfaceResolved,
+    completedBuilderEntryPlacement: metrics.builder.completedBuilderEntryPlacement,
+    completedBuilderEntryOverlapsControls: metrics.builder.completedBuilderEntryOverlapsControls,
+    completedBuilderEntryHiddenForStage: metrics.builder.completedBuilderEntryHiddenForStage,
   }
 }
 
@@ -3385,9 +5023,11 @@ export function buildVoiceDeveloperMetrics({
     artifacts: artifactMetrics.artifactCount,
     artifactPublicEventCount: artifactMetrics.artifactPublicEventCount,
     artifactRuntimeIngestCount: artifactMetrics.artifactRuntimeIngestCount,
+    artifactSelectedStageCount: artifactMetrics.artifactSelectedStageCount,
     artifactRenderedCount: artifactMetrics.artifactRenderedCount,
     artifactCountSource: artifactMetrics.artifactCountSource,
     artifactCountMismatch: artifactMetrics.artifactCountMismatch,
+    artifactCountMismatchReason: artifactMetrics.artifactCountMismatchReason,
     diagnostics: diagnosticCount,
     builderEvents,
   }
@@ -3424,6 +5064,7 @@ export function buildVoiceDeveloperMetrics({
     timings,
     counts,
     lastTurn,
+    microphone,
     nowMs,
   })
   const coreview = buildCoreviewUsageTelemetry(activeEvents)

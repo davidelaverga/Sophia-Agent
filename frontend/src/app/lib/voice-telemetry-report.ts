@@ -36,6 +36,9 @@ export type VoiceTelemetryReport = {
     geminiRelayBackend: Record<string, unknown> | null;
     geminiRelayThroughput: Record<string, unknown> | null;
     geminiStaleOutput: Record<string, unknown> | null;
+    builderSurface: Record<string, unknown>;
+    artifactReview: Record<string, unknown>;
+    coreviewStillFrame: Record<string, unknown>;
   };
   turnCaptureDiagnostics: TurnCaptureDiagnostics;
   captureBundle: VoiceTelemetryCaptureBundle;
@@ -43,6 +46,8 @@ export type VoiceTelemetryReport = {
 
 const MAX_TELEMETRY_CAPTURE_EVENTS = 500;
 const REDACTED = '[redacted]';
+const TRANSCRIPT_RELAY_LATENCY_WARNING_MS = 15_000;
+const ORDERED_RELAY_QUEUE_DEPTH_WARNING = 20;
 const SENSITIVE_KEY_PATTERN = /(?:^|[_-])(token|secret|authorization|api[_-]?key|access[_-]?token|client[_-]?secret|credential|password)(?:$|[_-])/i;
 const SENSITIVE_QUERY_PARAMS = new Set([
   'access_token',
@@ -83,11 +88,123 @@ const READ_ARTIFACT_TEXT_SAFE_TOOL_EXECUTION_KEYS = new Set([
   'artifact_id',
   'char_count',
   'latency_ms',
+  'page_count',
   'raw_artifact_text_excluded',
   'safe_reason',
   'source',
   'status',
   'truncated',
+  'review_tool_timed_out',
+  'review_tool_timeout_name',
+  'review_tool_timeout_result_sent',
+]);
+const COREVIEW_SAFE_TOOL_EXECUTION_KEYS = new Set([
+  'action',
+  'annotation_action_source',
+  'annotation_anchor_type',
+  'annotation_color',
+  'annotation_command_kept_artifact_mounted',
+  'annotation_command_prevented_navigation',
+  'annotation_commit_attempted',
+  'annotation_commit_count_after',
+  'annotation_commit_count_before',
+  'annotation_commit_result',
+  'annotation_commit_verified',
+  'annotation_count',
+  'annotation_created',
+  'annotation_delete_count',
+  'annotation_edit_count',
+  'annotation_export_available',
+  'annotation_export_kind',
+  'annotation_export_page_scope',
+  'annotation_export_result',
+  'annotation_fallback_attempted',
+  'annotation_fallback_blocked_reason',
+  'annotation_fallback_result',
+  'annotation_fallback_utterance_kind',
+  'annotation_kind',
+  'annotation_intent_detected_count',
+  'annotation_intent_source',
+  'annotation_overlay_captured',
+  'annotation_partial_success',
+  'annotation_page_index',
+  'annotation_persist_attempted',
+  'annotation_persist_count',
+  'annotation_persist_result',
+  'annotation_persisted_count',
+  'annotation_persistence_status',
+  'annotation_identity_read_hash',
+  'annotation_identity_write_hash',
+  'annotation_restore_attempted',
+  'annotation_restore_count',
+  'annotation_restore_overwritten_count',
+  'annotation_restore_result',
+  'annotation_restore_source',
+  'annotation_migrated_identity_count',
+  'annotation_prevented_empty_overwrite_count',
+  'annotation_store_hydrated_artifact_stage',
+  'annotation_store_survived_canvas_close',
+  'annotation_state_cleared_reason',
+  'annotation_storage_key_hash',
+  'annotation_storage_version',
+  'annotation_view_ready_timed_out',
+  'arrow_count',
+  'assistant_annotation_claim_suppressed_count',
+  'blocked_reason',
+  'canvas_restore_attempted',
+  'canvas_restore_result',
+  'canvas_restore_source',
+  'canvas_restored_artifact_identity_hash',
+  'capability_summary',
+  'comment_count',
+  'command_source',
+  'coreview_workspace_contract_version',
+  'coreview_workspace_event_log_active',
+  'coreview_annotation_command_source',
+  'coreview_annotation_fallback_count',
+  'coreview_annotation_fallback_result',
+  'coreview_annotation_state_source',
+  'coreview_annotation_store_active',
+  'coreview_share_status',
+  'coreview_workspace_actor_kind',
+  'coreview_workspace_event_count',
+  'coreview_workspace_has_share_ready_metadata',
+  'coreview_workspace_last_event_type',
+  'current_view_summary',
+  'fit_mode',
+  'focus_anchor_type',
+  'highlight_count',
+  'last_tool_mode_after_action',
+  'last_tool_mode_before_action',
+  'draw_path_count',
+  'ok',
+  'page_count',
+  'page_index',
+  'page_number',
+  'preserved_mic',
+  'preserved_review',
+  'raw_artifact_text_excluded',
+  'raw_comment_text_excluded',
+  'raw_frame_excluded',
+  'recent_annotation_action_succeeded',
+  'refresh_attempted',
+  'refresh_result',
+  'renderer_kind',
+  'result_summary',
+  'review_active',
+  'session_leave_guard_suppressed_for_annotation',
+  'stale',
+  'sticky_tool_mode_enabled',
+  'tool_mode_reset_reason',
+  'underline_count',
+  'unsupported_annotation_kind',
+  'workspace_event_log_persist_result',
+  'workspace_event_log_restore_count',
+  'annotation_events_created_count',
+  'view_changed_event_count',
+  'visual_fresh',
+  'visual_frame_fresh',
+  'zoom',
 ]);
 
 export function buildVoiceTelemetryReport({
@@ -114,7 +231,7 @@ export function buildVoiceTelemetryReport({
     summary: sanitizeTelemetryValue(summary) as VoiceTelemetrySummary,
     coreview: sanitizeTelemetryValue(reconciledMetrics.coreview) as CoreviewUsageTelemetry,
     metrics: sanitizedMetrics,
-    diagnosticsSummary: buildDiagnosticsSummary(captureBundle, selected),
+    diagnosticsSummary: buildDiagnosticsSummary(selected, reconciledMetrics),
     turnCaptureDiagnostics: sanitizeTelemetryValue(
       buildTurnCaptureDiagnostics(selected.events, reconciledMetrics),
     ) as TurnCaptureDiagnostics,
@@ -136,21 +253,33 @@ function reconcileArtifactTelemetryMetrics(
     artifacts: artifactMetrics.artifactCount,
     artifactPublicEventCount: artifactMetrics.artifactPublicEventCount,
     artifactRuntimeIngestCount: artifactMetrics.artifactRuntimeIngestCount,
+    artifactSelectedStageCount: artifactMetrics.artifactSelectedStageCount,
     artifactRenderedCount: artifactMetrics.artifactRenderedCount,
     artifactCountSource: artifactMetrics.artifactCountSource,
     artifactCountMismatch: artifactMetrics.artifactCountMismatch,
+    artifactCountMismatchReason: artifactMetrics.artifactCountMismatchReason,
+  };
+  const coreviewCommandTelemetry = buildCoreviewCommandTelemetryPatch(selectedEvents);
+  const coreview = {
+    ...metrics.coreview,
+    visual: {
+      ...metrics.coreview.visual,
+      ...coreviewCommandTelemetry,
+    },
   };
 
   if (metrics.sessionTelemetry.runtime !== 'gemini_live') {
     return {
       ...metrics,
       counts,
+      coreview,
     };
   }
 
   return {
     ...metrics,
     counts,
+    coreview,
     sessionTelemetry: {
       ...metrics.sessionTelemetry,
       gemini: {
@@ -158,11 +287,92 @@ function reconcileArtifactTelemetryMetrics(
         artifactCount: artifactMetrics.artifactCount,
         artifactPublicEventCount: artifactMetrics.artifactPublicEventCount,
         artifactRuntimeIngestCount: artifactMetrics.artifactRuntimeIngestCount,
+        artifactSelectedStageCount: artifactMetrics.artifactSelectedStageCount,
         artifactRenderedCount: artifactMetrics.artifactRenderedCount,
         artifactCountSource: artifactMetrics.artifactCountSource,
         artifactCountMismatch: artifactMetrics.artifactCountMismatch,
+        artifactCountMismatchReason: artifactMetrics.artifactCountMismatchReason,
       },
     },
+  };
+}
+
+function buildCoreviewCommandTelemetryPatch(
+  events: CaptureEvent[],
+): Partial<CoreviewUsageTelemetry['visual']> {
+  const commandPayloads = events
+    .filter((event) => event.name === 'artifact-review-voice-command')
+    .map((event) => asRecord(event.payload))
+    .filter((value): value is Record<string, unknown> => value !== null);
+  const latest = commandPayloads.at(-1);
+
+  if (!latest) {
+    return {};
+  }
+
+  const lastReviewVoiceCommands = commandPayloads.slice(-5).map((payload) => ({
+    kind: asString(payload.reviewVoiceCommandKind) ?? asString(payload.lastReviewVoiceCommandKind),
+    applied: asBoolean(payload.reviewVoiceCommandApplied) ?? asBoolean(payload.lastReviewVoiceCommandApplied),
+    uiMode: asString(payload.lastReviewVoiceCommandUiMode),
+    refreshResult: asString(payload.reviewVoiceCommandRefreshResult),
+    autoRefreshBlockedReason: asString(payload.reviewVoiceCommandAutoRefreshBlockedReason),
+    waitedForViewReady: asBoolean(payload.reviewVoiceCommandWaitedForViewReady),
+    didHardIntercept: asBoolean(payload.reviewVoiceCommandDidHardIntercept),
+    artifactCurrentPageIndex: asFiniteNumber(payload.artifactCurrentPageIndex),
+    artifactCurrentPageCount: asFiniteNumber(payload.artifactCurrentPageCount),
+    rawTranscriptExcluded: true as const,
+  }));
+  const latestSummary = lastReviewVoiceCommands.at(-1);
+  const annotationPayloads = commandPayloads.filter((payload) => (
+    asString(payload.reviewVoiceCommandKind) === 'add_annotation'
+    || asString(payload.lastReviewVoiceCommandKind) === 'add_annotation'
+    || asBoolean(payload.annotationCommitAttempted) === true
+    || (asFiniteNumber(payload.annotationIntentDetectedCount) ?? 0) > 0
+  ));
+  const latestAnnotation = annotationPayloads.at(-1);
+  const annotationIntentDetectedCount = annotationPayloads.reduce((total, payload) => (
+    total + (asFiniteNumber(payload.annotationIntentDetectedCount) ?? 0)
+  ), 0);
+
+  const patch: Partial<CoreviewUsageTelemetry['visual']> = {
+    reviewCommandStaleAfterViewChange: asBoolean(latest.reviewCommandStaleAfterViewChange)
+      ?? asBoolean(latest.reviewCommandStaleAfterPageChange)
+      ?? false,
+    reviewVoiceCommandTransportStateBefore: asString(latest.reviewVoiceCommandTransportStateBefore),
+    reviewVoiceCommandTransportStateAfter: asString(latest.reviewVoiceCommandTransportStateAfter),
+    reviewVoiceCommandDidHardIntercept: asBoolean(latest.reviewVoiceCommandDidHardIntercept),
+    reviewVoiceCommandWaitedForViewReady: asBoolean(latest.reviewVoiceCommandWaitedForViewReady),
+    reviewVoiceCommandAutoRefreshTiming: asString(latest.reviewVoiceCommandAutoRefreshTiming),
+    reviewVoiceCommandAutoRefreshBlockedReason: asString(latest.reviewVoiceCommandAutoRefreshBlockedReason),
+    lastReviewVoiceCommandKind: latestSummary?.kind ?? null,
+    lastReviewVoiceCommandApplied: latestSummary?.applied ?? null,
+    lastReviewVoiceCommandUiMode: latestSummary?.uiMode ?? null,
+    lastReviewVoiceCommands,
+  };
+
+  if (!latestAnnotation) {
+    return patch;
+  }
+
+  return {
+    ...patch,
+    annotationIntentDetectedCount,
+    annotationIntentSource: asString(latestAnnotation.annotationIntentSource),
+    annotationFallbackAttempted: asBoolean(latestAnnotation.annotationFallbackAttempted) ?? false,
+    annotationFallbackResult: asString(latestAnnotation.annotationFallbackResult),
+    annotationFallbackBlockedReason: asString(latestAnnotation.annotationFallbackBlockedReason),
+    annotationFallbackUtteranceKind: asString(latestAnnotation.annotationFallbackUtteranceKind),
+    recentAnnotationActionSucceeded: asBoolean(latestAnnotation.recentAnnotationActionSucceeded) ?? false,
+    annotationCommitAttempted: asBoolean(latestAnnotation.annotationCommitAttempted) ?? false,
+    annotationCommitResult: asString(latestAnnotation.annotationCommitResult),
+    annotationCommitCountBefore: asFiniteNumber(latestAnnotation.annotationCommitCountBefore),
+    annotationCommitCountAfter: asFiniteNumber(latestAnnotation.annotationCommitCountAfter),
+    annotationCommitVerified: asBoolean(latestAnnotation.annotationCommitVerified) ?? false,
+    annotationCommandPreventedNavigation: asBoolean(latestAnnotation.annotationCommandPreventedNavigation) ?? false,
+    annotationCommandKeptArtifactMounted: asBoolean(latestAnnotation.annotationCommandKeptArtifactMounted) ?? false,
+    annotationViewReadyTimedOut: asBoolean(latestAnnotation.annotationViewReadyTimedOut) ?? false,
+    annotationPartialSuccess: asBoolean(latestAnnotation.annotationPartialSuccess) ?? false,
+    sessionLeaveGuardSuppressedForAnnotation: asBoolean(latestAnnotation.sessionLeaveGuardSuppressedForAnnotation) ?? false,
   };
 }
 
@@ -414,6 +624,8 @@ function compactGeminiRelayBackendDiagnostics(diagnostics: Record<string, unknow
   const mappingOutputs = asRecord(diagnostics.provider_event_mapping_outputs) ?? asRecord(diagnostics.providerEventMappingOutputs);
   const publicCounts = asRecord(diagnostics.public_sophia_emitted_counts) ?? asRecord(diagnostics.publicSophiaEmittedCounts);
   const latestToolExecution = asRecord(toolExecutionRecent.filter((entry) => asRecord(entry)).at(-1));
+  const directLatestToolExecution = asRecord(diagnostics.latest_tool_execution)
+    ?? asRecord(diagnostics.latestToolExecution);
 
   return {
     schema: 'gemini_backend_diagnostics_compact_v1',
@@ -429,7 +641,9 @@ function compactGeminiRelayBackendDiagnostics(diagnostics: Record<string, unknow
     public_sophia_emitted_count_total: numericFallback(sumNumericRecord(publicCounts), diagnostics.public_sophia_emitted_count_total),
     latest_tool_execution: latestToolExecution
       ? compactLatestToolExecution(latestToolExecution)
-      : diagnostics.latest_tool_execution ?? null,
+      : directLatestToolExecution
+        ? compactLatestToolExecution(directLatestToolExecution)
+        : null,
   };
 }
 
@@ -457,6 +671,16 @@ function compactLatestToolExecution(latestToolExecution: Record<string, unknown>
       }
     }
     compact.raw_query_excluded = true;
+  }
+  if (toolName?.startsWith('coreview_')) {
+    for (const key of COREVIEW_SAFE_TOOL_EXECUTION_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(latestToolExecution, key)) {
+        compact[key] = latestToolExecution[key];
+      }
+    }
+    compact.raw_comment_text_excluded = true;
+    compact.raw_artifact_text_excluded = true;
+    compact.raw_frame_excluded = true;
   }
   return compact;
 }
@@ -498,13 +722,25 @@ function buildGeminiRelayThroughputSummary(events: CaptureEvent[]): Record<strin
 
   const latest = throughputEntries.at(-1) ?? asRecord(coalescingDiagnostics.at(-1)?.metrics);
   const coalescedBySegment = latest ? asRecord(latest.coalescedBySegment) : null;
+  const maxOrderedRelayQueueDepth = maxNumericField(throughputEntries, 'orderedRelayQueueDepth');
+  const maxTranscriptRelayLatencyMs = maxNumericField(throughputEntries, 'maxTranscriptRelayLatencyMs');
+  const p95TranscriptRelayLatencyMs = latest ? asFiniteNumber(latest.p95TranscriptRelayLatencyMs) : null;
+  const warnings: string[] = [];
+
+  if ((p95TranscriptRelayLatencyMs ?? maxTranscriptRelayLatencyMs ?? 0) >= TRANSCRIPT_RELAY_LATENCY_WARNING_MS) {
+    warnings.push('public_transcript_relay_latency_high');
+  }
+  if ((maxOrderedRelayQueueDepth ?? asFiniteNumber(latest?.orderedRelayQueueDepth) ?? 0) >= ORDERED_RELAY_QUEUE_DEPTH_WARNING) {
+    warnings.push('relay_queue_depth_high');
+  }
 
   return {
     schema: 'gemini_relay_throughput_summary_v1',
+    warnings,
     relayTraceCountWithThroughput: throughputEntries.length,
     coalescingDiagnosticCount: coalescingDiagnostics.length,
     latestOrderedRelayQueueDepth: latest ? asFiniteNumber(latest.orderedRelayQueueDepth) : null,
-    maxOrderedRelayQueueDepth: maxNumericField(throughputEntries, 'orderedRelayQueueDepth'),
+    maxOrderedRelayQueueDepth,
     maxOldestQueuedAgeMs: maxNumericField(throughputEntries, 'oldestQueuedAgeMs'),
     transcriptPartialsCoalesced: latest ? asFiniteNumber(latest.transcriptPartialsCoalesced) : null,
     transcriptPartialsSent: latest ? asFiniteNumber(latest.transcriptPartialsSent) : null,
@@ -513,8 +749,8 @@ function buildGeminiRelayThroughputSummary(events: CaptureEvent[]): Record<strin
     finalTranscriptEventsSent: latest ? asFiniteNumber(latest.finalTranscriptEventsSent) : null,
     nonDroppableCriticalEventsSent: latest ? asFiniteNumber(latest.nonDroppableCriticalEventsSent) : null,
     lastTranscriptRelayLatencyMs: latest ? asFiniteNumber(latest.lastTranscriptRelayLatencyMs) : null,
-    maxTranscriptRelayLatencyMs: maxNumericField(throughputEntries, 'maxTranscriptRelayLatencyMs'),
-    p95TranscriptRelayLatencyMs: latest ? asFiniteNumber(latest.p95TranscriptRelayLatencyMs) : null,
+    maxTranscriptRelayLatencyMs,
+    p95TranscriptRelayLatencyMs,
     coalescedBySegment,
   };
 }
@@ -705,6 +941,10 @@ function asFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+function asBoolean(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
 function sumNumericRecord(value: Record<string, unknown> | null): number {
   if (!value) {
     return 0;
@@ -750,13 +990,377 @@ function findLastIndex<T>(values: T[], predicate: (value: T) => boolean): number
 }
 
 function buildDiagnosticsSummary(
-  captureBundle: SophiaCaptureBundle,
-  selected = selectCurrentRunEvents(captureBundle.events, captureBundle.snapshot),
+  selected: ReturnType<typeof selectCurrentRunEvents>,
+  metrics: VoiceDeveloperMetrics,
 ): VoiceTelemetryReport['diagnosticsSummary'] {
   return {
     geminiRelayBackend: buildGeminiRelayBackendDiagnosticsSummary(selected.events),
     geminiRelayThroughput: buildGeminiRelayThroughputSummary(selected.events),
     geminiStaleOutput: buildGeminiStaleOutputDiagnosticsSummary(selected.events),
+    builderSurface: buildBuilderSurfaceDiagnosticsSummary(metrics),
+    artifactReview: buildArtifactReviewDiagnosticsSummary(selected.events, metrics),
+    coreviewStillFrame: buildCoreviewStillFrameDiagnosticsSummary(metrics.coreview),
+  };
+}
+
+function buildBuilderSurfaceDiagnosticsSummary(metrics: VoiceDeveloperMetrics): Record<string, unknown> {
+  return {
+    schema: 'builder_surface_summary_v1',
+    builderSurfaceMode: metrics.builder.builderSurfaceMode,
+    canonicalBuilderSurface: metrics.builder.canonicalBuilderSurface,
+    legacyBuilderSurfaceHidden: metrics.builder.legacyBuilderSurfaceHidden,
+    builderReadyPillSuppressed: metrics.builder.builderReadyPillSuppressed,
+    duplicateBuilderSurfaceSuppressed: metrics.builder.duplicateBuilderSurfaceSuppressed,
+    resumedBuilderSurfaceResolved: metrics.builder.resumedBuilderSurfaceResolved,
+    completedBuilderEntryPlacement: metrics.builder.completedBuilderEntryPlacement,
+    completedBuilderEntryOverlapsControls: metrics.builder.completedBuilderEntryOverlapsControls,
+    completedBuilderEntryHiddenForStage: metrics.builder.completedBuilderEntryHiddenForStage,
+    rawArtifactTextExcluded: true,
+    rawFrameExcluded: true,
+    rawCommentTextExcluded: true,
+  };
+}
+
+function buildArtifactReviewDiagnosticsSummary(
+  events: CaptureEvent[],
+  metrics: VoiceDeveloperMetrics,
+): Record<string, unknown> {
+  const counts = metrics.counts;
+  const gemini = metrics.sessionTelemetry.runtime === 'gemini_live'
+    ? metrics.sessionTelemetry.gemini
+    : null;
+  const reviewActive = isArtifactReviewActive(metrics);
+  const selectedStageEventCount = events.filter(
+    (event) => event.category === 'artifacts-runtime' && event.name === 'select-stage-artifact',
+  ).length;
+  const suppressedReview = countSuppressedArtifactReviewTools(events);
+
+  return {
+    schema: 'artifact_review_summary_v1',
+    warnings: buildArtifactReviewWarnings({
+      counts,
+      emitArtifactToolCallCount: gemini?.artifactToolCallCount ?? 0,
+      reviewActive,
+      artifactRebindResult: metrics.coreview.visual.artifactRebindResult,
+      suppressedReviewEmitToolCount: suppressedReview.emitArtifactCount,
+      suppressedReviewToolCount: suppressedReview.totalCount,
+      toolRejectionCount: gemini?.toolRejectionCount ?? 0,
+    }),
+    reviewActive,
+    artifactCount: counts.artifacts,
+    artifactPublicEventCount: counts.artifactPublicEventCount,
+    artifactRuntimeIngestCount: counts.artifactRuntimeIngestCount,
+    artifactSelectedStageCount: counts.artifactSelectedStageCount,
+    artifactRenderedCount: counts.artifactRenderedCount,
+    artifactCountSource: counts.artifactCountSource,
+    artifactCountMismatch: counts.artifactCountMismatch,
+    artifactCountMismatchReason: counts.artifactCountMismatchReason,
+    selectedStageEventCount,
+    currentRunSelectedStageEvents: metrics.coreview.visual.currentRunSelectedStageEvents,
+    longLivedSelectedStageState: metrics.coreview.visual.longLivedSelectedStageState,
+    telemetryScopeMode: metrics.coreview.visual.telemetryScopeMode,
+    artifactStableIdentity: metrics.coreview.visual.artifactStableIdentity,
+    artifactRebindAttempted: metrics.coreview.visual.artifactRebindAttempted,
+    artifactRebindResult: metrics.coreview.visual.artifactRebindResult,
+    artifactRebindReason: metrics.coreview.visual.artifactRebindReason,
+    artifactReboundFromRenderedState: metrics.coreview.visual.artifactReboundFromRenderedState,
+    artifactRebindSource: metrics.coreview.visual.artifactRebindSource,
+    exactTextRehydrated: metrics.coreview.visual.exactTextRehydrated,
+    exactTextRehydrateResult: metrics.coreview.visual.exactTextRehydrateResult,
+    emitArtifactToolCallCount: gemini?.artifactToolCallCount ?? 0,
+    emitArtifactBlockedDuringReviewCount: suppressedReview.emitArtifactCount,
+    emitArtifactBlockedForAnnotationIntentCount: metrics.coreview.visual.emitArtifactBlockedForAnnotationIntentCount,
+    toolRejectionCount: gemini?.toolRejectionCount ?? 0,
+    rawArtifactTextExcluded: true,
+    rawFrameExcluded: true,
+  };
+}
+
+function isArtifactReviewActive(metrics: VoiceDeveloperMetrics): boolean {
+  return Boolean(
+    metrics.coreview.visual.coreviewEnabled
+      && (
+        metrics.coreview.visual.coreviewArtifactId
+        || metrics.coreview.visual.frameSentCount > 0
+        || metrics.counts.artifactSelectedStageCount > 0
+      ),
+  );
+}
+
+function countSuppressedArtifactReviewTools(events: CaptureEvent[]): {
+  emitArtifactCount: number;
+  totalCount: number;
+} {
+  let emitArtifactCount = 0;
+  let totalCount = 0;
+
+  for (const event of events) {
+    const toolName = suppressedArtifactReviewToolName(event);
+    if (toolName === null) {
+      continue;
+    }
+    totalCount += 1;
+    if (toolName === 'emit_artifact') {
+      emitArtifactCount += 1;
+    }
+  }
+
+  return { emitArtifactCount, totalCount };
+}
+
+function suppressedArtifactReviewToolName(event: CaptureEvent): string | null {
+  if (event.category !== 'voice-session' || event.name !== 'gemini-tool-loop-diagnostic') {
+    return null;
+  }
+  const payload = asRecord(event.payload);
+  const data = asRecord(payload?.data) ?? payload;
+  if (asString(data?.phase) !== 'tool_execution_rejected') {
+    return null;
+  }
+  const diagnostic = asRecord(data?.diagnostic);
+  const toolCall = asRecord(diagnostic?.toolCall);
+  const rejectionReason = asString(data?.rejectionReason)
+    ?? asString(diagnostic?.rejectionReason)
+    ?? asString(diagnostic?.rejection_reason);
+  if (rejectionReason !== 'artifact_review_emit_artifact_suppressed') {
+    return null;
+  }
+  return asString(data?.toolName ?? toolCall?.name);
+}
+
+function buildArtifactReviewWarnings({
+  counts,
+  emitArtifactToolCallCount,
+  reviewActive,
+  artifactRebindResult,
+  suppressedReviewEmitToolCount,
+  suppressedReviewToolCount,
+  toolRejectionCount,
+}: {
+  counts: VoiceDeveloperMetrics['counts'];
+  emitArtifactToolCallCount: number;
+  reviewActive: boolean;
+  artifactRebindResult?: string | null;
+  suppressedReviewEmitToolCount: number;
+  suppressedReviewToolCount: number;
+  toolRejectionCount: number;
+}): string[] {
+  const warnings: string[] = [];
+
+  if (
+    counts.artifactRenderedCount > 0
+    && counts.artifactRuntimeIngestCount === 0
+    && artifactRebindResult !== 'success'
+  ) {
+    warnings.push('artifact_rendered_not_runtime_ingested');
+  }
+  if (counts.artifactCountMismatch) {
+    warnings.push('artifact_count_mismatch');
+  }
+  if (reviewActive && emitArtifactToolCallCount > suppressedReviewEmitToolCount) {
+    warnings.push('review_emit_artifact_tool_churn_detected');
+  }
+  if (reviewActive && toolRejectionCount > suppressedReviewToolCount) {
+    warnings.push('review_tool_churn_suppressed');
+  }
+
+  return warnings;
+}
+
+function buildCoreviewStillFrameDiagnosticsSummary(coreview: CoreviewUsageTelemetry): Record<string, unknown> {
+  return {
+    schema: 'coreview_still_frame_summary_v1',
+    coreviewEnabled: coreview.visual.coreviewEnabled,
+    frontendCoreviewFlagParsed: coreview.visual.frontendCoreviewFlagParsed,
+    frontendStillFrameFlagParsed: coreview.visual.frontendStillFrameFlagParsed,
+    backendCoreviewFlagParsed: coreview.visual.backendCoreviewFlagParsed,
+    backendStillFrameFlagParsed: coreview.visual.backendStillFrameFlagParsed,
+    coreviewDisabledReason: coreview.visual.coreviewDisabledReason,
+    reviewStartBlockedReason: coreview.visual.reviewStartBlockedReason,
+    coreviewSessionActive: coreview.visual.coreviewSessionActive,
+    coreviewArtifactId: coreview.visual.coreviewArtifactId,
+    coreviewWorkspaceContractVersion: coreview.visual.coreviewWorkspaceContractVersion,
+    artifactStableIdentity: coreview.visual.artifactStableIdentity,
+    artifactCapabilityRendererKind: coreview.visual.artifactCapabilityRendererKind,
+    artifactCapabilityRenderMode: coreview.visual.artifactCapabilityRenderMode,
+    artifactCapabilitySupportsPages: coreview.visual.artifactCapabilitySupportsPages,
+    artifactCapabilitySupportsAnnotations: coreview.visual.artifactCapabilitySupportsAnnotations,
+    artifactCapabilitySupportsTextExtraction: coreview.visual.artifactCapabilitySupportsTextExtraction,
+    artifactCapabilitySupportsLayoutAnchors: coreview.visual.artifactCapabilitySupportsLayoutAnchors,
+    artifactCapabilitySupportsOCR: coreview.visual.artifactCapabilitySupportsOCR,
+    artifactCapabilityRequiresOCR: coreview.visual.artifactCapabilityRequiresOCR,
+    artifactCapabilitySupportsPptxNativeRender: coreview.visual.artifactCapabilitySupportsPptxNativeRender,
+    artifactCapabilitySupportsAnnotatedExport: coreview.visual.artifactCapabilitySupportsAnnotatedExport,
+    artifactCapabilityFallbackReason: coreview.visual.artifactCapabilityFallbackReason,
+    coreviewWorkspaceEventLogActive: coreview.visual.coreviewWorkspaceEventLogActive,
+    coreviewWorkspaceEventCount: coreview.visual.coreviewWorkspaceEventCount,
+    coreviewWorkspaceLastEventType: coreview.visual.coreviewWorkspaceLastEventType,
+    coreviewWorkspaceActorKind: coreview.visual.coreviewWorkspaceActorKind,
+    coreviewWorkspaceHasShareReadyMetadata: coreview.visual.coreviewWorkspaceHasShareReadyMetadata,
+    coreviewShareStatus: coreview.visual.coreviewShareStatus,
+    workspaceEventLogPersistResult: coreview.visual.workspaceEventLogPersistResult,
+    workspaceEventLogRestoreCount: coreview.visual.workspaceEventLogRestoreCount,
+    annotationEventsCreatedCount: coreview.visual.annotationEventsCreatedCount,
+    viewChangedEventCount: coreview.visual.viewChangedEventCount,
+    artifactRebindAttempted: coreview.visual.artifactRebindAttempted,
+    artifactRebindResult: coreview.visual.artifactRebindResult,
+    artifactRebindReason: coreview.visual.artifactRebindReason,
+    artifactReboundFromRenderedState: coreview.visual.artifactReboundFromRenderedState,
+    artifactRebindSource: coreview.visual.artifactRebindSource,
+    exactTextRehydrated: coreview.visual.exactTextRehydrated,
+    exactTextRehydrateResult: coreview.visual.exactTextRehydrateResult,
+    currentRunSelectedStageEvents: coreview.visual.currentRunSelectedStageEvents,
+    longLivedSelectedStageState: coreview.visual.longLivedSelectedStageState,
+    telemetryScopeMode: coreview.visual.telemetryScopeMode,
+    canvasRestoreAttempted: coreview.visual.canvasRestoreAttempted,
+    canvasRestoreResult: coreview.visual.canvasRestoreResult,
+    canvasRestoreSource: coreview.visual.canvasRestoreSource,
+    canvasRestoredArtifactIdentityHash: coreview.visual.canvasRestoredArtifactIdentityHash,
+    visualSourceKind: coreview.visual.visualSourceKind,
+    frameSentCount: coreview.visual.frameSentCount,
+    initialFrameSent: coreview.visual.initialFrameSent,
+    frameSendFailureCount: coreview.visual.frameSendFailureCount,
+    lastFrameSendFailureReason: coreview.visual.lastFrameSendFailureReason,
+    lastFrameDimensions: coreview.visual.lastFrameDimensions,
+    lastFrameBytes: coreview.visual.lastFrameBytes,
+    visualFresh: coreview.visual.visualFresh,
+    visualFreshForTurn: coreview.visual.visualFreshForTurn,
+    exactTextAvailable: coreview.visual.exactTextAvailable,
+    reviewCommandPreservedMic: coreview.visual.reviewCommandPreservedMic,
+    reviewCommandPreservedReview: coreview.visual.reviewCommandPreservedReview,
+    reviewCommandAutoRefreshAttempted: coreview.visual.reviewCommandAutoRefreshAttempted,
+    reviewCommandAutoRefreshResult: coreview.visual.reviewCommandAutoRefreshResult,
+    reviewCommandStaleAfterPageChange: coreview.visual.reviewCommandStaleAfterPageChange,
+    reviewCommandStaleAfterViewChange: coreview.visual.reviewCommandStaleAfterViewChange,
+    reviewVoiceCommandTransportStateBefore: coreview.visual.reviewVoiceCommandTransportStateBefore,
+    reviewVoiceCommandTransportStateAfter: coreview.visual.reviewVoiceCommandTransportStateAfter,
+    reviewVoiceCommandDidHardIntercept: coreview.visual.reviewVoiceCommandDidHardIntercept,
+    reviewVoiceCommandWaitedForViewReady: coreview.visual.reviewVoiceCommandWaitedForViewReady,
+    reviewVoiceCommandAutoRefreshTiming: coreview.visual.reviewVoiceCommandAutoRefreshTiming,
+    reviewVoiceCommandAutoRefreshBlockedReason: coreview.visual.reviewVoiceCommandAutoRefreshBlockedReason,
+    telemetryExportAfterCommandSucceeded: coreview.visual.telemetryExportAfterCommandSucceeded,
+    lastReviewVoiceCommandKind: coreview.visual.lastReviewVoiceCommandKind,
+    lastReviewVoiceCommandApplied: coreview.visual.lastReviewVoiceCommandApplied,
+    lastReviewVoiceCommandUiMode: coreview.visual.lastReviewVoiceCommandUiMode,
+    lastReviewVoiceCommands: coreview.visual.lastReviewVoiceCommands,
+    pdfTextExtractionStatus: coreview.visual.pdfTextExtractionStatus,
+    pdfTextExtractionPageCount: coreview.visual.pdfTextExtractionPageCount,
+    pdfTextExtractionCharCount: coreview.visual.pdfTextExtractionCharCount,
+    pdfTextExtractionSource: coreview.visual.pdfTextExtractionSource,
+    annotationOverlayCaptured: coreview.visual.annotationOverlayCaptured,
+    annotationCount: coreview.visual.annotationCount,
+    highlightCount: coreview.visual.highlightCount,
+    commentCount: coreview.visual.commentCount,
+    underlineCount: coreview.visual.underlineCount,
+    arrowCount: coreview.visual.arrowCount,
+    drawPathCount: coreview.visual.drawPathCount,
+    annotationPersistenceStatus: coreview.visual.annotationPersistenceStatus,
+    annotationRestoreAttempted: coreview.visual.annotationRestoreAttempted,
+    annotationRestoreResult: coreview.visual.annotationRestoreResult,
+    annotationRestoreCount: coreview.visual.annotationRestoreCount,
+    annotationRestoreSource: coreview.visual.annotationRestoreSource,
+    annotationPersistAttempted: coreview.visual.annotationPersistAttempted,
+    annotationPersistResult: coreview.visual.annotationPersistResult,
+    annotationPersistCount: coreview.visual.annotationPersistCount,
+    annotationPersistedCount: coreview.visual.annotationPersistedCount,
+    annotationStorageVersion: coreview.visual.annotationStorageVersion,
+    annotationStorageKeyHash: coreview.visual.annotationStorageKeyHash,
+    annotationIdentityWriteHash: coreview.visual.annotationIdentityWriteHash,
+    annotationIdentityReadHash: coreview.visual.annotationIdentityReadHash,
+    annotationRestoreOverwrittenCount: coreview.visual.annotationRestoreOverwrittenCount,
+    coreviewAnnotationStoreActive: coreview.visual.coreviewAnnotationStoreActive,
+    coreviewAnnotationStateSource: coreview.visual.coreviewAnnotationStateSource,
+    annotationPreventedEmptyOverwriteCount: coreview.visual.annotationPreventedEmptyOverwriteCount,
+    annotationMigratedIdentityCount: coreview.visual.annotationMigratedIdentityCount,
+    annotationStoreSurvivedCanvasClose: coreview.visual.annotationStoreSurvivedCanvasClose,
+    annotationStoreHydratedArtifactStage: coreview.visual.annotationStoreHydratedArtifactStage,
+    annotationStateClearedReason: coreview.visual.annotationStateClearedReason,
+    builderSnapshotIgnoredForActiveArtifact: coreview.visual.builderSnapshotIgnoredForActiveArtifact,
+    builderSnapshotEmptyPassive: coreview.visual.builderSnapshotEmptyPassive,
+    artifactStageProtectedFromSnapshot: coreview.visual.artifactStageProtectedFromSnapshot,
+    artifactStageUnmountPrevented: coreview.visual.artifactStageUnmountPrevented,
+    thumbnailAnnotationIndicatorMode: coreview.visual.thumbnailAnnotationIndicatorMode,
+    thumbnailAnnotationPageCounts: coreview.visual.thumbnailAnnotationPageCounts,
+    thumbnailAnnotationRefreshCount: coreview.visual.thumbnailAnnotationRefreshCount,
+    canvasPointerBlockedAfterAnnotation: coreview.visual.canvasPointerBlockedAfterAnnotation,
+    stickyToolModeEnabled: coreview.visual.stickyToolModeEnabled,
+    lastToolModeBeforeAction: coreview.visual.lastToolModeBeforeAction,
+    lastToolModeAfterAction: coreview.visual.lastToolModeAfterAction,
+    toolModeResetReason: coreview.visual.toolModeResetReason,
+    annotationExportAvailable: coreview.visual.annotationExportAvailable,
+    annotationExportResult: coreview.visual.annotationExportResult,
+    annotationExportKind: coreview.visual.annotationExportKind,
+    annotationExportPageScope: coreview.visual.annotationExportPageScope,
+    annotationDeleteCount: coreview.visual.annotationDeleteCount,
+    annotationEditCount: coreview.visual.annotationEditCount,
+    unsupportedAnnotationKind: coreview.visual.unsupportedAnnotationKind,
+    annotationActionSource: coreview.visual.annotationActionSource,
+    coreviewAnnotationToolCount: coreview.visual.coreviewAnnotationToolCount,
+    coreviewAnnotationFallbackCount: coreview.visual.coreviewAnnotationFallbackCount,
+    coreviewAnnotationCommandSource: coreview.visual.coreviewAnnotationCommandSource,
+    coreviewAnnotationToolResult: coreview.visual.coreviewAnnotationToolResult,
+    coreviewAnnotationFallbackResult: coreview.visual.coreviewAnnotationFallbackResult,
+    coreviewAnnotationKind: coreview.visual.coreviewAnnotationKind,
+    coreviewAnnotationAnchorType: coreview.visual.coreviewAnnotationAnchorType,
+    coreviewAnnotationColor: coreview.visual.coreviewAnnotationColor,
+    coreviewAnnotationPageIndex: coreview.visual.coreviewAnnotationPageIndex,
+    coreviewAnnotationBlockedReason: coreview.visual.coreviewAnnotationBlockedReason,
+    annotationIntentDetectedCount: coreview.visual.annotationIntentDetectedCount,
+    annotationIntentSource: coreview.visual.annotationIntentSource,
+    annotationFallbackAttempted: coreview.visual.annotationFallbackAttempted,
+    annotationFallbackResult: coreview.visual.annotationFallbackResult,
+    annotationFallbackBlockedReason: coreview.visual.annotationFallbackBlockedReason,
+    annotationFallbackUtteranceKind: coreview.visual.annotationFallbackUtteranceKind,
+    recentAnnotationActionSucceeded: coreview.visual.recentAnnotationActionSucceeded,
+    annotationCommitAttempted: coreview.visual.annotationCommitAttempted,
+    annotationCommitResult: coreview.visual.annotationCommitResult,
+    annotationCommitCountBefore: coreview.visual.annotationCommitCountBefore,
+    annotationCommitCountAfter: coreview.visual.annotationCommitCountAfter,
+    annotationCommitVerified: coreview.visual.annotationCommitVerified,
+    annotationCommandPreventedNavigation: coreview.visual.annotationCommandPreventedNavigation,
+    annotationCommandKeptArtifactMounted: coreview.visual.annotationCommandKeptArtifactMounted,
+    annotationViewReadyTimedOut: coreview.visual.annotationViewReadyTimedOut,
+    annotationPartialSuccess: coreview.visual.annotationPartialSuccess,
+    sessionLeaveGuardSuppressedForAnnotation: coreview.visual.sessionLeaveGuardSuppressedForAnnotation,
+    assistantAnnotationClaimSuppressedCount: coreview.visual.assistantAnnotationClaimSuppressedCount,
+    coreviewFocusAnchorCount: coreview.visual.coreviewFocusAnchorCount,
+    coreviewFocusAnchorResult: coreview.visual.coreviewFocusAnchorResult,
+    coreviewFocusAnchorType: coreview.visual.coreviewFocusAnchorType,
+    keyboardArtifactShortcutUsed: coreview.visual.keyboardArtifactShortcutUsed,
+    pinchZoomUsed: coreview.visual.pinchZoomUsed,
+    panModeActive: coreview.visual.panModeActive,
+    panGestureCount: coreview.visual.panGestureCount,
+    panGestureResult: coreview.visual.panGestureResult,
+    panScrollDeltaX: coreview.visual.panScrollDeltaX,
+    panScrollDeltaY: coreview.visual.panScrollDeltaY,
+    coreviewToolCompletedCount: coreview.visual.coreviewToolCompletedCount,
+    coreviewToolUnresolvedCount: coreview.visual.coreviewToolUnresolvedCount,
+    coreviewToolLastResult: coreview.visual.coreviewToolLastResult,
+    coreviewToolRefreshResult: coreview.visual.coreviewToolRefreshResult,
+    coreviewToolVisualFreshAfterResult: coreview.visual.coreviewToolVisualFreshAfterResult,
+    reviewToolsExposed: coreview.visual.reviewToolsExposed,
+    emitArtifactExposedDuringReview: coreview.visual.emitArtifactExposedDuringReview,
+    reviewToolTimedOut: coreview.visual.reviewToolTimedOut,
+    reviewToolTimeoutName: coreview.visual.reviewToolTimeoutName,
+    reviewToolTimeoutResultSent: coreview.visual.reviewToolTimeoutResultSent,
+    coreviewGetCurrentViewCount: coreview.visual.coreviewGetCurrentViewCount,
+    coreviewGetCurrentViewResult: coreview.visual.coreviewGetCurrentViewResult,
+    providerToPublicTranscriptGapAfterCoreviewTool: coreview.visual.providerToPublicTranscriptGapAfterCoreviewTool,
+    followUpTurnDispatchedAfterCoreviewTool: coreview.visual.followUpTurnDispatchedAfterCoreviewTool,
+    emitArtifactBlockedDuringReviewCount: coreview.visual.emitArtifactBlockedDuringReviewCount,
+    emitArtifactBlockedForAnnotationIntentCount: coreview.visual.emitArtifactBlockedForAnnotationIntentCount,
+    exactTextCallCount: coreview.exactText.exactTextCallCount,
+    exactTextSuccessCount: coreview.exactText.exactTextSuccessCount,
+    readArtifactTextCallCount: coreview.exactText.readArtifactTextCallCount,
+    readArtifactTextResolvedCount: coreview.exactText.readArtifactTextResolvedCount,
+    readArtifactTextUnresolvedCount: coreview.exactText.readArtifactTextUnresolvedCount,
+    readArtifactTextTimeoutCount: coreview.exactText.readArtifactTextTimeoutCount,
+    readArtifactTextLastStatus: coreview.exactText.readArtifactTextLastStatus,
+    readArtifactTextPdfExtractionStatus: coreview.exactText.readArtifactTextPdfExtractionStatus,
+    exactTextRegistrySource: coreview.exactText.exactTextRegistrySource,
+    rawFrameExcluded: coreview.visual.rawFrameExcluded,
+    rawProviderPayloadExcluded: coreview.visual.rawProviderPayloadExcluded,
+    rawArtifactTextExcluded: coreview.exactText.rawArtifactTextExcluded,
   };
 }
 

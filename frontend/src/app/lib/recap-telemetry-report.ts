@@ -143,7 +143,9 @@ export type LastSessionTelemetrySnapshot = {
     artifacts: number;
     artifactPublicEventCount: number;
     artifactRuntimeIngestCount: number;
+    artifactSelectedStageCount: number;
     artifactRenderedCount: number;
+    artifactCountMismatchReason: string | null;
     diagnostics: number;
     builderEvents: number;
   };
@@ -629,7 +631,9 @@ export function buildLastSessionTelemetrySnapshot({
       artifacts: metrics.counts.artifacts,
       artifactPublicEventCount: metrics.counts.artifactPublicEventCount,
       artifactRuntimeIngestCount: metrics.counts.artifactRuntimeIngestCount,
+      artifactSelectedStageCount: metrics.counts.artifactSelectedStageCount,
       artifactRenderedCount: metrics.counts.artifactRenderedCount,
+      artifactCountMismatchReason: metrics.counts.artifactCountMismatchReason,
       diagnostics: metrics.counts.diagnostics,
       builderEvents: metrics.counts.builderEvents,
     },

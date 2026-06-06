@@ -3,6 +3,7 @@ import { useEffect } from 'react';
 import { logger } from '../lib/error-logger';
 
 import { persistRefreshInterruptHint } from './refresh-interrupt-hint';
+import { isSessionLeaveGuardSuppressedForAnnotation } from './session-annotation-navigation-guard';
 
 type ExitGuardMessage = {
   id: string;
@@ -57,6 +58,7 @@ export function useSessionExitProtection({
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
       if (isExitInProgress) return;
+      if (isSessionLeaveGuardSuppressedForAnnotation()) return;
       if (!isSophiaResponding || messages.length === 0) return;
 
       const currentMessages = messages.map((message, index) => ({
@@ -98,6 +100,10 @@ export function useSessionExitProtection({
     window.history.pushState({ sophiaResponding: true }, '');
 
     const handlePopState = () => {
+      if (isSessionLeaveGuardSuppressedForAnnotation()) {
+        window.history.pushState({ sophiaResponding: true }, '');
+        return;
+      }
       openExitConfirm();
       window.history.pushState({ sophiaResponding: true }, '');
     };

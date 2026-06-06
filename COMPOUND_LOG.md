@@ -26,6 +26,29 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-06-02 · [coreview-artifact-still-review] · PR #TBD
+**Author:** Codex · **Track:** frontend | voice · **Spec:** `docs/coreview-artifact-still-review.md`
+
+### What Changed
+- Added default-off Coreview artifact still-frame review for builder and companion artifacts.
+- Replaced fixture/probe UI with artifact-scoped hidden canvases and a single **Review with Sophia** action.
+- Added safe Coreview telemetry fields and `diagnosticsSummary.coreviewStillFrame`.
+- Documented flags, non-goals, smoke steps, exact-text sideband usage, and raw payload exclusions.
+
+### What We Learned
+- Coreview is safest when it is modeled as one artifact frame plus trusted text, not a second visual runtime.
+- The UI should say whether Sophia is Looking or Not Looking and whether the visual may be stale so the user does not infer continuous watching.
+- Exact text availability belongs in sideband/tool telemetry, while raw frame/provider/text payloads stay excluded.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A - no prompt or skill files changed.
+
 ## 2026-05-24 · [voice-session-finalization-contract] · PR #TBD
 **Author:** GitHub Copilot · **Track:** frontend | backend · **Spec:** `docs/specs/03_memory_system.md`, `docs/specs/04_backend_integration.md`
 
@@ -2102,6 +2125,30 @@ The single highest-leverage finding in this entire cycle was Codex P1 on the cro
 
 ### Skills Created / Modified
 - None. Vision support is wired entirely at the tool + middleware + state-channel level; no skill files added.
+
+### GEPA Log Entry
+- N/A — no prompt files changed.
+
+---
+
+## 2026-06-03 · [artifact-canvas-visual-ux-audit] · PR #133 still-review audit
+**Author:** Codex · **Track:** frontend UX docs · **Spec reference:** `docs/audits/artifact-canvas-visual-ux-audit.md`
+
+### What Changed
+- Added a docs-only visual UX audit for the current artifact canvas / review experience.
+- Inventoried the live session stage, voice stage, builder completion/ready flows, companion artifact review controls, still-frame capture path, and secondary artifact surfaces.
+- Recommended the next implementation slice: visual shell polish first, then canvas fill, Sophia review language, text/voice unification, single-page PDF, multipage rail, and final edge-case polish.
+
+### What We Learned
+- The current implementation has useful review mechanics, but the visual product still reads as several adjacent artifact surfaces rather than one first-class Sophia canvas.
+- `Page 1 of 1`, disabled zoom controls, metadata-only fallbacks, and hidden capture canvases should not be treated as PDF/multipage readiness.
+- The next slice should avoid provider, liveframe, VAD, and PDF dependency work; the shell needs a stable canvas bed and unified review chrome first.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
 
 ### GEPA Log Entry
 - N/A — no prompt files changed.

@@ -166,6 +166,83 @@ def test_dispatch_sets_stream_resumable_true(monkeypatch):
     )
 
 
+def test_visual_report_html_request_targets_html_file():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "visual_report",
+        "Build a concise HTML document with charts and diagrams about GEPA SkillOpt.",
+    )
+
+    assert target.endswith(".html")
+
+
+def test_pdf_request_with_html_charts_still_targets_pdf():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "visual_report",
+        "Make a PDF report with HTML charts about GEPA SkillOpt.",
+    )
+
+    assert target.endswith(".pdf")
+
+
+def test_simple_product_review_pdf_targets_stable_filename():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "document",
+        "Create a simple product review PDF artifact.",
+    )
+
+    assert target == "/mnt/user-data/outputs/simple-product-review.pdf"
+
+
+def test_pdf_source_mentions_do_not_force_pdf_output():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "document",
+        "Summarize these PDFs into a concise research brief with recommendations.",
+    )
+
+    assert target.endswith(".md")
+
+
+def test_pdf_source_material_with_markdown_request_targets_markdown():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "research",
+        "Read the attached PDF source material and write the final brief in markdown.",
+    )
+
+    assert target.endswith(".md")
+
+
+def test_incidental_html_charts_do_not_override_visual_report_pdf_default():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "visual_report",
+        "Build a concise visual report with HTML charts and diagrams about GEPA SkillOpt.",
+    )
+
+    assert target.endswith(".pdf")
+
+
+def test_visual_report_without_html_request_still_targets_pdf():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "visual_report",
+        "Build a concise visual report with charts and diagrams about GEPA SkillOpt.",
+    )
+
+    assert target.endswith(".pdf")
+
+
 # ---------- duplicate protection --------------------------------------------
 
 
@@ -414,51 +491,47 @@ def test_start_builder_task_live_context_embedding(monkeypatch):
     )
     assert isinstance(response, Command)
 
-    # Inspect what the SDK was asked to dispatch.
     run_kwargs = captured["run_kwargs"]
     sent_messages = run_kwargs["input"]["messages"]
     assert len(sent_messages) == 1
-    body = sent_messages[0]["content"]
+    _assert_live_context_brief(sent_messages[0]["content"])
+    _assert_live_context_state(run_kwargs["input"])
 
-    # Task-type prefix at the start.
+
+def _assert_live_context_brief(body: str) -> None:
     assert body.startswith("[research]")
-    # Memories section.
-    assert "Relevant memories from this session:" in body
-    assert "Prefers headlines" in body
-    assert "Hates jargon" in body
-    # Emotional context.
-    assert "tone=2.3" in body
-    assert "Land the first paying user" in body
-    # Ritual context.
-    assert "Active ritual: debrief" in body
-    assert "debrief.step2_what_worked" in body
-    # Explicit URL surfaced.
-    assert "https://example.com/ar-roundup-2026" in body
+    for expected in (
+        "Relevant memories from this session:",
+        "Prefers headlines",
+        "Hates jargon",
+        "tone=2.3",
+        "Land the first paying user",
+        "Active ritual: debrief",
+        "debrief.step2_what_worked",
+        "https://example.com/ar-roundup-2026",
+    ):
+        assert expected in body
 
-    # delegation_context state seed includes the same fields.
-    delegation = run_kwargs["input"]["delegation_context"]
-    assert delegation["task_type"] == "research"
-    assert delegation["allow_web_research"] is True  # task_type=research → on
-    assert delegation["explicit_user_urls"] == ["https://example.com/ar-roundup-2026"]
+
+def _assert_live_context_state(input_state: dict) -> None:
+    delegation = input_state["delegation_context"]
+    expected_delegation = {
+        "task_type": "research",
+        "allow_web_research": True,
+        "explicit_user_urls": ["https://example.com/ar-roundup-2026"],
+        "active_ritual": "debrief",
+        "parent_thread_id": "thread-1",
+        "parent_user_id": "alice",
+    }
+    for key, value in expected_delegation.items():
+        assert delegation[key] == value
     assert delegation["relevant_memories"][:2] == [
         "Prefers headlines, not paragraphs",
         "Hates jargon",
     ]
-    assert delegation["active_ritual"] == "debrief"
-
-    # State seeds redundantly carry the policy fields the builder reads
-    # (matches switch_to_builder's emission shape).
-    assert run_kwargs["input"]["allow_web_research"] is True
-    assert run_kwargs["input"]["explicit_user_urls"] == ["https://example.com/ar-roundup-2026"]
-    assert isinstance(run_kwargs["input"]["builder_web_budget"], dict)
-
-    # Production-bug fix (2026-05-06): parent_thread_id + parent_user_id
-    # MUST be embedded in delegation_context (state) because langgraph-api
-    # 0.8.1 doesn't forward custom configurable keys. Without these, the
-    # builder webhook payload's thread_id is None and Telegram delivery
-    # silently dies in _post_webhook's missing-thread_id guard.
-    assert delegation["parent_thread_id"] == "thread-1"  # _make_runtime default
-    assert delegation["parent_user_id"] == "alice"
+    assert input_state["allow_web_research"] is True
+    assert input_state["explicit_user_urls"] == ["https://example.com/ar-roundup-2026"]
+    assert isinstance(input_state["builder_web_budget"], dict)
 
 
 def test_start_builder_task_prefix_idempotent(monkeypatch):
@@ -541,6 +614,28 @@ def test_start_builder_task_normalizes_demo_request(monkeypatch):
     # The async_tasks entry records demo_mode=True so the gateway can log it.
     task_id = next(iter(response.update["async_tasks"]))
     assert response.update["async_tasks"][task_id]["demo_mode"] is True
+
+
+def test_start_builder_task_keeps_web_research_available_for_frontend(monkeypatch):
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+    fake_client, captured = _make_fake_sdk_client()
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+
+    response = asyncio.run(
+        module.start_builder_task.coroutine(
+            description="Build an HTML document about the Meta Harness framework.",
+            task_type="frontend",
+            runtime=_make_runtime({"user_id": "alice"}),
+        )
+    )
+
+    assert isinstance(response, Command)
+    run_input = captured["run_kwargs"]["input"]
+    delegation = run_input["delegation_context"]
+    assert delegation["task_type"] == "frontend"
+    assert delegation["allow_web_research"] is True
+    assert run_input["allow_web_research"] is True
+    assert isinstance(run_input["builder_web_budget"], dict)
 
 
 # ---------- user_id resolution ----------------------------------------------

@@ -354,6 +354,25 @@ curl -X POST http://localhost:2024/threads/{thread_id}/runs/stream \
 
 ---
 
+## Coreview Artifact Still-Frame Review
+
+Coreview is an opt-in artifact review path for the Gemini Live browser runtime. It is off by default:
+
+```bash
+NEXT_PUBLIC_SOPHIA_COREVIEW_ENABLED=false
+NEXT_PUBLIC_SOPHIA_COREVIEW_STILL_FRAME_ENABLED=false
+SOPHIA_GEMINI_COREVIEW_ENABLED=false
+SOPHIA_GEMINI_COREVIEW_STILL_FRAME_ENABLED=false
+```
+
+When both frontend flags are enabled, artifact panels expose **Review with Sophia** for builder artifacts and current companion artifacts. The app sends one artifact-scoped canvas still frame for visual layout/composition only. Exact words, numbers, table values, labels, and fine print must come from `read_artifact_text` or the trusted artifact text sideband.
+
+Coreview does not capture the browser tab, desktop, camera, or microphone video. It does not run continuous video/liveframes. Telemetry includes safe counts and booleans such as `frameSentCount`, `initialFrameSent`, `visualFresh`, `exactTextAvailable`, `readArtifactTextCallCount`, `rawFrameExcluded=true`, `rawProviderPayloadExcluded=true`, and `rawArtifactTextExcluded=true`; raw frames, raw provider payloads, and raw artifact text are excluded.
+
+Local smoke: enable the four flags above, start the Gemini Live voice path, open a session with a builder or companion artifact, click **Review with Sophia**, and verify the UI shows Looking, Frame sent, Exact text available, and a Coreview block in the voice telemetry panel.
+
+---
+
 ## Advanced
 
 ### Sandbox Mode

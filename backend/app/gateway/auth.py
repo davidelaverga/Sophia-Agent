@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 import httpx
 from fastapi import HTTPException, Request
@@ -88,13 +89,18 @@ async def _get_authenticated_user(token: str) -> dict:
         logger.warning("gateway.auth auth_me_unavailable url=%s error=%s", auth_url, exc)
         raise HTTPException(status_code=503, detail="Auth service unavailable") from exc
 
+    _raise_for_auth_me_status(response, auth_url)
+    payload = _auth_me_payload(response, auth_url)
+    _validate_auth_me_payload(payload, auth_url)
+    return payload
+
+
+def _raise_for_auth_me_status(response: httpx.Response, auth_url: str) -> None:
     if response.status_code in {401, 403}:
         raise HTTPException(status_code=401, detail="Invalid or expired auth token")
-
     if response.status_code == 404:
         logger.warning("gateway.auth auth_me_missing url=%s", auth_url)
         raise HTTPException(status_code=503, detail="Legacy auth bridge unavailable")
-
     if response.status_code >= 500:
         logger.warning(
             "gateway.auth auth_me_server_error url=%s status=%s",
@@ -106,17 +112,19 @@ async def _get_authenticated_user(token: str) -> dict:
     if response.status_code >= 400:
         raise HTTPException(status_code=401, detail="Auth token rejected")
 
+
+def _auth_me_payload(response: httpx.Response, auth_url: str) -> Any:
     try:
-        payload = response.json()
+        return response.json()
     except ValueError as exc:
         logger.warning("gateway.auth auth_me_invalid_json url=%s", auth_url)
         raise HTTPException(status_code=503, detail="Auth service returned invalid JSON") from exc
 
+
+def _validate_auth_me_payload(payload: Any, auth_url: str) -> None:
     if not isinstance(payload, dict) or not isinstance(payload.get("id"), str) or not payload["id"].strip():
         logger.warning("gateway.auth auth_me_missing_id url=%s payload_type=%s", auth_url, type(payload).__name__)
         raise HTTPException(status_code=503, detail="Auth service returned an invalid user payload")
-
-    return payload
 
 
 async def require_authorized_user_scope(request: Request) -> str:
@@ -148,3 +156,13 @@ async def require_authorized_user_scope(request: Request) -> str:
         raise HTTPException(status_code=403, detail="Token does not grant access to this user")
 
     return user_id
+
+
+async def require_authenticated_user(request: Request) -> str:
+    """Return the authenticated user for routes without a user_id path segment."""
+    if _is_explicit_bypass_enabled():
+        return _get_bypass_user_id()
+
+    token = _extract_bearer_token(request)
+    authenticated_user = await _get_authenticated_user(token)
+    return authenticated_user["id"].strip()

@@ -1,5 +1,7 @@
 import json
 import os
+import sys
+import zipfile
 from io import BytesIO
 
 from PIL import Image
@@ -23,110 +25,115 @@ def generate_ppt(
     Returns:
         Status message
     """
-    # Load presentation plan
-    with open(plan_file, "r", encoding="utf-8") as f:
-        plan = json.load(f)
+    plan = load_plan(plan_file)
+    if not slide_images:
+        raise ValueError("No slide images were provided")
 
-    # Determine slide dimensions based on aspect ratio
-    aspect_ratio = plan.get("aspect_ratio", "16:9")
-    if aspect_ratio == "16:9":
-        slide_width = Inches(13.333)
-        slide_height = Inches(7.5)
-    elif aspect_ratio == "4:3":
-        slide_width = Inches(10)
-        slide_height = Inches(7.5)
-    else:
-        # Default to 16:9
-        slide_width = Inches(13.333)
-        slide_height = Inches(7.5)
-
-    # Create presentation with specified dimensions
+    slide_width, slide_height = slide_dimensions(plan)
     prs = Presentation()
     prs.slide_width = slide_width
     prs.slide_height = slide_height
 
-    # Get blank layout
     blank_layout = prs.slide_layouts[6]  # Blank layout
-
-    # Add each slide image
     slides_info = plan.get("slides", [])
 
     for i, image_path in enumerate(slide_images):
-        if not os.path.exists(image_path):
-            return f"Error: Slide image not found: {image_path}"
-
-        # Add a blank slide
         slide = prs.slides.add_slide(blank_layout)
-
-        # Load and process image
-        with Image.open(image_path) as img:
-            # Convert to RGB if necessary (for PNG with transparency)
-            if img.mode in ("RGBA", "P"):
-                img = img.convert("RGB")
-
-            # Calculate dimensions to fill slide while maintaining aspect ratio
-            img_width, img_height = img.size
-            img_aspect = img_width / img_height
-            slide_aspect = slide_width / slide_height
-
-            # Convert to EMU for calculations
-            slide_width_emu = int(slide_width)
-            slide_height_emu = int(slide_height)
-
-            if img_aspect > slide_aspect:
-                # Image is wider - fit to width
-                new_width_emu = slide_width_emu
-                new_height_emu = int(slide_width_emu / img_aspect)
-                left = Inches(0)
-                top = Inches((slide_height_emu - new_height_emu) / 914400)
-            else:
-                # Image is taller - fit to height
-                new_height_emu = slide_height_emu
-                new_width_emu = int(slide_height_emu * img_aspect)
-                left = Inches((slide_width_emu - new_width_emu) / 914400)
-                top = Inches(0)
-
-            # Save processed image to bytes
-            img_bytes = BytesIO()
-            img.save(img_bytes, format="JPEG", quality=95)
-            img_bytes.seek(0)
-
-            # Add image to slide
-            slide.shapes.add_picture(
-                img_bytes, left, top, Inches(new_width_emu / 914400), Inches(new_height_emu / 914400)
-            )
-
-        # Add speaker notes if available in plan
+        add_slide_image(slide, image_path, slide_width, slide_height)
         if i < len(slides_info):
-            slide_info = slides_info[i]
-            notes = []
+            add_speaker_notes(slide, slides_info[i])
 
-            if slide_info.get("title"):
-                notes.append(f"Title: {slide_info['title']}")
+    save_and_validate_pptx(prs, output_file)
+    return f"Successfully generated presentation with {len(slide_images)} slides"
 
-            if slide_info.get("subtitle"):
-                notes.append(f"Subtitle: {slide_info['subtitle']}")
 
-            if slide_info.get("key_points"):
-                notes.append("Key Points:")
-                for point in slide_info["key_points"]:
-                    notes.append(f"  • {point}")
+def load_plan(plan_file: str) -> dict:
+    with open(plan_file, "r", encoding="utf-8") as f:
+        plan = json.load(f)
+    if not isinstance(plan, dict):
+        raise ValueError("Invalid presentation plan: top-level JSON must be an object")
+    return plan
 
-            if notes:
-                notes_slide = slide.notes_slide
-                text_frame = notes_slide.notes_text_frame
-                if text_frame is not None:
-                    text_frame.text = "\n".join(notes)
 
-    # Save presentation
+def slide_dimensions(plan: dict):
+    aspect_ratio = plan.get("aspect_ratio", "16:9")
+    if aspect_ratio == "4:3":
+        return Inches(10), Inches(7.5)
+    return Inches(13.333), Inches(7.5)
+
+
+def add_slide_image(slide, image_path: str, slide_width, slide_height) -> None:
+    if not os.path.exists(image_path):
+        raise FileNotFoundError("Slide image not found")
+    with Image.open(image_path) as img:
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        img_bytes, left, top, width, height = fitted_image_payload(
+            img,
+            slide_width,
+            slide_height,
+        )
+        slide.shapes.add_picture(img_bytes, left, top, width, height)
+
+
+def fitted_image_payload(img, slide_width, slide_height):
+    img_width, img_height = img.size
+    img_aspect = img_width / img_height
+    slide_width_emu = int(slide_width)
+    slide_height_emu = int(slide_height)
+    slide_aspect = slide_width / slide_height
+    if img_aspect > slide_aspect:
+        new_width_emu = slide_width_emu
+        new_height_emu = int(slide_width_emu / img_aspect)
+        left = Inches(0)
+        top = Inches((slide_height_emu - new_height_emu) / 914400)
+    else:
+        new_height_emu = slide_height_emu
+        new_width_emu = int(slide_height_emu * img_aspect)
+        left = Inches((slide_width_emu - new_width_emu) / 914400)
+        top = Inches(0)
+    img_bytes = BytesIO()
+    img.save(img_bytes, format="JPEG", quality=95)
+    img_bytes.seek(0)
+    return img_bytes, left, top, Inches(new_width_emu / 914400), Inches(new_height_emu / 914400)
+
+
+def add_speaker_notes(slide, slide_info) -> None:
+    notes = speaker_notes(slide_info)
+    if not notes:
+        return
+    text_frame = slide.notes_slide.notes_text_frame
+    if text_frame is not None:
+        text_frame.text = "\n".join(notes)
+
+
+def speaker_notes(slide_info) -> list[str]:
+    notes = []
+    if slide_info.get("title"):
+        notes.append(f"Title: {slide_info['title']}")
+    if slide_info.get("subtitle"):
+        notes.append(f"Subtitle: {slide_info['subtitle']}")
+    if slide_info.get("key_points"):
+        notes.append("Key Points:")
+        notes.extend(f"  • {point}" for point in slide_info["key_points"])
+    return notes
+
+
+def save_and_validate_pptx(prs, output_file: str) -> None:
+    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
     prs.save(output_file)
+    if not os.path.exists(output_file) or os.path.getsize(output_file) <= 0:
+        raise RuntimeError("PPTX save did not produce output bytes")
+    with zipfile.ZipFile(output_file, "r") as archive:
+        names = set(archive.namelist())
+    required = {"[Content_Types].xml", "_rels/.rels", "ppt/presentation.xml"}
+    missing = sorted(required.difference(names))
+    if missing:
+        raise RuntimeError(f"PPTX save missing required Office entries: {','.join(missing)}")
 
-    return f"Successfully generated presentation with {len(slide_images)} slides to {output_file}"
 
-
-if __name__ == "__main__":
+def main() -> int:
     import argparse
-
     parser = argparse.ArgumentParser(
         description="Generate PowerPoint presentation from slide images"
     )
@@ -150,12 +157,26 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     try:
-        print(
-            generate_ppt(
-                args.plan_file,
-                args.slide_images,
-                args.output_file,
-            )
+        message = generate_ppt(
+            args.plan_file,
+            args.slide_images,
+            args.output_file,
         )
+        size = os.path.getsize(args.output_file)
+        print(message)
+        print(
+            "PPT generation diagnostics: "
+            f"slide_count={len(args.slide_images)} output_ext=.pptx bytes={size}",
+            file=sys.stderr,
+        )
+        return 0
     except Exception as e:
-        print(f"Error while generating presentation: {e}")
+        print(
+            f"Error while generating presentation: {type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

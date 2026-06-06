@@ -57,7 +57,7 @@ def _maybe_mirror_tool_output(
     outputs_host_path = thread_data.get("outputs_path")
     if not outputs_host_path:
         return
-    thread_id = runtime.context.get("thread_id") if runtime.context else None
+    thread_id = resolve_runtime_thread_id(runtime)
     if not thread_id:
         return
     supabase_mirror.maybe_mirror_file(resolved_path, thread_id, outputs_host_path)
@@ -454,6 +454,70 @@ def get_thread_data(runtime: ToolRuntime[ContextT, ThreadState] | None) -> Threa
     return runtime.state.get("thread_data")
 
 
+def _runtime_context_dict(
+    runtime: ToolRuntime[ContextT, ThreadState] | None,
+) -> dict | None:
+    context = getattr(runtime, "context", None) if runtime is not None else None
+    return context if isinstance(context, dict) else None
+
+
+def _runtime_configurable(
+    runtime: ToolRuntime[ContextT, ThreadState] | None,
+) -> dict:
+    config = getattr(runtime, "config", None) if runtime is not None else None
+    if isinstance(config, dict):
+        configurable = config.get("configurable") or {}
+        if isinstance(configurable, dict):
+            return configurable
+    return {}
+
+
+def resolve_runtime_thread_id(
+    runtime: ToolRuntime[ContextT, ThreadState] | None,
+) -> str | None:
+    """Resolve a thread id from all runtime carriers used by LangGraph.
+
+    Resumed async-subagent runs can arrive with ``runtime.context`` missing
+    even though ``configurable.thread_id`` and thread state are still present.
+    Sandbox reacquisition must therefore not depend on context alone.
+    """
+    context = _runtime_context_dict(runtime)
+    candidate = _thread_id_from_mapping(context)
+    if candidate is not None:
+        return candidate
+
+    candidate = _thread_id_from_mapping(_runtime_configurable(runtime))
+    if candidate is not None:
+        return candidate
+
+    return _thread_id_from_current_runnable_config()
+
+
+def _thread_id_from_mapping(values: dict | None) -> str | None:
+    candidate = values.get("thread_id") if isinstance(values, dict) else None
+    return candidate if isinstance(candidate, str) and candidate else None
+
+
+def _thread_id_from_current_runnable_config() -> str | None:
+    try:
+        from langchain_core.runnables.config import var_child_runnable_config
+
+        config = var_child_runnable_config.get({}) or {}
+        configurable = config.get("configurable") or {}
+        return _thread_id_from_mapping(configurable)
+    except Exception:
+        return None
+
+
+def _store_sandbox_id_in_runtime_context(
+    runtime: ToolRuntime[ContextT, ThreadState] | None,
+    sandbox_id: str,
+) -> None:
+    context = _runtime_context_dict(runtime)
+    if context is not None:
+        context["sandbox_id"] = sandbox_id
+
+
 def _truncate_shell_text(value: str | None, *, limit: int = 500) -> str | None:
     if value is None:
         return None
@@ -569,7 +633,7 @@ def sandbox_from_runtime(runtime: ToolRuntime[ContextT, ThreadState] | None = No
     if sandbox is None:
         raise SandboxNotFoundError(f"Sandbox with ID '{sandbox_id}' not found", sandbox_id=sandbox_id)
 
-    runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for downstream use
+    _store_sandbox_id_in_runtime_context(runtime, sandbox_id)
     return sandbox
 
 
@@ -604,12 +668,12 @@ def ensure_sandbox_initialized(runtime: ToolRuntime[ContextT, ThreadState] | Non
         if sandbox_id is not None:
             sandbox = get_sandbox_provider().get(sandbox_id)
             if sandbox is not None:
-                runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
+                _store_sandbox_id_in_runtime_context(runtime, sandbox_id)
                 return sandbox
             # Sandbox was released, fall through to acquire new one
 
     # Lazy acquisition: get thread_id and acquire sandbox
-    thread_id = runtime.context.get("thread_id")
+    thread_id = resolve_runtime_thread_id(runtime)
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
@@ -624,7 +688,7 @@ def ensure_sandbox_initialized(runtime: ToolRuntime[ContextT, ThreadState] | Non
     if sandbox is None:
         raise SandboxNotFoundError("Sandbox not found after acquisition", sandbox_id=sandbox_id)
 
-    runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
+    _store_sandbox_id_in_runtime_context(runtime, sandbox_id)
     return sandbox
 
 
@@ -734,7 +798,7 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
             # outputs without going through write_file_tool. Scan and mirror.
             if supabase_mirror.is_mirror_enabled():
                 outputs_host_path = thread_data.get("outputs_path") if thread_data else None
-                thread_id = runtime.context.get("thread_id") if runtime.context else None
+                thread_id = resolve_runtime_thread_id(runtime)
                 if outputs_host_path and thread_id:
                     supabase_mirror.scan_and_mirror_outputs(thread_id, outputs_host_path)
             return mask_local_paths_in_output(output, thread_data)
