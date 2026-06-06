@@ -1047,6 +1047,66 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     await connection.close();
   });
 
+  it('suppresses internal builder recovery language during artifact review', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch();
+    const fakeAudioContext = new FakeAudioContext();
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+    });
+
+    await connection.sendArtifactFrame({
+      artifactId: 'artifact-1',
+      data: 'base64-frame',
+      mimeType: 'image/jpeg',
+      byteLength: 12,
+      dimensions: { width: 640, height: 360 },
+      rawFrameExcluded: true,
+    });
+    const callsAfterFrame = fetchMock.mock.calls.length;
+    const audioChunk = Buffer.from([0x00, 0x00]).toString('base64');
+
+    websocket?.emitMessage({
+      responseId: 'review-leak-response-recovery',
+      serverContent: {
+        responseId: 'review-leak-response-recovery',
+        modelTurn: {
+          parts: [
+            { inlineData: { mimeType: 'audio/pcm;rate=24000', data: audioChunk } },
+          ],
+        },
+      },
+    });
+    await Promise.resolve();
+    expect(fakeAudioContext.createdSources).toHaveLength(0);
+
+    websocket?.emitMessage({
+      responseId: 'review-leak-response-recovery',
+      serverContent: {
+        responseId: 'review-leak-response-recovery',
+        outputTranscription: {
+          text: 'I am having a slight issue tracking that specific task, so try listing all the builds.',
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(fetchMock).toHaveBeenCalledTimes(callsAfterFrame);
+    expect(fakeAudioContext.createdSources).toHaveLength(0);
+
+    await connection.close();
+  });
+
   it('returns a safe unavailable result when the Gemini WebSocket is already closed', async () => {
     const fetchMock = makeGeminiBrowserSessionFetch();
     const fakeAudioContext = new FakeAudioContext();
@@ -2492,11 +2552,15 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       response: {
         ok: false,
         rejection_reason: 'artifact_review_generic_builder_tool_suppressed',
-        recovery_guidance: 'Use coreview_request_artifact_update for selected-artifact update requests during Review with Sophia.',
+        recovery_guidance: expect.stringContaining('Use coreview_request_artifact_update'),
         coreview_builder_update_intent_detected: false,
         selected_artifact_update_context: true,
+        generic_async_tool_responded_safely: true,
       },
     });
+    expect(sentToolResponse?.toolResponse?.functionResponses?.[0]?.response?.recovery_guidance).toEqual(
+      expect.stringContaining('Do not expose internal ids'),
+    );
     await vi.waitFor(() => expect(toolDiagnostics).toEqual(expect.arrayContaining([
       expect.objectContaining({
         phase: 'tool_response_sent',
@@ -2504,6 +2568,114 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         rejectionReason: 'artifact_review_generic_builder_tool_suppressed',
       }),
     ])));
+
+    await connection.close();
+  });
+
+  it('redirects placeholder check_async_task to Coreview status during selected-artifact review', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-coreview-check-redirect',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: {
+              model: 'models/gemini-3.1-flash-live-preview',
+              inputAudioTranscription: {},
+              tools: [{ functionDeclarations: [{ name: 'check_async_task' }] }],
+            },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-coreview-check-redirect',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202 }));
+    const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
+    const ledgerUpdates: Array<{ toolCallId: string; finalState: string }> = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      sessionId: 'browser-gemini-coreview-check-redirect',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      coreviewStillFrameEnabled: true,
+      onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
+      onToolCallLedgerUpdate: (entry) => ledgerUpdates.push({
+        toolCallId: entry.toolCallId,
+        finalState: entry.finalState,
+      }),
+    });
+
+    expect(readGeminiConfiguredToolNames(connection.setup)).toContain('coreview_get_builder_status');
+    expect(readGeminiConfiguredToolNames(connection.setup)).not.toContain('check_async_task');
+
+    await connection.sendArtifactFrame({
+      artifactId: 'coreview-real-artifact-site-html',
+      visualSourceKind: 'html_preview_canvas',
+      data: 'AA==',
+      mimeType: 'image/png',
+      byteLength: 1,
+      dimensions: { width: 1, height: 1 },
+      rawFrameExcluded: true,
+    });
+    const fetchCallCountBeforeTool = fetchMock.mock.calls.length;
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          {
+            id: 'generic-check-placeholder',
+            name: 'check_async_task',
+            args: { task_id: 'builder-thread-id' },
+          },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => expect(JSON.stringify(websocket?.sent)).toContain('artifact_review_generic_async_status_redirected'));
+    expect(fetchMock).toHaveBeenCalledTimes(fetchCallCountBeforeTool);
+    const sentFunctionResponses = (websocket?.sent ?? [])
+      .flatMap((payload) => {
+        const parsed = JSON.parse(payload) as {
+          toolResponse?: { functionResponses?: Array<{ id?: string; name?: string; response?: Record<string, unknown> }> };
+        };
+        return parsed.toolResponse?.functionResponses ?? [];
+      })
+      .filter((response) => response.id === 'generic-check-placeholder');
+
+    expect(sentFunctionResponses).toHaveLength(1);
+    expect(sentFunctionResponses[0]).toMatchObject({
+      id: 'generic-check-placeholder',
+      name: 'check_async_task',
+      response: {
+        ok: false,
+        rejection_reason: 'artifact_review_generic_async_status_redirected',
+        recovery_guidance: 'Use coreview_get_builder_status for artifact update status. Do not expose internal ids, tool names, or recovery mechanics to the user.',
+        result_summary: 'Artifact update status redirected to Coreview status.',
+        user_facing_message: "I don't see an active artifact update right now.",
+        generic_async_tool_blocked_reason: 'use_coreview_get_builder_status',
+        generic_async_tool_responded_safely: true,
+      },
+    });
+    expect(JSON.stringify(sentFunctionResponses[0]?.response)).not.toContain('builder-thread-id');
+    expect(JSON.stringify(sentFunctionResponses[0]?.response)).not.toMatch(/task id|tracking that specific task|listing all/i);
+
+    await vi.waitFor(() => expect(toolDiagnostics.filter((diagnostic) => (
+      diagnostic.phase === 'tool_response_sent'
+      && diagnostic.toolCall.name === 'check_async_task'
+    ))).toHaveLength(1));
+    expect(Object.fromEntries(ledgerUpdates.map((entry) => [entry.toolCallId, entry.finalState]))).toMatchObject({
+      'generic-check-placeholder': 'responded',
+    });
+    expect(JSON.stringify(toolDiagnostics)).not.toContain('builder-thread-id');
 
     await connection.close();
   });

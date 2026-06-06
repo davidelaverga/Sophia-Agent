@@ -789,8 +789,10 @@ const GEMINI_GENERIC_BUILDER_TOOL_NAMES = new Set([
 ]);
 const GEMINI_SELECTED_ARTIFACT_REVIEW_REDIRECT_BUILDER_TOOL_NAMES = new Set([
   'start_builder_task',
+  'check_async_task',
   'update_async_task',
   'cancel_async_task',
+  'list_async_tasks',
 ]);
 const GEMINI_PROVIDER_EVENT_CATEGORIES: GeminiProviderEventCategory[] = [
   'setupComplete',
@@ -3452,7 +3454,7 @@ function reviewToolTimeoutResult(
       action: call.name,
       result: 'failed',
       blockedReason: 'builder_action_unavailable',
-      userFacingMessage: `${call.name} timed out before the voice response deadline.`,
+      userFacingMessage: "Artifact update status is taking longer than expected. I'll keep the review open.",
       preservedMic: true,
       preservedReview: true,
       rawArtifactTextExcluded: true,
@@ -3700,18 +3702,35 @@ function suppressedGenericBuilderToolResponse(
   call: GeminiSuppressedGenericBuilderToolCallInput,
   artifactReviewContext: GeminiArtifactReviewRelayContext | null,
 ): Record<string, unknown> {
+  const isStatusCheck = call.name === 'check_async_task' || call.name === 'list_async_tasks';
+  const recoveryGuidance = isStatusCheck
+    ? 'Use coreview_get_builder_status for artifact update status. Do not expose internal ids, tool names, or recovery mechanics to the user.'
+    : 'Use coreview_request_artifact_update for selected-artifact update requests during Review with Sophia. Do not expose internal ids, tool names, or recovery mechanics to the user.';
   return {
     ok: false,
     rejected: true,
     execution_rejected: true,
-    safe_reason: 'artifact_review_generic_builder_tool_suppressed',
-    rejection_reason: 'artifact_review_generic_builder_tool_suppressed',
-    recovery_guidance: 'Use coreview_request_artifact_update for selected-artifact update requests during Review with Sophia.',
-    result_summary: 'Generic builder tool suppressed for selected-artifact review update.',
+    safe_reason: isStatusCheck
+      ? 'artifact_review_generic_async_status_redirected'
+      : 'artifact_review_generic_builder_tool_suppressed',
+    rejection_reason: isStatusCheck
+      ? 'artifact_review_generic_async_status_redirected'
+      : 'artifact_review_generic_builder_tool_suppressed',
+    recovery_guidance: recoveryGuidance,
+    result_summary: isStatusCheck
+      ? 'Artifact update status redirected to Coreview status.'
+      : 'Selected-artifact update redirected to Coreview builder action.',
+    user_facing_message: isStatusCheck
+      ? "I don't see an active artifact update right now."
+      : "I'll update the selected artifact from the review.",
     artifact_review_active: artifactReviewContext?.active === true,
     artifact_review_user_intent: artifactReviewContext?.user_intent ?? null,
     coreview_builder_update_intent_detected: artifactReviewContext?.builder_update_intent_detected === true,
     selected_artifact_update_context: artifactReviewContext?.selected_artifact_update_context === true,
+    generic_async_tool_blocked_reason: isStatusCheck
+      ? 'use_coreview_get_builder_status'
+      : 'use_coreview_request_artifact_update',
+    generic_async_tool_responded_safely: true,
     suppressed_tool_name: call.name,
     raw_transcript_excluded: true,
     raw_comment_text_excluded: true,
@@ -3740,14 +3759,21 @@ function suppressedGenericBuilderToolDiagnostic(
   call: GeminiSuppressedGenericBuilderToolCallInput,
   response: Record<string, unknown>,
 ): GeminiRelayToolDiagnosticPayload {
+  const isStatusCheck = call.name === 'check_async_task' || call.name === 'list_async_tasks';
   return {
     id: call.id ?? undefined,
     name: call.name,
     success: false,
     execution_rejected: true,
-    rejection_reason: 'artifact_review_generic_builder_tool_suppressed',
-    recovery_guidance: 'Use coreview_request_artifact_update for selected-artifact update requests during Review with Sophia.',
-    result_summary: 'Generic builder tool suppressed for selected-artifact review update.',
+    rejection_reason: isStatusCheck
+      ? 'artifact_review_generic_async_status_redirected'
+      : 'artifact_review_generic_builder_tool_suppressed',
+    recovery_guidance: isStatusCheck
+      ? 'Use coreview_get_builder_status for artifact update status. Do not expose internal ids, tool names, or recovery mechanics to the user.'
+      : 'Use coreview_request_artifact_update for selected-artifact update requests during Review with Sophia. Do not expose internal ids, tool names, or recovery mechanics to the user.',
+    result_summary: isStatusCheck
+      ? 'Artifact update status redirected to Coreview status.'
+      : 'Selected-artifact update redirected to Coreview builder action.',
     response,
   };
 }
@@ -4586,13 +4612,21 @@ function promptOrToolLeakageMarker(text: string): string | null {
   if (/\bemit_artifact\b/u.test(normalized)) return 'emit_artifact';
   if (/\bread_artifact_text\b/u.test(normalized)) return 'read_artifact_text';
   if (/\bcoreview_request_artifact_update\b/u.test(normalized)) return 'coreview_request_artifact_update';
+  if (/\bcoreview_get_builder_status\b/u.test(normalized)) return 'coreview_get_builder_status';
+  if (/\b(?:start_builder_task|check_async_task|update_async_task|cancel_async_task|list_async_tasks)\b/u.test(normalized)) return 'generic_builder_lifecycle_tool';
   if (/\bartifact_id\b/u.test(normalized)) return 'artifact_id';
+  if (/\btask[_\s-]?id\b/u.test(normalized)) return 'task_id';
+  if (/\basync\s+task\b/u.test(normalized)) return 'async_task';
+  if (/\btracking\s+that\s+specific\s+task\b/u.test(normalized)) return 'task_tracking_recovery';
+  if (/\b(?:listing\s+all\s+(?:the\s+)?builds|try\s+listing\s+all\s+(?:the\s+)?builds|list(?:ing)?\s+builds)\b/u.test(normalized)) return 'list_builds_recovery';
   if (/\bactive_goal\s*:/u.test(normalized)) return 'active_goal';
   if (/\btool_call_id\b/u.test(normalized)) return 'tool_call_id';
+  if (/\btool\s+(?:call|response|result|name|mechanic|mechanics)\b/u.test(normalized)) return 'tool_mechanics';
   if (/^(?:tool\s+)?schema$/u.test(normalized) || /\btool\s+schema\b/u.test(normalized)) return 'tool_schema';
-  if (/\b(?:system|developer|internal)\s+prompt\b/u.test(normalized)) return 'internal_prompt';
+  if (/\b(?:system|developer|internal|behavior)\s+prompt\b/u.test(normalized)) return 'internal_prompt';
   if (/\bdeveloper\s+instructions\b/u.test(normalized)) return 'internal_prompt';
   if (/\bfunction\s*declarations?\b|\bfunctiondeclarations\b|\btool\s+payload\b/u.test(normalized)) return 'tool_schema';
+  if (/\btool\b/u.test(normalized)) return 'tool_word';
   return null;
 }
 
@@ -5173,18 +5207,22 @@ function redactToolCallArgsForTelemetry(
 
   if (toolName && GEMINI_GENERIC_BUILDER_TOOL_NAMES.has(toolName) && args) {
     const description = stringFromAnyKey(args, 'description', 'task', 'brief');
-    const taskId = stringFromAnyKey(args, 'task_id', 'taskId');
-    const runId = stringFromAnyKey(args, 'run_id', 'runId');
+    const rawTaskId = stringFromAnyKey(args, 'task_id', 'taskId');
+    const rawRunId = stringFromAnyKey(args, 'run_id', 'runId');
+    const taskId = rawTaskId && !isPlaceholderBuilderTaskId(rawTaskId) ? rawTaskId : null;
+    const runId = rawRunId && !isPlaceholderBuilderTaskId(rawRunId) ? rawRunId : null;
     return {
       description_length: description?.length ?? 0,
       description_fingerprint: description ? telemetryTextFingerprint(description) : null,
       task_type: stringFromAnyKey(args, 'task_type', 'taskType'),
       task_id: taskId,
       taskId,
-      task_id_present: Boolean(taskId),
+      task_id_present: Boolean(rawTaskId),
+      task_id_placeholder: Boolean(rawTaskId && isPlaceholderBuilderTaskId(rawTaskId)),
       run_id: runId,
       runId,
-      run_id_present: Boolean(runId),
+      run_id_present: Boolean(rawRunId),
+      run_id_placeholder: Boolean(rawRunId && isPlaceholderBuilderTaskId(rawRunId)),
       raw_description_excluded: true,
       raw_artifact_text_excluded: true,
       raw_frame_excluded: true,
@@ -5451,7 +5489,23 @@ function trackedTaskIdsFromDiagnostic(diagnostic: GeminiRelayToolDiagnosticPaylo
 }
 
 function taskIdFromToolCallArgs(args: Record<string, unknown> | null): string | null {
-  return stringFromAnyKey(args, 'task_id', 'taskId');
+  const taskId = stringFromAnyKey(args, 'task_id', 'taskId');
+  return taskId && !isPlaceholderBuilderTaskId(taskId) ? taskId : null;
+}
+
+function isPlaceholderBuilderTaskId(value: string | null | undefined): boolean {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (!normalized) {
+    return false;
+  }
+  return new Set([
+    'builder-thread-id',
+    'thread-id',
+    'task-id',
+    'builder-task-id',
+    'async-task-id',
+    'placeholder',
+  ]).has(normalized);
 }
 
 function taskIdFromResponseRecord(response: Record<string, unknown> | null): string | null {

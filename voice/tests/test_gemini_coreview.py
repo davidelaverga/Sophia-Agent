@@ -298,6 +298,38 @@ async def test_coreview_action_tool_loop_returns_browser_owned_fallback(monkeypa
     assert "user asked for page two" not in str(diagnostic)
 
 
+@pytest.mark.anyio
+async def test_placeholder_check_async_task_returns_safe_rejected_response_without_raw_id() -> None:
+    executor = GeminiDogfoodToolExecutor()
+
+    execution = await executor.execute(
+        GeminiLiveFunctionCall(
+            call_id="check-placeholder-1",
+            name="check_async_task",
+            args={"task_id": "builder-thread-id"},
+        ),
+        session_id="session-1",
+        user_id="user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="gemini",
+        async_tasks={},
+    )
+    diagnostic = execution.diagnostic()
+
+    assert execution.success is False
+    assert execution.response["ok"] is False
+    assert execution.response["error_type"] == "placeholder_task_id"
+    assert execution.response["generic_async_tool_responded_safely"] is True
+    assert execution.response["generic_async_tool_blocked_reason"] == "placeholder_task_id"
+    assert execution.response["raw_task_id_excluded"] is True
+    assert "task_id" not in execution.response
+    assert "tracked_task_ids" not in execution.response
+    assert "builder-thread-id" not in str(execution.response)
+    assert "builder-thread-id" not in str(diagnostic)
+    assert "list_async_tasks" not in str(execution.response)
+    assert "listing all" not in str(execution.response).lower()
+
+
 def test_explicit_overlay_builder_is_empty_when_disabled() -> None:
     assert build_gemini_coreview_prompt_overlay(enabled=False) == ""
     assert "<gemini_coreview_artifact_policy>" in build_gemini_coreview_prompt_overlay(enabled=True)

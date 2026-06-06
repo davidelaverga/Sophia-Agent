@@ -2033,10 +2033,14 @@ async def test_browser_relay_unknown_lifecycle_task_id_returns_recoverable_tool_
     assert function_response["name"] == tool_name
     assert function_response["response"]["ok"] is False
     assert function_response["response"]["error_type"] == "unknown_task_id"
-    assert function_response["response"]["task_id"] == "789654321"
-    assert function_response["response"]["tracked_task_ids"] == []
-    assert "Do not invent task ids" in function_response["response"]["recovery_guidance"]
-    assert "start_builder_task first" in function_response["response"]["recovery_guidance"]
+    assert function_response["response"]["tracked_task_count"] == 0
+    assert function_response["response"]["generic_async_tool_responded_safely"] is True
+    assert function_response["response"]["raw_task_id_excluded"] is True
+    assert "task_id" not in function_response["response"]
+    assert "tracked_task_ids" not in function_response["response"]
+    assert "789654321" not in str(function_response["response"])
+    assert "Coreview status action" in function_response["response"]["recovery_guidance"]
+    assert "list_async_tasks" not in function_response["response"]["recovery_guidance"]
     diagnostic = response["tool_diagnostics"][0]
     assert diagnostic["success"] is False
     assert diagnostic["execution_rejected"] is True
@@ -2079,12 +2083,16 @@ async def test_lifecycle_unknown_task_id_reports_current_trusted_session_ids() -
 
     assert execution.success is False
     assert execution.response["ok"] is False
-    assert execution.response["task_id"] == "other-session-task"
-    assert execution.response["tracked_task_ids"] == ["current-session-task"]
+    assert execution.response["tracked_task_count"] == 1
+    assert execution.response["raw_task_id_excluded"] is True
+    assert "task_id" not in execution.response
+    assert "tracked_task_ids" not in execution.response
+    assert "other-session-task" not in str(execution.response)
     action = gemini_tool_loop.gemini_tool_response_client_action([execution])
     function_response = action["payload"]["toolResponse"]["functionResponses"][0]
     assert function_response["response"]["error_type"] == "unknown_task_id"
-    assert function_response["response"]["tracked_task_ids"] == ["current-session-task"]
+    assert function_response["response"]["tracked_task_count"] == 1
+    assert "tracked_task_ids" not in function_response["response"]
 
 
 @pytest.mark.anyio

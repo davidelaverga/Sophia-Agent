@@ -84,6 +84,9 @@ export type CoreviewVisualTelemetry = {
   builderLastWorkspaceEventType: string | null
   coreviewBuilderActionsEnabled: boolean
   coreviewBuilderActionsBlockedReason: string | null
+  coreviewBuilderToolsExposed: boolean
+  coreviewBuilderGenericToolsSuppressed: boolean
+  coreviewBuilderActiveTaskState: string | null
   coreviewBuilderUpdateIntentDetected: boolean
   coreviewBuilderUpdateAttempted: boolean
   coreviewBuilderUpdateResult: string | null
@@ -97,6 +100,9 @@ export type CoreviewVisualTelemetry = {
   coreviewBuilderCancelResult: string | null
   coreviewBuilderCancelBlockedReason: string | null
   coreviewBuilderStatusResult: string | null
+  coreviewBuilderStatusToolResult: string | null
+  genericAsyncToolBlockedReason: string | null
+  genericAsyncToolRespondedSafely: boolean
   coreviewBuilderPreservedMic: boolean | null
   coreviewBuilderPreservedReview: boolean | null
   artifactRebindAttempted: boolean
@@ -1329,6 +1335,9 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       builderLastWorkspaceEventType: null,
       coreviewBuilderActionsEnabled: false,
       coreviewBuilderActionsBlockedReason: null,
+      coreviewBuilderToolsExposed: false,
+      coreviewBuilderGenericToolsSuppressed: false,
+      coreviewBuilderActiveTaskState: null,
       coreviewBuilderUpdateIntentDetected: false,
       coreviewBuilderUpdateAttempted: false,
       coreviewBuilderUpdateResult: null,
@@ -1342,6 +1351,9 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       coreviewBuilderCancelResult: null,
       coreviewBuilderCancelBlockedReason: null,
       coreviewBuilderStatusResult: null,
+      coreviewBuilderStatusToolResult: null,
+      genericAsyncToolBlockedReason: null,
+      genericAsyncToolRespondedSafely: false,
       coreviewBuilderPreservedMic: null,
       coreviewBuilderPreservedReview: null,
       artifactRebindAttempted: false,
@@ -1633,6 +1645,22 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((value): value is Record<string, unknown> => value !== null)
   const latestSetupTools = setupToolEvents.at(-1) ?? null
   const setupReviewToolsExposed = asStringArray(latestSetupTools?.reviewToolsExposed) ?? []
+  const setupCoreviewBuilderToolsExposed = setupReviewToolsExposed.some((name) => (
+    GEMINI_COREVIEW_BUILDER_TOOL_NAMES.has(name)
+  ))
+  const setupGenericBuilderToolsExposed = setupReviewToolsExposed.some((name) => (
+    GEMINI_BUILDER_TOOL_NAMES.has(name)
+  ))
+  const genericAsyncToolDiagnosticRecords = activeEvents
+    .filter((event) => event.name === "gemini-tool-loop-diagnostic" && GEMINI_BUILDER_TOOL_NAMES.has(geminiToolName(event) ?? ""))
+    .map((event) => {
+      const diagnostic = asRecord(eventData(event)?.diagnostic)
+      const backendResponse = toolBackendResponseFromDiagnostic(diagnostic)
+      return {
+        ...(diagnostic ?? {}),
+        ...(backendResponse ?? {}),
+      }
+    })
   const keyboardShortcutEvents = activeEvents
     .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-keyboard-shortcut")
     .map((event) => event.payloadRecord)
@@ -1754,10 +1782,15 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.builderLastWorkspaceEventType = asString(latestCoreviewBuilderAction?.builderLastWorkspaceEventType)
     ?? asString(latestWorkspaceEvent?.builderLastWorkspaceEventType)
     ?? null
+  visual.coreviewBuilderToolsExposed = asBoolean(latestSetupTools?.coreviewBuilderToolsExposed)
+    ?? setupCoreviewBuilderToolsExposed
+  visual.coreviewBuilderGenericToolsSuppressed = asBoolean(latestSetupTools?.coreviewBuilderGenericToolsSuppressed)
+    ?? (visual.coreviewBuilderToolsExposed && !setupGenericBuilderToolsExposed)
   visual.coreviewBuilderActionsEnabled = coreviewBuilderActionEvents.some((event) => (
     asBoolean(event.coreviewBuilderActionsEnabled) === true
-  )) || setupReviewToolsExposed.some((name) => GEMINI_COREVIEW_BUILDER_TOOL_NAMES.has(name))
+  )) || visual.coreviewBuilderToolsExposed
   visual.coreviewBuilderActionsBlockedReason = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewBuilderActionsBlockedReason")
+  visual.coreviewBuilderActiveTaskState = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewBuilderActiveTaskState")
   visual.coreviewBuilderUpdateIntentDetected = coreviewBuilderActionEvents.some((event) => (
     asBoolean(event.coreviewBuilderUpdateIntentDetected) === true
   ))
@@ -1785,6 +1818,15 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.coreviewBuilderCancelResult = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewBuilderCancelResult")
   visual.coreviewBuilderCancelBlockedReason = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewBuilderCancelBlockedReason")
   visual.coreviewBuilderStatusResult = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewBuilderStatusResult")
+  visual.coreviewBuilderStatusToolResult = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewBuilderStatusToolResult")
+    ?? visual.coreviewBuilderStatusResult
+  visual.genericAsyncToolBlockedReason = latestStringFromRecords(genericAsyncToolDiagnosticRecords, "generic_async_tool_blocked_reason")
+    ?? latestStringFromRecords(genericAsyncToolDiagnosticRecords, "genericAsyncToolBlockedReason")
+    ?? latestStringFromRecords(coreviewBuilderActionEvents, "genericAsyncToolBlockedReason")
+  visual.genericAsyncToolRespondedSafely = genericAsyncToolDiagnosticRecords.some((event) => (
+    asBoolean(event.generic_async_tool_responded_safely) === true
+      || asBoolean(event.genericAsyncToolRespondedSafely) === true
+  )) || coreviewBuilderActionEvents.some((event) => asBoolean(event.genericAsyncToolRespondedSafely) === true)
   visual.coreviewBuilderPreservedMic = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewBuilderPreservedMic")
   visual.coreviewBuilderPreservedReview = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewBuilderPreservedReview")
   visual.artifactRebindAttempted = latestRebindEvent !== null

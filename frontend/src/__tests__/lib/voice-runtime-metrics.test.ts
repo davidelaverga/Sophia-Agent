@@ -2683,6 +2683,81 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(JSON.stringify(metrics.coreview.visual)).not.toContain('change the font');
   });
 
+  it('reports Coreview builder availability and safe generic async rejection telemetry', () => {
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events: [
+        buildEvent({
+          seq: 1,
+          at: '2026-06-06T12:00:00.000Z',
+          category: 'voice-session',
+          name: 'gemini-setup-tools',
+          payload: {
+            reviewToolsExposed: [
+              'coreview_request_artifact_update',
+              'coreview_cancel_builder_task',
+              'coreview_get_builder_status',
+            ],
+            coreviewBuilderToolsExposed: true,
+            coreviewBuilderGenericToolsSuppressed: true,
+          },
+        }),
+        buildEvent({
+          seq: 2,
+          at: '2026-06-06T12:00:01.000Z',
+          category: 'voice-session',
+          name: 'coreview-builder-action',
+          payload: {
+            coreviewBuilderActionsEnabled: true,
+            coreviewBuilderActionsBlockedReason: null,
+            coreviewBuilderActiveTaskState: 'starting',
+            coreviewBuilderStatusResult: 'starting',
+            coreviewBuilderStatusToolResult: 'status',
+            rawArtifactTextExcluded: true,
+            rawCommentTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        }),
+        buildEvent({
+          seq: 3,
+          at: '2026-06-06T12:00:02.000Z',
+          category: 'voice-session',
+          name: 'gemini-tool-loop-diagnostic',
+          payload: {
+            runtime: 'gemini_live',
+            phase: 'tool_response_sent',
+            toolName: 'check_async_task',
+            diagnostic: {
+              phase: 'tool_response_sent',
+              toolCall: { name: 'check_async_task' },
+              response: {
+                ok: false,
+                rejection_reason: 'artifact_review_generic_async_status_redirected',
+                generic_async_tool_blocked_reason: 'use_coreview_get_builder_status',
+                generic_async_tool_responded_safely: true,
+                raw_task_id_excluded: true,
+              },
+            },
+          },
+        }),
+      ],
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-06-06T12:00:04.000Z'),
+    });
+
+    expect(metrics.coreview.visual).toMatchObject({
+      coreviewBuilderActionsEnabled: true,
+      coreviewBuilderActionsBlockedReason: null,
+      coreviewBuilderToolsExposed: true,
+      coreviewBuilderGenericToolsSuppressed: true,
+      coreviewBuilderActiveTaskState: 'starting',
+      coreviewBuilderStatusResult: 'starting',
+      coreviewBuilderStatusToolResult: 'status',
+      genericAsyncToolBlockedReason: 'use_coreview_get_builder_status',
+      genericAsyncToolRespondedSafely: true,
+    });
+  });
+
   it('reports builder snapshot protection and thumbnail annotation indicators', () => {
     const metrics = buildVoiceDeveloperMetrics({
       stage: 'listening',

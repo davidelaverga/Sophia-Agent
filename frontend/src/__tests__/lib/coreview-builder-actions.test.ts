@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { buildArtifactViewSignature } from "../../app/lib/artifact-renderers"
 import type { CoreviewCurrentView } from "../../app/lib/coreview-actions"
@@ -8,6 +8,7 @@ import {
 } from "../../app/lib/coreview-artifact-capabilities"
 import {
   buildCoreviewBuilderUpdatePrompt,
+  clearCoreviewBuilderTaskStateForTests,
   createCoreviewBuilderActionBus,
   resolveCoreviewBuilderActionAvailability,
   type CoreviewBuilderActionAdapter,
@@ -76,13 +77,14 @@ function createHarness(options: {
   activeTask?: ReturnType<typeof createActiveTask> | null
   startOk?: boolean
   startTaskId?: string | null
+  startRunId?: string | null
   cancelOk?: boolean
 } = {}) {
   const events: CoreviewBuilderWorkspaceEventInput[] = []
   const start = vi.fn<CoreviewBuilderActionAdapter["startBuilderTask"]>(() => ({
     ok: options.startOk ?? true,
-    taskId: options.startTaskId ?? "task-1",
-    runId: "run-1",
+    taskId: Object.prototype.hasOwnProperty.call(options, "startTaskId") ? options.startTaskId ?? null : "task-1",
+    runId: Object.prototype.hasOwnProperty.call(options, "startRunId") ? options.startRunId ?? null : "run-1",
     userFacingMessage: "Sophia is updating this artifact.",
   }))
   const cancel = vi.fn<CoreviewBuilderActionAdapter["cancelBuilderTask"]>(() => ({
@@ -127,6 +129,10 @@ function createActiveTask() {
 }
 
 describe("Coreview builder action bus", () => {
+  beforeEach(() => {
+    clearCoreviewBuilderTaskStateForTests()
+  })
+
   it("enables builder actions for selected HTML artifacts without annotation support", () => {
     const view = createView({
       rendererKind: "html",
@@ -212,7 +218,8 @@ describe("Coreview builder action bus", () => {
     })
 
     expect(availability.enabled).toBe(false)
-    expect(availability.blockedReason).toContain("PDF native editing")
+    expect(availability.blockedReason).toBe("unsupported_renderer")
+    expect(availability.unsupportedUpdateReason).toContain("PDF native editing")
     expect(availability.supportsArtifactUpdate).toBe(false)
   })
 
@@ -260,6 +267,79 @@ describe("Coreview builder action bus", () => {
     expect(JSON.stringify(result)).not.toContain("emit_artifact")
   })
 
+  it("stores active Coreview builder task state after requesting an update", async () => {
+    const harness = createHarness()
+
+    await harness.bus.requestArtifactUpdate({
+      userUpdateRequest: "make the cards more premium",
+    })
+
+    const status = harness.bus.getBuilderStatus("user")
+    expect(status).toMatchObject({
+      ok: true,
+      action: "coreview_get_builder_status",
+      result: "status",
+      taskId: "task-1",
+      runId: "run-1",
+      status: {
+        phase: "running",
+        taskId: "task-1",
+        runId: "run-1",
+      },
+    })
+  })
+
+  it("returns starting status after request when the builder task id is not known yet", async () => {
+    const harness = createHarness({ startTaskId: null, startRunId: null })
+
+    const request = await harness.bus.requestArtifactUpdate({
+      userUpdateRequest: "make the cards more premium",
+    })
+    const status = harness.bus.getBuilderStatus("user")
+
+    expect(request).toMatchObject({
+      ok: true,
+      result: "update_requested",
+      taskId: null,
+      runId: null,
+    })
+    expect(status).toMatchObject({
+      ok: true,
+      action: "coreview_get_builder_status",
+      result: "status",
+      status: {
+        phase: "starting",
+        taskId: null,
+        runId: null,
+        cancellable: false,
+      },
+      userFacingMessage: "The update has not started yet. I'll keep the review open.",
+    })
+    expect(JSON.stringify(status)).not.toContain("builder-thread-id")
+  })
+
+  it("reconciles pending Coreview builder state when builder ids arrive from canvas state", async () => {
+    const pendingHarness = createHarness({ startTaskId: null, startRunId: null })
+    await pendingHarness.bus.requestArtifactUpdate({
+      userUpdateRequest: "make the cards more premium",
+    })
+    const reconciledHarness = createHarness({ activeTask: createActiveTask(), startTaskId: null, startRunId: null })
+
+    const status = reconciledHarness.bus.getBuilderStatus("user")
+
+    expect(status).toMatchObject({
+      ok: true,
+      result: "status",
+      taskId: "task-1",
+      runId: "run-1",
+      status: {
+        phase: "running",
+        taskId: "task-1",
+        runId: "run-1",
+      },
+    })
+  })
+
   it("coreview_request_artifact_update fails safely with no selected artifact", async () => {
     const harness = createHarness({
       current: createView({ artifactId: null, artifactPath: null }),
@@ -303,8 +383,12 @@ describe("Coreview builder action bus", () => {
     expect(harness.events).toHaveLength(0)
   })
 
-  it("cancel emits cancel requested and cancelled events", async () => {
-    const harness = createHarness({ activeTask: createActiveTask() })
+  it("cancel uses active Coreview builder task state from the update request", async () => {
+    const harness = createHarness()
+
+    await harness.bus.requestArtifactUpdate({
+      userUpdateRequest: "make the cards more premium",
+    })
 
     const result = await harness.bus.cancelBuilderTask("user")
 
@@ -316,7 +400,13 @@ describe("Coreview builder action bus", () => {
       runId: "run-1",
     })
     expect(harness.cancel).toHaveBeenCalledTimes(1)
+    expect(harness.cancel.mock.calls[0]?.[0].task).toMatchObject({
+      taskId: "task-1",
+      runId: "run-1",
+    })
     expect(harness.events.map((event) => event.type)).toEqual([
+      "builder.update_requested",
+      "builder.task_started",
       "builder.task_cancel_requested",
       "builder.task_cancelled",
     ])
@@ -337,9 +427,33 @@ describe("Coreview builder action bus", () => {
     expect(harness.events).toHaveLength(0)
   })
 
-  it("returns status without exposing raw artifact text", () => {
+  it("coreview_get_builder_status with no active task returns no_active_builder_task", () => {
+    const harness = createHarness()
+
+    const result = harness.bus.getBuilderStatus("user")
+
+    expect(result).toMatchObject({
+      ok: true,
+      action: "coreview_get_builder_status",
+      result: "no_active_builder_task",
+      blockedReason: "no_active_builder_task",
+      userFacingMessage: "I don't see an active artifact update right now.",
+      status: {
+        phase: "idle",
+        taskId: null,
+        runId: null,
+        cancellable: false,
+      },
+    })
+    expect(JSON.stringify(result)).not.toMatch(/task id|tracking that specific task|listing all/i)
+  })
+
+  it("returns status without exposing raw artifact text", async () => {
     const harness = createHarness({ activeTask: createActiveTask() })
 
+    await harness.bus.requestArtifactUpdate({
+      userUpdateRequest: "make the cards more premium",
+    })
     const result = harness.bus.getBuilderStatus("user")
 
     expect(result).toMatchObject({

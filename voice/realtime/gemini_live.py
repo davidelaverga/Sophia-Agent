@@ -118,7 +118,13 @@ _JSONISH_TOOL_SYNTAX_LEAK_RE = re.compile(
 _PROMPT_OR_TOOL_LEAK_RE = re.compile(
     r"(?:\bactive_goal\s*:|\btool_call_id\b|\bsystem\s+prompt\b|\bdeveloper\s+instructions\b|"
     r"\binternal\s+prompt\b|\btool\s+schema\b|\bfunction\s+declarations?\b|\bfunctiondeclarations\b|"
-    r"\b(?:read_artifact_text|coreview_set_view|coreview_refresh_view|coreview_get_current_view)\b|^\s*schema\s*$)",
+    r"\bbehavior\s+prompt\b|\btask[_\s-]?id\b|\basync\s+task\b|"
+    r"\btracking\s+that\s+specific\s+task\b|"
+    r"\b(?:try\s+listing\s+all\s+(?:the\s+)?builds|listing\s+all\s+(?:the\s+)?builds|list(?:ing)?\s+builds)\b|"
+    r"\btool\s+(?:call|response|result|name|mechanic|mechanics)\b|"
+    r"\b(?:read_artifact_text|coreview_set_view|coreview_refresh_view|coreview_get_current_view|"
+    r"coreview_request_artifact_update|coreview_get_builder_status|coreview_cancel_builder_task|"
+    r"start_builder_task|check_async_task|update_async_task|cancel_async_task|list_async_tasks)\b|^\s*schema\s*$)",
     re.IGNORECASE,
 )
 

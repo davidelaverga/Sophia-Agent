@@ -168,6 +168,8 @@ export type GeminiRuntimeTelemetry = {
   coreviewToolVisualFreshAfterResult?: boolean | null
   reviewToolsExposed?: string[]
   emitArtifactExposedDuringReview?: boolean
+  coreviewBuilderToolsExposed?: boolean
+  coreviewBuilderGenericToolsSuppressed?: boolean
   reviewToolTimedOut?: boolean
   reviewToolTimeoutName?: string | null
   reviewToolTimeoutResultSent?: boolean

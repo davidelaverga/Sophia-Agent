@@ -41,6 +41,11 @@ export type CoreviewBuilderBlockedReason =
   | "unsupported_renderer"
   | "unsupported_update_mode"
   | "no_active_builder_task"
+  | "update_not_started"
+  | "missing_update_callback"
+  | "missing_cancel_callback"
+  | "review_not_active"
+  | "no_workspace_context"
   | "builder_action_unavailable"
   | "builder_start_failed"
   | "builder_cancel_failed"
@@ -54,6 +59,7 @@ export type CoreviewBuilderActionResultKind =
   | "failed"
   | "unsupported"
   | "no_active_builder_task"
+  | "update_not_started"
 
 export type CoreviewBuilderSourceActor = "user" | "sophia" | "system"
 
@@ -92,7 +98,7 @@ export interface CoreviewArtifactUpdateContext {
 }
 
 export interface CoreviewBuilderTaskStatus {
-  phase: "running" | "completed" | "failed" | "timed_out" | "cancelled" | "idle"
+  phase: "starting" | "running" | "completed" | "failed" | "timed_out" | "cancelled" | "idle"
   taskId: string | null
   runId: string | null
   cancellable: boolean
@@ -124,6 +130,22 @@ export interface CoreviewBuilderActionResult {
   rawArtifactTextExcluded: true
   rawFrameExcluded: true
   rawCommentTextExcluded: true
+}
+
+export interface CoreviewActiveBuilderTaskState {
+  workspaceKey: string
+  artifactStableIdentity: string | null
+  artifactPath: string | null
+  rendererKind: ArtifactRendererKind
+  requestedChangeSummary: string
+  builderTaskId: string | null
+  builderRunId: string | null
+  status: CoreviewBuilderTaskStatus["phase"]
+  phase: CoreviewBuilderTaskStatus["phase"]
+  currentStep: string | null
+  cancellable: boolean
+  startedAt: string
+  updatedAt: string
 }
 
 export interface CoreviewBuilderStartAdapterResult {
@@ -242,10 +264,13 @@ export function resolveCoreviewBuilderActionAvailability(
     return unavailable("no_selected_artifact")
   }
   if (!capabilitySummary || (!supportsArtifactUpdate && !supportsVersionedRebuild)) {
-    return unavailable(unsupportedUpdateReason ?? "unsupported_renderer")
+    return unavailable("unsupported_renderer")
   }
-  if (!input.requestArtifactUpdateWired || !input.cancelBuilderTaskWired) {
-    return unavailable("builder_action_unavailable")
+  if (!input.requestArtifactUpdateWired) {
+    return unavailable("missing_update_callback")
+  }
+  if (!input.cancelBuilderTaskWired) {
+    return unavailable("missing_cancel_callback")
   }
 
   return {
@@ -335,10 +360,24 @@ export function createCoreviewBuilderActionBus(adapter: CoreviewBuilderActionAda
       type: "builder.update_requested",
       context,
     })
+    upsertActiveCoreviewBuilderTaskState(context, {
+      status: "starting",
+      taskId: null,
+      runId: null,
+      cancellable: false,
+      currentStep: "Starting artifact update",
+    })
 
     const prompt = buildCoreviewBuilderUpdatePrompt(context)
     const started = await adapter.startBuilderTask({ context, prompt })
     if (!started.ok) {
+      upsertActiveCoreviewBuilderTaskState(context, {
+        status: "failed",
+        taskId: started.taskId ?? null,
+        runId: started.runId ?? null,
+        cancellable: false,
+        currentStep: "Artifact update could not start",
+      })
       adapter.emitWorkspaceEvent({
         type: "builder.task_failed",
         context,
@@ -357,6 +396,17 @@ export function createCoreviewBuilderActionBus(adapter: CoreviewBuilderActionAda
         context,
       })
     }
+
+    const startingStatus: CoreviewBuilderTaskStatus["phase"] = started.taskId || started.runId
+      ? "running"
+      : "starting"
+    upsertActiveCoreviewBuilderTaskState(context, {
+      status: startingStatus,
+      taskId: started.taskId ?? null,
+      runId: started.runId ?? null,
+      cancellable: Boolean(started.taskId),
+      currentStep: startingStatus === "starting" ? "Starting artifact update" : "Updating artifact",
+    })
 
     if (started.taskId || started.runId) {
       adapter.emitWorkspaceEvent({
@@ -381,22 +431,26 @@ export function createCoreviewBuilderActionBus(adapter: CoreviewBuilderActionAda
   const cancelBuilderTask = async (
     sourceActor: CoreviewBuilderSourceActor = "user",
   ): Promise<CoreviewBuilderActionResult> => {
-    const task = adapter.getActiveBuilderTask()
+    const context = buildUpdateContext({
+      userUpdateRequest: "Cancel this artifact update.",
+      sourceActor,
+    })
+    const trackedState = context ? reconcileActiveCoreviewBuilderTaskState(context, adapter.getActiveBuilderTask()) : null
+    const task = trackedState ? statusFromActiveCoreviewBuilderTaskState(trackedState) : null
     if (!task?.cancellable || !task.taskId) {
       return builderResult({
         ok: false,
         action: COREVIEW_CANCEL_BUILDER_TASK_TOOL_NAME,
         result: "no_active_builder_task",
         blockedReason: "no_active_builder_task",
-        userFacingMessage: "There is no active builder update to cancel.",
+        userFacingMessage: trackedState
+          ? "The update has not started yet. I'll keep the review open."
+          : "I don't see an active artifact update right now.",
+        context,
         status: task ?? idleStatus(),
       })
     }
 
-    const context = buildUpdateContext({
-      userUpdateRequest: "Cancel this artifact update.",
-      sourceActor,
-    })
     if (context) {
       adapter.emitWorkspaceEvent({
         type: "builder.task_cancel_requested",
@@ -408,6 +462,15 @@ export function createCoreviewBuilderActionBus(adapter: CoreviewBuilderActionAda
 
     const cancelled = await adapter.cancelBuilderTask({ context, task })
     const status = normalizeCancelStatus(cancelled.status)
+    if (context) {
+      upsertActiveCoreviewBuilderTaskState(context, {
+        status,
+        taskId: cancelled.taskId ?? task.taskId,
+        runId: cancelled.runId ?? task.runId,
+        cancellable: status === "running",
+        currentStep: status === "cancelled" ? "Artifact update cancelled" : task.currentStep,
+      })
+    }
     if (context) {
       adapter.emitWorkspaceEvent({
         type: status === "cancelled" ? "builder.task_cancelled" : "builder.task_failed",
@@ -438,9 +501,26 @@ export function createCoreviewBuilderActionBus(adapter: CoreviewBuilderActionAda
   }
 
   const getBuilderStatus = (
-    _sourceActor: CoreviewBuilderSourceActor = "user",
+    sourceActor: CoreviewBuilderSourceActor = "user",
   ): CoreviewBuilderActionResult => {
-    const task = adapter.getActiveBuilderTask() ?? idleStatus()
+    const context = buildUpdateContext({
+      userUpdateRequest: "Check this artifact update.",
+      sourceActor,
+    })
+    const trackedState = context ? reconcileActiveCoreviewBuilderTaskState(context, adapter.getActiveBuilderTask()) : null
+    if (!trackedState) {
+      return builderResult({
+        ok: true,
+        action: COREVIEW_GET_BUILDER_STATUS_TOOL_NAME,
+        result: "no_active_builder_task",
+        blockedReason: "no_active_builder_task",
+        userFacingMessage: "I don't see an active artifact update right now.",
+        context,
+        status: idleStatus(),
+        latestOutput: null,
+      })
+    }
+    const task = statusFromActiveCoreviewBuilderTaskState(trackedState)
     const latestOutput = adapter.getLatestOutput()
     return builderResult({
       ok: true,
@@ -448,9 +528,12 @@ export function createCoreviewBuilderActionBus(adapter: CoreviewBuilderActionAda
       result: "status",
       taskId: task.taskId,
       runId: task.runId,
-      userFacingMessage: task.phase === "idle"
-        ? "No artifact update is running."
-        : "Artifact update status is available.",
+      userFacingMessage: task.phase === "starting"
+        ? "The update has not started yet. I'll keep the review open."
+        : task.phase === "idle"
+          ? "I don't see an active artifact update right now."
+          : "Artifact update status is available.",
+      context,
       status: task,
       latestOutput,
     })
@@ -505,6 +588,17 @@ export function clearCoreviewBuilderToolBridgeForTests(): void {
   activeBuilderToolBridge = null
 }
 
+export function reconcileCoreviewBuilderTaskStateForContext(
+  context: CoreviewArtifactUpdateContext,
+  task: CoreviewBuilderTaskStatus | null,
+): CoreviewActiveBuilderTaskState | null {
+  return reconcileActiveCoreviewBuilderTaskState(context, task)
+}
+
+export function clearCoreviewBuilderTaskStateForTests(): void {
+  activeCoreviewBuilderTasks.clear()
+}
+
 export function isCoreviewBuilderToolName(name: string | null | undefined): name is CoreviewBuilderToolName {
   return COREVIEW_BUILDER_TOOL_NAMES.includes(name as CoreviewBuilderToolName)
 }
@@ -554,7 +648,7 @@ export function coreviewBuilderGeminiFunctionDeclarations(): Record<string, unkn
 
 export function coreviewBuilderToolExceptionResult(
   call: CoreviewBuilderToolCallInput,
-  error: unknown,
+  _error: unknown,
 ): CoreviewBuilderActionResult {
   return builderResult({
     ok: false,
@@ -563,9 +657,7 @@ export function coreviewBuilderToolExceptionResult(
     blockedReason: call.name === COREVIEW_CANCEL_BUILDER_TASK_TOOL_NAME
       ? "builder_cancel_failed"
       : "builder_action_unavailable",
-    userFacingMessage: error instanceof Error
-      ? `Coreview builder action failed: ${error.message}`
-      : "Coreview builder action failed.",
+    userFacingMessage: "Artifact update action failed.",
   })
 }
 
@@ -725,6 +817,90 @@ function idleStatus(): CoreviewBuilderTaskStatus {
   }
 }
 
+const activeCoreviewBuilderTasks = new Map<string, CoreviewActiveBuilderTaskState>()
+
+function activeCoreviewBuilderTaskKey(input: {
+  workspaceKey: string
+  artifactStableIdentity: string | null
+  artifactPath: string | null
+}): string {
+  return [
+    input.workspaceKey,
+    input.artifactStableIdentity ?? input.artifactPath ?? "no-artifact",
+  ].join("::")
+}
+
+function upsertActiveCoreviewBuilderTaskState(
+  context: CoreviewArtifactUpdateContext,
+  update: {
+    status: CoreviewBuilderTaskStatus["phase"]
+    taskId?: string | null
+    runId?: string | null
+    cancellable?: boolean | null
+    currentStep?: string | null
+  },
+): CoreviewActiveBuilderTaskState {
+  const key = activeCoreviewBuilderTaskKey(context)
+  const existing = activeCoreviewBuilderTasks.get(key)
+  const now = new Date().toISOString()
+  const taskId = update.taskId !== undefined ? normalizeTaskIdentity(update.taskId) : existing?.builderTaskId ?? null
+  const runId = update.runId !== undefined ? normalizeTaskIdentity(update.runId) : existing?.builderRunId ?? null
+  const state: CoreviewActiveBuilderTaskState = {
+    workspaceKey: context.workspaceKey,
+    artifactStableIdentity: context.artifactStableIdentity,
+    artifactPath: context.artifactPath,
+    rendererKind: context.rendererKind,
+    requestedChangeSummary: context.requestedChangeSummary,
+    builderTaskId: taskId,
+    builderRunId: runId,
+    status: update.status,
+    phase: update.status,
+    currentStep: update.currentStep !== undefined ? update.currentStep : existing?.currentStep ?? null,
+    cancellable: update.cancellable ?? (update.status === "running" && Boolean(taskId)),
+    startedAt: existing?.startedAt ?? now,
+    updatedAt: now,
+  }
+  activeCoreviewBuilderTasks.set(key, state)
+  return state
+}
+
+function reconcileActiveCoreviewBuilderTaskState(
+  context: CoreviewArtifactUpdateContext,
+  liveTask: CoreviewBuilderTaskStatus | null,
+): CoreviewActiveBuilderTaskState | null {
+  const key = activeCoreviewBuilderTaskKey(context)
+  const existing = activeCoreviewBuilderTasks.get(key)
+  if (!existing) {
+    return null
+  }
+  if (!liveTask) {
+    return existing
+  }
+  return upsertActiveCoreviewBuilderTaskState(context, {
+    status: liveTask.phase === "idle" ? existing.status : liveTask.phase,
+    taskId: liveTask.taskId ?? existing.builderTaskId,
+    runId: liveTask.runId ?? existing.builderRunId,
+    cancellable: liveTask.cancellable,
+    currentStep: liveTask.currentStep ?? existing.currentStep,
+  })
+}
+
+function statusFromActiveCoreviewBuilderTaskState(
+  state: CoreviewActiveBuilderTaskState,
+): CoreviewBuilderTaskStatus {
+  return {
+    phase: state.phase,
+    taskId: state.builderTaskId,
+    runId: state.builderRunId,
+    cancellable: state.cancellable && state.phase === "running" && Boolean(state.builderTaskId),
+    currentStep: state.currentStep,
+  }
+}
+
+function normalizeTaskIdentity(value: string | null | undefined): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null
+}
+
 function builderResult(
   input: Omit<
     CoreviewBuilderActionResult,
@@ -752,6 +928,6 @@ function unavailableBuilderToolResult(toolName: CoreviewBuilderToolName): Corevi
       ? "no_active_builder_task"
       : "failed",
     blockedReason: "builder_action_unavailable",
-    userFacingMessage: "Coreview builder actions are unavailable right now.",
+    userFacingMessage: "Artifact update actions are unavailable right now.",
   })
 }

@@ -94,11 +94,12 @@ class GeminiDogfoodToolError(ValueError):
 class GeminiBuilderTaskNotTrackedError(GeminiDogfoodToolError):
     """Raised when a lifecycle call references no task in the trusted session."""
 
-    def __init__(self, task_id: str, tracked_task_ids: list[str]) -> None:
+    def __init__(self, task_id: str, tracked_task_ids: list[str], *, placeholder: bool = False) -> None:
         self.task_id = task_id
         self.tracked_task_ids = tracked_task_ids
+        self.placeholder = placeholder
         super().__init__(
-            f"No tracked task exists for task_id {task_id!r} in this trusted Gemini dogfood session."
+            "No active build is available for that request."
         )
 
 
@@ -1204,11 +1205,27 @@ def _active_builder_task_id(async_tasks: Mapping[str, dict[str, Any]]) -> str | 
 
 
 def _tracked_task(task_id: str, async_tasks: Mapping[str, dict[str, Any]]) -> dict[str, Any]:
-    task = async_tasks.get(task_id.strip())
+    normalized_task_id = task_id.strip()
+    placeholder = _is_placeholder_task_id(normalized_task_id)
+    task = None if placeholder else async_tasks.get(normalized_task_id)
     if not isinstance(task, Mapping):
         tracked_task_ids = sorted(str(known_task_id) for known_task_id in async_tasks if str(known_task_id).strip())
-        raise GeminiBuilderTaskNotTrackedError(task_id, tracked_task_ids)
+        raise GeminiBuilderTaskNotTrackedError(normalized_task_id, tracked_task_ids, placeholder=placeholder)
     return dict(task)
+
+
+def _is_placeholder_task_id(task_id: str) -> bool:
+    normalized = task_id.strip().lower()
+    if not normalized:
+        return True
+    return normalized in {
+        "builder-thread-id",
+        "thread-id",
+        "task-id",
+        "builder-task-id",
+        "async-task-id",
+        "placeholder",
+    }
 
 
 def _recoverable_unknown_task_execution(
@@ -1221,25 +1238,27 @@ def _recoverable_unknown_task_execution(
     provider: str,
 ) -> GeminiDogfoodToolExecution:
     guidance = (
-        "No tracked task exists for that task_id in this trusted session. Do not invent task ids. "
-        "For a new build/create/generate/research request, call start_builder_task first. "
-        "If the user is asking about an existing task and you lost the identifier, call list_async_tasks."
+        "For selected-artifact review status, use the Coreview status action. "
+        "Keep any user-facing reply product-level: I don't see an active artifact update right now. "
+        "Do not mention internal identifiers or recovery mechanics."
     )
     response = {
         "ok": False,
         "tool": call.name,
         "rejected": True,
-        "error_type": "unknown_task_id",
-        "error_message": str(exc),
-        "task_id": exc.task_id,
+        "error_type": "placeholder_task_id" if exc.placeholder else "unknown_task_id",
+        "error_message": "No active build is available for that request.",
         "status": "rejected",
-        "tracked_task_ids": exc.tracked_task_ids,
+        "tracked_task_count": len(exc.tracked_task_ids),
         "recovery_guidance": guidance,
         "session_id": session_id,
         "user_id": user_id,
         "runtime": runtime_mode.value,
         "provider": provider,
-        "result_summary": f"Lifecycle tool rejected: no tracked task exists for task_id {exc.task_id!r}.",
+        "generic_async_tool_blocked_reason": "placeholder_task_id" if exc.placeholder else "unknown_task_id",
+        "generic_async_tool_responded_safely": True,
+        "raw_task_id_excluded": True,
+        "result_summary": "No active build is available for that request.",
     }
     return GeminiDogfoodToolExecution(
         call=call,

@@ -47,6 +47,7 @@ import {
   parseArtifactReviewVoiceCommand,
   parseArtifactReviewVoiceCommands,
   recordSophiaCaptureEvent,
+  reconcileCoreviewBuilderTaskStateForContext,
   registerCoreviewBuilderToolBridge,
   registerCoreviewToolBridge,
   resolveCoreviewBuilderActionAvailability,
@@ -2056,6 +2057,9 @@ export function PresenceArtifactPanel({
     )
     const isUpdate = result.action === "coreview_request_artifact_update"
     const isCancel = result.action === "coreview_cancel_builder_task"
+    const isStatus = result.action === "coreview_get_builder_status"
+    const activeTaskState = result.status?.phase
+      ?? (result.result === "task_started" ? "running" : result.result === "update_requested" ? "starting" : null)
     recordSophiaCaptureEvent({
       category: "voice-session",
       name: "coreview-builder-action",
@@ -2063,7 +2067,13 @@ export function PresenceArtifactPanel({
         sessionId: sessionId ?? null,
         normalSessionId: normalSessionId ?? null,
         threadId: threadId ?? null,
-        coreviewBuilderActionsEnabled: true,
+        coreviewBuilderActionsEnabled: coreviewBuilderActionAvailability.enabled,
+        coreviewBuilderActionsBlockedReason: coreviewBuilderActionAvailability.enabled
+          ? null
+          : coreviewBuilderActionAvailability.blockedReason,
+        coreviewBuilderToolsExposed: coreviewBuilderActionAvailability.enabled,
+        coreviewBuilderGenericToolsSuppressed: coreviewBuilderActionAvailability.enabled,
+        coreviewBuilderActiveTaskState: activeTaskState,
         coreviewBuilderUpdateIntentDetected: isUpdate,
         coreviewBuilderUpdateAttempted: isUpdate,
         coreviewBuilderUpdateResult: isUpdate ? result.result : null,
@@ -2076,7 +2086,8 @@ export function PresenceArtifactPanel({
         coreviewBuilderCancelAttempted: isCancel && result.result !== "no_active_builder_task",
         coreviewBuilderCancelResult: isCancel ? result.result : null,
         coreviewBuilderCancelBlockedReason: isCancel ? result.blockedReason ?? null : null,
-        coreviewBuilderStatusResult: result.action === "coreview_get_builder_status" ? result.status?.phase ?? "idle" : null,
+        coreviewBuilderStatusResult: isStatus ? result.status?.phase ?? "idle" : null,
+        coreviewBuilderStatusToolResult: isStatus ? result.result : null,
         coreviewBuilderPreservedMic: result.preservedMic,
         coreviewBuilderPreservedReview: result.preservedReview,
         builderWorkspaceEventCount: telemetry.builderWorkspaceEventCount,
@@ -2093,6 +2104,8 @@ export function PresenceArtifactPanel({
     })
   }, [
     artifactStableIdentity,
+    coreviewBuilderActionAvailability.blockedReason,
+    coreviewBuilderActionAvailability.enabled,
     coreviewArtifactKey,
     coreviewShareState,
     coreviewWorkspaceKey,
@@ -2123,6 +2136,7 @@ export function PresenceArtifactPanel({
       unsupportedUpdateReason: coreviewBuilderActionAvailability.unsupportedUpdateReason,
       updateCallback: Boolean(onCoreviewBuilderUpdateRequest),
       cancelCallback: Boolean(onCoreviewBuilderCancelRequest),
+      activeTaskState: activeCoreviewBuilderTask?.phase ?? null,
     })
     if (signature === lastCoreviewBuilderAvailabilitySignatureRef.current) {
       return
@@ -2139,6 +2153,9 @@ export function PresenceArtifactPanel({
         coreviewBuilderActionsAvailabilityReported: true,
         coreviewBuilderActionsEnabled: coreviewBuilderActionAvailability.enabled,
         coreviewBuilderActionsBlockedReason: coreviewBuilderActionAvailability.blockedReason,
+        coreviewBuilderToolsExposed: coreviewBuilderActionAvailability.enabled,
+        coreviewBuilderGenericToolsSuppressed: coreviewBuilderActionAvailability.enabled,
+        coreviewBuilderActiveTaskState: activeCoreviewBuilderTask?.phase ?? null,
         coreviewBuilderActionsSupportsArtifactUpdate: coreviewBuilderActionAvailability.supportsArtifactUpdate,
         coreviewBuilderActionsSupportsVersionedRebuild: coreviewBuilderActionAvailability.supportsVersionedRebuild,
         coreviewBuilderUpdateIntentDetected: false,
@@ -2158,6 +2175,7 @@ export function PresenceArtifactPanel({
           ? null
           : coreviewBuilderActionAvailability.blockedReason,
         coreviewBuilderStatusResult: null,
+        coreviewBuilderStatusToolResult: null,
         coreviewBuilderPreservedMic: true,
         coreviewBuilderPreservedReview: true,
         builderWorkspaceEventCount: telemetry.builderWorkspaceEventCount,
@@ -2174,6 +2192,7 @@ export function PresenceArtifactPanel({
       },
     })
   }, [
+    activeCoreviewBuilderTask?.phase,
     artifactStableIdentity,
     builderStageActive,
     coreviewArtifactKey,
@@ -2348,6 +2367,7 @@ export function PresenceArtifactPanel({
     const task = coreviewBuilderStatusFromTask(builderTask)
     const output = coreviewOutputFromCompletion(builderCompletion)
     const status = builderCardStatusFromTask(builderTask, builderCompletion)
+    reconcileCoreviewBuilderTaskStateForContext(context, task)
     if (status) {
       setCoreviewBuilderUpdateCard((current) => current
         ? {

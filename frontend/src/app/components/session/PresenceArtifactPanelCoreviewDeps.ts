@@ -4,6 +4,7 @@ export { coreviewFlagDiagnostics, isCoreviewStillFrameReviewEnabled } from "../.
 export type { CoReviewMediaTransport } from "../../lib/co-review-transport"
 export {
   createCoreviewBuilderActionBus,
+  reconcileCoreviewBuilderTaskStateForContext,
   registerCoreviewBuilderToolBridge,
   resolveCoreviewBuilderActionAvailability,
   summarizeRequestedChange,

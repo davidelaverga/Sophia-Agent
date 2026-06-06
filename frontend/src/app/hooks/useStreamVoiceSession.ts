@@ -341,6 +341,8 @@ function createGeminiRuntimeTelemetry(params: Partial<Extract<VoiceRuntimeTeleme
     builderToolCallCount: params.builderToolCallCount ?? 0,
     reviewToolsExposed: params.reviewToolsExposed ?? [],
     emitArtifactExposedDuringReview: params.emitArtifactExposedDuringReview ?? false,
+    coreviewBuilderToolsExposed: params.coreviewBuilderToolsExposed ?? false,
+    coreviewBuilderGenericToolsSuppressed: params.coreviewBuilderGenericToolsSuppressed ?? false,
     reviewToolTimedOut: params.reviewToolTimedOut ?? false,
     reviewToolTimeoutName: params.reviewToolTimeoutName ?? null,
     reviewToolTimeoutResultSent: params.reviewToolTimeoutResultSent ?? false,
@@ -3606,6 +3608,13 @@ export function useStreamVoiceSession(
           GEMINI_REVIEW_TOOL_NAMES.has(name) || name === GEMINI_EMIT_ARTIFACT_TOOL_NAME
         ))
         const emitArtifactExposedDuringReview = reviewToolsExposed.includes(GEMINI_EMIT_ARTIFACT_TOOL_NAME)
+        const coreviewBuilderToolsExposed = reviewToolsExposed.some((name) => (
+          name === GEMINI_COREVIEW_REQUEST_ARTIFACT_UPDATE_TOOL_NAME
+          || name === GEMINI_COREVIEW_CANCEL_BUILDER_TASK_TOOL_NAME
+          || name === GEMINI_COREVIEW_GET_BUILDER_STATUS_TOOL_NAME
+        ))
+        const coreviewBuilderGenericToolsSuppressed = coreviewBuilderToolsExposed
+          && !configuredToolNames.some((name) => GEMINI_BUILDER_TOOL_NAMES.has(name))
         setRuntimeTelemetry((current) => current.runtime === "gemini_live"
           ? {
               ...current,
@@ -3624,6 +3633,8 @@ export function useStreamVoiceSession(
               publicEventBoundary: connection.publicEventBoundary,
               reviewToolsExposed,
               emitArtifactExposedDuringReview,
+              coreviewBuilderToolsExposed,
+              coreviewBuilderGenericToolsSuppressed,
             }
           : current)
         recordSophiaCaptureEvent({
@@ -3635,6 +3646,8 @@ export function useStreamVoiceSession(
             voiceAgentSessionId: creds.session_id,
             reviewToolsExposed,
             emitArtifactExposedDuringReview,
+            coreviewBuilderToolsExposed,
+            coreviewBuilderGenericToolsSuppressed,
             rawArtifactTextExcluded: true,
             rawFrameExcluded: true,
           },

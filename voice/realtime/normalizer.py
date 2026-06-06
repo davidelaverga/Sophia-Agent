@@ -23,8 +23,27 @@ _GEMINI_INTERNAL_OUTPUT_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("read_artifact_text", re.compile(r"\bread_artifact_text\b", re.IGNORECASE)),
     ("active_goal", re.compile(r"\bactive_goal\s*:", re.IGNORECASE)),
     ("tool_call_id", re.compile(r"\btool_call_id\b", re.IGNORECASE)),
+    ("task_id", re.compile(r"\btask[_\s-]?id\b", re.IGNORECASE)),
+    ("async_task", re.compile(r"\basync\s+task\b", re.IGNORECASE)),
+    (
+        "builder_lifecycle_tool",
+        re.compile(
+            r"\b(?:start_builder_task|check_async_task|update_async_task|cancel_async_task|list_async_tasks|"
+            r"coreview_request_artifact_update|coreview_get_builder_status|coreview_cancel_builder_task)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("task_tracking_recovery", re.compile(r"\btracking\s+that\s+specific\s+task\b", re.IGNORECASE)),
+    (
+        "list_builds_recovery",
+        re.compile(
+            r"\b(?:try\s+listing\s+all\s+(?:the\s+)?builds|listing\s+all\s+(?:the\s+)?builds|list(?:ing)?\s+builds)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("tool_mechanics", re.compile(r"\btool\s+(?:call|response|result|name|mechanic|mechanics)\b", re.IGNORECASE)),
     ("tool_schema", re.compile(r"\btool\s+schema\b", re.IGNORECASE)),
-    ("internal_prompt", re.compile(r"\b(?:system|developer|internal)\s+prompt\b", re.IGNORECASE)),
+    ("internal_prompt", re.compile(r"\b(?:system|developer|internal|behavior)\s+prompt\b", re.IGNORECASE)),
     ("repair_intent", re.compile(r"\bi\s+will\s+correct\s+this\s+by\b", re.IGNORECASE)),
     ("previous_artifact_failed", re.compile(r"\bmy\s+previous\s+artifact\s+call\s+failed\b", re.IGNORECASE)),
     (

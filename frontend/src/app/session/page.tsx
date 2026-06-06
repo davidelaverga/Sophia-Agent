@@ -616,7 +616,7 @@ function SessionPageContent() {
         runId: task.runId,
         status: task.phase,
         blockedReason: 'no_active_builder_task',
-        userFacingMessage: 'There is no active builder update to cancel.',
+        userFacingMessage: "I don't see an active artifact update right now.",
       };
     }
     const response = await cancelBuilderTask();
@@ -627,7 +627,7 @@ function SessionPageContent() {
         runId: task.runId,
         status: 'idle',
         blockedReason: 'no_active_builder_task',
-        userFacingMessage: 'There is no active builder update to cancel.',
+        userFacingMessage: "I don't see an active artifact update right now.",
       };
     }
     const status = response.status ?? 'cancelled';
