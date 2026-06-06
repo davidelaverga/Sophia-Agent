@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { type ComponentProps } from "react"
+import { useState, type ComponentProps } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
@@ -75,6 +75,27 @@ const MARKDOWN_LIBRARY = [
     mimeType: "text/markdown",
   },
 ]
+const HTML_BUILDER_ARTIFACT = {
+  artifactType: "webpage",
+  artifactTitle: "site.html",
+  artifactPath: "mnt/user-data/outputs/site.html",
+  supportingFiles: [],
+  decisionsMade: [],
+  companionSummary: "HTML artifact ready for live preview.",
+  userNextAction: "Review the page in canvas.",
+}
+const HTML_LIBRARY = [
+  {
+    path: "mnt/user-data/outputs/site.html",
+    name: "site.html",
+    mimeType: "text/html",
+  },
+  {
+    path: "mnt/user-data/outputs/site-v2.html",
+    name: "site-v2.html",
+    mimeType: "text/html",
+  },
+]
 const PDF_SELECTED_PATH = "mnt/user-data/outputs/launch-brief.pdf"
 const WORKSPACE_KEY = "user:unknown|thread:thread-1"
 const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46])
@@ -126,6 +147,7 @@ function renderPanel({
   voiceAgentSessionId = null,
   onCoreviewBuilderUpdateRequest,
   onCoreviewBuilderCancelRequest,
+  onSelectedBuilderArtifactPathChange,
   onCoreviewBuilderViewUpdatedVersion,
   onStartVoiceBuilderArtifactReview,
   onPendingBuilderArtifactReviewConsumed,
@@ -157,6 +179,7 @@ function renderPanel({
   voiceAgentSessionId?: ComponentProps<typeof PresenceArtifactPanel>["voiceAgentSessionId"]
   onCoreviewBuilderUpdateRequest?: ComponentProps<typeof PresenceArtifactPanel>["onCoreviewBuilderUpdateRequest"]
   onCoreviewBuilderCancelRequest?: ComponentProps<typeof PresenceArtifactPanel>["onCoreviewBuilderCancelRequest"]
+  onSelectedBuilderArtifactPathChange?: ComponentProps<typeof PresenceArtifactPanel>["onSelectedBuilderArtifactPathChange"]
   onCoreviewBuilderViewUpdatedVersion?: ComponentProps<typeof PresenceArtifactPanel>["onCoreviewBuilderViewUpdatedVersion"]
   onStartVoiceBuilderArtifactReview?: ComponentProps<typeof PresenceArtifactPanel>["onStartVoiceBuilderArtifactReview"]
   onPendingBuilderArtifactReviewConsumed?: ComponentProps<typeof PresenceArtifactPanel>["onPendingBuilderArtifactReviewConsumed"]
@@ -172,6 +195,7 @@ function renderPanel({
       builderCompletion={builderCompletion}
       isCancellingBuilderTask={isCancellingBuilderTask}
       selectedBuilderArtifactPath={selectedBuilderArtifactPath}
+      onSelectedBuilderArtifactPathChange={onSelectedBuilderArtifactPathChange}
       onCoreviewBuilderUpdateRequest={onCoreviewBuilderUpdateRequest}
       onCoreviewBuilderCancelRequest={onCoreviewBuilderCancelRequest}
       onCoreviewBuilderViewUpdatedVersion={onCoreviewBuilderViewUpdatedVersion}
@@ -1021,7 +1045,8 @@ describe("Coreview artifact still-frame review", () => {
 
     const updateCard = await screen.findByTestId("artifact-review-builder-update-card")
     expect(updateCard).toHaveAttribute("data-coreview-builder-update-status", "updating")
-    expect(within(updateCard).getByText("Updating artifact")).toBeInTheDocument()
+    expect(within(updateCard).getByText("Sophia is updating this artifact…")).toBeInTheDocument()
+    expect(within(updateCard).getByText("Applying changes…")).toBeInTheDocument()
     expect(within(updateCard).getByText("change the title")).toBeInTheDocument()
     expect(within(updateCard).getByText("Updating the artifact source")).toBeInTheDocument()
     expect(within(updateCard).getByRole("button", { name: /cancel update/i })).toBeInTheDocument()
@@ -1146,6 +1171,205 @@ describe("Coreview artifact still-frame review", () => {
     })
     expect(onCoreviewBuilderUpdateRequest).not.toHaveBeenCalled()
     expect(getWorkspaceEvents(WORKSPACE_KEY).some((event) => event.type === "builder.update_requested")).toBe(false)
+  })
+
+  it("auto-applies completed HTML builder updates in the same canvas and can restore original", async () => {
+    setCoreviewFlags(true)
+    const user = userEvent.setup()
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const href = String(input)
+      return new Response(
+        href.includes("site-v2.html")
+          ? "<!doctype html><html><body><h1>Updated preview</h1></body></html>"
+          : "<!doctype html><html><body><h1>Original preview</h1></body></html>",
+        {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        },
+      )
+    })
+    let routeArtifactCommand: ArtifactReviewVoiceCommandRouteHandler = null
+    const onCoreviewBuilderUpdateRequest = vi.fn<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onCoreviewBuilderUpdateRequest"]>>(async () => ({
+      ok: true,
+      taskId: "task-html-1",
+      runId: "run-html-1",
+      userFacingMessage: "Sophia is updating this artifact.",
+    }))
+    const completion = {
+      type: "builder_completion" as const,
+      task_id: "task-html-1",
+      run_id: "run-html-1",
+      thread_id: "thread-1",
+      parent_thread_id: "thread-1",
+      status: "success" as const,
+      artifact_path: "mnt/user-data/outputs/site-v2.html",
+      artifact_filename: "site-v2.html",
+      artifact_title: "site-v2.html",
+      artifact_url: null,
+      summary: "Updated the HTML preview.",
+      user_next_action: null,
+      error_message: null,
+      source: "builder_canvas",
+      completed_at: "2026-06-06T12:00:00.000Z",
+    }
+    function HtmlAutoApplyHarness({ completed }: { completed: boolean }) {
+      const [selectedPath, setSelectedPath] = useState("mnt/user-data/outputs/site.html")
+      return (
+        <PresenceArtifactPanel
+          artifacts={null}
+          builderArtifact={HTML_BUILDER_ARTIFACT}
+          builderArtifactLibrary={HTML_LIBRARY}
+          builderTask={{
+            phase: completed ? "completed" : "running",
+            taskId: "task-html-1",
+            runId: "run-html-1",
+            activeStepTitle: completed ? "Update complete" : "Applying changes",
+          }}
+          builderCompletion={completed ? completion : null}
+          selectedBuilderArtifactPath={selectedPath}
+          onSelectedBuilderArtifactPathChange={setSelectedPath}
+          onCoreviewBuilderUpdateRequest={onCoreviewBuilderUpdateRequest}
+          sessionId="session-1"
+          normalSessionId="normal-1"
+          threadId="thread-1"
+          isVisible={true}
+          onDismiss={vi.fn()}
+          isVoiceMode={false}
+          coReviewTransport={new GeminiStillFrameTransport({ sendArtifactFrame: vi.fn() })}
+          onArtifactReviewVoiceCommandRouteChange={(handler) => {
+            routeArtifactCommand = handler
+          }}
+        />
+      )
+    }
+
+    const rendered = render(<HtmlAutoApplyHarness completed={false} />)
+
+    expect(await screen.findByTitle("Preview of site.html")).toBeInTheDocument()
+    await waitFor(() => expect(routeArtifactCommand).not.toBeNull())
+    act(() => {
+      expect(routeArtifactCommand?.("make the hero more modern")).toMatchObject({
+        handled: true,
+        applied: true,
+      })
+    })
+    await waitFor(() => expect(onCoreviewBuilderUpdateRequest).toHaveBeenCalledTimes(1))
+
+    rendered.rerender(<HtmlAutoApplyHarness completed={true} />)
+
+    expect(await screen.findByTitle("Preview of site-v2.html")).toBeInTheDocument()
+    const updateCard = await screen.findByTestId("artifact-review-builder-update-card")
+    expect(updateCard).toHaveAttribute("data-coreview-builder-update-status", "completed")
+    expect(within(updateCard).getByText("Preview updated")).toBeInTheDocument()
+    expect(within(updateCard).getByText("Version 2 saved")).toBeInTheDocument()
+    expect(within(updateCard).getByText("Original preserved")).toBeInTheDocument()
+    expect(within(updateCard).getByRole("button", { name: /restore original/i })).toBeInTheDocument()
+    expect(within(updateCard).queryByRole("button", { name: /view updated version/i })).not.toBeInTheDocument()
+
+    await waitFor(() => {
+      const eventTypes = getWorkspaceEvents(WORKSPACE_KEY).map((event) => event.type)
+      expect(eventTypes).toEqual(expect.arrayContaining([
+        "artifact.version_created",
+        "artifact.version_selected",
+      ]))
+    })
+
+    await user.click(within(updateCard).getByRole("button", { name: /restore original/i }))
+    expect(await screen.findByTitle("Preview of site.html")).toBeInTheDocument()
+    await waitFor(() => {
+      const selectedEvents = getWorkspaceEvents(WORKSPACE_KEY)
+        .filter((event) => event.type === "artifact.version_selected")
+      expect(selectedEvents.some((event) => event.payload.result === "restore_original")).toBe(true)
+    })
+  })
+
+  it("does not auto-apply non-HTML builder output into an HTML canvas", async () => {
+    setCoreviewFlags(true)
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("<!doctype html><html><body><h1>Original preview</h1></body></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      }),
+    )
+    let routeArtifactCommand: ArtifactReviewVoiceCommandRouteHandler = null
+    const selectedPaths: string[] = []
+    const onCoreviewBuilderUpdateRequest = vi.fn<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onCoreviewBuilderUpdateRequest"]>>(async () => ({
+      ok: true,
+      taskId: "task-html-2",
+      runId: "run-html-2",
+      userFacingMessage: "Sophia is updating this artifact.",
+    }))
+    const completion = {
+      type: "builder_completion" as const,
+      task_id: "task-html-2",
+      run_id: "run-html-2",
+      thread_id: "thread-1",
+      parent_thread_id: "thread-1",
+      status: "success" as const,
+      artifact_path: "mnt/user-data/outputs/site-update.pdf",
+      artifact_filename: "site-update.pdf",
+      artifact_title: "site-update.pdf",
+      artifact_url: null,
+      summary: "Created a PDF artifact.",
+      user_next_action: null,
+      error_message: null,
+      source: "builder_canvas",
+      completed_at: "2026-06-06T12:00:00.000Z",
+    }
+    function HtmlNonApplyHarness({ completed }: { completed: boolean }) {
+      const [selectedPath, setSelectedPath] = useState("mnt/user-data/outputs/site.html")
+      return (
+        <PresenceArtifactPanel
+          artifacts={null}
+          builderArtifact={HTML_BUILDER_ARTIFACT}
+          builderArtifactLibrary={HTML_LIBRARY}
+          builderTask={{
+            phase: completed ? "completed" : "running",
+            taskId: "task-html-2",
+            runId: "run-html-2",
+            activeStepTitle: completed ? "Update complete" : "Applying changes",
+          }}
+          builderCompletion={completed ? completion : null}
+          selectedBuilderArtifactPath={selectedPath}
+          onSelectedBuilderArtifactPathChange={(path) => {
+            selectedPaths.push(path ?? "")
+            setSelectedPath(path)
+          }}
+          onCoreviewBuilderUpdateRequest={onCoreviewBuilderUpdateRequest}
+          sessionId="session-1"
+          normalSessionId="normal-1"
+          threadId="thread-1"
+          isVisible={true}
+          onDismiss={vi.fn()}
+          isVoiceMode={false}
+          coReviewTransport={new GeminiStillFrameTransport({ sendArtifactFrame: vi.fn() })}
+          onArtifactReviewVoiceCommandRouteChange={(handler) => {
+            routeArtifactCommand = handler
+          }}
+        />
+      )
+    }
+
+    const rendered = render(<HtmlNonApplyHarness completed={false} />)
+
+    expect(await screen.findByTitle("Preview of site.html")).toBeInTheDocument()
+    await waitFor(() => expect(routeArtifactCommand).not.toBeNull())
+    act(() => {
+      expect(routeArtifactCommand?.("rebuild this page as pdf")).toMatchObject({
+        handled: true,
+        applied: true,
+      })
+    })
+    await waitFor(() => expect(onCoreviewBuilderUpdateRequest).toHaveBeenCalledTimes(1))
+
+    rendered.rerender(<HtmlNonApplyHarness completed={true} />)
+
+    const updateCard = await screen.findByTestId("artifact-review-builder-update-card")
+    expect(within(updateCard).getByText("New artifact created")).toBeInTheDocument()
+    expect(within(updateCard).getByText("A new artifact was created, but it is not an HTML update.")).toBeInTheDocument()
+    expect(screen.getByTitle("Preview of site.html")).toBeInTheDocument()
+    expect(selectedPaths).not.toContain("mnt/user-data/outputs/site-update.pdf")
+    expect(getWorkspaceEvents(WORKSPACE_KEY).some((event) => event.type === "artifact.version_selected")).toBe(false)
   })
 
   it("keeps the artifact review room mounted and interactive after annotation refresh timeout", async () => {

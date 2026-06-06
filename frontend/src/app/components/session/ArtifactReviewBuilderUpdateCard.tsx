@@ -32,6 +32,12 @@ export type ArtifactReviewBuilderUpdateCardProps = {
   outputTitle?: string | null
   outputPath?: string | null
   onViewUpdatedVersion?: () => void
+  autoApplied?: boolean
+  nonHtmlOutput?: boolean
+  versionLabel?: string | null
+  restoreAvailable?: boolean
+  onRestoreOriginal?: () => void
+  restorePending?: boolean
   className?: string
 }
 
@@ -40,8 +46,8 @@ const STATUS_META: Record<ArtifactReviewBuilderUpdateCardStatus, {
   tone: string
   icon: LucideIcon
 }> = {
-  starting: { label: "Starting update", tone: "var(--cosmic-amber)", icon: Sparkles },
-  updating: { label: "Updating artifact", tone: "var(--sophia-purple)", icon: Sparkles },
+  starting: { label: "Sophia is updating this artifact…", tone: "var(--cosmic-amber)", icon: Sparkles },
+  updating: { label: "Sophia is updating this artifact…", tone: "var(--sophia-purple)", icon: Sparkles },
   cancelling: { label: "Cancelling", tone: "var(--cosmic-amber)", icon: RotateCcw },
   cancelled: { label: "Cancelled", tone: "var(--cosmic-text-faint)", icon: XCircle },
   completed: { label: "New version ready", tone: "var(--cosmic-teal)", icon: CheckCircle2 },
@@ -61,11 +67,31 @@ export function ArtifactReviewBuilderUpdateCard({
   outputTitle,
   outputPath,
   onViewUpdatedVersion,
+  autoApplied = false,
+  nonHtmlOutput = false,
+  versionLabel,
+  restoreAvailable = false,
+  onRestoreOriginal,
+  restorePending = false,
   className,
 }: ArtifactReviewBuilderUpdateCardProps) {
-  const meta = STATUS_META[status]
+  const meta = status === "completed" && autoApplied
+    ? { ...STATUS_META.completed, label: "Preview updated" }
+    : status === "completed" && nonHtmlOutput
+      ? { ...STATUS_META.completed, label: "New artifact created" }
+      : STATUS_META[status]
   const Icon = meta.icon
-  const showViewUpdatedVersion = status === "completed" && Boolean(outputPath && onViewUpdatedVersion)
+  const showViewUpdatedVersion = status === "completed" && !autoApplied && Boolean(outputPath && onViewUpdatedVersion)
+  const showRestoreOriginal = status === "completed" && restoreAvailable && Boolean(onRestoreOriginal)
+  const statusDetail = status === "completed" && autoApplied
+    ? "Original preserved"
+    : status === "completed" && nonHtmlOutput
+      ? "A new artifact was created, but it is not an HTML update."
+      : status === "failed"
+        ? "Couldn’t apply the update. Original preserved."
+        : status === "starting" || status === "updating"
+          ? "Applying changes…"
+          : null
 
   return (
     <div
@@ -116,6 +142,22 @@ export function ArtifactReviewBuilderUpdateCard({
           >
             {requestedChangeSummary}
           </p>
+          {statusDetail && (
+            <p
+              className="mt-1 text-[10px] font-medium"
+              style={{ color: status === "failed" ? "var(--sophia-error, #f87171)" : "var(--cosmic-text-faint)" }}
+            >
+              {statusDetail}
+            </p>
+          )}
+          {status === "completed" && autoApplied && versionLabel && (
+            <p
+              className="mt-1 text-[10px] font-medium"
+              style={{ color: "var(--cosmic-teal)" }}
+            >
+              {versionLabel}
+            </p>
+          )}
           {currentStep && (
             <p
               className="mt-1 truncate text-[10px]"
@@ -133,21 +175,42 @@ export function ArtifactReviewBuilderUpdateCard({
               {unsupportedReason}
             </p>
           )}
-          {showViewUpdatedVersion && (
-            <button
-              type="button"
-              className="mt-2 inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[10px] font-medium tracking-[0.06em] transition-opacity hover:opacity-90"
-              style={{
-                borderColor: "color-mix(in srgb, var(--cosmic-teal) 35%, transparent)",
-                background: "color-mix(in srgb, var(--cosmic-teal) 12%, transparent)",
-                color: "var(--cosmic-teal)",
-              }}
-              aria-label={`View updated version${outputTitle ? ` of ${outputTitle}` : ""}`}
-              onClick={onViewUpdatedVersion}
-            >
-              <Eye className="h-3 w-3" />
-              View updated version
-            </button>
+          {(showViewUpdatedVersion || showRestoreOriginal) && (
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {showRestoreOriginal && (
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[10px] font-medium tracking-[0.06em] transition-opacity hover:opacity-90 disabled:opacity-45"
+                  style={{
+                    borderColor: "color-mix(in srgb, var(--cosmic-border-soft) 90%, transparent)",
+                    background: "color-mix(in srgb, var(--cosmic-panel-soft) 62%, transparent)",
+                    color: "var(--cosmic-text-faint)",
+                  }}
+                  disabled={restorePending}
+                  aria-label="Restore original artifact version"
+                  onClick={onRestoreOriginal}
+                >
+                  <RotateCcw className="h-3 w-3" />
+                  Restore original
+                </button>
+              )}
+              {showViewUpdatedVersion && (
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[10px] font-medium tracking-[0.06em] transition-opacity hover:opacity-90"
+                  style={{
+                    borderColor: "color-mix(in srgb, var(--cosmic-teal) 35%, transparent)",
+                    background: "color-mix(in srgb, var(--cosmic-teal) 12%, transparent)",
+                    color: "var(--cosmic-teal)",
+                  }}
+                  aria-label={`${nonHtmlOutput ? "Open artifact" : "View updated version"}${outputTitle ? ` of ${outputTitle}` : ""}`}
+                  onClick={onViewUpdatedVersion}
+                >
+                  <Eye className="h-3 w-3" />
+                  {nonHtmlOutput ? "Open artifact" : "View updated version"}
+                </button>
+              )}
+            </div>
           )}
         </div>
       </div>

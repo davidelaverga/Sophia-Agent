@@ -2,6 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
+import { isHtmlArtifactFile } from "../../lib/builder-artifacts"
+import {
+  createVersionFromBuilderOutput,
+  getCurrentVersion,
+  getVersionTelemetry,
+  restoreOriginalVersion,
+  type CoreviewArtifactVersionState,
+} from "../../lib/coreview-artifact-version-store"
 import type { ArtifactToolMode } from "../../types/artifact-annotations"
 import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 import type { BuilderCompletionEventV1 } from "../../types/builder-completion"
@@ -727,6 +735,29 @@ function coreviewBuilderEventSignature(
   return `${type}:${taskId ?? "no-task"}:${runId ?? "no-run"}`
 }
 
+function coreviewBuilderCompletionSignature(input: {
+  workspaceKey: string
+  artifactStableIdentity: string | null
+  taskId: string | null | undefined
+  runId: string | null | undefined
+  outputPath: string | null | undefined
+}): string {
+  return [
+    input.workspaceKey,
+    input.artifactStableIdentity ?? "no-artifact",
+    input.taskId ?? "no-task",
+    input.runId ?? "no-run",
+    normalizeBuilderArtifactPath(input.outputPath) ?? "no-output",
+  ].join("|")
+}
+
+function isHtmlBuilderOutput(output: CoreviewBuilderOutputStatus | null | undefined): boolean {
+  return isHtmlArtifactFile({
+    path: output?.artifactPath ?? null,
+    name: output?.artifactTitle ?? null,
+  })
+}
+
 /**
  * Cosmic artifact panel — part of the presence field.
  *
@@ -795,9 +826,16 @@ export function PresenceArtifactPanel({
     outputTitle: string | null
     outputPath: string | null
     unsupportedReason: string | null
+    autoApplied: boolean
+    nonHtmlOutput: boolean
+    versionLabel: string | null
+    restoreAvailable: boolean
   } | null>(null)
+  const [coreviewArtifactVersionState, setCoreviewArtifactVersionState] = useState<CoreviewArtifactVersionState | null>(null)
+  const [restoreOriginalPending, setRestoreOriginalPending] = useState(false)
   const latestCoreviewBuilderContextRef = useRef<CoreviewArtifactUpdateContext | null>(null)
   const emittedCoreviewBuilderEventSignaturesRef = useRef(new Set<string>())
+  const autoAppliedCoreviewBuilderSignaturesRef = useRef(new Set<string>())
   const lastCoreviewBuilderAvailabilitySignatureRef = useRef<string | null>(null)
   const recordCoreviewWorkspaceEventRef = useRef<((input: {
     type: CoreviewWorkspaceEventType
@@ -879,7 +917,7 @@ export function PresenceArtifactPanel({
       stageRendererKind,
     ].join("|")
   ), [builderArtifactId, normalizedSelectedBuilderArtifactPath, stageArtifactPath, stageRendererKind])
-  const artifactStableIdentity = useMemo(() => (
+  const defaultArtifactStableIdentity = useMemo(() => (
     builderArtifactId
       ? buildCoreviewArtifactStableIdentity({
           userId: userId ?? null,
@@ -889,6 +927,20 @@ export function PresenceArtifactPanel({
         }).key
       : null
   ), [builderArtifactId, stageArtifactPath, stageRendererKind, threadId, userId])
+  const currentArtifactVersion = useMemo(
+    () => getCurrentVersion(coreviewArtifactVersionState),
+    [coreviewArtifactVersionState],
+  )
+  const versionStateAppliesToStage = useMemo(() => (
+    Boolean(
+      coreviewArtifactVersionState
+        && currentArtifactVersion
+        && normalizeBuilderArtifactPath(currentArtifactVersion.artifactPath) === normalizeBuilderArtifactPath(stageArtifactPath),
+    )
+  ), [coreviewArtifactVersionState, currentArtifactVersion, stageArtifactPath])
+  const artifactStableIdentity = versionStateAppliesToStage
+    ? coreviewArtifactVersionState?.logicalArtifactId ?? defaultArtifactStableIdentity
+    : defaultArtifactStableIdentity
   const coreviewWorkspaceIdentity = useMemo(() => (
     buildCoreviewWorkspaceKey({
       userId: userId ?? null,
@@ -2048,6 +2100,16 @@ export function PresenceArtifactPanel({
     () => coreviewOutputFromCompletion(builderCompletion),
     [builderCompletion],
   )
+  const coreviewArtifactVersionTelemetry = useMemo(
+    () => getVersionTelemetry(coreviewArtifactVersionState),
+    [coreviewArtifactVersionState],
+  )
+  const coreviewHtmlLiveUpdateEnabled = Boolean(
+    stageRendererKind === "html"
+      && stageArtifactCapabilities.supportsArtifactUpdate
+      && stageArtifactCapabilities.supportsVersioning
+      && stageArtifactCapabilities.supportsSourceRead,
+  )
 
   const recordCoreviewBuilderTelemetry = useCallback((result: CoreviewBuilderActionResult) => {
     const telemetry = getCoreviewWorkspaceEventLogTelemetry(
@@ -2090,6 +2152,18 @@ export function PresenceArtifactPanel({
         coreviewBuilderStatusToolResult: isStatus ? result.result : null,
         coreviewBuilderPreservedMic: result.preservedMic,
         coreviewBuilderPreservedReview: result.preservedReview,
+        coreviewHtmlLiveUpdateEnabled,
+        coreviewArtifactVersioningEnabled: coreviewArtifactVersionTelemetry.coreviewArtifactVersioningEnabled
+          || stageArtifactCapabilities.supportsVersioning,
+        coreviewArtifactLogicalId: coreviewArtifactVersionTelemetry.coreviewArtifactLogicalId
+          ?? result.context?.artifactStableIdentity
+          ?? artifactStableIdentity,
+        coreviewArtifactOriginalVersionIdPresent: coreviewArtifactVersionTelemetry.coreviewArtifactOriginalVersionIdPresent,
+        coreviewArtifactCurrentVersionIdPresent: coreviewArtifactVersionTelemetry.coreviewArtifactCurrentVersionIdPresent,
+        coreviewArtifactVersionCount: coreviewArtifactVersionTelemetry.coreviewArtifactVersionCount,
+        coreviewHtmlUpdatePreviousPathHash: coreviewArtifactVersionTelemetry.coreviewHtmlUpdatePreviousPathHash,
+        coreviewHtmlUpdateCurrentPathHash: coreviewArtifactVersionTelemetry.coreviewHtmlUpdateCurrentPathHash,
+        coreviewHtmlUpdateRestoreAvailable: coreviewArtifactVersionTelemetry.coreviewHtmlUpdateRestoreAvailable,
         builderWorkspaceEventCount: telemetry.builderWorkspaceEventCount,
         builderLastWorkspaceEventType: telemetry.builderLastWorkspaceEventType,
         artifactStableIdentity: result.context?.artifactStableIdentity ?? artifactStableIdentity,
@@ -2106,11 +2180,14 @@ export function PresenceArtifactPanel({
     artifactStableIdentity,
     coreviewBuilderActionAvailability.blockedReason,
     coreviewBuilderActionAvailability.enabled,
+    coreviewArtifactVersionTelemetry,
+    coreviewHtmlLiveUpdateEnabled,
     coreviewArtifactKey,
     coreviewShareState,
     coreviewWorkspaceKey,
     normalSessionId,
     sessionId,
+    stageArtifactCapabilities.supportsVersioning,
     stageRendererKind,
     threadId,
   ])
@@ -2178,6 +2255,17 @@ export function PresenceArtifactPanel({
         coreviewBuilderStatusToolResult: null,
         coreviewBuilderPreservedMic: true,
         coreviewBuilderPreservedReview: true,
+        coreviewHtmlLiveUpdateEnabled,
+        coreviewArtifactVersioningEnabled: coreviewArtifactVersionTelemetry.coreviewArtifactVersioningEnabled
+          || stageArtifactCapabilities.supportsVersioning,
+        coreviewArtifactLogicalId: coreviewArtifactVersionTelemetry.coreviewArtifactLogicalId
+          ?? artifactStableIdentity,
+        coreviewArtifactOriginalVersionIdPresent: coreviewArtifactVersionTelemetry.coreviewArtifactOriginalVersionIdPresent,
+        coreviewArtifactCurrentVersionIdPresent: coreviewArtifactVersionTelemetry.coreviewArtifactCurrentVersionIdPresent,
+        coreviewArtifactVersionCount: coreviewArtifactVersionTelemetry.coreviewArtifactVersionCount,
+        coreviewHtmlUpdatePreviousPathHash: coreviewArtifactVersionTelemetry.coreviewHtmlUpdatePreviousPathHash,
+        coreviewHtmlUpdateCurrentPathHash: coreviewArtifactVersionTelemetry.coreviewHtmlUpdateCurrentPathHash,
+        coreviewHtmlUpdateRestoreAvailable: coreviewArtifactVersionTelemetry.coreviewHtmlUpdateRestoreAvailable,
         builderWorkspaceEventCount: telemetry.builderWorkspaceEventCount,
         builderLastWorkspaceEventType: telemetry.builderLastWorkspaceEventType,
         artifactStableIdentity,
@@ -2198,6 +2286,8 @@ export function PresenceArtifactPanel({
     coreviewArtifactKey,
     coreviewBuilderActionAvailability,
     coreviewBuilderCapabilitySummary.preferredUpdateMode,
+    coreviewArtifactVersionTelemetry,
+    coreviewHtmlLiveUpdateEnabled,
     coreviewShareState,
     coreviewWorkspaceKey,
     isVisible,
@@ -2206,6 +2296,7 @@ export function PresenceArtifactPanel({
     onCoreviewBuilderUpdateRequest,
     sessionId,
     stageArtifactCapabilityTelemetry,
+    stageArtifactCapabilities.supportsVersioning,
     stageArtifactPath,
     stageRendererKind,
     threadId,
@@ -2238,6 +2329,10 @@ export function PresenceArtifactPanel({
       outputTitle: output?.artifactTitle ?? null,
       outputPath: output?.artifactPath ?? null,
       unsupportedReason: result.result === "unsupported" ? result.userFacingMessage ?? null : null,
+      autoApplied: false,
+      nonHtmlOutput: false,
+      versionLabel: null,
+      restoreAvailable: false,
     })
     setVoiceCommandStatus({
       text: result.userFacingMessage
@@ -2354,10 +2449,15 @@ export function PresenceArtifactPanel({
   ])
 
   useEffect(() => {
+    if (versionStateAppliesToStage) {
+      return
+    }
     latestCoreviewBuilderContextRef.current = null
     emittedCoreviewBuilderEventSignaturesRef.current.clear()
+    autoAppliedCoreviewBuilderSignaturesRef.current.clear()
+    setCoreviewArtifactVersionState(null)
     setCoreviewBuilderUpdateCard(null)
-  }, [artifactStableIdentity, stageArtifactPath, stageRendererKind])
+  }, [artifactStableIdentity, stageArtifactPath, stageRendererKind, versionStateAppliesToStage])
 
   useEffect(() => {
     const context = latestCoreviewBuilderContextRef.current
@@ -2367,6 +2467,8 @@ export function PresenceArtifactPanel({
     const task = coreviewBuilderStatusFromTask(builderTask)
     const output = coreviewOutputFromCompletion(builderCompletion)
     const status = builderCardStatusFromTask(builderTask, builderCompletion)
+    const eventTaskId = task?.taskId ?? builderCompletion?.task_id ?? null
+    const eventRunId = task?.runId ?? builderCompletion?.run_id ?? null
     reconcileCoreviewBuilderTaskStateForContext(context, task)
     if (status) {
       setCoreviewBuilderUpdateCard((current) => current
@@ -2376,11 +2478,15 @@ export function PresenceArtifactPanel({
             currentStep: task?.currentStep ?? current.currentStep,
             outputTitle: output?.artifactTitle ?? current.outputTitle,
             outputPath: output?.artifactPath ?? current.outputPath,
+            nonHtmlOutput: current.nonHtmlOutput,
+            autoApplied: current.autoApplied,
+            versionLabel: current.versionLabel,
+            restoreAvailable: current.restoreAvailable,
           }
         : current)
     }
 
-    if (!task?.taskId) {
+    if (!eventTaskId && !output?.artifactPath) {
       return
     }
 
@@ -2389,7 +2495,7 @@ export function PresenceArtifactPanel({
       result?: string | null,
       eventOutput?: CoreviewBuilderOutputStatus | null,
     ) => {
-      const signature = coreviewBuilderEventSignature(type, task.taskId, task.runId)
+      const signature = coreviewBuilderEventSignature(type, eventTaskId, eventRunId)
       if (emittedCoreviewBuilderEventSignaturesRef.current.has(signature)) {
         return
       }
@@ -2397,35 +2503,181 @@ export function PresenceArtifactPanel({
       emitCoreviewBuilderWorkspaceEvent({
         type: type as CoreviewBuilderWorkspaceEventInput["type"],
         context,
-        taskId: task.taskId,
-        runId: task.runId,
+        taskId: eventTaskId,
+        runId: eventRunId,
         result,
         output: eventOutput ?? null,
       })
     }
 
-    if (task.phase === "running") {
+    if (task?.phase === "running") {
       emitOnce("builder.task_started")
       return
     }
-    if (task.phase === "completed" || builderCompletion?.status === "success") {
+    if (task?.phase === "completed" || builderCompletion?.status === "success") {
       emitOnce("builder.task_completed", "completed", output)
       if (output?.artifactPath) {
         emitOnce("artifact.version_created", "new_version", output)
       }
+      const outputPath = normalizeBuilderArtifactPath(output?.artifactPath)
+      const htmlOutput = isHtmlBuilderOutput(output)
+      const shouldAutoApplyHtml = Boolean(
+        context.rendererKind === "html"
+          && outputPath
+          && htmlOutput
+          && onSelectedBuilderArtifactPathChange,
+      )
+      if (shouldAutoApplyHtml && outputPath) {
+        const signature = coreviewBuilderCompletionSignature({
+          workspaceKey: context.workspaceKey,
+          artifactStableIdentity: context.artifactStableIdentity,
+          taskId: eventTaskId,
+          runId: eventRunId,
+          outputPath,
+        })
+        if (!autoAppliedCoreviewBuilderSignaturesRef.current.has(signature)) {
+          autoAppliedCoreviewBuilderSignaturesRef.current.add(signature)
+          const outputStableIdentity = buildCoreviewArtifactStableIdentity({
+            userId: userId ?? null,
+            threadId: threadId ?? context.threadId ?? null,
+            artifactPath: outputPath,
+            rendererKind: "html",
+          }).key
+          const nextVersionState = createVersionFromBuilderOutput({
+            workspaceKey: context.workspaceKey,
+            logicalArtifactId: context.artifactStableIdentity ?? artifactStableIdentity,
+            original: {
+              artifactStableIdentity: context.artifactStableIdentity,
+              artifactPath: context.artifactPath,
+              artifactTitle: context.artifactTitle,
+              rendererKind: context.rendererKind,
+            },
+            output: {
+              artifactStableIdentity: outputStableIdentity,
+              artifactPath: outputPath,
+              artifactTitle: output?.artifactTitle ?? null,
+              rendererKind: "html",
+            },
+            builderTaskId: eventTaskId,
+            requestedChangeSummary: context.requestedChangeSummary,
+          })
+          const versionTelemetry = getVersionTelemetry(nextVersionState)
+          if (nextVersionState) {
+            setCoreviewArtifactVersionState(nextVersionState)
+            setRestoreOriginalPending(false)
+            onSelectedBuilderArtifactPathChange?.(outputPath)
+            emitOnce("artifact.version_selected", "auto_selected", output)
+            setCoreviewBuilderUpdateCard((current) => ({
+              artifactTitle: current?.artifactTitle ?? context.artifactTitle ?? output?.artifactTitle ?? "Selected artifact",
+              requestedChangeSummary: current?.requestedChangeSummary ?? context.requestedChangeSummary,
+              status: "completed",
+              currentStep: null,
+              outputTitle: output?.artifactTitle ?? current?.outputTitle ?? null,
+              outputPath,
+              unsupportedReason: null,
+              autoApplied: true,
+              nonHtmlOutput: false,
+              versionLabel: `Version ${nextVersionState.versions.length} saved`,
+              restoreAvailable: versionTelemetry.coreviewHtmlUpdateRestoreAvailable,
+            }))
+          } else {
+            setCoreviewBuilderUpdateCard((current) => current
+              ? {
+                  ...current,
+                  status: "failed",
+                  currentStep: null,
+                  unsupportedReason: "Couldn’t apply the update. Original preserved.",
+                  autoApplied: false,
+                  restoreAvailable: false,
+                }
+              : current)
+          }
+          recordSophiaCaptureEvent({
+            category: "voice-session",
+            name: "coreview-builder-action",
+            payload: {
+              sessionId: sessionId ?? null,
+              normalSessionId: normalSessionId ?? null,
+              threadId: threadId ?? null,
+              coreviewHtmlLiveUpdateEnabled,
+              coreviewArtifactVersioningEnabled: true,
+              coreviewArtifactLogicalId: versionTelemetry.coreviewArtifactLogicalId
+                ?? context.artifactStableIdentity
+                ?? artifactStableIdentity,
+              coreviewArtifactOriginalVersionIdPresent: versionTelemetry.coreviewArtifactOriginalVersionIdPresent,
+              coreviewArtifactCurrentVersionIdPresent: versionTelemetry.coreviewArtifactCurrentVersionIdPresent,
+              coreviewArtifactVersionCount: versionTelemetry.coreviewArtifactVersionCount,
+              coreviewHtmlUpdateAutoApplied: Boolean(nextVersionState),
+              coreviewHtmlUpdateAutoApplyResult: nextVersionState ? "success" : "version_state_unavailable",
+              coreviewHtmlUpdatePreviousPathHash: versionTelemetry.coreviewHtmlUpdatePreviousPathHash,
+              coreviewHtmlUpdateCurrentPathHash: versionTelemetry.coreviewHtmlUpdateCurrentPathHash,
+              coreviewHtmlUpdateRestoreAvailable: versionTelemetry.coreviewHtmlUpdateRestoreAvailable,
+              coreviewHtmlUpdateNoViewClickRequired: Boolean(nextVersionState),
+              coreviewHtmlUpdatePreservedReview: true,
+              coreviewHtmlUpdatePreservedMic: true,
+              rawArtifactTextExcluded: true,
+              rawCommentTextExcluded: true,
+              rawFrameExcluded: true,
+            },
+          })
+        }
+      } else if (context.rendererKind === "html" && outputPath && !htmlOutput) {
+        setCoreviewBuilderUpdateCard((current) => current
+          ? {
+              ...current,
+              status: "completed",
+              currentStep: null,
+              outputTitle: output?.artifactTitle ?? current.outputTitle,
+              outputPath,
+              unsupportedReason: null,
+              autoApplied: false,
+              nonHtmlOutput: true,
+              versionLabel: null,
+              restoreAvailable: false,
+            }
+          : current)
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "coreview-builder-action",
+          payload: {
+            sessionId: sessionId ?? null,
+            normalSessionId: normalSessionId ?? null,
+            threadId: threadId ?? null,
+            coreviewHtmlLiveUpdateEnabled,
+            coreviewArtifactVersioningEnabled: stageArtifactCapabilities.supportsVersioning,
+            coreviewArtifactLogicalId: context.artifactStableIdentity ?? artifactStableIdentity,
+            coreviewHtmlUpdateAutoApplied: false,
+            coreviewHtmlUpdateAutoApplyResult: "non_html_output",
+            coreviewHtmlUpdateNoViewClickRequired: false,
+            coreviewHtmlUpdatePreservedReview: true,
+            coreviewHtmlUpdatePreservedMic: true,
+            rawArtifactTextExcluded: true,
+            rawCommentTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        })
+      }
       return
     }
-    if (task.phase === "cancelled" || builderCompletion?.status === "cancelled") {
+    if (task?.phase === "cancelled" || builderCompletion?.status === "cancelled") {
       emitOnce("builder.task_cancelled", "cancelled")
       return
     }
-    if (task.phase === "failed" || task.phase === "timed_out" || builderCompletion?.status === "error" || builderCompletion?.status === "timeout") {
-      emitOnce("builder.task_failed", task.phase)
+    if (task?.phase === "failed" || task?.phase === "timed_out" || builderCompletion?.status === "error" || builderCompletion?.status === "timeout") {
+      emitOnce("builder.task_failed", task?.phase ?? builderCompletion?.status ?? "failed")
     }
   }, [
+    artifactStableIdentity,
     builderCompletion,
     builderTask,
+    coreviewHtmlLiveUpdateEnabled,
     emitCoreviewBuilderWorkspaceEvent,
+    normalSessionId,
+    onSelectedBuilderArtifactPathChange,
+    sessionId,
+    stageArtifactCapabilities.supportsVersioning,
+    threadId,
+    userId,
   ])
 
   useEffect(() => {
@@ -3360,6 +3612,90 @@ export function PresenceArtifactPanel({
     onCoreviewBuilderViewUpdatedVersion,
   ])
 
+  const handleRestoreOriginalCoreviewArtifact = useCallback(() => {
+    if (!coreviewArtifactVersionState) {
+      return
+    }
+    setRestoreOriginalPending(true)
+    const restoredState = restoreOriginalVersion({
+      workspaceKey: coreviewWorkspaceKey,
+      logicalArtifactId: coreviewArtifactVersionState.logicalArtifactId,
+    })
+    const restoredVersion = getCurrentVersion(restoredState)
+    const restoreResult = restoredState && restoredVersion ? "success" : "version_state_unavailable"
+    const versionTelemetry = getVersionTelemetry(restoredState ?? coreviewArtifactVersionState)
+    if (restoredState && restoredVersion) {
+      setCoreviewArtifactVersionState(restoredState)
+      onSelectedBuilderArtifactPathChange?.(restoredVersion.artifactPath)
+      const context = latestCoreviewBuilderContextRef.current
+      if (context) {
+        emitCoreviewBuilderWorkspaceEvent({
+          type: "artifact.version_selected",
+          context,
+          taskId: restoredVersion.builderTaskId ?? builderTask?.taskId ?? builderCompletion?.task_id ?? null,
+          runId: builderTask?.runId ?? builderCompletion?.run_id ?? null,
+          result: "restore_original",
+          output: {
+            artifactPath: restoredVersion.artifactPath,
+            artifactTitle: restoredVersion.artifactTitle,
+          },
+        })
+      }
+      setCoreviewBuilderUpdateCard((current) => current
+        ? {
+            ...current,
+            status: "completed",
+            currentStep: null,
+            outputTitle: restoredVersion.artifactTitle,
+            outputPath: restoredVersion.artifactPath,
+            autoApplied: true,
+            nonHtmlOutput: false,
+            versionLabel: "Version 1 restored",
+            restoreAvailable: false,
+          }
+        : current)
+    }
+    setRestoreOriginalPending(false)
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "coreview-builder-action",
+      payload: {
+        sessionId: sessionId ?? null,
+        normalSessionId: normalSessionId ?? null,
+        threadId: threadId ?? null,
+        coreviewHtmlLiveUpdateEnabled,
+        coreviewArtifactVersioningEnabled: true,
+        coreviewArtifactLogicalId: versionTelemetry.coreviewArtifactLogicalId
+          ?? coreviewArtifactVersionState.logicalArtifactId,
+        coreviewArtifactOriginalVersionIdPresent: versionTelemetry.coreviewArtifactOriginalVersionIdPresent,
+        coreviewArtifactCurrentVersionIdPresent: versionTelemetry.coreviewArtifactCurrentVersionIdPresent,
+        coreviewArtifactVersionCount: versionTelemetry.coreviewArtifactVersionCount,
+        coreviewHtmlUpdatePreviousPathHash: versionTelemetry.coreviewHtmlUpdatePreviousPathHash,
+        coreviewHtmlUpdateCurrentPathHash: versionTelemetry.coreviewHtmlUpdateCurrentPathHash,
+        coreviewHtmlUpdateRestoreAvailable: versionTelemetry.coreviewHtmlUpdateRestoreAvailable,
+        coreviewHtmlUpdateRestoreResult: restoreResult,
+        coreviewHtmlUpdatePreservedReview: true,
+        coreviewHtmlUpdatePreservedMic: true,
+        rawArtifactTextExcluded: true,
+        rawCommentTextExcluded: true,
+        rawFrameExcluded: true,
+      },
+    })
+  }, [
+    builderCompletion?.run_id,
+    builderCompletion?.task_id,
+    builderTask?.runId,
+    builderTask?.taskId,
+    coreviewArtifactVersionState,
+    coreviewHtmlLiveUpdateEnabled,
+    coreviewWorkspaceKey,
+    emitCoreviewBuilderWorkspaceEvent,
+    normalSessionId,
+    onSelectedBuilderArtifactPathChange,
+    sessionId,
+    threadId,
+  ])
+
   if ((!artifacts && !stageBuilderArtifact && !hasBuilderLibrary) || phase === "hidden") return null
 
   const hasContent = hasBuilder || hasBuilderLibrary || hasTakeaway || hasReflection || hasMemories
@@ -3482,7 +3818,13 @@ export function PresenceArtifactPanel({
                 cancelPending={isCancellingBuilderTask || coreviewBuilderUpdateCard.status === "cancelling"}
                 outputTitle={coreviewBuilderUpdateCard.outputTitle}
                 outputPath={coreviewBuilderUpdateCard.outputPath}
+                autoApplied={coreviewBuilderUpdateCard.autoApplied}
+                nonHtmlOutput={coreviewBuilderUpdateCard.nonHtmlOutput}
+                versionLabel={coreviewBuilderUpdateCard.versionLabel}
+                restoreAvailable={coreviewBuilderUpdateCard.restoreAvailable}
+                restorePending={restoreOriginalPending}
                 onCancel={handleCancelCoreviewBuilderUpdate}
+                onRestoreOriginal={handleRestoreOriginalCoreviewArtifact}
                 onViewUpdatedVersion={handleViewCoreviewBuilderUpdatedVersion}
               />
             )}

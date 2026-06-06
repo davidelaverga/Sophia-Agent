@@ -105,6 +105,21 @@ export type CoreviewVisualTelemetry = {
   genericAsyncToolRespondedSafely: boolean
   coreviewBuilderPreservedMic: boolean | null
   coreviewBuilderPreservedReview: boolean | null
+  coreviewHtmlLiveUpdateEnabled: boolean
+  coreviewArtifactVersioningEnabled: boolean
+  coreviewArtifactLogicalId: string | null
+  coreviewArtifactOriginalVersionIdPresent: boolean
+  coreviewArtifactCurrentVersionIdPresent: boolean
+  coreviewArtifactVersionCount: number
+  coreviewHtmlUpdateAutoApplied: boolean
+  coreviewHtmlUpdateAutoApplyResult: string | null
+  coreviewHtmlUpdatePreviousPathHash: string | null
+  coreviewHtmlUpdateCurrentPathHash: string | null
+  coreviewHtmlUpdateRestoreAvailable: boolean
+  coreviewHtmlUpdateRestoreResult: string | null
+  coreviewHtmlUpdateNoViewClickRequired: boolean
+  coreviewHtmlUpdatePreservedReview: boolean | null
+  coreviewHtmlUpdatePreservedMic: boolean | null
   artifactRebindAttempted: boolean
   artifactRebindResult: string | null
   artifactRebindReason: string | null
@@ -1356,6 +1371,21 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       genericAsyncToolRespondedSafely: false,
       coreviewBuilderPreservedMic: null,
       coreviewBuilderPreservedReview: null,
+      coreviewHtmlLiveUpdateEnabled: false,
+      coreviewArtifactVersioningEnabled: false,
+      coreviewArtifactLogicalId: null,
+      coreviewArtifactOriginalVersionIdPresent: false,
+      coreviewArtifactCurrentVersionIdPresent: false,
+      coreviewArtifactVersionCount: 0,
+      coreviewHtmlUpdateAutoApplied: false,
+      coreviewHtmlUpdateAutoApplyResult: null,
+      coreviewHtmlUpdatePreviousPathHash: null,
+      coreviewHtmlUpdateCurrentPathHash: null,
+      coreviewHtmlUpdateRestoreAvailable: false,
+      coreviewHtmlUpdateRestoreResult: null,
+      coreviewHtmlUpdateNoViewClickRequired: false,
+      coreviewHtmlUpdatePreservedReview: null,
+      coreviewHtmlUpdatePreservedMic: null,
       artifactRebindAttempted: false,
       artifactRebindResult: null,
       artifactRebindReason: null,
@@ -1829,6 +1859,35 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   )) || coreviewBuilderActionEvents.some((event) => asBoolean(event.genericAsyncToolRespondedSafely) === true)
   visual.coreviewBuilderPreservedMic = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewBuilderPreservedMic")
   visual.coreviewBuilderPreservedReview = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewBuilderPreservedReview")
+  visual.coreviewHtmlLiveUpdateEnabled = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewHtmlLiveUpdateEnabled) === true
+  ))
+  visual.coreviewArtifactVersioningEnabled = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewArtifactVersioningEnabled) === true
+  ))
+  visual.coreviewArtifactLogicalId = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewArtifactLogicalId")
+  visual.coreviewArtifactOriginalVersionIdPresent = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewArtifactOriginalVersionIdPresent) === true
+  ))
+  visual.coreviewArtifactCurrentVersionIdPresent = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewArtifactCurrentVersionIdPresent) === true
+  ))
+  visual.coreviewArtifactVersionCount = numberFromKeys(latestCoreviewBuilderAction, ["coreviewArtifactVersionCount"]) ?? 0
+  visual.coreviewHtmlUpdateAutoApplied = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewHtmlUpdateAutoApplied) === true
+  ))
+  visual.coreviewHtmlUpdateAutoApplyResult = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewHtmlUpdateAutoApplyResult")
+  visual.coreviewHtmlUpdatePreviousPathHash = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewHtmlUpdatePreviousPathHash")
+  visual.coreviewHtmlUpdateCurrentPathHash = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewHtmlUpdateCurrentPathHash")
+  visual.coreviewHtmlUpdateRestoreAvailable = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewHtmlUpdateRestoreAvailable) === true
+  ))
+  visual.coreviewHtmlUpdateRestoreResult = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewHtmlUpdateRestoreResult")
+  visual.coreviewHtmlUpdateNoViewClickRequired = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewHtmlUpdateNoViewClickRequired) === true
+  ))
+  visual.coreviewHtmlUpdatePreservedReview = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewHtmlUpdatePreservedReview")
+  visual.coreviewHtmlUpdatePreservedMic = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewHtmlUpdatePreservedMic")
   visual.artifactRebindAttempted = latestRebindEvent !== null
   visual.artifactRebindResult = asString(latestRebindEvent?.artifactRebindResult)
   visual.artifactRebindReason = asString(latestRebindEvent?.artifactRebindReason)
