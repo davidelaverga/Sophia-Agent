@@ -11,7 +11,7 @@ export interface PdfRenderTask {
 export interface PdfPageProxy {
   getViewport: (options: { scale: number }) => PdfViewport
   render: (params: {
-    canvas: HTMLCanvasElement
+    canvasContext: CanvasRenderingContext2D
     viewport: PdfViewport
     transform?: number[]
   }) => PdfRenderTask
