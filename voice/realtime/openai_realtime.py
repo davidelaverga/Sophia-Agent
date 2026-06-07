@@ -44,6 +44,7 @@ _TRUE_VALUES = {"1", "true", "yes", "on"}
 _ARTIFACT_TOOL_NAMES = {"emit_artifact"}
 _BUILDER_TOOL_NAMES = {
     "start_builder_task",
+    "edit_builder_artifact",
     "check_async_task",
     "update_async_task",
     "cancel_async_task",

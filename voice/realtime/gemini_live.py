@@ -93,6 +93,7 @@ _ARTIFACT_TOOL_NAMES = {"emit_artifact"}
 _NULL_LIKE_ARTIFACT_STRINGS = {"", "null", "none", "undefined", "n/a"}
 _BUILDER_TOOL_NAMES = {
     "start_builder_task",
+    "edit_builder_artifact",
     "check_async_task",
     "update_async_task",
     "cancel_async_task",
@@ -124,7 +125,7 @@ _PROMPT_OR_TOOL_LEAK_RE = re.compile(
     r"\btool\s+(?:call|response|result|name|mechanic|mechanics)\b|"
     r"\b(?:read_artifact_text|coreview_set_view|coreview_refresh_view|coreview_get_current_view|"
     r"coreview_request_artifact_update|coreview_get_builder_status|coreview_cancel_builder_task|"
-    r"start_builder_task|check_async_task|update_async_task|cancel_async_task|list_async_tasks)\b|^\s*schema\s*$)",
+    r"start_builder_task|edit_builder_artifact|check_async_task|update_async_task|cancel_async_task|list_async_tasks)\b|^\s*schema\s*$)",
     re.IGNORECASE,
 )
 

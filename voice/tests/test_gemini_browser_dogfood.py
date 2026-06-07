@@ -51,6 +51,7 @@ BACKEND_START_BUILDER_IMPLEMENTATION_MODULE = "deerflow.sophia.tools.start_build
 EXPECTED_GEMINI_TOOL_NAMES = [
     GEMINI_EMIT_ARTIFACT_TOOL_NAME,
     "start_builder_task",
+    "edit_builder_artifact",
     "check_async_task",
     "update_async_task",
     "cancel_async_task",
@@ -180,6 +181,34 @@ class FakeBuilderLifecycleBackend:
                 },
                 result_summary="Existing Sophia builder task launched: builder-thread-1.",
                 updated_async_tasks={"builder-thread-1": async_task},
+            )
+        if tool_name == "edit_builder_artifact":
+            async_task = {
+                "task_id": "builder-edit-thread-1",
+                "agent_name": "sophia_builder",
+                "thread_id": "builder-edit-thread-1",
+                "run_id": "run-edit-1",
+                "status": "running",
+                "created_at": "2026-05-19T00:00:00Z",
+                "last_checked_at": "2026-05-19T00:00:00Z",
+                "last_updated_at": "2026-05-19T00:00:00Z",
+                "task_type": "document",
+                "edit_mode": "edit_existing_artifact",
+                "source_artifact_path": args.get("artifact_path") or "mnt/user-data/outputs/report.md",
+                "revision_of_artifact_path": args.get("artifact_path") or "mnt/user-data/outputs/report.md",
+            }
+            return gemini_tool_loop.GeminiBuilderLifecycleResult(
+                response={
+                    "ok": True,
+                    "tool": tool_name,
+                    "started": True,
+                    "task_id": "builder-edit-thread-1",
+                    "status": "running",
+                    "async_task": async_task,
+                    "result_summary": "Launched builder artifact edit. task_id: builder-edit-thread-1.",
+                },
+                result_summary="Existing Sophia builder artifact edit launched: builder-edit-thread-1.",
+                updated_async_tasks={"builder-edit-thread-1": async_task},
             )
         if tool_name == "check_async_task":
             task = dict(async_tasks[str(args["task_id"])])
@@ -404,11 +433,16 @@ def test_gemini_tool_declarations_align_with_prompt_and_use_dependency_safe_cont
         "frontend",
         "visual_report",
     ]
-    check_declaration = tool_declarations[2]
-    update_declaration = tool_declarations[3]
-    cancel_declaration = tool_declarations[4]
-    list_declaration = tool_declarations[5]
-    retrieve_declaration = tool_declarations[6]
+    edit_declaration = tool_declarations[2]
+    check_declaration = tool_declarations[3]
+    update_declaration = tool_declarations[4]
+    cancel_declaration = tool_declarations[5]
+    list_declaration = tool_declarations[6]
+    retrieve_declaration = tool_declarations[7]
+    assert edit_declaration["name"] == "edit_builder_artifact"
+    assert set(edit_declaration["parameters"]["required"]) == {"message"}
+    assert "completed Sophia builder artifact" in edit_declaration["description"]
+    assert "Do not use for active builds" in edit_declaration["description"]
     assert "Use ONLY with a real task_id" in check_declaration["description"]
     assert "Never invent a task id" in check_declaration["description"]
     assert "current trusted session" in check_declaration["description"]

@@ -473,7 +473,7 @@ describe("Coreview builder action bus", () => {
     })
   })
 
-  it("builds a prompt that uses start_builder_task and not emit_artifact", () => {
+  it("builds a prompt that uses edit_builder_artifact and not emit_artifact", () => {
     const context = createHarness().bus.buildUpdateContext({
       userUpdateRequest: "make a new version",
       updateMode: "revise_version",
@@ -482,7 +482,8 @@ describe("Coreview builder action bus", () => {
     expect(context).not.toBeNull()
     if (!context) throw new Error("expected update context")
     const prompt = buildCoreviewBuilderUpdatePrompt(context)
-    expect(prompt).toContain("start_builder_task")
+    expect(prompt).toContain("edit_builder_artifact")
+    expect(prompt).toContain("Use start_builder_task only")
     expect(prompt).toContain("revise current artifact")
     expect(prompt).toContain("Do not call emit_artifact")
     expect(prompt).toContain("Prefer creating a new version")

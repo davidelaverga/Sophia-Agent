@@ -64,7 +64,12 @@ function mockCanvasApis() {
     textBaseline: "alphabetic",
   } as unknown as CanvasRenderingContext2D
 
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(context)
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function mockGetContext(this: HTMLCanvasElement) {
+    return {
+      ...context,
+      canvas: this,
+    } as unknown as CanvasRenderingContext2D
+  })
   return context
 }
 
@@ -94,6 +99,7 @@ function immediateRenderTask() {
 
 type MockPdfRenderParams = {
   canvas?: HTMLCanvasElement
+  canvasContext?: CanvasRenderingContext2D
 }
 
 type MockPdfRenderTask = {
@@ -102,7 +108,23 @@ type MockPdfRenderTask = {
 }
 
 function isThumbnailRender(params: unknown): boolean {
-  return (params as MockPdfRenderParams).canvas?.dataset.artifactPdfThumbnail === "true"
+  return getRenderCanvas(params)?.dataset.artifactPdfThumbnail === "true"
+}
+
+function getRenderCanvas(params: unknown): HTMLCanvasElement | undefined {
+  const renderParams = params as MockPdfRenderParams
+  return renderParams.canvasContext?.canvas ?? renderParams.canvas
+}
+
+function hasRenderCallForCanvas(
+  render: { mock: { calls: unknown[][] } },
+  pageNumber: number,
+  matchesCanvas: (canvas: HTMLCanvasElement) => boolean,
+) {
+  return render.mock.calls.some(([renderPageNumber, params]) => {
+    const canvas = getRenderCanvas(params)
+    return renderPageNumber === pageNumber && canvas ? matchesCanvas(canvas) : false
+  })
 }
 
 function mockPdfDocument({
@@ -346,7 +368,7 @@ describe("ArtifactPdfPreview", () => {
     expect(canvas).toHaveAttribute("height", "1000")
     expect(canvas.style.width).toBe("750px")
     expect(canvas.style.height).toBe("1000px")
-    expect(pdf.render).toHaveBeenCalledWith(1, expect.objectContaining({ canvas }))
+    expect(hasRenderCallForCanvas(pdf.render, 1, (renderCanvas) => renderCanvas === canvas)).toBe(true)
   })
 
   it("extracts PDF.js textContent and reports exact text metadata without OCR", async () => {
@@ -432,17 +454,10 @@ describe("ArtifactPdfPreview", () => {
           .map((canvas) => canvas.getAttribute("data-artifact-pdf-thumbnail-page-number")),
       ).toEqual(["1", "2"])
     })
-    expect(pdf.render).toHaveBeenCalledWith(
-      2,
-      expect.objectContaining({
-        canvas: expect.objectContaining({
-          dataset: expect.objectContaining({
-            artifactPdfThumbnail: "true",
-            artifactPdfThumbnailPageNumber: "2",
-          }),
-        }),
-      }),
-    )
+    expect(hasRenderCallForCanvas(pdf.render, 2, (canvas) => (
+      canvas.dataset.artifactPdfThumbnail === "true"
+      && canvas.dataset.artifactPdfThumbnailPageNumber === "2"
+    ))).toBe(true)
 
     const pageOneButton = within(rail).getByLabelText("Page 1")
     const pageTwoButton = within(rail).getByLabelText("Page 2")

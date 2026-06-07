@@ -40,6 +40,7 @@ from voice.realtime.sophia_backend_tools import (
 
 GEMINI_EMIT_ARTIFACT_TOOL_NAME = "emit_artifact"
 GEMINI_START_BUILDER_TASK_TOOL_NAME = "start_builder_task"
+GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME = "edit_builder_artifact"
 GEMINI_CHECK_ASYNC_TASK_TOOL_NAME = "check_async_task"
 GEMINI_UPDATE_ASYNC_TASK_TOOL_NAME = "update_async_task"
 GEMINI_CANCEL_ASYNC_TASK_TOOL_NAME = "cancel_async_task"
@@ -53,6 +54,7 @@ GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES = frozenset(
     {
         GEMINI_EMIT_ARTIFACT_TOOL_NAME,
         GEMINI_START_BUILDER_TASK_TOOL_NAME,
+        GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME,
         GEMINI_CHECK_ASYNC_TASK_TOOL_NAME,
         GEMINI_UPDATE_ASYNC_TASK_TOOL_NAME,
         GEMINI_CANCEL_ASYNC_TASK_TOOL_NAME,
@@ -186,6 +188,15 @@ class GeminiBuilderLifecycleHttpBackend:
         validated = validate_builder_lifecycle_tool_args(tool_name, args)
         if tool_name == GEMINI_START_BUILDER_TASK_TOOL_NAME:
             return await self._start_builder_task(
+                validated,
+                session_id=session_id,
+                user_id=user_id,
+                runtime_mode=runtime_mode,
+                provider=provider,
+                async_tasks=async_tasks,
+            )
+        if tool_name == GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME:
+            return await self._edit_builder_artifact(
                 validated,
                 session_id=session_id,
                 user_id=user_id,
@@ -334,6 +345,183 @@ class GeminiBuilderLifecycleHttpBackend:
         return GeminiBuilderLifecycleResult(
             response=response,
             result_summary=f"Existing Sophia builder task launched: {thread_id}.",
+            updated_async_tasks={thread_id: async_task},
+        )
+
+    async def _edit_builder_artifact(
+        self,
+        args: Mapping[str, Any],
+        *,
+        session_id: str,
+        user_id: str,
+        runtime_mode: VoiceRuntimeMode,
+        provider: str,
+        async_tasks: Mapping[str, dict[str, Any]],
+    ) -> GeminiBuilderLifecycleResult:
+        existing_task_id = _active_builder_task_id(async_tasks)
+        if existing_task_id:
+            response = {
+                "ok": False,
+                "tool": GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME,
+                "started": False,
+                "rejected": True,
+                "error_type": "active_builder_task",
+                "task_id": existing_task_id,
+                "status": async_tasks.get(existing_task_id, {}).get("status", "running"),
+                "recovery_guidance": (
+                    "A builder task is still active. Use update_async_task with the active task_id "
+                    "for mid-build changes."
+                ),
+                "result_summary": "edit_builder_artifact rejected because a builder task is already active.",
+            }
+            return GeminiBuilderLifecycleResult(
+                response=response,
+                result_summary=str(response["result_summary"]),
+            )
+
+        source = _resolve_edit_builder_source(args, async_tasks)
+        if source is None:
+            response = {
+                "ok": False,
+                "tool": GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME,
+                "started": False,
+                "rejected": True,
+                "error_type": "no_durable_source_artifact",
+                "recovery_guidance": (
+                    "No durable completed builder artifact is available in this voice session. "
+                    "Ask which file to edit, or start a fresh build only if the user wants a rebuild."
+                ),
+                "result_summary": "No durable completed builder artifact is available to edit.",
+            }
+            return GeminiBuilderLifecycleResult(
+                response=response,
+                result_summary=str(response["result_summary"]),
+            )
+
+        message = str(args["message"]).strip()
+        source_path = str(source["artifact_path"])
+        revision_path = _revision_artifact_path(source_path, message)
+        task_type = _task_type_for_edit_source(source)
+        description = _build_edit_existing_artifact_description(
+            message=message,
+            source_artifact_path=source_path,
+            revision_artifact_path=revision_path,
+        )
+        explicit_urls = _extract_explicit_user_urls(description)
+        allow_web_research = _should_allow_builder_web_research(task_type, description)
+        builder_web_budget = _make_builder_web_budget(task_type)
+        contract = builder_lifecycle_contract()
+
+        thread = await self._request_json("POST", "/threads", json_body={})
+        thread_id = _required_string(thread.get("thread_id"), "LangGraph thread response omitted thread_id.")
+        now = _utcnow_iso()
+        edit_context = {
+            "mode": "edit_existing_artifact",
+            "source_artifact_path": source_path,
+            "source_task_id": source.get("source_task_id") or args.get("task_id"),
+            "source_run_id": source.get("source_run_id"),
+            "revision_of_artifact_path": source_path,
+            "revision_artifact_path": revision_path,
+            "requested_artifact_ext": _artifact_ext_from_path(revision_path),
+            "artifact_ext": _artifact_ext_from_path(revision_path),
+        }
+        delegation_context = {
+            "task": description,
+            "task_brief": description,
+            "normalized_brief": description,
+            "task_type": task_type,
+            "source": "gemini_live_dogfood_edit_builder_artifact",
+            "parent_thread_id": session_id,
+            "parent_user_id": user_id,
+            "companion_artifact": None,
+            "active_ritual": None,
+            "ritual_phase": None,
+            "memories_for_builder": None,
+            "relevant_memories": [],
+            "allow_web_research": allow_web_research,
+            "search_mode": "autonomous",
+            "explicit_user_urls": explicit_urls,
+            "builder_web_budget": builder_web_budget,
+            "artifact_target_path": revision_path,
+            "edit_context": edit_context,
+            "handoff_resolution": {
+                "user_id_source": "trusted_gemini_dogfood_session_user_id",
+                "tool_arg_user_id_present": bool(args.get("user_id")),
+                "tool_arg_user_id_ignored": bool(args.get("user_id") and args.get("user_id") != user_id),
+            },
+        }
+        run_input = {
+            "messages": [{"role": "user", "content": _prefixed_description(description, task_type)}],
+            "delegation_context": delegation_context,
+            "allow_web_research": allow_web_research,
+            "explicit_user_urls": explicit_urls,
+            "builder_web_budget": builder_web_budget,
+            "builder_artifact_target_path": revision_path,
+            "builder_edit_context": edit_context,
+        }
+        run = await self._request_json(
+            "POST",
+            f"/threads/{thread_id}/runs",
+            json_body={
+                "assistant_id": contract.ASYNC_BUILDER_AGENT_NAME,
+                "input": run_input,
+                "config": {
+                    "configurable": {
+                        "thread_id": thread_id,
+                        "user_id": user_id,
+                        "parent_thread_id": session_id,
+                    }
+                },
+            },
+        )
+        run_id = _required_string(run.get("run_id"), "LangGraph run response omitted run_id.")
+        async_task = {
+            "task_id": thread_id,
+            "agent_name": contract.ASYNC_BUILDER_AGENT_NAME,
+            "thread_id": thread_id,
+            "run_id": run_id,
+            "status": "running",
+            "created_at": now,
+            "last_checked_at": now,
+            "last_updated_at": now,
+            "task_type": task_type,
+            "demo_mode": False,
+            "trace_id": f"gemini-edit-{thread_id[:8]}",
+            "edit_mode": "edit_existing_artifact",
+            "artifact_target_path": revision_path,
+            "source_artifact_path": source_path,
+            "revision_of_artifact_path": source_path,
+        }
+        response = {
+            "ok": True,
+            "tool": GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME,
+            "started": True,
+            "task_id": thread_id,
+            "thread_id": thread_id,
+            "run_id": run_id,
+            "status": "running",
+            "task_type": task_type,
+            "async_task": async_task,
+            "source_artifact_path": source_path,
+            "revision_of_artifact_path": source_path,
+            "artifact_target_path": revision_path,
+            "trusted_user_id": user_id,
+            "tool_arg_user_id_ignored": bool(args.get("user_id") and args.get("user_id") != user_id),
+            "runtime": runtime_mode.value,
+            "provider": provider,
+            "result_summary": f"Launched builder artifact edit. task_id: {thread_id}.",
+        }
+        logger.info(
+            "gemini.builder_lifecycle.edit_builder_artifact launched session_id=%s task_id=%s run_id=%s source=%s target=%s",
+            session_id,
+            thread_id,
+            run_id,
+            source_path,
+            revision_path,
+        )
+        return GeminiBuilderLifecycleResult(
+            response=response,
+            result_summary=f"Existing Sophia builder artifact edit launched: {thread_id}.",
             updated_async_tasks={thread_id: async_task},
         )
 
@@ -1190,6 +1378,151 @@ def _make_builder_web_budget(task_type: str) -> dict[str, int]:
     if (task_type or "").strip().lower() == "research":
         return {"search_limit": 5, "fetch_limit": 8, "search_calls": 0, "fetch_calls": 0}
     return {"search_limit": 3, "fetch_limit": 5, "search_calls": 0, "fetch_calls": 0}
+
+
+def _canonical_output_artifact_path(path: Any) -> str | None:
+    if not isinstance(path, str) or not path.strip():
+        return None
+    normalized = path.strip().replace("\\", "/")
+    if normalized.startswith("/mnt/user-data/outputs/"):
+        return normalized
+    if normalized.startswith("mnt/user-data/outputs/"):
+        return f"/{normalized}"
+    return None
+
+
+def _artifact_ext_from_path(path: str | None) -> str | None:
+    name = str(path or "").replace("\\", "/").rsplit("/", 1)[-1]
+    if "." not in name:
+        return None
+    suffix = name.rsplit(".", 1)[-1].strip().lower()
+    return suffix or None
+
+
+def _slugify_for_filename(value: str, *, max_len: int = 48) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip(".-")
+    return (slug[:max_len].strip(".-") or "artifact")
+
+
+def _revision_artifact_path(source_artifact_path: str, message: str) -> str:
+    source_name = source_artifact_path.replace("\\", "/").rsplit("/", 1)[-1]
+    stem = source_name.rsplit(".", 1)[0] if "." in source_name else source_name
+    suffix = f".{_artifact_ext_from_path(source_name) or 'md'}"
+    revision_id = sha256(f"{source_artifact_path}\n{message}\n{time.time()}".encode("utf-8")).hexdigest()[:8]
+    return f"/mnt/user-data/outputs/{_slugify_for_filename(stem)}-revision-{revision_id}{suffix}"
+
+
+def _direct_artifact_payload_from_task(task: Mapping[str, Any]) -> dict[str, Any] | None:
+    artifact_path = _canonical_output_artifact_path(task.get("artifact_path"))
+    if not artifact_path:
+        return None
+    return {
+        "artifact_path": artifact_path,
+        "artifact_ext": task.get("artifact_ext") or _artifact_ext_from_path(artifact_path),
+        "artifact_title": task.get("artifact_title"),
+        "task_type": task.get("task_type"),
+        "source_task_id": task.get("task_id"),
+        "source_run_id": task.get("run_id"),
+    }
+
+
+def _builder_artifact_payload_from_task(task: Mapping[str, Any]) -> dict[str, Any] | None:
+    for key in ("builder_result", "artifact"):
+        payload = task.get(key)
+        if isinstance(payload, Mapping):
+            artifact_path = _canonical_output_artifact_path(payload.get("artifact_path"))
+            if artifact_path:
+                return {
+                    **dict(payload),
+                    "artifact_path": artifact_path,
+                    "artifact_ext": payload.get("artifact_ext") or _artifact_ext_from_path(artifact_path),
+                    "task_type": payload.get("task_type") or task.get("task_type"),
+                    "source_task_id": payload.get("task_id") or task.get("task_id"),
+                    "source_run_id": payload.get("run_id") or task.get("run_id"),
+                }
+    result = task.get("result")
+    if isinstance(result, Mapping):
+        nested = result.get("builder_result")
+        if isinstance(nested, Mapping):
+            artifact_path = _canonical_output_artifact_path(nested.get("artifact_path"))
+            if artifact_path:
+                return {
+                    **dict(nested),
+                    "artifact_path": artifact_path,
+                    "artifact_ext": nested.get("artifact_ext") or _artifact_ext_from_path(artifact_path),
+                    "task_type": nested.get("task_type") or task.get("task_type"),
+                    "source_task_id": nested.get("task_id") or task.get("task_id"),
+                    "source_run_id": nested.get("run_id") or task.get("run_id"),
+                }
+    return _direct_artifact_payload_from_task(task)
+
+
+def _resolve_edit_builder_source(
+    args: Mapping[str, Any],
+    async_tasks: Mapping[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    explicit_path = _canonical_output_artifact_path(args.get("artifact_path"))
+    explicit_task_id = _string_value(args.get("task_id"))
+    if explicit_path:
+        source: dict[str, Any] = {
+            "artifact_path": explicit_path,
+            "artifact_ext": _artifact_ext_from_path(explicit_path),
+            "source_task_id": explicit_task_id,
+        }
+        if explicit_task_id and isinstance(async_tasks.get(explicit_task_id), Mapping):
+            task = async_tasks[explicit_task_id]
+            source["task_type"] = task.get("task_type")
+            source["source_run_id"] = task.get("run_id")
+        return source
+
+    candidates: list[Mapping[str, Any]] = []
+    if explicit_task_id and isinstance(async_tasks.get(explicit_task_id), Mapping):
+        candidates.append(async_tasks[explicit_task_id])
+    candidates.extend(
+        task
+        for task in async_tasks.values()
+        if isinstance(task, Mapping) and task not in candidates
+    )
+    for task in candidates:
+        if str(task.get("status") or "").lower() not in {"success", "completed"}:
+            continue
+        payload = _builder_artifact_payload_from_task(task)
+        if payload is not None:
+            return payload
+    return None
+
+
+def _task_type_for_edit_source(source: Mapping[str, Any]) -> str:
+    task_type = source.get("task_type")
+    if isinstance(task_type, str) and task_type in builder_lifecycle_contract().TASK_TYPE_PREFIXES:
+        return task_type
+    ext = str(source.get("artifact_ext") or "").lower().lstrip(".")
+    if ext == "html":
+        return "document"
+    if ext == "pdf":
+        return "visual_report"
+    if ext == "pptx":
+        return "presentation"
+    return "document"
+
+
+def _build_edit_existing_artifact_description(
+    *,
+    message: str,
+    source_artifact_path: str,
+    revision_artifact_path: str,
+) -> str:
+    return (
+        "Edit an existing completed builder artifact, preserving unrelated content.\n\n"
+        f"Source artifact path: {source_artifact_path}\n"
+        f"Revised artifact target path: {revision_artifact_path}\n\n"
+        "Read the source artifact before making changes. Do not rebuild from scratch unless "
+        "the user's edit explicitly asks for a full rewrite. For pure local wording, layout, "
+        "or content edits, web research is optional; if the edit introduces new URLs, named "
+        "projects, papers, frameworks, companies, factual topics, or source requirements, "
+        "search/fetch that new material before editing.\n\n"
+        f"User edit request:\n{message}"
+    )
 
 
 def _active_builder_task_id(async_tasks: Mapping[str, dict[str, Any]]) -> str | None:

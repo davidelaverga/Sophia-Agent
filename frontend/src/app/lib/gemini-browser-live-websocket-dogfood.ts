@@ -782,6 +782,7 @@ type GeminiFrontendReviewToolCallInput =
   | GeminiReadArtifactTextToolCallInput;
 const GEMINI_GENERIC_BUILDER_TOOL_NAMES = new Set([
   'start_builder_task',
+  'edit_builder_artifact',
   'check_async_task',
   'update_async_task',
   'cancel_async_task',
@@ -789,6 +790,7 @@ const GEMINI_GENERIC_BUILDER_TOOL_NAMES = new Set([
 ]);
 const GEMINI_SELECTED_ARTIFACT_REVIEW_REDIRECT_BUILDER_TOOL_NAMES = new Set([
   'start_builder_task',
+  'edit_builder_artifact',
   'check_async_task',
   'update_async_task',
   'cancel_async_task',
@@ -4613,7 +4615,7 @@ function promptOrToolLeakageMarker(text: string): string | null {
   if (/\bread_artifact_text\b/u.test(normalized)) return 'read_artifact_text';
   if (/\bcoreview_request_artifact_update\b/u.test(normalized)) return 'coreview_request_artifact_update';
   if (/\bcoreview_get_builder_status\b/u.test(normalized)) return 'coreview_get_builder_status';
-  if (/\b(?:start_builder_task|check_async_task|update_async_task|cancel_async_task|list_async_tasks)\b/u.test(normalized)) return 'generic_builder_lifecycle_tool';
+  if (/\b(?:start_builder_task|edit_builder_artifact|check_async_task|update_async_task|cancel_async_task|list_async_tasks)\b/u.test(normalized)) return 'generic_builder_lifecycle_tool';
   if (/\bartifact_id\b/u.test(normalized)) return 'artifact_id';
   if (/\btask[_\s-]?id\b/u.test(normalized)) return 'task_id';
   if (/\basync\s+task\b/u.test(normalized)) return 'async_task';

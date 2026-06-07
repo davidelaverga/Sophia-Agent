@@ -81,6 +81,7 @@ def test_gemini_sophia_declarations_include_emit_artifact_from_contract() -> Non
     assert [declaration["name"] for declaration in declarations] == [
         "emit_artifact",
         "start_builder_task",
+        "edit_builder_artifact",
         "check_async_task",
         "update_async_task",
         "cancel_async_task",

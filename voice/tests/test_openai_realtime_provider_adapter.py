@@ -152,10 +152,15 @@ async def test_raw_openai_realtime_flow_normalizes_to_existing_sophia_events() -
         "text": "I had a rough day.",
         "utterance_id": "user-item-1",
     }
-    assert payloads[3]["data"] == {"text": "That sounds heavy. ", "is_final": False}
+    assert payloads[3]["data"] == {
+        "text": "That sounds heavy. ",
+        "is_final": False,
+        "assistant_transcript_source": "output_audio_transcript",
+    }
     assert payloads[5]["data"] == {
         "text": "That sounds heavy. I'm here with you.",
         "is_final": True,
+        "assistant_transcript_source": "output_audio_transcript",
     }
     assert payloads[6] == {"type": "sophia.artifact", "data": _artifact()}
     assert all(payload["type"].startswith("sophia.") for payload in payloads)
@@ -254,8 +259,22 @@ def test_mapper_uses_one_assistant_transcript_surface_per_response() -> None:
         ProviderEventType.ASSISTANT_TEXT_FINAL,
     ]
     assert _payloads(events) == [
-        {"type": "sophia.transcript", "data": {"text": "Text surface. ", "is_final": False}},
-        {"type": "sophia.transcript", "data": {"text": "Text surface.", "is_final": True}},
+        {
+            "type": "sophia.transcript",
+            "data": {
+                "text": "Text surface. ",
+                "is_final": False,
+                "assistant_transcript_source": "output_text",
+            },
+        },
+        {
+            "type": "sophia.transcript",
+            "data": {
+                "text": "Text surface.",
+                "is_final": True,
+                "assistant_transcript_source": "output_text",
+            },
+        },
     ]
 
 

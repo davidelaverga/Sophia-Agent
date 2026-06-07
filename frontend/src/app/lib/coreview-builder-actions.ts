@@ -607,7 +607,7 @@ export function coreviewBuilderGeminiFunctionDeclarations(): Record<string, unkn
   return [
     {
       name: COREVIEW_REQUEST_ARTIFACT_UPDATE_TOOL_NAME,
-      description: "Required during Review with Sophia for user requests to update, revise, edit, change, rebuild, restyle, or make a new version of the currently selected artifact. Use this instead of start_builder_task, update_async_task, or emit_artifact for selected-artifact updates. The browser will preserve the selected artifact path, renderer, stable identity, current view, source href, capability summary, annotations, and session/thread ids.",
+      description: "Required during Review with Sophia for user requests to update, revise, edit, change, rebuild, restyle, or make a new version of the currently selected artifact. Use this instead of start_builder_task, update_async_task, edit_builder_artifact, or emit_artifact for selected-artifact updates. The browser will preserve the selected artifact path, renderer, stable identity, current view, source href, capability summary, annotations, and session/thread ids.",
       parameters: {
         type: "OBJECT",
         properties: {
@@ -663,6 +663,11 @@ export function coreviewBuilderToolExceptionResult(
 
 export function buildCoreviewBuilderUpdatePrompt(context: CoreviewArtifactUpdateContext): string {
   const capabilitySummary = JSON.stringify(context.capabilitySummary)
+  const useEditBuilderArtifact = (
+    context.updateMode === "revise_version"
+    || context.updateMode === "update_existing"
+    || context.updateMode === "repair_artifact"
+  )
   const lines = [
     "Coreview artifact update request.",
     "",
@@ -685,7 +690,10 @@ export function buildCoreviewBuilderUpdatePrompt(context: CoreviewArtifactUpdate
     "",
     "Builder instructions:",
     "- This is a revise current artifact request, not an unrelated new document request.",
-    "- Use start_builder_task with this brief for the Coreview artifact update path when starting work.",
+    useEditBuilderArtifact
+      ? "- Use edit_builder_artifact with message set to the user's requested change and artifact_path set to the selected Artifact path above."
+      : "- Use start_builder_task with this brief because this request is a fresh build or format conversion rather than a same-format source revision.",
+    "- Use start_builder_task only when the user explicitly wants a fresh deliverable, a format conversion, or edit_builder_artifact reports no durable source artifact.",
     "- Do not call emit_artifact for this co-review update.",
     "- Update/revise the current artifact identified by the selected artifact path and stable identity.",
     "- Preserve the current artifact when possible.",

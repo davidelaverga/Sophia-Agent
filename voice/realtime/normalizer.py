@@ -29,7 +29,8 @@ _GEMINI_INTERNAL_OUTPUT_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "builder_lifecycle_tool",
         re.compile(
             r"\b(?:start_builder_task|check_async_task|update_async_task|cancel_async_task|list_async_tasks|"
-            r"coreview_request_artifact_update|coreview_get_builder_status|coreview_cancel_builder_task)\b",
+            r"edit_builder_artifact|coreview_request_artifact_update|coreview_get_builder_status|"
+            r"coreview_cancel_builder_task)\b",
             re.IGNORECASE,
         ),
     ),

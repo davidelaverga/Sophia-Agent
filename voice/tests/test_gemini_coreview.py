@@ -58,16 +58,20 @@ def test_normal_voice_tool_declarations_unchanged_when_flag_off(monkeypatch) -> 
     monkeypatch.delenv(COREVIEW_FEATURE_FLAG, raising=False)
 
     declarations = gemini_sophia_function_declarations()
+    names = [declaration["name"] for declaration in declarations]
 
-    assert [declaration["name"] for declaration in declarations] == [
+    assert names == [
         "emit_artifact",
         "start_builder_task",
+        "edit_builder_artifact",
         "check_async_task",
         "update_async_task",
         "cancel_async_task",
         "list_async_tasks",
         "retrieve_memories",
     ]
+    assert GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME not in names
+    assert GEMINI_COREVIEW_ACTION_TOOL_NAMES.isdisjoint(names)
 
 
 def test_coreview_tool_declaration_is_opt_in(monkeypatch) -> None:
