@@ -285,8 +285,8 @@ describe("Coreview action feedback", () => {
     })
     expect(focusFeedback).toMatchObject({
       actionKind: "navigation",
-      displayMessage: "Focused.",
-      spokenMessage: "Focused.",
+      displayMessage: "Scrolled.",
+      spokenMessage: "Scrolled.",
       shouldSpeak: true,
     })
   })

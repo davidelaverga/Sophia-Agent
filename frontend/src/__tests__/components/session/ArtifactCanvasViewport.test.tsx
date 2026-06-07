@@ -90,6 +90,93 @@ const htmlArtifact = {
   artifactPath: "mnt/user-data/outputs/launch-brief.html",
 } satisfies BuilderArtifactV1
 
+function extractBridgeScript(srcDoc: string): string {
+  const match = /<script>([\s\S]*)<\/script>/u.exec(srcDoc)
+  if (!match?.[1]) {
+    throw new Error("Expected injected HTML preview bridge script")
+  }
+  return match[1]
+}
+
+function runPreviewBridgeFromSrcDoc(srcDoc: string) {
+  const previewDocument = document.implementation.createHTMLDocument("preview")
+  previewDocument.open()
+  previewDocument.write(srcDoc)
+  previewDocument.close()
+
+  const posted: Record<string, unknown>[] = []
+  const messageListeners: Array<(event: { data: unknown }) => void> = []
+  const previousScrollIntoView = Element.prototype.scrollIntoView
+  const scrollIntoView = vi.fn(function scrollIntoViewMock(this: Element) {
+    this.setAttribute("data-test-scrolled", "true")
+  })
+  Element.prototype.scrollIntoView = scrollIntoView
+
+  Object.defineProperty(previewDocument, "scrollingElement", {
+    configurable: true,
+    value: previewDocument.documentElement,
+  })
+  Object.defineProperty(previewDocument.documentElement, "scrollTop", {
+    configurable: true,
+    writable: true,
+    value: 0,
+  })
+  Object.assign(previewDocument.documentElement, {
+    scrollTo: vi.fn((options?: ScrollToOptions) => {
+      previewDocument.documentElement.scrollTop = Math.max(0, Number(options?.top ?? 0))
+    }),
+  })
+
+  const open = vi.fn(() => ({ closed: false }))
+  const fakeWindow = {
+    parent: {
+      postMessage: vi.fn((payload: Record<string, unknown>) => {
+        posted.push(payload)
+      }),
+    },
+    innerHeight: 520,
+    innerWidth: 900,
+    scrollY: 0,
+    setTimeout: (handler: TimerHandler) => {
+      if (typeof handler === "function") {
+        handler()
+      }
+      return 1
+    },
+    clearTimeout: vi.fn(),
+    addEventListener: vi.fn((type: string, listener: (event: { data: unknown }) => void) => {
+      if (type === "message") {
+        messageListeners.push(listener)
+      }
+    }),
+    open,
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval -- exercises the exact injected iframe bridge from srcdoc.
+  const runScript = new Function("window", "document", extractBridgeScript(srcDoc))
+  runScript(fakeWindow, previewDocument)
+  posted.length = 0
+
+  return {
+    document: previewDocument,
+    posted,
+    open,
+    scrollIntoView,
+    sendParentMessage(data: unknown) {
+      messageListeners.forEach((listener) => listener({ data }))
+    },
+    cleanup() {
+      Element.prototype.scrollIntoView = previousScrollIntoView
+    },
+  }
+}
+
+function clickPreviewElement(element: Element): MouseEvent {
+  const event = new MouseEvent("click", { bubbles: true, cancelable: true })
+  element.dispatchEvent(event)
+  return event
+}
+
 afterEach(() => {
   vi.restoreAllMocks()
   vi.mocked(loadPdfJs).mockReset()
@@ -393,6 +480,183 @@ describe("ArtifactCanvasViewport", () => {
     expect(layer).toHaveAttribute("data-html-overlay-pointer-events-mode", "passthrough")
     expect(layer).toHaveAttribute("data-html-annotation-overlay-capturing", "false")
     expect(layer.className).toContain("pointer-events-none")
+  })
+
+  it("routes internal HTML links inside the iframe and blocks unsafe navigations", async () => {
+    mockCanvasApis()
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        [
+          "<!doctype html><html><body><main>",
+          "<nav><a id='hash-link' href='#features'>Explore Features</a>",
+          "<a id='slash-hash-link' href='/#features'>Features hash</a>",
+          "<a id='dot-slash-hash-link' href='./#features'>Features dot hash</a>",
+          "<a id='path-link' href='/features'>Features path</a>",
+          "<a id='relative-link' href='features'>Features relative</a>",
+          "<a id='missing-link' href='/missing'>Missing</a>",
+          "<a id='external-link' href='https://example.com/docs?secret=hidden'>External docs</a></nav>",
+          "<button id='data-scroll-button' data-scroll='coreview'>Coreview</button>",
+          "<section id='features'><h2>Features</h2><p>Feature details live here.</p></section>",
+          "<section><h2>Coreview</h2><p>Coreview details live here.</p></section>",
+          "</main></body></html>",
+        ].join(""),
+        {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        },
+      ),
+    )
+
+    render(
+      <ArtifactCanvasViewport
+        artifact={htmlArtifact}
+        files={[{
+          path: "mnt/user-data/outputs/launch-brief.html",
+          name: "launch-brief.html",
+          label: "launch-brief.html",
+          isPrimary: true,
+          mimeType: "text/html",
+        }]}
+        typeLabel="Webpage"
+        previewHref="/artifact.html"
+        artifactTextRegistration={{
+          artifactId: "artifact-1",
+          threadId: "thread-1",
+        }}
+        toolMode="select"
+      />,
+    )
+
+    const iframe = await screen.findByTestId("artifact-html-preview-iframe")
+    const bridge = runPreviewBridgeFromSrcDoc(iframe.getAttribute("srcdoc") ?? "")
+    try {
+      for (const id of ["hash-link", "slash-hash-link", "dot-slash-hash-link", "path-link", "relative-link"]) {
+        bridge.posted.length = 0
+        const event = clickPreviewElement(bridge.document.getElementById(id) as Element)
+        const result = bridge.posted.filter((payload) => payload.type === "navigation-result").at(-1)
+
+        expect(event.defaultPrevented).toBe(true)
+        expect(result).toMatchObject({
+          htmlInternalNavigationResult: "success",
+          htmlInternalNavigationTargetKind: "id",
+          htmlInternalNavigationPreventedDefault: true,
+          htmlInternalNavigationBlockedExternal: false,
+          htmlInternalNavigationScrolled: true,
+          htmlNavigationPreservedCaptureTarget: true,
+        })
+        expect(bridge.document.getElementById("features")?.getAttribute("data-test-scrolled")).toBe("true")
+      }
+
+      bridge.posted.length = 0
+      const dataScrollEvent = clickPreviewElement(bridge.document.getElementById("data-scroll-button") as Element)
+      const dataScrollResult = bridge.posted.filter((payload) => payload.type === "navigation-result").at(-1)
+      expect(dataScrollEvent.defaultPrevented).toBe(true)
+      expect(dataScrollResult).toMatchObject({
+        htmlInternalNavigationResult: "success",
+        htmlInternalNavigationTargetKind: "heading",
+        htmlInternalNavigationPreventedDefault: true,
+        htmlInternalNavigationScrolled: true,
+      })
+
+      bridge.posted.length = 0
+      const missingEvent = clickPreviewElement(bridge.document.getElementById("missing-link") as Element)
+      const missingResult = bridge.posted.filter((payload) => payload.type === "navigation-result").at(-1)
+      expect(missingEvent.defaultPrevented).toBe(true)
+      expect(missingResult).toMatchObject({
+        htmlInternalNavigationResult: "section_not_found",
+        htmlInternalNavigationFailureReason: "section_not_found",
+        htmlInternalNavigationPreventedDefault: true,
+        htmlInternalNavigationScrolled: false,
+      })
+
+      bridge.posted.length = 0
+      const externalEvent = clickPreviewElement(bridge.document.getElementById("external-link") as Element)
+      const externalResult = bridge.posted.filter((payload) => payload.type === "navigation-result").at(-1)
+      expect(externalEvent.defaultPrevented).toBe(true)
+      expect(bridge.open).toHaveBeenCalledWith("https://example.com/docs?secret=hidden", "_blank", "noopener,noreferrer")
+      expect(externalResult).toMatchObject({
+        target: "external",
+        htmlInternalNavigationResult: "opened_external",
+        htmlInternalNavigationTargetKind: "external",
+        htmlInternalNavigationBlockedExternal: true,
+        htmlInternalNavigationScrolled: false,
+      })
+      expect(JSON.stringify(externalResult)).not.toContain("secret=hidden")
+    } finally {
+      bridge.cleanup()
+    }
+  })
+
+  it("uses the same iframe resolver for HTML voice focus commands", async () => {
+    mockCanvasApis()
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        "<!doctype html><html><body><main><h1>Landing</h1><section><h2>Coreview</h2><p>Review details.</p></section></main></body></html>",
+        {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        },
+      ),
+    )
+
+    render(
+      <ArtifactCanvasViewport
+        artifact={htmlArtifact}
+        files={[{
+          path: "mnt/user-data/outputs/launch-brief.html",
+          name: "launch-brief.html",
+          label: "launch-brief.html",
+          isPrimary: true,
+          mimeType: "text/html",
+        }]}
+        typeLabel="Webpage"
+        previewHref="/artifact.html"
+        artifactTextRegistration={{
+          artifactId: "artifact-1",
+          threadId: "thread-1",
+        }}
+      />,
+    )
+
+    const iframe = await screen.findByTestId("artifact-html-preview-iframe")
+    const bridge = runPreviewBridgeFromSrcDoc(iframe.getAttribute("srcdoc") ?? "")
+    try {
+      bridge.sendParentMessage({
+        source: "coreview-html-preview-parent",
+        type: "command",
+        command: "focus_text",
+        commandId: "voice-focus-1",
+        text: "Coreview",
+      })
+      const commandResult = bridge.posted.find((payload) => payload.type === "command-result")
+
+      expect(commandResult).toMatchObject({
+        commandId: "voice-focus-1",
+        ok: true,
+        method: "heading",
+        scrolled: true,
+        htmlInternalNavigationTargetKind: "heading",
+        htmlVoiceNavigationUsedSameResolver: true,
+      })
+
+      bridge.posted.length = 0
+      bridge.sendParentMessage({
+        source: "coreview-html-preview-parent",
+        type: "command",
+        command: "focus_text",
+        commandId: "voice-focus-missing",
+        text: "Missing",
+      })
+      const missingResult = bridge.posted.find((payload) => payload.type === "command-result")
+      expect(missingResult).toMatchObject({
+        commandId: "voice-focus-missing",
+        ok: false,
+        blockedReason: "section_not_found",
+        htmlVoiceNavigationUsedSameResolver: true,
+      })
+    } finally {
+      bridge.cleanup()
+    }
   })
 
   it("captures pointer events for HTML highlight mode", async () => {

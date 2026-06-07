@@ -10,6 +10,7 @@ import {
   withCoreviewGeminiToolDeclarations,
   type CoreviewCurrentView,
   type CoreviewRendererAdapter,
+  type CoreviewResolvedAnnotationAnchor,
   type CoreviewSetViewAdapterInput,
   type CoreviewToolRefreshResult,
 } from "../../app/lib/coreview-actions"
@@ -36,6 +37,7 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
   let focusCalls = 0
   let staleSignature: string | null = null
   let annotations: Array<{ kind: "highlight" | "comment" | "underline" | "arrow" }> = []
+  const focusedAnchors: CoreviewResolvedAnnotationAnchor[] = []
   const defaultCapabilities = getCoreviewArtifactCapabilities({
     rendererKind: "pdf",
     artifactPath: "outputs/report.pdf",
@@ -238,6 +240,7 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
     },
     focusAnnotationAnchor: (input) => {
       focusCalls += 1
+      focusedAnchors.push(input.anchor)
       current = {
         ...current,
         pageIndex: input.pageIndex,
@@ -285,6 +288,9 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
     },
     get focusCalls() {
       return focusCalls
+    },
+    get focusedAnchors() {
+      return focusedAnchors
     },
     get annotations() {
       return annotations
@@ -663,6 +669,41 @@ describe("Coreview action bus", () => {
       result_summary: "Scrolled the HTML document.",
       refresh_attempted: false,
       refresh_result: "not_requested",
+    })
+  })
+
+  it("lets HTML focus use the iframe resolver when exact text resolution misses", async () => {
+    const harness = createHarness({
+      artifactPath: "outputs/site.html",
+      artifactTitle: "site.html",
+      rendererKind: "html",
+      pageIndex: 0,
+      pageCount: 1,
+      fitMode: "custom",
+      reviewActive: false,
+      reviewHasFrame: false,
+      canRefresh: false,
+    })
+
+    const result = await harness.bus.focusAnchor({
+      anchor: { type: "text_quote", text: "Features" },
+      pageIndex: 0,
+    }, "frontend_fallback")
+
+    expect(result).toMatchObject({
+      ok: true,
+      action: "focus_anchor",
+      renderer_kind: "html",
+      focus_anchor_type: "text_quote",
+      html_focus_anchor_attempted: true,
+      html_focus_anchor_result: "success",
+      result_summary: "Focused the HTML section. Visual review is not active.",
+    })
+    expect(harness.focusCalls).toBe(1)
+    expect(harness.focusedAnchors[0]).toMatchObject({
+      anchorType: "text_quote",
+      text: "Features",
+      rect: { x: 0, y: 0, width: 0.01, height: 0.01 },
     })
   })
 

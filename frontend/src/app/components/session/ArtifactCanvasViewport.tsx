@@ -84,9 +84,11 @@ export interface ArtifactHtmlViewState {
 export interface ArtifactHtmlCommandResult {
   ok: boolean
   blockedReason: "section_not_found" | "text_anchor_not_found" | "layout_anchor_not_supported" | null
-  method: "scroll_by" | "scroll_to" | "heading" | "nav_label" | "id" | "text" | null
+  method: "scroll_by" | "scroll_to" | "heading" | "nav_label" | "id" | "name" | "text" | null
   scrolled: boolean
   state: ArtifactHtmlViewState | null
+  targetKind?: HtmlInternalNavigationTargetKind | null
+  voiceNavigationUsedSameResolver?: boolean
 }
 
 export interface ArtifactHtmlCommandTarget {
@@ -154,11 +156,36 @@ const ARTIFACT_CANVAS_BED_FALLBACK_BOUNDS = {
   height: 720,
 }
 
+type HtmlInternalNavigationTargetKind =
+  | "fragment"
+  | "path"
+  | "data_attribute"
+  | "id"
+  | "name"
+  | "heading"
+  | "nav_label"
+  | "text"
+  | "top"
+  | "external"
+  | "unknown"
+
+type HtmlInternalNavigationResult =
+  | "attempted"
+  | "success"
+  | "section_not_found"
+  | "blocked_external"
+  | "opened_external"
+  | "external_open_failed"
+  | "invalid_target"
+
 const HTML_PREVIEW_BRIDGE_SCRIPT = `
 (function () {
   var BRIDGE_SOURCE = "coreview-html-preview";
   var PARENT_SOURCE = "coreview-html-preview-parent";
+  var NAV_ATTEMPTED = "html_internal_navigation_attempted";
+  var NAV_RESULT = "html_internal_navigation_result";
   var reportTimer = null;
+  var statusTimer = null;
 
   function clampText(value) {
     return String(value || "").replace(/\\s+/g, " ").trim().slice(0, 96);
@@ -166,6 +193,36 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
 
   function normalize(value) {
     return clampText(value).toLowerCase();
+  }
+
+  function normalizeSearch(value) {
+    return normalize(value)
+      .replace(/&/g, " and ")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  }
+
+  function safeDecode(value) {
+    var text = String(value || "");
+    try {
+      return decodeURIComponent(text.replace(/\\+/g, " "));
+    } catch (error) {
+      return text;
+    }
+  }
+
+  function cleanTargetToken(value) {
+    var text = safeDecode(value);
+    text = text.replace(/^#+/, "").replace(/^\\.\\//, "").replace(/^\\/+/, "").replace(/\\/+$/, "").trim();
+    if (!text) {
+      return "";
+    }
+    var parts = text.split("/").filter(function (part) { return part.length > 0; });
+    if (parts.length > 0) {
+      text = parts[parts.length - 1];
+    }
+    text = text.replace(/\\.[a-z0-9]{1,8}$/i, "").replace(/[-_]+/g, " ");
+    return clampText(text);
   }
 
   function scrollingElement() {
@@ -243,12 +300,30 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
     window.parent.postMessage(state(reason), "*");
   }
 
+  function postNavigation(type, details) {
+    var payload = state(type);
+    var isAttempt = type === "navigation-attempted";
+    payload.type = type;
+    payload.navigationEvent = isAttempt ? NAV_ATTEMPTED : NAV_RESULT;
+    payload.target = clampText(details && details.target);
+    payload.htmlInternalNavigationAttempted = isAttempt || Boolean(details && details.attempted);
+    payload.htmlInternalNavigationResult = details && details.result ? details.result : (isAttempt ? "attempted" : null);
+    payload.htmlInternalNavigationTargetKind = details && details.targetKind ? details.targetKind : "unknown";
+    payload.htmlInternalNavigationPreventedDefault = Boolean(details && details.preventedDefault);
+    payload.htmlInternalNavigationBlockedExternal = Boolean(details && details.blockedExternal);
+    payload.htmlInternalNavigationScrolled = Boolean(details && details.scrolled);
+    payload.htmlInternalNavigationFailureReason = details && details.failureReason ? details.failureReason : null;
+    payload.htmlVoiceNavigationUsedSameResolver = Boolean(details && details.voiceNavigationUsedSameResolver);
+    payload.htmlNavigationPreservedCaptureTarget = true;
+    window.parent.postMessage(payload, "*");
+  }
+
   function scheduleState(reason) {
     window.clearTimeout(reportTimer);
     reportTimer = window.setTimeout(function () { postState(reason); }, 60);
   }
 
-  function sendResult(commandId, ok, blockedReason, method, scrolled) {
+  function sendResult(commandId, ok, blockedReason, method, scrolled, details) {
     window.setTimeout(function () {
       var payload = state("command-result");
       payload.type = "command-result";
@@ -257,6 +332,8 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
       payload.blockedReason = blockedReason || null;
       payload.method = method || null;
       payload.scrolled = scrolled === true;
+      payload.htmlInternalNavigationTargetKind = details && details.targetKind ? details.targetKind : null;
+      payload.htmlVoiceNavigationUsedSameResolver = Boolean(details && details.voiceNavigationUsedSameResolver);
       window.parent.postMessage(payload, "*");
     }, 80);
   }
@@ -268,38 +345,286 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
     return Math.abs(before - Math.max(0, top)) > 1;
   }
 
-  function findTarget(query) {
-    var needle = normalize(query);
-    if (!needle) {
-      return null;
+  function labelForElement(element) {
+    return element.getAttribute("aria-label")
+      || element.getAttribute("data-section")
+      || element.getAttribute("data-target")
+      || element.getAttribute("data-scroll")
+      || element.getAttribute("name")
+      || element.id
+      || element.textContent
+      || "";
+  }
+
+  function matchesTarget(value, target, allowContains) {
+    var label = normalizeSearch(value);
+    var needle = normalizeSearch(target);
+    if (!label || !needle) {
+      return false;
     }
-    var selectors = [
-      "h1", "h2", "h3", "h4", "h5", "h6",
-      "nav a", "a", "button",
-      "[id]", "[aria-label]", "[data-section]", "section", "article", "main p", "li"
-    ];
-    var elements = Array.prototype.slice.call(document.querySelectorAll(selectors.join(",")));
-    var best = null;
+    return label === needle || (allowContains && label.indexOf(needle) >= 0);
+  }
+
+  function firstAttributeMatch(selector, attribute, target, excludedElement) {
+    var elements = Array.prototype.slice.call(document.querySelectorAll(selector));
+    var exact = null;
+    var loose = null;
     elements.some(function (element) {
-      var label = normalize(
-        element.getAttribute("aria-label")
-        || element.getAttribute("data-section")
-        || element.id
-        || element.textContent
-        || ""
-      );
-      if (!label || label.indexOf(needle) < 0) {
+      if (excludedElement && element === excludedElement) {
         return false;
       }
-      var tag = String(element.tagName || "").toLowerCase();
-      var method = tag.match(/^h[1-6]$/) ? "heading"
-        : tag === "a" || element.closest("nav") ? "nav_label"
-          : element.id ? "id"
-            : "text";
+      var value = element.getAttribute(attribute) || "";
+      if (normalize(value) === normalize(target)) {
+        exact = element;
+        return true;
+      }
+      if (!loose && matchesTarget(value, target, true)) {
+        loose = element;
+      }
+      return false;
+    });
+    return exact || loose;
+  }
+
+  function firstTextMatch(selector, target, method, allowContains, excludedElement) {
+    var elements = Array.prototype.slice.call(document.querySelectorAll(selector));
+    var best = null;
+    elements.some(function (element) {
+      if (excludedElement && element === excludedElement) {
+        return false;
+      }
+      if (element.closest("script,style,noscript")) {
+        return false;
+      }
+      if (!matchesTarget(labelForElement(element), target, allowContains)) {
+        return false;
+      }
       best = { element: element, method: method };
-      return method === "heading" || method === "nav_label" || method === "id";
+      return true;
     });
     return best;
+  }
+
+  function resolveTarget(query, excludedElement) {
+    var target = cleanTargetToken(query);
+    if (!target) {
+      return { element: scrollingElement(), method: "scroll_to", targetKind: "top", target: "top" };
+    }
+
+    var idElement = firstAttributeMatch("[id]", "id", target, excludedElement);
+    if (idElement) {
+      return { element: idElement, method: "id", targetKind: "id", target: target };
+    }
+
+    var nameElement = firstAttributeMatch("[name]", "name", target, excludedElement);
+    if (nameElement) {
+      return { element: nameElement, method: "name", targetKind: "name", target: target };
+    }
+
+    var heading = firstTextMatch("h1,h2,h3,h4,h5,h6,[role='heading']", target, "heading", true, excludedElement);
+    if (heading) {
+      heading.targetKind = "heading";
+      heading.target = target;
+      return heading;
+    }
+
+    var section = firstTextMatch("section,article,[data-section],[aria-label],[role='region']", target, "text", true, excludedElement);
+    if (section) {
+      section.targetKind = "text";
+      section.target = target;
+      return section;
+    }
+
+    var nav = firstTextMatch("nav a,nav button,a,button", target, "nav_label", true, excludedElement);
+    if (nav) {
+      nav.targetKind = "nav_label";
+      nav.target = target;
+      return nav;
+    }
+
+    var text = firstTextMatch("main p,main li,section p,section li,article p,article li,p,li,blockquote,td,th,[data-text-anchor]", target, "text", true, excludedElement);
+    if (text) {
+      text.targetKind = "text";
+      text.target = target;
+      return text;
+    }
+
+    return null;
+  }
+
+  function scrollResolvedTarget(target) {
+    if (!target) {
+      return { ok: false, blockedReason: "section_not_found", method: null, scrolled: false, targetKind: "unknown" };
+    }
+    if (target.targetKind === "top") {
+      var moved = scrollToTop(0);
+      return { ok: true, blockedReason: null, method: "scroll_to", scrolled: moved, targetKind: "top" };
+    }
+    target.element.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+    if (typeof target.element.focus === "function") {
+      try { target.element.focus({ preventScroll: true }); } catch (error) {}
+    }
+    target.element.setAttribute("data-coreview-focus-pulse", "true");
+    window.setTimeout(function () { target.element.removeAttribute("data-coreview-focus-pulse"); }, 900);
+    return { ok: true, blockedReason: null, method: target.method, scrolled: true, targetKind: target.targetKind || target.method || "unknown" };
+  }
+
+  function findTarget(query) {
+    return resolveTarget(query);
+  }
+
+  function classifyHref(rawHref) {
+    var href = String(rawHref || "").trim();
+    if (!href) {
+      return null;
+    }
+    if (/^(?:javascript|data|vbscript):/i.test(href)) {
+      return { kind: "external", href: href, safeExternal: false, target: "external", targetKind: "external" };
+    }
+    if (/^(?:https?:|mailto:|tel:)/i.test(href) || href.indexOf("//") === 0) {
+      return { kind: "external", href: href, safeExternal: /^(?:https?:)/i.test(href) || href.indexOf("//") === 0, target: "external", targetKind: "external" };
+    }
+    if (href.charAt(0) === "#") {
+      return { kind: "internal", target: cleanTargetToken(href.slice(1)), targetKind: "fragment" };
+    }
+    var hashIndex = href.indexOf("#");
+    if (hashIndex >= 0) {
+      return { kind: "internal", target: cleanTargetToken(href.slice(hashIndex + 1)), targetKind: "fragment" };
+    }
+    var path = href.split(/[?#]/)[0] || "";
+    if (!path || path === "." || path === "./" || path === "/") {
+      return { kind: "internal", target: "", targetKind: "top" };
+    }
+    return { kind: "internal", target: cleanTargetToken(path), targetKind: "path" };
+  }
+
+  function navigationTriggerFromEvent(event) {
+    var target = event.target;
+    if (!target || typeof target.closest !== "function") {
+      return null;
+    }
+    var dataTarget = target.closest("[data-target],[data-scroll],[data-scroll-target],[data-section-target]");
+    if (dataTarget) {
+      var value = dataTarget.getAttribute("data-target")
+        || dataTarget.getAttribute("data-scroll")
+        || dataTarget.getAttribute("data-scroll-target")
+        || dataTarget.getAttribute("data-section-target");
+      if (value) {
+        return { route: { kind: "internal", target: cleanTargetToken(value), targetKind: "data_attribute" }, element: dataTarget };
+      }
+    }
+    var anchor = target.closest("a[href]");
+    if (!anchor) {
+      return null;
+    }
+    var route = classifyHref(anchor.getAttribute("href"));
+    return route ? { route: route, element: anchor } : null;
+  }
+
+  function preventNavigation(event) {
+    try { event.preventDefault(); } catch (error) {}
+    try {
+      if (typeof event.stopImmediatePropagation === "function") {
+        event.stopImmediatePropagation();
+      } else {
+        event.stopPropagation();
+      }
+    } catch (error) {}
+  }
+
+  function showNavigationStatus(message) {
+    var status = document.querySelector("[data-coreview-navigation-status='true']");
+    if (!status) {
+      status = document.createElement("div");
+      status.setAttribute("data-coreview-navigation-status", "true");
+      status.setAttribute("role", "status");
+      status.setAttribute("aria-live", "polite");
+      status.style.position = "absolute";
+      status.style.width = "1px";
+      status.style.height = "1px";
+      status.style.overflow = "hidden";
+      status.style.clipPath = "inset(50%)";
+      status.style.whiteSpace = "nowrap";
+      document.body.appendChild(status);
+    }
+    status.textContent = message;
+    window.clearTimeout(statusTimer);
+    statusTimer = window.setTimeout(function () {
+      status.textContent = "";
+    }, 2200);
+  }
+
+  function handleExternalNavigation(route) {
+    if (!route.safeExternal) {
+      showNavigationStatus("External link blocked in preview.");
+      return { result: "blocked_external", blockedExternal: true, failureReason: "blocked_external" };
+    }
+    var opened = null;
+    try {
+      opened = window.open(route.href, "_blank", "noopener,noreferrer");
+    } catch (error) {
+      opened = null;
+    }
+    if (opened) {
+      showNavigationStatus("External link opened in a new tab.");
+      return { result: "opened_external", blockedExternal: true, failureReason: null };
+    }
+    showNavigationStatus("External link blocked in preview.");
+    return { result: "external_open_failed", blockedExternal: true, failureReason: "external_open_failed" };
+  }
+
+  function handleNavigationClick(event) {
+    if (event.defaultPrevented) {
+      return;
+    }
+    var trigger = navigationTriggerFromEvent(event);
+    if (!trigger) {
+      return;
+    }
+
+    var route = trigger.route;
+    preventNavigation(event);
+    postNavigation("navigation-attempted", {
+      attempted: true,
+      target: route.target || "external",
+      targetKind: route.targetKind || "unknown",
+      preventedDefault: true,
+      blockedExternal: route.kind === "external",
+      scrolled: false,
+      result: "attempted"
+    });
+
+    if (route.kind === "external") {
+      var external = handleExternalNavigation(route);
+      postNavigation("navigation-result", {
+        attempted: true,
+        target: "external",
+        targetKind: "external",
+        preventedDefault: true,
+        blockedExternal: true,
+        scrolled: false,
+        result: external.result,
+        failureReason: external.failureReason
+      });
+      return;
+    }
+
+    var resolved = resolveTarget(route.target, trigger.element);
+    var scroll = scrollResolvedTarget(resolved);
+    var failureReason = scroll.ok ? null : (scroll.blockedReason || "section_not_found");
+    window.setTimeout(function () {
+      postNavigation("navigation-result", {
+        attempted: true,
+        target: route.target || "top",
+        targetKind: scroll.targetKind || route.targetKind || "unknown",
+        preventedDefault: true,
+        blockedExternal: false,
+        scrolled: scroll.scrolled,
+        result: scroll.ok ? "success" : failureReason,
+        failureReason: failureReason
+      });
+    }, 80);
+    scheduleState("internal-navigation");
   }
 
   window.addEventListener("message", function (event) {
@@ -332,19 +657,21 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
     if (data.command === "focus_text") {
       var target = findTarget(data.text);
       if (!target) {
-        sendResult(data.commandId, false, "section_not_found", null, false);
+        sendResult(data.commandId, false, "section_not_found", null, false, {
+          targetKind: "unknown",
+          voiceNavigationUsedSameResolver: true
+        });
         return;
       }
-      target.element.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
-      if (typeof target.element.focus === "function") {
-        try { target.element.focus({ preventScroll: true }); } catch (error) {}
-      }
-      target.element.setAttribute("data-coreview-focus-pulse", "true");
-      window.setTimeout(function () { target.element.removeAttribute("data-coreview-focus-pulse"); }, 900);
-      sendResult(data.commandId, true, null, target.method, true);
+      var scroll = scrollResolvedTarget(target);
+      sendResult(data.commandId, scroll.ok, scroll.blockedReason, scroll.method, scroll.scrolled, {
+        targetKind: scroll.targetKind,
+        voiceNavigationUsedSameResolver: true
+      });
     }
   });
 
+  document.addEventListener("click", handleNavigationClick, true);
   document.addEventListener("scroll", function () { scheduleState("scroll"); }, true);
   window.addEventListener("resize", function () { scheduleState("resize"); });
   window.addEventListener("load", function () { scheduleState("load"); });
@@ -1340,6 +1667,14 @@ function HtmlDocumentPage({
         return
       }
       applyHtmlViewState(message.state)
+      if (message.type === "navigation-attempted" || message.type === "navigation-result") {
+        recordHtmlInternalNavigationTelemetry({
+          artifactId,
+          artifactPath: file?.path ?? null,
+          message,
+        })
+        return
+      }
       if (message.type !== "command-result" || !message.commandId) {
         return
       }
@@ -1355,12 +1690,14 @@ function HtmlDocumentPage({
         method: message.method,
         scrolled: message.scrolled,
         state: message.state,
+        targetKind: message.navigation?.targetKind ?? null,
+        voiceNavigationUsedSameResolver: message.navigation?.voiceNavigationUsedSameResolver ?? false,
       })
     }
 
     window.addEventListener("message", handleMessage)
     return () => window.removeEventListener("message", handleMessage)
-  }, [annotations.length, applyHtmlViewState, normalizedZoom, preview.status])
+  }, [annotations.length, applyHtmlViewState, artifactId, file?.path, normalizedZoom, preview.status])
 
   const sendHtmlCommand = useCallback((
     command: Record<string, string | number | null>,
@@ -1603,13 +1940,24 @@ function buildInteractiveHtmlPreviewSrcDoc(html: string): string {
 }
 
 type HtmlPreviewBridgeMessage = {
-  type: "state" | "command-result"
+  type: "state" | "command-result" | "navigation-attempted" | "navigation-result"
   commandId: string | null
   ok: boolean
   blockedReason: ArtifactHtmlCommandResult["blockedReason"]
   method: ArtifactHtmlCommandResult["method"]
   scrolled: boolean
   state: ArtifactHtmlViewState
+  navigation: {
+    target: string | null
+    result: HtmlInternalNavigationResult | null
+    targetKind: HtmlInternalNavigationTargetKind | null
+    preventedDefault: boolean
+    blockedExternal: boolean
+    scrolled: boolean
+    failureReason: string | null
+    voiceNavigationUsedSameResolver: boolean
+    preservedCaptureTarget: boolean
+  } | null
 }
 
 function normalizeHtmlPreviewBridgeMessage(
@@ -1624,7 +1972,15 @@ function normalizeHtmlPreviewBridgeMessage(
   if (!isRecord(value) || value.source !== HTML_PREVIEW_BRIDGE_SOURCE) {
     return null
   }
-  const type = value.type === "command-result" ? "command-result" : value.type === "state" ? "state" : null
+  const type = value.type === "command-result"
+    ? "command-result"
+    : value.type === "state"
+      ? "state"
+      : value.type === "navigation-attempted"
+        ? "navigation-attempted"
+        : value.type === "navigation-result"
+          ? "navigation-result"
+          : null
   if (!type) {
     return null
   }
@@ -1662,6 +2018,7 @@ function normalizeHtmlPreviewBridgeMessage(
     method: htmlCommandMethod(value.method),
     scrolled: value.scrolled === true,
     state,
+    navigation: normalizeHtmlInternalNavigationMessage(value),
   }
 }
 
@@ -1679,11 +2036,120 @@ function htmlCommandMethod(value: unknown): ArtifactHtmlCommandResult["method"] 
     || value === "heading"
     || value === "nav_label"
     || value === "id"
+    || value === "name"
     || value === "text"
   ) {
     return value
   }
   return null
+}
+
+function normalizeHtmlInternalNavigationMessage(
+  value: Record<string, unknown>,
+): HtmlPreviewBridgeMessage["navigation"] {
+  if (
+    value.type !== "navigation-attempted"
+    && value.type !== "navigation-result"
+    && value.htmlVoiceNavigationUsedSameResolver !== true
+    && typeof value.htmlInternalNavigationTargetKind !== "string"
+  ) {
+    return null
+  }
+  const result = htmlInternalNavigationResult(value.htmlInternalNavigationResult)
+  const targetKind = htmlInternalNavigationTargetKind(value.htmlInternalNavigationTargetKind)
+  return {
+    target: typeof value.target === "string" && value.target.trim()
+      ? value.target.trim().slice(0, 96)
+      : null,
+    result,
+    targetKind,
+    preventedDefault: value.htmlInternalNavigationPreventedDefault === true,
+    blockedExternal: value.htmlInternalNavigationBlockedExternal === true,
+    scrolled: value.htmlInternalNavigationScrolled === true || value.scrolled === true,
+    failureReason: typeof value.htmlInternalNavigationFailureReason === "string" && value.htmlInternalNavigationFailureReason.trim()
+      ? value.htmlInternalNavigationFailureReason.trim().slice(0, 80)
+      : null,
+    voiceNavigationUsedSameResolver: value.htmlVoiceNavigationUsedSameResolver === true,
+    preservedCaptureTarget: value.htmlNavigationPreservedCaptureTarget !== false,
+  }
+}
+
+function htmlInternalNavigationTargetKind(value: unknown): HtmlInternalNavigationTargetKind | null {
+  if (
+    value === "fragment"
+    || value === "path"
+    || value === "data_attribute"
+    || value === "id"
+    || value === "name"
+    || value === "heading"
+    || value === "nav_label"
+    || value === "text"
+    || value === "top"
+    || value === "external"
+    || value === "unknown"
+  ) {
+    return value
+  }
+  return null
+}
+
+function htmlInternalNavigationResult(value: unknown): HtmlInternalNavigationResult | null {
+  if (
+    value === "attempted"
+    || value === "success"
+    || value === "section_not_found"
+    || value === "blocked_external"
+    || value === "opened_external"
+    || value === "external_open_failed"
+    || value === "invalid_target"
+  ) {
+    return value
+  }
+  return null
+}
+
+function recordHtmlInternalNavigationTelemetry({
+  artifactId,
+  artifactPath,
+  message,
+}: {
+  artifactId?: string | null
+  artifactPath: string | null
+  message: HtmlPreviewBridgeMessage
+}) {
+  const navigation = message.navigation
+  if (!navigation) {
+    return
+  }
+  recordSophiaCaptureEvent({
+    category: "artifacts-runtime",
+    name: "html-internal-navigation",
+    payload: {
+      artifactId: artifactId ?? null,
+      artifactRendererKind: "html",
+      htmlCaptureTargetArtifactPathHash: stableTelemetryHash(artifactPath),
+      htmlInternalNavigationAttempted: true,
+      htmlInternalNavigationResult: navigation.result,
+      htmlInternalNavigationTargetKind: navigation.targetKind,
+      htmlInternalNavigationPreventedDefault: navigation.preventedDefault,
+      htmlInternalNavigationBlockedExternal: navigation.blockedExternal,
+      htmlInternalNavigationScrolled: navigation.scrolled,
+      htmlInternalNavigationFailureReason: navigation.failureReason,
+      htmlVoiceNavigationUsedSameResolver: navigation.voiceNavigationUsedSameResolver,
+      htmlPostMessageNavigationReceived: true,
+      htmlNavigationPreservedCaptureTarget: navigation.preservedCaptureTarget,
+      htmlScrollMode: "iframe_document",
+      htmlScrollContainerResolved: true,
+      htmlScrollTop: message.state.scrollTop,
+      htmlScrollHeight: message.state.scrollHeight,
+      htmlViewportHeight: message.state.viewportHeight,
+      rawArtifactTextExcluded: true,
+      rawHtmlExcluded: true,
+      rawCommentTextExcluded: true,
+      rawFrameExcluded: true,
+      rawScreenshotExcluded: true,
+    },
+  })
 }
 
 function safeNonNegativeNumber(value: unknown): number {

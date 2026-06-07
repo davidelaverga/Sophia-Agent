@@ -1345,6 +1345,34 @@ describe('buildVoiceDeveloperMetrics', () => {
           rawFrameExcluded: true,
         },
       }),
+      buildEvent({
+        seq: 6,
+        at: '2026-04-07T12:00:00.390Z',
+        category: 'artifacts-runtime',
+        name: 'html-internal-navigation',
+        payload: {
+          artifactId: 'coreview-real-artifact-landing-html',
+          rendererKind: 'html',
+          htmlInternalNavigationAttempted: true,
+          htmlInternalNavigationResult: 'success',
+          htmlInternalNavigationTargetKind: 'id',
+          htmlInternalNavigationPreventedDefault: true,
+          htmlInternalNavigationBlockedExternal: false,
+          htmlInternalNavigationScrolled: true,
+          htmlInternalNavigationFailureReason: null,
+          htmlVoiceNavigationUsedSameResolver: true,
+          htmlPostMessageNavigationReceived: true,
+          htmlNavigationPreservedCaptureTarget: true,
+          htmlScrollMode: 'iframe_document',
+          htmlScrollContainerResolved: true,
+          htmlScrollTop: 360,
+          htmlScrollHeight: 1800,
+          htmlViewportHeight: 720,
+          rawArtifactTextExcluded: true,
+          rawHtmlExcluded: true,
+          rawFrameExcluded: true,
+        },
+      }),
     ];
 
     const metrics = buildVoiceDeveloperMetrics({
@@ -1379,7 +1407,7 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.coreview.visual.htmlOffscreenCaptureAffectsLayout).toBe(false);
     expect(metrics.coreview.visual.htmlScrollMode).toBe('iframe_document');
     expect(metrics.coreview.visual.htmlScrollContainerResolved).toBe(true);
-    expect(metrics.coreview.visual.htmlScrollTop).toBe(320);
+    expect(metrics.coreview.visual.htmlScrollTop).toBe(360);
     expect(metrics.coreview.visual.htmlScrollHeight).toBe(1800);
     expect(metrics.coreview.visual.htmlViewportHeight).toBe(720);
     expect(metrics.coreview.visual.htmlScrollAttempted).toBe(true);
@@ -1388,6 +1416,16 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.coreview.visual.htmlFocusAnchorResult).toBe('success');
     expect(metrics.coreview.visual.htmlFocusAnchorMethod).toBe('heading');
     expect(metrics.coreview.visual.htmlFocusAnchorScrolled).toBe(true);
+    expect(metrics.coreview.visual.htmlInternalNavigationAttempted).toBe(true);
+    expect(metrics.coreview.visual.htmlInternalNavigationResult).toBe('success');
+    expect(metrics.coreview.visual.htmlInternalNavigationTargetKind).toBe('id');
+    expect(metrics.coreview.visual.htmlInternalNavigationPreventedDefault).toBe(true);
+    expect(metrics.coreview.visual.htmlInternalNavigationBlockedExternal).toBe(false);
+    expect(metrics.coreview.visual.htmlInternalNavigationScrolled).toBe(true);
+    expect(metrics.coreview.visual.htmlInternalNavigationFailureReason).toBeNull();
+    expect(metrics.coreview.visual.htmlVoiceNavigationUsedSameResolver).toBe(true);
+    expect(metrics.coreview.visual.htmlPostMessageNavigationReceived).toBe(true);
+    expect(metrics.coreview.visual.htmlNavigationPreservedCaptureTarget).toBe(true);
     expect(metrics.coreview.visual.htmlAnnotationOverlayCapturing).toBe(false);
     expect(metrics.coreview.visual.htmlBrowserInteractionEnabled).toBe(true);
     expect(metrics.coreview.visual.htmlPageRailHidden).toBe(true);

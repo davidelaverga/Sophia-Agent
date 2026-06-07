@@ -248,10 +248,10 @@ function buildAppliedVoiceCommandStatus(
       return `Page ${pageIndex + 1} selected`
     case "scroll_down":
     case "scroll_up":
-      return "Scrolled"
+      return "Scrolled."
     case "go_to_top":
     case "go_to_bottom":
-      return "Scrolled"
+      return "Scrolled."
     case "zoom_in":
     case "zoom_out":
     case "fit_width":
@@ -261,7 +261,7 @@ function buildAppliedVoiceCommandStatus(
     case "refresh_view":
       return "Refresh requested"
     case "focus_anchor":
-      return "Focused"
+      return "Scrolled."
     case "add_annotation":
       return appliedAnnotationStatusText(command.annotationKind)
     default:
@@ -307,7 +307,7 @@ function buildRefreshUnavailableVoiceCommandMessage(
 ): string {
   if (staleAfterViewChange && command.kind !== "refresh_view") {
     if (isHtmlScrollVoiceCommand(command) || command.kind === "focus_anchor") {
-      return "View updated. Sophia's view is stale."
+      return "Scrolled."
     }
     return isPageNavigationVoiceCommand(command)
       ? "Page changed. Sophia's view is stale."
@@ -316,7 +316,7 @@ function buildRefreshUnavailableVoiceCommandMessage(
 
   if (shouldStartVoiceReview) {
     if (isHtmlScrollVoiceCommand(command) || command.kind === "focus_anchor") {
-      return "View updated. Start Review with Sophia to share this view."
+      return "Scrolled."
     }
     return isPageNavigationVoiceCommand(command)
       ? "Page changed. Start Review with Sophia to share this view."
@@ -328,7 +328,7 @@ function buildRefreshUnavailableVoiceCommandMessage(
   }
 
   if (isHtmlScrollVoiceCommand(command) || command.kind === "focus_anchor") {
-    return "View updated. Visual refresh is not active."
+    return "Scrolled."
   }
 
   return isPageNavigationVoiceCommand(command)
@@ -398,7 +398,7 @@ const COREVIEW_BLOCKED_STATUS_TEXT: Partial<Record<CoreviewToolBlockedReason, st
   zoom_not_supported: "This artifact does not support zoom controls.",
   annotations_not_supported: "Annotations are not available for this artifact format.",
   layout_anchor_not_supported: "Layout anchors are not available for this artifact format.",
-  section_not_found: "Sophia could not find that section.",
+  section_not_found: "I couldn't find that section.",
   ocr_not_available: "OCR is not available yet.",
   pptx_native_renderer_unavailable: "PPTX native canvas rendering is not available yet.",
   unsupported_pages: "This view cannot be controlled by Sophia.",
@@ -409,7 +409,8 @@ const COREVIEW_BLOCKED_STATUS_TEXT: Partial<Record<CoreviewToolBlockedReason, st
   tool_unavailable: "Sophia cannot control this view right now.",
   invalid_tool_args: "Sophia asked for an invalid view change.",
   annotation_commit_failed: "Sophia could not verify that the annotation was added.",
-  text_anchor_not_found: "Sophia could not find that text in this artifact.",
+  text_anchor_not_found: "I couldn't find that section.",
+  anchor_not_found: "I couldn't find that section.",
   unsupported_annotation_kind: "That annotation type is not available yet.",
 }
 
@@ -2066,10 +2067,13 @@ export function PresenceArtifactPanel({
     }
 
     if (result.action === "set_view") {
+      const htmlScrollApplied = result.renderer_kind === "html" && result.html_scroll_attempted === true
       setVoiceCommandStatus({
         text: result.refresh_attempted && result.refresh_result === "success"
           ? "Sophia's view refreshed"
-          : result.page_number
+          : htmlScrollApplied
+            ? "Scrolled."
+            : result.page_number
             ? `Page ${result.page_number} selected`
             : "Artifact view updated",
         tone: result.refresh_attempted && result.refresh_result === "success" ? "success" : "neutral",
@@ -2098,7 +2102,9 @@ export function PresenceArtifactPanel({
 
     if (result.action === "focus_anchor") {
       setVoiceCommandStatus({
-        text: result.focus_anchor_type === "current_title"
+        text: result.renderer_kind === "html"
+          ? "Scrolled."
+          : result.focus_anchor_type === "current_title"
           ? "Sophia focused the title"
           : "Sophia focused the anchor",
         tone: "success",

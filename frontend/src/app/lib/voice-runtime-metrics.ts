@@ -192,6 +192,16 @@ export type CoreviewVisualTelemetry = {
   htmlFocusAnchorResult: string | null
   htmlFocusAnchorMethod: string | null
   htmlFocusAnchorScrolled: boolean | null
+  htmlInternalNavigationAttempted: boolean | null
+  htmlInternalNavigationResult: string | null
+  htmlInternalNavigationTargetKind: string | null
+  htmlInternalNavigationPreventedDefault: boolean | null
+  htmlInternalNavigationBlockedExternal: boolean | null
+  htmlInternalNavigationScrolled: boolean | null
+  htmlInternalNavigationFailureReason: string | null
+  htmlVoiceNavigationUsedSameResolver: boolean | null
+  htmlPostMessageNavigationReceived: boolean | null
+  htmlNavigationPreservedCaptureTarget: boolean | null
   htmlAnnotationOverlayCapturing: boolean | null
   htmlBrowserInteractionEnabled: boolean | null
   htmlPageRailHidden: boolean | null
@@ -1542,6 +1552,16 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       htmlFocusAnchorResult: null,
       htmlFocusAnchorMethod: null,
       htmlFocusAnchorScrolled: null,
+      htmlInternalNavigationAttempted: null,
+      htmlInternalNavigationResult: null,
+      htmlInternalNavigationTargetKind: null,
+      htmlInternalNavigationPreventedDefault: null,
+      htmlInternalNavigationBlockedExternal: null,
+      htmlInternalNavigationScrolled: null,
+      htmlInternalNavigationFailureReason: null,
+      htmlVoiceNavigationUsedSameResolver: null,
+      htmlPostMessageNavigationReceived: null,
+      htmlNavigationPreservedCaptureTarget: null,
       htmlAnnotationOverlayCapturing: null,
       htmlBrowserInteractionEnabled: null,
       htmlPageRailHidden: null,
@@ -1782,6 +1802,7 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((event) => event.category === "artifacts-runtime" && (
       event.name === "html-scroll-command"
       || event.name === "html-focus-anchor-command"
+      || event.name === "html-internal-navigation"
       || event.name === "html-visible-preview-layout"
     ))
     .map((event) => event.payloadRecord)
@@ -2272,6 +2293,46 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.htmlFocusAnchorScrolled = latestBooleanFromRecords(
     htmlInteractionEvents,
     "htmlFocusAnchorScrolled",
+  )
+  visual.htmlInternalNavigationAttempted = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlInternalNavigationAttempted",
+  )
+  visual.htmlInternalNavigationResult = latestStringFromRecords(
+    htmlInteractionEvents,
+    "htmlInternalNavigationResult",
+  )
+  visual.htmlInternalNavigationTargetKind = latestStringFromRecords(
+    htmlInteractionEvents,
+    "htmlInternalNavigationTargetKind",
+  )
+  visual.htmlInternalNavigationPreventedDefault = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlInternalNavigationPreventedDefault",
+  )
+  visual.htmlInternalNavigationBlockedExternal = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlInternalNavigationBlockedExternal",
+  )
+  visual.htmlInternalNavigationScrolled = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlInternalNavigationScrolled",
+  )
+  visual.htmlInternalNavigationFailureReason = latestStringFromRecords(
+    htmlInteractionEvents,
+    "htmlInternalNavigationFailureReason",
+  )
+  visual.htmlVoiceNavigationUsedSameResolver = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlVoiceNavigationUsedSameResolver",
+  )
+  visual.htmlPostMessageNavigationReceived = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlPostMessageNavigationReceived",
+  )
+  visual.htmlNavigationPreservedCaptureTarget = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlNavigationPreservedCaptureTarget",
   )
   visual.htmlAnnotationOverlayCapturing = latestBooleanFromRecords(
     htmlInteractionEvents,

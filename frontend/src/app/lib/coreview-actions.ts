@@ -1070,12 +1070,18 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       })
     }
 
-    const resolvedAnchor = adapter.resolveAnnotationAnchor({
+    const resolvedAnchorResult = adapter.resolveAnnotationAnchor({
       anchor: normalized.anchor,
       pageIndex: normalized.pageIndex,
     })
-    if (resolvedAnchor.ok === false) {
-      const blockedReason = resolvedAnchor.blockedReason
+    let resolvedAnchor: CoreviewResolvedAnnotationAnchor | null = resolvedAnchorResult.ok
+      ? resolvedAnchorResult.anchor
+      : null
+    if (!resolvedAnchor && before.rendererKind === "html" && normalized.anchor.type === "text_quote") {
+      resolvedAnchor = buildHtmlFocusTextAnchor(normalized.anchor.text, normalized.pageIndex)
+    }
+    if (!resolvedAnchor) {
+      const blockedReason = resolvedAnchorResult.ok === false ? resolvedAnchorResult.blockedReason : "anchor_not_found"
       return buildCoreviewResult({
         action: "focus_anchor",
         source,
@@ -1092,7 +1098,7 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
         ...resolved.rebind,
       })
     }
-    if (!resolvedAnchor.anchor.rect) {
+    if (!resolvedAnchor.rect && !(before.rendererKind === "html" && resolvedAnchor.text)) {
       const blockedReason: CoreviewToolBlockedReason = "anchor_not_found"
       return buildCoreviewResult({
         action: "focus_anchor",
@@ -1127,7 +1133,7 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
 
     const focused = await adapter.focusAnnotationAnchor({
       pageIndex: normalized.pageIndex,
-      anchor: resolvedAnchor.anchor,
+      anchor: resolvedAnchor,
       zoom: normalized.zoom,
       fitMode: normalized.fitMode,
     })
@@ -1145,7 +1151,7 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
         viewSignatureBefore: initialBefore.viewSignature,
         viewSignatureAfter: adapter.getCurrentViewState().viewSignature,
         focusAnchorType: normalized.anchor.type,
-        focusedRect: resolvedAnchor.anchor.rect,
+        focusedRect: resolvedAnchor.rect,
         htmlFocusAnchorAttempted: before.rendererKind === "html",
         htmlFocusAnchorResult: before.rendererKind === "html" ? focused.blockedReason ?? "failed" : null,
         htmlFocusAnchorMethod: focused.method ?? null,
@@ -1169,7 +1175,7 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
         viewSignatureBefore: initialBefore.viewSignature,
         viewSignatureAfter: adapter.getCurrentViewState().viewSignature,
         focusAnchorType: normalized.anchor.type,
-        focusedRect: resolvedAnchor.anchor.rect,
+        focusedRect: resolvedAnchor.rect,
         ...resolved.rebind,
       })
     }
@@ -1225,7 +1231,7 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       staleOverride: forceStale,
       visualFrameFreshOverride: forceVisualFrameFresh,
       focusAnchorType: normalized.anchor.type,
-      focusedRect: resolvedAnchor.anchor.rect,
+      focusedRect: resolvedAnchor.rect,
       htmlFocusAnchorAttempted: before.rendererKind === "html",
       htmlFocusAnchorResult: before.rendererKind === "html" ? "success" : null,
       htmlFocusAnchorMethod: focused.method ?? null,
@@ -2074,6 +2080,25 @@ function normalizeAddAnnotationInput(
 
 function defaultAnnotationColorForKind(kind: CoreviewAnnotationKind): CoreviewAnnotationColor {
   return kind === "underline" || kind === "arrow" ? "purple" : "yellow"
+}
+
+function buildHtmlFocusTextAnchor(
+  text: string,
+  pageIndex: number,
+): CoreviewResolvedAnnotationAnchor | null {
+  const normalizedText = normalizeAnnotationText(text)
+  if (!normalizedText) {
+    return null
+  }
+  return {
+    anchorType: "text_quote",
+    pageIndex,
+    rect: { x: 0, y: 0, width: 0.01, height: 0.01 },
+    point: null,
+    text: normalizedText,
+    matchCount: null,
+    textLength: normalizedText.length,
+  }
 }
 
 function normalizeFocusAnchorInput(

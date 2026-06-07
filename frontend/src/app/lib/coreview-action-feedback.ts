@@ -295,11 +295,12 @@ export function coreviewFeedbackFromActionResult(
       })
     }
     if (result.action === "focus_anchor") {
+      const htmlFocus = result.renderer_kind === "html" || result.html_focus_anchor_attempted === true
       return createCoreviewActionFeedback({
         actionKind: "navigation",
         status: result.ok ? "applied" : "failed",
-        displayMessage: result.ok ? "Focused." : "Could not focus that section.",
-        spokenMessage: result.ok ? "Focused." : "I couldn't find that section.",
+        displayMessage: result.ok ? (htmlFocus ? "Scrolled." : "Focused.") : "I couldn't find that section.",
+        spokenMessage: result.ok ? (htmlFocus ? "Scrolled." : "Focused.") : "I couldn't find that section.",
         shouldSpeak: voiceTriggered,
         shouldShowToastOrCard: false,
         dedupeKey: baseKey,

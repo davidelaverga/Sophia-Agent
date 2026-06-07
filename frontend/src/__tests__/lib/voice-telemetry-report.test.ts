@@ -420,6 +420,16 @@ function buildMetrics(): VoiceDeveloperMetrics {
         htmlFocusAnchorResult: 'success',
         htmlFocusAnchorMethod: 'heading',
         htmlFocusAnchorScrolled: true,
+        htmlInternalNavigationAttempted: true,
+        htmlInternalNavigationResult: 'success',
+        htmlInternalNavigationTargetKind: 'id',
+        htmlInternalNavigationPreventedDefault: true,
+        htmlInternalNavigationBlockedExternal: false,
+        htmlInternalNavigationScrolled: true,
+        htmlInternalNavigationFailureReason: null,
+        htmlVoiceNavigationUsedSameResolver: true,
+        htmlPostMessageNavigationReceived: true,
+        htmlNavigationPreservedCaptureTarget: true,
         htmlAnnotationOverlayCapturing: false,
         htmlBrowserInteractionEnabled: true,
         htmlPageRailHidden: true,
@@ -781,6 +791,16 @@ describe('buildVoiceTelemetryReport', () => {
       htmlFocusAnchorResult: 'success',
       htmlFocusAnchorMethod: 'heading',
       htmlFocusAnchorScrolled: true,
+      htmlInternalNavigationAttempted: true,
+      htmlInternalNavigationResult: 'success',
+      htmlInternalNavigationTargetKind: 'id',
+      htmlInternalNavigationPreventedDefault: true,
+      htmlInternalNavigationBlockedExternal: false,
+      htmlInternalNavigationScrolled: true,
+      htmlInternalNavigationFailureReason: null,
+      htmlVoiceNavigationUsedSameResolver: true,
+      htmlPostMessageNavigationReceived: true,
+      htmlNavigationPreservedCaptureTarget: true,
       htmlAnnotationOverlayCapturing: false,
       htmlBrowserInteractionEnabled: true,
       htmlPageRailHidden: true,
@@ -1937,6 +1957,16 @@ describe('buildVoiceTelemetryReport', () => {
     expect(report.coreview.visual.coreviewFocusAnchorCount).toBe(1);
     expect(report.coreview.visual.coreviewFocusAnchorResult).toBe('success');
     expect(report.coreview.visual.coreviewFocusAnchorType).toBe('current_title');
+    expect(report.coreview.visual.htmlInternalNavigationAttempted).toBe(true);
+    expect(report.coreview.visual.htmlInternalNavigationResult).toBe('success');
+    expect(report.coreview.visual.htmlInternalNavigationTargetKind).toBe('id');
+    expect(report.coreview.visual.htmlInternalNavigationPreventedDefault).toBe(true);
+    expect(report.coreview.visual.htmlInternalNavigationBlockedExternal).toBe(false);
+    expect(report.coreview.visual.htmlInternalNavigationScrolled).toBe(true);
+    expect(report.coreview.visual.htmlInternalNavigationFailureReason).toBeNull();
+    expect(report.coreview.visual.htmlVoiceNavigationUsedSameResolver).toBe(true);
+    expect(report.coreview.visual.htmlPostMessageNavigationReceived).toBe(true);
+    expect(report.coreview.visual.htmlNavigationPreservedCaptureTarget).toBe(true);
     expect(report.coreview.visual.panModeActive).toBe(true);
     expect(report.coreview.visual.panGestureCount).toBe(1);
     expect(report.coreview.visual.panGestureResult).toBe('success');
@@ -1974,6 +2004,15 @@ describe('buildVoiceTelemetryReport', () => {
       coreviewFocusAnchorCount: 1,
       coreviewFocusAnchorResult: 'success',
       coreviewFocusAnchorType: 'current_title',
+      htmlInternalNavigationAttempted: true,
+      htmlInternalNavigationResult: 'success',
+      htmlInternalNavigationTargetKind: 'id',
+      htmlInternalNavigationPreventedDefault: true,
+      htmlInternalNavigationBlockedExternal: false,
+      htmlInternalNavigationScrolled: true,
+      htmlVoiceNavigationUsedSameResolver: true,
+      htmlPostMessageNavigationReceived: true,
+      htmlNavigationPreservedCaptureTarget: true,
       panModeActive: true,
       panGestureCount: 1,
       panGestureResult: 'success',
