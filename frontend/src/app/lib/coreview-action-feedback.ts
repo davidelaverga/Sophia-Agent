@@ -259,7 +259,11 @@ export function coreviewFeedbackFromActionResult(
       status: unsupportedFeedbackStatus(result.blocked_reason),
       displayMessage: blockedFeedbackDisplayMessage(result.blocked_reason),
       spokenMessage: blockedFeedbackSpokenMessage(result.blocked_reason),
-      shouldSpeak: voiceTriggered && result.action === "add_annotation",
+      shouldSpeak: voiceTriggered && (
+        result.action === "add_annotation"
+        || result.action === "focus_anchor"
+        || result.html_scroll_attempted === true
+      ),
       dedupeKey: baseKey,
     })
   }
@@ -279,8 +283,30 @@ export function coreviewFeedbackFromActionResult(
   }
 
   if (result.action === "set_view" || result.action === "focus_anchor") {
+    if (result.action === "set_view" && result.html_scroll_attempted === true) {
+      return createCoreviewActionFeedback({
+        actionKind: "navigation",
+        status: result.ok ? "applied" : "failed",
+        displayMessage: result.ok ? "Scrolled." : "Could not scroll.",
+        spokenMessage: result.ok ? "Scrolled." : "I couldn't scroll that view.",
+        shouldSpeak: voiceTriggered,
+        shouldShowToastOrCard: false,
+        dedupeKey: baseKey,
+      })
+    }
+    if (result.action === "focus_anchor") {
+      return createCoreviewActionFeedback({
+        actionKind: "navigation",
+        status: result.ok ? "applied" : "failed",
+        displayMessage: result.ok ? "Focused." : "Could not focus that section.",
+        spokenMessage: result.ok ? "Focused." : "I couldn't find that section.",
+        shouldSpeak: voiceTriggered,
+        shouldShowToastOrCard: false,
+        dedupeKey: baseKey,
+      })
+    }
     const commandKind = options.commandKind ?? null
-    const actionKind: CoreviewActionFeedbackKind = isZoomCommand(commandKind) || result.action === "focus_anchor"
+    const actionKind: CoreviewActionFeedbackKind = isZoomCommand(commandKind)
       ? "zoom"
       : "navigation"
     return createCoreviewActionFeedback({
@@ -384,6 +410,7 @@ function annotationSpokenMessage(kind: string, created: boolean): string {
 
 function blockedFeedbackDisplayMessage(reason: string): string {
   if (reason === "layout_anchor_not_supported") return "Text anchor is not supported for this view."
+  if (reason === "section_not_found") return "Section was not found."
   if (reason === "text_anchor_not_found") return "Text anchor was not found."
   if (reason === "anchor_not_found") return "Text anchor was not found."
   if (reason === "annotations_not_supported") return "Annotations are not supported for this artifact."
@@ -395,6 +422,7 @@ function blockedFeedbackDisplayMessage(reason: string): string {
 
 function blockedFeedbackSpokenMessage(reason: string): string {
   if (reason === "layout_anchor_not_supported") return "I can't place that text anchor in this view yet."
+  if (reason === "section_not_found") return "I couldn't find that section."
   if (reason === "text_anchor_not_found") return "I couldn't find that text in the artifact."
   if (reason === "anchor_not_found") return "I couldn't find that text in the artifact."
   if (reason === "annotations_not_supported") return "Annotations are not available for this artifact."

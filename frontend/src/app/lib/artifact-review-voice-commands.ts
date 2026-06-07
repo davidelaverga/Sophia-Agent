@@ -4,6 +4,10 @@ export type ArtifactReviewVoiceCommandKind =
   | "previous_page"
   | "first_page"
   | "last_page"
+  | "scroll_down"
+  | "scroll_up"
+  | "go_to_top"
+  | "go_to_bottom"
   | "zoom_in"
   | "zoom_out"
   | "fit_width"
@@ -35,6 +39,7 @@ export type ArtifactReviewVoiceCommandBlockedReason =
   | "visual_refresh_unavailable"
   | "layout_anchor_not_supported"
   | "text_anchor_not_found"
+  | "section_not_found"
   | "unsupported_update_mode"
   | "no_active_builder_task"
 
@@ -144,6 +149,22 @@ const TITLE_FOCUS_PATTERNS = [
   /\b(?:zoom\s+in|focus|center)\s+(?:on\s+)?(?:the\s+)?(?:current\s+)?title\b/u,
   /\b(?:current\s+)?title\b.*\b(?:zoom\s+in|focus|center)\b/u,
 ]
+const SCROLL_DOWN_PATTERNS = [
+  /\bscroll\s+down\b/u,
+  /\bmove\s+down\b/u,
+]
+const SCROLL_UP_PATTERNS = [
+  /\bscroll\s+up\b/u,
+  /\bmove\s+up\b/u,
+]
+const GO_TO_TOP_PATTERNS = [
+  /\b(?:go to|jump to|show|open)\s+(?:the\s+)?top\b/u,
+  /\bback\s+to\s+top\b/u,
+]
+const GO_TO_BOTTOM_PATTERNS = [
+  /\b(?:go to|jump to|show|open)\s+(?:the\s+)?bottom\b/u,
+]
+const GO_TO_SECTION_PATTERN = /\b(?:go to|jump to|show|open|focus(?:\s+on)?)\s+(?:the\s+)?(?!(?:page|first|last|next|previous|prev|top|bottom)\b)(?:section\s+)?([a-z0-9][a-z0-9\s-]{1,80})\b/u
 const UNDERLINE_PATTERNS = [/\bunderline(?:d)?\b/u]
 const ARROW_PATTERNS = [
   /\b(?:draw|add|place|put|make)\s+(?:an?\s+)?arrow\b/u,
@@ -315,6 +336,25 @@ function parseArtifactPageCommands(normalized: string): IndexedArtifactReviewCom
 
 function parseArtifactViewCommands(normalized: string): IndexedArtifactReviewCommand[] {
   const commands: IndexedArtifactReviewCommand[] = []
+  commands.push(...indexedCommand(normalized, SCROLL_DOWN_PATTERNS, { kind: "scroll_down" }))
+  commands.push(...indexedCommand(normalized, SCROLL_UP_PATTERNS, { kind: "scroll_up" }))
+  commands.push(...indexedCommand(normalized, GO_TO_TOP_PATTERNS, { kind: "go_to_top" }))
+  commands.push(...indexedCommand(normalized, GO_TO_BOTTOM_PATTERNS, { kind: "go_to_bottom" }))
+
+  const sectionMatch = GO_TO_SECTION_PATTERN.exec(normalized)
+  const sectionText = cleanAnchorText(sectionMatch?.[1])
+  if (sectionMatch && sectionText) {
+    commands.push({
+      index: sectionMatch.index,
+      command: {
+        kind: "focus_anchor",
+        anchorType: "text_quote",
+        anchorText: sectionText,
+        zoomDelta: 1,
+      },
+    })
+  }
+
   const focusIndex = firstMatchedIndex(normalized, TITLE_FOCUS_PATTERNS)
   if (focusIndex >= 0) {
     commands.push({

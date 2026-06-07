@@ -2601,6 +2601,89 @@ describe("Coreview artifact still-frame review", () => {
     expect(getDisplayMedia).not.toHaveBeenCalled()
   })
 
+  it("Review with Sophia sends the selected HTML capture frame without layout capture bleed", async () => {
+    setCoreviewFlags(true)
+    registerSophiaCaptureBridge()
+    window.__sophiaCapture?.clear()
+    window.__sophiaCapture?.enable()
+    const user = userEvent.setup()
+    const sendArtifactFrame = vi.fn<ArtifactFrameSender["sendArtifactFrame"]>((frame) => ({
+      ok: true,
+      supported: true,
+      providerAcceptedFrame: true,
+      websocketSendAccepted: true,
+      frameBytes: frame.byteLength,
+      frameDimensions: frame.dimensions,
+      frameSendLatencyMs: 5,
+      estimatedVisualCost: null,
+      error: null,
+      rawFrameExcluded: true as const,
+    }))
+    const transport = new GeminiStillFrameTransport({ sendArtifactFrame })
+    mockHtmlArtifactFetch(() => (
+      "<!doctype html><html><body><h1>Original preview</h1><p>HTML capture text is available.</p></body></html>"
+    ))
+
+    renderPanel({
+      builderArtifact: HTML_BUILDER_ARTIFACT,
+      builderArtifactLibrary: HTML_LIBRARY,
+      selectedBuilderArtifactPath: "mnt/user-data/outputs/site.html",
+      transport,
+    })
+
+    expect(await screen.findByTitle("Preview of site.html")).toBeInTheDocument()
+    const captureCanvas = await screen.findByLabelText("Generated HTML artifact review canvas")
+    expect(captureCanvas).toHaveAttribute("data-artifact-canvas-source", "selected-html-preview")
+    expect(captureCanvas).toHaveAttribute("data-coreview-offscreen-render", "true")
+    await waitFor(() => expect(screen.getByRole("button", { name: /review with sophia/i })).toBeEnabled())
+
+    await user.click(screen.getByRole("button", { name: /review with sophia/i }))
+
+    await waitFor(() => expect(sendArtifactFrame).toHaveBeenCalledTimes(1))
+    expect(sendArtifactFrame.mock.calls[0]?.[0]).toMatchObject({
+      visualSourceKind: "html_preview_canvas",
+      rawFrameExcluded: true,
+    })
+    expect(sendArtifactFrame.mock.calls[0]?.[1]).toEqual({ coreviewSendStage: "start" })
+    expect(screen.getByRole("status", { name: /sophia is looking/i })).toBeInTheDocument()
+    expect(screen.getByText("Frame sent")).toBeInTheDocument()
+    expect(screen.queryByText("Preparing view")).not.toBeInTheDocument()
+    expect(screen.queryByText("Visual review not active")).not.toBeInTheDocument()
+    expect(screen.getByText("Exact text available")).toBeInTheDocument()
+
+    const capture = JSON.stringify(exportSophiaCaptureBundle())
+    expect(capture).toContain("htmlReviewStatusResolved")
+    expect(capture).toContain("htmlVisiblePreviewResponsive")
+    expect(capture).not.toContain("HTML capture text is available.")
+    expect(capture).not.toContain("<h1>Original preview</h1>")
+    expect(getDisplayMedia).not.toHaveBeenCalled()
+  })
+
+  it("does not leave capture-ready HTML review status stuck preparing when visual transport is inactive", async () => {
+    setCoreviewFlags(true)
+    mockHtmlArtifactFetch(() => (
+      "<!doctype html><html><body><h1>Original preview</h1><p>Exact HTML text is ready.</p></body></html>"
+    ))
+
+    renderPanel({
+      builderArtifact: HTML_BUILDER_ARTIFACT,
+      builderArtifactLibrary: HTML_LIBRARY,
+      selectedBuilderArtifactPath: "mnt/user-data/outputs/site.html",
+      isVoiceMode: true,
+      transport: closedVoiceFrameTransport(),
+    })
+
+    expect(await screen.findByTitle("Preview of site.html")).toBeInTheDocument()
+    await screen.findByLabelText("Generated HTML artifact review canvas")
+
+    await waitFor(() => expect(screen.queryByText("Preparing view")).not.toBeInTheDocument())
+    expect(screen.getByRole("status", { name: /not looking/i })).toBeInTheDocument()
+    expect(screen.getByText("Visual review not active")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /review with sophia/i })).toBeDisabled()
+    expect(screen.getByText("Exact text available")).toBeInTheDocument()
+    expect(screen.queryByText("Frame unavailable")).not.toBeInTheDocument()
+  })
+
   it("shows safe frame-unavailable copy when the selected markdown capture canvas cannot be prepared", async () => {
     setCoreviewFlags(true)
     getContextSpy?.mockReturnValue(null)

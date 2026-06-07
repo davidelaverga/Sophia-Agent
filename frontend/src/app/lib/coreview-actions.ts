@@ -64,6 +64,7 @@ export type CoreviewToolBlockedReason =
   | "zoom_not_supported"
   | "annotations_not_supported"
   | "layout_anchor_not_supported"
+  | "section_not_found"
   | "ocr_not_available"
   | "pptx_native_renderer_unavailable"
   | "requested_page_out_of_bounds"
@@ -119,6 +120,8 @@ export interface CoreviewSetViewInput {
   pageLabel?: string
   zoom?: number
   fitMode?: ArtifactFitMode
+  htmlScrollDelta?: number
+  htmlScrollPosition?: "top" | "bottom"
   reason?: string
 }
 
@@ -174,6 +177,16 @@ export interface CoreviewCurrentView {
   pageCount: number
   zoom: number
   fitMode: ArtifactFitMode
+  scrollTop?: number | null
+  scrollHeight?: number | null
+  documentHeight?: number | null
+  viewportHeight?: number | null
+  viewportWidth?: number | null
+  scale?: number | null
+  visibleTextSummary?: string | null
+  visibleHeadings?: string[]
+  currentSection?: string | null
+  stillFrameAvailable?: boolean | null
   viewSignature: string | null
   stale: boolean
   refreshInProgress: boolean
@@ -230,6 +243,7 @@ export interface CoreviewResolvedAnnotationAnchor {
   pageIndex: number
   rect: CoreviewNormalizedRect | null
   point: CoreviewNormalizedPoint | null
+  text?: string | null
   matchCount?: number | null
   textLength?: number | null
 }
@@ -262,6 +276,14 @@ export interface CoreviewAddAnnotationAdapterResult {
   drawPathCount?: number
 }
 
+export interface CoreviewSetViewAdapterInput {
+  pageIndex: number
+  zoom: number
+  fitMode: ArtifactFitMode
+  htmlScrollDelta?: number | null
+  htmlScrollPosition?: "top" | "bottom" | null
+}
+
 export interface CoreviewFocusAnchorAdapterInput {
   pageIndex: number
   anchor: CoreviewResolvedAnnotationAnchor
@@ -272,11 +294,13 @@ export interface CoreviewFocusAnchorAdapterInput {
 export interface CoreviewFocusAnchorAdapterResult {
   ok: boolean
   blockedReason: CoreviewToolBlockedReason | null
+  method?: string | null
+  scrolled?: boolean | null
 }
 
 export interface CoreviewRendererAdapter {
   getCurrentViewState(): CoreviewCurrentView
-  setView(input: Required<Pick<CoreviewSetViewInput, "pageIndex" | "zoom" | "fitMode">>): Promise<void> | void
+  setView(input: CoreviewSetViewAdapterInput): Promise<void> | void
   refreshView(input?: CoreviewRefreshViewInput): Promise<CoreviewRefreshAdapterResult> | CoreviewRefreshAdapterResult
   waitForViewReady(viewSignature: string | null): Promise<CoreviewViewReadyResult>
   markViewStale(viewSignature: string | null): void
@@ -304,6 +328,22 @@ export interface CoreviewActionResult {
   page_count: number | null
   zoom: number | null
   fit_mode: ArtifactFitMode | null
+  scroll_top?: number | null
+  scroll_height?: number | null
+  document_height?: number | null
+  viewport_height?: number | null
+  viewport_width?: number | null
+  scale?: number | null
+  visible_text_summary?: string | null
+  visible_headings?: string[]
+  current_section?: string | null
+  still_frame_available?: boolean | null
+  html_scroll_attempted?: boolean
+  html_scroll_result?: string | null
+  html_focus_anchor_attempted?: boolean
+  html_focus_anchor_result?: string | null
+  html_focus_anchor_method?: string | null
+  html_focus_anchor_scrolled?: boolean | null
   view_signature: string | null
   stale: boolean
   refresh_attempted: boolean
@@ -532,6 +572,10 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
     if (changed && before.reviewHasFrame) {
       adapter.markViewStale(expectedViewSignature)
     }
+    const htmlScrollAttempted = before.rendererKind === "html" && (
+      normalized.htmlScrollDelta !== null
+      || Boolean(normalized.htmlScrollPosition)
+    )
     await adapter.setView(normalized)
 
     const ready = await adapter.waitForViewReady(expectedViewSignature)
@@ -592,7 +636,9 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       current: after,
       ok: true,
       blockedReason,
-      resultSummary: `Switched to ${pageSummary(after)}.${refreshSummary}`,
+      resultSummary: htmlScrollAttempted
+        ? `Scrolled the HTML document.${refreshSummary}`
+        : `Switched to ${pageSummary(after)}.${refreshSummary}`,
       refreshAttempted,
       refreshResult,
       viewReadyWaitMs: ready.waitMs,
@@ -600,6 +646,8 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       viewSignatureAfter: after.viewSignature,
       staleOverride: forceStale,
       visualFrameFreshOverride: forceVisualFrameFresh,
+      htmlScrollAttempted,
+      htmlScrollResult: htmlScrollAttempted ? "success" : null,
       ...resolved.rebind,
     })
   }
@@ -1098,6 +1146,10 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
         viewSignatureAfter: adapter.getCurrentViewState().viewSignature,
         focusAnchorType: normalized.anchor.type,
         focusedRect: resolvedAnchor.anchor.rect,
+        htmlFocusAnchorAttempted: before.rendererKind === "html",
+        htmlFocusAnchorResult: before.rendererKind === "html" ? focused.blockedReason ?? "failed" : null,
+        htmlFocusAnchorMethod: focused.method ?? null,
+        htmlFocusAnchorScrolled: focused.scrolled ?? null,
         ...resolved.rebind,
       })
     }
@@ -1162,7 +1214,9 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       current: after,
       ok: true,
       blockedReason,
-      resultSummary: `Focused ${anchorLabel(normalized.anchor.type)} on ${pageSummary(after)}.${refreshSummary}`,
+      resultSummary: before.rendererKind === "html"
+        ? `Focused the HTML section.${refreshSummary}`
+        : `Focused ${anchorLabel(normalized.anchor.type)} on ${pageSummary(after)}.${refreshSummary}`,
       refreshAttempted,
       refreshResult,
       viewReadyWaitMs: ready.waitMs,
@@ -1172,6 +1226,10 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       visualFrameFreshOverride: forceVisualFrameFresh,
       focusAnchorType: normalized.anchor.type,
       focusedRect: resolvedAnchor.anchor.rect,
+      htmlFocusAnchorAttempted: before.rendererKind === "html",
+      htmlFocusAnchorResult: before.rendererKind === "html" ? "success" : null,
+      htmlFocusAnchorMethod: focused.method ?? null,
+      htmlFocusAnchorScrolled: focused.scrolled ?? null,
       ...resolved.rebind,
     })
   }
@@ -1266,16 +1324,18 @@ export function coreviewGeminiFunctionDeclarations(): Record<string, unknown>[] 
   return [
     {
       name: COREVIEW_SET_VIEW_TOOL_NAME,
-      description: "Set the active Coreview artifact view during Review with Sophia. Use for page navigation or generic zoom changes. For zoom/focus on a specific title, text, selection, or area, use coreview_focus_anchor instead. Wait for the app result before acknowledging.",
+      description: "Set the active Coreview artifact view during Review with Sophia. Use page fields for PDF page navigation, zoom fields for generic zoom changes, and html_scroll_delta/html_scroll_position for HTML document scrolling. For zoom/focus on a specific title, text, selection, section, or area, use coreview_focus_anchor instead. Wait for the app result before acknowledging.",
       parameters: {
         type: "OBJECT",
         properties: {
           artifact_id: { type: "STRING", description: "Optional active artifact id. Omit when using the currently selected artifact." },
-          page_index: { type: "NUMBER", description: "Zero-based page index. Preferred for exact page navigation." },
-          page_number: { type: "NUMBER", description: "One-based user-facing page number." },
-          page_label: { type: "STRING", description: "Optional user-facing page label." },
+          page_index: { type: "NUMBER", description: "Zero-based page index for PDF page navigation." },
+          page_number: { type: "NUMBER", description: "One-based user-facing PDF page number." },
+          page_label: { type: "STRING", description: "Optional user-facing PDF page label." },
           zoom: { type: "NUMBER", description: "Zoom multiplier, for example 1.2." },
           fit_mode: { type: "STRING", enum: ["page", "width", "custom"], description: "View fit mode." },
+          html_scroll_delta: { type: "NUMBER", description: "HTML-only vertical document scroll delta in pixels. Positive scrolls down; negative scrolls up." },
+          html_scroll_position: { type: "STRING", enum: ["top", "bottom"], description: "HTML-only document scroll target." },
           reason: { type: "STRING", description: "Short safe reason for the view change." },
         },
         required: [],
@@ -1557,7 +1617,7 @@ function normalizeSetViewInput(
   input: CoreviewSetViewInput,
   current: CoreviewCurrentView,
 ): (
-  | { ok: true; pageIndex: number; zoom: number; fitMode: ArtifactFitMode }
+  | { ok: true; pageIndex: number; zoom: number; fitMode: ArtifactFitMode; htmlScrollDelta?: number | null; htmlScrollPosition?: "top" | "bottom" | null }
   | { ok: false; blockedReason: CoreviewToolBlockedReason }
 ) {
   let pageIndex = current.pageIndex
@@ -1587,14 +1647,26 @@ function normalizeSetViewInput(
     return { ok: false, blockedReason: "zoom_not_supported" }
   }
 
-  const fitMode = input.fitMode ?? current.fitMode
+  const htmlScrollDelta = typeof input.htmlScrollDelta === "number" && Number.isFinite(input.htmlScrollDelta)
+    ? input.htmlScrollDelta
+    : null
+  const htmlScrollPosition = input.htmlScrollPosition === "top" || input.htmlScrollPosition === "bottom"
+    ? input.htmlScrollPosition
+    : null
+  if ((htmlScrollDelta !== null || htmlScrollPosition) && current.rendererKind !== "html") {
+    return { ok: false, blockedReason: "layout_anchor_not_supported" }
+  }
+
+  const fitMode = current.rendererKind === "html" && input.fitMode === "page"
+    ? "width"
+    : input.fitMode ?? current.fitMode
   const zoom = typeof input.zoom === "number" && Number.isFinite(input.zoom)
     ? clampArtifactZoom(input.zoom)
     : fitMode === "custom"
       ? current.zoom
       : 1
 
-  return { ok: true, pageIndex, zoom, fitMode }
+  return { ok: true, pageIndex, zoom, fitMode, htmlScrollDelta, htmlScrollPosition }
 }
 
 function buildCoreviewResult(params: {
@@ -1638,6 +1710,12 @@ function buildCoreviewResult(params: {
   annotationPartialSuccess?: boolean
   focusAnchorType?: CoreviewAnnotationAnchor["type"] | null
   focusedRect?: CoreviewNormalizedRect | null
+  htmlScrollAttempted?: boolean
+  htmlScrollResult?: string | null
+  htmlFocusAnchorAttempted?: boolean
+  htmlFocusAnchorResult?: string | null
+  htmlFocusAnchorMethod?: string | null
+  htmlFocusAnchorScrolled?: boolean | null
 }): CoreviewActionResult {
   const current = params.current
   const stale = params.staleOverride ?? current.stale
@@ -1668,6 +1746,22 @@ function buildCoreviewResult(params: {
     page_count: current.pageCount,
     zoom: clampArtifactZoom(current.zoom),
     fit_mode: current.fitMode,
+    scroll_top: current.scrollTop ?? null,
+    scroll_height: current.scrollHeight ?? null,
+    document_height: current.documentHeight ?? null,
+    viewport_height: current.viewportHeight ?? null,
+    viewport_width: current.viewportWidth ?? null,
+    scale: current.scale ?? current.zoom,
+    visible_text_summary: current.visibleTextSummary ?? null,
+    visible_headings: current.visibleHeadings ?? [],
+    current_section: current.currentSection ?? null,
+    still_frame_available: current.stillFrameAvailable ?? current.reviewHasFrame,
+    html_scroll_attempted: params.htmlScrollAttempted ?? false,
+    html_scroll_result: params.htmlScrollResult ?? null,
+    html_focus_anchor_attempted: params.htmlFocusAnchorAttempted ?? false,
+    html_focus_anchor_result: params.htmlFocusAnchorResult ?? null,
+    html_focus_anchor_method: params.htmlFocusAnchorMethod ?? null,
+    html_focus_anchor_scrolled: params.htmlFocusAnchorScrolled ?? null,
     view_signature: current.viewSignature,
     stale,
     refresh_attempted: params.refreshAttempted,
@@ -1750,10 +1844,23 @@ function annotationKindCount(
 }
 
 function pageSummary(current: CoreviewCurrentView): string {
+  if (current.rendererKind === "html") {
+    const scrollTop = Math.max(0, Math.round(current.scrollTop ?? 0))
+    const viewportHeight = Math.max(0, Math.round(current.viewportHeight ?? 0))
+    const documentHeight = Math.max(0, Math.round(current.documentHeight ?? current.scrollHeight ?? 0))
+    if (documentHeight > 0 && viewportHeight > 0) {
+      return `HTML document at scroll ${scrollTop} of ${Math.max(0, documentHeight - viewportHeight)}`
+    }
+    return "HTML document"
+  }
   return `page ${current.pageIndex + 1} of ${Math.max(1, current.pageCount)}`
 }
 
 function currentViewSummary(current: CoreviewCurrentView): string {
+  if (current.rendererKind === "html") {
+    const section = current.currentSection ? ` Current section is ${current.currentSection}.` : ""
+    return `Current view is an HTML document.${section}`
+  }
   return `Current view is ${pageSummary(current)}.`
 }
 
@@ -1782,6 +1889,8 @@ function blockedSummary(reason: CoreviewToolBlockedReason): string {
       return "Annotations are not available for this artifact format."
     case "layout_anchor_not_supported":
       return "Layout anchors are not available for this artifact format."
+    case "section_not_found":
+      return "Sophia could not find that section in the HTML document."
     case "ocr_not_available":
       return "OCR is not available yet."
     case "pptx_native_renderer_unavailable":
@@ -1865,6 +1974,8 @@ function coreviewSetViewInputFromArgs(args: Record<string, unknown>): CoreviewSe
     pageLabel: stringFromAnyKey(args, "page_label", "pageLabel") ?? undefined,
     zoom: numberFromAnyKey(args, "zoom") ?? undefined,
     fitMode: fitModeFromArgs(args),
+    htmlScrollDelta: numberFromAnyKey(args, "html_scroll_delta", "htmlScrollDelta") ?? undefined,
+    htmlScrollPosition: htmlScrollPositionFromArgs(args),
     reason: stringFromAnyKey(args, "reason") ?? undefined,
   }
 }
@@ -2220,6 +2331,11 @@ function focusFitModeFromArgs(args: Record<string, unknown>): ArtifactFitMode | 
 function fitModeFromArgs(args: Record<string, unknown>): ArtifactFitMode | undefined {
   const value = stringFromAnyKey(args, "fit_mode", "fitMode")
   return value === "page" || value === "width" || value === "custom" ? value : undefined
+}
+
+function htmlScrollPositionFromArgs(args: Record<string, unknown>): "top" | "bottom" | undefined {
+  const value = stringFromAnyKey(args, "html_scroll_position", "htmlScrollPosition")
+  return value === "top" || value === "bottom" ? value : undefined
 }
 
 function unavailableToolResult(toolName: CoreviewToolName): CoreviewActionResult {

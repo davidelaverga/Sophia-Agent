@@ -31,6 +31,16 @@ describe("artifact review voice command parser", () => {
     expect(parseArtifactReviewVoiceCommand("reset zoom")).toEqual({ kind: "reset_zoom" })
     expect(parseArtifactReviewVoiceCommand("refresh view")).toEqual({ kind: "refresh_view" })
     expect(parseArtifactReviewVoiceCommand("refresh your page")).toEqual({ kind: "refresh_view" })
+    expect(parseArtifactReviewVoiceCommand("scroll down")).toEqual({ kind: "scroll_down" })
+    expect(parseArtifactReviewVoiceCommand("scroll up")).toEqual({ kind: "scroll_up" })
+    expect(parseArtifactReviewVoiceCommand("go to top")).toEqual({ kind: "go_to_top" })
+    expect(parseArtifactReviewVoiceCommand("go to bottom")).toEqual({ kind: "go_to_bottom" })
+    expect(parseArtifactReviewVoiceCommand("go to Coreview")).toEqual({
+      kind: "focus_anchor",
+      anchorType: "text_quote",
+      anchorText: "coreview",
+      zoomDelta: 1,
+    })
     expect(parseArtifactReviewVoiceCommand("zoom in on the current title")).toEqual({
       kind: "focus_anchor",
       anchorType: "current_title",

@@ -246,6 +246,12 @@ function buildAppliedVoiceCommandStatus(
     case "first_page":
     case "last_page":
       return `Page ${pageIndex + 1} selected`
+    case "scroll_down":
+    case "scroll_up":
+      return "Scrolled"
+    case "go_to_top":
+    case "go_to_bottom":
+      return "Scrolled"
     case "zoom_in":
     case "zoom_out":
     case "fit_width":
@@ -255,7 +261,7 @@ function buildAppliedVoiceCommandStatus(
     case "refresh_view":
       return "Refresh requested"
     case "focus_anchor":
-      return "PDF view updated"
+      return "Focused"
     case "add_annotation":
       return appliedAnnotationStatusText(command.annotationKind)
     default:
@@ -287,18 +293,31 @@ function isPageNavigationVoiceCommand(command: ArtifactReviewVoiceCommand): bool
   )
 }
 
+function isHtmlScrollVoiceCommand(command: ArtifactReviewVoiceCommand): boolean {
+  return command.kind === "scroll_down"
+    || command.kind === "scroll_up"
+    || command.kind === "go_to_top"
+    || command.kind === "go_to_bottom"
+}
+
 function buildRefreshUnavailableVoiceCommandMessage(
   command: ArtifactReviewVoiceCommand,
   shouldStartVoiceReview: boolean,
   staleAfterViewChange = false,
 ): string {
   if (staleAfterViewChange && command.kind !== "refresh_view") {
+    if (isHtmlScrollVoiceCommand(command) || command.kind === "focus_anchor") {
+      return "View updated. Sophia's view is stale."
+    }
     return isPageNavigationVoiceCommand(command)
       ? "Page changed. Sophia's view is stale."
       : "PDF view updated. Sophia's view is stale."
   }
 
   if (shouldStartVoiceReview) {
+    if (isHtmlScrollVoiceCommand(command) || command.kind === "focus_anchor") {
+      return "View updated. Start Review with Sophia to share this view."
+    }
     return isPageNavigationVoiceCommand(command)
       ? "Page changed. Start Review with Sophia to share this view."
       : "PDF view updated. Start Review with Sophia to share this view."
@@ -306,6 +325,10 @@ function buildRefreshUnavailableVoiceCommandMessage(
 
   if (command.kind === "refresh_view") {
     return "Visual refresh is not active."
+  }
+
+  if (isHtmlScrollVoiceCommand(command) || command.kind === "focus_anchor") {
+    return "View updated. Visual refresh is not active."
   }
 
   return isPageNavigationVoiceCommand(command)
@@ -375,6 +398,7 @@ const COREVIEW_BLOCKED_STATUS_TEXT: Partial<Record<CoreviewToolBlockedReason, st
   zoom_not_supported: "This artifact does not support zoom controls.",
   annotations_not_supported: "Annotations are not available for this artifact format.",
   layout_anchor_not_supported: "Layout anchors are not available for this artifact format.",
+  section_not_found: "Sophia could not find that section.",
   ocr_not_available: "OCR is not available yet.",
   pptx_native_renderer_unavailable: "PPTX native canvas rendering is not available yet.",
   unsupported_pages: "This view cannot be controlled by Sophia.",
@@ -405,6 +429,7 @@ const COREVIEW_ROUTE_BLOCKED_REASON: Partial<Record<
   zoom_not_supported: "no_multipage_artifact_selected",
   annotations_not_supported: "no_multipage_artifact_selected",
   layout_anchor_not_supported: "layout_anchor_not_supported",
+  section_not_found: "section_not_found",
   text_anchor_not_found: "text_anchor_not_found",
   ocr_not_available: "no_multipage_artifact_selected",
   pptx_native_renderer_unavailable: "no_multipage_artifact_selected",
@@ -478,6 +503,14 @@ const COREVIEW_SET_VIEW_INPUT_BY_COMMAND: Partial<Record<
   previous_page: (_command, current) => ({ pageIndex: current.pageIndex - 1 }),
   first_page: () => ({ pageIndex: 0 }),
   last_page: (_command, current) => ({ pageIndex: Math.max(0, current.pageCount - 1) }),
+  scroll_down: (_command, current) => ({
+    htmlScrollDelta: Math.max(240, Math.round((current.viewportHeight ?? 720) * 0.72)),
+  }),
+  scroll_up: (_command, current) => ({
+    htmlScrollDelta: -Math.max(240, Math.round((current.viewportHeight ?? 720) * 0.72)),
+  }),
+  go_to_top: () => ({ htmlScrollPosition: "top" }),
+  go_to_bottom: () => ({ htmlScrollPosition: "bottom" }),
   zoom_in: (_command, current) => ({ zoom: clampArtifactZoom(current.zoom * 1.2), fitMode: "custom" }),
   zoom_out: (_command, current) => ({ zoom: clampArtifactZoom(current.zoom / 1.2), fitMode: "custom" }),
   fit_width: () => ({ zoom: 1, fitMode: "width" }),
@@ -1515,6 +1548,9 @@ export function PresenceArtifactPanel({
   )
   const coreviewCurrentView = useMemo<CoreviewCurrentView>(() => {
     const capabilities = builderVoiceCommandTarget?.capabilities ?? stageArtifactCapabilities
+    const htmlViewState = builderVoiceCommandTarget?.rendererKind === "html"
+      ? builderVoiceCommandTarget.htmlViewState ?? null
+      : null
     return {
       artifactId: builderArtifactId,
       artifactPath: stageArtifactPath,
@@ -1528,6 +1564,16 @@ export function PresenceArtifactPanel({
       pageCount: Math.max(1, builderVoiceCommandTarget?.pageCount ?? builderArtifactViewState.pageCount),
       zoom: builderVoiceCommandTarget?.zoom ?? builderArtifactViewState.zoom,
       fitMode: builderVoiceCommandTarget?.fitMode ?? builderArtifactViewState.fitMode,
+      scrollTop: htmlViewState?.scrollTop ?? null,
+      scrollHeight: htmlViewState?.scrollHeight ?? null,
+      documentHeight: htmlViewState?.documentHeight ?? null,
+      viewportHeight: htmlViewState?.viewportHeight ?? null,
+      viewportWidth: htmlViewState?.viewportWidth ?? null,
+      scale: htmlViewState?.scale ?? null,
+      visibleTextSummary: htmlViewState?.visibleTextSummary ?? null,
+      visibleHeadings: htmlViewState?.visibleHeadings ?? [],
+      currentSection: htmlViewState?.currentSection ?? null,
+      stillFrameAvailable: htmlViewState?.stillFrameAvailable ?? builderVisualSourceReady,
       viewSignature: builderArtifactViewSignature,
       stale: builderReviewStale,
       refreshInProgress: builderArtifactCoReview.state.refreshFrameInProgress,
@@ -1561,6 +1607,7 @@ export function PresenceArtifactPanel({
     builderReviewHasFrame,
     builderReviewStale,
     builderVoiceCommandTarget,
+    builderVisualSourceReady,
     coreviewAnnotationCounts.annotationCount,
     coreviewAnnotationCounts.arrowCount,
     coreviewAnnotationCounts.commentCount,
@@ -1633,6 +1680,7 @@ export function PresenceArtifactPanel({
   const visualReviewPreparing = Boolean(
     transportNeedsVoice
     && isVoiceMode
+    && pendingBuilderArtifactReview
   )
 
   const recordSelectedStageArtifactTelemetry = useCallback((details: {
@@ -2093,7 +2141,7 @@ export function PresenceArtifactPanel({
 
   const coreviewAdapter = useMemo<CoreviewRendererAdapter>(() => ({
     getCurrentViewState: () => coreviewCurrentViewRef.current ?? coreviewCurrentView,
-    setView: (view) => {
+    setView: async (view) => {
       const current = coreviewCurrentViewRef.current ?? coreviewCurrentView
       const expectedViewSignature = buildArtifactViewSignature({
         artifactId: current.artifactId,
@@ -2107,7 +2155,7 @@ export function PresenceArtifactPanel({
       if (expectedViewSignature !== current.viewSignature) {
         setBuilderVisualCaptureStatus(unavailableCaptureStatus("preview_not_ready"))
       }
-      builderVoiceCommandTargetRef.current?.setView(view)
+      await builderVoiceCommandTargetRef.current?.setView(view)
     },
     refreshView: async () => {
       if (!builderArtifactCoReview.canRefresh) {

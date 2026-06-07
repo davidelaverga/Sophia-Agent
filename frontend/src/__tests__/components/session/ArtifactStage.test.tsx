@@ -914,8 +914,8 @@ describe("ArtifactStage", () => {
     Object.defineProperty(panLayer, "scrollWidth", { configurable: true, value: 900 })
     Object.defineProperty(panLayer, "scrollHeight", { configurable: true, value: 1000 })
 
-    act(() => {
-      const result = voiceTarget?.focusAnchor({
+    await act(async () => {
+      const result = await voiceTarget?.focusAnchor({
         pageIndex: 0,
         anchor: resolvedTitle.anchor,
         zoom: 1.4,
@@ -949,6 +949,10 @@ describe("ArtifactStage", () => {
     })
 
     expect(await screen.findByTitle("Preview of launch-site.html")).toBeInTheDocument()
+    expect(screen.getByText("HTML preview")).toBeInTheDocument()
+    expect(screen.queryByLabelText("Fit page")).not.toBeInTheDocument()
+    expect(screen.queryByLabelText("Previous page")).not.toBeInTheDocument()
+    expect(screen.queryByLabelText("Next page")).not.toBeInTheDocument()
     await waitFor(() => expect(voiceTarget?.rendererKind).toBe("html"))
     await waitFor(() => {
       const resolved = voiceTarget?.resolveAnchor({

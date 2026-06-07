@@ -49,7 +49,12 @@ import type {
   BuilderArtifactV1,
 } from "../../types/builder-artifact"
 
-import { ArtifactCanvasViewport, type ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
+import {
+  ArtifactCanvasViewport,
+  type ArtifactHtmlCommandTarget,
+  type ArtifactHtmlViewState,
+  type ArtifactVisualCaptureStatus,
+} from "./ArtifactCanvasViewport"
 import type { ArtifactPdfFocusRequest } from "./ArtifactPdfPreview"
 import { ArtifactReviewStatus, hasConfirmedStillFrame } from "./ArtifactReviewStatus"
 import {
@@ -67,6 +72,13 @@ import { ReviewWithSophiaButton } from "./ReviewWithSophiaButton"
 
 type ToolModeResetReason = "escape_key" | "select_button" | "unsupported_renderer" | null
 type ArtifactStageAnnotationPatch = { text?: string | null }
+type ArtifactStageSetViewInput = {
+  pageIndex: number
+  zoom: number
+  fitMode: ArtifactFitMode
+  htmlScrollDelta?: number | null
+  htmlScrollPosition?: "top" | "bottom" | null
+}
 
 export interface ArtifactStageProps {
   builderArtifact: BuilderArtifactV1
@@ -123,11 +135,13 @@ export interface ArtifactReviewVoiceCommandTarget {
   pageCount: number
   zoom: number
   fitMode: ArtifactFitMode
+  htmlViewState?: ArtifactHtmlViewState | null
   applyCommand: (command: ArtifactReviewVoiceCommand) => ArtifactReviewVoiceCommandApplyResult
-  setView: (view: { pageIndex: number; zoom: number; fitMode: ArtifactFitMode }) => void
+  setView: (view: ArtifactStageSetViewInput) => Promise<void> | void
   resolveAnchor: (input: { anchor: CoreviewAnnotationAnchor; pageIndex: number }) => CoreviewResolveAnnotationAnchorResult
   addAnnotation: (input: CoreviewAddAnnotationAdapterInput) => CoreviewAddAnnotationAdapterResult
-  focusAnchor: (input: CoreviewFocusAnchorAdapterInput) => CoreviewFocusAnchorAdapterResult
+  focusAnchor: (input: CoreviewFocusAnchorAdapterInput) =>
+    Promise<CoreviewFocusAnchorAdapterResult> | CoreviewFocusAnchorAdapterResult
   annotationCounts: {
     annotationCount: number
     highlightCount: number
@@ -141,6 +155,7 @@ export interface ArtifactReviewVoiceCommandTarget {
 
 type VoiceCommandContext = {
   artifactId?: string | null
+  rendererKind: ArtifactRendererKind
   currentPageIndex: number
   normalizedPageCount: number
   supportsPagination: boolean
@@ -274,10 +289,16 @@ const ARTIFACT_VOICE_COMMAND_HANDLERS: Partial<Record<ArtifactReviewVoiceCommand
     context.setPageIndex(nextPageIndex)
     return appliedVoiceCommand(context, nextPageIndex, nextPageIndex !== context.currentPageIndex)
   },
+  scroll_down: (_command, context) => appliedVoiceCommand(context, context.currentPageIndex, true),
+  scroll_up: (_command, context) => appliedVoiceCommand(context, context.currentPageIndex, true),
+  go_to_top: (_command, context) => appliedVoiceCommand(context, context.currentPageIndex, true),
+  go_to_bottom: (_command, context) => appliedVoiceCommand(context, context.currentPageIndex, true),
   zoom_in: (_command, context) => applyZoomVoiceCommand(context, context.handleZoomIn, clampArtifactZoom(context.zoom * 1.2), "custom"),
   zoom_out: (_command, context) => applyZoomVoiceCommand(context, context.handleZoomOut, clampArtifactZoom(context.zoom / 1.2), "custom"),
   fit_width: (_command, context) => applyZoomVoiceCommand(context, context.handleFitWidth, 1, "width"),
-  fit_page: (_command, context) => applyZoomVoiceCommand(context, context.handleFitPage, 1, "page"),
+  fit_page: (_command, context) => context.rendererKind === "html"
+    ? applyZoomVoiceCommand(context, context.handleFitWidth, 1, "width")
+    : applyZoomVoiceCommand(context, context.handleFitPage, 1, "page"),
   reset_zoom: (_command, context) => applyZoomVoiceCommand(context, context.handleResetZoom, 1, "custom"),
   refresh_view: (_command, context) => {
     if (!context.supportsPagination && !context.supportsZoom) {
@@ -351,6 +372,7 @@ function resolveCoreviewHtmlTextAnchor(
         pageIndex: 0,
         rect: { x: 0.08, y: 0.1, width: 0.74, height: 0.08 },
         point: { x: 0.84, y: 0.13 },
+        text: null,
       },
     }
   }
@@ -384,6 +406,7 @@ function resolveCoreviewHtmlTextAnchor(
         x: Math.min(0.96, rect.x + rect.width + 0.025),
         y: Math.min(0.96, rect.y + rect.height / 2),
       },
+      text: needle,
       matchCount: countCaseInsensitiveMatches(text, needle),
       textLength: needle.length,
     },
@@ -476,6 +499,7 @@ export function ArtifactStage({
   const annotations = coreviewAnnotations
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null)
   const [htmlPreviewText, setHtmlPreviewText] = useState("")
+  const [htmlViewState, setHtmlViewState] = useState<ArtifactHtmlViewState | null>(null)
   const [toolModeTelemetry, setToolModeTelemetry] = useState<{
     stickyToolModeEnabled: true
     lastToolModeBeforeAction: ArtifactToolMode
@@ -491,6 +515,7 @@ export function ArtifactStage({
   const [pdfFocusRequest, setPdfFocusRequest] = useState<ArtifactPdfFocusRequest | null>(null)
   const annotationsRef = useRef<ArtifactAnnotation[]>([])
   const toolModeRef = useRef<ArtifactToolMode>("select")
+  const htmlCommandTargetRef = useRef<ArtifactHtmlCommandTarget | null>(null)
   const voiceCommandTargetRegistrationRef = useRef<{
     key: string
     target: ArtifactReviewVoiceCommandTarget
@@ -573,10 +598,12 @@ export function ArtifactStage({
     setPageIndex(0)
     setPageCount(1)
     setZoom(1)
-    setFitMode(supportsZoom ? "page" : "custom")
+    setFitMode(rendererKind === "pdf" && supportsZoom ? "page" : "custom")
     setSelectedAnnotationId(null)
     setPdfTextLayout(null)
     setHtmlPreviewText("")
+    setHtmlViewState(null)
+    htmlCommandTargetRef.current = null
     setPdfFocusRequest(null)
   }, [
     annotationStableArtifactIdentity,
@@ -624,6 +651,12 @@ export function ArtifactStage({
   const handlePageIndexChange = useCallback((nextPageIndex: number) => {
     setPageIndex(Math.min(Math.max(0, nextPageIndex), Math.max(1, pageCount) - 1))
   }, [pageCount])
+  const handleHtmlViewStateChange = useCallback((state: ArtifactHtmlViewState | null) => {
+    setHtmlViewState(state)
+  }, [])
+  const handleHtmlCommandTargetChange = useCallback((target: ArtifactHtmlCommandTarget | null) => {
+    htmlCommandTargetRef.current = target
+  }, [])
   const handleZoomIn = useCallback(() => {
     setFitMode("custom")
     setZoom((current) => clampArtifactZoom(current * 1.2))
@@ -653,7 +686,7 @@ export function ArtifactStage({
     }
     setToolModeWithTelemetry(mode, mode === "select" ? "select_button" : null)
     onWorkspaceToolModeChange?.(mode)
-    if (mode === "pan") {
+    if (mode === "pan" || mode === "select") {
       setSelectedAnnotationId(null)
     }
   }, [artifactCapabilities, onWorkspaceToolModeChange, setToolModeWithTelemetry])
@@ -819,6 +852,7 @@ export function ArtifactStage({
     const currentPageIndex = Math.min(Math.max(0, pageIndex), normalizedPageCount - 1)
     return applyArtifactVoiceCommand(command, {
       artifactId,
+      rendererKind,
       currentPageIndex,
       normalizedPageCount,
       supportsPagination,
@@ -842,20 +876,78 @@ export function ArtifactStage({
     handleZoomOut,
     pageCount,
     pageIndex,
+    rendererKind,
     supportsPagination,
     supportsZoom,
     zoom,
   ])
-  const setCoreviewTargetView = useCallback((view: { pageIndex: number; zoom: number; fitMode: ArtifactFitMode }) => {
+  const setCoreviewTargetView = useCallback(async (view: ArtifactStageSetViewInput) => {
     const normalizedPageCount = Math.max(1, Math.floor(pageCount))
     if (supportsPagination) {
       setPageIndex(Math.min(Math.max(0, Math.floor(view.pageIndex)), normalizedPageCount - 1))
     }
     if (supportsZoom) {
-      setFitMode(view.fitMode)
+      const nextFitMode = rendererKind === "html" && view.fitMode === "page" ? "width" : view.fitMode
+      setFitMode(nextFitMode)
       setZoom(clampArtifactZoom(view.zoom))
     }
-  }, [pageCount, supportsPagination, supportsZoom])
+    if (rendererKind !== "html") {
+      return
+    }
+
+    const htmlTarget = htmlCommandTargetRef.current
+    if (!htmlTarget) {
+      recordSophiaCaptureEvent({
+        category: "artifacts-runtime",
+        name: "html-scroll-command",
+        payload: {
+          artifactId: artifactId ?? null,
+          artifactPath: primaryFile?.path ?? null,
+          artifactRendererKind: rendererKind,
+          htmlScrollAttempted: Boolean(view.htmlScrollDelta || view.htmlScrollPosition),
+          htmlScrollResult: "target_unavailable",
+          htmlScrollContainerResolved: false,
+          htmlScrollMode: "iframe_document",
+          htmlCoreviewCommandModel: "scroll_document",
+          rawArtifactTextExcluded: true,
+          rawCommentTextExcluded: true,
+          rawFrameExcluded: true,
+        },
+      })
+      return
+    }
+
+    const result = typeof view.htmlScrollDelta === "number" && Number.isFinite(view.htmlScrollDelta)
+      ? await htmlTarget.scrollBy(view.htmlScrollDelta)
+      : view.htmlScrollPosition
+        ? await htmlTarget.scrollTo(view.htmlScrollPosition)
+        : null
+    if (result?.state) {
+      setHtmlViewState(result.state)
+    }
+    if (result) {
+      recordSophiaCaptureEvent({
+        category: "artifacts-runtime",
+        name: "html-scroll-command",
+        payload: {
+          artifactId: artifactId ?? null,
+          artifactPath: primaryFile?.path ?? null,
+          artifactRendererKind: rendererKind,
+          htmlScrollAttempted: true,
+          htmlScrollResult: result.ok ? "success" : result.blockedReason ?? "failed",
+          htmlScrollContainerResolved: true,
+          htmlScrollMode: "iframe_document",
+          htmlScrollTop: result.state?.scrollTop ?? htmlViewState?.scrollTop ?? null,
+          htmlScrollHeight: result.state?.scrollHeight ?? htmlViewState?.scrollHeight ?? null,
+          htmlViewportHeight: result.state?.viewportHeight ?? htmlViewState?.viewportHeight ?? null,
+          htmlCoreviewCommandModel: "scroll_document",
+          rawArtifactTextExcluded: true,
+          rawCommentTextExcluded: true,
+          rawFrameExcluded: true,
+        },
+      })
+    }
+  }, [artifactId, htmlViewState, pageCount, primaryFile?.path, rendererKind, supportsPagination, supportsZoom])
   const resolveCoreviewAnchor = useCallback((input: {
     anchor: CoreviewAnnotationAnchor
     pageIndex: number
@@ -936,7 +1028,7 @@ export function ArtifactStage({
 
     return commitAnnotation(input)
   }, [artifactCapabilities, commitAnnotation])
-  const focusCoreviewAnchor = useCallback((input: CoreviewFocusAnchorAdapterInput): CoreviewFocusAnchorAdapterResult => {
+  const focusCoreviewAnchor = useCallback(async (input: CoreviewFocusAnchorAdapterInput): Promise<CoreviewFocusAnchorAdapterResult> => {
     if (!artifactCapabilities.supportsLayoutAnchors) {
       return {
         ok: false,
@@ -947,6 +1039,52 @@ export function ArtifactStage({
       return {
         ok: false,
         blockedReason: "zoom_not_supported",
+      }
+    }
+    if (rendererKind === "html") {
+      const target = htmlCommandTargetRef.current
+      if (!target) {
+        return {
+          ok: false,
+          blockedReason: "layout_anchor_not_supported",
+        }
+      }
+      setFitMode(input.fitMode === "page" ? "width" : input.fitMode)
+      setZoom(clampArtifactZoom(input.zoom))
+      const focusText = input.anchor.text?.trim()
+      const result = focusText
+        ? await target.focusText(focusText)
+        : input.anchor.anchorType === "current_title"
+          ? await target.scrollTo("top")
+          : { ok: false, blockedReason: "text_anchor_not_found" as const, method: null, scrolled: false, state: target.getLatestState() }
+      if (result.state) {
+        setHtmlViewState(result.state)
+      }
+      recordSophiaCaptureEvent({
+        category: "artifacts-runtime",
+        name: "html-focus-anchor-command",
+        payload: {
+          artifactId: artifactId ?? null,
+          artifactPath: primaryFile?.path ?? null,
+          artifactRendererKind: rendererKind,
+          htmlFocusAnchorAttempted: true,
+          htmlFocusAnchorResult: result.ok ? "success" : result.blockedReason ?? "failed",
+          htmlFocusAnchorMethod: result.method,
+          htmlFocusAnchorScrolled: result.scrolled,
+          htmlScrollTop: result.state?.scrollTop ?? htmlViewState?.scrollTop ?? null,
+          htmlScrollHeight: result.state?.scrollHeight ?? htmlViewState?.scrollHeight ?? null,
+          htmlViewportHeight: result.state?.viewportHeight ?? htmlViewState?.viewportHeight ?? null,
+          htmlCoreviewCommandModel: "scroll_document",
+          rawArtifactTextExcluded: true,
+          rawCommentTextExcluded: true,
+          rawFrameExcluded: true,
+        },
+      })
+      return {
+        ok: result.ok,
+        blockedReason: result.ok ? null : result.blockedReason ?? "text_anchor_not_found",
+        method: result.method,
+        scrolled: result.scrolled,
       }
     }
     if (!input.anchor.rect) {
@@ -969,7 +1107,7 @@ export function ArtifactStage({
       ok: true,
       blockedReason: null,
     }
-  }, [artifactCapabilities.requiresOCR, artifactCapabilities.supportsLayoutAnchors, artifactCapabilities.supportsZoom, pageCount])
+  }, [artifactCapabilities.requiresOCR, artifactCapabilities.supportsLayoutAnchors, artifactCapabilities.supportsZoom, artifactId, htmlViewState, pageCount, primaryFile?.path, rendererKind])
   const handlePinchZoomChange = useCallback((nextZoom: number) => {
     if (!supportsZoom) {
       return
@@ -1073,6 +1211,7 @@ export function ArtifactStage({
     pageCount,
     zoom,
     fitMode,
+    htmlViewState: rendererKind === "html" ? htmlViewState : null,
     applyCommand: applyVoiceCommand,
     setView: setCoreviewTargetView,
     resolveAnchor: resolveCoreviewAnchor,
@@ -1088,6 +1227,7 @@ export function ArtifactStage({
     annotationCounts,
     fitMode,
     focusCoreviewAnchor,
+    htmlViewState,
     pageCount,
     pageIndex,
     primaryFile?.path,
@@ -1322,6 +1462,7 @@ export function ArtifactStage({
         pageCount={pageCount}
         supportsPagination={supportsPagination}
         supportsZoom={supportsZoom}
+        supportsFitPage={rendererKind === "pdf"}
         zoom={zoom}
         fitMode={fitMode}
         onPreviousPage={handlePreviousPage}
@@ -1381,6 +1522,8 @@ export function ArtifactStage({
         artifactTextRegistration={artifactTextRegistration}
         onVisualCaptureStatusChange={onVisualCaptureStatusChange}
         onHtmlTextChange={setHtmlPreviewText}
+        onHtmlViewStateChange={handleHtmlViewStateChange}
+        onHtmlCommandTargetChange={handleHtmlCommandTargetChange}
         onPdfTextLayoutChange={setPdfTextLayout}
         reviewSurfaceState={reviewSurfaceState}
         rendererKind={rendererKind}

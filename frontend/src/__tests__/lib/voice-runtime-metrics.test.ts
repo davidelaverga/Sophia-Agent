@@ -1241,6 +1241,8 @@ describe('buildVoiceDeveloperMetrics', () => {
           htmlFrameCaptureSourceKind: 'html_preview_canvas',
           htmlFrameCaptureSucceeded: true,
           htmlFrameCaptureFailureReason: null,
+          htmlReviewStatusResolved: true,
+          htmlReviewStatusReason: 'capture_ready',
           rawArtifactTextExcluded: true,
           rawHtmlExcluded: true,
           rawFrameExcluded: true,
@@ -1268,6 +1270,81 @@ describe('buildVoiceDeveloperMetrics', () => {
           rawFrameExcluded: true,
         },
       }),
+      buildEvent({
+        seq: 3,
+        at: '2026-04-07T12:00:00.250Z',
+        category: 'artifacts-runtime',
+        name: 'html-visible-preview-layout',
+        payload: {
+          artifactId: 'coreview-real-artifact-landing-html',
+          rendererKind: 'html',
+          htmlCaptureTargetArtifactPathHash: 'pathhash123',
+          htmlVisiblePreviewResponsive: true,
+          htmlVisiblePreviewUsesCaptureDimensions: false,
+          htmlVisiblePreviewWidth: 1184,
+          htmlVisiblePreviewHeight: 720,
+          htmlVisiblePreviewScrollMode: 'iframe',
+          htmlVisibleRendererKind: 'iframe',
+          htmlVisibleRendererInteractive: true,
+          htmlVisibleIframePointerEvents: 'auto',
+          htmlOverlayPointerEventsMode: 'passthrough',
+          htmlOffscreenCaptureAffectsLayout: false,
+          htmlBrowserInteractionEnabled: true,
+          htmlAnnotationOverlayCapturing: false,
+          htmlPageRailHidden: true,
+          htmlThumbnailRailHidden: true,
+          htmlCoreviewCommandModel: 'scroll_document',
+          htmlFitModeApplied: 'width',
+          htmlZoomScale: 1,
+          rawArtifactTextExcluded: true,
+          rawHtmlExcluded: true,
+          rawFrameExcluded: true,
+        },
+      }),
+      buildEvent({
+        seq: 4,
+        at: '2026-04-07T12:00:00.320Z',
+        category: 'artifacts-runtime',
+        name: 'html-focus-anchor-command',
+        payload: {
+          artifactId: 'coreview-real-artifact-landing-html',
+          rendererKind: 'html',
+          htmlFocusAnchorAttempted: true,
+          htmlFocusAnchorResult: 'success',
+          htmlFocusAnchorMethod: 'heading',
+          htmlFocusAnchorScrolled: true,
+          htmlScrollMode: 'iframe_document',
+          htmlScrollContainerResolved: true,
+          htmlScrollTop: 320,
+          htmlScrollHeight: 1800,
+          htmlViewportHeight: 720,
+          htmlCoreviewCommandModel: 'scroll_document',
+          rawArtifactTextExcluded: true,
+          rawHtmlExcluded: true,
+          rawFrameExcluded: true,
+        },
+      }),
+      buildEvent({
+        seq: 5,
+        at: '2026-04-07T12:00:00.360Z',
+        category: 'artifacts-runtime',
+        name: 'html-scroll-command',
+        payload: {
+          artifactId: 'coreview-real-artifact-landing-html',
+          rendererKind: 'html',
+          htmlScrollAttempted: true,
+          htmlScrollResult: 'success',
+          htmlScrollMode: 'iframe_document',
+          htmlScrollContainerResolved: true,
+          htmlScrollTop: 320,
+          htmlScrollHeight: 1800,
+          htmlViewportHeight: 720,
+          htmlCoreviewCommandModel: 'scroll_document',
+          rawArtifactTextExcluded: true,
+          rawHtmlExcluded: true,
+          rawFrameExcluded: true,
+        },
+      }),
     ];
 
     const metrics = buildVoiceDeveloperMetrics({
@@ -1290,6 +1367,36 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.coreview.visual.htmlFrameCaptureSourceKind).toBe('html_preview_canvas');
     expect(metrics.coreview.visual.htmlFrameCaptureSucceeded).toBe(true);
     expect(metrics.coreview.visual.htmlFrameCaptureFailureReason).toBeNull();
+    expect(metrics.coreview.visual.htmlVisiblePreviewResponsive).toBe(true);
+    expect(metrics.coreview.visual.htmlVisiblePreviewUsesCaptureDimensions).toBe(false);
+    expect(metrics.coreview.visual.htmlVisiblePreviewWidth).toBe(1184);
+    expect(metrics.coreview.visual.htmlVisiblePreviewHeight).toBe(720);
+    expect(metrics.coreview.visual.htmlVisiblePreviewScrollMode).toBe('iframe');
+    expect(metrics.coreview.visual.htmlVisibleRendererKind).toBe('iframe');
+    expect(metrics.coreview.visual.htmlVisibleRendererInteractive).toBe(true);
+    expect(metrics.coreview.visual.htmlVisibleIframePointerEvents).toBe('auto');
+    expect(metrics.coreview.visual.htmlOverlayPointerEventsMode).toBe('passthrough');
+    expect(metrics.coreview.visual.htmlOffscreenCaptureAffectsLayout).toBe(false);
+    expect(metrics.coreview.visual.htmlScrollMode).toBe('iframe_document');
+    expect(metrics.coreview.visual.htmlScrollContainerResolved).toBe(true);
+    expect(metrics.coreview.visual.htmlScrollTop).toBe(320);
+    expect(metrics.coreview.visual.htmlScrollHeight).toBe(1800);
+    expect(metrics.coreview.visual.htmlViewportHeight).toBe(720);
+    expect(metrics.coreview.visual.htmlScrollAttempted).toBe(true);
+    expect(metrics.coreview.visual.htmlScrollResult).toBe('success');
+    expect(metrics.coreview.visual.htmlFocusAnchorAttempted).toBe(true);
+    expect(metrics.coreview.visual.htmlFocusAnchorResult).toBe('success');
+    expect(metrics.coreview.visual.htmlFocusAnchorMethod).toBe('heading');
+    expect(metrics.coreview.visual.htmlFocusAnchorScrolled).toBe(true);
+    expect(metrics.coreview.visual.htmlAnnotationOverlayCapturing).toBe(false);
+    expect(metrics.coreview.visual.htmlBrowserInteractionEnabled).toBe(true);
+    expect(metrics.coreview.visual.htmlPageRailHidden).toBe(true);
+    expect(metrics.coreview.visual.htmlThumbnailRailHidden).toBe(true);
+    expect(metrics.coreview.visual.htmlCoreviewCommandModel).toBe('scroll_document');
+    expect(metrics.coreview.visual.htmlFitModeApplied).toBe('width');
+    expect(metrics.coreview.visual.htmlZoomScale).toBe(1);
+    expect(metrics.coreview.visual.htmlReviewStatusResolved).toBe(true);
+    expect(metrics.coreview.visual.htmlReviewStatusReason).toBe('capture_ready');
     expect(metrics.coreview.visual.reviewStartWaitedForHtmlCaptureTarget).toBe(true);
     expect(metrics.coreview.visual.reviewStartHtmlCaptureTargetResult).toBe('success');
   });

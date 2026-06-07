@@ -68,6 +68,7 @@ describe("ArtifactToolbar", () => {
         supportsComments
         supportsUnderline
         supportsArrow={false}
+        supportsFitPage={false}
         zoom={1}
         fitMode="width"
       />,
@@ -81,7 +82,7 @@ describe("ArtifactToolbar", () => {
     expect(screen.getByLabelText("Comment")).toBeInTheDocument()
     expect(screen.getByLabelText("Zoom in")).toBeInTheDocument()
     expect(screen.getByLabelText("Zoom out")).toBeInTheDocument()
-    expect(screen.getByLabelText("Fit page")).toBeInTheDocument()
+    expect(screen.queryByLabelText("Fit page")).not.toBeInTheDocument()
     expect(screen.getByLabelText("Fit width")).toBeInTheDocument()
     expect(screen.getByLabelText("Reset zoom")).toBeInTheDocument()
     expect(screen.queryByLabelText("Previous page")).not.toBeInTheDocument()

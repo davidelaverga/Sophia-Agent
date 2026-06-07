@@ -271,7 +271,12 @@ describe("ArtifactCanvasViewport", () => {
     const iframe = await screen.findByTitle("Preview of launch-brief.html")
 
     expect(previewRegion).toContainElement(iframe)
-    expect(iframe).toHaveAttribute("sandbox", "")
+    expect(iframe).toHaveAttribute(
+      "sandbox",
+      "allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-scripts",
+    )
+    expect(iframe).toHaveAttribute("data-html-visible-renderer-interactive", "true")
+    expect(iframe).toHaveAttribute("data-html-iframe-pointer-events", "auto")
     expect(iframe).toHaveAttribute("srcdoc", expect.stringContaining("<h1>Deck fallback</h1>"))
     const captureCanvas = await screen.findByLabelText("Generated HTML artifact review canvas")
     expect(captureCanvas).toHaveAttribute("data-artifact-id", "artifact-1")
@@ -289,6 +294,330 @@ describe("ArtifactCanvasViewport", () => {
         previewHref: "/artifact.html",
       })
     })
+  })
+
+  it("sizes the visible HTML preview responsively instead of using capture dimensions", async () => {
+    mockCanvasApis()
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        "<!doctype html><html><body><main><h1>Full pane page</h1><p>Readable content.</p></main></body></html>",
+        {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        },
+      ),
+    )
+
+    render(
+      <ArtifactCanvasViewport
+        artifact={htmlArtifact}
+        files={[{
+          path: "mnt/user-data/outputs/launch-brief.html",
+          name: "launch-brief.html",
+          label: "launch-brief.html",
+          isPrimary: true,
+          mimeType: "text/html",
+        }]}
+        typeLabel="Webpage"
+        previewHref="/artifact.html"
+        artifactTextRegistration={{
+          artifactId: "artifact-1",
+          threadId: "thread-1",
+        }}
+        zoom={1.4}
+        fitMode="custom"
+      />,
+    )
+
+    const canvasBed = screen.getByTestId("artifact-canvas-bed")
+    const scrollArea = screen.getByTestId("artifact-canvas-scroll-area")
+    const previewRegion = await screen.findByLabelText("Artifact HTML preview")
+    const zoomFrame = await screen.findByTestId("artifact-html-zoom-frame")
+    const iframe = await screen.findByTestId("artifact-html-preview-iframe")
+
+    expect(canvasBed).toContainElement(previewRegion)
+    expect(scrollArea.className).toContain("overflow-hidden")
+    expect(scrollArea.className).not.toContain("overflow-y-auto")
+    expect(previewRegion.className).toContain("flex-1")
+    expect(previewRegion.className).not.toContain("max-w-[1120px]")
+    expect(previewRegion.className).not.toContain("mx-auto")
+    expect(previewRegion).toHaveAttribute("data-html-visible-preview-responsive", "true")
+    expect(previewRegion).toHaveAttribute("data-html-visible-preview-uses-capture-dimensions", "false")
+    expect(previewRegion).toHaveAttribute("data-html-visible-preview-scroll-mode", "iframe")
+    expect(zoomFrame).toHaveAttribute("data-artifact-zoom", "1.4")
+    expect(zoomFrame.style.transform).toBe("scale(1.4)")
+    expect(zoomFrame.style.width).toBe("71.42857142857143%")
+    expect(zoomFrame.style.height).toBe("71.42857142857143%")
+    expect(zoomFrame.className).toContain("flex-1")
+    expect(iframe.className).toContain("h-full")
+    expect(iframe.className).toContain("min-h-0")
+    expect(iframe.className).not.toContain("min-h-[560px]")
+  })
+
+  it("passes pointer events through the HTML overlay in select mode", async () => {
+    mockCanvasApis()
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        "<!doctype html><html><body><main><h1>Clickable page</h1><a href='#features'>Features</a><button>Try it</button></main></body></html>",
+        {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        },
+      ),
+    )
+
+    render(
+      <ArtifactCanvasViewport
+        artifact={htmlArtifact}
+        files={[{
+          path: "mnt/user-data/outputs/launch-brief.html",
+          name: "launch-brief.html",
+          label: "launch-brief.html",
+          isPrimary: true,
+          mimeType: "text/html",
+        }]}
+        typeLabel="Webpage"
+        previewHref="/artifact.html"
+        artifactTextRegistration={{
+          artifactId: "artifact-1",
+          threadId: "thread-1",
+        }}
+        toolMode="select"
+      />,
+    )
+
+    const iframe = await screen.findByTestId("artifact-html-preview-iframe")
+    const layer = await screen.findByTestId("artifact-html-annotation-layer")
+
+    expect(iframe).toHaveAttribute("data-html-visible-renderer-interactive", "true")
+    expect(layer).toHaveAttribute("data-html-overlay-pointer-events-mode", "passthrough")
+    expect(layer).toHaveAttribute("data-html-annotation-overlay-capturing", "false")
+    expect(layer.className).toContain("pointer-events-none")
+  })
+
+  it("captures pointer events for HTML highlight mode", async () => {
+    mockCanvasApis()
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("<!doctype html><html><body><h1>Annotate me</h1></body></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      }),
+    )
+
+    render(
+      <ArtifactCanvasViewport
+        artifact={htmlArtifact}
+        files={[{
+          path: "mnt/user-data/outputs/launch-brief.html",
+          name: "launch-brief.html",
+          label: "launch-brief.html",
+          isPrimary: true,
+          mimeType: "text/html",
+        }]}
+        typeLabel="Webpage"
+        previewHref="/artifact.html"
+        artifactTextRegistration={{
+          artifactId: "artifact-1",
+          threadId: "thread-1",
+        }}
+        toolMode="highlight"
+      />,
+    )
+
+    const layer = await screen.findByTestId("artifact-html-annotation-layer")
+
+    expect(layer).toHaveAttribute("data-html-overlay-pointer-events-mode", "capture")
+    expect(layer).toHaveAttribute("data-html-annotation-overlay-capturing", "true")
+    expect(layer.className).toContain("pointer-events-auto")
+  })
+
+  it("keeps the HTML capture target offscreen and out of visible layout", async () => {
+    mockCanvasApis()
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        "<!doctype html><html><body><h1>Capture target</h1><p>Still-frame source is ready.</p></body></html>",
+        {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        },
+      ),
+    )
+
+    render(
+      <ArtifactCanvasViewport
+        artifact={htmlArtifact}
+        files={[{
+          path: "mnt/user-data/outputs/launch-brief.html",
+          name: "launch-brief.html",
+          label: "launch-brief.html",
+          isPrimary: true,
+          mimeType: "text/html",
+        }]}
+        typeLabel="Webpage"
+        previewHref="/artifact.html"
+        artifactTextRegistration={{
+          artifactId: "artifact-1",
+          threadId: "thread-1",
+        }}
+      />,
+    )
+
+    await screen.findByTitle("Preview of launch-brief.html")
+    const captureRegion = await screen.findByTestId("artifact-html-capture-canvas")
+    const captureCanvas = await screen.findByLabelText("Generated HTML artifact review canvas")
+    const previewRegion = screen.getByLabelText("Artifact HTML preview")
+
+    expect(previewRegion).not.toContainElement(captureCanvas)
+    expect(captureRegion).toHaveAttribute("aria-hidden", "true")
+    expect(captureRegion).toHaveAttribute("data-html-offscreen-capture-affects-layout", "false")
+    expect(captureRegion.className).toContain("absolute")
+    expect(captureRegion.className).toContain("h-px")
+    expect(captureRegion.className).toContain("w-px")
+    expect(captureRegion.style.left).toBe("-10000px")
+    expect(captureRegion.style.top).toBe("0px")
+    expect(captureCanvas).toHaveAttribute("width", "960")
+    expect(captureCanvas).toHaveAttribute("height", "720")
+    expect(captureCanvas).toHaveAttribute("data-artifact-canvas-source", "selected-html-preview")
+    expect(captureCanvas).toHaveAttribute("data-coreview-offscreen-render", "true")
+  })
+
+  it("applies HTML fit and reset as a clean responsive scale", async () => {
+    mockCanvasApis()
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        "<!doctype html><html><body><h1>Fit me</h1><p>Responsive preview.</p></body></html>",
+        {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        },
+      ),
+    )
+
+    const view = render(
+      <ArtifactCanvasViewport
+        artifact={htmlArtifact}
+        files={[{
+          path: "mnt/user-data/outputs/launch-brief.html",
+          name: "launch-brief.html",
+          label: "launch-brief.html",
+          isPrimary: true,
+          mimeType: "text/html",
+        }]}
+        typeLabel="Webpage"
+        previewHref="/artifact.html"
+        artifactTextRegistration={{
+          artifactId: "artifact-1",
+          threadId: "thread-1",
+        }}
+        zoom={1.5}
+        fitMode="custom"
+      />,
+    )
+
+    const zoomFrame = await screen.findByTestId("artifact-html-zoom-frame")
+    expect(zoomFrame).toHaveAttribute("data-artifact-zoom", "1.5")
+    expect(zoomFrame.style.transform).toBe("scale(1.5)")
+
+    view.rerender(
+      <ArtifactCanvasViewport
+        artifact={htmlArtifact}
+        files={[{
+          path: "mnt/user-data/outputs/launch-brief.html",
+          name: "launch-brief.html",
+          label: "launch-brief.html",
+          isPrimary: true,
+          mimeType: "text/html",
+        }]}
+        typeLabel="Webpage"
+        previewHref="/artifact.html"
+        artifactTextRegistration={{
+          artifactId: "artifact-1",
+          threadId: "thread-1",
+        }}
+        zoom={1.5}
+        fitMode="width"
+      />,
+    )
+
+    await waitFor(() => expect(zoomFrame).toHaveAttribute("data-artifact-zoom", "1"))
+    expect(zoomFrame).toHaveAttribute("data-html-fit-mode-applied", "width")
+    expect(zoomFrame.style.transform).toBe("scale(1)")
+    expect(zoomFrame.style.width).toBe("100%")
+    expect(zoomFrame.style.height).toBe("100%")
+
+    view.rerender(
+      <ArtifactCanvasViewport
+        artifact={htmlArtifact}
+        files={[{
+          path: "mnt/user-data/outputs/launch-brief.html",
+          name: "launch-brief.html",
+          label: "launch-brief.html",
+          isPrimary: true,
+          mimeType: "text/html",
+        }]}
+        typeLabel="Webpage"
+        previewHref="/artifact.html"
+        artifactTextRegistration={{
+          artifactId: "artifact-1",
+          threadId: "thread-1",
+        }}
+        zoom={1}
+        fitMode="custom"
+      />,
+    )
+
+    await waitFor(() => expect(zoomFrame).toHaveAttribute("data-html-fit-mode-applied", "custom"))
+    expect(zoomFrame).toHaveAttribute("data-artifact-zoom", "1")
+    expect(zoomFrame.style.transform).toBe("scale(1)")
+  })
+
+  it("uses the iframe as the intentional HTML scroll container without outer blank space", async () => {
+    mockCanvasApis()
+    const longHtml = [
+      "<!doctype html><html><body><main><h1>Long page</h1>",
+      ...Array.from({ length: 40 }, (_, index) => `<p>Section ${index + 1}: more page content.</p>`),
+      "</main></body></html>",
+    ].join("")
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(longHtml, {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      }),
+    )
+
+    render(
+      <ArtifactCanvasViewport
+        artifact={htmlArtifact}
+        files={[{
+          path: "mnt/user-data/outputs/launch-brief.html",
+          name: "launch-brief.html",
+          label: "launch-brief.html",
+          isPrimary: true,
+          mimeType: "text/html",
+        }]}
+        typeLabel="Webpage"
+        previewHref="/artifact.html"
+        artifactTextRegistration={{
+          artifactId: "artifact-1",
+          threadId: "thread-1",
+        }}
+      />,
+    )
+
+    const scrollArea = screen.getByTestId("artifact-canvas-scroll-area")
+    const previewRegion = await screen.findByLabelText("Artifact HTML preview")
+    const zoomFrame = await screen.findByTestId("artifact-html-zoom-frame")
+    const annotationHost = await screen.findByTestId("artifact-html-annotation-host")
+    const iframe = await screen.findByTestId("artifact-html-preview-iframe")
+
+    expect(scrollArea.className).toContain("overflow-hidden")
+    expect(previewRegion.className).toContain("overflow-hidden")
+    expect(zoomFrame.className).toContain("overflow-hidden")
+    expect(annotationHost.className).toContain("overflow-hidden")
+    expect(iframe).toHaveAttribute("srcdoc", expect.stringContaining("Section 40"))
+    expect(iframe.className).toContain("h-full")
+    expect(iframe.className).toContain("flex-1")
+    expect(previewRegion).toHaveAttribute("data-html-visible-preview-scroll-mode", "iframe")
   })
 
   it("registers HTML revision artifacts with version-aware capture identity", async () => {

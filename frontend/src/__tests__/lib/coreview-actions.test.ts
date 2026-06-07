@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest"
 
 import {
   buildArtifactViewSignature,
-  type ArtifactFitMode,
 } from "../../app/lib/artifact-renderers"
 import {
   COREVIEW_ADD_ANNOTATION_TOOL_NAME,
@@ -11,6 +10,7 @@ import {
   withCoreviewGeminiToolDeclarations,
   type CoreviewCurrentView,
   type CoreviewRendererAdapter,
+  type CoreviewSetViewAdapterInput,
   type CoreviewToolRefreshResult,
 } from "../../app/lib/coreview-actions"
 import { getCoreviewArtifactCapabilities } from "../../app/lib/coreview-artifact-capabilities"
@@ -94,12 +94,20 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
 
   const adapter: CoreviewRendererAdapter = {
     getCurrentViewState: () => current,
-    setView: (view: { pageIndex: number; zoom: number; fitMode: ArtifactFitMode }) => {
+    setView: (view: CoreviewSetViewAdapterInput) => {
+      const nextScrollTop = typeof view.htmlScrollDelta === "number"
+        ? Math.max(0, (current.scrollTop ?? 0) + view.htmlScrollDelta)
+        : view.htmlScrollPosition === "top"
+          ? 0
+          : view.htmlScrollPosition === "bottom"
+            ? Math.max(0, (current.scrollHeight ?? 0) - (current.viewportHeight ?? 0))
+            : current.scrollTop
       current = {
         ...current,
         pageIndex: view.pageIndex,
         zoom: view.zoom,
         fitMode: view.fitMode,
+        scrollTop: nextScrollTop,
         viewSignature: buildArtifactViewSignature({
           artifactId: current.artifactId,
           filePath: current.artifactPath,
@@ -570,6 +578,92 @@ describe("Coreview action bus", () => {
       raw_frame_excluded: true,
     })
     expect(JSON.stringify(result)).not.toContain("base64")
+  })
+
+  it("returns HTML current view as a scroll document", () => {
+    const harness = createHarness({
+      artifactPath: "outputs/site.html",
+      artifactTitle: "site.html",
+      rendererKind: "html",
+      pageIndex: 0,
+      pageCount: 1,
+      fitMode: "custom",
+      scrollTop: 320,
+      scrollHeight: 1800,
+      documentHeight: 1800,
+      viewportHeight: 720,
+      viewportWidth: 1180,
+      scale: 1,
+      visibleHeadings: ["Coreview", "Features"],
+      currentSection: "Coreview",
+      visibleTextSummary: "Visible section: Coreview",
+      stillFrameAvailable: true,
+    })
+
+    const result = harness.bus.getCurrentView(undefined, "gemini_tool")
+
+    expect(result).toMatchObject({
+      ok: true,
+      action: "get_current_view",
+      renderer_kind: "html",
+      page_index: 0,
+      page_count: 1,
+      scroll_top: 320,
+      scroll_height: 1800,
+      document_height: 1800,
+      viewport_height: 720,
+      viewport_width: 1180,
+      visible_headings: ["Coreview", "Features"],
+      current_section: "Coreview",
+      visible_text_summary: "Visible section: Coreview",
+      still_frame_available: true,
+      current_view_summary: "Current view is an HTML document. Current section is Coreview.",
+      capability_summary: {
+        rendererKind: "html",
+        renderMode: "html",
+        supportsPages: false,
+        supportsPageRail: false,
+        pageCount: 1,
+        supportsAnnotations: true,
+        supportsZoom: true,
+      },
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
+    })
+  })
+
+  it("scrolls HTML with set_view without pretending there are pages", async () => {
+    const harness = createHarness({
+      artifactPath: "outputs/site.html",
+      artifactTitle: "site.html",
+      rendererKind: "html",
+      pageIndex: 0,
+      pageCount: 1,
+      fitMode: "custom",
+      scrollTop: 0,
+      scrollHeight: 1800,
+      documentHeight: 1800,
+      viewportHeight: 720,
+      reviewActive: false,
+      reviewHasFrame: false,
+      canRefresh: false,
+    })
+
+    const result = await harness.bus.setView({ htmlScrollDelta: 500 }, "frontend_fallback")
+
+    expect(result).toMatchObject({
+      ok: true,
+      action: "set_view",
+      renderer_kind: "html",
+      page_index: 0,
+      page_count: 1,
+      scroll_top: 500,
+      html_scroll_attempted: true,
+      html_scroll_result: "success",
+      result_summary: "Scrolled the HTML document.",
+      refresh_attempted: false,
+      refresh_result: "not_requested",
+    })
   })
 
   it("adds a yellow highlight on the current title and refreshes the same review state", async () => {

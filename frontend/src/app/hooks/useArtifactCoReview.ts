@@ -669,6 +669,8 @@ function recordHtmlCaptureTargetRetryEvent(
       htmlFrameCaptureSourceKind: input.sourceKind,
       htmlFrameCaptureSucceeded: input.result === "success",
       htmlFrameCaptureFailureReason: input.finalReason,
+      htmlReviewStatusResolved: input.result === "success",
+      htmlReviewStatusReason: input.finalReason ?? input.result,
       rawArtifactTextExcluded: true,
       rawHtmlExcluded: true,
       rawCommentTextExcluded: true,

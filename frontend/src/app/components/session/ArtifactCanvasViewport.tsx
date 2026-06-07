@@ -64,6 +64,38 @@ export interface ArtifactVisualCaptureStatus {
   annotationOverlayCaptured?: boolean | null
 }
 
+export interface ArtifactHtmlViewState {
+  rendererKind: "html"
+  scrollTop: number
+  scrollHeight: number
+  documentHeight: number
+  viewportHeight: number
+  viewportWidth: number
+  zoom: number
+  scale: number
+  visibleHeadings: string[]
+  currentSection: string | null
+  visibleTextSummary: string | null
+  exactTextAvailable: boolean
+  stillFrameAvailable: boolean
+  annotationCount: number
+}
+
+export interface ArtifactHtmlCommandResult {
+  ok: boolean
+  blockedReason: "section_not_found" | "text_anchor_not_found" | "layout_anchor_not_supported" | null
+  method: "scroll_by" | "scroll_to" | "heading" | "nav_label" | "id" | "text" | null
+  scrolled: boolean
+  state: ArtifactHtmlViewState | null
+}
+
+export interface ArtifactHtmlCommandTarget {
+  getLatestState: () => ArtifactHtmlViewState | null
+  scrollBy: (deltaY: number) => Promise<ArtifactHtmlCommandResult>
+  scrollTo: (position: "top" | "bottom") => Promise<ArtifactHtmlCommandResult>
+  focusText: (text: string) => Promise<ArtifactHtmlCommandResult>
+}
+
 interface ArtifactCanvasViewportProps {
   artifact: BuilderArtifactV1
   files: ArtifactViewportFile[]
@@ -80,6 +112,8 @@ interface ArtifactCanvasViewportProps {
   } | null
   onVisualCaptureStatusChange?: (status: ArtifactVisualCaptureStatus) => void
   onHtmlTextChange?: (text: string) => void
+  onHtmlViewStateChange?: (state: ArtifactHtmlViewState | null) => void
+  onHtmlCommandTargetChange?: (target: ArtifactHtmlCommandTarget | null) => void
   onPdfTextLayoutChange?: (layout: CoreviewPdfTextLayout | null) => void
   reviewSurfaceState?: ArtifactReviewSurfaceState
   rendererKind?: ArtifactRendererKind
@@ -110,11 +144,216 @@ const MARKDOWN_CAPTURE_CANVAS_WIDTH = 960
 const MARKDOWN_CAPTURE_CANVAS_HEIGHT = 1240
 const HTML_CAPTURE_CANVAS_WIDTH = 960
 const HTML_CAPTURE_CANVAS_HEIGHT = 720
+const HTML_VISIBLE_PREVIEW_MIN_HEIGHT = 480
+const HTML_PREVIEW_BRIDGE_SOURCE = "coreview-html-preview"
+const HTML_PREVIEW_PARENT_SOURCE = "coreview-html-preview-parent"
+const HTML_PREVIEW_COMMAND_TIMEOUT_MS = 900
 const MAX_CAPTURE_BLOCKS = 28
 const ARTIFACT_CANVAS_BED_FALLBACK_BOUNDS = {
   width: 860,
   height: 720,
 }
+
+const HTML_PREVIEW_BRIDGE_SCRIPT = `
+(function () {
+  var BRIDGE_SOURCE = "coreview-html-preview";
+  var PARENT_SOURCE = "coreview-html-preview-parent";
+  var reportTimer = null;
+
+  function clampText(value) {
+    return String(value || "").replace(/\\s+/g, " ").trim().slice(0, 96);
+  }
+
+  function normalize(value) {
+    return clampText(value).toLowerCase();
+  }
+
+  function scrollingElement() {
+    return document.scrollingElement || document.documentElement || document.body;
+  }
+
+  function scrollMetrics() {
+    var root = scrollingElement();
+    var body = document.body || root;
+    var doc = document.documentElement || root;
+    var viewportHeight = window.innerHeight || doc.clientHeight || root.clientHeight || 0;
+    var viewportWidth = window.innerWidth || doc.clientWidth || root.clientWidth || 0;
+    var scrollHeight = Math.max(root.scrollHeight || 0, body.scrollHeight || 0, doc.scrollHeight || 0, viewportHeight);
+    var scrollTop = root.scrollTop || window.scrollY || doc.scrollTop || body.scrollTop || 0;
+    return {
+      scrollTop: Math.max(0, Math.round(scrollTop)),
+      scrollHeight: Math.max(0, Math.round(scrollHeight)),
+      documentHeight: Math.max(0, Math.round(scrollHeight)),
+      viewportHeight: Math.max(0, Math.round(viewportHeight)),
+      viewportWidth: Math.max(0, Math.round(viewportWidth))
+    };
+  }
+
+  function headingEntries() {
+    return Array.prototype.slice.call(document.querySelectorAll("h1,h2,h3,h4,h5,h6,[role='heading']"))
+      .map(function (element) {
+        var rect = element.getBoundingClientRect();
+        var text = clampText(element.getAttribute("aria-label") || element.textContent || element.id || "");
+        return {
+          text: text,
+          top: rect.top,
+          bottom: rect.bottom
+        };
+      })
+      .filter(function (entry) { return entry.text.length > 0; });
+  }
+
+  function visibleHeadings(metrics) {
+    return headingEntries()
+      .filter(function (entry) { return entry.bottom >= 0 && entry.top <= metrics.viewportHeight; })
+      .slice(0, 8)
+      .map(function (entry) { return entry.text; });
+  }
+
+  function currentSection(metrics) {
+    var current = null;
+    headingEntries().forEach(function (entry) {
+      if (entry.top <= Math.max(80, metrics.viewportHeight * 0.35)) {
+        current = entry.text;
+      }
+    });
+    return current;
+  }
+
+  function state(reason) {
+    var metrics = scrollMetrics();
+    var section = currentSection(metrics);
+    return {
+      source: BRIDGE_SOURCE,
+      type: "state",
+      reason: reason || "state",
+      rendererKind: "html",
+      scrollTop: metrics.scrollTop,
+      scrollHeight: metrics.scrollHeight,
+      documentHeight: metrics.documentHeight,
+      viewportHeight: metrics.viewportHeight,
+      viewportWidth: metrics.viewportWidth,
+      visibleHeadings: visibleHeadings(metrics),
+      currentSection: section,
+      visibleTextSummary: section ? "Visible section: " + section : null
+    };
+  }
+
+  function postState(reason) {
+    window.parent.postMessage(state(reason), "*");
+  }
+
+  function scheduleState(reason) {
+    window.clearTimeout(reportTimer);
+    reportTimer = window.setTimeout(function () { postState(reason); }, 60);
+  }
+
+  function sendResult(commandId, ok, blockedReason, method, scrolled) {
+    window.setTimeout(function () {
+      var payload = state("command-result");
+      payload.type = "command-result";
+      payload.commandId = commandId || null;
+      payload.ok = ok === true;
+      payload.blockedReason = blockedReason || null;
+      payload.method = method || null;
+      payload.scrolled = scrolled === true;
+      window.parent.postMessage(payload, "*");
+    }, 80);
+  }
+
+  function scrollToTop(top) {
+    var root = scrollingElement();
+    var before = root.scrollTop || window.scrollY || 0;
+    root.scrollTo({ top: Math.max(0, top), left: 0, behavior: "smooth" });
+    return Math.abs(before - Math.max(0, top)) > 1;
+  }
+
+  function findTarget(query) {
+    var needle = normalize(query);
+    if (!needle) {
+      return null;
+    }
+    var selectors = [
+      "h1", "h2", "h3", "h4", "h5", "h6",
+      "nav a", "a", "button",
+      "[id]", "[aria-label]", "[data-section]", "section", "article", "main p", "li"
+    ];
+    var elements = Array.prototype.slice.call(document.querySelectorAll(selectors.join(",")));
+    var best = null;
+    elements.some(function (element) {
+      var label = normalize(
+        element.getAttribute("aria-label")
+        || element.getAttribute("data-section")
+        || element.id
+        || element.textContent
+        || ""
+      );
+      if (!label || label.indexOf(needle) < 0) {
+        return false;
+      }
+      var tag = String(element.tagName || "").toLowerCase();
+      var method = tag.match(/^h[1-6]$/) ? "heading"
+        : tag === "a" || element.closest("nav") ? "nav_label"
+          : element.id ? "id"
+            : "text";
+      best = { element: element, method: method };
+      return method === "heading" || method === "nav_label" || method === "id";
+    });
+    return best;
+  }
+
+  window.addEventListener("message", function (event) {
+    var data = event.data || {};
+    if (!data || data.source !== PARENT_SOURCE) {
+      return;
+    }
+    if (data.type === "request-state") {
+      postState("request");
+      return;
+    }
+    if (data.type !== "command") {
+      return;
+    }
+    var metrics = scrollMetrics();
+    if (data.command === "scroll_by") {
+      var deltaY = Number(data.deltaY) || 0;
+      scrollToTop(metrics.scrollTop + deltaY);
+      sendResult(data.commandId, true, null, "scroll_by", Math.abs(deltaY) > 0);
+      return;
+    }
+    if (data.command === "scroll_to") {
+      var targetTop = data.position === "bottom"
+        ? Math.max(0, metrics.scrollHeight - metrics.viewportHeight)
+        : 0;
+      var moved = scrollToTop(targetTop);
+      sendResult(data.commandId, true, null, "scroll_to", moved);
+      return;
+    }
+    if (data.command === "focus_text") {
+      var target = findTarget(data.text);
+      if (!target) {
+        sendResult(data.commandId, false, "section_not_found", null, false);
+        return;
+      }
+      target.element.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+      if (typeof target.element.focus === "function") {
+        try { target.element.focus({ preventScroll: true }); } catch (error) {}
+      }
+      target.element.setAttribute("data-coreview-focus-pulse", "true");
+      window.setTimeout(function () { target.element.removeAttribute("data-coreview-focus-pulse"); }, 900);
+      sendResult(data.commandId, true, null, target.method, true);
+    }
+  });
+
+  document.addEventListener("scroll", function () { scheduleState("scroll"); }, true);
+  window.addEventListener("resize", function () { scheduleState("resize"); });
+  window.addEventListener("load", function () { scheduleState("load"); });
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", function () { postState("ready"); });
+  } else {
+    postState("ready");
+  }
+})();`
 
 export function ArtifactCanvasViewport({
   artifact,
@@ -125,6 +364,8 @@ export function ArtifactCanvasViewport({
   artifactTextRegistration,
   onVisualCaptureStatusChange,
   onHtmlTextChange,
+  onHtmlViewStateChange,
+  onHtmlCommandTargetChange,
   onPdfTextLayoutChange,
   reviewSurfaceState = "idle",
   rendererKind,
@@ -521,16 +762,19 @@ export function ArtifactCanvasViewport({
           ref={scrollAreaRef}
           data-testid="artifact-canvas-scroll-area"
           className={cn(
-            "relative z-10 flex min-h-0 min-w-0 w-full flex-1 overscroll-contain px-4 py-6 [-webkit-overflow-scrolling:touch] [scrollbar-gutter:stable] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--cosmic-border)] [&::-webkit-scrollbar-track]:bg-transparent sm:px-7 sm:py-7 lg:px-10",
+            "relative z-10 flex min-h-0 min-w-0 w-full flex-1 overscroll-contain [-webkit-overflow-scrolling:touch] [scrollbar-gutter:stable] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--cosmic-border)] [&::-webkit-scrollbar-track]:bg-transparent",
             canPreviewPdf
-              ? "items-stretch overflow-hidden"
-              : "flex-col items-stretch overflow-y-auto",
+              ? "items-stretch overflow-hidden px-4 py-6 sm:px-7 sm:py-7 lg:px-10"
+              : canPreviewHtml
+                ? "items-stretch overflow-hidden px-2 py-2 sm:px-3 sm:py-3 lg:px-4 lg:py-4"
+                : "flex-col items-stretch overflow-y-auto px-4 py-6 sm:px-7 sm:py-7 lg:px-10",
           )}
           style={{ scrollbarColor: "var(--cosmic-border) transparent" }}
         >
           {canPreviewHtml ? (
             <HtmlDocumentPage
               artifact={artifact}
+              artifactId={captureArtifactId}
               file={primaryFile}
               preview={htmlPreview}
               typeLabel={typeLabel}
@@ -544,6 +788,8 @@ export function ArtifactCanvasViewport({
               onCreateUnderline={onCreateUnderline}
               onSelectAnnotation={onSelectAnnotation}
               onUpdateCommentText={onUpdateCommentText}
+              onHtmlViewStateChange={onHtmlViewStateChange}
+              onHtmlCommandTargetChange={onHtmlCommandTargetChange}
             />
           ) : canPreviewMarkdown ? (
             <MarkdownDocumentPage
@@ -1012,6 +1258,7 @@ function MarkdownDocumentPage({
 
 function HtmlDocumentPage({
   artifact,
+  artifactId,
   file,
   preview,
   typeLabel,
@@ -1025,8 +1272,11 @@ function HtmlDocumentPage({
   onCreateUnderline,
   onSelectAnnotation,
   onUpdateCommentText,
+  onHtmlViewStateChange,
+  onHtmlCommandTargetChange,
 }: {
   artifact: BuilderArtifactV1
+  artifactId?: string | null
   file?: ArtifactViewportFile
   preview: HtmlPreviewState
   typeLabel: string
@@ -1040,22 +1290,216 @@ function HtmlDocumentPage({
   onCreateUnderline?: (rect: NormalizedArtifactRect) => void
   onSelectAnnotation?: (id: string | null) => void
   onUpdateCommentText?: (id: string, text: string) => void
+  onHtmlViewStateChange?: (state: ArtifactHtmlViewState | null) => void
+  onHtmlCommandTargetChange?: (target: ArtifactHtmlCommandTarget | null) => void
 }) {
-  const normalizedZoom = Math.max(0.25, Math.min(4, zoom))
+  const normalizedZoom = resolveHtmlVisiblePreviewScale({ fitMode, zoom })
+  const previewShellRef = useRef<HTMLDivElement | null>(null)
+  const iframeRef = useRef<HTMLIFrameElement | null>(null)
+  const previewBounds = useElementClientBounds(previewShellRef)
+  const layoutTelemetrySignatureRef = useRef<string | null>(null)
+  const commandIdRef = useRef(0)
+  const latestViewStateRef = useRef<ArtifactHtmlViewState | null>(null)
+  const [htmlViewState, setHtmlViewState] = useState<ArtifactHtmlViewState | null>(null)
+  const pendingCommandsRef = useRef(new Map<string, {
+    resolve: (result: ArtifactHtmlCommandResult) => void
+    timeoutId: number
+  }>())
+  const interactiveSrcDoc = useMemo(() => (
+    preview.status === "ready" ? buildInteractiveHtmlPreviewSrcDoc(preview.html) : ""
+  ), [preview.html, preview.status])
   const selectedAnnotation = useMemo(() => (
     annotations.find((annotation) => annotation.id === selectedAnnotationId) ?? null
   ), [annotations, selectedAnnotationId])
+  const annotationOverlayCapturing = htmlAnnotationOverlayCapturesPointer(toolMode, selectedAnnotation)
+
+  const applyHtmlViewState = useCallback((state: ArtifactHtmlViewState | null) => {
+    latestViewStateRef.current = state
+    setHtmlViewState(state)
+    onHtmlViewStateChange?.(state)
+  }, [onHtmlViewStateChange])
+
+  useEffect(() => {
+    if (preview.status !== "ready") {
+      applyHtmlViewState(null)
+    }
+  }, [applyHtmlViewState, preview.status])
+
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (event.source !== iframeRef.current?.contentWindow) {
+        return
+      }
+      const message = normalizeHtmlPreviewBridgeMessage(event.data, {
+        zoom: normalizedZoom,
+        exactTextAvailable: true,
+        stillFrameAvailable: preview.status === "ready",
+        annotationCount: annotations.length,
+      })
+      if (!message) {
+        return
+      }
+      applyHtmlViewState(message.state)
+      if (message.type !== "command-result" || !message.commandId) {
+        return
+      }
+      const pending = pendingCommandsRef.current.get(message.commandId)
+      if (!pending) {
+        return
+      }
+      window.clearTimeout(pending.timeoutId)
+      pendingCommandsRef.current.delete(message.commandId)
+      pending.resolve({
+        ok: message.ok,
+        blockedReason: message.blockedReason,
+        method: message.method,
+        scrolled: message.scrolled,
+        state: message.state,
+      })
+    }
+
+    window.addEventListener("message", handleMessage)
+    return () => window.removeEventListener("message", handleMessage)
+  }, [annotations.length, applyHtmlViewState, normalizedZoom, preview.status])
+
+  const sendHtmlCommand = useCallback((
+    command: Record<string, string | number | null>,
+  ): Promise<ArtifactHtmlCommandResult> => {
+    const contentWindow = iframeRef.current?.contentWindow
+    if (!contentWindow || preview.status !== "ready") {
+      return Promise.resolve({
+        ok: false,
+        blockedReason: "layout_anchor_not_supported",
+        method: null,
+        scrolled: false,
+        state: latestViewStateRef.current,
+      })
+    }
+    const commandId = `html-command-${Date.now().toString(36)}-${commandIdRef.current += 1}`
+    return new Promise((resolve) => {
+      const timeoutId = window.setTimeout(() => {
+        pendingCommandsRef.current.delete(commandId)
+        resolve({
+          ok: false,
+          blockedReason: "layout_anchor_not_supported",
+          method: null,
+          scrolled: false,
+          state: latestViewStateRef.current,
+        })
+      }, HTML_PREVIEW_COMMAND_TIMEOUT_MS)
+
+      pendingCommandsRef.current.set(commandId, { resolve, timeoutId })
+      contentWindow.postMessage({
+        source: HTML_PREVIEW_PARENT_SOURCE,
+        type: "command",
+        commandId,
+        ...command,
+      }, "*")
+    })
+  }, [preview.status])
+
+  useEffect(() => {
+    if (preview.status !== "ready") {
+      onHtmlCommandTargetChange?.(null)
+      return
+    }
+
+    const target: ArtifactHtmlCommandTarget = {
+      getLatestState: () => latestViewStateRef.current,
+      scrollBy: (deltaY) => sendHtmlCommand({ command: "scroll_by", deltaY }),
+      scrollTo: (position) => sendHtmlCommand({ command: "scroll_to", position }),
+      focusText: (text) => sendHtmlCommand({ command: "focus_text", text }),
+    }
+    onHtmlCommandTargetChange?.(target)
+    return () => {
+      onHtmlCommandTargetChange?.(null)
+    }
+  }, [onHtmlCommandTargetChange, preview.status, sendHtmlCommand])
+
+  useEffect(() => () => {
+    for (const pending of pendingCommandsRef.current.values()) {
+      window.clearTimeout(pending.timeoutId)
+      pending.resolve({
+        ok: false,
+        blockedReason: "layout_anchor_not_supported",
+        method: null,
+        scrolled: false,
+        state: latestViewStateRef.current,
+      })
+    }
+    pendingCommandsRef.current.clear()
+  }, [])
+
+  useEffect(() => {
+    if (preview.status !== "ready") {
+      return
+    }
+
+    const width = Math.max(0, Math.round(previewBounds.width))
+    const height = Math.max(0, Math.round(previewBounds.height))
+    const signature = [
+      artifactId ?? "",
+      stableTelemetryHash(file?.path),
+      fitMode,
+      normalizedZoom,
+      width,
+      height,
+    ].join("|")
+
+    if (layoutTelemetrySignatureRef.current === signature) {
+      return
+    }
+    layoutTelemetrySignatureRef.current = signature
+
+    recordSophiaCaptureEvent({
+      category: "artifacts-runtime",
+      name: "html-visible-preview-layout",
+      payload: {
+        artifactId: artifactId ?? null,
+        rendererKind: "html",
+        htmlCaptureTargetArtifactPathHash: stableTelemetryHash(file?.path),
+        htmlVisiblePreviewResponsive: true,
+        htmlVisiblePreviewUsesCaptureDimensions: false,
+        htmlVisiblePreviewWidth: width,
+        htmlVisiblePreviewHeight: height,
+        htmlVisiblePreviewScrollMode: "iframe",
+        htmlVisibleRendererKind: "iframe",
+        htmlVisibleRendererInteractive: true,
+        htmlVisibleIframePointerEvents: "auto",
+        htmlOverlayPointerEventsMode: annotationOverlayCapturing ? "capture" : "passthrough",
+        htmlOffscreenCaptureAffectsLayout: false,
+        htmlFitModeApplied: fitMode,
+        htmlZoomScale: normalizedZoom,
+        htmlBrowserInteractionEnabled: !annotationOverlayCapturing,
+        htmlAnnotationOverlayCapturing: annotationOverlayCapturing,
+        htmlPageRailHidden: true,
+        htmlThumbnailRailHidden: true,
+        htmlCoreviewCommandModel: "scroll_document",
+        rawArtifactTextExcluded: true,
+        rawHtmlExcluded: true,
+        rawCommentTextExcluded: true,
+        rawFrameExcluded: true,
+        rawScreenshotExcluded: true,
+      },
+    })
+  }, [annotationOverlayCapturing, artifactId, file?.path, fitMode, normalizedZoom, preview.status, previewBounds.height, previewBounds.width])
 
   return (
     <div
       data-testid="artifact-document-page"
-      className="mx-auto flex min-h-full w-full max-w-[1120px] flex-col overflow-hidden rounded-lg border bg-[color:color-mix(in_srgb,var(--card-bg)_96%,var(--cosmic-panel-soft))] shadow-[0_18px_54px_color-mix(in_srgb,var(--bg)_34%,transparent),0_1px_0_color-mix(in_srgb,white_26%,transparent)_inset]"
+      className="flex min-h-0 w-full flex-1 flex-col overflow-hidden rounded-lg border bg-[color:color-mix(in_srgb,var(--card-bg)_96%,var(--cosmic-panel-soft))] shadow-[0_18px_54px_color-mix(in_srgb,var(--bg)_26%,transparent),0_1px_0_color-mix(in_srgb,white_24%,transparent)_inset]"
       style={{ borderColor: "var(--cosmic-border-soft)" }}
       aria-label="Artifact HTML preview"
       data-artifact-fit-mode={fitMode}
       data-artifact-zoom={String(normalizedZoom)}
+      data-html-visible-preview-responsive="true"
+      data-html-visible-preview-uses-capture-dimensions="false"
+      data-html-visible-preview-scroll-mode="iframe"
+      data-html-visible-renderer-kind="iframe"
+      data-html-visible-renderer-interactive="true"
+      data-html-browser-interaction-enabled={annotationOverlayCapturing ? "false" : "true"}
     >
-      <div className="flex items-center justify-between gap-4 border-b border-[color:var(--cosmic-border-soft)] px-5 py-4 sm:px-6">
+      <div className="flex shrink-0 items-center justify-between gap-4 border-b border-[color:var(--cosmic-border-soft)] px-4 py-3 sm:px-5">
         <div className="min-w-0">
           <span className="inline-flex items-center gap-1.5 rounded-full border border-[color:var(--cosmic-border-soft)] px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-[color:var(--cosmic-text-muted)]">
             <Layers className="h-3.5 w-3.5" aria-hidden="true" />
@@ -1068,39 +1512,57 @@ function HtmlDocumentPage({
         <Sparkles className="h-7 w-7 shrink-0 text-[color:var(--cosmic-text-faint)]" aria-hidden="true" />
       </div>
 
-      <div className="flex min-h-[420px] flex-1 flex-col px-4 py-4 sm:px-5 sm:py-5">
+      <div className="flex min-h-0 flex-1 flex-col p-2 sm:p-3">
         {preview.status === "loading" ? (
           <PreviewStateCard title="Preparing webpage view" body="You can still open or download the artifact." />
         ) : preview.status === "failed" || preview.status === "idle" ? (
           <PreviewStateCard title="Preview unavailable" body="Open or download the artifact to view the file." />
         ) : (
           <div
+            ref={previewShellRef}
             data-testid="artifact-html-zoom-frame"
             data-artifact-fit-mode={fitMode}
             data-artifact-zoom={String(normalizedZoom)}
-            className="origin-top"
+            data-html-fit-mode-applied={fitMode}
+            data-html-visible-preview-scroll-mode="iframe"
+            data-html-scroll-mode="iframe_document"
+            className="flex min-h-0 w-full flex-1 origin-top overflow-hidden"
             style={{
               transform: `scale(${normalizedZoom})`,
-              transformOrigin: "top center",
+              transformOrigin: "top left",
               width: `${100 / normalizedZoom}%`,
-              minHeight: `${Math.max(560, 560 * normalizedZoom)}px`,
+              height: `${100 / normalizedZoom}%`,
+              minHeight: `${HTML_VISIBLE_PREVIEW_MIN_HEIGHT / normalizedZoom}px`,
             }}
           >
             <div
               data-testid="artifact-html-annotation-host"
               data-annotation-overlay-captured={annotations.length > 0 ? "true" : "false"}
-              className="relative min-h-[560px] w-full"
+              data-html-overlay-pointer-events-mode={annotationOverlayCapturing ? "capture" : "passthrough"}
+              className="relative flex min-h-0 w-full flex-1 overflow-hidden"
             >
               <iframe
+                ref={iframeRef}
                 title={`Preview of ${file?.name ?? artifact.artifactTitle}`}
-                sandbox=""
-                srcDoc={preview.html}
-                className="min-h-[560px] w-full rounded-md border bg-white"
-                style={{ borderColor: "var(--cosmic-border-soft)" }}
+                sandbox="allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-scripts"
+                srcDoc={interactiveSrcDoc}
+                data-testid="artifact-html-preview-iframe"
+                data-html-visible-renderer-kind="iframe"
+                data-html-visible-renderer-interactive="true"
+                data-html-iframe-pointer-events="auto"
+                className="h-full min-h-0 w-full flex-1 rounded-md border bg-white"
+                style={{ borderColor: "var(--cosmic-border-soft)", pointerEvents: "auto" }}
+                onLoad={() => {
+                  iframeRef.current?.contentWindow?.postMessage({
+                    source: HTML_PREVIEW_PARENT_SOURCE,
+                    type: "request-state",
+                  }, "*")
+                }}
               />
               <ArtifactHtmlAnnotationLayer
                 toolMode={toolMode}
                 annotations={annotations}
+                htmlViewState={htmlViewState}
                 selectedAnnotation={selectedAnnotation}
                 onCreateHighlight={onCreateHighlight}
                 onCreateComment={onCreateComment}
@@ -1116,9 +1578,136 @@ function HtmlDocumentPage({
   )
 }
 
+function resolveHtmlVisiblePreviewScale({
+  fitMode,
+  zoom,
+}: {
+  fitMode: ArtifactFitMode
+  zoom: number
+}): number {
+  if (fitMode === "custom") {
+    return Math.max(0.25, Math.min(4, zoom))
+  }
+  return 1
+}
+
+function buildInteractiveHtmlPreviewSrcDoc(html: string): string {
+  const bridge = [
+    "<style>[data-coreview-focus-pulse='true']{outline:2px solid #7c3aed;outline-offset:4px;transition:outline-color .2s ease;}</style>",
+    `<script>${HTML_PREVIEW_BRIDGE_SCRIPT}</script>`,
+  ].join("")
+  if (/<\/body\s*>/iu.test(html)) {
+    return html.replace(/<\/body\s*>/iu, `${bridge}</body>`)
+  }
+  return `${html}${bridge}`
+}
+
+type HtmlPreviewBridgeMessage = {
+  type: "state" | "command-result"
+  commandId: string | null
+  ok: boolean
+  blockedReason: ArtifactHtmlCommandResult["blockedReason"]
+  method: ArtifactHtmlCommandResult["method"]
+  scrolled: boolean
+  state: ArtifactHtmlViewState
+}
+
+function normalizeHtmlPreviewBridgeMessage(
+  value: unknown,
+  context: {
+    zoom: number
+    exactTextAvailable: boolean
+    stillFrameAvailable: boolean
+    annotationCount: number
+  },
+): HtmlPreviewBridgeMessage | null {
+  if (!isRecord(value) || value.source !== HTML_PREVIEW_BRIDGE_SOURCE) {
+    return null
+  }
+  const type = value.type === "command-result" ? "command-result" : value.type === "state" ? "state" : null
+  if (!type) {
+    return null
+  }
+  const visibleHeadings = Array.isArray(value.visibleHeadings)
+    ? value.visibleHeadings
+      .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      .map((item) => item.trim().slice(0, 96))
+      .slice(0, 8)
+    : []
+  const state: ArtifactHtmlViewState = {
+    rendererKind: "html",
+    scrollTop: safeNonNegativeNumber(value.scrollTop),
+    scrollHeight: safeNonNegativeNumber(value.scrollHeight),
+    documentHeight: safeNonNegativeNumber(value.documentHeight ?? value.scrollHeight),
+    viewportHeight: safeNonNegativeNumber(value.viewportHeight),
+    viewportWidth: safeNonNegativeNumber(value.viewportWidth),
+    zoom: context.zoom,
+    scale: context.zoom,
+    visibleHeadings,
+    currentSection: typeof value.currentSection === "string" && value.currentSection.trim()
+      ? value.currentSection.trim().slice(0, 96)
+      : null,
+    visibleTextSummary: typeof value.visibleTextSummary === "string" && value.visibleTextSummary.trim()
+      ? value.visibleTextSummary.trim().slice(0, 140)
+      : null,
+    exactTextAvailable: context.exactTextAvailable,
+    stillFrameAvailable: context.stillFrameAvailable,
+    annotationCount: context.annotationCount,
+  }
+  return {
+    type,
+    commandId: typeof value.commandId === "string" ? value.commandId : null,
+    ok: value.ok === true,
+    blockedReason: htmlCommandBlockedReason(value.blockedReason),
+    method: htmlCommandMethod(value.method),
+    scrolled: value.scrolled === true,
+    state,
+  }
+}
+
+function htmlCommandBlockedReason(value: unknown): ArtifactHtmlCommandResult["blockedReason"] {
+  if (value === "section_not_found" || value === "text_anchor_not_found" || value === "layout_anchor_not_supported") {
+    return value
+  }
+  return null
+}
+
+function htmlCommandMethod(value: unknown): ArtifactHtmlCommandResult["method"] {
+  if (
+    value === "scroll_by"
+    || value === "scroll_to"
+    || value === "heading"
+    || value === "nav_label"
+    || value === "id"
+    || value === "text"
+  ) {
+    return value
+  }
+  return null
+}
+
+function safeNonNegativeNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
+function htmlAnnotationOverlayCapturesPointer(
+  toolMode: ArtifactToolMode,
+  selectedAnnotation: ArtifactAnnotation | null,
+): boolean {
+  return toolMode === "highlight"
+    || toolMode === "underline"
+    || toolMode === "comment"
+    || selectedAnnotation !== null
+}
+
 function ArtifactHtmlAnnotationLayer({
   toolMode,
   annotations,
+  htmlViewState,
   selectedAnnotation,
   onCreateHighlight,
   onCreateComment,
@@ -1128,6 +1717,7 @@ function ArtifactHtmlAnnotationLayer({
 }: {
   toolMode: ArtifactToolMode
   annotations: ArtifactAnnotation[]
+  htmlViewState: ArtifactHtmlViewState | null
   selectedAnnotation: ArtifactAnnotation | null
   onCreateHighlight?: (rect: NormalizedArtifactRect) => void
   onCreateComment?: (point: NormalizedArtifactPoint) => void
@@ -1145,13 +1735,10 @@ function ArtifactHtmlAnnotationLayer({
       ? normalizedUnderlineRectFromPoints(draft.start, draft.current)
       : normalizedRectFromPoints(draft.start, draft.current)
     : null
+  const overlayCapturing = htmlAnnotationOverlayCapturesPointer(toolMode, selectedAnnotation)
 
   const handlePointerDown = useCallback((event: PointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || toolMode === "pan") {
-      return
-    }
-    if (toolMode === "select") {
-      onSelectAnnotation?.(null)
+    if (event.button !== 0 || !overlayCapturing) {
       return
     }
 
@@ -1160,7 +1747,7 @@ function ArtifactHtmlAnnotationLayer({
     event.stopPropagation()
 
     if (toolMode === "comment") {
-      onCreateComment?.(point)
+      onCreateComment?.(htmlViewportPointToContentPoint(point, htmlViewState))
       return
     }
     if (toolMode === "highlight" || toolMode === "underline") {
@@ -1171,7 +1758,7 @@ function ArtifactHtmlAnnotationLayer({
         // Pointer capture is optional for this overlay.
       }
     }
-  }, [onCreateComment, onSelectAnnotation, toolMode])
+  }, [htmlViewState, onCreateComment, overlayCapturing, toolMode])
 
   const handlePointerMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
     if (toolMode !== draft?.kind) {
@@ -1196,21 +1783,24 @@ function ArtifactHtmlAnnotationLayer({
     if (rect.width < 0.008 || (draft.kind === "highlight" && rect.height < 0.008)) {
       return
     }
+    const contentRect = htmlViewportRectToContentRect(rect, htmlViewState)
     if (draft.kind === "underline") {
-      onCreateUnderline?.(rect)
+      onCreateUnderline?.(contentRect)
     } else {
-      onCreateHighlight?.(rect)
+      onCreateHighlight?.(contentRect)
     }
-  }, [draft, onCreateHighlight, onCreateUnderline, toolMode])
+  }, [draft, htmlViewState, onCreateHighlight, onCreateUnderline, toolMode])
 
   return (
     <div
       data-testid="artifact-html-annotation-layer"
       data-artifact-tool-mode={toolMode}
       data-annotation-overlay-captured={annotations.length > 0 ? "true" : "false"}
+      data-html-overlay-pointer-events-mode={overlayCapturing ? "capture" : "passthrough"}
+      data-html-annotation-overlay-capturing={overlayCapturing ? "true" : "false"}
       className={cn(
         "absolute inset-0 z-10",
-        toolMode === "pan" ? "pointer-events-none" : "pointer-events-auto",
+        overlayCapturing ? "pointer-events-auto" : "pointer-events-none",
         toolMode === "highlight" && "cursor-crosshair",
         toolMode === "underline" && "cursor-crosshair",
         toolMode === "comment" && "cursor-copy",
@@ -1225,6 +1815,7 @@ function ArtifactHtmlAnnotationLayer({
         <HtmlAnnotation
           key={annotation.id}
           annotation={annotation}
+          htmlViewState={htmlViewState}
           selected={selectedAnnotation?.id === annotation.id}
           onSelect={(id) => onSelectAnnotation?.(id)}
           onTextChange={(id, text) => onUpdateCommentText?.(id, text)}
@@ -1254,25 +1845,28 @@ function ArtifactHtmlAnnotationLayer({
 
 function HtmlAnnotation({
   annotation,
+  htmlViewState,
   selected,
   onSelect,
   onTextChange,
 }: {
   annotation: ArtifactAnnotation
+  htmlViewState: ArtifactHtmlViewState | null
   selected: boolean
   onSelect: (id: string) => void
   onTextChange: (id: string, value: string) => void
 }) {
   if (annotation.kind === "highlight") {
-    return <HtmlHighlightAnnotation annotation={annotation} selected={selected} onSelect={onSelect} />
+    return <HtmlHighlightAnnotation annotation={annotation} htmlViewState={htmlViewState} selected={selected} onSelect={onSelect} />
   }
   if (annotation.kind === "underline") {
-    return <HtmlUnderlineAnnotation annotation={annotation} selected={selected} onSelect={onSelect} />
+    return <HtmlUnderlineAnnotation annotation={annotation} htmlViewState={htmlViewState} selected={selected} onSelect={onSelect} />
   }
   if (annotation.kind === "comment") {
     return (
       <HtmlCommentAnnotation
         annotation={annotation}
+        htmlViewState={htmlViewState}
         selected={selected}
         onSelect={onSelect}
         onTextChange={onTextChange}
@@ -1284,10 +1878,12 @@ function HtmlAnnotation({
 
 function HtmlHighlightAnnotation({
   annotation,
+  htmlViewState,
   selected,
   onSelect,
 }: {
   annotation: Extract<ArtifactAnnotation, { kind: "highlight" }>
+  htmlViewState: ArtifactHtmlViewState | null
   selected: boolean
   onSelect: (id: string) => void
 }) {
@@ -1303,13 +1899,13 @@ function HtmlHighlightAnnotation({
       aria-label="Highlight annotation"
       aria-pressed={selected}
       className={cn(
-        "cosmic-focus-ring absolute rounded-[3px] border transition",
+        "cosmic-focus-ring pointer-events-auto absolute rounded-[3px] border transition",
         selected
           ? "border-[color:var(--sophia-purple)] shadow-[0_0_0_2px_color-mix(in_srgb,var(--sophia-purple)_34%,transparent)]"
           : "border-[color:color-mix(in_srgb,var(--sophia-purple)_26%,#facc15)]",
       )}
       style={{
-        ...rectToStyle(annotation.rect),
+        ...htmlContentRectToViewportStyle(annotation.rect, htmlViewState),
         ...highlightAnnotationStyle(annotation.color ?? "yellow"),
       }}
       onPointerDown={(event) => event.stopPropagation()}
@@ -1323,10 +1919,12 @@ function HtmlHighlightAnnotation({
 
 function HtmlUnderlineAnnotation({
   annotation,
+  htmlViewState,
   selected,
   onSelect,
 }: {
   annotation: Extract<ArtifactAnnotation, { kind: "underline" }>
+  htmlViewState: ArtifactHtmlViewState | null
   selected: boolean
   onSelect: (id: string) => void
 }) {
@@ -1342,10 +1940,10 @@ function HtmlUnderlineAnnotation({
       aria-label="Underline annotation"
       aria-pressed={selected}
       className={cn(
-        "cosmic-focus-ring absolute rounded-[3px] border bg-transparent transition",
+        "cosmic-focus-ring pointer-events-auto absolute rounded-[3px] border bg-transparent transition",
         selected ? "border-[color:var(--sophia-purple)]" : "border-transparent",
       )}
-      style={rectToStyle(annotation.rect)}
+      style={htmlContentRectToViewportStyle(annotation.rect, htmlViewState)}
       onPointerDown={(event) => event.stopPropagation()}
       onClick={(event) => {
         event.stopPropagation()
@@ -1359,17 +1957,20 @@ function HtmlUnderlineAnnotation({
 
 function HtmlCommentAnnotation({
   annotation,
+  htmlViewState,
   selected,
   onSelect,
   onTextChange,
 }: {
   annotation: Extract<ArtifactAnnotation, { kind: "comment" }>
+  htmlViewState: ArtifactHtmlViewState | null
   selected: boolean
   onSelect: (id: string) => void
   onTextChange: (id: string, value: string) => void
 }) {
-  const popoverAlign = annotation.point.x > 0.72 ? "right-0" : "left-5"
-  const popoverSide = annotation.point.y > 0.72 ? "bottom-5" : "top-5"
+  const viewportPoint = htmlContentPointToViewportPoint(annotation.point, htmlViewState)
+  const popoverAlign = viewportPoint.x > 0.72 ? "right-0" : "left-5"
+  const popoverSide = viewportPoint.y > 0.72 ? "bottom-5" : "top-5"
   return (
     <div
       data-testid="artifact-html-comment-annotation"
@@ -1378,8 +1979,8 @@ function HtmlCommentAnnotation({
       data-annotation-page-index="0"
       data-page-index={annotation.pageIndex}
       data-annotation-source={annotation.source ?? "user"}
-      className="absolute"
-      style={pointToStyle(annotation.point)}
+      className="pointer-events-auto absolute"
+      style={pointToStyle(viewportPoint)}
       onPointerDown={(event) => event.stopPropagation()}
     >
       <button
@@ -1464,6 +2065,64 @@ function normalizedUnderlineRectFromPoints(
     y: Math.min(rect.y, 1 - height),
     width: rect.width,
     height,
+  }
+}
+
+function htmlViewportPointToContentPoint(
+  point: NormalizedArtifactPoint,
+  state: ArtifactHtmlViewState | null,
+): NormalizedArtifactPoint {
+  if (!state || state.scrollHeight <= 0 || state.viewportHeight <= 0) {
+    return point
+  }
+  return {
+    x: point.x,
+    y: clampNormalized((state.scrollTop + point.y * state.viewportHeight) / state.scrollHeight),
+  }
+}
+
+function htmlViewportRectToContentRect(
+  rect: NormalizedArtifactRect,
+  state: ArtifactHtmlViewState | null,
+): NormalizedArtifactRect {
+  if (!state || state.scrollHeight <= 0 || state.viewportHeight <= 0) {
+    return rect
+  }
+  return {
+    x: rect.x,
+    y: clampNormalized((state.scrollTop + rect.y * state.viewportHeight) / state.scrollHeight),
+    width: rect.width,
+    height: clampNormalized((rect.height * state.viewportHeight) / state.scrollHeight),
+  }
+}
+
+function htmlContentPointToViewportPoint(
+  point: NormalizedArtifactPoint,
+  state: ArtifactHtmlViewState | null,
+): NormalizedArtifactPoint {
+  if (!state || state.scrollHeight <= 0 || state.viewportHeight <= 0) {
+    return point
+  }
+  return {
+    x: point.x,
+    y: (point.y * state.scrollHeight - state.scrollTop) / state.viewportHeight,
+  }
+}
+
+function htmlContentRectToViewportStyle(
+  rect: NormalizedArtifactRect,
+  state: ArtifactHtmlViewState | null,
+) {
+  if (!state || state.scrollHeight <= 0 || state.viewportHeight <= 0) {
+    return rectToStyle(rect)
+  }
+  const top = (rect.y * state.scrollHeight - state.scrollTop) / state.viewportHeight
+  const height = (rect.height * state.scrollHeight) / state.viewportHeight
+  return {
+    left: `${rect.x * 100}%`,
+    top: `${top * 100}%`,
+    width: `${rect.width * 100}%`,
+    height: `${height * 100}%`,
   }
 }
 
@@ -1662,9 +2321,10 @@ function HtmlArtifactCaptureCanvas({
       data-coreview-artifact-stable-identity={artifactStableIdentity ?? undefined}
       data-coreview-artifact-logical-id={artifactLogicalId ?? undefined}
       data-coreview-artifact-version-id={artifactVersionId ?? undefined}
+      data-html-offscreen-capture-affects-layout="false"
       data-testid="artifact-html-capture-canvas"
       className="pointer-events-none absolute h-px w-px overflow-hidden opacity-0"
-      style={{ inset: 0 }}
+      style={{ left: -10000, top: 0 }}
     >
       <canvas
         ref={canvasRef}
@@ -2270,6 +2930,9 @@ function recordHtmlCaptureTargetTelemetry(input: {
       htmlFrameCaptureSourceKind: "html_preview_canvas",
       htmlFrameCaptureSucceeded: input.succeeded,
       htmlFrameCaptureFailureReason: input.failureReason,
+      htmlOffscreenCaptureAffectsLayout: false,
+      htmlReviewStatusResolved: input.succeeded,
+      htmlReviewStatusReason: input.succeeded ? "capture_ready" : input.failureReason ?? input.result,
       rawArtifactTextExcluded: true,
       rawHtmlExcluded: true,
       rawCommentTextExcluded: true,

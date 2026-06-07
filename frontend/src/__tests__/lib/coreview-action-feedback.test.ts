@@ -247,4 +247,47 @@ describe("Coreview action feedback", () => {
       shouldShowToastOrCard: true,
     })
   })
+
+  it("speaks generic HTML scroll and focus feedback when voice-triggered", () => {
+    const scrollFeedback = coreviewFeedbackFromActionResult({
+      ...baseActionResult,
+      action: "set_view",
+      annotation_id: null,
+      annotation_kind: null,
+      annotation_commit_verified: false,
+      html_scroll_attempted: true,
+      html_scroll_result: "success",
+    }, {
+      voiceTriggered: true,
+      commandKind: "scroll_down",
+    })
+    const focusFeedback = coreviewFeedbackFromActionResult({
+      ...baseActionResult,
+      action: "focus_anchor",
+      annotation_id: null,
+      annotation_kind: null,
+      annotation_commit_verified: false,
+      focus_anchor_type: "text_quote",
+      html_focus_anchor_attempted: true,
+      html_focus_anchor_result: "success",
+      html_focus_anchor_method: "heading",
+      html_focus_anchor_scrolled: true,
+    }, {
+      voiceTriggered: true,
+      commandKind: "focus_anchor",
+    })
+
+    expect(scrollFeedback).toMatchObject({
+      actionKind: "navigation",
+      displayMessage: "Scrolled.",
+      spokenMessage: "Scrolled.",
+      shouldSpeak: true,
+    })
+    expect(focusFeedback).toMatchObject({
+      actionKind: "navigation",
+      displayMessage: "Focused.",
+      spokenMessage: "Focused.",
+      shouldSpeak: true,
+    })
+  })
 })

@@ -171,6 +171,36 @@ export type CoreviewVisualTelemetry = {
   htmlFrameCaptureSourceKind: string | null
   htmlFrameCaptureSucceeded: boolean
   htmlFrameCaptureFailureReason: string | null
+  htmlVisiblePreviewResponsive: boolean | null
+  htmlVisiblePreviewUsesCaptureDimensions: boolean | null
+  htmlVisiblePreviewWidth: number | null
+  htmlVisiblePreviewHeight: number | null
+  htmlVisiblePreviewScrollMode: string | null
+  htmlVisibleRendererKind: string | null
+  htmlVisibleRendererInteractive: boolean | null
+  htmlVisibleIframePointerEvents: string | null
+  htmlOverlayPointerEventsMode: string | null
+  htmlOffscreenCaptureAffectsLayout: boolean | null
+  htmlScrollMode: string | null
+  htmlScrollContainerResolved: boolean | null
+  htmlScrollTop: number | null
+  htmlScrollHeight: number | null
+  htmlViewportHeight: number | null
+  htmlScrollAttempted: boolean | null
+  htmlScrollResult: string | null
+  htmlFocusAnchorAttempted: boolean | null
+  htmlFocusAnchorResult: string | null
+  htmlFocusAnchorMethod: string | null
+  htmlFocusAnchorScrolled: boolean | null
+  htmlAnnotationOverlayCapturing: boolean | null
+  htmlBrowserInteractionEnabled: boolean | null
+  htmlPageRailHidden: boolean | null
+  htmlThumbnailRailHidden: boolean | null
+  htmlCoreviewCommandModel: string | null
+  htmlFitModeApplied: string | null
+  htmlZoomScale: number | null
+  htmlReviewStatusResolved: boolean | null
+  htmlReviewStatusReason: string | null
   reviewStartWaitedForHtmlCaptureTarget: boolean
   reviewStartHtmlCaptureTargetResult: string | null
   artifactRebindAttempted: boolean
@@ -1491,6 +1521,36 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       htmlFrameCaptureSourceKind: null,
       htmlFrameCaptureSucceeded: false,
       htmlFrameCaptureFailureReason: null,
+      htmlVisiblePreviewResponsive: null,
+      htmlVisiblePreviewUsesCaptureDimensions: null,
+      htmlVisiblePreviewWidth: null,
+      htmlVisiblePreviewHeight: null,
+      htmlVisiblePreviewScrollMode: null,
+      htmlVisibleRendererKind: null,
+      htmlVisibleRendererInteractive: null,
+      htmlVisibleIframePointerEvents: null,
+      htmlOverlayPointerEventsMode: null,
+      htmlOffscreenCaptureAffectsLayout: null,
+      htmlScrollMode: null,
+      htmlScrollContainerResolved: null,
+      htmlScrollTop: null,
+      htmlScrollHeight: null,
+      htmlViewportHeight: null,
+      htmlScrollAttempted: null,
+      htmlScrollResult: null,
+      htmlFocusAnchorAttempted: null,
+      htmlFocusAnchorResult: null,
+      htmlFocusAnchorMethod: null,
+      htmlFocusAnchorScrolled: null,
+      htmlAnnotationOverlayCapturing: null,
+      htmlBrowserInteractionEnabled: null,
+      htmlPageRailHidden: null,
+      htmlThumbnailRailHidden: null,
+      htmlCoreviewCommandModel: null,
+      htmlFitModeApplied: null,
+      htmlZoomScale: null,
+      htmlReviewStatusResolved: null,
+      htmlReviewStatusReason: null,
       reviewStartWaitedForHtmlCaptureTarget: false,
       reviewStartHtmlCaptureTargetResult: null,
       artifactRebindAttempted: false,
@@ -1714,6 +1774,18 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     ))
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
+  const htmlVisiblePreviewEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && event.name === "html-visible-preview-layout")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const htmlInteractionEvents = activeEvents
+    .filter((event) => event.category === "artifacts-runtime" && (
+      event.name === "html-scroll-command"
+      || event.name === "html-focus-anchor-command"
+      || event.name === "html-visible-preview-layout"
+    ))
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
   const artifactCommandEvents = activeEvents
     .filter((event) => event.name === "artifact-review-voice-command")
     .map((event) => event.payloadRecord)
@@ -1840,7 +1912,9 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((value): value is Record<string, unknown> => value !== null)
   const latestState = stateEvents.at(-1) ?? null
   const latestSelectedStage = selectedStageEvents.at(-1) ?? null
-  const htmlCaptureTelemetryRecords = [...htmlCaptureTargetEvents, ...stateEvents]
+  const htmlCaptureTelemetryRecords = [...htmlVisiblePreviewEvents, ...htmlCaptureTargetEvents, ...stateEvents]
+  const latestHtmlVisiblePreview = htmlVisiblePreviewEvents.at(-1) ?? null
+  const latestHtmlInteraction = htmlInteractionEvents.at(-1) ?? null
   const latestArtifactCommand = artifactCommandEvents.at(-1) ?? null
   const latestAnnotationIntent = annotationIntentEvents.at(-1) ?? null
   const latestPdfTextExtraction = pdfTextExtractionEvents.at(-1) ?? latestSelectedStage
@@ -2138,6 +2212,93 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.htmlFrameCaptureFailureReason = latestStringFromRecords(
     htmlCaptureTelemetryRecords,
     "htmlFrameCaptureFailureReason",
+  )
+  visual.htmlVisiblePreviewResponsive = latestBooleanFromRecords(
+    htmlVisiblePreviewEvents,
+    "htmlVisiblePreviewResponsive",
+  )
+  visual.htmlVisiblePreviewUsesCaptureDimensions = latestBooleanFromRecords(
+    htmlVisiblePreviewEvents,
+    "htmlVisiblePreviewUsesCaptureDimensions",
+  )
+  visual.htmlVisiblePreviewWidth = numberFromKeys(latestHtmlVisiblePreview, ["htmlVisiblePreviewWidth"])
+  visual.htmlVisiblePreviewHeight = numberFromKeys(latestHtmlVisiblePreview, ["htmlVisiblePreviewHeight"])
+  visual.htmlVisiblePreviewScrollMode = latestStringFromRecords(
+    htmlVisiblePreviewEvents,
+    "htmlVisiblePreviewScrollMode",
+  )
+  visual.htmlVisibleRendererKind = latestStringFromRecords(
+    htmlVisiblePreviewEvents,
+    "htmlVisibleRendererKind",
+  )
+  visual.htmlVisibleRendererInteractive = latestBooleanFromRecords(
+    htmlVisiblePreviewEvents,
+    "htmlVisibleRendererInteractive",
+  )
+  visual.htmlVisibleIframePointerEvents = latestStringFromRecords(
+    htmlVisiblePreviewEvents,
+    "htmlVisibleIframePointerEvents",
+  )
+  visual.htmlOverlayPointerEventsMode = latestStringFromRecords(
+    htmlInteractionEvents,
+    "htmlOverlayPointerEventsMode",
+  )
+  visual.htmlOffscreenCaptureAffectsLayout = latestBooleanFromRecords(
+    htmlVisiblePreviewEvents,
+    "htmlOffscreenCaptureAffectsLayout",
+  )
+  visual.htmlScrollMode = latestStringFromRecords(htmlInteractionEvents, "htmlScrollMode")
+  visual.htmlScrollContainerResolved = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlScrollContainerResolved",
+  )
+  visual.htmlScrollTop = numberFromKeys(latestHtmlInteraction, ["htmlScrollTop"])
+  visual.htmlScrollHeight = numberFromKeys(latestHtmlInteraction, ["htmlScrollHeight"])
+  visual.htmlViewportHeight = numberFromKeys(latestHtmlInteraction, ["htmlViewportHeight"])
+  visual.htmlScrollAttempted = latestBooleanFromRecords(htmlInteractionEvents, "htmlScrollAttempted")
+  visual.htmlScrollResult = latestStringFromRecords(htmlInteractionEvents, "htmlScrollResult")
+  visual.htmlFocusAnchorAttempted = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlFocusAnchorAttempted",
+  )
+  visual.htmlFocusAnchorResult = latestStringFromRecords(
+    htmlInteractionEvents,
+    "htmlFocusAnchorResult",
+  )
+  visual.htmlFocusAnchorMethod = latestStringFromRecords(
+    htmlInteractionEvents,
+    "htmlFocusAnchorMethod",
+  )
+  visual.htmlFocusAnchorScrolled = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlFocusAnchorScrolled",
+  )
+  visual.htmlAnnotationOverlayCapturing = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlAnnotationOverlayCapturing",
+  )
+  visual.htmlBrowserInteractionEnabled = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlBrowserInteractionEnabled",
+  )
+  visual.htmlPageRailHidden = latestBooleanFromRecords(htmlInteractionEvents, "htmlPageRailHidden")
+  visual.htmlThumbnailRailHidden = latestBooleanFromRecords(htmlInteractionEvents, "htmlThumbnailRailHidden")
+  visual.htmlCoreviewCommandModel = latestStringFromRecords(
+    htmlInteractionEvents,
+    "htmlCoreviewCommandModel",
+  )
+  visual.htmlFitModeApplied = latestStringFromRecords(
+    htmlVisiblePreviewEvents,
+    "htmlFitModeApplied",
+  )
+  visual.htmlZoomScale = numberFromKeys(latestHtmlVisiblePreview, ["htmlZoomScale"])
+  visual.htmlReviewStatusResolved = latestBooleanFromRecords(
+    htmlCaptureTelemetryRecords,
+    "htmlReviewStatusResolved",
+  )
+  visual.htmlReviewStatusReason = latestStringFromRecords(
+    htmlCaptureTelemetryRecords,
+    "htmlReviewStatusReason",
   )
   visual.reviewStartWaitedForHtmlCaptureTarget = htmlCaptureTelemetryRecords.some((event) => (
     asBoolean(event.reviewStartWaitedForHtmlCaptureTarget) === true

@@ -15,6 +15,7 @@ interface ArtifactToolbarProps {
   pageCount?: number
   supportsPagination?: boolean
   supportsZoom?: boolean
+  supportsFitPage?: boolean
   zoom?: number
   fitMode?: ArtifactFitMode
   onPreviousPage?: () => void
@@ -51,6 +52,7 @@ export function ArtifactToolbar({
   pageCount = 1,
   supportsPagination = false,
   supportsZoom = false,
+  supportsFitPage = supportsZoom,
   zoom = 1,
   fitMode = "custom",
   onPreviousPage,
@@ -224,16 +226,18 @@ export function ArtifactToolbar({
             >
               <ZoomIn className="h-3.5 w-3.5" aria-hidden="true" />
             </ToolbarButton>
-            <ToolbarButton
-              label="Fit page"
-              pressed={fitMode === "page"}
-              onClick={() => {
-                haptic("light")
-                onFitPage?.()
-              }}
-            >
-              <Maximize className="h-3.5 w-3.5" aria-hidden="true" />
-            </ToolbarButton>
+            {supportsFitPage ? (
+              <ToolbarButton
+                label="Fit page"
+                pressed={fitMode === "page"}
+                onClick={() => {
+                  haptic("light")
+                  onFitPage?.()
+                }}
+              >
+                <Maximize className="h-3.5 w-3.5" aria-hidden="true" />
+              </ToolbarButton>
+            ) : null}
             <ToolbarButton
               label="Fit width"
               pressed={fitMode === "width"}
