@@ -25,6 +25,7 @@ import type {
   CoreviewFocusAnchorAdapterInput,
   CoreviewFocusAnchorAdapterResult,
   CoreviewResolveAnnotationAnchorResult,
+  CoreviewSetViewAdapterResult,
 } from "../../lib/coreview-actions"
 import {
   COREVIEW_ANNOTATION_STORAGE_VERSION,
@@ -137,7 +138,7 @@ export interface ArtifactReviewVoiceCommandTarget {
   fitMode: ArtifactFitMode
   htmlViewState?: ArtifactHtmlViewState | null
   applyCommand: (command: ArtifactReviewVoiceCommand) => ArtifactReviewVoiceCommandApplyResult
-  setView: (view: ArtifactStageSetViewInput) => Promise<void> | void
+  setView: (view: ArtifactStageSetViewInput) => Promise<CoreviewSetViewAdapterResult | void> | CoreviewSetViewAdapterResult | void
   resolveAnchor: (input: { anchor: CoreviewAnnotationAnchor; pageIndex: number }) => CoreviewResolveAnnotationAnchorResult
   addAnnotation: (input: CoreviewAddAnnotationAdapterInput) => CoreviewAddAnnotationAdapterResult
   focusAnchor: (input: CoreviewFocusAnchorAdapterInput) =>
@@ -895,6 +896,11 @@ export function ArtifactStage({
       return
     }
 
+    const htmlNavigationCommandKind = typeof view.htmlScrollDelta === "number" && Number.isFinite(view.htmlScrollDelta)
+      ? "scroll_by"
+      : view.htmlScrollPosition
+        ? "scroll_to"
+        : null
     const htmlTarget = htmlCommandTargetRef.current
     if (!htmlTarget) {
       recordSophiaCaptureEvent({
@@ -906,6 +912,13 @@ export function ArtifactStage({
           artifactRendererKind: rendererKind,
           htmlScrollAttempted: Boolean(view.htmlScrollDelta || view.htmlScrollPosition),
           htmlScrollResult: "target_unavailable",
+          htmlBridgeReady: false,
+          htmlSectionIndexReady: false,
+          htmlNavigationRouterUsed: true,
+          htmlNavigationCommandKind,
+          htmlNavigationResult: "iframe_not_ready",
+          htmlNavigationFailureReason: "iframe_not_ready",
+          htmlNavigationPreventedPdfFallback: true,
           htmlScrollContainerResolved: false,
           htmlScrollMode: "iframe_document",
           htmlCoreviewCommandModel: "scroll_document",
@@ -915,7 +928,16 @@ export function ArtifactStage({
           rawFrameExcluded: true,
         },
       })
-      return
+      return {
+        ok: false,
+        blockedReason: "iframe_not_ready",
+        scrolled: false,
+        htmlNavigationRouterUsed: true,
+        htmlNavigationCommandKind,
+        htmlNavigationResult: "iframe_not_ready",
+        htmlNavigationFailureReason: "iframe_not_ready",
+        htmlNavigationPreventedPdfFallback: true,
+      } satisfies CoreviewSetViewAdapterResult
     }
 
     const result = typeof view.htmlScrollDelta === "number" && Number.isFinite(view.htmlScrollDelta)
@@ -936,6 +958,23 @@ export function ArtifactStage({
           artifactRendererKind: rendererKind,
           htmlScrollAttempted: true,
           htmlScrollResult: result.ok ? "success" : result.blockedReason ?? "failed",
+          htmlBridgeReady: result.state?.htmlBridgeReady ?? false,
+          htmlSectionIndexReady: result.state?.sectionIndexReady ?? false,
+          htmlSectionIndexEntryCount: result.state?.indexEntryCount ?? null,
+          htmlSectionIndexBuildResult: result.state?.indexBuildResult ?? null,
+          htmlNavigationRouterUsed: true,
+          htmlNavigationCommandKind,
+          htmlNavigationTargetSafe: result.targetLabelSafe ?? null,
+          htmlNavigationTargetKind: result.targetKind ?? null,
+          htmlNavigationResult: result.ok ? "success" : result.blockedReason ?? "failed",
+          htmlNavigationFailureReason: result.ok ? null : result.blockedReason ?? "failed",
+          htmlNavigationScrollTopBefore: result.scrollTopBefore ?? null,
+          htmlNavigationScrollTopAfter: result.scrollTopAfter ?? result.state?.scrollTop ?? htmlViewState?.scrollTop ?? null,
+          htmlNavigationScrolled: result.scrolled,
+          htmlNavigationCommandId: result.commandId ?? null,
+          htmlNavigationTimedOut: result.timedOut ?? false,
+          htmlNavigationWaitedForReady: result.waitedForReady ?? false,
+          htmlNavigationPreventedPdfFallback: true,
           htmlScrollContainerResolved: true,
           htmlScrollMode: "iframe_document",
           htmlScrollTop: result.state?.scrollTop ?? htmlViewState?.scrollTop ?? null,
@@ -948,7 +987,35 @@ export function ArtifactStage({
           rawFrameExcluded: true,
         },
       })
+      return {
+        ok: result.ok,
+        blockedReason: result.ok ? null : result.blockedReason ?? "section_not_found",
+        method: result.method,
+        scrolled: result.scrolled,
+        htmlNavigationRouterUsed: true,
+        htmlNavigationCommandKind,
+        htmlNavigationTargetSafe: result.targetLabelSafe ?? null,
+        htmlNavigationTargetKind: result.targetKind ?? null,
+        htmlNavigationResult: result.ok ? "success" : result.blockedReason ?? "failed",
+        htmlNavigationFailureReason: result.ok ? null : result.blockedReason ?? "failed",
+        htmlNavigationScrollTopBefore: result.scrollTopBefore ?? null,
+        htmlNavigationScrollTopAfter: result.scrollTopAfter ?? result.state?.scrollTop ?? htmlViewState?.scrollTop ?? null,
+        htmlNavigationScrolled: result.scrolled,
+        htmlNavigationCommandId: result.commandId ?? null,
+        htmlNavigationTimedOut: result.timedOut ?? false,
+        htmlNavigationWaitedForReady: result.waitedForReady ?? false,
+        htmlNavigationPreventedPdfFallback: true,
+      } satisfies CoreviewSetViewAdapterResult
     }
+    return {
+      ok: true,
+      blockedReason: null,
+      scrolled: false,
+      htmlNavigationRouterUsed: true,
+      htmlNavigationCommandKind,
+      htmlNavigationResult: "success",
+      htmlNavigationPreventedPdfFallback: true,
+    } satisfies CoreviewSetViewAdapterResult
   }, [artifactId, htmlViewState, pageCount, primaryFile?.path, rendererKind, supportsPagination, supportsZoom])
   const resolveCoreviewAnchor = useCallback((input: {
     anchor: CoreviewAnnotationAnchor
@@ -1048,7 +1115,15 @@ export function ArtifactStage({
       if (!target) {
         return {
           ok: false,
-          blockedReason: "layout_anchor_not_supported",
+          blockedReason: "iframe_not_ready",
+          htmlNavigation: {
+            htmlNavigationRouterUsed: true,
+            htmlNavigationCommandKind: "focus_text",
+            htmlNavigationResult: "iframe_not_ready",
+            htmlNavigationFailureReason: "iframe_not_ready",
+            htmlNavigationPreventedPdfFallback: true,
+            htmlVoiceNavigationUsedSameResolver: true,
+          },
         }
       }
       setFitMode(input.fitMode === "page" ? "width" : input.fitMode)
@@ -1073,6 +1148,23 @@ export function ArtifactStage({
           htmlFocusAnchorResult: result.ok ? "success" : result.blockedReason ?? "failed",
           htmlFocusAnchorMethod: result.method,
           htmlFocusAnchorScrolled: result.scrolled,
+          htmlBridgeReady: result.state?.htmlBridgeReady ?? false,
+          htmlSectionIndexReady: result.state?.sectionIndexReady ?? false,
+          htmlSectionIndexEntryCount: result.state?.indexEntryCount ?? null,
+          htmlSectionIndexBuildResult: result.state?.indexBuildResult ?? null,
+          htmlNavigationRouterUsed: true,
+          htmlNavigationCommandKind: focusText ? "focus_text" : "scroll_to",
+          htmlNavigationTargetSafe: result.targetLabelSafe ?? (focusText || (input.anchor.anchorType === "current_title" ? "top" : null)),
+          htmlNavigationTargetKind: result.targetKind ?? result.method,
+          htmlNavigationResult: result.ok ? "success" : result.blockedReason ?? "failed",
+          htmlNavigationFailureReason: result.ok ? null : result.blockedReason ?? "failed",
+          htmlNavigationScrollTopBefore: result.scrollTopBefore ?? null,
+          htmlNavigationScrollTopAfter: result.scrollTopAfter ?? result.state?.scrollTop ?? htmlViewState?.scrollTop ?? null,
+          htmlNavigationScrolled: result.scrolled,
+          htmlNavigationCommandId: result.commandId ?? null,
+          htmlNavigationTimedOut: result.timedOut ?? false,
+          htmlNavigationWaitedForReady: result.waitedForReady ?? false,
+          htmlNavigationPreventedPdfFallback: true,
           htmlInternalNavigationTargetKind: result.targetKind ?? result.method,
           htmlInternalNavigationScrolled: result.scrolled,
           htmlInternalNavigationFailureReason: result.ok ? null : result.blockedReason ?? "failed",
@@ -1093,6 +1185,22 @@ export function ArtifactStage({
         blockedReason: result.ok ? null : result.blockedReason ?? "text_anchor_not_found",
         method: result.method,
         scrolled: result.scrolled,
+        htmlNavigation: {
+          htmlNavigationRouterUsed: true,
+          htmlNavigationCommandKind: focusText ? "focus_text" : "scroll_to",
+          htmlNavigationTargetSafe: result.targetLabelSafe ?? (focusText || (input.anchor.anchorType === "current_title" ? "top" : null)),
+          htmlNavigationTargetKind: result.targetKind ?? result.method,
+          htmlNavigationResult: result.ok ? "success" : result.blockedReason ?? "failed",
+          htmlNavigationFailureReason: result.ok ? null : result.blockedReason ?? "failed",
+          htmlNavigationScrollTopBefore: result.scrollTopBefore ?? null,
+          htmlNavigationScrollTopAfter: result.scrollTopAfter ?? result.state?.scrollTop ?? htmlViewState?.scrollTop ?? null,
+          htmlNavigationScrolled: result.scrolled,
+          htmlNavigationCommandId: result.commandId ?? null,
+          htmlNavigationTimedOut: result.timedOut ?? false,
+          htmlNavigationWaitedForReady: result.waitedForReady ?? false,
+          htmlNavigationPreventedPdfFallback: true,
+          htmlVoiceNavigationUsedSameResolver: result.voiceNavigationUsedSameResolver === true,
+        },
       }
     }
     if (!input.anchor.rect) {

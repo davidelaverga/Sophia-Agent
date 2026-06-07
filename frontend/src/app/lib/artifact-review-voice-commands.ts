@@ -37,6 +37,8 @@ export type ArtifactReviewVoiceCommandBlockedReason =
   | "no_multipage_artifact_selected"
   | "requested_page_out_of_bounds"
   | "visual_refresh_unavailable"
+  | "iframe_not_ready"
+  | "document_unavailable"
   | "layout_anchor_not_supported"
   | "text_anchor_not_found"
   | "section_not_found"
@@ -147,6 +149,7 @@ const PREVIOUS_PAGE_PATTERNS = [
 ]
 const TITLE_FOCUS_PATTERNS = [
   /\b(?:zoom\s+in|focus|center)\s+(?:on\s+)?(?:the\s+)?(?:current\s+)?title\b/u,
+  /\b(?:focus|center)\s+(?:on\s+)?(?:the\s+)?hero\s+title\b/u,
   /\b(?:current\s+)?title\b.*\b(?:zoom\s+in|focus|center)\b/u,
 ]
 const SCROLL_DOWN_PATTERNS = [
@@ -159,12 +162,14 @@ const SCROLL_UP_PATTERNS = [
 ]
 const GO_TO_TOP_PATTERNS = [
   /\b(?:go to|jump to|show|open)\s+(?:the\s+)?top\b/u,
+  /\b(?:go to|jump to|show|open)\s+(?:the\s+)?(?:front\s+page|home|hero)\b/u,
+  /\b(?:go|jump|return)\s+home\b/u,
   /\bback\s+to\s+top\b/u,
 ]
 const GO_TO_BOTTOM_PATTERNS = [
   /\b(?:go to|jump to|show|open)\s+(?:the\s+)?bottom\b/u,
 ]
-const GO_TO_SECTION_PATTERN = /\b(?:go to|jump to|show|open|focus(?:\s+on)?)\s+(?:the\s+)?(?!(?:page|first|last|next|previous|prev|top|bottom)\b)(?:section\s+)?([a-z0-9][a-z0-9\s-]{1,80})\b/u
+const GO_TO_SECTION_PATTERN = /\b(?:go to|jump to|show|open|focus(?:\s+on)?)\s+(?:the\s+)?(?!(?:page|first|last|next|previous|prev|top|bottom|front\s+page|home|hero)\b)(?:section\s+)?([a-z0-9][a-z0-9\s-]{1,80})\b/u
 const UNDERLINE_PATTERNS = [/\bunderline(?:d)?\b/u]
 const ARROW_PATTERNS = [
   /\b(?:draw|add|place|put|make)\s+(?:an?\s+)?arrow\b/u,

@@ -2763,6 +2763,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         coreview_builder_update_intent_detected: false,
         selected_artifact_update_context: true,
         generic_async_tool_responded_safely: true,
+        htmlNavigationBlockedGenericToolCount: 1,
       },
     });
     expect(sentToolResponse?.toolResponse?.functionResponses?.[0]?.response?.recovery_guidance).toEqual(

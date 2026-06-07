@@ -399,6 +399,9 @@ const COREVIEW_BLOCKED_STATUS_TEXT: Partial<Record<CoreviewToolBlockedReason, st
   annotations_not_supported: "Annotations are not available for this artifact format.",
   layout_anchor_not_supported: "Layout anchors are not available for this artifact format.",
   section_not_found: "I couldn't find that section.",
+  iframe_not_ready: "The page is still loading. Try again in a moment.",
+  document_unavailable: "The page is unavailable.",
+  cross_origin_unavailable: "I can't inspect that page safely.",
   ocr_not_available: "OCR is not available yet.",
   pptx_native_renderer_unavailable: "PPTX native canvas rendering is not available yet.",
   unsupported_pages: "This view cannot be controlled by Sophia.",
@@ -431,6 +434,9 @@ const COREVIEW_ROUTE_BLOCKED_REASON: Partial<Record<
   annotations_not_supported: "no_multipage_artifact_selected",
   layout_anchor_not_supported: "layout_anchor_not_supported",
   section_not_found: "section_not_found",
+  iframe_not_ready: "iframe_not_ready",
+  document_unavailable: "document_unavailable",
+  cross_origin_unavailable: "document_unavailable",
   text_anchor_not_found: "text_anchor_not_found",
   ocr_not_available: "no_multipage_artifact_selected",
   pptx_native_renderer_unavailable: "no_multipage_artifact_selected",
@@ -1574,6 +1580,10 @@ export function PresenceArtifactPanel({
       visibleTextSummary: htmlViewState?.visibleTextSummary ?? null,
       visibleHeadings: htmlViewState?.visibleHeadings ?? [],
       currentSection: htmlViewState?.currentSection ?? null,
+      htmlBridgeReady: htmlViewState?.htmlBridgeReady ?? null,
+      htmlSectionIndexReady: htmlViewState?.sectionIndexReady ?? null,
+      htmlSectionIndexEntryCount: htmlViewState?.indexEntryCount ?? null,
+      htmlSectionIndexBuildResult: htmlViewState?.indexBuildResult ?? null,
       stillFrameAvailable: htmlViewState?.stillFrameAvailable ?? builderVisualSourceReady,
       viewSignature: builderArtifactViewSignature,
       stale: builderReviewStale,
@@ -2020,6 +2030,33 @@ export function PresenceArtifactPanel({
         artifactReboundFromRenderedState: result.rebind_attempted && isVisible,
         coreviewSetViewPageIndex: result.action === "set_view" ? result.page_index : null,
         coreviewSetViewPageCount: result.action === "set_view" ? result.page_count : null,
+        htmlNavigationRouterUsed: result.html_navigation_router_used,
+        htmlNavigationCommandKind: result.html_navigation_command_kind,
+        htmlNavigationTargetSafe: result.html_navigation_target_safe,
+        htmlNavigationTargetKind: result.html_navigation_target_kind,
+        htmlNavigationResult: result.html_navigation_result,
+        htmlNavigationFailureReason: result.html_navigation_failure_reason,
+        htmlNavigationScrollTopBefore: result.html_navigation_scroll_top_before,
+        htmlNavigationScrollTopAfter: result.html_navigation_scroll_top_after,
+        htmlNavigationScrolled: result.html_navigation_scrolled,
+        htmlNavigationCommandId: result.html_navigation_command_id,
+        htmlNavigationTimedOut: result.html_navigation_timed_out,
+        htmlNavigationWaitedForReady: result.html_navigation_waited_for_ready,
+        htmlNavigationFeedbackEmitted: result.html_navigation_feedback_emitted ?? (result.html_navigation_router_used ? true : null),
+        htmlNavigationPreventedPdfFallback: result.html_navigation_prevented_pdf_fallback,
+        htmlNavigationBlockedGenericToolCount: result.html_navigation_blocked_generic_tool_count,
+        htmlInternalNavigationUsedSameResolver: result.html_internal_navigation_used_same_resolver,
+        htmlVoiceNavigationUsedSameResolver: result.html_voice_navigation_used_same_resolver,
+        htmlScrollAttempted: result.html_scroll_attempted,
+        htmlScrollResult: result.html_scroll_result,
+        htmlFocusAnchorAttempted: result.html_focus_anchor_attempted,
+        htmlFocusAnchorResult: result.html_focus_anchor_result,
+        htmlFocusAnchorMethod: result.html_focus_anchor_method,
+        htmlFocusAnchorScrolled: result.html_focus_anchor_scrolled,
+        htmlBridgeReady: result.html_bridge_ready,
+        htmlSectionIndexReady: result.html_section_index_ready,
+        htmlSectionIndexEntryCount: result.html_section_index_entry_count,
+        htmlSectionIndexBuildResult: result.html_section_index_build_result,
         artifactId: result.artifact_id,
         artifactPath: result.artifact_path,
         artifactRendererKind: result.renderer_kind,
@@ -2161,7 +2198,7 @@ export function PresenceArtifactPanel({
       if (expectedViewSignature !== current.viewSignature) {
         setBuilderVisualCaptureStatus(unavailableCaptureStatus("preview_not_ready"))
       }
-      await builderVoiceCommandTargetRef.current?.setView(view)
+      return await builderVoiceCommandTargetRef.current?.setView(view)
     },
     refreshView: async () => {
       if (!builderArtifactCoReview.canRefresh) {
@@ -3740,7 +3777,11 @@ export function PresenceArtifactPanel({
       }
 
       setVoiceCommandStatus({
-        text: nativeToolsPrimary ? "Annotation request queued" : buildAppliedVoiceCommandStatus(command, currentPageIndex),
+        text: nativeToolsPrimary
+          ? "Annotation request queued"
+          : command.kind === "focus_anchor"
+            ? "Finding section..."
+            : buildAppliedVoiceCommandStatus(command, currentPageIndex),
         tone: nativeToolsPrimary ? "pending" : "neutral",
       })
 
@@ -3889,7 +3930,7 @@ export function PresenceArtifactPanel({
       return {
         handled: true,
         command,
-        applied: true,
+        applied: command.kind !== "focus_anchor",
         blockedReason: null,
         triggeredRefresh: false,
         refreshResult: "not_requested",
@@ -4030,12 +4071,20 @@ export function PresenceArtifactPanel({
     }
     setVoiceCommandStatus(triggeredRefresh
       ? {
-          text: buildAppliedVoiceCommandStatus(command, nextPageIndex),
-          tone: "neutral",
+          text: currentView.rendererKind === "html" && isHtmlScrollVoiceCommand(command)
+            ? "Scrolling..."
+            : buildAppliedVoiceCommandStatus(command, nextPageIndex),
+          tone: currentView.rendererKind === "html" && isHtmlScrollVoiceCommand(command) ? "pending" : "neutral",
         }
       : {
-          text: buildRefreshUnavailableVoiceCommandMessage(command, shouldStartVoiceReview, viewChanged && currentView.reviewHasFrame),
-          tone: command.kind === "refresh_view" || viewChanged ? "warn" : "neutral",
+          text: currentView.rendererKind === "html" && isHtmlScrollVoiceCommand(command)
+            ? "Scrolling..."
+            : buildRefreshUnavailableVoiceCommandMessage(command, shouldStartVoiceReview, viewChanged && currentView.reviewHasFrame),
+          tone: currentView.rendererKind === "html" && isHtmlScrollVoiceCommand(command)
+            ? "pending"
+            : command.kind === "refresh_view" || viewChanged
+              ? "warn"
+              : "neutral",
         })
 
     void runCoreviewAction((bus) => (
@@ -4098,7 +4147,7 @@ export function PresenceArtifactPanel({
     return {
       handled: true,
       command,
-      applied: true,
+      applied: !(currentView.rendererKind === "html" && isHtmlScrollVoiceCommand(command)),
       blockedReason: null,
       triggeredRefresh,
       refreshResult,

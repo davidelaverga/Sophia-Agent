@@ -199,6 +199,26 @@ export type CoreviewVisualTelemetry = {
   htmlInternalNavigationBlockedExternal: boolean | null
   htmlInternalNavigationScrolled: boolean | null
   htmlInternalNavigationFailureReason: string | null
+  htmlBridgeReady: boolean | null
+  htmlSectionIndexReady: boolean | null
+  htmlSectionIndexEntryCount: number | null
+  htmlSectionIndexBuildResult: string | null
+  htmlNavigationRouterUsed: boolean | null
+  htmlNavigationCommandKind: string | null
+  htmlNavigationTargetSafe: string | null
+  htmlNavigationTargetKind: string | null
+  htmlNavigationResult: string | null
+  htmlNavigationFailureReason: string | null
+  htmlNavigationScrollTopBefore: number | null
+  htmlNavigationScrollTopAfter: number | null
+  htmlNavigationScrolled: boolean | null
+  htmlNavigationCommandId: string | null
+  htmlNavigationTimedOut: boolean | null
+  htmlNavigationWaitedForReady: boolean | null
+  htmlNavigationFeedbackEmitted: boolean | null
+  htmlNavigationPreventedPdfFallback: boolean | null
+  htmlNavigationBlockedGenericToolCount: number | null
+  htmlInternalNavigationUsedSameResolver: boolean | null
   htmlVoiceNavigationUsedSameResolver: boolean | null
   htmlPostMessageNavigationReceived: boolean | null
   htmlNavigationPreservedCaptureTarget: boolean | null
@@ -1559,6 +1579,26 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       htmlInternalNavigationBlockedExternal: null,
       htmlInternalNavigationScrolled: null,
       htmlInternalNavigationFailureReason: null,
+      htmlBridgeReady: null,
+      htmlSectionIndexReady: null,
+      htmlSectionIndexEntryCount: null,
+      htmlSectionIndexBuildResult: null,
+      htmlNavigationRouterUsed: null,
+      htmlNavigationCommandKind: null,
+      htmlNavigationTargetSafe: null,
+      htmlNavigationTargetKind: null,
+      htmlNavigationResult: null,
+      htmlNavigationFailureReason: null,
+      htmlNavigationScrollTopBefore: null,
+      htmlNavigationScrollTopAfter: null,
+      htmlNavigationScrolled: null,
+      htmlNavigationCommandId: null,
+      htmlNavigationTimedOut: null,
+      htmlNavigationWaitedForReady: null,
+      htmlNavigationFeedbackEmitted: null,
+      htmlNavigationPreventedPdfFallback: null,
+      htmlNavigationBlockedGenericToolCount: null,
+      htmlInternalNavigationUsedSameResolver: null,
       htmlVoiceNavigationUsedSameResolver: null,
       htmlPostMessageNavigationReceived: null,
       htmlNavigationPreservedCaptureTarget: null,
@@ -1799,11 +1839,16 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
   const htmlInteractionEvents = activeEvents
-    .filter((event) => event.category === "artifacts-runtime" && (
-      event.name === "html-scroll-command"
-      || event.name === "html-focus-anchor-command"
-      || event.name === "html-internal-navigation"
-      || event.name === "html-visible-preview-layout"
+    .filter((event) => (
+      event.category === "artifacts-runtime" && (
+        event.name === "html-scroll-command"
+        || event.name === "html-focus-anchor-command"
+        || event.name === "html-internal-navigation"
+        || event.name === "html-visible-preview-layout"
+      )
+    ) || (
+      event.category === "voice-session"
+      && event.name === "coreview-tool-call"
     ))
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
@@ -2321,6 +2366,68 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.htmlInternalNavigationFailureReason = latestStringFromRecords(
     htmlInteractionEvents,
     "htmlInternalNavigationFailureReason",
+  )
+  visual.htmlBridgeReady = latestBooleanFromRecords(htmlInteractionEvents, "htmlBridgeReady")
+  visual.htmlSectionIndexReady = latestBooleanFromRecords(htmlInteractionEvents, "htmlSectionIndexReady")
+  visual.htmlSectionIndexEntryCount = numberFromKeys(latestHtmlInteraction, ["htmlSectionIndexEntryCount"])
+  visual.htmlSectionIndexBuildResult = latestStringFromRecords(
+    htmlInteractionEvents,
+    "htmlSectionIndexBuildResult",
+  )
+  visual.htmlNavigationRouterUsed = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlNavigationRouterUsed",
+  )
+  visual.htmlNavigationCommandKind = latestStringFromRecords(
+    htmlInteractionEvents,
+    "htmlNavigationCommandKind",
+  )
+  visual.htmlNavigationTargetSafe = latestStringFromRecords(
+    htmlInteractionEvents,
+    "htmlNavigationTargetSafe",
+  )
+  visual.htmlNavigationTargetKind = latestStringFromRecords(
+    htmlInteractionEvents,
+    "htmlNavigationTargetKind",
+  )
+  visual.htmlNavigationResult = latestStringFromRecords(
+    htmlInteractionEvents,
+    "htmlNavigationResult",
+  )
+  visual.htmlNavigationFailureReason = latestStringFromRecords(
+    htmlInteractionEvents,
+    "htmlNavigationFailureReason",
+  )
+  visual.htmlNavigationScrollTopBefore = numberFromKeys(latestHtmlInteraction, ["htmlNavigationScrollTopBefore"])
+  visual.htmlNavigationScrollTopAfter = numberFromKeys(latestHtmlInteraction, ["htmlNavigationScrollTopAfter"])
+  visual.htmlNavigationScrolled = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlNavigationScrolled",
+  )
+  visual.htmlNavigationCommandId = latestStringFromRecords(
+    htmlInteractionEvents,
+    "htmlNavigationCommandId",
+  )
+  visual.htmlNavigationTimedOut = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlNavigationTimedOut",
+  )
+  visual.htmlNavigationWaitedForReady = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlNavigationWaitedForReady",
+  )
+  visual.htmlNavigationFeedbackEmitted = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlNavigationFeedbackEmitted",
+  )
+  visual.htmlNavigationPreventedPdfFallback = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlNavigationPreventedPdfFallback",
+  )
+  visual.htmlNavigationBlockedGenericToolCount = numberFromKeys(latestHtmlInteraction, ["htmlNavigationBlockedGenericToolCount"])
+  visual.htmlInternalNavigationUsedSameResolver = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlInternalNavigationUsedSameResolver",
   )
   visual.htmlVoiceNavigationUsedSameResolver = latestBooleanFromRecords(
     htmlInteractionEvents,

@@ -35,11 +35,19 @@ describe("artifact review voice command parser", () => {
     expect(parseArtifactReviewVoiceCommand("scroll up")).toEqual({ kind: "scroll_up" })
     expect(parseArtifactReviewVoiceCommand("go to top")).toEqual({ kind: "go_to_top" })
     expect(parseArtifactReviewVoiceCommand("go to bottom")).toEqual({ kind: "go_to_bottom" })
+    expect(parseArtifactReviewVoiceCommand("go to front page")).toEqual({ kind: "go_to_top" })
+    expect(parseArtifactReviewVoiceCommand("go home")).toEqual({ kind: "go_to_top" })
+    expect(parseArtifactReviewVoiceCommand("go to hero")).toEqual({ kind: "go_to_top" })
     expect(parseArtifactReviewVoiceCommand("go to Coreview")).toEqual({
       kind: "focus_anchor",
       anchorType: "text_quote",
       anchorText: "coreview",
       zoomDelta: 1,
+    })
+    expect(parseArtifactReviewVoiceCommand("focus hero title")).toEqual({
+      kind: "focus_anchor",
+      anchorType: "current_title",
+      zoomDelta: 1.35,
     })
     expect(parseArtifactReviewVoiceCommand("zoom in on the current title")).toEqual({
       kind: "focus_anchor",

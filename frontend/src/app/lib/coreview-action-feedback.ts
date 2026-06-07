@@ -254,8 +254,10 @@ export function coreviewFeedbackFromActionResult(
       actionKind: result.action === "add_annotation"
         ? "annotation"
         : result.action === "set_view"
-          ? "zoom"
-          : "status",
+          ? result.html_scroll_attempted === true || result.html_navigation_router_used === true
+            ? "navigation"
+            : "zoom"
+        : "status",
       status: unsupportedFeedbackStatus(result.blocked_reason),
       displayMessage: blockedFeedbackDisplayMessage(result.blocked_reason),
       spokenMessage: blockedFeedbackSpokenMessage(result.blocked_reason),
@@ -411,7 +413,10 @@ function annotationSpokenMessage(kind: string, created: boolean): string {
 
 function blockedFeedbackDisplayMessage(reason: string): string {
   if (reason === "layout_anchor_not_supported") return "Text anchor is not supported for this view."
-  if (reason === "section_not_found") return "Section was not found."
+  if (reason === "section_not_found") return "I couldn't find that section."
+  if (reason === "iframe_not_ready") return "The page is still loading."
+  if (reason === "document_unavailable") return "The page is unavailable."
+  if (reason === "cross_origin_unavailable") return "The page cannot be inspected safely."
   if (reason === "text_anchor_not_found") return "Text anchor was not found."
   if (reason === "anchor_not_found") return "Text anchor was not found."
   if (reason === "annotations_not_supported") return "Annotations are not supported for this artifact."
@@ -424,6 +429,9 @@ function blockedFeedbackDisplayMessage(reason: string): string {
 function blockedFeedbackSpokenMessage(reason: string): string {
   if (reason === "layout_anchor_not_supported") return "I can't place that text anchor in this view yet."
   if (reason === "section_not_found") return "I couldn't find that section."
+  if (reason === "iframe_not_ready") return "The page is still loading. Try again in a moment."
+  if (reason === "document_unavailable") return "The page is unavailable."
+  if (reason === "cross_origin_unavailable") return "I can't inspect that page safely."
   if (reason === "text_anchor_not_found") return "I couldn't find that text in the artifact."
   if (reason === "anchor_not_found") return "I couldn't find that text in the artifact."
   if (reason === "annotations_not_supported") return "Annotations are not available for this artifact."

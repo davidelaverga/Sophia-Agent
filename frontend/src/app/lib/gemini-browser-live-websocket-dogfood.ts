@@ -3808,7 +3808,15 @@ function shouldRouteDirectEditBuilderArtifactThroughCoreview(
 ): boolean {
   return Boolean(
     artifactReviewContext?.active
-    && artifactReviewContext.artifact_id,
+    && artifactReviewContext.artifact_id
+    && (
+      artifactReviewContext.builder_update_intent_detected
+      || artifactReviewContext.user_intent === 'create_update'
+      || (
+        artifactReviewContext.selected_artifact_update_context
+        && artifactReviewContext.user_intent === 'unknown'
+      )
+    ),
   );
 }
 
@@ -3817,7 +3825,15 @@ function shouldRouteGenericBuilderStatusThroughCoreview(
 ): boolean {
   return Boolean(
     artifactReviewContext?.active
-    && artifactReviewContext.artifact_id,
+    && artifactReviewContext.artifact_id
+    && (
+      artifactReviewContext.builder_update_intent_detected
+      || artifactReviewContext.user_intent === 'create_update'
+      || (
+        artifactReviewContext.selected_artifact_update_context
+        && artifactReviewContext.user_intent === 'unknown'
+      )
+    ),
   );
 }
 
@@ -3830,7 +3846,8 @@ function shouldSuppressGenericBuilderToolCallForArtifactReviewUpdate(
     && artifactReviewContext.artifact_id
     && GEMINI_SELECTED_ARTIFACT_REVIEW_REDIRECT_BUILDER_TOOL_NAMES.has(toolName)
     && (
-      artifactReviewContext.selected_artifact_update_context
+      artifactReviewContext.user_intent !== 'create_update'
+      || artifactReviewContext.selected_artifact_update_context
       || artifactReviewContext.builder_update_intent_detected
       || artifactReviewContext.user_intent === 'create_update'
       || artifactReviewContext.user_intent === 'unknown'
@@ -3939,6 +3956,10 @@ function suppressedGenericBuilderToolResponse(
         ? 'already_routed_through_coreview_request_artifact_update'
       : 'use_coreview_request_artifact_update',
     generic_async_tool_responded_safely: true,
+    htmlNavigationBlockedGenericToolCount: artifactReviewContext?.user_intent !== 'create_update'
+      && artifactReviewContext?.builder_update_intent_detected !== true
+      ? 1
+      : 0,
     coreviewHtmlUpdateSuppressedDuplicateReplyCount: duplicateOfCoreviewUpdate ? 1 : 0,
     suppressed_tool_name: call.name,
     raw_transcript_excluded: true,

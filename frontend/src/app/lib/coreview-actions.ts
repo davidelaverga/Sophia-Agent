@@ -65,6 +65,9 @@ export type CoreviewToolBlockedReason =
   | "annotations_not_supported"
   | "layout_anchor_not_supported"
   | "section_not_found"
+  | "iframe_not_ready"
+  | "document_unavailable"
+  | "cross_origin_unavailable"
   | "ocr_not_available"
   | "pptx_native_renderer_unavailable"
   | "requested_page_out_of_bounds"
@@ -186,6 +189,10 @@ export interface CoreviewCurrentView {
   visibleTextSummary?: string | null
   visibleHeadings?: string[]
   currentSection?: string | null
+  htmlBridgeReady?: boolean | null
+  htmlSectionIndexReady?: boolean | null
+  htmlSectionIndexEntryCount?: number | null
+  htmlSectionIndexBuildResult?: string | null
   stillFrameAvailable?: boolean | null
   viewSignature: string | null
   stale: boolean
@@ -284,6 +291,33 @@ export interface CoreviewSetViewAdapterInput {
   htmlScrollPosition?: "top" | "bottom" | null
 }
 
+export interface CoreviewHtmlNavigationTelemetry {
+  htmlNavigationRouterUsed?: boolean | null
+  htmlNavigationCommandKind?: string | null
+  htmlNavigationTargetSafe?: string | null
+  htmlNavigationTargetKind?: string | null
+  htmlNavigationResult?: string | null
+  htmlNavigationFailureReason?: string | null
+  htmlNavigationScrollTopBefore?: number | null
+  htmlNavigationScrollTopAfter?: number | null
+  htmlNavigationScrolled?: boolean | null
+  htmlNavigationCommandId?: string | null
+  htmlNavigationTimedOut?: boolean | null
+  htmlNavigationWaitedForReady?: boolean | null
+  htmlNavigationFeedbackEmitted?: boolean | null
+  htmlNavigationPreventedPdfFallback?: boolean | null
+  htmlNavigationBlockedGenericToolCount?: number | null
+  htmlInternalNavigationUsedSameResolver?: boolean | null
+  htmlVoiceNavigationUsedSameResolver?: boolean | null
+}
+
+export interface CoreviewSetViewAdapterResult extends CoreviewHtmlNavigationTelemetry {
+  ok: boolean
+  blockedReason: CoreviewToolBlockedReason | null
+  method?: string | null
+  scrolled?: boolean | null
+}
+
 export interface CoreviewFocusAnchorAdapterInput {
   pageIndex: number
   anchor: CoreviewResolvedAnnotationAnchor
@@ -296,11 +330,12 @@ export interface CoreviewFocusAnchorAdapterResult {
   blockedReason: CoreviewToolBlockedReason | null
   method?: string | null
   scrolled?: boolean | null
+  htmlNavigation?: CoreviewHtmlNavigationTelemetry | null
 }
 
 export interface CoreviewRendererAdapter {
   getCurrentViewState(): CoreviewCurrentView
-  setView(input: CoreviewSetViewAdapterInput): Promise<void> | void
+  setView(input: CoreviewSetViewAdapterInput): Promise<CoreviewSetViewAdapterResult | void> | CoreviewSetViewAdapterResult | void
   refreshView(input?: CoreviewRefreshViewInput): Promise<CoreviewRefreshAdapterResult> | CoreviewRefreshAdapterResult
   waitForViewReady(viewSignature: string | null): Promise<CoreviewViewReadyResult>
   markViewStale(viewSignature: string | null): void
@@ -337,6 +372,10 @@ export interface CoreviewActionResult {
   visible_text_summary?: string | null
   visible_headings?: string[]
   current_section?: string | null
+  html_bridge_ready?: boolean | null
+  html_section_index_ready?: boolean | null
+  html_section_index_entry_count?: number | null
+  html_section_index_build_result?: string | null
   still_frame_available?: boolean | null
   html_scroll_attempted?: boolean
   html_scroll_result?: string | null
@@ -344,6 +383,23 @@ export interface CoreviewActionResult {
   html_focus_anchor_result?: string | null
   html_focus_anchor_method?: string | null
   html_focus_anchor_scrolled?: boolean | null
+  html_navigation_router_used?: boolean | null
+  html_navigation_command_kind?: string | null
+  html_navigation_target_safe?: string | null
+  html_navigation_target_kind?: string | null
+  html_navigation_result?: string | null
+  html_navigation_failure_reason?: string | null
+  html_navigation_scroll_top_before?: number | null
+  html_navigation_scroll_top_after?: number | null
+  html_navigation_scrolled?: boolean | null
+  html_navigation_command_id?: string | null
+  html_navigation_timed_out?: boolean | null
+  html_navigation_waited_for_ready?: boolean | null
+  html_navigation_feedback_emitted?: boolean | null
+  html_navigation_prevented_pdf_fallback?: boolean | null
+  html_navigation_blocked_generic_tool_count?: number | null
+  html_internal_navigation_used_same_resolver?: boolean | null
+  html_voice_navigation_used_same_resolver?: boolean | null
   view_signature: string | null
   stale: boolean
   refresh_attempted: boolean
@@ -576,7 +632,33 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       normalized.htmlScrollDelta !== null
       || Boolean(normalized.htmlScrollPosition)
     )
-    await adapter.setView(normalized)
+    const setViewResult = await adapter.setView(normalized)
+    const structuredSetViewResult = isCoreviewSetViewAdapterResult(setViewResult)
+      ? setViewResult
+      : null
+    if (htmlScrollAttempted && structuredSetViewResult?.ok === false) {
+      const afterFailedScroll = adapter.getCurrentViewState()
+      return buildCoreviewResult({
+        action: "set_view",
+        source,
+        current: afterFailedScroll,
+        ok: false,
+        blockedReason: structuredSetViewResult.blockedReason ?? "section_not_found",
+        resultSummary: blockedSummary(structuredSetViewResult.blockedReason ?? "section_not_found"),
+        refreshAttempted: false,
+        refreshResult: "not_requested",
+        viewReadyWaitMs: null,
+        viewSignatureBefore: initialBefore.viewSignature,
+        viewSignatureAfter: afterFailedScroll.viewSignature,
+        htmlScrollAttempted,
+        htmlScrollResult: structuredSetViewResult.blockedReason ?? "failed",
+        htmlNavigation: htmlNavigationTelemetryFromAdapterResult(structuredSetViewResult, {
+          commandKind: normalized.htmlScrollDelta !== null ? "scroll_by" : "scroll_to",
+          fallbackResult: structuredSetViewResult.blockedReason ?? "failed",
+        }),
+        ...resolved.rebind,
+      })
+    }
 
     const ready = await adapter.waitForViewReady(expectedViewSignature)
     if (!ready.ok) {
@@ -647,7 +729,17 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       staleOverride: forceStale,
       visualFrameFreshOverride: forceVisualFrameFresh,
       htmlScrollAttempted,
-      htmlScrollResult: htmlScrollAttempted ? "success" : null,
+      htmlScrollResult: htmlScrollAttempted
+        ? structuredSetViewResult?.htmlNavigationResult ?? (structuredSetViewResult?.ok === false ? structuredSetViewResult.blockedReason ?? "failed" : "success")
+        : null,
+      htmlNavigation: htmlNavigationTelemetryFromAdapterResult(structuredSetViewResult, {
+        commandKind: htmlScrollAttempted
+          ? normalized.htmlScrollDelta !== null
+            ? "scroll_by"
+            : "scroll_to"
+          : null,
+        fallbackResult: htmlScrollAttempted ? "success" : null,
+      }),
       ...resolved.rebind,
     })
   }
@@ -1156,6 +1248,7 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
         htmlFocusAnchorResult: before.rendererKind === "html" ? focused.blockedReason ?? "failed" : null,
         htmlFocusAnchorMethod: focused.method ?? null,
         htmlFocusAnchorScrolled: focused.scrolled ?? null,
+        htmlNavigation: focused.htmlNavigation ?? null,
         ...resolved.rebind,
       })
     }
@@ -1236,6 +1329,7 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       htmlFocusAnchorResult: before.rendererKind === "html" ? "success" : null,
       htmlFocusAnchorMethod: focused.method ?? null,
       htmlFocusAnchorScrolled: focused.scrolled ?? null,
+      htmlNavigation: focused.htmlNavigation ?? null,
       ...resolved.rebind,
     })
   }
@@ -1722,6 +1816,7 @@ function buildCoreviewResult(params: {
   htmlFocusAnchorResult?: string | null
   htmlFocusAnchorMethod?: string | null
   htmlFocusAnchorScrolled?: boolean | null
+  htmlNavigation?: CoreviewHtmlNavigationTelemetry | null
 }): CoreviewActionResult {
   const current = params.current
   const stale = params.staleOverride ?? current.stale
@@ -1761,6 +1856,10 @@ function buildCoreviewResult(params: {
     visible_text_summary: current.visibleTextSummary ?? null,
     visible_headings: current.visibleHeadings ?? [],
     current_section: current.currentSection ?? null,
+    html_bridge_ready: current.htmlBridgeReady ?? null,
+    html_section_index_ready: current.htmlSectionIndexReady ?? null,
+    html_section_index_entry_count: current.htmlSectionIndexEntryCount ?? null,
+    html_section_index_build_result: current.htmlSectionIndexBuildResult ?? null,
     still_frame_available: current.stillFrameAvailable ?? current.reviewHasFrame,
     html_scroll_attempted: params.htmlScrollAttempted ?? false,
     html_scroll_result: params.htmlScrollResult ?? null,
@@ -1768,6 +1867,23 @@ function buildCoreviewResult(params: {
     html_focus_anchor_result: params.htmlFocusAnchorResult ?? null,
     html_focus_anchor_method: params.htmlFocusAnchorMethod ?? null,
     html_focus_anchor_scrolled: params.htmlFocusAnchorScrolled ?? null,
+    html_navigation_router_used: params.htmlNavigation?.htmlNavigationRouterUsed ?? null,
+    html_navigation_command_kind: params.htmlNavigation?.htmlNavigationCommandKind ?? null,
+    html_navigation_target_safe: params.htmlNavigation?.htmlNavigationTargetSafe ?? null,
+    html_navigation_target_kind: params.htmlNavigation?.htmlNavigationTargetKind ?? null,
+    html_navigation_result: params.htmlNavigation?.htmlNavigationResult ?? null,
+    html_navigation_failure_reason: params.htmlNavigation?.htmlNavigationFailureReason ?? null,
+    html_navigation_scroll_top_before: params.htmlNavigation?.htmlNavigationScrollTopBefore ?? null,
+    html_navigation_scroll_top_after: params.htmlNavigation?.htmlNavigationScrollTopAfter ?? null,
+    html_navigation_scrolled: params.htmlNavigation?.htmlNavigationScrolled ?? null,
+    html_navigation_command_id: params.htmlNavigation?.htmlNavigationCommandId ?? null,
+    html_navigation_timed_out: params.htmlNavigation?.htmlNavigationTimedOut ?? null,
+    html_navigation_waited_for_ready: params.htmlNavigation?.htmlNavigationWaitedForReady ?? null,
+    html_navigation_feedback_emitted: params.htmlNavigation?.htmlNavigationFeedbackEmitted ?? null,
+    html_navigation_prevented_pdf_fallback: params.htmlNavigation?.htmlNavigationPreventedPdfFallback ?? null,
+    html_navigation_blocked_generic_tool_count: params.htmlNavigation?.htmlNavigationBlockedGenericToolCount ?? null,
+    html_internal_navigation_used_same_resolver: params.htmlNavigation?.htmlInternalNavigationUsedSameResolver ?? null,
+    html_voice_navigation_used_same_resolver: params.htmlNavigation?.htmlVoiceNavigationUsedSameResolver ?? null,
     view_signature: current.viewSignature,
     stale,
     refresh_attempted: params.refreshAttempted,
@@ -1829,6 +1945,69 @@ function normalizeSetViewRefreshResult(result: CoreviewToolRefreshResult): Corev
     return "unavailable"
   }
   return "failed"
+}
+
+function isCoreviewSetViewAdapterResult(
+  result: CoreviewSetViewAdapterResult | void | null | undefined,
+): result is CoreviewSetViewAdapterResult {
+  return Boolean(result && typeof result === "object" && "ok" in result)
+}
+
+function htmlNavigationTelemetryFromAdapterResult(
+  result: (CoreviewSetViewAdapterResult | CoreviewFocusAnchorAdapterResult | void) | null | undefined,
+  fallback: {
+    commandKind?: string | null
+    fallbackResult?: string | null
+  } = {},
+): CoreviewHtmlNavigationTelemetry | null {
+  if (!result) {
+    return fallback.commandKind || fallback.fallbackResult
+      ? {
+          htmlNavigationRouterUsed: true,
+          htmlNavigationCommandKind: fallback.commandKind ?? null,
+          htmlNavigationResult: fallback.fallbackResult ?? null,
+          htmlNavigationPreventedPdfFallback: true,
+        }
+      : null
+  }
+  const resultOk = "ok" in result ? result.ok : true
+  const resultBlockedReason = "blockedReason" in result ? result.blockedReason : null
+  const resultScrolled = "scrolled" in result ? result.scrolled ?? null : null
+  const direct: CoreviewHtmlNavigationTelemetry | null = "htmlNavigation" in result
+    ? result.htmlNavigation ?? null
+    : isCoreviewSetViewAdapterResult(result)
+      ? result
+      : null
+  if (!direct) {
+    return fallback.commandKind || fallback.fallbackResult
+      ? {
+          htmlNavigationRouterUsed: true,
+          htmlNavigationCommandKind: fallback.commandKind ?? null,
+          htmlNavigationResult: fallback.fallbackResult ?? (resultOk ? "success" : resultBlockedReason ?? "failed"),
+          htmlNavigationFailureReason: resultOk ? null : resultBlockedReason ?? "failed",
+          htmlNavigationPreventedPdfFallback: true,
+        }
+      : null
+  }
+  return {
+    htmlNavigationRouterUsed: direct.htmlNavigationRouterUsed ?? true,
+    htmlNavigationCommandKind: direct.htmlNavigationCommandKind ?? fallback.commandKind ?? null,
+    htmlNavigationTargetSafe: direct.htmlNavigationTargetSafe ?? null,
+    htmlNavigationTargetKind: direct.htmlNavigationTargetKind ?? null,
+    htmlNavigationResult: direct.htmlNavigationResult ?? fallback.fallbackResult ?? (resultOk ? "success" : resultBlockedReason ?? "failed"),
+    htmlNavigationFailureReason: direct.htmlNavigationFailureReason ?? (resultOk ? null : resultBlockedReason ?? "failed"),
+    htmlNavigationScrollTopBefore: direct.htmlNavigationScrollTopBefore ?? null,
+    htmlNavigationScrollTopAfter: direct.htmlNavigationScrollTopAfter ?? null,
+    htmlNavigationScrolled: direct.htmlNavigationScrolled ?? resultScrolled,
+    htmlNavigationCommandId: direct.htmlNavigationCommandId ?? null,
+    htmlNavigationTimedOut: direct.htmlNavigationTimedOut ?? null,
+    htmlNavigationWaitedForReady: direct.htmlNavigationWaitedForReady ?? null,
+    htmlNavigationFeedbackEmitted: direct.htmlNavigationFeedbackEmitted ?? null,
+    htmlNavigationPreventedPdfFallback: direct.htmlNavigationPreventedPdfFallback ?? true,
+    htmlNavigationBlockedGenericToolCount: direct.htmlNavigationBlockedGenericToolCount ?? null,
+    htmlInternalNavigationUsedSameResolver: direct.htmlInternalNavigationUsedSameResolver ?? null,
+    htmlVoiceNavigationUsedSameResolver: direct.htmlVoiceNavigationUsedSameResolver ?? null,
+  }
 }
 
 function annotationKindCount(
@@ -1897,6 +2076,12 @@ function blockedSummary(reason: CoreviewToolBlockedReason): string {
       return "Layout anchors are not available for this artifact format."
     case "section_not_found":
       return "Sophia could not find that section in the HTML document."
+    case "iframe_not_ready":
+      return "The HTML document is still loading."
+    case "document_unavailable":
+      return "The HTML document is unavailable."
+    case "cross_origin_unavailable":
+      return "The HTML document cannot be inspected safely."
     case "ocr_not_available":
       return "OCR is not available yet."
     case "pptx_native_renderer_unavailable":

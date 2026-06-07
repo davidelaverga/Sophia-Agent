@@ -155,11 +155,13 @@ function runPreviewBridgeFromSrcDoc(srcDoc: string) {
   // eslint-disable-next-line @typescript-eslint/no-implied-eval -- exercises the exact injected iframe bridge from srcdoc.
   const runScript = new Function("window", "document", extractBridgeScript(srcDoc))
   runScript(fakeWindow, previewDocument)
+  const initialPosted = [...posted]
   posted.length = 0
 
   return {
     document: previewDocument,
     posted,
+    initialPosted,
     open,
     scrollIntoView,
     sendParentMessage(data: unknown) {
@@ -530,6 +532,15 @@ describe("ArtifactCanvasViewport", () => {
     const iframe = await screen.findByTestId("artifact-html-preview-iframe")
     const bridge = runPreviewBridgeFromSrcDoc(iframe.getAttribute("srcdoc") ?? "")
     try {
+      expect(bridge.initialPosted).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: "ready",
+          htmlBridgeReady: true,
+          htmlSectionIndexReady: true,
+          htmlSectionIndexEntryCount: expect.any(Number),
+          htmlSectionIndexBuildResult: "success",
+        }),
+      ]))
       for (const id of ["hash-link", "slash-hash-link", "dot-slash-hash-link", "path-link", "relative-link"]) {
         bridge.posted.length = 0
         const event = clickPreviewElement(bridge.document.getElementById(id) as Element)
@@ -543,6 +554,8 @@ describe("ArtifactCanvasViewport", () => {
           htmlInternalNavigationBlockedExternal: false,
           htmlInternalNavigationScrolled: true,
           htmlNavigationPreservedCaptureTarget: true,
+          htmlNavigationRouterUsed: true,
+          htmlInternalNavigationUsedSameResolver: true,
         })
         expect(bridge.document.getElementById("features")?.getAttribute("data-test-scrolled")).toBe("true")
       }
@@ -556,6 +569,8 @@ describe("ArtifactCanvasViewport", () => {
         htmlInternalNavigationTargetKind: "heading",
         htmlInternalNavigationPreventedDefault: true,
         htmlInternalNavigationScrolled: true,
+        htmlNavigationRouterUsed: true,
+        htmlInternalNavigationUsedSameResolver: true,
       })
 
       bridge.posted.length = 0
@@ -567,6 +582,8 @@ describe("ArtifactCanvasViewport", () => {
         htmlInternalNavigationFailureReason: "section_not_found",
         htmlInternalNavigationPreventedDefault: true,
         htmlInternalNavigationScrolled: false,
+        htmlNavigationRouterUsed: true,
+        htmlInternalNavigationUsedSameResolver: true,
       })
 
       bridge.posted.length = 0
@@ -621,6 +638,14 @@ describe("ArtifactCanvasViewport", () => {
     const iframe = await screen.findByTestId("artifact-html-preview-iframe")
     const bridge = runPreviewBridgeFromSrcDoc(iframe.getAttribute("srcdoc") ?? "")
     try {
+      expect(bridge.initialPosted).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: "ready",
+          htmlBridgeReady: true,
+          htmlSectionIndexReady: true,
+          htmlSectionIndexBuildResult: "success",
+        }),
+      ]))
       bridge.sendParentMessage({
         source: "coreview-html-preview-parent",
         type: "command",
@@ -636,6 +661,35 @@ describe("ArtifactCanvasViewport", () => {
         method: "heading",
         scrolled: true,
         htmlInternalNavigationTargetKind: "heading",
+        htmlNavigationRouterUsed: true,
+        htmlNavigationCommandKind: "focus_text",
+        htmlNavigationResult: "success",
+        htmlVoiceNavigationUsedSameResolver: true,
+      })
+
+      bridge.posted.length = 0
+      bridge.sendParentMessage({
+        source: "coreview-html-preview-parent",
+        type: "command",
+        command: "scroll_by",
+        commandId: "voice-scroll-1",
+        deltaY: 240,
+      })
+      bridge.sendParentMessage({
+        source: "coreview-html-preview-parent",
+        type: "command",
+        command: "scroll_by",
+        commandId: "voice-scroll-1",
+        deltaY: 240,
+      })
+      const scrollResults = bridge.posted.filter((payload) => payload.type === "command-result")
+      expect(scrollResults).toHaveLength(1)
+      expect(scrollResults[0]).toMatchObject({
+        commandId: "voice-scroll-1",
+        ok: true,
+        htmlNavigationRouterUsed: true,
+        htmlNavigationCommandKind: "scroll_by",
+        htmlNavigationResult: "success",
         htmlVoiceNavigationUsedSameResolver: true,
       })
 
@@ -652,6 +706,10 @@ describe("ArtifactCanvasViewport", () => {
         commandId: "voice-focus-missing",
         ok: false,
         blockedReason: "section_not_found",
+        htmlNavigationRouterUsed: true,
+        htmlNavigationCommandKind: "focus_text",
+        htmlNavigationResult: "section_not_found",
+        htmlNavigationFailureReason: "section_not_found",
         htmlVoiceNavigationUsedSameResolver: true,
       })
     } finally {

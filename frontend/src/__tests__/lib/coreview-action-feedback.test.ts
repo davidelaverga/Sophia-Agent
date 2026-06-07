@@ -290,4 +290,64 @@ describe("Coreview action feedback", () => {
       shouldSpeak: true,
     })
   })
+
+  it("gives honest feedback for missing HTML sections without saying Done", () => {
+    const feedback = coreviewFeedbackFromActionResult({
+      ...baseActionResult,
+      ok: false,
+      action: "set_view",
+      blocked_reason: "section_not_found",
+      result_summary: "Section not found.",
+      annotation_id: null,
+      annotation_kind: null,
+      annotation_commit_verified: false,
+      html_scroll_attempted: true,
+      html_scroll_result: "section_not_found",
+      html_navigation_router_used: true,
+      html_navigation_result: "section_not_found",
+      html_navigation_failure_reason: "section_not_found",
+    }, {
+      voiceTriggered: true,
+      commandKind: "focus_anchor",
+    })
+
+    expect(feedback).toMatchObject({
+      actionKind: "navigation",
+      status: "failed",
+      displayMessage: "I couldn't find that section.",
+      spokenMessage: "I couldn't find that section.",
+      shouldSpeak: true,
+    })
+    expect(feedback.spokenMessage).not.toContain("Done")
+  })
+
+  it("tells voice users when the HTML page is still loading", () => {
+    const feedback = coreviewFeedbackFromActionResult({
+      ...baseActionResult,
+      ok: false,
+      action: "set_view",
+      blocked_reason: "iframe_not_ready",
+      result_summary: "The page is still loading.",
+      annotation_id: null,
+      annotation_kind: null,
+      annotation_commit_verified: false,
+      html_scroll_attempted: true,
+      html_scroll_result: "iframe_not_ready",
+      html_navigation_router_used: true,
+      html_navigation_timed_out: true,
+      html_navigation_waited_for_ready: true,
+    }, {
+      voiceTriggered: true,
+      commandKind: "scroll_down",
+    })
+
+    expect(feedback).toMatchObject({
+      actionKind: "navigation",
+      status: "failed",
+      displayMessage: "The page is still loading.",
+      spokenMessage: "The page is still loading. Try again in a moment.",
+      shouldSpeak: true,
+    })
+    expect(`${feedback.displayMessage} ${feedback.spokenMessage}`).not.toMatch(/tool|task id|async|prompt|tracking/iu)
+  })
 })

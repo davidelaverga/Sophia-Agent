@@ -12,6 +12,8 @@ import {
   type CoreviewRendererAdapter,
   type CoreviewResolvedAnnotationAnchor,
   type CoreviewSetViewAdapterInput,
+  type CoreviewSetViewAdapterResult,
+  type CoreviewToolBlockedReason,
   type CoreviewToolRefreshResult,
 } from "../../app/lib/coreview-actions"
 import { getCoreviewArtifactCapabilities } from "../../app/lib/coreview-artifact-capabilities"
@@ -20,6 +22,7 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
   refreshOk?: boolean
   waitOk?: boolean
   annotationCommitNoop?: boolean
+  htmlSetViewFailure?: CoreviewToolBlockedReason
   rebindCurrent?: Partial<CoreviewCurrentView>
   rebindOk?: boolean
   rebindReason?: string | null
@@ -28,6 +31,7 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
     refreshOk = true,
     waitOk = true,
     annotationCommitNoop = false,
+    htmlSetViewFailure,
     rebindCurrent,
     rebindOk = true,
     rebindReason = null,
@@ -96,7 +100,33 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
 
   const adapter: CoreviewRendererAdapter = {
     getCurrentViewState: () => current,
-    setView: (view: CoreviewSetViewAdapterInput) => {
+    setView: (view: CoreviewSetViewAdapterInput): CoreviewSetViewAdapterResult | void => {
+      const htmlScrollAttempted = current.rendererKind === "html" && (
+        typeof view.htmlScrollDelta === "number"
+        || Boolean(view.htmlScrollPosition)
+      )
+      if (htmlScrollAttempted && htmlSetViewFailure) {
+        return {
+          ok: false,
+          blockedReason: htmlSetViewFailure,
+          method: "heading",
+          scrolled: false,
+          htmlNavigationRouterUsed: true,
+          htmlNavigationCommandKind: typeof view.htmlScrollDelta === "number" ? "scroll_by" : "scroll_to",
+          htmlNavigationTargetSafe: view.htmlScrollPosition ?? null,
+          htmlNavigationTargetKind: view.htmlScrollPosition ?? "unknown",
+          htmlNavigationResult: htmlSetViewFailure,
+          htmlNavigationFailureReason: htmlSetViewFailure,
+          htmlNavigationScrollTopBefore: current.scrollTop ?? null,
+          htmlNavigationScrollTopAfter: current.scrollTop ?? null,
+          htmlNavigationScrolled: false,
+          htmlNavigationCommandId: "test-html-command",
+          htmlNavigationTimedOut: htmlSetViewFailure === "iframe_not_ready",
+          htmlNavigationWaitedForReady: htmlSetViewFailure === "iframe_not_ready",
+          htmlNavigationPreventedPdfFallback: true,
+          htmlVoiceNavigationUsedSameResolver: true,
+        }
+      }
       const nextScrollTop = typeof view.htmlScrollDelta === "number"
         ? Math.max(0, (current.scrollTop ?? 0) + view.htmlScrollDelta)
         : view.htmlScrollPosition === "top"
@@ -600,6 +630,10 @@ describe("Coreview action bus", () => {
       viewportHeight: 720,
       viewportWidth: 1180,
       scale: 1,
+      htmlBridgeReady: true,
+      htmlSectionIndexReady: true,
+      htmlSectionIndexEntryCount: 5,
+      htmlSectionIndexBuildResult: "success",
       visibleHeadings: ["Coreview", "Features"],
       currentSection: "Coreview",
       visibleTextSummary: "Visible section: Coreview",
@@ -619,6 +653,10 @@ describe("Coreview action bus", () => {
       document_height: 1800,
       viewport_height: 720,
       viewport_width: 1180,
+      html_bridge_ready: true,
+      html_section_index_ready: true,
+      html_section_index_entry_count: 5,
+      html_section_index_build_result: "success",
       visible_headings: ["Coreview", "Features"],
       current_section: "Coreview",
       visible_text_summary: "Visible section: Coreview",
@@ -636,6 +674,56 @@ describe("Coreview action bus", () => {
       raw_artifact_text_excluded: true,
       raw_frame_excluded: true,
     })
+  })
+
+  it("keeps failed HTML scroll routed through the HTML resolver without PDF fallback", async () => {
+    const harness = createHarness({
+      artifactPath: "outputs/site.html",
+      artifactTitle: "site.html",
+      rendererKind: "html",
+      pageIndex: 0,
+      pageCount: 1,
+      fitMode: "custom",
+      scrollTop: 120,
+      scrollHeight: 1800,
+      documentHeight: 1800,
+      viewportHeight: 720,
+      reviewActive: false,
+      reviewHasFrame: false,
+      canRefresh: false,
+      htmlSetViewFailure: "section_not_found",
+    })
+
+    const result = await harness.bus.setView({ htmlScrollPosition: "bottom" }, "frontend_fallback")
+
+    expect(result).toMatchObject({
+      ok: false,
+      action: "set_view",
+      renderer_kind: "html",
+      page_index: 0,
+      page_count: 1,
+      scroll_top: 120,
+      blocked_reason: "section_not_found",
+      html_scroll_attempted: true,
+      html_scroll_result: "section_not_found",
+      html_navigation_router_used: true,
+      html_navigation_command_kind: "scroll_to",
+      html_navigation_target_safe: "bottom",
+      html_navigation_target_kind: "bottom",
+      html_navigation_result: "section_not_found",
+      html_navigation_failure_reason: "section_not_found",
+      html_navigation_scroll_top_before: 120,
+      html_navigation_scroll_top_after: 120,
+      html_navigation_scrolled: false,
+      html_navigation_prevented_pdf_fallback: true,
+      html_voice_navigation_used_same_resolver: true,
+      result_summary: "Sophia could not find that section in the HTML document.",
+      refresh_attempted: false,
+      refresh_result: "not_requested",
+    })
+    expect(harness.current.pageIndex).toBe(0)
+    expect(harness.current.scrollTop).toBe(120)
+    expect(harness.refreshes).toBe(0)
   })
 
   it("scrolls HTML with set_view without pretending there are pages", async () => {

@@ -13,6 +13,10 @@ import {
   registerCoreviewArtifactText,
   registerCoreviewArtifactTextStatus,
 } from "../../lib/coreview-artifact-text"
+import type {
+  CoreviewHtmlNavigationFailureReason,
+  CoreviewHtmlNavigationTargetKind,
+} from "../../lib/coreview-html-navigation"
 import type { CoreviewPdfTextLayout } from "../../lib/coreview-pdf-text-layout"
 import type { CoreviewArtifactCapabilities } from "../../lib/coreview-workspace-contract"
 import { recordSophiaCaptureEvent } from "../../lib/session-capture"
@@ -79,15 +83,26 @@ export interface ArtifactHtmlViewState {
   exactTextAvailable: boolean
   stillFrameAvailable: boolean
   annotationCount: number
+  htmlBridgeReady: boolean
+  sectionIndexReady: boolean
+  lastIndexBuildAt: number | null
+  indexEntryCount: number
+  indexBuildResult: "success" | CoreviewHtmlNavigationFailureReason | null
 }
 
 export interface ArtifactHtmlCommandResult {
   ok: boolean
-  blockedReason: "section_not_found" | "text_anchor_not_found" | "layout_anchor_not_supported" | null
-  method: "scroll_by" | "scroll_to" | "heading" | "nav_label" | "id" | "name" | "text" | null
+  blockedReason: CoreviewHtmlNavigationFailureReason | "text_anchor_not_found" | "layout_anchor_not_supported" | null
+  method: "scroll_by" | "scroll_to" | "heading" | "nav" | "button" | "id" | "name" | "text" | null
   scrolled: boolean
   state: ArtifactHtmlViewState | null
   targetKind?: HtmlInternalNavigationTargetKind | null
+  targetLabelSafe?: string | null
+  scrollTopBefore?: number | null
+  scrollTopAfter?: number | null
+  commandId?: string | null
+  timedOut?: boolean
+  waitedForReady?: boolean
   voiceNavigationUsedSameResolver?: boolean
 }
 
@@ -150,6 +165,7 @@ const HTML_VISIBLE_PREVIEW_MIN_HEIGHT = 480
 const HTML_PREVIEW_BRIDGE_SOURCE = "coreview-html-preview"
 const HTML_PREVIEW_PARENT_SOURCE = "coreview-html-preview-parent"
 const HTML_PREVIEW_COMMAND_TIMEOUT_MS = 900
+const HTML_PREVIEW_READY_WAIT_MS = 650
 const MAX_CAPTURE_BLOCKS = 28
 const ARTIFACT_CANVAS_BED_FALLBACK_BOUNDS = {
   width: 860,
@@ -160,14 +176,9 @@ type HtmlInternalNavigationTargetKind =
   | "fragment"
   | "path"
   | "data_attribute"
-  | "id"
+  | CoreviewHtmlNavigationTargetKind
   | "name"
-  | "heading"
-  | "nav_label"
-  | "text"
-  | "top"
   | "external"
-  | "unknown"
 
 type HtmlInternalNavigationResult =
   | "attempted"
@@ -186,6 +197,11 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
   var NAV_RESULT = "html_internal_navigation_result";
   var reportTimer = null;
   var statusTimer = null;
+  var readyPosted = false;
+  var lastIndexBuildAt = 0;
+  var lastIndexEntryCount = 0;
+  var lastIndexBuildResult = "document_unavailable";
+  var completedCommands = {};
 
   function clampText(value) {
     return String(value || "").replace(/\\s+/g, " ").trim().slice(0, 96);
@@ -200,6 +216,43 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
       .replace(/&/g, " and ")
       .replace(/[^a-z0-9]+/g, " ")
       .trim();
+  }
+
+  function slug(value) {
+    return normalizeSearch(value).replace(/\\s+/g, "");
+  }
+
+  function aliasTargets(value) {
+    var target = normalizeSearch(value);
+    var compact = slug(value);
+    if (!target) {
+      return ["top"];
+    }
+    if (target === "top" || target === "front page" || compact === "frontpage" || target === "home" || target === "hero") {
+      return ["top", "front page", "home", "hero"];
+    }
+    if (target === "bottom" || target === "end") {
+      return ["bottom", "end"];
+    }
+    if (target === "features" || target === "feature") {
+      return ["features", "feature"];
+    }
+    if (target === "coreview" || target === "co review" || compact === "coreview" || compact === "coreview" || target === "review") {
+      return ["coreview", "co review", "review"];
+    }
+    if (target === "docs" || target === "documentation") {
+      return ["docs", "documentation"];
+    }
+    return [value];
+  }
+
+  function matchesAnyTarget(value, targets, allowContains) {
+    for (var index = 0; index < targets.length; index += 1) {
+      if (matchesTarget(value, targets[index], allowContains)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   function safeDecode(value) {
@@ -267,6 +320,77 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
       .map(function (entry) { return entry.text; });
   }
 
+  function buildSectionIndex() {
+    var entries = [];
+    try {
+      var selectors = [
+        "[id]",
+        "[name]",
+        "h1,h2,h3,h4,h5,h6,[role='heading']",
+        "nav a,nav button,[role='navigation'] a,[role='navigation'] button",
+        "a[href]",
+        "button,[role='button']",
+        "[data-target],[data-section],[data-scroll],[data-scroll-target],[data-section-target]"
+      ];
+      selectors.forEach(function (selector) {
+        Array.prototype.slice.call(document.querySelectorAll(selector)).forEach(function (element) {
+          if (element.closest("script,style,noscript")) {
+            return;
+          }
+          var label = labelForElement(element);
+          var href = cleanTargetToken(element.getAttribute("href") || "");
+          var dataTarget = cleanTargetToken(
+            element.getAttribute("data-target")
+              || element.getAttribute("data-section")
+              || element.getAttribute("data-scroll")
+              || element.getAttribute("data-scroll-target")
+              || element.getAttribute("data-section-target")
+              || ""
+          );
+          if (label || href || dataTarget) {
+            entries.push({
+              label: clampText(label || href || dataTarget),
+              hrefTarget: clampText(href || dataTarget),
+              kind: element.matches("h1,h2,h3,h4,h5,h6,[role='heading']")
+                ? "heading"
+                : element.matches("nav a,nav button,[role='navigation'] a,[role='navigation'] button")
+                  ? "nav"
+                  : element.matches("button,[role='button']")
+                    ? "button"
+                    : element.id || element.getAttribute("name")
+                      ? "id"
+                      : "text"
+            });
+          }
+        });
+      });
+      lastIndexEntryCount = entries.length;
+      lastIndexBuildResult = "success";
+    } catch (error) {
+      lastIndexEntryCount = 0;
+      lastIndexBuildResult = "cross_origin_unavailable";
+    }
+    lastIndexBuildAt = Date.now();
+    return {
+      ok: lastIndexBuildResult === "success",
+      entryCount: lastIndexEntryCount,
+      buildResult: lastIndexBuildResult,
+      builtAt: lastIndexBuildAt
+    };
+  }
+
+  function sectionIndexStatus() {
+    if (!lastIndexBuildAt) {
+      buildSectionIndex();
+    }
+    return {
+      ready: lastIndexBuildResult === "success",
+      entryCount: lastIndexEntryCount,
+      buildResult: lastIndexBuildResult,
+      builtAt: lastIndexBuildAt
+    };
+  }
+
   function currentSection(metrics) {
     var current = null;
     headingEntries().forEach(function (entry) {
@@ -280,6 +404,7 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
   function state(reason) {
     var metrics = scrollMetrics();
     var section = currentSection(metrics);
+    var indexStatus = sectionIndexStatus();
     return {
       source: BRIDGE_SOURCE,
       type: "state",
@@ -292,12 +417,30 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
       viewportWidth: metrics.viewportWidth,
       visibleHeadings: visibleHeadings(metrics),
       currentSection: section,
-      visibleTextSummary: section ? "Visible section: " + section : null
+      visibleTextSummary: section ? "Visible section: " + section : null,
+      htmlBridgeReady: true,
+      htmlSectionIndexReady: indexStatus.ready,
+      htmlSectionIndexEntryCount: indexStatus.entryCount,
+      htmlSectionIndexBuildResult: indexStatus.buildResult,
+      htmlSectionIndexLastBuildAt: indexStatus.builtAt
     };
   }
 
   function postState(reason) {
     window.parent.postMessage(state(reason), "*");
+  }
+
+  function postReady() {
+    buildSectionIndex();
+    var payload = state("ready");
+    payload.type = "ready";
+    payload.htmlBridgeReady = true;
+    payload.htmlSectionIndexReady = lastIndexBuildResult === "success";
+    payload.htmlSectionIndexEntryCount = lastIndexEntryCount;
+    payload.htmlSectionIndexBuildResult = lastIndexBuildResult;
+    payload.htmlSectionIndexLastBuildAt = lastIndexBuildAt;
+    readyPosted = true;
+    window.parent.postMessage(payload, "*");
   }
 
   function postNavigation(type, details) {
@@ -313,6 +456,16 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
     payload.htmlInternalNavigationBlockedExternal = Boolean(details && details.blockedExternal);
     payload.htmlInternalNavigationScrolled = Boolean(details && details.scrolled);
     payload.htmlInternalNavigationFailureReason = details && details.failureReason ? details.failureReason : null;
+    payload.htmlInternalNavigationUsedSameResolver = true;
+    payload.htmlNavigationRouterUsed = true;
+    payload.htmlNavigationCommandKind = "internal_link";
+    payload.htmlNavigationTargetSafe = clampText(details && details.target);
+    payload.htmlNavigationTargetKind = details && details.targetKind ? details.targetKind : "unknown";
+    payload.htmlNavigationResult = details && details.result ? details.result : (isAttempt ? "attempted" : null);
+    payload.htmlNavigationFailureReason = details && details.failureReason ? details.failureReason : null;
+    payload.htmlNavigationScrollTopBefore = typeof (details && details.scrollTopBefore) === "number" ? Math.max(0, Math.round(details.scrollTopBefore)) : null;
+    payload.htmlNavigationScrollTopAfter = payload.scrollTop;
+    payload.htmlNavigationScrolled = Boolean(details && details.scrolled);
     payload.htmlVoiceNavigationUsedSameResolver = Boolean(details && details.voiceNavigationUsedSameResolver);
     payload.htmlNavigationPreservedCaptureTarget = true;
     window.parent.postMessage(payload, "*");
@@ -324,6 +477,12 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
   }
 
   function sendResult(commandId, ok, blockedReason, method, scrolled, details) {
+    if (commandId && completedCommands[commandId]) {
+      return;
+    }
+    if (commandId) {
+      completedCommands[commandId] = true;
+    }
     window.setTimeout(function () {
       var payload = state("command-result");
       payload.type = "command-result";
@@ -333,6 +492,19 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
       payload.method = method || null;
       payload.scrolled = scrolled === true;
       payload.htmlInternalNavigationTargetKind = details && details.targetKind ? details.targetKind : null;
+      payload.htmlNavigationRouterUsed = true;
+      payload.htmlNavigationCommandKind = details && details.commandKind ? details.commandKind : null;
+      payload.htmlNavigationTargetSafe = clampText(details && details.targetLabelSafe);
+      payload.htmlNavigationTargetKind = details && details.targetKind ? details.targetKind : null;
+      payload.htmlNavigationResult = ok === true ? "success" : (blockedReason || "failed");
+      payload.htmlNavigationFailureReason = ok === true ? null : (blockedReason || "failed");
+      payload.htmlNavigationScrollTopBefore = typeof (details && details.scrollTopBefore) === "number" ? Math.max(0, Math.round(details.scrollTopBefore)) : null;
+      payload.htmlNavigationScrollTopAfter = payload.scrollTop;
+      payload.htmlNavigationScrolled = scrolled === true;
+      payload.htmlNavigationCommandId = commandId || null;
+      payload.htmlNavigationTimedOut = false;
+      payload.htmlNavigationWaitedForReady = Boolean(details && details.waitedForReady);
+      payload.htmlNavigationPreventedPdfFallback = true;
       payload.htmlVoiceNavigationUsedSameResolver = Boolean(details && details.voiceNavigationUsedSameResolver);
       window.parent.postMessage(payload, "*");
     }, 80);
@@ -366,6 +538,7 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
   }
 
   function firstAttributeMatch(selector, attribute, target, excludedElement) {
+    var targets = aliasTargets(target);
     var elements = Array.prototype.slice.call(document.querySelectorAll(selector));
     var exact = null;
     var loose = null;
@@ -374,11 +547,11 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
         return false;
       }
       var value = element.getAttribute(attribute) || "";
-      if (normalize(value) === normalize(target)) {
+      if (targets.some(function (candidate) { return normalize(value) === normalize(candidate) || slug(value) === slug(candidate); })) {
         exact = element;
         return true;
       }
-      if (!loose && matchesTarget(value, target, true)) {
+      if (!loose && matchesAnyTarget(value, targets, true)) {
         loose = element;
       }
       return false;
@@ -387,6 +560,7 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
   }
 
   function firstTextMatch(selector, target, method, allowContains, excludedElement) {
+    var targets = aliasTargets(target);
     var elements = Array.prototype.slice.call(document.querySelectorAll(selector));
     var best = null;
     elements.some(function (element) {
@@ -396,7 +570,7 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
       if (element.closest("script,style,noscript")) {
         return false;
       }
-      if (!matchesTarget(labelForElement(element), target, allowContains)) {
+      if (!matchesAnyTarget(labelForElement(element), targets, allowContains)) {
         return false;
       }
       best = { element: element, method: method };
@@ -407,45 +581,56 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
 
   function resolveTarget(query, excludedElement) {
     var target = cleanTargetToken(query);
-    if (!target) {
+    var canonical = aliasTargets(target)[0] || target;
+    if (!target || canonical === "top") {
       return { element: scrollingElement(), method: "scroll_to", targetKind: "top", target: "top" };
     }
+    if (canonical === "bottom") {
+      return { element: scrollingElement(), method: "scroll_to", targetKind: "bottom", target: "bottom" };
+    }
 
-    var idElement = firstAttributeMatch("[id]", "id", target, excludedElement);
+    var idElement = firstAttributeMatch("[id]", "id", canonical, excludedElement);
     if (idElement) {
-      return { element: idElement, method: "id", targetKind: "id", target: target };
+      return { element: idElement, method: "id", targetKind: "id", target: canonical };
     }
 
-    var nameElement = firstAttributeMatch("[name]", "name", target, excludedElement);
+    var nameElement = firstAttributeMatch("[name]", "name", canonical, excludedElement);
     if (nameElement) {
-      return { element: nameElement, method: "name", targetKind: "name", target: target };
+      return { element: nameElement, method: "name", targetKind: "id", target: canonical };
     }
 
-    var heading = firstTextMatch("h1,h2,h3,h4,h5,h6,[role='heading']", target, "heading", true, excludedElement);
+    var heading = firstTextMatch("h1,h2,h3,h4,h5,h6,[role='heading']", canonical, "heading", true, excludedElement);
     if (heading) {
       heading.targetKind = "heading";
-      heading.target = target;
+      heading.target = canonical;
       return heading;
     }
 
-    var section = firstTextMatch("section,article,[data-section],[aria-label],[role='region']", target, "text", true, excludedElement);
+    var section = firstTextMatch("section,article,[data-section],[aria-label],[role='region']", canonical, "text", true, excludedElement);
     if (section) {
       section.targetKind = "text";
-      section.target = target;
+      section.target = canonical;
       return section;
     }
 
-    var nav = firstTextMatch("nav a,nav button,a,button", target, "nav_label", true, excludedElement);
+    var nav = firstTextMatch("nav a,nav button,a", canonical, "nav", true, excludedElement);
     if (nav) {
-      nav.targetKind = "nav_label";
-      nav.target = target;
+      nav.targetKind = "nav";
+      nav.target = canonical;
       return nav;
     }
 
-    var text = firstTextMatch("main p,main li,section p,section li,article p,article li,p,li,blockquote,td,th,[data-text-anchor]", target, "text", true, excludedElement);
+    var button = firstTextMatch("button,[role='button']", canonical, "button", true, excludedElement);
+    if (button) {
+      button.targetKind = "button";
+      button.target = canonical;
+      return button;
+    }
+
+    var text = firstTextMatch("main p,main li,section p,section li,article p,article li,p,li,blockquote,td,th,[data-text-anchor]", canonical, "text", true, excludedElement);
     if (text) {
       text.targetKind = "text";
-      text.target = target;
+      text.target = canonical;
       return text;
     }
 
@@ -459,6 +644,12 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
     if (target.targetKind === "top") {
       var moved = scrollToTop(0);
       return { ok: true, blockedReason: null, method: "scroll_to", scrolled: moved, targetKind: "top" };
+    }
+    if (target.targetKind === "bottom") {
+      var metrics = scrollMetrics();
+      var bottom = Math.max(0, metrics.scrollHeight - metrics.viewportHeight);
+      var movedBottom = scrollToTop(bottom);
+      return { ok: true, blockedReason: null, method: "scroll_to", scrolled: movedBottom, targetKind: "bottom" };
     }
     target.element.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
     if (typeof target.element.focus === "function") {
@@ -609,6 +800,7 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
       return;
     }
 
+    var beforeMetrics = scrollMetrics();
     var resolved = resolveTarget(route.target, trigger.element);
     var scroll = scrollResolvedTarget(resolved);
     var failureReason = scroll.ok ? null : (scroll.blockedReason || "section_not_found");
@@ -621,7 +813,8 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
         blockedExternal: false,
         scrolled: scroll.scrolled,
         result: scroll.ok ? "success" : failureReason,
-        failureReason: failureReason
+        failureReason: failureReason,
+        scrollTopBefore: beforeMetrics.scrollTop
       });
     }, 80);
     scheduleState("internal-navigation");
@@ -643,7 +836,14 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
     if (data.command === "scroll_by") {
       var deltaY = Number(data.deltaY) || 0;
       scrollToTop(metrics.scrollTop + deltaY);
-      sendResult(data.commandId, true, null, "scroll_by", Math.abs(deltaY) > 0);
+      sendResult(data.commandId, true, null, "scroll_by", Math.abs(deltaY) > 0, {
+        commandKind: "scroll_by",
+        targetKind: deltaY >= 0 ? "bottom" : "top",
+        targetLabelSafe: deltaY >= 0 ? "scroll down" : "scroll up",
+        scrollTopBefore: metrics.scrollTop,
+        waitedForReady: data.waitedForReady === true,
+        voiceNavigationUsedSameResolver: true
+      });
       return;
     }
     if (data.command === "scroll_to") {
@@ -651,21 +851,36 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
         ? Math.max(0, metrics.scrollHeight - metrics.viewportHeight)
         : 0;
       var moved = scrollToTop(targetTop);
-      sendResult(data.commandId, true, null, "scroll_to", moved);
+      sendResult(data.commandId, true, null, "scroll_to", moved, {
+        commandKind: "scroll_to",
+        targetKind: data.position === "bottom" ? "bottom" : "top",
+        targetLabelSafe: data.position === "bottom" ? "bottom" : "top",
+        scrollTopBefore: metrics.scrollTop,
+        waitedForReady: data.waitedForReady === true,
+        voiceNavigationUsedSameResolver: true
+      });
       return;
     }
     if (data.command === "focus_text") {
       var target = findTarget(data.text);
       if (!target) {
         sendResult(data.commandId, false, "section_not_found", null, false, {
+          commandKind: "focus_text",
           targetKind: "unknown",
+          targetLabelSafe: data.text,
+          scrollTopBefore: metrics.scrollTop,
+          waitedForReady: data.waitedForReady === true,
           voiceNavigationUsedSameResolver: true
         });
         return;
       }
       var scroll = scrollResolvedTarget(target);
       sendResult(data.commandId, scroll.ok, scroll.blockedReason, scroll.method, scroll.scrolled, {
+        commandKind: "focus_text",
         targetKind: scroll.targetKind,
+        targetLabelSafe: target.target,
+        scrollTopBefore: metrics.scrollTop,
+        waitedForReady: data.waitedForReady === true,
         voiceNavigationUsedSameResolver: true
       });
     }
@@ -676,10 +891,15 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
   window.addEventListener("resize", function () { scheduleState("resize"); });
   window.addEventListener("load", function () { scheduleState("load"); });
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", function () { postState("ready"); });
+    document.addEventListener("DOMContentLoaded", function () { postReady(); });
   } else {
-    postState("ready");
+    postReady();
   }
+  window.setTimeout(function () {
+    if (!readyPosted) {
+      postReady();
+    }
+  }, 120);
 })();`
 
 export function ArtifactCanvasViewport({
@@ -1627,6 +1847,8 @@ function HtmlDocumentPage({
   const layoutTelemetrySignatureRef = useRef<string | null>(null)
   const commandIdRef = useRef(0)
   const latestViewStateRef = useRef<ArtifactHtmlViewState | null>(null)
+  const htmlBridgeReadyRef = useRef(false)
+  const htmlReadyWaitersRef = useRef<Array<() => void>>([])
   const [htmlViewState, setHtmlViewState] = useState<ArtifactHtmlViewState | null>(null)
   const pendingCommandsRef = useRef(new Map<string, {
     resolve: (result: ArtifactHtmlCommandResult) => void
@@ -1642,12 +1864,19 @@ function HtmlDocumentPage({
 
   const applyHtmlViewState = useCallback((state: ArtifactHtmlViewState | null) => {
     latestViewStateRef.current = state
+    htmlBridgeReadyRef.current = Boolean(state?.htmlBridgeReady && state.sectionIndexReady)
+    if (htmlBridgeReadyRef.current && htmlReadyWaitersRef.current.length > 0) {
+      const waiters = htmlReadyWaitersRef.current
+      htmlReadyWaitersRef.current = []
+      waiters.forEach((resolve) => resolve())
+    }
     setHtmlViewState(state)
     onHtmlViewStateChange?.(state)
   }, [onHtmlViewStateChange])
 
   useEffect(() => {
     if (preview.status !== "ready") {
+      htmlBridgeReadyRef.current = false
       applyHtmlViewState(null)
     }
   }, [applyHtmlViewState, preview.status])
@@ -1690,8 +1919,15 @@ function HtmlDocumentPage({
         method: message.method,
         scrolled: message.scrolled,
         state: message.state,
-        targetKind: message.navigation?.targetKind ?? null,
-        voiceNavigationUsedSameResolver: message.navigation?.voiceNavigationUsedSameResolver ?? false,
+        targetKind: message.htmlNavigationTargetKind ?? message.navigation?.targetKind ?? null,
+        targetLabelSafe: message.htmlNavigationTargetSafe ?? message.navigation?.target ?? null,
+        scrollTopBefore: message.htmlNavigationScrollTopBefore,
+        scrollTopAfter: message.htmlNavigationScrollTopAfter ?? message.state.scrollTop,
+        commandId: message.commandId,
+        timedOut: message.htmlNavigationTimedOut,
+        waitedForReady: message.htmlNavigationWaitedForReady,
+        voiceNavigationUsedSameResolver: message.navigation?.voiceNavigationUsedSameResolver
+          ?? message.htmlNavigationRouterUsed,
       })
     }
 
@@ -1699,18 +1935,43 @@ function HtmlDocumentPage({
     return () => window.removeEventListener("message", handleMessage)
   }, [annotations.length, applyHtmlViewState, artifactId, file?.path, normalizedZoom, preview.status])
 
-  const sendHtmlCommand = useCallback((
+  const waitForHtmlBridgeReady = useCallback(async (): Promise<boolean> => {
+    if (htmlBridgeReadyRef.current) {
+      return false
+    }
+    return new Promise((resolve) => {
+      let settled = false
+      const timeoutId = window.setTimeout(() => {
+        if (settled) return
+        settled = true
+        htmlReadyWaitersRef.current = htmlReadyWaitersRef.current.filter((waiter) => waiter !== ready)
+        resolve(true)
+      }, HTML_PREVIEW_READY_WAIT_MS)
+      const ready = () => {
+        if (settled) return
+        settled = true
+        window.clearTimeout(timeoutId)
+        resolve(true)
+      }
+      htmlReadyWaitersRef.current.push(ready)
+    })
+  }, [])
+
+  const sendHtmlCommand = useCallback(async (
     command: Record<string, string | number | null>,
   ): Promise<ArtifactHtmlCommandResult> => {
+    const waitedForReady = await waitForHtmlBridgeReady()
     const contentWindow = iframeRef.current?.contentWindow
-    if (!contentWindow || preview.status !== "ready") {
-      return Promise.resolve({
+    if (!contentWindow || preview.status !== "ready" || !htmlBridgeReadyRef.current) {
+      return {
         ok: false,
-        blockedReason: "layout_anchor_not_supported",
+        blockedReason: "iframe_not_ready",
         method: null,
         scrolled: false,
         state: latestViewStateRef.current,
-      })
+        timedOut: !htmlBridgeReadyRef.current,
+        waitedForReady,
+      }
     }
     const commandId = `html-command-${Date.now().toString(36)}-${commandIdRef.current += 1}`
     return new Promise((resolve) => {
@@ -1718,10 +1979,13 @@ function HtmlDocumentPage({
         pendingCommandsRef.current.delete(commandId)
         resolve({
           ok: false,
-          blockedReason: "layout_anchor_not_supported",
+          blockedReason: "iframe_not_ready",
           method: null,
           scrolled: false,
           state: latestViewStateRef.current,
+          commandId,
+          timedOut: true,
+          waitedForReady,
         })
       }, HTML_PREVIEW_COMMAND_TIMEOUT_MS)
 
@@ -1730,10 +1994,11 @@ function HtmlDocumentPage({
         source: HTML_PREVIEW_PARENT_SOURCE,
         type: "command",
         commandId,
+        waitedForReady,
         ...command,
       }, "*")
     })
-  }, [preview.status])
+  }, [preview.status, waitForHtmlBridgeReady])
 
   useEffect(() => {
     if (preview.status !== "ready") {
@@ -1754,14 +2019,18 @@ function HtmlDocumentPage({
   }, [onHtmlCommandTargetChange, preview.status, sendHtmlCommand])
 
   useEffect(() => () => {
+    const waiters = htmlReadyWaitersRef.current
+    htmlReadyWaitersRef.current = []
+    waiters.forEach((resolve) => resolve())
     for (const pending of pendingCommandsRef.current.values()) {
       window.clearTimeout(pending.timeoutId)
       pending.resolve({
         ok: false,
-        blockedReason: "layout_anchor_not_supported",
+        blockedReason: "iframe_not_ready",
         method: null,
         scrolled: false,
         state: latestViewStateRef.current,
+        timedOut: true,
       })
     }
     pendingCommandsRef.current.clear()
@@ -1940,13 +2209,25 @@ function buildInteractiveHtmlPreviewSrcDoc(html: string): string {
 }
 
 type HtmlPreviewBridgeMessage = {
-  type: "state" | "command-result" | "navigation-attempted" | "navigation-result"
+  type: "ready" | "state" | "command-result" | "navigation-attempted" | "navigation-result"
   commandId: string | null
   ok: boolean
   blockedReason: ArtifactHtmlCommandResult["blockedReason"]
   method: ArtifactHtmlCommandResult["method"]
   scrolled: boolean
   state: ArtifactHtmlViewState
+  htmlNavigationRouterUsed: boolean
+  htmlNavigationCommandKind: string | null
+  htmlNavigationTargetSafe: string | null
+  htmlNavigationTargetKind: HtmlInternalNavigationTargetKind | null
+  htmlNavigationResult: string | null
+  htmlNavigationFailureReason: string | null
+  htmlNavigationScrollTopBefore: number | null
+  htmlNavigationScrollTopAfter: number | null
+  htmlNavigationCommandId: string | null
+  htmlNavigationTimedOut: boolean
+  htmlNavigationWaitedForReady: boolean
+  htmlNavigationPreventedPdfFallback: boolean
   navigation: {
     target: string | null
     result: HtmlInternalNavigationResult | null
@@ -1976,11 +2257,13 @@ function normalizeHtmlPreviewBridgeMessage(
     ? "command-result"
     : value.type === "state"
       ? "state"
-      : value.type === "navigation-attempted"
-        ? "navigation-attempted"
-        : value.type === "navigation-result"
-          ? "navigation-result"
-          : null
+      : value.type === "ready"
+        ? "ready"
+        : value.type === "navigation-attempted"
+          ? "navigation-attempted"
+          : value.type === "navigation-result"
+            ? "navigation-result"
+            : null
   if (!type) {
     return null
   }
@@ -2009,6 +2292,11 @@ function normalizeHtmlPreviewBridgeMessage(
     exactTextAvailable: context.exactTextAvailable,
     stillFrameAvailable: context.stillFrameAvailable,
     annotationCount: context.annotationCount,
+    htmlBridgeReady: value.htmlBridgeReady === true || type === "ready",
+    sectionIndexReady: value.htmlSectionIndexReady === true,
+    lastIndexBuildAt: safeNullableNonNegativeNumber(value.htmlSectionIndexLastBuildAt),
+    indexEntryCount: safeNonNegativeNumber(value.htmlSectionIndexEntryCount),
+    indexBuildResult: htmlSectionIndexBuildResult(value.htmlSectionIndexBuildResult),
   }
   return {
     type,
@@ -2018,12 +2306,40 @@ function normalizeHtmlPreviewBridgeMessage(
     method: htmlCommandMethod(value.method),
     scrolled: value.scrolled === true,
     state,
+    htmlNavigationRouterUsed: value.htmlNavigationRouterUsed === true,
+    htmlNavigationCommandKind: typeof value.htmlNavigationCommandKind === "string" && value.htmlNavigationCommandKind.trim()
+      ? value.htmlNavigationCommandKind.trim().slice(0, 48)
+      : null,
+    htmlNavigationTargetSafe: typeof value.htmlNavigationTargetSafe === "string" && value.htmlNavigationTargetSafe.trim()
+      ? value.htmlNavigationTargetSafe.trim().slice(0, 96)
+      : null,
+    htmlNavigationTargetKind: htmlInternalNavigationTargetKind(value.htmlNavigationTargetKind),
+    htmlNavigationResult: typeof value.htmlNavigationResult === "string" && value.htmlNavigationResult.trim()
+      ? value.htmlNavigationResult.trim().slice(0, 80)
+      : null,
+    htmlNavigationFailureReason: typeof value.htmlNavigationFailureReason === "string" && value.htmlNavigationFailureReason.trim()
+      ? value.htmlNavigationFailureReason.trim().slice(0, 80)
+      : null,
+    htmlNavigationScrollTopBefore: safeNullableNonNegativeNumber(value.htmlNavigationScrollTopBefore),
+    htmlNavigationScrollTopAfter: safeNullableNonNegativeNumber(value.htmlNavigationScrollTopAfter),
+    htmlNavigationCommandId: typeof value.htmlNavigationCommandId === "string" ? value.htmlNavigationCommandId : null,
+    htmlNavigationTimedOut: value.htmlNavigationTimedOut === true,
+    htmlNavigationWaitedForReady: value.htmlNavigationWaitedForReady === true,
+    htmlNavigationPreventedPdfFallback: value.htmlNavigationPreventedPdfFallback === true,
     navigation: normalizeHtmlInternalNavigationMessage(value),
   }
 }
 
 function htmlCommandBlockedReason(value: unknown): ArtifactHtmlCommandResult["blockedReason"] {
-  if (value === "section_not_found" || value === "text_anchor_not_found" || value === "layout_anchor_not_supported") {
+  if (
+    value === "section_not_found"
+    || value === "text_anchor_not_found"
+    || value === "layout_anchor_not_supported"
+    || value === "iframe_not_ready"
+    || value === "document_unavailable"
+    || value === "cross_origin_unavailable"
+    || value === "unsupported_renderer"
+  ) {
     return value
   }
   return null
@@ -2034,7 +2350,8 @@ function htmlCommandMethod(value: unknown): ArtifactHtmlCommandResult["method"] 
     value === "scroll_by"
     || value === "scroll_to"
     || value === "heading"
-    || value === "nav_label"
+    || value === "nav"
+    || value === "button"
     || value === "id"
     || value === "name"
     || value === "text"
@@ -2082,9 +2399,11 @@ function htmlInternalNavigationTargetKind(value: unknown): HtmlInternalNavigatio
     || value === "id"
     || value === "name"
     || value === "heading"
-    || value === "nav_label"
+    || value === "nav"
+    || value === "button"
     || value === "text"
     || value === "top"
+    || value === "bottom"
     || value === "external"
     || value === "unknown"
   ) {
@@ -2135,6 +2454,26 @@ function recordHtmlInternalNavigationTelemetry({
       htmlInternalNavigationBlockedExternal: navigation.blockedExternal,
       htmlInternalNavigationScrolled: navigation.scrolled,
       htmlInternalNavigationFailureReason: navigation.failureReason,
+      htmlInternalNavigationUsedSameResolver: true,
+      htmlNavigationRouterUsed: message.htmlNavigationRouterUsed,
+      htmlNavigationCommandKind: message.htmlNavigationCommandKind,
+      htmlNavigationTargetSafe: message.htmlNavigationTargetSafe,
+      htmlNavigationTargetKind: message.htmlNavigationTargetKind,
+      htmlNavigationResult: message.htmlNavigationResult,
+      htmlNavigationFailureReason: message.htmlNavigationFailureReason,
+      htmlNavigationScrollTopBefore: message.htmlNavigationScrollTopBefore,
+      htmlNavigationScrollTopAfter: message.htmlNavigationScrollTopAfter ?? message.state.scrollTop,
+      htmlNavigationScrolled: message.htmlNavigationScrollTopBefore !== null
+        ? message.htmlNavigationScrollTopBefore !== (message.htmlNavigationScrollTopAfter ?? message.state.scrollTop)
+        : navigation.scrolled,
+      htmlNavigationCommandId: message.htmlNavigationCommandId,
+      htmlNavigationTimedOut: message.htmlNavigationTimedOut,
+      htmlNavigationWaitedForReady: message.htmlNavigationWaitedForReady,
+      htmlNavigationPreventedPdfFallback: message.htmlNavigationPreventedPdfFallback,
+      htmlBridgeReady: message.state.htmlBridgeReady,
+      htmlSectionIndexReady: message.state.sectionIndexReady,
+      htmlSectionIndexEntryCount: message.state.indexEntryCount,
+      htmlSectionIndexBuildResult: message.state.indexBuildResult,
       htmlVoiceNavigationUsedSameResolver: navigation.voiceNavigationUsedSameResolver,
       htmlPostMessageNavigationReceived: true,
       htmlNavigationPreservedCaptureTarget: navigation.preservedCaptureTarget,
@@ -2154,6 +2493,24 @@ function recordHtmlInternalNavigationTelemetry({
 
 function safeNonNegativeNumber(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0
+}
+
+function safeNullableNonNegativeNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.round(value)) : null
+}
+
+function htmlSectionIndexBuildResult(value: unknown): ArtifactHtmlViewState["indexBuildResult"] {
+  if (
+    value === "success"
+    || value === "section_not_found"
+    || value === "iframe_not_ready"
+    || value === "document_unavailable"
+    || value === "cross_origin_unavailable"
+    || value === "unsupported_renderer"
+  ) {
+    return value
+  }
+  return null
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

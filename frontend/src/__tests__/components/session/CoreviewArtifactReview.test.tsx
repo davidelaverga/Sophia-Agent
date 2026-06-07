@@ -1958,7 +1958,7 @@ describe("Coreview artifact still-frame review", () => {
         "Sophia, zoom in on the current title. Highlight it yellow. Leave a comment: change the font.",
       )).toMatchObject({
         handled: true,
-        applied: true,
+        applied: false,
         suppressAssistant: true,
       })
     })
