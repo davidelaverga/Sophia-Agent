@@ -18,6 +18,7 @@ export {
   type CoreviewBuilderOutputStatus,
   type CoreviewBuilderWorkspaceEventInput,
   type CoreviewBuilderToolCallInput,
+  type CoreviewHtmlQuickPatchActionTelemetry,
   type CoreviewRequestArtifactUpdateInput,
   type CoreviewBuilderSourceActor,
 } from "../../lib/coreview-builder-actions"

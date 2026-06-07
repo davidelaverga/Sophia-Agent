@@ -47,6 +47,10 @@ describe("artifact review voice command parser", () => {
       kind: "builder_update",
       updateRequest: "change the title",
     })
+    expect(parseArtifactReviewVoiceCommand("change the main title to Sophia Workspace Version Two")).toEqual({
+      kind: "builder_update",
+      updateRequest: "change the main title to Sophia Workspace Version Two",
+    })
     expect(parseArtifactReviewVoiceCommand("make the background darker")).toEqual({
       kind: "builder_update",
       updateRequest: "make the background darker",

@@ -115,4 +115,66 @@ describe('useSessionOutboundSend', () => {
     expect(session.last_message_preview).toBe('I need to prepare for my investor meeting tomorrow');
     expect(session.turn_count).toBe(1);
   });
+
+  it('passes a safe request options object when chatRequestBody is missing', async () => {
+    const sendChatMessage = vi.fn(async (
+      _message: { text: string },
+      options?: { body?: Record<string, unknown> },
+    ) => {
+      void (options?.body as { state?: unknown } | undefined)?.state;
+    });
+
+    const { result } = renderHook(() => useSessionOutboundSend({
+      chatStatus: 'ready',
+      sendChatMessage,
+      hasValidBackendSessionId: true,
+      chatRequestBody: undefined,
+      debugEnabled: false,
+      markStreamTurnStarted: vi.fn(),
+      showToast: vi.fn(),
+    }));
+
+    await act(async () => {
+      await result.current({ text: 'Change the title to Sophia Workspace Version Two' });
+    });
+
+    expect(sendChatMessage).toHaveBeenCalledWith(
+      { text: 'Change the title to Sophia Workspace Version Two' },
+      { body: {} },
+    );
+    expect(touchSessionMock).not.toHaveBeenCalled();
+  });
+
+  it('preserves normal chat body state and attachments', async () => {
+    const sendChatMessage = vi.fn(async () => undefined);
+
+    const chatRequestBody = {
+      session_id: 'sess-1',
+      user_id: 'dev-user',
+      thread_id: 'thread-1',
+      attached_files: ['uploads/brief.pdf'],
+      state: {
+        client_turn_id: 'turn-1',
+      },
+    };
+
+    const { result } = renderHook(() => useSessionOutboundSend({
+      chatStatus: 'ready',
+      sendChatMessage,
+      hasValidBackendSessionId: true,
+      chatRequestBody,
+      debugEnabled: false,
+      markStreamTurnStarted: vi.fn(),
+      showToast: vi.fn(),
+    }));
+
+    await act(async () => {
+      await result.current({ text: 'Use the attached brief' });
+    });
+
+    expect(sendChatMessage).toHaveBeenCalledWith(
+      { text: 'Use the attached brief' },
+      { body: chatRequestBody },
+    );
+  });
 });

@@ -11,6 +11,7 @@ import {
   type CoreviewArtifactVersionState,
   type CoreviewArtifactVersionTelemetry,
 } from "../../lib/coreview-artifact-version-store"
+import { requestCoreviewHtmlQuickPatch } from "../../lib/coreview-html-quick-edit"
 import type { ArtifactToolMode } from "../../types/artifact-annotations"
 import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 import type { BuilderCompletionEventV1 } from "../../types/builder-completion"
@@ -85,6 +86,7 @@ import {
   type CoreviewBuilderTaskStatus,
   type CoreviewBuilderToolCallInput,
   type CoreviewBuilderWorkspaceEventInput,
+  type CoreviewHtmlQuickPatchActionTelemetry,
   type CoreviewAddAnnotationAdapterInput,
   type CoreviewAddAnnotationAdapterResult,
   type CoreviewAddAnnotationInput,
@@ -770,6 +772,7 @@ type CoreviewHtmlUpdateMatchedBy =
   | "artifact_stable_identity"
   | "builder_task_id"
   | "builder_run_id"
+  | "quick_patch"
 
 type PendingCoreviewHtmlAutoApply = {
   signature: string
@@ -782,6 +785,7 @@ type PendingCoreviewHtmlAutoApply = {
   matchedBy: CoreviewHtmlUpdateMatchedBy
   versionState: CoreviewArtifactVersionState
   versionTelemetry: CoreviewArtifactVersionTelemetry
+  quickPatchTelemetry?: CoreviewHtmlQuickPatchActionTelemetry | null
   attemptedAt: number
   timedOut: boolean
 }
@@ -2297,6 +2301,18 @@ export function PresenceArtifactPanel({
         coreviewHtmlUpdatePreviousPathHash: coreviewArtifactVersionTelemetry.coreviewHtmlUpdatePreviousPathHash,
         coreviewHtmlUpdateCurrentPathHash: coreviewArtifactVersionTelemetry.coreviewHtmlUpdateCurrentPathHash,
         coreviewHtmlUpdateRestoreAvailable: coreviewArtifactVersionTelemetry.coreviewHtmlUpdateRestoreAvailable,
+        coreviewHtmlQuickPatchEligible: result.htmlQuickPatch?.eligible ?? false,
+        coreviewHtmlQuickPatchAttempted: result.htmlQuickPatch?.attempted ?? false,
+        coreviewHtmlQuickPatchResult: result.htmlQuickPatch?.result ?? null,
+        coreviewHtmlQuickPatchKind: result.htmlQuickPatch?.kind ?? null,
+        coreviewHtmlQuickPatchFallbackReason: result.htmlQuickPatch?.fallbackReason ?? null,
+        coreviewHtmlQuickPatchLatencyMs: result.htmlQuickPatch?.latencyMs ?? null,
+        coreviewHtmlQuickPatchRevisionPathHash: result.htmlQuickPatch?.revisionPathHash ?? null,
+        coreviewHtmlQuickPatchUsedFullBuilder: result.htmlQuickPatch?.usedFullBuilder ?? null,
+        coreviewHtmlQuickPatchRenderConfirmed: result.htmlQuickPatch?.renderConfirmed ?? null,
+        coreviewHtmlQuickPatchPreservedOriginal: result.htmlQuickPatch?.preservedOriginal ?? null,
+        coreviewHtmlQuickPatchRestoreAvailable: result.htmlQuickPatch?.restoreAvailable ?? null,
+        coreviewHtmlQuickPatchTypeErrorPrevented: result.htmlQuickPatch?.typeErrorPrevented ?? null,
         builderWorkspaceEventCount: telemetry.builderWorkspaceEventCount,
         builderLastWorkspaceEventType: telemetry.builderLastWorkspaceEventType,
         artifactStableIdentity: result.context?.artifactStableIdentity ?? artifactStableIdentity,
@@ -2440,6 +2456,203 @@ export function PresenceArtifactPanel({
       latestCoreviewBuilderContextRef.current = result.context
     }
 
+    if (result.result === "quick_patch_applied" && result.context && result.latestOutput?.artifactPath) {
+      const context = result.context
+      const outputPath = normalizeBuilderArtifactPath(result.latestOutput.artifactPath)
+      if (!outputPath || context.rendererKind !== "html") {
+        setCoreviewBuilderUpdateCard((current) => current
+          ? {
+              ...current,
+              status: "failed",
+              currentStep: null,
+              unsupportedReason: "Couldn’t apply the quick update. Original preserved.",
+              autoApplied: false,
+              restoreAvailable: false,
+            }
+          : current)
+        recordCoreviewBuilderTelemetry(result)
+        return
+      }
+
+      const output = {
+        artifactPath: outputPath,
+        artifactTitle: result.latestOutput.artifactTitle ?? outputPath.split("/").filter(Boolean).pop() ?? null,
+      }
+      const outputStableIdentity = buildCoreviewArtifactStableIdentity({
+        userId: userId ?? null,
+        threadId: threadId ?? context.threadId ?? null,
+        artifactPath: outputPath,
+        rendererKind: "html",
+      }).key
+      const nextVersionState = createVersionFromBuilderOutput({
+        workspaceKey: context.workspaceKey,
+        logicalArtifactId: context.artifactStableIdentity ?? artifactStableIdentity,
+        original: {
+          artifactStableIdentity: context.artifactStableIdentity,
+          artifactPath: context.artifactPath,
+          artifactTitle: context.artifactTitle,
+          rendererKind: context.rendererKind,
+        },
+        output: {
+          artifactStableIdentity: outputStableIdentity,
+          artifactPath: outputPath,
+          artifactTitle: output.artifactTitle,
+          rendererKind: "html",
+        },
+        builderTaskId: null,
+        requestedChangeSummary: context.requestedChangeSummary,
+      })
+      const versionTelemetry = getVersionTelemetry(nextVersionState)
+      if (!nextVersionState) {
+        setCoreviewBuilderUpdateCard({
+          artifactTitle: context.artifactTitle ?? output.artifactTitle ?? "Selected artifact",
+          requestedChangeSummary: context.requestedChangeSummary,
+          status: "failed",
+          currentStep: null,
+          outputTitle: output.artifactTitle,
+          outputPath,
+          unsupportedReason: "Couldn’t save the quick update. Original preserved.",
+          autoApplied: false,
+          nonHtmlOutput: false,
+          versionLabel: null,
+          restoreAvailable: false,
+        })
+        setVoiceCommandStatus({
+          text: "The quick update could not be saved. Original preserved.",
+          tone: "warn",
+        })
+        recordCoreviewBuilderTelemetry(result)
+        return
+      }
+
+      const actor = context.sourceActor === "sophia" ? sophiaWorkspaceActor : userWorkspaceActor
+      const versionEventPayload = {
+        workspaceKey: context.workspaceKey,
+        artifactKey: coreviewArtifactKey,
+        artifactStableIdentity: context.artifactStableIdentity,
+        artifactPath: context.artifactPath,
+        artifactTitle: context.artifactTitle,
+        rendererKind: context.rendererKind,
+        builderTaskId: null,
+        builderRunId: null,
+        updateMode: context.updateMode,
+        requestedChangeSummary: context.requestedChangeSummary,
+        sourceActor: context.sourceActor,
+        sessionId: context.sessionId,
+        threadId: context.threadId,
+        parentThreadId: context.parentThreadId ?? null,
+        outputArtifactPath: outputPath,
+        outputArtifactTitle: output.artifactTitle,
+        quickPatchApplied: true,
+        rawCommentTextExcluded: true,
+        rawArtifactTextExcluded: true,
+        rawFrameExcluded: true,
+      }
+      recordCoreviewWorkspaceEvent({
+        type: "artifact.version_created",
+        actor,
+        artifactKey: coreviewArtifactKey,
+        artifactStableIdentity: context.artifactStableIdentity,
+        threadId: context.threadId,
+        payload: {
+          ...versionEventPayload,
+          result: "quick_patch_new_version",
+        },
+      })
+      recordCoreviewWorkspaceEvent({
+        type: "artifact.version_selected",
+        actor,
+        artifactKey: coreviewArtifactKey,
+        artifactStableIdentity: context.artifactStableIdentity,
+        threadId: context.threadId,
+        payload: {
+          ...versionEventPayload,
+          result: "quick_patch_auto_selected",
+        },
+      })
+
+      setCoreviewArtifactVersionState(nextVersionState)
+      setRestoreOriginalPending(false)
+      onSelectedBuilderArtifactPathChange?.(outputPath)
+      setCoreviewBuilderUpdateCard({
+        artifactTitle: context.artifactTitle ?? output.artifactTitle ?? "Selected artifact",
+        requestedChangeSummary: context.requestedChangeSummary,
+        status: "applying",
+        currentStep: "Applying update...",
+        outputTitle: output.artifactTitle,
+        outputPath,
+        unsupportedReason: null,
+        autoApplied: false,
+        nonHtmlOutput: false,
+        versionLabel: null,
+        restoreAvailable: false,
+      })
+      setPendingCoreviewHtmlAutoApply({
+        signature: coreviewBuilderCompletionSignature({
+          workspaceKey: context.workspaceKey,
+          artifactStableIdentity: context.artifactStableIdentity,
+          taskId: null,
+          runId: null,
+          outputPath,
+        }),
+        context,
+        output,
+        outputPath,
+        originalPath: normalizeBuilderArtifactPath(context.artifactPath),
+        taskId: null,
+        runId: null,
+        matchedBy: "quick_patch",
+        versionState: nextVersionState,
+        versionTelemetry,
+        quickPatchTelemetry: result.htmlQuickPatch ?? null,
+        attemptedAt: Date.now(),
+        timedOut: false,
+      })
+      recordCoreviewBuilderTelemetry(result)
+      recordSophiaCaptureEvent({
+        category: "voice-session",
+        name: "coreview-builder-action",
+        payload: {
+          sessionId: sessionId ?? null,
+          normalSessionId: normalSessionId ?? null,
+          threadId: threadId ?? null,
+          coreviewHtmlLiveUpdateEnabled,
+          coreviewArtifactVersioningEnabled: true,
+          coreviewHtmlUpdateMatchedBy: "quick_patch",
+          coreviewHtmlUpdateAutoApplyAttempted: true,
+          coreviewHtmlUpdateAutoApplied: false,
+          coreviewHtmlUpdateAutoApplyResult: "pending_render_confirmation",
+          coreviewHtmlUpdateRenderConfirmed: false,
+          coreviewHtmlUpdatePreviewRefreshFailed: false,
+          coreviewHtmlUpdatePreviousPathHash: versionTelemetry.coreviewHtmlUpdatePreviousPathHash,
+          coreviewHtmlUpdateCurrentPathHash: versionTelemetry.coreviewHtmlUpdateCurrentPathHash,
+          coreviewHtmlUpdateRestoreAvailable: versionTelemetry.coreviewHtmlUpdateRestoreAvailable,
+          coreviewHtmlUpdateNoViewClickRequired: false,
+          coreviewHtmlUpdateSelectedPathChanged: normalizeBuilderArtifactPath(normalizedSelectedBuilderArtifactPath) === outputPath,
+          coreviewHtmlUpdateSuccessClaimBlockedUntilRender: true,
+          coreviewHtmlUpdateSuppressedCompletedBuilderSurface: true,
+          coreviewHtmlQuickPatchEligible: result.htmlQuickPatch?.eligible ?? true,
+          coreviewHtmlQuickPatchAttempted: result.htmlQuickPatch?.attempted ?? true,
+          coreviewHtmlQuickPatchResult: result.htmlQuickPatch?.result ?? "patched",
+          coreviewHtmlQuickPatchKind: result.htmlQuickPatch?.kind ?? null,
+          coreviewHtmlQuickPatchFallbackReason: result.htmlQuickPatch?.fallbackReason ?? null,
+          coreviewHtmlQuickPatchLatencyMs: result.htmlQuickPatch?.latencyMs ?? null,
+          coreviewHtmlQuickPatchRevisionPathHash: result.htmlQuickPatch?.revisionPathHash ?? versionTelemetry.coreviewHtmlUpdateCurrentPathHash,
+          coreviewHtmlQuickPatchUsedFullBuilder: false,
+          coreviewHtmlQuickPatchRenderConfirmed: false,
+          coreviewHtmlQuickPatchPreservedOriginal: result.htmlQuickPatch?.preservedOriginal ?? true,
+          coreviewHtmlQuickPatchRestoreAvailable: versionTelemetry.coreviewHtmlUpdateRestoreAvailable,
+          coreviewHtmlQuickPatchTypeErrorPrevented: false,
+          coreviewHtmlUpdatePreservedReview: true,
+          coreviewHtmlUpdatePreservedMic: true,
+          rawArtifactTextExcluded: true,
+          rawCommentTextExcluded: true,
+          rawFrameExcluded: true,
+        },
+      })
+      return
+    }
+
     const artifactTitle = result.context?.artifactTitle ?? stageBuilderArtifact?.artifactTitle ?? "Selected artifact"
     const requestedChangeSummary = result.requestedChangeSummary
       ?? result.context?.requestedChangeSummary
@@ -2475,11 +2688,23 @@ export function PresenceArtifactPanel({
     recordCoreviewBuilderTelemetry(result)
   }, [
     activeCoreviewBuilderTask?.currentStep,
+    artifactStableIdentity,
     builderCompletion,
     builderTask,
+    coreviewArtifactKey,
+    coreviewHtmlLiveUpdateEnabled,
     latestCoreviewBuilderOutput,
+    normalSessionId,
+    normalizedSelectedBuilderArtifactPath,
+    onSelectedBuilderArtifactPathChange,
     recordCoreviewBuilderTelemetry,
+    recordCoreviewWorkspaceEvent,
+    sessionId,
+    sophiaWorkspaceActor,
     stageBuilderArtifact?.artifactTitle,
+    threadId,
+    userId,
+    userWorkspaceActor,
   ])
 
   const emitCoreviewBuilderWorkspaceEvent = useCallback((input: CoreviewBuilderWorkspaceEventInput) => {
@@ -2551,6 +2776,30 @@ export function PresenceArtifactPanel({
           context,
           prompt,
           updateMode: context.updateMode,
+        })
+      },
+      quickPatchHtmlArtifact: async ({ context, classification }) => {
+        const patchThreadId = context.threadId ?? threadId ?? null
+        if (!patchThreadId || !context.artifactPath || context.rendererKind !== "html" || !classification.quickEditKind) {
+          return {
+            ok: false,
+            result: "failed",
+            fallback_reason: "quick_patch_context_unavailable",
+            raw_html_excluded: true,
+            raw_artifact_text_excluded: true,
+          }
+        }
+        return requestCoreviewHtmlQuickPatch(patchThreadId, {
+          artifact_path: context.artifactPath,
+          artifact_stable_identity: context.artifactStableIdentity,
+          renderer_kind: "html",
+          user_update_request: context.userUpdateRequest,
+          requested_change_summary: classification.requestedChangeSummary,
+          quick_edit_kind: classification.quickEditKind,
+          target_fields: classification.targetFields,
+          workspace_key: context.workspaceKey,
+          session_id: context.sessionId,
+          thread_id: context.threadId,
         })
       },
       cancelBuilderTask: async ({ context, task }) => {
@@ -2986,6 +3235,22 @@ export function PresenceArtifactPanel({
           coreviewArtifactLogicalId: pending.versionTelemetry.coreviewArtifactLogicalId
             ?? pending.context.artifactStableIdentity
             ?? artifactStableIdentity,
+          coreviewHtmlQuickPatchEligible: pending.quickPatchTelemetry?.eligible ?? false,
+          coreviewHtmlQuickPatchAttempted: pending.quickPatchTelemetry?.attempted ?? false,
+          coreviewHtmlQuickPatchResult: pending.quickPatchTelemetry
+            ? "patched"
+            : null,
+          coreviewHtmlQuickPatchKind: pending.quickPatchTelemetry?.kind ?? null,
+          coreviewHtmlQuickPatchFallbackReason: pending.quickPatchTelemetry?.fallbackReason ?? null,
+          coreviewHtmlQuickPatchLatencyMs: pending.quickPatchTelemetry?.latencyMs ?? null,
+          coreviewHtmlQuickPatchRevisionPathHash: pending.quickPatchTelemetry?.revisionPathHash
+            ?? pending.versionTelemetry.coreviewHtmlUpdateCurrentPathHash,
+          coreviewHtmlQuickPatchUsedFullBuilder: pending.quickPatchTelemetry ? false : null,
+          coreviewHtmlQuickPatchRenderConfirmed: pending.quickPatchTelemetry ? true : null,
+          coreviewHtmlQuickPatchPreservedOriginal: pending.quickPatchTelemetry?.preservedOriginal ?? null,
+          coreviewHtmlQuickPatchRestoreAvailable: pending.quickPatchTelemetry
+            ? pending.versionTelemetry.coreviewHtmlUpdateRestoreAvailable
+            : null,
           coreviewArtifactOriginalVersionIdPresent: pending.versionTelemetry.coreviewArtifactOriginalVersionIdPresent,
           coreviewArtifactCurrentVersionIdPresent: pending.versionTelemetry.coreviewArtifactCurrentVersionIdPresent,
           coreviewArtifactVersionCount: pending.versionTelemetry.coreviewArtifactVersionCount,
@@ -3053,6 +3318,20 @@ export function PresenceArtifactPanel({
         coreviewArtifactLogicalId: pending.versionTelemetry.coreviewArtifactLogicalId
           ?? pending.context.artifactStableIdentity
           ?? artifactStableIdentity,
+        coreviewHtmlQuickPatchEligible: pending.quickPatchTelemetry?.eligible ?? false,
+        coreviewHtmlQuickPatchAttempted: pending.quickPatchTelemetry?.attempted ?? false,
+        coreviewHtmlQuickPatchResult: pending.quickPatchTelemetry
+          ? "preview_not_refreshed"
+          : null,
+        coreviewHtmlQuickPatchKind: pending.quickPatchTelemetry?.kind ?? null,
+        coreviewHtmlQuickPatchFallbackReason: pending.quickPatchTelemetry?.fallbackReason ?? null,
+        coreviewHtmlQuickPatchLatencyMs: pending.quickPatchTelemetry?.latencyMs ?? null,
+        coreviewHtmlQuickPatchRevisionPathHash: pending.quickPatchTelemetry?.revisionPathHash
+          ?? pending.versionTelemetry.coreviewHtmlUpdateCurrentPathHash,
+        coreviewHtmlQuickPatchUsedFullBuilder: pending.quickPatchTelemetry ? false : null,
+        coreviewHtmlQuickPatchRenderConfirmed: pending.quickPatchTelemetry ? false : null,
+        coreviewHtmlQuickPatchPreservedOriginal: pending.quickPatchTelemetry?.preservedOriginal ?? null,
+        coreviewHtmlQuickPatchRestoreAvailable: pending.quickPatchTelemetry ? false : null,
         coreviewArtifactOriginalVersionIdPresent: pending.versionTelemetry.coreviewArtifactOriginalVersionIdPresent,
         coreviewArtifactCurrentVersionIdPresent: pending.versionTelemetry.coreviewArtifactCurrentVersionIdPresent,
         coreviewArtifactVersionCount: pending.versionTelemetry.coreviewArtifactVersionCount,
@@ -3137,6 +3416,29 @@ export function PresenceArtifactPanel({
         text: isUpdateCommand ? "Starting artifact update" : "Cancelling artifact update",
         tone: "pending",
       })
+      if (isUpdateCommand) {
+        const optimisticContext = coreviewBuilderActionBus.buildUpdateContext({
+          userUpdateRequest: command.updateRequest ?? transcript,
+          updateMode: command.updateMode ?? null,
+          sourceActor: "user",
+        })
+        if (optimisticContext?.rendererKind === "html") {
+          latestCoreviewBuilderContextRef.current = optimisticContext
+          setCoreviewBuilderUpdateCard({
+            artifactTitle: optimisticContext.artifactTitle ?? stageBuilderArtifact?.artifactTitle ?? "Selected artifact",
+            requestedChangeSummary: optimisticContext.requestedChangeSummary,
+            status: "applying",
+            currentStep: "Applying update...",
+            outputTitle: null,
+            outputPath: null,
+            unsupportedReason: null,
+            autoApplied: false,
+            nonHtmlOutput: false,
+            versionLabel: null,
+            restoreAvailable: false,
+          })
+        }
+      }
 
       const runBuilderCommand = async () => {
         const result = isUpdateCommand
@@ -3636,6 +3938,7 @@ export function PresenceArtifactPanel({
     isVisible,
     recordReviewVoiceCommandTelemetry,
     runCoreviewAction,
+    stageBuilderArtifact?.artifactTitle,
   ])
 
   useEffect(() => {

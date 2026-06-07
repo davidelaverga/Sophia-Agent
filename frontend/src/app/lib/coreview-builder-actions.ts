@@ -1,6 +1,11 @@
 import type { ArtifactRendererKind } from "./artifact-renderers"
 import type { CoreviewCurrentView } from "./coreview-actions"
 import { buildCoreviewCapabilitySummary } from "./coreview-artifact-capabilities"
+import {
+  classifyCoreviewHtmlQuickEdit,
+  type CoreviewHtmlQuickEditClassification,
+  type CoreviewHtmlQuickPatchResponse,
+} from "./coreview-html-quick-edit"
 import type {
   CoreviewCurrentViewCapabilitySummary,
 } from "./coreview-workspace-contract"
@@ -53,6 +58,7 @@ export type CoreviewBuilderBlockedReason =
 export type CoreviewBuilderActionResultKind =
   | "update_requested"
   | "task_started"
+  | "quick_patch_applied"
   | "status"
   | "cancel_requested"
   | "cancelled"
@@ -111,6 +117,21 @@ export interface CoreviewBuilderOutputStatus {
   artifactHref?: string | null
 }
 
+export interface CoreviewHtmlQuickPatchActionTelemetry {
+  eligible: boolean
+  attempted: boolean
+  result: "patched" | "unsupported" | "failed" | "not_eligible" | "fallback_full_builder"
+  kind: string | null
+  fallbackReason: string | null
+  latencyMs: number | null
+  revisionPathHash: string | null
+  usedFullBuilder: boolean
+  renderConfirmed?: boolean | null
+  preservedOriginal: boolean
+  restoreAvailable?: boolean | null
+  typeErrorPrevented?: boolean | null
+}
+
 export interface CoreviewBuilderActionResult {
   ok: boolean
   action: CoreviewBuilderActionResultName
@@ -125,6 +146,8 @@ export interface CoreviewBuilderActionResult {
   context?: CoreviewArtifactUpdateContext | null
   status?: CoreviewBuilderTaskStatus | null
   latestOutput?: CoreviewBuilderOutputStatus | null
+  htmlQuickPatch?: CoreviewHtmlQuickPatchActionTelemetry | null
+  htmlQuickPatchResponse?: CoreviewHtmlQuickPatchResponse | null
   editBuilderArtifactInterceptedByCoreview?: boolean
   editBuilderArtifactDirectCallResult?: string | null
   coreviewUpdateStateCreatedFromDirectEditTool?: boolean
@@ -202,6 +225,10 @@ export interface CoreviewBuilderActionAdapter {
     context: CoreviewArtifactUpdateContext
     prompt: string
   }): Promise<CoreviewBuilderStartAdapterResult> | CoreviewBuilderStartAdapterResult
+  quickPatchHtmlArtifact?(input: {
+    context: CoreviewArtifactUpdateContext
+    classification: CoreviewHtmlQuickEditClassification
+  }): Promise<CoreviewHtmlQuickPatchResponse> | CoreviewHtmlQuickPatchResponse
   cancelBuilderTask(input: {
     context: CoreviewArtifactUpdateContext | null
     task: CoreviewBuilderTaskStatus
@@ -359,17 +386,148 @@ export function createCoreviewBuilderActionBus(adapter: CoreviewBuilderActionAda
       })
     }
 
-    adapter.emitWorkspaceEvent({
-      type: "builder.update_requested",
-      context,
+    const quickEdit = classifyCoreviewHtmlQuickEdit({
+      userUpdateRequest: context.userUpdateRequest,
+      rendererKind: context.rendererKind,
+      artifactPath: context.artifactPath,
+      updateMode: context.updateMode,
     })
-    upsertActiveCoreviewBuilderTaskState(context, {
-      status: "starting",
-      taskId: null,
-      runId: null,
-      cancellable: false,
-      currentStep: "Applying update...",
-    })
+    const quickPatchEligible = Boolean(
+      quickEdit.supported
+        && context.rendererKind === "html"
+        && context.artifactPath
+        && (context.updateMode === "revise_version" || context.updateMode === "update_existing"),
+    )
+    let updateStateCreated = false
+    const beginUpdateState = () => {
+      if (updateStateCreated) {
+        return
+      }
+      updateStateCreated = true
+      adapter.emitWorkspaceEvent({
+        type: "builder.update_requested",
+        context,
+      })
+      upsertActiveCoreviewBuilderTaskState(context, {
+        status: "starting",
+        taskId: null,
+        runId: null,
+        cancellable: false,
+        currentStep: "Applying update...",
+      })
+    }
+    let quickPatchTelemetry: CoreviewHtmlQuickPatchActionTelemetry | null = quickPatchEligible
+      ? {
+          eligible: true,
+          attempted: false,
+          result: "fallback_full_builder",
+          kind: quickEdit.quickEditKind,
+          fallbackReason: adapter.quickPatchHtmlArtifact ? null : "quick_patch_adapter_unavailable",
+          latencyMs: null,
+          revisionPathHash: null,
+          usedFullBuilder: true,
+          preservedOriginal: true,
+          restoreAvailable: null,
+          renderConfirmed: null,
+        }
+      : {
+          eligible: false,
+          attempted: false,
+          result: "not_eligible",
+          kind: quickEdit.quickEditKind,
+          fallbackReason: quickEdit.fallbackReason,
+          latencyMs: null,
+          revisionPathHash: null,
+          usedFullBuilder: true,
+          preservedOriginal: true,
+          restoreAvailable: null,
+          renderConfirmed: null,
+        }
+
+    if (quickPatchEligible && adapter.quickPatchHtmlArtifact) {
+      beginUpdateState()
+      const quickStartedAt = Date.now()
+      const quickPatch = await adapter.quickPatchHtmlArtifact({
+        context,
+        classification: quickEdit,
+      })
+      const latencyMs = Math.max(0, Date.now() - quickStartedAt)
+      quickPatchTelemetry = {
+        eligible: true,
+        attempted: true,
+        result: quickPatch.result,
+        kind: quickEdit.quickEditKind,
+        fallbackReason: quickPatch.fallback_reason ?? null,
+        latencyMs,
+        revisionPathHash: quickPatch.revision_path_hash ?? null,
+        usedFullBuilder: quickPatch.result !== "patched",
+        preservedOriginal: quickPatch.preserved_original !== false,
+        restoreAvailable: null,
+        renderConfirmed: null,
+      }
+
+      if (quickPatch.ok && quickPatch.result === "patched" && quickPatch.revision_artifact_path) {
+        upsertActiveCoreviewBuilderTaskState(context, {
+          status: "completed",
+          taskId: null,
+          runId: null,
+          cancellable: false,
+          currentStep: null,
+        })
+        return builderResult({
+          ok: true,
+          action: COREVIEW_REQUEST_ARTIFACT_UPDATE_TOOL_NAME,
+          result: "quick_patch_applied",
+          taskId: null,
+          runId: null,
+          userFacingMessage: "Sophia applied a quick HTML update.",
+          context,
+          status: {
+            phase: "completed",
+            taskId: null,
+            runId: null,
+            cancellable: false,
+            currentStep: null,
+          },
+          latestOutput: {
+            artifactPath: quickPatch.revision_artifact_path,
+            artifactTitle: artifactTitleFromPath(quickPatch.revision_artifact_path),
+          },
+          htmlQuickPatch: {
+            ...quickPatchTelemetry,
+            usedFullBuilder: false,
+          },
+          htmlQuickPatchResponse: quickPatch,
+        })
+      }
+
+      if (quickPatch.result !== "unsupported") {
+        upsertActiveCoreviewBuilderTaskState(context, {
+          status: "failed",
+          taskId: null,
+          runId: null,
+          cancellable: false,
+          currentStep: "Quick update could not be applied",
+        })
+        adapter.emitWorkspaceEvent({
+          type: "builder.task_failed",
+          context,
+          result: quickPatch.fallback_reason ?? "quick_patch_failed",
+        })
+        return builderResult({
+          ok: false,
+          action: COREVIEW_REQUEST_ARTIFACT_UPDATE_TOOL_NAME,
+          result: "failed",
+          blockedReason: quickPatch.fallback_reason ?? "quick_patch_failed",
+          userFacingMessage: "Sophia could not apply that quick update. Original preserved.",
+          context,
+          htmlQuickPatch: quickPatchTelemetry,
+          htmlQuickPatchResponse: quickPatch,
+        })
+      }
+    }
+
+    beginUpdateState()
 
     const prompt = buildCoreviewBuilderUpdatePrompt(context)
     const started = await adapter.startBuilderTask({ context, prompt })
@@ -397,6 +555,7 @@ export function createCoreviewBuilderActionBus(adapter: CoreviewBuilderActionAda
         blockedReason: started.blockedReason ?? "builder_start_failed",
         userFacingMessage: started.userFacingMessage ?? "Sophia could not start the artifact update.",
         context,
+        htmlQuickPatch: quickPatchTelemetry,
       })
     }
 
@@ -428,6 +587,7 @@ export function createCoreviewBuilderActionBus(adapter: CoreviewBuilderActionAda
       runId: started.runId,
       userFacingMessage: started.userFacingMessage ?? "Sophia is updating this artifact.",
       context,
+      htmlQuickPatch: quickPatchTelemetry,
     })
   }
 
@@ -833,6 +993,13 @@ function stringFromAnyKey(value: Record<string, unknown>, ...keys: string[]): st
     }
   }
   return null
+}
+
+function artifactTitleFromPath(path: string | null | undefined): string | null {
+  if (typeof path !== "string" || !path.trim()) {
+    return null
+  }
+  return path.split("/").filter(Boolean).pop() ?? null
 }
 
 function normalizeCancelStatus(

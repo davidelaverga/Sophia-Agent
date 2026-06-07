@@ -79,6 +79,16 @@ function createHarness(options: {
   startTaskId?: string | null
   startRunId?: string | null
   cancelOk?: boolean
+  quickPatchResponse?: {
+    ok: boolean
+    result: "patched" | "unsupported" | "failed"
+    revision_artifact_path?: string | null
+    revision_path_hash?: string | null
+    fallback_reason?: string | null
+    preserved_original?: boolean
+    raw_html_excluded: true
+    raw_artifact_text_excluded: true
+  } | null
 } = {}) {
   const events: CoreviewBuilderWorkspaceEventInput[] = []
   const start = vi.fn<CoreviewBuilderActionAdapter["startBuilderTask"]>(() => ({
@@ -94,6 +104,15 @@ function createHarness(options: {
     status: options.cancelOk === false ? "failed" : "cancelled",
     userFacingMessage: options.cancelOk === false ? "Cancel failed." : "The artifact update was cancelled.",
   }))
+  const quickPatch = vi.fn<NonNullable<CoreviewBuilderActionAdapter["quickPatchHtmlArtifact"]>>(() => (
+    options.quickPatchResponse ?? {
+      ok: false,
+      result: "unsupported",
+      fallback_reason: "unsupported_quick_patch",
+      raw_html_excluded: true,
+      raw_artifact_text_excluded: true,
+    }
+  ))
   const bus = createCoreviewBuilderActionBus({
     getCurrentView: () => options.current ?? createView(),
     getWorkspaceKey: () => "user:unknown|thread:thread-1",
@@ -113,9 +132,10 @@ function createHarness(options: {
       events.push(event)
     },
     startBuilderTask: start,
+    quickPatchHtmlArtifact: quickPatch,
     cancelBuilderTask: cancel,
   })
-  return { bus, events, start, cancel }
+  return { bus, events, start, cancel, quickPatch }
 }
 
 function createActiveTask() {
@@ -265,6 +285,91 @@ describe("Coreview builder action bus", () => {
       "builder.task_started",
     ])
     expect(JSON.stringify(result)).not.toContain("emit_artifact")
+  })
+
+  it("uses quick HTML patch for simple title edits without starting the full builder", async () => {
+    const harness = createHarness({
+      quickPatchResponse: {
+        ok: true,
+        result: "patched",
+        revision_artifact_path: "mnt/user-data/outputs/site-quick-1234abcd.html",
+        revision_path_hash: "path-hash",
+        preserved_original: true,
+        raw_html_excluded: true,
+        raw_artifact_text_excluded: true,
+      },
+    })
+
+    const result = await harness.bus.requestArtifactUpdate({
+      userUpdateRequest: "Change the main title to Sophia Workspace Version Two",
+    })
+
+    expect(result).toMatchObject({
+      ok: true,
+      action: "coreview_request_artifact_update",
+      result: "quick_patch_applied",
+      latestOutput: {
+        artifactPath: "mnt/user-data/outputs/site-quick-1234abcd.html",
+        artifactTitle: "site-quick-1234abcd.html",
+      },
+      htmlQuickPatch: {
+        eligible: true,
+        attempted: true,
+        result: "patched",
+        kind: "title",
+        usedFullBuilder: false,
+        preservedOriginal: true,
+        revisionPathHash: "path-hash",
+      },
+    })
+    expect(harness.quickPatch).toHaveBeenCalledTimes(1)
+    expect(harness.quickPatch.mock.calls[0]?.[0].classification).toMatchObject({
+      supported: true,
+      quickEditKind: "title",
+      targetFields: {
+        titleText: "Sophia Workspace Version Two",
+      },
+    })
+    expect(harness.start).not.toHaveBeenCalled()
+    expect(harness.events.map((event) => event.type)).toEqual([
+      "builder.update_requested",
+    ])
+  })
+
+  it("falls back to full builder when a quick HTML patch is unsupported", async () => {
+    const harness = createHarness({
+      quickPatchResponse: {
+        ok: false,
+        result: "unsupported",
+        fallback_reason: "card_css_target_not_found",
+        raw_html_excluded: true,
+        raw_artifact_text_excluded: true,
+      },
+    })
+
+    const result = await harness.bus.requestArtifactUpdate({
+      userUpdateRequest: "Make the cards darker",
+    })
+
+    expect(result).toMatchObject({
+      ok: true,
+      result: "task_started",
+      htmlQuickPatch: {
+        eligible: true,
+        attempted: true,
+        result: "unsupported",
+        kind: "cards_darker",
+        fallbackReason: "card_css_target_not_found",
+        usedFullBuilder: true,
+      },
+    })
+    expect(harness.quickPatch).toHaveBeenCalledTimes(1)
+    expect(harness.start).toHaveBeenCalledTimes(1)
+    expect(harness.start.mock.calls[0]?.[0].prompt).toContain("Use edit_builder_artifact")
+    expect(harness.events.map((event) => event.type)).toEqual([
+      "builder.update_requested",
+      "builder.task_started",
+    ])
   })
 
   it("stores active Coreview builder task state after requesting an update", async () => {

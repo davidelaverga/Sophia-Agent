@@ -93,6 +93,177 @@ def test_get_artifact_serves_local_html_as_text_html(tmp_path, monkeypatch) -> N
     assert response.media_type == "text/html"
 
 
+def test_quick_patch_html_title_creates_revision_without_overwriting_original(tmp_path, monkeypatch) -> None:
+    user_data = tmp_path / "user-data"
+    outputs_dir = user_data / "outputs"
+    outputs_dir.mkdir(parents=True)
+    source_path = outputs_dir / "site.html"
+    original_html = (
+        "<!doctype html><html><head><title>Original Title</title></head>"
+        "<body><main><h1>Original Title</h1></main></body></html>"
+    )
+    source_path.write_text(original_html, encoding="utf-8")
+
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        thread_user_data_resolver({"thread-1": user_data}),
+    )
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "upload_artifact", lambda **_kwargs: None)
+
+    response = asyncio.run(
+        artifacts_router.quick_patch_html_artifact(
+            "thread-1",
+            artifacts_router.HtmlQuickPatchRequest(
+                artifact_path="mnt/user-data/outputs/site.html",
+                renderer_kind="html",
+                user_update_request="Change the main title to Sophia Workspace Version Two",
+                requested_change_summary="Change the main title to Sophia Workspace Version Two",
+                quick_edit_kind="title",
+                target_fields={"titleText": "Sophia Workspace Version Two"},
+            ),
+            authenticated_user_id=None,
+        )
+    )
+
+    assert response.ok is True
+    assert response.result == "patched"
+    assert response.original_artifact_path == "mnt/user-data/outputs/site.html"
+    assert response.source_artifact_path == "mnt/user-data/outputs/site.html"
+    assert response.revision_of_artifact_path == "mnt/user-data/outputs/site.html"
+    assert response.revision_artifact_path is not None
+    assert response.revision_artifact_path != response.original_artifact_path
+    assert response.revision_path_hash
+    assert response.content_hash
+    assert source_path.read_text(encoding="utf-8") == original_html
+
+    revision_relative = response.revision_artifact_path.removeprefix("mnt/user-data/")
+    revision_path = user_data / revision_relative
+    revision_html = revision_path.read_text(encoding="utf-8")
+    assert "<title>Sophia Workspace Version Two</title>" in revision_html
+    assert "<h1>Sophia Workspace Version Two</h1>" in revision_html
+
+
+def test_quick_patch_html_unsupported_edit_falls_back_safely(tmp_path, monkeypatch) -> None:
+    user_data = tmp_path / "user-data"
+    outputs_dir = user_data / "outputs"
+    outputs_dir.mkdir(parents=True)
+    source_path = outputs_dir / "site.html"
+    source_path.write_text("<html><body><h1>Original</h1></body></html>", encoding="utf-8")
+
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        thread_user_data_resolver({"thread-1": user_data}),
+    )
+
+    response = asyncio.run(
+        artifacts_router.quick_patch_html_artifact(
+            "thread-1",
+            artifacts_router.HtmlQuickPatchRequest(
+                artifact_path="mnt/user-data/outputs/site.html",
+                renderer_kind="html",
+                user_update_request="Redesign the whole page",
+                requested_change_summary="Redesign the whole page",
+                quick_edit_kind="redesign",
+                target_fields={},
+            ),
+            authenticated_user_id=None,
+        )
+    )
+
+    assert response.ok is False
+    assert response.result == "unsupported"
+    assert response.fallback_reason == "unsupported_quick_edit_kind"
+    assert response.revision_artifact_path is None
+    assert source_path.read_text(encoding="utf-8") == "<html><body><h1>Original</h1></body></html>"
+
+
+def test_quick_patch_html_darkens_card_css_when_card_class_exists(tmp_path, monkeypatch) -> None:
+    user_data = tmp_path / "user-data"
+    outputs_dir = user_data / "outputs"
+    outputs_dir.mkdir(parents=True)
+    source_path = outputs_dir / "site.html"
+    source_path.write_text(
+        (
+            "<!doctype html><html><head><style>"
+            ".feature-card { background: #ffffff; border-color: #eeeeee; }"
+            "</style></head><body><div class=\"feature-card\">One</div></body></html>"
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        thread_user_data_resolver({"thread-1": user_data}),
+    )
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "upload_artifact", lambda **_kwargs: None)
+
+    response = asyncio.run(
+        artifacts_router.quick_patch_html_artifact(
+            "thread-1",
+            artifacts_router.HtmlQuickPatchRequest(
+                artifact_path="mnt/user-data/outputs/site.html",
+                renderer_kind="html",
+                user_update_request="Make the cards darker",
+                requested_change_summary="Make the cards darker",
+                quick_edit_kind="cards_darker",
+                target_fields={},
+            ),
+            authenticated_user_id=None,
+        )
+    )
+
+    assert response.ok is True
+    assert response.revision_artifact_path is not None
+    revision_html = (user_data / response.revision_artifact_path.removeprefix("mnt/user-data/")).read_text(
+        encoding="utf-8"
+    )
+    assert "background: #151821;" in revision_html
+    assert "border-color: #2b3446;" in revision_html
+    assert "<html>" in revision_html
+    assert "<body>" in revision_html
+
+
+def test_quick_patch_html_response_excludes_raw_html(tmp_path, monkeypatch) -> None:
+    user_data = tmp_path / "user-data"
+    outputs_dir = user_data / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (outputs_dir / "site.html").write_text(
+        "<html><head><title>Secret Original</title></head><body><h1>Secret Original</h1></body></html>",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        thread_user_data_resolver({"thread-1": user_data}),
+    )
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "upload_artifact", lambda **_kwargs: None)
+
+    response = asyncio.run(
+        artifacts_router.quick_patch_html_artifact(
+            "thread-1",
+            artifacts_router.HtmlQuickPatchRequest(
+                artifact_path="mnt/user-data/outputs/site.html",
+                renderer_kind="html",
+                user_update_request="Change the main title to Public Title",
+                requested_change_summary="Change the main title to Public Title",
+                quick_edit_kind="title",
+                target_fields={"titleText": "Public Title"},
+            ),
+            authenticated_user_id=None,
+        )
+    )
+
+    serialized = response.model_dump_json()
+    assert response.raw_html_excluded is True
+    assert response.raw_artifact_text_excluded is True
+    assert "Secret Original" not in serialized
+    assert "<html" not in serialized.lower()
+
+
 def test_get_artifact_serves_local_pptx_as_attachment(tmp_path, monkeypatch) -> None:
     artifact_path = tmp_path / "deck.pptx"
     artifact_path.write_bytes(b"pptx-bytes")

@@ -13,6 +13,12 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Res
 from pydantic import BaseModel, Field
 
 from app.gateway.auth import require_authenticated_user
+from app.gateway.html_quick_patch import (
+    apply_html_quick_patch,
+    content_hash,
+    revision_artifact_path,
+    stable_path_hash,
+)
 from app.gateway.path_utils import resolve_thread_virtual_path
 from deerflow.sophia.session_store import SessionStore
 from deerflow.sophia.storage import supabase_artifact_store
@@ -49,6 +55,38 @@ class ThreadArtifactListItem(BaseModel):
 class ThreadArtifactListResponse(BaseModel):
     thread_id: str
     artifacts: list[ThreadArtifactListItem] = Field(default_factory=list)
+
+
+class HtmlQuickPatchRequest(BaseModel):
+    artifact_path: str = Field(min_length=1)
+    artifact_stable_identity: str | None = None
+    renderer_kind: str = Field(default="html")
+    user_update_request: str = Field(min_length=1)
+    requested_change_summary: str | None = None
+    quick_edit_kind: str = Field(min_length=1)
+    target_fields: dict[str, Any] = Field(default_factory=dict)
+    workspace_key: str | None = None
+    session_id: str | None = None
+    thread_id: str | None = None
+
+
+class HtmlQuickPatchResponse(BaseModel):
+    ok: bool
+    result: str
+    fallback_reason: str | None = None
+    quick_edit_kind: str | None = None
+    requested_change_summary: str | None = None
+    original_artifact_path: str | None = None
+    revision_artifact_path: str | None = None
+    source_artifact_path: str | None = None
+    revision_of_artifact_path: str | None = None
+    renderer_kind: str | None = "html"
+    content_hash: str | None = None
+    revision_path_hash: str | None = None
+    safe_summary: str | None = None
+    preserved_original: bool = True
+    raw_html_excluded: bool = True
+    raw_artifact_text_excluded: bool = True
 
 
 def _is_builder_internal(name: str) -> bool:
@@ -705,6 +743,197 @@ def _enforce_artifact_list_access(
         _short_id(authenticated_user_id),
         _short_id(thread_id),
         local_count,
+    )
+
+
+def _quick_patch_response(
+    *,
+    ok: bool,
+    result: str,
+    request: HtmlQuickPatchRequest,
+    original_artifact_path: str | None,
+    fallback_reason: str | None = None,
+    revision_path: str | None = None,
+    patched_content: str | None = None,
+    safe_summary: str | None = None,
+) -> HtmlQuickPatchResponse:
+    return HtmlQuickPatchResponse(
+        ok=ok,
+        result=result,
+        fallback_reason=fallback_reason,
+        quick_edit_kind=request.quick_edit_kind,
+        requested_change_summary=_safe_quick_patch_summary(
+            request.requested_change_summary or request.user_update_request
+        ),
+        original_artifact_path=original_artifact_path,
+        revision_artifact_path=revision_path,
+        source_artifact_path=original_artifact_path,
+        revision_of_artifact_path=original_artifact_path,
+        renderer_kind="html",
+        content_hash=content_hash(patched_content) if patched_content is not None else None,
+        revision_path_hash=stable_path_hash(revision_path),
+        safe_summary=safe_summary,
+        preserved_original=True,
+        raw_html_excluded=True,
+        raw_artifact_text_excluded=True,
+    )
+
+
+def _safe_quick_patch_summary(value: str | None) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return " ".join(value.split())[:160]
+
+
+def _read_quick_patch_source(
+    *,
+    thread_id: str,
+    path: str,
+    resolution: ArtifactPathResolution,
+) -> tuple[str, str | None]:
+    actual_path = resolution.actual_path
+    if actual_path.exists() and actual_path.is_file():
+        return actual_path.read_text(encoding="utf-8"), mimetypes.guess_type(actual_path.name)[0]
+
+    relative = _relative_output_artifact_path(path)
+    if relative is None or relative == "":
+        raise FileNotFoundError(path)
+    result = supabase_artifact_store.download_artifact(thread_id=thread_id, filename=relative)
+    if result is None:
+        raise FileNotFoundError(path)
+    content, content_type = result
+    return content.decode("utf-8", errors="replace"), content_type
+
+
+def _write_quick_patch_revision(
+    *,
+    thread_id: str,
+    revision_path: str,
+    content: str,
+) -> Path:
+    revision_actual_path = _resolve_artifact_path(thread_id, revision_path)
+    revision_actual_path.parent.mkdir(parents=True, exist_ok=True)
+    revision_actual_path.write_text(content, encoding="utf-8")
+    return revision_actual_path
+
+
+def _mirror_quick_patch_revision(
+    *,
+    thread_id: str,
+    revision_path: str,
+    content: str,
+) -> None:
+    relative = _relative_output_artifact_path(revision_path)
+    if not relative:
+        return
+    try:
+        supabase_artifact_store.upload_artifact(
+            thread_id=thread_id,
+            filename=relative,
+            content=content.encode("utf-8"),
+            content_type="text/html",
+        )
+    except Exception:  # noqa: BLE001 - quick patch remains valid locally.
+        logger.info(
+            "Quick HTML patch Supabase mirror skipped: thread_id=%s revision_path_hash=%s",
+            _short_id(thread_id),
+            stable_path_hash(revision_path),
+            exc_info=True,
+        )
+
+
+@router.post(
+    "/threads/{thread_id}/artifacts/quick-html-patch",
+    response_model=HtmlQuickPatchResponse,
+    summary="Quick Patch HTML Artifact",
+    description="Apply a conservative deterministic quick edit to a selected HTML artifact.",
+)
+async def quick_patch_html_artifact(
+    thread_id: str,
+    request_body: HtmlQuickPatchRequest,
+    authenticated_user_id: str | None = Depends(require_authenticated_user),
+) -> HtmlQuickPatchResponse:
+    path = _normalize_artifact_virtual_path(request_body.artifact_path)
+    _enforce_artifact_owner(authenticated_user_id, thread_id, path)
+    original_path = path
+
+    if request_body.renderer_kind != "html" or not path.lower().endswith((".html", ".htm")):
+        return _quick_patch_response(
+            ok=False,
+            result="unsupported",
+            request=request_body,
+            original_artifact_path=original_path,
+            fallback_reason="artifact_not_html",
+        )
+
+    resolution = await _resolve_artifact_path_for_request(thread_id, path)
+    try:
+        source_html, content_type = _read_quick_patch_source(
+            thread_id=resolution.resolved_task_thread_id or thread_id,
+            path=path,
+            resolution=resolution,
+        )
+    except (FileNotFoundError, UnicodeDecodeError):
+        return _quick_patch_response(
+            ok=False,
+            result="unsupported",
+            request=request_body,
+            original_artifact_path=original_path,
+            fallback_reason="source_artifact_not_found",
+        )
+
+    if content_type and content_type.split(";")[0].strip().lower() not in {"text/html", "application/xhtml+xml"}:
+        return _quick_patch_response(
+            ok=False,
+            result="unsupported",
+            request=request_body,
+            original_artifact_path=original_path,
+            fallback_reason="source_content_type_not_html",
+        )
+
+    patch = apply_html_quick_patch(
+        source_html,
+        quick_edit_kind=request_body.quick_edit_kind,
+        target_fields=request_body.target_fields,
+    )
+    if not patch.ok or patch.html is None:
+        return _quick_patch_response(
+            ok=False,
+            result=patch.result,
+            request=request_body,
+            original_artifact_path=original_path,
+            fallback_reason=patch.fallback_reason,
+            safe_summary=patch.safe_summary,
+        )
+
+    revision_path = revision_artifact_path(path, patch.html, request_body.user_update_request)
+    write_thread_id = resolution.resolved_task_thread_id or thread_id
+    _write_quick_patch_revision(
+        thread_id=write_thread_id,
+        revision_path=revision_path,
+        content=patch.html,
+    )
+    _mirror_quick_patch_revision(
+        thread_id=write_thread_id,
+        revision_path=revision_path,
+        content=patch.html,
+    )
+
+    logger.info(
+        "Quick HTML patch saved: thread_id=%s source_path_hash=%s revision_path_hash=%s kind=%s",
+        _short_id(thread_id),
+        stable_path_hash(original_path),
+        stable_path_hash(revision_path),
+        request_body.quick_edit_kind,
+    )
+    return _quick_patch_response(
+        ok=True,
+        result="patched",
+        request=request_body,
+        original_artifact_path=original_path,
+        revision_path=revision_path,
+        patched_content=patch.html,
+        safe_summary=patch.safe_summary,
     )
 
 

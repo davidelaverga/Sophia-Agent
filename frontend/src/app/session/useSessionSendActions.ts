@@ -141,11 +141,9 @@ export function useSessionOutboundSend({
       });
     }
 
-    const requestOptions = chatRequestBody
-      ? {
-          body: chatRequestBody,
-        }
-      : undefined;
+    const requestOptions = {
+      body: chatRequestBody ?? {},
+    };
 
     await sendChatMessage({ text: normalizedText }, requestOptions);
 

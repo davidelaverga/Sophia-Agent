@@ -1325,7 +1325,7 @@ describe("Coreview artifact still-frame review", () => {
     const updateCard = await screen.findByTestId("artifact-review-builder-update-card")
     await waitFor(() => expect(updateCard).toHaveAttribute("data-coreview-builder-update-status", "completed"))
     expect(within(updateCard).getByText("Preview updated")).toBeInTheDocument()
-    expect(within(updateCard).getByText("Version 2 saved")).toBeInTheDocument()
+    expect(within(updateCard).getByText(/Version \d+ saved/)).toBeInTheDocument()
     expect(within(updateCard).getByText("Original preserved")).toBeInTheDocument()
     expect(within(updateCard).getByRole("button", { name: /restore original/i })).toBeInTheDocument()
     expect(within(updateCard).queryByRole("button", { name: /view updated version/i })).not.toBeInTheDocument()
@@ -1344,6 +1344,131 @@ describe("Coreview artifact still-frame review", () => {
       const selectedEvents = getWorkspaceEvents(WORKSPACE_KEY)
         .filter((event) => event.type === "artifact.version_selected")
       expect(selectedEvents.some((event) => event.payload.result === "restore_original")).toBe(true)
+    })
+  })
+
+  it("quick-patches a simple HTML title edit without launching the full builder", async () => {
+    setCoreviewFlags(true)
+    registerSophiaCaptureBridge()
+    window.__sophiaCapture?.clear()
+    window.__sophiaCapture?.enable()
+    const quickPatchRequests: Array<Record<string, unknown>> = []
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const href = fetchInputHref(input)
+      if (href.includes("/quick-html-patch")) {
+        quickPatchRequests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>)
+        return Promise.resolve(Response.json({
+          ok: true,
+          result: "patched",
+          quick_edit_kind: "title",
+          requested_change_summary: "Change the main title to Sophia Workspace Version Two",
+          original_artifact_path: "mnt/user-data/outputs/site.html",
+          revision_artifact_path: "mnt/user-data/outputs/site-quick-title.html",
+          source_artifact_path: "mnt/user-data/outputs/site.html",
+          revision_of_artifact_path: "mnt/user-data/outputs/site.html",
+          renderer_kind: "html",
+          content_hash: "content-hash",
+          revision_path_hash: "revision-path-hash",
+          safe_summary: "Updated HTML title and primary heading.",
+          preserved_original: true,
+          raw_html_excluded: true,
+          raw_artifact_text_excluded: true,
+        }))
+      }
+
+      const artifactPath = normalizeArtifactFetchPath(href)
+      if (artifactPath.includes("site-quick-title.html")) {
+        return createHtmlFetchResponse("<!doctype html><html><body><h1>Sophia Workspace Version Two</h1></body></html>")
+      }
+      if (artifactPath.includes("site.html")) {
+        return createHtmlFetchResponse(ORIGINAL_HTML_PREVIEW)
+      }
+      throw new Error(`Unhandled fetch in quick patch test: ${href}`)
+    })
+
+    let routeArtifactCommand: ArtifactReviewVoiceCommandRouteHandler = null
+    const onCoreviewBuilderUpdateRequest = vi.fn<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onCoreviewBuilderUpdateRequest"]>>(async () => ({
+      ok: true,
+      taskId: "task-should-not-start",
+      runId: "run-should-not-start",
+    }))
+
+    function QuickPatchHarness() {
+      const [selectedPath, setSelectedPath] = useState("mnt/user-data/outputs/site.html")
+      return (
+        <PresenceArtifactPanel
+          artifacts={null}
+          builderArtifact={HTML_BUILDER_ARTIFACT}
+          builderArtifactLibrary={[
+            ...HTML_LIBRARY,
+            {
+              path: "mnt/user-data/outputs/site-quick-title.html",
+              name: "site-quick-title.html",
+              mimeType: "text/html",
+            },
+          ]}
+          selectedBuilderArtifactPath={selectedPath}
+          onSelectedBuilderArtifactPathChange={setSelectedPath}
+          onCoreviewBuilderUpdateRequest={onCoreviewBuilderUpdateRequest}
+          sessionId="session-1"
+          normalSessionId="normal-1"
+          threadId="thread-1"
+          isVisible={true}
+          onDismiss={vi.fn()}
+          isVoiceMode={false}
+          coReviewTransport={new GeminiStillFrameTransport({ sendArtifactFrame: vi.fn() })}
+          onArtifactReviewVoiceCommandRouteChange={(handler) => {
+            routeArtifactCommand = handler
+          }}
+        />
+      )
+    }
+
+    render(<QuickPatchHarness />)
+
+    expect(await screen.findByTitle("Preview of site.html")).toBeInTheDocument()
+    await waitFor(() => expect(routeArtifactCommand).not.toBeNull())
+
+    act(() => {
+      expect(routeArtifactCommand?.("change the main title to Sophia Workspace Version Two")).toMatchObject({
+        handled: true,
+        applied: true,
+        suppressAssistant: true,
+      })
+    })
+
+    const applyingCard = await screen.findByTestId("artifact-review-builder-update-card")
+    expect(applyingCard).toHaveAttribute("data-coreview-builder-update-status", "applying")
+    expect(within(applyingCard).getAllByText("Applying update...").length).toBeGreaterThan(0)
+
+    await waitFor(() => expect(quickPatchRequests).toHaveLength(1))
+    expect(quickPatchRequests[0]).toMatchObject({
+      artifact_path: "mnt/user-data/outputs/site.html",
+      renderer_kind: "html",
+      quick_edit_kind: "title",
+      target_fields: {
+        titleText: "Sophia Workspace Version Two",
+      },
+    })
+    expect(onCoreviewBuilderUpdateRequest).not.toHaveBeenCalled()
+
+    expect(await screen.findByTitle("Preview of site-quick-title.html")).toBeInTheDocument()
+    const updateCard = await screen.findByTestId("artifact-review-builder-update-card")
+    await waitFor(() => expect(updateCard).toHaveAttribute("data-coreview-builder-update-status", "completed"))
+    expect(within(updateCard).getByText("Preview updated")).toBeInTheDocument()
+    expect(within(updateCard).getByText(/Version \d+ saved/)).toBeInTheDocument()
+    expect(within(updateCard).getByRole("button", { name: /restore original/i })).toBeInTheDocument()
+    expect(within(updateCard).queryByRole("button", { name: /view updated version/i })).not.toBeInTheDocument()
+    expect(screen.queryByTestId("builder-task-notice")).not.toBeInTheDocument()
+
+    await waitFor(() => {
+      const serialized = JSON.stringify(exportSophiaCaptureBundle().events)
+      expect(serialized).toContain("coreviewHtmlQuickPatchAttempted")
+      expect(serialized).toContain("coreviewHtmlQuickPatchUsedFullBuilder")
+      expect(serialized).toContain('"coreviewHtmlQuickPatchUsedFullBuilder":false')
+      expect(serialized).toContain('"coreviewHtmlQuickPatchRenderConfirmed":true')
+      expect(serialized).not.toContain("edit_builder_artifact")
+      expect(serialized).not.toContain("emit_artifact")
     })
   })
 

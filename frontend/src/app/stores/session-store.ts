@@ -300,7 +300,7 @@ export const useSessionStore = create<SessionState>()(
             }
             if (!found) {
               const synthesized = buildFromActiveSession();
-              if (synthesized?.status !== 'ended') updated.unshift(synthesized);
+              if (synthesized && synthesized.status !== 'ended') updated.unshift(synthesized);
             }
             return sortSessionsByUpdatedAt(updated);
           })();

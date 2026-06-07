@@ -132,6 +132,18 @@ export type CoreviewVisualTelemetry = {
   coreviewHtmlUpdateSelectedPathChanged: boolean
   coreviewHtmlUpdatePreservedReview: boolean | null
   coreviewHtmlUpdatePreservedMic: boolean | null
+  coreviewHtmlQuickPatchEligible: boolean
+  coreviewHtmlQuickPatchAttempted: boolean
+  coreviewHtmlQuickPatchResult: string | null
+  coreviewHtmlQuickPatchKind: string | null
+  coreviewHtmlQuickPatchFallbackReason: string | null
+  coreviewHtmlQuickPatchLatencyMs: number | null
+  coreviewHtmlQuickPatchRevisionPathHash: string | null
+  coreviewHtmlQuickPatchUsedFullBuilder: boolean | null
+  coreviewHtmlQuickPatchRenderConfirmed: boolean | null
+  coreviewHtmlQuickPatchPreservedOriginal: boolean | null
+  coreviewHtmlQuickPatchRestoreAvailable: boolean | null
+  coreviewHtmlQuickPatchTypeErrorPrevented: boolean | null
   htmlCaptureTargetRegistered: boolean
   htmlCaptureTargetRegistrationResult: string | null
   htmlCaptureTargetArtifactPathHash: string | null
@@ -1425,6 +1437,18 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       coreviewHtmlUpdateSelectedPathChanged: false,
       coreviewHtmlUpdatePreservedReview: null,
       coreviewHtmlUpdatePreservedMic: null,
+      coreviewHtmlQuickPatchEligible: false,
+      coreviewHtmlQuickPatchAttempted: false,
+      coreviewHtmlQuickPatchResult: null,
+      coreviewHtmlQuickPatchKind: null,
+      coreviewHtmlQuickPatchFallbackReason: null,
+      coreviewHtmlQuickPatchLatencyMs: null,
+      coreviewHtmlQuickPatchRevisionPathHash: null,
+      coreviewHtmlQuickPatchUsedFullBuilder: null,
+      coreviewHtmlQuickPatchRenderConfirmed: null,
+      coreviewHtmlQuickPatchPreservedOriginal: null,
+      coreviewHtmlQuickPatchRestoreAvailable: null,
+      coreviewHtmlQuickPatchTypeErrorPrevented: null,
       htmlCaptureTargetRegistered: false,
       htmlCaptureTargetRegistrationResult: null,
       htmlCaptureTargetArtifactPathHash: null,
@@ -1996,6 +2020,25 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   ))
   visual.coreviewHtmlUpdatePreservedReview = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewHtmlUpdatePreservedReview")
   visual.coreviewHtmlUpdatePreservedMic = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewHtmlUpdatePreservedMic")
+  visual.coreviewHtmlQuickPatchEligible = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewHtmlQuickPatchEligible) === true
+  ))
+  visual.coreviewHtmlQuickPatchAttempted = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewHtmlQuickPatchAttempted) === true
+  ))
+  visual.coreviewHtmlQuickPatchResult = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewHtmlQuickPatchResult")
+  visual.coreviewHtmlQuickPatchKind = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewHtmlQuickPatchKind")
+  visual.coreviewHtmlQuickPatchFallbackReason = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewHtmlQuickPatchFallbackReason")
+  visual.coreviewHtmlQuickPatchLatencyMs = maxFiniteFromRecords(
+    coreviewBuilderActionEvents,
+    "coreviewHtmlQuickPatchLatencyMs",
+  )
+  visual.coreviewHtmlQuickPatchRevisionPathHash = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewHtmlQuickPatchRevisionPathHash")
+  visual.coreviewHtmlQuickPatchUsedFullBuilder = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewHtmlQuickPatchUsedFullBuilder")
+  visual.coreviewHtmlQuickPatchRenderConfirmed = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewHtmlQuickPatchRenderConfirmed")
+  visual.coreviewHtmlQuickPatchPreservedOriginal = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewHtmlQuickPatchPreservedOriginal")
+  visual.coreviewHtmlQuickPatchRestoreAvailable = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewHtmlQuickPatchRestoreAvailable")
+  visual.coreviewHtmlQuickPatchTypeErrorPrevented = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewHtmlQuickPatchTypeErrorPrevented")
   visual.htmlCaptureTargetRegistered = htmlCaptureTelemetryRecords.some((event) => (
     asBoolean(event.htmlCaptureTargetRegistered) === true
   ))
