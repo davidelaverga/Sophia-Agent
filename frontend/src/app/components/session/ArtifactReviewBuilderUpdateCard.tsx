@@ -14,9 +14,11 @@ import { cn } from "../../lib/utils"
 export type ArtifactReviewBuilderUpdateCardStatus =
   | "starting"
   | "updating"
+  | "applying"
   | "cancelling"
   | "cancelled"
   | "completed"
+  | "preview_not_refreshed"
   | "failed"
   | "unsupported"
 
@@ -48,9 +50,11 @@ const STATUS_META: Record<ArtifactReviewBuilderUpdateCardStatus, {
 }> = {
   starting: { label: "Sophia is updating this artifact…", tone: "var(--cosmic-amber)", icon: Sparkles },
   updating: { label: "Sophia is updating this artifact…", tone: "var(--sophia-purple)", icon: Sparkles },
+  applying: { label: "Applying update...", tone: "var(--sophia-purple)", icon: Sparkles },
   cancelling: { label: "Cancelling", tone: "var(--cosmic-amber)", icon: RotateCcw },
   cancelled: { label: "Cancelled", tone: "var(--cosmic-text-faint)", icon: XCircle },
   completed: { label: "New version ready", tone: "var(--cosmic-teal)", icon: CheckCircle2 },
+  preview_not_refreshed: { label: "Update built, but preview did not refresh.", tone: "var(--cosmic-amber)", icon: XCircle },
   failed: { label: "Failed", tone: "var(--sophia-error, #f87171)", icon: XCircle },
   unsupported: { label: "Unsupported", tone: "var(--cosmic-amber)", icon: XCircle },
 }
@@ -87,16 +91,20 @@ export function ArtifactReviewBuilderUpdateCard({
     ? "Original preserved"
     : status === "completed" && nonHtmlOutput
       ? "A new artifact was created, but it is not an HTML update."
+      : status === "preview_not_refreshed"
+        ? "Original preserved"
       : status === "failed"
         ? "Couldn’t apply the update. Original preserved."
-        : status === "starting" || status === "updating"
-          ? "Applying changes…"
+        : status === "applying"
+          ? "Version built. Refreshing preview..."
+          : status === "starting" || status === "updating"
+            ? "Applying changes…"
           : null
 
   return (
     <div
       role="status"
-      aria-live={status === "updating" || status === "starting" ? "polite" : "assertive"}
+      aria-live={status === "updating" || status === "starting" || status === "applying" ? "polite" : "assertive"}
       data-testid="artifact-review-builder-update-card"
       data-coreview-builder-update-status={status}
       className={cn(
@@ -118,7 +126,7 @@ export function ArtifactReviewBuilderUpdateCard({
             background: `color-mix(in srgb, ${meta.tone} 10%, transparent)`,
           }}
         >
-          <Icon className={cn("h-3.5 w-3.5", (status === "starting" || status === "updating") && "animate-pulse")} />
+          <Icon className={cn("h-3.5 w-3.5", (status === "starting" || status === "updating" || status === "applying") && "animate-pulse")} />
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
@@ -145,7 +153,7 @@ export function ArtifactReviewBuilderUpdateCard({
           {statusDetail && (
             <p
               className="mt-1 text-[10px] font-medium"
-              style={{ color: status === "failed" ? "var(--sophia-error, #f87171)" : "var(--cosmic-text-faint)" }}
+              style={{ color: status === "failed" || status === "preview_not_refreshed" ? "var(--sophia-error, #f87171)" : "var(--cosmic-text-faint)" }}
             >
               {statusDetail}
             </p>

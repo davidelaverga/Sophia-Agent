@@ -59,6 +59,22 @@ describe('resolveBuilderSurface', () => {
     expect(surface.duplicateBuilderSurfaceSuppressed).toBe(true);
   });
 
+  it('keeps Coreview artifact updates in the review room over completed builder UI', () => {
+    const surface = resolveBuilderSurface({
+      ...baseInput,
+      coreviewArtifactUpdateActive: true,
+      completedBuilderAvailable: true,
+      legacyCompletionAvailable: true,
+    });
+
+    expect(surface.builderSurfaceMode).toBe('artifact_review_room');
+    expect(surface.canonicalBuilderSurface).toBe('artifact_review_room');
+    expect(surface.showCanonicalCompletedBuilder).toBe(false);
+    expect(surface.showLegacyCompletionFallback).toBe(false);
+    expect(surface.builderReadyPillSuppressed).toBe(true);
+    expect(surface.duplicateBuilderSurfaceSuppressed).toBe(true);
+  });
+
   it('resolves resumed selected artifacts without resurrecting the old card', () => {
     const surface = resolveBuilderSurface({
       ...baseInput,

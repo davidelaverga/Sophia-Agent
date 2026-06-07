@@ -12,6 +12,7 @@ export type CanonicalBuilderSurface =
 
 export type BuilderSurfaceArbitrationInput = {
   artifactStageActive: boolean;
+  coreviewArtifactUpdateActive?: boolean;
   buildRunning: boolean;
   completedBuilderAvailable: boolean;
   secondaryFileRowsAvailable: boolean;
@@ -33,26 +34,28 @@ export type BuilderSurfaceArbitrationResult = {
 
 export function resolveBuilderSurface({
   artifactStageActive,
+  coreviewArtifactUpdateActive = false,
   buildRunning,
   completedBuilderAvailable,
   secondaryFileRowsAvailable,
   legacyCompletionAvailable,
   selectedBuilderArtifactPathExists,
 }: BuilderSurfaceArbitrationInput): BuilderSurfaceArbitrationResult {
-  const suppressesLegacy = artifactStageActive
+  const reviewRoomActive = artifactStageActive || coreviewArtifactUpdateActive;
+  const suppressesLegacy = reviewRoomActive
     || buildRunning
     || completedBuilderAvailable
     || secondaryFileRowsAvailable
     || selectedBuilderArtifactPathExists;
   const legacyBuilderSurfaceHidden = legacyCompletionAvailable && suppressesLegacy;
-  const builderReadyPillSuppressed = artifactStageActive
+  const builderReadyPillSuppressed = reviewRoomActive
     || completedBuilderAvailable
     || secondaryFileRowsAvailable
     || selectedBuilderArtifactPathExists;
   const duplicateBuilderSurfaceSuppressed = legacyBuilderSurfaceHidden || builderReadyPillSuppressed;
   const resumedBuilderSurfaceResolved = selectedBuilderArtifactPathExists && suppressesLegacy;
 
-  if (artifactStageActive) {
+  if (reviewRoomActive) {
     return {
       builderSurfaceMode: 'artifact_review_room',
       canonicalBuilderSurface: 'artifact_review_room',

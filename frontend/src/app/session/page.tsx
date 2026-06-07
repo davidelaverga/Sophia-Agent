@@ -103,6 +103,44 @@ import { useSessionVoiceCommandSystem } from './useSessionVoiceCommandSystem';
 
 const MISSING_BUILDER_DELIVERABLE_ERROR = 'Builder finished without a deliverable artifact.';
 const MISSING_BUILDER_DELIVERABLE_RETRY_MESSAGE = `${MISSING_BUILDER_DELIVERABLE_ERROR} Please try again.`;
+const COREVIEW_ARTIFACT_UPDATE_SURFACE_RECENT_MS = 60_000;
+
+type CoreviewArtifactUpdateSurfaceClaim = {
+  artifactPath: string | null;
+  artifactStableIdentity: string | null;
+  rendererKind: string | null;
+  requestedAt: number;
+  taskId: string | null;
+  runId: string | null;
+};
+
+function normalizedBuilderPathsEqual(left: string | null | undefined, right: string | null | undefined): boolean {
+  const normalizedLeft = normalizeBuilderArtifactPath(left);
+  const normalizedRight = normalizeBuilderArtifactPath(right);
+  return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight);
+}
+
+function builderCompletionMatchesCoreviewClaim(
+  completion: BuilderCompletionEventV1 | null | undefined,
+  claim: CoreviewArtifactUpdateSurfaceClaim | null,
+): boolean {
+  if (!completion || claim?.rendererKind !== 'html') {
+    return false;
+  }
+  if (normalizedBuilderPathsEqual(completion.revision_of_artifact_path, claim.artifactPath)) {
+    return true;
+  }
+  if (normalizedBuilderPathsEqual(completion.source_artifact_path, claim.artifactPath)) {
+    return true;
+  }
+  if (claim.taskId && completion.task_id === claim.taskId) {
+    return true;
+  }
+  if (claim.runId && completion.run_id === claim.runId) {
+    return true;
+  }
+  return false;
+}
 
 // ============================================================================
 // PROTECTED SESSION PAGE WRAPPER
@@ -288,6 +326,7 @@ function SessionPageContent() {
 
   const [selectedBuilderArtifactPath, setSelectedBuilderArtifactPath] = useState<string | null>(null);
   const [pendingBuilderArtifactReview, setPendingBuilderArtifactReview] = useState(false);
+  const [coreviewArtifactUpdateSurfaceClaim, setCoreviewArtifactUpdateSurfaceClaim] = useState<CoreviewArtifactUpdateSurfaceClaim | null>(null);
 
   const {
     cancelledMessageId,
@@ -592,6 +631,14 @@ function SessionPageContent() {
     updateMode: CoreviewArtifactUpdateMode;
   }): Promise<CoreviewBuilderStartAdapterResult> => {
     suppressSessionLeaveGuardForCoreviewBuilderUpdate();
+    setCoreviewArtifactUpdateSurfaceClaim({
+      artifactPath: normalizeBuilderArtifactPath(context.artifactPath),
+      artifactStableIdentity: context.artifactStableIdentity ?? null,
+      rendererKind: context.rendererKind,
+      requestedAt: Date.now(),
+      taskId: builderTask?.taskId ?? null,
+      runId: builderTask?.runId ?? null,
+    });
     await sendMessage({ text: prompt });
     return {
       ok: true,
@@ -639,9 +686,32 @@ function SessionPageContent() {
       blockedReason: status === 'failed' ? 'builder_cancel_failed' : null,
       userFacingMessage: response.detail ?? (status === 'cancelled'
         ? 'The artifact update was cancelled.'
-        : 'Builder cancellation was requested.'),
+      : 'Builder cancellation was requested.'),
     };
   }, [cancelBuilderTask]);
+  useEffect(() => {
+    if (!coreviewArtifactUpdateSurfaceClaim || !builderTask) {
+      return;
+    }
+    const nextTaskId = builderTask.taskId ?? null;
+    const nextRunId = builderTask.runId ?? null;
+    if (coreviewArtifactUpdateSurfaceClaim.taskId === nextTaskId && coreviewArtifactUpdateSurfaceClaim.runId === nextRunId) {
+      return;
+    }
+    if (
+      (coreviewArtifactUpdateSurfaceClaim.taskId && coreviewArtifactUpdateSurfaceClaim.taskId !== nextTaskId)
+      || (coreviewArtifactUpdateSurfaceClaim.runId && nextRunId && coreviewArtifactUpdateSurfaceClaim.runId !== nextRunId)
+    ) {
+      return;
+    }
+    setCoreviewArtifactUpdateSurfaceClaim((current) => current
+      ? {
+          ...current,
+          taskId: current.taskId ?? nextTaskId,
+          runId: current.runId ?? nextRunId,
+        }
+      : current);
+  }, [builderTask, coreviewArtifactUpdateSurfaceClaim]);
   const builderArtifactLibraryRef = useRef(builderArtifactLibrary);
 
   useEffect(() => {
@@ -1574,8 +1644,36 @@ function SessionPageContent() {
     && showArtifacts
     && effectiveShowArtifactsUi
     && !showTextArtifactStage;
+  const coreviewArtifactUpdateSurfaceActive = useMemo(() => {
+    const claim = coreviewArtifactUpdateSurfaceClaim;
+    if (claim?.rendererKind !== 'html') {
+      return false;
+    }
+    const claimRecent = Date.now() - claim.requestedAt <= COREVIEW_ARTIFACT_UPDATE_SURFACE_RECENT_MS;
+    if (claimRecent && builderCompletionMatchesCoreviewClaim(builderCompletionForDisplay, claim)) {
+      return true;
+    }
+    if (
+      builderTask
+      && (
+        (claim.taskId && builderTask.taskId === claim.taskId)
+        || (claim.runId && builderTask.runId === claim.runId)
+      )
+      && (builderTask.phase === 'running' || builderTask.phase === 'completed')
+    ) {
+      return true;
+    }
+    return normalizedBuilderPathsEqual(selectedBuilderArtifactPath, claim.artifactPath)
+      && claimRecent;
+  }, [
+    builderCompletionForDisplay,
+    builderTask,
+    coreviewArtifactUpdateSurfaceClaim,
+    selectedBuilderArtifactPath,
+  ]);
   const builderSurface = useMemo(() => resolveBuilderSurface({
     artifactStageActive,
+    coreviewArtifactUpdateActive: coreviewArtifactUpdateSurfaceActive,
     buildRunning: isBuilderActivelyRunning && !hasRecoveredBuilderArtifact,
     completedBuilderAvailable: Boolean(builderPrimaryFile && !builderReadyDismissed),
     secondaryFileRowsAvailable: Boolean(builderArtifact) || hasBuilderArtifactLibrary,
@@ -1591,6 +1689,7 @@ function SessionPageContent() {
     hasRecoveredBuilderArtifact,
     isBuilderActivelyRunning,
     artifactStageActive,
+    coreviewArtifactUpdateSurfaceActive,
   ]);
   const canonicalCompletedBuilderEntryAvailable = Boolean(
     builderPrimaryFile
@@ -1630,6 +1729,7 @@ function SessionPageContent() {
       builderCompletionForDisplay?.status ?? 'no-completion',
       hasSelectedBuilderArtifactPath ? 'selected-artifact' : 'no-selected-artifact',
       artifactStageActive ? 'stage-active' : 'stage-inactive',
+      coreviewArtifactUpdateSurfaceActive ? 'coreview-update-surface-active' : 'coreview-update-surface-inactive',
       completedBuilderEntryPlacement,
       completedBuilderEntryHiddenForStage ? 'completed-hidden-for-stage' : 'completed-not-hidden-for-stage',
     ].join('|');
@@ -1653,6 +1753,7 @@ function SessionPageContent() {
         activeBuildStepsVisible: builderSurface.showActiveBuildSteps,
         canonicalCompletedBuilderVisible: showCanonicalCompletedBuilderEntryInline || showCanonicalCompletedBuilderEntryCorner,
         completedBuilderEntryPlacement,
+        coreviewHtmlUpdateSuppressedCompletedBuilderSurface: coreviewArtifactUpdateSurfaceActive && !builderSurface.showCanonicalCompletedBuilder,
         completedBuilderEntryOverlapsControls,
         completedBuilderEntryHiddenForStage,
         legacyCompletionFallbackVisible: builderSurface.showLegacyCompletionFallback,
@@ -1674,6 +1775,7 @@ function SessionPageContent() {
     builderSurface.showLegacyCompletionFallback,
     builderTask?.phase,
     artifactStageActive,
+    coreviewArtifactUpdateSurfaceActive,
     completedBuilderEntryHiddenForStage,
     completedBuilderEntryOverlapsControls,
     completedBuilderEntryPlacement,

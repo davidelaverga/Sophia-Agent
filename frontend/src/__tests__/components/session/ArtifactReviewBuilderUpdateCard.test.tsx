@@ -48,4 +48,37 @@ describe("ArtifactReviewBuilderUpdateCard", () => {
     expect(within(card).getByRole("button", { name: /open artifact/i })).toBeInTheDocument()
     expect(within(card).queryByText("Preview updated")).not.toBeInTheDocument()
   })
+
+  it("shows applying copy before render confirmation", () => {
+    render(
+      <ArtifactReviewBuilderUpdateCard
+        artifactTitle="site.html"
+        requestedChangeSummary="Make the page calmer."
+        status="applying"
+        outputTitle="site-v2.html"
+        outputPath="mnt/user-data/outputs/site-v2.html"
+      />,
+    )
+
+    const card = screen.getByTestId("artifact-review-builder-update-card")
+    expect(within(card).getByText("Applying update...")).toBeInTheDocument()
+    expect(within(card).queryByText("Preview updated")).not.toBeInTheDocument()
+  })
+
+  it("shows preview refresh failure without claiming success", () => {
+    render(
+      <ArtifactReviewBuilderUpdateCard
+        artifactTitle="site.html"
+        requestedChangeSummary="Make the page calmer."
+        status="preview_not_refreshed"
+        outputTitle="site-v2.html"
+        outputPath="mnt/user-data/outputs/site-v2.html"
+      />,
+    )
+
+    const card = screen.getByTestId("artifact-review-builder-update-card")
+    expect(within(card).getByText("Update built, but preview did not refresh.")).toBeInTheDocument()
+    expect(within(card).getByText("Original preserved")).toBeInTheDocument()
+    expect(within(card).queryByText("Preview updated")).not.toBeInTheDocument()
+  })
 })

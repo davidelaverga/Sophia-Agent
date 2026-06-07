@@ -392,6 +392,7 @@ describe("Coreview artifact still-frame review", () => {
     }
     process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_ENABLED = originalCoreviewFlag
     process.env.NEXT_PUBLIC_SOPHIA_COREVIEW_STILL_FRAME_ENABLED = originalStillFrameFlag
+    vi.useRealTimers()
   })
 
   it("keeps artifact review hidden when the two Coreview flags are off", () => {
@@ -1281,6 +1282,321 @@ describe("Coreview artifact still-frame review", () => {
         .filter((event) => event.type === "artifact.version_selected")
       expect(selectedEvents.some((event) => event.payload.result === "restore_original")).toBe(true)
     })
+  })
+
+  it("auto-applies an HTML completion when revision_of_artifact_path matches the selected artifact", async () => {
+    setCoreviewFlags(true)
+    registerSophiaCaptureBridge()
+    window.__sophiaCapture?.clear()
+    window.__sophiaCapture?.enable()
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const href = String(input)
+      return new Response(
+        href.includes("site-v2.html")
+          ? "<!doctype html><html><body><h1>Revision preview</h1></body></html>"
+          : "<!doctype html><html><body><h1>Original preview</h1></body></html>",
+        {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        },
+      )
+    })
+    const selectedPaths: string[] = []
+    const completion = {
+      type: "builder_completion" as const,
+      task_id: "task-html-revision",
+      run_id: "run-html-revision",
+      thread_id: "thread-1",
+      parent_thread_id: "thread-1",
+      status: "success" as const,
+      artifact_path: "mnt/user-data/outputs/site-v2.html",
+      artifact_filename: "site-v2.html",
+      artifact_title: "site-v2.html",
+      artifact_url: null,
+      source_artifact_path: null,
+      revision_of_artifact_path: "mnt/user-data/outputs/site.html",
+      summary: "Updated the HTML preview.",
+      user_next_action: null,
+      error_message: null,
+      source: "builder_canvas",
+      completed_at: "2026-06-06T12:00:00.000Z",
+    }
+
+    function RevisionHarness() {
+      const [selectedPath, setSelectedPath] = useState("mnt/user-data/outputs/site.html")
+      return (
+        <PresenceArtifactPanel
+          artifacts={null}
+          builderArtifact={HTML_BUILDER_ARTIFACT}
+          builderArtifactLibrary={HTML_LIBRARY}
+          builderTask={{
+            phase: "completed",
+            taskId: "task-html-revision",
+            runId: "run-html-revision",
+            activeStepTitle: "Update complete",
+          }}
+          builderCompletion={completion}
+          selectedBuilderArtifactPath={selectedPath}
+          onSelectedBuilderArtifactPathChange={(path) => {
+            selectedPaths.push(path ?? "")
+            setSelectedPath(path)
+          }}
+          sessionId="session-1"
+          normalSessionId="normal-1"
+          threadId="thread-1"
+          isVisible={true}
+          onDismiss={vi.fn()}
+          isVoiceMode={false}
+          coReviewTransport={new GeminiStillFrameTransport({ sendArtifactFrame: vi.fn() })}
+        />
+      )
+    }
+
+    render(<RevisionHarness />)
+
+    expect(await screen.findByTitle("Preview of site-v2.html")).toBeInTheDocument()
+    const updateCard = await screen.findByTestId("artifact-review-builder-update-card")
+    expect(updateCard).toHaveAttribute("data-coreview-builder-update-status", "completed")
+    expect(within(updateCard).getByText("Preview updated")).toBeInTheDocument()
+    expect(selectedPaths).toContain("mnt/user-data/outputs/site-v2.html")
+    expect(getWorkspaceEvents(WORKSPACE_KEY).map((event) => event.type)).toEqual(expect.arrayContaining([
+      "artifact.version_created",
+      "artifact.version_selected",
+    ]))
+    const capture = JSON.stringify(exportSophiaCaptureBundle())
+    expect(capture).toContain("coreviewHtmlUpdateMatchedBy")
+    expect(capture).toContain("revision_of_artifact_path")
+    expect(capture).toContain("coreviewHtmlUpdateRenderConfirmed")
+  })
+
+  it("auto-applies an HTML completion when source_artifact_path matches the selected artifact", async () => {
+    setCoreviewFlags(true)
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const href = String(input)
+      return new Response(
+        href.includes("site-v2.html")
+          ? "<!doctype html><html><body><h1>Source matched preview</h1></body></html>"
+          : "<!doctype html><html><body><h1>Original preview</h1></body></html>",
+        {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        },
+      )
+    })
+    const selectedPaths: string[] = []
+    const completion = {
+      type: "builder_completion" as const,
+      task_id: "task-html-source",
+      run_id: "run-html-source",
+      thread_id: "thread-1",
+      parent_thread_id: "thread-1",
+      status: "success" as const,
+      artifact_path: "mnt/user-data/outputs/site-v2.html",
+      artifact_filename: "site-v2.html",
+      artifact_title: "site-v2.html",
+      artifact_url: null,
+      source_artifact_path: "mnt/user-data/outputs/site.html",
+      revision_of_artifact_path: null,
+      summary: "Updated the HTML preview.",
+      user_next_action: null,
+      error_message: null,
+      source: "builder_canvas",
+      completed_at: "2026-06-06T12:00:00.000Z",
+    }
+
+    function SourceHarness() {
+      const [selectedPath, setSelectedPath] = useState("mnt/user-data/outputs/site.html")
+      return (
+        <PresenceArtifactPanel
+          artifacts={null}
+          builderArtifact={HTML_BUILDER_ARTIFACT}
+          builderArtifactLibrary={HTML_LIBRARY}
+          builderTask={{ phase: "completed", taskId: "task-html-source", runId: "run-html-source" }}
+          builderCompletion={completion}
+          selectedBuilderArtifactPath={selectedPath}
+          onSelectedBuilderArtifactPathChange={(path) => {
+            selectedPaths.push(path ?? "")
+            setSelectedPath(path)
+          }}
+          sessionId="session-1"
+          normalSessionId="normal-1"
+          threadId="thread-1"
+          isVisible={true}
+          onDismiss={vi.fn()}
+          isVoiceMode={false}
+          coReviewTransport={new GeminiStillFrameTransport({ sendArtifactFrame: vi.fn() })}
+        />
+      )
+    }
+
+    render(<SourceHarness />)
+
+    expect(await screen.findByTitle("Preview of site-v2.html")).toBeInTheDocument()
+    expect(selectedPaths).toContain("mnt/user-data/outputs/site-v2.html")
+    const updateCard = await screen.findByTestId("artifact-review-builder-update-card")
+    await waitFor(() => expect(within(updateCard).getByText("Preview updated")).toBeInTheDocument())
+  })
+
+  it("does not auto-apply unrelated HTML completion output into the selected canvas", async () => {
+    setCoreviewFlags(true)
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("<!doctype html><html><body><h1>Original preview</h1></body></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      }),
+    )
+    const selectedPaths: string[] = []
+    const completion = {
+      type: "builder_completion" as const,
+      task_id: "task-html-unrelated",
+      run_id: "run-html-unrelated",
+      thread_id: "thread-1",
+      parent_thread_id: "thread-1",
+      status: "success" as const,
+      artifact_path: "mnt/user-data/outputs/site-v2.html",
+      artifact_filename: "site-v2.html",
+      artifact_title: "site-v2.html",
+      artifact_url: null,
+      source_artifact_path: null,
+      revision_of_artifact_path: null,
+      summary: "Created another HTML page.",
+      user_next_action: null,
+      error_message: null,
+      source: "builder_canvas",
+      completed_at: "2026-06-06T12:00:00.000Z",
+    }
+
+    renderPanel({
+      builderArtifact: HTML_BUILDER_ARTIFACT,
+      builderArtifactLibrary: HTML_LIBRARY,
+      builderTask: { phase: "completed", taskId: "task-html-unrelated", runId: "run-html-unrelated" },
+      builderCompletion: completion,
+      selectedBuilderArtifactPath: "mnt/user-data/outputs/site.html",
+      onSelectedBuilderArtifactPathChange: (path) => {
+        selectedPaths.push(path ?? "")
+      },
+    })
+
+    expect(await screen.findByTitle("Preview of site.html")).toBeInTheDocument()
+    expect(screen.queryByTitle("Preview of site-v2.html")).not.toBeInTheDocument()
+    expect(selectedPaths).toEqual([])
+    expect(getWorkspaceEvents(WORKSPACE_KEY).some((event) => event.type === "artifact.version_selected")).toBe(false)
+  })
+
+  it("does not show preview success when auto-apply did not change the selected path", async () => {
+    setCoreviewFlags(true)
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("<!doctype html><html><body><h1>Original preview</h1></body></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      }),
+    )
+    const onSelectedBuilderArtifactPathChange = vi.fn()
+    const completion = {
+      type: "builder_completion" as const,
+      task_id: "task-html-no-select",
+      run_id: "run-html-no-select",
+      thread_id: "thread-1",
+      parent_thread_id: "thread-1",
+      status: "success" as const,
+      artifact_path: "mnt/user-data/outputs/site-v2.html",
+      artifact_filename: "site-v2.html",
+      artifact_title: "site-v2.html",
+      artifact_url: null,
+      source_artifact_path: null,
+      revision_of_artifact_path: "mnt/user-data/outputs/site.html",
+      summary: "Updated the HTML preview.",
+      user_next_action: null,
+      error_message: null,
+      source: "builder_canvas",
+      completed_at: "2026-06-06T12:00:00.000Z",
+    }
+
+    renderPanel({
+      builderArtifact: HTML_BUILDER_ARTIFACT,
+      builderArtifactLibrary: HTML_LIBRARY,
+      builderTask: { phase: "completed", taskId: "task-html-no-select", runId: "run-html-no-select" },
+      builderCompletion: completion,
+      selectedBuilderArtifactPath: "mnt/user-data/outputs/site.html",
+      onSelectedBuilderArtifactPathChange,
+    })
+
+    const updateCard = await screen.findByTestId("artifact-review-builder-update-card")
+    await waitFor(() => expect(updateCard).toHaveAttribute("data-coreview-builder-update-status", "applying"))
+    expect(within(updateCard).queryByText("Preview updated")).not.toBeInTheDocument()
+    expect(onSelectedBuilderArtifactPathChange).toHaveBeenCalledWith("mnt/user-data/outputs/site-v2.html")
+    expect(screen.getByTitle("Preview of site.html")).toBeInTheDocument()
+  })
+
+  it("shows preview_not_refreshed when the selected HTML output fails to render", async () => {
+    setCoreviewFlags(true)
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const href = String(input)
+      if (href.includes("site-v2.html")) {
+        return new Response("", { status: 404 })
+      }
+      return new Response("<!doctype html><html><body><h1>Original preview</h1></body></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      })
+    })
+    const selectedPaths: string[] = []
+    const completion = {
+      type: "builder_completion" as const,
+      task_id: "task-html-render-fail",
+      run_id: "run-html-render-fail",
+      thread_id: "thread-1",
+      parent_thread_id: "thread-1",
+      status: "success" as const,
+      artifact_path: "mnt/user-data/outputs/site-v2.html",
+      artifact_filename: "site-v2.html",
+      artifact_title: "site-v2.html",
+      artifact_url: null,
+      source_artifact_path: null,
+      revision_of_artifact_path: "mnt/user-data/outputs/site.html",
+      summary: "Updated the HTML preview.",
+      user_next_action: null,
+      error_message: null,
+      source: "builder_canvas",
+      completed_at: "2026-06-06T12:00:00.000Z",
+    }
+
+    function RenderFailHarness() {
+      const [selectedPath, setSelectedPath] = useState("mnt/user-data/outputs/site.html")
+      return (
+        <PresenceArtifactPanel
+          artifacts={null}
+          builderArtifact={HTML_BUILDER_ARTIFACT}
+          builderArtifactLibrary={HTML_LIBRARY}
+          builderTask={{ phase: "completed", taskId: "task-html-render-fail", runId: "run-html-render-fail" }}
+          builderCompletion={completion}
+          selectedBuilderArtifactPath={selectedPath}
+          onSelectedBuilderArtifactPathChange={(path) => {
+            selectedPaths.push(path ?? "")
+            setSelectedPath(path)
+          }}
+          sessionId="session-1"
+          normalSessionId="normal-1"
+          threadId="thread-1"
+          isVisible={true}
+          onDismiss={vi.fn()}
+          isVoiceMode={false}
+          coReviewTransport={new GeminiStillFrameTransport({ sendArtifactFrame: vi.fn() })}
+        />
+      )
+    }
+
+    render(<RenderFailHarness />)
+
+    const updateCard = await screen.findByTestId("artifact-review-builder-update-card")
+    await waitFor(() => expect(updateCard).toHaveAttribute("data-coreview-builder-update-status", "preview_not_refreshed"))
+    expect(within(updateCard).getByText("Update built, but preview did not refresh.")).toBeInTheDocument()
+    expect(within(updateCard).queryByText("Preview updated")).not.toBeInTheDocument()
+    expect(selectedPaths).toEqual(expect.arrayContaining([
+      "mnt/user-data/outputs/site-v2.html",
+      "mnt/user-data/outputs/site.html",
+    ]))
+    expect(await screen.findByTitle("Preview of site.html")).toBeInTheDocument()
   })
 
   it("does not auto-apply non-HTML builder output into an HTML canvas", async () => {

@@ -111,13 +111,21 @@ export type CoreviewVisualTelemetry = {
   coreviewArtifactOriginalVersionIdPresent: boolean
   coreviewArtifactCurrentVersionIdPresent: boolean
   coreviewArtifactVersionCount: number
+  coreviewHtmlUpdateMatchedBy: string | null
+  coreviewHtmlUpdateAutoApplyAttempted: boolean
   coreviewHtmlUpdateAutoApplied: boolean
   coreviewHtmlUpdateAutoApplyResult: string | null
+  coreviewHtmlUpdateRenderConfirmed: boolean
+  coreviewHtmlUpdatePreviewRefreshFailed: boolean
   coreviewHtmlUpdatePreviousPathHash: string | null
   coreviewHtmlUpdateCurrentPathHash: string | null
   coreviewHtmlUpdateRestoreAvailable: boolean
   coreviewHtmlUpdateRestoreResult: string | null
   coreviewHtmlUpdateNoViewClickRequired: boolean
+  coreviewHtmlUpdateSuppressedCompletedBuilderSurface: boolean
+  coreviewHtmlUpdateSuppressedDuplicateReplyCount: number
+  coreviewHtmlUpdateSuccessClaimBlockedUntilRender: boolean
+  coreviewHtmlUpdateSelectedPathChanged: boolean
   coreviewHtmlUpdatePreservedReview: boolean | null
   coreviewHtmlUpdatePreservedMic: boolean | null
   artifactRebindAttempted: boolean
@@ -1377,13 +1385,21 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       coreviewArtifactOriginalVersionIdPresent: false,
       coreviewArtifactCurrentVersionIdPresent: false,
       coreviewArtifactVersionCount: 0,
+      coreviewHtmlUpdateMatchedBy: null,
+      coreviewHtmlUpdateAutoApplyAttempted: false,
       coreviewHtmlUpdateAutoApplied: false,
       coreviewHtmlUpdateAutoApplyResult: null,
+      coreviewHtmlUpdateRenderConfirmed: false,
+      coreviewHtmlUpdatePreviewRefreshFailed: false,
       coreviewHtmlUpdatePreviousPathHash: null,
       coreviewHtmlUpdateCurrentPathHash: null,
       coreviewHtmlUpdateRestoreAvailable: false,
       coreviewHtmlUpdateRestoreResult: null,
       coreviewHtmlUpdateNoViewClickRequired: false,
+      coreviewHtmlUpdateSuppressedCompletedBuilderSurface: false,
+      coreviewHtmlUpdateSuppressedDuplicateReplyCount: 0,
+      coreviewHtmlUpdateSuccessClaimBlockedUntilRender: false,
+      coreviewHtmlUpdateSelectedPathChanged: false,
       coreviewHtmlUpdatePreservedReview: null,
       coreviewHtmlUpdatePreservedMic: null,
       artifactRebindAttempted: false,
@@ -1663,6 +1679,10 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
   const latestCoreviewBuilderAction = coreviewBuilderActionEvents.at(-1) ?? null
+  const builderSurfaceEvents = activeEvents
+    .filter((event) => event.category === "builder-ui" && event.name === "builder-surface-resolved")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
   const assistantAnnotationClaimSuppressedEvents = activeEvents
     .filter((event) => event.category === "voice-session" && event.name === "assistant-annotation-claim-suppressed")
   const coreviewToolDiagnostics = activeEvents.filter((event) => (
@@ -1873,10 +1893,20 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     asBoolean(event.coreviewArtifactCurrentVersionIdPresent) === true
   ))
   visual.coreviewArtifactVersionCount = numberFromKeys(latestCoreviewBuilderAction, ["coreviewArtifactVersionCount"]) ?? 0
+  visual.coreviewHtmlUpdateMatchedBy = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewHtmlUpdateMatchedBy")
+  visual.coreviewHtmlUpdateAutoApplyAttempted = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewHtmlUpdateAutoApplyAttempted) === true
+  ))
   visual.coreviewHtmlUpdateAutoApplied = coreviewBuilderActionEvents.some((event) => (
     asBoolean(event.coreviewHtmlUpdateAutoApplied) === true
   ))
   visual.coreviewHtmlUpdateAutoApplyResult = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewHtmlUpdateAutoApplyResult")
+  visual.coreviewHtmlUpdateRenderConfirmed = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewHtmlUpdateRenderConfirmed) === true
+  ))
+  visual.coreviewHtmlUpdatePreviewRefreshFailed = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewHtmlUpdatePreviewRefreshFailed) === true
+  ))
   visual.coreviewHtmlUpdatePreviousPathHash = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewHtmlUpdatePreviousPathHash")
   visual.coreviewHtmlUpdateCurrentPathHash = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewHtmlUpdateCurrentPathHash")
   visual.coreviewHtmlUpdateRestoreAvailable = coreviewBuilderActionEvents.some((event) => (
@@ -1885,6 +1915,21 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.coreviewHtmlUpdateRestoreResult = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewHtmlUpdateRestoreResult")
   visual.coreviewHtmlUpdateNoViewClickRequired = coreviewBuilderActionEvents.some((event) => (
     asBoolean(event.coreviewHtmlUpdateNoViewClickRequired) === true
+  ))
+  visual.coreviewHtmlUpdateSuppressedCompletedBuilderSurface = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewHtmlUpdateSuppressedCompletedBuilderSurface) === true
+  )) || builderSurfaceEvents.some((event) => (
+    asBoolean(event.coreviewHtmlUpdateSuppressedCompletedBuilderSurface) === true
+  ))
+  visual.coreviewHtmlUpdateSuppressedDuplicateReplyCount = maxFiniteFromRecords(
+    coreviewBuilderActionEvents,
+    "coreviewHtmlUpdateSuppressedDuplicateReplyCount",
+  ) ?? countDuplicateSuppressedReviewToolDiagnostics(activeEvents)
+  visual.coreviewHtmlUpdateSuccessClaimBlockedUntilRender = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewHtmlUpdateSuccessClaimBlockedUntilRender) === true
+  ))
+  visual.coreviewHtmlUpdateSelectedPathChanged = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewHtmlUpdateSelectedPathChanged) === true
   ))
   visual.coreviewHtmlUpdatePreservedReview = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewHtmlUpdatePreservedReview")
   visual.coreviewHtmlUpdatePreservedMic = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewHtmlUpdatePreservedMic")
@@ -2502,6 +2547,48 @@ function isReviewEmitArtifactSuppressedForAnnotationIntentDiagnostic(event: Norm
   const diagnostic = asRecord(eventData(event)?.diagnostic)
   const backendResponse = toolBackendResponseFromDiagnostic(diagnostic)
   return asBoolean(backendResponse?.emit_artifact_blocked_for_annotation_intent) === true
+}
+
+function reviewSuppressedToolDiagnosticKey(event: NormalizedVoiceCaptureEvent): string | null {
+  if (event.name !== "gemini-tool-loop-diagnostic") {
+    return null
+  }
+  const data = eventData(event)
+  if (asString(data?.phase) !== "tool_execution_rejected") {
+    return null
+  }
+  const diagnostic = asRecord(data?.diagnostic)
+  const backendResponse = toolBackendResponseFromDiagnostic(diagnostic)
+  const rejectionReason = asString(data?.rejectionReason)
+    ?? asString(diagnostic?.rejectionReason)
+    ?? asString(diagnostic?.rejection_reason)
+    ?? asString(backendResponse?.rejection_reason)
+    ?? asString(backendResponse?.safe_reason)
+  if (
+    rejectionReason !== "artifact_review_emit_artifact_suppressed"
+    && rejectionReason !== "artifact_review_generic_builder_tool_suppressed"
+    && rejectionReason !== "artifact_review_generic_async_status_redirected"
+  ) {
+    return null
+  }
+  return `${geminiToolName(event) ?? "unknown"}:${rejectionReason}`
+}
+
+function countDuplicateSuppressedReviewToolDiagnostics(events: NormalizedVoiceCaptureEvent[]): number {
+  const seen = new Set<string>()
+  let duplicates = 0
+  for (const event of events) {
+    const key = reviewSuppressedToolDiagnosticKey(event)
+    if (!key) {
+      continue
+    }
+    if (seen.has(key)) {
+      duplicates += 1
+      continue
+    }
+    seen.add(key)
+  }
+  return duplicates
 }
 
 function asVoiceStage(value: string | null): VoiceStage | null {

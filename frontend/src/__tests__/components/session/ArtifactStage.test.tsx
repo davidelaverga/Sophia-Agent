@@ -1907,12 +1907,13 @@ describe("ArtifactStage", () => {
     const captureCanvas = screen.getByTestId("artifact-markdown-capture-canvas").querySelector("canvas")
     expect(captureCanvas).toHaveAttribute("data-artifact-canvas-source", "selected-markdown-preview")
     await waitFor(() => {
-      expect(onVisualCaptureStatusChange).toHaveBeenLastCalledWith({
+      expect(onVisualCaptureStatusChange).toHaveBeenLastCalledWith(expect.objectContaining({
         ready: true,
         reason: null,
         source: "markdown_preview_canvas",
         exactTextAvailable: true,
-      })
+        artifactPath: "mnt/user-data/outputs/launch-brief.md",
+      }))
     })
   })
 

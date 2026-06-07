@@ -267,6 +267,8 @@ describe("ArtifactCanvasViewport", () => {
       reason: null,
       source: "html_preview_canvas",
       exactTextAvailable: true,
+      artifactPath: "mnt/user-data/outputs/launch-brief.html",
+      previewHref: "/artifact.html",
     })
   })
 })

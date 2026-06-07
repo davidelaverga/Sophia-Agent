@@ -46,6 +46,8 @@ export interface ArtifactVisualCaptureStatus {
   reason: ArtifactVisualCaptureUnavailableReason | null
   source: "markdown_preview_canvas" | "html_preview_canvas" | "metadata_canvas" | "pdf_page_canvas" | "none"
   exactTextAvailable: boolean
+  artifactPath?: string | null
+  previewHref?: string | null
   pdfTextExtractionStatus?: ArtifactPdfTextExtractionStatus["status"] | null
   pdfTextExtractionSource?: ArtifactPdfTextExtractionStatus["source"] | null
   pdfTextExtractionPageCount?: number | null
@@ -246,7 +248,7 @@ export function ArtifactCanvasViewport({
     currentPdfTextExtractionStatus.status,
     currentPdfTextExtractionStatus.truncated,
   ])
-  const visualCaptureStatus = useMemo(() => resolveVisualCaptureStatus({
+  const baseVisualCaptureStatus = useMemo(() => resolveVisualCaptureStatus({
     captureArtifactId,
     canPreviewHtml,
     canPreviewMarkdown,
@@ -269,6 +271,11 @@ export function ArtifactCanvasViewport({
     htmlPreviewText,
     preview,
   ])
+  const visualCaptureStatus = useMemo(() => withRenderedArtifactSource(
+    baseVisualCaptureStatus,
+    primaryFile?.path ?? null,
+    previewHref ?? null,
+  ), [baseVisualCaptureStatus, previewHref, primaryFile?.path])
   const handlePdfTextExtractionStatusChange = useCallback((status: ArtifactPdfTextExtractionStatus) => {
     onPdfTextLayoutChange?.(status.status === "success" ? status.layout ?? null : null)
     setPdfTextExtractionState((current) => {
@@ -776,6 +783,21 @@ function htmlVisualCaptureStatus(
   }
 }
 
+function withRenderedArtifactSource(
+  status: ArtifactVisualCaptureStatus,
+  artifactPath: string | null,
+  previewHref: string | null,
+): ArtifactVisualCaptureStatus {
+  if (status.artifactPath === artifactPath && status.previewHref === previewHref) {
+    return status
+  }
+  return {
+    ...status,
+    artifactPath,
+    previewHref,
+  }
+}
+
 function unavailableCaptureStatus(
   reason: ArtifactVisualCaptureUnavailableReason,
   source: ArtifactVisualCaptureStatus["source"],
@@ -809,6 +831,8 @@ function captureStatusesEqual(
     && left.reason === right.reason
     && left.source === right.source
     && left.exactTextAvailable === right.exactTextAvailable
+    && left.artifactPath === right.artifactPath
+    && left.previewHref === right.previewHref
     && left.pdfTextExtractionStatus === right.pdfTextExtractionStatus
     && left.pdfTextExtractionSource === right.pdfTextExtractionSource
     && left.pdfTextExtractionPageCount === right.pdfTextExtractionPageCount
