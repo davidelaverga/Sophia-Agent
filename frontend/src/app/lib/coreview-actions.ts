@@ -74,6 +74,7 @@ export type CoreviewToolBlockedReason =
   | "invalid_tool_args"
   | "unsupported_annotation_kind"
   | "anchor_not_found"
+  | "text_anchor_not_found"
   | "invalid_rect"
   | "annotation_commit_failed"
   | "annotation_target_unavailable"
@@ -1799,6 +1800,8 @@ function blockedSummary(reason: CoreviewToolBlockedReason): string {
       return "That annotation type is not available yet."
     case "anchor_not_found":
       return "Sophia could not find that anchor in the current artifact view."
+    case "text_anchor_not_found":
+      return "Sophia could not find that text in the current artifact view."
     case "invalid_rect":
       return "The annotation rectangle was invalid."
     case "annotation_commit_failed":

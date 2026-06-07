@@ -287,6 +287,128 @@ const ARTIFACT_VOICE_COMMAND_HANDLERS: Partial<Record<ArtifactReviewVoiceCommand
   },
 }
 
+function resolveCoreviewHtmlTextAnchor(
+  exactText: string,
+  anchor: CoreviewAnnotationAnchor,
+  pageIndex: number,
+  selected: { rect?: NormalizedArtifactRect | null; point?: NormalizedArtifactPoint | null } | null,
+): CoreviewResolveAnnotationAnchorResult {
+  if (pageIndex !== 0) {
+    return { ok: false, blockedReason: "requested_page_out_of_bounds" }
+  }
+  if (anchor.type === "rect") {
+    return {
+      ok: true,
+      anchor: {
+        anchorType: "rect",
+        pageIndex: 0,
+        rect: { x: anchor.x, y: anchor.y, width: anchor.width, height: anchor.height },
+        point: null,
+      },
+    }
+  }
+  if (anchor.type === "point") {
+    return {
+      ok: true,
+      anchor: {
+        anchorType: "point",
+        pageIndex: 0,
+        rect: null,
+        point: { x: anchor.x, y: anchor.y },
+      },
+    }
+  }
+  if (anchor.type === "current_selection") {
+    if (selected?.rect) {
+      return {
+        ok: true,
+        anchor: {
+          anchorType: "current_selection",
+          pageIndex: 0,
+          rect: selected.rect,
+          point: null,
+        },
+      }
+    }
+    if (selected?.point) {
+      return {
+        ok: true,
+        anchor: {
+          anchorType: "current_selection",
+          pageIndex: 0,
+          rect: null,
+          point: selected.point,
+        },
+      }
+    }
+    return { ok: false, blockedReason: "anchor_not_found" }
+  }
+  if (anchor.type === "current_title") {
+    return {
+      ok: true,
+      anchor: {
+        anchorType: "current_title",
+        pageIndex: 0,
+        rect: { x: 0.08, y: 0.1, width: 0.74, height: 0.08 },
+        point: { x: 0.84, y: 0.13 },
+      },
+    }
+  }
+
+  const text = exactText.replace(/\s+/gu, " ").trim()
+  const needle = anchor.text.replace(/\s+/gu, " ").trim()
+  if (!text || !needle) {
+    return { ok: false, blockedReason: "layout_anchor_not_supported" }
+  }
+  const index = text.toLowerCase().indexOf(needle.toLowerCase())
+  if (index < 0) {
+    return { ok: false, blockedReason: "text_anchor_not_found" }
+  }
+  const progress = index / Math.max(text.length, 1)
+  const width = Math.min(0.76, Math.max(0.18, needle.length / 90))
+  const x = Math.min(0.82 - width, 0.08 + (progress % 0.18))
+  const y = Math.min(0.86, 0.16 + progress * 0.68)
+  const rect = {
+    x,
+    y,
+    width,
+    height: 0.045,
+  }
+  return {
+    ok: true,
+    anchor: {
+      anchorType: "text_quote",
+      pageIndex: 0,
+      rect,
+      point: {
+        x: Math.min(0.96, rect.x + rect.width + 0.025),
+        y: Math.min(0.96, rect.y + rect.height / 2),
+      },
+      matchCount: countCaseInsensitiveMatches(text, needle),
+      textLength: needle.length,
+    },
+  }
+}
+
+function countCaseInsensitiveMatches(text: string, needle: string): number {
+  if (!needle) {
+    return 0
+  }
+  let count = 0
+  let offset = 0
+  const haystack = text.toLowerCase()
+  const normalizedNeedle = needle.toLowerCase()
+  while (offset < haystack.length) {
+    const index = haystack.indexOf(normalizedNeedle, offset)
+    if (index < 0) {
+      break
+    }
+    count += 1
+    offset = index + normalizedNeedle.length
+  }
+  return count
+}
+
 export function ArtifactStage({
   builderArtifact,
   builderArtifactLibrary = [],
@@ -353,6 +475,7 @@ export function ArtifactStage({
   const [toolMode, setToolMode] = useState<ArtifactToolMode>("select")
   const annotations = coreviewAnnotations
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null)
+  const [htmlPreviewText, setHtmlPreviewText] = useState("")
   const [toolModeTelemetry, setToolModeTelemetry] = useState<{
     stickyToolModeEnabled: true
     lastToolModeBeforeAction: ArtifactToolMode
@@ -410,6 +533,7 @@ export function ArtifactStage({
   ), [artifactCapabilities, rendererKind])
   const supportsPagination = artifactCapabilities.supportsPages
   const supportsZoom = artifactCapabilities.supportsZoom
+  const toolbarPageLabel = !supportsPagination && rendererKind === "html" ? "HTML preview" : undefined
   const artifactTextRegistration = useMemo(() => (
     artifactId ? {
       artifactId,
@@ -452,6 +576,7 @@ export function ArtifactStage({
     setFitMode(supportsZoom ? "page" : "custom")
     setSelectedAnnotationId(null)
     setPdfTextLayout(null)
+    setHtmlPreviewText("")
     setPdfFocusRequest(null)
   }, [
     annotationStableArtifactIdentity,
@@ -744,6 +869,18 @@ export function ArtifactStage({
     const selected = selectedAnnotationId
       ? annotationsRef.current.find((annotation) => annotation.id === selectedAnnotationId && annotation.pageIndex === input.pageIndex)
       : null
+    if (rendererKind === "html") {
+      return resolveCoreviewHtmlTextAnchor(
+        htmlPreviewText,
+        input.anchor,
+        input.pageIndex,
+        selected?.kind === "highlight" || selected?.kind === "underline"
+          ? { rect: selected.rect }
+          : selected?.kind === "comment"
+            ? { point: selected.point }
+            : null,
+      )
+    }
     return resolveCoreviewPdfTextAnchor(
       pdfTextLayout,
       input.anchor,
@@ -754,7 +891,7 @@ export function ArtifactStage({
           ? { point: selected.point }
           : null,
     )
-  }, [artifactCapabilities.requiresOCR, artifactCapabilities.supportsLayoutAnchors, pdfTextLayout, selectedAnnotationId])
+  }, [artifactCapabilities.requiresOCR, artifactCapabilities.supportsLayoutAnchors, htmlPreviewText, pdfTextLayout, rendererKind, selectedAnnotationId])
   const addCoreviewAnnotation = useCallback((input: CoreviewAddAnnotationAdapterInput): CoreviewAddAnnotationAdapterResult => {
     if (!artifactAnnotationKindSupported(input.kind, artifactCapabilities)) {
       return {
@@ -1180,6 +1317,7 @@ export function ArtifactStage({
       />
       <ArtifactToolbar
         title={builderArtifact.artifactTitle}
+        pageLabel={toolbarPageLabel}
         pageIndex={pageIndex}
         pageCount={pageCount}
         supportsPagination={supportsPagination}
@@ -1242,6 +1380,7 @@ export function ArtifactStage({
         previewHref={openHref}
         artifactTextRegistration={artifactTextRegistration}
         onVisualCaptureStatusChange={onVisualCaptureStatusChange}
+        onHtmlTextChange={setHtmlPreviewText}
         onPdfTextLayoutChange={setPdfTextLayout}
         reviewSurfaceState={reviewSurfaceState}
         rendererKind={rendererKind}

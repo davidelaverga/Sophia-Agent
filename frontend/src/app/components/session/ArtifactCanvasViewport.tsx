@@ -1,7 +1,7 @@
 "use client"
 
 import { FileText, Layers, ListChecks, Sparkles } from "lucide-react"
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type RefObject } from "react"
 
 import type { ArtifactFitMode, ArtifactRendererKind } from "../../lib/artifact-renderers"
 import { detectArtifactRendererKind } from "../../lib/artifact-renderers"
@@ -19,6 +19,7 @@ import { recordSophiaCaptureEvent } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
 import type {
   ArtifactAnnotation,
+  ArtifactAnnotationColor,
   ArtifactToolMode,
   NormalizedArtifactLine,
   NormalizedArtifactPoint,
@@ -78,6 +79,7 @@ interface ArtifactCanvasViewportProps {
     artifactVersionId?: string | null
   } | null
   onVisualCaptureStatusChange?: (status: ArtifactVisualCaptureStatus) => void
+  onHtmlTextChange?: (text: string) => void
   onPdfTextLayoutChange?: (layout: CoreviewPdfTextLayout | null) => void
   reviewSurfaceState?: ArtifactReviewSurfaceState
   rendererKind?: ArtifactRendererKind
@@ -122,6 +124,7 @@ export function ArtifactCanvasViewport({
   previewHref,
   artifactTextRegistration,
   onVisualCaptureStatusChange,
+  onHtmlTextChange,
   onPdfTextLayoutChange,
   reviewSurfaceState = "idle",
   rendererKind,
@@ -169,6 +172,12 @@ export function ArtifactCanvasViewport({
   const htmlPreviewText = useMemo(() => (
     htmlPreview.status === "ready" ? extractTextFromHtml(htmlPreview.html) : ""
   ), [htmlPreview])
+  const htmlAnnotationSignature = useMemo(() => (
+    annotations
+      .filter((annotation) => annotation.pageIndex === 0)
+      .map(pdfAnnotationSignature)
+      .join("|")
+  ), [annotations])
   const captureArtifactId = artifactTextRegistration?.artifactId ?? null
   const htmlCaptureKey = [
     captureArtifactId ?? "",
@@ -184,9 +193,15 @@ export function ArtifactCanvasViewport({
   }))
   const currentHtmlCaptureStatus = useMemo(() => (
     htmlCaptureState.key === htmlCaptureKey
-      ? htmlCaptureState.status
-      : unavailableCaptureStatus("preview_not_ready", "html_preview_canvas", Boolean(htmlPreviewText.trim()))
-  ), [htmlCaptureKey, htmlCaptureState, htmlPreviewText])
+      ? {
+          ...htmlCaptureState.status,
+          annotationOverlayCaptured: Boolean(htmlAnnotationSignature),
+        }
+      : {
+          ...unavailableCaptureStatus("preview_not_ready", "html_preview_canvas", Boolean(htmlPreviewText.trim())),
+          annotationOverlayCaptured: Boolean(htmlAnnotationSignature),
+        }
+  ), [htmlAnnotationSignature, htmlCaptureKey, htmlCaptureState, htmlPreviewText])
   const handleHtmlCaptureStatusChange = useCallback((status: ArtifactVisualCaptureStatus) => {
     setHtmlCaptureState((current) => {
       if (current.key === htmlCaptureKey && captureStatusesEqual(current.status, status)) {
@@ -454,9 +469,11 @@ export function ArtifactCanvasViewport({
 
   useEffect(() => {
     if (!artifactTextRegistration || !htmlPreviewText.trim()) {
+      onHtmlTextChange?.("")
       return
     }
 
+    onHtmlTextChange?.(htmlPreviewText)
     return registerCoreviewArtifactText({
       artifactId: artifactTextRegistration.artifactId,
       source: "builder_file",
@@ -465,7 +482,7 @@ export function ArtifactCanvasViewport({
       threadId: artifactTextRegistration.threadId,
       artifactStableIdentity: artifactTextRegistration.artifactStableIdentity,
     })
-  }, [artifactTextRegistration, htmlPreviewText])
+  }, [artifactTextRegistration, htmlPreviewText, onHtmlTextChange])
 
   useEffect(() => {
     if (!onVisualCaptureStatusChange) {
@@ -517,6 +534,16 @@ export function ArtifactCanvasViewport({
               file={primaryFile}
               preview={htmlPreview}
               typeLabel={typeLabel}
+              zoom={zoom}
+              fitMode={fitMode}
+              toolMode={toolMode}
+              annotations={annotations.filter((annotation) => annotation.pageIndex === 0)}
+              selectedAnnotationId={selectedAnnotationId}
+              onCreateHighlight={onCreateHighlight}
+              onCreateComment={onCreateComment}
+              onCreateUnderline={onCreateUnderline}
+              onSelectAnnotation={onSelectAnnotation}
+              onUpdateCommentText={onUpdateCommentText}
             />
           ) : canPreviewMarkdown ? (
             <MarkdownDocumentPage
@@ -988,18 +1015,45 @@ function HtmlDocumentPage({
   file,
   preview,
   typeLabel,
+  zoom,
+  fitMode,
+  toolMode,
+  annotations,
+  selectedAnnotationId,
+  onCreateHighlight,
+  onCreateComment,
+  onCreateUnderline,
+  onSelectAnnotation,
+  onUpdateCommentText,
 }: {
   artifact: BuilderArtifactV1
   file?: ArtifactViewportFile
   preview: HtmlPreviewState
   typeLabel: string
+  zoom: number
+  fitMode: ArtifactFitMode
+  toolMode: ArtifactToolMode
+  annotations: ArtifactAnnotation[]
+  selectedAnnotationId?: string | null
+  onCreateHighlight?: (rect: NormalizedArtifactRect) => void
+  onCreateComment?: (point: NormalizedArtifactPoint) => void
+  onCreateUnderline?: (rect: NormalizedArtifactRect) => void
+  onSelectAnnotation?: (id: string | null) => void
+  onUpdateCommentText?: (id: string, text: string) => void
 }) {
+  const normalizedZoom = Math.max(0.25, Math.min(4, zoom))
+  const selectedAnnotation = useMemo(() => (
+    annotations.find((annotation) => annotation.id === selectedAnnotationId) ?? null
+  ), [annotations, selectedAnnotationId])
+
   return (
     <div
       data-testid="artifact-document-page"
       className="mx-auto flex min-h-full w-full max-w-[1120px] flex-col overflow-hidden rounded-lg border bg-[color:color-mix(in_srgb,var(--card-bg)_96%,var(--cosmic-panel-soft))] shadow-[0_18px_54px_color-mix(in_srgb,var(--bg)_34%,transparent),0_1px_0_color-mix(in_srgb,white_26%,transparent)_inset]"
       style={{ borderColor: "var(--cosmic-border-soft)" }}
       aria-label="Artifact HTML preview"
+      data-artifact-fit-mode={fitMode}
+      data-artifact-zoom={String(normalizedZoom)}
     >
       <div className="flex items-center justify-between gap-4 border-b border-[color:var(--cosmic-border-soft)] px-5 py-4 sm:px-6">
         <div className="min-w-0">
@@ -1020,17 +1074,454 @@ function HtmlDocumentPage({
         ) : preview.status === "failed" || preview.status === "idle" ? (
           <PreviewStateCard title="Preview unavailable" body="Open or download the artifact to view the file." />
         ) : (
-          <iframe
-            title={`Preview of ${file?.name ?? artifact.artifactTitle}`}
-            sandbox=""
-            srcDoc={preview.html}
-            className="min-h-[560px] w-full flex-1 rounded-md border bg-white"
-            style={{ borderColor: "var(--cosmic-border-soft)" }}
-          />
+          <div
+            data-testid="artifact-html-zoom-frame"
+            data-artifact-fit-mode={fitMode}
+            data-artifact-zoom={String(normalizedZoom)}
+            className="origin-top"
+            style={{
+              transform: `scale(${normalizedZoom})`,
+              transformOrigin: "top center",
+              width: `${100 / normalizedZoom}%`,
+              minHeight: `${Math.max(560, 560 * normalizedZoom)}px`,
+            }}
+          >
+            <div
+              data-testid="artifact-html-annotation-host"
+              data-annotation-overlay-captured={annotations.length > 0 ? "true" : "false"}
+              className="relative min-h-[560px] w-full"
+            >
+              <iframe
+                title={`Preview of ${file?.name ?? artifact.artifactTitle}`}
+                sandbox=""
+                srcDoc={preview.html}
+                className="min-h-[560px] w-full rounded-md border bg-white"
+                style={{ borderColor: "var(--cosmic-border-soft)" }}
+              />
+              <ArtifactHtmlAnnotationLayer
+                toolMode={toolMode}
+                annotations={annotations}
+                selectedAnnotation={selectedAnnotation}
+                onCreateHighlight={onCreateHighlight}
+                onCreateComment={onCreateComment}
+                onCreateUnderline={onCreateUnderline}
+                onSelectAnnotation={onSelectAnnotation}
+                onUpdateCommentText={onUpdateCommentText}
+              />
+            </div>
+          </div>
         )}
       </div>
     </div>
   )
+}
+
+function ArtifactHtmlAnnotationLayer({
+  toolMode,
+  annotations,
+  selectedAnnotation,
+  onCreateHighlight,
+  onCreateComment,
+  onCreateUnderline,
+  onSelectAnnotation,
+  onUpdateCommentText,
+}: {
+  toolMode: ArtifactToolMode
+  annotations: ArtifactAnnotation[]
+  selectedAnnotation: ArtifactAnnotation | null
+  onCreateHighlight?: (rect: NormalizedArtifactRect) => void
+  onCreateComment?: (point: NormalizedArtifactPoint) => void
+  onCreateUnderline?: (rect: NormalizedArtifactRect) => void
+  onSelectAnnotation?: (id: string | null) => void
+  onUpdateCommentText?: (id: string, text: string) => void
+}) {
+  const [draft, setDraft] = useState<{
+    kind: "highlight" | "underline"
+    start: NormalizedArtifactPoint
+    current: NormalizedArtifactPoint
+  } | null>(null)
+  const draftRect = draft
+    ? draft.kind === "underline"
+      ? normalizedUnderlineRectFromPoints(draft.start, draft.current)
+      : normalizedRectFromPoints(draft.start, draft.current)
+    : null
+
+  const handlePointerDown = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || toolMode === "pan") {
+      return
+    }
+    if (toolMode === "select") {
+      onSelectAnnotation?.(null)
+      return
+    }
+
+    const point = normalizedPointFromPointerEvent(event)
+    event.preventDefault()
+    event.stopPropagation()
+
+    if (toolMode === "comment") {
+      onCreateComment?.(point)
+      return
+    }
+    if (toolMode === "highlight" || toolMode === "underline") {
+      setDraft({ kind: toolMode, start: point, current: point })
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId)
+      } catch {
+        // Pointer capture is optional for this overlay.
+      }
+    }
+  }, [onCreateComment, onSelectAnnotation, toolMode])
+
+  const handlePointerMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (toolMode !== draft?.kind) {
+      return
+    }
+    event.preventDefault()
+    const point = normalizedPointFromPointerEvent(event)
+    setDraft((current) => current ? { ...current, current: point } : current)
+  }, [draft, toolMode])
+
+  const finishDraft = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (toolMode !== draft?.kind) {
+      return
+    }
+    event.preventDefault()
+    event.stopPropagation()
+    const current = normalizedPointFromPointerEvent(event)
+    const rect = draft.kind === "underline"
+      ? normalizedUnderlineRectFromPoints(draft.start, current)
+      : normalizedRectFromPoints(draft.start, current)
+    setDraft(null)
+    if (rect.width < 0.008 || (draft.kind === "highlight" && rect.height < 0.008)) {
+      return
+    }
+    if (draft.kind === "underline") {
+      onCreateUnderline?.(rect)
+    } else {
+      onCreateHighlight?.(rect)
+    }
+  }, [draft, onCreateHighlight, onCreateUnderline, toolMode])
+
+  return (
+    <div
+      data-testid="artifact-html-annotation-layer"
+      data-artifact-tool-mode={toolMode}
+      data-annotation-overlay-captured={annotations.length > 0 ? "true" : "false"}
+      className={cn(
+        "absolute inset-0 z-10",
+        toolMode === "pan" ? "pointer-events-none" : "pointer-events-auto",
+        toolMode === "highlight" && "cursor-crosshair",
+        toolMode === "underline" && "cursor-crosshair",
+        toolMode === "comment" && "cursor-copy",
+        toolMode === "select" && "cursor-default",
+      )}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={finishDraft}
+      onPointerCancel={() => setDraft(null)}
+    >
+      {annotations.map((annotation) => (
+        <HtmlAnnotation
+          key={annotation.id}
+          annotation={annotation}
+          selected={selectedAnnotation?.id === annotation.id}
+          onSelect={(id) => onSelectAnnotation?.(id)}
+          onTextChange={(id, text) => onUpdateCommentText?.(id, text)}
+        />
+      ))}
+      {draftRect ? (
+        <div
+          data-testid={draft?.kind === "underline" ? "artifact-html-underline-draft" : "artifact-html-highlight-draft"}
+          data-annotation-page-index="0"
+          data-page-index="0"
+          className={cn(
+            "pointer-events-none absolute rounded-[3px] border shadow-[0_0_0_1px_color-mix(in_srgb,var(--sophia-purple)_22%,transparent)]",
+            draft?.kind === "underline"
+              ? "border-transparent bg-transparent"
+              : "border-[color:color-mix(in_srgb,var(--sophia-purple)_74%,#facc15)] bg-[color:color-mix(in_srgb,#facc15_32%,var(--sophia-purple)_18%)]",
+          )}
+          style={rectToStyle(draftRect)}
+        >
+          {draft?.kind === "underline" ? (
+            <span className="absolute bottom-0 left-0 right-0 h-[3px] rounded-full bg-[color:var(--sophia-purple)] shadow-[0_0_10px_color-mix(in_srgb,var(--sophia-purple)_34%,transparent)]" />
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function HtmlAnnotation({
+  annotation,
+  selected,
+  onSelect,
+  onTextChange,
+}: {
+  annotation: ArtifactAnnotation
+  selected: boolean
+  onSelect: (id: string) => void
+  onTextChange: (id: string, value: string) => void
+}) {
+  if (annotation.kind === "highlight") {
+    return <HtmlHighlightAnnotation annotation={annotation} selected={selected} onSelect={onSelect} />
+  }
+  if (annotation.kind === "underline") {
+    return <HtmlUnderlineAnnotation annotation={annotation} selected={selected} onSelect={onSelect} />
+  }
+  if (annotation.kind === "comment") {
+    return (
+      <HtmlCommentAnnotation
+        annotation={annotation}
+        selected={selected}
+        onSelect={onSelect}
+        onTextChange={onTextChange}
+      />
+    )
+  }
+  return null
+}
+
+function HtmlHighlightAnnotation({
+  annotation,
+  selected,
+  onSelect,
+}: {
+  annotation: Extract<ArtifactAnnotation, { kind: "highlight" }>
+  selected: boolean
+  onSelect: (id: string) => void
+}) {
+  return (
+    <button
+      type="button"
+      data-testid="artifact-html-highlight-annotation"
+      data-annotation-id={annotation.id}
+      data-annotation-kind="highlight"
+      data-annotation-page-index="0"
+      data-page-index={annotation.pageIndex}
+      data-annotation-source={annotation.source ?? "user"}
+      aria-label="Highlight annotation"
+      aria-pressed={selected}
+      className={cn(
+        "cosmic-focus-ring absolute rounded-[3px] border transition",
+        selected
+          ? "border-[color:var(--sophia-purple)] shadow-[0_0_0_2px_color-mix(in_srgb,var(--sophia-purple)_34%,transparent)]"
+          : "border-[color:color-mix(in_srgb,var(--sophia-purple)_26%,#facc15)]",
+      )}
+      style={{
+        ...rectToStyle(annotation.rect),
+        ...highlightAnnotationStyle(annotation.color ?? "yellow"),
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => {
+        event.stopPropagation()
+        onSelect(annotation.id)
+      }}
+    />
+  )
+}
+
+function HtmlUnderlineAnnotation({
+  annotation,
+  selected,
+  onSelect,
+}: {
+  annotation: Extract<ArtifactAnnotation, { kind: "underline" }>
+  selected: boolean
+  onSelect: (id: string) => void
+}) {
+  return (
+    <button
+      type="button"
+      data-testid="artifact-html-underline-annotation"
+      data-annotation-id={annotation.id}
+      data-annotation-kind="underline"
+      data-annotation-page-index="0"
+      data-page-index={annotation.pageIndex}
+      data-annotation-source={annotation.source ?? "user"}
+      aria-label="Underline annotation"
+      aria-pressed={selected}
+      className={cn(
+        "cosmic-focus-ring absolute rounded-[3px] border bg-transparent transition",
+        selected ? "border-[color:var(--sophia-purple)]" : "border-transparent",
+      )}
+      style={rectToStyle(annotation.rect)}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => {
+        event.stopPropagation()
+        onSelect(annotation.id)
+      }}
+    >
+      <span className="absolute bottom-0 left-0 right-0 h-[3px] rounded-full bg-[color:var(--sophia-purple)] shadow-[0_0_10px_color-mix(in_srgb,var(--sophia-purple)_30%,transparent)]" />
+    </button>
+  )
+}
+
+function HtmlCommentAnnotation({
+  annotation,
+  selected,
+  onSelect,
+  onTextChange,
+}: {
+  annotation: Extract<ArtifactAnnotation, { kind: "comment" }>
+  selected: boolean
+  onSelect: (id: string) => void
+  onTextChange: (id: string, value: string) => void
+}) {
+  const popoverAlign = annotation.point.x > 0.72 ? "right-0" : "left-5"
+  const popoverSide = annotation.point.y > 0.72 ? "bottom-5" : "top-5"
+  return (
+    <div
+      data-testid="artifact-html-comment-annotation"
+      data-annotation-id={annotation.id}
+      data-annotation-kind="comment"
+      data-annotation-page-index="0"
+      data-page-index={annotation.pageIndex}
+      data-annotation-source={annotation.source ?? "user"}
+      className="absolute"
+      style={pointToStyle(annotation.point)}
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      <button
+        type="button"
+        data-testid="artifact-html-comment-pin"
+        aria-label={annotation.text.trim() ? "Comment annotation" : "Empty comment annotation"}
+        aria-pressed={selected}
+        className={cn(
+          "cosmic-focus-ring flex h-6 w-6 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border text-[11px] font-semibold shadow-[0_8px_22px_rgba(25,19,35,0.22)] transition",
+          selected
+            ? "border-[color:var(--sophia-purple)] bg-[color:color-mix(in_srgb,var(--sophia-purple)_82%,white)] text-white ring-2 ring-[color:color-mix(in_srgb,var(--sophia-purple)_34%,transparent)]"
+            : "border-[color:color-mix(in_srgb,var(--sophia-purple)_46%,white)] bg-[color:color-mix(in_srgb,var(--sophia-purple)_72%,white)] text-white hover:bg-[color:var(--sophia-purple)]",
+        )}
+        onClick={(event) => {
+          event.stopPropagation()
+          onSelect(annotation.id)
+        }}
+      >
+        +
+      </button>
+      {selected ? (
+        <label
+          className={cn(
+            "absolute z-20 flex w-[220px] flex-col gap-1 rounded-lg border border-[color:color-mix(in_srgb,var(--sophia-purple)_36%,var(--cosmic-border-soft))] bg-[color:color-mix(in_srgb,var(--cosmic-panel)_96%,white)] p-2 shadow-[0_18px_44px_rgba(25,19,35,0.24)]",
+            popoverAlign,
+            popoverSide,
+          )}
+          onClick={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <span className="text-[10px] font-medium uppercase tracking-[0.12em] text-[color:var(--cosmic-text-muted)]">
+            Comment
+          </span>
+          <textarea
+            data-testid="artifact-html-comment-input"
+            aria-label="Comment text"
+            value={annotation.text}
+            maxLength={180}
+            rows={3}
+            className="cosmic-focus-ring min-h-[70px] resize-none rounded-md border border-[color:var(--cosmic-border-soft)] bg-white px-2 py-1.5 text-xs leading-relaxed text-[#282233] outline-none"
+            placeholder="Add a note"
+            onChange={(event: ChangeEvent<HTMLTextAreaElement>) => onTextChange(annotation.id, event.target.value)}
+          />
+        </label>
+      ) : null}
+    </div>
+  )
+}
+
+function normalizedPointFromPointerEvent(event: PointerEvent<HTMLElement>): NormalizedArtifactPoint {
+  const rect = event.currentTarget.getBoundingClientRect()
+  const width = rect.width > 0 ? rect.width : 1
+  const height = rect.height > 0 ? rect.height : 1
+  return {
+    x: clampNormalized((event.clientX - rect.left) / width),
+    y: clampNormalized((event.clientY - rect.top) / height),
+  }
+}
+
+function normalizedRectFromPoints(
+  start: NormalizedArtifactPoint,
+  end: NormalizedArtifactPoint,
+): NormalizedArtifactRect {
+  const x = Math.min(start.x, end.x)
+  const y = Math.min(start.y, end.y)
+  return {
+    x,
+    y,
+    width: Math.max(0, Math.max(start.x, end.x) - x),
+    height: Math.max(0, Math.max(start.y, end.y) - y),
+  }
+}
+
+function normalizedUnderlineRectFromPoints(
+  start: NormalizedArtifactPoint,
+  end: NormalizedArtifactPoint,
+): NormalizedArtifactRect {
+  const rect = normalizedRectFromPoints(start, end)
+  const height = Math.max(rect.height, 0.012)
+  return {
+    x: rect.x,
+    y: Math.min(rect.y, 1 - height),
+    width: rect.width,
+    height,
+  }
+}
+
+function rectToStyle(rect: NormalizedArtifactRect) {
+  return {
+    left: `${rect.x * 100}%`,
+    top: `${rect.y * 100}%`,
+    width: `${rect.width * 100}%`,
+    height: `${rect.height * 100}%`,
+  }
+}
+
+function pointToStyle(point: NormalizedArtifactPoint) {
+  return {
+    left: `${point.x * 100}%`,
+    top: `${point.y * 100}%`,
+  }
+}
+
+function highlightAnnotationStyle(color: ArtifactAnnotationColor) {
+  const palette = annotationColorPalette(color)
+  return {
+    backgroundColor: palette.background,
+    borderColor: palette.border,
+  }
+}
+
+function annotationColorPalette(color: ArtifactAnnotationColor) {
+  switch (color) {
+    case "purple":
+      return {
+        background: "color-mix(in srgb, var(--sophia-purple) 30%, transparent)",
+        border: "color-mix(in srgb, var(--sophia-purple) 58%, white)",
+      }
+    case "blue":
+      return {
+        background: "rgba(96, 165, 250, 0.28)",
+        border: "rgba(59, 130, 246, 0.58)",
+      }
+    case "pink":
+      return {
+        background: "rgba(244, 114, 182, 0.28)",
+        border: "rgba(219, 39, 119, 0.54)",
+      }
+    case "yellow":
+    default:
+      return {
+        background: "color-mix(in srgb, #facc15 34%, var(--sophia-purple) 16%)",
+        border: "color-mix(in srgb, var(--sophia-purple) 26%, #facc15)",
+      }
+  }
+}
+
+function clampNormalized(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0
+  }
+  return Math.min(1, Math.max(0, value))
 }
 
 function HtmlArtifactCaptureCanvas({

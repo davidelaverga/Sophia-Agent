@@ -137,6 +137,22 @@ describe("artifact review voice command parser", () => {
       color: "purple",
       utteranceKind: "annotation_underline",
     })
+    expect(parseArtifactReviewVoiceCommand("highlight the text Readable slide content")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "highlight",
+      anchorType: "text_quote",
+      anchorText: "readable slide content",
+      color: "yellow",
+      utteranceKind: "annotation_highlight",
+    })
+    expect(parseArtifactReviewVoiceCommand("underline the phrase Readable slide content")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "underline",
+      anchorType: "text_quote",
+      anchorText: "readable slide content",
+      color: "purple",
+      utteranceKind: "annotation_underline",
+    })
     expect(parseArtifactReviewVoiceCommand("draw an arrow to this")).toEqual({
       kind: "add_annotation",
       annotationKind: "arrow",
@@ -182,6 +198,14 @@ describe("artifact review voice command parser", () => {
       annotationKind: "comment",
       anchorType: "current_title",
       commentText: "change the font",
+      utteranceKind: "annotation_comment",
+    })
+    expect(parseArtifactReviewVoiceCommand("comment on Readable slide content saying tighten this")).toEqual({
+      kind: "add_annotation",
+      annotationKind: "comment",
+      anchorType: "text_quote",
+      anchorText: "Readable slide content",
+      commentText: "tighten this",
       utteranceKind: "annotation_comment",
     })
     expect(parseArtifactReviewVoiceCommand("change the font")).toEqual({

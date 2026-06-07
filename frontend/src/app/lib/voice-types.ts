@@ -264,6 +264,20 @@ export type GeminiRuntimeTelemetry = {
   coreviewFocusAnchorCount?: number
   coreviewFocusAnchorResult?: string | null
   coreviewFocusAnchorType?: string | null
+  coreviewActionFeedbackEmitted?: boolean
+  coreviewActionFeedbackKind?: string | null
+  coreviewActionFeedbackStatus?: string | null
+  coreviewActionFeedbackSpoken?: boolean
+  coreviewActionFeedbackAudioAttempted?: boolean
+  coreviewActionFeedbackAudioResult?: string | null
+  coreviewActionFeedbackDedupeSuppressedCount?: number
+  coreviewActionFeedbackRawContentExcluded?: boolean
+  voiceAudioAckUnavailable?: boolean
+  coreviewHtmlAnnotationsEnabled?: boolean | null
+  coreviewHtmlAnnotationKind?: string | null
+  coreviewHtmlAnnotationAnchorType?: string | null
+  coreviewHtmlAnnotationResult?: string | null
+  coreviewHtmlAnnotationPersisted?: boolean | null
   providerToPublicTranscriptGapAfterCoreviewTool?: number | null
   followUpTurnDispatchedAfterCoreviewTool?: boolean
   emitArtifactBlockedDuringReviewCount?: number

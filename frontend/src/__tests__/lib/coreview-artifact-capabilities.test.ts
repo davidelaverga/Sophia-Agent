@@ -120,7 +120,7 @@ describe("Coreview artifact capability matrix", () => {
     })
   })
 
-  it("returns HTML capabilities without annotation claims", () => {
+  it("returns HTML capabilities with one-page zoom and annotation support", () => {
     const capabilities = getCoreviewArtifactCapabilities({
       rendererKind: "html",
       artifactPath: "outputs/site.html",
@@ -130,10 +130,16 @@ describe("Coreview artifact capability matrix", () => {
       canRender: true,
       renderMode: "html",
       supportsPages: false,
+      supportsPageRail: false,
+      supportsZoom: true,
       supportsTextExtraction: true,
-      supportsLayoutAnchors: false,
-      supportsAnnotations: false,
+      supportsLayoutAnchors: true,
+      supportsAnnotations: true,
+      supportsComments: true,
+      supportsUnderline: true,
+      supportsArrow: false,
       supportsStillFrame: true,
+      supportsAnnotatedExport: false,
       supportsOriginalDownload: true,
       supportsArtifactUpdate: true,
       supportsScopedEdit: true,

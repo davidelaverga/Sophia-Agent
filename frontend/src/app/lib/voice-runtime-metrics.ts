@@ -144,6 +144,20 @@ export type CoreviewVisualTelemetry = {
   coreviewHtmlQuickPatchPreservedOriginal: boolean | null
   coreviewHtmlQuickPatchRestoreAvailable: boolean | null
   coreviewHtmlQuickPatchTypeErrorPrevented: boolean | null
+  coreviewActionFeedbackEmitted: boolean
+  coreviewActionFeedbackKind: string | null
+  coreviewActionFeedbackStatus: string | null
+  coreviewActionFeedbackSpoken: boolean | null
+  coreviewActionFeedbackAudioAttempted: boolean
+  coreviewActionFeedbackAudioResult: string | null
+  coreviewActionFeedbackDedupeSuppressedCount: number
+  coreviewActionFeedbackRawContentExcluded: true
+  voiceAudioAckUnavailable: boolean
+  coreviewHtmlAnnotationsEnabled: boolean | null
+  coreviewHtmlAnnotationKind: string | null
+  coreviewHtmlAnnotationAnchorType: string | null
+  coreviewHtmlAnnotationResult: string | null
+  coreviewHtmlAnnotationPersisted: boolean | null
   htmlCaptureTargetRegistered: boolean
   htmlCaptureTargetRegistrationResult: string | null
   htmlCaptureTargetArtifactPathHash: string | null
@@ -316,6 +330,7 @@ export type CoreviewVisualTelemetry = {
   followUpTurnDispatchedAfterCoreviewTool: boolean
   emitArtifactBlockedDuringReviewCount: number
   emitArtifactBlockedForAnnotationIntentCount: number
+  rawCommentTextExcluded: true
   rawFrameExcluded: true
   rawProviderPayloadExcluded: true
 }
@@ -1449,6 +1464,20 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       coreviewHtmlQuickPatchPreservedOriginal: null,
       coreviewHtmlQuickPatchRestoreAvailable: null,
       coreviewHtmlQuickPatchTypeErrorPrevented: null,
+      coreviewActionFeedbackEmitted: false,
+      coreviewActionFeedbackKind: null,
+      coreviewActionFeedbackStatus: null,
+      coreviewActionFeedbackSpoken: null,
+      coreviewActionFeedbackAudioAttempted: false,
+      coreviewActionFeedbackAudioResult: null,
+      coreviewActionFeedbackDedupeSuppressedCount: 0,
+      coreviewActionFeedbackRawContentExcluded: true,
+      voiceAudioAckUnavailable: false,
+      coreviewHtmlAnnotationsEnabled: null,
+      coreviewHtmlAnnotationKind: null,
+      coreviewHtmlAnnotationAnchorType: null,
+      coreviewHtmlAnnotationResult: null,
+      coreviewHtmlAnnotationPersisted: null,
       htmlCaptureTargetRegistered: false,
       htmlCaptureTargetRegistrationResult: null,
       htmlCaptureTargetArtifactPathHash: null,
@@ -1621,6 +1650,7 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       followUpTurnDispatchedAfterCoreviewTool: false,
       emitArtifactBlockedDuringReviewCount: 0,
       emitArtifactBlockedForAnnotationIntentCount: 0,
+      rawCommentTextExcluded: true,
       rawFrameExcluded: true,
       rawProviderPayloadExcluded: true,
     },
@@ -1755,6 +1785,11 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
   const latestCoreviewBuilderAction = coreviewBuilderActionEvents.at(-1) ?? null
+  const coreviewActionFeedbackEvents = activeEvents
+    .filter((event) => event.category === "voice-session" && event.name === "coreview-action-feedback")
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const latestCoreviewActionFeedback = coreviewActionFeedbackEvents.at(-1) ?? null
   const builderSurfaceEvents = activeEvents
     .filter((event) => event.category === "builder-ui" && event.name === "builder-surface-resolved")
     .map((event) => event.payloadRecord)
@@ -2039,6 +2074,24 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.coreviewHtmlQuickPatchPreservedOriginal = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewHtmlQuickPatchPreservedOriginal")
   visual.coreviewHtmlQuickPatchRestoreAvailable = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewHtmlQuickPatchRestoreAvailable")
   visual.coreviewHtmlQuickPatchTypeErrorPrevented = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewHtmlQuickPatchTypeErrorPrevented")
+  visual.coreviewActionFeedbackEmitted = coreviewActionFeedbackEvents.some((event) => (
+    asBoolean(event.coreviewActionFeedbackEmitted) === true
+  ))
+  visual.coreviewActionFeedbackKind = asString(latestCoreviewActionFeedback?.coreviewActionFeedbackKind)
+  visual.coreviewActionFeedbackStatus = asString(latestCoreviewActionFeedback?.coreviewActionFeedbackStatus)
+  visual.coreviewActionFeedbackSpoken = asBoolean(latestCoreviewActionFeedback?.coreviewActionFeedbackSpoken)
+  visual.coreviewActionFeedbackAudioAttempted = coreviewActionFeedbackEvents.some((event) => (
+    asBoolean(event.coreviewActionFeedbackAudioAttempted) === true
+  ))
+  visual.coreviewActionFeedbackAudioResult = asString(latestCoreviewActionFeedback?.coreviewActionFeedbackAudioResult)
+  visual.coreviewActionFeedbackDedupeSuppressedCount = maxFiniteFromRecords(
+    coreviewActionFeedbackEvents,
+    "coreviewActionFeedbackDedupeSuppressedCount",
+  ) ?? 0
+  visual.coreviewActionFeedbackRawContentExcluded = true
+  visual.voiceAudioAckUnavailable = coreviewActionFeedbackEvents.some((event) => (
+    asBoolean(event.voiceAudioAckUnavailable) === true
+  ))
   visual.htmlCaptureTargetRegistered = htmlCaptureTelemetryRecords.some((event) => (
     asBoolean(event.htmlCaptureTargetRegistered) === true
   ))
@@ -2264,6 +2317,14 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.coreviewAnnotationColor = asString(latestAnnotationTool?.coreviewAnnotationColor)
   visual.coreviewAnnotationPageIndex = numberFromKeys(latestAnnotationTool, ["coreviewAnnotationPageIndex"])
   visual.coreviewAnnotationBlockedReason = asString(latestAnnotationTool?.coreviewAnnotationBlockedReason)
+  visual.coreviewHtmlAnnotationsEnabled = latestBooleanFromRecords(coreviewToolEvents, "coreviewHtmlAnnotationsEnabled")
+  visual.coreviewHtmlAnnotationKind = asString(latestAnnotationTool?.coreviewHtmlAnnotationKind)
+    ?? latestStringFromRecords(coreviewToolEvents, "coreviewHtmlAnnotationKind")
+  visual.coreviewHtmlAnnotationAnchorType = asString(latestAnnotationTool?.coreviewHtmlAnnotationAnchorType)
+    ?? latestStringFromRecords(coreviewToolEvents, "coreviewHtmlAnnotationAnchorType")
+  visual.coreviewHtmlAnnotationResult = asString(latestAnnotationTool?.coreviewHtmlAnnotationResult)
+    ?? latestStringFromRecords(coreviewToolEvents, "coreviewHtmlAnnotationResult")
+  visual.coreviewHtmlAnnotationPersisted = latestBooleanFromRecords(coreviewToolEvents, "coreviewHtmlAnnotationPersisted")
   visual.annotationIntentDetectedCount = annotationIntentEvents.reduce((total, event) => (
     total + (numberFromKeys(event, ["annotationIntentDetectedCount"]) ?? 1)
   ), 0)

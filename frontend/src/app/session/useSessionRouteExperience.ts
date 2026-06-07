@@ -520,6 +520,7 @@ export function useSessionRouteExperience({
     voiceStatus,
     isReflectionTtsActive,
     appendVoiceUserMessage,
+    appendVoiceAssistantMessage,
     setOnUserTranscriptHandler,
     setAssistantResponseSuppressedChecker,
     voiceRetryState,

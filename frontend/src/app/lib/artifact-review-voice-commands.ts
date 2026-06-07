@@ -17,7 +17,7 @@ export type ArtifactReviewVoiceCommandKind =
 
 export type ArtifactReviewAnnotationKind = "highlight" | "comment" | "underline" | "arrow"
 export type ArtifactReviewAnnotationColor = "yellow" | "purple" | "blue" | "pink"
-export type ArtifactReviewAnnotationAnchorType = "current_title" | "current_selection"
+export type ArtifactReviewAnnotationAnchorType = "current_title" | "current_selection" | "text_quote"
 export type ArtifactReviewAnnotationUtteranceKind =
   | "annotation_highlight"
   | "annotation_underline"
@@ -33,6 +33,8 @@ export type ArtifactReviewVoiceCommandBlockedReason =
   | "no_multipage_artifact_selected"
   | "requested_page_out_of_bounds"
   | "visual_refresh_unavailable"
+  | "layout_anchor_not_supported"
+  | "text_anchor_not_found"
   | "unsupported_update_mode"
   | "no_active_builder_task"
 
@@ -49,6 +51,7 @@ export interface ArtifactReviewVoiceCommand {
   pageTarget?: number
   annotationKind?: ArtifactReviewAnnotationKind
   anchorType?: ArtifactReviewAnnotationAnchorType
+  anchorText?: string
   color?: ArtifactReviewAnnotationColor
   commentText?: string
   updateRequest?: string
@@ -158,6 +161,7 @@ const FONT_FOLLOW_UP_PATTERNS = [
   /\bfont\s+(?:needs|should|must)\s+(?:to\s+)?(?:change|be\s+changed)\b/u,
 ]
 const COMMENT_TEXT_PATTERNS = [
+  /\b(?:comment|note|feedback|pin)\s+on\s+.+?\s+(?:saying|that\s+says|to\s+say|:)\s+(.+)$/iu,
   /\b(?:leave|add|make|put)\s+(?:a\s+)?(?:comment|note|feedback|pin)(?:\s+on\s+(?:the\s+)?(?:current\s+)?(?:title|it|this))?\s*(?:saying|that\s+says|to\s+say|:)?\s+(.+)$/iu,
   /\b(?:comment|note|feedback|pin)\s+(?:on\s+)?(?:the\s+)?(?:current\s+)?(?:title|it|this)?\s*(?:saying|that\s+says|to\s+say|:)?\s+(.+)$/iu,
   /\b(?:comment|note|feedback|pin)\s+(?!on\b|the\b|current\b|title\b|it\b|this\b)(.+)$/iu,
@@ -418,7 +422,7 @@ function annotationCommand(
     command: {
       kind: "add_annotation",
       annotationKind,
-      anchorType: annotationAnchorTypeFromNormalized(normalized),
+      ...annotationAnchorFromTranscript(transcriptFromNormalized(normalized), normalized, annotationKind),
       color: annotationColorFromNormalized(normalized) ?? defaultColor,
       utteranceKind,
     },
@@ -438,7 +442,7 @@ function commentCommand(
     command: {
       kind: "add_annotation",
       annotationKind: "comment",
-      anchorType: annotationAnchorTypeFromNormalized(normalized),
+      ...annotationAnchorFromTranscript(transcript, normalized, "comment"),
       commentText: extractCommentText(transcript),
       utteranceKind: /\bpin\b/u.test(normalized) ? "annotation_pin" : "annotation_comment",
     },
@@ -459,7 +463,7 @@ function followUpCommentCommand(
     command: {
       kind: "add_annotation",
       annotationKind: "comment",
-      anchorType: annotationAnchorTypeFromNormalized(normalized),
+      ...annotationAnchorFromTranscript(transcript, normalized, "comment"),
       commentText: cleanCommentText(transcript) ?? "change the font",
       utteranceKind: "annotation_follow_up_comment",
     },
@@ -519,6 +523,65 @@ function annotationAnchorTypeFromNormalized(
     return "current_selection"
   }
   return undefined
+}
+
+function annotationAnchorFromTranscript(
+  transcript: string,
+  normalized: string,
+  kind: ArtifactReviewAnnotationKind,
+): Pick<ArtifactReviewVoiceCommand, "anchorType" | "anchorText"> {
+  const explicit = annotationAnchorTypeFromNormalized(normalized)
+  if (explicit) {
+    return { anchorType: explicit }
+  }
+
+  const anchorText = extractAnnotationAnchorText(transcript, kind)
+  return anchorText
+    ? { anchorType: "text_quote", anchorText }
+    : {}
+}
+
+function extractAnnotationAnchorText(
+  transcript: string,
+  kind: ArtifactReviewAnnotationKind,
+): string | undefined {
+  const stripped = stripWakeWord(transcript)
+  const patterns = kind === "comment"
+    ? [
+        /\b(?:comment|note|feedback|pin)\s+on\s+(?:the\s+)?(?:(?:text|words?|phrase)\s+)?(?:that\s+says|saying|called|named)?\s*["'“”`]?(.+?)(?:["'“”`]\s*)?(?:\s+(?:saying|that\s+says|to\s+say|:)\s+.+)?$/iu,
+      ]
+    : [
+        /\b(?:highlight|underline|mark|flag|callout)\s+(?:the\s+)?(?:(?:text|words?|phrase)\s+|(?:that\s+says|saying|called|named)\s+|["'“”`])(.+?)(?:["'“”`]\s*)?(?:\s+(?:in|with)\s+(?:yellow|purple|blue|pink))?$/iu,
+      ]
+
+  for (const pattern of patterns) {
+    const match = pattern.exec(stripped)
+    const candidate = cleanAnchorText(match?.[1])
+    if (candidate) {
+      return candidate
+    }
+  }
+  return undefined
+}
+
+function cleanAnchorText(value: string | undefined): string | undefined {
+  const cleaned = value
+    ?.replace(/^(?:the\s+)?(?:current\s+)?(?:text|words?|phrase)\s+/iu, "")
+    .replace(/^(?:["'`]|\u2018|\u2019|\u201c|\u201d)+|(?:["'`]|\u2018|\u2019|\u201c|\u201d)+$/gu, "")
+    .replace(/\s+/gu, " ")
+    .replace(/[.!?]+$/gu, "")
+    .trim()
+  if (!cleaned || cleaned.length < 2 || cleaned.length > 120) {
+    return undefined
+  }
+  if (/^(?:on\s+)?(?:the\s+)?(?:current\s+)?(?:title|selection|selected\s+text|it|this|that)$/iu.test(cleaned)) {
+    return undefined
+  }
+  return cleaned
+}
+
+function transcriptFromNormalized(normalized: string): string {
+  return normalized
 }
 
 function annotationColorFromNormalized(

@@ -153,7 +153,7 @@ describe("Coreview builder action bus", () => {
     clearCoreviewBuilderTaskStateForTests()
   })
 
-  it("enables builder actions for selected HTML artifacts without annotation support", () => {
+  it("enables builder actions for selected HTML artifacts with review tool support", () => {
     const view = createView({
       rendererKind: "html",
       annotationCount: 0,
@@ -176,7 +176,8 @@ describe("Coreview builder action bus", () => {
       cancelBuilderTaskWired: true,
     })
 
-    expect(view.capabilities.supportsAnnotations).toBe(false)
+    expect(view.capabilities.supportsAnnotations).toBe(true)
+    expect(view.capabilities.supportsZoom).toBe(true)
     expect(availability).toMatchObject({
       enabled: true,
       blockedReason: null,

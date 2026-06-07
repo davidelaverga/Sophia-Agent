@@ -67,6 +67,15 @@ const markdownBuilderArtifact = {
   userNextAction: "Review the rendered brief.",
 }
 
+const htmlBuilderArtifact = {
+  ...builderArtifact,
+  artifactTitle: "Launch site",
+  artifactType: "webpage",
+  artifactPath: "mnt/user-data/outputs/launch-site.html",
+  supportingFiles: [],
+  userNextAction: "Review the HTML preview.",
+}
+
 function mockCanvasApis() {
   const context = {
     arcTo: vi.fn(),
@@ -918,6 +927,148 @@ describe("ArtifactStage", () => {
     await waitFor(() => expect(canvas).toHaveAttribute("data-artifact-zoom", "1.4"))
     await waitFor(() => expect(scrollTo).toHaveBeenCalled())
     expect(screen.getByRole("status", { name: /not looking/i })).toBeInTheDocument()
+  })
+
+  it("lets the Coreview stage target annotate findable HTML text and fail missing text safely", async () => {
+    let voiceTarget: ArtifactReviewVoiceCommandTarget | null = null
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        "<!doctype html><html><body><h1>Launch Site</h1><p>Readable slide content is ready for review.</p></body></html>",
+        { status: 200, headers: { "Content-Type": "text/html" } },
+      ),
+    )
+
+    renderStage({
+      artifact: htmlBuilderArtifact,
+      artifactId: "artifact-html-1",
+      artifactStableIdentity: "user:test-user|thread:thread-1|path:mnt/user-data/outputs/launch-site.html|renderer:html",
+      exactTextAvailable: false,
+      onVoiceCommandTargetChange: (target) => {
+        voiceTarget = target
+      },
+    })
+
+    expect(await screen.findByTitle("Preview of launch-site.html")).toBeInTheDocument()
+    await waitFor(() => expect(voiceTarget?.rendererKind).toBe("html"))
+    await waitFor(() => {
+      const resolved = voiceTarget?.resolveAnchor({
+        anchor: { type: "text_quote", text: "Readable slide content" },
+        pageIndex: 0,
+      })
+      expect(resolved).toMatchObject({ ok: true })
+    })
+
+    const missing = voiceTarget?.resolveAnchor({
+      anchor: { type: "text_quote", text: "unfindable sentence" },
+      pageIndex: 0,
+    })
+    expect(missing).toMatchObject({ ok: false, blockedReason: "text_anchor_not_found" })
+
+    const resolvedText = voiceTarget?.resolveAnchor({
+      anchor: { type: "text_quote", text: "Readable slide content" },
+      pageIndex: 0,
+    })
+    expect(resolvedText?.ok).toBe(true)
+    if (!resolvedText?.ok) {
+      throw new Error("HTML text anchor did not resolve")
+    }
+
+    act(() => {
+      voiceTarget?.addAnnotation({
+        kind: "highlight",
+        pageIndex: 0,
+        anchor: resolvedText.anchor,
+        rect: resolvedText.anchor.rect,
+        point: null,
+        line: null,
+        color: "yellow",
+        text: null,
+        source: "sophia",
+      })
+    })
+
+    expect(await screen.findByTestId("artifact-html-highlight-annotation")).toHaveAttribute("data-page-index", "0")
+
+    act(() => {
+      voiceTarget?.addAnnotation({
+        kind: "underline",
+        pageIndex: 0,
+        anchor: resolvedText.anchor,
+        rect: resolvedText.anchor.rect,
+        point: null,
+        line: null,
+        color: "blue",
+        text: null,
+        source: "sophia",
+      })
+    })
+
+    expect(await screen.findByTestId("artifact-html-underline-annotation")).toHaveAttribute("data-page-index", "0")
+
+    act(() => {
+      voiceTarget?.addAnnotation({
+        kind: "comment",
+        pageIndex: 0,
+        anchor: resolvedText.anchor,
+        rect: null,
+        point: resolvedText.anchor.point ?? { x: 0.72, y: 0.22 },
+        line: null,
+        color: "purple",
+        text: "tighten this",
+        source: "sophia",
+      })
+    })
+
+    expect(await screen.findByTestId("artifact-html-comment-pin")).toHaveAttribute("aria-pressed", "true")
+    expect(screen.getByDisplayValue("tighten this")).toBeInTheDocument()
+    expect(voiceTarget?.annotationCounts).toMatchObject({
+      annotationCount: 3,
+      highlightCount: 1,
+      underlineCount: 1,
+      commentCount: 1,
+    })
+  })
+
+  it("restores persisted HTML annotations for page zero", async () => {
+    const stableIdentity = "user:test-user|thread:thread-1|path:mnt/user-data/outputs/launch-site.html|renderer:html"
+    const identity = buildArtifactAnnotationWorkspaceIdentity({
+      artifactStableIdentity: stableIdentity,
+      threadId: "thread-1",
+      artifactId: "artifact-html-1",
+      artifactPath: htmlBuilderArtifact.artifactPath,
+      rendererKind: "html",
+    })
+    const persisted = persistArtifactAnnotations(identity.storageKey, [{
+      id: "html-persisted-highlight",
+      kind: "highlight",
+      pageIndex: 0,
+      rect: { x: 0.1, y: 0.22, width: 0.42, height: 0.08 },
+      color: "yellow",
+      source: "sophia",
+      createdAt: 1,
+    }], {
+      stableArtifactIdentity: identity.stableArtifactIdentity,
+    })
+    expect(persisted.status).toBe("saved")
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        "<!doctype html><html><body><h1>Launch Site</h1><p>Readable slide content is ready.</p></body></html>",
+        { status: 200, headers: { "Content-Type": "text/html" } },
+      ),
+    )
+
+    renderStage({
+      artifact: htmlBuilderArtifact,
+      artifactId: "artifact-html-1",
+      artifactStableIdentity: stableIdentity,
+      exactTextAvailable: false,
+    })
+
+    expect(await screen.findByTestId("artifact-html-highlight-annotation")).toHaveAttribute(
+      "data-annotation-id",
+      "html-persisted-highlight",
+    )
   })
 
   it("does not unregister the Coreview stage target during annotation state updates", async () => {

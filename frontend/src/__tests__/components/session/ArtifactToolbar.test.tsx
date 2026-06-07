@@ -58,6 +58,38 @@ describe("ArtifactToolbar", () => {
     expect(screen.getByLabelText("Reset zoom")).toBeInTheDocument()
   })
 
+  it("shows HTML zoom and annotation tools without page or arrow controls", () => {
+    render(
+      <ArtifactToolbar
+        title="Launch site"
+        pageLabel="HTML preview"
+        supportsZoom
+        supportsAnnotations
+        supportsComments
+        supportsUnderline
+        supportsArrow={false}
+        zoom={1}
+        fitMode="width"
+      />,
+    )
+
+    expect(screen.getByText("HTML preview")).toBeInTheDocument()
+    expect(screen.getByText("Fit width")).toBeInTheDocument()
+    expect(screen.getByLabelText("Select")).toBeInTheDocument()
+    expect(screen.getByLabelText("Highlight")).toBeInTheDocument()
+    expect(screen.getByLabelText("Underline")).toBeInTheDocument()
+    expect(screen.getByLabelText("Comment")).toBeInTheDocument()
+    expect(screen.getByLabelText("Zoom in")).toBeInTheDocument()
+    expect(screen.getByLabelText("Zoom out")).toBeInTheDocument()
+    expect(screen.getByLabelText("Fit page")).toBeInTheDocument()
+    expect(screen.getByLabelText("Fit width")).toBeInTheDocument()
+    expect(screen.getByLabelText("Reset zoom")).toBeInTheDocument()
+    expect(screen.queryByLabelText("Previous page")).not.toBeInTheDocument()
+    expect(screen.queryByLabelText("Next page")).not.toBeInTheDocument()
+    expect(screen.queryByLabelText("Pan")).not.toBeInTheDocument()
+    expect(screen.queryByLabelText("Arrow")).not.toBeInTheDocument()
+  })
+
   it("renders real annotation modes and marks the active tool", async () => {
     const user = userEvent.setup()
     const onToolModeChange = vi.fn()

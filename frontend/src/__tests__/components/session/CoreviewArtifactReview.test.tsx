@@ -1259,6 +1259,7 @@ describe("Coreview artifact still-frame review", () => {
       runId: "run-html-1",
       userFacingMessage: "Sophia is updating this artifact.",
     }))
+    const onCoreviewActionFeedback = vi.fn<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onCoreviewActionFeedback"]>>()
     const completion = {
       type: "builder_completion" as const,
       task_id: "task-html-1",
@@ -1293,6 +1294,7 @@ describe("Coreview artifact still-frame review", () => {
           selectedBuilderArtifactPath={selectedPath}
           onSelectedBuilderArtifactPathChange={setSelectedPath}
           onCoreviewBuilderUpdateRequest={onCoreviewBuilderUpdateRequest}
+          onCoreviewActionFeedback={onCoreviewActionFeedback}
           sessionId="session-1"
           normalSessionId="normal-1"
           threadId="thread-1"
@@ -1340,6 +1342,13 @@ describe("Coreview artifact still-frame review", () => {
 
     await user.click(within(updateCard).getByRole("button", { name: /restore original/i }))
     expect(await screen.findByTitle("Preview of site.html")).toBeInTheDocument()
+    await waitFor(() => expect(onCoreviewActionFeedback).toHaveBeenCalledWith(expect.objectContaining({
+      actionKind: "restore_original",
+      status: "completed",
+      displayMessage: "Original restored.",
+      shouldSpeak: false,
+      rawContentExcluded: true,
+    })))
     await waitFor(() => {
       const selectedEvents = getWorkspaceEvents(WORKSPACE_KEY)
         .filter((event) => event.type === "artifact.version_selected")
@@ -1392,6 +1401,7 @@ describe("Coreview artifact still-frame review", () => {
       taskId: "task-should-not-start",
       runId: "run-should-not-start",
     }))
+    const onCoreviewActionFeedback = vi.fn<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onCoreviewActionFeedback"]>>()
 
     function QuickPatchHarness() {
       const [selectedPath, setSelectedPath] = useState("mnt/user-data/outputs/site.html")
@@ -1410,6 +1420,7 @@ describe("Coreview artifact still-frame review", () => {
           selectedBuilderArtifactPath={selectedPath}
           onSelectedBuilderArtifactPathChange={setSelectedPath}
           onCoreviewBuilderUpdateRequest={onCoreviewBuilderUpdateRequest}
+          onCoreviewActionFeedback={onCoreviewActionFeedback}
           sessionId="session-1"
           normalSessionId="normal-1"
           threadId="thread-1"
@@ -1460,6 +1471,14 @@ describe("Coreview artifact still-frame review", () => {
     expect(within(updateCard).getByRole("button", { name: /restore original/i })).toBeInTheDocument()
     expect(within(updateCard).queryByRole("button", { name: /view updated version/i })).not.toBeInTheDocument()
     expect(screen.queryByTestId("builder-task-notice")).not.toBeInTheDocument()
+    await waitFor(() => expect(onCoreviewActionFeedback).toHaveBeenCalledWith(expect.objectContaining({
+      actionKind: "quick_patch",
+      status: "applied",
+      displayMessage: "Preview updated.",
+      spokenMessage: "Done - I updated it.",
+      shouldSpeak: false,
+      rawContentExcluded: true,
+    })))
 
     await waitFor(() => {
       const serialized = JSON.stringify(exportSophiaCaptureBundle().events)

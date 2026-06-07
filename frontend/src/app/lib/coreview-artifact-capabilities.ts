@@ -60,7 +60,7 @@ export type CoreviewArtifactCapabilityTelemetry = {
 }
 
 const MARKDOWN_TRUTH = "Markdown preview is available. Visual annotations are not available for this format yet."
-const HTML_TRUTH = "HTML preview is available. Visual annotations are not available for this format yet."
+const HTML_TRUTH = "HTML preview, zoom, and visual annotations are available in Coreview."
 const DOCX_TRUTH = "Word documents can be opened or downloaded. In-canvas document rendering is not available yet."
 const PPTX_TRUTH = "PPTX native canvas rendering is not available yet. Open or download the file to review it."
 const IMAGE_TRUTH = "Image files can be opened or downloaded. OCR is not available yet."
@@ -142,7 +142,12 @@ export function getCoreviewArtifactCapabilities(
       return buildCapabilities({
         canRender: true,
         renderMode: "html",
+        supportsZoom: true,
         supportsTextExtraction: true,
+        supportsLayoutAnchors: true,
+        supportsAnnotations: true,
+        supportsComments: true,
+        supportsUnderline: true,
         supportsStillFrame: true,
         supportsOriginalDownload: downloadAvailable,
         supportsOpenInNewTab: openAvailable,

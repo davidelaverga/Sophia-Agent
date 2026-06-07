@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { ArtifactCanvasViewport } from "../../../app/components/session/ArtifactCanvasViewport"
 import { loadPdfJs } from "../../../app/lib/pdfjs-loader"
+import type { ArtifactAnnotation } from "../../../app/types/artifact-annotations"
 import type { BuilderArtifactV1 } from "../../../app/types/builder-artifact"
 
 vi.mock("../../../app/lib/pdfjs-loader", () => ({
@@ -283,6 +284,7 @@ describe("ArtifactCanvasViewport", () => {
         reason: null,
         source: "html_preview_canvas",
         exactTextAvailable: true,
+        annotationOverlayCaptured: false,
         artifactPath: "mnt/user-data/outputs/launch-brief.html",
         previewHref: "/artifact.html",
       })
@@ -413,8 +415,97 @@ describe("ArtifactCanvasViewport", () => {
         reason: null,
         source: "html_preview_canvas",
         exactTextAvailable: true,
+        annotationOverlayCaptured: false,
         artifactPath: "mnt/user-data/outputs/launch-brief-revision-534f86ab.html",
         previewHref: "/revision.html",
+      })
+    })
+  })
+
+  it("renders HTML zoom and page-zero annotations on the capture layer", async () => {
+    mockCanvasApis()
+    const onVisualCaptureStatusChange = vi.fn()
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        "<!doctype html><html><body><h1>Deck fallback</h1><p>Readable slide content.</p></body></html>",
+        { status: 200, headers: { "Content-Type": "text/html" } },
+      ),
+    )
+    const annotations: ArtifactAnnotation[] = [
+      {
+        id: "highlight-1",
+        kind: "highlight",
+        pageIndex: 0,
+        rect: { x: 0.1, y: 0.2, width: 0.3, height: 0.08 },
+        color: "yellow",
+        source: "sophia",
+        createdAt: 1,
+      },
+      {
+        id: "underline-1",
+        kind: "underline",
+        pageIndex: 0,
+        rect: { x: 0.15, y: 0.35, width: 0.36, height: 0.03 },
+        color: "blue",
+        source: "user",
+        createdAt: 2,
+      },
+      {
+        id: "comment-1",
+        kind: "comment",
+        pageIndex: 0,
+        point: { x: 0.72, y: 0.42 },
+        text: "Private comment text",
+        color: "purple",
+        source: "sophia",
+        createdAt: 3,
+      },
+    ]
+
+    render(
+      <ArtifactCanvasViewport
+        artifact={htmlArtifact}
+        files={[{
+          path: "mnt/user-data/outputs/launch-brief.html",
+          name: "launch-brief.html",
+          label: "launch-brief.html",
+          isPrimary: true,
+          mimeType: "text/html",
+        }]}
+        typeLabel="Webpage"
+        previewHref="/artifact.html"
+        artifactTextRegistration={{
+          artifactId: "artifact-1",
+          threadId: "thread-1",
+        }}
+        zoom={1.25}
+        fitMode="custom"
+        annotations={annotations}
+        selectedAnnotationId="comment-1"
+        toolMode="select"
+        onVisualCaptureStatusChange={onVisualCaptureStatusChange}
+      />,
+    )
+
+    const zoomFrame = await screen.findByTestId("artifact-html-zoom-frame")
+    expect(zoomFrame).toHaveAttribute("data-artifact-zoom", "1.25")
+    expect(zoomFrame).toHaveAttribute("data-artifact-fit-mode", "custom")
+    expect(screen.queryByTestId("artifact-page-rail")).not.toBeInTheDocument()
+    expect(await screen.findByTestId("artifact-html-annotation-layer")).toBeInTheDocument()
+    expect(screen.getByTestId("artifact-html-highlight-annotation")).toHaveAttribute("data-page-index", "0")
+    expect(screen.getByTestId("artifact-html-underline-annotation")).toHaveAttribute("data-page-index", "0")
+    expect(screen.getByTestId("artifact-html-comment-annotation")).toHaveAttribute("data-page-index", "0")
+    expect(screen.getByDisplayValue("Private comment text")).toBeInTheDocument()
+
+    await waitFor(() => {
+      expect(onVisualCaptureStatusChange).toHaveBeenLastCalledWith({
+        ready: true,
+        reason: null,
+        source: "html_preview_canvas",
+        exactTextAvailable: true,
+        annotationOverlayCaptured: true,
+        artifactPath: "mnt/user-data/outputs/launch-brief.html",
+        previewHref: "/artifact.html",
       })
     })
   })

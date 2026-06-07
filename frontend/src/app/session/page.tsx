@@ -63,6 +63,12 @@ import { detectArtifactRendererKind } from '../lib/artifact-renderers';
 import type { ArtifactReviewVoiceCommandRouter } from '../lib/artifact-review-voice-commands';
 import { buildThreadArtifactHref, getBuilderArtifactFiles, normalizeBuilderArtifactPath } from '../lib/builder-artifacts';
 import { GeminiStillFrameTransport } from '../lib/co-review-still-frame-transport';
+import {
+  coreviewFeedbackSuppressedTelemetryPayload,
+  coreviewFeedbackTelemetryPayload,
+  dedupeCoreviewActionFeedback,
+  type CoreviewActionFeedback,
+} from '../lib/coreview-action-feedback';
 import { buildCoreviewArtifactStableIdentity } from '../lib/coreview-artifact-identity';
 import type {
   CoreviewArtifactUpdateContext,
@@ -375,6 +381,7 @@ function SessionPageContent() {
     voiceStatus,
     isReflectionTtsActive,
     appendVoiceUserMessage,
+    appendVoiceAssistantMessage,
     setOnUserTranscriptHandler,
     setAssistantResponseSuppressedChecker,
     voiceRetryState,
@@ -615,12 +622,76 @@ function SessionPageContent() {
     [voiceState.getArtifactFrameTransportStatus, voiceState.sendArtifactFrame],
   );
   const artifactReviewVoiceCommandRouterRef = useRef<ArtifactReviewVoiceCommandRouter | null>(null);
+  const coreviewActionFeedbackDedupeRef = useRef(new Set<string>());
   const handleArtifactReviewVoiceCommandRouteChange = useCallback((handler: ArtifactReviewVoiceCommandRouter | null) => {
     artifactReviewVoiceCommandRouterRef.current = handler;
   }, []);
   const routeArtifactReviewVoiceCommand = useCallback<ArtifactReviewVoiceCommandRouter>((text) => (
     artifactReviewVoiceCommandRouterRef.current?.(text) ?? { handled: false }
   ), []);
+  const handleCoreviewActionFeedback = useCallback((feedback: CoreviewActionFeedback) => {
+    const deduped = dedupeCoreviewActionFeedback(feedback, coreviewActionFeedbackDedupeRef.current);
+    if (deduped.suppressed) {
+      recordSophiaCaptureEvent({
+        category: 'voice-session',
+        name: 'coreview-action-feedback',
+        payload: coreviewFeedbackSuppressedTelemetryPayload(feedback, deduped.suppressedCount),
+      });
+      return;
+    }
+
+    const nextFeedback = deduped.feedback;
+    if (!nextFeedback) {
+      return;
+    }
+
+    const transcript = nextFeedback.shouldSpeak
+      ? nextFeedback.spokenMessage ?? nextFeedback.displayMessage
+      : nextFeedback.displayMessage;
+    if (nextFeedback.shouldShowToastOrCard || nextFeedback.shouldSpeak) {
+      appendVoiceAssistantMessage(transcript, false);
+    }
+
+    const shouldAttemptAudio = nextFeedback.shouldSpeak && Boolean(nextFeedback.spokenMessage);
+    if (!shouldAttemptAudio) {
+      recordSophiaCaptureEvent({
+        category: 'voice-session',
+        name: 'coreview-action-feedback',
+        payload: coreviewFeedbackTelemetryPayload(nextFeedback, {
+          spoken: false,
+          audioAttempted: false,
+          audioResult: 'not_attempted',
+        }),
+      });
+      return;
+    }
+
+    void voiceState.speakText(nextFeedback.spokenMessage ?? nextFeedback.displayMessage)
+      .then((spoken) => {
+        recordSophiaCaptureEvent({
+          category: 'voice-session',
+          name: 'coreview-action-feedback',
+          payload: coreviewFeedbackTelemetryPayload(nextFeedback, {
+            spoken,
+            audioAttempted: true,
+            audioResult: spoken ? 'spoken' : 'unavailable',
+            voiceAudioAckUnavailable: !spoken,
+          }),
+        });
+      })
+      .catch(() => {
+        recordSophiaCaptureEvent({
+          category: 'voice-session',
+          name: 'coreview-action-feedback',
+          payload: coreviewFeedbackTelemetryPayload(nextFeedback, {
+            spoken: false,
+            audioAttempted: true,
+            audioResult: 'failed',
+            voiceAudioAckUnavailable: true,
+          }),
+        });
+      });
+  }, [appendVoiceAssistantMessage, voiceState]);
   const handleCoreviewBuilderUpdateRequest = useCallback(async ({
     context,
     prompt,
@@ -1952,6 +2023,7 @@ function SessionPageContent() {
               onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}
               onPendingBuilderArtifactReviewConsumed={handlePendingBuilderArtifactReviewConsumed}
               onArtifactReviewVoiceCommandRouteChange={handleArtifactReviewVoiceCommandRouteChange}
+              onCoreviewActionFeedback={handleCoreviewActionFeedback}
               onAnnotationActionSucceeded={voiceState.markAnnotationActionSucceeded}
               onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
               onMemoryApprove={handleMemoryApprove}
@@ -2200,6 +2272,7 @@ function SessionPageContent() {
               onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}
               onPendingBuilderArtifactReviewConsumed={handlePendingBuilderArtifactReviewConsumed}
               onArtifactReviewVoiceCommandRouteChange={handleArtifactReviewVoiceCommandRouteChange}
+              onCoreviewActionFeedback={handleCoreviewActionFeedback}
               onAnnotationActionSucceeded={voiceState.markAnnotationActionSucceeded}
               onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
               onMemoryApprove={handleMemoryApprove}
@@ -2235,6 +2308,7 @@ function SessionPageContent() {
             onStartVoiceBuilderArtifactReview={handleStartVoiceBuilderArtifactReview}
             onPendingBuilderArtifactReviewConsumed={handlePendingBuilderArtifactReviewConsumed}
             onArtifactReviewVoiceCommandRouteChange={handleArtifactReviewVoiceCommandRouteChange}
+            onCoreviewActionFeedback={handleCoreviewActionFeedback}
             onAnnotationActionSucceeded={voiceState.markAnnotationActionSucceeded}
             onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
             onMemoryApprove={handleMemoryApprove}

@@ -4,6 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { isHtmlArtifactFile } from "../../lib/builder-artifacts"
 import {
+  coreviewFeedbackFromActionResult,
+  coreviewFeedbackFromBuilderActionResult,
+  createCoreviewActionFeedback,
+  type CoreviewActionFeedback,
+} from "../../lib/coreview-action-feedback"
+import {
   createVersionFromBuilderOutput,
   getCurrentVersion,
   getVersionTelemetry,
@@ -143,6 +149,7 @@ interface PresenceArtifactPanelProps {
   onStartVoiceBuilderArtifactReview?: () => void
   onPendingBuilderArtifactReviewConsumed?: () => void
   onArtifactReviewVoiceCommandRouteChange?: (handler: ArtifactReviewVoiceCommandRouter | null) => void
+  onCoreviewActionFeedback?: (feedback: CoreviewActionFeedback) => void
   onAnnotationActionSucceeded?: (counts: {
     annotationCount?: number | null
     highlightCount?: number | null
@@ -378,6 +385,7 @@ const COREVIEW_BLOCKED_STATUS_TEXT: Partial<Record<CoreviewToolBlockedReason, st
   tool_unavailable: "Sophia cannot control this view right now.",
   invalid_tool_args: "Sophia asked for an invalid view change.",
   annotation_commit_failed: "Sophia could not verify that the annotation was added.",
+  text_anchor_not_found: "Sophia could not find that text in this artifact.",
   unsupported_annotation_kind: "That annotation type is not available yet.",
 }
 
@@ -396,7 +404,8 @@ const COREVIEW_ROUTE_BLOCKED_REASON: Partial<Record<
   pages_not_supported: "no_multipage_artifact_selected",
   zoom_not_supported: "no_multipage_artifact_selected",
   annotations_not_supported: "no_multipage_artifact_selected",
-  layout_anchor_not_supported: "no_multipage_artifact_selected",
+  layout_anchor_not_supported: "layout_anchor_not_supported",
+  text_anchor_not_found: "text_anchor_not_found",
   ocr_not_available: "no_multipage_artifact_selected",
   pptx_native_renderer_unavailable: "no_multipage_artifact_selected",
   unsupported_pages: "no_multipage_artifact_selected",
@@ -480,6 +489,9 @@ function coreviewAnchorFromVoiceCommand(
   command: ArtifactReviewVoiceCommand,
   lastFocusedAnchorType: CoreviewAnnotationAnchor["type"] | null,
 ): CoreviewAnnotationAnchor {
+  if (command.anchorType === "text_quote" && command.anchorText) {
+    return { type: "text_quote", text: command.anchorText }
+  }
   const anchorType = command.anchorType ?? lastFocusedAnchorType ?? "current_title"
   return anchorType === "current_selection"
     ? { type: "current_selection" }
@@ -910,6 +922,7 @@ export function PresenceArtifactPanel({
   onStartVoiceBuilderArtifactReview,
   onPendingBuilderArtifactReviewConsumed,
   onArtifactReviewVoiceCommandRouteChange,
+  onCoreviewActionFeedback,
   onAnnotationActionSucceeded,
   onReflectionTap,
   onMemoryApprove,
@@ -1893,6 +1906,21 @@ export function PresenceArtifactPanel({
         artifactCapabilitySupportsPptxNativeRender: capabilitySummary?.supportsPptxNativeRender ?? null,
         artifactCapabilitySupportsAnnotatedExport: capabilitySummary?.supportsAnnotatedExport ?? null,
         artifactCapabilityFallbackReason: capabilitySummary?.fallbackReason ?? null,
+        coreviewHtmlAnnotationsEnabled: result.renderer_kind === "html"
+          ? capabilitySummary?.supportsAnnotations === true
+          : null,
+        coreviewHtmlAnnotationKind: result.renderer_kind === "html" && result.action === "add_annotation"
+          ? result.annotation_kind ?? null
+          : null,
+        coreviewHtmlAnnotationAnchorType: result.renderer_kind === "html" && result.action === "add_annotation"
+          ? result.annotation_anchor_type ?? null
+          : null,
+        coreviewHtmlAnnotationResult: result.renderer_kind === "html" && result.action === "add_annotation"
+          ? annotationFallbackResult
+          : null,
+        coreviewHtmlAnnotationPersisted: result.renderer_kind === "html" && result.action === "add_annotation"
+          ? annotationStateChanged
+          : null,
         coreviewAnnotationToolCount: result.action === "add_annotation" ? 1 : 0,
         coreviewAnnotationToolResult: result.action === "add_annotation" ? annotationFallbackResult : null,
         coreviewAnnotationFallbackCount: result.action === "add_annotation" && result.command_source === "frontend_fallback" ? 1 : 0,
@@ -1955,6 +1983,22 @@ export function PresenceArtifactPanel({
       },
     })
   }, [artifactStableIdentity, builderStageActive, isVisible, normalSessionId, onAnnotationActionSucceeded, sessionId, threadId])
+
+  const emitCoreviewToolFeedback = useCallback((
+    result: CoreviewActionResult,
+    options?: {
+      voiceTriggered?: boolean
+      commandKind?: ArtifactReviewVoiceCommand["kind"] | null
+      dedupePrefix?: string | null
+    },
+  ) => {
+    onCoreviewActionFeedback?.(coreviewFeedbackFromActionResult(result, {
+      voiceMode: isVoiceMode,
+      voiceTriggered: options?.voiceTriggered ?? isVoiceMode,
+      commandKind: options?.commandKind ?? null,
+      dedupePrefix: options?.dedupePrefix ?? null,
+    }))
+  }, [isVoiceMode, onCoreviewActionFeedback])
 
   const applyCoreviewActionStatus = useCallback((result: CoreviewActionResult) => {
     if (!result.ok) {
@@ -2206,7 +2250,13 @@ export function PresenceArtifactPanel({
 
   const runCoreviewAction = useCallback(async (
     runner: (bus: CoreviewActionBus) => Promise<CoreviewActionResult> | CoreviewActionResult,
-    options?: { applyStatus?: boolean },
+    options?: {
+      applyStatus?: boolean
+      emitFeedback?: boolean
+      voiceTriggered?: boolean
+      commandKind?: ArtifactReviewVoiceCommand["kind"] | null
+      dedupePrefix?: string | null
+    },
   ): Promise<CoreviewActionResult> => {
     pendingWorkspaceViewActorRef.current = sophiaWorkspaceActor
     const result = await runner(coreviewActionBus)
@@ -2219,11 +2269,18 @@ export function PresenceArtifactPanel({
       applyCoreviewActionStatus(result)
     }
     recordCoreviewToolTelemetry(result)
+    if (options?.emitFeedback !== false) {
+      emitCoreviewToolFeedback(result, {
+        voiceTriggered: options?.voiceTriggered,
+        commandKind: options?.commandKind,
+        dedupePrefix: options?.dedupePrefix,
+      })
+    }
     if (pendingWorkspaceViewActorRef.current === sophiaWorkspaceActor) {
       pendingWorkspaceViewActorRef.current = null
     }
     return result
-  }, [applyCoreviewActionStatus, coreviewActionBus, recordCoreviewToolTelemetry, sophiaWorkspaceActor])
+  }, [applyCoreviewActionStatus, coreviewActionBus, emitCoreviewToolFeedback, recordCoreviewToolTelemetry, sophiaWorkspaceActor])
 
   const activeCoreviewBuilderTask = useMemo(
     () => coreviewBuilderStatusFromTask(builderTask),
@@ -2340,6 +2397,20 @@ export function PresenceArtifactPanel({
     stageRendererKind,
     threadId,
   ])
+
+  const emitCoreviewBuilderFeedback = useCallback((
+    result: CoreviewBuilderActionResult,
+    options?: {
+      voiceTriggered?: boolean
+      dedupePrefix?: string | null
+    },
+  ) => {
+    onCoreviewActionFeedback?.(coreviewFeedbackFromBuilderActionResult(result, {
+      voiceMode: isVoiceMode,
+      voiceTriggered: options?.voiceTriggered ?? isVoiceMode,
+      dedupePrefix: options?.dedupePrefix ?? null,
+    }))
+  }, [isVoiceMode, onCoreviewActionFeedback])
 
   useEffect(() => {
     if (!isVisible || !builderStageActive) {
@@ -2470,6 +2541,14 @@ export function PresenceArtifactPanel({
               restoreAvailable: false,
             }
           : current)
+        onCoreviewActionFeedback?.(createCoreviewActionFeedback({
+          actionKind: "quick_patch",
+          status: "failed",
+          displayMessage: "Quick edit could not be applied.",
+          spokenMessage: "I couldn't safely apply that quick edit.",
+          shouldSpeak: isVoiceMode,
+          dedupeKey: `quick-patch-invalid-output:${result.htmlQuickPatch?.revisionPathHash ?? result.latestOutput?.artifactPath ?? "unknown"}`,
+        }))
         recordCoreviewBuilderTelemetry(result)
         return
       }
@@ -2521,6 +2600,14 @@ export function PresenceArtifactPanel({
           text: "The quick update could not be saved. Original preserved.",
           tone: "warn",
         })
+        onCoreviewActionFeedback?.(createCoreviewActionFeedback({
+          actionKind: "quick_patch",
+          status: "failed",
+          displayMessage: "Quick edit could not be saved.",
+          spokenMessage: "I couldn't safely save that quick edit.",
+          shouldSpeak: isVoiceMode,
+          dedupeKey: `quick-patch-version-state:${result.htmlQuickPatch?.revisionPathHash ?? outputPath}`,
+        }))
         recordCoreviewBuilderTelemetry(result)
         return
       }
@@ -2686,6 +2773,10 @@ export function PresenceArtifactPanel({
       tone: result.ok ? "success" : "warn",
     })
     recordCoreviewBuilderTelemetry(result)
+    emitCoreviewBuilderFeedback(result, {
+      voiceTriggered: isVoiceMode,
+      dedupePrefix: "builder-result",
+    })
   }, [
     activeCoreviewBuilderTask?.currentStep,
     artifactStableIdentity,
@@ -2693,11 +2784,14 @@ export function PresenceArtifactPanel({
     builderTask,
     coreviewArtifactKey,
     coreviewHtmlLiveUpdateEnabled,
+    isVoiceMode,
     latestCoreviewBuilderOutput,
     normalSessionId,
     normalizedSelectedBuilderArtifactPath,
     onSelectedBuilderArtifactPathChange,
+    onCoreviewActionFeedback,
     recordCoreviewBuilderTelemetry,
+    emitCoreviewBuilderFeedback,
     recordCoreviewWorkspaceEvent,
     sessionId,
     sophiaWorkspaceActor,
@@ -3211,6 +3305,14 @@ export function PresenceArtifactPanel({
         text: "Preview updated.",
         tone: "success",
       })
+      onCoreviewActionFeedback?.(createCoreviewActionFeedback({
+        actionKind: "quick_patch",
+        status: "applied",
+        displayMessage: "Preview updated.",
+        spokenMessage: "Done - I updated it.",
+        shouldSpeak: isVoiceMode,
+        dedupeKey: `quick-patch-rendered:${pending.signature}`,
+      }))
       recordSophiaCaptureEvent({
         category: "voice-session",
         name: "coreview-builder-action",
@@ -3294,6 +3396,14 @@ export function PresenceArtifactPanel({
       text: "The update was built, but I couldn’t refresh the preview yet.",
       tone: "warn",
     })
+    onCoreviewActionFeedback?.(createCoreviewActionFeedback({
+      actionKind: "quick_patch",
+      status: "failed",
+      displayMessage: "Preview could not refresh.",
+      spokenMessage: "The update was built, but I couldn't refresh the preview yet.",
+      shouldSpeak: isVoiceMode,
+      dedupeKey: `quick-patch-preview-refresh:${pending.signature}`,
+    }))
     recordSophiaCaptureEvent({
       category: "voice-session",
       name: "coreview-builder-action",
@@ -3347,8 +3457,10 @@ export function PresenceArtifactPanel({
     artifactStableIdentity,
     builderVisualCaptureStatus,
     coreviewHtmlLiveUpdateEnabled,
+    isVoiceMode,
     normalSessionId,
     normalizedSelectedBuilderArtifactPath,
+    onCoreviewActionFeedback,
     onSelectedBuilderArtifactPathChange,
     pendingCoreviewHtmlAutoApply,
     sessionId,
@@ -3367,6 +3479,10 @@ export function PresenceArtifactPanel({
       const result = await coreviewBuilderActionBus.handleToolCall(call)
       if (call.name === "coreview_get_builder_status") {
         recordCoreviewBuilderTelemetry(result)
+        emitCoreviewBuilderFeedback(result, {
+          voiceTriggered: isVoiceMode,
+          dedupePrefix: "builder-tool-status",
+        })
       } else {
         applyCoreviewBuilderResult(result)
       }
@@ -3381,7 +3497,9 @@ export function PresenceArtifactPanel({
     applyCoreviewBuilderResult,
     builderStageActive,
     coreviewBuilderActionBus,
+    emitCoreviewBuilderFeedback,
     isVisible,
+    isVoiceMode,
     recordCoreviewBuilderTelemetry,
     runCoreviewAction,
   ])
@@ -3615,6 +3733,10 @@ export function PresenceArtifactPanel({
               )
             }
             return bus.setView(coreviewSetViewInputFromVoiceCommand(nextCommand, commandView), "frontend_fallback")
+          }, {
+            voiceTriggered: true,
+            commandKind: nextCommand.kind,
+            dedupePrefix: `voice:${startedAtMs}`,
           })
           const annotationStateChanged = coreviewAnnotationStateChanged(result)
           const annotationFallbackResult = annotationFallbackResultFromCoreview(result)
@@ -3866,7 +3988,12 @@ export function PresenceArtifactPanel({
       command.kind === "refresh_view"
         ? bus.refreshView({ reason: "voice command fallback" }, "frontend_fallback")
         : bus.setView(coreviewSetViewInputFromVoiceCommand(command, currentView), "frontend_fallback")
-    ), { applyStatus: triggeredRefresh })
+    ), {
+      applyStatus: triggeredRefresh,
+      voiceTriggered: true,
+      commandKind: command.kind,
+      dedupePrefix: `voice:${startedAtMs}`,
+    })
       .then((result) => {
         recordReviewVoiceCommandTelemetry({
           command,
@@ -4357,6 +4484,14 @@ export function PresenceArtifactPanel({
           }
         : current)
     }
+    onCoreviewActionFeedback?.(createCoreviewActionFeedback({
+      actionKind: "restore_original",
+      status: restoredState && restoredVersion ? "completed" : "failed",
+      displayMessage: restoredState && restoredVersion ? "Original restored." : "Original could not be restored.",
+      spokenMessage: restoredState && restoredVersion ? "Original restored." : "I couldn't restore the original.",
+      shouldSpeak: isVoiceMode,
+      dedupeKey: `restore-original:${coreviewArtifactVersionState.logicalArtifactId}:${restoreResult}`,
+    }))
     setRestoreOriginalPending(false)
     recordSophiaCaptureEvent({
       category: "voice-session",
@@ -4392,7 +4527,9 @@ export function PresenceArtifactPanel({
     coreviewHtmlLiveUpdateEnabled,
     coreviewWorkspaceKey,
     emitCoreviewBuilderWorkspaceEvent,
+    isVoiceMode,
     normalSessionId,
+    onCoreviewActionFeedback,
     onSelectedBuilderArtifactPathChange,
     sessionId,
     threadId,

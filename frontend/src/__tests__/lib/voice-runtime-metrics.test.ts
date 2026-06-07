@@ -2907,6 +2907,96 @@ describe('buildVoiceDeveloperMetrics', () => {
     });
   });
 
+  it('reports Coreview action feedback and HTML annotation telemetry without raw comments', () => {
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events: [
+        buildEvent({
+          seq: 1,
+          at: '2026-06-06T12:00:00.000Z',
+          category: 'voice-session',
+          name: 'coreview-action-feedback',
+          payload: {
+            coreviewActionFeedbackEmitted: true,
+            coreviewActionFeedbackKind: 'quick_patch',
+            coreviewActionFeedbackStatus: 'applied',
+            coreviewActionFeedbackSpoken: false,
+            coreviewActionFeedbackAudioAttempted: true,
+            coreviewActionFeedbackAudioResult: 'unavailable',
+            coreviewActionFeedbackDedupeSuppressedCount: 0,
+            coreviewActionFeedbackRawContentExcluded: true,
+            voiceAudioAckUnavailable: true,
+            rawCommentTextExcluded: true,
+            rawArtifactTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        }),
+        buildEvent({
+          seq: 2,
+          at: '2026-06-06T12:00:01.000Z',
+          category: 'voice-session',
+          name: 'coreview-action-feedback',
+          payload: {
+            coreviewActionFeedbackEmitted: false,
+            coreviewActionFeedbackKind: 'quick_patch',
+            coreviewActionFeedbackStatus: 'applied',
+            coreviewActionFeedbackSpoken: false,
+            coreviewActionFeedbackAudioAttempted: false,
+            coreviewActionFeedbackAudioResult: 'not_attempted',
+            coreviewActionFeedbackDedupeSuppressedCount: 1,
+            coreviewActionFeedbackRawContentExcluded: true,
+            rawCommentTextExcluded: true,
+            rawArtifactTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        }),
+        buildEvent({
+          seq: 3,
+          at: '2026-06-06T12:00:02.000Z',
+          category: 'voice-session',
+          name: 'coreview-tool-call',
+          payload: {
+            rendererKind: 'html',
+            action: 'add_annotation',
+            coreviewAnnotationToolCount: 1,
+            coreviewAnnotationToolResult: 'committed',
+            coreviewAnnotationKind: 'comment',
+            coreviewAnnotationAnchorType: 'text_quote',
+            coreviewHtmlAnnotationsEnabled: true,
+            coreviewHtmlAnnotationKind: 'comment',
+            coreviewHtmlAnnotationAnchorType: 'text_quote',
+            coreviewHtmlAnnotationResult: 'committed',
+            coreviewHtmlAnnotationPersisted: true,
+            rawCommentTextExcluded: true,
+            rawArtifactTextExcluded: true,
+            rawFrameExcluded: true,
+          },
+        }),
+      ],
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-06-06T12:00:04.000Z'),
+    });
+
+    expect(metrics.coreview.visual).toMatchObject({
+      coreviewActionFeedbackEmitted: true,
+      coreviewActionFeedbackKind: 'quick_patch',
+      coreviewActionFeedbackStatus: 'applied',
+      coreviewActionFeedbackSpoken: false,
+      coreviewActionFeedbackAudioAttempted: true,
+      coreviewActionFeedbackAudioResult: 'not_attempted',
+      coreviewActionFeedbackDedupeSuppressedCount: 1,
+      coreviewActionFeedbackRawContentExcluded: true,
+      voiceAudioAckUnavailable: true,
+      coreviewHtmlAnnotationsEnabled: true,
+      coreviewHtmlAnnotationKind: 'comment',
+      coreviewHtmlAnnotationAnchorType: 'text_quote',
+      coreviewHtmlAnnotationResult: 'committed',
+      coreviewHtmlAnnotationPersisted: true,
+      rawCommentTextExcluded: true,
+    });
+    expect(JSON.stringify(metrics.coreview.visual)).not.toContain('tighten this');
+  });
+
   it('reports builder snapshot protection and thumbnail annotation indicators', () => {
     const metrics = buildVoiceDeveloperMetrics({
       stage: 'listening',
