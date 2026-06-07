@@ -44,9 +44,12 @@ _DIRECT_TEXT_EXTENSIONS: frozenset[str] = frozenset(
     {".md", ".markdown", ".txt", ".csv", ".tsv", ".json", ".yaml", ".yml"}
 )
 
-# Max bytes returned to the model — bounded so a giant CSV doesn't blow
-# the context window. The companion can re-request a different file if
-# truncated content isn't enough.
+# Max bytes returned PER read — bounded so a giant CSV doesn't blow the
+# context window in a single tool result. A document larger than this is
+# NOT truncated away: the footer reports the next byte offset and the
+# model pages through the rest via the ``offset`` parameter (see
+# ``_page_for_context``). On-demand chunked loading replaces the old
+# hard cut.
 _MAX_BYTES_RETURNED = 64_000
 
 # Same search order as view_user_image: uploads first, then outputs.
@@ -168,15 +171,44 @@ def _materialize_from_supabase(thread_id: str, filename: str) -> Path | None:
     return dest
 
 
-def _truncate_for_context(text: str) -> str:
+def _page_for_context(text: str, offset: int = 0) -> str:
+    """Return the byte window ``[offset, offset+_MAX_BYTES_RETURNED)`` of
+    ``text`` plus an actionable footer so the model can page through a
+    document larger than one read.
+
+    Byte (not char) offsets keep this consistent with the per-read cap.
+    ``decode(errors="ignore")`` tolerates a multibyte UTF-8 sequence split
+    at EITHER page boundary (start of a non-zero offset or end of a
+    window) — at most a few bytes of one glyph are dropped at a seam.
+
+    ``offset == 0`` on a document that fits in one window returns the text
+    verbatim with no footer (preserves the prior single-read behaviour).
+    """
     encoded = text.encode("utf-8")
-    if len(encoded) <= _MAX_BYTES_RETURNED:
-        return text
-    truncated = encoded[:_MAX_BYTES_RETURNED].decode("utf-8", errors="ignore")
-    return (
-        truncated
-        + f"\n\n[...truncated; original file was {len(encoded)} bytes, returned first {_MAX_BYTES_RETURNED}]"
-    )
+    total = len(encoded)
+    if offset < 0:
+        offset = 0
+    if offset >= total:
+        if total == 0:
+            return text
+        return (
+            f"[offset {offset} is at or past the end of the document "
+            f"({total} bytes). No more content to read.]"
+        )
+    window = encoded[offset : offset + _MAX_BYTES_RETURNED]
+    chunk = window.decode("utf-8", errors="ignore")
+    next_offset = offset + len(window)
+    if next_offset < total:
+        chunk += (
+            f"\n\n[Showing bytes {offset}–{next_offset} of {total}. "
+            f"To continue reading this document, call read_user_document again "
+            f"with offset={next_offset}.]"
+        )
+    elif offset > 0:
+        # Final page of a multi-page read — confirm the tail arrived so the
+        # model knows it has now seen the whole document.
+        chunk += f"\n\n[End of document — showed bytes {offset}–{next_offset} of {total}.]"
+    return chunk
 
 
 @tool("read_user_document", parse_docstring=True)
@@ -184,6 +216,7 @@ async def read_user_document(
     runtime: ToolRuntime[ContextT, ThreadState],
     document_filename: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
+    offset: int = 0,
 ) -> Command:
     """Read the text content of a user-uploaded document.
 
@@ -192,6 +225,12 @@ async def read_user_document(
     text-reading over view_user_image for textual content. Supported:
     PDF, DOCX, PPTX, XLSX, MD, TXT, CSV, JSON, YAML.
 
+    Each call returns up to ~64 KB. For a larger document the result ends
+    with a footer reporting the next byte offset — call this tool again
+    with that ``offset`` to keep reading, repeating until the footer says
+    you have reached the end. Nothing is truncated away; large documents
+    are read in full across multiple calls.
+
     When NOT to use:
     - For images (.jpg/.jpeg/.png/.webp) — use ``view_user_image``.
 
@@ -199,7 +238,26 @@ async def read_user_document(
         document_filename: The bare filename, e.g. ``report.pdf``. No
             paths or path separators. The tool searches the current
             thread's uploads first, then outputs.
+        offset: Byte offset to start reading from (default 0). When a
+            previous read returned a "Showing bytes X–Y" footer, pass that
+            next offset here to continue reading the rest of the document.
     """
+    try:
+        offset = int(offset)
+    except (TypeError, ValueError):
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        f"Error: offset must be an integer byte position (e.g., 0 or {_MAX_BYTES_RETURNED}); got {offset!r}.",
+                        tool_call_id=tool_call_id,
+                    )
+                ]
+            }
+        )
+    if offset < 0:
+        offset = 0
+
     if not _is_safe_filename(document_filename):
         return Command(
             update={
@@ -268,7 +326,7 @@ async def read_user_document(
             update={
                 "messages": [
                     ToolMessage(
-                        _truncate_for_context(text),
+                        _page_for_context(text, offset),
                         tool_call_id=tool_call_id,
                     )
                 ]
@@ -318,7 +376,7 @@ async def read_user_document(
             update={
                 "messages": [
                     ToolMessage(
-                        _truncate_for_context(text),
+                        _page_for_context(text, offset),
                         tool_call_id=tool_call_id,
                     )
                 ]

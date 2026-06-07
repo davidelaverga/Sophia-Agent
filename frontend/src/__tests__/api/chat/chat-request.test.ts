@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { parseAndValidateChatPayload } from '../../../app/api/chat/_lib/chat-request';
-import { MAX_MESSAGE_LENGTH } from '../../../app/api/chat/_lib/request-validation';
+import { SPILL_THRESHOLD } from '../../../app/api/chat/_lib/request-validation';
 
 describe('parseAndValidateChatPayload', () => {
   it('returns error when message is missing', () => {
@@ -44,8 +44,11 @@ describe('parseAndValidateChatPayload', () => {
     }
   });
 
-  it('truncates overlong messages while preserving raw length metadata', () => {
-    const longMessage = 'a'.repeat(MAX_MESSAGE_LENGTH + 75);
+  it('preserves overlong messages in full (no inline truncation — spilled downstream)', () => {
+    // Regression guard for the spill feature: the validator must NOT cut
+    // the message. A message past SPILL_THRESHOLD is forwarded intact and
+    // the /api/chat post-handler spills it to a document attachment.
+    const longMessage = 'a'.repeat(SPILL_THRESHOLD + 75);
     const result = parseAndValidateChatPayload({
       messages: [{ role: 'user', content: longMessage }],
       session_id: '123e4567-e89b-12d3-a456-426614174000',
@@ -53,8 +56,9 @@ describe('parseAndValidateChatPayload', () => {
 
     expect(result.kind).toBe('valid');
     if (result.kind === 'valid') {
-      expect(result.data.userMessage).toHaveLength(MAX_MESSAGE_LENGTH);
-      expect(result.data.rawMessageLength).toBe(MAX_MESSAGE_LENGTH + 75);
+      // Full length preserved — the old slice(0, 2000) is gone.
+      expect(result.data.userMessage).toHaveLength(SPILL_THRESHOLD + 75);
+      expect(result.data.rawMessageLength).toBe(SPILL_THRESHOLD + 75);
     }
   });
 

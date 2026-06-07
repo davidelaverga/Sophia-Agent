@@ -4,8 +4,8 @@ import { secureLog } from './config';
 import {
   extractRawMessage,
   isValidSessionId,
-  MAX_MESSAGE_LENGTH,
   sanitizeMessage,
+  SPILL_THRESHOLD,
   validateContextMode,
   validateSessionType,
 } from './request-validation';
@@ -138,7 +138,9 @@ export function parseAndValidateChatPayload(payload: unknown): ParseChatRequestR
     sessionType,
     contextMode,
     messageLength: userMessage.length,
-    truncated: rawMessage.length > MAX_MESSAGE_LENGTH,
+    // No longer truncated inline — a long message is spilled to a document
+    // attachment by the post-handler. This flag flags that routing.
+    overSpillThreshold: userMessage.length > SPILL_THRESHOLD,
   });
 
   const attachedFiles = extractAttachedFiles(record);
