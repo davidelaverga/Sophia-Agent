@@ -182,6 +182,7 @@ _PROMOTABLE_DELIVERABLE_EXTENSIONS = frozenset({
     ".css",
 })
 _PDF_FALLBACK_EXTENSIONS = frozenset({".md", ".html"})
+_PDF_RENDER_SOURCE_EXTENSIONS = frozenset({".md", ".markdown", ".html", ".htm"})
 _PPTX_FALLBACK_EXTENSIONS = frozenset({".md", ".html"})
 _PPTX_REQUIRED_ZIP_ENTRIES = frozenset({
     "[Content_Types].xml",
@@ -459,12 +460,15 @@ def _is_promotable_candidate_path(
     path: Path,
     *,
     min_mtime: float | None,
+    requested_pdf: bool = False,
     requested_pptx: bool,
 ) -> bool:
     if not _is_recent_promotable_path(path, min_mtime):
         return False
     if path.suffix.lower() == ".pptx":
         return _pptx_integrity_error_for_file(path) is None
+    if requested_pdf and path.suffix.lower() in {".html", ".htm"}:
+        return _html_fallback_integrity_error_for_file(path) is None
     if requested_pptx and path.suffix.lower() in {".html", ".htm"}:
         return _html_fallback_integrity_error_for_file(path) is None
     return True
@@ -839,6 +843,8 @@ def _apply_artifact_request_metadata(
     if _artifact_is_extension_fallback(requested_ext, artifact_ext):
         artifact["artifact_is_fallback"] = True
         artifact["fallback_reason"] = _artifact_fallback_reason(artifact, requested_ext, fallback_reason)
+    elif fallback_reason:
+        artifact["fallback_reason"] = fallback_reason
     elif requested_ext:
         artifact.setdefault("artifact_is_fallback", False)
     return artifact
@@ -1072,6 +1078,56 @@ def _pdf_fallback_rejection_reason(suffix: str, state: dict[str, Any]) -> str | 
     return None
 
 
+def _pdf_source_candidate_paths(state: dict[str, Any]) -> list[Path]:
+    outputs_root = _outputs_root_from_state(state)
+    if outputs_root is None:
+        return []
+    min_mtime = _builder_started_min_mtime(state)
+    try:
+        candidates = [
+            entry for entry in outputs_root.rglob("*")
+            if _is_recent_promotable_path(entry, min_mtime)
+            and entry.suffix.lower() in _PDF_RENDER_SOURCE_EXTENSIONS
+            and (
+                entry.suffix.lower() not in {".html", ".htm"}
+                or _html_fallback_integrity_error_for_file(entry) is None
+            )
+        ]
+    except OSError:
+        logger.debug(
+            "BuilderArtifact: pdf source scan failed outputs_path=%s",
+            _outputs_host_path_from_state(state),
+            exc_info=True,
+        )
+        return []
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates
+
+
+def _preferred_pdf_render_source_path(state: dict[str, Any]) -> str | None:
+    candidates = _pdf_source_candidate_paths(state)
+    if not candidates:
+        return None
+    target = BuilderArtifactMiddleware._target_artifact_path(state)
+    target_stem = Path(target or "").stem
+    if target_stem:
+        for candidate in candidates:
+            if candidate.stem == target_stem:
+                return BuilderArtifactMiddleware._virtual_output_path(candidate, state)
+    return BuilderArtifactMiddleware._virtual_output_path(candidates[0], state)
+
+
+def _pdf_render_target_path(state: dict[str, Any], source_path: str | None) -> str:
+    target = BuilderArtifactMiddleware._target_artifact_path(state)
+    if isinstance(target, str) and PurePosixPath(target).suffix.lower() == ".pdf":
+        return target
+    source = _canonical_outputs_artifact_path(source_path)
+    if source:
+        relative = PurePosixPath(source.removeprefix(_OUTPUTS_VIRTUAL_PREFIX))
+        return f"{_OUTPUTS_VIRTUAL_PREFIX}{relative.with_suffix('.pdf').as_posix()}"
+    return f"{_OUTPUTS_VIRTUAL_PREFIX}build.pdf"
+
+
 def _pdf_render_attempt_missing(state: dict[str, Any]) -> bool:
     if not _requested_pdf_artifact(state):
         return False
@@ -1227,6 +1283,21 @@ def _pptx_generator_invoked_seen(state: dict[str, Any]) -> bool:
         for summary in summaries
         if isinstance(summary, dict)
     )
+
+
+def _pptx_fallback_generation_attempt_satisfied(state: dict[str, Any]) -> bool:
+    attempts = _pptx_diagnostic_count(state, "pptx_generator_attempt_count")
+    if attempts <= 0:
+        summaries = state.get("builder_tool_turn_summaries") or []
+        return any(
+            bool(summary.get("pptx_generator_invoked"))
+            for summary in summaries
+            if isinstance(summary, dict)
+        )
+    diagnostics = _pptx_diagnostics(state)
+    if diagnostics.get("pptx_generator_error_class") == "invalid_plan_json" and attempts < 2:
+        return False
+    return True
 
 
 def _image_generation_invoked_seen(state: dict[str, Any]) -> bool:
@@ -1535,10 +1606,11 @@ def _pptx_skill_correction_message(state: dict[str, Any]) -> str:
         "Your next safe workflow is:\n"
         "1. If you have not already done so, call "
         "`read_file(path='/mnt/skills/public/ppt-generation/SKILL.md')`.\n"
-        "2. Create the slide plan/assets the skill expects under "
+        "2. Create a valid slide plan JSON under "
         "`/mnt/user-data/workspace/`.\n"
-        "3. Compose the deck by running "
-        "`/mnt/skills/public/ppt-generation/scripts/generate.py`.\n"
+        "3. Compose a no-image deck by running "
+        "`/mnt/skills/public/ppt-generation/scripts/generate.py` with "
+        "`--plan-file` and `--output-file` only.\n"
         "4. Use `/mnt/skills/public/image-generation/scripts/generate.py` only if the "
         "user explicitly requested generated images or illustrations. If image generation "
         "fails, continue with a no-image PPTX.\n"
@@ -1549,6 +1621,52 @@ def _pptx_skill_correction_message(state: dict[str, Any]) -> str:
         f"{fallback_suffix}', content='...', append=False)`, then emit that "
         "fallback. Do not emit placeholder/tiny/corrupt `.pptx` files, Python scripts, "
         "or test files."
+    )
+
+
+def _pptx_plan_correction_message() -> str:
+    return (
+        "[Sophia/presentation-plan correction]\n"
+        "The PPTX generator rejected the presentation plan JSON. Do not switch "
+        "to HTML yet. Rewrite the plan as a valid JSON object under "
+        "`/mnt/user-data/workspace/` and run the PPT generator once more.\n\n"
+        "Minimum schema:\n"
+        "{\n"
+        '  "title": "Deck title",\n'
+        '  "aspect_ratio": "16:9",\n'
+        '  "slides": [\n'
+        '    {"slide_number": 1, "type": "title", "title": "Title", "subtitle": "Subtitle"},\n'
+        '    {"slide_number": 2, "type": "content", "title": "Slide title", '
+        '"key_points": ["Point 1", "Point 2"]}\n'
+        "  ]\n"
+        "}\n\n"
+        "Generated slide images are optional unless the user explicitly asked "
+        "for generated images. A text/layout/chart-only deck is valid."
+    )
+
+
+def _pdf_render_correction_message(source_path: str, pdf_path: str) -> str:
+    return (
+        "[Sophia/PDF render correction]\n"
+        "A requested PDF has a source document on disk, but the PDF renderer "
+        "has not been attempted. Your next action must be:\n"
+        f"`render_markdown_to_pdf(markdown_path='{source_path}', pdf_path='{pdf_path}')`.\n"
+        "If rendering succeeds, immediately emit that `.pdf`. If rendering "
+        "fails, emit the approved Markdown/HTML fallback with explicit PDF "
+        "fallback metadata."
+    )
+
+
+def _pdf_source_write_message(target_path: str) -> str:
+    source_path = f"{_OUTPUTS_VIRTUAL_PREFIX}{PurePosixPath(target_path).with_suffix('.md').name}"
+    return (
+        "[Sophia/PDF source correction]\n"
+        "This is a requested PDF build, but no Markdown/HTML source is available "
+        "for the renderer yet. Stop writing helper scripts. Use one complete "
+        "`write_file` call to create the Markdown source now:\n"
+        "`write_file(description='write PDF source', "
+        f"path='{source_path}', content='...', append=False)`.\n"
+        "After that, call `render_markdown_to_pdf` to create the PDF."
     )
 
 
@@ -1601,7 +1719,10 @@ class BuilderArtifactState(AgentState):
     builder_pdf_render_result: NotRequired[dict | None]
     builder_pdf_layout_repair_attempts: NotRequired[int]
     builder_pdf_layout_repair_requested: NotRequired[bool]
+    builder_pdf_render_correction_emitted: NotRequired[bool]
+    builder_pdf_source_write_directive_emitted: NotRequired[bool]
     builder_pptx_skill_correction_emitted: NotRequired[bool]
+    builder_pptx_plan_correction_emitted: NotRequired[bool]
     builder_pptx_fallback_directive_emitted: NotRequired[bool]
 
 
@@ -2162,6 +2283,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             if _is_promotable_candidate_path(
                 p,
                 min_mtime=min_mtime,
+                requested_pdf=requested_pdf,
                 requested_pptx=requested_pptx,
             )
         ]
@@ -2442,6 +2564,70 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
 
     @staticmethod
+    def _requested_pdf_without_render_fallback(
+        state: BuilderArtifactState,
+        *,
+        promoted_path: str | None,
+        steps_completed: int,
+    ) -> dict[str, Any] | None:
+        if not _requested_pdf_artifact(state) or _render_markdown_to_pdf_attempted(state):
+            return None
+        if promoted_path:
+            promoted_suffix = PurePosixPath(promoted_path).suffix.lower()
+            if promoted_suffix == ".pdf":
+                return None
+            logger.warning(
+                "BuilderArtifact: PDF ceiling fallback refused source before "
+                "render attempt source_ext=%s reason=pdf_render_tool_not_attempted",
+                promoted_suffix.lstrip(".") or None,
+            )
+        elif not _preferred_pdf_render_source_path(state):
+            return None
+        else:
+            logger.warning(
+                "BuilderArtifact: PDF ceiling found source but no render attempt "
+                "reason=pdf_render_tool_not_attempted"
+            )
+        fallback = BuilderArtifactMiddleware._pdf_no_deliverable_fallback(
+            steps_completed=steps_completed,
+        )
+        return _apply_artifact_request_metadata(
+            fallback,
+            state,
+            fallback_reason="pdf_render_tool_not_attempted",
+        )
+
+    @staticmethod
+    def _requested_pptx_without_generation_fallback(
+        state: BuilderArtifactState,
+        *,
+        promoted_path: str | None,
+        steps_completed: int,
+    ) -> dict[str, Any] | None:
+        if (
+            not promoted_path
+            or not _requested_pptx_artifact(state)
+            or _pptx_fallback_generation_attempt_satisfied(state)
+        ):
+            return None
+        promoted_suffix = PurePosixPath(promoted_path).suffix.lower()
+        if promoted_suffix == ".pptx":
+            return None
+        logger.warning(
+            "BuilderArtifact: PPTX ceiling fallback refused before "
+            "generator attempt source_ext=%s",
+            promoted_suffix.lstrip(".") or None,
+        )
+        fallback = BuilderArtifactMiddleware._pptx_no_deliverable_fallback(
+            steps_completed=steps_completed,
+        )
+        return _apply_artifact_request_metadata(
+            fallback,
+            state,
+            fallback_reason="pptx_generation_not_completed",
+        )
+
+    @staticmethod
     def _build_ceiling_fallback(
         state: BuilderArtifactState,
         *,
@@ -2481,6 +2667,20 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             requested_pptx=requested_pptx,
             reason=reason,
         )
+        fallback = BuilderArtifactMiddleware._requested_pdf_without_render_fallback(
+            state,
+            promoted_path=promoted_path,
+            steps_completed=steps_completed,
+        )
+        if fallback is not None:
+            return fallback
+        fallback = BuilderArtifactMiddleware._requested_pptx_without_generation_fallback(
+            state,
+            promoted_path=promoted_path,
+            steps_completed=steps_completed,
+        )
+        if fallback is not None:
+            return fallback
         if promoted_path:
             fallback = BuilderArtifactMiddleware._recovered_deliverable_fallback(
                 promoted_path,
@@ -2492,6 +2692,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 state,
                 fallback_reason="pptx_generation_not_completed" if requested_pptx else reason,
             )
+        fallback = BuilderArtifactMiddleware._requested_pdf_without_render_fallback(
+            state,
+            promoted_path=None,
+            steps_completed=steps_completed,
+        )
+        if fallback is not None:
+            return fallback
         promoted_generator_path = BuilderArtifactMiddleware._promoted_generator_from_outputs(
             state,
             requested_pdf=requested_pdf,
@@ -2711,6 +2918,32 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         canonical_primary = _canonical_outputs_artifact_path(primary)
         if canonical_primary is None:
             return False
+        canonical_suffix = PurePosixPath(canonical_primary).suffix.lower()
+        if canonical_suffix in _PPTX_FALLBACK_EXTENSIONS:
+            if not _pptx_fallback_generation_attempt_satisfied(state):
+                _log_pptx_diagnostics(
+                    phase="emit_rejected",
+                    state=state,
+                    artifact_path=primary,
+                    integrity_reason="pptx_fallback_before_generation_attempt",
+                )
+                BuilderArtifactMiddleware._log_pptx_artifact_rejection(
+                    primary,
+                    "pptx_fallback_before_generation_attempt",
+                )
+                return False
+            if BuilderArtifactMiddleware._has_valid_pptx_output(state):
+                _log_pptx_diagnostics(
+                    phase="emit_rejected",
+                    state=state,
+                    artifact_path=primary,
+                    integrity_reason="pptx_fallback_when_valid_deck_exists",
+                )
+                BuilderArtifactMiddleware._log_pptx_artifact_rejection(
+                    primary,
+                    "pptx_fallback_when_valid_deck_exists",
+                )
+                return False
         integrity_rejection = _pptx_path_integrity_rejection_reason(canonical_primary, state, runtime)
         if integrity_rejection is not None:
             _log_pptx_diagnostics(
@@ -3142,6 +3375,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return (
             self._pdf_terminal_tool_choice_for_state(state)
             or self._simple_pdf_tool_choice_for_state(state)
+            or self._pdf_render_source_tool_choice_for_state(state)
             or self._research_tool_choice_for_state(state)
             or self._completion_tool_choice_for_state(state, runtime)
         )
@@ -3167,6 +3401,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             _pdf_layout_repair_attempts(state),
         )
         return self._forced_tool_choice()
+
+    def _pdf_render_source_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _requested_pdf_artifact(state):
+            return None
+        if self._has_requested_pdf_binary(state) or _render_markdown_to_pdf_attempted(state):
+            return None
+        source_path = _preferred_pdf_render_source_path(state)
+        if not source_path:
+            return None
+        logger.warning(
+            "BuilderArtifact: forcing tool_choice=render_markdown_to_pdf "
+            "because PDF source exists before render source_ext=%s",
+            PurePosixPath(source_path).suffix.lower().lstrip(".") or None,
+        )
+        return self._forced_pdf_render_tool_choice()
 
     # Phase 2F.3: after N consecutive write_file_tool errors, inject a
     # corrective HumanMessage so the model breaks out of the loop and
@@ -3671,6 +3920,63 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "builder_pdf_layout_repair_attempts": _pdf_layout_repair_attempts(state) + 1,
         }
 
+    def _maybe_inject_pdf_render_source_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _requested_pdf_artifact(state):
+            return None
+        if state.get("builder_pdf_render_correction_emitted"):
+            return None
+        if self._has_requested_pdf_binary(state) or _render_markdown_to_pdf_attempted(state):
+            return None
+        source_path = _preferred_pdf_render_source_path(state)
+        if not source_path:
+            return None
+        pdf_path = _pdf_render_target_path(state, source_path)
+        logger.warning(
+            "BuilderArtifact: injecting PDF render correction source_ext=%s target_ext=pdf",
+            PurePosixPath(source_path).suffix.lower().lstrip(".") or None,
+        )
+        return {
+            "messages": [HumanMessage(content=_pdf_render_correction_message(source_path, pdf_path))],
+            "builder_pdf_render_correction_emitted": True,
+        }
+
+    def _maybe_inject_pdf_source_write_directive(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _requested_pdf_artifact(state):
+            return None
+        if state.get("builder_pdf_source_write_directive_emitted"):
+            return None
+        if self._has_requested_pdf_binary(state) or _render_markdown_to_pdf_attempted(state):
+            return None
+        if _preferred_pdf_render_source_path(state):
+            return None
+        turn_force = self._should_force_emit(state)
+        if not turn_force:
+            return None
+        target = self._target_artifact_path(state) or f"{_OUTPUTS_VIRTUAL_PREFIX}build.pdf"
+        logger.warning(
+            "BuilderArtifact: injecting PDF source write directive before force window"
+        )
+        return {
+            "messages": [HumanMessage(content=_pdf_source_write_message(target))],
+            "builder_pdf_source_write_directive_emitted": True,
+        }
+
+    def _maybe_inject_pptx_plan_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _requested_pptx_artifact(state):
+            return None
+        if state.get("builder_pptx_plan_correction_emitted"):
+            return None
+        diagnostics = _pptx_diagnostics(state)
+        if diagnostics.get("pptx_generator_error_class") != "invalid_plan_json":
+            return None
+        if self._has_valid_pptx_output(state):
+            return None
+        logger.warning("BuilderArtifact: injecting PPTX plan JSON correction after invalid_plan_json")
+        return {
+            "messages": [HumanMessage(content=_pptx_plan_correction_message())],
+            "builder_pptx_plan_correction_emitted": True,
+        }
+
     def _maybe_inject_pptx_skill_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
         if not _requested_pptx_artifact(state):
             return None
@@ -3770,9 +4076,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if isinstance(promotion, dict):
             update.update(promotion)
             return update
+        pdf_render = self._maybe_inject_pdf_render_source_correction(state)
+        if isinstance(pdf_render, dict):
+            update.update(pdf_render)
+            return update
         pdf_repair = self._maybe_inject_pdf_layout_repair(state)
         if isinstance(pdf_repair, dict):
             update.update(pdf_repair)
+            return update
+        pdf_source_write = self._maybe_inject_pdf_source_write_directive(state)
+        if isinstance(pdf_source_write, dict):
+            update.update(pdf_source_write)
+            return update
+        pptx_plan = self._maybe_inject_pptx_plan_correction(state)
+        if isinstance(pptx_plan, dict):
+            update.update(pptx_plan)
             return update
         pptx_fallback = self._maybe_inject_pptx_fallback_after_image_failure(state)
         if isinstance(pptx_fallback, dict):

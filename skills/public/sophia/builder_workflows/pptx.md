@@ -7,14 +7,14 @@ Use this card only for requested `.pptx` or slide-deck builds.
 1. Plan with `write_todos`, then create a presentation plan JSON under
    `/mnt/user-data/workspace/`.
 2. Read `/mnt/skills/public/ppt-generation/SKILL.md`.
-3. Compose the deck with `/mnt/skills/public/ppt-generation/scripts/generate.py`,
-   passing the plan and an output path under `/mnt/user-data/outputs/`. A
-   valid text/layout/chart deck is acceptable; generated raster images are not
-   mandatory.
+3. Compose a valid no-image deck first with
+   `/mnt/skills/public/ppt-generation/scripts/generate.py`, passing the plan
+   and an output path under `/mnt/user-data/outputs/`. Do not pass
+   `--slide-images` unless you actually generated slide images.
 4. Use `/mnt/skills/public/image-generation/scripts/generate.py` only when the
    user explicitly requests generated images, illustrations, visual scenes, or
-   image-heavy slides. If image generation fails, continue with a no-image
-   PPTX rather than immediately falling back to HTML.
+   image-heavy slides. If image generation fails, continue with the no-image
+   PPTX path rather than immediately falling back to HTML.
 5. Emit only after the `.pptx` exists and passes structural validation. If a
    valid `.pptx` exists, it is authoritative; do not emit an HTML or Markdown
    fallback instead.

@@ -83,7 +83,7 @@ def test_pptx_generation_bash_result_classifies_missing_output(tmp_path: Path) -
     assert delta["pptx_generator_error_class"] == "missing_slide_image"
 
 
-def test_failed_image_generation_after_correction_gets_fallback_directive(tmp_path: Path) -> None:
+def test_failed_image_generation_after_correction_does_not_force_fallback(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     state = {
@@ -100,10 +100,65 @@ def test_failed_image_generation_after_correction_gets_fallback_directive(tmp_pa
 
     result = BuilderArtifactMiddleware().before_model(state, SimpleNamespace(context={}))
 
+    assert result is None
+
+
+def test_invalid_plan_json_gets_pptx_plan_correction(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    state = {
+        "thread_data": {"outputs_path": str(outputs)},
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "builder_pptx_diagnostics": {
+            "pptx_generator_attempt_count": 1,
+            "pptx_generator_success_count": 0,
+            "pptx_generator_error_class": "invalid_plan_json",
+        },
+    }
+
+    result = BuilderArtifactMiddleware().before_model(state, SimpleNamespace(context={}))
+
     assert result is not None
-    assert result["builder_pptx_fallback_directive_emitted"] is True
-    assert "presentation fallback directive" in result["messages"][0].content
-    assert "artifact_is_fallback=true" in result["messages"][0].content
+    assert result["builder_pptx_plan_correction_emitted"] is True
+    assert "presentation-plan correction" in result["messages"][0].content
+    assert "slides" in result["messages"][0].content
+
+
+def test_ppt_generation_script_can_create_no_image_deck(tmp_path: Path) -> None:
+    plan = tmp_path / "plan.json"
+    plan.write_text(
+        json.dumps(
+            {
+                "title": "No Image Deck",
+                "aspect_ratio": "16:9",
+                "slides": [
+                    {"title": "One", "subtitle": "Opening"},
+                    {"title": "Two", "key_points": ["A", "B"]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "deck.pptx"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_PPT_SCRIPT),
+            "--plan-file",
+            str(plan),
+            "--output-file",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert result.returncode == 0
+    assert output.exists()
+    assert output.stat().st_size > 1024
+    assert "Successfully generated presentation with 2 slides" in result.stdout
 
 
 def test_ppt_generation_script_exits_nonzero_when_slide_image_missing(tmp_path: Path) -> None:

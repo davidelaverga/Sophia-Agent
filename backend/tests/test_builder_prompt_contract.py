@@ -47,8 +47,9 @@ def test_pptx_workflow_card_requires_deerflow_native_sequence() -> None:
 
     assert "image-generation/scripts/generate.py" in card
     assert "ppt-generation/scripts/generate.py" in card
-    assert "generated raster images are not" in card
-    assert "mandatory" in card
+    assert "Compose a valid no-image deck first" in card
+    assert "only when the" in card
+    assert "user explicitly requests generated images" in card
     assert "no-image" in card
     assert "PPTX" in card
     assert "passes structural validation" in card

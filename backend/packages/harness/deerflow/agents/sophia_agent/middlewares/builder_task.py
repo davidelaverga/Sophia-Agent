@@ -265,6 +265,35 @@ def _artifact_target_extension(artifact_target_path: object) -> str:
     return Path(artifact_target_path).suffix.lower()
 
 
+_IMAGE_OUTPUT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+_EXPLICIT_IMAGE_GENERATION_MARKERS = (
+    "generated image",
+    "generate image",
+    "generate an image",
+    "generate images",
+    "ai image",
+    "ai-generated image",
+    "illustration",
+    "illustrations",
+    "visual scene",
+    "image-heavy",
+    "raster image",
+)
+
+
+def _image_generation_explicitly_requested(
+    delegation_context: dict[str, Any],
+    *,
+    artifact_target_ext: str,
+) -> bool:
+    if artifact_target_ext in _IMAGE_OUTPUT_EXTENSIONS:
+        return True
+    task = str(delegation_context.get("task") or "").lower()
+    description = str(delegation_context.get("description") or "").lower()
+    combined = f"{task}\n{description}"
+    return any(marker in combined for marker in _EXPLICIT_IMAGE_GENERATION_MARKERS)
+
+
 def _critical_emit_guidance(artifact_target_ext: str) -> str:
     if artifact_target_ext == ".pdf":
         return (
@@ -520,7 +549,12 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         # data-analysis) are available. Without this block the model
         # falls back to writing its own matplotlib/reportlab code, which
         # is the failure pattern PR #93/#94 spent recovery machinery on.
-        skills_block = self._build_skills_inventory_block()
+        skills_block = self._build_skills_inventory_block(
+            include_image_generation=_image_generation_explicitly_requested(
+                delegation_context,
+                artifact_target_ext=artifact_target_ext,
+            )
+        )
         if skills_block:
             sections.append(skills_block)
 
@@ -788,7 +822,11 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
     )
 
     @classmethod
-    def _build_skills_inventory_block(cls) -> str | None:
+    def _build_skills_inventory_block(
+        cls,
+        *,
+        include_image_generation: bool = True,
+    ) -> str | None:
         """Return a ``<skill_system>`` block listing builder-relevant skills.
 
         Reuses the central skills loader so SKILL.md descriptions stay
@@ -823,7 +861,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             logger.warning("BuilderTask: load_skills failed; skipping skills inventory block", exc_info=True)
             return None
 
-        relevant = [s for s in skills if getattr(s, "name", None) in cls._BUILDER_RELEVANT_SKILLS]
+        allowed_skill_names = set(cls._BUILDER_RELEVANT_SKILLS)
+        if not include_image_generation:
+            allowed_skill_names.discard("image-generation")
+        relevant = [s for s in skills if getattr(s, "name", None) in allowed_skill_names]
         # Log either way so "did the builder see skills this run?" is
         # answerable from a single grep on the langgraph-server logs.
         # Without this, the only signal in the existing logs is the
