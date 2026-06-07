@@ -50,6 +50,8 @@ import type {
 } from "../../types/builder-artifact"
 
 import { ArtifactCanvasViewport, type ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
+import type { ArtifactPdfFocusRequest } from "./ArtifactPdfPreview"
+import { ArtifactReviewStatus, hasConfirmedStillFrame } from "./ArtifactReviewStatus"
 import {
   buildThreadArtifactHref,
   cn,
@@ -60,8 +62,6 @@ import {
   recordSophiaCaptureEvent,
   RefreshCw,
 } from "./ArtifactStageDeps"
-import type { ArtifactPdfFocusRequest } from "./ArtifactPdfPreview"
-import { ArtifactReviewStatus, hasConfirmedStillFrame } from "./ArtifactReviewStatus"
 import { ArtifactToolbar } from "./ArtifactToolbar"
 import { ReviewWithSophiaButton } from "./ReviewWithSophiaButton"
 
@@ -77,6 +77,8 @@ export interface ArtifactStageProps {
   normalSessionId?: string | null
   voiceAgentSessionId?: string | null
   artifactStableIdentity?: string | null
+  artifactLogicalId?: string | null
+  artifactVersionId?: string | null
   annotations?: ArtifactAnnotation[]
   annotationStoreTelemetry?: CoreviewAnnotationStoreTelemetry | null
   onAddAnnotation?: (input: CoreviewAddAnnotationAdapterInput) => CoreviewAddAnnotationAdapterResult
@@ -294,6 +296,8 @@ export function ArtifactStage({
   normalSessionId,
   voiceAgentSessionId,
   artifactStableIdentity,
+  artifactLogicalId,
+  artifactVersionId,
   annotations: coreviewAnnotations = [],
   annotationStoreTelemetry = null,
   onAddAnnotation,
@@ -412,8 +416,10 @@ export function ArtifactStage({
       sessionIds: [sessionId, normalSessionId, voiceAgentSessionId],
       threadId,
       artifactStableIdentity,
+      artifactLogicalId,
+      artifactVersionId,
     } : null
-  ), [artifactId, artifactStableIdentity, normalSessionId, sessionId, threadId, voiceAgentSessionId])
+  ), [artifactId, artifactLogicalId, artifactStableIdentity, artifactVersionId, normalSessionId, sessionId, threadId, voiceAgentSessionId])
   const rendererResetKey = `${primaryFile?.path ?? ""}|${rendererKind}`
   const annotationStableArtifactIdentity = artifactStableIdentity ?? null
   const annotationStore = useMemo(() => (

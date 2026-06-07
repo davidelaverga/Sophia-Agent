@@ -1,13 +1,13 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react"
 
 import {
   buildArtifactViewSignature,
   safeArtifactViewTelemetry,
   type ArtifactViewState,
 } from "../lib/artifact-renderers"
-import { resolveArtifactVisualSource } from "../lib/co-review-capture"
+import { resolveArtifactVisualSource, type ArtifactVisualSource } from "../lib/co-review-capture"
 import { coreviewFlagDiagnostics, isCoreviewStillFrameReviewEnabled } from "../lib/co-review-flags"
 import {
   AudioWebSocketUnsupportedTransport,
@@ -18,6 +18,9 @@ import {
   type CoReviewSessionState,
 } from "../lib/co-review-transport"
 import { recordSophiaCaptureEvent } from "../lib/session-capture"
+
+const HTML_CAPTURE_TARGET_WAIT_TIMEOUT_MS = 1200
+const HTML_CAPTURE_TARGET_RETRY_INTERVAL_MS = 80
 
 export interface UseArtifactCoReviewOptions {
   sessionId: string | null
@@ -55,6 +58,15 @@ export function useArtifactCoReview({
   const currentViewSignature = buildArtifactViewSignature(artifactViewState)
   const currentViewSignatureRef = useRef<string | null>(currentViewSignature)
   const lastTransportUnavailableTelemetryRef = useRef<string | null>(null)
+  const latestCaptureContextRef = useRef({
+    artifactId,
+    artifactRoot,
+    artifactViewState,
+    exactTextAvailable,
+    missingCanvasReason,
+    visualSourceUnavailableReason,
+    visualSourceReady,
+  })
 
   if (!machineRef.current) {
     machineRef.current = new CoReviewSessionMachine({
@@ -66,6 +78,26 @@ export function useArtifactCoReview({
   useEffect(() => {
     currentViewSignatureRef.current = currentViewSignature
   }, [currentViewSignature])
+
+  useEffect(() => {
+    latestCaptureContextRef.current = {
+      artifactId,
+      artifactRoot,
+      artifactViewState,
+      exactTextAvailable,
+      missingCanvasReason,
+      visualSourceUnavailableReason,
+      visualSourceReady,
+    }
+  }, [
+    artifactId,
+    artifactRoot,
+    artifactViewState,
+    exactTextAvailable,
+    missingCanvasReason,
+    visualSourceUnavailableReason,
+    visualSourceReady,
+  ])
 
   const transportStatus = machineRef.current.status()
   const frameConfirmed = hasConfirmedStillFrameForReviewState(state, transportStatus)
@@ -83,7 +115,7 @@ export function useArtifactCoReview({
 
   const startReview = useCallback(async () => {
     const flagDiagnostics = coreviewFlagDiagnostics()
-    const reviewStartBlockedReason = reviewStartBlockedReasonFromContext({
+    let reviewStartBlockedReason = reviewStartBlockedReasonFromContext({
       featureEnabled,
       sessionId,
       threadId,
@@ -120,30 +152,103 @@ export function useArtifactCoReview({
       return state
     }
 
+    let visualSource: ArtifactVisualSource | null = null
+    let htmlCaptureTargetTelemetry: Record<string, string | number | boolean | null> | null = null
+    const shouldWaitForHtmlTarget = shouldWaitForHtmlCaptureTarget({
+      artifactViewState,
+      exactTextAvailable,
+      visualSourceUnavailableReason,
+    })
+
     if (!visualSourceReady) {
-      logCoreviewBreadcrumb("coReviewStartError", {
-        reason: reviewStartBlockedReason ?? visualSourceUnavailableReason ?? "capture_target_missing",
-        featureEnabled,
-        hasSessionId: Boolean(sessionId),
-        hasThreadId: Boolean(threadId),
-        hasArtifactId: Boolean(artifactId),
-        reviewStartBlockedReason,
-        ...flagDiagnostics,
-      })
-      recordCoreviewTelemetry("start", state, {
-        featureEnabled,
-        reviewStartBlockedReason: reviewStartBlockedReason ?? visualSourceUnavailableReason ?? "capture_target_missing",
-        artifactViewTelemetry,
-      })
-      return state
+      if (shouldWaitForHtmlTarget) {
+        const waitResult = await waitForHtmlCaptureTarget({
+          latestContext: latestCaptureContextRef,
+          initialArtifactId: artifactId,
+          initialArtifactRoot: artifactRoot,
+          initialMissingCanvasReason: visualSourceUnavailableReason ?? missingCanvasReason,
+        })
+        htmlCaptureTargetTelemetry = htmlCaptureTargetTelemetryFromWait(waitResult)
+        if (waitResult.visualSource) {
+          visualSource = waitResult.visualSource
+          reviewStartBlockedReason = null
+        } else {
+          const finalReason = "capture_target_missing_final"
+          logCoreviewBreadcrumb("coReviewStartError", {
+            reason: finalReason,
+            featureEnabled,
+            hasSessionId: Boolean(sessionId),
+            hasThreadId: Boolean(threadId),
+            hasArtifactId: Boolean(artifactId),
+            reviewStartBlockedReason: finalReason,
+            ...flagDiagnostics,
+          })
+          recordCoreviewTelemetry("start", state, {
+            featureEnabled,
+            reviewStartBlockedReason: finalReason,
+            artifactViewTelemetry,
+            captureTargetTelemetry: htmlCaptureTargetTelemetry,
+          })
+          return state
+        }
+      } else {
+        logCoreviewBreadcrumb("coReviewStartError", {
+          reason: reviewStartBlockedReason ?? visualSourceUnavailableReason ?? "capture_target_missing",
+          featureEnabled,
+          hasSessionId: Boolean(sessionId),
+          hasThreadId: Boolean(threadId),
+          hasArtifactId: Boolean(artifactId),
+          reviewStartBlockedReason,
+          ...flagDiagnostics,
+        })
+        recordCoreviewTelemetry("start", state, {
+          featureEnabled,
+          reviewStartBlockedReason: reviewStartBlockedReason ?? visualSourceUnavailableReason ?? "capture_target_missing",
+          artifactViewTelemetry,
+        })
+        return state
+      }
     }
 
-    const visualSource = resolveArtifactVisualSource({
-      root: artifactRoot,
-      artifactId,
-      mode: "still_frame",
-      missingCanvasReason: visualSourceUnavailableReason ?? missingCanvasReason,
-    })
+    if (!visualSource) {
+      visualSource = resolveArtifactVisualSource({
+        root: artifactRoot,
+        artifactId,
+        mode: "still_frame",
+        missingCanvasReason: visualSourceUnavailableReason ?? missingCanvasReason,
+      })
+      if (visualSource.status !== "ready" && shouldWaitForHtmlTarget) {
+        const waitResult = await waitForHtmlCaptureTarget({
+          latestContext: latestCaptureContextRef,
+          initialArtifactId: artifactId,
+          initialArtifactRoot: artifactRoot,
+          initialMissingCanvasReason: visualSource.reason ?? visualSourceUnavailableReason ?? missingCanvasReason,
+        })
+        htmlCaptureTargetTelemetry = htmlCaptureTargetTelemetryFromWait(waitResult)
+        if (waitResult.visualSource) {
+          visualSource = waitResult.visualSource
+          reviewStartBlockedReason = null
+        } else {
+          const finalReason = "capture_target_missing_final"
+          logCoreviewBreadcrumb("coReviewStartError", {
+            reason: finalReason,
+            featureEnabled,
+            hasSessionId: Boolean(sessionId),
+            hasThreadId: Boolean(threadId),
+            hasArtifactId: Boolean(artifactId),
+            reviewStartBlockedReason: finalReason,
+            ...flagDiagnostics,
+          })
+          recordCoreviewTelemetry("start", state, {
+            featureEnabled,
+            reviewStartBlockedReason: finalReason,
+            artifactViewTelemetry,
+            captureTargetTelemetry: htmlCaptureTargetTelemetry,
+          })
+          return state
+        }
+      }
+    }
 
     logCoreviewBreadcrumb("canvasFound", {
       found: visualSource.status === "ready",
@@ -177,9 +282,10 @@ export function useArtifactCoReview({
       featureEnabled,
       reviewStartBlockedReason: nextState.state === "co_review_error" ? nextState.error : null,
       artifactViewTelemetry,
+      captureTargetTelemetry: htmlCaptureTargetTelemetry,
     })
     return nextState
-  }, [artifactId, artifactRoot, artifactViewTelemetry, exactTextAvailable, featureEnabled, missingCanvasReason, normalSessionId, sessionId, state, threadId, visualSourceReady, visualSourceUnavailableReason])
+  }, [artifactId, artifactRoot, artifactViewState, artifactViewTelemetry, exactTextAvailable, featureEnabled, missingCanvasReason, normalSessionId, sessionId, state, threadId, visualSourceReady, visualSourceUnavailableReason])
 
   const stopReview = useCallback(async () => {
     const nextState = await machineRef.current.stopCoReview()
@@ -325,7 +431,8 @@ function recordCoreviewTelemetry(
   details: {
     featureEnabled: boolean
     reviewStartBlockedReason?: string | null
-    artifactViewTelemetry?: Record<string, string | number | null>
+    artifactViewTelemetry?: Record<string, string | number | boolean | null>
+    captureTargetTelemetry?: Record<string, string | number | boolean | null> | null
   },
 ) {
   const flagDiagnostics = coreviewFlagDiagnostics()
@@ -342,6 +449,7 @@ function recordCoreviewTelemetry(
         reviewStartBlockedReason: details.reviewStartBlockedReason ?? null,
         ...safeCoReviewTelemetryFromState(state),
         ...(details.artifactViewTelemetry ?? {}),
+        ...(details.captureTargetTelemetry ?? {}),
       },
     },
   })
@@ -381,4 +489,201 @@ function reviewStartBlockedReasonFromContext({
   if (!featureEnabled) return coreviewFlagDiagnostics().coreviewDisabledReason ?? "coreview_feature_disabled"
   if (!visualSourceReady) return visualSourceUnavailableReason ?? "capture_target_missing"
   return null
+}
+
+type HtmlCaptureTargetWaitResult = {
+  visualSource: ArtifactVisualSource | null
+  result: "success" | "timeout"
+  attempts: number
+  latencyMs: number
+  missingBeforeRetry: boolean
+  retryAttempted: boolean
+  finalReason: string | null
+}
+
+function shouldWaitForHtmlCaptureTarget({
+  artifactViewState,
+  exactTextAvailable,
+  visualSourceUnavailableReason,
+}: {
+  artifactViewState: ArtifactViewState | null
+  exactTextAvailable: boolean
+  visualSourceUnavailableReason: string | null
+}): boolean {
+  return Boolean(
+    artifactViewState?.rendererKind === "html"
+      && exactTextAvailable
+      && (
+        !visualSourceUnavailableReason
+        || visualSourceUnavailableReason === "preview_not_ready"
+        || visualSourceUnavailableReason === "capture_target_missing"
+        || visualSourceUnavailableReason === "artifact_canvas_not_found"
+      ),
+  )
+}
+
+async function waitForHtmlCaptureTarget({
+  latestContext,
+  initialArtifactId,
+  initialArtifactRoot,
+  initialMissingCanvasReason,
+}: {
+  latestContext: MutableRefObject<{
+    artifactId: string | null
+    artifactRoot: ParentNode | null
+    artifactViewState: ArtifactViewState | null
+    exactTextAvailable: boolean
+    missingCanvasReason?: string
+    visualSourceUnavailableReason: string | null
+    visualSourceReady: boolean
+  }>
+  initialArtifactId: string
+  initialArtifactRoot: ParentNode | null
+  initialMissingCanvasReason?: string | null
+}): Promise<HtmlCaptureTargetWaitResult> {
+  const startedAt = nowMs()
+  let attempts = 0
+  recordHtmlCaptureTargetRetryEvent("capture_target_wait_started", {
+    artifactId: initialArtifactId,
+    result: "waiting_for_capture_target",
+    attempts,
+    latencyMs: 0,
+    missingBeforeRetry: true,
+    retryAttempted: true,
+    finalReason: initialMissingCanvasReason ?? "capture_target_missing",
+    sourceKind: null,
+  })
+
+  while (nowMs() - startedAt <= HTML_CAPTURE_TARGET_WAIT_TIMEOUT_MS) {
+    attempts += 1
+    const current = latestContext.current
+    const artifactId = current.artifactId ?? initialArtifactId
+    const root = current.artifactRoot ?? initialArtifactRoot
+    const source = resolveArtifactVisualSource({
+      root,
+      artifactId,
+      mode: "still_frame",
+      missingCanvasReason: current.visualSourceUnavailableReason
+        ?? current.missingCanvasReason
+        ?? initialMissingCanvasReason
+        ?? "capture_target_missing",
+    })
+    if (source.status === "ready") {
+      const latencyMs = Math.max(0, Math.round(nowMs() - startedAt))
+      recordHtmlCaptureTargetRetryEvent("capture_target_retry_success", {
+        artifactId,
+        result: "success",
+        attempts,
+        latencyMs,
+        missingBeforeRetry: true,
+        retryAttempted: true,
+        finalReason: null,
+        sourceKind: source.kind,
+      })
+      return {
+        visualSource: source,
+        result: "success",
+        attempts,
+        latencyMs,
+        missingBeforeRetry: true,
+        retryAttempted: true,
+        finalReason: null,
+      }
+    }
+    await delay(HTML_CAPTURE_TARGET_RETRY_INTERVAL_MS)
+  }
+
+  const latencyMs = Math.max(0, Math.round(nowMs() - startedAt))
+  const finalReason = "capture_target_missing_final"
+  recordHtmlCaptureTargetRetryEvent("capture_target_retry_timeout", {
+    artifactId: latestContext.current.artifactId ?? initialArtifactId,
+    result: "timeout",
+    attempts,
+    latencyMs,
+    missingBeforeRetry: true,
+    retryAttempted: true,
+    finalReason,
+    sourceKind: null,
+  })
+  recordHtmlCaptureTargetRetryEvent("capture_target_missing_final", {
+    artifactId: latestContext.current.artifactId ?? initialArtifactId,
+    result: "capture_target_missing_final",
+    attempts,
+    latencyMs,
+    missingBeforeRetry: true,
+    retryAttempted: true,
+    finalReason,
+    sourceKind: null,
+  })
+  return {
+    visualSource: null,
+    result: "timeout",
+    attempts,
+    latencyMs,
+    missingBeforeRetry: true,
+    retryAttempted: true,
+    finalReason,
+  }
+}
+
+function htmlCaptureTargetTelemetryFromWait(
+  result: HtmlCaptureTargetWaitResult,
+): Record<string, string | number | boolean | null> {
+  return {
+    reviewStartWaitedForHtmlCaptureTarget: true,
+    reviewStartHtmlCaptureTargetResult: result.finalReason ?? result.result,
+    htmlCaptureTargetMissingBeforeRetry: result.missingBeforeRetry,
+    htmlCaptureTargetRetryAttempted: result.retryAttempted,
+    htmlCaptureTargetRetryResult: result.finalReason ?? result.result,
+    htmlCaptureTargetReadyLatencyMs: result.latencyMs,
+    htmlFrameCaptureSourceKind: result.visualSource?.kind ?? null,
+  }
+}
+
+function recordHtmlCaptureTargetRetryEvent(
+  name: "capture_target_wait_started" | "capture_target_retry_success" | "capture_target_retry_timeout" | "capture_target_missing_final",
+  input: {
+    artifactId: string | null
+    result: string
+    attempts: number
+    latencyMs: number
+    missingBeforeRetry: boolean
+    retryAttempted: boolean
+    finalReason: string | null
+    sourceKind: string | null
+  },
+) {
+  recordSophiaCaptureEvent({
+    category: "artifacts-runtime",
+    name,
+    payload: {
+      artifactId: input.artifactId,
+      rendererKind: "html",
+      reviewStartWaitedForHtmlCaptureTarget: true,
+      reviewStartHtmlCaptureTargetResult: input.result,
+      htmlCaptureTargetMissingBeforeRetry: input.missingBeforeRetry,
+      htmlCaptureTargetRetryAttempted: input.retryAttempted,
+      htmlCaptureTargetRetryResult: input.result,
+      htmlCaptureTargetRetryAttemptCount: input.attempts,
+      htmlCaptureTargetReadyLatencyMs: input.latencyMs,
+      htmlFrameCaptureSourceKind: input.sourceKind,
+      htmlFrameCaptureSucceeded: input.result === "success",
+      htmlFrameCaptureFailureReason: input.finalReason,
+      rawArtifactTextExcluded: true,
+      rawHtmlExcluded: true,
+      rawCommentTextExcluded: true,
+      rawFrameExcluded: true,
+      rawScreenshotExcluded: true,
+    },
+  })
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms)
+  })
+}
+
+function nowMs(): number {
+  return Date.now()
 }

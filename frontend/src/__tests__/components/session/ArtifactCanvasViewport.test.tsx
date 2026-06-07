@@ -33,6 +33,15 @@ const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46])
 function mockCanvasApis() {
   const context = {
     clearRect: vi.fn(),
+    fillRect: vi.fn(),
+    fillText: vi.fn(),
+    beginPath: vi.fn(),
+    arc: vi.fn(),
+    moveTo: vi.fn(),
+    arcTo: vi.fn(),
+    closePath: vi.fn(),
+    fill: vi.fn(),
+    measureText: vi.fn((text: string) => ({ width: text.length * 8 })),
   } as unknown as CanvasRenderingContext2D
 
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(context)
@@ -225,6 +234,7 @@ describe("ArtifactCanvasViewport", () => {
   })
 
   it("renders HTML artifacts in a sandboxed iframe preview", async () => {
+    mockCanvasApis()
     const onVisualCaptureStatusChange = vi.fn()
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       new Response(
@@ -262,13 +272,187 @@ describe("ArtifactCanvasViewport", () => {
     expect(previewRegion).toContainElement(iframe)
     expect(iframe).toHaveAttribute("sandbox", "")
     expect(iframe).toHaveAttribute("srcdoc", expect.stringContaining("<h1>Deck fallback</h1>"))
-    expect(onVisualCaptureStatusChange).toHaveBeenLastCalledWith({
-      ready: true,
-      reason: null,
-      source: "html_preview_canvas",
-      exactTextAvailable: true,
-      artifactPath: "mnt/user-data/outputs/launch-brief.html",
-      previewHref: "/artifact.html",
+    const captureCanvas = await screen.findByLabelText("Generated HTML artifact review canvas")
+    expect(captureCanvas).toHaveAttribute("data-artifact-id", "artifact-1")
+    expect(captureCanvas).toHaveAttribute("data-coreview-artifact-id", "artifact-1")
+    expect(captureCanvas).toHaveAttribute("data-artifact-canvas-source", "selected-html-preview")
+    expect(captureCanvas).toHaveAttribute("data-coreview-renderer-kind", "html")
+    await waitFor(() => {
+      expect(onVisualCaptureStatusChange).toHaveBeenLastCalledWith({
+        ready: true,
+        reason: null,
+        source: "html_preview_canvas",
+        exactTextAvailable: true,
+        artifactPath: "mnt/user-data/outputs/launch-brief.html",
+        previewHref: "/artifact.html",
+      })
     })
+  })
+
+  it("registers HTML revision artifacts with version-aware capture identity", async () => {
+    mockCanvasApis()
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        "<!doctype html><html><head><title>Revision</title></head><body><h1>Revision</h1><p>Updated content.</p></body></html>",
+        {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        },
+      ),
+    )
+
+    render(
+      <ArtifactCanvasViewport
+        artifact={{
+          ...htmlArtifact,
+          artifactPath: "mnt/user-data/outputs/update-the-html-landing-page-with-one-ch-revision-534f86ab.html",
+        }}
+        files={[{
+          path: "mnt/user-data/outputs/update-the-html-landing-page-with-one-ch-revision-534f86ab.html",
+          name: "update-the-html-landing-page-with-one-ch-revision-534f86ab.html",
+          label: "Revision",
+          isPrimary: true,
+          mimeType: "text/html",
+        }]}
+        typeLabel="Webpage"
+        previewHref="/revision.html"
+        artifactTextRegistration={{
+          artifactId: "artifact-revision",
+          threadId: "thread-1",
+          artifactStableIdentity: "logical-html-artifact",
+          artifactLogicalId: "logical-html-artifact",
+          artifactVersionId: "logical-html-artifact::v2",
+        }}
+      />,
+    )
+
+    const captureCanvas = await screen.findByLabelText("Generated HTML artifact review canvas")
+    expect(captureCanvas).toHaveAttribute("data-artifact-id", "artifact-revision")
+    expect(captureCanvas).toHaveAttribute(
+      "data-coreview-artifact-path",
+      "mnt/user-data/outputs/update-the-html-landing-page-with-one-ch-revision-534f86ab.html",
+    )
+    expect(captureCanvas).toHaveAttribute("data-coreview-artifact-stable-identity", "logical-html-artifact")
+    expect(captureCanvas).toHaveAttribute("data-coreview-artifact-logical-id", "logical-html-artifact")
+    expect(captureCanvas).toHaveAttribute("data-coreview-artifact-version-id", "logical-html-artifact::v2")
+  })
+
+  it("re-registers the HTML capture target when the selected path changes", async () => {
+    mockCanvasApis()
+    const onVisualCaptureStatusChange = vi.fn()
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(
+          "<!doctype html><html><body><h1>Original</h1><p>Original content.</p></body></html>",
+          { status: 200, headers: { "Content-Type": "text/html" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          "<!doctype html><html><body><h1>Revision</h1><p>Revised content.</p></body></html>",
+          { status: 200, headers: { "Content-Type": "text/html" } },
+        ),
+      )
+
+    const { rerender } = render(
+      <ArtifactCanvasViewport
+        artifact={htmlArtifact}
+        files={[{
+          path: "mnt/user-data/outputs/launch-brief.html",
+          name: "launch-brief.html",
+          label: "launch-brief.html",
+          isPrimary: true,
+          mimeType: "text/html",
+        }]}
+        typeLabel="Webpage"
+        previewHref="/artifact.html"
+        artifactTextRegistration={{
+          artifactId: "artifact-original",
+          threadId: "thread-1",
+          artifactStableIdentity: "logical-html-artifact",
+          artifactLogicalId: "logical-html-artifact",
+          artifactVersionId: "logical-html-artifact::v1",
+        }}
+        onVisualCaptureStatusChange={onVisualCaptureStatusChange}
+      />,
+    )
+
+    await screen.findByLabelText("Generated HTML artifact review canvas")
+    rerender(
+      <ArtifactCanvasViewport
+        artifact={{
+          ...htmlArtifact,
+          artifactPath: "mnt/user-data/outputs/launch-brief-revision-534f86ab.html",
+        }}
+        files={[{
+          path: "mnt/user-data/outputs/launch-brief-revision-534f86ab.html",
+          name: "launch-brief-revision-534f86ab.html",
+          label: "Revision",
+          isPrimary: true,
+          mimeType: "text/html",
+        }]}
+        typeLabel="Webpage"
+        previewHref="/revision.html"
+        artifactTextRegistration={{
+          artifactId: "artifact-revision",
+          threadId: "thread-1",
+          artifactStableIdentity: "logical-html-artifact",
+          artifactLogicalId: "logical-html-artifact",
+          artifactVersionId: "logical-html-artifact::v2",
+        }}
+        onVisualCaptureStatusChange={onVisualCaptureStatusChange}
+      />,
+    )
+
+    await waitFor(() => {
+      const captureCanvas = screen.getByLabelText("Generated HTML artifact review canvas")
+      expect(captureCanvas).toHaveAttribute("data-artifact-id", "artifact-revision")
+      expect(captureCanvas).toHaveAttribute("data-coreview-artifact-version-id", "logical-html-artifact::v2")
+      expect(onVisualCaptureStatusChange).toHaveBeenLastCalledWith({
+        ready: true,
+        reason: null,
+        source: "html_preview_canvas",
+        exactTextAvailable: true,
+        artifactPath: "mnt/user-data/outputs/launch-brief-revision-534f86ab.html",
+        previewHref: "/revision.html",
+      })
+    })
+  })
+
+  it("removes the HTML capture target when the canvas unmounts", async () => {
+    mockCanvasApis()
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        "<!doctype html><html><body><h1>Deck fallback</h1><p>Readable slide content.</p></body></html>",
+        {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        },
+      ),
+    )
+
+    const { unmount } = render(
+      <ArtifactCanvasViewport
+        artifact={htmlArtifact}
+        files={[{
+          path: "mnt/user-data/outputs/launch-brief.html",
+          name: "launch-brief.html",
+          label: "launch-brief.html",
+          isPrimary: true,
+          mimeType: "text/html",
+        }]}
+        typeLabel="Webpage"
+        previewHref="/artifact.html"
+        artifactTextRegistration={{
+          artifactId: "artifact-1",
+          threadId: "thread-1",
+        }}
+      />,
+    )
+
+    await screen.findByLabelText("Generated HTML artifact review canvas")
+    unmount()
+
+    expect(document.querySelector("canvas[data-artifact-canvas-source='selected-html-preview']")).toBeNull()
   })
 })

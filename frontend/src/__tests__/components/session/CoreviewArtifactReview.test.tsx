@@ -99,6 +99,9 @@ const HTML_LIBRARY = [
 const PDF_SELECTED_PATH = "mnt/user-data/outputs/launch-brief.pdf"
 const WORKSPACE_KEY = "user:unknown|thread:thread-1"
 const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46])
+const ORIGINAL_HTML_PREVIEW = "<!doctype html><html><body><h1>Original preview</h1></body></html>"
+
+type HtmlFetchFixture = string | { html: string; status?: number }
 
 const SELECTED_MARKDOWN_ARTIFACT = {
   ...MARKDOWN_BUILDER_ARTIFACT,
@@ -113,6 +116,82 @@ const SELECTED_PDF_ARTIFACT = {
   decisionsMade: [],
   supportingFiles: [],
   userNextAction: "Open or download the artifact if the in-canvas preview is unavailable.",
+}
+
+function createTextFetchResponse(
+  text: string,
+  contentType: string,
+  status = 200,
+): Promise<Response> {
+  return Promise.resolve(
+    new Response(text, {
+      status,
+      headers: { "Content-Type": contentType },
+    }),
+  )
+}
+
+function createHtmlFetchResponse(html = ORIGINAL_HTML_PREVIEW, status = 200): Promise<Response> {
+  return createTextFetchResponse(html, "text/html", status)
+}
+
+function fetchInputHref(input: Parameters<typeof fetch>[0]): string {
+  if (typeof input === "string") {
+    return input
+  }
+  if (input instanceof URL) {
+    return input.href
+  }
+  if (typeof Request !== "undefined" && input instanceof Request) {
+    return input.url
+  }
+  return String(input)
+}
+
+function normalizeArtifactFetchPath(href: string): string {
+  const withoutOrigin = href.replace(/^https?:\/\/[^/]+/iu, "")
+  const withoutQuery = withoutOrigin.split(/[?#]/u)[0] ?? ""
+  const artifactMarker = "/artifacts/"
+  const markerIndex = withoutQuery.indexOf(artifactMarker)
+  const rawPath = markerIndex >= 0
+    ? withoutQuery.slice(markerIndex + artifactMarker.length)
+    : withoutQuery.replace(/^\/+/, "")
+
+  try {
+    return decodeURIComponent(rawPath)
+  } catch {
+    return rawPath
+  }
+}
+
+function mockHtmlArtifactFetch(
+  resolveHtml: (artifactPath: string, href: string) => HtmlFetchFixture = () => ORIGINAL_HTML_PREVIEW,
+) {
+  fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+    const href = fetchInputHref(input)
+    const artifactPath = normalizeArtifactFetchPath(href)
+    if (artifactPath.toLowerCase().includes(".html")) {
+      const fixture = resolveHtml(artifactPath, href)
+      if (typeof fixture === "string") {
+        return createHtmlFetchResponse(fixture)
+      }
+      return createHtmlFetchResponse(fixture.html, fixture.status ?? 200)
+    }
+    throw new Error(`Unhandled fetch in CoreviewArtifactReview test: ${href}`)
+  })
+  return fetchSpy
+}
+
+function mockMarkdownArtifactFetch(markdown: string) {
+  fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+    const href = fetchInputHref(input)
+    const artifactPath = normalizeArtifactFetchPath(href)
+    if (artifactPath.toLowerCase().includes(".md")) {
+      return createTextFetchResponse(markdown, "text/markdown")
+    }
+    throw new Error(`Unhandled fetch in CoreviewArtifactReview test: ${href}`)
+  })
+  return fetchSpy
 }
 
 type ArtifactReviewVoiceCommandRouteHandler = Parameters<
@@ -234,6 +313,7 @@ function closedVoiceFrameTransport(sendArtifactFrame = vi.fn()) {
 function mockCanvasApis() {
   const gradient = { addColorStop: vi.fn() }
   const context = {
+    arc: vi.fn(),
     arcTo: vi.fn(),
     beginPath: vi.fn(),
     clearRect: vi.fn(),
@@ -948,12 +1028,7 @@ describe("Coreview artifact still-frame review", () => {
     registerSophiaCaptureBridge()
     window.__sophiaCapture?.clear()
     window.__sophiaCapture?.enable()
-    fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response("# Launch Brief\n\nCurrent title.", {
-        status: 200,
-        headers: { "Content-Type": "text/markdown" },
-      }),
-    )
+    mockMarkdownArtifactFetch("# Launch Brief\n\nCurrent title.")
     let routeArtifactCommand: ArtifactReviewVoiceCommandRouteHandler = null
     const onCoreviewBuilderUpdateRequest = vi.fn<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onCoreviewBuilderUpdateRequest"]>>(async () => ({
       ok: true,
@@ -1066,12 +1141,7 @@ describe("Coreview artifact still-frame review", () => {
 
   it("routes voice builder cancellation through Coreview cancel actions", async () => {
     setCoreviewFlags(true)
-    fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response("# Launch Brief\n\nCurrent title.", {
-        status: 200,
-        headers: { "Content-Type": "text/markdown" },
-      }),
-    )
+    mockMarkdownArtifactFetch("# Launch Brief\n\nCurrent title.")
     let routeArtifactCommand: ArtifactReviewVoiceCommandRouteHandler = null
     const onCoreviewBuilderCancelRequest = vi.fn<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onCoreviewBuilderCancelRequest"]>>(async () => ({
       ok: true,
@@ -1177,18 +1247,11 @@ describe("Coreview artifact still-frame review", () => {
   it("auto-applies completed HTML builder updates in the same canvas and can restore original", async () => {
     setCoreviewFlags(true)
     const user = userEvent.setup()
-    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const href = String(input)
-      return new Response(
-        href.includes("site-v2.html")
-          ? "<!doctype html><html><body><h1>Updated preview</h1></body></html>"
-          : "<!doctype html><html><body><h1>Original preview</h1></body></html>",
-        {
-          status: 200,
-          headers: { "Content-Type": "text/html" },
-        },
-      )
-    })
+    mockHtmlArtifactFetch((artifactPath) => (
+      artifactPath.includes("site-v2.html")
+        ? "<!doctype html><html><body><h1>Updated preview</h1></body></html>"
+        : ORIGINAL_HTML_PREVIEW
+    ))
     let routeArtifactCommand: ArtifactReviewVoiceCommandRouteHandler = null
     const onCoreviewBuilderUpdateRequest = vi.fn<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onCoreviewBuilderUpdateRequest"]>>(async () => ({
       ok: true,
@@ -1260,7 +1323,7 @@ describe("Coreview artifact still-frame review", () => {
 
     expect(await screen.findByTitle("Preview of site-v2.html")).toBeInTheDocument()
     const updateCard = await screen.findByTestId("artifact-review-builder-update-card")
-    expect(updateCard).toHaveAttribute("data-coreview-builder-update-status", "completed")
+    await waitFor(() => expect(updateCard).toHaveAttribute("data-coreview-builder-update-status", "completed"))
     expect(within(updateCard).getByText("Preview updated")).toBeInTheDocument()
     expect(within(updateCard).getByText("Version 2 saved")).toBeInTheDocument()
     expect(within(updateCard).getByText("Original preserved")).toBeInTheDocument()
@@ -1289,18 +1352,11 @@ describe("Coreview artifact still-frame review", () => {
     registerSophiaCaptureBridge()
     window.__sophiaCapture?.clear()
     window.__sophiaCapture?.enable()
-    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const href = String(input)
-      return new Response(
-        href.includes("site-v2.html")
-          ? "<!doctype html><html><body><h1>Revision preview</h1></body></html>"
-          : "<!doctype html><html><body><h1>Original preview</h1></body></html>",
-        {
-          status: 200,
-          headers: { "Content-Type": "text/html" },
-        },
-      )
-    })
+    mockHtmlArtifactFetch((artifactPath) => (
+      artifactPath.includes("site-v2.html")
+        ? "<!doctype html><html><body><h1>Revision preview</h1></body></html>"
+        : ORIGINAL_HTML_PREVIEW
+    ))
     const selectedPaths: string[] = []
     const completion = {
       type: "builder_completion" as const,
@@ -1356,7 +1412,7 @@ describe("Coreview artifact still-frame review", () => {
 
     expect(await screen.findByTitle("Preview of site-v2.html")).toBeInTheDocument()
     const updateCard = await screen.findByTestId("artifact-review-builder-update-card")
-    expect(updateCard).toHaveAttribute("data-coreview-builder-update-status", "completed")
+    await waitFor(() => expect(updateCard).toHaveAttribute("data-coreview-builder-update-status", "completed"))
     expect(within(updateCard).getByText("Preview updated")).toBeInTheDocument()
     expect(selectedPaths).toContain("mnt/user-data/outputs/site-v2.html")
     expect(getWorkspaceEvents(WORKSPACE_KEY).map((event) => event.type)).toEqual(expect.arrayContaining([
@@ -1371,18 +1427,11 @@ describe("Coreview artifact still-frame review", () => {
 
   it("auto-applies an HTML completion when source_artifact_path matches the selected artifact", async () => {
     setCoreviewFlags(true)
-    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const href = String(input)
-      return new Response(
-        href.includes("site-v2.html")
-          ? "<!doctype html><html><body><h1>Source matched preview</h1></body></html>"
-          : "<!doctype html><html><body><h1>Original preview</h1></body></html>",
-        {
-          status: 200,
-          headers: { "Content-Type": "text/html" },
-        },
-      )
-    })
+    mockHtmlArtifactFetch((artifactPath) => (
+      artifactPath.includes("site-v2.html")
+        ? "<!doctype html><html><body><h1>Source matched preview</h1></body></html>"
+        : ORIGINAL_HTML_PREVIEW
+    ))
     const selectedPaths: string[] = []
     const completion = {
       type: "builder_completion" as const,
@@ -1434,17 +1483,13 @@ describe("Coreview artifact still-frame review", () => {
     expect(await screen.findByTitle("Preview of site-v2.html")).toBeInTheDocument()
     expect(selectedPaths).toContain("mnt/user-data/outputs/site-v2.html")
     const updateCard = await screen.findByTestId("artifact-review-builder-update-card")
-    await waitFor(() => expect(within(updateCard).getByText("Preview updated")).toBeInTheDocument())
+    await waitFor(() => expect(updateCard).toHaveAttribute("data-coreview-builder-update-status", "completed"))
+    expect(within(updateCard).getByText("Preview updated")).toBeInTheDocument()
   })
 
   it("does not auto-apply unrelated HTML completion output into the selected canvas", async () => {
     setCoreviewFlags(true)
-    fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response("<!doctype html><html><body><h1>Original preview</h1></body></html>", {
-        status: 200,
-        headers: { "Content-Type": "text/html" },
-      }),
-    )
+    mockHtmlArtifactFetch()
     const selectedPaths: string[] = []
     const completion = {
       type: "builder_completion" as const,
@@ -1485,12 +1530,7 @@ describe("Coreview artifact still-frame review", () => {
 
   it("does not show preview success when auto-apply did not change the selected path", async () => {
     setCoreviewFlags(true)
-    fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response("<!doctype html><html><body><h1>Original preview</h1></body></html>", {
-        status: 200,
-        headers: { "Content-Type": "text/html" },
-      }),
-    )
+    mockHtmlArtifactFetch()
     const onSelectedBuilderArtifactPathChange = vi.fn()
     const completion = {
       type: "builder_completion" as const,
@@ -1530,16 +1570,11 @@ describe("Coreview artifact still-frame review", () => {
 
   it("shows preview_not_refreshed when the selected HTML output fails to render", async () => {
     setCoreviewFlags(true)
-    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const href = String(input)
-      if (href.includes("site-v2.html")) {
-        return new Response("", { status: 404 })
-      }
-      return new Response("<!doctype html><html><body><h1>Original preview</h1></body></html>", {
-        status: 200,
-        headers: { "Content-Type": "text/html" },
-      })
-    })
+    mockHtmlArtifactFetch((artifactPath) => (
+      artifactPath.includes("site-v2.html")
+        ? { html: "", status: 404 }
+        : ORIGINAL_HTML_PREVIEW
+    ))
     const selectedPaths: string[] = []
     const completion = {
       type: "builder_completion" as const,
@@ -1601,12 +1636,7 @@ describe("Coreview artifact still-frame review", () => {
 
   it("does not auto-apply non-HTML builder output into an HTML canvas", async () => {
     setCoreviewFlags(true)
-    fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response("<!doctype html><html><body><h1>Original preview</h1></body></html>", {
-        status: 200,
-        headers: { "Content-Type": "text/html" },
-      }),
-    )
+    mockHtmlArtifactFetch()
     let routeArtifactCommand: ArtifactReviewVoiceCommandRouteHandler = null
     const selectedPaths: string[] = []
     const onCoreviewBuilderUpdateRequest = vi.fn<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["onCoreviewBuilderUpdateRequest"]>>(async () => ({
@@ -2248,12 +2278,7 @@ describe("Coreview artifact still-frame review", () => {
     { isVoiceMode: true, label: "voice mode" },
   ])("renders the same selected artifact stage in $label", async ({ isVoiceMode }) => {
     setCoreviewFlags(true)
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response("# Launch Brief\n\nShared preview source.", {
-        status: 200,
-        headers: { "Content-Type": "text/markdown" },
-      }),
-    )
+    const markdownFetchSpy = mockMarkdownArtifactFetch("# Launch Brief\n\nShared preview source.")
 
     renderPanel({
       builderArtifact: MARKDOWN_BUILDER_ARTIFACT,
@@ -2275,7 +2300,7 @@ describe("Coreview artifact still-frame review", () => {
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md?download=true",
     )
-    expect(fetchSpy).toHaveBeenCalledWith(
+    expect(markdownFetchSpy).toHaveBeenCalledWith(
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md",
       expect.objectContaining({
         cache: "no-store",
@@ -2286,12 +2311,7 @@ describe("Coreview artifact still-frame review", () => {
 
   it("exposes a capture-ready selected markdown artifact source without frame-unavailable copy", async () => {
     setCoreviewFlags(true)
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response("# Launch Brief\n\nShared preview source.", {
-        status: 200,
-        headers: { "Content-Type": "text/markdown" },
-      }),
-    )
+    mockMarkdownArtifactFetch("# Launch Brief\n\nShared preview source.")
 
     renderPanel({
       builderArtifact: MARKDOWN_BUILDER_ARTIFACT,
@@ -2315,12 +2335,7 @@ describe("Coreview artifact still-frame review", () => {
     setCoreviewFlags(true)
     const user = userEvent.setup()
     const onStartVoiceBuilderArtifactReview = vi.fn()
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response("# Launch Brief\n\nExact text is ready before voice starts.", {
-        status: 200,
-        headers: { "Content-Type": "text/markdown" },
-      }),
-    )
+    mockMarkdownArtifactFetch("# Launch Brief\n\nExact text is ready before voice starts.")
 
     renderPanel({
       builderArtifact: MARKDOWN_BUILDER_ARTIFACT,
@@ -2343,12 +2358,7 @@ describe("Coreview artifact still-frame review", () => {
 
   it("renders voice mode through the shared artifact stage without a second artifact surface", async () => {
     setCoreviewFlags(true)
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response("# Launch Brief\n\nShared preview source in voice mode.", {
-        status: 200,
-        headers: { "Content-Type": "text/markdown" },
-      }),
-    )
+    mockMarkdownArtifactFetch("# Launch Brief\n\nShared preview source in voice mode.")
 
     renderPanel({
       builderArtifact: MARKDOWN_BUILDER_ARTIFACT,
@@ -2408,12 +2418,7 @@ describe("Coreview artifact still-frame review", () => {
       rawFrameExcluded: true as const,
     }))
     const transport = new GeminiStillFrameTransport({ sendArtifactFrame })
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response("# Exact Launch Title\n\nBudget delta: 17.4%", {
-        status: 200,
-        headers: { "Content-Type": "text/markdown" },
-      }),
-    )
+    mockMarkdownArtifactFetch("# Exact Launch Title\n\nBudget delta: 17.4%")
 
     renderPanel({
       builderArtifact: MARKDOWN_BUILDER_ARTIFACT,
@@ -2455,12 +2460,7 @@ describe("Coreview artifact still-frame review", () => {
   it("shows safe frame-unavailable copy when the selected markdown capture canvas cannot be prepared", async () => {
     setCoreviewFlags(true)
     getContextSpy?.mockReturnValue(null)
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response("# Launch Brief\n\nThe text can render even if capture fails.", {
-        status: 200,
-        headers: { "Content-Type": "text/markdown" },
-      }),
-    )
+    mockMarkdownArtifactFetch("# Launch Brief\n\nThe text can render even if capture fails.")
 
     renderPanel({
       builderArtifact: MARKDOWN_BUILDER_ARTIFACT,

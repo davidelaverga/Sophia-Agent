@@ -130,6 +130,66 @@ describe("co-review artifact capture", () => {
     expect(source.element).toBe(selectedPreviewCanvas)
   })
 
+  it("resolves selected HTML preview canvases with an HTML source kind", () => {
+    const root = document.createElement("section")
+    const canvas = document.createElement("canvas")
+    canvas.dataset.artifactId = "artifact-html"
+    canvas.dataset.artifactCanvasSource = "selected-html-preview"
+    canvas.dataset.coreviewOffscreenRender = "true"
+    root.appendChild(canvas)
+
+    const source = resolveArtifactVisualSource({
+      root,
+      artifactId: "artifact-html",
+    })
+
+    expect(source.status).toBe("ready")
+    expect(source.kind).toBe("html_preview_canvas")
+    expect(source.element).toBe(canvas)
+  })
+
+  it("prefers the selected HTML revision canvas over an older matching metadata canvas", () => {
+    const root = document.createElement("section")
+    const metadataCanvas = document.createElement("canvas")
+    metadataCanvas.dataset.artifactId = "artifact-html-revision"
+    metadataCanvas.dataset.coreviewOffscreenRender = "true"
+    root.appendChild(metadataCanvas)
+
+    const selectedRevisionCanvas = document.createElement("canvas")
+    selectedRevisionCanvas.dataset.coreviewArtifactId = "artifact-html-revision"
+    selectedRevisionCanvas.dataset.coreviewArtifactCanvasSource = "selected-html-preview"
+    selectedRevisionCanvas.dataset.coreviewArtifactVersionId = "logical-html-artifact::v2"
+    selectedRevisionCanvas.dataset.coreviewOffscreenRender = "true"
+    root.appendChild(selectedRevisionCanvas)
+
+    const source = resolveArtifactVisualSource({
+      root,
+      artifactId: "artifact-html-revision",
+    })
+
+    expect(source.status).toBe("ready")
+    expect(source.kind).toBe("html_preview_canvas")
+    expect(source.element).toBe(selectedRevisionCanvas)
+  })
+
+  it("keeps PDF composite capture behavior unchanged", () => {
+    const root = document.createElement("section")
+    const canvas = document.createElement("canvas")
+    canvas.dataset.artifactId = "artifact-pdf"
+    canvas.dataset.artifactCanvasSource = "selected-pdf-page-composite"
+    canvas.dataset.coreviewOffscreenRender = "true"
+    root.appendChild(canvas)
+
+    const source = resolveArtifactVisualSource({
+      root,
+      artifactId: "artifact-pdf",
+    })
+
+    expect(source.status).toBe("ready")
+    expect(source.kind).toBe("offscreen_render")
+    expect(source.element).toBe(canvas)
+  })
+
   it("stopArtifactVisualSource is a no-op for one-shot still-frame sources", () => {
     expect(() => stopArtifactVisualSource(resolveArtifactVisualSource())).not.toThrow()
   })

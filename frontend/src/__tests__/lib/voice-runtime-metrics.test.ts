@@ -1221,6 +1221,79 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.coreview.visual.exactTextAvailable).toBe(true);
   });
 
+  it('summarizes HTML capture target registration and retry telemetry safely', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'artifacts-runtime',
+        name: 'capture_target_registered',
+        payload: {
+          artifactId: 'coreview-real-artifact-landing-html',
+          rendererKind: 'html',
+          htmlCaptureTargetRegistered: true,
+          htmlCaptureTargetRegistrationResult: 'registered',
+          htmlCaptureTargetArtifactPathHash: 'pathhash123',
+          htmlCaptureTargetStableIdentityHash: 'stablehash456',
+          htmlCaptureTargetVersionAware: true,
+          htmlCaptureTargetRebindCount: 1,
+          htmlCaptureTargetReadyLatencyMs: 42,
+          htmlFrameCaptureSourceKind: 'html_preview_canvas',
+          htmlFrameCaptureSucceeded: true,
+          htmlFrameCaptureFailureReason: null,
+          rawArtifactTextExcluded: true,
+          rawHtmlExcluded: true,
+          rawFrameExcluded: true,
+        },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:00.200Z',
+        category: 'artifacts-runtime',
+        name: 'capture_target_retry_success',
+        payload: {
+          artifactId: 'coreview-real-artifact-landing-html',
+          rendererKind: 'html',
+          reviewStartWaitedForHtmlCaptureTarget: true,
+          reviewStartHtmlCaptureTargetResult: 'success',
+          htmlCaptureTargetMissingBeforeRetry: true,
+          htmlCaptureTargetRetryAttempted: true,
+          htmlCaptureTargetRetryResult: 'success',
+          htmlCaptureTargetReadyLatencyMs: 120,
+          htmlFrameCaptureSourceKind: 'html_preview_canvas',
+          htmlFrameCaptureSucceeded: true,
+          htmlFrameCaptureFailureReason: null,
+          rawArtifactTextExcluded: true,
+          rawHtmlExcluded: true,
+          rawFrameExcluded: true,
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-04-07T12:00:01.500Z'),
+    });
+
+    expect(metrics.coreview.visual.htmlCaptureTargetRegistered).toBe(true);
+    expect(metrics.coreview.visual.htmlCaptureTargetRegistrationResult).toBe('registered');
+    expect(metrics.coreview.visual.htmlCaptureTargetArtifactPathHash).toBe('pathhash123');
+    expect(metrics.coreview.visual.htmlCaptureTargetStableIdentityHash).toBe('stablehash456');
+    expect(metrics.coreview.visual.htmlCaptureTargetVersionAware).toBe(true);
+    expect(metrics.coreview.visual.htmlCaptureTargetRebindCount).toBe(1);
+    expect(metrics.coreview.visual.htmlCaptureTargetMissingBeforeRetry).toBe(true);
+    expect(metrics.coreview.visual.htmlCaptureTargetRetryAttempted).toBe(true);
+    expect(metrics.coreview.visual.htmlCaptureTargetRetryResult).toBe('success');
+    expect(metrics.coreview.visual.htmlCaptureTargetReadyLatencyMs).toBe(120);
+    expect(metrics.coreview.visual.htmlFrameCaptureSourceKind).toBe('html_preview_canvas');
+    expect(metrics.coreview.visual.htmlFrameCaptureSucceeded).toBe(true);
+    expect(metrics.coreview.visual.htmlFrameCaptureFailureReason).toBeNull();
+    expect(metrics.coreview.visual.reviewStartWaitedForHtmlCaptureTarget).toBe(true);
+    expect(metrics.coreview.visual.reviewStartHtmlCaptureTargetResult).toBe('success');
+  });
+
   it('counts coreviewArtifactId state as selected artifact evidence when stage-selection events are absent', () => {
     const events: VoiceCaptureEvent[] = [
       buildEvent({

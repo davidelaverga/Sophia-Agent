@@ -1,4 +1,4 @@
-export type ArtifactVisualSourceKind = "canvas_element" | "offscreen_render" | "unsupported"
+export type ArtifactVisualSourceKind = "canvas_element" | "offscreen_render" | "html_preview_canvas" | "unsupported"
 
 export type ArtifactVisualSourceStatus = "ready" | "unsupported"
 export type ArtifactVisualSourceMode = "still_frame"
@@ -54,6 +54,12 @@ export function resolveArtifactVisualSource({
 }
 
 function readArtifactCanvasKind(canvas: HTMLCanvasElement): ArtifactVisualSourceKind {
+  if (
+    canvas.dataset.artifactCanvasSource === "selected-html-preview"
+    || canvas.dataset.coreviewArtifactCanvasSource === "selected-html-preview"
+  ) {
+    return "html_preview_canvas"
+  }
   if (canvas.dataset.coreviewOffscreenRender === "true") {
     return "offscreen_render"
   }
@@ -70,6 +76,16 @@ export function findArtifactCanvas(
 ): HTMLCanvasElement | null {
   if (artifactId) {
     const escapedArtifactId = cssEscape(artifactId)
+    const htmlPreview = root.querySelector<HTMLCanvasElement>(
+      [
+        `canvas[data-artifact-id='${escapedArtifactId}'][data-artifact-canvas-source='selected-html-preview']`,
+        `canvas[data-coreview-artifact-id='${escapedArtifactId}'][data-artifact-canvas-source='selected-html-preview']`,
+        `canvas[data-artifact-id='${escapedArtifactId}'][data-coreview-artifact-canvas-source='selected-html-preview']`,
+        `canvas[data-coreview-artifact-id='${escapedArtifactId}'][data-coreview-artifact-canvas-source='selected-html-preview']`,
+      ].join(", "),
+    )
+    if (htmlPreview) return htmlPreview
+
     const preview = root.querySelector<HTMLCanvasElement>(
       [
         `canvas[data-artifact-id='${escapedArtifactId}'][data-artifact-canvas-source='selected-markdown-preview']`,

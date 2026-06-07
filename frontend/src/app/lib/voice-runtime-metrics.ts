@@ -128,6 +128,21 @@ export type CoreviewVisualTelemetry = {
   coreviewHtmlUpdateSelectedPathChanged: boolean
   coreviewHtmlUpdatePreservedReview: boolean | null
   coreviewHtmlUpdatePreservedMic: boolean | null
+  htmlCaptureTargetRegistered: boolean
+  htmlCaptureTargetRegistrationResult: string | null
+  htmlCaptureTargetArtifactPathHash: string | null
+  htmlCaptureTargetStableIdentityHash: string | null
+  htmlCaptureTargetVersionAware: boolean
+  htmlCaptureTargetRebindCount: number
+  htmlCaptureTargetMissingBeforeRetry: boolean
+  htmlCaptureTargetRetryAttempted: boolean
+  htmlCaptureTargetRetryResult: string | null
+  htmlCaptureTargetReadyLatencyMs: number | null
+  htmlFrameCaptureSourceKind: string | null
+  htmlFrameCaptureSucceeded: boolean
+  htmlFrameCaptureFailureReason: string | null
+  reviewStartWaitedForHtmlCaptureTarget: boolean
+  reviewStartHtmlCaptureTargetResult: string | null
   artifactRebindAttempted: boolean
   artifactRebindResult: string | null
   artifactRebindReason: string | null
@@ -1402,6 +1417,21 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       coreviewHtmlUpdateSelectedPathChanged: false,
       coreviewHtmlUpdatePreservedReview: null,
       coreviewHtmlUpdatePreservedMic: null,
+      htmlCaptureTargetRegistered: false,
+      htmlCaptureTargetRegistrationResult: null,
+      htmlCaptureTargetArtifactPathHash: null,
+      htmlCaptureTargetStableIdentityHash: null,
+      htmlCaptureTargetVersionAware: false,
+      htmlCaptureTargetRebindCount: 0,
+      htmlCaptureTargetMissingBeforeRetry: false,
+      htmlCaptureTargetRetryAttempted: false,
+      htmlCaptureTargetRetryResult: null,
+      htmlCaptureTargetReadyLatencyMs: null,
+      htmlFrameCaptureSourceKind: null,
+      htmlFrameCaptureSucceeded: false,
+      htmlFrameCaptureFailureReason: null,
+      reviewStartWaitedForHtmlCaptureTarget: false,
+      reviewStartHtmlCaptureTargetResult: null,
       artifactRebindAttempted: false,
       artifactRebindResult: null,
       artifactRebindReason: null,
@@ -1608,6 +1638,20 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((event) => event.category === "artifacts-runtime" && event.name === "select-stage-artifact")
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
+  const htmlCaptureTargetEvents = activeEvents
+    .filter((event) => (
+      event.category === "artifacts-runtime"
+      && (
+        event.name === "html-capture-target"
+        || event.name === "capture_target_registered"
+        || event.name === "capture_target_wait_started"
+        || event.name === "capture_target_retry_success"
+        || event.name === "capture_target_retry_timeout"
+        || event.name === "capture_target_missing_final"
+      )
+    ))
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
   const artifactCommandEvents = activeEvents
     .filter((event) => event.name === "artifact-review-voice-command")
     .map((event) => event.payloadRecord)
@@ -1729,6 +1773,7 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((value): value is Record<string, unknown> => value !== null)
   const latestState = stateEvents.at(-1) ?? null
   const latestSelectedStage = selectedStageEvents.at(-1) ?? null
+  const htmlCaptureTelemetryRecords = [...htmlCaptureTargetEvents, ...stateEvents]
   const latestArtifactCommand = artifactCommandEvents.at(-1) ?? null
   const latestAnnotationIntent = annotationIntentEvents.at(-1) ?? null
   const latestPdfTextExtraction = pdfTextExtractionEvents.at(-1) ?? latestSelectedStage
@@ -1933,6 +1978,60 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   ))
   visual.coreviewHtmlUpdatePreservedReview = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewHtmlUpdatePreservedReview")
   visual.coreviewHtmlUpdatePreservedMic = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewHtmlUpdatePreservedMic")
+  visual.htmlCaptureTargetRegistered = htmlCaptureTelemetryRecords.some((event) => (
+    asBoolean(event.htmlCaptureTargetRegistered) === true
+  ))
+  visual.htmlCaptureTargetRegistrationResult = latestStringFromRecords(
+    htmlCaptureTelemetryRecords,
+    "htmlCaptureTargetRegistrationResult",
+  )
+  visual.htmlCaptureTargetArtifactPathHash = latestStringFromRecords(
+    htmlCaptureTelemetryRecords,
+    "htmlCaptureTargetArtifactPathHash",
+  )
+  visual.htmlCaptureTargetStableIdentityHash = latestStringFromRecords(
+    htmlCaptureTelemetryRecords,
+    "htmlCaptureTargetStableIdentityHash",
+  )
+  visual.htmlCaptureTargetVersionAware = htmlCaptureTelemetryRecords.some((event) => (
+    asBoolean(event.htmlCaptureTargetVersionAware) === true
+  ))
+  visual.htmlCaptureTargetRebindCount = maxFiniteFromRecords(
+    htmlCaptureTelemetryRecords,
+    "htmlCaptureTargetRebindCount",
+  ) ?? 0
+  visual.htmlCaptureTargetMissingBeforeRetry = htmlCaptureTelemetryRecords.some((event) => (
+    asBoolean(event.htmlCaptureTargetMissingBeforeRetry) === true
+  ))
+  visual.htmlCaptureTargetRetryAttempted = htmlCaptureTelemetryRecords.some((event) => (
+    asBoolean(event.htmlCaptureTargetRetryAttempted) === true
+  ))
+  visual.htmlCaptureTargetRetryResult = latestStringFromRecords(
+    htmlCaptureTelemetryRecords,
+    "htmlCaptureTargetRetryResult",
+  )
+  visual.htmlCaptureTargetReadyLatencyMs = maxFiniteFromRecords(
+    htmlCaptureTelemetryRecords,
+    "htmlCaptureTargetReadyLatencyMs",
+  )
+  visual.htmlFrameCaptureSourceKind = latestStringFromRecords(
+    htmlCaptureTelemetryRecords,
+    "htmlFrameCaptureSourceKind",
+  )
+  visual.htmlFrameCaptureSucceeded = htmlCaptureTelemetryRecords.some((event) => (
+    asBoolean(event.htmlFrameCaptureSucceeded) === true
+  ))
+  visual.htmlFrameCaptureFailureReason = latestStringFromRecords(
+    htmlCaptureTelemetryRecords,
+    "htmlFrameCaptureFailureReason",
+  )
+  visual.reviewStartWaitedForHtmlCaptureTarget = htmlCaptureTelemetryRecords.some((event) => (
+    asBoolean(event.reviewStartWaitedForHtmlCaptureTarget) === true
+  ))
+  visual.reviewStartHtmlCaptureTargetResult = latestStringFromRecords(
+    htmlCaptureTelemetryRecords,
+    "reviewStartHtmlCaptureTargetResult",
+  )
   visual.artifactRebindAttempted = latestRebindEvent !== null
   visual.artifactRebindResult = asString(latestRebindEvent?.artifactRebindResult)
   visual.artifactRebindReason = asString(latestRebindEvent?.artifactRebindReason)

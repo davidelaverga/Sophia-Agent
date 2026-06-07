@@ -34,6 +34,13 @@ type ArtifactViewportFile = BuilderArtifactFileV1 & {
   sizeBytes?: number
 }
 
+type HtmlCaptureRegistrationResult =
+  | "registered"
+  | "canvas_missing"
+  | "context_unavailable"
+  | "draw_failed"
+  | "unregistered"
+
 export type ArtifactVisualCaptureUnavailableReason =
   | "no_selected_artifact"
   | "preview_not_ready"
@@ -67,6 +74,8 @@ interface ArtifactCanvasViewportProps {
     sessionIds?: Array<string | null | undefined>
     threadId?: string | null
     artifactStableIdentity?: string | null
+    artifactLogicalId?: string | null
+    artifactVersionId?: string | null
   } | null
   onVisualCaptureStatusChange?: (status: ArtifactVisualCaptureStatus) => void
   onPdfTextLayoutChange?: (layout: CoreviewPdfTextLayout | null) => void
@@ -97,6 +106,8 @@ export type ArtifactReviewSurfaceState = "idle" | "preparing" | "active" | "unav
 
 const MARKDOWN_CAPTURE_CANVAS_WIDTH = 960
 const MARKDOWN_CAPTURE_CANVAS_HEIGHT = 1240
+const HTML_CAPTURE_CANVAS_WIDTH = 960
+const HTML_CAPTURE_CANVAS_HEIGHT = 720
 const MAX_CAPTURE_BLOCKS = 28
 const ARTIFACT_CANVAS_BED_FALLBACK_BOUNDS = {
   width: 860,
@@ -159,6 +170,31 @@ export function ArtifactCanvasViewport({
     htmlPreview.status === "ready" ? extractTextFromHtml(htmlPreview.html) : ""
   ), [htmlPreview])
   const captureArtifactId = artifactTextRegistration?.artifactId ?? null
+  const htmlCaptureKey = [
+    captureArtifactId ?? "",
+    primaryFile?.path ?? "",
+    htmlPreview.status === "ready" ? htmlPreview.html : "",
+  ].join("::")
+  const [htmlCaptureState, setHtmlCaptureState] = useState<{
+    key: string
+    status: ArtifactVisualCaptureStatus
+  }>(() => ({
+    key: "",
+    status: unavailableCaptureStatus("preview_not_ready", "html_preview_canvas"),
+  }))
+  const currentHtmlCaptureStatus = useMemo(() => (
+    htmlCaptureState.key === htmlCaptureKey
+      ? htmlCaptureState.status
+      : unavailableCaptureStatus("preview_not_ready", "html_preview_canvas", Boolean(htmlPreviewText.trim()))
+  ), [htmlCaptureKey, htmlCaptureState, htmlPreviewText])
+  const handleHtmlCaptureStatusChange = useCallback((status: ArtifactVisualCaptureStatus) => {
+    setHtmlCaptureState((current) => {
+      if (current.key === htmlCaptureKey && captureStatusesEqual(current.status, status)) {
+        return current
+      }
+      return { key: htmlCaptureKey, status }
+    })
+  }, [htmlCaptureKey])
   const markdownCaptureKey = [
     captureArtifactId ?? "",
     primaryFile?.path ?? "",
@@ -253,6 +289,7 @@ export function ArtifactCanvasViewport({
     canPreviewHtml,
     canPreviewMarkdown,
     canPreviewPdf,
+    currentHtmlCaptureStatus,
     currentMarkdownCaptureStatus,
     currentPdfCaptureStatusWithText,
     effectiveCapabilities,
@@ -264,6 +301,7 @@ export function ArtifactCanvasViewport({
     canPreviewMarkdown,
     canPreviewPdf,
     captureArtifactId,
+    currentHtmlCaptureStatus,
     currentMarkdownCaptureStatus,
     currentPdfCaptureStatusWithText,
     effectiveCapabilities,
@@ -535,6 +573,20 @@ export function ArtifactCanvasViewport({
           onStatusChange={handleMarkdownCaptureStatusChange}
         />
       ) : null}
+      {canPreviewHtml && captureArtifactId && htmlPreview.status === "ready" && htmlPreview.html.trim() ? (
+        <HtmlArtifactCaptureCanvas
+          artifact={artifact}
+          artifactId={captureArtifactId}
+          file={primaryFile}
+          html={htmlPreview.html}
+          previewText={htmlPreviewText}
+          typeLabel={typeLabel}
+          artifactStableIdentity={artifactTextRegistration?.artifactStableIdentity ?? null}
+          artifactLogicalId={artifactTextRegistration?.artifactLogicalId ?? artifactTextRegistration?.artifactStableIdentity ?? null}
+          artifactVersionId={artifactTextRegistration?.artifactVersionId ?? null}
+          onStatusChange={handleHtmlCaptureStatusChange}
+        />
+      ) : null}
     </div>
   )
 }
@@ -719,6 +771,7 @@ function resolveVisualCaptureStatus({
   canPreviewHtml,
   canPreviewMarkdown,
   canPreviewPdf,
+  currentHtmlCaptureStatus,
   currentMarkdownCaptureStatus,
   currentPdfCaptureStatusWithText,
   effectiveCapabilities,
@@ -730,6 +783,7 @@ function resolveVisualCaptureStatus({
   canPreviewHtml: boolean
   canPreviewMarkdown: boolean
   canPreviewPdf: boolean
+  currentHtmlCaptureStatus: ArtifactVisualCaptureStatus
   currentMarkdownCaptureStatus: ArtifactVisualCaptureStatus
   currentPdfCaptureStatusWithText: ArtifactVisualCaptureStatus
   effectiveCapabilities: CoreviewArtifactCapabilities
@@ -741,7 +795,7 @@ function resolveVisualCaptureStatus({
     return unavailableCaptureStatus("no_selected_artifact", "none")
   }
   if (canPreviewHtml) {
-    return htmlVisualCaptureStatus(htmlPreview, htmlPreviewText)
+    return htmlVisualCaptureStatus(htmlPreview, htmlPreviewText, currentHtmlCaptureStatus)
   }
   if (canPreviewPdf) {
     return currentPdfCaptureStatusWithText
@@ -768,6 +822,7 @@ function resolveVisualCaptureStatus({
 function htmlVisualCaptureStatus(
   preview: HtmlPreviewState,
   previewText: string,
+  currentHtmlCaptureStatus: ArtifactVisualCaptureStatus,
 ): ArtifactVisualCaptureStatus {
   if (preview.status === "idle" || preview.status === "loading") {
     return unavailableCaptureStatus("preview_not_ready", "html_preview_canvas")
@@ -776,10 +831,8 @@ function htmlVisualCaptureStatus(
     return unavailableCaptureStatus("exact_text_only_no_visual_source", "html_preview_canvas")
   }
   return {
-    ready: true,
-    reason: null,
-    source: "html_preview_canvas",
-    exactTextAvailable: Boolean(previewText.trim()),
+    ...currentHtmlCaptureStatus,
+    exactTextAvailable: currentHtmlCaptureStatus.exactTextAvailable || Boolean(previewText.trim()),
   }
 }
 
@@ -801,12 +854,13 @@ function withRenderedArtifactSource(
 function unavailableCaptureStatus(
   reason: ArtifactVisualCaptureUnavailableReason,
   source: ArtifactVisualCaptureStatus["source"],
+  exactTextAvailable = false,
 ): ArtifactVisualCaptureStatus {
   return {
     ready: false,
     reason,
     source,
-    exactTextAvailable: false,
+    exactTextAvailable,
   }
 }
 
@@ -979,6 +1033,171 @@ function HtmlDocumentPage({
   )
 }
 
+function HtmlArtifactCaptureCanvas({
+  artifact,
+  artifactId,
+  file,
+  html,
+  previewText,
+  typeLabel,
+  artifactStableIdentity,
+  artifactLogicalId,
+  artifactVersionId,
+  onStatusChange,
+}: {
+  artifact: BuilderArtifactV1
+  artifactId: string
+  file?: ArtifactViewportFile
+  html: string
+  previewText: string
+  typeLabel: string
+  artifactStableIdentity?: string | null
+  artifactLogicalId?: string | null
+  artifactVersionId?: string | null
+  onStatusChange: (status: ArtifactVisualCaptureStatus) => void
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const mountedAtMsRef = useRef(nowMs())
+  const registrationCountRef = useRef(0)
+  const exactTextAvailable = Boolean(previewText.trim())
+
+  useLayoutEffect(() => {
+    const latencyMs = Math.max(0, Math.round(nowMs() - mountedAtMsRef.current))
+    const emitTelemetry = (
+      result: HtmlCaptureRegistrationResult,
+      succeeded: boolean,
+      failureReason: ArtifactVisualCaptureUnavailableReason | null,
+    ) => {
+      recordHtmlCaptureTargetTelemetry({
+        artifactId,
+        artifactPath: file?.path ?? null,
+        artifactStableIdentity,
+        artifactLogicalId,
+        artifactVersionId,
+        result,
+        succeeded,
+        failureReason,
+        readyLatencyMs: latencyMs,
+        rebindCount: registrationCountRef.current,
+      })
+    }
+    const unavailableStatus = (reason: ArtifactVisualCaptureUnavailableReason): ArtifactVisualCaptureStatus => ({
+      ready: false,
+      reason,
+      source: "html_preview_canvas",
+      exactTextAvailable,
+    })
+    const canvas = canvasRef.current
+    if (!canvas) {
+      onStatusChange(unavailableStatus("capture_target_missing"))
+      emitTelemetry("canvas_missing", false, "capture_target_missing")
+      return
+    }
+
+    const context = getCanvasContext(canvas)
+    if (!context) {
+      onStatusChange(unavailableStatus("capture_failed"))
+      emitTelemetry("context_unavailable", false, "capture_failed")
+      return
+    }
+
+    try {
+      drawHtmlArtifactCapture(context, canvas.width, canvas.height, {
+        artifact,
+        file,
+        html,
+        previewText,
+        typeLabel,
+      })
+      const rebindCount = registrationCountRef.current
+      registrationCountRef.current += 1
+      onStatusChange({
+        ready: true,
+        reason: null,
+        source: "html_preview_canvas",
+        exactTextAvailable,
+      })
+      recordHtmlCaptureTargetTelemetry({
+        artifactId,
+        artifactPath: file?.path ?? null,
+        artifactStableIdentity,
+        artifactLogicalId,
+        artifactVersionId,
+        result: "registered",
+        succeeded: true,
+        failureReason: null,
+        readyLatencyMs: latencyMs,
+        rebindCount,
+      })
+    } catch {
+      onStatusChange(unavailableStatus("capture_failed"))
+      emitTelemetry("draw_failed", false, "capture_failed")
+    }
+
+    return () => {
+      recordHtmlCaptureTargetTelemetry({
+        artifactId,
+        artifactPath: file?.path ?? null,
+        artifactStableIdentity,
+        artifactLogicalId,
+        artifactVersionId,
+        result: "unregistered",
+        succeeded: false,
+        failureReason: "capture_target_missing",
+        readyLatencyMs: latencyMs,
+        rebindCount: registrationCountRef.current,
+      })
+    }
+  }, [
+    artifact,
+    artifactId,
+    artifactLogicalId,
+    artifactStableIdentity,
+    artifactVersionId,
+    exactTextAvailable,
+    file,
+    html,
+    onStatusChange,
+    previewText,
+    typeLabel,
+  ])
+
+  return (
+    <div
+      aria-hidden="true"
+      data-artifact-region="true"
+      data-coreview-artifact-region="true"
+      data-coreview-renderer-kind="html"
+      data-coreview-artifact-stable-identity={artifactStableIdentity ?? undefined}
+      data-coreview-artifact-logical-id={artifactLogicalId ?? undefined}
+      data-coreview-artifact-version-id={artifactVersionId ?? undefined}
+      data-testid="artifact-html-capture-canvas"
+      className="pointer-events-none absolute h-px w-px overflow-hidden opacity-0"
+      style={{ inset: 0 }}
+    >
+      <canvas
+        ref={canvasRef}
+        width={HTML_CAPTURE_CANVAS_WIDTH}
+        height={HTML_CAPTURE_CANVAS_HEIGHT}
+        data-artifact-id={artifactId}
+        data-coreview-artifact-id={artifactId}
+        data-artifact-path={file?.path ?? undefined}
+        data-coreview-artifact-path={file?.path ?? undefined}
+        data-coreview-artifact-stable-identity={artifactStableIdentity ?? undefined}
+        data-coreview-artifact-logical-id={artifactLogicalId ?? undefined}
+        data-coreview-artifact-version-id={artifactVersionId ?? undefined}
+        data-coreview-renderer-kind="html"
+        data-artifact-canvas="true"
+        data-coreview-artifact-canvas="true"
+        data-artifact-canvas-source="selected-html-preview"
+        data-coreview-artifact-canvas-source="selected-html-preview"
+        data-coreview-offscreen-render="true"
+        aria-label="Generated HTML artifact review canvas"
+      />
+    </div>
+  )
+}
+
 function MarkdownArtifactCaptureCanvas({
   artifact,
   artifactId,
@@ -1138,10 +1357,104 @@ function drawMarkdownArtifactCapture(
   context.fillText("Artifact review view. Exact wording is available through trusted text.", contentX, height - 48)
 }
 
+function drawHtmlArtifactCapture(
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  input: {
+    artifact: BuilderArtifactV1
+    file?: ArtifactViewportFile
+    html: string
+    previewText: string
+    typeLabel: string
+  },
+) {
+  const title = firstHtmlHeading(input.html)
+    || htmlDocumentTitle(input.html)
+    || input.artifact.artifactTitle
+    || input.file?.name
+    || "Generated webpage"
+  const blocks = htmlTextToCaptureBlocks(input.previewText)
+  const pageX = 54
+  const pageY = 44
+  const pageWidth = width - pageX * 2
+  const pageHeight = height - pageY * 2
+  const contentX = pageX + 48
+  const maxTextWidth = pageWidth - 96
+  let y = pageY + 116
+
+  context.clearRect(0, 0, width, height)
+  context.fillStyle = "#eef2f7"
+  context.fillRect(0, 0, width, height)
+
+  context.fillStyle = "#ffffff"
+  fillRoundedRect(context, pageX, pageY, pageWidth, pageHeight, 22)
+
+  context.fillStyle = "#e7edf5"
+  fillRoundedRect(context, pageX + 18, pageY + 18, pageWidth - 36, 52, 18)
+  context.fillStyle = "#ef4444"
+  context.beginPath()
+  context.arc(contentX, pageY + 44, 5, 0, Math.PI * 2)
+  context.fill()
+  context.fillStyle = "#f59e0b"
+  context.beginPath()
+  context.arc(contentX + 20, pageY + 44, 5, 0, Math.PI * 2)
+  context.fill()
+  context.fillStyle = "#10b981"
+  context.beginPath()
+  context.arc(contentX + 40, pageY + 44, 5, 0, Math.PI * 2)
+  context.fill()
+
+  context.fillStyle = "#64748b"
+  context.font = "600 13px system-ui, sans-serif"
+  context.fillText(input.typeLabel.toUpperCase(), contentX, pageY + 92)
+
+  context.fillStyle = "#0f172a"
+  context.font = "700 34px system-ui, sans-serif"
+  y = drawWrappedCanvasText(context, title, contentX, y, maxTextWidth, 40, 2)
+
+  context.fillStyle = "#64748b"
+  context.font = "14px system-ui, sans-serif"
+  drawSingleLineCanvasText(context, input.file?.name ?? "Generated webpage", contentX, y + 12, maxTextWidth)
+  y += 48
+
+  context.fillStyle = "#dbe3ee"
+  context.fillRect(contentX, y, maxTextWidth, 1)
+  y += 34
+
+  for (const block of blocks.slice(0, MAX_CAPTURE_BLOCKS)) {
+    if (y > pageY + pageHeight - 72) {
+      drawOverflowHint(context, contentX, pageY + pageHeight - 42, maxTextWidth)
+      break
+    }
+
+    context.fillStyle = block.kind === "h2" ? "#111827" : "#334155"
+    context.font = block.kind === "h2" ? "700 22px system-ui, sans-serif" : "17px system-ui, sans-serif"
+    y = drawWrappedCanvasText(
+      context,
+      block.text,
+      contentX,
+      y,
+      maxTextWidth,
+      block.kind === "h2" ? 30 : 25,
+      block.kind === "h2" ? 2 : 4,
+    ) + (block.kind === "h2" ? 12 : 10)
+  }
+
+  context.fillStyle = "#64748b"
+  context.font = "13px system-ui, sans-serif"
+  context.fillText("HTML artifact review view. Exact wording is available through trusted text.", contentX, height - 44)
+}
+
 type MarkdownCaptureBlock = {
   kind: "h1" | "h2" | "h3" | "paragraph" | "bullet" | "numbered" | "spacer"
   text: string
   prefix?: string
+}
+
+type HtmlCaptureBlock = {
+  kind: "h2" | "paragraph"
+  text: string
 }
 
 function drawMarkdownCaptureBlock(
@@ -1250,6 +1563,68 @@ function firstMarkdownHeading(markdown: string): string | null {
     }
   }
   return null
+}
+
+function firstHtmlHeading(html: string): string | null {
+  const doc = parseHtmlDocument(html)
+  const heading = doc?.querySelector("h1, h2, h3")?.textContent
+  return normalizeCanvasText(heading)
+}
+
+function htmlDocumentTitle(html: string): string | null {
+  const doc = parseHtmlDocument(html)
+  return normalizeCanvasText(doc?.querySelector("title")?.textContent)
+}
+
+function htmlTextToCaptureBlocks(text: string): HtmlCaptureBlock[] {
+  const normalized = normalizeCanvasText(text)
+  if (!normalized) {
+    return [{
+      kind: "paragraph",
+      text: "HTML preview content is ready. Use exact text for full wording.",
+    }]
+  }
+
+  const sentences = normalized
+    .split(/(?<=[.!?])\s+/u)
+    .map((part) => part.trim())
+    .filter(Boolean)
+  const blocks: HtmlCaptureBlock[] = []
+  let current = ""
+
+  for (const sentence of sentences.length > 0 ? sentences : [normalized]) {
+    const candidate = current ? `${current} ${sentence}` : sentence
+    if (candidate.length <= 220) {
+      current = candidate
+      continue
+    }
+    if (current) {
+      blocks.push({ kind: blocks.length === 0 ? "h2" : "paragraph", text: current })
+    }
+    current = sentence
+  }
+
+  if (current) {
+    blocks.push({ kind: blocks.length === 0 ? "h2" : "paragraph", text: current })
+  }
+
+  return blocks
+}
+
+function parseHtmlDocument(html: string): Document | null {
+  if (!html.trim() || typeof DOMParser === "undefined") {
+    return null
+  }
+  try {
+    return new DOMParser().parseFromString(html, "text/html")
+  } catch {
+    return null
+  }
+}
+
+function normalizeCanvasText(value: string | null | undefined): string | null {
+  const normalized = value?.replace(/\s+/gu, " ").trim() ?? ""
+  return normalized || null
 }
 
 function cleanMarkdownInline(value: string): string {
@@ -1374,6 +1749,58 @@ function fillRoundedRect(
   context.arcTo(x, y, x + width, y, radius)
   context.closePath()
   context.fill()
+}
+
+function recordHtmlCaptureTargetTelemetry(input: {
+  artifactId: string
+  artifactPath: string | null
+  artifactStableIdentity?: string | null
+  artifactLogicalId?: string | null
+  artifactVersionId?: string | null
+  result: HtmlCaptureRegistrationResult
+  succeeded: boolean
+  failureReason: ArtifactVisualCaptureUnavailableReason | null
+  readyLatencyMs: number
+  rebindCount: number
+}) {
+  recordSophiaCaptureEvent({
+    category: "artifacts-runtime",
+    name: input.result === "registered" ? "capture_target_registered" : "html-capture-target",
+    payload: {
+      artifactId: input.artifactId,
+      rendererKind: "html",
+      htmlCaptureTargetRegistered: input.result === "registered",
+      htmlCaptureTargetRegistrationResult: input.result,
+      htmlCaptureTargetArtifactPathHash: stableTelemetryHash(input.artifactPath),
+      htmlCaptureTargetStableIdentityHash: stableTelemetryHash(input.artifactStableIdentity),
+      htmlCaptureTargetVersionAware: Boolean(input.artifactLogicalId || input.artifactVersionId),
+      htmlCaptureTargetRebindCount: Math.max(0, input.rebindCount),
+      htmlCaptureTargetReadyLatencyMs: input.readyLatencyMs,
+      htmlFrameCaptureSourceKind: "html_preview_canvas",
+      htmlFrameCaptureSucceeded: input.succeeded,
+      htmlFrameCaptureFailureReason: input.failureReason,
+      rawArtifactTextExcluded: true,
+      rawHtmlExcluded: true,
+      rawCommentTextExcluded: true,
+      rawFrameExcluded: true,
+      rawScreenshotExcluded: true,
+    },
+  })
+}
+
+function stableTelemetryHash(value: string | null | undefined): string | null {
+  if (!value) {
+    return null
+  }
+  let hash = 5381
+  for (let index = 0; index < value.length; index += 1) {
+    hash = ((hash << 5) + hash) ^ value.charCodeAt(index)
+  }
+  return (hash >>> 0).toString(36)
+}
+
+function nowMs(): number {
+  return Date.now()
 }
 
 function ArtifactMetadataPage({

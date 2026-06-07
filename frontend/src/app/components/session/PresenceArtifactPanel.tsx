@@ -1050,6 +1050,13 @@ export function PresenceArtifactPanel({
   const artifactStableIdentity = versionStateAppliesToStage
     ? coreviewArtifactVersionState?.logicalArtifactId ?? defaultArtifactStableIdentity
     : defaultArtifactStableIdentity
+  const currentCoreviewArtifactVersion = useMemo(() => (
+    versionStateAppliesToStage ? getCurrentVersion(coreviewArtifactVersionState) : null
+  ), [coreviewArtifactVersionState, versionStateAppliesToStage])
+  const coreviewArtifactLogicalId = versionStateAppliesToStage
+    ? coreviewArtifactVersionState?.logicalArtifactId ?? artifactStableIdentity
+    : artifactStableIdentity
+  const coreviewArtifactVersionId = currentCoreviewArtifactVersion?.versionId ?? null
   const coreviewWorkspaceIdentity = useMemo(() => (
     buildCoreviewWorkspaceKey({
       userId: userId ?? null,
@@ -1471,6 +1478,17 @@ export function PresenceArtifactPanel({
       && builderArtifactViewSignature === voiceCommandStaleViewSignature
       && !builderVisualSourceReady,
   )
+  const builderHtmlCaptureTargetPending = Boolean(
+    stageUsesHtmlPreview
+      && builderArtifactId
+      && !builderVisualSourceReady
+      && builderExactTextAvailable
+      && (
+        builderVisualUnavailableReason === "preview_not_ready"
+        || builderVisualUnavailableReason === "capture_target_missing"
+      ),
+  )
+  const builderReviewViewPending = Boolean(voiceCommandViewPending || builderHtmlCaptureTargetPending)
   const builderReviewStale = Boolean(builderArtifactCoReview.reviewStale || voiceCommandReviewStale)
   const builderReviewStaleReason = builderArtifactCoReview.reviewStaleReason
     ?? (voiceCommandReviewStale ? "view_changed" : null)
@@ -4223,6 +4241,8 @@ export function PresenceArtifactPanel({
                   normalSessionId={normalSessionId}
                   voiceAgentSessionId={voiceAgentSessionId}
                   artifactStableIdentity={artifactStableIdentity}
+                  artifactLogicalId={coreviewArtifactLogicalId}
+                  artifactVersionId={coreviewArtifactVersionId}
                   annotations={coreviewAnnotationList}
                   annotationStoreTelemetry={coreviewAnnotationTelemetry}
                   onAddAnnotation={addCoreviewAnnotation}
@@ -4236,7 +4256,7 @@ export function PresenceArtifactPanel({
                   visualReviewPreparing={visualReviewPreparing}
                   pendingStartVoiceReview={pendingBuilderArtifactReview}
                   visualCaptureStatus={stageUsesHtmlPreview || stageUsesMarkdownPreview || stageUsesPdfPreview ? builderVisualCaptureStatus : null}
-                  reviewViewPending={voiceCommandViewPending}
+                  reviewViewPending={builderReviewViewPending}
                   reviewStale={builderReviewStale}
                   canRefreshReview={builderArtifactCoReview.canRefresh}
                   voiceCommandStatusText={voiceCommandStatus?.text ?? null}
@@ -4260,6 +4280,8 @@ export function PresenceArtifactPanel({
                   normalSessionId={normalSessionId}
                   voiceAgentSessionId={voiceAgentSessionId}
                   artifactStableIdentity={artifactStableIdentity}
+                  artifactLogicalId={coreviewArtifactLogicalId}
+                  artifactVersionId={coreviewArtifactVersionId}
                   annotations={coreviewAnnotationList}
                   annotationStoreTelemetry={coreviewAnnotationTelemetry}
                   onAddAnnotation={addCoreviewAnnotation}
@@ -4273,7 +4295,7 @@ export function PresenceArtifactPanel({
                   visualReviewRequiresVoice={visualReviewRequiresVoice}
                   pendingStartVoiceReview={pendingBuilderArtifactReview}
                   visualCaptureStatus={stageUsesHtmlPreview || stageUsesMarkdownPreview || stageUsesPdfPreview ? builderVisualCaptureStatus : null}
-                  reviewViewPending={voiceCommandViewPending}
+                  reviewViewPending={builderReviewViewPending}
                   reviewStale={builderReviewStale}
                   canRefreshReview={builderArtifactCoReview.canRefresh}
                   voiceCommandStatusText={voiceCommandStatus?.text ?? null}
