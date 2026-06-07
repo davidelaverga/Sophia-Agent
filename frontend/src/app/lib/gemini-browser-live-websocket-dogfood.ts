@@ -14,6 +14,8 @@ import {
   readCoreviewArtifactTextSideband,
 } from './coreview-artifact-text';
 import {
+  COREVIEW_GET_BUILDER_STATUS_TOOL_NAME,
+  COREVIEW_REQUEST_ARTIFACT_UPDATE_TOOL_NAME,
   coreviewBuilderToolExceptionResult,
   executeCoreviewBuilderToolBridgeCall,
   isCoreviewBuilderToolName,
@@ -760,6 +762,7 @@ const RELAYABLE_GEMINI_PROVIDER_EVENT_KEYS = new Set([
 ]);
 const ZERO_FIELD_GEMINI_PROVIDER_EVENT_KEYS = new Set(['setupComplete', 'setup_complete']);
 const GEMINI_EMIT_ARTIFACT_TOOL_NAME = 'emit_artifact';
+const GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME = 'edit_builder_artifact';
 const GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME = 'read_artifact_text';
 type GeminiReadArtifactTextToolCallInput = {
   id: string | null;
@@ -775,14 +778,23 @@ type GeminiSuppressedGenericBuilderToolCallInput = {
   id: string | null;
   name: string;
   args: Record<string, unknown>;
+  duplicateOfCoreviewUpdate?: boolean;
+};
+type GeminiCoreviewRoutedBuilderToolCallInput = {
+  id: string | null;
+  name: string;
+  args: Record<string, unknown>;
+  routeKind: 'direct_edit_builder_artifact' | 'generic_builder_status';
+  coreviewCall: CoreviewBuilderToolCallInput;
 };
 type GeminiFrontendReviewToolCallInput =
   | CoreviewToolCallInput
   | CoreviewBuilderToolCallInput
-  | GeminiReadArtifactTextToolCallInput;
+  | GeminiReadArtifactTextToolCallInput
+  | GeminiCoreviewRoutedBuilderToolCallInput;
 const GEMINI_GENERIC_BUILDER_TOOL_NAMES = new Set([
   'start_builder_task',
-  'edit_builder_artifact',
+  GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME,
   'check_async_task',
   'update_async_task',
   'cancel_async_task',
@@ -790,7 +802,7 @@ const GEMINI_GENERIC_BUILDER_TOOL_NAMES = new Set([
 ]);
 const GEMINI_SELECTED_ARTIFACT_REVIEW_REDIRECT_BUILDER_TOOL_NAMES = new Set([
   'start_builder_task',
-  'edit_builder_artifact',
+  GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME,
   'check_async_task',
   'update_async_task',
   'cancel_async_task',
@@ -2228,7 +2240,7 @@ export function buildGeminiArtifactTextReaderHint(artifactId: string): Record<st
         'For simple visibility questions, answer from the fresh artifact frame or safe current-view metadata.',
         'Use exact-text sideband only when exact words, numbers, labels, or table values are needed.',
         'For highlight, mark, underline, annotate, note, comment, pin, flag, or callout requests, use coreview_add_annotation and wait for ok=true before saying it was added. Do not use coreview_refresh_view for annotation requests.',
-        'For selected artifact edit, update, revise, rebuild, restyle, change title, or new-version requests, use the Coreview selected-artifact update action and do not create a fresh companion artifact in this reply.',
+        'For selected artifact edit, update, revise, rebuild, restyle, change title, or new-version requests, call coreview_request_artifact_update. Do not call edit_builder_artifact, start_builder_task, update_async_task, or emit_artifact directly in review.',
         'For zoom or focus on a title, selection, text, or area, use coreview_focus_anchor. Use coreview_refresh_view only when the user asks to refresh your view.',
         'Do not answer this context message.',
       ].join(' '),
@@ -3348,6 +3360,39 @@ async function executeFrontendReviewToolCallWithTimeout(
           startedAtMs,
         });
       }
+      if (isCoreviewRoutedBuilderToolCall(call)) {
+        const coreviewResponse = { ...(await executeCoreviewBuilderToolBridgeCall(call.coreviewCall)) };
+        const directCallResult = coreviewResponse.ok === true
+          ? call.routeKind === 'direct_edit_builder_artifact'
+            ? 'routed_to_coreview_update'
+            : 'routed_to_coreview_status'
+          : stringFromAnyKey(coreviewResponse, 'blockedReason', 'blocked_reason')
+            ?? stringFromAnyKey(coreviewResponse, 'result')
+            ?? 'coreview_route_failed';
+        return {
+          ...coreviewResponse,
+          result_summary: stringFromAnyKey(coreviewResponse, 'userFacingMessage', 'user_facing_message')
+            ?? (call.routeKind === 'direct_edit_builder_artifact'
+              ? 'Direct edit_builder_artifact routed through Coreview update state.'
+              : 'Generic builder status routed through Coreview status.'),
+          coreview_control_plane_tool: call.coreviewCall.name,
+          editBuilderArtifactInterceptedByCoreview: call.routeKind === 'direct_edit_builder_artifact',
+          editBuilderArtifactDirectCallResult: call.routeKind === 'direct_edit_builder_artifact' ? directCallResult : null,
+          coreviewUpdateStateCreatedFromDirectEditTool: call.routeKind === 'direct_edit_builder_artifact'
+            && coreviewResponse.ok === true
+            && (
+              stringFromAnyKey(coreviewResponse, 'result') === 'task_started'
+              || stringFromAnyKey(coreviewResponse, 'result') === 'update_requested'
+            ),
+          genericAsyncToolBlockedReason: call.routeKind === 'generic_builder_status'
+            ? 'use_coreview_get_builder_status'
+            : null,
+          genericAsyncToolRespondedSafely: true,
+          raw_artifact_text_excluded: true,
+          raw_frame_excluded: true,
+          raw_comment_text_excluded: true,
+        };
+      }
       if (isCoreviewBuilderToolName(call.name)) {
         return { ...(await executeCoreviewBuilderToolBridgeCall(call as CoreviewBuilderToolCallInput)) };
       }
@@ -3357,6 +3402,19 @@ async function executeFrontendReviewToolCallWithTimeout(
         return readArtifactTextFailureResponse(call, 'unavailable', error instanceof Error
           ? error.message
           : 'Trusted artifact text is unavailable.');
+      }
+      if (isCoreviewRoutedBuilderToolCall(call)) {
+        return {
+          ...coreviewBuilderToolExceptionResult(call.coreviewCall, error),
+          result_summary: 'Coreview artifact update action failed.',
+          coreview_control_plane_tool: call.coreviewCall.name,
+          editBuilderArtifactInterceptedByCoreview: call.routeKind === 'direct_edit_builder_artifact',
+          editBuilderArtifactDirectCallResult: 'coreview_route_failed',
+          coreviewUpdateStateCreatedFromDirectEditTool: false,
+          raw_artifact_text_excluded: true,
+          raw_frame_excluded: true,
+          raw_comment_text_excluded: true,
+        };
       }
       return isCoreviewBuilderToolName(call.name)
         ? { ...coreviewBuilderToolExceptionResult(call as CoreviewBuilderToolCallInput, error) }
@@ -3382,7 +3440,17 @@ async function executeFrontendReviewToolCallWithTimeout(
 function isReadArtifactTextToolCall(
   call: GeminiFrontendReviewToolCallInput,
 ): call is GeminiReadArtifactTextToolCallInput {
-  return call.name === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME;
+  return !isCoreviewRoutedBuilderToolCall(call)
+    && call.name === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME;
+}
+
+function isCoreviewRoutedBuilderToolCall(
+  call: GeminiFrontendReviewToolCallInput,
+): call is GeminiCoreviewRoutedBuilderToolCallInput {
+  const candidate = call as Record<string, unknown>;
+  return isRecord(candidate)
+    && isRecord(candidate.coreviewCall)
+    && typeof candidate.routeKind === 'string';
 }
 
 function executeBrowserReadArtifactTextToolCall(
@@ -3435,7 +3503,7 @@ function reviewToolTimeoutResult(
     timeoutMs: number;
   },
 ): Record<string, unknown> {
-  if (call.name === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
+  if (isReadArtifactTextToolCall(call)) {
     return {
       ...readArtifactTextFailureResponse(
         call,
@@ -3447,6 +3515,32 @@ function reviewToolTimeoutResult(
       review_tool_timed_out: true,
       review_tool_timeout_name: call.name,
       review_tool_timeout_result_sent: true,
+    };
+  }
+
+  if (isCoreviewRoutedBuilderToolCall(call)) {
+    return {
+      ok: false,
+      action: call.coreviewCall.name,
+      result: 'failed',
+      blockedReason: 'builder_action_unavailable',
+      userFacingMessage: "Artifact update status is taking longer than expected. I'll keep the review open.",
+      result_summary: 'Coreview artifact update action timed out.',
+      coreview_control_plane_tool: call.coreviewCall.name,
+      editBuilderArtifactInterceptedByCoreview: call.routeKind === 'direct_edit_builder_artifact',
+      editBuilderArtifactDirectCallResult: 'coreview_route_timeout',
+      coreviewUpdateStateCreatedFromDirectEditTool: false,
+      preservedMic: true,
+      preservedReview: true,
+      rawArtifactTextExcluded: true,
+      rawFrameExcluded: true,
+      rawCommentTextExcluded: true,
+      review_tool_timed_out: true,
+      review_tool_timeout_name: call.name,
+      review_tool_timeout_result_sent: true,
+      raw_comment_text_excluded: true,
+      raw_artifact_text_excluded: true,
+      raw_frame_excluded: true,
     };
   }
 
@@ -3568,6 +3662,11 @@ function splitFrontendReviewToolCallsFromProviderEvent(
   if (!Array.isArray(functionCalls)) {
     return { frontendCalls: [], suppressedEmitArtifactCalls: [], suppressedGenericBuilderCalls: [], relayEvent: event };
   }
+  const batchHasCoreviewArtifactUpdate = functionCalls.some((functionCall) => (
+    isRecord(functionCall)
+    && stringFromAnyKey(functionCall, 'name') === COREVIEW_REQUEST_ARTIFACT_UPDATE_TOOL_NAME
+  ));
+  let coreviewUpdateAlreadyRoutedInBatch = batchHasCoreviewArtifactUpdate;
 
   const frontendCalls: GeminiFrontendReviewToolCallInput[] = [];
   const suppressedEmitArtifactCalls: GeminiSuppressedEmitArtifactToolCallInput[] = [];
@@ -3587,6 +3686,56 @@ function splitFrontendReviewToolCallsFromProviderEvent(
         id: stringFromAnyKey(functionCall, 'id'),
         name,
         args: readGeminiFunctionCallArgs(functionCall) ?? {},
+      });
+      continue;
+    }
+    if (
+      name === GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME
+      && shouldRouteDirectEditBuilderArtifactThroughCoreview(artifactReviewContext)
+    ) {
+      const args = readGeminiFunctionCallArgs(functionCall) ?? {};
+      if (coreviewUpdateAlreadyRoutedInBatch) {
+        suppressedGenericBuilderCalls.push({
+          id: stringFromAnyKey(functionCall, 'id'),
+          name,
+          args,
+          duplicateOfCoreviewUpdate: true,
+        });
+        continue;
+      }
+      frontendCalls.push({
+        id: stringFromAnyKey(functionCall, 'id'),
+        name,
+        args,
+        routeKind: 'direct_edit_builder_artifact',
+        coreviewCall: {
+          id: stringFromAnyKey(functionCall, 'id'),
+          name: COREVIEW_REQUEST_ARTIFACT_UPDATE_TOOL_NAME,
+          args: coreviewRequestArtifactUpdateArgsFromEditBuilderArtifactArgs(args),
+        },
+      });
+      coreviewUpdateAlreadyRoutedInBatch = true;
+      continue;
+    }
+    if (
+      (name === 'check_async_task' || name === 'list_async_tasks')
+      && shouldRouteGenericBuilderStatusThroughCoreview(artifactReviewContext)
+    ) {
+      const args = readGeminiFunctionCallArgs(functionCall) ?? {};
+      frontendCalls.push({
+        id: stringFromAnyKey(functionCall, 'id'),
+        name,
+        args,
+        routeKind: 'generic_builder_status',
+        coreviewCall: {
+          id: stringFromAnyKey(functionCall, 'id'),
+          name: COREVIEW_GET_BUILDER_STATUS_TOOL_NAME,
+          args: {
+            reason: stringFromAnyKey(args, 'reason', 'message', 'query')
+              ?? 'Check selected artifact update status.',
+            source_actor: 'sophia',
+          },
+        },
       });
       continue;
     }
@@ -3654,6 +3803,24 @@ function shouldSuppressEmitArtifactToolCallForArtifactReview(
   );
 }
 
+function shouldRouteDirectEditBuilderArtifactThroughCoreview(
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null,
+): boolean {
+  return Boolean(
+    artifactReviewContext?.active
+    && artifactReviewContext.artifact_id,
+  );
+}
+
+function shouldRouteGenericBuilderStatusThroughCoreview(
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null,
+): boolean {
+  return Boolean(
+    artifactReviewContext?.active
+    && artifactReviewContext.artifact_id,
+  );
+}
+
 function shouldSuppressGenericBuilderToolCallForArtifactReviewUpdate(
   artifactReviewContext: GeminiArtifactReviewRelayContext | null,
   toolName: string,
@@ -3669,6 +3836,36 @@ function shouldSuppressGenericBuilderToolCallForArtifactReviewUpdate(
       || artifactReviewContext.user_intent === 'unknown'
     ),
   );
+}
+
+function coreviewRequestArtifactUpdateArgsFromEditBuilderArtifactArgs(
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    user_update_request: stringFromAnyKey(
+      args,
+      'message',
+      'user_update_request',
+      'userUpdateRequest',
+      'requested_change_summary',
+      'requestedChangeSummary',
+      'change_summary',
+      'changeSummary',
+      'description',
+      'brief',
+      'task',
+      'request',
+      'summary',
+    ) ?? 'Update this artifact.',
+    update_mode: 'revise_version',
+    source_actor: 'sophia',
+    source_artifact_path: stringFromAnyKey(args, 'artifact_path', 'artifactPath', 'source_artifact_path', 'sourceArtifactPath'),
+    revision_of_artifact_path: stringFromAnyKey(args, 'revision_of_artifact_path', 'revisionOfArtifactPath', 'artifact_path', 'artifactPath'),
+    routed_from_tool: GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME,
+    raw_artifact_text_excluded: true,
+    raw_frame_excluded: true,
+    raw_comment_text_excluded: true,
+  };
 }
 
 function suppressedEmitArtifactToolResponse(
@@ -3705,6 +3902,7 @@ function suppressedGenericBuilderToolResponse(
   artifactReviewContext: GeminiArtifactReviewRelayContext | null,
 ): Record<string, unknown> {
   const isStatusCheck = call.name === 'check_async_task' || call.name === 'list_async_tasks';
+  const duplicateOfCoreviewUpdate = call.duplicateOfCoreviewUpdate === true;
   const recoveryGuidance = isStatusCheck
     ? 'Use coreview_get_builder_status for artifact update status. Do not expose internal ids, tool names, or recovery mechanics to the user.'
     : 'Use coreview_request_artifact_update for selected-artifact update requests during Review with Sophia. Do not expose internal ids, tool names, or recovery mechanics to the user.';
@@ -3712,14 +3910,20 @@ function suppressedGenericBuilderToolResponse(
     ok: false,
     rejected: true,
     execution_rejected: true,
-    safe_reason: isStatusCheck
+    safe_reason: duplicateOfCoreviewUpdate
+      ? 'artifact_review_generic_builder_duplicate_suppressed'
+      : isStatusCheck
       ? 'artifact_review_generic_async_status_redirected'
       : 'artifact_review_generic_builder_tool_suppressed',
-    rejection_reason: isStatusCheck
+    rejection_reason: duplicateOfCoreviewUpdate
+      ? 'artifact_review_generic_builder_tool_suppressed'
+      : isStatusCheck
       ? 'artifact_review_generic_async_status_redirected'
       : 'artifact_review_generic_builder_tool_suppressed',
     recovery_guidance: recoveryGuidance,
-    result_summary: isStatusCheck
+    result_summary: duplicateOfCoreviewUpdate
+      ? 'Duplicate selected-artifact update tool call suppressed because Coreview already controls this update.'
+      : isStatusCheck
       ? 'Artifact update status redirected to Coreview status.'
       : 'Selected-artifact update redirected to Coreview builder action.',
     user_facing_message: isStatusCheck
@@ -3731,8 +3935,11 @@ function suppressedGenericBuilderToolResponse(
     selected_artifact_update_context: artifactReviewContext?.selected_artifact_update_context === true,
     generic_async_tool_blocked_reason: isStatusCheck
       ? 'use_coreview_get_builder_status'
+      : duplicateOfCoreviewUpdate
+        ? 'already_routed_through_coreview_request_artifact_update'
       : 'use_coreview_request_artifact_update',
     generic_async_tool_responded_safely: true,
+    coreviewHtmlUpdateSuppressedDuplicateReplyCount: duplicateOfCoreviewUpdate ? 1 : 0,
     suppressed_tool_name: call.name,
     raw_transcript_excluded: true,
     raw_comment_text_excluded: true,
@@ -5208,7 +5415,7 @@ function redactToolCallArgsForTelemetry(
   }
 
   if (toolName && GEMINI_GENERIC_BUILDER_TOOL_NAMES.has(toolName) && args) {
-    const description = stringFromAnyKey(args, 'description', 'task', 'brief');
+    const description = stringFromAnyKey(args, 'description', 'task', 'brief', 'message', 'request', 'summary');
     const rawTaskId = stringFromAnyKey(args, 'task_id', 'taskId');
     const rawRunId = stringFromAnyKey(args, 'run_id', 'runId');
     const taskId = rawTaskId && !isPlaceholderBuilderTaskId(rawTaskId) ? rawTaskId : null;
@@ -5225,6 +5432,7 @@ function redactToolCallArgsForTelemetry(
       runId,
       run_id_present: Boolean(rawRunId),
       run_id_placeholder: Boolean(rawRunId && isPlaceholderBuilderTaskId(rawRunId)),
+      artifact_path_present: Boolean(stringFromAnyKey(args, 'artifact_path', 'artifactPath', 'source_artifact_path', 'sourceArtifactPath')),
       raw_description_excluded: true,
       raw_artifact_text_excluded: true,
       raw_frame_excluded: true,
@@ -5255,6 +5463,20 @@ function redactBackendResponseForToolTelemetry(
 
   if (isCoreviewBuilderToolName(toolName) && response) {
     return redactCoreviewBuilderActionResponseForTelemetry(response);
+  }
+
+  if (
+    toolName === GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME
+    && response?.editBuilderArtifactInterceptedByCoreview === true
+  ) {
+    return {
+      ...redactCoreviewBuilderActionResponseForTelemetry(response),
+      original_tool_name: GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME,
+      coreview_control_plane_tool: stringFromAnyKey(response, 'coreview_control_plane_tool', 'coreviewControlPlaneTool'),
+      editBuilderArtifactInterceptedByCoreview: true,
+      editBuilderArtifactDirectCallResult: stringFromAnyKey(response, 'editBuilderArtifactDirectCallResult'),
+      coreviewUpdateStateCreatedFromDirectEditTool: response.coreviewUpdateStateCreatedFromDirectEditTool === true,
+    };
   }
 
   if (toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME && response) {

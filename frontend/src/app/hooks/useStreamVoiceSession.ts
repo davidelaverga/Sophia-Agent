@@ -216,6 +216,7 @@ const GEMINI_REVIEW_TOOL_NAMES = new Set([
 const GEMINI_TRANSCRIPT_COALESCING_DISABLED_REASON = "provider_output_transcription_is_delta_like"
 const GEMINI_BUILDER_TOOL_NAMES = new Set([
   "start_builder_task",
+  "edit_builder_artifact",
   "check_async_task",
   "update_async_task",
   "cancel_async_task",

@@ -462,8 +462,11 @@ GEMINI_REVIEW_BLOCKED_TOOL_NAMES = {
 }
 GEMINI_REVIEW_GENERIC_BUILDER_REDIRECT_TOOL_NAMES = {
     "start_builder_task",
+    "edit_builder_artifact",
+    "check_async_task",
     "update_async_task",
     "cancel_async_task",
+    "list_async_tasks",
 }
 ARTIFACT_REVIEW_EMIT_SUPPRESSED_REASON = "artifact_review_emit_artifact_suppressed"
 ARTIFACT_REVIEW_GENERIC_BUILDER_SUPPRESSED_REASON = "artifact_review_generic_builder_tool_suppressed"
@@ -526,10 +529,6 @@ def _artifact_review_selected_update_context(context: dict[str, object] | None) 
     )
 
 
-def _artifact_review_active_builder_task_present(context: dict[str, object] | None) -> bool:
-    return bool(context and context.get("active_builder_task_present") is True)
-
-
 def _artifact_review_generic_builder_redirect(
     tool_name: str,
     context: dict[str, object] | None,
@@ -537,7 +536,6 @@ def _artifact_review_generic_builder_redirect(
     return (
         tool_name in GEMINI_REVIEW_GENERIC_BUILDER_REDIRECT_TOOL_NAMES
         and _artifact_review_selected_update_context(context)
-        and not _artifact_review_active_builder_task_present(context)
     )
 
 
@@ -936,6 +934,7 @@ def _artifact_review_emit_suppression_payload(
             tool_name == GEMINI_EMIT_ARTIFACT_TOOL_NAME
             and _artifact_review_builder_update_intent(body.artifact_review_context)
         )
+        generic_builder_status_check = tool_name in {"check_async_task", "list_async_tasks"}
         rejection_reason = (
             ARTIFACT_REVIEW_GENERIC_BUILDER_SUPPRESSED_REASON
             if generic_builder_redirect
@@ -947,7 +946,9 @@ def _artifact_review_emit_suppression_payload(
             else rejection_reason
         )
         guidance = (
-            "Use coreview_request_artifact_update for selected-artifact update requests during Review with Sophia."
+            "Use coreview_get_builder_status for selected-artifact update status during Review with Sophia."
+            if generic_builder_status_check
+            else "Use coreview_request_artifact_update for selected-artifact update requests during Review with Sophia."
             if generic_builder_redirect or update_only_review_request
             else (
                 "Artifact review is active. Use read_artifact_text for exact artifact text and answer from the "
@@ -968,6 +969,14 @@ def _artifact_review_emit_suppression_payload(
                 body.artifact_review_context,
             ),
             "update_only_review_request": update_only_review_request,
+            "generic_async_tool_blocked_reason": (
+                "use_coreview_get_builder_status"
+                if generic_builder_status_check
+                else "use_coreview_request_artifact_update"
+                if generic_builder_redirect
+                else None
+            ),
+            "generic_async_tool_responded_safely": generic_builder_redirect,
             "raw_artifact_text_excluded": True,
             "raw_comment_text_excluded": True,
             "raw_frame_excluded": True,

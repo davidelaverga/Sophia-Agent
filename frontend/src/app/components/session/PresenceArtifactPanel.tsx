@@ -2284,6 +2284,10 @@ export function PresenceArtifactPanel({
         coreviewHtmlLiveUpdateEnabled,
         coreviewArtifactVersioningEnabled: coreviewArtifactVersionTelemetry.coreviewArtifactVersioningEnabled
           || stageArtifactCapabilities.supportsVersioning,
+        editBuilderArtifactInterceptedByCoreview: result.editBuilderArtifactInterceptedByCoreview === true,
+        editBuilderArtifactDirectCallResult: result.editBuilderArtifactDirectCallResult ?? null,
+        coreviewUpdateStateCreatedFromDirectEditTool: result.coreviewUpdateStateCreatedFromDirectEditTool === true,
+        coreviewUpdateCardVisible: isUpdate || isCancel,
         coreviewArtifactLogicalId: coreviewArtifactVersionTelemetry.coreviewArtifactLogicalId
           ?? result.context?.artifactStableIdentity
           ?? artifactStableIdentity,

@@ -31,6 +31,7 @@ export const COREVIEW_TOOL_NAMES = [
 
 const GEMINI_GENERIC_BUILDER_TOOL_NAMES = new Set([
   "start_builder_task",
+  "edit_builder_artifact",
   "check_async_task",
   "update_async_task",
   "cancel_async_task",

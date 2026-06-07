@@ -338,6 +338,7 @@ describe("Coreview action bus", () => {
       tools: [{ functionDeclarations: [
         { name: "emit_artifact" },
         { name: "start_builder_task" },
+        { name: "edit_builder_artifact" },
         { name: "check_async_task" },
         { name: "update_async_task" },
       ] }],
@@ -347,6 +348,7 @@ describe("Coreview action bus", () => {
     expect(declarationNames).toContain("coreview_request_artifact_update")
     expect(declarationNames).not.toContain("emit_artifact")
     expect(declarationNames).not.toContain("start_builder_task")
+    expect(declarationNames).not.toContain("edit_builder_artifact")
     expect(declarationNames).not.toContain("check_async_task")
     expect(declarationNames).not.toContain("update_async_task")
   })

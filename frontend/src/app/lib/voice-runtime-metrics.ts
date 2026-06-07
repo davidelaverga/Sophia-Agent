@@ -105,6 +105,10 @@ export type CoreviewVisualTelemetry = {
   genericAsyncToolRespondedSafely: boolean
   coreviewBuilderPreservedMic: boolean | null
   coreviewBuilderPreservedReview: boolean | null
+  editBuilderArtifactInterceptedByCoreview: boolean
+  editBuilderArtifactDirectCallResult: string | null
+  coreviewUpdateStateCreatedFromDirectEditTool: boolean
+  coreviewUpdateCardVisible: boolean
   coreviewHtmlLiveUpdateEnabled: boolean
   coreviewArtifactVersioningEnabled: boolean
   coreviewArtifactLogicalId: string | null
@@ -1394,6 +1398,10 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       genericAsyncToolRespondedSafely: false,
       coreviewBuilderPreservedMic: null,
       coreviewBuilderPreservedReview: null,
+      editBuilderArtifactInterceptedByCoreview: false,
+      editBuilderArtifactDirectCallResult: null,
+      coreviewUpdateStateCreatedFromDirectEditTool: false,
+      coreviewUpdateCardVisible: false,
       coreviewHtmlLiveUpdateEnabled: false,
       coreviewArtifactVersioningEnabled: false,
       coreviewArtifactLogicalId: null,
@@ -1924,6 +1932,16 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   )) || coreviewBuilderActionEvents.some((event) => asBoolean(event.genericAsyncToolRespondedSafely) === true)
   visual.coreviewBuilderPreservedMic = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewBuilderPreservedMic")
   visual.coreviewBuilderPreservedReview = latestBooleanFromRecords(coreviewBuilderActionEvents, "coreviewBuilderPreservedReview")
+  visual.editBuilderArtifactInterceptedByCoreview = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.editBuilderArtifactInterceptedByCoreview) === true
+  ))
+  visual.editBuilderArtifactDirectCallResult = latestStringFromRecords(coreviewBuilderActionEvents, "editBuilderArtifactDirectCallResult")
+  visual.coreviewUpdateStateCreatedFromDirectEditTool = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewUpdateStateCreatedFromDirectEditTool) === true
+  ))
+  visual.coreviewUpdateCardVisible = coreviewBuilderActionEvents.some((event) => (
+    asBoolean(event.coreviewUpdateCardVisible) === true
+  ))
   visual.coreviewHtmlLiveUpdateEnabled = coreviewBuilderActionEvents.some((event) => (
     asBoolean(event.coreviewHtmlLiveUpdateEnabled) === true
   ))

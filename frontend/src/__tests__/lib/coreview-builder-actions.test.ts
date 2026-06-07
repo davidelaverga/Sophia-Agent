@@ -289,6 +289,43 @@ describe("Coreview builder action bus", () => {
     })
   })
 
+  it("creates Coreview active update state when a direct edit tool is routed through the request handler", async () => {
+    const harness = createHarness()
+
+    const result = await harness.bus.handleToolCall({
+      id: "direct-edit-1",
+      name: "coreview_request_artifact_update",
+      args: {
+        user_update_request: "change the title card",
+        update_mode: "revise_version",
+        routed_from_tool: "edit_builder_artifact",
+      },
+    })
+    const status = harness.bus.getBuilderStatus("user")
+
+    expect(result).toMatchObject({
+      ok: true,
+      action: "coreview_request_artifact_update",
+      result: "task_started",
+      updateMode: "revise_version",
+      editBuilderArtifactInterceptedByCoreview: true,
+      editBuilderArtifactDirectCallResult: "routed_to_coreview_update",
+      coreviewUpdateStateCreatedFromDirectEditTool: true,
+    })
+    expect(status).toMatchObject({
+      ok: true,
+      result: "status",
+      status: {
+        phase: "running",
+        currentStep: "Applying update...",
+      },
+    })
+    expect(harness.events.map((event) => event.type)).toEqual([
+      "builder.update_requested",
+      "builder.task_started",
+    ])
+  })
+
   it("returns starting status after request when the builder task id is not known yet", async () => {
     const harness = createHarness({ startTaskId: null, startRunId: null })
 
