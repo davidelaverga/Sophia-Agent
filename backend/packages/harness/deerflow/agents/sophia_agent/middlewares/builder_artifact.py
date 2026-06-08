@@ -110,6 +110,7 @@ _BUILDER_SUBSTANTIVE_TOOL_NAMES = {
     "str_replace",
     "str_replace_tool",
     "emit_builder_artifact",
+    "generate_visual_asset",
 }
 _SIMPLE_PDF_REQUEST_MARKERS = (
     "simple pdf",
@@ -206,6 +207,21 @@ _PDF_VISUAL_FALLBACK_MARKERS = (
     "image",
     "images",
 )
+_VISUAL_REQUEST_MARKERS = _PDF_VISUAL_FALLBACK_MARKERS + (
+    "flowchart",
+    "timeline",
+    "matrix",
+    "quadrant",
+    "concept map",
+)
+_VISUAL_DESIGN_SKILL_PATH_MARKERS = (
+    "/skills/public/visual-design/SKILL.md",
+    "/mnt/skills/public/visual-design/SKILL.md",
+    "/skills/visual-design/SKILL.md",
+    "/mnt/skills/visual-design/SKILL.md",
+)
+_VISUAL_ASSET_TOOL_NAMES = frozenset({"generate_visual_asset"})
+_VISUAL_ASSET_EXTENSIONS = frozenset({".svg", ".png", ".jpg", ".jpeg", ".webp"})
 _WRITE_ERROR_CLASS_MARKERS = (
     ("missing_thread_id", ("thread id not available", "nonetype' object has no attribute 'get")),
     ("missing_thread_data", ("thread data not available", "no allowed local sandbox directories")),
@@ -277,6 +293,27 @@ def _merge_builder_pptx_diagnostic_value(merged: dict, key: str, value: object) 
         merged[key] = _merge_string_list(merged.get(key), value)
         return
     merged[key] = value
+
+
+def _merge_builder_visual_diagnostics(
+    current: dict | None, update: dict | None
+) -> dict:
+    if current is None and update is None:
+        return {}
+    if current is None:
+        return dict(update or {})
+    if update is None:
+        return dict(current)
+    merged = dict(current)
+    for key, value in update.items():
+        if (key.endswith("_count") or key.endswith("_bytes_total")) and isinstance(value, int):
+            merged[key] = int(merged.get(key, 0) or 0) + value
+            continue
+        if key in {"visual_asset_paths", "visual_svg_paths", "visual_png_paths"} and isinstance(value, list):
+            merged[key] = _merge_string_list(merged.get(key), value)
+            continue
+        merged[key] = value
+    return merged
 
 
 def _extract_output_relative_path(artifact_path: str | None) -> str | None:
@@ -1405,6 +1442,169 @@ def _pptx_skill_flags_from_tool_calls(tool_calls: list[dict[str, Any]]) -> dict[
     return flags
 
 
+def _visual_skill_flags_from_tool_calls(tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
+    for call in tool_calls:
+        if call.get("name") not in ("read_file", "read_file_tool"):
+            continue
+        args = call.get("args") or {}
+        if not isinstance(args, dict):
+            continue
+        path = str(args.get("path") or args.get("file_path") or "")
+        if any(marker in path for marker in _VISUAL_DESIGN_SKILL_PATH_MARKERS):
+            return {"visual_design_skill_read": True}
+    return {"visual_design_skill_read": False}
+
+
+def _visual_design_skill_read_seen(state: dict[str, Any]) -> bool:
+    summaries = state.get("builder_tool_turn_summaries") or []
+    if any(
+        bool(summary.get("visual_design_skill_read"))
+        for summary in summaries
+        if isinstance(summary, dict)
+    ):
+        return True
+    diagnostics = state.get("builder_visual_diagnostics")
+    return isinstance(diagnostics, dict) and bool(
+        diagnostics.get("visual_design_skill_read") or diagnostics.get("design_skill_read")
+    )
+
+
+def _visuals_requested(state: dict[str, Any]) -> bool:
+    delegation = state.get("delegation_context")
+    if not isinstance(delegation, dict):
+        return False
+    combined = "\n".join(
+        str(delegation.get(key) or "").lower()
+        for key in ("task", "description", "artifact_brief", "original_task")
+    )
+    return any(marker in combined for marker in _VISUAL_REQUEST_MARKERS)
+
+
+def _visual_asset_success_count(state: dict[str, Any]) -> int:
+    diagnostics = state.get("builder_visual_diagnostics")
+    if not isinstance(diagnostics, dict):
+        return 0
+    return int(diagnostics.get("visual_asset_success_count", 0) or 0)
+
+
+def _visual_asset_attempt_count(state: dict[str, Any]) -> int:
+    diagnostics = state.get("builder_visual_diagnostics")
+    if not isinstance(diagnostics, dict):
+        return 0
+    return int(diagnostics.get("visual_asset_attempt_count", 0) or 0)
+
+
+def _visual_asset_paths(state: dict[str, Any]) -> list[str]:
+    diagnostics = state.get("builder_visual_diagnostics")
+    if not isinstance(diagnostics, dict):
+        return []
+    paths = diagnostics.get("visual_asset_paths") or []
+    return [path for path in paths if isinstance(path, str)]
+
+
+def _local_output_file_for_artifact(state: dict[str, Any], artifact_path: object) -> Path | None:
+    canonical = _canonical_outputs_artifact_path(artifact_path)
+    relative = _extract_output_relative_path(canonical)
+    outputs_root = _outputs_root_from_state(state)
+    if canonical is None or relative is None or outputs_root is None:
+        return None
+    candidate = outputs_root / relative
+    return candidate if candidate.is_file() else None
+
+
+def _html_contains_visual_evidence(path: Path) -> bool:
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore").lower()
+    except OSError:
+        return False
+    return (
+        "<svg" in text
+        or "/visuals/" in text
+        or "visuals/" in text
+        or "outputs/visuals/" in text
+    )
+
+
+def _pdf_source_contains_visual_evidence(state: dict[str, Any]) -> bool:
+    for source in _pdf_source_candidate_paths(state):
+        try:
+            text = source.read_text(encoding="utf-8", errors="ignore").lower()
+        except OSError:
+            continue
+        if (
+            "<svg" in text
+            or "/visuals/" in text
+            or "visuals/" in text
+            or "outputs/visuals/" in text
+        ):
+            return True
+    return False
+
+
+def _pptx_contains_visual_evidence(path: Path) -> bool:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
+    except (OSError, zipfile.BadZipFile):
+        return False
+    return any(
+        name.startswith("ppt/media/")
+        or name.startswith("ppt/charts/")
+        or name.startswith("ppt/diagrams/")
+        for name in names
+    )
+
+
+def _visual_presence_validated(artifact_args: dict[str, Any], state: dict[str, Any]) -> bool:
+    if not _visuals_requested(state):
+        return True
+    artifact_path = artifact_args.get("artifact_path")
+    artifact_file = _local_output_file_for_artifact(state, artifact_path)
+    suffix = PurePosixPath(str(artifact_path or "")).suffix.lower()
+
+    if suffix in {".html", ".htm"} and artifact_file is not None:
+        return _html_contains_visual_evidence(artifact_file)
+    if suffix == ".pptx" and artifact_file is not None:
+        return _pptx_contains_visual_evidence(artifact_file)
+    if suffix == ".pdf":
+        return _visual_asset_success_count(state) > 0 and _pdf_source_contains_visual_evidence(state)
+    return _visual_asset_success_count(state) > 0
+
+
+def _visual_asset_result_delta(result: ToolMessage) -> dict[str, Any] | None:
+    if not isinstance(result.content, str):
+        return None
+    try:
+        payload = json.loads(result.content)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    success = payload.get("success") is True
+    svg_path = payload.get("svg_path")
+    png_path = payload.get("png_path")
+    paths = [path for path in (svg_path, png_path) if isinstance(path, str) and path]
+    logger.info(
+        "[BuilderVisualDiagnostics] phase=tool_result success=%s visual_type=%s "
+        "svg_bytes=%s png_bytes=%s png_error=%s",
+        success,
+        payload.get("visual_type"),
+        payload.get("svg_bytes"),
+        payload.get("png_bytes"),
+        payload.get("png_error"),
+    )
+    return {
+        "visual_asset_attempt_count": 1,
+        "visual_asset_success_count": 1 if success else 0,
+        "visual_asset_bytes_total": int(payload.get("svg_bytes", 0) or 0)
+        + int(payload.get("png_bytes", 0) or 0),
+        "visual_asset_error_class": None if success else payload.get("error_type", "visual_asset_error"),
+        "visual_asset_paths": paths if success else [],
+        "visual_svg_paths": [svg_path] if success and isinstance(svg_path, str) else [],
+        "visual_png_paths": [png_path] if success and isinstance(png_path, str) else [],
+    }
+
+
 def _virtual_output_status(state: dict[str, Any], path: str | None) -> tuple[bool, int, str | None]:
     canonical = _canonical_outputs_artifact_path(path)
     if canonical is None:
@@ -1670,6 +1870,31 @@ def _pdf_source_write_message(target_path: str) -> str:
     )
 
 
+def _visual_design_skill_message() -> str:
+    return (
+        "[Sophia/visual-design correction]\n"
+        "The user requested charts, diagrams, or visual explanations. Before "
+        "creating visual assets or emitting the final artifact, read the visual "
+        "design skill now:\n"
+        "`read_file(description='read visual design skill', "
+        "path='/mnt/skills/public/visual-design/SKILL.md')`.\n"
+        "Then create local visual assets with `generate_visual_asset` under "
+        "`/mnt/user-data/outputs/visuals/` and embed them in the final artifact."
+    )
+
+
+def _visual_asset_required_message(state: dict[str, Any]) -> str:
+    target_ext = _requested_target_suffix(state).lstrip(".") or "artifact"
+    return (
+        "[Sophia/visual-asset correction]\n"
+        f"This {target_ext} request asked for charts, diagrams, or visuals, but "
+        "no verified local visual asset has been created yet. Create one now "
+        "with `generate_visual_asset`, writing under `/mnt/user-data/outputs/visuals/`, "
+        "then reference or embed that asset in the final HTML/PDF source/PPTX plan "
+        "before emitting. Remote chart URLs and prose descriptions do not count."
+    )
+
+
 def _force_reason(turn_force: bool, clock_force: bool) -> str:
     if turn_force and clock_force:
         return "turns+wall_clock"
@@ -1705,6 +1930,7 @@ class BuilderArtifactState(AgentState):
     builder_last_successful_output_path: NotRequired[str | None]
     builder_write_diagnostics: NotRequired[Annotated[dict, _merge_builder_write_diagnostics]]
     builder_pptx_diagnostics: NotRequired[Annotated[dict, _merge_builder_pptx_diagnostics]]
+    builder_visual_diagnostics: NotRequired[Annotated[dict, _merge_builder_visual_diagnostics]]
     # PR #94: count consecutive emit attempts rejected for empty/missing
     # ``artifact_path``. When this reaches ``_REJECTION_SHORT_CIRCUIT_AT``
     # we route directly to the hard-ceiling fallback instead of letting
@@ -1724,6 +1950,8 @@ class BuilderArtifactState(AgentState):
     builder_pptx_skill_correction_emitted: NotRequired[bool]
     builder_pptx_plan_correction_emitted: NotRequired[bool]
     builder_pptx_fallback_directive_emitted: NotRequired[bool]
+    builder_visual_design_correction_emitted: NotRequired[bool]
+    builder_visual_asset_correction_emitted: NotRequired[bool]
 
 
 class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
@@ -2001,6 +2229,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return {"type": "tool", "name": "write_file"}
 
     @staticmethod
+    def _forced_read_tool_choice() -> dict[str, Any]:
+        """Anthropic tool_choice payload that forces read_file."""
+        return {"type": "tool", "name": "read_file"}
+
+    @staticmethod
+    def _forced_visual_asset_tool_choice() -> dict[str, Any]:
+        """Anthropic tool_choice payload that forces local visual asset generation."""
+        return {"type": "tool", "name": "generate_visual_asset"}
+
+    @staticmethod
     def _forced_search_tool_choice() -> dict[str, Any]:
         """Anthropic tool_choice payload that forces builder_web_search."""
         return {"type": "tool", "name": "builder_web_search"}
@@ -2044,6 +2282,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "before artifact writing"
         )
         return self._forced_search_tool_choice()
+
+    def _visual_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _visuals_requested(state):
+            return None
+        if not _visual_design_skill_read_seen(state):
+            logger.warning("BuilderArtifact: forcing tool_choice=read_file for visual-design skill")
+            return self._forced_read_tool_choice()
+        if (
+            state.get("builder_visual_asset_correction_emitted")
+            and _visual_asset_success_count(state) <= 0
+            and _visual_asset_attempt_count(state) <= 0
+        ):
+            logger.warning("BuilderArtifact: forcing tool_choice=generate_visual_asset after visual correction")
+            return self._forced_visual_asset_tool_choice()
+        return None
 
     def _completion_tool_choice_for_state(
         self,
@@ -2896,6 +3149,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             ):
                 return False
 
+        visual_ok = _visual_presence_validated(artifact_args, state)
+        logger.info(
+            "[BuilderVisualDiagnostics] phase=emit_validation visuals_requested=%s "
+            "design_skill_read=%s visual_asset_success_count=%d "
+            "visual_presence_validated=%s requested_ext=%s final_ext=%s",
+            _visuals_requested(state),
+            _visual_design_skill_read_seen(state),
+            _visual_asset_success_count(state),
+            visual_ok,
+            _requested_artifact_ext(state),
+            _artifact_path_suffix_label(artifact_args.get("artifact_path")),
+        )
+        if not visual_ok:
+            return False
+
         return True
 
     @staticmethod
@@ -3062,6 +3330,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         artifact_args: dict[str, Any],
         state: BuilderArtifactState,
     ) -> str:
+        if _visuals_requested(state) and not _visual_presence_validated(artifact_args, state):
+            return (
+                "Error: emit_builder_artifact rejected — the user requested charts, "
+                "diagrams, or visuals, but the artifact does not contain verified "
+                "visual evidence yet. Read /mnt/skills/public/visual-design/SKILL.md "
+                "if you have not already, create a local visual with generate_visual_asset "
+                "under /mnt/user-data/outputs/visuals/, then embed or reference it before "
+                "emitting. Inline SVG in HTML also counts."
+            )
         if _requested_pdf_artifact(state):
             primary = artifact_args.get("artifact_path")
             reason = _pdf_artifact_path_rejection_reason(primary, state)
@@ -3375,8 +3652,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return (
             self._pdf_terminal_tool_choice_for_state(state)
             or self._simple_pdf_tool_choice_for_state(state)
-            or self._pdf_render_source_tool_choice_for_state(state)
             or self._research_tool_choice_for_state(state)
+            or self._visual_tool_choice_for_state(state)
+            or self._pdf_render_source_tool_choice_for_state(state)
             or self._completion_tool_choice_for_state(state, runtime)
         )
 
@@ -4056,6 +4334,45 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "builder_pptx_fallback_directive_emitted": True,
         }
 
+    def _maybe_inject_visual_design_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _visuals_requested(state):
+            return None
+        if _visual_design_skill_read_seen(state):
+            return None
+        if state.get("builder_visual_design_correction_emitted"):
+            return None
+        logger.warning(
+            "[BuilderVisualDiagnostics] phase=design_skill_required design_skill_read=false"
+        )
+        return {
+            "messages": [HumanMessage(content=_visual_design_skill_message())],
+            "builder_visual_design_correction_emitted": True,
+        }
+
+    def _maybe_inject_visual_asset_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _visuals_requested(state):
+            return None
+        if not (_requested_pdf_artifact(state) or _requested_pptx_artifact(state)):
+            return None
+        if not _visual_design_skill_read_seen(state):
+            return None
+        if _visual_asset_success_count(state) > 0:
+            return None
+        if state.get("builder_visual_asset_correction_emitted"):
+            return None
+        non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0)
+        if non_artifact_turns < 2:
+            return None
+        logger.warning(
+            "[BuilderVisualDiagnostics] phase=asset_required requested_ext=%s "
+            "asset_success_count=0",
+            _requested_artifact_ext(state),
+        )
+        return {
+            "messages": [HumanMessage(content=_visual_asset_required_message(state))],
+            "builder_visual_asset_correction_emitted": True,
+        }
+
     def _combined_before_model_updates(
         self,
         state: BuilderArtifactState,
@@ -4075,6 +4392,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
         if isinstance(promotion, dict):
             update.update(promotion)
+            return update
+        visual_design = self._maybe_inject_visual_design_correction(state)
+        if isinstance(visual_design, dict):
+            update.update(visual_design)
+            return update
+        visual_asset = self._maybe_inject_visual_asset_correction(state)
+        if isinstance(visual_asset, dict):
+            update.update(visual_asset)
             return update
         pdf_render = self._maybe_inject_pdf_render_source_correction(state)
         if isinstance(pdf_render, dict):
@@ -4174,6 +4499,44 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         ),
                         tool_call_id=tool_call_id,
                         name=str(tool_name),
+                        status="error",
+                    ),
+                ],
+            },
+            goto="model",
+        )
+
+    def _block_visual_asset_before_design_skill(
+        self,
+        request: ToolCallRequest,
+    ) -> Command | None:
+        tool_name = request.tool_call.get("name")
+        if tool_name not in _VISUAL_ASSET_TOOL_NAMES:
+            return None
+        if not _visuals_requested(request.state):
+            return None
+        if _visual_design_skill_read_seen(request.state):
+            return None
+
+        tool_call_id = request.tool_call.get("id", "")
+        logger.warning(
+            "[BuilderVisualDiagnostics] blocked_visual_asset_before_design_skill "
+            "tool=%s",
+            tool_name,
+        )
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=(
+                            "Error: visual-design enforcement blocked this tool call. "
+                            "Before creating chart or diagram assets, read the design "
+                            "skill with `read_file(description='read visual design skill', "
+                            "path='/mnt/skills/public/visual-design/SKILL.md')`, then "
+                            "call generate_visual_asset again."
+                        ),
+                        tool_call_id=tool_call_id,
+                        name=str(tool_name or "generate_visual_asset"),
                         status="error",
                     ),
                 ],
@@ -4467,6 +4830,22 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             }
         )
 
+    def _visual_asset_result_command(
+        self,
+        result: ToolMessage | Command,
+    ) -> ToolMessage | Command:
+        if not isinstance(result, ToolMessage):
+            return result
+        delta = _visual_asset_result_delta(result)
+        if delta is None:
+            return result
+        return Command(
+            update={
+                "messages": [result],
+                "builder_visual_diagnostics": delta,
+            }
+        )
+
     def _tool_result_command(
         self,
         request: ToolCallRequest,
@@ -4479,6 +4858,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return self._pdf_result_command(request, result)
         if tool_name in {"bash", "bash_tool"}:
             return self._pptx_bash_result_command(request, result)
+        if tool_name in _VISUAL_ASSET_TOOL_NAMES:
+            return self._visual_asset_result_command(result)
         return result
 
     @override
@@ -4497,6 +4878,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         research_block = self._block_substantive_tool_before_research(request)
         if research_block is not None:
             return research_block
+        visual_design_block = self._block_visual_asset_before_design_skill(request)
+        if visual_design_block is not None:
+            return visual_design_block
 
         if request.tool_call.get("name") != "emit_builder_artifact":
             return self._tool_result_command(request, handler(request))
@@ -4543,6 +4927,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         research_block = self._block_substantive_tool_before_research(request)
         if research_block is not None:
             return research_block
+        visual_design_block = self._block_visual_asset_before_design_skill(request)
+        if visual_design_block is not None:
+            return visual_design_block
 
         if request.tool_call.get("name") != "emit_builder_artifact":
             return self._tool_result_command(request, await handler(request))
@@ -4610,6 +4997,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 artifact_calls = [tc for tc in tool_calls if tc.get("name") == "emit_builder_artifact"]
                 tool_names = self._tool_names(tool_calls)
                 pptx_skill_flags = _pptx_skill_flags_from_tool_calls(tool_calls)
+                visual_skill_flags = _visual_skill_flags_from_tool_calls(tool_calls)
                 research_diagnostics = self._update_research_diagnostics(state, tool_names)
                 allow_web_research = self._allow_web_research(state)
 
@@ -4667,6 +5055,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 "emit_rejected": True,
                                 "empty_artifact_path": is_empty_path_rejection,
                                 **pptx_skill_flags,
+                                **visual_skill_flags,
                             },
                         )
                         write_diagnostics = state.get("builder_write_diagnostics") or {}
@@ -4756,6 +5145,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "tool_names": tool_names,
                             "has_emit_builder_artifact": True,
                             **pptx_skill_flags,
+                            **visual_skill_flags,
                         },
                     )
                     _apply_artifact_request_metadata(
@@ -4858,6 +5248,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "tool_names": tool_names,
                         "has_emit_builder_artifact": False,
                         **pptx_skill_flags,
+                        **visual_skill_flags,
                     },
                 )
                 joined_names = ", ".join(tool_names) if tool_names else "none"

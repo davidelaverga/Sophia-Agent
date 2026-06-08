@@ -3047,7 +3047,9 @@ class TestBuilderArtifactMiddleware:
 
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
-        (outputs_dir / "report.md").write_text("# Visual report")
+        (outputs_dir / "visuals").mkdir()
+        (outputs_dir / "visuals" / "chart.svg").write_text("<svg></svg>")
+        (outputs_dir / "report.md").write_text("# Visual report\n\n![Chart](visuals/chart.svg)")
 
         state = {
             "thread_data": {"outputs_path": str(outputs_dir)},
@@ -3055,6 +3057,16 @@ class TestBuilderArtifactMiddleware:
             "builder_non_artifact_turns": 27,
             "delegation_context": {
                 "task": "Build a PDF report with charts and diagrams",
+            },
+            "builder_tool_turn_summaries": [
+                {"tool_names": ["builder_web_search"]},
+                {"tool_names": ["builder_web_fetch"]},
+            ],
+            "builder_web_budget": {"search_calls": 1, "fetch_calls": 1},
+            "builder_visual_diagnostics": {
+                "visual_design_skill_read": True,
+                "visual_asset_success_count": 1,
+                "visual_asset_paths": ["/mnt/user-data/outputs/visuals/chart.svg"],
             },
         }
         choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
@@ -3205,13 +3217,16 @@ class TestBuilderArtifactMiddleware:
         assert recovered is not None
         assert recovered["artifact_path"] == "/mnt/user-data/outputs/report.pdf"
 
-    @pytest.mark.parametrize("fallback_name", ["report.html", "report.md"])
+    @pytest.mark.parametrize("fallback_name", ["report.html", "fallback.md"])
     def test_successful_pdf_render_overrides_existing_fallback_emit(self, tmp_path, fallback_name):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
+        (outputs_dir / "visuals").mkdir()
         (outputs_dir / "report.pdf").write_bytes(b"%PDF-1.4 fake")
+        (outputs_dir / "visuals" / "chart.svg").write_text("<svg></svg>")
+        (outputs_dir / "report.md").write_text("# Report\n\n![Chart](visuals/chart.svg)")
         if fallback_name.endswith(".html"):
             (outputs_dir / fallback_name).write_text("<!doctype html><html><body>Fallback</body></html>")
         else:
@@ -3227,6 +3242,11 @@ class TestBuilderArtifactMiddleware:
                 {"tool_names": ["render_markdown_to_pdf"]},
             ],
             "builder_web_budget": {"search_calls": 1, "fetch_calls": 1},
+            "builder_visual_diagnostics": {
+                "visual_design_skill_read": True,
+                "visual_asset_success_count": 1,
+                "visual_asset_paths": ["/mnt/user-data/outputs/visuals/chart.svg"],
+            },
             "builder_pdf_render_result": {
                 "success": True,
                 "pdf_path": "/mnt/user-data/outputs/report.pdf",
@@ -3264,7 +3284,10 @@ class TestBuilderArtifactMiddleware:
 
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
+        (outputs_dir / "visuals").mkdir()
         (outputs_dir / "report.pdf").write_bytes(b"%PDF-1.4 fake")
+        (outputs_dir / "visuals" / "chart.svg").write_text("<svg></svg>")
+        (outputs_dir / "report.md").write_text("# Report\n\n![Chart](visuals/chart.svg)")
         (outputs_dir / "report.html").write_text("<!doctype html><html><body>Fallback</body></html>")
         state = {
             "thread_data": {"outputs_path": str(outputs_dir)},
@@ -3276,6 +3299,11 @@ class TestBuilderArtifactMiddleware:
                 {"tool_names": ["render_markdown_to_pdf"]},
             ],
             "builder_web_budget": {"search_calls": 1, "fetch_calls": 1},
+            "builder_visual_diagnostics": {
+                "visual_design_skill_read": True,
+                "visual_asset_success_count": 1,
+                "visual_asset_paths": ["/mnt/user-data/outputs/visuals/chart.svg"],
+            },
             "builder_pdf_render_result": {
                 "success": True,
                 "pdf_path": "/mnt/user-data/outputs/report.pdf",
@@ -3774,7 +3802,10 @@ class TestBuilderArtifactMiddleware:
 
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
-        (outputs_dir / "report.html").write_text("<h1>Visual report</h1>")
+        (outputs_dir / "report.html").write_text(
+            "<!doctype html><html><body><h1>Visual report</h1>"
+            "<svg viewBox='0 0 120 60'><rect width='80' height='40'/></svg></body></html>"
+        )
         runtime = _make_runtime(thread_id="thread-x")
         state = {
             "thread_data": {"outputs_path": str(outputs_dir)},
@@ -3879,7 +3910,8 @@ class TestBuilderArtifactMiddleware:
         (outputs_dir / "deck.html").write_text(
             "<!doctype html><html><head><title>Deck fallback</title><style>body{font-family:sans-serif}</style></head>"
             "<body><main><h1>Deck fallback</h1><p>Complete browser-renderable slide content.</p>"
-            "<p>Charts and diagrams are summarized in the page layout.</p></main></body></html>"
+            "<svg viewBox='0 0 120 60'><rect width='80' height='40'/></svg>"
+            "<p>Charts and diagrams are represented inline in the page layout.</p></main></body></html>"
         )
         runtime = _make_runtime(thread_id="thread-x")
         state = {

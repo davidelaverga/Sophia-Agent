@@ -203,3 +203,15 @@ class TestBuilderWorkflowCards:
         assert '<builder_workflow_card name="html"' in briefing
         assert "standalone browser-renderable document" in briefing
         assert '<builder_workflow_card name="pptx"' not in briefing
+
+    def test_visual_request_gets_visuals_card_and_visual_design_skill(self) -> None:
+        state = _make_state("document")
+        state["delegation_context"]["artifact_target_path"] = "/mnt/user-data/outputs/report.pdf"
+        state["delegation_context"]["description"] = "Build a PDF report with charts and diagrams"
+
+        result = BuilderTaskMiddleware().before_agent(state, _make_runtime())
+        briefing = _briefing(result)
+
+        assert '<builder_workflow_card name="visuals"' in briefing
+        assert "/mnt/skills/public/visual-design/SKILL.md" in briefing
+        assert "generate_visual_asset" in briefing

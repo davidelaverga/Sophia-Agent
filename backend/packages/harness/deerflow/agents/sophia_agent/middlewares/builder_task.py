@@ -280,6 +280,23 @@ _EXPLICIT_IMAGE_GENERATION_MARKERS = (
     "raster image",
 )
 
+_VISUAL_REQUEST_MARKERS = (
+    "chart",
+    "charts",
+    "diagram",
+    "diagrams",
+    "visual",
+    "visuals",
+    "visualization",
+    "visualisation",
+    "infographic",
+    "flowchart",
+    "timeline",
+    "map",
+    "matrix",
+    "quadrant",
+)
+
 
 def _image_generation_explicitly_requested(
     delegation_context: dict[str, Any],
@@ -292,6 +309,13 @@ def _image_generation_explicitly_requested(
     description = str(delegation_context.get("description") or "").lower()
     combined = f"{task}\n{description}"
     return any(marker in combined for marker in _EXPLICIT_IMAGE_GENERATION_MARKERS)
+
+
+def _visuals_requested(delegation_context: dict[str, Any]) -> bool:
+    task = str(delegation_context.get("task") or "").lower()
+    description = str(delegation_context.get("description") or "").lower()
+    combined = f"{task}\n{description}"
+    return any(marker in combined for marker in _VISUAL_REQUEST_MARKERS)
 
 
 def _critical_emit_guidance(artifact_target_ext: str) -> str:
@@ -345,10 +369,13 @@ def _builder_workflow_sections(
     artifact_target_ext: str,
     task_type: str,
     allow_web_research: bool,
+    visuals_requested: bool,
 ) -> list[str]:
     cards: list[str] = []
     if allow_web_research:
         cards.append("research")
+    if visuals_requested:
+        cards.append("visuals")
     if artifact_target_ext == ".pptx":
         cards.append("pptx")
     elif artifact_target_ext == ".pdf":
@@ -553,7 +580,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             include_image_generation=_image_generation_explicitly_requested(
                 delegation_context,
                 artifact_target_ext=artifact_target_ext,
-            )
+            ),
+            include_visual_design=_visuals_requested(delegation_context),
         )
         if skills_block:
             sections.append(skills_block)
@@ -562,6 +590,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             artifact_target_ext=artifact_target_ext,
             task_type=task_type,
             allow_web_research=allow_web_research,
+            visuals_requested=_visuals_requested(delegation_context),
         )
         if workflow_sections:
             sections.append(
@@ -816,6 +845,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
     # (sophia, bootstrap, surprise-me, …) are noise here.
     _BUILDER_RELEVANT_SKILLS: tuple[str, ...] = (
         "chart-visualization",
+        "visual-design",
         "ppt-generation",
         "image-generation",
         "data-analysis",
@@ -826,6 +856,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         cls,
         *,
         include_image_generation: bool = True,
+        include_visual_design: bool = False,
     ) -> str | None:
         """Return a ``<skill_system>`` block listing builder-relevant skills.
 
@@ -864,6 +895,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         allowed_skill_names = set(cls._BUILDER_RELEVANT_SKILLS)
         if not include_image_generation:
             allowed_skill_names.discard("image-generation")
+        if not include_visual_design:
+            allowed_skill_names.discard("visual-design")
         relevant = [s for s in skills if getattr(s, "name", None) in allowed_skill_names]
         # Log either way so "did the builder see skills this run?" is
         # answerable from a single grep on the langgraph-server logs.
@@ -909,11 +942,12 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "\n"
             "How to use a skill:\n"
             "1. read_file_tool on the skill's SKILL.md to learn its workflow.\n"
-            "2. Follow the SKILL.md instructions — usually involves invoking the bundled "
-            "script via bash_tool with structured input (a JSON spec, not custom code).\n"
-            "3. The script writes its output (PNG/SVG/PPTX/JSON/CSV) to a path you pass it.\n"
-            "4. Compose downstream artifacts (e.g. a Markdown document referencing chart "
-            "images) using the skill's output paths.\n"
+            "2. Follow the SKILL.md instructions. Some skills are guidance-only "
+            "(visual-design); generation skills usually involve invoking a bundled "
+            "script or tool with structured input.\n"
+            "3. Generation scripts/tools write outputs (PNG/SVG/PPTX/JSON/CSV) to a path you pass them.\n"
+            "4. Compose downstream artifacts (e.g. a Markdown document referencing local "
+            "visual assets) using the generated output paths.\n"
             "\n"
             "<available_skills>\n"
             + "\n".join(items)

@@ -33,6 +33,7 @@ from deerflow.sophia.tools.builder_web_fetch import builder_web_fetch
 from deerflow.sophia.tools.builder_web_search import builder_web_search
 from deerflow.sophia.tools.create_pdf_artifact import create_pdf_artifact
 from deerflow.sophia.tools.emit_builder_artifact import emit_builder_artifact
+from deerflow.sophia.tools.generate_visual_asset import generate_visual_asset
 from deerflow.sophia.tools.render_markdown_to_pdf import render_markdown_to_pdf
 from deerflow.tools.builtins.view_image_tool import view_image_tool
 
@@ -157,6 +158,7 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         builder_web_search,
         builder_web_fetch,
         create_pdf_artifact,
+        generate_visual_asset,
         render_markdown_to_pdf,
         emit_builder_artifact,
     ]

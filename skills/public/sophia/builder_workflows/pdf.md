@@ -3,15 +3,20 @@
 Use this card only for requested `.pdf` builds.
 
 1. Plan with `write_todos`.
-2. Create Markdown or HTML source under `/mnt/user-data/outputs/`.
+2. If the user requested charts, diagrams, or visuals, first read
+   `/mnt/skills/public/visual-design/SKILL.md`, then create at least one local
+   visual asset with `generate_visual_asset` under
+   `/mnt/user-data/outputs/visuals/`.
+3. Create Markdown or HTML source under `/mnt/user-data/outputs/`.
    Source creation is not completion and is not a fallback yet.
-3. Your next substantive action after source creation must be
+   Reference any local visual assets from that source before rendering.
+4. Your next substantive action after source creation must be
    `render_markdown_to_pdf(markdown_path=<source>, pdf_path=<target .pdf>)`.
-4. If rendering succeeds and layout quality is `ok`, that rendered `.pdf` is
+5. If rendering succeeds and layout quality is `ok`, that rendered `.pdf` is
    authoritative. Immediately emit that exact `.pdf`. Do not emit an older
    `.md` or `.html` fallback, and do not run extra `bash`, replan, or render
    again.
-5. If the harness injects a layout repair message, revise the source once,
+6. If the harness injects a layout repair message, revise the source once,
    render once more, then emit the best usable PDF.
 
 Default unspecified PDF length is 10-15 pages. Avoid forced page breaks,

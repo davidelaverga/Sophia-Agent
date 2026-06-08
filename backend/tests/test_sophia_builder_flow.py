@@ -134,6 +134,7 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     assert "emit_builder_artifact" in builder_tool_names
     # render_markdown_to_pdf (Phase B) is the skill-driven PDF path.
     assert "render_markdown_to_pdf" in builder_tool_names
+    assert "generate_visual_asset" in builder_tool_names
     # ``present_files`` must NOT be in the builder's tool list. Its presence
     # invited the model (trained on upstream's pattern) to call
     # ``present_files + emit_builder_artifact`` together on the final turn,
