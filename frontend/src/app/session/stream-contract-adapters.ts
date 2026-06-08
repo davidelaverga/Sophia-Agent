@@ -2,6 +2,7 @@ import { normalizeBuilderArtifactPayload } from '../lib/builder-artifacts';
 import { asRecord, readNumber, readString } from '../lib/record-parsers';
 import { InterruptPayloadSchema } from '../lib/schemas/session-schemas';
 import type { BuilderArtifactV1 } from '../types/builder-artifact';
+import type { BuilderFailureDiagnosticsV1 } from '../types/builder-completion';
 import type {
   BuilderActivityEntryV1,
   BuilderShellCommandDebugV1,
@@ -306,6 +307,26 @@ export function parseBuilderTaskPayload(data: unknown): BuilderTaskV1 | null {
   const stuckReason = readString(record, 'stuckReason') ?? readString(record, 'stuck_reason');
   const todos = parseBuilderTodos(record.todos);
   const activityLog = parseBuilderActivityLog(record.activity_log ?? record.activityLog);
+  const rawDiagnostics = asRecord(record.builderFailureDiagnostics ?? record.builder_failure_diagnostics);
+  const builderFailureDiagnostics = rawDiagnostics
+    ? rawDiagnostics as BuilderFailureDiagnosticsV1
+    : null;
+  const builderFailureDiagnosticAvailableValue =
+    record.builderFailureDiagnosticAvailable ?? record.builder_failure_diagnostic_available;
+  const builderEmitAttemptedValue = record.builderEmitAttempted ?? record.builder_emit_attempted;
+  const builderExpectedArtifactExistsValue =
+    record.builderExpectedArtifactExists ?? record.builder_expected_artifact_exists;
+  const builderFailureStage = readString(record, 'builderFailureStage') ?? readString(record, 'builder_failure_stage');
+  const builderFailureCode = readString(record, 'builderFailureCode') ?? readString(record, 'builder_failure_code');
+  const builderExpectedArtifactPathHash =
+    readString(record, 'builderExpectedArtifactPathHash') ?? readString(record, 'builder_expected_artifact_path_hash');
+  const builderOutputsSummaryCount =
+    readNumber(record, 'builderOutputsSummaryCount') ?? readNumber(record, 'builder_outputs_summary_count');
+  const builderSupabaseMirrorResult =
+    readString(record, 'builderSupabaseMirrorResult') ?? readString(record, 'builder_supabase_mirror_result');
+  const builderCompletionReconciliationAction =
+    readString(record, 'builderCompletionReconciliationAction')
+    ?? readString(record, 'builder_completion_reconciliation_action');
   const stuckValue = record.stuck ?? record.is_stuck;
   const heartbeatValue = record.heartbeat;
   const stuck = typeof stuckValue === 'boolean' ? stuckValue : undefined;
@@ -340,6 +361,24 @@ export function parseBuilderTaskPayload(data: unknown): BuilderTaskV1 | null {
     ...(typeof heartbeat === 'boolean' ? { heartbeat } : {}),
     ...(typeof pollCount === 'number' ? { pollCount } : {}),
     ...(activityLog ? { activityLog } : {}),
+    ...(builderFailureDiagnostics ? { builderFailureDiagnostics } : {}),
+    ...(typeof builderFailureDiagnosticAvailableValue === 'boolean'
+      ? { builderFailureDiagnosticAvailable: builderFailureDiagnosticAvailableValue }
+      : {}),
+    ...(builderFailureStage ? { builderFailureStage } : {}),
+    ...(builderFailureCode ? { builderFailureCode } : {}),
+    ...(typeof builderEmitAttemptedValue === 'boolean'
+      ? { builderEmitAttempted: builderEmitAttemptedValue }
+      : {}),
+    ...(builderExpectedArtifactPathHash ? { builderExpectedArtifactPathHash } : {}),
+    ...(typeof builderExpectedArtifactExistsValue === 'boolean'
+      ? { builderExpectedArtifactExists: builderExpectedArtifactExistsValue }
+      : {}),
+    ...(typeof builderOutputsSummaryCount === 'number'
+      ? { builderOutputsSummaryCount }
+      : {}),
+    ...(builderSupabaseMirrorResult ? { builderSupabaseMirrorResult } : {}),
+    ...(builderCompletionReconciliationAction ? { builderCompletionReconciliationAction } : {}),
   };
 }
 

@@ -32,6 +32,12 @@ from langgraph.types import Command
 from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
 from deerflow.agents.sophia_agent.utils import log_middleware
 from deerflow.sophia.builder_events import fire_completion_webhook_from_artifact
+from deerflow.sophia.builder_failure_diagnostics import (
+    build_builder_failure_diagnostics,
+    diagnostic_safe_failure_message,
+    merge_builder_failure_diagnostics,
+    normalize_emit_failure_code,
+)
 from deerflow.sophia.builder_web_policy import extract_explicit_user_urls
 from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.sophia.storage.supabase_mirror import maybe_mirror_file
@@ -302,7 +308,7 @@ def _upload_builder_outputs_to_supabase(
     thread_id: str | None,
     outputs_host_path: str | None,
     artifact_args: dict[str, Any],
-) -> None:
+) -> str:
     """Best-effort upload of the builder's outputs to Supabase Storage.
 
     PR-E (Phase 2.2): delegates to ``maybe_mirror_file`` which uses SHA-256
@@ -316,7 +322,7 @@ def _upload_builder_outputs_to_supabase(
             thread_id,
             outputs_host_path,
         )
-        return
+        return "skipped"
 
     candidates: list[str] = []
     primary = artifact_args.get("artifact_path")
@@ -326,13 +332,30 @@ def _upload_builder_outputs_to_supabase(
     if isinstance(supporting, list):
         candidates.extend(path for path in supporting if isinstance(path, str))
 
+    result = "skipped"
     outputs_root = Path(outputs_host_path)
     for candidate in candidates:
         relative = _extract_output_relative_path(candidate)
         if relative is None:
             continue
         host_file = outputs_root / relative
-        maybe_mirror_file(str(host_file), thread_id, outputs_host_path)
+        result = _merge_supabase_mirror_result(
+            result,
+            maybe_mirror_file(str(host_file), thread_id, outputs_host_path),
+        )
+    return result
+
+
+def _merge_supabase_mirror_result(current: str, update: str | None) -> str:
+    if update is None:
+        return current
+    if update == "failed_best_effort":
+        return "failed_best_effort"
+    if update == "uploaded" and current not in {"failed_best_effort"}:
+        return "uploaded"
+    if update == "not_configured" and current == "skipped":
+        return "not_configured"
+    return current
 
 
 def _outputs_host_path_from_state(state: dict[str, Any]) -> str | None:
@@ -509,6 +532,15 @@ def _emit_candidate_paths(artifact_args: dict[str, Any]) -> list[str]:
 
 def _invalid_outputs_candidate(candidate: str) -> bool:
     return candidate.strip().startswith(_OUTPUTS_VIRTUAL_PREFIX)
+
+
+def _path_has_traversal(path: Any) -> bool:
+    if not isinstance(path, str):
+        return False
+    cleaned = path.strip().replace("\\", "/")
+    if not cleaned:
+        return False
+    return ".." in PurePosixPath(cleaned).parts
 
 
 def _local_emit_candidate_status(
@@ -1643,6 +1675,7 @@ class BuilderArtifactState(AgentState):
     builder_last_successful_output_path: NotRequired[str | None]
     builder_write_diagnostics: NotRequired[Annotated[dict, _merge_builder_write_diagnostics]]
     builder_pptx_diagnostics: NotRequired[Annotated[dict, _merge_builder_pptx_diagnostics]]
+    builder_failure_diagnostics: NotRequired[dict]
     # PR #94: count consecutive emit attempts rejected for empty/missing
     # ``artifact_path``. When this reaches ``_REJECTION_SHORT_CIRCUIT_AT``
     # we route directly to the hard-ceiling fallback instead of letting
@@ -1680,6 +1713,221 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         history = list(state.get("builder_tool_turn_summaries", []) or [])
         history.append(summary)
         return history[-12:]
+
+    @classmethod
+    def _emit_rejection_diagnostics(
+        cls,
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> dict[str, Any]:
+        reason, is_supporting_file = cls._emit_validation_rejection_reason(
+            artifact_args,
+            state,
+            runtime,
+        )
+        failure_code = normalize_emit_failure_code(
+            reason,
+            is_supporting_file=is_supporting_file,
+        )
+        return build_builder_failure_diagnostics(
+            state=state,
+            runtime=runtime,
+            artifact_args=artifact_args,
+            failure_stage="emit_rejected",
+            failure_reason=diagnostic_safe_failure_message(failure_code, reason),
+            failure_code=failure_code,
+            emit_attempted=True,
+            emit_tool_call_seen=True,
+        )
+
+    @classmethod
+    def _emit_validation_rejection_reason(
+        cls,
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> tuple[str | None, bool]:
+        primary = artifact_args.get("artifact_path")
+        if _requested_pdf_artifact(state):
+            rejection_reason = _pdf_artifact_path_rejection_reason(primary, state)
+            if rejection_reason is not None:
+                return cls._path_sensitive_rejection_reason(primary, rejection_reason), False
+        if _requested_pptx_artifact(state):
+            rejection_reason = _pptx_artifact_path_rejection_reason(primary, state)
+            if rejection_reason is not None:
+                return cls._path_sensitive_rejection_reason(primary, rejection_reason), False
+            canonical_primary = _canonical_outputs_artifact_path(primary)
+            if canonical_primary is not None:
+                integrity_rejection = _pptx_path_integrity_rejection_reason(canonical_primary, state, runtime)
+                if integrity_rejection is not None:
+                    return integrity_rejection, False
+                html_rejection = _pptx_html_fallback_integrity_rejection_reason(
+                    canonical_primary,
+                    state,
+                    runtime,
+                )
+                if html_rejection is not None:
+                    return html_rejection, False
+        if _requested_html_artifact(state):
+            rejection_reason = _html_artifact_path_rejection_reason(primary)
+            if rejection_reason is not None:
+                return cls._path_sensitive_rejection_reason(primary, rejection_reason), False
+            canonical_primary = _canonical_outputs_artifact_path(primary)
+            if canonical_primary is not None:
+                integrity_rejection = _html_artifact_integrity_rejection_reason(
+                    canonical_primary,
+                    state,
+                    runtime,
+                )
+                if integrity_rejection is not None:
+                    return integrity_rejection, False
+
+        candidates = _emit_candidate_paths(artifact_args)
+        if not candidates:
+            return "artifact_file_missing", False
+
+        thread_data = state.get("thread_data") or {}
+        outputs_host_path = (
+            thread_data.get("outputs_path")
+            if isinstance(thread_data, dict)
+            else None
+        )
+        remote_thread_ids = _artifact_remote_thread_ids(state, runtime)
+        primary_text = primary.strip() if isinstance(primary, str) else None
+        for index, candidate in enumerate(candidates):
+            is_supporting = not primary_text or index > 0 or candidate.strip() != primary_text
+            reason = cls._emit_candidate_rejection_reason(
+                candidate,
+                outputs_host_path=outputs_host_path,
+                remote_thread_ids=remote_thread_ids,
+            )
+            if reason is not None:
+                return reason, is_supporting
+        return "unknown_emit_validation_error", False
+
+    @staticmethod
+    def _path_sensitive_rejection_reason(path: Any, reason: str) -> str:
+        if _path_has_traversal(path):
+            return "artifact_path_traversal"
+        return reason
+
+    @staticmethod
+    def _emit_candidate_rejection_reason(
+        candidate: str,
+        *,
+        outputs_host_path: str | None,
+        remote_thread_ids: list[str],
+    ) -> str | None:
+        relative = _extract_output_relative_path(candidate)
+        if relative is None:
+            if _invalid_outputs_candidate(candidate):
+                return "artifact_path_traversal" if _path_has_traversal(candidate) else "artifact_path_outside_outputs"
+            return None
+        local_status = _local_emit_candidate_status(candidate, relative, outputs_host_path)
+        if local_status == "valid":
+            return None
+        if local_status == "invalid":
+            return "pptx_integrity_failed" if PurePosixPath(candidate).suffix.lower() == ".pptx" else None
+        remote_status = _remote_emit_candidate_status(candidate, relative, remote_thread_ids)
+        if remote_status == "valid":
+            return None
+        if remote_status == "invalid":
+            return "pptx_integrity_failed" if PurePosixPath(candidate).suffix.lower() == ".pptx" else None
+        return "artifact_file_missing"
+
+    @staticmethod
+    def _terminal_failure_diagnostics(
+        state: BuilderArtifactState,
+        runtime: Runtime,
+        *,
+        fallback: dict[str, Any],
+        failure_stage: str,
+        failure_code: str,
+        failure_reason: str,
+        emit_attempted: bool,
+        emit_tool_call_seen: bool | None,
+    ) -> dict[str, Any]:
+        current = state.get("builder_failure_diagnostics")
+        if isinstance(current, dict) and current:
+            return merge_builder_failure_diagnostics(
+                current,
+                failure_stage=failure_stage,
+                failure_code=failure_code,
+                failure_reason=failure_reason,
+                emit_attempted=emit_attempted,
+                emit_tool_call_seen=emit_tool_call_seen,
+                completion_webhook_attempted=True,
+                completion_webhook_result="scheduled",
+            )
+        return build_builder_failure_diagnostics(
+            state=state,
+            runtime=runtime,
+            artifact_args=fallback,
+            failure_stage=failure_stage,  # type: ignore[arg-type]
+            failure_reason=failure_reason,
+            failure_code=failure_code,
+            emit_attempted=emit_attempted,
+            emit_tool_call_seen=emit_tool_call_seen,
+            completion_webhook_attempted=True,
+            completion_webhook_result="scheduled",
+        )
+
+    @staticmethod
+    def _attach_terminal_failure_diagnostics(
+        state: BuilderArtifactState,
+        runtime: Runtime,
+        fallback: dict[str, Any],
+        *,
+        failure_stage: str,
+        failure_code: str,
+        failure_reason: str,
+        emit_attempted: bool,
+        emit_tool_call_seen: bool | None,
+    ) -> dict[str, Any]:
+        fallback["builder_failure_diagnostics"] = BuilderArtifactMiddleware._terminal_failure_diagnostics(
+            state,
+            runtime,
+            fallback=fallback,
+            failure_stage=failure_stage,
+            failure_code=failure_code,
+            failure_reason=failure_reason,
+            emit_attempted=emit_attempted,
+            emit_tool_call_seen=emit_tool_call_seen,
+        )
+        return fallback
+
+    @staticmethod
+    def _annotate_supabase_mirror_diagnostics(
+        state: BuilderArtifactState,
+        runtime: Runtime,
+        artifact_args: dict[str, Any],
+        *,
+        mirror_result: str,
+    ) -> None:
+        if mirror_result == "uploaded":
+            return
+        diagnostic = build_builder_failure_diagnostics(
+            state=state,
+            runtime=runtime,
+            artifact_args=artifact_args,
+            failure_stage="storage_mirror",
+            failure_reason=(
+                "Supabase mirror did not create a remote copy, but the local artifact path remains available."
+            ),
+            failure_code=None,
+            emit_attempted=True,
+            emit_tool_call_seen=True,
+            include_outputs_summary=False,
+            supabase_mirror_attempted=mirror_result != "skipped",
+            supabase_mirror_result=mirror_result,
+        )
+        artifact_args["builder_failure_diagnostics"] = merge_builder_failure_diagnostics(
+            artifact_args.get("builder_failure_diagnostics")
+            if isinstance(artifact_args.get("builder_failure_diagnostics"), dict)
+            else None,
+            **diagnostic,
+        )
 
     @staticmethod
     def _allow_web_research(state: BuilderArtifactState) -> bool:
@@ -2664,11 +2912,34 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             runtime.context.get("thread_id") if getattr(runtime, "context", None) else None
         )
         upload_thread_id = parent_thread_id or builder_thread_id
-        _upload_builder_outputs_to_supabase(
+        mirror_result = _upload_builder_outputs_to_supabase(
             thread_id=upload_thread_id,
             outputs_host_path=outputs_host_path,
             artifact_args=fallback,
         )
+        if mirror_result != "uploaded":
+            current_diagnostics = fallback.get("builder_failure_diagnostics")
+            if isinstance(current_diagnostics, dict) and current_diagnostics:
+                fallback["builder_failure_diagnostics"] = merge_builder_failure_diagnostics(
+                    current_diagnostics,
+                    supabase_mirror_attempted=mirror_result not in {"skipped", "not_configured"},
+                    supabase_mirror_result=mirror_result,
+                )
+            elif fallback.get("artifact_path"):
+                fallback["builder_failure_diagnostics"] = build_builder_failure_diagnostics(
+                    state=state,
+                    runtime=runtime,
+                    artifact_args=fallback,
+                    failure_stage="storage_mirror",
+                    failure_reason=(
+                        "Supabase mirror did not create a remote copy, but the local artifact path remains available."
+                    ),
+                    emit_attempted=True,
+                    emit_tool_call_seen=True,
+                    include_outputs_summary=False,
+                    supabase_mirror_attempted=mirror_result not in {"skipped", "not_configured"},
+                    supabase_mirror_result=mirror_result,
+                )
         fire_completion_webhook_from_artifact(
             state=state,
             runtime=runtime,
@@ -4367,6 +4638,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "artifact_path %s not found. Routing back to model for retry.",
             args.get("artifact_path"),
         )
+        diagnostics = self._emit_rejection_diagnostics(args, request.state, request.runtime)
         return Command(
             update={
                 "messages": [
@@ -4377,6 +4649,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         status="error",
                     ),
                 ],
+                "builder_failure_diagnostics": diagnostics,
             },
             goto="model",
         )
@@ -4413,6 +4686,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "artifact_path %s not found. Routing back to model for retry.",
             args.get("artifact_path"),
         )
+        diagnostics = self._emit_rejection_diagnostics(args, request.state, request.runtime)
         return Command(
             update={
                 "messages": [
@@ -4423,6 +4697,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         status="error",
                     ),
                 ],
+                "builder_failure_diagnostics": diagnostics,
             },
             goto="model",
         )
@@ -4485,6 +4760,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "Builder will retry via wrap_tool_call.",
                             args.get("artifact_path"),
                         )
+                        diagnostics = self._emit_rejection_diagnostics(args, state, runtime)
                         non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0) + 1
 
                         # PR #94: track *empty* artifact_path rejections separately
@@ -4531,6 +4807,19 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 steps_completed=non_artifact_turns,
                                 reason="repeated_write_failures_no_output",
                             )
+                            if not fallback.get("artifact_path"):
+                                self._attach_terminal_failure_diagnostics(
+                                    {**state, "builder_failure_diagnostics": diagnostics},
+                                    runtime,
+                                    fallback,
+                                    failure_stage="generation",
+                                    failure_code="artifact_file_missing",
+                                    failure_reason=(
+                                        "Builder stopped after repeated write failures with no successful output."
+                                    ),
+                                    emit_attempted=True,
+                                    emit_tool_call_seen=True,
+                                )
                             self._upload_fallback_and_fire(
                                 state=state,
                                 runtime=runtime,
@@ -4543,6 +4832,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 "builder_last_tool_names": tool_names,
                                 "builder_tool_turn_summaries": history,
                                 "builder_research_diagnostics": research_diagnostics,
+                                "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
                                 "builder_task_started_at_ms": 0,
                                 "builder_consecutive_empty_emit_rejections": 0,
                                 "jump_to": "end",
@@ -4565,6 +4855,19 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 steps_completed=non_artifact_turns,
                                 reason=f"consecutive_empty_emit_rejections={consecutive_rejections}",
                             )
+                            if not fallback.get("artifact_path"):
+                                self._attach_terminal_failure_diagnostics(
+                                    {**state, "builder_failure_diagnostics": diagnostics},
+                                    runtime,
+                                    fallback,
+                                    failure_stage="emit_rejected",
+                                    failure_code=diagnostics.get("failure_code") or "artifact_file_missing",
+                                    failure_reason=diagnostics.get("failure_reason") or (
+                                        "Builder stopped after consecutive empty artifact emit rejections."
+                                    ),
+                                    emit_attempted=True,
+                                    emit_tool_call_seen=True,
+                                )
                             # Phase 4L: upload the promoted file to
                             # Supabase BEFORE firing the webhook so the
                             # signed-URL mint + Telegram bytes-download
@@ -4584,6 +4887,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 "builder_last_tool_names": tool_names,
                                 "builder_tool_turn_summaries": history,
                                 "builder_research_diagnostics": research_diagnostics,
+                                "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
                                 "builder_task_started_at_ms": 0,
                                 "builder_consecutive_empty_emit_rejections": 0,
                                 "jump_to": "end",
@@ -4594,6 +4898,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "builder_last_tool_names": tool_names,
                             "builder_tool_turn_summaries": history,
                             "builder_research_diagnostics": research_diagnostics,
+                            "builder_failure_diagnostics": diagnostics,
                             "builder_consecutive_empty_emit_rejections": consecutive_rejections,
                         }
 
@@ -4647,10 +4952,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         runtime.context.get("thread_id") if runtime.context else None
                     )
                     upload_thread_id = parent_thread_id or builder_thread_id
-                    _upload_builder_outputs_to_supabase(
+                    mirror_result = _upload_builder_outputs_to_supabase(
                         thread_id=upload_thread_id,
                         outputs_host_path=outputs_host_path,
                         artifact_args=args,
+                    )
+                    self._annotate_supabase_mirror_diagnostics(
+                        state,
+                        runtime,
+                        args,
+                        mirror_result=mirror_result,
                     )
                     self._log_missing_pdf_render_attempt_if_needed(state, args)
                     self._log_research_diagnostics(
@@ -4754,6 +5065,19 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         steps_completed=non_artifact_turns,
                         reason="hard_ceiling",
                     )
+                    if not fallback.get("artifact_path"):
+                        self._attach_terminal_failure_diagnostics(
+                            state,
+                            runtime,
+                            fallback,
+                            failure_stage="generation",
+                            failure_code="builder_completed_without_deliverable",
+                            failure_reason=(
+                                "Builder reached its hard ceiling before emitting a deliverable artifact."
+                            ),
+                            emit_attempted=False,
+                            emit_tool_call_seen=False,
+                        )
                     # Phase 4L: upload-before-webhook (see
                     # ``_upload_fallback_and_fire`` docstring). Same
                     # contract as the consecutive-rejection short-circuit
@@ -4772,6 +5096,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "builder_last_tool_names": tool_names,
                         "builder_tool_turn_summaries": history,
                         "builder_research_diagnostics": research_diagnostics,
+                        "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
                         "builder_task_started_at_ms": 0,
                         "builder_consecutive_empty_emit_rejections": 0,
                         "jump_to": "end",
@@ -4811,6 +5136,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "user_next_action": None,
                 "confidence": 0.3,
             }
+            self._attach_terminal_failure_diagnostics(
+                state,
+                runtime,
+                fallback,
+                failure_stage="generation",
+                failure_code="builder_completed_without_deliverable",
+                failure_reason="Builder finished without producing a deliverable artifact.",
+                emit_attempted=False,
+                emit_tool_call_seen=False,
+            )
             history = self._append_turn_summary(
                 state,
                 {
@@ -4838,6 +5173,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "builder_non_artifact_turns": 0,
                 "builder_last_tool_names": [],
                 "builder_tool_turn_summaries": history,
+                "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
                 "builder_consecutive_empty_emit_rejections": 0,
             }
 

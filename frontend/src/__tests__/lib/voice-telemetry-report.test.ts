@@ -279,6 +279,15 @@ function buildMetrics(): VoiceDeveloperMetrics {
       completedBuilderEntryPlacement: 'hidden',
       completedBuilderEntryOverlapsControls: false,
       completedBuilderEntryHiddenForStage: false,
+      builderFailureDiagnosticAvailable: false,
+      builderFailureStage: null,
+      builderFailureCode: null,
+      builderEmitAttempted: null,
+      builderExpectedArtifactPathHash: null,
+      builderExpectedArtifactExists: null,
+      builderOutputsSummaryCount: null,
+      builderSupabaseMirrorResult: null,
+      builderCompletionReconciliationAction: null,
     },
     coreview: {
       visual: {
@@ -538,6 +547,15 @@ function buildSummary(): VoiceTelemetrySummary {
     completedBuilderEntryPlacement: 'hidden',
     completedBuilderEntryOverlapsControls: false,
     completedBuilderEntryHiddenForStage: false,
+    builderFailureDiagnosticAvailable: false,
+    builderFailureStage: null,
+    builderFailureCode: null,
+    builderEmitAttempted: null,
+    builderExpectedArtifactPathHash: null,
+    builderExpectedArtifactExists: null,
+    builderOutputsSummaryCount: null,
+    builderSupabaseMirrorResult: null,
+    builderCompletionReconciliationAction: null,
   };
 }
 
@@ -662,6 +680,15 @@ describe('buildVoiceTelemetryReport', () => {
       completedBuilderEntryPlacement: 'hidden',
       completedBuilderEntryOverlapsControls: false,
       completedBuilderEntryHiddenForStage: false,
+      builderFailureDiagnosticAvailable: false,
+      builderFailureStage: null,
+      builderFailureCode: null,
+      builderEmitAttempted: null,
+      builderExpectedArtifactPathHash: null,
+      builderExpectedArtifactExists: null,
+      builderOutputsSummaryCount: null,
+      builderSupabaseMirrorResult: null,
+      builderCompletionReconciliationAction: null,
       rawArtifactTextExcluded: true,
       rawFrameExcluded: true,
       rawCommentTextExcluded: true,
@@ -853,6 +880,45 @@ describe('buildVoiceTelemetryReport', () => {
     expect(report.captureBundle.snapshot.transcript.voiceMessages).toEqual([]);
     expect(report.captureBundle.snapshot.artifacts.sessionArtifacts).toBeNull();
     expect(report.captureBundle.snapshot.artifacts.recapArtifacts).toBeNull();
+  });
+
+  it('includes only safe builder failure diagnostic fields in the report summary', () => {
+    const metrics = buildMetrics();
+    metrics.builder = {
+      ...metrics.builder,
+      phase: 'failed',
+      detail: 'Builder failed: artifact file was missing.',
+      builderFailureDiagnosticAvailable: true,
+      builderFailureStage: 'artifact_missing',
+      builderFailureCode: 'artifact_file_missing',
+      builderEmitAttempted: true,
+      builderExpectedArtifactPathHash: '7d8f98a1',
+      builderExpectedArtifactExists: false,
+      builderOutputsSummaryCount: 2,
+      builderSupabaseMirrorResult: 'failed_best_effort',
+      builderCompletionReconciliationAction: null,
+    };
+    const report = buildVoiceTelemetryReport({
+      exportedAt: '2026-05-20T12:00:05.000Z',
+      metrics,
+      summary: buildSummary(),
+      captureBundle: buildCaptureBundle([]),
+    });
+
+    expect(report.diagnosticsSummary.builderSurface).toMatchObject({
+      builderFailureDiagnosticAvailable: true,
+      builderFailureStage: 'artifact_missing',
+      builderFailureCode: 'artifact_file_missing',
+      builderEmitAttempted: true,
+      builderExpectedArtifactPathHash: '7d8f98a1',
+      builderExpectedArtifactExists: false,
+      builderOutputsSummaryCount: 2,
+      builderSupabaseMirrorResult: 'failed_best_effort',
+      rawArtifactTextExcluded: true,
+      rawFrameExcluded: true,
+    });
+    expect(JSON.stringify(report.diagnosticsSummary.builderSurface)).not.toContain('<!doctype html>');
+    expect(JSON.stringify(report.diagnosticsSummary.builderSurface)).not.toContain('signed-url');
   });
 
   it('does not flag review emit churn when emit_artifact was explicitly suppressed by the review guard', () => {

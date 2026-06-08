@@ -598,6 +598,15 @@ export type VoiceTelemetrySummary = {
   completedBuilderEntryPlacement: CompletedBuilderEntryPlacement | null
   completedBuilderEntryOverlapsControls: boolean | null
   completedBuilderEntryHiddenForStage: boolean
+  builderFailureDiagnosticAvailable: boolean
+  builderFailureStage: string | null
+  builderFailureCode: string | null
+  builderEmitAttempted: boolean | null
+  builderExpectedArtifactPathHash: string | null
+  builderExpectedArtifactExists: boolean | null
+  builderOutputsSummaryCount: number | null
+  builderSupabaseMirrorResult: string | null
+  builderCompletionReconciliationAction: string | null
 }
 
 export type LegacySessionTelemetry = {
@@ -968,6 +977,15 @@ export type VoiceDeveloperMetrics = {
     completedBuilderEntryPlacement: CompletedBuilderEntryPlacement | null
     completedBuilderEntryOverlapsControls: boolean | null
     completedBuilderEntryHiddenForStage: boolean
+    builderFailureDiagnosticAvailable: boolean
+    builderFailureStage: string | null
+    builderFailureCode: string | null
+    builderEmitAttempted: boolean | null
+    builderExpectedArtifactPathHash: string | null
+    builderExpectedArtifactExists: boolean | null
+    builderOutputsSummaryCount: number | null
+    builderSupabaseMirrorResult: string | null
+    builderCompletionReconciliationAction: string | null
   }
   health: {
     level: VoiceMetricsHealthLevel
@@ -4632,6 +4650,15 @@ function buildBuilderSurfaceMetrics(events: NormalizedVoiceCaptureEvent[]): Pick
   | "completedBuilderEntryPlacement"
   | "completedBuilderEntryOverlapsControls"
   | "completedBuilderEntryHiddenForStage"
+  | "builderFailureDiagnosticAvailable"
+  | "builderFailureStage"
+  | "builderFailureCode"
+  | "builderEmitAttempted"
+  | "builderExpectedArtifactPathHash"
+  | "builderExpectedArtifactExists"
+  | "builderOutputsSummaryCount"
+  | "builderSupabaseMirrorResult"
+  | "builderCompletionReconciliationAction"
 > {
   const latestSurfaceEvent = findLast(
     events,
@@ -4649,6 +4676,15 @@ function buildBuilderSurfaceMetrics(events: NormalizedVoiceCaptureEvent[]): Pick
     completedBuilderEntryPlacement: asCompletedBuilderEntryPlacement(asString(payload?.completedBuilderEntryPlacement)),
     completedBuilderEntryOverlapsControls: asBoolean(payload?.completedBuilderEntryOverlapsControls),
     completedBuilderEntryHiddenForStage: asBoolean(payload?.completedBuilderEntryHiddenForStage) ?? false,
+    builderFailureDiagnosticAvailable: asBoolean(payload?.builderFailureDiagnosticAvailable) ?? false,
+    builderFailureStage: asString(payload?.builderFailureStage),
+    builderFailureCode: asString(payload?.builderFailureCode),
+    builderEmitAttempted: asBoolean(payload?.builderEmitAttempted),
+    builderExpectedArtifactPathHash: asString(payload?.builderExpectedArtifactPathHash),
+    builderExpectedArtifactExists: asBoolean(payload?.builderExpectedArtifactExists),
+    builderOutputsSummaryCount: asFiniteNumber(payload?.builderOutputsSummaryCount),
+    builderSupabaseMirrorResult: asString(payload?.builderSupabaseMirrorResult),
+    builderCompletionReconciliationAction: asString(payload?.builderCompletionReconciliationAction),
   }
 }
 
@@ -4722,6 +4758,24 @@ function buildBuilderMetrics(events: NormalizedVoiceCaptureEvent[], nowMs: numbe
     stuck,
     stuckReason,
     ...surfaceMetrics,
+    builderFailureDiagnosticAvailable: asBoolean(payload?.builderFailureDiagnosticAvailable)
+      ?? surfaceMetrics.builderFailureDiagnosticAvailable,
+    builderFailureStage: asString(payload?.builderFailureStage)
+      ?? surfaceMetrics.builderFailureStage,
+    builderFailureCode: asString(payload?.builderFailureCode)
+      ?? surfaceMetrics.builderFailureCode,
+    builderEmitAttempted: asBoolean(payload?.builderEmitAttempted)
+      ?? surfaceMetrics.builderEmitAttempted,
+    builderExpectedArtifactPathHash: asString(payload?.builderExpectedArtifactPathHash)
+      ?? surfaceMetrics.builderExpectedArtifactPathHash,
+    builderExpectedArtifactExists: asBoolean(payload?.builderExpectedArtifactExists)
+      ?? surfaceMetrics.builderExpectedArtifactExists,
+    builderOutputsSummaryCount: asFiniteNumber(payload?.builderOutputsSummaryCount)
+      ?? surfaceMetrics.builderOutputsSummaryCount,
+    builderSupabaseMirrorResult: asString(payload?.builderSupabaseMirrorResult)
+      ?? surfaceMetrics.builderSupabaseMirrorResult,
+    builderCompletionReconciliationAction: asString(payload?.builderCompletionReconciliationAction)
+      ?? surfaceMetrics.builderCompletionReconciliationAction,
   }
 }
 
@@ -5184,6 +5238,15 @@ export function buildVoiceTelemetrySummary(metrics: VoiceDeveloperMetrics): Voic
     completedBuilderEntryPlacement: metrics.builder.completedBuilderEntryPlacement,
     completedBuilderEntryOverlapsControls: metrics.builder.completedBuilderEntryOverlapsControls,
     completedBuilderEntryHiddenForStage: metrics.builder.completedBuilderEntryHiddenForStage,
+    builderFailureDiagnosticAvailable: metrics.builder.builderFailureDiagnosticAvailable,
+    builderFailureStage: metrics.builder.builderFailureStage,
+    builderFailureCode: metrics.builder.builderFailureCode,
+    builderEmitAttempted: metrics.builder.builderEmitAttempted,
+    builderExpectedArtifactPathHash: metrics.builder.builderExpectedArtifactPathHash,
+    builderExpectedArtifactExists: metrics.builder.builderExpectedArtifactExists,
+    builderOutputsSummaryCount: metrics.builder.builderOutputsSummaryCount,
+    builderSupabaseMirrorResult: metrics.builder.builderSupabaseMirrorResult,
+    builderCompletionReconciliationAction: metrics.builder.builderCompletionReconciliationAction,
   }
 }
 

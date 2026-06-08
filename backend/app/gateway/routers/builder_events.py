@@ -46,6 +46,7 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "fallback_reason",
     "error_message",
     "trace_id",
+    "builder_failure_diagnostics",
 )
 
 
@@ -80,6 +81,7 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "summary",
         "user_next_action",
         "error_message",
+        "builder_failure_diagnostics",
         "completed_at",
         "source",
     )
@@ -205,6 +207,7 @@ class BuilderCompletionEvent(BaseModel):
     summary: str | None = None
     user_next_action: str | None = None
     error_message: str | None = None
+    builder_failure_diagnostics: dict[str, Any] | None = None
     completed_at: str | None = None
     source: str | None = Field(None, description="Origin: subagent_executor | async_subagent_monitor")
     user_id: str | None = Field(

@@ -102,12 +102,35 @@ function deriveBody(event: BuilderCompletionEventV1): string | null {
     return event.summary || event.user_next_action || null;
   }
   if (event.status === 'error') {
-    return event.error_message || FAILURE_BODY;
+    return event.error_message || diagnosticFailureBody(event) || FAILURE_BODY;
   }
   if (event.status === 'timeout') {
     return TIMEOUT_BODY;
   }
   return CANCELLED_BODY;
+}
+
+function diagnosticFailureBody(event: BuilderCompletionEventV1): string | null {
+  const code = event.builder_failure_diagnostics?.failure_code;
+  switch (code) {
+    case 'artifact_file_missing':
+    case 'html_artifact_missing':
+      return 'Builder failed: artifact file was missing.';
+    case 'supporting_file_missing':
+      return 'Builder failed: a supporting file was missing.';
+    case 'builder_completed_without_deliverable':
+      return 'Builder finished without a deliverable artifact.';
+    case 'html_invalid_artifact_extension':
+      return 'Builder rejected HTML output because it was not a standalone .html file.';
+    case 'html_markdown_fence':
+      return 'Builder rejected HTML output because it was wrapped in Markdown fences.';
+    case 'html_escaped_as_text':
+      return 'Builder rejected HTML output because HTML was escaped as text.';
+    case 'html_missing_standalone_structure':
+      return 'Builder rejected HTML output because it was not a standalone HTML document.';
+    default:
+      return event.builder_failure_diagnostics?.failure_reason ?? null;
+  }
 }
 
 function artifactExtension(event: BuilderCompletionEventV1): string {

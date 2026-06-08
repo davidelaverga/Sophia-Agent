@@ -65,7 +65,9 @@ def test_maybe_mirror_skips_when_feature_flag_off(monkeypatch, tmp_path) -> None
     file_path = outputs_dir / "note.md"
     file_path.write_text("hello")
     # Should not raise even though Supabase is unconfigured
-    supabase_mirror.maybe_mirror_file(str(file_path), "thread-1", str(outputs_dir))
+    result = supabase_mirror.maybe_mirror_file(str(file_path), "thread-1", str(outputs_dir))
+
+    assert result == "not_configured"
 
 
 def test_maybe_mirror_uploads_file_when_enabled(monkeypatch, tmp_path) -> None:
@@ -91,11 +93,12 @@ def test_maybe_mirror_uploads_file_when_enabled(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(supabase_artifact_store, "upload_artifact", fake_upload_artifact)
 
-    supabase_mirror.maybe_mirror_file(str(file_path), "thread-1", str(outputs_dir))
+    result = supabase_mirror.maybe_mirror_file(str(file_path), "thread-1", str(outputs_dir))
 
     assert captured["thread_id"] == "thread-1"
     assert captured["filename"] == "report.md"
     assert captured["content"] == b"build output"
+    assert result == "uploaded"
 
 
 def test_maybe_mirror_skips_invalid_pptx_placeholder(monkeypatch, tmp_path) -> None:
@@ -113,7 +116,9 @@ def test_maybe_mirror_skips_invalid_pptx_placeholder(monkeypatch, tmp_path) -> N
     upload_calls: list[dict[str, object]] = []
     monkeypatch.setattr(supabase_artifact_store, "upload_artifact", lambda **kw: upload_calls.append(kw))
 
-    supabase_mirror.maybe_mirror_file(str(file_path), "thread-1", str(outputs_dir))
+    result = supabase_mirror.maybe_mirror_file(str(file_path), "thread-1", str(outputs_dir))
+
+    assert result == "skipped"
 
     assert upload_calls == []
 
@@ -298,6 +303,7 @@ def test_maybe_mirror_logs_and_continues_on_upload_error(monkeypatch, tmp_path, 
     import logging
 
     with caplog.at_level(logging.WARNING, logger=supabase_mirror.logger.name):
-        supabase_mirror.maybe_mirror_file(str(file_path), "thread-1", str(outputs_dir))
+        result = supabase_mirror.maybe_mirror_file(str(file_path), "thread-1", str(outputs_dir))
 
     assert "Mirror upload failed" in caplog.text
+    assert result == "failed_best_effort"

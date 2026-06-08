@@ -76,7 +76,7 @@ def maybe_mirror_file(
     host_path: str,
     thread_id: str,
     outputs_host_path: str | None,
-) -> None:
+) -> str:
     """Upload a single file to Supabase if it lives under the outputs directory.
 
     Uses SHA-256 hash deduplication so unchanged files are not re-uploaded.
@@ -89,35 +89,35 @@ def maybe_mirror_file(
     are uploaded regardless of the incremental mirror setting.
     """
     if not supabase_artifact_store.is_configured():
-        return
+        return "not_configured"
     if not thread_id or not outputs_host_path:
-        return
+        return "skipped"
 
     resolved = _resolved_mirror_paths(host_path, outputs_host_path)
     if resolved is None:
-        return
+        return "skipped"
     host_file, outputs_root = resolved
 
     # Only mirror files inside the outputs directory
     if not _is_output_file(host_file, outputs_root):
-        return
+        return "skipped"
 
     try:
         content = host_file.read_bytes()
     except OSError as exc:
         logger.warning("Mirror skipped; read error path=%s error=%s", host_file, exc)
-        return
+        return "failed_best_effort"
 
     relative = host_file.relative_to(outputs_root).as_posix()
     if not _valid_mirror_artifact(thread_id, relative, host_file, content):
-        return
+        return "skipped"
 
     file_hash = hashlib.sha256(content).hexdigest()
     cache_key = (thread_id, relative)
 
     if _MIRROR_HASH_CACHE.get(cache_key) == file_hash:
         logger.debug("Mirror dedup; unchanged file thread_id=%s path=%s", thread_id, relative)
-        return
+        return "uploaded"
 
     try:
         supabase_artifact_store.upload_artifact(
@@ -133,6 +133,7 @@ def maybe_mirror_file(
             len(content),
             file_hash,
         )
+        return "uploaded"
     except Exception as exc:  # noqa: BLE001 — best-effort
         logger.warning(
             "Mirror upload failed; continuing without remote copy thread_id=%s path=%s error=%s",
@@ -140,6 +141,7 @@ def maybe_mirror_file(
             relative,
             exc,
         )
+        return "failed_best_effort"
 
 
 def _valid_mirror_artifact(thread_id: str, relative: str, host_file: Path, content: bytes) -> bool:

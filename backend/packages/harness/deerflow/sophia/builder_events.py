@@ -36,6 +36,11 @@ from typing import Any
 
 import httpx
 
+from deerflow.sophia.builder_failure_diagnostics import (
+    build_builder_failure_diagnostics,
+    merge_builder_failure_diagnostics,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -462,6 +467,35 @@ def _artifact_signed_url(
     )
 
 
+def _artifact_signed_url_with_result(
+    *,
+    parent_thread_id: Any,
+    builder_thread_id: str | None,
+    artifact_storage_path: str | None,
+    artifact_filename: str | None,
+) -> tuple[str | None, str]:
+    signing_thread_id = parent_thread_id or builder_thread_id
+    signing_path = artifact_storage_path or artifact_filename
+    if not signing_thread_id or not signing_path:
+        return None, "skipped"
+    url = _artifact_signed_url(
+        parent_thread_id=parent_thread_id,
+        builder_thread_id=builder_thread_id,
+        artifact_storage_path=artifact_storage_path,
+        artifact_filename=artifact_filename,
+    )
+    if url:
+        return url, "signed_url_created"
+    try:
+        from deerflow.sophia.storage import supabase_artifact_store
+
+        if not supabase_artifact_store.is_configured():
+            return None, "not_configured"
+    except Exception:  # pragma: no cover - defensive only
+        logger.debug("Failed to inspect Supabase signing config", exc_info=True)
+    return None, "signed_url_failed"
+
+
 def _coerce_phantom_success(
     *,
     mapped_status: str,
@@ -490,6 +524,84 @@ def _coerce_phantom_success(
         "Builder finished but couldn't produce a deliverable. "
         "Want me to try again?"
     )
+
+
+def _has_deliverable(artifact_path: str | None, artifact_url: str | None) -> bool:
+    return bool(
+        (isinstance(artifact_path, str) and artifact_path.strip())
+        or (isinstance(artifact_url, str) and artifact_url.strip())
+    )
+
+
+def _combined_supabase_result(current: Any, signed_url_result: str) -> str:
+    current_result = current if isinstance(current, str) and current else None
+    if current_result == "failed_best_effort":
+        return current_result
+    if signed_url_result in {"signed_url_failed", "signed_url_created"}:
+        return signed_url_result
+    return current_result or signed_url_result
+
+
+def _completion_failure_diagnostics(
+    *,
+    state: dict[str, Any],
+    runtime: Any,
+    artifact: dict[str, Any],
+    mapped_status: str,
+    artifact_path: str | None,
+    artifact_url: str | None,
+    signed_url_result: str,
+) -> dict[str, Any] | None:
+    current = artifact.get("builder_failure_diagnostics")
+    current_diag = current if isinstance(current, dict) else None
+    signed_url_created = signed_url_result == "signed_url_created"
+    supabase_result = _combined_supabase_result(
+        current_diag.get("supabase_mirror_result") if isinstance(current_diag, dict) else None,
+        signed_url_result,
+    )
+    if current_diag:
+        return merge_builder_failure_diagnostics(
+            current_diag,
+            signed_url_created=signed_url_created,
+            supabase_mirror_result=supabase_result,
+            completion_webhook_attempted=True,
+            completion_webhook_result="scheduled",
+        )
+    if mapped_status == "error" and not _has_deliverable(artifact_path, artifact_url):
+        return build_builder_failure_diagnostics(
+            state=state,
+            runtime=runtime,
+            artifact_args=artifact,
+            failure_stage="completion_reconciliation",
+            failure_reason="Builder finished without a deliverable artifact.",
+            failure_code="builder_completed_without_deliverable",
+            emit_attempted=False,
+            emit_tool_call_seen=None,
+            signed_url_created=signed_url_created,
+            supabase_mirror_result=supabase_result,
+            completion_webhook_attempted=True,
+            completion_webhook_result="scheduled",
+            canvas_reconciliation_action="coerced_success_to_failed_no_deliverable",
+        )
+    if artifact_path and signed_url_result in {"signed_url_failed", "not_configured"}:
+        return build_builder_failure_diagnostics(
+            state=state,
+            runtime=runtime,
+            artifact_args=artifact,
+            failure_stage="storage_mirror",
+            failure_reason=(
+                "Supabase signing did not create a URL, but the local artifact path remains available."
+            ),
+            failure_code=None,
+            emit_attempted=True,
+            emit_tool_call_seen=True,
+            include_outputs_summary=False,
+            signed_url_created=signed_url_created,
+            supabase_mirror_result=supabase_result,
+            completion_webhook_attempted=True,
+            completion_webhook_result="scheduled",
+        )
+    return None
 
 
 def _artifact_completion_fields(
@@ -592,7 +704,7 @@ def build_completion_payload_from_artifact(
     )
     artifact_storage_path = _relative_output_artifact_path(artifact_path)
     artifact_filename = _artifact_filename(artifact_path)
-    artifact_url = _artifact_signed_url(
+    artifact_url, signed_url_result = _artifact_signed_url_with_result(
         parent_thread_id=parent_thread_id,
         builder_thread_id=builder_thread_id,
         artifact_storage_path=artifact_storage_path,
@@ -611,8 +723,17 @@ def build_completion_payload_from_artifact(
         builder_thread_id=builder_thread_id,
         error_message=error_message,
     )
+    failure_diagnostics = _completion_failure_diagnostics(
+        state=state_dict,
+        runtime=runtime,
+        artifact=artifact_dict,
+        mapped_status=mapped_status,
+        artifact_path=artifact_path,
+        artifact_url=artifact_url,
+        signed_url_result=signed_url_result,
+    )
 
-    return {
+    payload = {
         # ``thread_id`` in the webhook payload is the COMPANION thread (where
         # the Telegram chat lives) — this matches the legacy contract that
         # ``app/channels/telegram.py:_on_builder_completion`` keys off.
@@ -644,6 +765,9 @@ def build_completion_payload_from_artifact(
         "source": "builder_artifact_middleware",
         "user_id": user_id,
     }
+    if failure_diagnostics:
+        payload["builder_failure_diagnostics"] = failure_diagnostics
+    return payload
 
 
 def fire_completion_webhook_from_artifact(

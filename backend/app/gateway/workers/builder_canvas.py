@@ -18,6 +18,8 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
+from deerflow.sophia.builder_failure_diagnostics import merge_builder_failure_diagnostics
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_TERMINAL_TTL_SECONDS = 15 * 60
@@ -274,12 +276,34 @@ def _normalize_completion_payload(payload: dict[str, Any]) -> dict[str, Any]:
             payload.get("task_id"),
             payload.get("run_id"),
         )
+        diagnostics = _missing_deliverable_diagnostics(payload)
         return {
             **payload,
             "status": "error",
             "error_message": payload.get("error_message") or _MISSING_DELIVERABLE_ERROR,
+            "builder_failure_diagnostics": diagnostics,
         }
     return payload
+
+
+def _missing_deliverable_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
+    current = payload.get("builder_failure_diagnostics")
+    current_diag = current if isinstance(current, dict) else None
+    updates: dict[str, Any] = {
+        "task_id": payload.get("task_id"),
+        "run_id": payload.get("run_id"),
+        "thread_id": payload.get("task_id"),
+        "parent_thread_id": payload.get("thread_id"),
+        "trace_id": payload.get("trace_id"),
+        "task_type": payload.get("task_type"),
+        "failure_stage": "completion_reconciliation",
+        "failure_reason": _MISSING_DELIVERABLE_ERROR,
+        "failure_code": "builder_completed_without_deliverable",
+        "canvas_reconciliation_action": "coerced_success_to_failed_no_deliverable",
+    }
+    if not current_diag or "emit_attempted" not in current_diag:
+        updates["emit_attempted"] = False
+    return merge_builder_failure_diagnostics(current_diag, **updates)
 
 
 class BuilderCanvasWorker:

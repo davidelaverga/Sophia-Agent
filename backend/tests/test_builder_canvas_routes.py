@@ -333,6 +333,12 @@ async def test_snapshot_downgrades_native_success_without_deliverable(app: FastA
     assert active_task["status"] == "failed"
     assert active_task["completion"]["status"] == "error"
     assert active_task["completion"]["error_message"] == "Builder finished without a deliverable artifact."
+    diagnostic = active_task["completion"]["builder_failure_diagnostics"]
+    assert diagnostic["task_id"] == "task-1"
+    assert diagnostic["run_id"] == "run-1"
+    assert diagnostic["failure_stage"] == "completion_reconciliation"
+    assert diagnostic["failure_code"] == "builder_completed_without_deliverable"
+    assert diagnostic["canvas_reconciliation_action"] == "coerced_success_to_failed_no_deliverable"
 
 
 @pytest.mark.anyio

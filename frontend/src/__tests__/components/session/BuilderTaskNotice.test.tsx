@@ -4,6 +4,22 @@ import { describe, expect, it, vi } from 'vitest';
 import { BuilderTaskNotice } from '../../../app/components/session/BuilderTaskNotice';
 
 describe('BuilderTaskNotice', () => {
+  it('renders a specific safe builder failure reason', () => {
+    render(
+      <BuilderTaskNotice
+        task={{
+          phase: 'failed',
+          detail: 'Builder failed: artifact file was missing.',
+          builderFailureDiagnosticAvailable: true,
+          builderFailureCode: 'artifact_file_missing',
+        }}
+      />,
+    );
+
+    expect(screen.getByText('Failed')).toBeInTheDocument();
+    expect(screen.getByText('Builder failed: artifact file was missing.')).toBeInTheDocument();
+  });
+
   it('renders determinate progress when step counts are available', () => {
     render(
       <BuilderTaskNotice

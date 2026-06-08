@@ -245,6 +245,26 @@ describe("BuilderCompletionCard — error variant", () => {
     expect(screen.queryByRole("link", { name: /open artifact in new tab/i })).toBeNull()
   })
 
+  it("surfaces a safe diagnostic reason when no error_message is provided", () => {
+    const event: BuilderCompletionEventV1 = {
+      ...ERROR_EVENT,
+      error_message: null,
+      builder_failure_diagnostics: {
+        schema: "builder_failure_diagnostics_v1",
+        failure_code: "html_invalid_artifact_extension",
+        failure_stage: "emit_rejected",
+        failure_reason: "Builder rejected HTML output because it was not a standalone .html file.",
+        emit_attempted: true,
+        raw_content_excluded: true,
+        raw_artifact_text_excluded: true,
+        raw_frame_excluded: true,
+        secrets_excluded: true,
+      },
+    }
+    render(<BuilderCompletionCard event={event} />)
+    expect(screen.getByText("Builder rejected HTML output because it was not a standalone .html file.")).toBeTruthy()
+  })
+
   it("surfaces a custom error_message when provided", () => {
     const event: BuilderCompletionEventV1 = {
       ...ERROR_EVENT,

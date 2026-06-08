@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from app.gateway.auth import require_authorized_user_scope
 from app.gateway.workers.builder_canvas import DEFAULT_TERMINAL_TTL_SECONDS, get_builder_canvas_worker
+from deerflow.sophia.builder_failure_diagnostics import merge_builder_failure_diagnostics
 from deerflow.sophia.session_store import SessionStore
 
 router = APIRouter(
@@ -513,7 +514,16 @@ def _completion_from_terminal_task(
     artifact_url = _completion_artifact_url(parent_thread_id, artifact_path, artifact)
     artifact_filename = artifact_path.rsplit("/", 1)[-1] if artifact_path else None
     fallback = _completion_fallback_metadata(task, artifact, artifact_path)
-    return {
+    diagnostics = _completion_failure_diagnostics_from_task(
+        parent_thread_id,
+        task,
+        artifact,
+        status=status,
+        task_id=task_id,
+        run_id=run_id,
+        error_message_override=error_message_override,
+    )
+    completion = {
         "thread_id": parent_thread_id,
         "task_id": task_id,
         "run_id": run_id,
@@ -536,6 +546,40 @@ def _completion_from_terminal_task(
         "completed_at": _completion_completed_at(task),
         "source": "builder_canvas_snapshot",
     }
+    if diagnostics:
+        completion["builder_failure_diagnostics"] = diagnostics
+    return completion
+
+
+def _completion_failure_diagnostics_from_task(
+    parent_thread_id: str,
+    task: dict[str, Any],
+    artifact: dict[str, Any],
+    *,
+    status: str,
+    task_id: str,
+    run_id: str,
+    error_message_override: str | None,
+) -> dict[str, Any] | None:
+    current = artifact.get("builder_failure_diagnostics") or task.get("builder_failure_diagnostics")
+    current_diag = current if isinstance(current, dict) else None
+    if status == "failed" and error_message_override == _MISSING_DELIVERABLE_ERROR:
+        updates: dict[str, Any] = {
+            "task_id": task_id,
+            "run_id": run_id,
+            "thread_id": task_id,
+            "parent_thread_id": parent_thread_id,
+            "trace_id": task.get("trace_id"),
+            "task_type": task.get("task_type") or artifact.get("artifact_type"),
+            "failure_stage": "completion_reconciliation",
+            "failure_reason": _MISSING_DELIVERABLE_ERROR,
+            "failure_code": "builder_completed_without_deliverable",
+            "canvas_reconciliation_action": "coerced_success_to_failed_no_deliverable",
+        }
+        if not current_diag or "emit_attempted" not in current_diag:
+            updates["emit_attempted"] = False
+        return merge_builder_failure_diagnostics(current_diag, **updates)
+    return merge_builder_failure_diagnostics(current_diag) if current_diag else None
 
 
 def _completion_fallback_metadata(

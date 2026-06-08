@@ -1,3 +1,5 @@
+import type { BuilderFailureDiagnosticsV1 } from './builder-completion';
+
 export type BuilderTaskPhaseV1 = 'running' | 'completed' | 'failed' | 'timed_out' | 'cancelled';
 
 export type BuilderTaskProgressSourceV1 = 'todos' | 'messages' | 'iterations' | 'none';
@@ -83,4 +85,14 @@ export type BuilderTaskV1 = {
   pollCount?: number;
   activityLog?: BuilderActivityEntryV1[];
   canvasStreamed?: boolean;
+  builderFailureDiagnostics?: BuilderFailureDiagnosticsV1 | null;
+  builderFailureDiagnosticAvailable?: boolean;
+  builderFailureStage?: string | null;
+  builderFailureCode?: string | null;
+  builderEmitAttempted?: boolean | null;
+  builderExpectedArtifactPathHash?: string | null;
+  builderExpectedArtifactExists?: boolean | null;
+  builderOutputsSummaryCount?: number;
+  builderSupabaseMirrorResult?: string | null;
+  builderCompletionReconciliationAction?: string | null;
 };

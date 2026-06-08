@@ -176,6 +176,11 @@ async def test_success_completion_without_deliverable_is_coerced_to_failure() ->
     assert events[-1]["status"] == "failed"
     assert events[-1]["completion"]["status"] == "error"
     assert events[-1]["completion"]["error_message"] == "Builder finished without a deliverable artifact."
+    diagnostic = events[-1]["completion"]["builder_failure_diagnostics"]
+    assert diagnostic["failure_stage"] == "completion_reconciliation"
+    assert diagnostic["failure_code"] == "builder_completed_without_deliverable"
+    assert diagnostic["emit_attempted"] is False
+    assert diagnostic["canvas_reconciliation_action"] == "coerced_success_to_failed_no_deliverable"
 
 
 @pytest.mark.anyio

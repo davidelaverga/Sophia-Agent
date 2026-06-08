@@ -14,7 +14,7 @@ import { debugLog } from '../lib/debug-logger';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
 import type { BuilderArtifactV1 } from '../types/builder-artifact';
 import type { BuilderCanvasActivity } from '../types/builder-canvas';
-import type { BuilderCompletionEventV1 } from '../types/builder-completion';
+import type { BuilderCompletionEventV1, BuilderFailureDiagnosticsV1 } from '../types/builder-completion';
 import type { BuilderTaskV1 } from '../types/builder-task';
 import type { InterruptPayload, RitualArtifacts } from '../types/session';
 import type { SophiaMessageMetadata } from '../types/sophia-ui-message';
@@ -71,6 +71,79 @@ function canvasActivityDetail(activity: BuilderCanvasActivity | undefined): stri
     return `${activity.source_title} · ${activity.source_domain}`;
   }
   return activity.detail ?? activity.source_title ?? activity.source_domain ?? undefined;
+}
+
+function builderFailureDetail(diagnostic?: BuilderFailureDiagnosticsV1 | null): string | undefined {
+  if (!diagnostic?.failure_code) return undefined;
+  switch (diagnostic.failure_code) {
+    case 'artifact_file_missing':
+    case 'html_artifact_missing':
+      return 'Builder failed: artifact file was missing.';
+    case 'supporting_file_missing':
+      return 'Builder failed: a supporting file was missing.';
+    case 'builder_completed_without_deliverable':
+      return 'Builder finished without a deliverable artifact.';
+    case 'html_invalid_artifact_extension':
+      return 'Builder rejected HTML output because it was not a standalone .html file.';
+    case 'html_markdown_fence':
+      return 'Builder rejected HTML output because it was wrapped in Markdown fences.';
+    case 'html_escaped_as_text':
+      return 'Builder rejected HTML output because HTML was escaped as text.';
+    case 'html_missing_standalone_structure':
+      return 'Builder rejected HTML output because it was not a standalone HTML document.';
+    case 'artifact_path_outside_outputs':
+      return 'Builder rejected the artifact path because it was outside outputs.';
+    case 'artifact_path_traversal':
+      return 'Builder rejected the artifact path because it contained path traversal.';
+    case 'pdf_integrity_failed':
+      return 'Builder rejected PDF output because integrity validation failed.';
+    case 'pptx_integrity_failed':
+      return 'Builder rejected PPTX output because integrity validation failed.';
+    default:
+      return diagnostic.failure_reason ?? undefined;
+  }
+}
+
+function hashDiagnosticPath(path?: string | null): string | null {
+  if (!path) return null;
+  let hash = 2166136261;
+  for (let index = 0; index < path.length; index += 1) {
+    hash ^= path.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function builderFailureTelemetryFields(
+  diagnostic?: BuilderFailureDiagnosticsV1 | null,
+): Partial<BuilderTaskV1> {
+  if (!diagnostic) {
+    return {
+      builderFailureDiagnostics: null,
+      builderFailureDiagnosticAvailable: false,
+      builderFailureStage: null,
+      builderFailureCode: null,
+      builderEmitAttempted: null,
+      builderExpectedArtifactPathHash: null,
+      builderExpectedArtifactExists: null,
+      builderOutputsSummaryCount: 0,
+      builderSupabaseMirrorResult: null,
+      builderCompletionReconciliationAction: null,
+    };
+  }
+  const expectedPath = diagnostic.artifact_target_path ?? diagnostic.target_path ?? null;
+  return {
+    builderFailureDiagnostics: diagnostic,
+    builderFailureDiagnosticAvailable: true,
+    builderFailureStage: diagnostic.failure_stage ?? null,
+    builderFailureCode: diagnostic.failure_code ?? null,
+    builderEmitAttempted: diagnostic.emit_attempted ?? null,
+    builderExpectedArtifactPathHash: hashDiagnosticPath(expectedPath),
+    builderExpectedArtifactExists: diagnostic.artifact_target_exists ?? null,
+    builderOutputsSummaryCount: diagnostic.outputs_summary?.length ?? 0,
+    builderSupabaseMirrorResult: diagnostic.supabase_mirror_result ?? null,
+    builderCompletionReconciliationAction: diagnostic.canvas_reconciliation_action ?? null,
+  };
 }
 
 export function useSessionRouteExperience({
@@ -221,6 +294,9 @@ export function useSessionRouteExperience({
         ...(event.activity?.source_title ? { sourceTitle: event.activity.source_title } : {}),
         status: 'done' as const,
       }));
+    const failureDiagnostic = active.completion?.builder_failure_diagnostics ?? null;
+    const failureDetail = phase === 'failed' ? builderFailureDetail(failureDiagnostic) : undefined;
+    const failureTelemetry = builderFailureTelemetryFields(failureDiagnostic);
     setBuilderTask((current) => {
       const sameRun = current?.taskId === active.task_id && current.runId === active.run_id;
       return {
@@ -228,9 +304,13 @@ export function useSessionRouteExperience({
         phase,
         taskId: active.task_id,
         runId: active.run_id,
-        detail: active.latest_activity?.label ?? (sameRun ? current?.detail : undefined) ?? 'Creating plan',
+        detail: failureDetail
+          ?? active.latest_activity?.label
+          ?? (sameRun ? current?.detail : undefined)
+          ?? 'Creating plan',
         ...(activityLog.length ? { activityLog } : {}),
         canvasStreamed: true,
+        ...failureTelemetry,
       };
     });
   }, [builderCanvas.activeTask, builderCanvas.recentEvents]);

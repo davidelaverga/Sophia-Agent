@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { SophiaCaptureSnapshot } from '../../app/lib/session-capture';
 import {
   buildVoiceDeveloperMetrics,
+  buildVoiceTelemetrySummary,
   type VoiceCaptureEvent,
 } from '../../app/lib/voice-runtime-metrics';
 
@@ -1676,6 +1677,46 @@ describe('buildVoiceDeveloperMetrics', () => {
     );
     expect(metrics.timeline.some((item) => item.label === 'Builder stalled')).toBe(true);
     expect(metrics.health.title).toBe('Builder appears stalled');
+  });
+
+  it('includes safe builder failure diagnostic fields in telemetry summary', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'builder',
+        name: 'task_failed',
+        payload: {
+          phase: 'failed',
+          taskId: 'builder-1',
+          detail: 'Builder failed: artifact file was missing.',
+          builderFailureDiagnosticAvailable: true,
+          builderFailureStage: 'artifact_missing',
+          builderFailureCode: 'artifact_file_missing',
+          builderEmitAttempted: true,
+          builderExpectedArtifactPathHash: '7d8f98a1',
+          builderExpectedArtifactExists: false,
+          builderOutputsSummaryCount: 1,
+          builderSupabaseMirrorResult: 'skipped',
+          builderCompletionReconciliationAction: null,
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'thinking',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-04-07T12:00:10.000Z'),
+    });
+    const summary = buildVoiceTelemetrySummary(metrics);
+
+    expect(metrics.builder.builderFailureDiagnosticAvailable).toBe(true);
+    expect(metrics.builder.builderFailureCode).toBe('artifact_file_missing');
+    expect(summary.builderExpectedArtifactPathHash).toBe('7d8f98a1');
+    expect(summary.builderOutputsSummaryCount).toBe(1);
+    expect(JSON.stringify(summary)).not.toContain('<!doctype html>');
+    expect(JSON.stringify(summary)).not.toContain('signed-url');
   });
 
   it('normalizes legacy completed artifact entry telemetry to the canonical completed builder surface', () => {

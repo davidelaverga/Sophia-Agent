@@ -206,6 +206,32 @@ def test_completion_payload_preserves_artifact_path_when_signed_url_missing():
     assert payload["artifact_url"] is None
 
 
+def test_completion_payload_records_signed_url_failure_without_dropping_artifact_path():
+    runtime = _make_runtime(
+        builder_thread_id="t-build",
+        builder_run_id="r-1",
+        parent_thread_id="t-parent",
+    )
+    state = _make_state(task_brief="Build a brief about X", task_type="document")
+
+    with (
+        patch.object(builder_events, "_signed_artifact_url", return_value=None),
+        patch("deerflow.sophia.storage.supabase_artifact_store.is_configured", return_value=True),
+    ):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    assert payload["status"] == "success"
+    assert payload["artifact_path"] == "mnt/user-data/outputs/foo.md"
+    assert payload["artifact_url"] is None
+    diagnostic = payload["builder_failure_diagnostics"]
+    assert diagnostic["failure_stage"] == "storage_mirror"
+    assert diagnostic["supabase_mirror_result"] == "signed_url_failed"
+    assert diagnostic["signed_url_created"] is False
+    assert "https://" not in repr(diagnostic)
+
+
 def test_completion_payload_preserves_fallback_metadata():
     runtime = _make_runtime(
         builder_thread_id="t-build",
@@ -294,11 +320,17 @@ def test_builder_completion_event_pydantic_accepts_run_id():
         task_id="t-build",
         run_id="r-NEW",
         status="success",
+        builder_failure_diagnostics={
+            "schema": "builder_failure_diagnostics_v1",
+            "failure_code": "builder_completed_without_deliverable",
+            "emit_attempted": False,
+        },
     )
     # The field round-trips through ``model_dump`` (what the router
     # uses to forward the payload).
     dumped = parsed.model_dump()
     assert dumped["run_id"] == "r-NEW"
+    assert dumped["builder_failure_diagnostics"]["failure_code"] == "builder_completed_without_deliverable"
     # Back-compat: run_id is optional. Pre-4I in-flight payloads
     # without the field still parse.
     legacy = BuilderCompletionEvent(thread_id="t-p", task_id="t-b", status="success")
@@ -318,6 +350,10 @@ def test_phantom_success_coerces_to_error():
     assert payload["status"] == "error"
     assert payload["error_message"] is not None
     assert "try again" in payload["error_message"].lower()
+    diagnostic = payload["builder_failure_diagnostics"]
+    assert diagnostic["failure_stage"] == "completion_reconciliation"
+    assert diagnostic["failure_code"] == "builder_completed_without_deliverable"
+    assert diagnostic["supabase_mirror_result"] != "signed_url_failed"
 
 
 def test_phantom_success_threshold_includes_point_three_confidence():

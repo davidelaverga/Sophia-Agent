@@ -76,6 +76,21 @@ def test_explicit_html_artifact_rejects_markdown_fallback(tmp_path: Path) -> Non
     assert BuilderArtifactMiddleware._artifact_files_exist(args, state, _runtime()) is False
 
 
+def test_html_markdown_emit_diagnostic_uses_invalid_extension_code(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "sophia-workspace-demo.md").write_text("# Demo\n\nMarkdown fallback.", encoding="utf-8")
+    state = _state_with_html_target(outputs)
+    args = {"artifact_path": "/mnt/user-data/outputs/sophia-workspace-demo.md", "artifact_type": "document"}
+
+    diagnostic = BuilderArtifactMiddleware._emit_rejection_diagnostics(args, state, _runtime())
+
+    assert diagnostic["failure_code"] == "html_invalid_artifact_extension"
+    assert diagnostic["failure_stage"] == "emit_rejected"
+    assert diagnostic["emit_attempted"] is True
+    assert "Markdown fallback" not in repr(diagnostic)
+
+
 def test_explicit_html_artifact_rejects_code_fenced_html(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
@@ -84,6 +99,52 @@ def test_explicit_html_artifact_rejects_code_fenced_html(tmp_path: Path) -> None
     args = {"artifact_path": "/mnt/user-data/outputs/sophia-workspace-demo.html", "artifact_type": "html"}
 
     assert BuilderArtifactMiddleware._artifact_files_exist(args, state, _runtime()) is False
+
+
+def test_html_fenced_emit_diagnostic_uses_markdown_fence_code(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "sophia-workspace-demo.html").write_text(f"```html\n{VALID_HTML}\n```", encoding="utf-8")
+    state = _state_with_html_target(outputs)
+    args = {"artifact_path": "/mnt/user-data/outputs/sophia-workspace-demo.html", "artifact_type": "html"}
+
+    diagnostic = BuilderArtifactMiddleware._emit_rejection_diagnostics(args, state, _runtime())
+
+    assert diagnostic["failure_code"] == "html_markdown_fence"
+    assert diagnostic["sanitized_emit_args"]["artifact_path"] == "sophia-workspace-demo.html"
+    assert VALID_HTML not in repr(diagnostic)
+
+
+def test_missing_html_emit_diagnostic_uses_artifact_file_missing_code(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    state = _state_with_html_target(outputs)
+    args = {"artifact_path": "/mnt/user-data/outputs/sophia-workspace-demo.html", "artifact_type": "html"}
+
+    diagnostic = BuilderArtifactMiddleware._emit_rejection_diagnostics(args, state, _runtime())
+
+    assert diagnostic["failure_code"] == "artifact_file_missing"
+    assert diagnostic["artifact_target_exists"] is False
+
+
+def test_missing_supporting_file_emit_diagnostic_uses_supporting_file_code(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "sophia-workspace-demo.html").write_text(VALID_HTML, encoding="utf-8")
+    state = _state_with_html_target(outputs)
+    args = {
+        "artifact_path": "/mnt/user-data/outputs/sophia-workspace-demo.html",
+        "artifact_type": "html",
+        "supporting_files": ["/mnt/user-data/outputs/missing.css"],
+    }
+
+    diagnostic = BuilderArtifactMiddleware._emit_rejection_diagnostics(args, state, _runtime())
+
+    assert diagnostic["failure_code"] == "supporting_file_missing"
+    assert diagnostic["sanitized_emit_args"]["supporting_files"] == {
+        "count": 1,
+        "paths": ["missing.css"],
+    }
 
 
 def test_explicit_html_ceiling_fallback_promotes_valid_html(tmp_path: Path) -> None:

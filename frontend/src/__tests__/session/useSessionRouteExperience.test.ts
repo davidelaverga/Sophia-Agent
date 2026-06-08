@@ -601,6 +601,81 @@ describe('useSessionRouteExperience', () => {
     expect(getBuilderTaskStatusMock).not.toHaveBeenCalled();
   });
 
+  it('maps canvas failure diagnostics to safe task detail and telemetry fields', () => {
+    useBuilderCanvasMock.mockReturnValue({
+      activeTask: {
+        parent_thread_id: 'thread-1',
+        task_id: 'task-builder-1',
+        run_id: 'run-builder-1',
+        status: 'failed',
+        latest_activity: { kind: 'phase', phase: 'finalizing', label: 'Finalizing' },
+        completion: {
+          thread_id: 'thread-1',
+          task_id: 'task-builder-1',
+          run_id: 'run-builder-1',
+          status: 'error',
+          builder_failure_diagnostics: {
+            schema: 'builder_failure_diagnostics_v1',
+            failure_stage: 'emit_rejected',
+            failure_code: 'html_invalid_artifact_extension',
+            failure_reason: 'Builder rejected HTML output because it was not a standalone .html file.',
+            emit_attempted: true,
+            artifact_target_path: 'sophia-workspace-demo.html',
+            artifact_target_exists: false,
+            outputs_summary: [{ relative_path: 'sophia-workspace-demo.md', extension: 'md', size_bytes: 12, exists: true }],
+            supabase_mirror_result: 'skipped',
+            raw_content_excluded: true,
+            raw_artifact_text_excluded: true,
+            raw_frame_excluded: true,
+            secrets_excluded: true,
+          },
+        },
+      },
+      recentEvents: [],
+      completion: null,
+      reconnecting: false,
+    });
+
+    const { result } = renderHook(() =>
+      useSessionRouteExperience({
+        sessionId: 'session-1',
+        activeSessionId: 'session-1',
+        activeThreadId: 'thread-1',
+        chatRequestBody: { session_id: 'session-1' },
+        hasValidBackendSessionId: true,
+        backendSessionId: 'session-1',
+        userId: 'user-1',
+        artifacts: null,
+        storedBuilderArtifact: null,
+        storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
+        updateSession: vi.fn(),
+        showUsageLimitModal: vi.fn(),
+        recordConnectivityFailure: vi.fn(),
+        showToast: vi.fn(),
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        greetingAnchorId: 'greeting-1',
+        markOffline: vi.fn(),
+      })
+    );
+
+    expect(result.current.builderTask).toMatchObject({
+      phase: 'failed',
+      detail: 'Builder rejected HTML output because it was not a standalone .html file.',
+      builderFailureDiagnosticAvailable: true,
+      builderFailureStage: 'emit_rejected',
+      builderFailureCode: 'html_invalid_artifact_extension',
+      builderEmitAttempted: true,
+      builderExpectedArtifactExists: false,
+      builderOutputsSummaryCount: 1,
+      builderSupabaseMirrorResult: 'skipped',
+    });
+    expect(result.current.builderTask?.builderExpectedArtifactPathHash).toMatch(/^[0-9a-f]{8}$/);
+    expect(JSON.stringify(result.current.builderTask)).not.toContain('<!doctype html>');
+    expect(JSON.stringify(result.current.builderTask)).not.toContain('signed-url');
+  });
+
   it('does not let a dismissed run hide a later run for the same builder task', () => {
     let builderCanvasState: {
       activeTask: Record<string, unknown>;

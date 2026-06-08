@@ -212,6 +212,62 @@ async def test_internal_post_persists_terminal_builder_state(
 
 
 @pytest.mark.anyio
+async def test_internal_post_persists_builder_failure_diagnostics(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    fake_threads = MagicMock()
+
+    async def _update_state(thread_id: str, values: dict):
+        captured["thread_id"] = thread_id
+        captured["values"] = values
+
+    fake_threads.update_state = AsyncMock(side_effect=_update_state)
+    fake_client = MagicMock()
+    fake_client.threads = fake_threads
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+    diagnostic = {
+        "schema": "builder_failure_diagnostics_v1",
+        "task_id": "builder-task",
+        "run_id": "run-1",
+        "failure_stage": "completion_reconciliation",
+        "failure_code": "builder_completed_without_deliverable",
+        "failure_reason": "Builder finished without a deliverable artifact.",
+        "emit_attempted": False,
+        "raw_content_excluded": True,
+        "raw_artifact_text_excluded": True,
+        "raw_frame_excluded": True,
+        "secrets_excluded": True,
+    }
+
+    async with client:
+        response = await client.post(
+            "/internal/builder-events",
+            json={
+                "thread_id": "parent-thread",
+                "task_id": "builder-task",
+                "run_id": "run-1",
+                "status": "error",
+                "agent_name": "sophia_builder",
+                "task_type": "document",
+                "error_message": "Builder finished without a deliverable artifact.",
+                "builder_failure_diagnostics": diagnostic,
+            },
+        )
+
+    assert response.status_code == 202
+    task_update = captured["values"]["async_tasks"]["builder-task"]
+    assert task_update["run_id"] == "run-1"
+    assert task_update["builder_failure_diagnostics"]["failure_code"] == (
+        "builder_completed_without_deliverable"
+    )
+    assert task_update["builder_result"]["builder_failure_diagnostics"]["task_id"] == "builder-task"
+
+
+@pytest.mark.anyio
 async def test_internal_post_rejects_missing_required_fields(app: FastAPI, client: httpx.AsyncClient):
     async with client:
         response = await client.post(
