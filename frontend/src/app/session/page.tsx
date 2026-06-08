@@ -59,7 +59,7 @@ import {
   restoreArtifactCanvasOpenState,
   type ArtifactCanvasRestoreContext,
 } from '../lib/artifact-canvas-restore-state';
-import { detectArtifactRendererKind } from '../lib/artifact-renderers';
+import { detectArtifactRendererKind, type ArtifactRendererKind } from '../lib/artifact-renderers';
 import type { ArtifactReviewVoiceCommandRouter } from '../lib/artifact-review-voice-commands';
 import { buildThreadArtifactHref, getBuilderArtifactFiles, normalizeBuilderArtifactPath } from '../lib/builder-artifacts';
 import { GeminiStillFrameTransport } from '../lib/co-review-still-frame-transport';
@@ -79,6 +79,15 @@ import type {
 } from '../lib/coreview-builder-actions';
 import { debugLog } from '../lib/debug-logger';
 import { errorCopy } from '../lib/error-copy';
+import {
+  loadArtifactSessionIndex,
+  openArtifactInSessionIndex,
+  registerArtifactInSessionIndex,
+  type ArtifactRecord,
+  type ArtifactRegisterSource,
+  type ArtifactSessionIndexContext,
+  type RegisterArtifactInput,
+} from '../lib/session-artifact-index';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
 import { cn } from '../lib/utils';
 import { useUiStore } from '../stores/ui-store';
@@ -198,6 +207,49 @@ function ComposerAttachButton({
 
 function getBuilderArtifactFilename(path: string): string {
   return path.split('/').filter(Boolean).pop() || 'Builder deliverable';
+}
+
+type SessionArtifactRegisterMetadata = Partial<Omit<RegisterArtifactInput, 'context' | 'localPath'>> & {
+  source?: ArtifactRegisterSource;
+};
+
+function inferSessionArtifactType(
+  path: string,
+  rendererKind: ArtifactRendererKind,
+  artifactType?: string | null,
+): string {
+  if (artifactType?.trim()) {
+    return artifactType.trim();
+  }
+  if (rendererKind === 'html') return 'webpage';
+  if (rendererKind === 'pdf') return 'pdf';
+  if (rendererKind === 'image') return 'visual_report';
+  if (rendererKind === 'markdown') return 'document';
+  const extension = path.split('.').pop()?.toLowerCase() ?? '';
+  if (['ppt', 'pptx'].includes(extension)) return 'presentation';
+  if (['csv', 'json', 'xls', 'xlsx'].includes(extension)) return 'data_analysis';
+  return 'document';
+}
+
+function inferSessionArtifactRendererKind({
+  path,
+  title,
+  mimeType,
+  artifactType,
+}: {
+  path: string;
+  title?: string | null;
+  mimeType?: string | null;
+  artifactType?: string | null;
+}): ArtifactRendererKind {
+  return detectArtifactRendererKind(
+    {
+      path,
+      name: title ?? getBuilderArtifactFilename(path),
+      ...(mimeType ? { mimeType } : {}),
+    },
+    artifactType ? { artifactType } : null,
+  );
 }
 
 function SessionPageContent() {
@@ -600,6 +652,21 @@ function SessionPageContent() {
   const hasBuilderArtifactLibrary = builderArtifactLibrary.length > 0;
   const hasSelectedBuilderArtifactPath = Boolean(selectedBuilderArtifactPath);
   const coReviewSessionId = backendSessionId || safeSessionId || sessionId || null;
+  const sessionArtifactIndexContext = useMemo<ArtifactSessionIndexContext>(() => ({
+    userId: userId ?? null,
+    threadId: resolvedThreadId ?? null,
+    sessionId: coReviewSessionId,
+  }), [coReviewSessionId, resolvedThreadId, userId]);
+  const sessionArtifactIndexContextSignature = useMemo(() => [
+    sessionArtifactIndexContext.userId ?? 'unknown',
+    sessionArtifactIndexContext.threadId ?? 'unknown',
+    sessionArtifactIndexContext.sessionId ?? 'unknown',
+  ].join('|'), [sessionArtifactIndexContext]);
+  const [sessionArtifactIndex, setSessionArtifactIndex] = useState(() => (
+    loadArtifactSessionIndex(sessionArtifactIndexContext)
+  ));
+  const sessionArtifactIndexDedupedCountRef = useRef(0);
+  const sessionArtifactIndexRestoreCountRef = useRef(0);
   const canvasRestoreContext = useMemo<ArtifactCanvasRestoreContext>(() => ({
     userId: userId ?? null,
     threadId: resolvedThreadId ?? null,
@@ -877,6 +944,7 @@ function SessionPageContent() {
   const previousReadyCountRef = useRef(0);
   const previousArtifactSignatureRef = useRef('');
   const previousBuilderSurfaceTelemetrySignatureRef = useRef('');
+  const sessionArtifactTrayTelemetrySignatureRef = useRef('');
   const canvasRestoreAttemptedContextRef = useRef<string | null>(null);
   const canvasRestoreClosedByUserRef = useRef(false);
 
@@ -1056,6 +1124,140 @@ function SessionPageContent() {
       },
     });
   }, []);
+  useEffect(() => {
+    const restored = loadArtifactSessionIndex(sessionArtifactIndexContext);
+    setSessionArtifactIndex(restored);
+    if (restored.artifacts.length > 0) {
+      sessionArtifactIndexRestoreCountRef.current += 1;
+      recordSophiaCaptureEvent({
+        category: 'artifacts-runtime',
+        name: 'session-artifact-index-restore',
+        payload: {
+          sessionArtifactIndexEnabled: true,
+          sessionArtifactIndexRestoreCount: sessionArtifactIndexRestoreCountRef.current,
+          sessionArtifactIndexArtifactCount: restored.artifacts.length,
+          sessionArtifactIndexActiveArtifactPresent: Boolean(restored.activeArtifactId),
+          sessionArtifactVersionCount: restored.artifacts.filter((artifact) => (
+            artifact.logicalArtifactId === restored.artifacts.find((candidate) => candidate.artifactId === restored.activeArtifactId)?.logicalArtifactId
+          )).length || 0,
+          rawArtifactContentExcluded: true,
+          rawArtifactTextExcluded: true,
+          rawCommentTextExcluded: true,
+          rawFrameExcluded: true,
+        },
+      });
+    }
+  }, [sessionArtifactIndexContext, sessionArtifactIndexContextSignature]);
+
+  const recordSessionArtifactIndexTelemetry = useCallback((payload: Record<string, unknown>) => {
+    recordSophiaCaptureEvent({
+      category: 'artifacts-runtime',
+      name: 'session-artifact-index',
+      payload: {
+        sessionArtifactIndexEnabled: true,
+        rawArtifactContentExcluded: true,
+        rawArtifactTextExcluded: true,
+        rawCommentTextExcluded: true,
+        rawFrameExcluded: true,
+        ...payload,
+      },
+    });
+  }, []);
+
+  const registerSessionArtifact = useCallback((
+    localPath: string | null | undefined,
+    metadata: SessionArtifactRegisterMetadata = {},
+  ): ArtifactRecord | null => {
+    const normalizedPath = normalizeBuilderArtifactPath(localPath);
+    if (!normalizedPath) {
+      return null;
+    }
+    const rendererKind = metadata.rendererKind ?? inferSessionArtifactRendererKind({
+      path: normalizedPath,
+      title: metadata.title,
+      mimeType: metadata.mimeType,
+      artifactType: metadata.artifactType,
+    });
+    const result = registerArtifactInSessionIndex({
+      ...metadata,
+      context: sessionArtifactIndexContext,
+      localPath: normalizedPath,
+      rendererKind,
+      artifactType: inferSessionArtifactType(normalizedPath, rendererKind, metadata.artifactType),
+      source: metadata.source ?? 'manual',
+    });
+    if (result.deduped) {
+      sessionArtifactIndexDedupedCountRef.current += 1;
+    }
+    setSessionArtifactIndex(result.index);
+    recordSessionArtifactIndexTelemetry({
+      sessionArtifactIndexRegisterSource: metadata.source ?? 'manual',
+      sessionArtifactIndexArtifactCount: result.index.artifacts.length,
+      sessionArtifactIndexActiveArtifactPresent: Boolean(result.index.activeArtifactId),
+      sessionArtifactIndexDedupedCount: sessionArtifactIndexDedupedCountRef.current,
+      sessionArtifactVersionCount: result.record
+        ? result.index.artifacts.filter((artifact) => artifact.logicalArtifactId === result.record?.logicalArtifactId).length
+        : 0,
+      sessionArtifactIndexRegisterResult: result.result,
+    });
+    return result.record;
+  }, [recordSessionArtifactIndexTelemetry, sessionArtifactIndexContext]);
+
+  const registerSessionArtifactByPath = useCallback((
+    path: string | null | undefined,
+    metadata: SessionArtifactRegisterMetadata = {},
+  ): ArtifactRecord | null => {
+    const normalizedPath = normalizeBuilderArtifactPath(path);
+    if (!normalizedPath) {
+      return null;
+    }
+    const builderFiles = getBuilderArtifactFiles(builderArtifact);
+    const builderFile = builderFiles.find((file) => (
+      normalizeBuilderArtifactPath(file.path) === normalizedPath
+    )) ?? null;
+    const libraryItem = builderArtifactLibrary.find((item) => (
+      normalizeBuilderArtifactPath(item.path) === normalizedPath
+    )) ?? null;
+    const title = metadata.title
+      ?? (builderFile?.isPrimary ? builderArtifact?.artifactTitle : builderFile?.label)
+      ?? libraryItem?.name
+      ?? getBuilderArtifactFilename(normalizedPath);
+    const mimeType = metadata.mimeType ?? libraryItem?.mimeType ?? null;
+    const artifactType = metadata.artifactType ?? builderArtifact?.artifactType ?? null;
+    const rendererKind = metadata.rendererKind ?? inferSessionArtifactRendererKind({
+      path: normalizedPath,
+      title,
+      mimeType,
+      artifactType,
+    });
+    return registerSessionArtifact(normalizedPath, {
+      ...metadata,
+      title,
+      mimeType,
+      artifactType: inferSessionArtifactType(normalizedPath, rendererKind, artifactType),
+      rendererKind,
+    });
+  }, [builderArtifact, builderArtifactLibrary, registerSessionArtifact]);
+
+  const openSessionArtifactRecord = useCallback((
+    artifactIdOrPath: string | null | undefined,
+    source: string,
+  ): ArtifactRecord | null => {
+    const result = openArtifactInSessionIndex(sessionArtifactIndexContext, artifactIdOrPath);
+    setSessionArtifactIndex(result.index);
+    recordSessionArtifactIndexTelemetry({
+      sessionArtifactOpenAttempted: true,
+      sessionArtifactOpenResult: result.result,
+      sessionArtifactOpenRendererKind: result.record?.rendererKind ?? null,
+      sessionArtifactIndexActiveArtifactPresent: Boolean(result.index.activeArtifactId),
+      sessionArtifactIndexArtifactCount: result.index.artifacts.length,
+      sessionArtifactOpenSource: source,
+      sessionArtifactVersionCount: result.record
+        ? result.index.artifacts.filter((artifact) => artifact.logicalArtifactId === result.record?.logicalArtifactId).length
+        : 0,
+    });
+    return result.record;
+  }, [recordSessionArtifactIndexTelemetry, sessionArtifactIndexContext]);
   const persistSelectedBuilderCanvasState = useCallback((path: string | null | undefined, source: string) => {
     const artifact = resolveBuilderCanvasArtifactForPath(path);
     if (!artifact) {
@@ -1206,6 +1408,38 @@ function SessionPageContent() {
   const effectiveShowArtifactsUi = showArtifactsUi || artifactStageVisibilityProtected;
 
   useEffect(() => {
+    const signature = [
+      showArtifacts && effectiveShowArtifactsUi ? 'visible' : 'hidden',
+      sessionArtifactIndex.artifacts.length,
+      sessionArtifactIndex.activeArtifactId ?? 'none',
+    ].join('|');
+    if (sessionArtifactTrayTelemetrySignatureRef.current === signature) {
+      return;
+    }
+    sessionArtifactTrayTelemetrySignatureRef.current = signature;
+    recordSophiaCaptureEvent({
+      category: 'artifacts-runtime',
+      name: 'session-artifact-tray',
+      payload: {
+        sessionArtifactTrayVisible: showArtifacts && effectiveShowArtifactsUi && sessionArtifactIndex.artifacts.length > 0,
+        sessionArtifactTrayArtifactCount: sessionArtifactIndex.artifacts.length,
+        sessionArtifactIndexEnabled: true,
+        sessionArtifactIndexArtifactCount: sessionArtifactIndex.artifacts.length,
+        sessionArtifactIndexActiveArtifactPresent: Boolean(sessionArtifactIndex.activeArtifactId),
+        rawArtifactContentExcluded: true,
+        rawArtifactTextExcluded: true,
+        rawCommentTextExcluded: true,
+        rawFrameExcluded: true,
+      },
+    });
+  }, [
+    effectiveShowArtifactsUi,
+    sessionArtifactIndex.activeArtifactId,
+    sessionArtifactIndex.artifacts.length,
+    showArtifacts,
+  ]);
+
+  useEffect(() => {
     if (!artifactStageVisibilityProtected || showArtifactsUi) {
       return;
     }
@@ -1240,18 +1474,114 @@ function SessionPageContent() {
     }
 
     canvasRestoreClosedByUserRef.current = false;
+    const record = registerSessionArtifactByPath(normalizedPath, { source: 'selected_stage' });
     const persistedPath = persistSelectedBuilderCanvasState(normalizedPath, 'view_in_canvas');
-    setSelectedBuilderArtifactPath(persistedPath ?? normalizedPath);
-  }, [clearSelectedBuilderCanvasState, persistSelectedBuilderCanvasState]);
-  const handleViewCoreviewBuilderUpdatedVersion = useCallback((path: string | null) => {
+    const nextPath = persistedPath ?? normalizedPath;
+    openSessionArtifactRecord(record?.artifactId ?? nextPath, 'view_in_canvas');
+    setSelectedBuilderArtifactPath(nextPath);
+  }, [
+    clearSelectedBuilderCanvasState,
+    openSessionArtifactRecord,
+    persistSelectedBuilderCanvasState,
+    registerSessionArtifactByPath,
+  ]);
+  const handleViewCoreviewBuilderUpdatedVersion = useCallback((
+    path: string | null,
+    metadata?: SessionArtifactRegisterMetadata,
+  ) => {
     const normalizedPath = normalizeBuilderArtifactPath(path);
     if (!normalizedPath) {
       return;
     }
-    handleSelectBuilderArtifactPath(normalizedPath);
+    const record = registerSessionArtifactByPath(normalizedPath, {
+      ...metadata,
+      source: metadata?.source ?? 'coreview_version',
+    });
+    handleSelectBuilderArtifactPath(record?.localPath ?? normalizedPath);
     setShowArtifacts(true);
     setUserOpenedArtifacts(true);
-  }, [handleSelectBuilderArtifactPath, setShowArtifacts, setUserOpenedArtifacts]);
+  }, [handleSelectBuilderArtifactPath, registerSessionArtifactByPath, setShowArtifacts, setUserOpenedArtifacts]);
+  const handleOpenSessionArtifact = useCallback((artifact: ArtifactRecord) => {
+    if (artifact.review?.missing) {
+      recordSessionArtifactIndexTelemetry({
+        sessionArtifactOpenAttempted: true,
+        sessionArtifactOpenResult: 'missing',
+        sessionArtifactOpenRendererKind: artifact.rendererKind,
+        sessionArtifactIndexArtifactCount: sessionArtifactIndex.artifacts.length,
+        sessionArtifactIndexActiveArtifactPresent: Boolean(sessionArtifactIndex.activeArtifactId),
+      });
+      return;
+    }
+    handleSelectBuilderArtifactPath(artifact.localPath);
+    setShowArtifacts(true);
+    setUserOpenedArtifacts(true);
+  }, [
+    handleSelectBuilderArtifactPath,
+    recordSessionArtifactIndexTelemetry,
+    sessionArtifactIndex.activeArtifactId,
+    sessionArtifactIndex.artifacts.length,
+    setShowArtifacts,
+    setUserOpenedArtifacts,
+  ]);
+
+  useEffect(() => {
+    if (!builderArtifact) {
+      return;
+    }
+    const files = getBuilderArtifactFiles(builderArtifact);
+    for (const file of files) {
+      registerSessionArtifactByPath(file.path, {
+        source: 'current_builder_artifact',
+        title: file.isPrimary ? builderArtifact.artifactTitle : file.label,
+        artifactType: builderArtifact.artifactType,
+        taskId: builderTask?.taskId ?? builderCompletionForDisplay?.task_id ?? null,
+        runId: builderTask?.runId ?? builderCompletionForDisplay?.run_id ?? null,
+        safeSummary: builderArtifact.companionSummary ?? builderArtifact.userNextAction ?? null,
+      });
+    }
+  }, [
+    builderArtifact,
+    builderCompletionForDisplay?.run_id,
+    builderCompletionForDisplay?.task_id,
+    builderTask?.runId,
+    builderTask?.taskId,
+    registerSessionArtifactByPath,
+  ]);
+
+  useEffect(() => {
+    for (const item of builderArtifactLibrary) {
+      registerSessionArtifactByPath(item.path, {
+        source: 'file_library',
+        title: item.name,
+        mimeType: item.mimeType ?? null,
+      });
+    }
+  }, [builderArtifactLibrary, registerSessionArtifactByPath]);
+
+  useEffect(() => {
+    if (builderCompletionForDisplay?.status !== 'success') {
+      return;
+    }
+    const completionPath = normalizeBuilderArtifactPath(builderCompletionForDisplay.artifact_path);
+    if (!completionPath) {
+      return;
+    }
+    registerSessionArtifactByPath(completionPath, {
+      source: builderCompletionForDisplay.source === 'artifact_library_recovery'
+        ? 'builder_canvas'
+        : 'builder_completion',
+      title: builderCompletionForDisplay.artifact_title
+        ?? builderCompletionForDisplay.artifact_filename
+        ?? getBuilderArtifactFilename(completionPath),
+      artifactType: builderCompletionForDisplay.artifact_type ?? null,
+      taskId: builderCompletionForDisplay.task_id,
+      runId: builderCompletionForDisplay.run_id ?? null,
+      sourceArtifactPath: builderCompletionForDisplay.source_artifact_path ?? null,
+      revisionOfArtifactPath: builderCompletionForDisplay.revision_of_artifact_path ?? null,
+      safeSummary: builderCompletionForDisplay.summary ?? builderCompletionForDisplay.user_next_action ?? null,
+      createdAt: builderCompletionForDisplay.completed_at ?? null,
+    });
+  }, [builderCompletionForDisplay, registerSessionArtifactByPath]);
 
   useEffect(() => {
     if (!showArtifacts || !effectiveShowArtifactsUi) {
@@ -1569,6 +1899,8 @@ function SessionPageContent() {
     setSelectedBuilderArtifactPath(artifact.normalizedPath);
     setShowArtifacts(true);
     setUserOpenedArtifacts(true);
+    const record = registerSessionArtifactByPath(artifact.normalizedPath, { source: 'canvas_open' });
+    openSessionArtifactRecord(record?.artifactId ?? artifact.normalizedPath, 'canvas_restore');
     recordCanvasRestoreTelemetry({
       attempted: true,
       result: 'restored',
@@ -1581,6 +1913,8 @@ function SessionPageContent() {
     canvasRestoreContext,
     canvasRestoreContextSignature,
     recordCanvasRestoreTelemetry,
+    openSessionArtifactRecord,
+    registerSessionArtifactByPath,
     resolveBuilderCanvasArtifactForPath,
     selectedBuilderArtifactPath,
     setShowArtifacts,
@@ -2004,12 +2338,14 @@ function SessionPageContent() {
               builderArtifactLibrary={builderArtifactLibrary}
               builderTask={builderTask}
               builderCompletion={builderCompletion}
+              sessionArtifactIndex={sessionArtifactIndex}
               isCancellingBuilderTask={isCancellingBuilderTask}
               selectedBuilderArtifactPath={selectedBuilderArtifactPath}
               onSelectedBuilderArtifactPathChange={handleSelectBuilderArtifactPath}
               onCoreviewBuilderUpdateRequest={handleCoreviewBuilderUpdateRequest}
               onCoreviewBuilderCancelRequest={handleCoreviewBuilderCancelRequest}
               onCoreviewBuilderViewUpdatedVersion={handleViewCoreviewBuilderUpdatedVersion}
+              onSessionArtifactOpen={handleOpenSessionArtifact}
               sessionId={coReviewSessionId}
               normalSessionId={coReviewSessionId}
               voiceAgentSessionId={coReviewVoiceAgentSessionId}
@@ -2253,12 +2589,14 @@ function SessionPageContent() {
               builderArtifactLibrary={builderArtifactLibrary}
               builderTask={builderTask}
               builderCompletion={builderCompletion}
+              sessionArtifactIndex={sessionArtifactIndex}
               isCancellingBuilderTask={isCancellingBuilderTask}
               selectedBuilderArtifactPath={selectedBuilderArtifactPath}
               onSelectedBuilderArtifactPathChange={handleSelectBuilderArtifactPath}
               onCoreviewBuilderUpdateRequest={handleCoreviewBuilderUpdateRequest}
               onCoreviewBuilderCancelRequest={handleCoreviewBuilderCancelRequest}
               onCoreviewBuilderViewUpdatedVersion={handleViewCoreviewBuilderUpdatedVersion}
+              onSessionArtifactOpen={handleOpenSessionArtifact}
               sessionId={coReviewSessionId}
               normalSessionId={coReviewSessionId}
               voiceAgentSessionId={coReviewVoiceAgentSessionId}
@@ -2289,12 +2627,14 @@ function SessionPageContent() {
             builderArtifactLibrary={builderArtifactLibrary}
             builderTask={builderTask}
             builderCompletion={builderCompletion}
+            sessionArtifactIndex={sessionArtifactIndex}
             isCancellingBuilderTask={isCancellingBuilderTask}
             selectedBuilderArtifactPath={selectedBuilderArtifactPath}
             onSelectedBuilderArtifactPathChange={handleSelectBuilderArtifactPath}
             onCoreviewBuilderUpdateRequest={handleCoreviewBuilderUpdateRequest}
             onCoreviewBuilderCancelRequest={handleCoreviewBuilderCancelRequest}
             onCoreviewBuilderViewUpdatedVersion={handleViewCoreviewBuilderUpdatedVersion}
+            onSessionArtifactOpen={handleOpenSessionArtifact}
             sessionId={coReviewSessionId}
             normalSessionId={coReviewSessionId}
             voiceAgentSessionId={coReviewVoiceAgentSessionId}

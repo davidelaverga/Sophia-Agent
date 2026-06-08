@@ -115,6 +115,20 @@ export type CoreviewVisualTelemetry = {
   coreviewArtifactOriginalVersionIdPresent: boolean
   coreviewArtifactCurrentVersionIdPresent: boolean
   coreviewArtifactVersionCount: number
+  sessionArtifactIndexEnabled: boolean
+  sessionArtifactIndexRestoreCount: number
+  sessionArtifactIndexArtifactCount: number
+  sessionArtifactIndexActiveArtifactPresent: boolean
+  sessionArtifactIndexRegisterSource: string | null
+  sessionArtifactIndexDedupedCount: number
+  sessionArtifactTrayVisible: boolean
+  sessionArtifactTrayArtifactCount: number
+  sessionArtifactOpenAttempted: boolean
+  sessionArtifactOpenResult: string | null
+  sessionArtifactOpenRendererKind: string | null
+  sessionArtifactVersionCount: number
+  sessionArtifactVoiceCommandResult: string | null
+  rawArtifactContentExcluded: true
   coreviewHtmlUpdateMatchedBy: string | null
   coreviewHtmlUpdateAutoApplyAttempted: boolean
   coreviewHtmlUpdateAutoApplied: boolean
@@ -1499,6 +1513,20 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       coreviewArtifactOriginalVersionIdPresent: false,
       coreviewArtifactCurrentVersionIdPresent: false,
       coreviewArtifactVersionCount: 0,
+      sessionArtifactIndexEnabled: false,
+      sessionArtifactIndexRestoreCount: 0,
+      sessionArtifactIndexArtifactCount: 0,
+      sessionArtifactIndexActiveArtifactPresent: false,
+      sessionArtifactIndexRegisterSource: null,
+      sessionArtifactIndexDedupedCount: 0,
+      sessionArtifactTrayVisible: false,
+      sessionArtifactTrayArtifactCount: 0,
+      sessionArtifactOpenAttempted: false,
+      sessionArtifactOpenResult: null,
+      sessionArtifactOpenRendererKind: null,
+      sessionArtifactVersionCount: 0,
+      sessionArtifactVoiceCommandResult: null,
+      rawArtifactContentExcluded: true,
       coreviewHtmlUpdateMatchedBy: null,
       coreviewHtmlUpdateAutoApplyAttempted: false,
       coreviewHtmlUpdateAutoApplied: false,
@@ -1901,6 +1929,17 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     .filter((event) => event.category === "artifacts-runtime" && event.name === "artifact-canvas-restore")
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
+  const sessionArtifactEvents = activeEvents
+    .filter((event) => (
+      event.category === "artifacts-runtime"
+      && (
+        event.name === "session-artifact-index"
+        || event.name === "session-artifact-index-restore"
+        || event.name === "session-artifact-tray"
+      )
+    ))
+    .map((event) => event.payloadRecord)
+    .filter((value): value is Record<string, unknown> => value !== null)
   const builderSnapshotProtectionEvents = activeEvents
     .filter((event) => (
       event.category === "builder-ui"
@@ -2166,6 +2205,27 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     asBoolean(event.coreviewArtifactCurrentVersionIdPresent) === true
   ))
   visual.coreviewArtifactVersionCount = numberFromKeys(latestCoreviewBuilderAction, ["coreviewArtifactVersionCount"]) ?? 0
+  visual.sessionArtifactIndexEnabled = sessionArtifactEvents.some((event) => (
+    asBoolean(event.sessionArtifactIndexEnabled) === true
+  ))
+  visual.sessionArtifactIndexRestoreCount = maxFiniteFromRecords(sessionArtifactEvents, "sessionArtifactIndexRestoreCount") ?? 0
+  visual.sessionArtifactIndexArtifactCount = maxFiniteFromRecords(sessionArtifactEvents, "sessionArtifactIndexArtifactCount") ?? 0
+  visual.sessionArtifactIndexActiveArtifactPresent = sessionArtifactEvents.some((event) => (
+    asBoolean(event.sessionArtifactIndexActiveArtifactPresent) === true
+  ))
+  visual.sessionArtifactIndexRegisterSource = latestStringFromRecords(sessionArtifactEvents, "sessionArtifactIndexRegisterSource")
+  visual.sessionArtifactIndexDedupedCount = maxFiniteFromRecords(sessionArtifactEvents, "sessionArtifactIndexDedupedCount") ?? 0
+  visual.sessionArtifactTrayVisible = sessionArtifactEvents.some((event) => (
+    asBoolean(event.sessionArtifactTrayVisible) === true
+  ))
+  visual.sessionArtifactTrayArtifactCount = maxFiniteFromRecords(sessionArtifactEvents, "sessionArtifactTrayArtifactCount") ?? 0
+  visual.sessionArtifactOpenAttempted = sessionArtifactEvents.some((event) => (
+    asBoolean(event.sessionArtifactOpenAttempted) === true
+  ))
+  visual.sessionArtifactOpenResult = latestStringFromRecords(sessionArtifactEvents, "sessionArtifactOpenResult")
+  visual.sessionArtifactOpenRendererKind = latestStringFromRecords(sessionArtifactEvents, "sessionArtifactOpenRendererKind")
+  visual.sessionArtifactVersionCount = maxFiniteFromRecords(sessionArtifactEvents, "sessionArtifactVersionCount") ?? 0
+  visual.sessionArtifactVoiceCommandResult = latestStringFromRecords(sessionArtifactEvents, "sessionArtifactVoiceCommandResult")
   visual.coreviewHtmlUpdateMatchedBy = latestStringFromRecords(coreviewBuilderActionEvents, "coreviewHtmlUpdateMatchedBy")
   visual.coreviewHtmlUpdateAutoApplyAttempted = coreviewBuilderActionEvents.some((event) => (
     asBoolean(event.coreviewHtmlUpdateAutoApplyAttempted) === true

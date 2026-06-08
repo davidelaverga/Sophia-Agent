@@ -18,6 +18,7 @@ import {
   type CoreviewArtifactVersionTelemetry,
 } from "../../lib/coreview-artifact-version-store"
 import { requestCoreviewHtmlQuickPatch } from "../../lib/coreview-html-quick-edit"
+import type { ArtifactRecord, ArtifactSessionIndex, RegisterArtifactInput } from "../../lib/session-artifact-index"
 import type { ArtifactToolMode } from "../../types/artifact-annotations"
 import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 import type { BuilderCompletionEventV1 } from "../../types/builder-completion"
@@ -123,6 +124,7 @@ interface PresenceArtifactPanelProps {
   builderArtifactLibrary?: BuilderArtifactLibraryItemV1[]
   builderTask?: BuilderTaskV1 | null
   builderCompletion?: BuilderCompletionEventV1 | null
+  sessionArtifactIndex?: ArtifactSessionIndex | null
   isCancellingBuilderTask?: boolean
   selectedBuilderArtifactPath?: string | null
   onSelectedBuilderArtifactPathChange?: (path: string | null) => void
@@ -135,7 +137,11 @@ interface PresenceArtifactPanelProps {
     context: CoreviewArtifactUpdateContext | null
     task: CoreviewBuilderTaskStatus
   }) => Promise<CoreviewBuilderCancelAdapterResult> | CoreviewBuilderCancelAdapterResult
-  onCoreviewBuilderViewUpdatedVersion?: (path: string | null) => void
+  onCoreviewBuilderViewUpdatedVersion?: (
+    path: string | null,
+    metadata?: Partial<Omit<RegisterArtifactInput, "context" | "localPath">>,
+  ) => void
+  onSessionArtifactOpen?: (artifact: ArtifactRecord) => void
   sessionId?: string | null
   normalSessionId?: string | null
   voiceAgentSessionId?: string | null
@@ -953,12 +959,14 @@ export function PresenceArtifactPanel({
   builderArtifactLibrary = [],
   builderTask = null,
   builderCompletion = null,
+  sessionArtifactIndex = null,
   isCancellingBuilderTask = false,
   selectedBuilderArtifactPath,
   onSelectedBuilderArtifactPathChange,
   onCoreviewBuilderUpdateRequest,
   onCoreviewBuilderCancelRequest,
   onCoreviewBuilderViewUpdatedVersion,
+  onSessionArtifactOpen,
   sessionId,
   normalSessionId,
   voiceAgentSessionId,
@@ -2767,7 +2775,28 @@ export function PresenceArtifactPanel({
 
       setCoreviewArtifactVersionState(nextVersionState)
       setRestoreOriginalPending(false)
-      onSelectedBuilderArtifactPathChange?.(outputPath)
+      const outputVersion = getCurrentVersion(nextVersionState)
+      if (onCoreviewBuilderViewUpdatedVersion) {
+        onCoreviewBuilderViewUpdatedVersion(outputPath, {
+          source: "quick_patch",
+          title: output.artifactTitle,
+          artifactType: "webpage",
+          rendererKind: "html",
+          stableArtifactIdentity: outputStableIdentity,
+          logicalArtifactId: nextVersionState.logicalArtifactId,
+          versionId: outputVersion?.versionId ?? null,
+          parentVersionId: outputVersion?.parentVersionId ?? null,
+          sourceArtifactPath: result.htmlQuickPatchResponse?.source_artifact_path
+            ?? result.htmlQuickPatchResponse?.original_artifact_path
+            ?? context.artifactPath,
+          revisionOfArtifactPath: result.htmlQuickPatchResponse?.revision_of_artifact_path
+            ?? context.artifactPath,
+          contentHash: result.htmlQuickPatchResponse?.content_hash ?? null,
+          safeSummary: result.htmlQuickPatchResponse?.safe_summary ?? context.requestedChangeSummary,
+        })
+      } else {
+        onSelectedBuilderArtifactPathChange?.(outputPath)
+      }
       setCoreviewBuilderUpdateCard({
         artifactTitle: context.artifactTitle ?? output.artifactTitle ?? "Selected artifact",
         requestedChangeSummary: context.requestedChangeSummary,
@@ -2895,6 +2924,7 @@ export function PresenceArtifactPanel({
     latestCoreviewBuilderOutput,
     normalSessionId,
     normalizedSelectedBuilderArtifactPath,
+    onCoreviewBuilderViewUpdatedVersion,
     onSelectedBuilderArtifactPathChange,
     onCoreviewActionFeedback,
     recordCoreviewBuilderTelemetry,
@@ -3176,7 +3206,28 @@ export function PresenceArtifactPanel({
           if (nextVersionState) {
             setCoreviewArtifactVersionState(nextVersionState)
             setRestoreOriginalPending(false)
-            onSelectedBuilderArtifactPathChange?.(outputPath)
+            const outputVersion = getCurrentVersion(nextVersionState)
+            if (onCoreviewBuilderViewUpdatedVersion) {
+              onCoreviewBuilderViewUpdatedVersion(outputPath, {
+                source: "coreview_version",
+                title: output?.artifactTitle ?? null,
+                artifactType: "webpage",
+                rendererKind: "html",
+                stableArtifactIdentity: outputStableIdentity,
+                logicalArtifactId: nextVersionState.logicalArtifactId,
+                versionId: outputVersion?.versionId ?? null,
+                parentVersionId: outputVersion?.parentVersionId ?? null,
+                taskId: eventTaskId ?? null,
+                runId: eventRunId ?? null,
+                sourceArtifactPath: builderCompletion?.source_artifact_path
+                  ?? context.artifactPath,
+                revisionOfArtifactPath: builderCompletion?.revision_of_artifact_path
+                  ?? context.artifactPath,
+                safeSummary: output?.artifactTitle ?? context.requestedChangeSummary,
+              })
+            } else {
+              onSelectedBuilderArtifactPathChange?.(outputPath)
+            }
             emitOnce("artifact.version_created", "new_version", output)
             emitOnce("artifact.version_selected", "auto_selected", output)
             setCoreviewBuilderUpdateCard((current) => ({
@@ -3346,6 +3397,7 @@ export function PresenceArtifactPanel({
     emitCoreviewBuilderWorkspaceEvent,
     normalSessionId,
     normalizedSelectedBuilderArtifactPath,
+    onCoreviewBuilderViewUpdatedVersion,
     onSelectedBuilderArtifactPathChange,
     sessionId,
     stageArtifactPath,
@@ -3484,7 +3536,22 @@ export function PresenceArtifactPanel({
       setCoreviewArtifactVersionState(restoredState)
     }
     if (fallbackOriginalPath) {
-      onSelectedBuilderArtifactPathChange?.(fallbackOriginalPath)
+      if (onCoreviewBuilderViewUpdatedVersion && restoredState && restoredVersion) {
+        onCoreviewBuilderViewUpdatedVersion(fallbackOriginalPath, {
+          source: "coreview_version",
+          title: restoredVersion.artifactTitle,
+          artifactType: restoredVersion.rendererKind === "html" ? "webpage" : "document",
+          rendererKind: restoredVersion.rendererKind,
+          stableArtifactIdentity: restoredVersion.artifactStableIdentity,
+          logicalArtifactId: restoredState.logicalArtifactId,
+          versionId: restoredVersion.versionId,
+          parentVersionId: restoredVersion.parentVersionId ?? null,
+          taskId: restoredVersion.builderTaskId ?? null,
+          safeSummary: restoredVersion.requestedChangeSummary ?? null,
+        })
+      } else {
+        onSelectedBuilderArtifactPathChange?.(fallbackOriginalPath)
+      }
     }
     setCoreviewBuilderUpdateCard((current) => ({
       artifactTitle: current?.artifactTitle ?? pending.context.artifactTitle ?? pending.output.artifactTitle ?? "Selected artifact",
@@ -3568,6 +3635,7 @@ export function PresenceArtifactPanel({
     normalSessionId,
     normalizedSelectedBuilderArtifactPath,
     onCoreviewActionFeedback,
+    onCoreviewBuilderViewUpdatedVersion,
     onSelectedBuilderArtifactPathChange,
     pendingCoreviewHtmlAutoApply,
     sessionId,
@@ -4692,7 +4760,22 @@ export function PresenceArtifactPanel({
     const versionTelemetry = getVersionTelemetry(restoredState ?? coreviewArtifactVersionState)
     if (restoredState && restoredVersion) {
       setCoreviewArtifactVersionState(restoredState)
-      onSelectedBuilderArtifactPathChange?.(restoredVersion.artifactPath)
+      if (onCoreviewBuilderViewUpdatedVersion) {
+        onCoreviewBuilderViewUpdatedVersion(restoredVersion.artifactPath, {
+          source: "coreview_version",
+          title: restoredVersion.artifactTitle,
+          artifactType: restoredVersion.rendererKind === "html" ? "webpage" : "document",
+          rendererKind: restoredVersion.rendererKind,
+          stableArtifactIdentity: restoredVersion.artifactStableIdentity,
+          logicalArtifactId: restoredState.logicalArtifactId,
+          versionId: restoredVersion.versionId,
+          parentVersionId: restoredVersion.parentVersionId ?? null,
+          taskId: restoredVersion.builderTaskId ?? null,
+          safeSummary: restoredVersion.requestedChangeSummary ?? null,
+        })
+      } else {
+        onSelectedBuilderArtifactPathChange?.(restoredVersion.artifactPath)
+      }
       const context = latestCoreviewBuilderContextRef.current
       if (context) {
         emitCoreviewBuilderWorkspaceEvent({
@@ -4767,6 +4850,7 @@ export function PresenceArtifactPanel({
     isVoiceMode,
     normalSessionId,
     onCoreviewActionFeedback,
+    onCoreviewBuilderViewUpdatedVersion,
     onSelectedBuilderArtifactPathChange,
     sessionId,
     threadId,
@@ -5002,6 +5086,7 @@ export function PresenceArtifactPanel({
           artifacts={artifacts}
           builderArtifactLibrary={builderArtifactLibrary}
           stageBuilderArtifact={stageBuilderArtifact}
+          sessionArtifactIndex={sessionArtifactIndex}
           showSecondaryArtifactSurfaces={showSecondaryArtifactSurfaces}
           showDomArtifactCoReview={showDomArtifactCoReview}
           threadId={threadId}
@@ -5013,6 +5098,7 @@ export function PresenceArtifactPanel({
           reflectionTapped={reflectionTapped}
           domArtifactCoReview={domArtifactCoReview}
           onSelectedBuilderArtifactPathChange={onSelectedBuilderArtifactPathChange}
+          onSessionArtifactOpen={onSessionArtifactOpen}
           onHandleReflectionTap={handleReflectionTap}
           onReflectionTap={onReflectionTap}
           onMemoryApprove={onMemoryApprove}

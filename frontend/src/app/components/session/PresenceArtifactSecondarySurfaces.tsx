@@ -3,7 +3,8 @@
 import type { ComponentProps } from "react"
 
 import { haptic } from "../../hooks/useHaptics"
-import { buildThreadArtifactHref, formatBuilderArtifactFileSize, getBuilderArtifactFiles, isMarkdownArtifactFile } from "../../lib/builder-artifacts"
+import { buildThreadArtifactHref, formatBuilderArtifactFileSize, formatBuilderArtifactTypeLabel, getBuilderArtifactFiles, isMarkdownArtifactFile } from "../../lib/builder-artifacts"
+import { listSessionArtifacts, type ArtifactRecord, type ArtifactSessionIndex } from "../../lib/session-artifact-index"
 import { cn } from "../../lib/utils"
 import { isRealReflection } from "../../session/artifacts"
 import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../types/builder-artifact"
@@ -168,6 +169,175 @@ function BuilderArtifactLibraryList({
           onSelectedBuilderArtifactPathChange={onSelectedBuilderArtifactPathChange}
         />
       ))}
+    </div>
+  )
+}
+
+function getSessionArtifactVersionLabel(record: ArtifactRecord, artifacts: ArtifactRecord[]): string {
+  const explicit = /::v(\d+)$/u.exec(record.versionId)?.[1]
+  if (explicit) {
+    return `v${explicit}`
+  }
+  const logicalVersions = artifacts
+    .filter((artifact) => artifact.logicalArtifactId === record.logicalArtifactId)
+    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))
+  const versionIndex = logicalVersions.findIndex((artifact) => artifact.artifactId === record.artifactId)
+  return versionIndex >= 0 ? `v${versionIndex + 1}` : "v1"
+}
+
+function formatRendererKindLabel(rendererKind: ArtifactRecord["rendererKind"]): string {
+  return rendererKind
+    .replace(/_/gu, " ")
+    .replace(/\b\w/gu, (match) => match.toUpperCase())
+}
+
+function getSessionArtifactRows(index: ArtifactSessionIndex): ArtifactRecord[] {
+  const seen = new Set<string>()
+  const rows: ArtifactRecord[] = []
+  for (const artifact of listSessionArtifacts(index)) {
+    const key = `${artifact.threadId}|${artifact.localPath}|${artifact.rendererKind}`
+    if (seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    rows.push(artifact)
+  }
+  return rows
+}
+
+function SessionArtifactTray({
+  sessionArtifactIndex,
+  stageBuilderArtifact,
+  threadId,
+  onSessionArtifactOpen,
+  onSelectedBuilderArtifactPathChange,
+}: {
+  sessionArtifactIndex: ArtifactSessionIndex
+  stageBuilderArtifact: BuilderArtifactV1 | null
+  threadId?: string
+  onSessionArtifactOpen?: (artifact: ArtifactRecord) => void
+  onSelectedBuilderArtifactPathChange?: (path: string | null) => void
+}) {
+  const artifacts = getSessionArtifactRows(sessionArtifactIndex)
+  if (artifacts.length === 0) {
+    return null
+  }
+
+  return (
+    <div className="flex flex-col items-center gap-2">
+      {artifacts.map((artifact) => (
+        <SessionArtifactTrayRow
+          key={artifact.artifactId}
+          artifact={artifact}
+          artifacts={artifacts}
+          isSelected={sessionArtifactIndex.activeArtifactId === artifact.artifactId || stageBuilderArtifact?.artifactPath === artifact.localPath}
+          threadId={threadId}
+          onSessionArtifactOpen={onSessionArtifactOpen}
+          onSelectedBuilderArtifactPathChange={onSelectedBuilderArtifactPathChange}
+        />
+      ))}
+    </div>
+  )
+}
+
+function SessionArtifactTrayRow({
+  artifact,
+  artifacts,
+  isSelected,
+  threadId,
+  onSessionArtifactOpen,
+  onSelectedBuilderArtifactPathChange,
+}: {
+  artifact: ArtifactRecord
+  artifacts: ArtifactRecord[]
+  isSelected: boolean
+  threadId?: string
+  onSessionArtifactOpen?: (artifact: ArtifactRecord) => void
+  onSelectedBuilderArtifactPathChange?: (path: string | null) => void
+}) {
+  const missing = artifact.review?.missing === true
+  const downloadHref = missing ? null : buildThreadArtifactHref(threadId, artifact.localPath, { download: true })
+  const openHref = missing ? null : buildThreadArtifactHref(threadId, artifact.localPath)
+  const versionLabel = getSessionArtifactVersionLabel(artifact, artifacts)
+  const meta = [
+    formatRendererKindLabel(artifact.rendererKind),
+    formatBuilderArtifactTypeLabel(artifact.artifactType),
+    versionLabel,
+    missing ? "Unavailable" : null,
+  ].filter(Boolean).join(" • ")
+
+  const openInCanvas = () => {
+    if (missing) {
+      return
+    }
+    haptic("light")
+    if (onSessionArtifactOpen) {
+      onSessionArtifactOpen(artifact)
+      return
+    }
+    onSelectedBuilderArtifactPathChange?.(artifact.localPath)
+  }
+
+  return (
+    <div className="flex w-full max-w-[520px] items-center justify-between gap-2" onClick={(event) => event.stopPropagation()}>
+      <div className="min-w-0 text-left">
+        <span className="block truncate text-[10px]" style={{ color: 'var(--cosmic-text-whisper)' }}>
+          {artifact.title}
+        </span>
+        <span className="block truncate text-[9px]" style={{ color: missing ? 'var(--cosmic-text-muted)' : 'var(--cosmic-text-faint)' }}>
+          {meta}
+        </span>
+      </div>
+      <div className="flex shrink-0 gap-1.5">
+        <button
+          type="button"
+          aria-label={`View ${artifact.title} in canvas`}
+          aria-pressed={isSelected}
+          disabled={missing}
+          className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+          style={{
+            borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
+            color: 'var(--sophia-purple)',
+            background: isSelected
+              ? 'color-mix(in srgb, var(--sophia-purple) 12%, transparent)'
+              : 'transparent',
+          }}
+          onClick={openInCanvas}
+        >
+          {isSelected ? "Active" : "View in canvas"}
+        </button>
+        {openHref && (
+          <a
+            href={openHref}
+            target="_blank"
+            rel="noreferrer"
+            aria-label={`Open ${artifact.title} in new tab`}
+            className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
+            style={{
+              borderColor: 'var(--cosmic-border-soft)',
+              color: 'var(--cosmic-text-whisper)',
+            }}
+            onClick={() => haptic("light")}
+          >
+            Open
+          </a>
+        )}
+        {downloadHref && (
+          <a
+            href={downloadHref}
+            aria-label={`Download ${artifact.title}`}
+            className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
+            style={{
+              borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
+              color: 'var(--sophia-purple)',
+              background: 'color-mix(in srgb, var(--sophia-purple) 8%, transparent)',
+            }}
+            onClick={() => haptic("medium")}
+          >
+            Download
+          </a>
+        )}
+      </div>
     </div>
   )
 }
@@ -465,6 +635,7 @@ export function PresenceArtifactSecondarySurfaces({
   artifacts,
   builderArtifactLibrary,
   stageBuilderArtifact,
+  sessionArtifactIndex,
   showSecondaryArtifactSurfaces,
   showDomArtifactCoReview,
   threadId,
@@ -476,6 +647,7 @@ export function PresenceArtifactSecondarySurfaces({
   reflectionTapped,
   domArtifactCoReview,
   onSelectedBuilderArtifactPathChange,
+  onSessionArtifactOpen,
   onHandleReflectionTap,
   onReflectionTap,
   onMemoryApprove,
@@ -485,6 +657,7 @@ export function PresenceArtifactSecondarySurfaces({
   artifacts: RitualArtifacts | null | undefined
   builderArtifactLibrary: BuilderArtifactLibraryItemV1[]
   stageBuilderArtifact: BuilderArtifactV1 | null
+  sessionArtifactIndex?: ArtifactSessionIndex | null
   showSecondaryArtifactSurfaces: boolean
   showDomArtifactCoReview: boolean
   threadId?: string
@@ -496,6 +669,7 @@ export function PresenceArtifactSecondarySurfaces({
   reflectionTapped: boolean
   domArtifactCoReview: MinimalArtifactCoReviewControls
   onSelectedBuilderArtifactPathChange?: (path: string | null) => void
+  onSessionArtifactOpen?: (artifact: ArtifactRecord) => void
   onHandleReflectionTap: () => void
   onReflectionTap?: (reflection: { prompt: string; why?: string }) => void
   onMemoryApprove?: (index: number) => void
@@ -509,6 +683,7 @@ export function PresenceArtifactSecondarySurfaces({
   const hasReflection = isRealReflection(reflection?.prompt)
   const hasMemories = Boolean(memories && memories.length > 0)
   const hasBuilderLibrary = builderArtifactLibrary.length > 0
+  const hasSessionArtifactTray = Boolean(sessionArtifactIndex && sessionArtifactIndex.artifacts.length > 0)
 
   if (!showSecondaryArtifactSurfaces) {
     return null
@@ -516,7 +691,7 @@ export function PresenceArtifactSecondarySurfaces({
 
   return (
     <>
-      {hasBuilderLibrary && (
+      {(hasSessionArtifactTray || hasBuilderLibrary) && (
         <div
           className={cn(
             cn(stageBuilderArtifact ? "mt-4" : ""),
@@ -528,14 +703,24 @@ export function PresenceArtifactSecondarySurfaces({
             className="mb-2 text-center text-[9px] tracking-[0.18em] uppercase"
             style={{ color: 'var(--cosmic-text-faint)' }}
           >
-            Session files
+            {hasSessionArtifactTray ? "Artifacts" : "Session files"}
           </p>
-          <BuilderArtifactLibraryList
-            builderArtifactLibrary={builderArtifactLibrary}
-            stageBuilderArtifact={stageBuilderArtifact}
-            threadId={threadId}
-            onSelectedBuilderArtifactPathChange={onSelectedBuilderArtifactPathChange}
-          />
+          {sessionArtifactIndex && hasSessionArtifactTray ? (
+            <SessionArtifactTray
+              sessionArtifactIndex={sessionArtifactIndex}
+              stageBuilderArtifact={stageBuilderArtifact}
+              threadId={threadId}
+              onSessionArtifactOpen={onSessionArtifactOpen}
+              onSelectedBuilderArtifactPathChange={onSelectedBuilderArtifactPathChange}
+            />
+          ) : (
+            <BuilderArtifactLibraryList
+              builderArtifactLibrary={builderArtifactLibrary}
+              stageBuilderArtifact={stageBuilderArtifact}
+              threadId={threadId}
+              onSelectedBuilderArtifactPathChange={onSelectedBuilderArtifactPathChange}
+            />
+          )}
         </div>
       )}
 
