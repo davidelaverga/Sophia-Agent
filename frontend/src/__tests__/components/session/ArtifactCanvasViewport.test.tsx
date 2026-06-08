@@ -555,6 +555,8 @@ describe("ArtifactCanvasViewport", () => {
           htmlInternalNavigationScrolled: true,
           htmlNavigationPreservedCaptureTarget: true,
           htmlNavigationRouterUsed: true,
+          htmlNavigationControllerActive: true,
+          htmlNavigationResultConfirmedBeforeFeedback: true,
           htmlInternalNavigationUsedSameResolver: true,
         })
         expect(bridge.document.getElementById("features")?.getAttribute("data-test-scrolled")).toBe("true")
@@ -570,6 +572,8 @@ describe("ArtifactCanvasViewport", () => {
         htmlInternalNavigationPreventedDefault: true,
         htmlInternalNavigationScrolled: true,
         htmlNavigationRouterUsed: true,
+        htmlNavigationControllerActive: true,
+        htmlNavigationResultConfirmedBeforeFeedback: true,
         htmlInternalNavigationUsedSameResolver: true,
       })
 
@@ -583,6 +587,8 @@ describe("ArtifactCanvasViewport", () => {
         htmlInternalNavigationPreventedDefault: true,
         htmlInternalNavigationScrolled: false,
         htmlNavigationRouterUsed: true,
+        htmlNavigationControllerActive: true,
+        htmlNavigationResultConfirmedBeforeFeedback: false,
         htmlInternalNavigationUsedSameResolver: true,
       })
 

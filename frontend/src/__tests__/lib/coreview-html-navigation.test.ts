@@ -47,10 +47,15 @@ describe("Coreview HTML navigation resolver", () => {
   it("resolves href fragment and path forms", () => {
     const documentRef = documentFromHtml("<main><h2 id='features'>Features</h2></main>")
 
+    expect(cleanHtmlNavigationTarget("#features")).toBe("features")
     expect(cleanHtmlNavigationTarget("/#features")).toBe("features")
     expect(cleanHtmlNavigationTarget("/features")).toBe("features")
     expect(cleanHtmlNavigationTarget("./#features")).toBe("features")
     expect(resolveCoreviewHtmlNavigationTarget(documentRef, { target: "/features" })).toMatchObject({
+      ok: true,
+      targetKind: "id",
+    })
+    expect(resolveCoreviewHtmlNavigationTarget(documentRef, { target: "/#features" })).toMatchObject({
       ok: true,
       targetKind: "id",
     })
@@ -85,6 +90,37 @@ describe("Coreview HTML navigation resolver", () => {
       ok: true,
       targetKind: "heading",
       targetLabelSafe: "Documentation",
+    })
+  })
+
+  it("resolves roadmap, pricing, about, and contact aliases", () => {
+    const documentRef = documentFromHtml([
+      "<main>",
+      "<a href='/pricing'>Plans</a>",
+      "<section aria-label='About us'></section>",
+      "<button data-section='contact'>Contact</button>",
+      "<h2>Roadmap</h2>",
+      "</main>",
+    ].join(""))
+
+    expect(resolveCoreviewHtmlNavigationTarget(documentRef, { target: "road map" })).toMatchObject({
+      ok: true,
+      targetKind: "heading",
+      targetLabelSafe: "Roadmap",
+    })
+    expect(resolveCoreviewHtmlNavigationTarget(documentRef, { target: "/pricing" })).toMatchObject({
+      ok: true,
+      targetKind: "nav",
+    })
+    expect(resolveCoreviewHtmlNavigationTarget(documentRef, { target: "about" })).toMatchObject({
+      ok: true,
+      targetKind: "text",
+      targetLabelSafe: "About us",
+    })
+    expect(resolveCoreviewHtmlNavigationTarget(documentRef, { target: "support" })).toMatchObject({
+      ok: true,
+      targetKind: "button",
+      targetLabelSafe: "Contact",
     })
   })
 

@@ -246,6 +246,7 @@ export function coreviewFeedbackFromActionResult(
     result.action,
     result.blocked_reason ?? "ok",
     result.artifact_stable_identity ?? result.artifact_id ?? result.artifact_path ?? "artifact",
+    result.html_navigation_command_id ?? "no-html-command",
     result.annotation_id ?? result.view_signature_after ?? result.view_signature ?? result.zoom ?? result.fit_mode ?? "view",
   ].join(":")
 
@@ -286,11 +287,13 @@ export function coreviewFeedbackFromActionResult(
 
   if (result.action === "set_view" || result.action === "focus_anchor") {
     if (result.action === "set_view" && result.html_scroll_attempted === true) {
+      const confirmed = result.html_navigation_result_confirmed_before_feedback !== false
+      const successMessage = result.html_navigation_target_kind === "top" ? "Back at the top." : "Scrolled."
       return createCoreviewActionFeedback({
         actionKind: "navigation",
-        status: result.ok ? "applied" : "failed",
-        displayMessage: result.ok ? "Scrolled." : "Could not scroll.",
-        spokenMessage: result.ok ? "Scrolled." : "I couldn't scroll that view.",
+        status: result.ok && confirmed ? "applied" : "failed",
+        displayMessage: result.ok && confirmed ? successMessage : blockedFeedbackDisplayMessage(result.html_navigation_failure_reason ?? result.blocked_reason ?? "section_not_found"),
+        spokenMessage: result.ok && confirmed ? successMessage : blockedFeedbackSpokenMessage(result.html_navigation_failure_reason ?? result.blocked_reason ?? "section_not_found"),
         shouldSpeak: voiceTriggered,
         shouldShowToastOrCard: false,
         dedupeKey: baseKey,
@@ -298,11 +301,12 @@ export function coreviewFeedbackFromActionResult(
     }
     if (result.action === "focus_anchor") {
       const htmlFocus = result.renderer_kind === "html" || result.html_focus_anchor_attempted === true
+      const confirmed = result.html_navigation_result_confirmed_before_feedback !== false
       return createCoreviewActionFeedback({
         actionKind: "navigation",
-        status: result.ok ? "applied" : "failed",
-        displayMessage: result.ok ? (htmlFocus ? "Scrolled." : "Focused.") : "I couldn't find that section.",
-        spokenMessage: result.ok ? (htmlFocus ? "Scrolled." : "Focused.") : "I couldn't find that section.",
+        status: result.ok && confirmed ? "applied" : "failed",
+        displayMessage: result.ok && confirmed ? (htmlFocus ? "Scrolled." : "Focused.") : blockedFeedbackDisplayMessage(result.html_navigation_failure_reason ?? result.blocked_reason ?? "section_not_found"),
+        spokenMessage: result.ok && confirmed ? (htmlFocus ? "Scrolled." : "Focused.") : blockedFeedbackSpokenMessage(result.html_navigation_failure_reason ?? result.blocked_reason ?? "section_not_found"),
         shouldSpeak: voiceTriggered,
         shouldShowToastOrCard: false,
         dedupeKey: baseKey,
@@ -415,6 +419,9 @@ function blockedFeedbackDisplayMessage(reason: string): string {
   if (reason === "layout_anchor_not_supported") return "Text anchor is not supported for this view."
   if (reason === "section_not_found") return "I couldn't find that section."
   if (reason === "iframe_not_ready") return "The page is still loading."
+  if (reason === "section_index_not_ready") return "The page is still loading."
+  if (reason === "command_timeout") return "The page did not respond in time."
+  if (reason === "bridge_unavailable") return "The page is still loading."
   if (reason === "document_unavailable") return "The page is unavailable."
   if (reason === "cross_origin_unavailable") return "The page cannot be inspected safely."
   if (reason === "text_anchor_not_found") return "Text anchor was not found."
@@ -430,6 +437,9 @@ function blockedFeedbackSpokenMessage(reason: string): string {
   if (reason === "layout_anchor_not_supported") return "I can't place that text anchor in this view yet."
   if (reason === "section_not_found") return "I couldn't find that section."
   if (reason === "iframe_not_ready") return "The page is still loading. Try again in a moment."
+  if (reason === "section_index_not_ready") return "The page is still loading. Try again in a moment."
+  if (reason === "command_timeout") return "The page did not respond in time."
+  if (reason === "bridge_unavailable") return "The page is still loading. Try again in a moment."
   if (reason === "document_unavailable") return "The page is unavailable."
   if (reason === "cross_origin_unavailable") return "I can't inspect that page safely."
   if (reason === "text_anchor_not_found") return "I couldn't find that text in the artifact."

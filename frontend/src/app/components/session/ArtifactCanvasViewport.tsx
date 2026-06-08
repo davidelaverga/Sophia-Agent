@@ -17,6 +17,12 @@ import type {
   CoreviewHtmlNavigationFailureReason,
   CoreviewHtmlNavigationTargetKind,
 } from "../../lib/coreview-html-navigation"
+import {
+  CoreviewHtmlNavigationController,
+  type HtmlNavigationCommand,
+  type HtmlNavigationResult,
+  type HtmlNavigationTransportCommand,
+} from "../../lib/coreview-html-navigation-controller"
 import type { CoreviewPdfTextLayout } from "../../lib/coreview-pdf-text-layout"
 import type { CoreviewArtifactCapabilities } from "../../lib/coreview-workspace-contract"
 import { recordSophiaCaptureEvent } from "../../lib/session-capture"
@@ -93,7 +99,7 @@ export interface ArtifactHtmlViewState {
 export interface ArtifactHtmlCommandResult {
   ok: boolean
   blockedReason: CoreviewHtmlNavigationFailureReason | "text_anchor_not_found" | "layout_anchor_not_supported" | null
-  method: "scroll_by" | "scroll_to" | "heading" | "nav" | "button" | "id" | "name" | "text" | null
+  method: "scroll_by" | "scroll_to" | "current_view" | "heading" | "nav" | "button" | "id" | "name" | "text" | null
   scrolled: boolean
   state: ArtifactHtmlViewState | null
   targetKind?: HtmlInternalNavigationTargetKind | null
@@ -104,10 +110,13 @@ export interface ArtifactHtmlCommandResult {
   timedOut?: boolean
   waitedForReady?: boolean
   voiceNavigationUsedSameResolver?: boolean
+  targetConfirmedVisible?: boolean
+  navigationResult?: HtmlNavigationResult | null
 }
 
 export interface ArtifactHtmlCommandTarget {
   getLatestState: () => ArtifactHtmlViewState | null
+  navigate: (command: HtmlNavigationCommand) => Promise<ArtifactHtmlCommandResult>
   scrollBy: (deltaY: number) => Promise<ArtifactHtmlCommandResult>
   scrollTo: (position: "top" | "bottom") => Promise<ArtifactHtmlCommandResult>
   focusText: (text: string) => Promise<ArtifactHtmlCommandResult>
@@ -243,6 +252,18 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
     if (target === "docs" || target === "documentation") {
       return ["docs", "documentation"];
     }
+    if (target === "roadmap" || target === "road map") {
+      return ["roadmap", "road map"];
+    }
+    if (target === "pricing" || target === "price" || target === "plans") {
+      return ["pricing", "price", "plans"];
+    }
+    if (target === "about" || target === "about us") {
+      return ["about", "about us"];
+    }
+    if (target === "contact" || target === "contact us" || target === "support") {
+      return ["contact", "contact us", "support"];
+    }
     return [value];
   }
 
@@ -330,6 +351,7 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
         "nav a,nav button,[role='navigation'] a,[role='navigation'] button",
         "a[href]",
         "button,[role='button']",
+        "[aria-label]",
         "[data-target],[data-section],[data-scroll],[data-scroll-target],[data-section-target]"
       ];
       selectors.forEach(function (selector) {
@@ -464,10 +486,12 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
     payload.htmlNavigationResult = details && details.result ? details.result : (isAttempt ? "attempted" : null);
     payload.htmlNavigationFailureReason = details && details.failureReason ? details.failureReason : null;
     payload.htmlNavigationScrollTopBefore = typeof (details && details.scrollTopBefore) === "number" ? Math.max(0, Math.round(details.scrollTopBefore)) : null;
-    payload.htmlNavigationScrollTopAfter = payload.scrollTop;
-    payload.htmlNavigationScrolled = Boolean(details && details.scrolled);
-    payload.htmlVoiceNavigationUsedSameResolver = Boolean(details && details.voiceNavigationUsedSameResolver);
-    payload.htmlNavigationPreservedCaptureTarget = true;
+      payload.htmlNavigationScrollTopAfter = payload.scrollTop;
+      payload.htmlNavigationScrolled = Boolean(details && details.scrolled);
+      payload.htmlNavigationControllerActive = true;
+      payload.htmlNavigationResultConfirmedBeforeFeedback = payload.htmlNavigationResult === "success";
+      payload.htmlVoiceNavigationUsedSameResolver = Boolean(details && details.voiceNavigationUsedSameResolver);
+      payload.htmlNavigationPreservedCaptureTarget = true;
     window.parent.postMessage(payload, "*");
   }
 
@@ -505,6 +529,9 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
       payload.htmlNavigationTimedOut = false;
       payload.htmlNavigationWaitedForReady = Boolean(details && details.waitedForReady);
       payload.htmlNavigationPreventedPdfFallback = true;
+      payload.htmlNavigationControllerActive = true;
+      payload.htmlNavigationResultConfirmedBeforeFeedback = ok === true;
+      payload.htmlNavigationTargetConfirmedVisible = Boolean(details && details.targetConfirmedVisible);
       payload.htmlVoiceNavigationUsedSameResolver = Boolean(details && details.voiceNavigationUsedSameResolver);
       window.parent.postMessage(payload, "*");
     }, 80);
@@ -515,6 +542,16 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
     var before = root.scrollTop || window.scrollY || 0;
     root.scrollTo({ top: Math.max(0, top), left: 0, behavior: "smooth" });
     return Math.abs(before - Math.max(0, top)) > 1;
+  }
+
+  function elementVisible(element) {
+    if (!element || typeof element.getBoundingClientRect !== "function") {
+      return false;
+    }
+    var rect = element.getBoundingClientRect();
+    var viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    var viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+    return rect.bottom >= 0 && rect.right >= 0 && rect.top <= viewportHeight && rect.left <= viewportWidth;
   }
 
   function labelForElement(element) {
@@ -643,13 +680,14 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
     }
     if (target.targetKind === "top") {
       var moved = scrollToTop(0);
-      return { ok: true, blockedReason: null, method: "scroll_to", scrolled: moved, targetKind: "top" };
+      return { ok: true, blockedReason: null, method: "scroll_to", scrolled: moved, targetKind: "top", targetConfirmedVisible: scrollMetrics().scrollTop <= 1 };
     }
     if (target.targetKind === "bottom") {
       var metrics = scrollMetrics();
       var bottom = Math.max(0, metrics.scrollHeight - metrics.viewportHeight);
       var movedBottom = scrollToTop(bottom);
-      return { ok: true, blockedReason: null, method: "scroll_to", scrolled: movedBottom, targetKind: "bottom" };
+      var afterMetrics = scrollMetrics();
+      return { ok: true, blockedReason: null, method: "scroll_to", scrolled: movedBottom, targetKind: "bottom", targetConfirmedVisible: afterMetrics.scrollTop >= bottom - 1 };
     }
     target.element.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
     if (typeof target.element.focus === "function") {
@@ -657,7 +695,7 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
     }
     target.element.setAttribute("data-coreview-focus-pulse", "true");
     window.setTimeout(function () { target.element.removeAttribute("data-coreview-focus-pulse"); }, 900);
-    return { ok: true, blockedReason: null, method: target.method, scrolled: true, targetKind: target.targetKind || target.method || "unknown" };
+    return { ok: true, blockedReason: null, method: target.method, scrolled: true, targetKind: target.targetKind || target.method || "unknown", targetConfirmedVisible: elementVisible(target.element) };
   }
 
   function findTarget(query) {
@@ -803,7 +841,8 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
     var beforeMetrics = scrollMetrics();
     var resolved = resolveTarget(route.target, trigger.element);
     var scroll = scrollResolvedTarget(resolved);
-    var failureReason = scroll.ok ? null : (scroll.blockedReason || "section_not_found");
+    var confirmed = scroll.ok && (scroll.scrolled === true || scroll.targetConfirmedVisible === true);
+    var failureReason = confirmed ? null : (scroll.blockedReason || "section_not_found");
     window.setTimeout(function () {
       postNavigation("navigation-result", {
         attempted: true,
@@ -812,9 +851,10 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
         preventedDefault: true,
         blockedExternal: false,
         scrolled: scroll.scrolled,
-        result: scroll.ok ? "success" : failureReason,
+        result: confirmed ? "success" : failureReason,
         failureReason: failureReason,
-        scrollTopBefore: beforeMetrics.scrollTop
+        scrollTopBefore: beforeMetrics.scrollTop,
+        targetConfirmedVisible: scroll.targetConfirmedVisible === true
       });
     }, 80);
     scheduleState("internal-navigation");
@@ -842,6 +882,9 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
         targetLabelSafe: deltaY >= 0 ? "scroll down" : "scroll up",
         scrollTopBefore: metrics.scrollTop,
         waitedForReady: data.waitedForReady === true,
+        targetConfirmedVisible: deltaY >= 0
+          ? scrollMetrics().scrollTop >= Math.max(0, scrollMetrics().scrollHeight - scrollMetrics().viewportHeight) - 1
+          : scrollMetrics().scrollTop <= 1,
         voiceNavigationUsedSameResolver: true
       });
       return;
@@ -857,6 +900,21 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
         targetLabelSafe: data.position === "bottom" ? "bottom" : "top",
         scrollTopBefore: metrics.scrollTop,
         waitedForReady: data.waitedForReady === true,
+        targetConfirmedVisible: data.position === "bottom"
+          ? scrollMetrics().scrollTop >= Math.max(0, scrollMetrics().scrollHeight - scrollMetrics().viewportHeight) - 1
+          : scrollMetrics().scrollTop <= 1,
+        voiceNavigationUsedSameResolver: true
+      });
+      return;
+    }
+    if (data.command === "current_view") {
+      sendResult(data.commandId, true, null, "current_view", false, {
+        commandKind: "current_view",
+        targetKind: "text",
+        targetLabelSafe: currentSection(metrics) || "current view",
+        scrollTopBefore: metrics.scrollTop,
+        waitedForReady: data.waitedForReady === true,
+        targetConfirmedVisible: true,
         voiceNavigationUsedSameResolver: true
       });
       return;
@@ -867,12 +925,13 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
         sendResult(data.commandId, false, "section_not_found", null, false, {
           commandKind: "focus_text",
           targetKind: "unknown",
-          targetLabelSafe: data.text,
-          scrollTopBefore: metrics.scrollTop,
-          waitedForReady: data.waitedForReady === true,
-          voiceNavigationUsedSameResolver: true
-        });
-        return;
+        targetLabelSafe: data.text,
+        scrollTopBefore: metrics.scrollTop,
+        waitedForReady: data.waitedForReady === true,
+        targetConfirmedVisible: false,
+        voiceNavigationUsedSameResolver: true
+      });
+      return;
       }
       var scroll = scrollResolvedTarget(target);
       sendResult(data.commandId, scroll.ok, scroll.blockedReason, scroll.method, scroll.scrolled, {
@@ -881,6 +940,7 @@ const HTML_PREVIEW_BRIDGE_SCRIPT = `
         targetLabelSafe: target.target,
         scrollTopBefore: metrics.scrollTop,
         waitedForReady: data.waitedForReady === true,
+        targetConfirmedVisible: scroll.targetConfirmedVisible === true,
         voiceNavigationUsedSameResolver: true
       });
     }
@@ -1845,14 +1905,12 @@ function HtmlDocumentPage({
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const previewBounds = useElementClientBounds(previewShellRef)
   const layoutTelemetrySignatureRef = useRef<string | null>(null)
-  const commandIdRef = useRef(0)
   const latestViewStateRef = useRef<ArtifactHtmlViewState | null>(null)
   const htmlBridgeReadyRef = useRef(false)
   const htmlReadyWaitersRef = useRef<Array<() => void>>([])
   const [htmlViewState, setHtmlViewState] = useState<ArtifactHtmlViewState | null>(null)
   const pendingCommandsRef = useRef(new Map<string, {
     resolve: (result: ArtifactHtmlCommandResult) => void
-    timeoutId: number
   }>())
   const interactiveSrcDoc = useMemo(() => (
     preview.status === "ready" ? buildInteractiveHtmlPreviewSrcDoc(preview.html) : ""
@@ -1911,7 +1969,6 @@ function HtmlDocumentPage({
       if (!pending) {
         return
       }
-      window.clearTimeout(pending.timeoutId)
       pendingCommandsRef.current.delete(message.commandId)
       pending.resolve({
         ok: message.ok,
@@ -1928,6 +1985,7 @@ function HtmlDocumentPage({
         waitedForReady: message.htmlNavigationWaitedForReady,
         voiceNavigationUsedSameResolver: message.navigation?.voiceNavigationUsedSameResolver
           ?? message.htmlNavigationRouterUsed,
+        targetConfirmedVisible: message.htmlNavigationTargetConfirmedVisible,
       })
     }
 
@@ -1957,48 +2015,133 @@ function HtmlDocumentPage({
     })
   }, [])
 
-  const sendHtmlCommand = useCallback(async (
-    command: Record<string, string | number | null>,
+  const dispatchHtmlTransportCommand = useCallback((
+    command: HtmlNavigationTransportCommand,
   ): Promise<ArtifactHtmlCommandResult> => {
-    const waitedForReady = await waitForHtmlBridgeReady()
     const contentWindow = iframeRef.current?.contentWindow
     if (!contentWindow || preview.status !== "ready" || !htmlBridgeReadyRef.current) {
-      return {
+      return Promise.resolve({
         ok: false,
         blockedReason: "iframe_not_ready",
         method: null,
         scrolled: false,
         state: latestViewStateRef.current,
+        commandId: command.commandId,
         timedOut: !htmlBridgeReadyRef.current,
-        waitedForReady,
-      }
+        waitedForReady: command.waitedForReady,
+      })
     }
-    const commandId = `html-command-${Date.now().toString(36)}-${commandIdRef.current += 1}`
     return new Promise((resolve) => {
-      const timeoutId = window.setTimeout(() => {
-        pendingCommandsRef.current.delete(commandId)
-        resolve({
-          ok: false,
-          blockedReason: "iframe_not_ready",
-          method: null,
-          scrolled: false,
-          state: latestViewStateRef.current,
-          commandId,
-          timedOut: true,
-          waitedForReady,
-        })
-      }, HTML_PREVIEW_COMMAND_TIMEOUT_MS)
-
-      pendingCommandsRef.current.set(commandId, { resolve, timeoutId })
+      pendingCommandsRef.current.set(command.commandId, { resolve })
       contentWindow.postMessage({
         source: HTML_PREVIEW_PARENT_SOURCE,
         type: "command",
-        commandId,
-        waitedForReady,
-        ...command,
+        commandId: command.commandId,
+        waitedForReady: command.waitedForReady,
+        command: command.command,
+        deltaY: command.deltaY,
+        position: command.position,
+        text: command.text,
       }, "*")
     })
-  }, [preview.status, waitForHtmlBridgeReady])
+  }, [preview.status])
+
+  const dropHtmlTransportCommand = useCallback((commandId: string) => {
+    pendingCommandsRef.current.delete(commandId)
+  }, [])
+
+  const htmlNavigationController = useMemo(() => new CoreviewHtmlNavigationController({
+    getState: () => {
+      const state = latestViewStateRef.current
+      return state
+        ? {
+            htmlBridgeReady: state.htmlBridgeReady,
+            htmlSectionIndexReady: state.sectionIndexReady,
+            htmlSectionIndexEntryCount: state.indexEntryCount,
+            htmlSectionIndexBuildResult: state.indexBuildResult,
+            scrollTop: state.scrollTop,
+            scrollHeight: state.scrollHeight,
+            viewportHeight: state.viewportHeight,
+            currentSection: state.currentSection,
+          }
+        : null
+    },
+    waitForReady: async () => {
+      await waitForHtmlBridgeReady()
+    },
+    dispatch: async (command) => {
+      const result = await dispatchHtmlTransportCommand(command)
+      return {
+        ok: result.ok,
+        commandId: result.commandId ?? command.commandId,
+        reason: htmlNavigationFailureReason(result.blockedReason),
+        targetSafe: result.targetLabelSafe,
+        targetKind: result.targetKind,
+        scrollTopBefore: result.scrollTopBefore,
+        scrollTopAfter: result.scrollTopAfter,
+        scrolled: result.scrolled,
+        targetConfirmedVisible: result.targetConfirmedVisible,
+        timedOut: result.timedOut,
+        waitedForReady: result.waitedForReady,
+        state: result.state
+          ? {
+              htmlBridgeReady: result.state.htmlBridgeReady,
+              htmlSectionIndexReady: result.state.sectionIndexReady,
+              htmlSectionIndexEntryCount: result.state.indexEntryCount,
+              htmlSectionIndexBuildResult: result.state.indexBuildResult,
+              scrollTop: result.state.scrollTop,
+              scrollHeight: result.state.scrollHeight,
+              viewportHeight: result.state.viewportHeight,
+              currentSection: result.state.currentSection,
+            }
+          : null,
+        method: result.method,
+      }
+    },
+    dropCommand: dropHtmlTransportCommand,
+  }, {
+    commandTimeoutMs: HTML_PREVIEW_COMMAND_TIMEOUT_MS,
+    readyTimeoutMs: HTML_PREVIEW_READY_WAIT_MS,
+    idPrefix: "html-command",
+  }), [dispatchHtmlTransportCommand, dropHtmlTransportCommand, waitForHtmlBridgeReady])
+
+  const navigateHtml = useCallback(async (command: HtmlNavigationCommand): Promise<ArtifactHtmlCommandResult> => {
+    const result = await htmlNavigationController.execute(command)
+    const state = latestViewStateRef.current
+    return {
+      ok: result.ok,
+      blockedReason: result.reason,
+      method: result.method === "scroll_by"
+        || result.method === "scroll_to"
+        || result.method === "current_view"
+        || result.method === "heading"
+        || result.method === "nav"
+        || result.method === "button"
+        || result.method === "id"
+        || result.method === "name"
+        || result.method === "text"
+        ? result.method
+        : result.kind === "scroll_down" || result.kind === "scroll_up"
+        ? "scroll_by"
+        : result.kind === "go_top" || result.kind === "go_bottom"
+          ? "scroll_to"
+          : result.kind === "current_view"
+            ? "current_view"
+            : null,
+      scrolled: result.scrolled,
+      state,
+      targetKind: result.targetKind as HtmlInternalNavigationTargetKind | null,
+      targetLabelSafe: result.targetSafe,
+      scrollTopBefore: result.scrollTopBefore,
+      scrollTopAfter: result.scrollTopAfter,
+      commandId: result.commandId,
+      timedOut: result.timedOut,
+      waitedForReady: result.waitedForReady,
+      voiceNavigationUsedSameResolver: command.source === "voice",
+      targetConfirmedVisible: result.targetConfirmedVisible,
+      navigationResult: result,
+    }
+  }, [htmlNavigationController])
 
   useEffect(() => {
     if (preview.status !== "ready") {
@@ -2008,22 +2151,35 @@ function HtmlDocumentPage({
 
     const target: ArtifactHtmlCommandTarget = {
       getLatestState: () => latestViewStateRef.current,
-      scrollBy: (deltaY) => sendHtmlCommand({ command: "scroll_by", deltaY }),
-      scrollTo: (position) => sendHtmlCommand({ command: "scroll_to", position }),
-      focusText: (text) => sendHtmlCommand({ command: "focus_text", text }),
+      navigate: navigateHtml,
+      scrollBy: (deltaY) => navigateHtml({
+        kind: deltaY >= 0 ? "scroll_down" : "scroll_up",
+        source: "tool",
+        rendererKind: "html",
+      }),
+      scrollTo: (position) => navigateHtml({
+        kind: position === "bottom" ? "go_bottom" : "go_top",
+        source: "tool",
+        rendererKind: "html",
+      }),
+      focusText: (text) => navigateHtml({
+        kind: "focus_text",
+        targetText: text,
+        source: "tool",
+        rendererKind: "html",
+      }),
     }
     onHtmlCommandTargetChange?.(target)
     return () => {
       onHtmlCommandTargetChange?.(null)
     }
-  }, [onHtmlCommandTargetChange, preview.status, sendHtmlCommand])
+  }, [navigateHtml, onHtmlCommandTargetChange, preview.status])
 
   useEffect(() => () => {
     const waiters = htmlReadyWaitersRef.current
     htmlReadyWaitersRef.current = []
     waiters.forEach((resolve) => resolve())
     for (const pending of pendingCommandsRef.current.values()) {
-      window.clearTimeout(pending.timeoutId)
       pending.resolve({
         ok: false,
         blockedReason: "iframe_not_ready",
@@ -2228,6 +2384,9 @@ type HtmlPreviewBridgeMessage = {
   htmlNavigationTimedOut: boolean
   htmlNavigationWaitedForReady: boolean
   htmlNavigationPreventedPdfFallback: boolean
+  htmlNavigationControllerActive: boolean
+  htmlNavigationTargetConfirmedVisible: boolean
+  htmlNavigationResultConfirmedBeforeFeedback: boolean
   navigation: {
     target: string | null
     result: HtmlInternalNavigationResult | null
@@ -2326,6 +2485,9 @@ function normalizeHtmlPreviewBridgeMessage(
     htmlNavigationTimedOut: value.htmlNavigationTimedOut === true,
     htmlNavigationWaitedForReady: value.htmlNavigationWaitedForReady === true,
     htmlNavigationPreventedPdfFallback: value.htmlNavigationPreventedPdfFallback === true,
+    htmlNavigationControllerActive: value.htmlNavigationControllerActive === true,
+    htmlNavigationTargetConfirmedVisible: value.htmlNavigationTargetConfirmedVisible === true,
+    htmlNavigationResultConfirmedBeforeFeedback: value.htmlNavigationResultConfirmedBeforeFeedback === true,
     navigation: normalizeHtmlInternalNavigationMessage(value),
   }
 }
@@ -2336,6 +2498,9 @@ function htmlCommandBlockedReason(value: unknown): ArtifactHtmlCommandResult["bl
     || value === "text_anchor_not_found"
     || value === "layout_anchor_not_supported"
     || value === "iframe_not_ready"
+    || value === "section_index_not_ready"
+    || value === "command_timeout"
+    || value === "bridge_unavailable"
     || value === "document_unavailable"
     || value === "cross_origin_unavailable"
     || value === "unsupported_renderer"
@@ -2345,10 +2510,20 @@ function htmlCommandBlockedReason(value: unknown): ArtifactHtmlCommandResult["bl
   return null
 }
 
+function htmlNavigationFailureReason(
+  value: ArtifactHtmlCommandResult["blockedReason"],
+): CoreviewHtmlNavigationFailureReason | null {
+  if (value === "text_anchor_not_found" || value === "layout_anchor_not_supported") {
+    return "section_not_found"
+  }
+  return value
+}
+
 function htmlCommandMethod(value: unknown): ArtifactHtmlCommandResult["method"] {
   if (
     value === "scroll_by"
     || value === "scroll_to"
+    || value === "current_view"
     || value === "heading"
     || value === "nav"
     || value === "button"
@@ -2470,6 +2645,8 @@ function recordHtmlInternalNavigationTelemetry({
       htmlNavigationTimedOut: message.htmlNavigationTimedOut,
       htmlNavigationWaitedForReady: message.htmlNavigationWaitedForReady,
       htmlNavigationPreventedPdfFallback: message.htmlNavigationPreventedPdfFallback,
+      htmlNavigationControllerActive: message.htmlNavigationControllerActive,
+      htmlNavigationResultConfirmedBeforeFeedback: message.htmlNavigationResultConfirmedBeforeFeedback,
       htmlBridgeReady: message.state.htmlBridgeReady,
       htmlSectionIndexReady: message.state.sectionIndexReady,
       htmlSectionIndexEntryCount: message.state.indexEntryCount,
@@ -2504,6 +2681,9 @@ function htmlSectionIndexBuildResult(value: unknown): ArtifactHtmlViewState["ind
     value === "success"
     || value === "section_not_found"
     || value === "iframe_not_ready"
+    || value === "section_index_not_ready"
+    || value === "command_timeout"
+    || value === "bridge_unavailable"
     || value === "document_unavailable"
     || value === "cross_origin_unavailable"
     || value === "unsupported_renderer"

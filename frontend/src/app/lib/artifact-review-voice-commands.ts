@@ -155,10 +155,12 @@ const TITLE_FOCUS_PATTERNS = [
 const SCROLL_DOWN_PATTERNS = [
   /\bscroll\s+down\b/u,
   /\bmove\s+down\b/u,
+  /\bgo\s+down\b/u,
 ]
 const SCROLL_UP_PATTERNS = [
   /\bscroll\s+up\b/u,
   /\bmove\s+up\b/u,
+  /\bgo\s+up\b/u,
 ]
 const GO_TO_TOP_PATTERNS = [
   /\b(?:go to|jump to|show|open)\s+(?:the\s+)?top\b/u,
@@ -169,7 +171,7 @@ const GO_TO_TOP_PATTERNS = [
 const GO_TO_BOTTOM_PATTERNS = [
   /\b(?:go to|jump to|show|open)\s+(?:the\s+)?bottom\b/u,
 ]
-const GO_TO_SECTION_PATTERN = /\b(?:go to|jump to|show|open|focus(?:\s+on)?)\s+(?:the\s+)?(?!(?:page|first|last|next|previous|prev|top|bottom|front\s+page|home|hero)\b)(?:section\s+)?([a-z0-9][a-z0-9\s-]{1,80})\b/u
+const GO_TO_SECTION_PATTERN = /\b(?:go to|jump to|take me to|show(?:\s+me)?|open|focus(?:\s+on)?)\s+(?:the\s+)?(?!(?:page|first|last|next|previous|prev|top|bottom|front\s+page|home|hero)\b)(?:section\s+)?([a-z0-9][a-z0-9\s-]{1,80})\b/u
 const UNDERLINE_PATTERNS = [/\bunderline(?:d)?\b/u]
 const ARROW_PATTERNS = [
   /\b(?:draw|add|place|put|make)\s+(?:an?\s+)?arrow\b/u,

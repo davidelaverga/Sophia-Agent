@@ -203,6 +203,7 @@ export type CoreviewVisualTelemetry = {
   htmlSectionIndexReady: boolean | null
   htmlSectionIndexEntryCount: number | null
   htmlSectionIndexBuildResult: string | null
+  htmlNavigationControllerActive: boolean | null
   htmlNavigationRouterUsed: boolean | null
   htmlNavigationCommandKind: string | null
   htmlNavigationTargetSafe: string | null
@@ -220,6 +221,9 @@ export type CoreviewVisualTelemetry = {
   htmlNavigationBlockedGenericToolCount: number | null
   htmlInternalNavigationUsedSameResolver: boolean | null
   htmlVoiceNavigationUsedSameResolver: boolean | null
+  htmlNavigationSuppressedEmitArtifact: boolean | null
+  htmlNavigationSuppressedBuilderTool: boolean | null
+  htmlNavigationResultConfirmedBeforeFeedback: boolean | null
   htmlPostMessageNavigationReceived: boolean | null
   htmlNavigationPreservedCaptureTarget: boolean | null
   htmlAnnotationOverlayCapturing: boolean | null
@@ -1583,6 +1587,7 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       htmlSectionIndexReady: null,
       htmlSectionIndexEntryCount: null,
       htmlSectionIndexBuildResult: null,
+      htmlNavigationControllerActive: null,
       htmlNavigationRouterUsed: null,
       htmlNavigationCommandKind: null,
       htmlNavigationTargetSafe: null,
@@ -1600,6 +1605,9 @@ function buildDefaultCoreviewTelemetry(): CoreviewUsageTelemetry {
       htmlNavigationBlockedGenericToolCount: null,
       htmlInternalNavigationUsedSameResolver: null,
       htmlVoiceNavigationUsedSameResolver: null,
+      htmlNavigationSuppressedEmitArtifact: null,
+      htmlNavigationSuppressedBuilderTool: null,
+      htmlNavigationResultConfirmedBeforeFeedback: null,
       htmlPostMessageNavigationReceived: null,
       htmlNavigationPreservedCaptureTarget: null,
       htmlAnnotationOverlayCapturing: null,
@@ -1849,6 +1857,9 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     ) || (
       event.category === "voice-session"
       && event.name === "coreview-tool-call"
+    ) || (
+      asBoolean(event.payloadRecord?.htmlNavigationSuppressedEmitArtifact) === true
+      || asBoolean(event.payloadRecord?.htmlNavigationSuppressedBuilderTool) === true
     ))
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
@@ -2378,6 +2389,10 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
     htmlInteractionEvents,
     "htmlNavigationRouterUsed",
   )
+  visual.htmlNavigationControllerActive = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlNavigationControllerActive",
+  )
   visual.htmlNavigationCommandKind = latestStringFromRecords(
     htmlInteractionEvents,
     "htmlNavigationCommandKind",
@@ -2432,6 +2447,18 @@ function buildCoreviewVisualTelemetry(activeEvents: NormalizedVoiceCaptureEvent[
   visual.htmlVoiceNavigationUsedSameResolver = latestBooleanFromRecords(
     htmlInteractionEvents,
     "htmlVoiceNavigationUsedSameResolver",
+  )
+  visual.htmlNavigationSuppressedEmitArtifact = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlNavigationSuppressedEmitArtifact",
+  )
+  visual.htmlNavigationSuppressedBuilderTool = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlNavigationSuppressedBuilderTool",
+  )
+  visual.htmlNavigationResultConfirmedBeforeFeedback = latestBooleanFromRecords(
+    htmlInteractionEvents,
+    "htmlNavigationResultConfirmedBeforeFeedback",
   )
   visual.htmlPostMessageNavigationReceived = latestBooleanFromRecords(
     htmlInteractionEvents,

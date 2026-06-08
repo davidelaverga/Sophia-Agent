@@ -23,6 +23,7 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
   waitOk?: boolean
   annotationCommitNoop?: boolean
   htmlSetViewFailure?: CoreviewToolBlockedReason
+  htmlFocusFailure?: CoreviewToolBlockedReason
   rebindCurrent?: Partial<CoreviewCurrentView>
   rebindOk?: boolean
   rebindReason?: string | null
@@ -32,6 +33,7 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
     waitOk = true,
     annotationCommitNoop = false,
     htmlSetViewFailure,
+    htmlFocusFailure,
     rebindCurrent,
     rebindOk = true,
     rebindReason = null,
@@ -106,13 +108,19 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
         || Boolean(view.htmlScrollPosition)
       )
       if (htmlScrollAttempted && htmlSetViewFailure) {
+        const commandKind = typeof view.htmlScrollDelta === "number"
+          ? view.htmlScrollDelta >= 0 ? "scroll_down" : "scroll_up"
+          : view.htmlScrollPosition === "bottom"
+            ? "go_bottom"
+            : "go_top"
         return {
           ok: false,
           blockedReason: htmlSetViewFailure,
           method: "heading",
           scrolled: false,
+          htmlNavigationControllerActive: true,
           htmlNavigationRouterUsed: true,
-          htmlNavigationCommandKind: typeof view.htmlScrollDelta === "number" ? "scroll_by" : "scroll_to",
+          htmlNavigationCommandKind: commandKind,
           htmlNavigationTargetSafe: view.htmlScrollPosition ?? null,
           htmlNavigationTargetKind: view.htmlScrollPosition ?? "unknown",
           htmlNavigationResult: htmlSetViewFailure,
@@ -125,10 +133,12 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
           htmlNavigationWaitedForReady: htmlSetViewFailure === "iframe_not_ready",
           htmlNavigationPreventedPdfFallback: true,
           htmlVoiceNavigationUsedSameResolver: true,
+          htmlNavigationResultConfirmedBeforeFeedback: false,
         }
       }
+      const beforeScrollTop = current.scrollTop ?? 0
       const nextScrollTop = typeof view.htmlScrollDelta === "number"
-        ? Math.max(0, (current.scrollTop ?? 0) + view.htmlScrollDelta)
+        ? Math.max(0, beforeScrollTop + view.htmlScrollDelta)
         : view.htmlScrollPosition === "top"
           ? 0
           : view.htmlScrollPosition === "bottom"
@@ -149,6 +159,35 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
           zoom: view.zoom,
           fitMode: view.fitMode,
         }),
+      }
+      if (htmlScrollAttempted) {
+        const commandKind = typeof view.htmlScrollDelta === "number"
+          ? view.htmlScrollDelta >= 0 ? "scroll_down" : "scroll_up"
+          : view.htmlScrollPosition === "bottom"
+            ? "go_bottom"
+            : "go_top"
+        return {
+          ok: true,
+          blockedReason: null,
+          method: typeof view.htmlScrollDelta === "number" ? "scroll_by" : "scroll_to",
+          scrolled: nextScrollTop !== beforeScrollTop,
+          htmlNavigationControllerActive: true,
+          htmlNavigationRouterUsed: true,
+          htmlNavigationCommandKind: commandKind,
+          htmlNavigationTargetSafe: view.htmlScrollPosition ?? (commandKind === "scroll_down" ? "scroll down" : "scroll up"),
+          htmlNavigationTargetKind: view.htmlScrollPosition ?? (commandKind === "scroll_down" ? "bottom" : "top"),
+          htmlNavigationResult: "success",
+          htmlNavigationFailureReason: null,
+          htmlNavigationScrollTopBefore: beforeScrollTop,
+          htmlNavigationScrollTopAfter: nextScrollTop,
+          htmlNavigationScrolled: nextScrollTop !== beforeScrollTop,
+          htmlNavigationCommandId: "test-html-command",
+          htmlNavigationTimedOut: false,
+          htmlNavigationWaitedForReady: false,
+          htmlNavigationPreventedPdfFallback: true,
+          htmlVoiceNavigationUsedSameResolver: view.htmlNavigationSource === "voice",
+          htmlNavigationResultConfirmedBeforeFeedback: true,
+        }
       }
     },
     refreshView: () => {
@@ -271,6 +310,76 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
     focusAnnotationAnchor: (input) => {
       focusCalls += 1
       focusedAnchors.push(input.anchor)
+      if (current.rendererKind === "html") {
+        const beforeScrollTop = current.scrollTop ?? 0
+        const nextScrollTop = beforeScrollTop + 240
+        if (htmlFocusFailure) {
+          return {
+            ok: false,
+            blockedReason: htmlFocusFailure,
+            method: null,
+            scrolled: false,
+            htmlNavigation: {
+              htmlNavigationControllerActive: true,
+              htmlNavigationRouterUsed: true,
+              htmlNavigationCommandKind: "focus_section",
+              htmlNavigationTargetSafe: input.anchor.text ?? null,
+              htmlNavigationTargetKind: "unknown",
+              htmlNavigationResult: htmlFocusFailure,
+              htmlNavigationFailureReason: htmlFocusFailure,
+              htmlNavigationScrollTopBefore: beforeScrollTop,
+              htmlNavigationScrollTopAfter: beforeScrollTop,
+              htmlNavigationScrolled: false,
+              htmlNavigationCommandId: "test-html-focus",
+              htmlNavigationTimedOut: htmlFocusFailure === "command_timeout",
+              htmlNavigationWaitedForReady: htmlFocusFailure === "iframe_not_ready",
+              htmlNavigationPreventedPdfFallback: true,
+              htmlVoiceNavigationUsedSameResolver: input.htmlNavigationSource === "voice",
+              htmlNavigationResultConfirmedBeforeFeedback: false,
+            },
+          }
+        }
+        current = {
+          ...current,
+          pageIndex: input.pageIndex,
+          zoom: input.zoom,
+          fitMode: input.fitMode,
+          scrollTop: nextScrollTop,
+          viewSignature: buildArtifactViewSignature({
+            artifactId: current.artifactId,
+            filePath: current.artifactPath,
+            rendererKind: current.rendererKind,
+            pageIndex: input.pageIndex,
+            pageCount: current.pageCount,
+            zoom: input.zoom,
+            fitMode: input.fitMode,
+          }),
+        }
+        return {
+          ok: true,
+          blockedReason: null,
+          method: "heading",
+          scrolled: true,
+          htmlNavigation: {
+            htmlNavigationControllerActive: true,
+            htmlNavigationRouterUsed: true,
+            htmlNavigationCommandKind: "focus_section",
+            htmlNavigationTargetSafe: input.anchor.text ?? "top",
+            htmlNavigationTargetKind: "heading",
+            htmlNavigationResult: "success",
+            htmlNavigationFailureReason: null,
+            htmlNavigationScrollTopBefore: beforeScrollTop,
+            htmlNavigationScrollTopAfter: nextScrollTop,
+            htmlNavigationScrolled: true,
+            htmlNavigationCommandId: "test-html-focus",
+            htmlNavigationTimedOut: false,
+            htmlNavigationWaitedForReady: false,
+            htmlNavigationPreventedPdfFallback: true,
+            htmlVoiceNavigationUsedSameResolver: input.htmlNavigationSource === "voice",
+            htmlNavigationResultConfirmedBeforeFeedback: true,
+          },
+        }
+      }
       current = {
         ...current,
         pageIndex: input.pageIndex,
@@ -703,11 +812,13 @@ describe("Coreview action bus", () => {
       page_index: 0,
       page_count: 1,
       scroll_top: 120,
+      navigation_model: "scroll_document",
       blocked_reason: "section_not_found",
       html_scroll_attempted: true,
       html_scroll_result: "section_not_found",
+      html_navigation_controller_active: true,
       html_navigation_router_used: true,
-      html_navigation_command_kind: "scroll_to",
+      html_navigation_command_kind: "go_bottom",
       html_navigation_target_safe: "bottom",
       html_navigation_target_kind: "bottom",
       html_navigation_result: "section_not_found",
@@ -717,6 +828,7 @@ describe("Coreview action bus", () => {
       html_navigation_scrolled: false,
       html_navigation_prevented_pdf_fallback: true,
       html_voice_navigation_used_same_resolver: true,
+      html_navigation_result_confirmed_before_feedback: false,
       result_summary: "Sophia could not find that section in the HTML document.",
       refresh_attempted: false,
       refresh_result: "not_requested",
@@ -752,8 +864,15 @@ describe("Coreview action bus", () => {
       page_index: 0,
       page_count: 1,
       scroll_top: 500,
+      navigation_model: "scroll_document",
       html_scroll_attempted: true,
       html_scroll_result: "success",
+      html_navigation_controller_active: true,
+      html_navigation_router_used: true,
+      html_navigation_command_kind: "scroll_down",
+      html_navigation_result: "success",
+      html_navigation_scrolled: true,
+      html_navigation_result_confirmed_before_feedback: true,
       result_summary: "Scrolled the HTML document.",
       refresh_attempted: false,
       refresh_result: "not_requested",
@@ -783,8 +902,17 @@ describe("Coreview action bus", () => {
       action: "focus_anchor",
       renderer_kind: "html",
       focus_anchor_type: "text_quote",
+      navigation_model: "scroll_document",
       html_focus_anchor_attempted: true,
       html_focus_anchor_result: "success",
+      html_navigation_controller_active: true,
+      html_navigation_router_used: true,
+      html_navigation_command_kind: "focus_section",
+      html_navigation_target_safe: "Features",
+      html_navigation_target_kind: "heading",
+      html_navigation_result: "success",
+      html_navigation_scrolled: true,
+      html_navigation_result_confirmed_before_feedback: true,
       result_summary: "Focused the HTML section. Visual review is not active.",
     })
     expect(harness.focusCalls).toBe(1)
@@ -792,6 +920,42 @@ describe("Coreview action bus", () => {
       anchorType: "text_quote",
       text: "Features",
       rect: { x: 0, y: 0, width: 0.01, height: 0.01 },
+    })
+  })
+
+  it("returns section_not_found when HTML focus controller cannot find the target", async () => {
+    const harness = createHarness({
+      artifactPath: "outputs/site.html",
+      artifactTitle: "site.html",
+      rendererKind: "html",
+      pageIndex: 0,
+      pageCount: 1,
+      fitMode: "custom",
+      reviewActive: false,
+      reviewHasFrame: false,
+      canRefresh: false,
+      htmlFocusFailure: "section_not_found",
+    })
+
+    const result = await harness.bus.focusAnchor({
+      anchor: { type: "text_quote", text: "Missing" },
+      pageIndex: 0,
+    }, "gemini_tool")
+
+    expect(result).toMatchObject({
+      ok: false,
+      action: "focus_anchor",
+      renderer_kind: "html",
+      blocked_reason: "section_not_found",
+      html_focus_anchor_attempted: true,
+      html_focus_anchor_result: "section_not_found",
+      html_navigation_controller_active: true,
+      html_navigation_router_used: true,
+      html_navigation_command_kind: "focus_section",
+      html_navigation_result: "section_not_found",
+      html_navigation_failure_reason: "section_not_found",
+      html_navigation_scrolled: false,
+      html_navigation_result_confirmed_before_feedback: false,
     })
   })
 

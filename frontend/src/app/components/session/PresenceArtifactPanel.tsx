@@ -300,6 +300,10 @@ function isHtmlScrollVoiceCommand(command: ArtifactReviewVoiceCommand): boolean 
     || command.kind === "go_to_bottom"
 }
 
+function isHtmlNavigationVoiceCommand(command: ArtifactReviewVoiceCommand): boolean {
+  return isHtmlScrollVoiceCommand(command) || command.kind === "focus_anchor"
+}
+
 function buildRefreshUnavailableVoiceCommandMessage(
   command: ArtifactReviewVoiceCommand,
   shouldStartVoiceReview: boolean,
@@ -400,6 +404,9 @@ const COREVIEW_BLOCKED_STATUS_TEXT: Partial<Record<CoreviewToolBlockedReason, st
   layout_anchor_not_supported: "Layout anchors are not available for this artifact format.",
   section_not_found: "I couldn't find that section.",
   iframe_not_ready: "The page is still loading. Try again in a moment.",
+  section_index_not_ready: "The page is still loading. Try again in a moment.",
+  command_timeout: "The page did not respond in time.",
+  bridge_unavailable: "The page is still loading. Try again in a moment.",
   document_unavailable: "The page is unavailable.",
   cross_origin_unavailable: "I can't inspect that page safely.",
   ocr_not_available: "OCR is not available yet.",
@@ -435,6 +442,9 @@ const COREVIEW_ROUTE_BLOCKED_REASON: Partial<Record<
   layout_anchor_not_supported: "layout_anchor_not_supported",
   section_not_found: "section_not_found",
   iframe_not_ready: "iframe_not_ready",
+  section_index_not_ready: "iframe_not_ready",
+  command_timeout: "visual_refresh_unavailable",
+  bridge_unavailable: "iframe_not_ready",
   document_unavailable: "document_unavailable",
   cross_origin_unavailable: "document_unavailable",
   text_anchor_not_found: "text_anchor_not_found",
@@ -1820,6 +1830,7 @@ export function PresenceArtifactPanel({
     autoRefreshBlockedReason?: string | null
     transportStateBefore?: string | null
     transportStateAfter?: string | null
+    hardIntercept?: boolean
     annotationFallbackAttempted?: boolean
     annotationFallbackResult?: "success" | "partial_success" | "blocked" | "not_attempted" | "annotation_commit_failed" | null
     annotationFallbackBlockedReason?: string | null
@@ -1873,7 +1884,7 @@ export function PresenceArtifactPanel({
         reviewVoiceCommandRefreshResult: details.refreshResult,
         reviewVoiceCommandTransportStateBefore: details.transportStateBefore ?? builderArtifactCoReview.transportStatus.statusText,
         reviewVoiceCommandTransportStateAfter: details.transportStateAfter ?? builderArtifactCoReview.transportStatus.statusText,
-        reviewVoiceCommandDidHardIntercept: false,
+        reviewVoiceCommandDidHardIntercept: details.hardIntercept === true,
         reviewVoiceCommandWaitedForViewReady: details.waitedForViewReady ?? false,
         reviewVoiceCommandAutoRefreshTiming: details.autoRefreshTiming ?? null,
         reviewVoiceCommandAutoRefreshBlockedReason: details.autoRefreshBlockedReason ?? null,
@@ -2030,6 +2041,8 @@ export function PresenceArtifactPanel({
         artifactReboundFromRenderedState: result.rebind_attempted && isVisible,
         coreviewSetViewPageIndex: result.action === "set_view" ? result.page_index : null,
         coreviewSetViewPageCount: result.action === "set_view" ? result.page_count : null,
+        navigationModel: result.navigation_model ?? null,
+        htmlNavigationControllerActive: result.html_navigation_controller_active,
         htmlNavigationRouterUsed: result.html_navigation_router_used,
         htmlNavigationCommandKind: result.html_navigation_command_kind,
         htmlNavigationTargetSafe: result.html_navigation_target_safe,
@@ -2047,6 +2060,9 @@ export function PresenceArtifactPanel({
         htmlNavigationBlockedGenericToolCount: result.html_navigation_blocked_generic_tool_count,
         htmlInternalNavigationUsedSameResolver: result.html_internal_navigation_used_same_resolver,
         htmlVoiceNavigationUsedSameResolver: result.html_voice_navigation_used_same_resolver,
+        htmlNavigationSuppressedEmitArtifact: result.html_navigation_suppressed_emit_artifact,
+        htmlNavigationSuppressedBuilderTool: result.html_navigation_suppressed_builder_tool,
+        htmlNavigationResultConfirmedBeforeFeedback: result.html_navigation_result_confirmed_before_feedback,
         htmlScrollAttempted: result.html_scroll_attempted,
         htmlScrollResult: result.html_scroll_result,
         htmlFocusAnchorAttempted: result.html_focus_anchor_attempted,
@@ -3703,6 +3719,124 @@ export function PresenceArtifactPanel({
         handled: true,
         command,
         applied: true,
+        blockedReason: null,
+        triggeredRefresh: false,
+        refreshResult: "not_requested",
+        userMessage: null,
+        suppressAssistant: true,
+      }
+    }
+
+    const reviewCommands = commands.length > 0 ? commands : [command]
+    const htmlNavigationCommands = reviewCommands.filter(isHtmlNavigationVoiceCommand)
+    if (currentView.rendererKind === "html" && htmlNavigationCommands.length > 0) {
+      if (!builderArtifactId || !currentView.artifactId) {
+        setVoiceCommandStatus({
+          text: "No artifact is selected.",
+          tone: "warn",
+        })
+        recordReviewVoiceCommandTelemetry({
+          command,
+          commands: reviewCommands,
+          applied: false,
+          blockedReason: "no_artifact_selected",
+          triggeredRefresh: false,
+          refreshResult: "not_requested",
+          artifactCurrentPageIndex: currentPageIndex,
+          artifactCurrentPageCount: currentPageCount,
+          autoRefreshBlockedReason: "no_artifact_selected",
+          transportStateBefore,
+          transportStateAfter: builderArtifactCoReview.transportStatus.statusText,
+          hardIntercept: true,
+        })
+        return {
+          handled: true,
+          command,
+          applied: false,
+          blockedReason: "no_artifact_selected",
+          triggeredRefresh: false,
+          refreshResult: "not_requested",
+          userMessage: null,
+          suppressAssistant: true,
+        }
+      }
+
+      setVoiceCommandStatus({
+        text: htmlNavigationCommands.some((candidate) => candidate.kind === "focus_anchor") ? "Finding section..." : "Scrolling...",
+        tone: "pending",
+      })
+
+      const executeHtmlNavigationCommands = async () => {
+        for (const nextCommand of htmlNavigationCommands) {
+          const commandView = coreviewCurrentViewRef.current ?? currentView
+          const result = await runCoreviewAction((bus) => (
+            nextCommand.kind === "focus_anchor"
+              ? bus.focusAnchor(
+                  coreviewFocusAnchorInputFromVoiceCommand(
+                    nextCommand,
+                    commandView,
+                    lastCoreviewFocusedAnchorTypeRef.current,
+                  ),
+                  "frontend_fallback",
+                )
+              : bus.setView(coreviewSetViewInputFromVoiceCommand(nextCommand, commandView), "frontend_fallback")
+          ), {
+            applyStatus: true,
+            voiceTriggered: true,
+            commandKind: nextCommand.kind,
+            dedupePrefix: `voice-html-nav:${startedAtMs}`,
+          })
+          const confirmed = result.html_navigation_result_confirmed_before_feedback !== false
+          const navigationBlockedReason = (result.blocked_reason ?? result.html_navigation_failure_reason) as CoreviewToolBlockedReason | null
+          recordReviewVoiceCommandTelemetry({
+            command: nextCommand,
+            commands: reviewCommands,
+            applied: result.ok && confirmed,
+            blockedReason: result.ok && confirmed ? null : routeBlockedReasonFromCoreview(navigationBlockedReason),
+            triggeredRefresh: result.refresh_attempted,
+            refreshResult: result.refresh_attempted
+              ? refreshResultFromCoreview(result.refresh_result)
+              : "not_requested",
+            artifactCurrentPageIndex: result.page_index ?? commandView.pageIndex,
+            artifactCurrentPageCount: result.page_count ?? Math.max(1, commandView.pageCount),
+            staleAfterPageChange: result.stale,
+            waitedForViewReady: result.view_ready_wait_ms !== null || result.html_navigation_waited_for_ready === true,
+            autoRefreshTiming: result.view_ready_wait_ms !== null
+              ? `after_view_ready:${result.view_ready_wait_ms}ms`
+              : null,
+            autoRefreshBlockedReason: navigationBlockedReason,
+            transportStateBefore,
+            transportStateAfter: builderArtifactCoReview.transportStatus.statusText,
+            hardIntercept: true,
+          })
+        }
+      }
+
+      window.setTimeout(() => {
+        void executeHtmlNavigationCommands().catch(() => {
+          recordReviewVoiceCommandTelemetry({
+            command,
+            commands: reviewCommands,
+            applied: false,
+            blockedReason: "visual_refresh_unavailable",
+            triggeredRefresh: false,
+            refreshResult: "error",
+            artifactCurrentPageIndex: currentPageIndex,
+            artifactCurrentPageCount: currentPageCount,
+            waitedForViewReady: false,
+            autoRefreshTiming: "queued",
+            autoRefreshBlockedReason: "refresh_exception",
+            transportStateBefore,
+            transportStateAfter: builderArtifactCoReview.transportStatus.statusText,
+            hardIntercept: true,
+          })
+        })
+      }, 0)
+
+      return {
+        handled: true,
+        command,
+        applied: false,
         blockedReason: null,
         triggeredRefresh: false,
         refreshResult: "not_requested",

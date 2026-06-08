@@ -33,6 +33,8 @@ describe("artifact review voice command parser", () => {
     expect(parseArtifactReviewVoiceCommand("refresh your page")).toEqual({ kind: "refresh_view" })
     expect(parseArtifactReviewVoiceCommand("scroll down")).toEqual({ kind: "scroll_down" })
     expect(parseArtifactReviewVoiceCommand("scroll up")).toEqual({ kind: "scroll_up" })
+    expect(parseArtifactReviewVoiceCommand("go down")).toEqual({ kind: "scroll_down" })
+    expect(parseArtifactReviewVoiceCommand("go up")).toEqual({ kind: "scroll_up" })
     expect(parseArtifactReviewVoiceCommand("go to top")).toEqual({ kind: "go_to_top" })
     expect(parseArtifactReviewVoiceCommand("go to bottom")).toEqual({ kind: "go_to_bottom" })
     expect(parseArtifactReviewVoiceCommand("go to front page")).toEqual({ kind: "go_to_top" })
@@ -42,6 +44,24 @@ describe("artifact review voice command parser", () => {
       kind: "focus_anchor",
       anchorType: "text_quote",
       anchorText: "coreview",
+      zoomDelta: 1,
+    })
+    expect(parseArtifactReviewVoiceCommand("take me to Features")).toEqual({
+      kind: "focus_anchor",
+      anchorType: "text_quote",
+      anchorText: "features",
+      zoomDelta: 1,
+    })
+    expect(parseArtifactReviewVoiceCommand("show me Docs")).toEqual({
+      kind: "focus_anchor",
+      anchorType: "text_quote",
+      anchorText: "docs",
+      zoomDelta: 1,
+    })
+    expect(parseArtifactReviewVoiceCommand("focus current section")).toEqual({
+      kind: "focus_anchor",
+      anchorType: "text_quote",
+      anchorText: "current section",
       zoomDelta: 1,
     })
     expect(parseArtifactReviewVoiceCommand("focus hero title")).toEqual({

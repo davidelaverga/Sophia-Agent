@@ -291,6 +291,59 @@ describe("Coreview action feedback", () => {
     })
   })
 
+  it("does not emit success feedback for unconfirmed HTML navigation", () => {
+    const feedback = coreviewFeedbackFromActionResult({
+      ...baseActionResult,
+      action: "set_view",
+      annotation_id: null,
+      annotation_kind: null,
+      annotation_commit_verified: false,
+      html_scroll_attempted: true,
+      html_scroll_result: "success",
+      html_navigation_router_used: true,
+      html_navigation_result: "success",
+      html_navigation_scrolled: false,
+      html_navigation_result_confirmed_before_feedback: false,
+    }, {
+      voiceTriggered: true,
+      commandKind: "scroll_down",
+    })
+
+    expect(feedback).toMatchObject({
+      actionKind: "navigation",
+      status: "failed",
+      spokenMessage: "I couldn't find that section.",
+      shouldSpeak: true,
+    })
+  })
+
+  it("uses top-specific feedback after confirmed top navigation", () => {
+    const feedback = coreviewFeedbackFromActionResult({
+      ...baseActionResult,
+      action: "set_view",
+      annotation_id: null,
+      annotation_kind: null,
+      annotation_commit_verified: false,
+      html_scroll_attempted: true,
+      html_scroll_result: "success",
+      html_navigation_router_used: true,
+      html_navigation_target_kind: "top",
+      html_navigation_result: "success",
+      html_navigation_scrolled: false,
+      html_navigation_result_confirmed_before_feedback: true,
+    }, {
+      voiceTriggered: true,
+      commandKind: "go_to_top",
+    })
+
+    expect(feedback).toMatchObject({
+      actionKind: "navigation",
+      status: "applied",
+      displayMessage: "Back at the top.",
+      spokenMessage: "Back at the top.",
+    })
+  })
+
   it("gives honest feedback for missing HTML sections without saying Done", () => {
     const feedback = coreviewFeedbackFromActionResult({
       ...baseActionResult,

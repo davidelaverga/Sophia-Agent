@@ -31,6 +31,7 @@ import {
   COREVIEW_ANNOTATION_STORAGE_VERSION,
   type CoreviewAnnotationStoreTelemetry,
 } from "../../lib/coreview-annotation-store"
+import { htmlNavigationResultTelemetry } from "../../lib/coreview-html-navigation-controller"
 import {
   resolveCoreviewPdfTextAnchor,
   type CoreviewPdfTextLayout,
@@ -79,6 +80,7 @@ type ArtifactStageSetViewInput = {
   fitMode: ArtifactFitMode
   htmlScrollDelta?: number | null
   htmlScrollPosition?: "top" | "bottom" | null
+  htmlNavigationSource?: "voice" | "tool" | "manual"
 }
 
 export interface ArtifactStageProps {
@@ -897,10 +899,12 @@ export function ArtifactStage({
     }
 
     const htmlNavigationCommandKind = typeof view.htmlScrollDelta === "number" && Number.isFinite(view.htmlScrollDelta)
-      ? "scroll_by"
-      : view.htmlScrollPosition
-        ? "scroll_to"
-        : null
+      ? view.htmlScrollDelta >= 0 ? "scroll_down" : "scroll_up"
+      : view.htmlScrollPosition === "bottom"
+        ? "go_bottom"
+        : view.htmlScrollPosition === "top"
+          ? "go_top"
+          : null
     const htmlTarget = htmlCommandTargetRef.current
     if (!htmlTarget) {
       recordSophiaCaptureEvent({
@@ -915,10 +919,12 @@ export function ArtifactStage({
           htmlBridgeReady: false,
           htmlSectionIndexReady: false,
           htmlNavigationRouterUsed: true,
+          htmlNavigationControllerActive: true,
           htmlNavigationCommandKind,
           htmlNavigationResult: "iframe_not_ready",
           htmlNavigationFailureReason: "iframe_not_ready",
           htmlNavigationPreventedPdfFallback: true,
+          htmlNavigationResultConfirmedBeforeFeedback: false,
           htmlScrollContainerResolved: false,
           htmlScrollMode: "iframe_document",
           htmlCoreviewCommandModel: "scroll_document",
@@ -933,22 +939,35 @@ export function ArtifactStage({
         blockedReason: "iframe_not_ready",
         scrolled: false,
         htmlNavigationRouterUsed: true,
+        htmlNavigationControllerActive: true,
         htmlNavigationCommandKind,
         htmlNavigationResult: "iframe_not_ready",
         htmlNavigationFailureReason: "iframe_not_ready",
         htmlNavigationPreventedPdfFallback: true,
+        htmlNavigationResultConfirmedBeforeFeedback: false,
       } satisfies CoreviewSetViewAdapterResult
     }
 
     const result = typeof view.htmlScrollDelta === "number" && Number.isFinite(view.htmlScrollDelta)
-      ? await htmlTarget.scrollBy(view.htmlScrollDelta)
+      ? await htmlTarget.navigate({
+          kind: view.htmlScrollDelta >= 0 ? "scroll_down" : "scroll_up",
+          source: view.htmlNavigationSource ?? "tool",
+          artifactStableIdentity: artifactStableIdentity ?? null,
+          rendererKind: "html",
+        })
       : view.htmlScrollPosition
-        ? await htmlTarget.scrollTo(view.htmlScrollPosition)
+        ? await htmlTarget.navigate({
+            kind: view.htmlScrollPosition === "bottom" ? "go_bottom" : "go_top",
+            source: view.htmlNavigationSource ?? "tool",
+            artifactStableIdentity: artifactStableIdentity ?? null,
+            rendererKind: "html",
+          })
         : null
     if (result?.state) {
       setHtmlViewState(result.state)
     }
     if (result) {
+      const navigationTelemetry = result.navigationResult ? htmlNavigationResultTelemetry(result.navigationResult) : null
       recordSophiaCaptureEvent({
         category: "artifacts-runtime",
         name: "html-scroll-command",
@@ -963,6 +982,7 @@ export function ArtifactStage({
           htmlSectionIndexEntryCount: result.state?.indexEntryCount ?? null,
           htmlSectionIndexBuildResult: result.state?.indexBuildResult ?? null,
           htmlNavigationRouterUsed: true,
+          htmlNavigationControllerActive: true,
           htmlNavigationCommandKind,
           htmlNavigationTargetSafe: result.targetLabelSafe ?? null,
           htmlNavigationTargetKind: result.targetKind ?? null,
@@ -975,6 +995,8 @@ export function ArtifactStage({
           htmlNavigationTimedOut: result.timedOut ?? false,
           htmlNavigationWaitedForReady: result.waitedForReady ?? false,
           htmlNavigationPreventedPdfFallback: true,
+          htmlNavigationResultConfirmedBeforeFeedback: result.ok,
+          ...navigationTelemetry,
           htmlScrollContainerResolved: true,
           htmlScrollMode: "iframe_document",
           htmlScrollTop: result.state?.scrollTop ?? htmlViewState?.scrollTop ?? null,
@@ -993,6 +1015,7 @@ export function ArtifactStage({
         method: result.method,
         scrolled: result.scrolled,
         htmlNavigationRouterUsed: true,
+        htmlNavigationControllerActive: true,
         htmlNavigationCommandKind,
         htmlNavigationTargetSafe: result.targetLabelSafe ?? null,
         htmlNavigationTargetKind: result.targetKind ?? null,
@@ -1005,6 +1028,8 @@ export function ArtifactStage({
         htmlNavigationTimedOut: result.timedOut ?? false,
         htmlNavigationWaitedForReady: result.waitedForReady ?? false,
         htmlNavigationPreventedPdfFallback: true,
+        htmlNavigationResultConfirmedBeforeFeedback: result.ok,
+        ...(navigationTelemetry ?? {}),
       } satisfies CoreviewSetViewAdapterResult
     }
     return {
@@ -1012,11 +1037,13 @@ export function ArtifactStage({
       blockedReason: null,
       scrolled: false,
       htmlNavigationRouterUsed: true,
+      htmlNavigationControllerActive: true,
       htmlNavigationCommandKind,
       htmlNavigationResult: "success",
       htmlNavigationPreventedPdfFallback: true,
+      htmlNavigationResultConfirmedBeforeFeedback: true,
     } satisfies CoreviewSetViewAdapterResult
-  }, [artifactId, htmlViewState, pageCount, primaryFile?.path, rendererKind, supportsPagination, supportsZoom])
+  }, [artifactId, artifactStableIdentity, htmlViewState, pageCount, primaryFile?.path, rendererKind, supportsPagination, supportsZoom])
   const resolveCoreviewAnchor = useCallback((input: {
     anchor: CoreviewAnnotationAnchor
     pageIndex: number
@@ -1118,11 +1145,13 @@ export function ArtifactStage({
           blockedReason: "iframe_not_ready",
           htmlNavigation: {
             htmlNavigationRouterUsed: true,
+            htmlNavigationControllerActive: true,
             htmlNavigationCommandKind: "focus_text",
             htmlNavigationResult: "iframe_not_ready",
             htmlNavigationFailureReason: "iframe_not_ready",
             htmlNavigationPreventedPdfFallback: true,
             htmlVoiceNavigationUsedSameResolver: true,
+            htmlNavigationResultConfirmedBeforeFeedback: false,
           },
         }
       }
@@ -1130,13 +1159,25 @@ export function ArtifactStage({
       setZoom(clampArtifactZoom(input.zoom))
       const focusText = input.anchor.text?.trim()
       const result = focusText
-        ? await target.focusText(focusText)
+        ? await target.navigate({
+            kind: "focus_section",
+            targetText: focusText,
+            source: input.htmlNavigationSource ?? "tool",
+            artifactStableIdentity: artifactStableIdentity ?? null,
+            rendererKind: "html",
+          })
         : input.anchor.anchorType === "current_title"
-          ? await target.scrollTo("top")
+          ? await target.navigate({
+              kind: "go_top",
+              source: input.htmlNavigationSource ?? "tool",
+              artifactStableIdentity: artifactStableIdentity ?? null,
+              rendererKind: "html",
+            })
           : { ok: false, blockedReason: "text_anchor_not_found" as const, method: null, scrolled: false, state: target.getLatestState() }
       if (result.state) {
         setHtmlViewState(result.state)
       }
+      const navigationTelemetry = result.navigationResult ? htmlNavigationResultTelemetry(result.navigationResult) : null
       recordSophiaCaptureEvent({
         category: "artifacts-runtime",
         name: "html-focus-anchor-command",
@@ -1153,7 +1194,8 @@ export function ArtifactStage({
           htmlSectionIndexEntryCount: result.state?.indexEntryCount ?? null,
           htmlSectionIndexBuildResult: result.state?.indexBuildResult ?? null,
           htmlNavigationRouterUsed: true,
-          htmlNavigationCommandKind: focusText ? "focus_text" : "scroll_to",
+          htmlNavigationControllerActive: true,
+          htmlNavigationCommandKind: focusText ? "focus_section" : "go_top",
           htmlNavigationTargetSafe: result.targetLabelSafe ?? (focusText || (input.anchor.anchorType === "current_title" ? "top" : null)),
           htmlNavigationTargetKind: result.targetKind ?? result.method,
           htmlNavigationResult: result.ok ? "success" : result.blockedReason ?? "failed",
@@ -1165,6 +1207,8 @@ export function ArtifactStage({
           htmlNavigationTimedOut: result.timedOut ?? false,
           htmlNavigationWaitedForReady: result.waitedForReady ?? false,
           htmlNavigationPreventedPdfFallback: true,
+          htmlNavigationResultConfirmedBeforeFeedback: result.ok,
+          ...navigationTelemetry,
           htmlInternalNavigationTargetKind: result.targetKind ?? result.method,
           htmlInternalNavigationScrolled: result.scrolled,
           htmlInternalNavigationFailureReason: result.ok ? null : result.blockedReason ?? "failed",
@@ -1187,7 +1231,8 @@ export function ArtifactStage({
         scrolled: result.scrolled,
         htmlNavigation: {
           htmlNavigationRouterUsed: true,
-          htmlNavigationCommandKind: focusText ? "focus_text" : "scroll_to",
+          htmlNavigationControllerActive: true,
+          htmlNavigationCommandKind: focusText ? "focus_section" : "go_top",
           htmlNavigationTargetSafe: result.targetLabelSafe ?? (focusText || (input.anchor.anchorType === "current_title" ? "top" : null)),
           htmlNavigationTargetKind: result.targetKind ?? result.method,
           htmlNavigationResult: result.ok ? "success" : result.blockedReason ?? "failed",
@@ -1199,7 +1244,9 @@ export function ArtifactStage({
           htmlNavigationTimedOut: result.timedOut ?? false,
           htmlNavigationWaitedForReady: result.waitedForReady ?? false,
           htmlNavigationPreventedPdfFallback: true,
+          htmlNavigationResultConfirmedBeforeFeedback: result.ok,
           htmlVoiceNavigationUsedSameResolver: result.voiceNavigationUsedSameResolver === true,
+          ...(navigationTelemetry ?? {}),
         },
       }
     }
@@ -1223,7 +1270,7 @@ export function ArtifactStage({
       ok: true,
       blockedReason: null,
     }
-  }, [artifactCapabilities.requiresOCR, artifactCapabilities.supportsLayoutAnchors, artifactCapabilities.supportsZoom, artifactId, htmlViewState, pageCount, primaryFile?.path, rendererKind])
+  }, [artifactCapabilities.requiresOCR, artifactCapabilities.supportsLayoutAnchors, artifactCapabilities.supportsZoom, artifactId, artifactStableIdentity, htmlViewState, pageCount, primaryFile?.path, rendererKind])
   const handlePinchZoomChange = useCallback((nextZoom: number) => {
     if (!supportsZoom) {
       return
