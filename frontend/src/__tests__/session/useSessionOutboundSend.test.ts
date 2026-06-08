@@ -115,4 +115,64 @@ describe('useSessionOutboundSend', () => {
     expect(session.last_message_preview).toBe('I need to prepare for my investor meeting tomorrow');
     expect(session.turn_count).toBe(1);
   });
+
+  it('forwards a long message to sendChatMessage WITHOUT truncating it', async () => {
+    // Regression for the production truncation bug: chatSanitizer must no
+    // longer cut the message at 4000 chars on the send path. The full text
+    // must reach sendChatMessage so the /api/chat server spill can act on it.
+    const sendChatMessage = vi.fn(async () => undefined);
+    const longText = 'a'.repeat(9000);
+
+    useSessionStore.setState({
+      session: {
+        sessionId: 'sess-1',
+        threadId: 'thread-1',
+        userId: 'dev-user',
+        presetType: 'open',
+        contextMode: 'life',
+        status: 'active',
+        voiceMode: false,
+        startedAt: '2026-04-15T00:00:00.000Z',
+        lastActivityAt: '2026-04-15T00:00:00.000Z',
+        isActive: true,
+        companionInvokesCount: 0,
+      },
+      openSessions: [
+        {
+          session_id: 'sess-1',
+          thread_id: 'thread-1',
+          session_type: 'open',
+          preset_context: 'life',
+          status: 'open',
+          started_at: '2026-04-15T00:00:00.000Z',
+          updated_at: '2026-04-15T00:00:00.000Z',
+          turn_count: 0,
+          title: null,
+          last_message_preview: null,
+        },
+      ],
+    });
+
+    const { result } = renderHook(() => useSessionOutboundSend({
+      chatStatus: 'ready',
+      sendChatMessage,
+      hasValidBackendSessionId: true,
+      chatRequestBody: { session_id: 'sess-1', user_id: 'dev-user' },
+      debugEnabled: false,
+      markStreamTurnStarted: vi.fn(),
+      showToast: vi.fn(),
+    }));
+
+    await act(async () => {
+      await result.current({ text: longText });
+    });
+
+    // The FULL 9000-char text must reach the send boundary verbatim — if the
+    // old 4000 cap were still active this would be 'a'.repeat(4000) and fail.
+    expect(sendChatMessage).toHaveBeenCalledTimes(1);
+    expect(sendChatMessage).toHaveBeenCalledWith(
+      { text: longText },
+      { body: { session_id: 'sess-1', user_id: 'dev-user' } },
+    );
+  });
 });

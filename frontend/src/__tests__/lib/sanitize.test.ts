@@ -380,9 +380,18 @@ describe('sanitize', () => {
       expect(chatSanitizer.sanitize('I feel great! 😊')).toBe('I feel great! 😊');
     });
 
-    it('should enforce max length of 4000', () => {
-      const longMessage = 'a'.repeat(5000);
-      expect(chatSanitizer.sanitize(longMessage).length).toBe(4000);
+    it('should NOT truncate long messages (spill-to-attachment, no client cap)', () => {
+      // Regression for the production truncation bug: the old 4000-char cap
+      // cut messages before they reached /api/chat, so the server spill never
+      // fired. The full message must now pass through untruncated.
+      const longMessage = 'a'.repeat(12000);
+      expect(chatSanitizer.sanitize(longMessage).length).toBe(12000);
+    });
+
+    it('should clamp only at the 1M abuse ceiling', () => {
+      // The ceiling is an abuse guard (parity with server MAX_MESSAGE_CHARS),
+      // not a UX truncation — no realistic message approaches it.
+      expect(chatSanitizer.sanitize('a'.repeat(1_000_001)).length).toBe(1_000_000);
     });
 
     it('should validate non-empty messages', () => {

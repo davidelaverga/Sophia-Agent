@@ -377,7 +377,13 @@ export const chatSanitizer = {
   /** Sanitiza mensaje de usuario antes de enviar */
   sanitize: (input: string) =>
     sanitizeText(input, {
-      maxLength: 4000, // Límite razonable para un mensaje
+      // Abuse ceiling, NOT a UX truncation. Real messages are never cut
+      // here — long messages are forwarded in full and the /api/chat route
+      // spills anything over SPILL_THRESHOLD (8000) into a chat-message-*.md
+      // attachment the companion reads via read_user_document. Matches the
+      // server-side MAX_MESSAGE_CHARS ceiling (request-validation.ts) so a
+      // pathological multi-MB paste clamps identically on both sides.
+      maxLength: 1_000_000,
       allowNewlines: true,
       allowEmojis: true,
       trim: true,
