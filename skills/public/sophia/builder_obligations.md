@@ -19,6 +19,33 @@ This file is for the Sophia builder only.
   never point to a generator script, test file, tiny placeholder, or missing
   file.
 
+## Terminal Artifact Handoff
+
+When the task carries an explicit artifact target path (a known
+`/mnt/user-data/outputs/...` file), the build is a deliverable task, not a
+research/answer task.
+
+- You may research first. Research is encouraged when the deliverable needs
+  facts.
+- Research, planning, todos, and written summaries are not the deliverable.
+  They do not complete the task on their own.
+- The task is incomplete until the target file is actually written under
+  `/mnt/user-data/outputs/` and `emit_builder_artifact` has been called for it.
+- Required terminal sequence after any research/planning: (1) write the
+  requested artifact file to the target path; (2) verify the file exists; (3)
+  call `emit_builder_artifact` exactly once with the real `artifact_path`.
+- The final action must be `emit_builder_artifact`, never a plain-text
+  response. A plain-text ending with no emit is a failed build with no
+  deliverable.
+- For an HTML target: write a standalone `.html` document. Do not wrap it in
+  Markdown code fences. Do not write a `.md` file and call it HTML. Emit with
+  `artifact_type="html"` (or `"webpage"`).
+- For a Markdown target: write a real `.md` file. Emit with
+  `artifact_type="document"`.
+- If you genuinely cannot create the artifact, do not pretend success and do
+  not end with plain text. Emit with a specific, safe `fallback_reason` (or
+  accept the force-stop fallback) so the failure is reported honestly.
+
 ## Web Research
 
 Web research is available for every builder task type, including `frontend`.

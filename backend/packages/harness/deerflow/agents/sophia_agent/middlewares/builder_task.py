@@ -311,6 +311,73 @@ def _workflow_card(name: str) -> str | None:
         return None
 
 
+def _terminal_artifact_format_line(artifact_target_ext: str) -> str:
+    """Return the format-specific terminal handoff line for the target ext.
+
+    Keeps the per-extension branching out of
+    ``_terminal_artifact_handoff_section`` so that function's cyclomatic
+    complexity stays under the Sentrux CC>=16 gate. Research is NEVER
+    disabled here — these lines only constrain the FINAL written file
+    shape, not whether the builder may search/fetch/read sources first.
+    """
+    if artifact_target_ext in {".html", ".htm"}:
+        return (
+            "- This is an HTML target: write a STANDALONE .html file (a complete "
+            "<!doctype html>/<html>...</html> document). Do NOT wrap the HTML in "
+            "Markdown code fences (```html). Do NOT write a .md file and call it HTML. "
+            "Call emit_builder_artifact with artifact_type=\"html\" (or \"webpage\").\n"
+        )
+    if artifact_target_ext == ".md":
+        return (
+            "- This is a Markdown target: write a real .md file. Call "
+            "emit_builder_artifact with artifact_type=\"document\".\n"
+        )
+    if artifact_target_ext == ".pdf":
+        return (
+            "- This is a PDF target: the deliverable is a real .pdf. Call "
+            "emit_builder_artifact with artifact_type=\"pdf\" (or an approved fallback "
+            "with explicit fallback metadata when rendering genuinely fails).\n"
+        )
+    return ""
+
+
+def _terminal_artifact_handoff_section(artifact_target_path: str, artifact_target_ext: str) -> str:
+    """Build the ``<terminal_artifact_handoff>`` block.
+
+    Emitted only when the task carries an explicit
+    ``artifact_target_path`` under ``/mnt/user-data/outputs/``. Forces the
+    write -> verify -> emit terminal contract for explicit artifact tasks
+    so the builder can never finish with research/planning/summary text
+    alone. Research itself is always permitted — this block only states
+    that research is not, by itself, a deliverable.
+    """
+    safe_target = html.escape(artifact_target_path, quote=True)
+    return (
+        "<terminal_artifact_handoff>\n"
+        "This task has an explicit artifact target. It is a DELIVERABLE task, not a "
+        "research/answer task.\n"
+        "- You MAY research first (builder_web_search / builder_web_fetch / read sources). "
+        "Research is encouraged when the deliverable needs facts.\n"
+        "- Research, planning, todos, and written summaries are NOT the deliverable. They "
+        "do not complete this task on their own.\n"
+        f"- This task is INCOMPLETE until the target file `{safe_target}` is actually written "
+        "under /mnt/user-data/outputs/ AND you have called emit_builder_artifact for it.\n"
+        "- Required terminal sequence after any research/planning: (1) write the requested "
+        f"artifact file to `{safe_target}`; (2) verify the file exists (e.g. ls_tool); "
+        "(3) call emit_builder_artifact exactly once with the real artifact_path.\n"
+        "- Your FINAL action MUST be emit_builder_artifact, never a plain-text response. A "
+        "plain-text ending with no emit is treated as a failed build with no deliverable.\n"
+        f"- Use the exact target path `{safe_target}` for artifact_path unless you have "
+        "written exactly one stronger verified deliverable candidate under "
+        "/mnt/user-data/outputs/.\n"
+        + _terminal_artifact_format_line(artifact_target_ext)
+        + "- If you genuinely cannot create the artifact, do NOT pretend success and do NOT "
+        "end with plain text: emit_builder_artifact with a specific, safe fallback_reason "
+        "(or accept the force-stop fallback) so the failure is reported honestly.\n"
+        "</terminal_artifact_handoff>"
+    )
+
+
 def _builder_workflow_sections(
     *,
     artifact_target_ext: str,
@@ -496,6 +563,14 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 "- Reuse this path across update/resume runs unless you have already written exactly one stronger deliverable candidate under /mnt/user-data/outputs/.\n"
                 "- emit_builder_artifact.artifact_path should point to this target or that single verified candidate, never to an unwritten placeholder.\n"
                 "</artifact_target>"
+            )
+            # Explicit-artifact tasks get a hard terminal contract: research is
+            # allowed but is never the deliverable, the target file must be
+            # written + verified, and the final action MUST be
+            # emit_builder_artifact (never a plain-text ending). This is the
+            # prompt-side fix for builds that "completed without a deliverable".
+            sections.append(
+                _terminal_artifact_handoff_section(artifact_target_path, artifact_target_ext)
             )
 
         edit_context = delegation_context.get("edit_context")
