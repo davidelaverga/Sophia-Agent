@@ -53,7 +53,28 @@ class ThreadArtifactListResponse(BaseModel):
 
 def _is_builder_internal(name: str) -> bool:
     # Builder generator/helper scripts are byproducts, not deliverables.
-    return name.startswith("_") and name.endswith(".py")
+    lowered = name.lower()
+    return (
+        name.startswith("_") and lowered.endswith(".py")
+        or lowered.startswith("test_") and lowered.endswith((".py", ".sh"))
+    )
+
+
+def _is_builder_support_artifact_path(relative_path: str) -> bool:
+    """Return True for builder support assets that should not be primary cards."""
+    normalized = relative_path.strip().lstrip("/").replace("\\", "/")
+    if not normalized:
+        return False
+    parts = [part for part in normalized.split("/") if part]
+    if not parts:
+        return False
+    if parts[0] in {"visuals", "sources", "source_artifact", ".builder"}:
+        return True
+    name = parts[-1].lower()
+    return (
+        _is_builder_internal(parts[-1])
+        or name.endswith((".source.md", ".source.html", ".plan.json", ".manifest.json"))
+    )
 
 
 def _is_office_download(filename: str | Path) -> bool:
@@ -420,12 +441,14 @@ def _add_output_artifacts_from_dir(
     outputs_path: Path,
 ) -> int:
     files_with_stat = [
-        (candidate, candidate.stat())
+        (candidate, candidate.stat(), candidate.relative_to(outputs_path).as_posix())
         for candidate in outputs_path.rglob("*")
-        if candidate.is_file() and not _is_builder_internal(candidate.name)
+        if (
+            candidate.is_file()
+            and not _is_builder_support_artifact_path(candidate.relative_to(outputs_path).as_posix())
+        )
     ]
-    for file_path, stat_result in files_with_stat:
-        relative_path = file_path.relative_to(outputs_path).as_posix()
+    for file_path, stat_result, relative_path in files_with_stat:
         mime_type, _ = mimetypes.guess_type(file_path.name)
         path = f"{_OUTPUTS_VIRTUAL_PATH}/{relative_path}"
         if path in artifacts_by_path:
@@ -674,7 +697,7 @@ def _merge_supabase_artifacts(
 ) -> int:
     count = 0
     for artifact in supabase_artifacts:
-        if _is_builder_internal(Path(artifact.filename).name):
+        if _is_builder_support_artifact_path(artifact.filename):
             continue
         path = f"{_OUTPUTS_VIRTUAL_PATH}/{artifact.filename}"
         if path in artifacts_by_path:

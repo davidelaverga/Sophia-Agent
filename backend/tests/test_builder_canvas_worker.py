@@ -346,7 +346,7 @@ async def test_completion_without_run_id_drops_ambiguous_retained_task_runs() ->
 
 
 @pytest.mark.anyio
-async def test_done_phase_is_projected_to_browser_activity() -> None:
+async def test_done_phase_is_projected_as_non_terminal_packaging_activity() -> None:
     worker = BuilderCanvasWorker()
     await worker.publish_progress(
         {
@@ -363,8 +363,8 @@ async def test_done_phase_is_projected_to_browser_activity() -> None:
         "kind": "phase",
         "phase": "done",
         "category": "finalize",
-        "action": "success",
-        "label": "Success",
+        "action": "packaging_artifact",
+        "label": "Packaging artifact",
     }
 
 

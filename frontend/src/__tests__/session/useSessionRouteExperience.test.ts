@@ -221,7 +221,12 @@ describe('useSessionRouteExperience', () => {
     await wrappedSendMessage({ text: 'ping' });
     expect(sendMessage).toHaveBeenCalledWith({ text: 'ping' });
 
-    expect(setOnUserTranscriptHandler).toHaveBeenCalledWith(appendVoiceUserMessage);
+    expect(setOnUserTranscriptHandler).toHaveBeenCalledWith(expect.any(Function));
+    const voiceTranscriptHandler = setOnUserTranscriptHandler.mock.calls[0][0] as (text: string) => void;
+    act(() => {
+      voiceTranscriptHandler('hello from voice');
+    });
+    expect(appendVoiceUserMessage).toHaveBeenCalledWith('hello from voice');
     expect(setAssistantResponseSuppressedChecker).toHaveBeenCalledWith(expect.any(Function));
 
     act(() => {
@@ -278,6 +283,114 @@ describe('useSessionRouteExperience', () => {
 
     expect(rawSendMessage).toHaveBeenCalledWith({ text: 'also add Recursive MAS' });
     expect(cancelBuilderTaskMock).not.toHaveBeenCalled();
+  });
+
+  it('cancels an active builder directly for explicit stop text without sending to companion', async () => {
+    const rawSendMessage = vi.fn(async () => undefined);
+    const showToast = vi.fn();
+    useSessionOutboundSendMock.mockReturnValue(rawSendMessage);
+
+    const { result } = renderHook(() =>
+      useSessionRouteExperience({
+        sessionId: 'session-1',
+        activeSessionId: 'session-1',
+        activeThreadId: 'thread-1',
+        chatRequestBody: { session_id: 'session-1' },
+        hasValidBackendSessionId: true,
+        backendSessionId: 'session-1',
+        userId: 'user-1',
+        artifacts: null,
+        storedBuilderArtifact: null,
+        storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
+        updateSession: vi.fn(),
+        showUsageLimitModal: vi.fn(),
+        recordConnectivityFailure: vi.fn(),
+        showToast,
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        greetingAnchorId: 'greeting-1',
+        markOffline: vi.fn(),
+      })
+    );
+
+    const streamContractCall = useCompanionStreamContractMock.mock.calls[0][0] as {
+      setBuilderTask: (task: { phase: string; taskId?: string; runId?: string; detail?: string }) => void;
+    };
+
+    act(() => {
+      streamContractCall.setBuilderTask({
+        phase: 'running',
+        taskId: 'task-builder-1',
+        runId: 'run-builder-1',
+        detail: 'Packaging artifact.',
+      });
+    });
+
+    await act(async () => {
+      await result.current.sendMessage({ text: 'please terminate the build task' });
+    });
+
+    expect(cancelBuilderTaskMock).toHaveBeenCalledWith('thread-1', 'task-builder-1', 'run-builder-1');
+    expect(rawSendMessage).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Builder cancelled.', variant: 'info' })
+    );
+  });
+
+  it('cancels an active builder directly from a voice stop transcript', async () => {
+    const showToast = vi.fn();
+
+    renderHook(() =>
+      useSessionRouteExperience({
+        sessionId: 'session-1',
+        activeSessionId: 'session-1',
+        activeThreadId: 'thread-1',
+        chatRequestBody: { session_id: 'session-1' },
+        hasValidBackendSessionId: true,
+        backendSessionId: 'session-1',
+        userId: 'user-1',
+        artifacts: null,
+        storedBuilderArtifact: null,
+        storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
+        updateSession: vi.fn(),
+        showUsageLimitModal: vi.fn(),
+        recordConnectivityFailure: vi.fn(),
+        showToast,
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        greetingAnchorId: 'greeting-1',
+        markOffline: vi.fn(),
+      })
+    );
+
+    const streamContractCall = useCompanionStreamContractMock.mock.calls[0][0] as {
+      setBuilderTask: (task: { phase: string; taskId?: string; runId?: string; detail?: string }) => void;
+    };
+    act(() => {
+      streamContractCall.setBuilderTask({
+        phase: 'running',
+        taskId: 'task-builder-1',
+        runId: 'run-builder-1',
+        detail: 'Finalizing.',
+      });
+    });
+
+    const { setOnUserTranscriptHandler } = useCompanionVoiceRuntimeMock.mock.results[0].value;
+    const calls = setOnUserTranscriptHandler.mock.calls;
+    const transcriptHandler = calls[calls.length - 1][0] as (text: string) => void;
+    await act(async () => {
+      transcriptHandler('please stop the build');
+      await Promise.resolve();
+    });
+
+    const { appendVoiceUserMessage } = useSessionVoiceMessagesMock.mock.results[0].value;
+    expect(appendVoiceUserMessage).toHaveBeenCalledWith('please stop the build');
+    expect(cancelBuilderTaskMock).toHaveBeenCalledWith('thread-1', 'task-builder-1', 'run-builder-1');
+    expect(showToast).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Builder cancelled.', variant: 'info' })
+    );
   });
 
   it('passes active stream state through to voice runtime retry handling', () => {

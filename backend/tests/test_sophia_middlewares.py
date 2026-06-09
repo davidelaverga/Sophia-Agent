@@ -4712,7 +4712,7 @@ class TestBuilderArtifactMiddleware:
         assert result is not None
         assert result["builder_consecutive_empty_emit_rejections"] == 0
 
-    def test_consecutive_rejection_counter_resets_on_typo_path_rejection(self, tmp_path):
+    def test_consecutive_rejection_counter_resets_empty_streak_on_typo_path_rejection(self, tmp_path):
         """A non-empty but invalid artifact_path (typo / hallucinated path)
         is NOT a None-emit signal — the model gave a real attempt. Reset
         the consecutive-empty streak so the model gets a normal retry via
@@ -4756,7 +4756,52 @@ class TestBuilderArtifactMiddleware:
         assert result is not None
         # Streak resets — typo path is not an empty-path emit.
         assert result["builder_consecutive_empty_emit_rejections"] == 0
+        assert result["builder_consecutive_missing_emit_path_rejections"] == 1
         assert result.get("jump_to") != "end"
+
+    def test_repeated_same_missing_emit_path_short_circuits_to_fallback(self, monkeypatch, tmp_path):
+        """A hallucinated non-empty artifact path should not loop forever."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
+            BuilderArtifactMiddleware,
+        )
+        from deerflow.sophia.storage import supabase_artifact_store
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+
+        monkeypatch.setattr(
+            supabase_artifact_store,
+            "check_artifact_exists",
+            lambda _tid, _fname: False,
+        )
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{
+            "name": "emit_builder_artifact",
+            "args": {
+                "artifact_path": "/mnt/user-data/outputs/missing.pdf",
+                "artifact_type": "document",
+                "artifact_title": "Missing",
+                "confidence": 0.5,
+            },
+        }]
+        runtime = _make_runtime(thread_id="test-thread")
+
+        state = {
+            "messages": [msg],
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_non_artifact_turns": 27,
+            "builder_consecutive_missing_emit_path_rejections": 1,
+            "builder_last_missing_emit_path": "/mnt/user-data/outputs/missing.pdf",
+        }
+        result = mw.after_model(state, runtime)
+
+        assert result is not None
+        assert result.get("jump_to") == "end"
+        assert result["builder_result"]["artifact_path"] is None
+        assert result["builder_consecutive_missing_emit_path_rejections"] == 0
 
     def test_endgame_lists_output_files_when_critical(self, tmp_path):
         """PR #94: when the endgame escalates to CRITICAL (turn-count or

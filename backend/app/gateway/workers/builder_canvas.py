@@ -30,7 +30,7 @@ _PHASE_LABELS = {
     "researching": "Researching",
     "drafting": "Creating artifact",
     "finalizing": "Creating artifact",
-    "done": "Success",
+    "done": "Packaging artifact",
 }
 _CHECK_COMMAND_PREFIXES = ("test", "pytest", "pnpm", "npm", "yarn", "uv", "ruff", "mypy", "tsc")
 _MISSING_DELIVERABLE_ERROR = "Builder finished without a deliverable artifact."
@@ -179,7 +179,7 @@ def _phase_activity(data: Any) -> dict[str, str] | None:
         "researching": "researching",
         "drafting": "creating_artifact",
         "finalizing": "creating_artifact",
-        "done": "success",
+        "done": "packaging_artifact",
     }[phase]
     category = {
         "starting": "plan",
@@ -188,6 +188,10 @@ def _phase_activity(data: Any) -> dict[str, str] | None:
         "finalizing": "package",
         "done": "finalize",
     }[phase]
+    if phase == "done":
+        logger.info(
+            "Builder canvas: projected non-terminal done phase as packaging activity; waiting for terminal completion event."
+        )
     return {
         "kind": "phase",
         "phase": phase,

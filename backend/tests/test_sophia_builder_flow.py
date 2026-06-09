@@ -99,6 +99,9 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     assert "DanglingToolCallMiddleware" in companion_types
     assert "PromptAssemblyMiddleware" in companion_types
     assert "AnthropicPromptCachingMiddleware" in companion_types
+    assert "LoopDetectionMiddleware" in companion_types
+    assert "SafetyFinishReasonMiddleware" in companion_types
+    assert "LLMErrorHandlingMiddleware" in companion_types
     assert (
         companion_types.index("PromptAssemblyMiddleware")
         < companion_types.index("DanglingToolCallMiddleware")
@@ -124,6 +127,9 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     builder_tool_names = [getattr(tool, "name", None) for tool in captured_builder["tools"]]
     assert "SandboxMiddleware" in builder_types
     assert "ToolErrorHandlingMiddleware" in builder_types
+    assert "LLMErrorHandlingMiddleware" in builder_types
+    assert "SafetyFinishReasonMiddleware" in builder_types
+    assert "LoopDetectionMiddleware" in builder_types
     assert "TodoMiddleware" in builder_types
     assert "BuilderResearchPolicyMiddleware" in builder_types
     assert "builder_web_search" in builder_tool_names

@@ -36,6 +36,7 @@ from __future__ import annotations
 from langchain.agents.middleware import AgentMiddleware
 
 from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -170,6 +171,7 @@ def build_builder_middleware_chain(
         BuilderProgressMiddleware(),
         _create_builder_todo_middleware(),
         BuilderArtifactMiddleware(),
+        LoopDetectionMiddleware(),
     ]
     if vision_enabled:
         chain_tail.append(ClearOnInjectViewImageMiddleware())

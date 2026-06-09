@@ -20,7 +20,9 @@ This file is for the Sophia companion only.
   a targeted edit.
 - Status cues: call `check_async_task(task_id)`. Cached conversation status is
   stale.
-- Explicit stop/cancel cues: call `cancel_async_task(task_id)`.
+- Explicit stop/cancel cues such as "stop", "cancel", "abort",
+  "terminate", "end the build", "kill it", or "delete/delate the build":
+  call `cancel_async_task(task_id)`.
 - Recall cues: call `list_async_tasks(status_filter?)`.
 
 ## Acknowledgement Matrix

@@ -1936,6 +1936,8 @@ class BuilderArtifactState(AgentState):
     # we route directly to the hard-ceiling fallback instead of letting
     # the model retry into the LangGraph recursion limit.
     builder_consecutive_empty_emit_rejections: NotRequired[int]
+    builder_last_missing_emit_path: NotRequired[str | None]
+    builder_consecutive_missing_emit_path_rejections: NotRequired[int]
     # Phase 2F.3: idempotency flag. Set once we've injected a path-
     # correction HumanMessage after N consecutive write_file_tool errors,
     # so we don't repeat the correction on every subsequent before_model.
@@ -3162,7 +3164,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             _artifact_path_suffix_label(artifact_args.get("artifact_path")),
         )
         if not visual_ok:
-            return False
+            logger.warning(
+                "[BuilderVisualDiagnostics] phase=emit_visual_missing_soft_pass "
+                "requested_ext=%s final_ext=%s visual assets are support-only; "
+                "allowing artifact truth validation to continue",
+                _requested_artifact_ext(state),
+                _artifact_path_suffix_label(artifact_args.get("artifact_path")),
+            )
 
         return True
 
@@ -3826,6 +3834,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "builder_non_artifact_turns": 0,
             "builder_task_started_at_ms": 0,
             "builder_consecutive_empty_emit_rejections": 0,
+            "builder_last_missing_emit_path": None,
+            "builder_consecutive_missing_emit_path_rejections": 0,
             "builder_runtime_write_failure_emitted": True,
             "jump_to": "end",
         }
@@ -3860,6 +3870,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "builder_non_artifact_turns": 0,
             "builder_task_started_at_ms": 0,
             "builder_consecutive_empty_emit_rejections": 0,
+            "builder_last_missing_emit_path": None,
+            "builder_consecutive_missing_emit_path_rejections": 0,
             "builder_recovered_deliverable_emitted": True,
             "jump_to": "end",
         }
@@ -3955,6 +3967,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "builder_non_artifact_turns": 0,
                 "builder_task_started_at_ms": 0,
                 "builder_consecutive_empty_emit_rejections": 0,
+                "builder_last_missing_emit_path": None,
+                "builder_consecutive_missing_emit_path_rejections": 0,
                 "builder_tool_argument_correction_emitted": True,
                 "jump_to": "end",
             }
@@ -4704,6 +4718,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "builder_non_artifact_turns": 0,
                 "builder_task_started_at_ms": 0,
                 "builder_consecutive_empty_emit_rejections": 0,
+                "builder_last_missing_emit_path": None,
+                "builder_consecutive_missing_emit_path_rejections": 0,
             },
             goto="end",
         )
@@ -5045,6 +5061,26 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             consecutive_rejections += 1
                         else:
                             consecutive_rejections = 0
+                        missing_path = (
+                            str(primary).strip()
+                            if isinstance(primary, str) and primary.strip()
+                            else None
+                        )
+                        previous_missing_path = state.get("builder_last_missing_emit_path")
+                        same_missing_path = (
+                            isinstance(previous_missing_path, str)
+                            and missing_path is not None
+                            and previous_missing_path == missing_path
+                        )
+                        consecutive_missing_path_rejections = int(
+                            state.get("builder_consecutive_missing_emit_path_rejections", 0) or 0
+                        )
+                        if missing_path is None:
+                            consecutive_missing_path_rejections = 0
+                        elif same_missing_path:
+                            consecutive_missing_path_rejections += 1
+                        else:
+                            consecutive_missing_path_rejections = 1
 
                         history = self._append_turn_summary(
                             state,
@@ -5054,6 +5090,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 "has_emit_builder_artifact": True,
                                 "emit_rejected": True,
                                 "empty_artifact_path": is_empty_path_rejection,
+                                "missing_artifact_path": missing_path,
                                 **pptx_skill_flags,
                                 **visual_skill_flags,
                             },
@@ -5127,6 +5164,47 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 "builder_research_diagnostics": research_diagnostics,
                                 "builder_task_started_at_ms": 0,
                                 "builder_consecutive_empty_emit_rejections": 0,
+                                "builder_last_missing_emit_path": None,
+                                "builder_consecutive_missing_emit_path_rejections": 0,
+                                "jump_to": "end",
+                            }
+
+                        if (
+                            missing_path is not None
+                            and consecutive_missing_path_rejections >= self._REJECTION_SHORT_CIRCUIT_AT
+                        ):
+                            logger.warning(
+                                "BuilderArtifact: short-circuiting after %d consecutive "
+                                "missing artifact_path rejections for the same path at "
+                                "turn=%d path=%s — routing to ceiling fallback.",
+                                consecutive_missing_path_rejections,
+                                non_artifact_turns,
+                                missing_path,
+                            )
+                            fallback = self._build_ceiling_fallback(
+                                state,
+                                steps_completed=non_artifact_turns,
+                                reason=(
+                                    "consecutive_missing_emit_path_rejections="
+                                    f"{consecutive_missing_path_rejections}"
+                                ),
+                            )
+                            self._upload_fallback_and_fire(
+                                state=state,
+                                runtime=runtime,
+                                fallback=fallback,
+                                status=self._fallback_completion_status(fallback),
+                            )
+                            return {
+                                "builder_result": fallback,
+                                "builder_non_artifact_turns": 0,
+                                "builder_last_tool_names": tool_names,
+                                "builder_tool_turn_summaries": history,
+                                "builder_research_diagnostics": research_diagnostics,
+                                "builder_task_started_at_ms": 0,
+                                "builder_consecutive_empty_emit_rejections": 0,
+                                "builder_last_missing_emit_path": None,
+                                "builder_consecutive_missing_emit_path_rejections": 0,
                                 "jump_to": "end",
                             }
 
@@ -5136,6 +5214,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "builder_tool_turn_summaries": history,
                             "builder_research_diagnostics": research_diagnostics,
                             "builder_consecutive_empty_emit_rejections": consecutive_rejections,
+                            "builder_last_missing_emit_path": missing_path,
+                            "builder_consecutive_missing_emit_path_rejections": consecutive_missing_path_rejections,
                         }
 
                     history = self._append_turn_summary(
@@ -5225,6 +5305,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "builder_research_diagnostics": research_diagnostics,
                         "builder_task_started_at_ms": 0,
                         "builder_consecutive_empty_emit_rejections": 0,
+                        "builder_last_missing_emit_path": None,
+                        "builder_consecutive_missing_emit_path_rejections": 0,
                         "jump_to": "end",
                     }
 
@@ -5317,6 +5399,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "builder_research_diagnostics": research_diagnostics,
                         "builder_task_started_at_ms": 0,
                         "builder_consecutive_empty_emit_rejections": 0,
+                        "builder_last_missing_emit_path": None,
+                        "builder_consecutive_missing_emit_path_rejections": 0,
                         "jump_to": "end",
                     }
 
@@ -5340,6 +5424,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     # streak. Reset so the short-circuit only fires on
                     # *consecutive* empty emits.
                     "builder_consecutive_empty_emit_rejections": 0,
+                    "builder_last_missing_emit_path": None,
+                    "builder_consecutive_missing_emit_path_rejections": 0,
                 }
 
             # AI message with NO tool calls -- agent ending with plain text, create fallback
@@ -5382,6 +5468,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "builder_last_tool_names": [],
                 "builder_tool_turn_summaries": history,
                 "builder_consecutive_empty_emit_rejections": 0,
+                "builder_last_missing_emit_path": None,
+                "builder_consecutive_missing_emit_path_rejections": 0,
             }
 
         log_middleware("BuilderArtifact", "no AI message found", _t0)
