@@ -96,6 +96,20 @@ import { useSessionVoiceCommandSystem } from './useSessionVoiceCommandSystem';
 const MISSING_BUILDER_DELIVERABLE_ERROR = 'Builder finished without a deliverable artifact.';
 const MISSING_BUILDER_DELIVERABLE_RETRY_MESSAGE = `${MISSING_BUILDER_DELIVERABLE_ERROR} Please try again.`;
 
+type BuilderLibraryBaseline = {
+  taskId: string;
+  runId: string | null;
+  items: Set<string>;
+};
+
+function builderLibraryItemSignature(item: { path: string; modifiedAt?: string | null; sizeBytes?: number | null }) {
+  return `${item.path}:${item.modifiedAt ?? ''}:${item.sizeBytes ?? ''}`;
+}
+
+function builderRunMatches(left: string | null | undefined, right: string | null | undefined) {
+  return !left || !right || left === right;
+}
+
 // ============================================================================
 // PROTECTED SESSION PAGE WRAPPER
 // ============================================================================
@@ -519,7 +533,7 @@ function SessionPageContent() {
   });
 
   const [artifactLibraryRefreshNonce, setArtifactLibraryRefreshNonce] = useState(0);
-  const [builderLibraryBaseline, setBuilderLibraryBaseline] = useState<Set<string> | null>(null);
+  const [builderLibraryBaseline, setBuilderLibraryBaseline] = useState<BuilderLibraryBaseline | null>(null);
   const [dismissedBuilderLibraryPath, setDismissedBuilderLibraryPath] = useState<string | null>(null);
 
   const builderArtifactRefreshToken = useMemo(() => [
@@ -581,14 +595,31 @@ function SessionPageContent() {
   }, [builderArtifactLibrary]);
 
   useEffect(() => {
-    if (!builderTask?.taskId || builderTask.phase !== 'running') {
+    if (!builderTask?.taskId) {
       setBuilderLibraryBaseline(null);
       return;
     }
+
+    if (builderTask.phase !== 'running') {
+      setBuilderLibraryBaseline((current) => {
+        if (
+          current
+          && current.taskId === builderTask.taskId
+          && builderRunMatches(current.runId, builderTask.runId)
+        ) {
+          return current;
+        }
+        return null;
+      });
+      return;
+    }
+
     setBuilderLibraryBaseline(
-      new Set(
-        builderArtifactLibraryRef.current.map((item) => `${item.path}:${item.modifiedAt ?? ''}:${item.sizeBytes ?? ''}`),
-      ),
+      {
+        taskId: builderTask.taskId,
+        runId: builderTask.runId ?? null,
+        items: new Set(builderArtifactLibraryRef.current.map(builderLibraryItemSignature)),
+      },
     );
   }, [builderTask?.phase, builderTask?.runId, builderTask?.taskId]);
 
@@ -720,13 +751,31 @@ function SessionPageContent() {
 
   const hasDesktopStyleBadge = hasPendingArtifacts || waitingArtifactCount > 0;
   const recoveredBuilderLibraryItem = useMemo(() => {
-    if (builderTask?.phase !== 'running' || !builderLibraryBaseline) {
+    if (!builderLibraryBaseline) {
+      return null;
+    }
+    const matchesBuilderTask = Boolean(
+      builderTask?.taskId === builderLibraryBaseline.taskId
+      && builderRunMatches(builderLibraryBaseline.runId, builderTask.runId),
+    );
+    const matchesBuilderCompletion = Boolean(
+      builderCompletion?.task_id === builderLibraryBaseline.taskId
+      && builderRunMatches(builderLibraryBaseline.runId, builderCompletion.run_id),
+    );
+    if (!matchesBuilderTask && !matchesBuilderCompletion) {
       return null;
     }
     return builderArtifactLibrary.find((item) => (
-      !builderLibraryBaseline.has(`${item.path}:${item.modifiedAt ?? ''}:${item.sizeBytes ?? ''}`)
+      !builderLibraryBaseline.items.has(builderLibraryItemSignature(item))
     )) ?? null;
-  }, [builderArtifactLibrary, builderLibraryBaseline, builderTask?.phase]);
+  }, [
+    builderArtifactLibrary,
+    builderCompletion?.run_id,
+    builderCompletion?.task_id,
+    builderLibraryBaseline,
+    builderTask?.runId,
+    builderTask?.taskId,
+  ]);
   const builderArtifactPrimaryFile = useMemo(
     () => getBuilderArtifactFiles(builderArtifact)[0] ?? null,
     [builderArtifact],
