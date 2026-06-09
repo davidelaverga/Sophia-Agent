@@ -78,6 +78,37 @@ _ALLOWED_DIAGNOSTIC_KEYS = frozenset({
     "raw_artifact_text_excluded",
     "raw_frame_excluded",
     "secrets_excluded",
+    # Provider-fallback snapshot (Builder OpenAI fallback). Values come
+    # exclusively from ``builder_provider_fallback.provider_fallback_snapshot``
+    # — fixed template strings + booleans, never key material or raw
+    # provider payloads.
+    "primary_provider",
+    "fallback_provider",
+    "fallback_enabled",
+    "fallback_attempted",
+    "fallback_reason",
+    "fallback_result",
+    "fallback_model_configured",
+    "provider_error_class",
+    "provider_error_safe_message",
+    "raw_provider_payload_excluded",
+    "provider_secrets_excluded",
+})
+
+# Keys copied from ``state["builder_provider_fallback"]`` into failure
+# diagnostics. Subset of ``_ALLOWED_DIAGNOSTIC_KEYS`` by construction.
+_PROVIDER_FALLBACK_KEYS = frozenset({
+    "primary_provider",
+    "fallback_provider",
+    "fallback_enabled",
+    "fallback_attempted",
+    "fallback_reason",
+    "fallback_result",
+    "fallback_model_configured",
+    "provider_error_class",
+    "provider_error_safe_message",
+    "raw_provider_payload_excluded",
+    "provider_secrets_excluded",
 })
 
 _UNSAFE_KEY_MARKERS = (
@@ -225,7 +256,11 @@ def build_builder_failure_diagnostics(
             completion_webhook_result=completion_webhook_result,
             canvas_reconciliation_action=canvas_reconciliation_action,
         )
-        return diagnostic.to_payload()
+        payload = diagnostic.to_payload()
+        provider_snapshot = _provider_fallback_fields(state_dict)
+        if provider_snapshot:
+            payload = merge_builder_failure_diagnostics(payload, **provider_snapshot)
+        return payload
     except Exception:  # pragma: no cover - diagnostics must never fail Builder
         logger.debug("Builder failure diagnostics construction failed", exc_info=True)
         return BuilderFailureDiagnostics(
@@ -476,9 +511,14 @@ def _sanitize_allowed_value(key: str, value: Any) -> Any:
         "raw_artifact_text_excluded",
         "raw_frame_excluded",
         "secrets_excluded",
+        "fallback_enabled",
+        "fallback_attempted",
+        "fallback_model_configured",
+        "raw_provider_payload_excluded",
+        "provider_secrets_excluded",
     }:
         return bool(value)
-    if key in {"failure_reason"}:
+    if key in {"failure_reason", "provider_error_safe_message"}:
         return _safe_reason(value)
     if key.endswith("_path") or key in {"target_path"}:
         return safe_output_path(value)
@@ -537,6 +577,24 @@ def _safe_scalar(value: Any) -> str | None:
 
 def _safe_int(value: Any) -> int:
     return int(value) if isinstance(value, int) and value >= 0 else 0
+
+
+def _provider_fallback_fields(state: dict[str, Any]) -> dict[str, Any]:
+    """Allowlisted provider-fallback fields from state, for diagnostics merge.
+
+    Reads the sanitized snapshot the ``BuilderProviderFallbackMiddleware``
+    wrote into ``state["builder_provider_fallback"]``. Only
+    ``_PROVIDER_FALLBACK_KEYS`` survive; values are re-sanitized by
+    ``merge_builder_failure_diagnostics`` at the call site.
+    """
+    snapshot = state.get("builder_provider_fallback")
+    if not isinstance(snapshot, dict) or not snapshot:
+        return {}
+    return {
+        key: snapshot.get(key)
+        for key in _PROVIDER_FALLBACK_KEYS
+        if snapshot.get(key) is not None
+    }
 
 
 def _outputs_host_path_from_state(state: dict[str, Any]) -> str | None:

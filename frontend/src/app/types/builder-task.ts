@@ -95,4 +95,12 @@ export type BuilderTaskV1 = {
   builderOutputsSummaryCount?: number;
   builderSupabaseMirrorResult?: string | null;
   builderCompletionReconciliationAction?: string | null;
+  // Provider fallback (Builder OpenAI fallback) — safe scalars only.
+  builderPrimaryProvider?: string | null;
+  builderFallbackProvider?: string | null;
+  builderFallbackEnabled?: boolean | null;
+  builderFallbackAttempted?: boolean | null;
+  builderFallbackReason?: string | null;
+  builderFallbackResult?: string | null;
+  builderProviderErrorClass?: string | null;
 };

@@ -556,6 +556,13 @@ function buildSummary(): VoiceTelemetrySummary {
     builderOutputsSummaryCount: null,
     builderSupabaseMirrorResult: null,
     builderCompletionReconciliationAction: null,
+    builderPrimaryProvider: null,
+    builderFallbackProvider: null,
+    builderFallbackEnabled: null,
+    builderFallbackAttempted: null,
+    builderFallbackReason: null,
+    builderFallbackResult: null,
+    builderProviderErrorClass: null,
   };
 }
 
@@ -919,6 +926,42 @@ describe('buildVoiceTelemetryReport', () => {
     });
     expect(JSON.stringify(report.diagnosticsSummary.builderSurface)).not.toContain('<!doctype html>');
     expect(JSON.stringify(report.diagnosticsSummary.builderSurface)).not.toContain('signed-url');
+  });
+
+  it('includes safe builder provider-fallback fields and excludes provider secrets', () => {
+    const metrics = buildMetrics();
+    metrics.builder = {
+      ...metrics.builder,
+      builderPrimaryProvider: 'anthropic',
+      builderFallbackProvider: 'openai',
+      builderFallbackEnabled: true,
+      builderFallbackAttempted: true,
+      builderFallbackReason: 'auth_error',
+      builderFallbackResult: 'success',
+      builderProviderErrorClass: 'auth_error',
+    };
+    const report = buildVoiceTelemetryReport({
+      exportedAt: '2026-05-20T12:00:05.000Z',
+      metrics,
+      summary: buildSummary(),
+      captureBundle: buildCaptureBundle([]),
+    });
+
+    expect(report.diagnosticsSummary.builderSurface).toMatchObject({
+      builderPrimaryProvider: 'anthropic',
+      builderFallbackProvider: 'openai',
+      builderFallbackEnabled: true,
+      builderFallbackAttempted: true,
+      builderFallbackReason: 'auth_error',
+      builderFallbackResult: 'success',
+      builderProviderErrorClass: 'auth_error',
+      rawProviderPayloadExcluded: true,
+      providerSecretsExcluded: true,
+    });
+    const serializedSurface = JSON.stringify(report.diagnosticsSummary.builderSurface);
+    expect(serializedSurface).not.toContain('sk-');
+    expect(serializedSurface).not.toContain('api_key');
+    expect(serializedSurface).not.toContain('OPENAI_API_KEY');
   });
 
   it('does not flag review emit churn when emit_artifact was explicitly suppressed by the review guard', () => {

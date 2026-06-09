@@ -1240,9 +1240,18 @@ function buildBuilderSurfaceDiagnosticsSummary(metrics: VoiceDeveloperMetrics): 
     builderOutputsSummaryCount: metrics.builder.builderOutputsSummaryCount,
     builderSupabaseMirrorResult: metrics.builder.builderSupabaseMirrorResult,
     builderCompletionReconciliationAction: metrics.builder.builderCompletionReconciliationAction,
+    builderPrimaryProvider: metrics.builder.builderPrimaryProvider,
+    builderFallbackProvider: metrics.builder.builderFallbackProvider,
+    builderFallbackEnabled: metrics.builder.builderFallbackEnabled,
+    builderFallbackAttempted: metrics.builder.builderFallbackAttempted,
+    builderFallbackReason: metrics.builder.builderFallbackReason,
+    builderFallbackResult: metrics.builder.builderFallbackResult,
+    builderProviderErrorClass: metrics.builder.builderProviderErrorClass,
     rawArtifactTextExcluded: true,
     rawFrameExcluded: true,
     rawCommentTextExcluded: true,
+    rawProviderPayloadExcluded: true,
+    providerSecretsExcluded: true,
   };
 }
 

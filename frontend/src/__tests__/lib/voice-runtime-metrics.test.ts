@@ -1719,6 +1719,53 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(JSON.stringify(summary)).not.toContain('signed-url');
   });
 
+  it('includes safe builder provider-fallback fields in telemetry summary without secrets', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'builder',
+        name: 'task_failed',
+        payload: {
+          phase: 'failed',
+          taskId: 'builder-1',
+          builderFailureDiagnosticAvailable: true,
+          builderFailureStage: 'completion_reconciliation',
+          builderFailureCode: 'builder_completed_without_deliverable',
+          builderPrimaryProvider: 'anthropic',
+          builderFallbackProvider: 'openai',
+          builderFallbackEnabled: true,
+          builderFallbackAttempted: true,
+          builderFallbackReason: 'rate_limit_or_quota',
+          builderFallbackResult: 'fallback_failed',
+          builderProviderErrorClass: 'rate_limit_or_quota',
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'thinking',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-04-07T12:00:10.000Z'),
+    });
+    const summary = buildVoiceTelemetrySummary(metrics);
+
+    expect(metrics.builder.builderPrimaryProvider).toBe('anthropic');
+    expect(metrics.builder.builderFallbackProvider).toBe('openai');
+    expect(metrics.builder.builderFallbackEnabled).toBe(true);
+    expect(metrics.builder.builderFallbackAttempted).toBe(true);
+    expect(metrics.builder.builderFallbackReason).toBe('rate_limit_or_quota');
+    expect(metrics.builder.builderFallbackResult).toBe('fallback_failed');
+    expect(summary.builderFallbackAttempted).toBe(true);
+    expect(summary.builderFallbackResult).toBe('fallback_failed');
+    expect(summary.builderProviderErrorClass).toBe('rate_limit_or_quota');
+    const serialized = JSON.stringify(summary);
+    expect(serialized).not.toContain('sk-');
+    expect(serialized).not.toContain('api_key');
+    expect(serialized).not.toContain('OPENAI_API_KEY');
+  });
+
   it('normalizes legacy completed artifact entry telemetry to the canonical completed builder surface', () => {
     const events: VoiceCaptureEvent[] = [
       buildEvent({

@@ -607,6 +607,13 @@ export type VoiceTelemetrySummary = {
   builderOutputsSummaryCount: number | null
   builderSupabaseMirrorResult: string | null
   builderCompletionReconciliationAction: string | null
+  builderPrimaryProvider: string | null
+  builderFallbackProvider: string | null
+  builderFallbackEnabled: boolean | null
+  builderFallbackAttempted: boolean | null
+  builderFallbackReason: string | null
+  builderFallbackResult: string | null
+  builderProviderErrorClass: string | null
 }
 
 export type LegacySessionTelemetry = {
@@ -986,6 +993,13 @@ export type VoiceDeveloperMetrics = {
     builderOutputsSummaryCount: number | null
     builderSupabaseMirrorResult: string | null
     builderCompletionReconciliationAction: string | null
+    builderPrimaryProvider: string | null
+    builderFallbackProvider: string | null
+    builderFallbackEnabled: boolean | null
+    builderFallbackAttempted: boolean | null
+    builderFallbackReason: string | null
+    builderFallbackResult: string | null
+    builderProviderErrorClass: string | null
   }
   health: {
     level: VoiceMetricsHealthLevel
@@ -4659,6 +4673,13 @@ function buildBuilderSurfaceMetrics(events: NormalizedVoiceCaptureEvent[]): Pick
   | "builderOutputsSummaryCount"
   | "builderSupabaseMirrorResult"
   | "builderCompletionReconciliationAction"
+  | "builderPrimaryProvider"
+  | "builderFallbackProvider"
+  | "builderFallbackEnabled"
+  | "builderFallbackAttempted"
+  | "builderFallbackReason"
+  | "builderFallbackResult"
+  | "builderProviderErrorClass"
 > {
   const latestSurfaceEvent = findLast(
     events,
@@ -4685,6 +4706,13 @@ function buildBuilderSurfaceMetrics(events: NormalizedVoiceCaptureEvent[]): Pick
     builderOutputsSummaryCount: asFiniteNumber(payload?.builderOutputsSummaryCount),
     builderSupabaseMirrorResult: asString(payload?.builderSupabaseMirrorResult),
     builderCompletionReconciliationAction: asString(payload?.builderCompletionReconciliationAction),
+    builderPrimaryProvider: asString(payload?.builderPrimaryProvider),
+    builderFallbackProvider: asString(payload?.builderFallbackProvider),
+    builderFallbackEnabled: asBoolean(payload?.builderFallbackEnabled),
+    builderFallbackAttempted: asBoolean(payload?.builderFallbackAttempted),
+    builderFallbackReason: asString(payload?.builderFallbackReason),
+    builderFallbackResult: asString(payload?.builderFallbackResult),
+    builderProviderErrorClass: asString(payload?.builderProviderErrorClass),
   }
 }
 
@@ -4776,6 +4804,20 @@ function buildBuilderMetrics(events: NormalizedVoiceCaptureEvent[], nowMs: numbe
       ?? surfaceMetrics.builderSupabaseMirrorResult,
     builderCompletionReconciliationAction: asString(payload?.builderCompletionReconciliationAction)
       ?? surfaceMetrics.builderCompletionReconciliationAction,
+    builderPrimaryProvider: asString(payload?.builderPrimaryProvider)
+      ?? surfaceMetrics.builderPrimaryProvider,
+    builderFallbackProvider: asString(payload?.builderFallbackProvider)
+      ?? surfaceMetrics.builderFallbackProvider,
+    builderFallbackEnabled: asBoolean(payload?.builderFallbackEnabled)
+      ?? surfaceMetrics.builderFallbackEnabled,
+    builderFallbackAttempted: asBoolean(payload?.builderFallbackAttempted)
+      ?? surfaceMetrics.builderFallbackAttempted,
+    builderFallbackReason: asString(payload?.builderFallbackReason)
+      ?? surfaceMetrics.builderFallbackReason,
+    builderFallbackResult: asString(payload?.builderFallbackResult)
+      ?? surfaceMetrics.builderFallbackResult,
+    builderProviderErrorClass: asString(payload?.builderProviderErrorClass)
+      ?? surfaceMetrics.builderProviderErrorClass,
   }
 }
 
@@ -5247,6 +5289,13 @@ export function buildVoiceTelemetrySummary(metrics: VoiceDeveloperMetrics): Voic
     builderOutputsSummaryCount: metrics.builder.builderOutputsSummaryCount,
     builderSupabaseMirrorResult: metrics.builder.builderSupabaseMirrorResult,
     builderCompletionReconciliationAction: metrics.builder.builderCompletionReconciliationAction,
+    builderPrimaryProvider: metrics.builder.builderPrimaryProvider,
+    builderFallbackProvider: metrics.builder.builderFallbackProvider,
+    builderFallbackEnabled: metrics.builder.builderFallbackEnabled,
+    builderFallbackAttempted: metrics.builder.builderFallbackAttempted,
+    builderFallbackReason: metrics.builder.builderFallbackReason,
+    builderFallbackResult: metrics.builder.builderFallbackResult,
+    builderProviderErrorClass: metrics.builder.builderProviderErrorClass,
   }
 }
 

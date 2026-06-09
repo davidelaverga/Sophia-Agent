@@ -129,6 +129,13 @@ function builderFailureTelemetryFields(
       builderOutputsSummaryCount: 0,
       builderSupabaseMirrorResult: null,
       builderCompletionReconciliationAction: null,
+      builderPrimaryProvider: null,
+      builderFallbackProvider: null,
+      builderFallbackEnabled: null,
+      builderFallbackAttempted: null,
+      builderFallbackReason: null,
+      builderFallbackResult: null,
+      builderProviderErrorClass: null,
     };
   }
   const expectedPath = diagnostic.artifact_target_path ?? diagnostic.target_path ?? null;
@@ -143,6 +150,15 @@ function builderFailureTelemetryFields(
     builderOutputsSummaryCount: diagnostic.outputs_summary?.length ?? 0,
     builderSupabaseMirrorResult: diagnostic.supabase_mirror_result ?? null,
     builderCompletionReconciliationAction: diagnostic.canvas_reconciliation_action ?? null,
+    builderPrimaryProvider: diagnostic.primary_provider ?? null,
+    builderFallbackProvider: diagnostic.fallback_provider ?? null,
+    builderFallbackEnabled: diagnostic.fallback_enabled ?? null,
+    builderFallbackAttempted: diagnostic.fallback_attempted ?? null,
+    // The "reason" fallback was considered is the classified provider
+    // error class — never raw provider text.
+    builderFallbackReason: diagnostic.provider_error_class ?? null,
+    builderFallbackResult: diagnostic.fallback_result ?? null,
+    builderProviderErrorClass: diagnostic.provider_error_class ?? null,
   };
 }
 

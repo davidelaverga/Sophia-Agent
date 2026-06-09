@@ -40,6 +40,7 @@ from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_progress import BuilderProgressMiddleware
+from deerflow.agents.sophia_agent.middlewares.builder_provider_fallback import BuilderProviderFallbackMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_research_policy import BuilderResearchPolicyMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
 from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
@@ -140,6 +141,13 @@ def build_builder_middleware_chain(
     """
     middlewares = build_subagent_runtime_middlewares(lazy_init=True)
     chain_tail: list[AgentMiddleware] = [
+        # Provider fallback (Anthropic primary → optional OpenAI retry).
+        # Uses ONLY wrap_model_call/awrap_model_call, so its position among
+        # the before/after-hook middlewares below is behavior-neutral; it
+        # sits first in the tail so its model-call wrapper is outermost.
+        # Default-off via SOPHIA_BUILDER_OPENAI_FALLBACK_ENABLED — with the
+        # flag unset the only delta on provider errors is one log line.
+        BuilderProviderFallbackMiddleware(),
         FileInjectionMiddleware(
             (SKILLS_PATH / "soul.md", False),
             (SKILLS_PATH / "coordination_core.md", False),

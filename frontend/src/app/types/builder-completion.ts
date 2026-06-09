@@ -57,6 +57,18 @@ export type BuilderFailureDiagnosticsV1 = {
   raw_artifact_text_excluded?: boolean;
   raw_frame_excluded?: boolean;
   secrets_excluded?: boolean;
+  // Builder provider-fallback snapshot (sanitized — booleans + fixed
+  // template strings only, never keys or raw provider payloads).
+  primary_provider?: string | null;
+  fallback_provider?: string | null;
+  fallback_enabled?: boolean | null;
+  fallback_attempted?: boolean | null;
+  fallback_result?: string | null;
+  fallback_model_configured?: boolean | null;
+  provider_error_class?: string | null;
+  provider_error_safe_message?: string | null;
+  raw_provider_payload_excluded?: boolean;
+  provider_secrets_excluded?: boolean;
 };
 
 export type BuilderCompletionEventV1 = {
