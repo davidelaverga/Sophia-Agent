@@ -302,6 +302,47 @@ def test_list_artifacts_includes_associated_builder_task_outputs(tmp_path, monke
     assert response.artifacts[0].size_bytes == len("builder artifact")
 
 
+def test_list_artifacts_prefers_newest_duplicate_associated_builder_output(tmp_path, monkeypatch) -> None:
+    parent_user_data = tmp_path / "parent" / "user-data"
+    old_task_user_data = tmp_path / "old-task" / "user-data"
+    new_task_user_data = tmp_path / "new-task" / "user-data"
+    old_outputs = old_task_user_data / "outputs"
+    new_outputs = new_task_user_data / "outputs"
+    old_outputs.mkdir(parents=True)
+    new_outputs.mkdir(parents=True)
+    old_file = old_outputs / "report.pdf"
+    new_file = new_outputs / "report.pdf"
+    old_file.write_bytes(b"old")
+    new_file.write_bytes(b"newer artifact")
+    os.utime(old_file, (1_700_000_100, 1_700_000_100))
+    os.utime(new_file, (1_700_000_500, 1_700_000_500))
+
+    async def associated(parent_thread_id: str) -> tuple[str, ...]:
+        assert parent_thread_id == "parent-thread"
+        return ("old-task-thread", "new-task-thread")
+
+    monkeypatch.setattr(artifacts_router, "_session_store", OwnedSophiaSessionStore())
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        thread_user_data_resolver({
+            "parent-thread": parent_user_data,
+            "old-task-thread": old_task_user_data,
+            "new-task-thread": new_task_user_data,
+        }),
+    )
+    monkeypatch.setattr(artifacts_router, "_associated_builder_task_thread_ids", associated)
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "list_artifacts", lambda *, thread_id: [])
+
+    response = asyncio.run(
+        artifacts_router.list_artifacts("parent-thread", authenticated_user_id="user-1")
+    )
+
+    assert [item.path for item in response.artifacts] == ["mnt/user-data/outputs/report.pdf"]
+    assert response.artifacts[0].size_bytes == len(b"newer artifact")
+    assert response.artifacts[0].modified_at == "2023-11-14T22:21:40+00:00"
+
+
 def test_get_artifact_resolves_associated_builder_task_output(tmp_path, monkeypatch) -> None:
     parent_user_data = tmp_path / "parent" / "user-data"
     task_user_data = tmp_path / "task" / "user-data"
@@ -335,6 +376,51 @@ def test_get_artifact_resolves_associated_builder_task_output(tmp_path, monkeypa
     )
 
     assert bytes(response.body).decode("utf-8") == "builder artifact"
+    assert response.media_type == "text/markdown"
+
+
+def test_get_artifact_prefers_newest_duplicate_associated_builder_output(tmp_path, monkeypatch) -> None:
+    parent_user_data = tmp_path / "parent" / "user-data"
+    old_task_user_data = tmp_path / "old-task" / "user-data"
+    new_task_user_data = tmp_path / "new-task" / "user-data"
+    old_outputs = old_task_user_data / "outputs"
+    new_outputs = new_task_user_data / "outputs"
+    old_outputs.mkdir(parents=True)
+    new_outputs.mkdir(parents=True)
+    old_file = old_outputs / "report.md"
+    new_file = new_outputs / "report.md"
+    old_file.write_text("old builder artifact", encoding="utf-8")
+    new_file.write_text("new builder artifact", encoding="utf-8")
+    os.utime(old_file, (1_700_000_100, 1_700_000_100))
+    os.utime(new_file, (1_700_000_500, 1_700_000_500))
+
+    async def associated(parent_thread_id: str) -> tuple[str, ...]:
+        assert parent_thread_id == "parent-thread"
+        return ("old-task-thread", "new-task-thread")
+
+    monkeypatch.setattr(artifacts_router, "_session_store", OwnedSophiaSessionStore())
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        thread_user_data_resolver({
+            "parent-thread": parent_user_data,
+            "old-task-thread": old_task_user_data,
+            "new-task-thread": new_task_user_data,
+        }),
+    )
+    monkeypatch.setattr(artifacts_router, "_associated_builder_task_thread_ids", associated)
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "download_artifact", lambda *, thread_id, filename: None)
+
+    response = asyncio.run(
+        artifacts_router.get_artifact(
+            "parent-thread",
+            "mnt/user-data/outputs/report.md",
+            http_request(),
+            authenticated_user_id="user-1",
+        )
+    )
+
+    assert bytes(response.body).decode("utf-8") == "new builder artifact"
     assert response.media_type == "text/markdown"
 
 
