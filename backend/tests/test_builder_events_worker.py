@@ -212,6 +212,58 @@ async def test_internal_post_persists_terminal_builder_state(
 
 
 @pytest.mark.anyio
+async def test_internal_post_hydrates_missing_run_id_from_parent_task(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    monkeypatch,
+):
+    captured: dict = {}
+    fake_threads = MagicMock()
+    fake_threads.get_state = AsyncMock(return_value={
+        "values": {
+            "async_tasks": {
+                "builder-task": {
+                    "task_id": "builder-task",
+                    "agent_name": "sophia_builder",
+                    "run_id": "run-from-parent-state",
+                    "status": "running",
+                }
+            }
+        }
+    })
+
+    async def _update_state(thread_id: str, values: dict):
+        captured["thread_id"] = thread_id
+        captured["values"] = values
+
+    fake_threads.update_state = AsyncMock(side_effect=_update_state)
+    fake_client = MagicMock()
+    fake_client.threads = fake_threads
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+
+    async with client:
+        response = await client.post(
+            "/internal/builder-events",
+            json={
+                "thread_id": "parent-thread",
+                "task_id": "builder-task",
+                "status": "success",
+                "agent_name": "sophia_builder",
+                "artifact_path": "mnt/user-data/outputs/brief.md",
+            },
+        )
+        last_response = await client.get("/api/threads/parent-thread/builder-events/last")
+
+    assert response.status_code == 202
+    assert captured["values"]["async_tasks"]["builder-task"]["run_id"] == "run-from-parent-state"
+    assert captured["values"]["async_tasks"]["builder-task"]["builder_result"]["run_id"] == (
+        "run-from-parent-state"
+    )
+    assert last_response.status_code == 200
+    assert last_response.json()["run_id"] == "run-from-parent-state"
+
+
+@pytest.mark.anyio
 async def test_internal_post_rejects_missing_required_fields(app: FastAPI, client: httpx.AsyncClient):
     async with client:
         response = await client.post(

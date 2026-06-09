@@ -24,6 +24,7 @@ DEFAULT_TERMINAL_TTL_SECONDS = 15 * 60
 DEFAULT_HISTORY_SIZE = 64
 DEFAULT_RETIRED_RUNS_SIZE = 128
 _SUBSCRIBER_QUEUE_MAXSIZE = 128
+_RUNLESS_COMPLETION_RUN_ID = "__runless_completion__"
 _TERMINAL_STATUSES = {"completed", "failed", "timed_out", "cancelled"}
 _PHASE_LABELS = {
     "starting": "Creating plan",
@@ -532,7 +533,7 @@ class BuilderCanvasWorker:
         task_run_ids = self._known_task_run_ids_locked(parent_thread_id, task_id)
         if len(task_run_ids) == 1:
             return next(iter(task_run_ids))
-        return None
+        return _RUNLESS_COMPLETION_RUN_ID
 
     def _known_task_run_ids_locked(self, parent_thread_id: str, task_id: str) -> set[str]:
         task_run_ids = {
@@ -647,16 +648,15 @@ class BuilderCanvasWorker:
             return 0
         async with self._lock:
             run_id = self._completion_run_id_locked(parent, task_id, payload.get("run_id"))
-            if run_id is None:
+            if run_id == _RUNLESS_COMPLETION_RUN_ID:
                 logger.info(
-                    "Builder canvas: terminal dropped reason=missing_run_id parent_thread_id=%s task_id=%s status=%s has_artifact_url=%s has_artifact_path=%s",
+                    "Builder canvas: terminal accepted with runless fallback parent_thread_id=%s task_id=%s status=%s has_artifact_url=%s has_artifact_path=%s",
                     parent,
                     task_id,
                     payload.get("status"),
                     _completion_has(payload, "artifact_url"),
                     _completion_has(payload, "artifact_path"),
                 )
-                return 0
         completion = _normalize_completion_payload({**payload, "run_id": run_id})
         status = _public_terminal_status(completion.get("status"))
         terminal_activity = {
