@@ -287,6 +287,11 @@ class SophiaState(AgentState):
     builder_web_budget: NotRequired[Annotated[dict, _merge_builder_web_budget]]
     allow_web_research: NotRequired[bool]
     explicit_user_urls: NotRequired[list[str]]
+    # Hard cost/token ceiling for a builder run, enforced by
+    # ``BuilderBudgetMiddleware`` (see builder_budget.py). Seeded once per run
+    # by ``start_builder_task`` and never mutated (frozen, like
+    # ``builder_web_budget``'s caps), so a plain field — no reducer needed.
+    builder_budget: NotRequired[dict | None]
 
     # Planning
     todos: NotRequired[list | None]

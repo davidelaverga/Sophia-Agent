@@ -1331,6 +1331,15 @@ async def _dispatch_via_asgi(
         "allow_web_research": allow_web_research,
         "explicit_user_urls": explicit_user_urls,
         "builder_web_budget": builder_web_budget,
+        # Hard cost/token circuit-breaker enforced by ``BuilderBudgetMiddleware``
+        # (constraints over instructions — runs regardless of model/loop). Mirrors
+        # ``DEFAULT_BUILDER_BUDGET`` in builder_budget.py; ``0``/``0.0`` disables a
+        # cap. Tune ``max_cost_usd`` from the measured $/build (spec §2).
+        "builder_budget": {
+            "max_cost_usd": 5.0,
+            "max_total_tokens": 2_000_000,
+            "cost_model_key": "claude-sonnet-4-6",
+        },
         "builder_artifact_target_path": delegation_context.get("artifact_target_path"),
     }
     if materialized_edit_context is not None:

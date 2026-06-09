@@ -155,13 +155,27 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
         "comment block in builder_agent.py for the full rationale."
     )
     # B2 — DanglingToolCallMiddleware MUST sit AFTER PromptAssemblyMiddleware
-    # in the builder chain too. The builder doesn't currently use Anthropic
-    # prompt caching, so we only assert the lower bound.
+    # and BEFORE AnthropicPromptCachingMiddleware in the builder chain (Phase 2
+    # caching), mirroring the companion so the cache keys off the patched
+    # message list.
     assert "DanglingToolCallMiddleware" in builder_types
     assert "PromptAssemblyMiddleware" in builder_types
+    assert "AnthropicPromptCachingMiddleware" in builder_types
     assert (
         builder_types.index("PromptAssemblyMiddleware")
         < builder_types.index("DanglingToolCallMiddleware")
+        < builder_types.index("AnthropicPromptCachingMiddleware")
+    )
+    # Budget circuit-breaker (Phase 1) must be listed BEFORE
+    # BuilderArtifactMiddleware so that — because after_model hooks run in
+    # reverse list order — it runs AFTER it: a legitimate artifact emit wins
+    # the completion-webhook dedup, while a runaway turn's "timed_out" budget
+    # kill fires uncontended. See builder_budget.py.
+    assert "BuilderBudgetMiddleware" in builder_types
+    assert "BuilderArtifactMiddleware" in builder_types
+    assert (
+        builder_types.index("BuilderBudgetMiddleware")
+        < builder_types.index("BuilderArtifactMiddleware")
     )
 
 
