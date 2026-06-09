@@ -9,7 +9,9 @@ Use this card only for requested `.pptx` or slide-deck builds.
 2. Read `/mnt/skills/public/ppt-generation/SKILL.md`.
 3. If the user requested charts, diagrams, or visuals, read
    `/mnt/skills/public/visual-design/SKILL.md`, then create local visual
-   assets with `generate_visual_asset` and reference them from the plan.
+   assets with `generate_visual_asset` and reference their `.png` paths from
+   the plan using a per-slide `image`, `chart_path`, or `visual_path` field.
+   Do not use the generated support PNG as the final artifact.
 4. Compose a valid no-image deck first with
    `/mnt/skills/public/ppt-generation/scripts/generate.py`, passing the plan
    and an output path under `/mnt/user-data/outputs/`. Do not pass

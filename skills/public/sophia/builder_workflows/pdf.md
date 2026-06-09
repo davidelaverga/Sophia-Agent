@@ -6,10 +6,12 @@ Use this card only for requested `.pdf` builds.
 2. If the user requested charts, diagrams, or visuals, first read
    `/mnt/skills/public/visual-design/SKILL.md`, then create at least one local
    visual asset with `generate_visual_asset` under
-   `/mnt/user-data/outputs/visuals/`.
+   `/mnt/user-data/outputs/visuals/`. Use the generated `.png` path for PDF
+   embedding; SVG is useful for HTML but Pandoc/XeLaTeX should receive PNG.
 3. Create Markdown or HTML source under `/mnt/user-data/outputs/`.
    Source creation is not completion and is not a fallback yet.
-   Reference any local visual assets from that source before rendering.
+   Reference generated PNGs with relative paths such as
+   `![Diagram](visuals/diagram.png)` before rendering.
 4. Your next substantive action after source creation must be
    `render_markdown_to_pdf(markdown_path=<source>, pdf_path=<target .pdf>)`.
 5. If rendering succeeds and layout quality is `ok`, that rendered `.pdf` is

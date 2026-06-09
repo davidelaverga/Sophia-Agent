@@ -141,6 +141,42 @@ def _page_word_count(page: Any) -> int:
     return len([word for word in text.split() if word.strip()])
 
 
+def _pdf_object(value: Any) -> Any:
+    getter = getattr(value, "get_object", None)
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:  # noqa: BLE001
+            return value
+    return value
+
+
+def _page_image_count(page: Any) -> int:
+    try:
+        images = getattr(page, "images", None)
+        if images:
+            return len(images)
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        resources = _pdf_object(page.get("/Resources", {}))
+        xobjects = _pdf_object(resources.get("/XObject", {})) if hasattr(resources, "get") else {}
+    except Exception:  # noqa: BLE001
+        return 0
+
+    count = 0
+    if hasattr(xobjects, "values"):
+        for item in xobjects.values():
+            xobject = _pdf_object(item)
+            subtype = xobject.get("/Subtype") if hasattr(xobject, "get") else None
+            if subtype == "/Image":
+                count += 1
+            elif subtype == "/Form":
+                count += _page_image_count(xobject)
+    return count
+
+
 def _layout_quality(page_count: int, blank_count: int, short_count: int) -> tuple[str, str | None]:
     if page_count <= 0:
         return "unknown", "pdf_layout_unreadable"
@@ -159,18 +195,21 @@ def _inspect_pdf_layout(pdf_file: Path) -> dict[str, int | str | None]:
             "page_count": 0,
             "blank_page_count": 0,
             "short_page_count": 0,
+            "image_count": 0,
             "layout_quality": "unknown",
             "layout_warning": "pypdf_unavailable",
         }
     try:
         reader = PdfReader(str(pdf_file))
         counts = [_page_word_count(page) for page in reader.pages]
+        image_count = sum(_page_image_count(page) for page in reader.pages)
     except Exception:  # noqa: BLE001
         logger.warning("render_markdown_to_pdf: layout_inspection_failed", exc_info=True)
         return {
             "page_count": 0,
             "blank_page_count": 0,
             "short_page_count": 0,
+            "image_count": 0,
             "layout_quality": "unknown",
             "layout_warning": "pdf_layout_unreadable",
         }
@@ -182,6 +221,7 @@ def _inspect_pdf_layout(pdf_file: Path) -> dict[str, int | str | None]:
         "page_count": page_count,
         "blank_page_count": blank_count,
         "short_page_count": short_count,
+        "image_count": image_count,
         "layout_quality": quality,
         "layout_warning": warning,
     }
@@ -248,17 +288,18 @@ def _pandoc_command(
     pdf_file: Path,
     engine: str | None,
 ) -> tuple[list[str], list[str]]:
+    source_format = "html" if md_file.suffix.lower() in {".html", ".htm"} else "markdown+smart+yaml_metadata_block"
     cmd = [
         pandoc_bin,
         "--standalone",
-        "--from=markdown+smart+yaml_metadata_block",
+        f"--from={source_format}",
         str(md_file),
         "-o",
         str(pdf_file),
     ]
     public_cmd = [
         "--standalone",
-        "--from=markdown+smart+yaml_metadata_block",
+        f"--from={source_format}",
         markdown_path,
         "-o",
         pdf_path,
@@ -340,6 +381,27 @@ def _pdf_size(pdf_file: Path) -> int:
         return -1
 
 
+def _rewrite_virtual_image_refs(md_file: Path, thread_data: dict[str, Any] | None) -> Path:
+    if thread_data is None:
+        return md_file
+    outputs_path = thread_data.get("outputs_path")
+    if not isinstance(outputs_path, str) or not outputs_path:
+        return md_file
+    try:
+        text = md_file.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        text = md_file.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return md_file
+
+    rewritten = text.replace(_OUTPUTS_VIRTUAL_PREFIX, f"{Path(outputs_path).resolve().as_posix()}/")
+    if rewritten == text:
+        return md_file
+    normalized = md_file.with_name(f".{md_file.stem}.pandoc{md_file.suffix}")
+    normalized.write_text(rewritten, encoding="utf-8")
+    return normalized
+
+
 def _pdf_success_result(
     *,
     pdf_path: str,
@@ -352,14 +414,15 @@ def _pdf_success_result(
     logger.info(
         "render_markdown_to_pdf: render_success selected_engine=%s "
         "final_artifact_ext=%s size_bytes=%s page_count=%s "
-        "blank_page_count=%s short_page_count=%s layout_quality=%s "
-        "layout_warning=%s",
+        "blank_page_count=%s short_page_count=%s image_count=%s "
+        "layout_quality=%s layout_warning=%s",
         engine or "pandoc_default",
         pdf_file.suffix.lower().lstrip(".") or "unknown",
         size_bytes,
         layout.get("page_count"),
         layout.get("blank_page_count"),
         layout.get("short_page_count"),
+        layout.get("image_count"),
         layout.get("layout_quality"),
         layout.get("layout_warning"),
     )
@@ -388,6 +451,7 @@ def _impl(
     md_file = _host_path_for_virtual_output(markdown_path, thread_data)
     if not md_file.is_file():
         return _missing_markdown_result(markdown_path)
+    pandoc_source_file = _rewrite_virtual_image_refs(md_file, thread_data)
 
     # ---- Pandoc availability --------------------------------------------
     pandoc_bin = shutil.which("pandoc")
@@ -405,7 +469,7 @@ def _impl(
         pandoc_bin=pandoc_bin,
         markdown_path=markdown_path,
         pdf_path=pdf_path,
-        md_file=md_file,
+        md_file=pandoc_source_file,
         pdf_file=pdf_file,
         engine=engine,
     )

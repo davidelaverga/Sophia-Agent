@@ -528,6 +528,8 @@ def _completion_from_terminal_task(
         "artifact_type": artifact.get("artifact_type"),
         "artifact_filename": artifact_filename,
         **fallback,
+        "image_generation_status": artifact.get("image_generation_status"),
+        "image_generation_reason": artifact.get("image_generation_reason"),
         "source_artifact_path": _completion_provenance_path(task, artifact, "source_artifact_path"),
         "revision_of_artifact_path": _completion_provenance_path(task, artifact, "revision_of_artifact_path"),
         "summary": artifact.get("companion_summary") or artifact.get("summary"),

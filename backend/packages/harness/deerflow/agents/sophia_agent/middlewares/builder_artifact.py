@@ -36,6 +36,11 @@ from deerflow.sophia.builder_web_policy import extract_explicit_user_urls
 from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.sophia.storage.supabase_mirror import maybe_mirror_file
 
+try:  # pragma: no cover - dependency availability varies in minimal tests.
+    from pypdf import PdfReader
+except Exception:  # noqa: BLE001
+    PdfReader = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 
@@ -884,6 +889,13 @@ def _apply_artifact_request_metadata(
         artifact["fallback_reason"] = fallback_reason
     elif requested_ext:
         artifact.setdefault("artifact_is_fallback", False)
+    image_status, image_reason = _image_generation_metadata_from_state(state)
+    if image_status:
+        artifact["image_generation_status"] = image_status
+        if image_reason:
+            artifact["image_generation_reason"] = image_reason
+        else:
+            artifact.pop("image_generation_reason", None)
     return artifact
 
 
@@ -1555,6 +1567,57 @@ def _pptx_contains_visual_evidence(path: Path) -> bool:
     )
 
 
+def _pdf_object(value: Any) -> Any:
+    getter = getattr(value, "get_object", None)
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:  # noqa: BLE001
+            return value
+    return value
+
+
+def _pdf_page_image_count(page: Any) -> int:
+    try:
+        images = getattr(page, "images", None)
+        if images:
+            return len(images)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        resources = _pdf_object(page.get("/Resources", {}))
+        xobjects = _pdf_object(resources.get("/XObject", {})) if hasattr(resources, "get") else {}
+    except Exception:  # noqa: BLE001
+        return 0
+    count = 0
+    if hasattr(xobjects, "values"):
+        for value in xobjects.values():
+            xobject = _pdf_object(value)
+            subtype = xobject.get("/Subtype") if hasattr(xobject, "get") else None
+            if subtype == "/Image":
+                count += 1
+            elif subtype == "/Form":
+                count += _pdf_page_image_count(xobject)
+    return count
+
+
+def _pdf_contains_visual_evidence(path: Path, state: dict[str, Any]) -> bool:
+    render_result = state.get("builder_pdf_render_result")
+    if isinstance(render_result, dict):
+        try:
+            return int(render_result.get("image_count", 0) or 0) > 0
+        except (TypeError, ValueError):
+            pass
+    if PdfReader is None:
+        return False
+    try:
+        reader = PdfReader(str(path))
+        return sum(_pdf_page_image_count(page) for page in reader.pages) > 0
+    except Exception:  # noqa: BLE001
+        logger.warning("[BuilderVisualDiagnostics] pdf_visual_inspection_failed", exc_info=True)
+        return False
+
+
 def _visual_presence_validated(artifact_args: dict[str, Any], state: dict[str, Any]) -> bool:
     if not _visuals_requested(state):
         return True
@@ -1566,9 +1629,40 @@ def _visual_presence_validated(artifact_args: dict[str, Any], state: dict[str, A
         return _html_contains_visual_evidence(artifact_file)
     if suffix == ".pptx" and artifact_file is not None:
         return _pptx_contains_visual_evidence(artifact_file)
-    if suffix == ".pdf":
-        return _visual_asset_success_count(state) > 0 and _pdf_source_contains_visual_evidence(state)
+    if suffix == ".pdf" and artifact_file is not None:
+        return _pdf_contains_visual_evidence(artifact_file, state)
     return _visual_asset_success_count(state) > 0
+
+
+def _apply_visual_missing_fallback_metadata(
+    artifact: dict[str, Any],
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    if not _visuals_requested(state):
+        return artifact
+    requested_ext = _requested_artifact_ext(state)
+    artifact_ext = _artifact_ext_from_path(artifact.get("artifact_path"))
+    if requested_ext not in {"pdf", "pptx"} or artifact_ext != requested_ext:
+        return artifact
+    if _visual_presence_validated(artifact, state):
+        return artifact
+    updated = dict(artifact)
+    updated["requested_artifact_ext"] = requested_ext
+    updated["artifact_ext"] = artifact_ext
+    updated["artifact_is_fallback"] = True
+    updated["fallback_reason"] = "visuals_not_embedded"
+    confidence = updated.get("confidence")
+    if isinstance(confidence, (int, float)):
+        updated["confidence"] = min(float(confidence), 0.65)
+    tone_hint = str(updated.get("companion_tone_hint") or "").strip()
+    degraded_hint = "Explain that the file is usable, but visual embedding did not complete."
+    updated["companion_tone_hint"] = f"{tone_hint} {degraded_hint}".strip()
+    logger.warning(
+        "[BuilderVisualDiagnostics] phase=visual_missing_marked_fallback requested_ext=%s final_ext=%s",
+        requested_ext,
+        artifact_ext,
+    )
+    return updated
 
 
 def _visual_asset_result_delta(result: ToolMessage) -> dict[str, Any] | None:
@@ -1626,17 +1720,32 @@ def _classify_image_generation_error(text: str, exists: bool, bytes_count: int) 
     lowered = text.lower()
     if exists and bytes_count > 0:
         return None
+    explicit = re.search(r"\bimagegen_fail\s+reason=([a-z0-9_:-]+)", lowered)
+    if explicit:
+        return explicit.group(1)
     if "openai_api_key" in lowered:
-        return "missing_openai_api_key"
+        return "missing_api_key"
     if "openai image generation failed" in lowered:
-        return "openai_api_error"
+        return "api_error"
     if "reference image" in lowered and "invalid" in lowered:
         return "invalid_reference_image"
-    if "no bytes landed" in lowered:
-        return "no_output_bytes"
+    if "no bytes landed" in lowered or "usable image bytes" in lowered:
+        return "empty_output"
     if "error" in lowered or "failed" in lowered:
-        return "image_generation_error"
+        return "api_error"
     return "missing_output"
+
+
+def _image_generation_metadata_from_state(state: dict[str, Any]) -> tuple[str | None, str | None]:
+    diagnostics = _pptx_diagnostics(state)
+    attempts = int(diagnostics.get("image_generation_attempt_count", 0) or 0)
+    if attempts <= 0:
+        return None, None
+    successes = int(diagnostics.get("image_generation_success_count", 0) or 0)
+    if successes > 0:
+        return "success", None
+    reason = diagnostics.get("image_generation_error_class")
+    return "failed", str(reason) if reason else "api_error"
 
 
 def _classify_pptx_generation_error(
@@ -1661,6 +1770,16 @@ def _existing_pptx_generation_error(state: dict[str, Any], path: str | None) -> 
     if not relative or not outputs_root:
         return "__inspect_text__"
     return _pptx_integrity_error_for_file(outputs_root / relative)
+
+
+def _pptx_picture_count_from_text(text: str) -> int:
+    match = re.search(r"\bpicture_count=(\d+)\b", text)
+    if match is None:
+        return 0
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return 0
 
 
 def _pptx_generation_error_from_text(text: str) -> str:
@@ -1695,7 +1814,8 @@ def _log_pptx_diagnostics(
         "image_generation_attempt_count=%d image_generation_success_count=%d "
         "image_generation_bytes_total=%d image_generation_error_class=%s "
         "pptx_generator_attempt_count=%d pptx_generator_success_count=%d "
-        "pptx_generator_bytes_total=%d pptx_generator_error_class=%s",
+        "pptx_generator_bytes_total=%d pptx_generator_error_class=%s "
+        "pptx_generator_picture_count=%d",
         phase,
         _pptx_skill_read_seen(state),
         _pptx_generator_invoked_seen(state),
@@ -1716,6 +1836,7 @@ def _log_pptx_diagnostics(
         _pptx_diagnostic_count(state, "pptx_generator_success_count"),
         int(pptx_diagnostics.get("pptx_generator_bytes_total", 0) or 0),
         pptx_diagnostics.get("pptx_generator_error_class"),
+        _pptx_diagnostic_count(state, "pptx_generator_picture_count"),
     )
 
 
@@ -3021,6 +3142,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             runtime.context.get("thread_id") if getattr(runtime, "context", None) else None
         )
         upload_thread_id = parent_thread_id or builder_thread_id
+        fallback = _apply_visual_missing_fallback_metadata(fallback, state)
         _upload_builder_outputs_to_supabase(
             thread_id=upload_thread_id,
             outputs_host_path=outputs_host_path,
@@ -4784,13 +4906,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         error_class = _classify_pptx_generation_error(state, output_path, text, exists)
         valid_pptx = error_class is None
         slide_count = len(_command_flag_values(command, "--slide-images"))
+        picture_count = _pptx_picture_count_from_text(text)
         logger.info(
             "[BuilderPptxGeneration] success=%s output_ext=%s bytes=%d "
-            "slide_image_count=%d error_class=%s status_reason=%s",
+            "slide_image_count=%d picture_count=%d error_class=%s status_reason=%s",
             valid_pptx,
             PurePosixPath(str(output_path or "")).suffix.lower().lstrip(".") or None,
             bytes_count,
             slide_count,
+            picture_count,
             error_class,
             status_reason,
         )
@@ -4799,6 +4923,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "pptx_generator_success_count": 1 if valid_pptx else 0,
             "pptx_generator_bytes_total": bytes_count if valid_pptx else 0,
             "pptx_generator_error_class": error_class,
+            "pptx_generator_picture_count": picture_count,
         }
         if output_path and valid_pptx:
             delta["pptx_output_paths"] = [output_path]
@@ -5233,6 +5358,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         state,
                         fallback_reason="pptx_generation_not_completed" if _requested_pptx_artifact(state) else None,
                     )
+                    args = _apply_visual_missing_fallback_metadata(args, state)
                     _log_pptx_diagnostics(
                         phase="emit_accepted",
                         state={**state, "builder_tool_turn_summaries": history},

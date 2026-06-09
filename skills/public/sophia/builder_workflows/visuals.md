@@ -8,8 +8,9 @@ explanations, visual reports, or visual slide decks.
 2. Choose the smallest useful visual set for the artifact.
 3. Use `generate_visual_asset` to create local SVG/PNG assets under
    `/mnt/user-data/outputs/visuals/`.
-4. Embed or reference those local assets in the delivered HTML, PDF source, or
-   PPTX plan before emitting.
+4. Embed inline SVG or linked SVG/PNG for HTML. For PDF and PPTX, reference the
+   generated PNG in the Markdown/HTML source or presentation plan before
+   rendering/composing the final artifact.
 
 Do not count remote chart URLs, generated Python scripts, or prose
 descriptions as completed visuals. If visual generation fails, emit a truthful

@@ -15,7 +15,8 @@ This skill generates professional PowerPoint presentations from a structured pla
 - Support multiple presentation styles: Business, Academic, Minimal, Apple Keynote, Creative
 - Optionally generate AI images for each slide using image-generation skill when explicitly requested
 - Maintain visual consistency by using previous slide as reference image when image generation is used
-- Compose the plan, and optional images, into a professional PPTX file
+- Compose the plan, optional generated slide images, and optional local chart/diagram
+  assets into a professional PPTX file
 
 ## Presentation Styles
 
@@ -73,11 +74,17 @@ Create a JSON file in `/mnt/user-data/workspace/` with the presentation structur
       "type": "content",
       "title": "Slide Title",
       "key_points": ["Point 1", "Point 2", "Point 3"],
-      "visual_description": "Detailed description for image generation"
+      "visual_description": "Detailed description for image generation only if explicitly requested",
+      "chart_path": "/mnt/user-data/outputs/visuals/example-chart.png"
     }
   ]
 }
 ```
+
+For deterministic charts/diagrams created with `generate_visual_asset`, reference
+the generated PNG in `image`, `chart_path`, or `visual_path` on the relevant
+slide. The composition script will create a content-with-image layout. SVG can
+be kept for HTML, but PPTX embedding should use PNG.
 
 ### Step 3: Decide Whether Images Are Needed
 
@@ -175,6 +182,10 @@ Parameters:
 - `--plan-file`: Absolute path to the presentation plan JSON file (required)
 - `--slide-images`: Optional absolute paths to slide images in order
 - `--output-file`: Absolute path to output PPTX file (required)
+
+Plan-level slide fields `image`, `chart_path`, or `visual_path` may also point
+to local PNG/JPEG assets under `/mnt/user-data/outputs/`; these are embedded
+without using the `--slide-images` option.
 
 [!NOTE]
 Do NOT read the python file, just call it with the parameters.

@@ -1,6 +1,8 @@
 import json
 from types import SimpleNamespace
 
+from PIL import Image
+
 from deerflow.sophia.tools.generate_visual_asset import generate_visual_asset
 
 
@@ -36,10 +38,20 @@ def test_generate_visual_asset_writes_svg_and_png_under_visuals(tmp_path) -> Non
     assert payload["success"] is True
     assert payload["svg_path"] == "/mnt/user-data/outputs/visuals/capability-comparison.svg"
     assert payload["png_path"] == "/mnt/user-data/outputs/visuals/capability-comparison.png"
-    assert (outputs / "visuals" / "capability-comparison.svg").is_file()
-    assert (outputs / "visuals" / "capability-comparison.png").is_file()
+    svg_file = outputs / "visuals" / "capability-comparison.svg"
+    png_file = outputs / "visuals" / "capability-comparison.png"
+    assert svg_file.is_file()
+    assert png_file.is_file()
     assert payload["svg_bytes"] > 100
     assert payload["png_bytes"] > 0
+    assert payload["png_render_engine"] in {"cairosvg", "svglib", "pillow_svg_subset"}
+    assert payload["png_validation_status"] == "ok"
+
+    with Image.open(png_file) as image:
+        image.load()
+        assert image.size == (960, 540)
+        extrema = image.convert("L").getextrema()
+    assert extrema[0] != extrema[1]
 
 
 def test_generate_visual_asset_rejects_invalid_dimensions(tmp_path) -> None:

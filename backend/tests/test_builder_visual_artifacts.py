@@ -2,7 +2,10 @@ from types import SimpleNamespace
 
 from langgraph.types import Command
 
-from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
+    BuilderArtifactMiddleware,
+    _apply_visual_missing_fallback_metadata,
+)
 
 
 def _runtime():
@@ -55,7 +58,7 @@ def test_generate_visual_asset_is_blocked_until_design_skill_is_read(tmp_path) -
     assert "visual-design enforcement blocked" in message.content
 
 
-def test_visual_pdf_emit_requires_local_visual_evidence(tmp_path) -> None:
+def test_visual_pdf_emit_without_embedded_visuals_soft_passes_for_metadata_truth(tmp_path) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     (outputs / "report.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
@@ -67,10 +70,19 @@ def test_visual_pdf_emit_requires_local_visual_evidence(tmp_path) -> None:
         _runtime(),
     )
 
-    assert ok is False
+    assert ok is True
+    updated = _apply_visual_missing_fallback_metadata(
+        {
+            "artifact_path": "/mnt/user-data/outputs/report.pdf",
+            "artifact_type": "pdf",
+        },
+        state,
+    )
+    assert updated["artifact_is_fallback"] is True
+    assert updated["fallback_reason"] == "visuals_not_embedded"
 
 
-def test_visual_pdf_emit_passes_with_visual_asset_and_source_reference(tmp_path) -> None:
+def test_visual_pdf_emit_is_marked_degraded_when_final_pdf_has_no_embedded_visuals(tmp_path) -> None:
     outputs = tmp_path / "outputs"
     visuals = outputs / "visuals"
     visuals.mkdir(parents=True)
@@ -82,6 +94,12 @@ def test_visual_pdf_emit_passes_with_visual_asset_and_source_reference(tmp_path)
         "visual_asset_success_count": 1,
         "visual_asset_paths": ["/mnt/user-data/outputs/visuals/chart.svg"],
     }
+    state["builder_pdf_render_result"] = {
+        "success": True,
+        "pdf_path": "/mnt/user-data/outputs/report.pdf",
+        "layout_quality": "ok",
+        "image_count": 0,
+    }
 
     ok = BuilderArtifactMiddleware._artifact_files_exist(
         {"artifact_path": "/mnt/user-data/outputs/report.pdf"},
@@ -90,3 +108,14 @@ def test_visual_pdf_emit_passes_with_visual_asset_and_source_reference(tmp_path)
     )
 
     assert ok is True
+    updated = _apply_visual_missing_fallback_metadata(
+        {
+            "artifact_path": "/mnt/user-data/outputs/report.pdf",
+            "artifact_type": "pdf",
+            "confidence": 0.9,
+        },
+        state,
+    )
+    assert updated["artifact_is_fallback"] is True
+    assert updated["fallback_reason"] == "visuals_not_embedded"
+    assert updated["confidence"] == 0.65

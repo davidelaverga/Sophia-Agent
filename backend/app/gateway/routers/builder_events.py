@@ -44,6 +44,8 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "requested_artifact_ext",
     "artifact_is_fallback",
     "fallback_reason",
+    "image_generation_status",
+    "image_generation_reason",
     "error_message",
     "trace_id",
 )
@@ -75,6 +77,8 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "artifact_ext",
         "artifact_is_fallback",
         "fallback_reason",
+        "image_generation_status",
+        "image_generation_reason",
         "source_artifact_path",
         "revision_of_artifact_path",
         "summary",
@@ -244,6 +248,8 @@ class BuilderCompletionEvent(BaseModel):
     artifact_ext: str | None = None
     artifact_is_fallback: bool | None = None
     fallback_reason: str | None = None
+    image_generation_status: str | None = None
+    image_generation_reason: str | None = None
     source_artifact_path: str | None = None
     revision_of_artifact_path: str | None = None
     summary: str | None = None

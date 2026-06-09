@@ -298,6 +298,66 @@ def test_resolves_virtual_output_paths_with_thread_data(tmp_path, monkeypatch):
     assert (outputs / "report.pdf").is_file()
 
 
+def test_rewrites_virtual_image_refs_before_pandoc(tmp_path, monkeypatch):
+    outputs = tmp_path / "thread" / "outputs"
+    visuals = outputs / "visuals"
+    visuals.mkdir(parents=True)
+    (visuals / "chart.png").write_bytes(b"png-bytes")
+    (outputs / "report.md").write_text(
+        "# Report\n\n![Chart](/mnt/user-data/outputs/visuals/chart.png)\n",
+        encoding="utf-8",
+    )
+    thread_data = {
+        "workspace_path": str(tmp_path / "thread" / "workspace"),
+        "uploads_path": str(tmp_path / "thread" / "uploads"),
+        "outputs_path": str(outputs),
+    }
+
+    monkeypatch.setattr(
+        "deerflow.sophia.tools.render_markdown_to_pdf.shutil.which",
+        lambda binary: f"/fake/{binary}",
+    )
+    monkeypatch.setattr(
+        render_pdf,
+        "_inspect_pdf_layout",
+        lambda _path: {
+            "page_count": 2,
+            "blank_page_count": 0,
+            "short_page_count": 0,
+            "image_count": 1,
+            "layout_quality": "ok",
+            "layout_warning": None,
+        },
+    )
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF-1.4 fake")
+
+        class _Completed:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
+        return _Completed()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = _parse(_impl(
+        markdown_path=f"{_OUTPUTS_PREFIX}report.md",
+        pdf_path=f"{_OUTPUTS_PREFIX}report.pdf",
+        pdf_engine=None,
+        thread_data=thread_data,
+    ))
+
+    source_arg = next(Path(arg) for arg in captured["cmd"] if str(arg).endswith(".pandoc.md"))
+    assert source_arg.name == ".report.pandoc.md"
+    assert f"{outputs.resolve().as_posix()}/visuals/chart.png" in source_arg.read_text(encoding="utf-8")
+    assert result["success"] is True
+    assert result["image_count"] == 1
+
+
 def test_success_payload_includes_pdf_layout_metrics(tmp_path, monkeypatch):
     md = _stage_for_subprocess_test(tmp_path, monkeypatch)
     pdf_path = tmp_path / "mnt" / "user-data" / "outputs" / "out.pdf"
@@ -325,6 +385,7 @@ def test_success_payload_includes_pdf_layout_metrics(tmp_path, monkeypatch):
             "page_count": 12,
             "blank_page_count": 0,
             "short_page_count": 1,
+            "image_count": 0,
             "layout_quality": "ok",
             "layout_warning": None,
         },

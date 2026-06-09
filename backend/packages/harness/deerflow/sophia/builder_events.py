@@ -508,6 +508,8 @@ def _artifact_completion_fields(
         "artifact_ext": artifact.get("artifact_ext"),
         "artifact_is_fallback": artifact.get("artifact_is_fallback"),
         "fallback_reason": artifact.get("fallback_reason"),
+        "image_generation_status": artifact.get("image_generation_status"),
+        "image_generation_reason": artifact.get("image_generation_reason"),
         "source_artifact_path": artifact.get("source_artifact_path"),
         "revision_of_artifact_path": artifact.get("revision_of_artifact_path"),
         "summary": artifact.get("companion_summary"),
@@ -715,13 +717,15 @@ def fire_completion_webhook_from_artifact(
     logger.info(
         "[Builder] fire_completion_webhook: dispatching task_id=%s "
         "parent_thread_id=%s status=%s artifact_path=%r artifact_filename=%r "
-        "artifact_url_present=%s",
+        "artifact_url_present=%s image_generation_status=%s image_generation_reason=%s",
         task_id,
         payload.get("thread_id"),
         payload.get("status"),
         payload.get("artifact_path"),
         payload.get("artifact_filename"),
         bool(payload.get("artifact_url")),
+        payload.get("image_generation_status"),
+        payload.get("image_generation_reason"),
     )
 
     threading.Thread(

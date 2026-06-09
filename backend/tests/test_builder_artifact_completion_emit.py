@@ -237,6 +237,29 @@ def test_completion_payload_preserves_fallback_metadata():
     assert payload["fallback_reason"] == "pptx_generation_not_completed"
 
 
+def test_completion_payload_preserves_image_generation_metadata():
+    runtime = _make_runtime(
+        builder_thread_id="t-build",
+        builder_run_id="r-1",
+        parent_thread_id="t-parent",
+    )
+    state = _make_state(task_brief="Build a slide deck with generated images", task_type="presentation")
+    artifact = _success_artifact(
+        artifact_path="/mnt/user-data/outputs/deck.pptx",
+        artifact_type="pptx",
+        image_generation_status="failed",
+        image_generation_reason="org_not_verified",
+    )
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=artifact, status="completed"
+        )
+
+    assert payload["image_generation_status"] == "failed"
+    assert payload["image_generation_reason"] == "org_not_verified"
+
+
 def test_build_completion_payload_run_id_is_none_when_runtime_missing_it():
     """Pre-4I in-flight payloads: if runtime.execution_info doesn't
     expose ``run_id`` (e.g. older test stubs / langgraph runtimes),

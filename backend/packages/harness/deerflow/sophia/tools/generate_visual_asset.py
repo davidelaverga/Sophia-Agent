@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from xml.sax.saxutils import escape
@@ -228,22 +229,173 @@ def _svg_for(kind: str, title: str, data: Any, colors: tuple[str, ...], width: i
     return _cards_svg(title, _coerce_text_items(data), colors, width, height, kind)
 
 
-def _write_png_preview(svg_path: Path, png_path: Path, width: int, height: int, title: str) -> tuple[bool, str | None]:
+def _validate_png(png_path: Path, width: int, height: int) -> str:
     try:
-        from PIL import Image, ImageDraw
+        from PIL import Image
+    except Exception:  # pragma: no cover - dependency is installed in runtime.
+        return "pillow_unavailable"
+    try:
+        with Image.open(png_path) as image:
+            image.verify()
+        with Image.open(png_path) as image:
+            image.load()
+            if image.size != (width, height):
+                return f"invalid_dimensions:{image.size[0]}x{image.size[1]}"
+            extrema = image.convert("RGB").getextrema()
+            if not any(channel_max > channel_min for channel_min, channel_max in extrema):
+                return "blank_or_uniform"
+    except Exception as exc:
+        return exc.__class__.__name__
+    return "ok"
+
+
+def _write_png_cairosvg(svg: str, png_path: Path, width: int, height: int) -> tuple[bool, str | None]:
+    try:
+        import cairosvg
     except Exception:
-        return False, "pillow_unavailable"
+        return False, "cairosvg_unavailable"
     try:
-        image = Image.new("RGB", (width, height), "#f8fafc")
-        draw = ImageDraw.Draw(image)
-        draw.rounded_rectangle((8, 8, width - 8, height - 8), radius=28, outline="#cbd5e1", width=3)
-        draw.text((40, 36), title[:96] or svg_path.stem, fill="#111827")
-        draw.text((40, height - 52), f"SVG source: {svg_path.name}", fill="#64748b")
         png_path.parent.mkdir(parents=True, exist_ok=True)
-        image.save(png_path)
+        cairosvg.svg2png(
+            bytestring=svg.encode("utf-8"),
+            write_to=str(png_path),
+            output_width=width,
+            output_height=height,
+            background_color="#ffffff",
+        )
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__
+
+
+def _write_png_svglib(svg_path: Path, png_path: Path, width: int, height: int) -> tuple[bool, str | None]:
+    try:
+        from reportlab.graphics import renderPM
+        from svglib.svglib import svg2rlg
+    except Exception:
+        return False, "svglib_unavailable"
+    try:
+        png_path.parent.mkdir(parents=True, exist_ok=True)
+        drawing = svg2rlg(str(svg_path))
+        if drawing is None:
+            return False, "svglib_empty_drawing"
+        source_width = float(getattr(drawing, "width", width) or width)
+        source_height = float(getattr(drawing, "height", height) or height)
+        drawing.scale(width / source_width, height / source_height)
+        drawing.width = width
+        drawing.height = height
+        renderPM.drawToFile(drawing, str(png_path), fmt="PNG")
+        return True, None
+    except Exception as exc:
+        return False, exc.__class__.__name__
+
+
+def _float_attr(node: ET.Element, name: str, default: float = 0.0) -> float:
+    try:
+        return float(str(node.attrib.get(name, default)).replace("%", ""))
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_color(value: str | None, default: str) -> str:
+    if isinstance(value, str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", value.strip()):
+        return value.strip()
+    return default
+
+
+def _write_png_pillow(svg: str, png_path: Path, width: int, height: int) -> tuple[bool, str | None]:
+    """Fallback renderer for Sophia's small deterministic SVG subset.
+
+    CairoSVG remains the production path. This keeps local gates and emergency
+    runtimes from falling back to blank placeholder PNGs when native Cairo is
+    unavailable.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except Exception:
+        return False, "pillow_unavailable"
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError as exc:
+        return False, exc.__class__.__name__
+
+    image = Image.new("RGB", (width, height), "#f8fafc")
+    draw = ImageDraw.Draw(image)
+    font_title = ImageFont.load_default(size=28)
+    font_label = ImageFont.load_default(size=15)
+    font_small = ImageFont.load_default(size=12)
+
+    for node in root.iter():
+        tag = node.tag.rsplit("}", 1)[-1]
+        if tag == "rect":
+            raw_w = node.attrib.get("width")
+            raw_h = node.attrib.get("height")
+            x = _float_attr(node, "x")
+            y = _float_attr(node, "y")
+            w = float(width) if raw_w == "100%" else _float_attr(node, "width", width)
+            h = float(height) if raw_h == "100%" else _float_attr(node, "height", height)
+            fill = _safe_color(node.attrib.get("fill"), "#ffffff")
+            outline = _safe_color(node.attrib.get("stroke"), fill)
+            draw.rounded_rectangle(
+                (x, y, x + w, y + h),
+                radius=max(_float_attr(node, "rx"), 0),
+                fill=fill,
+                outline=outline,
+            )
+        elif tag == "line":
+            draw.line(
+                (
+                    _float_attr(node, "x1"),
+                    _float_attr(node, "y1"),
+                    _float_attr(node, "x2"),
+                    _float_attr(node, "y2"),
+                ),
+                fill=_safe_color(node.attrib.get("stroke"), "#94a3b8"),
+                width=max(int(_float_attr(node, "stroke-width", 1)), 1),
+            )
+        elif tag == "circle":
+            cx = _float_attr(node, "cx")
+            cy = _float_attr(node, "cy")
+            r = _float_attr(node, "r", 1)
+            draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=_safe_color(node.attrib.get("fill"), "#14b8a6"))
+        elif tag == "text":
+            text = "".join(node.itertext()).strip()
+            if not text:
+                continue
+            class_name = node.attrib.get("class", "")
+            font = font_title if class_name == "title" else font_small if class_name == "small" else font_label
+            anchor = "mm" if node.attrib.get("text-anchor") == "middle" else "la"
+            draw.text(
+                (_float_attr(node, "x"), _float_attr(node, "y")),
+                text,
+                fill=_safe_color(node.attrib.get("fill"), "#111827"),
+                font=font,
+                anchor=anchor,
+            )
+
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(png_path, format="PNG")
+    return True, None
+
+
+def _write_png(svg: str, svg_path: Path, png_path: Path, width: int, height: int) -> tuple[bool, str | None, str | None, str]:
+    last_error: str | None = None
+    last_validation = "not_rendered"
+    for engine, writer in (
+        ("cairosvg", lambda: _write_png_cairosvg(svg, png_path, width, height)),
+        ("svglib", lambda: _write_png_svglib(svg_path, png_path, width, height)),
+        ("pillow_svg_subset", lambda: _write_png_pillow(svg, png_path, width, height)),
+    ):
+        success, error = writer()
+        if not success:
+            last_error = f"{engine}:{error or 'render_failed'}"
+            continue
+        validation = _validate_png(png_path, width, height)
+        if validation == "ok":
+            return True, None, engine, validation
+        last_error = f"{engine}:{validation}"
+        last_validation = validation
+    return False, last_error, None, last_validation
 
 
 @tool("generate_visual_asset", parse_docstring=True)
@@ -257,7 +409,7 @@ def generate_visual_asset(
     height: int = 540,
     palette: list[str] | None = None,
 ) -> str:
-    """Create a deterministic local SVG visual asset, plus a PNG preview when possible.
+    """Create deterministic local SVG and PNG visual assets.
 
     Use this for charts and diagrams that must be embedded into HTML, PDF, or
     PPTX artifacts. Files are written under /mnt/user-data/outputs/visuals/.
@@ -286,7 +438,7 @@ def generate_visual_asset(
         svg_path.parent.mkdir(parents=True, exist_ok=True)
         svg = _svg_for(visual_type, str(title or visual_type), data, _palette(palette), width, height)
         svg_path.write_text(svg, encoding="utf-8")
-        png_success, png_error = _write_png_preview(svg_path, png_path, width, height, str(title or visual_type))
+        png_success, png_error, png_engine, png_validation = _write_png(svg, svg_path, png_path, width, height)
         payload = {
             "visual_type": visual_type,
             "svg_path": svg_virtual,
@@ -296,6 +448,8 @@ def generate_visual_asset(
             "svg_bytes": svg_path.stat().st_size,
             "png_bytes": png_path.stat().st_size if png_success and png_path.exists() else 0,
             "png_error": png_error,
+            "png_render_engine": png_engine,
+            "png_validation_status": png_validation,
         }
         return _result(success=True, **payload)
     except Exception as exc:

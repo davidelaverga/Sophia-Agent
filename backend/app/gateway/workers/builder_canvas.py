@@ -466,7 +466,8 @@ class BuilderCanvasWorker:
             "Builder canvas: event %s kind=%s reason=%s parent_thread_id=%s task_id=%s run_id=%s "
             "sequence=%s event_name=%s activity_kind=%s activity_category=%s status=%s "
             "activity_action=%s has_artifact_url=%s has_artifact_path=%s "
-            "requested_artifact_ext=%s artifact_ext=%s artifact_is_fallback=%s fallback_reason=%s",
+            "requested_artifact_ext=%s artifact_ext=%s artifact_is_fallback=%s fallback_reason=%s "
+            "image_generation_status=%s image_generation_reason=%s",
             decision,
             event.get("kind"),
             reason,
@@ -485,6 +486,8 @@ class BuilderCanvasWorker:
             completion.get("artifact_ext") if isinstance(completion, dict) else None,
             completion.get("artifact_is_fallback") if isinstance(completion, dict) else None,
             completion.get("fallback_reason") if isinstance(completion, dict) else None,
+            completion.get("image_generation_status") if isinstance(completion, dict) else None,
+            completion.get("image_generation_reason") if isinstance(completion, dict) else None,
         )
 
     def _record_event_locked(self, event: dict[str, Any], key: tuple[str, str, str], sequence: int) -> None:
