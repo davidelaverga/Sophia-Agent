@@ -161,7 +161,9 @@ def test_ceiling_fallback_pptx_promotes_valid_powerpoint(tmp_path: Path) -> None
     assert fallback["artifact_type"] == "pptx"
 
 
-def test_ceiling_fallback_pptx_rejects_tiny_deck_and_promotes_markdown_fallback(tmp_path: Path) -> None:
+def test_ceiling_fallback_pptx_rejects_tiny_deck_and_refuses_markdown_swap(tmp_path: Path) -> None:
+    """Format-swapped promotion is disabled: a pptx request never completes
+    with a .md artifact — the build reports an honest failure instead."""
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     (outputs / "deck.pptx").write_bytes(b"hello")
@@ -180,15 +182,13 @@ def test_ceiling_fallback_pptx_rejects_tiny_deck_and_promotes_markdown_fallback(
         state, steps_completed=12, reason="hard_ceiling"
     )
 
-    assert fallback["artifact_path"] == "/mnt/user-data/outputs/deck.md"
-    assert fallback["artifact_type"] == "md"
+    assert fallback["artifact_path"] is None
     assert fallback["requested_artifact_ext"] == "pptx"
-    assert fallback["artifact_ext"] == "md"
-    assert fallback["artifact_is_fallback"] is True
     assert fallback["fallback_reason"] == "pptx_generation_not_completed"
+    assert fallback["confidence"] == 0.2
 
 
-def test_ceiling_fallback_pptx_promotes_valid_html_fallback_with_metadata(tmp_path: Path) -> None:
+def test_ceiling_fallback_pptx_refuses_html_swap_with_failure_metadata(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     _write_file(
@@ -213,12 +213,12 @@ def test_ceiling_fallback_pptx_promotes_valid_html_fallback_with_metadata(tmp_pa
         state, steps_completed=12, reason="hard_ceiling"
     )
 
-    assert fallback["artifact_path"] == "/mnt/user-data/outputs/deck.html"
-    assert fallback["artifact_type"] == "webpage"
+    # Format-swapped promotion is disabled: an HTML file is never delivered
+    # as the completion artifact for a pptx request.
+    assert fallback["artifact_path"] is None
     assert fallback["requested_artifact_ext"] == "pptx"
-    assert fallback["artifact_ext"] == "html"
-    assert fallback["artifact_is_fallback"] is True
     assert fallback["fallback_reason"] == "pptx_generation_not_completed"
+    assert fallback["confidence"] == 0.2
 
 
 def test_ceiling_fallback_pptx_rejects_code_fenced_html_fallback(tmp_path: Path) -> None:

@@ -46,6 +46,9 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "fallback_reason",
     "image_generation_status",
     "image_generation_reason",
+    "artifact_preview_filename",
+    "quality_warning",
+    "visuals_missing",
     "error_message",
     "trace_id",
 )
@@ -79,6 +82,9 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "fallback_reason",
         "image_generation_status",
         "image_generation_reason",
+        "artifact_preview_filename",
+        "quality_warning",
+        "visuals_missing",
         "source_artifact_path",
         "revision_of_artifact_path",
         "summary",
@@ -250,6 +256,18 @@ class BuilderCompletionEvent(BaseModel):
     fallback_reason: str | None = None
     image_generation_status: str | None = None
     image_generation_reason: str | None = None
+    artifact_preview_filename: str | None = Field(
+        None,
+        description="Canvas preview sibling (e.g. <deck>.preview.pdf rendered "
+        "from a .pptx) so the webapp can render binary formats through the "
+        "PDF canvas.",
+    )
+    quality_warning: str | None = Field(
+        None,
+        description="Honest quality note on a delivered primary (e.g. "
+        "visuals_not_embedded) — never a fallback flag.",
+    )
+    visuals_missing: bool | None = None
     source_artifact_path: str | None = None
     revision_of_artifact_path: str | None = None
     summary: str | None = None

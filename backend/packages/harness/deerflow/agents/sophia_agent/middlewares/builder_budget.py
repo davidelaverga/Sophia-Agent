@@ -71,6 +71,12 @@ DEFAULT_BUILDER_BUDGET: dict[str, Any] = {
     "cost_model_key": "claude-sonnet-4-6",
 }
 
+# Flat estimate per gpt-image-2 call (image-generation skill, enrichment-by-
+# default). The CALL COUNT cap lives in BuilderArtifactMiddleware's bash
+# interception (_IMAGE_GENERATION_MAX_CALLS); this constant only folds the
+# spend into the cost ceiling + telemetry.
+_IMAGE_GEN_COST_USD = 0.07
+
 
 def _price_for(key: str | None) -> dict[str, float]:
     if key:
@@ -153,15 +159,28 @@ class BuilderBudgetMiddleware(AgentMiddleware[BuilderBudgetState]):
         totals = _sum_usage(messages)
         total_tokens = totals["input"] + totals["output"]
         cost = _estimate_cost_usd(totals, _price_for(cost_key))
+        # Image-generation spend (enrichment-by-default). Read the diagnostics
+        # channel dynamically — do NOT redeclare ``builder_pptx_diagnostics``
+        # in BuilderBudgetState: a plain NotRequired redeclaration would
+        # shadow the accumulating reducer down to LastValue (see the
+        # documented trap in builder_task.py).
+        image_attempts = int(
+            (state.get("builder_pptx_diagnostics") or {}).get("image_generation_attempt_count", 0) or 0
+        )
+        image_cost = image_attempts * _IMAGE_GEN_COST_USD
+        cost += image_cost
 
         # Telemetry (Phase 2a): per-turn cumulative usage so cache reads ≫
         # writes can be confirmed and $/build measured from logs.
         logger.info(
-            "[BuilderBudget] usage in=%d out=%d cache_read=%d cache_creation=%d est_cost=$%.4f",
+            "[BuilderBudget] usage in=%d out=%d cache_read=%d cache_creation=%d "
+            "image_calls=%d image_cost=$%.2f est_cost=$%.4f",
             totals["input"],
             totals["output"],
             totals["cache_read"],
             totals["cache_creation"],
+            image_attempts,
+            image_cost,
             cost,
         )
 

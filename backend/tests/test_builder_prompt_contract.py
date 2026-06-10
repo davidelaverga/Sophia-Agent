@@ -55,12 +55,22 @@ def test_pptx_workflow_card_requires_deerflow_native_sequence() -> None:
 
     assert "image-generation/scripts/generate.py" in card
     assert "ppt-generation/scripts/generate.py" in card
-    assert "Compose a valid no-image deck first" in card
-    assert "only when the" in card
-    assert "user explicitly requests generated images" in card
-    assert "no-image" in card
+    # Visuals must be wired into the plan BEFORE composing (prod 2026-06-10:
+    # the "compose a no-image deck first" instruction shipped text-only decks).
+    assert "BEFORE composing the deck" in card
+    assert "The plan must reference" in card
+    # Enrichment policy (2026-06-11): generated imagery is on by default
+    # for decks, hard-capped, with a plain-deck opt-out.
+    assert "ON BY DEFAULT" in card
+    assert "HARD CAP" in card
+    assert "plain/text-only/minimal" in card
     assert "PPTX" in card
     assert "passes structural validation" in card
+    # Format-swapped fallbacks are disabled — the card must state the
+    # honest-failure policy instead of instructing .md/.html fallbacks.
+    assert "Format-swapped fallbacks are DISABLED" in card
+    assert "artifact_path=null" in card
+    assert "artifact_is_fallback=true" not in card
 
 
 def test_visuals_workflow_card_requires_design_skill_and_local_assets() -> None:

@@ -120,6 +120,45 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
   --aspect-ratio 16:9
 ```
 
+## Business Deck & Report Enrichment
+
+When enriching slide decks, visual reports, or PDFs (the default for Sophia
+builder presentation tasks), follow this discipline:
+
+**Budget**: HARD CAP of 3 image-generation calls per build (enforced — calls
+beyond the cap are rejected). Plan before generating: 1 hero image first,
+then up to 2 supporting images. Charts, diagrams, and data visuals are NOT
+this skill's job — use the deterministic `generate_visual_asset` tool for
+those (no cap, no API cost).
+
+**Subjects that work for business content**: abstract/conceptual
+compositions (gradients, geometric forms, light fields), product and object
+renders, landscapes and architecture, textures, metaphoric scenes (paths,
+horizons, networks). AVOID: photorealistic identifiable people and faces,
+celebrities or public figures, brand logos and trademarks, stock-photo
+clichés (handshakes, suited crowds), and text inside images — rendered text
+is unreliable; the deck supplies the words.
+
+**Coherence**: all images in one deliverable must share an aesthetic. Anchor
+every prompt to the deck's theme/palette (e.g. "deep navy and warm gold
+accents, premium boardroom aesthetic" for the boardroom theme). Generate the
+hero FIRST, then pass it via `--reference-images` to subsequent calls so the
+set stays visually consistent.
+
+**Aspect ratios**: `16:9` for hero/full-bleed/section-divider images; `4:3`
+for content-card images placed beside text.
+
+**Naming**: write to `/mnt/user-data/outputs/visuals/hero-<desc>.png` and
+`/mnt/user-data/outputs/visuals/slide-<N>-<desc>.png`, then reference those
+paths from the presentation plan (`"layout": "full_bleed_image"`, `"image":
+...`) or the Markdown source before composing/rendering.
+
+**Failure handling**: if a call fails (content policy, auth, network), retry
+at most ONCE with a simplified, safer prompt. After that, continue the build
+with charts and text — never stall or fail a deliverable over imagery. If the
+failure is `content_policy`, drop the problematic concept entirely rather
+than rephrasing it.
+
 ## Common Scenarios
 
 Use different JSON schemas for different scenarios.

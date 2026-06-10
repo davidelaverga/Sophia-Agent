@@ -172,3 +172,32 @@ def test_async_after_model_enforces_too(monkeypatch):
     out = asyncio.run(mw.aafter_model(state, _runtime()))
     assert out is not None and out["jump_to"] == "end"
     assert calls[0]["status"] == "timed_out"
+
+
+def test_image_generation_cost_counts_toward_cost_cap(monkeypatch):
+    calls = _capture_webhook(monkeypatch)
+    mw = BuilderBudgetMiddleware()
+    # Token cost alone is tiny (~$0.0045); 10 tracked image calls add $0.70
+    # and push the total over a $0.50 cap.
+    state = {
+        "builder_budget": {"max_cost_usd": 0.5, "max_total_tokens": 0, "cost_model_key": "claude-sonnet-4-6"},
+        "messages": [_ai(input_tokens=1000, output_tokens=100)],
+        "builder_pptx_diagnostics": {"image_generation_attempt_count": 10},
+    }
+    out = mw.after_model(state, _runtime())
+    assert out is not None
+    assert out["jump_to"] == "end"
+    assert len(calls) == 1
+    assert calls[0]["status"] == "timed_out"
+
+
+def test_image_generation_cost_under_cap_is_noop(monkeypatch):
+    calls = _capture_webhook(monkeypatch)
+    mw = BuilderBudgetMiddleware()
+    state = {
+        "builder_budget": {"max_cost_usd": 5.0, "max_total_tokens": 0, "cost_model_key": "claude-sonnet-4-6"},
+        "messages": [_ai(input_tokens=1000, output_tokens=100)],
+        "builder_pptx_diagnostics": {"image_generation_attempt_count": 3},
+    }
+    assert mw.after_model(state, _runtime()) is None
+    assert calls == []

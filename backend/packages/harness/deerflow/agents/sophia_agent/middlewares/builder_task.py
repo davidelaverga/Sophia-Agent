@@ -298,17 +298,45 @@ _VISUAL_REQUEST_MARKERS = (
 )
 
 
-def _image_generation_explicitly_requested(
+_PLAIN_DECK_MARKERS = (
+    "plain",
+    "text-only",
+    "text only",
+    "no images",
+    "no imagery",
+    "no illustrations",
+    "minimal",  # deliberately also opts out "minimal" style decks
+    "charts only",
+)
+_IMAGE_ENRICHMENT_TASK_TYPES = frozenset({"presentation", "visual_report"})
+
+
+def _image_generation_enabled(
     delegation_context: dict[str, Any],
     *,
     artifact_target_ext: str,
+    task_type: str = "",
 ) -> bool:
+    """Whether the image-generation skill is offered to the builder.
+
+    Image targets and explicit requests keep the legacy behavior. For
+    presentations / visual reports, generated imagery is ON BY DEFAULT
+    (product decision 2026-06-11) unless the brief signals a plain deck.
+    """
     if artifact_target_ext in _IMAGE_OUTPUT_EXTENSIONS:
         return True
     task = str(delegation_context.get("task") or "").lower()
     description = str(delegation_context.get("description") or "").lower()
     combined = f"{task}\n{description}"
-    return any(marker in combined for marker in _EXPLICIT_IMAGE_GENERATION_MARKERS)
+    if any(marker in combined for marker in _EXPLICIT_IMAGE_GENERATION_MARKERS):
+        return True
+    enrichment_target = (
+        str(task_type or "").lower() in _IMAGE_ENRICHMENT_TASK_TYPES
+        or artifact_target_ext == ".pptx"
+    )
+    if not enrichment_target:
+        return False
+    return not any(marker in combined for marker in _PLAIN_DECK_MARKERS)
 
 
 def _visuals_requested(delegation_context: dict[str, Any]) -> bool:
@@ -318,18 +346,40 @@ def _visuals_requested(delegation_context: dict[str, Any]) -> bool:
     return any(marker in combined for marker in _VISUAL_REQUEST_MARKERS)
 
 
+def _image_enrichment_section() -> str:
+    return (
+        "<image_enrichment>\n"
+        "Generated imagery is ON BY DEFAULT for this deliverable. Policy:\n"
+        "- Generate 1 hero image (16:9, for the title slide / cover) and up to 2 "
+        "supporting images (section dividers or illustrative content) with the "
+        "image-generation skill. HARD CAP: 3 image-generation script calls per "
+        "build — calls beyond the cap are rejected by the harness.\n"
+        "- Charts, diagrams, timelines, and data visuals stay on the deterministic "
+        "generate_visual_asset path (no API cost; does not count toward the cap).\n"
+        "- Save generated images under /mnt/user-data/outputs/visuals/ "
+        "(hero-<desc>.png, slide-<n>-<desc>.png) and reference them from the "
+        "plan/source before composing.\n"
+        "- A failed image call must NEVER stall the deliverable: at most ONE retry "
+        "with a simplified prompt, then continue with charts and text — a "
+        "chart/text-only deck is a valid deliverable.\n"
+        "- Skip generated imagery entirely if the brief asks for a plain, "
+        "text-only, or minimal deliverable.\n"
+        "</image_enrichment>"
+    )
+
+
 def _critical_emit_guidance(artifact_target_ext: str) -> str:
     if artifact_target_ext == ".pdf":
         return (
-            "for this PDF target, emit the valid .pdf if it exists. Only if no "
-            "usable PDF exists may you emit an approved Markdown/HTML fallback "
-            "with explicit fallback metadata. Do NOT emit a generator .py as a "
-            "PDF fallback.\n"
+            "for this PDF target, emit the valid .pdf if it exists. Format-swapped "
+            "fallbacks (.md/.html) are disabled and will be rejected. If no usable "
+            "PDF can be rendered, emit with artifact_path=null and an honest "
+            "companion_summary. Do NOT emit a generator .py as a PDF deliverable.\n"
         )
     return (
         "if no user-facing deliverable exists, do NOT emit a generator script "
-        "unless the user explicitly requested source code. Emit a verified "
-        "fallback or fail cleanly with a safe companion_tone_hint.\n"
+        "unless the user explicitly requested source code. Emit with "
+        "artifact_path=null and an honest companion_summary instead.\n"
     )
 
 
@@ -337,7 +387,8 @@ def _critical_pick_guidance(artifact_target_ext: str) -> str:
     if artifact_target_ext == ".pdf":
         return (
             "first file marked 'deliverable'. If only generator files exist, "
-            "do not emit them; create a verified .md/.html fallback or fail cleanly.\n"
+            "do not emit them; emit with artifact_path=null and an honest "
+            "companion_summary instead.\n"
         )
     return "first file marked 'deliverable'. Do not choose generator scripts as user-facing artifacts. "
 
@@ -349,7 +400,7 @@ def _generator_listing_tag(
     has_generator: bool,
 ) -> tuple[str, bool]:
     if artifact_target_ext == ".pdf":
-        return "(generator script — do NOT emit for PDF; use .pdf or approved .md/.html fallback instead)", has_generator
+        return "(generator script — do NOT emit for PDF; render and emit the real .pdf)", has_generator
     if not has_deliverable and has_generator:
         return "(generator script — do NOT emit unless the user explicitly asked for source code)", False
     return "(generator script)", has_generator
@@ -387,9 +438,11 @@ def _terminal_artifact_format_line(artifact_target_ext: str) -> str:
         )
     if artifact_target_ext == ".pdf":
         return (
-            "- This is a PDF target: the deliverable is a real .pdf. Call "
-            "emit_builder_artifact with artifact_type=\"pdf\" (or an approved fallback "
-            "with explicit fallback metadata when rendering genuinely fails).\n"
+            "- This is a PDF target: the deliverable is a real .pdf rendered via "
+            "render_markdown_to_pdf. Call emit_builder_artifact with "
+            "artifact_type=\"pdf\". Format-swapped fallbacks are disabled; if "
+            "rendering genuinely fails, emit with artifact_path=null and an "
+            "honest companion_summary.\n"
         )
     return ""
 
@@ -667,15 +720,22 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         # data-analysis) are available. Without this block the model
         # falls back to writing its own matplotlib/reportlab code, which
         # is the failure pattern PR #93/#94 spent recovery machinery on.
+        image_generation_enabled = _image_generation_enabled(
+            delegation_context,
+            artifact_target_ext=artifact_target_ext,
+            task_type=task_type,
+        )
         skills_block = self._build_skills_inventory_block(
-            include_image_generation=_image_generation_explicitly_requested(
-                delegation_context,
-                artifact_target_ext=artifact_target_ext,
-            ),
+            include_image_generation=image_generation_enabled,
             include_visual_design=_visuals_requested(delegation_context),
         )
         if skills_block:
             sections.append(skills_block)
+        if image_generation_enabled and (
+            str(task_type or "").lower() in _IMAGE_ENRICHMENT_TASK_TYPES
+            or artifact_target_ext == ".pptx"
+        ):
+            sections.append(_image_enrichment_section())
 
         workflow_sections = _builder_workflow_sections(
             artifact_target_ext=artifact_target_ext,
@@ -742,8 +802,9 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             f"{wall_clock_line}"
             "BEFORE planning, check <skill_system> above. If a listed skill matches "
             "the deliverable type (e.g. chart-visualization for any chart, "
-            "ppt-generation for slide decks, image-generation for explicit generated "
-            "images, data-analysis for tabular data), USE IT — read its SKILL.md "
+            "ppt-generation for slide decks, image-generation for deck/report "
+            "enrichment when listed (max 3 images; never block the deliverable on "
+            "image failures), data-analysis for tabular data), USE IT — read its SKILL.md "
             "via read_file_tool and follow its workflow. Workflow cards are authoritative "
             "for PDF, PPTX, HTML, and research tasks. Do not replace them with ad hoc "
             "matplotlib/reportlab/python-pptx generator code; that is the fragile path "
@@ -777,8 +838,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "    * **PDF**: follow the PDF workflow card. A valid render is terminal-ready; emit immediately "
             "unless Sophia asks for one layout repair.\n"
             "    * **PPTX / presentation**: follow the PPTX workflow card. Reading SKILL.md alone is not "
-            "completion; normal success requires deck composition and a valid .pptx. Use image-generation "
-            "only when the user explicitly requested generated images/illustrations or the workflow truly depends on raster assets.\n"
+            "completion; normal success requires deck composition and a valid .pptx. When image-generation "
+            "is listed in <skill_system>, generated imagery is ON BY DEFAULT for decks (1 hero + up to 2 "
+            "supporting images, max 3 calls — enforced); skip it when the brief asks for a plain/text-only/"
+            "minimal deck, and never let an image failure stall the deck.\n"
             "    * **HTML**: follow the HTML workflow card. Standalone browser-renderable HTML is a text "
             "deliverable, not a frontend app unless the user requested app behavior.\n"
             "    * **Standalone chart / image**: use the chart-visualization or image-generation skill. The "
@@ -790,7 +853,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "fragile. Prefer a skill if at all possible. If you must use a generator script: keep it under "
             "120 lines, run it with bash_tool, verify the real requested output with ls_tool, and at most "
             "2 fix-and-retry cycles. Never ship the generator script as the artifact unless the user "
-            "explicitly asked for code; emit a verified fallback or fail cleanly.\n"
+            "explicitly asked for code; emit with artifact_path=null and an honest companion_summary instead.\n"
             "    Libraries listed in <preinstalled_libraries> are already available — do NOT pip install.\n"
             "- After each meaningful step (write_file, successful skill invocation, render_markdown_to_pdf), "
             "call write_todos again to mark the corresponding item 'completed' or 'in-progress'. This is how "

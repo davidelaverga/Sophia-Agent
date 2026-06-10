@@ -285,12 +285,22 @@ def _render_active_block(task: dict) -> str:
 def _render_terminal_block(task: dict) -> str:
     minutes_ago = _minutes_since(task.get("last_updated_at") or task.get("last_checked_at") or task.get("created_at"))
     status = task.get("status") or "unknown"
+    result = task.get("builder_result") if isinstance(task.get("builder_result"), dict) else {}
     if status in {"error", "failed", "timeout", "timed_out"}:
+        summary = str(result.get("summary") or "").strip()
+        summary_line = (
+            f"The builder's own explanation (safe to relay in plain words): {summary}\n"
+            "Intermediate files the builder wrote remain available in the session "
+            "artifacts list — mention that if the user wants to salvage the work.\n"
+            if summary
+            else ""
+        )
         return (
             "<build_status>\n"
             f"The most recent builder task ended in {status} state ({minutes_ago} min ago). "
             "If the user is upset or confused, address that first — don't try to fix the "
             "technical issue yourself. If they ask for a retry, confirm scope and re-issue. "
+            f"{summary_line}"
             "Don't bring this up unprompted unless the user references the failed build.\n"
             "</build_status>"
         )
@@ -304,12 +314,21 @@ def _render_terminal_block(task: dict) -> str:
     # success / completed
     task_id = task.get("task_id") or ""
     task_type = task.get("task_type") or "build"
+    quality_note = ""
+    if result.get("quality_warning") == "visuals_not_embedded" or result.get("visuals_missing"):
+        quality_note = (
+            "QUALITY NOTE: the deliverable is real and usable, but the requested "
+            "charts/images did not embed. If the user asks about it (or about the "
+            "build), mention this plainly in one sentence and offer a revision via "
+            "edit_builder_artifact. Never call the deliverable a fallback.\n"
+        )
     return (
         "<build_status>\n"
         f"The builder just finished a task ({minutes_ago} min ago, task_id: {task_id}, "
         f"type: {task_type}). The artifact has been delivered separately to the user "
         "(Telegram chat / web view). If the user asks about it, reference the delivered "
         "artifact naturally — don't recite a file path or claim the file is unreachable.\n"
+        f"{quality_note}"
         "\n"
         "MODIFY cues on this TERMINAL build (\"add X\", \"also include\", \"make it longer\", "
         "\"change to N\"):\n"

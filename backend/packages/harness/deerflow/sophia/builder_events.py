@@ -626,6 +626,12 @@ def _artifact_completion_fields(
         "revision_of_artifact_path": artifact.get("revision_of_artifact_path"),
         "summary": artifact.get("companion_summary"),
         "user_next_action": artifact.get("user_next_action"),
+        # Canvas preview sibling (e.g. <deck>.preview.pdf rendered from a
+        # .pptx via LibreOffice) — lets the webapp render binary formats it
+        # has no native renderer for through the existing PDF canvas.
+        "artifact_preview_filename": artifact.get("artifact_preview_filename"),
+        "quality_warning": artifact.get("quality_warning"),
+        "visuals_missing": artifact.get("visuals_missing"),
     }
 
 

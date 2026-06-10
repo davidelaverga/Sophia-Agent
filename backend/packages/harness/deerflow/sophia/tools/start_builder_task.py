@@ -853,7 +853,60 @@ def _build_enriched_description(
         joined = ", ".join(explicit_user_urls)
         sections.append(f"Explicit URLs the user provided (treat as authoritative): {joined}.")
 
+    visual_line = _visual_expectations_line(description, task_type)
+    if visual_line:
+        sections.append(visual_line)
+
     return "\n\n".join(sections)
+
+
+_PLAIN_VISUAL_OPT_OUT_MARKERS = (
+    "plain",
+    "text-only",
+    "text only",
+    "no images",
+    "no imagery",
+    "no illustrations",
+    "minimal",
+    "charts only",
+)
+_VISUAL_STYLE_KEYWORDS = (
+    "professional",
+    "corporate",
+    "abstract",
+    "illustrative",
+    "playful",
+    "bold",
+    "elegant",
+    "technical",
+    "modern",
+    "futuristic",
+    "photorealistic",
+    "hand-drawn",
+    "cartoon",
+)
+
+
+def _visual_expectations_line(description: str, task_type: str) -> str | None:
+    """One explicit visual-expectations line for visual deliverable briefs.
+
+    Gives the builder-side enrichment gating (``_image_generation_enabled``)
+    a reliable signal instead of leaving visual intent implicit in prose.
+    """
+    if task_type not in {"presentation", "visual_report"}:
+        return None
+    lowered = description.lower()
+    if any(marker in lowered for marker in _PLAIN_VISUAL_OPT_OUT_MARKERS):
+        return (
+            "Visual expectations: the user asked for a plain/minimal deliverable — "
+            "do NOT use generated imagery; charts only if explicitly requested."
+        )
+    styles = [kw for kw in _VISUAL_STYLE_KEYWORDS if kw in lowered]
+    style_note = f" Preferred style cues from the user: {', '.join(styles[:3])}." if styles else ""
+    return (
+        "Visual expectations: enrich with generated imagery per the image "
+        f"enrichment policy (1 hero + up to 2 supporting, max 3).{style_note}"
+    )
 
 
 def _build_delegation_context(

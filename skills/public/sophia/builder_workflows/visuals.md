@@ -12,7 +12,16 @@ explanations, visual reports, or visual slide decks.
    generated PNG in the Markdown/HTML source or presentation plan before
    rendering/composing the final artifact.
 
+## Two Visual Paths
+
+Use `generate_visual_asset` for anything data-shaped: charts, diagrams,
+timelines, flows, matrices, quadrants (deterministic, instant, no API cost,
+unlimited). Use the image-generation skill for illustrative content: hero
+images, section covers, conceptual scenes — capped at 3 generated images per
+build (the cap never applies to charts). If image generation fails, continue
+with charts and text; never stall the deliverable waiting on imagery.
+
 Do not count remote chart URLs, generated Python scripts, or prose
-descriptions as completed visuals. If visual generation fails, emit a truthful
-fallback only when a usable fallback file exists and fallback metadata is
-explicit.
+descriptions as completed visuals. If visual generation fails entirely on a
+visuals-requested build, deliver the strongest chart/text version and let the
+quality warning surface honestly — never swap formats.

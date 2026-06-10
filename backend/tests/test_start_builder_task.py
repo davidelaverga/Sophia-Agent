@@ -1030,3 +1030,37 @@ def test_start_builder_task_treats_failed_status_as_terminal(monkeypatch):
     )
     assert isinstance(response, Command)
     assert "new-1" in response.update["async_tasks"]
+
+
+# ---- visual expectations brief line (enrichment-by-default, 2026-06-11) -----
+
+
+def test_presentation_brief_gains_visual_expectations_line():
+    from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
+
+    line = _visual_expectations_line("Build an investor deck about our roadmap", "presentation")
+    assert line is not None
+    assert "Visual expectations" in line
+    assert "max 3" in line
+
+
+def test_plain_deck_brief_gets_opt_out_line():
+    from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
+
+    line = _visual_expectations_line("A plain text-only deck please", "presentation")
+    assert line is not None
+    assert "do NOT use generated imagery" in line
+
+
+def test_style_keywords_surface_in_brief():
+    from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
+
+    line = _visual_expectations_line("A bold modern investor deck", "presentation")
+    assert line is not None
+    assert "bold" in line and "modern" in line
+
+
+def test_document_brief_gets_no_visual_line():
+    from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
+
+    assert _visual_expectations_line("Write a markdown report", "document") is None

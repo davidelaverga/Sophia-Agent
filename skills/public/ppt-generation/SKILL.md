@@ -48,11 +48,12 @@ When a user requests presentation generation, identify:
 
 ### Step 2: Create Presentation Plan
 
-Create a JSON file in `/mnt/user-data/workspace/` with the presentation structure. **Important**: Include the `style` field to define the overall visual consistency.
+Create a JSON file in `/mnt/user-data/workspace/` with the presentation structure. **Important**: Include the `theme` field (compositor color palette) and a per-slide `layout` field to produce varied, professional decks. The `style` / `style_guidelines` fields still describe the visual language for optional image generation.
 
 ```json
 {
   "title": "Presentation Title",
+  "theme": "boardroom",
   "style": "keynote",
   "style_guidelines": {
     "color_palette": "Deep black backgrounds, white text, single accent color (blue or orange)",
@@ -65,6 +66,7 @@ Create a JSON file in `/mnt/user-data/workspace/` with the presentation structur
     {
       "slide_number": 1,
       "type": "title",
+      "layout": "title",
       "title": "Main Title",
       "subtitle": "Subtitle or tagline",
       "visual_description": "Detailed description for image generation"
@@ -72,19 +74,80 @@ Create a JSON file in `/mnt/user-data/workspace/` with the presentation structur
     {
       "slide_number": 2,
       "type": "content",
+      "layout": "section_divider",
+      "title": "Part One",
+      "section_number": 1
+    },
+    {
+      "slide_number": 3,
+      "type": "content",
+      "layout": "content_image",
       "title": "Slide Title",
       "key_points": ["Point 1", "Point 2", "Point 3"],
       "visual_description": "Detailed description for image generation only if explicitly requested",
       "chart_path": "/mnt/user-data/outputs/visuals/example-chart.png"
+    },
+    {
+      "slide_number": 4,
+      "type": "content",
+      "layout": "two_column",
+      "title": "Trade-offs",
+      "columns": [
+        {"heading": "Pros", "points": ["Point 1", "Point 2"]},
+        {"heading": "Cons", "points": ["Point 1"]}
+      ]
+    },
+    {
+      "slide_number": 5,
+      "type": "content",
+      "layout": "quote",
+      "quote": "A memorable line worth a full slide.",
+      "attribution": "Source Name"
+    },
+    {
+      "slide_number": 6,
+      "type": "conclusion",
+      "layout": "closing",
+      "title": "Thank You",
+      "subtitle": "Contact or call to action"
     }
   ]
 }
 ```
 
+#### Compositor Themes
+
+The composition script renders the deck with one of four deterministic themes:
+
+| Theme | Palette | Best For |
+|-------|---------|----------|
+| **boardroom** | Dark navy background, ivory titles, gold-tinged blue accent, Georgia headlines | Executive and premium decks |
+| **daylight** | Light background, blue accent, Calibri | Business default |
+| **ember** | Warm charcoal background, amber accent, Georgia headlines | Creative, storytelling |
+| **mist** | Gray-blue light background, slate accent, Arial | Minimal, academic |
+
+Prefer the `theme` field. When `theme` is absent, the legacy `style` value is mapped automatically: `dark-premium` / `keynote` / `glassmorphism` → boardroom, `business` → daylight, `minimal` / `academic` → mist, `creative` → ember. Anything else falls back to daylight.
+
+#### Slide Layouts
+
+| Layout | When to use | Required fields |
+|--------|-------------|-----------------|
+| `title` | Opening slide; centered title + accent rule (full-bleed background variant when an image is referenced) | `title` (`subtitle`, image ref optional) |
+| `content_text` | Bullet content without a visual | `title`, `key_points` |
+| `content_image` | Bullets beside a chart/diagram card | `title`, `key_points`, image ref |
+| `full_bleed_image` | Hero visual covering the slide with a title band | `title`, image ref (`subtitle` optional) |
+| `section_divider` | Chapter break with oversized section number | `title` (`section_number`, `subtitle` optional) |
+| `quote` | Pull quote with decorative quotation mark | `quote` (falls back to first key point; `attribution` optional) |
+| `two_column` | Comparisons, before/after, pros/cons | `title`, `columns` as `[{"heading": str, "points": [str]}]` (falls back to `key_points` split in half) |
+| `closing` | Final slide | none (`title` defaults to "Thank You", `subtitle` optional) |
+
+`layout` is optional. Without it the script infers the layout: `"type": "title"` gets the title treatment, a slide with an image reference gets `content_image`, everything else gets `content_text`. Unknown layout names fall back to the same inference. If an image-dependent layout references an image that is missing on disk, the slide degrades to a text layout (with a stderr note) instead of failing the whole deck.
+
+**Image field priority**: each slide may reference a local PNG/JPEG via `image`, `chart_path`, or `visual_path` — only the FIRST non-empty of `image` > `chart_path` > `visual_path` is used.
+
 For deterministic charts/diagrams created with `generate_visual_asset`, reference
 the generated PNG in `image`, `chart_path`, or `visual_path` on the relevant
-slide. The composition script will create a content-with-image layout. SVG can
-be kept for HTML, but PPTX embedding should use PNG.
+slide. SVG can be kept for HTML, but PPTX embedding should use PNG.
 
 ### Step 3: Decide Whether Images Are Needed
 
@@ -190,10 +253,12 @@ without using the `--slide-images` option.
 [!NOTE]
 Do NOT read the python file, just call it with the parameters.
 
-The composition script exits non-zero if the plan JSON is invalid, a slide image
-is missing, saving fails, or the produced file is not a valid Office PPTX
-package. If it fails after one correction, create an explicit Markdown or HTML
-fallback instead of writing ad hoc `python-pptx` code.
+The composition script exits non-zero if the plan JSON is invalid, a
+`--slide-images` file is missing, saving fails, or the produced file is not a
+valid Office PPTX package. (A missing plan-referenced `image`/`chart_path`/
+`visual_path` does NOT fail the deck — that slide degrades to a text layout
+with a stderr note.) If it fails after one correction, create an explicit
+Markdown or HTML fallback instead of writing ad hoc `python-pptx` code.
 
 ## Complete Example: Glassmorphism Style With Generated Images (最现代前卫)
 
