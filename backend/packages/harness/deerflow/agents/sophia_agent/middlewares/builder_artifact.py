@@ -3499,7 +3499,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
         upload_thread_id = parent_thread_id or builder_thread_id
         fallback = _apply_visual_missing_fallback_metadata(fallback, state)
-        _upload_builder_outputs_to_supabase(
+        mirror_result = _upload_builder_outputs_to_supabase(
             thread_id=upload_thread_id,
             outputs_host_path=outputs_host_path,
             artifact_args=fallback,

@@ -446,8 +446,9 @@ def make_sophia_agent(config: RunnableConfig):
             # Prompt caching AFTER assembly + dangling-tool patching — adds
             # cache_control to the assembled system message and keys the
             # cache off the patched messages. Turn 2+ reads from cache →
-            # ~85% lower TTFT.
-            AnthropicPromptCachingMiddleware(ttl="5m"),
+            # ~85% lower TTFT. "ignore" keeps this a silent no-op when the
+            # companion OpenAI fallback model passes through the middleware.
+            AnthropicPromptCachingMiddleware(ttl="5m", unsupported_model_behavior="ignore"),
             LLMErrorHandlingMiddleware(),
             SophiaTitleMiddleware(),
         ]

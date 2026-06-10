@@ -390,9 +390,9 @@ export function useSessionRouteExperience({
     canAutoReload: canReloadForFreshBuild,
   });
 
-  const cancelBuilderTask = useCallback(async (): Promise<boolean> => {
+  const cancelBuilderTask = useCallback(async () => {
     if (!activeThreadId || !builderTask?.taskId || builderTask.phase !== 'running' || isCancellingBuilderTask) {
-      return false;
+      return null;
     }
 
     const runId = builderTask.runId
@@ -441,14 +441,19 @@ export function useSessionRouteExperience({
         variant: 'info',
         durationMs: 2400,
       });
-      return true;
+      return response;
     } catch (error) {
       showToast({
         message: error instanceof Error ? error.message : 'Could not cancel Builder right now.',
         variant: 'warning',
         durationMs: 3200,
       });
-      return false;
+      return {
+        task_id: builderTask.taskId,
+        run_id: runId,
+        status: 'failed',
+        detail: error instanceof Error ? error.message : 'Could not cancel Builder right now.',
+      };
     } finally {
       setIsCancellingBuilderTask(false);
     }
