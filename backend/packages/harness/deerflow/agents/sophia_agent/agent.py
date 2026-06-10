@@ -25,6 +25,7 @@ from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddlew
 from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
 from deerflow.agents.sophia_agent.middlewares.build_awareness import BuildAwarenessMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_command import BuilderCommandMiddleware
+from deerflow.agents.sophia_agent.middlewares.companion_provider_fallback import CompanionProviderFallbackMiddleware
 from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
 from deerflow.agents.sophia_agent.middlewares.crisis_check import CrisisCheckMiddleware
 from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
@@ -313,6 +314,18 @@ def make_sophia_agent(config: RunnableConfig):
 
     # Middleware chain — order is load-bearing.
     middlewares = [
+        # 0. Provider fallback (Anthropic primary → optional OpenAI retry).
+        #    Uses ONLY wrap_model_call/awrap_model_call, so placing it first
+        #    is behavior-neutral for the load-bearing before/after ordering
+        #    below — it just makes its model-call wrapper the OUTERMOST one,
+        #    so it catches the provider exception that surfaces out of
+        #    AnthropicPromptCachingMiddleware and the model call itself.
+        #    Default-off via SOPHIA_COMPANION_OPENAI_FALLBACK_ENABLED — with
+        #    the flag unset the only delta on provider errors is one log line.
+        #    Without this, an Anthropic outage (auth/quota/billing) fails the
+        #    companion model call before it can emit start_builder_task, so
+        #    the Builder's own fallback never runs (the Builder never starts).
+        CompanionProviderFallbackMiddleware(),
         # 1. Infrastructure
         ThreadDataMiddleware(lazy_init=True),
         # 2. Normalize message-like dict payloads before middleware inspects them.

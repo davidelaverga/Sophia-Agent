@@ -65,6 +65,20 @@ _OPENAI_KEY_ENV = "OPENAI_API_KEY"
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
+# Anthropic returns "Your credit balance is too low ..." as a 400
+# BadRequestError (invalid_request_error), NOT a 402/403/429. This is a
+# billing/quota outage masquerading as a validation error. These tokens are
+# Anthropic *billing-system* strings (never user prompt content); they are
+# read ONLY to decide fallback eligibility and never enter the diagnostics
+# snapshot (a fixed safe template is used instead).
+_BILLING_SIGNAL_TOKENS = (
+    "credit balance",
+    "plans & billing",
+    "purchase credits",
+    "billing",
+    "payment required",
+)
+
 # Classified error class → fixed, safe message template. NEVER interpolate
 # raw exception text here — provider bodies can echo prompts or headers.
 _SAFE_MESSAGES: dict[str, str] = {
@@ -110,14 +124,48 @@ def openai_api_key_present() -> bool:
     return bool(os.environ.get(_OPENAI_KEY_ENV, "").strip())
 
 
+def _has_billing_signal(exc: BaseException) -> bool:
+    """True when the exception carries an Anthropic billing/credit signal.
+
+    Used solely to classify Anthropic's "credit balance is too low" 400 (a
+    billing outage delivered as ``BadRequestError``) as fallback-eligible.
+    Both the exception message and the structured ``.body`` error message
+    are inspected ONLY for this decision — neither is stored, logged, or
+    placed in the diagnostics snapshot. Generic 400s (real prompt/validation
+    failures) carry none of these billing-system tokens and stay
+    non-eligible.
+    """
+    fragments: list[str] = []
+
+    message = getattr(exc, "message", None)
+    fragments.append(message if isinstance(message, str) else str(exc))
+
+    # Anthropic SDK errors expose the parsed JSON body; the billing text lives
+    # under body["error"]["message"]. Read the structured field directly
+    # rather than relying on string formatting of the exception.
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict):
+            err_message = error.get("message")
+            if isinstance(err_message, str):
+                fragments.append(err_message)
+        elif isinstance(error, str):
+            fragments.append(error)
+
+    text = " ".join(fragments).lower()
+    return any(token in text for token in _BILLING_SIGNAL_TOKENS)
+
+
 def classify_provider_error(exc: BaseException) -> str | None:
     """Return a provider-availability error class, or None if not eligible.
 
     Positive-match only. Returning None means "this is not a provider
     availability problem — do NOT fall back, re-raise unchanged". That
-    automatically excludes prompt/validation errors (400), tool execution
-    bugs, LangGraph interrupts, safety refusals (normal responses, not
-    exceptions), and cancellations (``BaseException``, not ``Exception``).
+    automatically excludes prompt/validation errors (400 without a billing
+    signal), tool execution bugs, LangGraph interrupts, safety refusals
+    (normal responses, not exceptions), and cancellations (``BaseException``,
+    not ``Exception``).
     """
     if not isinstance(exc, Exception):
         return None
@@ -137,6 +185,11 @@ def classify_provider_error(exc: BaseException) -> str | None:
             return "rate_limit_or_quota"
         if isinstance(exc, anthropic.APIConnectionError):
             return "provider_unreachable"
+        # Narrow billing-400: Anthropic delivers "credit balance is too low"
+        # as a BadRequestError (400). Treat ONLY the billing variant as a
+        # payment outage; generic 400s still fall through to None below.
+        if isinstance(exc, anthropic.BadRequestError) and _has_billing_signal(exc):
+            return "permission_or_payment_error"
         if isinstance(exc, anthropic.APIStatusError):
             status = getattr(exc, "status_code", None)
             if isinstance(status, int) and status >= 500:
