@@ -313,8 +313,21 @@ def make_sophia_agent(config: RunnableConfig):
     # as before. Only added to the tools list at the bottom of this factory.
     web_tools = load_sophia_web_tools()
 
+    from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
+
     # Middleware chain — order is load-bearing.
     middlewares = [
+        # -1. Generic LLM error handling — OUTERMOST wrap_model_call, i.e.
+        #    the LAST chance to handle a model exception. It converts any
+        #    error the provider-fallback middleware below re-raises
+        #    (fallback disabled / not configured / ineligible error class /
+        #    fallback itself failed) into a safe user-facing message. It MUST
+        #    sit OUTSIDE CompanionProviderFallbackMiddleware: placed inside
+        #    (closer to the model) it swallows Anthropic quota/billing
+        #    errors into a generic reply before the fallback can retry via
+        #    OpenAI — observed live as "provider rejected this request"
+        #    with no [CompanionProviderFallback] retry log.
+        LLMErrorHandlingMiddleware(),
         # 0. Provider fallback (Anthropic primary → optional OpenAI retry).
         #    Uses ONLY wrap_model_call/awrap_model_call, so placing it first
         #    is behavior-neutral for the load-bearing before/after ordering
@@ -434,7 +447,6 @@ def make_sophia_agent(config: RunnableConfig):
     # locks the position so a future refactor can't re-drop it silently.
     from langchain_anthropic.middleware.prompt_caching import AnthropicPromptCachingMiddleware
 
-    from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
     from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     middlewares.extend(
@@ -449,7 +461,10 @@ def make_sophia_agent(config: RunnableConfig):
             # ~85% lower TTFT. "ignore" keeps this a silent no-op when the
             # companion OpenAI fallback model passes through the middleware.
             AnthropicPromptCachingMiddleware(ttl="5m", unsupported_model_behavior="ignore"),
-            LLMErrorHandlingMiddleware(),
+            # NOTE: LLMErrorHandlingMiddleware moved to the FRONT of the chain
+            # (outermost) so CompanionProviderFallbackMiddleware gets first
+            # chance at provider quota/billing errors — see the head of
+            # `middlewares` above.
             SophiaTitleMiddleware(),
         ]
     )

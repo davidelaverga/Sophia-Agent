@@ -453,6 +453,88 @@ class TestChainWiring:
         # is added unconditionally in make_sophia_agent.)
 
 
+class TestErrorHandlingOrdering:
+    """Locks the first-chance contract: the provider fallback wraps INSIDE
+    LLMErrorHandlingMiddleware, so fallback-eligible provider errors reach
+    the fallback before being converted into a generic user-facing reply.
+    (Post-stream regression: LLMErrorHandling innermost swallowed Anthropic
+    billing-400s as reason=quota and the OpenAI fallback never ran.)"""
+
+    @staticmethod
+    def _composed_call(request, model_call):
+        """LLMErrorHandling (outer) wrapping CompanionProviderFallback (inner),
+        matching the production companion chain ordering."""
+        from deerflow.agents.middlewares.llm_error_handling_middleware import (
+            LLMErrorHandlingMiddleware,
+        )
+
+        error_mw = LLMErrorHandlingMiddleware(retry_max_attempts=1)
+        fallback_mw = CompanionProviderFallbackMiddleware()
+
+        def inner_handler(req):
+            return fallback_mw.wrap_model_call(req, model_call)
+
+        return error_mw.wrap_model_call(request, inner_handler)
+
+    def test_quota_error_reaches_fallback_before_generic_reply(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from langchain_core.messages import AIMessage
+
+        _enable_fallback(monkeypatch)
+        reply = AIMessage(content="Hey Luis. I'm here — what's on your mind?")
+        model_call = _Handler(_make_anthropic_billing_400(), response=SimpleNamespace(result=[reply]))
+
+        with caplog.at_level(logging.WARNING):
+            result = self._composed_call(_FakeRequest(), model_call)
+
+        # The fallback retried via OpenAI and produced the visible reply —
+        # the generic quota message never fired.
+        assert len(model_call.calls) == 2
+        assert model_call.calls[1].model is _FALLBACK_MODEL_SENTINEL
+        update = result.command.update["companion_provider_fallback"]
+        assert update["companion_fallback_result"] == "success"
+        assert result.model_response.result[-1] is reply
+        assert "retrying once via OpenAI" in caplog.text
+        assert "configured model provider rejected" not in caplog.text
+
+    def test_quota_error_with_fallback_disabled_still_gets_generic_reply(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from langchain_core.messages import AIMessage
+
+        _disable_fallback(monkeypatch)
+        model_call = _Handler(_make_anthropic_billing_400())
+
+        with caplog.at_level(logging.WARNING):
+            result = self._composed_call(_FakeRequest(), model_call)
+
+        # Fallback re-raised (disabled) → LLMErrorHandling converted the
+        # error into its safe user-facing quota message. OpenAI never called.
+        assert len(model_call.calls) == 1
+        assert isinstance(result, AIMessage)
+        assert "out of quota" in result.content
+        assert result.additional_kwargs.get("deerflow_error_fallback") is True
+        assert "fallback_result=fallback_disabled" in caplog.text
+        assert _PLACEHOLDER_KEY not in caplog.text
+
+    def test_product_errors_skip_fallback_and_get_generic_handling(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from langchain_core.messages import AIMessage
+
+        _enable_fallback(monkeypatch)
+        model_call = _Handler(ValueError("emit_artifact missing required field"))
+
+        result = self._composed_call(_FakeRequest(), model_call)
+
+        # Not fallback-eligible → no OpenAI retry; LLMErrorHandling still
+        # produces its generic message exactly as before.
+        assert len(model_call.calls) == 1
+        assert isinstance(result, AIMessage)
+        assert result.additional_kwargs.get("deerflow_error_fallback") is True
+
+
 class TestVisibleReplySurfacing:
     """Locks the live-UI fix: a successful OpenAI fallback must surface a
     visible reply the same way a successful Anthropic call does."""

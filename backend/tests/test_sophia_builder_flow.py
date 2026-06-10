@@ -107,6 +107,15 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
         < companion_types.index("DanglingToolCallMiddleware")
         < companion_types.index("AnthropicPromptCachingMiddleware")
     )
+    # LLMErrorHandling must wrap OUTSIDE the provider fallback (earlier in the
+    # list = outermost wrap_model_call). Inside, it converts Anthropic
+    # quota/billing errors into a generic reply before the fallback can retry
+    # via OpenAI — observed live as "provider rejected this request" with no
+    # [CompanionProviderFallback] retry log.
+    assert (
+        companion_types.index("LLMErrorHandlingMiddleware")
+        < companion_types.index("CompanionProviderFallbackMiddleware")
+    )
 
     monkeypatch.setattr(builder_module, "ChatAnthropic", lambda **kwargs: {"model": kwargs["model"]})
     monkeypatch.setattr(
@@ -129,6 +138,12 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     assert "ToolErrorHandlingMiddleware" in builder_types
     assert "LLMErrorHandlingMiddleware" in builder_types
     assert "SafetyFinishReasonMiddleware" in builder_types
+    # Same first-chance contract on the builder side: the provider fallback
+    # sits INSIDE LLMErrorHandling so it catches provider errors first.
+    assert (
+        builder_types.index("LLMErrorHandlingMiddleware")
+        < builder_types.index("BuilderProviderFallbackMiddleware")
+    )
     assert "LoopDetectionMiddleware" in builder_types
     assert "TodoMiddleware" in builder_types
     assert "BuilderResearchPolicyMiddleware" in builder_types
