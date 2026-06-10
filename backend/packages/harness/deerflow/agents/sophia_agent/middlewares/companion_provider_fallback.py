@@ -112,17 +112,75 @@ class CompanionProviderFallbackMiddleware(AgentMiddleware[CompanionProviderFallb
             return None
 
     @staticmethod
+    def _response_is_empty(response: Any) -> bool:
+        """True only when the fallback produced a message with no visible
+        text AND no tool calls.
+
+        Conservative by design: when the response shape can't be inspected
+        (e.g. a bare sentinel in a unit test, or an unexpected wrapper) it
+        returns ``False`` so a genuine reply is never mislabeled as empty.
+        Only the already-parsed LangChain ``content`` / ``tool_calls`` are
+        inspected — raw provider payloads are never touched.
+        """
+        candidates: list[Any] = []
+        result = getattr(response, "result", None)
+        if isinstance(result, list):
+            candidates.extend(result)
+        elif hasattr(response, "content") or hasattr(response, "tool_calls"):
+            candidates.append(response)
+        if not candidates:
+            return False
+        message = candidates[-1]
+        if not (hasattr(message, "content") or hasattr(message, "tool_calls")):
+            return False
+        if getattr(message, "tool_calls", None):
+            return False
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            has_text = bool(content.strip())
+        elif isinstance(content, list):
+            has_text = any(
+                (isinstance(block, str) and block.strip())
+                or (
+                    isinstance(block, dict)
+                    and block.get("type") == "text"
+                    and str(block.get("text", "")).strip()
+                )
+                for block in content
+            )
+        else:
+            has_text = bool(content)
+        return not has_text
+
+    @staticmethod
     def _success_response(response: Any, error_class: str) -> ExtendedModelResponse:
+        is_empty = CompanionProviderFallbackMiddleware._response_is_empty(response)
+        fallback_result = "empty_response" if is_empty else "success"
         snapshot = companion_provider_fallback_snapshot(
             error_class=error_class,
             fallback_attempted=True,
-            fallback_result="success",
+            fallback_result=fallback_result,
         )
-        logger.warning(
-            "[CompanionProviderFallback] OpenAI fallback succeeded "
-            "provider_error_class=%s fallback_attempted=true fallback_result=success",
-            error_class,
-        )
+        if is_empty:
+            # The fallback call returned cleanly but with nothing the UI can
+            # render (no visible text, no tool call). Surface a safe
+            # diagnostic so this is distinguishable from a real reply — no
+            # crash, no fake failure, no raw payload.
+            logger.warning(
+                "[CompanionProviderFallback] OpenAI fallback returned no "
+                "visible content and no tool calls "
+                "provider_error_class=%s fallback_attempted=true "
+                "companionFallbackEmptyResponse=true "
+                "companionFallbackResult=empty_response "
+                "rawProviderPayloadExcluded=true",
+                error_class,
+            )
+        else:
+            logger.warning(
+                "[CompanionProviderFallback] OpenAI fallback succeeded "
+                "provider_error_class=%s fallback_attempted=true fallback_result=success",
+                error_class,
+            )
         return ExtendedModelResponse(
             model_response=response,
             command=Command(update={"companion_provider_fallback": snapshot}),

@@ -440,7 +440,18 @@ def make_sophia_agent(config: RunnableConfig):
             # cache_control to the assembled system message and keys the
             # cache off the patched messages. Turn 2+ reads from cache →
             # ~85% lower TTFT.
-            AnthropicPromptCachingMiddleware(ttl="5m"),
+            #
+            # `unsupported_model_behavior="ignore"`: when the companion
+            # OpenAI provider-fallback is active the model in-flight is a
+            # ``ChatOpenAI``, which this Anthropic-specific middleware can't
+            # cache. Default ("warn") floods logs with a warning on every
+            # fallback turn; "ignore" makes it a silent no-op (it already
+            # just `return handler(request)` when caching can't apply, so
+            # response propagation is unaffected). Anthropic turns keep full
+            # caching behavior.
+            AnthropicPromptCachingMiddleware(
+                ttl="5m", unsupported_model_behavior="ignore"
+            ),
             SophiaTitleMiddleware(),
         ]
     )

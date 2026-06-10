@@ -443,3 +443,170 @@ class TestChainWiring:
         # start_builder_task delegation tool stays wired on the companion.
         # (Tool list assertion done indirectly via chain membership; the tool
         # is added unconditionally in make_sophia_agent.)
+
+
+class TestVisibleReplySurfacing:
+    """Locks the live-UI fix: a successful OpenAI fallback must surface a
+    visible reply the same way a successful Anthropic call does."""
+
+    def test_fallback_model_does_not_set_streaming(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Regression guard for the root cause. Explicit ``streaming=True`` made
+        # the fallback drive its own v1 ``.stream()`` path, whose tokens
+        # LangGraph 0.8's StreamMessagesHandlerV2 drops (``on_llm_new_token``
+        # is an intentional no-op) — so successful fallbacks persisted to state
+        # but never reached the live ``messages``-tuple stream the UI renders.
+        # The fallback must match the companion primary ChatAnthropic, which
+        # omits the flag (LangGraph then streams it via the v2 event path).
+        from deerflow.sophia.companion_provider_fallback import (
+            build_fallback_chat_model,
+        )
+
+        monkeypatch.setenv(FALLBACK_MODEL_ENV, "gpt-4o-mini")
+        monkeypatch.setenv("OPENAI_API_KEY", _PLACEHOLDER_KEY)
+        model = build_fallback_chat_model()
+        assert getattr(model, "streaming", False) is False
+
+    def test_text_response_surfaces_and_is_not_flagged_empty(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from langchain_core.messages import AIMessage
+
+        _enable_fallback(monkeypatch)
+        reply = AIMessage(content="Hey, I'm right here with you.")
+        response = SimpleNamespace(result=[reply])
+        handler = _Handler(_ProviderStatusError(401), response=response)
+        with caplog.at_level(logging.WARNING):
+            result = CompanionProviderFallbackMiddleware().wrap_model_call(
+                _FakeRequest(), handler
+            )
+        update = result.command.update["companion_provider_fallback"]
+        assert update["companion_fallback_result"] == "success"
+        # The visible AIMessage is preserved verbatim for the stream.
+        assert result.model_response is response
+        assert "fallback_result=success" in caplog.text
+        assert "companionFallbackEmptyResponse" not in caplog.text
+
+    def test_tool_only_response_is_not_flagged_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from langchain_core.messages import AIMessage
+
+        _enable_fallback(monkeypatch)
+        tool_msg = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "start_builder_task",
+                    "args": {"task_type": "document"},
+                    "id": "tc-1",
+                }
+            ],
+        )
+        response = SimpleNamespace(result=[tool_msg])
+        handler = _Handler(_ProviderStatusError(401), response=response)
+        result = CompanionProviderFallbackMiddleware().wrap_model_call(
+            _FakeRequest(), handler
+        )
+        update = result.command.update["companion_provider_fallback"]
+        # A tool-only turn (start_builder_task) is a real, actionable reply.
+        assert update["companion_fallback_result"] == "success"
+
+    def test_empty_response_logs_diagnostic_without_crashing(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from langchain_core.messages import AIMessage
+
+        _enable_fallback(monkeypatch)
+        empty = AIMessage(content="")
+        response = SimpleNamespace(result=[empty])
+        handler = _Handler(_ProviderStatusError(429), response=response)
+        with caplog.at_level(logging.WARNING):
+            result = CompanionProviderFallbackMiddleware().wrap_model_call(
+                _FakeRequest(), handler
+            )
+        # No crash, no fake failure: the (empty) response is still returned.
+        assert result.model_response is response
+        update = result.command.update["companion_provider_fallback"]
+        assert update["companion_fallback_result"] == "empty_response"
+        # Exact safe-diagnostic tokens, and no raw payload / secret leakage.
+        assert "companionFallbackEmptyResponse=true" in caplog.text
+        assert "companionFallbackResult=empty_response" in caplog.text
+        assert "rawProviderPayloadExcluded=true" in caplog.text
+        assert _PLACEHOLDER_KEY not in caplog.text
+
+
+class TestPromptCachingNoOpForFallback:
+    """The Anthropic prompt-caching middleware must silently no-op for the
+    OpenAI fallback model instead of flooding logs with a warning."""
+
+    def test_chain_wires_caching_with_ignore_behavior(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import importlib
+
+        companion_module = importlib.import_module(
+            "deerflow.agents.sophia_agent.agent"
+        )
+
+        class DummyAgent:
+            recursion_limit = 0
+
+        captured: dict = {}
+        monkeypatch.setattr(
+            companion_module,
+            "ChatAnthropic",
+            lambda **kwargs: {"model": kwargs["model"]},
+        )
+        monkeypatch.setattr(
+            companion_module, "_create_summarization_middleware", lambda: None
+        )
+        monkeypatch.setattr(
+            companion_module,
+            "make_retrieve_memories_tool",
+            lambda user_id: {"tool": user_id},
+        )
+        monkeypatch.setattr(companion_module, "load_sophia_web_tools", lambda: [])
+
+        def _capture(**kwargs):
+            captured["middleware"] = kwargs["middleware"]
+            return DummyAgent()
+
+        monkeypatch.setattr(companion_module, "create_agent", _capture)
+        companion_module.make_sophia_agent({"configurable": {"user_id": "user_y"}})
+
+        caching = [
+            mw
+            for mw in captured["middleware"]
+            if type(mw).__name__ == "AnthropicPromptCachingMiddleware"
+        ]
+        assert caching, "prompt caching middleware must stay wired"
+        assert caching[0].unsupported_model_behavior == "ignore"
+
+    def test_caching_is_silent_noop_on_non_anthropic_model(self) -> None:
+        import warnings
+
+        from langchain_anthropic.middleware.prompt_caching import (
+            AnthropicPromptCachingMiddleware,
+        )
+
+        request = SimpleNamespace(model=object(), messages=[], system_message=None)
+        sentinel = object()
+
+        # "ignore" → no warning, response passes through untouched.
+        ignore_mw = AnthropicPromptCachingMiddleware(
+            ttl="5m", unsupported_model_behavior="ignore"
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            out = ignore_mw.wrap_model_call(request, lambda req: sentinel)
+        assert out is sentinel
+        assert not any("Anthropic" in str(w.message) for w in caught)
+
+        # Sanity check the default still warns — proving "ignore" suppressed it.
+        warn_mw = AnthropicPromptCachingMiddleware(ttl="5m")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            warn_mw.wrap_model_call(request, lambda req: sentinel)
+        assert any("Anthropic" in str(w.message) for w in caught)

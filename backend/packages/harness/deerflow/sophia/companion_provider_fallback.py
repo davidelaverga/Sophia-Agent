@@ -118,11 +118,11 @@ def companion_provider_fallback_snapshot(
 ) -> dict[str, Any]:
     """Sanitized snapshot for state + diagnostics. Allowlisted fields only.
 
-    ``fallback_result`` is one of ``success`` / ``fallback_failed`` /
-    ``fallback_disabled`` / ``fallback_not_configured``. No key material,
-    raw payloads, model URLs, or exception text ever enter this dict. The
-    keys are ``companion_*``-prefixed so companion telemetry is distinct
-    from the Builder's ``builder_provider_fallback`` snapshot.
+    ``fallback_result`` is one of ``success`` / ``empty_response`` /
+    ``fallback_failed`` / ``fallback_disabled`` / ``fallback_not_configured``.
+    No key material, raw payloads, model URLs, or exception text ever enter
+    this dict. The keys are ``companion_*``-prefixed so companion telemetry is
+    distinct from the Builder's ``builder_provider_fallback`` snapshot.
     """
     return {
         "companion_primary_provider": PRIMARY_PROVIDER,
@@ -142,9 +142,20 @@ def companion_provider_fallback_snapshot(
 def build_fallback_chat_model():
     """Construct the OpenAI fallback chat model (lazy import).
 
-    ``streaming=True`` matches the voice/text companion path so tokens still
-    flow incrementally (the voice runtime pipes them to Cartesia). Timeout and
-    retry come from the companion env namespace.
+    The fallback model intentionally does NOT set ``streaming=True`` — it
+    mirrors the companion *primary* ``ChatAnthropic`` (see
+    ``sophia_agent/agent.py``), which also omits the flag. This is load-bearing
+    for the live UI: under LangGraph 0.8's ``StreamMessagesHandlerV2`` the v1
+    ``on_llm_new_token`` callback is an intentional no-op, so a model invoked
+    with explicit ``streaming=True`` drives its own ``.stream()`` path and its
+    tokens are dropped from the ``stream_mode="messages"`` (messages-tuple)
+    output the frontend renders. A model WITHOUT the flag is steered by
+    LangGraph through the v2 event path (``on_stream_event``), which forwards
+    content onto the messages stream — the same way the primary Anthropic call
+    surfaces text. Setting ``streaming=True`` here made successful OpenAI
+    fallbacks persist to state but never appear in the live session UI.
+
+    Timeout and retry come from the companion env namespace.
     """
     from langchain_openai import ChatOpenAI
 
@@ -156,7 +167,6 @@ def build_fallback_chat_model():
         )
     return ChatOpenAI(
         model=model_name,
-        streaming=True,
         timeout=fallback_timeout_seconds(),
         max_retries=fallback_max_retries(),
     )
