@@ -87,6 +87,28 @@ describe('useSessionMessageViewModel', () => {
     expect(result.current.latestAssistantMessage?.id).toBe('a-stream');
   });
 
+  it('collapses a reply repeated inside a single assistant bubble', () => {
+    const markOffline = vi.fn();
+    const sentence = "Starting the build now — I'll have it back to you shortly.";
+    const curlySentence = 'Starting the build now — I’ll have it back to you shortly.';
+
+    const { result } = renderHook(() =>
+      useSessionMessageViewModel({
+        chatMessages: [
+          { id: 'u-1', role: 'user', parts: [{ type: 'text', text: 'Build me a page' }] },
+          // Doubled-stream shape: prose-retry tokens + merged final message
+          // land in ONE bubble, second copy with curly apostrophes.
+          { id: 'a-doubled', role: 'assistant', parts: [{ type: 'text', text: `${sentence}${curlySentence}` }] },
+        ],
+        greetingAnchorId: null,
+        markOffline,
+      })
+    );
+
+    expect(result.current.messages).toHaveLength(2);
+    expect(result.current.messages[1].content).toBe(sentence);
+  });
+
   it('keeps genuinely different adjacent assistant replies separate', () => {
     const markOffline = vi.fn();
 

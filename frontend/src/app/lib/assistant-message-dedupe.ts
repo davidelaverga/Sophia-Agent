@@ -43,6 +43,86 @@ export function hasRenderableAssistantText(text: string | null | undefined): boo
 }
 
 /**
+ * Collapse immediately repeated segments INSIDE one assistant message for
+ * display. The live stream can emit the same reply twice into a single
+ * bubble (prose-retry tokens + the merged final message), rendering as
+ * "Starting the build now — I'll have it back to you shortly.Starting the
+ * build now — I'll have it back to you shortly." — sometimes with curly vs
+ * straight apostrophe variation between the copies.
+ *
+ * Display-safe and conservative: only ADJACENT repeats collapse, only when
+ * the repeated segment is substantial (≥ {@link CONTAINMENT_MIN_LENGTH}
+ * normalized chars — deliberate short emphasis like "No. No." is kept), and
+ * the kept copy is the original segment text, untouched. Works at paragraph
+ * level first, then sentence level within each paragraph. Never mutates the
+ * stored transcript — callers apply it to view-model/display text only.
+ */
+export function collapseRepeatedAssistantText(text: string): string {
+  if (!text?.trim()) {
+    return text
+  }
+  const paragraphs = text.split(/(\n{2,})/u)
+  const keptParagraphs: string[] = []
+  let previousParagraphKey: string | null = null
+  for (const part of paragraphs) {
+    if (/^\n{2,}$/u.test(part)) {
+      keptParagraphs.push(part)
+      continue
+    }
+    const key = normalizeAssistantTextForDedupe(part)
+    if (
+      previousParagraphKey !== null
+      && key.length >= CONTAINMENT_MIN_LENGTH
+      && key === previousParagraphKey
+    ) {
+      // Drop the separator that introduced the skipped duplicate paragraph.
+      if (keptParagraphs.length > 0 && /^\n{2,}$/u.test(keptParagraphs[keptParagraphs.length - 1])) {
+        keptParagraphs.pop()
+      }
+      continue
+    }
+    keptParagraphs.push(collapseRepeatedSentences(part))
+    previousParagraphKey = key
+  }
+  return keptParagraphs.join("")
+}
+
+function collapseRepeatedSentences(paragraph: string): string {
+  // Sentences keep their terminal punctuation and trailing whitespace; the
+  // boundary also matches the no-space doubled case ("…shortly.Starting…").
+  const segments = paragraph.match(/[^.!?…]*[.!?…]+["')\]]*\s*|[^.!?…]+$/gu)
+  if (!segments || segments.length < 2) {
+    return paragraph
+  }
+  // Whole-run doubling first: the same (possibly multi-sentence) reply
+  // emitted twice back-to-back ("A. B.A. B.") collapses to one copy.
+  for (let split = 1; split < segments.length; split += 1) {
+    const head = normalizeAssistantTextForDedupe(segments.slice(0, split).join(""))
+    const tail = normalizeAssistantTextForDedupe(segments.slice(split).join(""))
+    if (head.length >= CONTAINMENT_MIN_LENGTH && head === tail) {
+      return collapseRepeatedSentences(segments.slice(0, split).join("").replace(/\s+$/u, ""))
+    }
+  }
+  const kept: string[] = []
+  let previousKey: string | null = null
+  for (const segment of segments) {
+    const key = normalizeAssistantTextForDedupe(segment)
+    if (
+      previousKey !== null
+      && key.length >= CONTAINMENT_MIN_LENGTH
+      && key === previousKey
+    ) {
+      continue
+    }
+    kept.push(segment)
+    if (key) {
+      previousKey = key
+    }
+  }
+  return kept.join("")
+}
+
+/**
  * True when two assistant texts should be treated as the same reply:
  * normalized equality, or containment when the shorter side is substantial
  * (≥ {@link CONTAINMENT_MIN_LENGTH} chars). Containment covers the doubled

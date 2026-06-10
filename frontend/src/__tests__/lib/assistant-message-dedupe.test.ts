@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  collapseRepeatedAssistantText,
   hasRenderableAssistantText,
   isEquivalentAssistantText,
   normalizeAssistantTextForDedupe,
@@ -44,6 +45,53 @@ describe('hasRenderableAssistantText', () => {
 
   it('is true for visible text', () => {
     expect(hasRenderableAssistantText('Hey!')).toBe(true);
+  });
+});
+
+describe('collapseRepeatedAssistantText', () => {
+  const sentence = "Starting the build now — I'll have it back to you shortly.";
+  const curlySentence = 'Starting the build now — I’ll have it back to you shortly.';
+
+  it('collapses the doubled build-start sentence with no separator', () => {
+    expect(collapseRepeatedAssistantText(`${sentence}${sentence}`)).toBe(sentence);
+  });
+
+  it('collapses straight + curly apostrophe copies, keeping the first', () => {
+    expect(collapseRepeatedAssistantText(`${sentence}${curlySentence}`)).toBe(sentence);
+  });
+
+  it('collapses doubled copies separated by whitespace', () => {
+    expect(collapseRepeatedAssistantText(`${sentence} ${sentence}`)).toBe(sentence);
+    expect(collapseRepeatedAssistantText(`${sentence}\n${sentence}`)).toBe(sentence);
+  });
+
+  it('collapses a tripled sentence to one copy', () => {
+    expect(collapseRepeatedAssistantText(`${sentence}${sentence}${sentence}`)).toBe(sentence);
+  });
+
+  it('collapses a doubled multi-sentence reply as a whole run', () => {
+    const reply = "The page is taking shape nicely. I'll send it over in a few minutes.";
+    expect(collapseRepeatedAssistantText(`${reply}${reply}`)).toBe(reply);
+  });
+
+  it('collapses doubled paragraphs and drops the duplicate separator', () => {
+    const paragraph = 'Here is the plan for tonight, step by step.';
+    expect(collapseRepeatedAssistantText(`${paragraph}\n\n${paragraph}`)).toBe(paragraph);
+  });
+
+  it('keeps genuinely different sentences intact', () => {
+    const text = 'Starting the build now. Your page is ready — take a look!';
+    expect(collapseRepeatedAssistantText(text)).toBe(text);
+  });
+
+  it('keeps deliberate short emphasis untouched', () => {
+    expect(collapseRepeatedAssistantText('No. No.')).toBe('No. No.');
+    expect(collapseRepeatedAssistantText('Yes! Yes!')).toBe('Yes! Yes!');
+  });
+
+  it('passes through empty and whitespace-only text unchanged', () => {
+    expect(collapseRepeatedAssistantText('')).toBe('');
+    expect(collapseRepeatedAssistantText('   ')).toBe('   ');
   });
 });
 

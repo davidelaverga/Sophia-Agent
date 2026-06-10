@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 
 import type { UIMessage } from '../components/session';
 import {
+  collapseRepeatedAssistantText,
   hasRenderableAssistantText,
   isEquivalentAssistantText,
   normalizeAssistantTextForDedupe,
@@ -80,11 +81,15 @@ export function useSessionMessageViewModel({
 
       const isVoiceUserMessage = msg.id.startsWith('voice-user-');
       const isVoiceAssistantMessage = msg.id.startsWith('voice-assistant-');
+      const rawText = getMessageText(msg);
 
       return {
         id: msg.id,
         role: msg.role as 'user' | 'assistant',
-        content: getMessageText(msg),
+        // Display-only sanitization: the stream can emit the same reply
+        // twice into one bubble (prose-retry tokens + merged final message).
+        // The raw chatMessages/transcript are never mutated.
+        content: msg.role === 'assistant' ? collapseRepeatedAssistantText(rawText) : rawText,
         createdAt: messageTimestampsRef.current.get(msg.id) || new Date().toISOString(),
         isNew: false,
         voiceTranscript: isVoiceUserMessage,
