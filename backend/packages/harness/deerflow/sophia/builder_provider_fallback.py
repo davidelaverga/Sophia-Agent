@@ -49,7 +49,11 @@ __all__ = [
     "fallback_max_retries",
     "fallback_model_name",
     "fallback_timeout_seconds",
+    "is_openai_chat_model",
+    "model_provider_label",
+    "normalize_tool_choice_for_model",
     "openai_api_key_present",
+    "provider_fallback_failure_diagnostic",
     "provider_fallback_snapshot",
     "safe_provider_error_message",
 ]
@@ -216,6 +220,117 @@ def safe_provider_error_message(error_class: str | None) -> str:
         error_class or "",
         "Primary model provider call failed before a response was produced.",
     )
+
+
+def is_openai_chat_model(model: Any) -> bool:
+    """True when ``model`` is an OpenAI(-compatible) LangChain chat model.
+
+    Detection walks the class MRO and matches ``ChatOpenAI`` (and subclasses
+    such as ``AzureChatOpenAI``, which use the identical OpenAI
+    ``/chat/completions`` ``tool_choice`` schema) without importing
+    ``langchain_openai`` eagerly. Anthropic and every other provider return
+    ``False`` so their native ``tool_choice`` shape is preserved untouched.
+
+    Only the class identity is inspected — never any client/key attribute —
+    so no secret material is read.
+    """
+    try:
+        mro = type(model).__mro__
+    except Exception:  # pragma: no cover - exotic/mock objects without a real type
+        return False
+    for klass in mro:
+        name = getattr(klass, "__name__", "")
+        module = getattr(klass, "__module__", "") or ""
+        if name == "ChatOpenAI" or module.startswith("langchain_openai"):
+            return True
+    return False
+
+
+def model_provider_label(model: Any) -> str:
+    """Coarse provider label for safe logging only (no payloads/keys)."""
+    return FALLBACK_PROVIDER if is_openai_chat_model(model) else PRIMARY_PROVIDER
+
+
+# Fixed token used ONLY to classify the OpenAI "missing tool_choice.function"
+# 400 into a stable, safe failure code. Like ``_BILLING_SIGNAL_TOKENS`` this is
+# a provider *schema* marker (never user prompt content); it is read for the
+# classification decision only and never logged or stored.
+_TOOL_CHOICE_FUNCTION_PARAM = "tool_choice.function"
+
+
+def _is_tool_choice_function_error(exc: BaseException) -> bool:
+    """True when an OpenAI fallback 400 is the missing ``tool_choice.function``
+    schema error (Anthropic-shaped forced tool choice reaching OpenAI).
+
+    Inspects only the structured ``.param`` attribute and the SDK ``.body``
+    error param — never raw bodies, prompts, or headers — mirroring the
+    decision-only inspection used by ``_has_billing_signal``.
+    """
+    param = getattr(exc, "param", None)
+    if isinstance(param, str) and param == _TOOL_CHOICE_FUNCTION_PARAM:
+        return True
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict) and error.get("param") == _TOOL_CHOICE_FUNCTION_PARAM:
+            return True
+    return False
+
+
+def provider_fallback_failure_diagnostic(exc: BaseException) -> dict[str, str]:
+    """Sanitized, allowlisted diagnostic fields for a failed OpenAI fallback.
+
+    Returns ONLY fixed strings + booleans for safe structured logging. No raw
+    provider payload, exception body, prompt text, key material, or signed URL
+    is ever read into the result. The ``tool_choice.function`` schema error is
+    classified into a stable code so dashboards can distinguish it from a
+    generic fallback failure.
+    """
+    if _is_tool_choice_function_error(exc):
+        failure_code = "builder_openai_tool_choice_invalid"
+        error_class = "bad_request_tool_choice"
+    else:
+        failure_code = "builder_provider_fallback_failed"
+        error_class = "provider_fallback_failed"
+    return {
+        "builder_failure_stage": "provider_fallback",
+        "builder_failure_code": failure_code,
+        "builder_provider_error_class": error_class,
+        "builder_fallback_attempted": "true",
+        "builder_fallback_result": "fallback_failed",
+        "raw_provider_payload_excluded": "true",
+        "provider_secrets_excluded": "true",
+    }
+
+
+def normalize_tool_choice_for_model(model: Any, tool_choice: Any) -> Any:
+    """Translate a forced ``tool_choice`` payload to the model provider's shape.
+
+    The Builder authors its forced tool choices in Anthropic's native shape
+    ``{"type": "tool", "name": <tool>}``. ``langchain-anthropic`` accepts that
+    verbatim. When the provider fallback swaps the bound model to
+    ``ChatOpenAI`` mid-run, that SAME payload reaches OpenAI's
+    ``/chat/completions``, which requires
+    ``{"type": "function", "function": {"name": <tool>}}`` and rejects the
+    Anthropic shape with ``Missing required parameter: 'tool_choice.function'``.
+
+    This is a pure, provider-keyed *shape* translation: it never changes WHICH
+    tool is forced (research stays forced, ``builder_web_search`` stays
+    ``builder_web_search``), only the provider-specific envelope. Inputs that
+    are not an Anthropic forced-tool dict — string sentinels like ``"auto"`` /
+    ``"required"`` / ``"none"``, OpenAI-shaped dicts, or anything unrecognized —
+    are returned unchanged, as is any payload when the model is not OpenAI.
+    """
+    if not isinstance(tool_choice, dict):
+        return tool_choice
+    if tool_choice.get("type") != "tool":
+        return tool_choice
+    name = tool_choice.get("name")
+    if not isinstance(name, str) or not name:
+        return tool_choice
+    if not is_openai_chat_model(model):
+        return tool_choice
+    return {"type": "function", "function": {"name": name}}
 
 
 def provider_fallback_snapshot(

@@ -53,6 +53,7 @@ from deerflow.sophia.builder_provider_fallback import (
     fallback_enabled,
     fallback_model_name,
     openai_api_key_present,
+    provider_fallback_failure_diagnostic,
     provider_fallback_snapshot,
 )
 
@@ -124,11 +125,24 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
         )
 
     @staticmethod
-    def _log_fallback_failed(error_class: str) -> None:
+    def _log_fallback_failed(error_class: str, fallback_exc: BaseException | None = None) -> None:
+        diagnostic = (
+            provider_fallback_failure_diagnostic(fallback_exc)
+            if fallback_exc is not None
+            else {}
+        )
         logger.warning(
             "[BuilderProviderFallback] OpenAI fallback also failed "
-            "provider_error_class=%s fallback_attempted=true fallback_result=fallback_failed",
+            "provider_error_class=%s fallback_attempted=true fallback_result=fallback_failed "
+            "builderFailureDiagnosticAvailable=%s builderFailureStage=%s builderFailureCode=%s "
+            "builderProviderErrorClass=%s builderFallbackAttempted=true "
+            "builderFallbackResult=fallback_failed rawProviderPayloadExcluded=true "
+            "providerSecretsExcluded=true",
             error_class,
+            "true" if diagnostic else "false",
+            diagnostic.get("builder_failure_stage", "provider_fallback"),
+            diagnostic.get("builder_failure_code", "builder_provider_fallback_failed"),
+            diagnostic.get("builder_provider_error_class", "provider_fallback_failed"),
         )
 
     # ------------------------------------------------------------------
@@ -153,7 +167,7 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
             try:
                 response = handler(request.override(model=fallback_model))
             except Exception as fallback_exc:
-                self._log_fallback_failed(error_class)
+                self._log_fallback_failed(error_class, fallback_exc)
                 raise fallback_exc from primary_exc
             return self._success_response(response, error_class)
 
@@ -175,6 +189,6 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
             try:
                 response = await handler(request.override(model=fallback_model))
             except Exception as fallback_exc:
-                self._log_fallback_failed(error_class)
+                self._log_fallback_failed(error_class, fallback_exc)
                 raise fallback_exc from primary_exc
             return self._success_response(response, error_class)

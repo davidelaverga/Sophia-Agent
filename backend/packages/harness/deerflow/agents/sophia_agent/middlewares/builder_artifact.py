@@ -38,6 +38,10 @@ from deerflow.sophia.builder_failure_diagnostics import (
     merge_builder_failure_diagnostics,
     normalize_emit_failure_code,
 )
+from deerflow.sophia.builder_provider_fallback import (
+    model_provider_label,
+    normalize_tool_choice_for_model,
+)
 from deerflow.sophia.builder_web_policy import extract_explicit_user_urls
 from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.sophia.storage.supabase_mirror import maybe_mirror_file
@@ -4249,6 +4253,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         """Force tool_choice when ceiling is imminent (two-stage)."""
         choice = self._force_choice_for_state(request.state, request.runtime)
         if choice is not None:
+            choice = self._provider_normalized_tool_choice(request.model, choice)
             request = request.override(tool_choice=choice)
         return handler(request)
 
@@ -4261,8 +4266,37 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         """Async variant — same two-stage logic as wrap_model_call."""
         choice = self._force_choice_for_state(request.state, request.runtime)
         if choice is not None:
+            choice = self._provider_normalized_tool_choice(request.model, choice)
             request = request.override(tool_choice=choice)
         return await handler(request)
+
+    @staticmethod
+    def _provider_normalized_tool_choice(model: Any, choice: dict[str, Any]) -> Any:
+        """Translate a forced ``tool_choice`` payload to the bound model's
+        provider shape and emit a safe (payload-free) audit log line.
+
+        The forced-choice helpers author Anthropic's native
+        ``{"type": "tool", "name": <tool>}``. When the Builder provider
+        fallback swaps the bound model to ``ChatOpenAI`` mid-run, the inner
+        model node would otherwise receive that Anthropic shape and OpenAI
+        rejects it with ``Missing required parameter: 'tool_choice.function'``.
+        Normalizing here — at the single point the choice is applied to the
+        request — keeps Anthropic byte-identical while making the OpenAI
+        retry valid, WITHOUT changing which tool is forced.
+        """
+        normalized = normalize_tool_choice_for_model(model, choice)
+        provider = model_provider_label(model)
+        was_normalized = normalized is not choice
+        tool_name = choice.get("name") if isinstance(choice, dict) else None
+        logger.info(
+            "[BuilderToolChoice] builderToolChoiceNormalized=%s "
+            "builderToolChoiceProvider=%s builderToolChoiceName=%s "
+            "rawProviderPayloadExcluded=true providerSecretsExcluded=true",
+            str(was_normalized).lower(),
+            provider,
+            tool_name,
+        )
+        return normalized
 
     def _block_substantive_tool_before_research(
         self,
