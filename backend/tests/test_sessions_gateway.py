@@ -834,3 +834,140 @@ def test_get_session_messages_returns_deduped_ordered_visible_rows(isolated_sess
 )
 def test_build_session_title_uses_topic_style_labels(message_preview, expected_title):
     assert sessions_router._build_session_title(message_preview) == expected_title
+
+
+def _seed_user_only_transcript(store, session_id: str, thread_id: str) -> None:
+    store.create(
+        SessionRecord(
+            session_id=session_id,
+            thread_id=thread_id,
+            user_id="dev-user",
+            status="open",
+        )
+    )
+    store.append_or_upsert_messages(
+        "dev-user",
+        session_id,
+        [
+            SessionMessageRecord(
+                message_id="user-only-1",
+                session_id=session_id,
+                thread_id=thread_id,
+                role="user",
+                content="Build me a page",
+                created_at="2026-06-10T02:42:13+00:00",
+                sequence=1,
+            ),
+        ],
+    )
+
+
+def _langgraph_state_client(mock_response):
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    return mock_client
+
+
+def test_get_session_messages_user_only_durable_falls_through_to_thread_state(isolated_session_store):
+    """A client-flushed transcript with no assistant rows must not shadow the
+    final AIMessage in LangGraph state (post-builder wakeup replies are
+    produced by a background run the browser never streams)."""
+    _seed_user_only_transcript(isolated_session_store, "session-user-only", "thread-user-only")
+
+    request = httpx.Request("GET", "http://127.0.0.1:2024/threads/thread-user-only/state")
+    mock_response = httpx.Response(
+        200,
+        request=request,
+        json={
+            "values": {
+                "messages": [
+                    {"id": "human-1", "type": "human", "content": "Build me a page"},
+                    {"id": "ai-wakeup", "type": "ai", "content": "Your page is ready — take a look!"},
+                ]
+            }
+        },
+    )
+
+    with patch("app.gateway.routers.sessions.httpx.AsyncClient") as mock_client_cls:
+        mock_client_cls.return_value = _langgraph_state_client(mock_response)
+        response = client.get("/api/v1/sessions/session-user-only/messages?user_id=dev-user")
+
+    assert response.status_code == 200
+    messages = response.json()["messages"]
+    assert [(message["role"], message["content"]) for message in messages] == [
+        ("user", "Build me a page"),
+        ("sophia", "Your page is ready — take a look!"),
+    ]
+    stored_roles = [
+        message.role
+        for message in isolated_session_store.list_messages("dev-user", "session-user-only")
+    ]
+    assert "assistant" in stored_roles
+
+
+def test_get_session_messages_user_only_durable_kept_when_state_has_no_assistant_text(isolated_session_store):
+    """Tool-call-only AI turns yield no visible text — keep the durable view
+    rather than replacing it with a state projection that adds nothing."""
+    _seed_user_only_transcript(isolated_session_store, "session-toolcall-only", "thread-toolcall-only")
+
+    request = httpx.Request("GET", "http://127.0.0.1:2024/threads/thread-toolcall-only/state")
+    mock_response = httpx.Response(
+        200,
+        request=request,
+        json={
+            "values": {
+                "messages": [
+                    {"id": "human-1", "type": "human", "content": "Build me a page"},
+                    {
+                        "id": "ai-tool-only",
+                        "type": "ai",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_789",
+                                "name": "emit_artifact",
+                                "partial_json": '{"tone_estimate":2.5}',
+                            }
+                        ],
+                    },
+                ]
+            }
+        },
+    )
+
+    with patch("app.gateway.routers.sessions.httpx.AsyncClient") as mock_client_cls:
+        mock_client_cls.return_value = _langgraph_state_client(mock_response)
+        response = client.get("/api/v1/sessions/session-toolcall-only/messages?user_id=dev-user")
+
+    assert response.status_code == 200
+    messages = response.json()["messages"]
+    assert [(message["role"], message["content"]) for message in messages] == [
+        ("user", "Build me a page"),
+    ]
+
+
+def test_get_session_messages_user_only_durable_kept_when_langgraph_unavailable(isolated_session_store):
+    """The state fall-through must never make a previously-200 durable read
+    start failing when LangGraph is down."""
+    _seed_user_only_transcript(isolated_session_store, "session-lg-down", "thread-lg-down")
+
+    request = httpx.Request("GET", "http://127.0.0.1:2024/threads/thread-lg-down/state")
+
+    with patch("app.gateway.routers.sessions.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(
+            side_effect=httpx.RequestError("connection refused", request=request)
+        )
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        response = client.get("/api/v1/sessions/session-lg-down/messages?user_id=dev-user")
+
+    assert response.status_code == 200
+    messages = response.json()["messages"]
+    assert [(message["role"], message["content"]) for message in messages] == [
+        ("user", "Build me a page"),
+    ]

@@ -20,6 +20,7 @@ import type { InterruptPayload, RitualArtifacts } from '../types/session';
 import type { SophiaMessageMetadata } from '../types/sophia-ui-message';
 
 import { completionFromTerminalCanvasTask } from './builder-canvas-completion';
+import { useSessionAssistantReplyBackfill } from './useSessionAssistantReplyBackfill';
 import { useSessionMessageViewModel } from './useSessionMessageViewModel';
 import { useSessionOutboundSend } from './useSessionSendActions';
 import { useSessionVoiceMessages } from './useSessionVoiceMessages';
@@ -551,6 +552,22 @@ export function useSessionRouteExperience({
     )
       ? builderCompletionCandidate
       : null;
+
+  // Recover assistant replies that landed in thread state without ever
+  // being streamed to this browser: tool-call-terminated turns whose final
+  // text was written post-stream, and the companion wakeup acknowledgment
+  // generated after a builder completes (a background run with no stream
+  // consumer). Append-only with id + content dedupe — never synthesizes text.
+  useSessionAssistantReplyBackfill({
+    enabled: hasValidBackendSessionId,
+    backendSessionId,
+    userId,
+    chatMessages,
+    chatStatus,
+    builderCompletion: effectiveBuilderCompletion,
+    setChatMessages,
+    setMessageTimestamp,
+  });
 
   /**
    * PR-B: handler for the completion card's "Try again" button.

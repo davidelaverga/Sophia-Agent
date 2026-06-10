@@ -613,13 +613,23 @@ async def get_session_messages(
         for message in durable_records
         if _message_record_to_response(message) is not None
     ]
-    if durable_messages:
+    durable_has_assistant = any(message.role == "sophia" for message in durable_messages)
+
+    def _durable_response() -> SessionMessagesResponse:
         _update_session_from_visible_records(owner_user_id, session_id, durable_records, record)
         return SessionMessagesResponse(
             session_id=session_id,
             thread_id=thread_id,
             messages=durable_messages,
         )
+
+    # An assistant-bearing durable transcript is authoritative. A transcript
+    # with ONLY user messages is a known degraded client flush (the live
+    # stream never appended assistant text — e.g. the post-builder companion
+    # wakeup reply, which has no browser stream consumer), so fall through to
+    # LangGraph thread state which holds the final AIMessage.
+    if durable_messages and durable_has_assistant:
+        return _durable_response()
 
     base_url = _get_langgraph_base_url()
 
@@ -628,23 +638,31 @@ async def get_session_messages(
             resp = await client.get(f"{base_url}/threads/{thread_id}/state")
             resp.raise_for_status()
     except httpx.TimeoutException as exc:
+        if durable_messages:
+            return _durable_response()
         raise HTTPException(
             status_code=503,
             detail="LangGraph timed out while reading thread state.",
         ) from exc
     except httpx.RequestError as exc:
+        if durable_messages:
+            return _durable_response()
         raise HTTPException(
             status_code=503,
             detail="LangGraph is unavailable.",
         ) from exc
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
+            if durable_messages:
+                return _durable_response()
             # Thread exists but has no checkpoint yet (no messages sent)
             return SessionMessagesResponse(
                 session_id=session_id,
                 thread_id=thread_id,
                 messages=[],
             )
+        if durable_messages:
+            return _durable_response()
         raise HTTPException(
             status_code=502,
             detail=f"LangGraph returned HTTP {exc.response.status_code}.",
@@ -653,6 +671,8 @@ async def get_session_messages(
     try:
         state = resp.json()
     except ValueError as exc:
+        if durable_messages:
+            return _durable_response()
         raise HTTPException(
             status_code=502,
             detail="LangGraph returned invalid JSON.",
@@ -684,6 +704,13 @@ async def get_session_messages(
                 content=content_text,
                 created_at=None,
             ))
+
+    state_has_assistant = any(message.role == "sophia" for message in messages)
+    if durable_messages and not state_has_assistant:
+        # Thread state offers nothing the degraded durable transcript lacks
+        # (and may even be missing user messages if the thread was recreated)
+        # — keep the durable view rather than replacing it with less.
+        return _durable_response()
 
     if messages:
         _store.replace_messages(
