@@ -120,6 +120,14 @@ def _disable_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _reset_primary_cooldown():
+    """The primary-provider cooldown is module-level state — isolate tests."""
+    mw_module.reset_companion_primary_cooldown_for_tests()
+    yield
+    mw_module.reset_companion_primary_cooldown_for_tests()
+
+
 class _Handler:
     """Records calls; raises ``primary_exc`` on the first call, then returns.
 
@@ -624,12 +632,14 @@ class _ProseFakeRequest:
         tools=("emit_artifact", "start_builder_task", "retrieve_memories"),
         tool_choice=None,
         system_prompt: str | None = "You are Sophia.",
+        state: dict | None = None,
     ) -> None:
         self.messages = list(messages or [])
         self.model = model
         self.tools = list(tools)
         self.tool_choice = tool_choice
         self.system_prompt = system_prompt
+        self.state = dict(state or {})
         self.overrides_applied: dict = {}
 
     def override(self, **overrides):
@@ -639,6 +649,7 @@ class _ProseFakeRequest:
             tools=overrides.get("tools", self.tools),
             tool_choice=overrides.get("tool_choice", self.tool_choice),
             system_prompt=self.system_prompt,
+            state=overrides.get("state", self.state),
         )
         system_message = overrides.get("system_message")
         if system_message is not None:
@@ -687,10 +698,20 @@ def _prose_response(text: str):
     return SimpleNamespace(result=[AIMessage(content=text)])
 
 
-def _conversational_request() -> _ProseFakeRequest:
+def _conversational_request(state: dict | None = None) -> _ProseFakeRequest:
     from langchain_core.messages import HumanMessage
 
-    return _ProseFakeRequest(messages=[HumanMessage(content="Hey Sophia!")])
+    return _ProseFakeRequest(messages=[HumanMessage(content="Hey Sophia!")], state=state)
+
+
+def _heavy_turn_request() -> _ProseFakeRequest:
+    """A build-intent turn that is NOT a direct document command: it keeps
+    the full tool set (heavy path) but stays eligible for the prose retry."""
+    from langchain_core.messages import HumanMessage
+
+    return _ProseFakeRequest(
+        messages=[HumanMessage(content="Can you build me an HTML dashboard for my stats?")]
+    )
 
 
 class TestConversationalProseRetry:
@@ -698,7 +719,7 @@ class TestConversationalProseRetry:
     greeting with an emit_artifact-only message must be retried once without
     tools so the final message carries visible prose + the artifact call."""
 
-    def test_tool_only_conversational_turn_retries_and_merges_prose(
+    def test_tool_only_heavy_turn_retries_and_merges_prose(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         _enable_fallback(monkeypatch)
@@ -708,7 +729,7 @@ class TestConversationalProseRetry:
             response,
             _prose_response("Hey Luis! Good to see you."),
         )
-        request = _conversational_request()
+        request = _heavy_turn_request()
 
         with caplog.at_level(logging.WARNING):
             result = CompanionProviderFallbackMiddleware().wrap_model_call(request, handler)
@@ -740,7 +761,7 @@ class TestConversationalProseRetry:
         assert "companionFallbackProseRetryResult=success" in caplog.text
         assert "rawProviderPayloadExcluded=true" in caplog.text
 
-    def test_async_tool_only_conversational_turn_retries_and_merges_prose(
+    def test_async_tool_only_heavy_turn_retries_and_merges_prose(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _enable_fallback(monkeypatch)
@@ -756,7 +777,7 @@ class TestConversationalProseRetry:
 
         async def run():
             return await CompanionProviderFallbackMiddleware().awrap_model_call(
-                _conversational_request(), handler
+                _heavy_turn_request(), handler
             )
 
         result = asyncio.run(run())
@@ -812,7 +833,7 @@ class TestConversationalProseRetry:
 
         with caplog.at_level(logging.WARNING):
             result = CompanionProviderFallbackMiddleware().wrap_model_call(
-                _conversational_request(), handler
+                _heavy_turn_request(), handler
             )
 
         # Original tool-only response returned unchanged — no synthesized text.
@@ -837,7 +858,7 @@ class TestConversationalProseRetry:
         )
 
         result = CompanionProviderFallbackMiddleware().wrap_model_call(
-            _conversational_request(), handler
+            _heavy_turn_request(), handler
         )
 
         final_message = result.model_response.result[-1]
@@ -882,15 +903,256 @@ class TestConversationalProseRetry:
 
         with caplog.at_level(logging.WARNING):
             result = CompanionProviderFallbackMiddleware().wrap_model_call(
-                _conversational_request(), handler
+                _heavy_turn_request(), handler
             )
 
         assert _PLACEHOLDER_KEY not in caplog.text
-        assert "Hey Sophia!" not in caplog.text          # user text never logged
+        assert "HTML dashboard" not in caplog.text       # user text never logged
         assert "You are Sophia." not in caplog.text      # system prompt never logged
         assert "Hey! I'm here." not in caplog.text       # model output never logged
         snapshot = result.command.update["companion_provider_fallback"]
         assert _PLACEHOLDER_KEY not in repr(snapshot)
-        assert "Hey Sophia!" not in repr(snapshot)
+        assert "HTML dashboard" not in repr(snapshot)
         assert snapshot["raw_provider_payload_excluded"] is True
         assert snapshot["provider_secrets_excluded"] is True
+
+
+_SOUL_BLOCK = "You are Sophia, an emotionally present companion. Stay warm and human."
+_TONE_BLOCK = "<tone_guidance>engagement band: meet their energy, lift half a point.</tone_guidance>"
+_ARTIFACT_BLOCK = "<artifact_instructions>Every turn you MUST call emit_artifact with 13 fields.</artifact_instructions>"
+_DELEGATION_BLOCK = "Use start_builder_task(description, task_type) to delegate builds."
+_BUILD_STATUS_BLOCK = "<build_status>\nNo active builds.\n</build_status>"
+
+_LIGHT_STATE = {
+    "system_prompt_blocks": [
+        _SOUL_BLOCK,
+        _TONE_BLOCK,
+        _ARTIFACT_BLOCK,
+        _DELEGATION_BLOCK,
+        _BUILD_STATUS_BLOCK,
+    ],
+}
+
+
+class TestConversationalLightPath:
+    """Plain conversational turns take a single tool-free fallback call with
+    Builder/artifact guidance stripped — Sophia answers as a companion."""
+
+    def test_hey_sophia_uses_light_tool_free_path(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _enable_fallback(monkeypatch)
+        handler = _SequenceHandler(
+            _make_anthropic_billing_400(),
+            _prose_response("Hey Luis. I'm here — what's on your mind?"),
+        )
+        request = _conversational_request(state=dict(_LIGHT_STATE))
+
+        with caplog.at_level(logging.WARNING):
+            result = CompanionProviderFallbackMiddleware().wrap_model_call(request, handler)
+
+        # One failed primary + ONE light fallback call — no extra prose retry.
+        assert len(handler.calls) == 2
+        light_request = handler.calls[1]
+        assert light_request.model is _FALLBACK_MODEL_SENTINEL
+        assert light_request.tools == []
+        assert light_request.tool_choice is None
+        # Builder/artifact guidance blocks dropped; companion context kept.
+        light_blocks = light_request.state["system_prompt_blocks"]
+        assert _SOUL_BLOCK in light_blocks
+        assert _TONE_BLOCK in light_blocks
+        assert _ARTIFACT_BLOCK not in light_blocks
+        assert _DELEGATION_BLOCK not in light_blocks
+        assert _BUILD_STATUS_BLOCK not in light_blocks
+        assert any("<conversational_turn>" in block for block in light_blocks)
+        # The reply is plain visible prose.
+        final_message = result.model_response.result[-1]
+        assert final_message.content == "Hey Luis. I'm here — what's on your mind?"
+        update = result.command.update["companion_provider_fallback"]
+        assert update["companion_fallback_result"] == "success"
+        assert update["companion_conversational_light_path"] is True
+        assert update["companion_conversational_tools_disabled"] is True
+        assert update["companion_fallback_conversational_turn"] is True
+        # Safe log tokens.
+        assert "companionConversationalLightPath=true" in caplog.text
+        assert "companionConversationalToolsDisabled=true" in caplog.text
+        assert "companionVisibleTextRequired=true" in caplog.text
+        assert "rawProviderPayloadExcluded=true" in caplog.text
+        assert "Hey Sophia!" not in caplog.text
+
+    def test_light_instruction_bans_internal_mechanics_language(self) -> None:
+        # The light-path instruction explicitly forbids the leakage observed
+        # in production (identity files / handoffs / Mem0 / metadata talk).
+        instruction = mw_module._CONVERSATIONAL_LIGHT_INSTRUCTION
+        for banned in ("identity files", "handoffs", "memory systems", "Mem0", "metadata", "artifacts"):
+            assert banned in instruction
+        assert "Do not call any tools" in instruction
+
+    def test_build_request_keeps_full_toolset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from langchain_core.messages import AIMessage
+
+        _enable_fallback(monkeypatch)
+        builder_response = SimpleNamespace(result=[AIMessage(
+            content="",
+            tool_calls=[{"name": "start_builder_task", "args": {"task_type": "frontend"}, "id": "tc-b1"}],
+        )])
+        handler = _SequenceHandler(_ProviderStatusError(401), builder_response)
+        request = _heavy_turn_request()
+        request.state = dict(_LIGHT_STATE)
+
+        result = CompanionProviderFallbackMiddleware().wrap_model_call(request, handler)
+
+        # Full tool set preserved verbatim — start_builder_task reachable.
+        fallback_request = handler.calls[1]
+        assert fallback_request.tools == request.tools
+        assert "start_builder_task" in fallback_request.tools
+        update = result.command.update["companion_provider_fallback"]
+        assert update["companion_conversational_light_path"] is False
+        assert update["companion_conversational_tools_disabled"] is False
+        tool_names = [tc["name"] for tc in result.model_response.result[-1].tool_calls]
+        assert "start_builder_task" in tool_names
+
+    def test_active_build_keeps_heavy_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _enable_fallback(monkeypatch)
+        handler = _SequenceHandler(
+            _ProviderStatusError(401),
+            _prose_response("The build is still running — almost there."),
+        )
+        state = dict(_LIGHT_STATE)
+        state["async_tasks"] = {"task-1": {"status": "running"}}
+        request = _conversational_request(state=state)
+
+        result = CompanionProviderFallbackMiddleware().wrap_model_call(request, handler)
+
+        # BuildAwareness context must survive: no light path while a build runs.
+        fallback_request = handler.calls[1]
+        assert fallback_request.tools == request.tools
+        update = result.command.update["companion_provider_fallback"]
+        assert update["companion_conversational_light_path"] is False
+
+
+class TestPrimaryProviderCooldown:
+    """After a classified Anthropic failure, companion turns within the TTL
+    skip the doomed primary attempt and call OpenAI directly."""
+
+    def test_failure_sets_cooldown_and_next_turn_bypasses_primary(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _enable_fallback(monkeypatch)
+        middleware = CompanionProviderFallbackMiddleware()
+
+        first_handler = _Handler(_make_anthropic_billing_400(), response="recovered")
+        middleware.wrap_model_call(_FakeRequest(), first_handler)
+        assert len(first_handler.calls) == 2  # primary + fallback, as before
+
+        second_handler = _Handler(None, response="bypassed-ok")
+        with caplog.at_level(logging.WARNING):
+            result = middleware.wrap_model_call(_FakeRequest(), second_handler)
+
+        # ONE call only — straight to the fallback model, no Anthropic attempt.
+        assert len(second_handler.calls) == 1
+        assert second_handler.calls[0].model is _FALLBACK_MODEL_SENTINEL
+        assert "companionFallbackPrimaryBypassed=true" in caplog.text
+        assert "companionFallbackBypassReason=provider_credit_depleted" in caplog.text
+        update = result.command.update["companion_provider_fallback"]
+        assert update["companion_fallback_primary_bypassed"] is True
+        assert update["companion_fallback_bypass_reason"] == "provider_credit_depleted"
+
+    def test_async_path_bypasses_primary_during_cooldown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _enable_fallback(monkeypatch)
+        middleware = CompanionProviderFallbackMiddleware()
+        mw_module._set_primary_cooldown("provider_unavailable")
+
+        sync_handler = _Handler(None, response="bypassed-ok")
+
+        async def handler(request):
+            return sync_handler(request)
+
+        async def run():
+            return await middleware.awrap_model_call(_FakeRequest(), handler)
+
+        result = asyncio.run(run())
+        assert len(sync_handler.calls) == 1
+        assert sync_handler.calls[0].model is _FALLBACK_MODEL_SENTINEL
+        update = result.command.update["companion_provider_fallback"]
+        assert update["companion_fallback_primary_bypassed"] is True
+        assert update["companion_fallback_bypass_reason"] == "provider_unavailable"
+
+    def test_cooldown_not_applied_when_fallback_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _disable_fallback(monkeypatch)
+        mw_module._set_primary_cooldown("permission_or_payment_error")
+        handler = _Handler(None, response="primary-ok")
+
+        result = CompanionProviderFallbackMiddleware().wrap_model_call(_FakeRequest(), handler)
+
+        # Primary attempted normally; the cooldown never short-circuits.
+        assert len(handler.calls) == 1
+        assert handler.calls[0].model == "primary-model"
+        assert result == "primary-ok"
+
+    def test_cooldown_not_applied_when_openai_key_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(FALLBACK_ENABLED_ENV, "true")
+        monkeypatch.setenv(FALLBACK_MODEL_ENV, "openai-model-placeholder")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        mw_module._set_primary_cooldown("permission_or_payment_error")
+        handler = _Handler(None, response="primary-ok")
+
+        result = CompanionProviderFallbackMiddleware().wrap_model_call(_FakeRequest(), handler)
+
+        assert len(handler.calls) == 1
+        assert result == "primary-ok"
+
+    def test_successful_primary_clears_cooldown(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _disable_fallback(monkeypatch)  # bypass inactive → primary runs
+        mw_module._set_primary_cooldown("provider_unavailable")
+        handler = _Handler(None, response="primary-ok")
+
+        CompanionProviderFallbackMiddleware().wrap_model_call(_FakeRequest(), handler)
+
+        assert mw_module._active_primary_cooldown_error_class() is None
+
+    def test_cooldown_ttl_zero_disables_caching(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from deerflow.sophia.companion_provider_fallback import PRIMARY_COOLDOWN_ENV
+
+        _enable_fallback(monkeypatch)
+        monkeypatch.setenv(PRIMARY_COOLDOWN_ENV, "0")
+        handler = _Handler(_ProviderStatusError(429), response="recovered")
+
+        CompanionProviderFallbackMiddleware().wrap_model_call(_FakeRequest(), handler)
+
+        assert mw_module._active_primary_cooldown_error_class() is None
+
+    def test_fallback_failure_during_bypass_clears_cooldown_and_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _enable_fallback(monkeypatch)
+        mw_module._set_primary_cooldown("permission_or_payment_error")
+
+        def failing_handler(request):
+            raise RuntimeError("fallback transport error")
+
+        with pytest.raises(RuntimeError):
+            CompanionProviderFallbackMiddleware().wrap_model_call(_FakeRequest(), failing_handler)
+
+        # Next turn retries the primary provider normally.
+        assert mw_module._active_primary_cooldown_error_class() is None
+
+    def test_no_secrets_in_bypass_logs(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _enable_fallback(monkeypatch)
+        mw_module._set_primary_cooldown("permission_or_payment_error")
+        handler = _Handler(None, response="bypassed-ok")
+
+        with caplog.at_level(logging.WARNING):
+            CompanionProviderFallbackMiddleware().wrap_model_call(_FakeRequest(), handler)
+
+        assert _PLACEHOLDER_KEY not in caplog.text
+        assert "openai-model-placeholder" not in caplog.text
+        assert "providerSecretsExcluded=true" in caplog.text

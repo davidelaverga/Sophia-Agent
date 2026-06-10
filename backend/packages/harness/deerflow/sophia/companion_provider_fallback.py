@@ -51,6 +51,7 @@ __all__ = [
     "FALLBACK_MAX_RETRIES_ENV",
     "FALLBACK_MODEL_ENV",
     "FALLBACK_TIMEOUT_ENV",
+    "PRIMARY_COOLDOWN_ENV",
     "PRIMARY_PROVIDER",
     "FALLBACK_PROVIDER",
     "build_fallback_chat_model",
@@ -61,6 +62,7 @@ __all__ = [
     "fallback_model_name",
     "fallback_timeout_seconds",
     "openai_api_key_present",
+    "primary_cooldown_seconds",
     "safe_provider_error_message",
 ]
 
@@ -71,7 +73,10 @@ FALLBACK_ENABLED_ENV = "SOPHIA_COMPANION_OPENAI_FALLBACK_ENABLED"
 FALLBACK_MODEL_ENV = "SOPHIA_COMPANION_OPENAI_FALLBACK_MODEL"
 FALLBACK_TIMEOUT_ENV = "SOPHIA_COMPANION_OPENAI_FALLBACK_TIMEOUT_SECONDS"
 FALLBACK_MAX_RETRIES_ENV = "SOPHIA_COMPANION_OPENAI_FALLBACK_MAX_RETRIES"
+PRIMARY_COOLDOWN_ENV = "SOPHIA_COMPANION_PRIMARY_COOLDOWN_SECONDS"
 _OPENAI_KEY_ENV = "OPENAI_API_KEY"
+
+_PRIMARY_COOLDOWN_DEFAULT_SECONDS = 300.0
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
@@ -110,6 +115,22 @@ def openai_api_key_present() -> bool:
     return bool(os.environ.get(_OPENAI_KEY_ENV, "").strip())
 
 
+def primary_cooldown_seconds() -> float:
+    """TTL of the temporary primary-provider-unavailable cooldown.
+
+    After a classified Anthropic availability failure, companion turns within
+    this window skip the doomed primary attempt and go straight to the OpenAI
+    fallback (only while the fallback is enabled AND configured). ``0``
+    disables the cooldown entirely — every turn retries Anthropic first.
+    """
+    raw = os.environ.get(PRIMARY_COOLDOWN_ENV, "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return _PRIMARY_COOLDOWN_DEFAULT_SECONDS
+    return value if value >= 0 else _PRIMARY_COOLDOWN_DEFAULT_SECONDS
+
+
 def companion_provider_fallback_snapshot(
     *,
     error_class: str,
@@ -119,6 +140,10 @@ def companion_provider_fallback_snapshot(
     tool_only_suppressed: bool = False,
     prose_retry_attempted: bool = False,
     prose_retry_result: str = "not_needed",
+    primary_bypassed: bool = False,
+    bypass_reason: str | None = None,
+    conversational_light_path: bool = False,
+    conversational_tools_disabled: bool = False,
 ) -> dict[str, Any]:
     """Sanitized snapshot for state + diagnostics. Allowlisted fields only.
 
@@ -143,6 +168,10 @@ def companion_provider_fallback_snapshot(
         "companion_fallback_tool_only_suppressed": bool(tool_only_suppressed),
         "companion_fallback_prose_retry_attempted": bool(prose_retry_attempted),
         "companion_fallback_prose_retry_result": prose_retry_result,
+        "companion_fallback_primary_bypassed": bool(primary_bypassed),
+        "companion_fallback_bypass_reason": bypass_reason,
+        "companion_conversational_light_path": bool(conversational_light_path),
+        "companion_conversational_tools_disabled": bool(conversational_tools_disabled),
         "companion_provider_error_class": error_class,
         "companion_provider_error_safe_message": safe_provider_error_message(error_class),
         "raw_provider_payload_excluded": True,
