@@ -21,6 +21,7 @@ export { VoiceFirstComposer, type VoiceStatus } from './VoiceFirstComposer';
 export { VoiceCaption } from './VoiceCaption';
 export { VoiceMetricsPanel } from './VoiceMetricsPanel';
 export { BuilderReadyPill } from './BuilderReadyPill';
+export { SessionArtifactTrayLauncher } from './SessionArtifactTrayLauncher';
 export { PresenceArtifactPanel, ArtifactToggleIcon } from './PresenceArtifactPanel';
 export { ArtifactStage } from './ArtifactStage';
 export { ArtifactCanvasViewport } from './ArtifactCanvasViewport';

@@ -31,6 +31,7 @@ import {
   VoiceCaption,
   VoiceMetricsPanel,
   PresenceArtifactPanel,
+  SessionArtifactTrayLauncher,
   WhisperIndicator,
   ReflectionOverlay,
   EmergenceOverlay,
@@ -2435,6 +2436,19 @@ function SessionPageContent() {
             />
           )}
 
+          {/* Session artifact tray — text mode: persistent entry above the composer.
+              Hidden while the artifact panel is open (the panel carries its own tray)
+              and renders nothing when the local session artifact index is empty. */}
+          {focusMode === 'text' && !(showArtifacts && effectiveShowArtifactsUi) && (
+            <div className="mb-2 flex justify-end px-3 sm:px-4">
+              <SessionArtifactTrayLauncher
+                sessionArtifactIndex={sessionArtifactIndex}
+                threadId={artifactPanelThreadId}
+                onSessionArtifactOpen={handleOpenSessionArtifact}
+              />
+            </div>
+          )}
+
           {/* Canonical completed builder surface — text mode: left-column inline above composer */}
           {showCanonicalCompletedBuilderEntryInline
             && builderPrimaryFile
@@ -2481,6 +2495,22 @@ function SessionPageContent() {
                 onDismiss={dismissVisibleBuilderArtifact}
                 compact={true}
                 className="pointer-events-auto max-w-full"
+              />
+            </div>
+          )}
+
+          {/* Session artifact tray — voice mode: safe-right corner scene element,
+              mirroring the completed-builder corner entry on the left. */}
+          {focusMode !== 'text' && !(showArtifacts && effectiveShowArtifactsUi) && (
+            <div
+              className="pointer-events-none fixed bottom-[calc(7.75rem+env(safe-area-inset-bottom,0px))] right-4 z-30 flex justify-end sm:bottom-6 sm:right-6"
+              style={{ opacity: voiceBuilderAccessoryOpacity, transition: 'opacity 0.6s ease' }}
+            >
+              <SessionArtifactTrayLauncher
+                className="pointer-events-auto"
+                sessionArtifactIndex={sessionArtifactIndex}
+                threadId={artifactPanelThreadId}
+                onSessionArtifactOpen={handleOpenSessionArtifact}
               />
             </div>
           )}
