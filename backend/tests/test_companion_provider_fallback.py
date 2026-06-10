@@ -610,3 +610,287 @@ class TestPromptCachingNoOpForFallback:
             warnings.simplefilter("always")
             warn_mw.wrap_model_call(request, lambda req: sentinel)
         assert any("Anthropic" in str(w.message) for w in caught)
+
+
+class _ProseFakeRequest:
+    """Fake request rich enough for the conversational prose retry: carries
+    messages, tools, tool_choice, and a system prompt, and records the
+    overrides each ``override`` call applied."""
+
+    def __init__(
+        self,
+        messages=None,
+        model: object = "primary-model",
+        tools=("emit_artifact", "start_builder_task", "retrieve_memories"),
+        tool_choice=None,
+        system_prompt: str | None = "You are Sophia.",
+    ) -> None:
+        self.messages = list(messages or [])
+        self.model = model
+        self.tools = list(tools)
+        self.tool_choice = tool_choice
+        self.system_prompt = system_prompt
+        self.overrides_applied: dict = {}
+
+    def override(self, **overrides):
+        clone = _ProseFakeRequest(
+            messages=self.messages,
+            model=overrides.get("model", self.model),
+            tools=overrides.get("tools", self.tools),
+            tool_choice=overrides.get("tool_choice", self.tool_choice),
+            system_prompt=self.system_prompt,
+        )
+        system_message = overrides.get("system_message")
+        if system_message is not None:
+            clone.system_prompt = system_message.content
+        clone.overrides_applied = dict(overrides)
+        return clone
+
+
+class _SequenceHandler:
+    """Returns (or raises) one scripted outcome per call, in order."""
+
+    def __init__(self, *outcomes) -> None:
+        self.outcomes = list(outcomes)
+        self.calls: list = []
+
+    def __call__(self, request):
+        self.calls.append(request)
+        outcome = self.outcomes[len(self.calls) - 1]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+def _artifact_only_response():
+    from langchain_core.messages import AIMessage
+
+    return SimpleNamespace(
+        result=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "emit_artifact",
+                        "args": {"tone_estimate": 2.5},
+                        "id": "tc-artifact-1",
+                    }
+                ],
+            )
+        ]
+    )
+
+
+def _prose_response(text: str):
+    from langchain_core.messages import AIMessage
+
+    return SimpleNamespace(result=[AIMessage(content=text)])
+
+
+def _conversational_request() -> _ProseFakeRequest:
+    from langchain_core.messages import HumanMessage
+
+    return _ProseFakeRequest(messages=[HumanMessage(content="Hey Sophia!")])
+
+
+class TestConversationalProseRetry:
+    """Locks the conversational-turn fix: OpenAI fallback answering a plain
+    greeting with an emit_artifact-only message must be retried once without
+    tools so the final message carries visible prose + the artifact call."""
+
+    def test_tool_only_conversational_turn_retries_and_merges_prose(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _enable_fallback(monkeypatch)
+        response = _artifact_only_response()
+        handler = _SequenceHandler(
+            _make_anthropic_billing_400(),
+            response,
+            _prose_response("Hey Luis! Good to see you."),
+        )
+        request = _conversational_request()
+
+        with caplog.at_level(logging.WARNING):
+            result = CompanionProviderFallbackMiddleware().wrap_model_call(request, handler)
+
+        # Exactly one prose retry on top of the provider fallback retry.
+        assert len(handler.calls) == 3
+        prose_request = handler.calls[2]
+        # Tools disabled and prose instruction appended for the retry only.
+        assert prose_request.tools == []
+        assert prose_request.tool_choice is None
+        assert "Do not call any tools" in prose_request.system_prompt
+        assert "You are Sophia." in prose_request.system_prompt
+        # Final message: visible prose + the ORIGINAL emit_artifact tool call
+        # (Anthropic's shape) — the artifact-per-turn contract is preserved.
+        final_message = result.model_response.result[-1]
+        assert final_message.content == "Hey Luis! Good to see you."
+        assert [tc["id"] for tc in final_message.tool_calls] == ["tc-artifact-1"]
+        assert [tc["name"] for tc in final_message.tool_calls] == ["emit_artifact"]
+        # Snapshot telemetry.
+        update = result.command.update["companion_provider_fallback"]
+        assert update["companion_fallback_result"] == "success"
+        assert update["companion_fallback_conversational_turn"] is True
+        assert update["companion_fallback_prose_retry_attempted"] is True
+        assert update["companion_fallback_prose_retry_result"] == "success"
+        assert update["companion_fallback_tool_only_suppressed"] is True
+        # Log tokens (safe fields only).
+        assert "companionFallbackConversationalTurn=true" in caplog.text
+        assert "companionFallbackProseRetryAttempted=true" in caplog.text
+        assert "companionFallbackProseRetryResult=success" in caplog.text
+        assert "rawProviderPayloadExcluded=true" in caplog.text
+
+    def test_async_tool_only_conversational_turn_retries_and_merges_prose(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _enable_fallback(monkeypatch)
+        response = _artifact_only_response()
+        sync_handler = _SequenceHandler(
+            _ProviderStatusError(429),
+            response,
+            _prose_response("Right here with you."),
+        )
+
+        async def handler(request):
+            return sync_handler(request)
+
+        async def run():
+            return await CompanionProviderFallbackMiddleware().awrap_model_call(
+                _conversational_request(), handler
+            )
+
+        result = asyncio.run(run())
+        assert len(sync_handler.calls) == 3
+        final_message = result.model_response.result[-1]
+        assert final_message.content == "Right here with you."
+        assert [tc["name"] for tc in final_message.tool_calls] == ["emit_artifact"]
+        update = result.command.update["companion_provider_fallback"]
+        assert update["companion_fallback_prose_retry_result"] == "success"
+
+    def test_start_builder_task_response_is_never_prose_retried(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        _enable_fallback(monkeypatch)
+        builder_message = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "start_builder_task",
+                    "args": {"description": "Build an HTML page", "task_type": "frontend"},
+                    "id": "tc-builder-1",
+                }
+            ],
+        )
+        response = SimpleNamespace(result=[builder_message])
+        handler = _SequenceHandler(_ProviderStatusError(401), response)
+        request = _ProseFakeRequest(
+            messages=[HumanMessage(content="Can you build me an HTML page about orcas?")]
+        )
+
+        result = CompanionProviderFallbackMiddleware().wrap_model_call(request, handler)
+
+        # No third call: the delegation tool call is a real action.
+        assert len(handler.calls) == 2
+        assert result.model_response.result[-1] is builder_message
+        update = result.command.update["companion_provider_fallback"]
+        assert update["companion_fallback_prose_retry_attempted"] is False
+        assert update["companion_fallback_prose_retry_result"] == "not_needed"
+        assert update["companion_fallback_tool_only_suppressed"] is False
+
+    def test_prose_retry_failure_keeps_original_without_fake_text(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _enable_fallback(monkeypatch)
+        response = _artifact_only_response()
+        handler = _SequenceHandler(
+            _ProviderStatusError(401),
+            response,
+            RuntimeError("prose retry transport error"),
+        )
+
+        with caplog.at_level(logging.WARNING):
+            result = CompanionProviderFallbackMiddleware().wrap_model_call(
+                _conversational_request(), handler
+            )
+
+        # Original tool-only response returned unchanged — no synthesized text.
+        final_message = result.model_response.result[-1]
+        assert final_message.content == ""
+        assert [tc["name"] for tc in final_message.tool_calls] == ["emit_artifact"]
+        update = result.command.update["companion_provider_fallback"]
+        assert update["companion_fallback_prose_retry_attempted"] is True
+        assert update["companion_fallback_prose_retry_result"] == "failed"
+        assert update["companion_fallback_tool_only_suppressed"] is False
+        assert "companionFallbackProseRetryResult=failed" in caplog.text
+
+    def test_prose_retry_empty_text_keeps_original_without_fake_text(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _enable_fallback(monkeypatch)
+        response = _artifact_only_response()
+        handler = _SequenceHandler(
+            _ProviderStatusError(401),
+            response,
+            _prose_response(""),
+        )
+
+        result = CompanionProviderFallbackMiddleware().wrap_model_call(
+            _conversational_request(), handler
+        )
+
+        final_message = result.model_response.result[-1]
+        assert final_message.content == ""
+        update = result.command.update["companion_provider_fallback"]
+        assert update["companion_fallback_prose_retry_result"] == "failed"
+
+    def test_direct_document_command_turn_is_not_prose_retried(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from langchain_core.messages import HumanMessage
+
+        _enable_fallback(monkeypatch)
+        response = _artifact_only_response()
+        handler = _SequenceHandler(_ProviderStatusError(401), response)
+        request = _ProseFakeRequest(
+            messages=[
+                HumanMessage(
+                    content="Sophia create a dummy document of one page about whales."
+                )
+            ]
+        )
+
+        result = CompanionProviderFallbackMiddleware().wrap_model_call(request, handler)
+
+        # Defensive: explicit document commands are BuilderCommand territory —
+        # never converted into a tool-free prose turn.
+        assert len(handler.calls) == 2
+        update = result.command.update["companion_provider_fallback"]
+        assert update["companion_fallback_conversational_turn"] is False
+        assert update["companion_fallback_prose_retry_attempted"] is False
+
+    def test_prose_retry_logs_contain_no_secrets_prompts_or_user_text(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _enable_fallback(monkeypatch)
+        handler = _SequenceHandler(
+            _ProviderStatusError(401),
+            _artifact_only_response(),
+            _prose_response("Hey! I'm here."),
+        )
+
+        with caplog.at_level(logging.WARNING):
+            result = CompanionProviderFallbackMiddleware().wrap_model_call(
+                _conversational_request(), handler
+            )
+
+        assert _PLACEHOLDER_KEY not in caplog.text
+        assert "Hey Sophia!" not in caplog.text          # user text never logged
+        assert "You are Sophia." not in caplog.text      # system prompt never logged
+        assert "Hey! I'm here." not in caplog.text       # model output never logged
+        snapshot = result.command.update["companion_provider_fallback"]
+        assert _PLACEHOLDER_KEY not in repr(snapshot)
+        assert "Hey Sophia!" not in repr(snapshot)
+        assert snapshot["raw_provider_payload_excluded"] is True
+        assert snapshot["provider_secrets_excluded"] is True

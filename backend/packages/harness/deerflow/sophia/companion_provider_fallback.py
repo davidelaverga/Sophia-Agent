@@ -115,11 +115,18 @@ def companion_provider_fallback_snapshot(
     error_class: str,
     fallback_attempted: bool,
     fallback_result: str,
+    conversational_turn: bool = False,
+    tool_only_suppressed: bool = False,
+    prose_retry_attempted: bool = False,
+    prose_retry_result: str = "not_needed",
 ) -> dict[str, Any]:
     """Sanitized snapshot for state + diagnostics. Allowlisted fields only.
 
     ``fallback_result`` is one of ``success`` / ``empty_response`` /
     ``fallback_failed`` / ``fallback_disabled`` / ``fallback_not_configured``.
+    ``prose_retry_result`` is one of ``success`` / ``failed`` / ``not_needed``
+    — set when the fallback returned an emit_artifact-only message with no
+    visible text on a conversational turn and a tool-free prose retry ran.
     No key material, raw payloads, model URLs, or exception text ever enter
     this dict. The keys are ``companion_*``-prefixed so companion telemetry is
     distinct from the Builder's ``builder_provider_fallback`` snapshot.
@@ -132,6 +139,10 @@ def companion_provider_fallback_snapshot(
         "companion_fallback_reason": error_class,
         "companion_fallback_result": fallback_result,
         "companion_fallback_model_configured": fallback_model_name() is not None,
+        "companion_fallback_conversational_turn": bool(conversational_turn),
+        "companion_fallback_tool_only_suppressed": bool(tool_only_suppressed),
+        "companion_fallback_prose_retry_attempted": bool(prose_retry_attempted),
+        "companion_fallback_prose_retry_result": prose_retry_result,
         "companion_provider_error_class": error_class,
         "companion_provider_error_safe_message": safe_provider_error_message(error_class),
         "raw_provider_payload_excluded": True,

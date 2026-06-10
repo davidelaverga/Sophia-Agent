@@ -37,6 +37,26 @@ Decision table on a primary-model exception:
    failure, the fallback exception propagates (chained to the primary) and the
    run fails as it would today.
 
+Conversational prose retry (post-success shaping):
+
+OpenAI models frequently answer a plain conversational turn ("Hey Sophia!")
+with ONLY an ``emit_artifact`` tool call and ``content=""`` — Anthropic emits
+prose + the tool call in one message. Because ``emit_artifact`` is the
+signal-only turn terminator (``ArtifactMiddleware.after_model`` jumps to
+``end``), such a message ends the turn with zero visible text. When the
+successful fallback response is emit_artifact-only with no visible text AND
+the turn is conversational (the same "no explicit document command" signal
+``BuilderCommandMiddleware`` uses), the middleware retries ONCE more through
+the same handler with the OpenAI model, **no tools**, and a prose-forcing
+instruction, then merges the prose text with the original ``emit_artifact``
+tool call(s) into a single AIMessage — the exact shape Anthropic produces.
+The artifact contract (emit_artifact every turn, via tool_use) is preserved.
+If the prose retry fails or returns no text, the original response is
+returned unchanged — no text is ever synthesized. Responses that contain any
+other tool call (``start_builder_task``, memory/vision tools, lifecycle
+tools) are never touched: those are real agentic actions and the loop
+continues normally.
+
 No API keys, raw provider payloads, prompts, or file contents are ever logged
 or stored — the snapshot is built exclusively from the fixed allowlisted
 fields in ``companion_provider_fallback_snapshot``.
@@ -50,8 +70,13 @@ from typing import Any, NotRequired
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ExtendedModelResponse
+from langchain_core.messages import AIMessage, SystemMessage
 from langgraph.types import Command
 
+from deerflow.agents.sophia_agent.middlewares.builder_command import (
+    _build_direct_document_task,
+)
+from deerflow.agents.sophia_agent.utils import extract_last_message_text
 from deerflow.sophia.companion_provider_fallback import (
     build_fallback_chat_model,
     classify_provider_error,
@@ -62,6 +87,19 @@ from deerflow.sophia.companion_provider_fallback import (
 )
 
 logger = logging.getLogger(__name__)
+
+# emit_artifact is signal-only and terminates the companion turn
+# (ArtifactMiddleware.after_model jumps to "end" on artifact-only messages),
+# so an emit_artifact-only message with no text means a silent turn.
+_ARTIFACT_TOOL_NAME = "emit_artifact"
+
+# Generic prose-forcing instruction appended to the system prompt for the
+# tool-free retry. Contains no user content, no provider payloads.
+_PROSE_RETRY_INSTRUCTION = (
+    "Your previous attempt returned only an emit_artifact tool call with no "
+    "visible reply text. Reply to the user now in visible conversational "
+    "prose, in Sophia's voice. Do not call any tools."
+)
 
 
 class CompanionProviderFallbackState(AgentState):
@@ -152,14 +190,172 @@ class CompanionProviderFallbackMiddleware(AgentMiddleware[CompanionProviderFallb
             has_text = bool(content)
         return not has_text
 
+    # ------------------------------------------------------------------
+    # Conversational prose retry (emit_artifact-only fallback responses)
+    # ------------------------------------------------------------------
+
     @staticmethod
-    def _success_response(response: Any, error_class: str) -> ExtendedModelResponse:
+    def _last_ai_message(response: Any) -> Any | None:
+        """The response's final message, or the response itself when it is a
+        bare message. None when no message shape can be found."""
+        result = getattr(response, "result", None)
+        if isinstance(result, list):
+            return result[-1] if result else None
+        if hasattr(response, "content") or hasattr(response, "tool_calls"):
+            return response
+        return None
+
+    @staticmethod
+    def _message_visible_text(message: Any) -> str:
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(str(block.get("text", "")))
+            return "\n".join(part for part in parts if part.strip())
+        return ""
+
+    @classmethod
+    def _artifact_only_message(cls, response: Any) -> Any | None:
+        """The final AIMessage when it carries ONLY emit_artifact tool calls
+        and no visible text — the silent-turn shape. None otherwise."""
+        message = cls._last_ai_message(response)
+        if message is None:
+            return None
+        tool_calls = getattr(message, "tool_calls", None) or []
+        if not tool_calls:
+            return None
+        names = {
+            tool_call.get("name")
+            for tool_call in tool_calls
+            if isinstance(tool_call, dict)
+        }
+        if names != {_ARTIFACT_TOOL_NAME}:
+            return None
+        if cls._message_visible_text(message).strip():
+            return None
+        return message
+
+    @staticmethod
+    def _is_conversational_turn(request: Any) -> bool:
+        """True when the latest user text is NOT an explicit document command
+        — the same signal ``BuilderCommandMiddleware`` routes on. Direct
+        document commands never reach the model call (that middleware
+        short-circuits them), so this is a defensive re-check; explicit
+        artifact/build requests that DO reach the model answer with
+        ``start_builder_task`` and never enter the prose retry at all."""
+        try:
+            messages = getattr(request, "messages", None) or []
+            user_text = extract_last_message_text(messages) if messages else ""
+            if not user_text:
+                return True
+            return _build_direct_document_task(user_text) is None
+        except Exception:
+            return True
+
+    @staticmethod
+    def _prose_retry_request(request: Any, fallback_model: Any) -> Any:
+        base_prompt = getattr(request, "system_prompt", None)
+        instruction = (
+            f"{base_prompt}\n\n{_PROSE_RETRY_INSTRUCTION}"
+            if base_prompt
+            else _PROSE_RETRY_INSTRUCTION
+        )
+        return request.override(
+            model=fallback_model,
+            tools=[],
+            tool_choice=None,
+            system_message=SystemMessage(content=instruction),
+        )
+
+    @classmethod
+    def _merge_prose_into_response(
+        cls, response: Any, original_message: Any, prose_response: Any
+    ) -> bool:
+        """Merge the prose retry's text with the original emit_artifact tool
+        call(s) into one AIMessage (the shape Anthropic produces). Returns
+        True when the response was updated; False when the retry yielded no
+        usable text (response stays untouched — no synthesized text)."""
+        prose_message = cls._last_ai_message(prose_response)
+        if prose_message is None:
+            return False
+        prose_text = cls._message_visible_text(prose_message).strip()
+        if not prose_text:
+            return False
+        merged = AIMessage(
+            content=prose_text,
+            tool_calls=list(getattr(original_message, "tool_calls", None) or []),
+            id=getattr(original_message, "id", None),
+        )
+        result = getattr(response, "result", None)
+        if isinstance(result, list) and result:
+            result[-1] = merged
+            return True
+        return False
+
+    def _run_prose_retry_sync(self, request: Any, fallback_model: Any, response: Any, original_message: Any, handler: Any, error_class: str) -> str:
+        """Sync prose retry. Returns ``success`` or ``failed``."""
+        try:
+            prose_response = handler(self._prose_retry_request(request, fallback_model))
+        except Exception:
+            self._log_prose_retry(error_class, "failed")
+            return "failed"
+        merged = self._merge_prose_into_response(response, original_message, prose_response)
+        outcome = "success" if merged else "failed"
+        self._log_prose_retry(error_class, outcome)
+        return outcome
+
+    async def _run_prose_retry_async(self, request: Any, fallback_model: Any, response: Any, original_message: Any, handler: Any, error_class: str) -> str:
+        """Async prose retry. Returns ``success`` or ``failed``."""
+        try:
+            prose_response = await handler(self._prose_retry_request(request, fallback_model))
+        except Exception:
+            self._log_prose_retry(error_class, "failed")
+            return "failed"
+        merged = self._merge_prose_into_response(response, original_message, prose_response)
+        outcome = "success" if merged else "failed"
+        self._log_prose_retry(error_class, outcome)
+        return outcome
+
+    @staticmethod
+    def _log_prose_retry(error_class: str, outcome: str) -> None:
+        logger.warning(
+            "[CompanionProviderFallback] tool-free prose retry finished "
+            "provider_error_class=%s "
+            "companionFallbackConversationalTurn=true "
+            "companionFallbackProseRetryAttempted=true "
+            "companionFallbackProseRetryResult=%s "
+            "companionFallbackToolOnlySuppressed=%s "
+            "rawProviderPayloadExcluded=true providerSecretsExcluded=true",
+            error_class,
+            outcome,
+            "true" if outcome == "success" else "false",
+        )
+
+    @staticmethod
+    def _success_response(
+        response: Any,
+        error_class: str,
+        *,
+        conversational_turn: bool = False,
+        prose_retry_attempted: bool = False,
+        prose_retry_result: str = "not_needed",
+    ) -> ExtendedModelResponse:
         is_empty = CompanionProviderFallbackMiddleware._response_is_empty(response)
         fallback_result = "empty_response" if is_empty else "success"
         snapshot = companion_provider_fallback_snapshot(
             error_class=error_class,
             fallback_attempted=True,
             fallback_result=fallback_result,
+            conversational_turn=conversational_turn,
+            tool_only_suppressed=prose_retry_result == "success",
+            prose_retry_attempted=prose_retry_attempted,
+            prose_retry_result=prose_retry_result,
         )
         if is_empty:
             # The fallback call returned cleanly but with nothing the UI can
@@ -218,7 +414,33 @@ class CompanionProviderFallbackMiddleware(AgentMiddleware[CompanionProviderFallb
             except Exception as fallback_exc:
                 self._log_fallback_failed(error_class)
                 raise fallback_exc from primary_exc
-            return self._success_response(response, error_class)
+            conversational_turn = False
+            prose_retry_attempted = False
+            prose_retry_result = "not_needed"
+            artifact_only = self._artifact_only_message(response)
+            if artifact_only is not None and self._is_conversational_turn(request):
+                conversational_turn = True
+                prose_retry_attempted = True
+                logger.warning(
+                    "[CompanionProviderFallback] OpenAI fallback returned an "
+                    "emit_artifact-only message with no visible text on a "
+                    "conversational turn — retrying once without tools for prose "
+                    "provider_error_class=%s "
+                    "companionFallbackConversationalTurn=true "
+                    "companionFallbackProseRetryAttempted=true "
+                    "rawProviderPayloadExcluded=true providerSecretsExcluded=true",
+                    error_class,
+                )
+                prose_retry_result = self._run_prose_retry_sync(
+                    request, fallback_model, response, artifact_only, handler, error_class
+                )
+            return self._success_response(
+                response,
+                error_class,
+                conversational_turn=conversational_turn,
+                prose_retry_attempted=prose_retry_attempted,
+                prose_retry_result=prose_retry_result,
+            )
 
     async def awrap_model_call(self, request, handler):  # type: ignore[override]
         try:
@@ -240,4 +462,30 @@ class CompanionProviderFallbackMiddleware(AgentMiddleware[CompanionProviderFallb
             except Exception as fallback_exc:
                 self._log_fallback_failed(error_class)
                 raise fallback_exc from primary_exc
-            return self._success_response(response, error_class)
+            conversational_turn = False
+            prose_retry_attempted = False
+            prose_retry_result = "not_needed"
+            artifact_only = self._artifact_only_message(response)
+            if artifact_only is not None and self._is_conversational_turn(request):
+                conversational_turn = True
+                prose_retry_attempted = True
+                logger.warning(
+                    "[CompanionProviderFallback] OpenAI fallback returned an "
+                    "emit_artifact-only message with no visible text on a "
+                    "conversational turn — retrying once without tools for prose "
+                    "provider_error_class=%s "
+                    "companionFallbackConversationalTurn=true "
+                    "companionFallbackProseRetryAttempted=true "
+                    "rawProviderPayloadExcluded=true providerSecretsExcluded=true",
+                    error_class,
+                )
+                prose_retry_result = await self._run_prose_retry_async(
+                    request, fallback_model, response, artifact_only, handler, error_class
+                )
+            return self._success_response(
+                response,
+                error_class,
+                conversational_turn=conversational_turn,
+                prose_retry_attempted=prose_retry_attempted,
+                prose_retry_result=prose_retry_result,
+            )
