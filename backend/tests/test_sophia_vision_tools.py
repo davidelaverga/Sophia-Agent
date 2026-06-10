@@ -572,3 +572,146 @@ async def test_read_user_document_rejects_control_and_unsafe_names(
         f"unsafe document name {evil_name!r} must be rejected by the allow-list "
         f"before Path construction (no ValueError leak)"
     )
+
+
+# ─── read_user_document: offset paging (replaces the hard 64KB truncation) ────
+
+
+def _rud_fake_paths(rud_mod, uploads: Path, outputs: Path):
+    return SimpleNamespace(
+        sandbox_uploads_dir=lambda _tid: uploads,
+        sandbox_outputs_dir=lambda _tid: outputs,
+    )
+
+
+@pytest.mark.anyio
+async def test_read_user_document_offset_pages_through_large_file(tmp_path: Path, monkeypatch) -> None:
+    """A document larger than the per-read cap is NOT truncated away: the
+    footer reports the next byte offset and the model pages through it."""
+    from deerflow.sophia.tools import read_user_document as rud_mod
+
+    cap = rud_mod._MAX_BYTES_RETURNED
+    total = cap * 2 + 2000  # three pages: [0,cap), [cap,2cap), [2cap,total)
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    (uploads / "big.md").write_text("A" * total, encoding="utf-8")
+    monkeypatch.setattr(rud_mod, "get_paths", lambda: _rud_fake_paths(rud_mod, uploads, tmp_path / "outputs"))
+    runtime = _make_runtime("t1", {})
+
+    # Page 1 (offset 0): exactly cap bytes of content + a "continue" footer.
+    page1 = _content(
+        await rud_mod.read_user_document.coroutine(
+            runtime=runtime, document_filename="big.md", tool_call_id="tc-1", offset=0
+        )
+    )
+    assert page1.count("A") == cap
+    assert f"of {total}" in page1
+    assert f"offset={cap}" in page1
+
+    # Page 2 (offset cap): next cap bytes + a footer pointing past it.
+    page2 = _content(
+        await rud_mod.read_user_document.coroutine(
+            runtime=runtime, document_filename="big.md", tool_call_id="tc-2", offset=cap
+        )
+    )
+    assert page2.count("A") == cap
+    assert f"offset={cap * 2}" in page2
+
+    # Final page (offset 2*cap): the 2000-byte tail + an end-of-document note.
+    page3 = _content(
+        await rud_mod.read_user_document.coroutine(
+            runtime=runtime, document_filename="big.md", tool_call_id="tc-3", offset=cap * 2
+        )
+    )
+    assert page3.count("A") == 2000
+    assert "End of document" in page3
+    assert "offset=" not in page3  # nothing more to fetch
+
+
+@pytest.mark.anyio
+async def test_read_user_document_offset_past_end_returns_clean_message(tmp_path: Path, monkeypatch) -> None:
+    """An offset at/past EOF returns a clean 'no more content' note, no crash."""
+    from deerflow.sophia.tools import read_user_document as rud_mod
+
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    (uploads / "small.md").write_text("only a little text", encoding="utf-8")
+    monkeypatch.setattr(rud_mod, "get_paths", lambda: _rud_fake_paths(rud_mod, uploads, tmp_path / "outputs"))
+    runtime = _make_runtime("t1", {})
+
+    body = _content(
+        await rud_mod.read_user_document.coroutine(
+            runtime=runtime, document_filename="small.md", tool_call_id="tc-1", offset=1_000_000
+        )
+    )
+    assert "no more content" in body.lower()
+
+
+@pytest.mark.anyio
+async def test_read_user_document_default_offset_unchanged_for_small_file(tmp_path: Path, monkeypatch) -> None:
+    """Back-compat lock: a doc that fits in one read returns the text
+    verbatim with NO paging footer when offset is omitted (default 0)."""
+    from deerflow.sophia.tools import read_user_document as rud_mod
+
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    (uploads / "notes.md").write_text("# Hello\n\nthis is a doc.", encoding="utf-8")
+    monkeypatch.setattr(rud_mod, "get_paths", lambda: _rud_fake_paths(rud_mod, uploads, tmp_path / "outputs"))
+    runtime = _make_runtime("t1", {})
+
+    body = _content(
+        await rud_mod.read_user_document.coroutine(
+            runtime=runtime, document_filename="notes.md", tool_call_id="tc-1"
+        )
+    )
+    assert body == "# Hello\n\nthis is a doc."  # exact — no footer appended
+
+
+@pytest.mark.anyio
+async def test_read_user_document_offset_multibyte_boundary(tmp_path: Path, monkeypatch) -> None:
+    """A multibyte UTF-8 char split across a page boundary decodes without
+    raising (errors='ignore' tolerates the partial byte at either seam)."""
+    from deerflow.sophia.tools import read_user_document as rud_mod
+
+    cap = rud_mod._MAX_BYTES_RETURNED
+    # 'é' is 2 bytes; place it straddling the cap boundary, then ASCII tail.
+    text = "a" * (cap - 1) + "é" + "b" * 100
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    (uploads / "uni.md").write_text(text, encoding="utf-8")
+    monkeypatch.setattr(rud_mod, "get_paths", lambda: _rud_fake_paths(rud_mod, uploads, tmp_path / "outputs"))
+    runtime = _make_runtime("t1", {})
+
+    # Page 1 ends mid-'é' — must not raise.
+    page1 = _content(
+        await rud_mod.read_user_document.coroutine(
+            runtime=runtime, document_filename="uni.md", tool_call_id="tc-1", offset=0
+        )
+    )
+    assert "a" in page1
+    # Page 2 begins mid-'é' — the partial leading byte is dropped, tail intact.
+    page2 = _content(
+        await rud_mod.read_user_document.coroutine(
+            runtime=runtime, document_filename="uni.md", tool_call_id="tc-2", offset=cap
+        )
+    )
+    assert "b" in page2
+
+
+@pytest.mark.anyio
+async def test_read_user_document_invalid_offset_returns_clean_error(tmp_path: Path, monkeypatch) -> None:
+    """A non-integer offset yields a clean tool error, never an exception."""
+    from deerflow.sophia.tools import read_user_document as rud_mod
+
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    (uploads / "notes.md").write_text("text", encoding="utf-8")
+    monkeypatch.setattr(rud_mod, "get_paths", lambda: _rud_fake_paths(rud_mod, uploads, tmp_path / "outputs"))
+    runtime = _make_runtime("t1", {})
+
+    body = _content(
+        await rud_mod.read_user_document.coroutine(
+            runtime=runtime, document_filename="notes.md", tool_call_id="tc-1", offset="abc"
+        )
+    )
+    assert "offset must be an integer" in body.lower()

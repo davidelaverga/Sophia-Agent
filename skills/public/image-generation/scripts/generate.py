@@ -48,6 +48,30 @@ _DEFAULT_SIZE = "1536x1024"
 _MODEL = "gpt-image-2"
 
 
+def _fail(reason: str, message: str, *, exit_code: int = 1) -> None:
+    """Emit one machine-readable failure line plus a short safe message."""
+    print(f"IMAGEGEN_FAIL reason={reason}", file=sys.stderr)
+    print(message, file=sys.stderr)
+    sys.exit(exit_code)
+
+
+def _classify_exception(exc: BaseException) -> str:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if "organization" in text and ("verified" in text or "verify" in text):
+        return "org_not_verified"
+    if any(token in text for token in ("invalid api key", "incorrect api key", "401", "unauthorized", "authentication")):
+        return "auth_invalid"
+    if any(token in text for token in ("content policy", "content_policy", "safety", "blocked", "moderation")):
+        return "content_blocked"
+    if any(token in text for token in ("timeout", "timed out", "readtimeout")):
+        return "timeout"
+    if any(token in text for token in ("connection", "connecterror", "network", "proxy", "name resolution", "dns")):
+        return "egress_blocked"
+    if "size" in text and any(token in text for token in ("invalid", "unsupported", "not one of")):
+        return "invalid_size"
+    return "api_error"
+
+
 def _resolve_size(aspect_ratio: str) -> str:
     return _ASPECT_TO_SIZE.get((aspect_ratio or "").strip(), _DEFAULT_SIZE)
 
@@ -114,14 +138,12 @@ def generate_image(
     if not api_key:
         # See module docstring — silent failure here was the root cause of
         # the 21-minute .pptx loop documented in COMPOUND_LOG.md.
-        print("OPENAI_API_KEY is not set", file=sys.stderr)
-        sys.exit(2)
+        _fail("missing_api_key", "OPENAI_API_KEY is not set", exit_code=2)
 
     try:
         from openai import OpenAI  # transitive dep via langchain-openai
     except ImportError as e:  # pragma: no cover - sandbox should always have this
-        print(f"openai SDK is not available in the sandbox: {e}", file=sys.stderr)
-        sys.exit(2)
+        _fail("api_error", f"openai SDK is not available in the sandbox: {type(e).__name__}", exit_code=2)
 
     with open(prompt_file, encoding="utf-8") as f:
         prompt = f.read()
@@ -153,17 +175,21 @@ def generate_image(
                 size=size,
             )
     except Exception as e:
-        print(f"OpenAI image generation failed: {type(e).__name__}: {e}", file=sys.stderr)
-        sys.exit(1)
+        _fail(
+            _classify_exception(e),
+            f"OpenAI image generation failed: {type(e).__name__}",
+        )
 
-    payload = _extract_b64(response)
+    try:
+        payload = _extract_b64(response)
+    except Exception as e:
+        _fail("empty_output", f"OpenAI image response did not include usable image bytes: {type(e).__name__}")
     _decode_to_file(payload, output_file)
 
     if not Path(output_file).exists() or Path(output_file).stat().st_size == 0:
-        print(f"OpenAI image generation succeeded but no bytes landed at {output_file}", file=sys.stderr)
-        sys.exit(1)
+        _fail("empty_output", "OpenAI image generation succeeded but no bytes landed on disk")
 
-    return f"Successfully generated image to {output_file}"
+    return f"IMAGEGEN_OK model={_MODEL} output_file={output_file}"
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:

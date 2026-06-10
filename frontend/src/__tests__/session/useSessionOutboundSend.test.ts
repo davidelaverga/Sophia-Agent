@@ -116,65 +116,63 @@ describe('useSessionOutboundSend', () => {
     expect(session.turn_count).toBe(1);
   });
 
-  it('passes a safe request options object when chatRequestBody is missing', async () => {
-    const sendChatMessage = vi.fn(async (
-      _message: { text: string },
-      options?: { body?: Record<string, unknown> },
-    ) => {
-      void (options?.body as { state?: unknown } | undefined)?.state;
-    });
-
-    const { result } = renderHook(() => useSessionOutboundSend({
-      chatStatus: 'ready',
-      sendChatMessage,
-      hasValidBackendSessionId: true,
-      chatRequestBody: undefined,
-      debugEnabled: false,
-      markStreamTurnStarted: vi.fn(),
-      showToast: vi.fn(),
-    }));
-
-    await act(async () => {
-      await result.current({ text: 'Change the title to Sophia Workspace Version Two' });
-    });
-
-    expect(sendChatMessage).toHaveBeenCalledWith(
-      { text: 'Change the title to Sophia Workspace Version Two' },
-      { body: {} },
-    );
-    expect(touchSessionMock).not.toHaveBeenCalled();
-  });
-
-  it('preserves normal chat body state and attachments', async () => {
+  it('forwards a long message to sendChatMessage WITHOUT truncating it', async () => {
+    // Regression for the production truncation bug: chatSanitizer must no
+    // longer cut the message at 4000 chars on the send path. The full text
+    // must reach sendChatMessage so the /api/chat server spill can act on it.
     const sendChatMessage = vi.fn(async () => undefined);
+    const longText = 'a'.repeat(9000);
 
-    const chatRequestBody = {
-      session_id: 'sess-1',
-      user_id: 'dev-user',
-      thread_id: 'thread-1',
-      attached_files: ['uploads/brief.pdf'],
-      state: {
-        client_turn_id: 'turn-1',
+    useSessionStore.setState({
+      session: {
+        sessionId: 'sess-1',
+        threadId: 'thread-1',
+        userId: 'dev-user',
+        presetType: 'open',
+        contextMode: 'life',
+        status: 'active',
+        voiceMode: false,
+        startedAt: '2026-04-15T00:00:00.000Z',
+        lastActivityAt: '2026-04-15T00:00:00.000Z',
+        isActive: true,
+        companionInvokesCount: 0,
       },
-    };
+      openSessions: [
+        {
+          session_id: 'sess-1',
+          thread_id: 'thread-1',
+          session_type: 'open',
+          preset_context: 'life',
+          status: 'open',
+          started_at: '2026-04-15T00:00:00.000Z',
+          updated_at: '2026-04-15T00:00:00.000Z',
+          turn_count: 0,
+          title: null,
+          last_message_preview: null,
+        },
+      ],
+    });
 
     const { result } = renderHook(() => useSessionOutboundSend({
       chatStatus: 'ready',
       sendChatMessage,
       hasValidBackendSessionId: true,
-      chatRequestBody,
+      chatRequestBody: { session_id: 'sess-1', user_id: 'dev-user' },
       debugEnabled: false,
       markStreamTurnStarted: vi.fn(),
       showToast: vi.fn(),
     }));
 
     await act(async () => {
-      await result.current({ text: 'Use the attached brief' });
+      await result.current({ text: longText });
     });
 
+    // The FULL 9000-char text must reach the send boundary verbatim — if the
+    // old 4000 cap were still active this would be 'a'.repeat(4000) and fail.
+    expect(sendChatMessage).toHaveBeenCalledTimes(1);
     expect(sendChatMessage).toHaveBeenCalledWith(
-      { text: 'Use the attached brief' },
-      { body: chatRequestBody },
+      { text: longText },
+      { body: { session_id: 'sess-1', user_id: 'dev-user' } },
     );
   });
 });

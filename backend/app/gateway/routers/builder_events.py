@@ -44,9 +44,10 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "requested_artifact_ext",
     "artifact_is_fallback",
     "fallback_reason",
+    "image_generation_status",
+    "image_generation_reason",
     "error_message",
     "trace_id",
-    "builder_failure_diagnostics",
 )
 
 
@@ -76,12 +77,13 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "artifact_ext",
         "artifact_is_fallback",
         "fallback_reason",
+        "image_generation_status",
+        "image_generation_reason",
         "source_artifact_path",
         "revision_of_artifact_path",
         "summary",
         "user_next_action",
         "error_message",
-        "builder_failure_diagnostics",
         "completed_at",
         "source",
     )
@@ -128,6 +130,50 @@ def _terminal_identity(payload: dict[str, Any]) -> tuple[str, str] | None:
     if not isinstance(task_id, str) or not task_id:
         return None
     return parent_thread_id, task_id
+
+
+async def _resolve_existing_builder_run_id(parent_thread_id: str, task_id: str) -> str | None:
+    try:
+        from langgraph_sdk import get_client
+
+        client = get_client(url=_langgraph_url())
+        state = await client.threads.get_state(parent_thread_id)
+    except Exception:
+        logger.warning(
+            "Builder terminal run_id lookup failed parent_thread_id=%s task_id=%s",
+            str(parent_thread_id)[:12],
+            str(task_id)[:12],
+            exc_info=True,
+        )
+        return None
+    values = state.get("values", {}) if isinstance(state, dict) else {}
+    tasks = values.get("async_tasks", {}) if isinstance(values, dict) else {}
+    if not isinstance(tasks, dict):
+        return None
+    task = tasks.get(task_id)
+    if not isinstance(task, dict):
+        return None
+    run_id = task.get("run_id")
+    return run_id if isinstance(run_id, str) and run_id else None
+
+
+async def _hydrate_missing_run_id(payload: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(payload.get("run_id"), str) and payload["run_id"]:
+        return payload
+    identity = _terminal_identity(payload)
+    if identity is None:
+        return payload
+    parent_thread_id, task_id = identity
+    run_id = await _resolve_existing_builder_run_id(parent_thread_id, task_id)
+    if run_id is None:
+        return payload
+    logger.info(
+        "Builder terminal payload hydrated missing run_id from parent async task parent_thread_id=%s task_id=%s run_id=%s",
+        str(parent_thread_id)[:12],
+        str(task_id)[:12],
+        str(run_id)[:12],
+    )
+    return {**payload, "run_id": run_id}
 
 
 def _should_persist_last_builder_artifact(payload: dict[str, Any]) -> bool:
@@ -202,6 +248,8 @@ class BuilderCompletionEvent(BaseModel):
     artifact_ext: str | None = None
     artifact_is_fallback: bool | None = None
     fallback_reason: str | None = None
+    image_generation_status: str | None = None
+    image_generation_reason: str | None = None
     source_artifact_path: str | None = None
     revision_of_artifact_path: str | None = None
     summary: str | None = None
@@ -269,7 +317,7 @@ async def receive_builder_event(event: BuilderCompletionEvent, request: Request)
     publishes it onto the channel ``MessageBus`` so Telegram/Slack/Feishu
     adapters can deliver a card to the originating chat.
     """
-    payload = event.model_dump()
+    payload = await _hydrate_missing_run_id(event.model_dump())
     await _persist_builder_terminal_state(payload)
     worker = get_builder_events_worker(request.app)
     delivered = await worker.publish(payload)

@@ -2376,6 +2376,39 @@ class TestBuilderTaskMiddleware:
             "skills_inventory: 4 skills injected" in rec.message for rec in caplog.records
         )
 
+    def test_skills_inventory_block_can_omit_image_generation(
+        self, monkeypatch
+    ):
+        from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+
+        class _FakeSkill:
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.description = f"{name} description"
+                self.enabled = False
+
+            def get_container_file_path(self, base: str) -> str:
+                return f"{base}/{self.name}/SKILL.md"
+
+        fake_skills = [
+            _FakeSkill("ppt-generation"),
+            _FakeSkill("image-generation"),
+            _FakeSkill("data-analysis"),
+        ]
+
+        import deerflow.skills as skills_module
+
+        monkeypatch.setattr(skills_module, "load_skills", lambda **_: list(fake_skills))
+
+        block = BuilderTaskMiddleware._build_skills_inventory_block(
+            include_image_generation=False,
+        )
+
+        assert block is not None
+        assert "ppt-generation" in block
+        assert "data-analysis" in block
+        assert "image-generation" not in block
+
     def test_completion_instruction_mandates_emit_only_on_final_turn(self):
         """Belt-and-suspenders for the ``present_files`` removal. Even though
         the tool is gone from the builder's toolbox, the prompt should also
@@ -3008,6 +3041,37 @@ class TestBuilderArtifactMiddleware:
         choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
         assert choice == {"type": "tool", "name": "render_markdown_to_pdf"}
 
+    def test_force_choice_visual_pdf_target_renders_markdown_source_before_html_fallback(self, tmp_path):
+        """Visual PDF requests may prefer HTML fallback, but Markdown source still renders first."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "visuals").mkdir()
+        (outputs_dir / "visuals" / "chart.svg").write_text("<svg></svg>")
+        (outputs_dir / "report.md").write_text("# Visual report\n\n![Chart](visuals/chart.svg)")
+
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+            "builder_non_artifact_turns": 27,
+            "delegation_context": {
+                "task": "Build a PDF report with charts and diagrams",
+            },
+            "builder_tool_turn_summaries": [
+                {"tool_names": ["builder_web_search"]},
+                {"tool_names": ["builder_web_fetch"]},
+            ],
+            "builder_web_budget": {"search_calls": 1, "fetch_calls": 1},
+            "builder_visual_diagnostics": {
+                "visual_design_skill_read": True,
+                "visual_asset_success_count": 1,
+                "visual_asset_paths": ["/mnt/user-data/outputs/visuals/chart.svg"],
+            },
+        }
+        choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
+        assert choice == {"type": "tool", "name": "render_markdown_to_pdf"}
+
     def test_force_choice_pdf_target_allows_fallback_after_render_attempt(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
@@ -3153,13 +3217,16 @@ class TestBuilderArtifactMiddleware:
         assert recovered is not None
         assert recovered["artifact_path"] == "/mnt/user-data/outputs/report.pdf"
 
-    @pytest.mark.parametrize("fallback_name", ["report.html", "report.md"])
+    @pytest.mark.parametrize("fallback_name", ["report.html", "fallback.md"])
     def test_successful_pdf_render_overrides_existing_fallback_emit(self, tmp_path, fallback_name):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
+        (outputs_dir / "visuals").mkdir()
         (outputs_dir / "report.pdf").write_bytes(b"%PDF-1.4 fake")
+        (outputs_dir / "visuals" / "chart.svg").write_text("<svg></svg>")
+        (outputs_dir / "report.md").write_text("# Report\n\n![Chart](visuals/chart.svg)")
         if fallback_name.endswith(".html"):
             (outputs_dir / fallback_name).write_text("<!doctype html><html><body>Fallback</body></html>")
         else:
@@ -3175,6 +3242,11 @@ class TestBuilderArtifactMiddleware:
                 {"tool_names": ["render_markdown_to_pdf"]},
             ],
             "builder_web_budget": {"search_calls": 1, "fetch_calls": 1},
+            "builder_visual_diagnostics": {
+                "visual_design_skill_read": True,
+                "visual_asset_success_count": 1,
+                "visual_asset_paths": ["/mnt/user-data/outputs/visuals/chart.svg"],
+            },
             "builder_pdf_render_result": {
                 "success": True,
                 "pdf_path": "/mnt/user-data/outputs/report.pdf",
@@ -3212,7 +3284,10 @@ class TestBuilderArtifactMiddleware:
 
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
+        (outputs_dir / "visuals").mkdir()
         (outputs_dir / "report.pdf").write_bytes(b"%PDF-1.4 fake")
+        (outputs_dir / "visuals" / "chart.svg").write_text("<svg></svg>")
+        (outputs_dir / "report.md").write_text("# Report\n\n![Chart](visuals/chart.svg)")
         (outputs_dir / "report.html").write_text("<!doctype html><html><body>Fallback</body></html>")
         state = {
             "thread_data": {"outputs_path": str(outputs_dir)},
@@ -3224,6 +3299,11 @@ class TestBuilderArtifactMiddleware:
                 {"tool_names": ["render_markdown_to_pdf"]},
             ],
             "builder_web_budget": {"search_calls": 1, "fetch_calls": 1},
+            "builder_visual_diagnostics": {
+                "visual_design_skill_read": True,
+                "visual_asset_success_count": 1,
+                "visual_asset_paths": ["/mnt/user-data/outputs/visuals/chart.svg"],
+            },
             "builder_pdf_render_result": {
                 "success": True,
                 "pdf_path": "/mnt/user-data/outputs/report.pdf",
@@ -3426,6 +3506,9 @@ class TestBuilderArtifactMiddleware:
             {
                 "thread_data": {"outputs_path": str(outputs_dir)},
                 "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+                "builder_tool_turn_summaries": [
+                    {"tool_names": ["render_markdown_to_pdf"]},
+                ],
             },
             steps_completed=30,
             reason="test",
@@ -3441,12 +3524,18 @@ class TestBuilderArtifactMiddleware:
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
         (outputs_dir / "report.md").write_text("# Report")
-        (outputs_dir / "report.html").write_text("<!doctype html><h1>Report</h1>")
+        (outputs_dir / "report.html").write_text(
+            "<!doctype html><html><head><title>Report</title></head>"
+            "<body><main><h1>Report</h1><p>Visual fallback content.</p></main></body></html>"
+        )
 
         result = BuilderArtifactMiddleware._build_ceiling_fallback(
             {
                 "thread_data": {"outputs_path": str(outputs_dir)},
                 "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+                "builder_tool_turn_summaries": [
+                    {"tool_names": ["render_markdown_to_pdf"]},
+                ],
                 "delegation_context": {
                     "task": "Build a PDF report with charts and diagrams",
                 },
@@ -3458,6 +3547,27 @@ class TestBuilderArtifactMiddleware:
         assert result["artifact_path"] == "/mnt/user-data/outputs/report.html"
         assert result["artifact_type"] == "html"
         assert result["confidence"] == 0.5
+
+    def test_hard_ceiling_pdf_source_without_render_attempt_fails_truthfully(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.md").write_text("# Report")
+
+        result = BuilderArtifactMiddleware._build_ceiling_fallback(
+            {
+                "thread_data": {"outputs_path": str(outputs_dir)},
+                "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+            },
+            steps_completed=30,
+            reason="test",
+        )
+
+        assert result["artifact_path"] is None
+        assert result["artifact_type"] == "pdf"
+        assert result["fallback_reason"] == "pdf_render_tool_not_attempted"
+        assert result["confidence"] == 0.2
 
     def test_hard_ceiling_pdf_target_refuses_generator_only_success(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -3692,7 +3802,10 @@ class TestBuilderArtifactMiddleware:
 
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
-        (outputs_dir / "report.html").write_text("<h1>Visual report</h1>")
+        (outputs_dir / "report.html").write_text(
+            "<!doctype html><html><body><h1>Visual report</h1>"
+            "<svg viewBox='0 0 120 60'><rect width='80' height='40'/></svg></body></html>"
+        )
         runtime = _make_runtime(thread_id="thread-x")
         state = {
             "thread_data": {"outputs_path": str(outputs_dir)},
@@ -3723,6 +3836,11 @@ class TestBuilderArtifactMiddleware:
         state = {
             "thread_data": {"outputs_path": str(outputs_dir)},
             "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            "builder_pptx_diagnostics": {
+                "pptx_generator_attempt_count": 1,
+                "pptx_generator_success_count": 0,
+                "pptx_generator_error_class": "pptx_generation_error",
+            },
         }
         args = {"artifact_path": "/mnt/user-data/outputs/deck.pptx"}
 
@@ -3770,6 +3888,11 @@ class TestBuilderArtifactMiddleware:
         state = {
             "thread_data": {"outputs_path": str(outputs_dir)},
             "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            "builder_pptx_diagnostics": {
+                "pptx_generator_attempt_count": 1,
+                "pptx_generator_success_count": 0,
+                "pptx_generator_error_class": "pptx_generation_error",
+            },
         }
         args = {"artifact_path": "/mnt/user-data/outputs/deck.md"}
 
@@ -3787,13 +3910,19 @@ class TestBuilderArtifactMiddleware:
         (outputs_dir / "deck.html").write_text(
             "<!doctype html><html><head><title>Deck fallback</title><style>body{font-family:sans-serif}</style></head>"
             "<body><main><h1>Deck fallback</h1><p>Complete browser-renderable slide content.</p>"
-            "<p>Charts and diagrams are summarized in the page layout.</p></main></body></html>"
+            "<svg viewBox='0 0 120 60'><rect width='80' height='40'/></svg>"
+            "<p>Charts and diagrams are represented inline in the page layout.</p></main></body></html>"
         )
         runtime = _make_runtime(thread_id="thread-x")
         state = {
             "thread_data": {"outputs_path": str(outputs_dir)},
             "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
             "delegation_context": {"task": "Build a slide deck with charts and diagrams"},
+            "builder_pptx_diagnostics": {
+                "pptx_generator_attempt_count": 1,
+                "pptx_generator_success_count": 0,
+                "pptx_generator_error_class": "pptx_generation_error",
+            },
         }
         args = {"artifact_path": "/mnt/user-data/outputs/deck.html"}
 
@@ -3803,6 +3932,61 @@ class TestBuilderArtifactMiddleware:
         assert args["artifact_ext"] == "html"
         assert args["artifact_is_fallback"] is True
         assert args["fallback_reason"] == "pptx_generation_not_completed"
+
+    def test_pptx_artifact_files_exist_rejects_fallback_before_generator_attempt(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "deck.md").write_text("# Deck outline")
+        runtime = _make_runtime(thread_id="thread-x")
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        }
+        args = {"artifact_path": "/mnt/user-data/outputs/deck.md"}
+
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
+
+    def test_pptx_artifact_files_exist_rejects_fallback_after_single_invalid_plan_attempt(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "deck.md").write_text("# Deck fallback after invalid plan")
+        runtime = _make_runtime(thread_id="thread-x")
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            "builder_pptx_diagnostics": {
+                "pptx_generator_attempt_count": 1,
+                "pptx_generator_success_count": 0,
+                "pptx_generator_error_class": "invalid_plan_json",
+            },
+        }
+        args = {"artifact_path": "/mnt/user-data/outputs/deck.md"}
+
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
+
+    def test_pptx_artifact_files_exist_accepts_fallback_after_plan_retry(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "deck.md").write_text("# Deck fallback after plan retry")
+        runtime = _make_runtime(thread_id="thread-x")
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            "builder_pptx_diagnostics": {
+                "pptx_generator_attempt_count": 2,
+                "pptx_generator_success_count": 0,
+                "pptx_generator_error_class": "invalid_plan_json",
+            },
+        }
+        args = {"artifact_path": "/mnt/user-data/outputs/deck.md"}
+
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
 
     def test_pptx_artifact_files_exist_rejects_invalid_html_fallback(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -4528,7 +4712,7 @@ class TestBuilderArtifactMiddleware:
         assert result is not None
         assert result["builder_consecutive_empty_emit_rejections"] == 0
 
-    def test_consecutive_rejection_counter_resets_on_typo_path_rejection(self, tmp_path):
+    def test_consecutive_rejection_counter_resets_empty_streak_on_typo_path_rejection(self, tmp_path):
         """A non-empty but invalid artifact_path (typo / hallucinated path)
         is NOT a None-emit signal — the model gave a real attempt. Reset
         the consecutive-empty streak so the model gets a normal retry via
@@ -4572,7 +4756,52 @@ class TestBuilderArtifactMiddleware:
         assert result is not None
         # Streak resets — typo path is not an empty-path emit.
         assert result["builder_consecutive_empty_emit_rejections"] == 0
+        assert result["builder_consecutive_missing_emit_path_rejections"] == 1
         assert result.get("jump_to") != "end"
+
+    def test_repeated_same_missing_emit_path_short_circuits_to_fallback(self, monkeypatch, tmp_path):
+        """A hallucinated non-empty artifact path should not loop forever."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
+            BuilderArtifactMiddleware,
+        )
+        from deerflow.sophia.storage import supabase_artifact_store
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+
+        monkeypatch.setattr(
+            supabase_artifact_store,
+            "check_artifact_exists",
+            lambda _tid, _fname: False,
+        )
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{
+            "name": "emit_builder_artifact",
+            "args": {
+                "artifact_path": "/mnt/user-data/outputs/missing.pdf",
+                "artifact_type": "document",
+                "artifact_title": "Missing",
+                "confidence": 0.5,
+            },
+        }]
+        runtime = _make_runtime(thread_id="test-thread")
+
+        state = {
+            "messages": [msg],
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_non_artifact_turns": 27,
+            "builder_consecutive_missing_emit_path_rejections": 1,
+            "builder_last_missing_emit_path": "/mnt/user-data/outputs/missing.pdf",
+        }
+        result = mw.after_model(state, runtime)
+
+        assert result is not None
+        assert result.get("jump_to") == "end"
+        assert result["builder_result"]["artifact_path"] is None
+        assert result["builder_consecutive_missing_emit_path_rejections"] == 0
 
     def test_endgame_lists_output_files_when_critical(self, tmp_path):
         """PR #94: when the endgame escalates to CRITICAL (turn-count or

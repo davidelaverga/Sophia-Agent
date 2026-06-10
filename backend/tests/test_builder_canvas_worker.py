@@ -259,6 +259,28 @@ async def test_completion_without_run_id_does_not_close_different_active_task() 
 
 
 @pytest.mark.anyio
+async def test_completion_without_run_id_is_retained_when_no_run_is_known() -> None:
+    worker = BuilderCanvasWorker()
+
+    delivered = await worker.publish_completion(
+        {
+            "thread_id": "parent-1",
+            "task_id": "task-legacy",
+            "status": "success",
+            "artifact_path": "mnt/user-data/outputs/legacy.md",
+        }
+    )
+
+    events = await worker.recent_events("parent-1")
+    assert delivered == 0
+    assert len(events) == 1
+    assert events[0]["kind"] == "terminal"
+    assert events[0]["task_id"] == "task-legacy"
+    assert events[0]["run_id"] == "__runless_completion__"
+    assert events[0]["completion"]["run_id"] == "__runless_completion__"
+
+
+@pytest.mark.anyio
 async def test_completion_without_run_id_uses_unambiguous_retained_task_run() -> None:
     worker = BuilderCanvasWorker()
     await worker.publish_progress(
@@ -351,7 +373,7 @@ async def test_completion_without_run_id_drops_ambiguous_retained_task_runs() ->
 
 
 @pytest.mark.anyio
-async def test_done_phase_is_projected_to_browser_activity() -> None:
+async def test_done_phase_is_projected_as_non_terminal_packaging_activity() -> None:
     worker = BuilderCanvasWorker()
     await worker.publish_progress(
         {
@@ -368,8 +390,8 @@ async def test_done_phase_is_projected_to_browser_activity() -> None:
         "kind": "phase",
         "phase": "done",
         "category": "finalize",
-        "action": "success",
-        "label": "Success",
+        "action": "packaging_artifact",
+        "label": "Packaging artifact",
     }
 
 

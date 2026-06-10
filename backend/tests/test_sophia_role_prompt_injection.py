@@ -32,6 +32,7 @@ class TestSophiaRolePromptFiles:
             "builder_workflows/pdf.md",
             "builder_workflows/html.md",
             "builder_workflows/research.md",
+            "builder_workflows/visuals.md",
         ]:
             path = SOPHIA_PROMPT_ROOT / name
             assert path.is_file(), f"missing: {path}"

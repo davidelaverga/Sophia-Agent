@@ -91,7 +91,28 @@ class HtmlQuickPatchResponse(BaseModel):
 
 def _is_builder_internal(name: str) -> bool:
     # Builder generator/helper scripts are byproducts, not deliverables.
-    return name.startswith("_") and name.endswith(".py")
+    lowered = name.lower()
+    return (
+        name.startswith("_") and lowered.endswith(".py")
+        or lowered.startswith("test_") and lowered.endswith((".py", ".sh"))
+    )
+
+
+def _is_builder_support_artifact_path(relative_path: str) -> bool:
+    """Return True for builder support assets that should not be primary cards."""
+    normalized = relative_path.strip().lstrip("/").replace("\\", "/")
+    if not normalized:
+        return False
+    parts = [part for part in normalized.split("/") if part]
+    if not parts:
+        return False
+    if parts[0] in {"visuals", "sources", "source_artifact", ".builder"}:
+        return True
+    name = parts[-1].lower()
+    return (
+        _is_builder_internal(parts[-1])
+        or name.endswith((".source.md", ".source.html", ".plan.json", ".manifest.json"))
+    )
 
 
 def _is_office_download(filename: str | Path) -> bool:
@@ -100,6 +121,22 @@ def _is_office_download(filename: str | Path) -> bool:
 
 def _short_id(value: str | None) -> str | None:
     return value[:12] if value else None
+
+
+def _path_modified_timestamp(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _iso_timestamp_value(value: str | None) -> float:
+    if not value:
+        return 0.0
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
 
 
 def _require_thread_owner(authenticated_user_id: str | None, thread_id: str) -> None:
@@ -378,6 +415,8 @@ async def _resolve_artifact_path_for_request(thread_id: str, path: str) -> Artif
     checked_task_thread_ids: tuple[str, ...] = ()
     if relative_output_path is not None:
         checked_task_thread_ids = await _builder_task_thread_ids_to_check(thread_id)
+        best_resolution: ArtifactPathResolution | None = None
+        best_modified_at = 0.0
         for task_thread_id in checked_task_thread_ids:
             try:
                 task_path = _resolve_artifact_path(task_thread_id, path)
@@ -390,7 +429,11 @@ async def _resolve_artifact_path_for_request(thread_id: str, path: str) -> Artif
                 )
                 continue
             if task_path.exists():
-                resolution = ArtifactPathResolution(
+                modified_at = _path_modified_timestamp(task_path)
+                if best_resolution is not None and modified_at <= best_modified_at:
+                    continue
+                best_modified_at = modified_at
+                best_resolution = ArtifactPathResolution(
                     actual_path=task_path,
                     requested_thread_id=thread_id,
                     requested_path=path,
@@ -399,8 +442,9 @@ async def _resolve_artifact_path_for_request(thread_id: str, path: str) -> Artif
                     resolved_task_thread_id=task_thread_id,
                     checked_builder_task_thread_ids=checked_task_thread_ids,
                 )
-                _log_artifact_resolution(resolution, artifact_exists=True)
-                return resolution
+        if best_resolution is not None:
+            _log_artifact_resolution(best_resolution, artifact_exists=True)
+            return best_resolution
 
     resolution = ArtifactPathResolution(
         actual_path=parent_path,
@@ -456,18 +500,26 @@ def _artifact_not_found_detail(thread_id: str, path: str, resolution: ArtifactPa
 def _add_output_artifacts_from_dir(
     artifacts_by_path: dict[str, ThreadArtifactListItem],
     outputs_path: Path,
+    *,
+    replace_existing_with_newer: bool = False,
 ) -> int:
     files_with_stat = [
-        (candidate, candidate.stat())
+        (candidate, candidate.stat(), candidate.relative_to(outputs_path).as_posix())
         for candidate in outputs_path.rglob("*")
-        if candidate.is_file() and not _is_builder_internal(candidate.name)
+        if (
+            candidate.is_file()
+            and not _is_builder_support_artifact_path(candidate.relative_to(outputs_path).as_posix())
+        )
     ]
-    for file_path, stat_result in files_with_stat:
-        relative_path = file_path.relative_to(outputs_path).as_posix()
+    for file_path, stat_result, relative_path in files_with_stat:
         mime_type, _ = mimetypes.guess_type(file_path.name)
         path = f"{_OUTPUTS_VIRTUAL_PATH}/{relative_path}"
-        if path in artifacts_by_path:
-            continue
+        existing = artifacts_by_path.get(path)
+        if existing is not None:
+            if not replace_existing_with_newer:
+                continue
+            if stat_result.st_mtime <= _iso_timestamp_value(existing.modified_at):
+                continue
         artifacts_by_path[path] = ThreadArtifactListItem(
             path=path,
             name=file_path.name,
@@ -664,11 +716,18 @@ async def _add_builder_task_local_artifacts(
     if not owns_thread:
         return 0, ()
     checked_thread_ids = await _builder_task_thread_ids_to_check(thread_id)
+    builder_artifacts_by_path: dict[str, ThreadArtifactListItem] = {}
     count = 0
     for task_thread_id in checked_thread_ids:
         task_outputs_path = _builder_task_outputs_path(thread_id, task_thread_id)
         if task_outputs_path is not None and task_outputs_path.exists():
-            count += _add_output_artifacts_from_dir(artifacts_by_path, task_outputs_path)
+            count += _add_output_artifacts_from_dir(
+                builder_artifacts_by_path,
+                task_outputs_path,
+                replace_existing_with_newer=True,
+            )
+    for path, item in builder_artifacts_by_path.items():
+        artifacts_by_path.setdefault(path, item)
     return count, checked_thread_ids
 
 
@@ -712,7 +771,7 @@ def _merge_supabase_artifacts(
 ) -> int:
     count = 0
     for artifact in supabase_artifacts:
-        if _is_builder_internal(Path(artifact.filename).name):
+        if _is_builder_support_artifact_path(artifact.filename):
             continue
         path = f"{_OUTPUTS_VIRTUAL_PATH}/{artifact.filename}"
         if path in artifacts_by_path:

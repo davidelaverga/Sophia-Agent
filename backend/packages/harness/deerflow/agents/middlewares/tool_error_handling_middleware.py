@@ -72,6 +72,8 @@ def _build_runtime_middlewares(
     lazy_init: bool = True,
 ) -> list[AgentMiddleware]:
     """Build shared base middlewares for agent execution."""
+    from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
+    from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
     from deerflow.sandbox.middleware import SandboxMiddleware
 
@@ -91,6 +93,8 @@ def _build_runtime_middlewares(
         middlewares.append(DanglingToolCallMiddleware())
 
     middlewares.append(ToolErrorHandlingMiddleware())
+    middlewares.append(LLMErrorHandlingMiddleware())
+    middlewares.append(SafetyFinishReasonMiddleware())
     return middlewares
 
 

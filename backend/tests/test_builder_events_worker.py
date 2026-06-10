@@ -212,14 +212,25 @@ async def test_internal_post_persists_terminal_builder_state(
 
 
 @pytest.mark.anyio
-async def test_internal_post_persists_builder_failure_diagnostics(
+async def test_internal_post_hydrates_missing_run_id_from_parent_task(
     app: FastAPI,
     client: httpx.AsyncClient,
     monkeypatch,
-) -> None:
-    captured: dict[str, object] = {}
-
+):
+    captured: dict = {}
     fake_threads = MagicMock()
+    fake_threads.get_state = AsyncMock(return_value={
+        "values": {
+            "async_tasks": {
+                "builder-task": {
+                    "task_id": "builder-task",
+                    "agent_name": "sophia_builder",
+                    "run_id": "run-from-parent-state",
+                    "status": "running",
+                }
+            }
+        }
+    })
 
     async def _update_state(thread_id: str, values: dict):
         captured["thread_id"] = thread_id
@@ -229,19 +240,6 @@ async def test_internal_post_persists_builder_failure_diagnostics(
     fake_client = MagicMock()
     fake_client.threads = fake_threads
     monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
-    diagnostic = {
-        "schema": "builder_failure_diagnostics_v1",
-        "task_id": "builder-task",
-        "run_id": "run-1",
-        "failure_stage": "completion_reconciliation",
-        "failure_code": "builder_completed_without_deliverable",
-        "failure_reason": "Builder finished without a deliverable artifact.",
-        "emit_attempted": False,
-        "raw_content_excluded": True,
-        "raw_artifact_text_excluded": True,
-        "raw_frame_excluded": True,
-        "secrets_excluded": True,
-    }
 
     async with client:
         response = await client.post(
@@ -249,22 +247,20 @@ async def test_internal_post_persists_builder_failure_diagnostics(
             json={
                 "thread_id": "parent-thread",
                 "task_id": "builder-task",
-                "run_id": "run-1",
-                "status": "error",
+                "status": "success",
                 "agent_name": "sophia_builder",
-                "task_type": "document",
-                "error_message": "Builder finished without a deliverable artifact.",
-                "builder_failure_diagnostics": diagnostic,
+                "artifact_path": "mnt/user-data/outputs/brief.md",
             },
         )
+        last_response = await client.get("/api/threads/parent-thread/builder-events/last")
 
     assert response.status_code == 202
-    task_update = captured["values"]["async_tasks"]["builder-task"]
-    assert task_update["run_id"] == "run-1"
-    assert task_update["builder_failure_diagnostics"]["failure_code"] == (
-        "builder_completed_without_deliverable"
+    assert captured["values"]["async_tasks"]["builder-task"]["run_id"] == "run-from-parent-state"
+    assert captured["values"]["async_tasks"]["builder-task"]["builder_result"]["run_id"] == (
+        "run-from-parent-state"
     )
-    assert task_update["builder_result"]["builder_failure_diagnostics"]["task_id"] == "builder-task"
+    assert last_response.status_code == 200
+    assert last_response.json()["run_id"] == "run-from-parent-state"
 
 
 @pytest.mark.anyio

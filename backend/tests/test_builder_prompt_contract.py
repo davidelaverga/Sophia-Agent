@@ -25,6 +25,14 @@ def test_builder_obligations_update_guidance_does_not_ban_research() -> None:
     assert "search or fetch that new material before editing" in contract
 
 
+def test_builder_obligations_require_verified_visuals_when_requested() -> None:
+    contract = _sophia_prompt("builder_obligations.md")
+
+    assert "When the user requests charts, diagrams, visuals" in contract
+    assert "/mnt/user-data/outputs/visuals/" in contract
+    assert "Remote chart URLs" in contract
+
+
 def test_agents_md_is_deprecated_pointer_not_active_contract() -> None:
     pointer = _sophia_prompt("AGENTS.md")
 
@@ -47,8 +55,18 @@ def test_pptx_workflow_card_requires_deerflow_native_sequence() -> None:
 
     assert "image-generation/scripts/generate.py" in card
     assert "ppt-generation/scripts/generate.py" in card
-    assert "generated raster images are not" in card
-    assert "mandatory" in card
+    assert "Compose a valid no-image deck first" in card
+    assert "only when the" in card
+    assert "user explicitly requests generated images" in card
     assert "no-image" in card
     assert "PPTX" in card
     assert "passes structural validation" in card
+
+
+def test_visuals_workflow_card_requires_design_skill_and_local_assets() -> None:
+    card = _sophia_prompt("builder_workflows/visuals.md")
+
+    assert "/mnt/skills/public/visual-design/SKILL.md" in card
+    assert "generate_visual_asset" in card
+    assert "/mnt/user-data/outputs/visuals/" in card
+    assert "remote chart URLs" in card

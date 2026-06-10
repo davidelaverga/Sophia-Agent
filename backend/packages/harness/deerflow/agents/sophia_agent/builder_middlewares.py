@@ -34,11 +34,14 @@ and was a private helper of ``builder_agent.py``.
 from __future__ import annotations
 
 from langchain.agents.middleware import AgentMiddleware
+from langchain_anthropic.middleware.prompt_caching import AnthropicPromptCachingMiddleware
 
 from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+from deerflow.agents.sophia_agent.middlewares.builder_budget import BuilderBudgetMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_progress import BuilderProgressMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_provider_fallback import BuilderProviderFallbackMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_research_policy import BuilderResearchPolicyMiddleware
@@ -177,7 +180,16 @@ def build_builder_middleware_chain(
         # raw model output before artifact rewrites it).
         BuilderProgressMiddleware(),
         _create_builder_todo_middleware(),
+        # Budget circuit-breaker. Listed BEFORE BuilderArtifactMiddleware so
+        # that — because after_model hooks run in REVERSE list order — it runs
+        # AFTER it. That lets a turn which legitimately emits an artifact claim
+        # the one-shot completion-webhook dedup with "completed" first (deliver
+        # the work), while a genuine runaway turn (no artifact) lets this
+        # middleware's "timed_out" budget kill win uncontended. See its module
+        # docstring. Caps seeded per-run via start_builder_task; 0 disables.
+        BuilderBudgetMiddleware(),
         BuilderArtifactMiddleware(),
+        LoopDetectionMiddleware(),
     ]
     if vision_enabled:
         chain_tail.append(ClearOnInjectViewImageMiddleware())
@@ -185,6 +197,13 @@ def build_builder_middleware_chain(
         [
             PromptAssemblyMiddleware(),
             DanglingToolCallMiddleware(),
+            # Phase 2 — prompt caching. MUST be last (innermost) so it keys off
+            # the message list AFTER DanglingToolCall repairs dangling tool_use/
+            # tool_result pairs, mirroring the companion's ordering in agent.py.
+            # On the direct Anthropic API this caches system + tools + an
+            # incremental message-prefix breakpoint that advances as the
+            # conversation grows.
+            AnthropicPromptCachingMiddleware(ttl="5m"),
         ]
     )
     middlewares.extend(chain_tail)

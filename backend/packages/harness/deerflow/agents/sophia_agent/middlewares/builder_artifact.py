@@ -46,6 +46,11 @@ from deerflow.sophia.builder_web_policy import extract_explicit_user_urls
 from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.sophia.storage.supabase_mirror import maybe_mirror_file
 
+try:  # pragma: no cover - dependency availability varies in minimal tests.
+    from pypdf import PdfReader
+except Exception:  # noqa: BLE001
+    PdfReader = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 
@@ -120,6 +125,7 @@ _BUILDER_SUBSTANTIVE_TOOL_NAMES = {
     "str_replace",
     "str_replace_tool",
     "emit_builder_artifact",
+    "generate_visual_asset",
 }
 _SIMPLE_PDF_REQUEST_MARKERS = (
     "simple pdf",
@@ -192,6 +198,7 @@ _PROMOTABLE_DELIVERABLE_EXTENSIONS = frozenset({
     ".css",
 })
 _PDF_FALLBACK_EXTENSIONS = frozenset({".md", ".html"})
+_PDF_RENDER_SOURCE_EXTENSIONS = frozenset({".md", ".markdown", ".html", ".htm"})
 _PPTX_FALLBACK_EXTENSIONS = frozenset({".md", ".html"})
 _PPTX_REQUIRED_ZIP_ENTRIES = frozenset({
     "[Content_Types].xml",
@@ -216,6 +223,21 @@ _PDF_VISUAL_FALLBACK_MARKERS = (
     "image",
     "images",
 )
+_VISUAL_REQUEST_MARKERS = _PDF_VISUAL_FALLBACK_MARKERS + (
+    "flowchart",
+    "timeline",
+    "matrix",
+    "quadrant",
+    "concept map",
+)
+_VISUAL_DESIGN_SKILL_PATH_MARKERS = (
+    "/skills/public/visual-design/SKILL.md",
+    "/mnt/skills/public/visual-design/SKILL.md",
+    "/skills/visual-design/SKILL.md",
+    "/mnt/skills/visual-design/SKILL.md",
+)
+_VISUAL_ASSET_TOOL_NAMES = frozenset({"generate_visual_asset"})
+_VISUAL_ASSET_EXTENSIONS = frozenset({".svg", ".png", ".jpg", ".jpeg", ".webp"})
 _WRITE_ERROR_CLASS_MARKERS = (
     ("missing_thread_id", ("thread id not available", "nonetype' object has no attribute 'get")),
     ("missing_thread_data", ("thread data not available", "no allowed local sandbox directories")),
@@ -287,6 +309,27 @@ def _merge_builder_pptx_diagnostic_value(merged: dict, key: str, value: object) 
         merged[key] = _merge_string_list(merged.get(key), value)
         return
     merged[key] = value
+
+
+def _merge_builder_visual_diagnostics(
+    current: dict | None, update: dict | None
+) -> dict:
+    if current is None and update is None:
+        return {}
+    if current is None:
+        return dict(update or {})
+    if update is None:
+        return dict(current)
+    merged = dict(current)
+    for key, value in update.items():
+        if (key.endswith("_count") or key.endswith("_bytes_total")) and isinstance(value, int):
+            merged[key] = int(merged.get(key, 0) or 0) + value
+            continue
+        if key in {"visual_asset_paths", "visual_svg_paths", "visual_png_paths"} and isinstance(value, list):
+            merged[key] = _merge_string_list(merged.get(key), value)
+            continue
+        merged[key] = value
+    return merged
 
 
 def _extract_output_relative_path(artifact_path: str | None) -> str | None:
@@ -495,6 +538,7 @@ def _is_promotable_candidate_path(
     path: Path,
     *,
     min_mtime: float | None,
+    requested_pdf: bool = False,
     requested_pptx: bool,
     requested_html: bool,
 ) -> bool:
@@ -506,6 +550,8 @@ def _is_promotable_candidate_path(
         return _html_fallback_integrity_error_for_file(path) is None
     if path.suffix.lower() == ".pptx":
         return _pptx_integrity_error_for_file(path) is None
+    if requested_pdf and path.suffix.lower() in {".html", ".htm"}:
+        return _html_fallback_integrity_error_for_file(path) is None
     if requested_pptx and path.suffix.lower() in {".html", ".htm"}:
         return _html_fallback_integrity_error_for_file(path) is None
     return True
@@ -893,8 +939,17 @@ def _apply_artifact_request_metadata(
     if _artifact_is_extension_fallback(requested_ext, artifact_ext):
         artifact["artifact_is_fallback"] = True
         artifact["fallback_reason"] = _artifact_fallback_reason(artifact, requested_ext, fallback_reason)
+    elif fallback_reason:
+        artifact["fallback_reason"] = fallback_reason
     elif requested_ext:
         artifact.setdefault("artifact_is_fallback", False)
+    image_status, image_reason = _image_generation_metadata_from_state(state)
+    if image_status:
+        artifact["image_generation_status"] = image_status
+        if image_reason:
+            artifact["image_generation_reason"] = image_reason
+        else:
+            artifact.pop("image_generation_reason", None)
     return artifact
 
 
@@ -1164,6 +1219,56 @@ def _pdf_fallback_rejection_reason(suffix: str, state: dict[str, Any]) -> str | 
     return None
 
 
+def _pdf_source_candidate_paths(state: dict[str, Any]) -> list[Path]:
+    outputs_root = _outputs_root_from_state(state)
+    if outputs_root is None:
+        return []
+    min_mtime = _builder_started_min_mtime(state)
+    try:
+        candidates = [
+            entry for entry in outputs_root.rglob("*")
+            if _is_recent_promotable_path(entry, min_mtime)
+            and entry.suffix.lower() in _PDF_RENDER_SOURCE_EXTENSIONS
+            and (
+                entry.suffix.lower() not in {".html", ".htm"}
+                or _html_fallback_integrity_error_for_file(entry) is None
+            )
+        ]
+    except OSError:
+        logger.debug(
+            "BuilderArtifact: pdf source scan failed outputs_path=%s",
+            _outputs_host_path_from_state(state),
+            exc_info=True,
+        )
+        return []
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates
+
+
+def _preferred_pdf_render_source_path(state: dict[str, Any]) -> str | None:
+    candidates = _pdf_source_candidate_paths(state)
+    if not candidates:
+        return None
+    target = BuilderArtifactMiddleware._target_artifact_path(state)
+    target_stem = Path(target or "").stem
+    if target_stem:
+        for candidate in candidates:
+            if candidate.stem == target_stem:
+                return BuilderArtifactMiddleware._virtual_output_path(candidate, state)
+    return BuilderArtifactMiddleware._virtual_output_path(candidates[0], state)
+
+
+def _pdf_render_target_path(state: dict[str, Any], source_path: str | None) -> str:
+    target = BuilderArtifactMiddleware._target_artifact_path(state)
+    if isinstance(target, str) and PurePosixPath(target).suffix.lower() == ".pdf":
+        return target
+    source = _canonical_outputs_artifact_path(source_path)
+    if source:
+        relative = PurePosixPath(source.removeprefix(_OUTPUTS_VIRTUAL_PREFIX))
+        return f"{_OUTPUTS_VIRTUAL_PREFIX}{relative.with_suffix('.pdf').as_posix()}"
+    return f"{_OUTPUTS_VIRTUAL_PREFIX}build.pdf"
+
+
 def _pdf_render_attempt_missing(state: dict[str, Any]) -> bool:
     if not _requested_pdf_artifact(state):
         return False
@@ -1321,6 +1426,21 @@ def _pptx_generator_invoked_seen(state: dict[str, Any]) -> bool:
     )
 
 
+def _pptx_fallback_generation_attempt_satisfied(state: dict[str, Any]) -> bool:
+    attempts = _pptx_diagnostic_count(state, "pptx_generator_attempt_count")
+    if attempts <= 0:
+        summaries = state.get("builder_tool_turn_summaries") or []
+        return any(
+            bool(summary.get("pptx_generator_invoked"))
+            for summary in summaries
+            if isinstance(summary, dict)
+        )
+    diagnostics = _pptx_diagnostics(state)
+    if diagnostics.get("pptx_generator_error_class") == "invalid_plan_json" and attempts < 2:
+        return False
+    return True
+
+
 def _image_generation_invoked_seen(state: dict[str, Any]) -> bool:
     if _pptx_diagnostic_count(state, "image_generation_attempt_count") > 0:
         return True
@@ -1426,6 +1546,251 @@ def _pptx_skill_flags_from_tool_calls(tool_calls: list[dict[str, Any]]) -> dict[
     return flags
 
 
+def _visual_skill_flags_from_tool_calls(tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
+    for call in tool_calls:
+        if call.get("name") not in ("read_file", "read_file_tool"):
+            continue
+        args = call.get("args") or {}
+        if not isinstance(args, dict):
+            continue
+        path = str(args.get("path") or args.get("file_path") or "")
+        if any(marker in path for marker in _VISUAL_DESIGN_SKILL_PATH_MARKERS):
+            return {"visual_design_skill_read": True}
+    return {"visual_design_skill_read": False}
+
+
+def _visual_design_skill_read_seen(state: dict[str, Any]) -> bool:
+    summaries = state.get("builder_tool_turn_summaries") or []
+    if any(
+        bool(summary.get("visual_design_skill_read"))
+        for summary in summaries
+        if isinstance(summary, dict)
+    ):
+        return True
+    diagnostics = state.get("builder_visual_diagnostics")
+    return isinstance(diagnostics, dict) and bool(
+        diagnostics.get("visual_design_skill_read") or diagnostics.get("design_skill_read")
+    )
+
+
+def _visuals_requested(state: dict[str, Any]) -> bool:
+    delegation = state.get("delegation_context")
+    if not isinstance(delegation, dict):
+        return False
+    combined = "\n".join(
+        str(delegation.get(key) or "").lower()
+        for key in ("task", "description", "artifact_brief", "original_task")
+    )
+    return any(marker in combined for marker in _VISUAL_REQUEST_MARKERS)
+
+
+def _visual_asset_success_count(state: dict[str, Any]) -> int:
+    diagnostics = state.get("builder_visual_diagnostics")
+    if not isinstance(diagnostics, dict):
+        return 0
+    return int(diagnostics.get("visual_asset_success_count", 0) or 0)
+
+
+def _visual_asset_attempt_count(state: dict[str, Any]) -> int:
+    diagnostics = state.get("builder_visual_diagnostics")
+    if not isinstance(diagnostics, dict):
+        return 0
+    return int(diagnostics.get("visual_asset_attempt_count", 0) or 0)
+
+
+def _visual_asset_paths(state: dict[str, Any]) -> list[str]:
+    diagnostics = state.get("builder_visual_diagnostics")
+    if not isinstance(diagnostics, dict):
+        return []
+    paths = diagnostics.get("visual_asset_paths") or []
+    return [path for path in paths if isinstance(path, str)]
+
+
+def _local_output_file_for_artifact(state: dict[str, Any], artifact_path: object) -> Path | None:
+    canonical = _canonical_outputs_artifact_path(artifact_path)
+    relative = _extract_output_relative_path(canonical)
+    outputs_root = _outputs_root_from_state(state)
+    if canonical is None or relative is None or outputs_root is None:
+        return None
+    candidate = outputs_root / relative
+    return candidate if candidate.is_file() else None
+
+
+def _html_contains_visual_evidence(path: Path) -> bool:
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore").lower()
+    except OSError:
+        return False
+    return (
+        "<svg" in text
+        or "/visuals/" in text
+        or "visuals/" in text
+        or "outputs/visuals/" in text
+    )
+
+
+def _pdf_source_contains_visual_evidence(state: dict[str, Any]) -> bool:
+    for source in _pdf_source_candidate_paths(state):
+        try:
+            text = source.read_text(encoding="utf-8", errors="ignore").lower()
+        except OSError:
+            continue
+        if (
+            "<svg" in text
+            or "/visuals/" in text
+            or "visuals/" in text
+            or "outputs/visuals/" in text
+        ):
+            return True
+    return False
+
+
+def _pptx_contains_visual_evidence(path: Path) -> bool:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
+    except (OSError, zipfile.BadZipFile):
+        return False
+    return any(
+        name.startswith("ppt/media/")
+        or name.startswith("ppt/charts/")
+        or name.startswith("ppt/diagrams/")
+        for name in names
+    )
+
+
+def _pdf_object(value: Any) -> Any:
+    getter = getattr(value, "get_object", None)
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:  # noqa: BLE001
+            return value
+    return value
+
+
+def _pdf_page_image_count(page: Any) -> int:
+    try:
+        images = getattr(page, "images", None)
+        if images:
+            return len(images)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        resources = _pdf_object(page.get("/Resources", {}))
+        xobjects = _pdf_object(resources.get("/XObject", {})) if hasattr(resources, "get") else {}
+    except Exception:  # noqa: BLE001
+        return 0
+    count = 0
+    if hasattr(xobjects, "values"):
+        for value in xobjects.values():
+            xobject = _pdf_object(value)
+            subtype = xobject.get("/Subtype") if hasattr(xobject, "get") else None
+            if subtype == "/Image":
+                count += 1
+            elif subtype == "/Form":
+                count += _pdf_page_image_count(xobject)
+    return count
+
+
+def _pdf_contains_visual_evidence(path: Path, state: dict[str, Any]) -> bool:
+    render_result = state.get("builder_pdf_render_result")
+    if isinstance(render_result, dict):
+        try:
+            return int(render_result.get("image_count", 0) or 0) > 0
+        except (TypeError, ValueError):
+            pass
+    if PdfReader is None:
+        return False
+    try:
+        reader = PdfReader(str(path))
+        return sum(_pdf_page_image_count(page) for page in reader.pages) > 0
+    except Exception:  # noqa: BLE001
+        logger.warning("[BuilderVisualDiagnostics] pdf_visual_inspection_failed", exc_info=True)
+        return False
+
+
+def _visual_presence_validated(artifact_args: dict[str, Any], state: dict[str, Any]) -> bool:
+    if not _visuals_requested(state):
+        return True
+    artifact_path = artifact_args.get("artifact_path")
+    artifact_file = _local_output_file_for_artifact(state, artifact_path)
+    suffix = PurePosixPath(str(artifact_path or "")).suffix.lower()
+
+    if suffix in {".html", ".htm"} and artifact_file is not None:
+        return _html_contains_visual_evidence(artifact_file)
+    if suffix == ".pptx" and artifact_file is not None:
+        return _pptx_contains_visual_evidence(artifact_file)
+    if suffix == ".pdf" and artifact_file is not None:
+        return _pdf_contains_visual_evidence(artifact_file, state)
+    return _visual_asset_success_count(state) > 0
+
+
+def _apply_visual_missing_fallback_metadata(
+    artifact: dict[str, Any],
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    if not _visuals_requested(state):
+        return artifact
+    requested_ext = _requested_artifact_ext(state)
+    artifact_ext = _artifact_ext_from_path(artifact.get("artifact_path"))
+    if requested_ext not in {"pdf", "pptx"} or artifact_ext != requested_ext:
+        return artifact
+    if _visual_presence_validated(artifact, state):
+        return artifact
+    updated = dict(artifact)
+    updated["requested_artifact_ext"] = requested_ext
+    updated["artifact_ext"] = artifact_ext
+    updated["artifact_is_fallback"] = True
+    updated["fallback_reason"] = "visuals_not_embedded"
+    confidence = updated.get("confidence")
+    if isinstance(confidence, (int, float)):
+        updated["confidence"] = min(float(confidence), 0.65)
+    tone_hint = str(updated.get("companion_tone_hint") or "").strip()
+    degraded_hint = "Explain that the file is usable, but visual embedding did not complete."
+    updated["companion_tone_hint"] = f"{tone_hint} {degraded_hint}".strip()
+    logger.warning(
+        "[BuilderVisualDiagnostics] phase=visual_missing_marked_fallback requested_ext=%s final_ext=%s",
+        requested_ext,
+        artifact_ext,
+    )
+    return updated
+
+
+def _visual_asset_result_delta(result: ToolMessage) -> dict[str, Any] | None:
+    if not isinstance(result.content, str):
+        return None
+    try:
+        payload = json.loads(result.content)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    success = payload.get("success") is True
+    svg_path = payload.get("svg_path")
+    png_path = payload.get("png_path")
+    paths = [path for path in (svg_path, png_path) if isinstance(path, str) and path]
+    logger.info(
+        "[BuilderVisualDiagnostics] phase=tool_result success=%s visual_type=%s "
+        "svg_bytes=%s png_bytes=%s png_error=%s",
+        success,
+        payload.get("visual_type"),
+        payload.get("svg_bytes"),
+        payload.get("png_bytes"),
+        payload.get("png_error"),
+    )
+    return {
+        "visual_asset_attempt_count": 1,
+        "visual_asset_success_count": 1 if success else 0,
+        "visual_asset_bytes_total": int(payload.get("svg_bytes", 0) or 0)
+        + int(payload.get("png_bytes", 0) or 0),
+        "visual_asset_error_class": None if success else payload.get("error_type", "visual_asset_error"),
+        "visual_asset_paths": paths if success else [],
+        "visual_svg_paths": [svg_path] if success and isinstance(svg_path, str) else [],
+        "visual_png_paths": [png_path] if success and isinstance(png_path, str) else [],
+    }
+
+
 def _virtual_output_status(state: dict[str, Any], path: str | None) -> tuple[bool, int, str | None]:
     canonical = _canonical_outputs_artifact_path(path)
     if canonical is None:
@@ -1447,17 +1812,32 @@ def _classify_image_generation_error(text: str, exists: bool, bytes_count: int) 
     lowered = text.lower()
     if exists and bytes_count > 0:
         return None
+    explicit = re.search(r"\bimagegen_fail\s+reason=([a-z0-9_:-]+)", lowered)
+    if explicit:
+        return explicit.group(1)
     if "openai_api_key" in lowered:
-        return "missing_openai_api_key"
+        return "missing_api_key"
     if "openai image generation failed" in lowered:
-        return "openai_api_error"
+        return "api_error"
     if "reference image" in lowered and "invalid" in lowered:
         return "invalid_reference_image"
-    if "no bytes landed" in lowered:
-        return "no_output_bytes"
+    if "no bytes landed" in lowered or "usable image bytes" in lowered:
+        return "empty_output"
     if "error" in lowered or "failed" in lowered:
-        return "image_generation_error"
+        return "api_error"
     return "missing_output"
+
+
+def _image_generation_metadata_from_state(state: dict[str, Any]) -> tuple[str | None, str | None]:
+    diagnostics = _pptx_diagnostics(state)
+    attempts = int(diagnostics.get("image_generation_attempt_count", 0) or 0)
+    if attempts <= 0:
+        return None, None
+    successes = int(diagnostics.get("image_generation_success_count", 0) or 0)
+    if successes > 0:
+        return "success", None
+    reason = diagnostics.get("image_generation_error_class")
+    return "failed", str(reason) if reason else "api_error"
 
 
 def _classify_pptx_generation_error(
@@ -1482,6 +1862,16 @@ def _existing_pptx_generation_error(state: dict[str, Any], path: str | None) -> 
     if not relative or not outputs_root:
         return "__inspect_text__"
     return _pptx_integrity_error_for_file(outputs_root / relative)
+
+
+def _pptx_picture_count_from_text(text: str) -> int:
+    match = re.search(r"\bpicture_count=(\d+)\b", text)
+    if match is None:
+        return 0
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return 0
 
 
 def _pptx_generation_error_from_text(text: str) -> str:
@@ -1516,7 +1906,8 @@ def _log_pptx_diagnostics(
         "image_generation_attempt_count=%d image_generation_success_count=%d "
         "image_generation_bytes_total=%d image_generation_error_class=%s "
         "pptx_generator_attempt_count=%d pptx_generator_success_count=%d "
-        "pptx_generator_bytes_total=%d pptx_generator_error_class=%s",
+        "pptx_generator_bytes_total=%d pptx_generator_error_class=%s "
+        "pptx_generator_picture_count=%d",
         phase,
         _pptx_skill_read_seen(state),
         _pptx_generator_invoked_seen(state),
@@ -1537,6 +1928,7 @@ def _log_pptx_diagnostics(
         _pptx_diagnostic_count(state, "pptx_generator_success_count"),
         int(pptx_diagnostics.get("pptx_generator_bytes_total", 0) or 0),
         pptx_diagnostics.get("pptx_generator_error_class"),
+        _pptx_diagnostic_count(state, "pptx_generator_picture_count"),
     )
 
 
@@ -1627,10 +2019,11 @@ def _pptx_skill_correction_message(state: dict[str, Any]) -> str:
         "Your next safe workflow is:\n"
         "1. If you have not already done so, call "
         "`read_file(path='/mnt/skills/public/ppt-generation/SKILL.md')`.\n"
-        "2. Create the slide plan/assets the skill expects under "
+        "2. Create a valid slide plan JSON under "
         "`/mnt/user-data/workspace/`.\n"
-        "3. Compose the deck by running "
-        "`/mnt/skills/public/ppt-generation/scripts/generate.py`.\n"
+        "3. Compose a no-image deck by running "
+        "`/mnt/skills/public/ppt-generation/scripts/generate.py` with "
+        "`--plan-file` and `--output-file` only.\n"
         "4. Use `/mnt/skills/public/image-generation/scripts/generate.py` only if the "
         "user explicitly requested generated images or illustrations. If image generation "
         "fails, continue with a no-image PPTX.\n"
@@ -1641,6 +2034,77 @@ def _pptx_skill_correction_message(state: dict[str, Any]) -> str:
         f"{fallback_suffix}', content='...', append=False)`, then emit that "
         "fallback. Do not emit placeholder/tiny/corrupt `.pptx` files, Python scripts, "
         "or test files."
+    )
+
+
+def _pptx_plan_correction_message() -> str:
+    return (
+        "[Sophia/presentation-plan correction]\n"
+        "The PPTX generator rejected the presentation plan JSON. Do not switch "
+        "to HTML yet. Rewrite the plan as a valid JSON object under "
+        "`/mnt/user-data/workspace/` and run the PPT generator once more.\n\n"
+        "Minimum schema:\n"
+        "{\n"
+        '  "title": "Deck title",\n'
+        '  "aspect_ratio": "16:9",\n'
+        '  "slides": [\n'
+        '    {"slide_number": 1, "type": "title", "title": "Title", "subtitle": "Subtitle"},\n'
+        '    {"slide_number": 2, "type": "content", "title": "Slide title", '
+        '"key_points": ["Point 1", "Point 2"]}\n'
+        "  ]\n"
+        "}\n\n"
+        "Generated slide images are optional unless the user explicitly asked "
+        "for generated images. A text/layout/chart-only deck is valid."
+    )
+
+
+def _pdf_render_correction_message(source_path: str, pdf_path: str) -> str:
+    return (
+        "[Sophia/PDF render correction]\n"
+        "A requested PDF has a source document on disk, but the PDF renderer "
+        "has not been attempted. Your next action must be:\n"
+        f"`render_markdown_to_pdf(markdown_path='{source_path}', pdf_path='{pdf_path}')`.\n"
+        "If rendering succeeds, immediately emit that `.pdf`. If rendering "
+        "fails, emit the approved Markdown/HTML fallback with explicit PDF "
+        "fallback metadata."
+    )
+
+
+def _pdf_source_write_message(target_path: str) -> str:
+    source_path = f"{_OUTPUTS_VIRTUAL_PREFIX}{PurePosixPath(target_path).with_suffix('.md').name}"
+    return (
+        "[Sophia/PDF source correction]\n"
+        "This is a requested PDF build, but no Markdown/HTML source is available "
+        "for the renderer yet. Stop writing helper scripts. Use one complete "
+        "`write_file` call to create the Markdown source now:\n"
+        "`write_file(description='write PDF source', "
+        f"path='{source_path}', content='...', append=False)`.\n"
+        "After that, call `render_markdown_to_pdf` to create the PDF."
+    )
+
+
+def _visual_design_skill_message() -> str:
+    return (
+        "[Sophia/visual-design correction]\n"
+        "The user requested charts, diagrams, or visual explanations. Before "
+        "creating visual assets or emitting the final artifact, read the visual "
+        "design skill now:\n"
+        "`read_file(description='read visual design skill', "
+        "path='/mnt/skills/public/visual-design/SKILL.md')`.\n"
+        "Then create local visual assets with `generate_visual_asset` under "
+        "`/mnt/user-data/outputs/visuals/` and embed them in the final artifact."
+    )
+
+
+def _visual_asset_required_message(state: dict[str, Any]) -> str:
+    target_ext = _requested_target_suffix(state).lstrip(".") or "artifact"
+    return (
+        "[Sophia/visual-asset correction]\n"
+        f"This {target_ext} request asked for charts, diagrams, or visuals, but "
+        "no verified local visual asset has been created yet. Create one now "
+        "with `generate_visual_asset`, writing under `/mnt/user-data/outputs/visuals/`, "
+        "then reference or embed that asset in the final HTML/PDF source/PPTX plan "
+        "before emitting. Remote chart URLs and prose descriptions do not count."
     )
 
 
@@ -1679,12 +2143,14 @@ class BuilderArtifactState(AgentState):
     builder_last_successful_output_path: NotRequired[str | None]
     builder_write_diagnostics: NotRequired[Annotated[dict, _merge_builder_write_diagnostics]]
     builder_pptx_diagnostics: NotRequired[Annotated[dict, _merge_builder_pptx_diagnostics]]
-    builder_failure_diagnostics: NotRequired[dict]
+    builder_visual_diagnostics: NotRequired[Annotated[dict, _merge_builder_visual_diagnostics]]
     # PR #94: count consecutive emit attempts rejected for empty/missing
     # ``artifact_path``. When this reaches ``_REJECTION_SHORT_CIRCUIT_AT``
     # we route directly to the hard-ceiling fallback instead of letting
     # the model retry into the LangGraph recursion limit.
     builder_consecutive_empty_emit_rejections: NotRequired[int]
+    builder_last_missing_emit_path: NotRequired[str | None]
+    builder_consecutive_missing_emit_path_rejections: NotRequired[int]
     # Phase 2F.3: idempotency flag. Set once we've injected a path-
     # correction HumanMessage after N consecutive write_file_tool errors,
     # so we don't repeat the correction on every subsequent before_model.
@@ -1694,8 +2160,13 @@ class BuilderArtifactState(AgentState):
     builder_pdf_render_result: NotRequired[dict | None]
     builder_pdf_layout_repair_attempts: NotRequired[int]
     builder_pdf_layout_repair_requested: NotRequired[bool]
+    builder_pdf_render_correction_emitted: NotRequired[bool]
+    builder_pdf_source_write_directive_emitted: NotRequired[bool]
     builder_pptx_skill_correction_emitted: NotRequired[bool]
+    builder_pptx_plan_correction_emitted: NotRequired[bool]
     builder_pptx_fallback_directive_emitted: NotRequired[bool]
+    builder_visual_design_correction_emitted: NotRequired[bool]
+    builder_visual_asset_correction_emitted: NotRequired[bool]
 
 
 class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
@@ -2188,6 +2659,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return {"type": "tool", "name": "write_file"}
 
     @staticmethod
+    def _forced_read_tool_choice() -> dict[str, Any]:
+        """Anthropic tool_choice payload that forces read_file."""
+        return {"type": "tool", "name": "read_file"}
+
+    @staticmethod
+    def _forced_visual_asset_tool_choice() -> dict[str, Any]:
+        """Anthropic tool_choice payload that forces local visual asset generation."""
+        return {"type": "tool", "name": "generate_visual_asset"}
+
+    @staticmethod
     def _forced_search_tool_choice() -> dict[str, Any]:
         """Anthropic tool_choice payload that forces builder_web_search."""
         return {"type": "tool", "name": "builder_web_search"}
@@ -2231,6 +2712,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "before artifact writing"
         )
         return self._forced_search_tool_choice()
+
+    def _visual_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _visuals_requested(state):
+            return None
+        if not _visual_design_skill_read_seen(state):
+            logger.warning("BuilderArtifact: forcing tool_choice=read_file for visual-design skill")
+            return self._forced_read_tool_choice()
+        if (
+            state.get("builder_visual_asset_correction_emitted")
+            and _visual_asset_success_count(state) <= 0
+            and _visual_asset_attempt_count(state) <= 0
+        ):
+            logger.warning("BuilderArtifact: forcing tool_choice=generate_visual_asset after visual correction")
+            return self._forced_visual_asset_tool_choice()
+        return None
 
     def _completion_tool_choice_for_state(
         self,
@@ -2471,6 +2967,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             if _is_promotable_candidate_path(
                 p,
                 min_mtime=min_mtime,
+                requested_pdf=requested_pdf,
                 requested_pptx=requested_pptx,
                 requested_html=requested_html,
             )
@@ -2791,6 +3288,70 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
 
     @staticmethod
+    def _requested_pdf_without_render_fallback(
+        state: BuilderArtifactState,
+        *,
+        promoted_path: str | None,
+        steps_completed: int,
+    ) -> dict[str, Any] | None:
+        if not _requested_pdf_artifact(state) or _render_markdown_to_pdf_attempted(state):
+            return None
+        if promoted_path:
+            promoted_suffix = PurePosixPath(promoted_path).suffix.lower()
+            if promoted_suffix == ".pdf":
+                return None
+            logger.warning(
+                "BuilderArtifact: PDF ceiling fallback refused source before "
+                "render attempt source_ext=%s reason=pdf_render_tool_not_attempted",
+                promoted_suffix.lstrip(".") or None,
+            )
+        elif not _preferred_pdf_render_source_path(state):
+            return None
+        else:
+            logger.warning(
+                "BuilderArtifact: PDF ceiling found source but no render attempt "
+                "reason=pdf_render_tool_not_attempted"
+            )
+        fallback = BuilderArtifactMiddleware._pdf_no_deliverable_fallback(
+            steps_completed=steps_completed,
+        )
+        return _apply_artifact_request_metadata(
+            fallback,
+            state,
+            fallback_reason="pdf_render_tool_not_attempted",
+        )
+
+    @staticmethod
+    def _requested_pptx_without_generation_fallback(
+        state: BuilderArtifactState,
+        *,
+        promoted_path: str | None,
+        steps_completed: int,
+    ) -> dict[str, Any] | None:
+        if (
+            not promoted_path
+            or not _requested_pptx_artifact(state)
+            or _pptx_fallback_generation_attempt_satisfied(state)
+        ):
+            return None
+        promoted_suffix = PurePosixPath(promoted_path).suffix.lower()
+        if promoted_suffix == ".pptx":
+            return None
+        logger.warning(
+            "BuilderArtifact: PPTX ceiling fallback refused before "
+            "generator attempt source_ext=%s",
+            promoted_suffix.lstrip(".") or None,
+        )
+        fallback = BuilderArtifactMiddleware._pptx_no_deliverable_fallback(
+            steps_completed=steps_completed,
+        )
+        return _apply_artifact_request_metadata(
+            fallback,
+            state,
+            fallback_reason="pptx_generation_not_completed",
+        )
+
+    @staticmethod
     def _build_ceiling_fallback(
         state: BuilderArtifactState,
         *,
@@ -2832,6 +3393,20 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             requested_html=requested_html,
             reason=reason,
         )
+        fallback = BuilderArtifactMiddleware._requested_pdf_without_render_fallback(
+            state,
+            promoted_path=promoted_path,
+            steps_completed=steps_completed,
+        )
+        if fallback is not None:
+            return fallback
+        fallback = BuilderArtifactMiddleware._requested_pptx_without_generation_fallback(
+            state,
+            promoted_path=promoted_path,
+            steps_completed=steps_completed,
+        )
+        if fallback is not None:
+            return fallback
         if promoted_path:
             fallback = BuilderArtifactMiddleware._recovered_deliverable_fallback(
                 promoted_path,
@@ -2843,6 +3418,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 state,
                 fallback_reason="pptx_generation_not_completed" if requested_pptx else reason,
             )
+        fallback = BuilderArtifactMiddleware._requested_pdf_without_render_fallback(
+            state,
+            promoted_path=None,
+            steps_completed=steps_completed,
+        )
+        if fallback is not None:
+            return fallback
         promoted_generator_path = BuilderArtifactMiddleware._promoted_generator_from_outputs(
             state,
             requested_pdf=requested_pdf,
@@ -2916,7 +3498,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             runtime.context.get("thread_id") if getattr(runtime, "context", None) else None
         )
         upload_thread_id = parent_thread_id or builder_thread_id
-        mirror_result = _upload_builder_outputs_to_supabase(
+        fallback = _apply_visual_missing_fallback_metadata(fallback, state)
+        _upload_builder_outputs_to_supabase(
             thread_id=upload_thread_id,
             outputs_host_path=outputs_host_path,
             artifact_args=fallback,
@@ -3071,6 +3654,27 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             ):
                 return False
 
+        visual_ok = _visual_presence_validated(artifact_args, state)
+        logger.info(
+            "[BuilderVisualDiagnostics] phase=emit_validation visuals_requested=%s "
+            "design_skill_read=%s visual_asset_success_count=%d "
+            "visual_presence_validated=%s requested_ext=%s final_ext=%s",
+            _visuals_requested(state),
+            _visual_design_skill_read_seen(state),
+            _visual_asset_success_count(state),
+            visual_ok,
+            _requested_artifact_ext(state),
+            _artifact_path_suffix_label(artifact_args.get("artifact_path")),
+        )
+        if not visual_ok:
+            logger.warning(
+                "[BuilderVisualDiagnostics] phase=emit_visual_missing_soft_pass "
+                "requested_ext=%s final_ext=%s visual assets are support-only; "
+                "allowing artifact truth validation to continue",
+                _requested_artifact_ext(state),
+                _artifact_path_suffix_label(artifact_args.get("artifact_path")),
+            )
+
         return True
 
     @staticmethod
@@ -3093,6 +3697,32 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         canonical_primary = _canonical_outputs_artifact_path(primary)
         if canonical_primary is None:
             return False
+        canonical_suffix = PurePosixPath(canonical_primary).suffix.lower()
+        if canonical_suffix in _PPTX_FALLBACK_EXTENSIONS:
+            if not _pptx_fallback_generation_attempt_satisfied(state):
+                _log_pptx_diagnostics(
+                    phase="emit_rejected",
+                    state=state,
+                    artifact_path=primary,
+                    integrity_reason="pptx_fallback_before_generation_attempt",
+                )
+                BuilderArtifactMiddleware._log_pptx_artifact_rejection(
+                    primary,
+                    "pptx_fallback_before_generation_attempt",
+                )
+                return False
+            if BuilderArtifactMiddleware._has_valid_pptx_output(state):
+                _log_pptx_diagnostics(
+                    phase="emit_rejected",
+                    state=state,
+                    artifact_path=primary,
+                    integrity_reason="pptx_fallback_when_valid_deck_exists",
+                )
+                BuilderArtifactMiddleware._log_pptx_artifact_rejection(
+                    primary,
+                    "pptx_fallback_when_valid_deck_exists",
+                )
+                return False
         integrity_rejection = _pptx_path_integrity_rejection_reason(canonical_primary, state, runtime)
         if integrity_rejection is not None:
             _log_pptx_diagnostics(
@@ -3256,6 +3886,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         artifact_args: dict[str, Any],
         state: BuilderArtifactState,
     ) -> str:
+        if _visuals_requested(state) and not _visual_presence_validated(artifact_args, state):
+            return (
+                "Error: emit_builder_artifact rejected — the user requested charts, "
+                "diagrams, or visuals, but the artifact does not contain verified "
+                "visual evidence yet. Read /mnt/skills/public/visual-design/SKILL.md "
+                "if you have not already, create a local visual with generate_visual_asset "
+                "under /mnt/user-data/outputs/visuals/, then embed or reference it before "
+                "emitting. Inline SVG in HTML also counts."
+            )
         if _requested_pdf_artifact(state):
             primary = artifact_args.get("artifact_path")
             reason = _pdf_artifact_path_rejection_reason(primary, state)
@@ -3584,6 +4223,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             self._pdf_terminal_tool_choice_for_state(state)
             or self._simple_pdf_tool_choice_for_state(state)
             or self._research_tool_choice_for_state(state)
+            or self._visual_tool_choice_for_state(state)
+            or self._pdf_render_source_tool_choice_for_state(state)
             or self._completion_tool_choice_for_state(state, runtime)
         )
 
@@ -3608,6 +4249,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             _pdf_layout_repair_attempts(state),
         )
         return self._forced_tool_choice()
+
+    def _pdf_render_source_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _requested_pdf_artifact(state):
+            return None
+        if self._has_requested_pdf_binary(state) or _render_markdown_to_pdf_attempted(state):
+            return None
+        source_path = _preferred_pdf_render_source_path(state)
+        if not source_path:
+            return None
+        logger.warning(
+            "BuilderArtifact: forcing tool_choice=render_markdown_to_pdf "
+            "because PDF source exists before render source_ext=%s",
+            PurePosixPath(source_path).suffix.lower().lstrip(".") or None,
+        )
+        return self._forced_pdf_render_tool_choice()
 
     # Phase 2F.3: after N consecutive write_file_tool errors, inject a
     # corrective HumanMessage so the model breaks out of the loop and
@@ -3740,6 +4396,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "builder_non_artifact_turns": 0,
             "builder_task_started_at_ms": 0,
             "builder_consecutive_empty_emit_rejections": 0,
+            "builder_last_missing_emit_path": None,
+            "builder_consecutive_missing_emit_path_rejections": 0,
             "builder_runtime_write_failure_emitted": True,
             "jump_to": "end",
         }
@@ -3774,6 +4432,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "builder_non_artifact_turns": 0,
             "builder_task_started_at_ms": 0,
             "builder_consecutive_empty_emit_rejections": 0,
+            "builder_last_missing_emit_path": None,
+            "builder_consecutive_missing_emit_path_rejections": 0,
             "builder_recovered_deliverable_emitted": True,
             "jump_to": "end",
         }
@@ -3869,6 +4529,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "builder_non_artifact_turns": 0,
                 "builder_task_started_at_ms": 0,
                 "builder_consecutive_empty_emit_rejections": 0,
+                "builder_last_missing_emit_path": None,
+                "builder_consecutive_missing_emit_path_rejections": 0,
                 "builder_tool_argument_correction_emitted": True,
                 "jump_to": "end",
             }
@@ -4112,6 +4774,63 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "builder_pdf_layout_repair_attempts": _pdf_layout_repair_attempts(state) + 1,
         }
 
+    def _maybe_inject_pdf_render_source_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _requested_pdf_artifact(state):
+            return None
+        if state.get("builder_pdf_render_correction_emitted"):
+            return None
+        if self._has_requested_pdf_binary(state) or _render_markdown_to_pdf_attempted(state):
+            return None
+        source_path = _preferred_pdf_render_source_path(state)
+        if not source_path:
+            return None
+        pdf_path = _pdf_render_target_path(state, source_path)
+        logger.warning(
+            "BuilderArtifact: injecting PDF render correction source_ext=%s target_ext=pdf",
+            PurePosixPath(source_path).suffix.lower().lstrip(".") or None,
+        )
+        return {
+            "messages": [HumanMessage(content=_pdf_render_correction_message(source_path, pdf_path))],
+            "builder_pdf_render_correction_emitted": True,
+        }
+
+    def _maybe_inject_pdf_source_write_directive(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _requested_pdf_artifact(state):
+            return None
+        if state.get("builder_pdf_source_write_directive_emitted"):
+            return None
+        if self._has_requested_pdf_binary(state) or _render_markdown_to_pdf_attempted(state):
+            return None
+        if _preferred_pdf_render_source_path(state):
+            return None
+        turn_force = self._should_force_emit(state)
+        if not turn_force:
+            return None
+        target = self._target_artifact_path(state) or f"{_OUTPUTS_VIRTUAL_PREFIX}build.pdf"
+        logger.warning(
+            "BuilderArtifact: injecting PDF source write directive before force window"
+        )
+        return {
+            "messages": [HumanMessage(content=_pdf_source_write_message(target))],
+            "builder_pdf_source_write_directive_emitted": True,
+        }
+
+    def _maybe_inject_pptx_plan_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _requested_pptx_artifact(state):
+            return None
+        if state.get("builder_pptx_plan_correction_emitted"):
+            return None
+        diagnostics = _pptx_diagnostics(state)
+        if diagnostics.get("pptx_generator_error_class") != "invalid_plan_json":
+            return None
+        if self._has_valid_pptx_output(state):
+            return None
+        logger.warning("BuilderArtifact: injecting PPTX plan JSON correction after invalid_plan_json")
+        return {
+            "messages": [HumanMessage(content=_pptx_plan_correction_message())],
+            "builder_pptx_plan_correction_emitted": True,
+        }
+
     def _maybe_inject_pptx_skill_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
         if not _requested_pptx_artifact(state):
             return None
@@ -4191,6 +4910,45 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "builder_pptx_fallback_directive_emitted": True,
         }
 
+    def _maybe_inject_visual_design_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _visuals_requested(state):
+            return None
+        if _visual_design_skill_read_seen(state):
+            return None
+        if state.get("builder_visual_design_correction_emitted"):
+            return None
+        logger.warning(
+            "[BuilderVisualDiagnostics] phase=design_skill_required design_skill_read=false"
+        )
+        return {
+            "messages": [HumanMessage(content=_visual_design_skill_message())],
+            "builder_visual_design_correction_emitted": True,
+        }
+
+    def _maybe_inject_visual_asset_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _visuals_requested(state):
+            return None
+        if not (_requested_pdf_artifact(state) or _requested_pptx_artifact(state)):
+            return None
+        if not _visual_design_skill_read_seen(state):
+            return None
+        if _visual_asset_success_count(state) > 0:
+            return None
+        if state.get("builder_visual_asset_correction_emitted"):
+            return None
+        non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0)
+        if non_artifact_turns < 2:
+            return None
+        logger.warning(
+            "[BuilderVisualDiagnostics] phase=asset_required requested_ext=%s "
+            "asset_success_count=0",
+            _requested_artifact_ext(state),
+        )
+        return {
+            "messages": [HumanMessage(content=_visual_asset_required_message(state))],
+            "builder_visual_asset_correction_emitted": True,
+        }
+
     def _combined_before_model_updates(
         self,
         state: BuilderArtifactState,
@@ -4211,9 +4969,29 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if isinstance(promotion, dict):
             update.update(promotion)
             return update
+        visual_design = self._maybe_inject_visual_design_correction(state)
+        if isinstance(visual_design, dict):
+            update.update(visual_design)
+            return update
+        visual_asset = self._maybe_inject_visual_asset_correction(state)
+        if isinstance(visual_asset, dict):
+            update.update(visual_asset)
+            return update
+        pdf_render = self._maybe_inject_pdf_render_source_correction(state)
+        if isinstance(pdf_render, dict):
+            update.update(pdf_render)
+            return update
         pdf_repair = self._maybe_inject_pdf_layout_repair(state)
         if isinstance(pdf_repair, dict):
             update.update(pdf_repair)
+            return update
+        pdf_source_write = self._maybe_inject_pdf_source_write_directive(state)
+        if isinstance(pdf_source_write, dict):
+            update.update(pdf_source_write)
+            return update
+        pptx_plan = self._maybe_inject_pptx_plan_correction(state)
+        if isinstance(pptx_plan, dict):
+            update.update(pptx_plan)
             return update
         pptx_fallback = self._maybe_inject_pptx_fallback_after_image_failure(state)
         if isinstance(pptx_fallback, dict):
@@ -4327,6 +5105,44 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         ),
                         tool_call_id=tool_call_id,
                         name=str(tool_name),
+                        status="error",
+                    ),
+                ],
+            },
+            goto="model",
+        )
+
+    def _block_visual_asset_before_design_skill(
+        self,
+        request: ToolCallRequest,
+    ) -> Command | None:
+        tool_name = request.tool_call.get("name")
+        if tool_name not in _VISUAL_ASSET_TOOL_NAMES:
+            return None
+        if not _visuals_requested(request.state):
+            return None
+        if _visual_design_skill_read_seen(request.state):
+            return None
+
+        tool_call_id = request.tool_call.get("id", "")
+        logger.warning(
+            "[BuilderVisualDiagnostics] blocked_visual_asset_before_design_skill "
+            "tool=%s",
+            tool_name,
+        )
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=(
+                            "Error: visual-design enforcement blocked this tool call. "
+                            "Before creating chart or diagram assets, read the design "
+                            "skill with `read_file(description='read visual design skill', "
+                            "path='/mnt/skills/public/visual-design/SKILL.md')`, then "
+                            "call generate_visual_asset again."
+                        ),
+                        tool_call_id=tool_call_id,
+                        name=str(tool_name or "generate_visual_asset"),
                         status="error",
                     ),
                 ],
@@ -4494,6 +5310,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "builder_non_artifact_turns": 0,
                 "builder_task_started_at_ms": 0,
                 "builder_consecutive_empty_emit_rejections": 0,
+                "builder_last_missing_emit_path": None,
+                "builder_consecutive_missing_emit_path_rejections": 0,
             },
             goto="end",
         )
@@ -4558,13 +5376,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         error_class = _classify_pptx_generation_error(state, output_path, text, exists)
         valid_pptx = error_class is None
         slide_count = len(_command_flag_values(command, "--slide-images"))
+        picture_count = _pptx_picture_count_from_text(text)
         logger.info(
             "[BuilderPptxGeneration] success=%s output_ext=%s bytes=%d "
-            "slide_image_count=%d error_class=%s status_reason=%s",
+            "slide_image_count=%d picture_count=%d error_class=%s status_reason=%s",
             valid_pptx,
             PurePosixPath(str(output_path or "")).suffix.lower().lstrip(".") or None,
             bytes_count,
             slide_count,
+            picture_count,
             error_class,
             status_reason,
         )
@@ -4573,6 +5393,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "pptx_generator_success_count": 1 if valid_pptx else 0,
             "pptx_generator_bytes_total": bytes_count if valid_pptx else 0,
             "pptx_generator_error_class": error_class,
+            "pptx_generator_picture_count": picture_count,
         }
         if output_path and valid_pptx:
             delta["pptx_output_paths"] = [output_path]
@@ -4620,6 +5441,22 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             }
         )
 
+    def _visual_asset_result_command(
+        self,
+        result: ToolMessage | Command,
+    ) -> ToolMessage | Command:
+        if not isinstance(result, ToolMessage):
+            return result
+        delta = _visual_asset_result_delta(result)
+        if delta is None:
+            return result
+        return Command(
+            update={
+                "messages": [result],
+                "builder_visual_diagnostics": delta,
+            }
+        )
+
     def _tool_result_command(
         self,
         request: ToolCallRequest,
@@ -4632,6 +5469,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return self._pdf_result_command(request, result)
         if tool_name in {"bash", "bash_tool"}:
             return self._pptx_bash_result_command(request, result)
+        if tool_name in _VISUAL_ASSET_TOOL_NAMES:
+            return self._visual_asset_result_command(result)
         return result
 
     @override
@@ -4650,6 +5489,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         research_block = self._block_substantive_tool_before_research(request)
         if research_block is not None:
             return research_block
+        visual_design_block = self._block_visual_asset_before_design_skill(request)
+        if visual_design_block is not None:
+            return visual_design_block
 
         if request.tool_call.get("name") != "emit_builder_artifact":
             return self._tool_result_command(request, handler(request))
@@ -4698,6 +5540,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         research_block = self._block_substantive_tool_before_research(request)
         if research_block is not None:
             return research_block
+        visual_design_block = self._block_visual_asset_before_design_skill(request)
+        if visual_design_block is not None:
+            return visual_design_block
 
         if request.tool_call.get("name") != "emit_builder_artifact":
             return self._tool_result_command(request, await handler(request))
@@ -4767,6 +5612,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 artifact_calls = [tc for tc in tool_calls if tc.get("name") == "emit_builder_artifact"]
                 tool_names = self._tool_names(tool_calls)
                 pptx_skill_flags = _pptx_skill_flags_from_tool_calls(tool_calls)
+                visual_skill_flags = _visual_skill_flags_from_tool_calls(tool_calls)
                 research_diagnostics = self._update_research_diagnostics(state, tool_names)
                 allow_web_research = self._allow_web_research(state)
 
@@ -4815,6 +5661,26 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             consecutive_rejections += 1
                         else:
                             consecutive_rejections = 0
+                        missing_path = (
+                            str(primary).strip()
+                            if isinstance(primary, str) and primary.strip()
+                            else None
+                        )
+                        previous_missing_path = state.get("builder_last_missing_emit_path")
+                        same_missing_path = (
+                            isinstance(previous_missing_path, str)
+                            and missing_path is not None
+                            and previous_missing_path == missing_path
+                        )
+                        consecutive_missing_path_rejections = int(
+                            state.get("builder_consecutive_missing_emit_path_rejections", 0) or 0
+                        )
+                        if missing_path is None:
+                            consecutive_missing_path_rejections = 0
+                        elif same_missing_path:
+                            consecutive_missing_path_rejections += 1
+                        else:
+                            consecutive_missing_path_rejections = 1
 
                         history = self._append_turn_summary(
                             state,
@@ -4824,7 +5690,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 "has_emit_builder_artifact": True,
                                 "emit_rejected": True,
                                 "empty_artifact_path": is_empty_path_rejection,
+                                "missing_artifact_path": missing_path,
                                 **pptx_skill_flags,
+                                **visual_skill_flags,
                             },
                         )
                         write_diagnostics = state.get("builder_write_diagnostics") or {}
@@ -4924,6 +5792,47 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
                                 "builder_task_started_at_ms": 0,
                                 "builder_consecutive_empty_emit_rejections": 0,
+                                "builder_last_missing_emit_path": None,
+                                "builder_consecutive_missing_emit_path_rejections": 0,
+                                "jump_to": "end",
+                            }
+
+                        if (
+                            missing_path is not None
+                            and consecutive_missing_path_rejections >= self._REJECTION_SHORT_CIRCUIT_AT
+                        ):
+                            logger.warning(
+                                "BuilderArtifact: short-circuiting after %d consecutive "
+                                "missing artifact_path rejections for the same path at "
+                                "turn=%d path=%s — routing to ceiling fallback.",
+                                consecutive_missing_path_rejections,
+                                non_artifact_turns,
+                                missing_path,
+                            )
+                            fallback = self._build_ceiling_fallback(
+                                state,
+                                steps_completed=non_artifact_turns,
+                                reason=(
+                                    "consecutive_missing_emit_path_rejections="
+                                    f"{consecutive_missing_path_rejections}"
+                                ),
+                            )
+                            self._upload_fallback_and_fire(
+                                state=state,
+                                runtime=runtime,
+                                fallback=fallback,
+                                status=self._fallback_completion_status(fallback),
+                            )
+                            return {
+                                "builder_result": fallback,
+                                "builder_non_artifact_turns": 0,
+                                "builder_last_tool_names": tool_names,
+                                "builder_tool_turn_summaries": history,
+                                "builder_research_diagnostics": research_diagnostics,
+                                "builder_task_started_at_ms": 0,
+                                "builder_consecutive_empty_emit_rejections": 0,
+                                "builder_last_missing_emit_path": None,
+                                "builder_consecutive_missing_emit_path_rejections": 0,
                                 "jump_to": "end",
                             }
 
@@ -4934,6 +5843,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "builder_research_diagnostics": research_diagnostics,
                             "builder_failure_diagnostics": diagnostics,
                             "builder_consecutive_empty_emit_rejections": consecutive_rejections,
+                            "builder_last_missing_emit_path": missing_path,
+                            "builder_consecutive_missing_emit_path_rejections": consecutive_missing_path_rejections,
                         }
 
                     history = self._append_turn_summary(
@@ -4943,6 +5854,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "tool_names": tool_names,
                             "has_emit_builder_artifact": True,
                             **pptx_skill_flags,
+                            **visual_skill_flags,
                         },
                     )
                     _apply_artifact_request_metadata(
@@ -4950,6 +5862,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         state,
                         fallback_reason="pptx_generation_not_completed" if _requested_pptx_artifact(state) else None,
                     )
+                    args = _apply_visual_missing_fallback_metadata(args, state)
                     _log_pptx_diagnostics(
                         phase="emit_accepted",
                         state={**state, "builder_tool_turn_summaries": history},
@@ -5028,6 +5941,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "builder_research_diagnostics": research_diagnostics,
                         "builder_task_started_at_ms": 0,
                         "builder_consecutive_empty_emit_rejections": 0,
+                        "builder_last_missing_emit_path": None,
+                        "builder_consecutive_missing_emit_path_rejections": 0,
                         "jump_to": "end",
                     }
 
@@ -5051,6 +5966,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "tool_names": tool_names,
                         "has_emit_builder_artifact": False,
                         **pptx_skill_flags,
+                        **visual_skill_flags,
                     },
                 )
                 joined_names = ", ".join(tool_names) if tool_names else "none"
@@ -5133,6 +6049,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
                         "builder_task_started_at_ms": 0,
                         "builder_consecutive_empty_emit_rejections": 0,
+                        "builder_last_missing_emit_path": None,
+                        "builder_consecutive_missing_emit_path_rejections": 0,
                         "jump_to": "end",
                     }
 
@@ -5156,6 +6074,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     # streak. Reset so the short-circuit only fires on
                     # *consecutive* empty emits.
                     "builder_consecutive_empty_emit_rejections": 0,
+                    "builder_last_missing_emit_path": None,
+                    "builder_consecutive_missing_emit_path_rejections": 0,
                 }
 
             # AI message with NO tool calls -- agent ending with plain text, create fallback
@@ -5209,6 +6129,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "builder_tool_turn_summaries": history,
                 "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
                 "builder_consecutive_empty_emit_rejections": 0,
+                "builder_last_missing_emit_path": None,
+                "builder_consecutive_missing_emit_path_rejections": 0,
             }
 
         log_middleware("BuilderArtifact", "no AI message found", _t0)

@@ -66,6 +66,12 @@ function builderRunKey(taskId?: string | null, runId?: string | null): string | 
   return `${taskId}:${runId ?? ''}`;
 }
 
+const BUILDER_CANCEL_INTENT_RE = /\b(?:stop|cancel|abort|terminate|end|kill|delete|delate)\b(?:\s+(?:the|this|that|my|current))?\s+(?:build|builder|task|artifact|job|run)\b|\b(?:stop|cancel|abort|terminate|kill)\s+(?:it|this|that|everything)\b/i;
+
+function isBuilderCancelIntent(text: string): boolean {
+  return BUILDER_CANCEL_INTENT_RE.test(text.trim());
+}
+
 function canvasActivityDetail(activity: BuilderCanvasActivity | undefined): string | undefined {
   if (!activity) return undefined;
   if (activity.source_title && activity.source_domain) {
@@ -384,9 +390,9 @@ export function useSessionRouteExperience({
     canAutoReload: canReloadForFreshBuild,
   });
 
-  const cancelBuilderTask = useCallback(async () => {
+  const cancelBuilderTask = useCallback(async (): Promise<boolean> => {
     if (!activeThreadId || !builderTask?.taskId || builderTask.phase !== 'running' || isCancellingBuilderTask) {
-      return null;
+      return false;
     }
 
     const runId = builderTask.runId
@@ -435,19 +441,14 @@ export function useSessionRouteExperience({
         variant: 'info',
         durationMs: 2400,
       });
-      return response;
+      return true;
     } catch (error) {
       showToast({
         message: error instanceof Error ? error.message : 'Could not cancel Builder right now.',
         variant: 'warning',
         durationMs: 3200,
       });
-      return {
-        task_id: builderTask.taskId,
-        run_id: runId,
-        status: 'failed',
-        detail: error instanceof Error ? error.message : 'Could not cancel Builder right now.',
-      };
+      return false;
     } finally {
       setIsCancellingBuilderTask(false);
     }
@@ -480,6 +481,15 @@ export function useSessionRouteExperience({
 
   const sendMessage: typeof rawSendMessage = useCallback(
     async (...args) => {
+      const [payload] = args;
+      if (
+        builderTask?.phase === 'running'
+        && typeof payload?.text === 'string'
+        && isBuilderCancelIntent(payload.text)
+      ) {
+        const cancelled = await cancelBuilderTask();
+        if (cancelled) return;
+      }
       const appVersionFresh = await checkAppVersionFreshness({
         reason: 'before-send',
         reloadIfStale: true,
@@ -489,7 +499,7 @@ export function useSessionRouteExperience({
       }
       return rawSendMessage(...args);
     },
-    [checkAppVersionFreshness, rawSendMessage],
+    [builderTask, cancelBuilderTask, checkAppVersionFreshness, rawSendMessage],
   );
 
   const { appendVoiceUserMessage, appendVoiceAssistantMessage } = useSessionVoiceMessages({
@@ -530,10 +540,17 @@ export function useSessionRouteExperience({
   });
 
   useEffect(() => {
-    setOnUserTranscriptHandler(appendVoiceUserMessage);
+    setOnUserTranscriptHandler((text: string) => {
+      appendVoiceUserMessage(text);
+      if (builderTask?.phase === 'running' && isBuilderCancelIntent(text)) {
+        void cancelBuilderTask();
+      }
+    });
     setAssistantResponseSuppressedChecker(() => false);
   }, [
     appendVoiceUserMessage,
+    builderTask,
+    cancelBuilderTask,
     setAssistantResponseSuppressedChecker,
     setOnUserTranscriptHandler,
   ]);

@@ -229,3 +229,14 @@ class TestLoopDetection:
 
         mw._apply(_make_state(tool_calls=call), runtime)
         assert "default" in mw._history
+
+    def test_fallback_thread_id_when_context_is_none(self):
+        """Missing runtime.context should not crash the safety middleware."""
+        mw = LoopDetectionMiddleware(warn_threshold=2)
+        runtime = MagicMock()
+        runtime.context = None
+        call = [_bash_call("ls")]
+
+        mw._apply(_make_state(tool_calls=call), runtime)
+
+        assert "default" in mw._history

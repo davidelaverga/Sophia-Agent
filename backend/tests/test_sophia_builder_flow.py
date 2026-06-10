@@ -99,6 +99,9 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     assert "DanglingToolCallMiddleware" in companion_types
     assert "PromptAssemblyMiddleware" in companion_types
     assert "AnthropicPromptCachingMiddleware" in companion_types
+    assert "LoopDetectionMiddleware" in companion_types
+    assert "SafetyFinishReasonMiddleware" in companion_types
+    assert "LLMErrorHandlingMiddleware" in companion_types
     assert (
         companion_types.index("PromptAssemblyMiddleware")
         < companion_types.index("DanglingToolCallMiddleware")
@@ -124,6 +127,9 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     builder_tool_names = [getattr(tool, "name", None) for tool in captured_builder["tools"]]
     assert "SandboxMiddleware" in builder_types
     assert "ToolErrorHandlingMiddleware" in builder_types
+    assert "LLMErrorHandlingMiddleware" in builder_types
+    assert "SafetyFinishReasonMiddleware" in builder_types
+    assert "LoopDetectionMiddleware" in builder_types
     assert "TodoMiddleware" in builder_types
     assert "BuilderResearchPolicyMiddleware" in builder_types
     assert "builder_web_search" in builder_tool_names
@@ -134,6 +140,7 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     assert "emit_builder_artifact" in builder_tool_names
     # render_markdown_to_pdf (Phase B) is the skill-driven PDF path.
     assert "render_markdown_to_pdf" in builder_tool_names
+    assert "generate_visual_asset" in builder_tool_names
     # ``present_files`` must NOT be in the builder's tool list. Its presence
     # invited the model (trained on upstream's pattern) to call
     # ``present_files + emit_builder_artifact`` together on the final turn,
@@ -148,13 +155,27 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
         "comment block in builder_agent.py for the full rationale."
     )
     # B2 — DanglingToolCallMiddleware MUST sit AFTER PromptAssemblyMiddleware
-    # in the builder chain too. The builder doesn't currently use Anthropic
-    # prompt caching, so we only assert the lower bound.
+    # and BEFORE AnthropicPromptCachingMiddleware in the builder chain (Phase 2
+    # caching), mirroring the companion so the cache keys off the patched
+    # message list.
     assert "DanglingToolCallMiddleware" in builder_types
     assert "PromptAssemblyMiddleware" in builder_types
+    assert "AnthropicPromptCachingMiddleware" in builder_types
     assert (
         builder_types.index("PromptAssemblyMiddleware")
         < builder_types.index("DanglingToolCallMiddleware")
+        < builder_types.index("AnthropicPromptCachingMiddleware")
+    )
+    # Budget circuit-breaker (Phase 1) must be listed BEFORE
+    # BuilderArtifactMiddleware so that — because after_model hooks run in
+    # reverse list order — it runs AFTER it: a legitimate artifact emit wins
+    # the completion-webhook dedup, while a runaway turn's "timed_out" budget
+    # kill fires uncontended. See builder_budget.py.
+    assert "BuilderBudgetMiddleware" in builder_types
+    assert "BuilderArtifactMiddleware" in builder_types
+    assert (
+        builder_types.index("BuilderBudgetMiddleware")
+        < builder_types.index("BuilderArtifactMiddleware")
     )
 
 

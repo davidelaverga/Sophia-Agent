@@ -310,12 +310,16 @@ def test_get_artifact_serves_supabase_pptx_as_attachment(tmp_path, monkeypatch) 
 def test_list_artifacts_returns_output_files_sorted_by_modified_time(tmp_path, monkeypatch) -> None:
     outputs_dir = tmp_path / "outputs"
     nested_dir = outputs_dir / "nested"
+    visuals_dir = outputs_dir / "visuals"
     nested_dir.mkdir(parents=True)
+    visuals_dir.mkdir(parents=True)
 
     older_file = outputs_dir / "first.md"
     newer_file = nested_dir / "second.txt"
+    support_file = visuals_dir / "chart.png"
     older_file.write_text("first", encoding="utf-8")
     newer_file.write_text("second", encoding="utf-8")
+    support_file.write_bytes(b"png")
     os.utime(older_file, (1_700_000_000, 1_700_000_000))
     os.utime(newer_file, (1_700_000_100, 1_700_000_100))
 
@@ -333,6 +337,7 @@ def test_list_artifacts_returns_output_files_sorted_by_modified_time(tmp_path, m
     assert response.artifacts[0].size_bytes == len("second")
     assert response.artifacts[0].mime_type == "text/plain"
     assert response.artifacts[1].name == "first.md"
+    assert all("visuals/" not in item.path for item in response.artifacts)
 
 
 def test_list_artifacts_includes_supabase_objects_when_local_outputs_are_missing(tmp_path, monkeypatch) -> None:
@@ -358,6 +363,35 @@ def test_list_artifacts_includes_supabase_objects_when_local_outputs_are_missing
     ]
     assert response.artifacts[0].size_bytes == 123
     assert response.artifacts[0].mime_type == "text/markdown"
+
+
+def test_list_artifacts_filters_supabase_visual_support_assets(tmp_path, monkeypatch) -> None:
+    missing_outputs = tmp_path / "missing" / "outputs"
+    supabase_items = [
+        artifacts_router.supabase_artifact_store.SupabaseArtifactInfo(
+            filename="deck.pptx",
+            size_bytes=1234,
+            modified_at="2026-05-26T22:46:50Z",
+            content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ),
+        artifacts_router.supabase_artifact_store.SupabaseArtifactInfo(
+            filename="visuals/openclaw_workflow.png",
+            size_bytes=4321,
+            modified_at="2026-05-26T22:46:51Z",
+            content_type="image/png",
+        ),
+    ]
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: missing_outputs)
+    monkeypatch.setattr(
+        artifacts_router.supabase_artifact_store,
+        "list_artifacts",
+        lambda *, thread_id: supabase_items,
+    )
+
+    response = asyncio.run(artifacts_router.list_artifacts("thread-1"))
+
+    assert [item.path for item in response.artifacts] == ["mnt/user-data/outputs/deck.pptx"]
 
 
 def test_list_artifacts_merges_and_dedupes_local_and_supabase(tmp_path, monkeypatch) -> None:
@@ -458,6 +492,47 @@ def test_list_artifacts_includes_associated_builder_task_outputs(tmp_path, monke
     assert response.artifacts[0].size_bytes == len("builder artifact")
 
 
+def test_list_artifacts_prefers_newest_duplicate_associated_builder_output(tmp_path, monkeypatch) -> None:
+    parent_user_data = tmp_path / "parent" / "user-data"
+    old_task_user_data = tmp_path / "old-task" / "user-data"
+    new_task_user_data = tmp_path / "new-task" / "user-data"
+    old_outputs = old_task_user_data / "outputs"
+    new_outputs = new_task_user_data / "outputs"
+    old_outputs.mkdir(parents=True)
+    new_outputs.mkdir(parents=True)
+    old_file = old_outputs / "report.pdf"
+    new_file = new_outputs / "report.pdf"
+    old_file.write_bytes(b"old")
+    new_file.write_bytes(b"newer artifact")
+    os.utime(old_file, (1_700_000_100, 1_700_000_100))
+    os.utime(new_file, (1_700_000_500, 1_700_000_500))
+
+    async def associated(parent_thread_id: str) -> tuple[str, ...]:
+        assert parent_thread_id == "parent-thread"
+        return ("old-task-thread", "new-task-thread")
+
+    monkeypatch.setattr(artifacts_router, "_session_store", OwnedSophiaSessionStore())
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        thread_user_data_resolver({
+            "parent-thread": parent_user_data,
+            "old-task-thread": old_task_user_data,
+            "new-task-thread": new_task_user_data,
+        }),
+    )
+    monkeypatch.setattr(artifacts_router, "_associated_builder_task_thread_ids", associated)
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "list_artifacts", lambda *, thread_id: [])
+
+    response = asyncio.run(
+        artifacts_router.list_artifacts("parent-thread", authenticated_user_id="user-1")
+    )
+
+    assert [item.path for item in response.artifacts] == ["mnt/user-data/outputs/report.pdf"]
+    assert response.artifacts[0].size_bytes == len(b"newer artifact")
+    assert response.artifacts[0].modified_at == "2023-11-14T22:21:40+00:00"
+
+
 def test_get_artifact_resolves_associated_builder_task_output(tmp_path, monkeypatch) -> None:
     parent_user_data = tmp_path / "parent" / "user-data"
     task_user_data = tmp_path / "task" / "user-data"
@@ -491,6 +566,51 @@ def test_get_artifact_resolves_associated_builder_task_output(tmp_path, monkeypa
     )
 
     assert bytes(response.body).decode("utf-8") == "builder artifact"
+    assert response.media_type == "text/markdown"
+
+
+def test_get_artifact_prefers_newest_duplicate_associated_builder_output(tmp_path, monkeypatch) -> None:
+    parent_user_data = tmp_path / "parent" / "user-data"
+    old_task_user_data = tmp_path / "old-task" / "user-data"
+    new_task_user_data = tmp_path / "new-task" / "user-data"
+    old_outputs = old_task_user_data / "outputs"
+    new_outputs = new_task_user_data / "outputs"
+    old_outputs.mkdir(parents=True)
+    new_outputs.mkdir(parents=True)
+    old_file = old_outputs / "report.md"
+    new_file = new_outputs / "report.md"
+    old_file.write_text("old builder artifact", encoding="utf-8")
+    new_file.write_text("new builder artifact", encoding="utf-8")
+    os.utime(old_file, (1_700_000_100, 1_700_000_100))
+    os.utime(new_file, (1_700_000_500, 1_700_000_500))
+
+    async def associated(parent_thread_id: str) -> tuple[str, ...]:
+        assert parent_thread_id == "parent-thread"
+        return ("old-task-thread", "new-task-thread")
+
+    monkeypatch.setattr(artifacts_router, "_session_store", OwnedSophiaSessionStore())
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        thread_user_data_resolver({
+            "parent-thread": parent_user_data,
+            "old-task-thread": old_task_user_data,
+            "new-task-thread": new_task_user_data,
+        }),
+    )
+    monkeypatch.setattr(artifacts_router, "_associated_builder_task_thread_ids", associated)
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "download_artifact", lambda *, thread_id, filename: None)
+
+    response = asyncio.run(
+        artifacts_router.get_artifact(
+            "parent-thread",
+            "mnt/user-data/outputs/report.md",
+            http_request(),
+            authenticated_user_id="user-1",
+        )
+    )
+
+    assert bytes(response.body).decode("utf-8") == "new builder artifact"
     assert response.media_type == "text/markdown"
 
 

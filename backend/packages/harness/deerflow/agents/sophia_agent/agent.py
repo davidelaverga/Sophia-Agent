@@ -108,7 +108,8 @@ _ASYNC_BUILDER_SYSTEM_PROMPT = (
     "  Ack like: \"Let me check on it — still running.\"\n"
     "\n"
     "- `cancel_async_task(task_id)` — user explicitly wants to stop. Cues: "
-    '"stop", "cancel", "nevermind", "don\'t bother", "abort", "kill it". Do '
+    '"stop", "cancel", "abort", "terminate", "end the build", "kill it", '
+    '"delete/delate the build", "nevermind", "don\'t bother". Do '
     "NOT cancel on weak signals — confirm if unsure.\n"
     "  Ack like: \"Got it, cancelling the build now.\"\n"
     "\n"
@@ -432,26 +433,22 @@ def make_sophia_agent(config: RunnableConfig):
     # `tests/test_sophia_builder_flow.py::test_middleware_parity_in_companion_and_builder_chains`
     # locks the position so a future refactor can't re-drop it silently.
     from langchain_anthropic.middleware.prompt_caching import AnthropicPromptCachingMiddleware
+
+    from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
+    from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+    from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     middlewares.extend(
         [
             PromptAssemblyMiddleware(),
             DanglingToolCallMiddleware(),
+            LoopDetectionMiddleware(),
+            SafetyFinishReasonMiddleware(),
             # Prompt caching AFTER assembly + dangling-tool patching — adds
             # cache_control to the assembled system message and keys the
             # cache off the patched messages. Turn 2+ reads from cache →
             # ~85% lower TTFT.
-            #
-            # `unsupported_model_behavior="ignore"`: when the companion
-            # OpenAI provider-fallback is active the model in-flight is a
-            # ``ChatOpenAI``, which this Anthropic-specific middleware can't
-            # cache. Default ("warn") floods logs with a warning on every
-            # fallback turn; "ignore" makes it a silent no-op (it already
-            # just `return handler(request)` when caching can't apply, so
-            # response propagation is unaffected). Anthropic turns keep full
-            # caching behavior.
-            AnthropicPromptCachingMiddleware(
-                ttl="5m", unsupported_model_behavior="ignore"
-            ),
+            AnthropicPromptCachingMiddleware(ttl="5m"),
+            LLMErrorHandlingMiddleware(),
             SophiaTitleMiddleware(),
         ]
     )

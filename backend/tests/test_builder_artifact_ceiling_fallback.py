@@ -147,6 +147,11 @@ def test_ceiling_fallback_pptx_promotes_valid_powerpoint(tmp_path: Path) -> None
     started_ms = int((time.time() - 10) * 1000)
     state = _state_with_outputs(outputs, started_ms=started_ms)
     state["builder_artifact_target_path"] = "/mnt/user-data/outputs/deck.pptx"
+    state["builder_pptx_diagnostics"] = {
+        "pptx_generator_attempt_count": 1,
+        "pptx_generator_success_count": 0,
+        "pptx_generator_error_class": "pptx_generation_error",
+    }
 
     fallback = BuilderArtifactMiddleware._build_ceiling_fallback(
         state, steps_completed=12, reason="hard_ceiling"
@@ -165,6 +170,11 @@ def test_ceiling_fallback_pptx_rejects_tiny_deck_and_promotes_markdown_fallback(
     started_ms = int((time.time() - 10) * 1000)
     state = _state_with_outputs(outputs, started_ms=started_ms)
     state["builder_artifact_target_path"] = "/mnt/user-data/outputs/deck.pptx"
+    state["builder_pptx_diagnostics"] = {
+        "pptx_generator_attempt_count": 1,
+        "pptx_generator_success_count": 0,
+        "pptx_generator_error_class": "pptx_generation_error",
+    }
 
     fallback = BuilderArtifactMiddleware._build_ceiling_fallback(
         state, steps_completed=12, reason="hard_ceiling"
@@ -185,13 +195,19 @@ def test_ceiling_fallback_pptx_promotes_valid_html_fallback_with_metadata(tmp_pa
         outputs / "deck.html",
         "<!doctype html><html><head><title>Deck</title><style>body{font-family:sans-serif}</style></head>"
         "<body><section><h1>Research deck fallback</h1><p>Complete browser-viewable slide content.</p></section>"
-        "<section><h2>Visual summary</h2><p>Charts and diagrams are represented inline.</p></section></body></html>",
+        "<section><h2>Visual summary</h2><svg viewBox='0 0 120 60'><rect width='80' height='40'/></svg>"
+        "<p>Charts and diagrams are represented inline.</p></section></body></html>",
     )
 
     started_ms = int((time.time() - 10) * 1000)
     state = _state_with_outputs(outputs, started_ms=started_ms)
     state["builder_artifact_target_path"] = "/mnt/user-data/outputs/deck.pptx"
     state["delegation_context"] = {"task": "Build a slide deck with charts and diagrams"}
+    state["builder_pptx_diagnostics"] = {
+        "pptx_generator_attempt_count": 1,
+        "pptx_generator_success_count": 0,
+        "pptx_generator_error_class": "pptx_generation_error",
+    }
 
     fallback = BuilderArtifactMiddleware._build_ceiling_fallback(
         state, steps_completed=12, reason="hard_ceiling"

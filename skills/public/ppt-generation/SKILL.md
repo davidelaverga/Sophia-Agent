@@ -1,21 +1,22 @@
 ---
 name: ppt-generation
-description: Use this skill when the user requests to generate, create, or make presentations (PPT/PPTX). Creates visually rich slides by generating images for each slide and composing them into a PowerPoint file.
+description: Use this skill when the user requests to generate, create, or make presentations (PPT/PPTX). Creates a valid PowerPoint file from a structured plan, with optional AI-generated slide images when explicitly requested.
 ---
 
 # PPT Generation Skill
 
 ## Overview
 
-This skill generates professional PowerPoint presentations by creating AI-generated images for each slide and composing them into a PPTX file. The workflow includes planning the presentation structure with a consistent visual style, generating slide images sequentially (using the previous slide as a reference for style consistency), and assembling them into a final presentation.
+This skill generates professional PowerPoint presentations from a structured plan. By default it creates a valid text/layout deck directly from the plan. If the user explicitly asks for generated images, illustrations, visual scenes, or image-heavy slides, it can also generate slide images sequentially and compose them into the final deck.
 
 ## Core Capabilities
 
 - Plan and structure multi-slide presentations with unified visual style
 - Support multiple presentation styles: Business, Academic, Minimal, Apple Keynote, Creative
-- Generate unique AI images for each slide using image-generation skill
-- Maintain visual consistency by using previous slide as reference image
-- Compose images into a professional PPTX file
+- Optionally generate AI images for each slide using image-generation skill when explicitly requested
+- Maintain visual consistency by using previous slide as reference image when image generation is used
+- Compose the plan, optional generated slide images, and optional local chart/diagram
+  assets into a professional PPTX file
 
 ## Presentation Styles
 
@@ -73,13 +74,26 @@ Create a JSON file in `/mnt/user-data/workspace/` with the presentation structur
       "type": "content",
       "title": "Slide Title",
       "key_points": ["Point 1", "Point 2", "Point 3"],
-      "visual_description": "Detailed description for image generation"
+      "visual_description": "Detailed description for image generation only if explicitly requested",
+      "chart_path": "/mnt/user-data/outputs/visuals/example-chart.png"
     }
   ]
 }
 ```
 
-### Step 3: Generate Slide Images Sequentially
+For deterministic charts/diagrams created with `generate_visual_asset`, reference
+the generated PNG in `image`, `chart_path`, or `visual_path` on the relevant
+slide. The composition script will create a content-with-image layout. SVG can
+be kept for HTML, but PPTX embedding should use PNG.
+
+### Step 3: Decide Whether Images Are Needed
+
+Generated images are optional. Skip image generation unless the user explicitly
+asks for generated images, illustrations, visual scenes, or an image-heavy deck.
+For normal slide decks, use the plan-only composition path in Step 4 with no
+`--slide-images` argument.
+
+### Step 3A: Optional Generated Slide Images
 
 **IMPORTANT**: Generate slides **strictly one by one, in order**. Do NOT parallelize or batch image generation. Each slide depends on the previous slide's output as a reference image. Generating slides in parallel will break visual consistency and is not allowed.
 
@@ -144,7 +158,17 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 
 ### Step 4: Compose PPT
 
-After all slide images are generated, call the composition script:
+For the default no-image path, call the composition script with just the plan and
+output file:
+
+```bash
+python /mnt/skills/public/ppt-generation/scripts/generate.py \
+  --plan-file /mnt/user-data/workspace/presentation-plan.json \
+  --output-file /mnt/user-data/outputs/presentation.pptx
+```
+
+If generated slide images were explicitly requested and successfully produced,
+pass them in order:
 
 ```bash
 python /mnt/skills/public/ppt-generation/scripts/generate.py \
@@ -156,8 +180,12 @@ python /mnt/skills/public/ppt-generation/scripts/generate.py \
 Parameters:
 
 - `--plan-file`: Absolute path to the presentation plan JSON file (required)
-- `--slide-images`: Absolute paths to slide images in order (required, space-separated)
+- `--slide-images`: Optional absolute paths to slide images in order
 - `--output-file`: Absolute path to output PPTX file (required)
+
+Plan-level slide fields `image`, `chart_path`, or `visual_path` may also point
+to local PNG/JPEG assets under `/mnt/user-data/outputs/`; these are embedded
+without using the `--slide-images` option.
 
 [!NOTE]
 Do NOT read the python file, just call it with the parameters.
@@ -167,7 +195,11 @@ is missing, saving fails, or the produced file is not a valid Office PPTX
 package. If it fails after one correction, create an explicit Markdown or HTML
 fallback instead of writing ad hoc `python-pptx` code.
 
-## Complete Example: Glassmorphism Style (最现代前卫)
+## Complete Example: Glassmorphism Style With Generated Images (最现代前卫)
+
+Use this example only when the user explicitly asks for generated images or an
+image-heavy visual deck. For ordinary PPTX requests, skip the image-generation
+steps and use the no-image composition command from Step 4.
 
 User request: "Create a presentation about AI product launch"
 

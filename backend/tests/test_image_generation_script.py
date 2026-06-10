@@ -90,6 +90,7 @@ class TestMissingApiKeyHardFails:
             timeout=15,
         )
         assert result.returncode == 2, result.stderr
+        assert "IMAGEGEN_FAIL reason=missing_api_key" in result.stderr
         assert "OPENAI_API_KEY is not set" in result.stderr
         assert not output_file.exists()
 
@@ -137,7 +138,7 @@ class TestGeneratePathWithoutReferenceImages:
         fake_client.images.edit.assert_not_called()
         assert output_file.exists()
         assert output_file.stat().st_size > 0
-        assert "Successfully generated image" in result
+        assert "IMAGEGEN_OK model=gpt-image-2" in result
 
 
 class TestEditPathWithReferenceImages:
@@ -237,14 +238,30 @@ class TestApiFailuresExitNonZero:
         # raise on the missing field, get caught by main(), and exit non-zero.
         fake_client.images.generate.return_value = _make_response_with_b64(None)
         with patch("openai.OpenAI", return_value=fake_client):
-            with pytest.raises(RuntimeError):
+            with pytest.raises(SystemExit) as excinfo:
                 script_module.generate_image(
                     prompt_file=str(prompt_file),
                     reference_images=[],
                     output_file=str(output_file),
                     aspect_ratio="16:9",
                 )
+        assert excinfo.value.code == 1
         assert not output_file.exists()
+
+    @pytest.mark.parametrize(
+        "message, expected",
+        [
+            ("Your organization must be verified to use this model", "org_not_verified"),
+            ("Incorrect API key provided", "auth_invalid"),
+            ("Request blocked by content policy", "content_blocked"),
+            ("ReadTimeout: timed out", "timeout"),
+            ("ConnectError: DNS failure", "egress_blocked"),
+            ("Invalid size value", "invalid_size"),
+            ("some other provider issue", "api_error"),
+        ],
+    )
+    def test_classifies_openai_failures(self, script_module, message: str, expected: str) -> None:
+        assert script_module._classify_exception(RuntimeError(message)) == expected
 
 
 # ---------------------------------------------------------------------------

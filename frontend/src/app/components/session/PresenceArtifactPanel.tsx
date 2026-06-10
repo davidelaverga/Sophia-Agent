@@ -1542,6 +1542,10 @@ export function PresenceArtifactPanel({
     visualSourceUnavailableReason: builderVisualUnavailableReason,
     artifactViewState: builderArtifactViewState,
   })
+  const builderArtifactCoReviewRef = useRef(builderArtifactCoReview)
+  useEffect(() => {
+    builderArtifactCoReviewRef.current = builderArtifactCoReview
+  }, [builderArtifactCoReview])
   const voiceCommandReviewStale = Boolean(
     voiceCommandStaleViewSignature
       && builderArtifactViewSignature === voiceCommandStaleViewSignature
@@ -2225,14 +2229,15 @@ export function PresenceArtifactPanel({
       return await builderVoiceCommandTargetRef.current?.setView(view)
     },
     refreshView: async () => {
-      if (!builderArtifactCoReview.canRefresh) {
+      const latestCoReview = builderArtifactCoReviewRef.current
+      if (!latestCoReview.canRefresh) {
         return {
           ok: false,
-          refreshResult: builderArtifactCoReview.state.state === "co_review_live" ? "refresh_unavailable" : "not_active",
-          blockedReason: builderArtifactCoReview.state.state === "co_review_live" ? "refresh_unavailable" : "review_not_active",
+          refreshResult: latestCoReview.state.state === "co_review_live" ? "refresh_unavailable" : "not_active",
+          blockedReason: latestCoReview.state.state === "co_review_live" ? "refresh_unavailable" : "review_not_active",
         }
       }
-      const nextState = await builderArtifactCoReview.refreshReview()
+      const nextState = await latestCoReview.refreshReview()
       const ok = nextState.refreshFrameResult === "success" && (nextState.frameSentCount ?? 0) > 0
       return {
         ok,
@@ -2350,7 +2355,6 @@ export function PresenceArtifactPanel({
       }
     },
   }), [
-    builderArtifactCoReview,
     builderArtifactId,
     builderStageActive,
     coreviewCurrentView,

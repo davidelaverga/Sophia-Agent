@@ -79,6 +79,8 @@ vi.mock('../../../app/lib/error-logger', () => ({
 }));
 
 import { handleChatPost } from '../../../app/api/chat/_lib/post-handler';
+// Real module (not mocked) — the spill threshold the post-handler uses.
+import { SPILL_THRESHOLD } from '../../../app/api/chat/_lib/request-validation';
 
 describe('handleChatPost auth hardening', () => {
   beforeEach(() => {
@@ -424,5 +426,138 @@ describe('handleChatPost mock-mode bypass (Codex P2 PR #132 later iteration)', (
 
     expect(response.status).toBe(200);
     expect(userOwnsThreadMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('handleChatPost long-message spill (instead of truncation)', () => {
+  // A message past SPILL_THRESHOLD is uploaded to the thread as a
+  // ``chat-message-*.md`` document (via the gateway uploads endpoint,
+  // which mirrors to Supabase) and the forwarded message becomes a head
+  // preview + read_user_document pointer — replacing the old silent
+  // 2000-char truncation. The gateway upload uses global ``fetch``; the
+  // backend stream uses ``fetchBackendStreamWithBootstrapMock``.
+  const longMessage = 'a'.repeat(SPILL_THRESHOLD + 100);
+  let fetchSpy: ReturnType<typeof vi.fn>;
+  const originalFetch = globalThis.fetch;
+
+  function mockValidator(overrides: Record<string, unknown>) {
+    parseAndValidateChatPayloadMock.mockReturnValue({
+      kind: 'valid',
+      data: {
+        userMessage: longMessage,
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+        threadId: 'thread-1',
+        sessionType: 'chat',
+        contextMode: 'life',
+        platform: 'text',
+        rawMessageLength: longMessage.length,
+        attachedFiles: [],
+        ...overrides,
+      },
+    });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    configMockState.useMock = false;
+    getAuthenticatedUserIdMock.mockResolvedValue('session-user-1');
+    getUserScopedAuthTokenMock.mockResolvedValue('test-token');
+    userOwnsThreadMock.mockResolvedValue(true);
+    getPrimaryGatewayUrlMock.mockReturnValue('https://gateway.test');
+    fetchBackendStreamWithBootstrapMock.mockResolvedValue({
+      upstream: new Response('event: message\ndata: ok\n\n', {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      }),
+      threadId: 'thread-1',
+    });
+    // Default: gateway upload succeeds.
+    fetchSpy = vi.fn(async () => new Response('{"success":true,"files":[]}', { status: 200 }));
+    globalThis.fetch = fetchSpy as never;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('uploads the full message as an attachment and forwards a preview + pointer', async () => {
+    mockValidator({});
+
+    const response = await handleChatPost({ json: async () => ({}) } as never);
+    expect(response.status).toBe(200);
+
+    // The gateway upload was attempted once, to this thread's uploads.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [uploadUrl, uploadInit] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(uploadUrl).toBe('https://gateway.test/api/threads/thread-1/uploads');
+    expect(uploadInit.method).toBe('POST');
+    expect(uploadInit.body).toBeInstanceOf(FormData);
+
+    const payload = fetchBackendStreamWithBootstrapMock.mock.calls[0][1] as {
+      message: string;
+      attached_files: string[];
+      raw_message: string;
+    };
+    // Spilled filename is added to attached_files...
+    expect(payload.attached_files).toHaveLength(1);
+    expect(payload.attached_files[0]).toMatch(/^chat-message-[a-z0-9-]+\.md$/);
+    // ...and the FormData carried that exact filename.
+    const sentName = (uploadInit.body as FormData).getAll('files').map((f) => (f as File).name);
+    expect(sentName).toContain(payload.attached_files[0]);
+    // Forwarded message is a preview + read instruction, NOT the full text.
+    expect(payload.message).toContain('read_user_document');
+    expect(payload.message).toContain(payload.attached_files[0]);
+    expect(payload.message.length).toBeLessThan(longMessage.length);
+    // raw_message keeps the FULL text for the stale-thread recovery path.
+    expect(payload.raw_message).toBe(longMessage);
+  });
+
+  it('falls back to inline (no truncation, no pointer) when the upload fails', async () => {
+    mockValidator({});
+    fetchSpy.mockResolvedValueOnce(new Response('nope', { status: 500 }));
+
+    const response = await handleChatPost({ json: async () => ({}) } as never);
+    expect(response.status).toBe(200);
+
+    const payload = fetchBackendStreamWithBootstrapMock.mock.calls[0][1] as {
+      message: string;
+      attached_files: string[];
+      raw_message: string;
+    };
+    // No attachment added; full message forwarded inline (NOT cut).
+    expect(payload.attached_files).toHaveLength(0);
+    expect(payload.message).toBe(longMessage);
+    expect(payload.raw_message).toBe(longMessage);
+  });
+
+  it('does not spill when there is no thread to attach to (new-session bootstrap)', async () => {
+    mockValidator({ threadId: undefined });
+
+    const response = await handleChatPost({ json: async () => ({}) } as never);
+    expect(response.status).toBe(200);
+
+    // No gateway upload attempted; full message sent inline untruncated.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const payload = fetchBackendStreamWithBootstrapMock.mock.calls[0][1] as {
+      message: string;
+      attached_files: string[];
+    };
+    expect(payload.attached_files).toHaveLength(0);
+    expect(payload.message).toBe(longMessage);
+  });
+
+  it('does not spill a short message', async () => {
+    mockValidator({ userMessage: 'short and sweet', rawMessageLength: 14 });
+
+    const response = await handleChatPost({ json: async () => ({}) } as never);
+    expect(response.status).toBe(200);
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const payload = fetchBackendStreamWithBootstrapMock.mock.calls[0][1] as {
+      message: string;
+      attached_files: string[];
+    };
+    expect(payload.attached_files).toHaveLength(0);
+    expect(payload.message).toBe('short and sweet');
   });
 });

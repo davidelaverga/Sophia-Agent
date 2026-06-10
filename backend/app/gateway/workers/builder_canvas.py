@@ -26,13 +26,14 @@ DEFAULT_TERMINAL_TTL_SECONDS = 15 * 60
 DEFAULT_HISTORY_SIZE = 64
 DEFAULT_RETIRED_RUNS_SIZE = 128
 _SUBSCRIBER_QUEUE_MAXSIZE = 128
+_RUNLESS_COMPLETION_RUN_ID = "__runless_completion__"
 _TERMINAL_STATUSES = {"completed", "failed", "timed_out", "cancelled"}
 _PHASE_LABELS = {
     "starting": "Creating plan",
     "researching": "Researching",
     "drafting": "Creating artifact",
     "finalizing": "Creating artifact",
-    "done": "Success",
+    "done": "Packaging artifact",
 }
 _CHECK_COMMAND_PREFIXES = ("test", "pytest", "pnpm", "npm", "yarn", "uv", "ruff", "mypy", "tsc")
 _MISSING_DELIVERABLE_ERROR = "Builder finished without a deliverable artifact."
@@ -181,7 +182,7 @@ def _phase_activity(data: Any) -> dict[str, str] | None:
         "researching": "researching",
         "drafting": "creating_artifact",
         "finalizing": "creating_artifact",
-        "done": "success",
+        "done": "packaging_artifact",
     }[phase]
     category = {
         "starting": "plan",
@@ -190,6 +191,10 @@ def _phase_activity(data: Any) -> dict[str, str] | None:
         "finalizing": "package",
         "done": "finalize",
     }[phase]
+    if phase == "done":
+        logger.info(
+            "Builder canvas: projected non-terminal done phase as packaging activity; waiting for terminal completion event."
+        )
     return {
         "kind": "phase",
         "phase": phase,
@@ -485,7 +490,8 @@ class BuilderCanvasWorker:
             "Builder canvas: event %s kind=%s reason=%s parent_thread_id=%s task_id=%s run_id=%s "
             "sequence=%s event_name=%s activity_kind=%s activity_category=%s status=%s "
             "activity_action=%s has_artifact_url=%s has_artifact_path=%s "
-            "requested_artifact_ext=%s artifact_ext=%s artifact_is_fallback=%s fallback_reason=%s",
+            "requested_artifact_ext=%s artifact_ext=%s artifact_is_fallback=%s fallback_reason=%s "
+            "image_generation_status=%s image_generation_reason=%s",
             decision,
             event.get("kind"),
             reason,
@@ -504,6 +510,8 @@ class BuilderCanvasWorker:
             completion.get("artifact_ext") if isinstance(completion, dict) else None,
             completion.get("artifact_is_fallback") if isinstance(completion, dict) else None,
             completion.get("fallback_reason") if isinstance(completion, dict) else None,
+            completion.get("image_generation_status") if isinstance(completion, dict) else None,
+            completion.get("image_generation_reason") if isinstance(completion, dict) else None,
         )
 
     def _record_event_locked(self, event: dict[str, Any], key: tuple[str, str, str], sequence: int) -> None:
@@ -552,7 +560,7 @@ class BuilderCanvasWorker:
         task_run_ids = self._known_task_run_ids_locked(parent_thread_id, task_id)
         if len(task_run_ids) == 1:
             return next(iter(task_run_ids))
-        return None
+        return _RUNLESS_COMPLETION_RUN_ID
 
     def _known_task_run_ids_locked(self, parent_thread_id: str, task_id: str) -> set[str]:
         task_run_ids = {
@@ -667,16 +675,15 @@ class BuilderCanvasWorker:
             return 0
         async with self._lock:
             run_id = self._completion_run_id_locked(parent, task_id, payload.get("run_id"))
-            if run_id is None:
+            if run_id == _RUNLESS_COMPLETION_RUN_ID:
                 logger.info(
-                    "Builder canvas: terminal dropped reason=missing_run_id parent_thread_id=%s task_id=%s status=%s has_artifact_url=%s has_artifact_path=%s",
+                    "Builder canvas: terminal accepted with runless fallback parent_thread_id=%s task_id=%s status=%s has_artifact_url=%s has_artifact_path=%s",
                     parent,
                     task_id,
                     payload.get("status"),
                     _completion_has(payload, "artifact_url"),
                     _completion_has(payload, "artifact_path"),
                 )
-                return 0
         completion = _normalize_completion_payload({**payload, "run_id": run_id})
         status = _public_terminal_status(completion.get("status"))
         terminal_activity = {

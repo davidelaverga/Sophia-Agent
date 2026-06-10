@@ -89,6 +89,8 @@ export type BuilderCompletionEventV1 = {
   artifact_ext?: string | null;
   artifact_is_fallback?: boolean | null;
   fallback_reason?: string | null;
+  image_generation_status?: string | null;
+  image_generation_reason?: string | null;
   source_artifact_path?: string | null;
   revision_of_artifact_path?: string | null;
   summary?: string | null;

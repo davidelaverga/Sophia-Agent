@@ -87,6 +87,16 @@ deliverable.
 
 ## Fallback Truth
 
+- When the user requests charts, diagrams, visuals, or visual explanations, a
+  successful artifact must contain verified visual evidence: inline SVG,
+  embedded media, native chart/diagram parts, or local assets produced under
+  `/mnt/user-data/outputs/visuals/`. Prose descriptions do not satisfy the
+  visual requirement. Remote chart URLs also do not count as completed local
+  visuals.
+- For PDF and PPTX, support visuals must be embedded into the final PDF/deck.
+  Generated assets under `/mnt/user-data/outputs/visuals/` are support files,
+  not deliverables. Use PNG assets in PDF sources and PPTX plans; keep SVG for
+  HTML/inline web output.
 - A fallback can be a successful user-facing artifact only when a usable file
   exists and fallback metadata is explicit.
 - For requested slide decks, normal success requires a structurally valid

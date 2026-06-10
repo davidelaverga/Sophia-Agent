@@ -7,20 +7,27 @@ Use this card only for requested `.pptx` or slide-deck builds.
 1. Plan with `write_todos`, then create a presentation plan JSON under
    `/mnt/user-data/workspace/`.
 2. Read `/mnt/skills/public/ppt-generation/SKILL.md`.
-3. Compose the deck with `/mnt/skills/public/ppt-generation/scripts/generate.py`,
-   passing the plan and an output path under `/mnt/user-data/outputs/`. A
-   valid text/layout/chart deck is acceptable; generated raster images are not
-   mandatory.
-4. Use `/mnt/skills/public/image-generation/scripts/generate.py` only when the
+3. If the user requested charts, diagrams, or visuals, read
+   `/mnt/skills/public/visual-design/SKILL.md`, then create local visual
+   assets with `generate_visual_asset` and reference their `.png` paths from
+   the plan using a per-slide `image`, `chart_path`, or `visual_path` field.
+   Do not use the generated support PNG as the final artifact.
+4. Compose a valid no-image deck first with
+   `/mnt/skills/public/ppt-generation/scripts/generate.py`, passing the plan
+   and an output path under `/mnt/user-data/outputs/`. Do not pass
+   `--slide-images` unless you actually generated slide images.
+5. Use `/mnt/skills/public/image-generation/scripts/generate.py` only when the
    user explicitly requests generated images, illustrations, visual scenes, or
-   image-heavy slides. If image generation fails, continue with a no-image
-   PPTX rather than immediately falling back to HTML.
-5. Emit only after the `.pptx` exists and passes structural validation. If a
+   image-heavy slides. If image generation fails, continue with the no-image
+   PPTX path rather than immediately falling back to HTML.
+6. Emit only after the `.pptx` exists and passes structural validation. If a
    valid `.pptx` exists, it is authoritative; do not emit an HTML or Markdown
    fallback instead.
 
 Reading the skill is not completion. Writing ad hoc `python-pptx` code,
 generic `.py` files, or HTML before trying the skill workflow is drift.
+A text-only deck does not satisfy a user request for charts, diagrams, or
+visual explanations.
 
 ## Failure And Fallback
 

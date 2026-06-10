@@ -18,6 +18,7 @@ import {
   USE_MOCK,
   secureLog,
 } from './config';
+import { maybeSpillLongMessage } from './message-spill';
 import { getMockResponse } from './mock';
 import {
   createSSEToUIMessageStream,
@@ -126,19 +127,13 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       platform,
     } = parsed.data;
 
-    // When the user attached files via AttachmentBar, prepend a short
-    // synthesized note so the companion knows which uploaded filenames
-    // it can pass to view_user_image / read_user_document this turn.
-    // Without this hint, Sophia would either need to call `ls` (extra
-    // tool turn) or guess that uploads exist.
-    //
     // Defensive coalesce: parseAndValidateChatPayload guarantees this
     // field is an array, but tests that mock the validator might omit
     // it. Treat undefined as the empty case rather than throwing.
+    // (The synthesized attachment briefing + final message body are
+    // assembled AFTER the spill step below, since a long message may add
+    // its own attachment to this list.)
     const attachedFiles = parsed.data.attachedFiles ?? [];
-    const userMessage = attachedFiles.length > 0
-      ? `${buildAttachmentPrompt(attachedFiles)}\n\n${rawUserMessage}`
-      : rawUserMessage;
 
     const userId = await getAuthenticatedUserId();
     if (!userId) {
@@ -195,9 +190,10 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
     // the auth-token's user (or a /by-thread/{thread_id} lookup that
     // 404s on cross-user reads) would close this gap globally and
     // remove the recent-100 fallback ceiling. Separate backend ticket.
+    const gatewayUrl = getPrimaryGatewayUrl();
+    const apiKey = await getUserScopedAuthToken();
+
     if (typeof threadId === 'string' && threadId) {
-      const gatewayUrl = getPrimaryGatewayUrl();
-      const apiKey = await getUserScopedAuthToken();
       const owns = await userOwnsThread(threadId, userId, apiKey, gatewayUrl);
       if (!owns) {
         return new Response(
@@ -209,6 +205,28 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
         );
       }
     }
+
+    // Spill an over-long chat message to a document attachment instead of
+    // truncating it (replaces the old silent 2000-char cut). No-op for
+    // short messages and when there's no thread to attach to; falls back
+    // to forwarding the full message inline on any upload failure.
+    const spill = await maybeSpillLongMessage({
+      fullMessage: rawUserMessage,
+      threadId,
+      attachedFiles,
+      apiKey,
+      gatewayUrl,
+    });
+    const effectiveAttachedFiles = spill.attachedFiles;
+
+    // When files are present (user-attached and/or a spilled message),
+    // prepend the synthesized briefing so the companion knows which bare
+    // filenames it can pass to view_user_image / read_user_document this
+    // turn. Without this hint, Sophia would call `ls` (extra tool turn)
+    // or guess that uploads exist.
+    const userMessage = effectiveAttachedFiles.length > 0
+      ? `${buildAttachmentPrompt(effectiveAttachedFiles)}\n\n${spill.primaryMessage}`
+      : spill.primaryMessage;
 
     const backendPayload = {
       message: userMessage,
@@ -228,14 +246,16 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       // ``runtime.config.configurable`` so it doesn't have to parse the
       // synthesized prompt block (which a user can spoof by typing the
       // marker into their own message).
-      attached_files: attachedFiles,
-      // The pre-prefix message. ``userMessage`` carries the
-      // synthesized ``[The user has uploaded ...]`` block when there
-      // are attachments; ``rawUserMessage`` does not. The backend
-      // client uses this on the stale-thread recovery path so the
-      // fresh-thread retry doesn't tell the model to read files
-      // absent from the new sandbox (Codex P2 PR #132).
-      raw_message: rawUserMessage,
+      attached_files: effectiveAttachedFiles,
+      // The pre-prefix message. ``userMessage`` carries the synthesized
+      // ``[The user has uploaded ...]`` block when there are attachments;
+      // ``spill.rawMessage`` does not. The backend client uses this on
+      // the stale-thread recovery path so the fresh-thread retry doesn't
+      // tell the model to read files absent from the new sandbox (Codex
+      // P2 PR #132). When a long message was spilled, ``rawMessage`` is
+      // the FULL text, so a recovered turn still carries the complete
+      // content inline rather than a dangling read_user_document pointer.
+      raw_message: spill.rawMessage,
     };
 
     const backendUrl = `${BACKEND_URL}${BACKEND_CHAT_ENDPOINT}`;
