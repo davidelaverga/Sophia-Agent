@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef } from 'react';
 
 import { getSessionMessages, isError } from '../lib/api/sessions-api';
+import {
+  hasRenderableAssistantText,
+  isEquivalentAssistantText,
+  normalizeAssistantTextForDedupe,
+} from '../lib/assistant-message-dedupe';
 import { debugLog } from '../lib/debug-logger';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
 import type { BuilderCompletionEventV1 } from '../types/builder-completion';
@@ -52,10 +57,6 @@ const STREAM_BACKFILL_DELAYS_MS = [1_500, 6_000];
  * browser stream consumer — its reply lands in thread state several seconds
  * after the terminal webhook. */
 const BUILDER_BACKFILL_DELAYS_MS = [4_000, 9_000, 16_000];
-
-function normalizeText(value: string): string {
-  return value.trim().replace(/\s+/g, ' ');
-}
 
 function messageText(message: ChatMessageLike): string {
   return (message.parts || [])
@@ -112,7 +113,7 @@ export function useSessionAssistantReplyBackfill({
 
   const countVisibleAssistantTexts = useCallback(() => (
     chatMessagesRef.current.filter(
-      (message) => message.role === 'assistant' && normalizeText(messageText(message)).length > 0,
+      (message) => message.role === 'assistant' && hasRenderableAssistantText(messageText(message)),
     ).length
   ), []);
 
@@ -175,8 +176,8 @@ export function useSessionAssistantReplyBackfill({
         return 'no-candidate';
       }
 
-      const candidateText = normalizeText(finalMessage.content || '');
-      if (!candidateText) {
+      const candidateContent = finalMessage.content || '';
+      if (!hasRenderableAssistantText(candidateContent)) {
         recordOutcome(reason, 'no-candidate');
         return 'no-candidate';
       }
@@ -187,12 +188,11 @@ export function useSessionAssistantReplyBackfill({
         return 'dedupe-suppressed';
       }
 
-      const visible = chatMessagesRef.current;
-      const alreadyVisible = visible.some((message) => (
+      const isVisibleEquivalent = (message: ChatMessageLike) => (
         message.id === candidateId
-        || (message.role === 'assistant' && normalizeText(messageText(message)) === candidateText)
-      ));
-      if (alreadyVisible) {
+        || (message.role === 'assistant' && isEquivalentAssistantText(messageText(message), candidateContent))
+      );
+      if (chatMessagesRef.current.some(isVisibleEquivalent)) {
         appendedIdsRef.current.add(candidateId);
         recordOutcome(reason, 'dedupe-suppressed');
         return 'dedupe-suppressed';
@@ -202,11 +202,7 @@ export function useSessionAssistantReplyBackfill({
       const createdAt = finalMessage.created_at || new Date().toISOString();
       setMessageTimestamp(candidateId, createdAt);
       setChatMessages((prev) => {
-        const duplicate = prev.some((message) => (
-          message.id === candidateId
-          || (message.role === 'assistant' && normalizeText(messageText(message)) === candidateText)
-        ));
-        if (duplicate) {
+        if (prev.some(isVisibleEquivalent)) {
           return prev;
         }
         return [
@@ -214,7 +210,7 @@ export function useSessionAssistantReplyBackfill({
           {
             id: candidateId,
             role: 'assistant' as const,
-            parts: [{ type: 'text' as const, text: finalMessage.content }],
+            parts: [{ type: 'text' as const, text: candidateContent }],
           },
         ];
       });
@@ -222,7 +218,7 @@ export function useSessionAssistantReplyBackfill({
       debugLog('AssistantReplyBackfill', 'appended missed assistant reply', {
         reason,
         candidateIdPresent: Boolean(finalMessage.id),
-        contentLength: candidateText.length,
+        contentLength: normalizeAssistantTextForDedupe(candidateContent).length,
       });
       recordOutcome(reason, 'appended');
       return 'appended';

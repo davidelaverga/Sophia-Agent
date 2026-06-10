@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 
 import type { UIMessage } from '../components/session';
+import {
+  hasRenderableAssistantText,
+  isEquivalentAssistantText,
+  normalizeAssistantTextForDedupe,
+} from '../lib/assistant-message-dedupe';
 import { debugLog } from '../lib/debug-logger';
 import { extractTextFromUiMessageStreamDump } from '../lib/ui-message-stream-parser';
 import { reconcileVoiceTranscript } from '../lib/voice-transcript-reconciliation';
@@ -121,6 +126,35 @@ export function useSessionMessageViewModel({
         continue;
       }
 
+      // Blank assistant rows render nothing — tool-call-only / emit_artifact-only
+      // turns and not-yet-streamed placeholders must not appear as empty
+      // "just now" entries.
+      if (message.role === 'assistant' && !hasRenderableAssistantText(message.content)) {
+        continue;
+      }
+
+      // The same assistant reply can arrive via multiple paths (live stream,
+      // final-state backfill, transcript hydration) with trivial typography
+      // differences (curly vs straight apostrophes). Adjacent equivalent
+      // assistant messages — no user turn between them, within a short time
+      // window — collapse to one rendered reply, keeping the earlier slot and
+      // the more complete text.
+      const duplicateOfPreviousAssistant =
+        previous?.role === 'assistant' &&
+        message.role === 'assistant' &&
+        isWithinAssistantDedupeWindow(previous.createdAt, message.createdAt) &&
+        isEquivalentAssistantText(previous.content, message.content);
+
+      if (duplicateOfPreviousAssistant && previous) {
+        const candidateIsMoreComplete =
+          normalizeAssistantTextForDedupe(message.content).length >
+          normalizeAssistantTextForDedupe(previous.content).length;
+        if (candidateIsMoreComplete) {
+          deduped[deduped.length - 1] = { ...previous, content: message.content };
+        }
+        continue;
+      }
+
       deduped.push(message);
     }
 
@@ -194,6 +228,24 @@ export function useSessionMessageViewModel({
     latestAssistantMessage,
     setMessageTimestamp,
   };
+}
+
+/** Duplicates only collapse when both copies are near in time — identical
+ * replies far apart (a deliberate repeat in a later exchange) stay separate. */
+const ASSISTANT_DEDUPE_WINDOW_MS = 10 * 60 * 1000;
+
+function isWithinAssistantDedupeWindow(
+  previousCreatedAt: string | undefined,
+  candidateCreatedAt: string | undefined,
+): boolean {
+  const previousTimestamp = previousCreatedAt ? Date.parse(previousCreatedAt) : Number.NaN;
+  const candidateTimestamp = candidateCreatedAt ? Date.parse(candidateCreatedAt) : Number.NaN;
+  if (!Number.isFinite(previousTimestamp) || !Number.isFinite(candidateTimestamp)) {
+    // Without two trustworthy timestamps, adjacency (no user turn between)
+    // is the stronger signal — treat as within the window.
+    return true;
+  }
+  return Math.abs(candidateTimestamp - previousTimestamp) <= ASSISTANT_DEDUPE_WINDOW_MS;
 }
 
 function dedupeMappedMessagesById(messages: UIMessage[]): SessionMessageDedupeResult {

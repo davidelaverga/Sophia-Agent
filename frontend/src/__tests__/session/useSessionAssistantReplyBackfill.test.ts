@@ -147,6 +147,56 @@ describe('useSessionAssistantReplyBackfill', () => {
     expect(outcomes).not.toContain('appended');
   });
 
+  it('suppresses a backfill copy that differs only by curly apostrophes', async () => {
+    getSessionMessagesMock.mockResolvedValue(transcriptResponse([
+      { id: 'm-user-1', role: 'user', content: 'Build me a page' },
+      { id: 'm-ai-1', role: 'sophia', content: 'Starting the build now — I’ll have it back to you shortly.' },
+    ]));
+
+    const { result, rerender } = renderHarness({
+      chatStatus: 'ready',
+      builderCompletion: null,
+      initialMessages: [
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Build me a page' }] },
+        { id: 'a1', role: 'assistant', parts: [{ type: 'text', text: "Starting the build now — I'll have it back to you shortly." }] },
+      ],
+    });
+
+    rerender({ chatStatus: 'ready', builderCompletion });
+    await advance(20_000);
+
+    expect(result.current.chatMessages.filter((message) => message.role === 'assistant')).toHaveLength(1);
+    const outcomes = recordCaptureEventMock.mock.calls.map(([event]) => event.payload.assistantMessageBackfillResult);
+    expect(outcomes).toContain('dedupe-suppressed');
+    expect(outcomes).not.toContain('appended');
+  });
+
+  it('suppresses a backfill copy already contained in the streamed bubble', async () => {
+    const sentence = "Starting the build now — I'll have it back to you shortly.";
+    getSessionMessagesMock.mockResolvedValue(transcriptResponse([
+      { id: 'm-user-1', role: 'user', content: 'Build me a page' },
+      { id: 'm-ai-1', role: 'sophia', content: sentence },
+    ]));
+
+    const { result, rerender } = renderHarness({
+      chatStatus: 'ready',
+      builderCompletion: null,
+      initialMessages: [
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Build me a page' }] },
+        // Doubled-stream shape: the live bubble already contains the sentence twice.
+        { id: 'a1', role: 'assistant', parts: [{ type: 'text', text: `${sentence}\n\n${sentence}` }] },
+      ],
+    });
+
+    rerender({ chatStatus: 'ready', builderCompletion });
+    await advance(20_000);
+
+    expect(result.current.chatMessages.filter((message) => message.role === 'assistant')).toHaveLength(1);
+    const outcomes = recordCaptureEventMock.mock.calls.map(([event]) => event.payload.assistantMessageBackfillResult);
+    expect(outcomes).toContain('dedupe-suppressed');
+    expect(outcomes).not.toContain('appended');
+  });
+
   it('retries after builder completion until the wakeup reply lands, then appends once', async () => {
     getSessionMessagesMock
       .mockResolvedValueOnce(transcriptResponse([
