@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
-import { isHtmlArtifactFile } from "../../lib/builder-artifacts"
+import { isHtmlArtifactFile, resolveCanvasRenderFile } from "../../lib/builder-artifacts"
 import {
   coreviewFeedbackFromActionResult,
   coreviewFeedbackFromBuilderActionResult,
@@ -1075,24 +1075,49 @@ export function PresenceArtifactPanel({
   const stagePrimaryFile = useMemo(() => {
     return getStagePrimaryFileWithMime(stageBuilderArtifact, builderArtifactLibrary)
   }, [builderArtifactLibrary, stageBuilderArtifact])
-  const stageRendererKind = detectArtifactRendererKind(stagePrimaryFile, stageBuilderArtifact)
+  // PPTX deliverables render via their .preview.pdf sibling when one exists
+  // (resolved the same way ArtifactStage does) so the panel routes the stage
+  // to the PDF pipeline instead of the metadata placeholder.
+  const stageCanvasRenderResolution = useMemo(() => {
+    const candidatesByPath = new Map(
+      getBuilderArtifactFiles(stageBuilderArtifact).map((file) => [file.path, file]),
+    )
+    for (const item of builderArtifactLibrary) {
+      if (!candidatesByPath.has(item.path)) {
+        candidatesByPath.set(item.path, {
+          path: item.path,
+          name: item.name,
+          label: item.name,
+          isPrimary: false,
+          ...(item.mimeType ? { mimeType: item.mimeType } : {}),
+        })
+      }
+    }
+    return resolveCanvasRenderFile([...candidatesByPath.values()], stageBuilderArtifact)
+  }, [builderArtifactLibrary, stageBuilderArtifact])
+  const stageCanvasRenderFile = stageCanvasRenderResolution.renderFile ?? stagePrimaryFile
+  const stageUsesPptxPdfPreview = stageCanvasRenderResolution.previewKind === "pptx_pdf_preview"
+  const stageRendererKind = detectArtifactRendererKind(stageCanvasRenderFile ?? stagePrimaryFile, stageBuilderArtifact)
   const stageArtifactPath = stagePrimaryFile?.path ?? stageBuilderArtifact?.artifactPath ?? null
   const stageArtifactCapabilities = useMemo(() => (
     getCoreviewArtifactCapabilitiesForFile({
-      file: stagePrimaryFile,
+      file: stageCanvasRenderFile ?? stagePrimaryFile,
       rendererKind: stageRendererKind,
       textExtractionStatus: builderVisualCaptureStatus.pdfTextExtractionStatus ?? null,
       exactTextAvailable: builderVisualCaptureStatus.exactTextAvailable,
       layoutAnchorsAvailable: false,
       originalDownloadAvailable: Boolean(stageArtifactPath),
       openInNewTabAvailable: Boolean(stageArtifactPath),
+      pptxPreviewPdf: stageUsesPptxPdfPreview,
     })
   ), [
     builderVisualCaptureStatus.exactTextAvailable,
     builderVisualCaptureStatus.pdfTextExtractionStatus,
     stageArtifactPath,
+    stageCanvasRenderFile,
     stagePrimaryFile,
     stageRendererKind,
+    stageUsesPptxPdfPreview,
   ])
   const stageArtifactCapabilityTelemetry = useMemo(() => (
     coreviewArtifactCapabilityTelemetry(stageRendererKind, stageArtifactCapabilities)

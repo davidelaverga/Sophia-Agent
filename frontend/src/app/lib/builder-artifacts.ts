@@ -99,6 +99,7 @@ export function normalizeBuilderArtifactPayload(raw: unknown): BuilderArtifactV1
   const decisionsMade = coerceStringArray(record, 'decisions_made', 'decisionsMade').slice(0, 4);
   const sourcesUsed = coerceStringArray(record, 'sources_used', 'sourcesUsed');
   const artifactTitle = rawArtifactTitle || getFallbackTitle(artifactPath);
+  const artifactPreviewFilename = coerceString(record, 'artifact_preview_filename', 'artifactPreviewFilename');
   const companionSummary = coerceString(record, 'companion_summary', 'companionSummary');
   const userNextAction = coerceString(record, 'user_next_action', 'userNextAction');
 
@@ -116,6 +117,7 @@ export function normalizeBuilderArtifactPayload(raw: unknown): BuilderArtifactV1
     ...(artifactPath ? { artifactPath } : {}),
     artifactType: coerceString(record, 'artifact_type', 'artifactType') || 'unknown',
     artifactTitle,
+    ...(artifactPreviewFilename ? { artifactPreviewFilename } : {}),
     ...(supportingFiles.length > 0 ? { supportingFiles } : {}),
     ...(coerceNumber(record, 'steps_completed', 'stepsCompleted') !== undefined
       ? { stepsCompleted: coerceNumber(record, 'steps_completed', 'stepsCompleted') }
@@ -135,6 +137,185 @@ export function normalizeBuilderArtifactPayload(raw: unknown): BuilderArtifactV1
 
 function getFileLabel(path: string): string {
   return path.split('/').filter(Boolean).pop() || path;
+}
+
+const PPTX_PREVIEW_PDF_SUFFIX = '.preview.pdf';
+const RENDER_SOURCE_SIBLING_PATTERN = /\.(?:pdf|pptx?|docx?|html?)\.(?:md|markdown)$/iu;
+const DELIVERABLE_EXTENSION_PRIORITY = ['pdf', 'pptx', 'ppt', 'html', 'htm', 'md', 'markdown'];
+
+export type BuilderArtifactFileRole = 'deliverable' | 'source' | 'preview';
+
+interface BuilderArtifactFileLike {
+  path?: string | null;
+  name?: string | null;
+  mimeType?: string | null;
+}
+
+function fileBaseName(file: BuilderArtifactFileLike | null | undefined): string {
+  const value = (typeof file?.name === 'string' && file.name.trim())
+    || (typeof file?.path === 'string' && file.path.trim())
+    || '';
+  return value.split('/').filter(Boolean).pop() ?? '';
+}
+
+function fileExtension(file: BuilderArtifactFileLike | null | undefined): string {
+  const name = fileBaseName(file).toLowerCase().split(/[?#]/u)[0] ?? '';
+  const match = /\.([a-z0-9]+)$/u.exec(name);
+  return match?.[1] ?? '';
+}
+
+export function isPptxArtifactFile(file: BuilderArtifactFileLike | null | undefined): boolean {
+  const mimeType = file?.mimeType?.toLowerCase().split(';')[0]?.trim() ?? '';
+  if (
+    mimeType === 'application/vnd.ms-powerpoint'
+    || mimeType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+  ) {
+    return true;
+  }
+  const extension = fileExtension(file);
+  return extension === 'ppt' || extension === 'pptx';
+}
+
+/**
+ * Base stem used to group a deliverable with its render-source and preview
+ * siblings: ``sophia-roadmap.pdf``, ``sophia-roadmap.pdf.md`` and
+ * ``sophia-roadmap.preview.pdf`` all share the stem ``sophia-roadmap``.
+ */
+export function getBuilderArtifactFileBaseStem(file: BuilderArtifactFileLike | null | undefined): string {
+  let name = fileBaseName(file).toLowerCase().split(/[?#]/u)[0] ?? '';
+  if (name.endsWith(PPTX_PREVIEW_PDF_SUFFIX)) {
+    return name.slice(0, -PPTX_PREVIEW_PDF_SUFFIX.length);
+  }
+  const sourceMatch = RENDER_SOURCE_SIBLING_PATTERN.exec(name);
+  if (sourceMatch) {
+    name = name.slice(0, name.length - sourceMatch[0].length);
+    return name;
+  }
+  return name.replace(/\.[a-z0-9]+$/u, '');
+}
+
+/**
+ * Classifies a file against its siblings so render sources (``report.pdf.md``,
+ * ``deck.md`` next to ``deck.pptx``) and deck previews (``deck.preview.pdf``)
+ * never outrank the requested deliverable.
+ */
+export function classifyBuilderArtifactFileRole(
+  file: BuilderArtifactFileLike | null | undefined,
+  siblings: readonly BuilderArtifactFileLike[] = [],
+): BuilderArtifactFileRole {
+  const name = fileBaseName(file).toLowerCase();
+  if (!name) {
+    return 'deliverable';
+  }
+  if (name.endsWith(PPTX_PREVIEW_PDF_SUFFIX)) {
+    return 'preview';
+  }
+  if (RENDER_SOURCE_SIBLING_PATTERN.test(name)) {
+    return 'source';
+  }
+  const extension = fileExtension(file);
+  if (extension === 'md' || extension === 'markdown') {
+    const stem = getBuilderArtifactFileBaseStem(file);
+    const hasRenderedSibling = siblings.some((sibling) => {
+      if (!sibling || sibling === file) {
+        return false;
+      }
+      const siblingName = fileBaseName(sibling).toLowerCase();
+      if (!siblingName || siblingName === name) {
+        return false;
+      }
+      const siblingExtension = fileExtension(sibling);
+      return ['pdf', 'pptx', 'ppt'].includes(siblingExtension)
+        && getBuilderArtifactFileBaseStem(sibling) === stem;
+    });
+    if (hasRenderedSibling) {
+      return 'source';
+    }
+  }
+  return 'deliverable';
+}
+
+export function formatBuilderArtifactFileRoleLabel(role: BuilderArtifactFileRole): string | null {
+  if (role === 'source') {
+    return 'Source';
+  }
+  if (role === 'preview') {
+    return 'Preview';
+  }
+  return null;
+}
+
+function deliverableExtensionRank(file: BuilderArtifactFileLike): number {
+  const index = DELIVERABLE_EXTENSION_PRIORITY.indexOf(fileExtension(file));
+  return index === -1 ? DELIVERABLE_EXTENSION_PRIORITY.length : index;
+}
+
+/**
+ * Ranks an artifact file list so the requested deliverable wins regardless of
+ * mtime: render-source and preview siblings sink below deliverables, and files
+ * sharing a base stem order by extension priority (pdf > pptx > html > md).
+ * Unrelated files keep their incoming (newest-first) order — the sort is
+ * stable.
+ */
+export function rankBuilderArtifactLibraryItems<T extends BuilderArtifactFileLike>(items: readonly T[]): T[] {
+  const roles = new Map<T, BuilderArtifactFileRole>();
+  for (const item of items) {
+    roles.set(item, classifyBuilderArtifactFileRole(item, items));
+  }
+  const roleRank = (item: T) => (roles.get(item) === 'deliverable' ? 0 : 1);
+  return [...items].sort((left, right) => {
+    const roleDelta = roleRank(left) - roleRank(right);
+    if (roleDelta !== 0) {
+      return roleDelta;
+    }
+    if (getBuilderArtifactFileBaseStem(left) === getBuilderArtifactFileBaseStem(right)) {
+      return deliverableExtensionRank(left) - deliverableExtensionRank(right);
+    }
+    return 0;
+  });
+}
+
+export type BuilderCanvasPreviewKind = 'pptx_pdf_preview';
+
+export interface ResolvedCanvasRenderFile<T extends BuilderArtifactFileLike> {
+  /** File the canvas should render (the .preview.pdf sibling for decks). */
+  renderFile: T | null;
+  /** File download / open-original affordances must keep pointing at. */
+  downloadFile: T | null;
+  previewKind: BuilderCanvasPreviewKind | null;
+}
+
+/**
+ * Resolves which file the canvas renders versus which file download/open
+ * affordances target. When the primary deliverable is a PPTX and a rendered
+ * ``<stem>.preview.pdf`` sibling exists (preferred name comes from the
+ * completion event's ``artifact_preview_filename`` when present), the preview
+ * renders through the existing PDF pipeline while downloads keep the deck.
+ */
+export function resolveCanvasRenderFile<T extends BuilderArtifactFileLike & { isPrimary?: boolean }>(
+  files: readonly T[],
+  artifact?: Pick<BuilderArtifactV1, 'artifactPreviewFilename'> | null,
+): ResolvedCanvasRenderFile<T> {
+  const list = files.filter((file): file is T => Boolean(file));
+  const downloadFile = list.find((file) => file.isPrimary) ?? list[0] ?? null;
+  if (!downloadFile || !isPptxArtifactFile(downloadFile)) {
+    return { renderFile: downloadFile, downloadFile, previewKind: null };
+  }
+
+  const explicitPreviewName = artifact?.artifactPreviewFilename?.trim().split('/').filter(Boolean).pop()?.toLowerCase() ?? '';
+  const primaryName = fileBaseName(downloadFile).toLowerCase();
+  const primaryStem = primaryName.replace(/\.pptx?$/u, '');
+  const stemPreviewName = `${primaryStem}${PPTX_PREVIEW_PDF_SUFFIX}`;
+  const findByName = (candidateName: string) => (
+    candidateName
+      ? list.find((file) => file !== downloadFile && fileBaseName(file).toLowerCase() === candidateName) ?? null
+      : null
+  );
+  const previewFile = findByName(explicitPreviewName) ?? findByName(stemPreviewName);
+  if (!previewFile) {
+    return { renderFile: downloadFile, downloadFile, previewKind: null };
+  }
+  return { renderFile: previewFile, downloadFile, previewKind: 'pptx_pdf_preview' };
 }
 
 export function getBuilderArtifactFiles(builderArtifact: BuilderArtifactV1 | null | undefined): BuilderArtifactFileV1[] {

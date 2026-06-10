@@ -31,6 +31,8 @@ export type CoreviewArtifactCapabilityInput = Partial<CoreviewWorkspaceArtifact>
   layoutAnchorsAvailable?: boolean | null
   originalDownloadAvailable?: boolean | null
   openInNewTabAvailable?: boolean | null
+  /** True when a PPTX deliverable renders via its .preview.pdf sibling. */
+  pptxPreviewPdf?: boolean | null
 }
 
 export type CoreviewArtifactCapabilityTelemetry = {
@@ -63,6 +65,7 @@ const MARKDOWN_TRUTH = "Markdown preview is available. Visual annotations are no
 const HTML_TRUTH = "HTML preview, zoom, and visual annotations are available in Coreview."
 const DOCX_TRUTH = "Word documents can be opened or downloaded. In-canvas document rendering is not available yet."
 const PPTX_TRUTH = "PPTX native canvas rendering is not available yet. Open or download the file to review it."
+const PPTX_PREVIEW_TRUTH = "Reviewing a rendered PDF preview of this deck. Download keeps the original PPTX."
 const IMAGE_TRUTH = "Image files can be opened or downloaded. OCR is not available yet."
 const METADATA_TRUTH = "A metadata preview is available. Rich artifact rendering is not available for this file yet."
 const UNSUPPORTED_TRUTH = "This file can be opened or downloaded, but in-canvas rendering is not available yet."
@@ -90,6 +93,7 @@ export function getCoreviewArtifactCapabilities(
   switch (input.rendererKind) {
     case "pdf": {
       const requiresOCR = textExtractionKnownUnavailable && !textExtractionReady
+      const pptxPreviewPdf = input.pptxPreviewPdf === true
       return buildCapabilities({
         canRender: true,
         renderMode: "canvas",
@@ -114,9 +118,17 @@ export function getCoreviewArtifactCapabilities(
         supportsArtifactUpdate: false,
         supportsSourceRead: false,
         supportsRebuildFromSource: false,
-        unsupportedUpdateReason: requiresOCR ? OCR_UPDATE_UNSUPPORTED : PDF_UPDATE_UNSUPPORTED,
+        unsupportedUpdateReason: requiresOCR
+          ? OCR_UPDATE_UNSUPPORTED
+          : pptxPreviewPdf
+            ? PPTX_UPDATE_UNSUPPORTED
+            : PDF_UPDATE_UNSUPPORTED,
         fallbackReason: requiresOCR ? "pdf_text_unavailable" : null,
-        userFacingTruth: requiresOCR ? PDF_OCR_TRUTH : null,
+        userFacingTruth: requiresOCR
+          ? PDF_OCR_TRUTH
+          : pptxPreviewPdf
+            ? PPTX_PREVIEW_TRUTH
+            : null,
       })
     }
     case "markdown":
@@ -243,6 +255,7 @@ export function getCoreviewArtifactCapabilitiesForFile({
   layoutAnchorsAvailable,
   originalDownloadAvailable,
   openInNewTabAvailable,
+  pptxPreviewPdf,
 }: {
   file: ArtifactRendererFileInput | null | undefined
   rendererKind: ArtifactRendererKind
@@ -251,6 +264,7 @@ export function getCoreviewArtifactCapabilitiesForFile({
   layoutAnchorsAvailable?: boolean | null
   originalDownloadAvailable?: boolean | null
   openInNewTabAvailable?: boolean | null
+  pptxPreviewPdf?: boolean | null
 }): CoreviewArtifactCapabilities {
   return getCoreviewArtifactCapabilities({
     rendererKind,
@@ -263,6 +277,7 @@ export function getCoreviewArtifactCapabilitiesForFile({
     layoutAnchorsAvailable,
     originalDownloadAvailable,
     openInNewTabAvailable,
+    pptxPreviewPdf,
   })
 }
 

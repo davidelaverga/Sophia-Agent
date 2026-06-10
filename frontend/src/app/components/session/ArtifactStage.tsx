@@ -68,6 +68,7 @@ import {
   getCoreviewArtifactCapabilitiesForFile,
   recordSophiaCaptureEvent,
   RefreshCw,
+  resolveCanvasRenderFile,
 } from "./ArtifactStageDeps"
 import { ArtifactToolbar } from "./ArtifactToolbar"
 import { ReviewWithSophiaButton } from "./ReviewWithSophiaButton"
@@ -490,10 +491,31 @@ export function ArtifactStage({
     })
   }, [builderArtifact, builderArtifactLibrary])
   const primaryFile = files.find((file) => file.isPrimary) ?? files[0] ?? builderArtifactLibrary[0]
+  const canvasRenderResolution = useMemo(() => {
+    const candidatesByPath = new Map(files.map((file) => [file.path, file]))
+    for (const item of builderArtifactLibrary) {
+      if (!candidatesByPath.has(item.path)) {
+        candidatesByPath.set(item.path, {
+          path: item.path,
+          name: item.name,
+          label: item.name,
+          isPrimary: false,
+          ...(item.mimeType ? { mimeType: item.mimeType } : {}),
+          ...(typeof item.sizeBytes === "number" ? { sizeBytes: item.sizeBytes } : {}),
+        })
+      }
+    }
+    return resolveCanvasRenderFile([...candidatesByPath.values()], builderArtifact)
+  }, [builderArtifact, builderArtifactLibrary, files])
+  const canvasPreviewKind = canvasRenderResolution.previewKind
+  const renderFile = canvasRenderResolution.renderFile ?? primaryFile
   const openHref = buildThreadArtifactHref(threadId, primaryFile?.path)
   const downloadHref = buildThreadArtifactHref(threadId, primaryFile?.path, { download: true })
+  const renderHref = canvasPreviewKind
+    ? buildThreadArtifactHref(threadId, renderFile?.path) ?? openHref
+    : openHref
   const typeLabel = formatBuilderArtifactTypeLabel(builderArtifact.artifactType)
-  const rendererKind = detectArtifactRendererKind(primaryFile, builderArtifact)
+  const rendererKind = detectArtifactRendererKind(renderFile, builderArtifact)
   const [pageIndex, setPageIndex] = useState(0)
   const [pageCount, setPageCount] = useState(1)
   const [zoom, setZoom] = useState(1)
@@ -525,17 +547,17 @@ export function ArtifactStage({
   } | null>(null)
   const annotationTelemetrySignatureRef = useRef<string | null>(null)
   const viewportPrimaryFile = useMemo(() => (
-    primaryFile
+    renderFile
       ? {
-          path: primaryFile.path,
-          name: primaryFile.name,
-          label: "label" in primaryFile ? primaryFile.label : primaryFile.name,
-          isPrimary: "isPrimary" in primaryFile ? primaryFile.isPrimary : true,
-          ...("mimeType" in primaryFile && primaryFile.mimeType ? { mimeType: primaryFile.mimeType } : {}),
-          ...("sizeBytes" in primaryFile && typeof primaryFile.sizeBytes === "number" ? { sizeBytes: primaryFile.sizeBytes } : {}),
+          path: renderFile.path,
+          name: renderFile.name,
+          label: "label" in renderFile ? renderFile.label : renderFile.name,
+          isPrimary: "isPrimary" in renderFile ? renderFile.isPrimary : true,
+          ...("mimeType" in renderFile && renderFile.mimeType ? { mimeType: renderFile.mimeType } : {}),
+          ...("sizeBytes" in renderFile && typeof renderFile.sizeBytes === "number" ? { sizeBytes: renderFile.sizeBytes } : {}),
         }
       : null
-  ), [primaryFile])
+  ), [renderFile])
   const artifactCapabilities = useMemo(() => (
     getCoreviewArtifactCapabilitiesForFile({
       file: viewportPrimaryFile,
@@ -545,8 +567,10 @@ export function ArtifactStage({
       layoutAnchorsAvailable: rendererKind === "pdf" && Boolean(pdfTextLayout),
       originalDownloadAvailable: Boolean(downloadHref),
       openInNewTabAvailable: Boolean(openHref),
+      pptxPreviewPdf: canvasPreviewKind === "pptx_pdf_preview",
     })
   ), [
+    canvasPreviewKind,
     downloadHref,
     exactTextAvailable,
     openHref,
@@ -572,7 +596,7 @@ export function ArtifactStage({
       artifactVersionId,
     } : null
   ), [artifactId, artifactLogicalId, artifactStableIdentity, artifactVersionId, normalSessionId, sessionId, threadId, voiceAgentSessionId])
-  const rendererResetKey = `${primaryFile?.path ?? ""}|${rendererKind}`
+  const rendererResetKey = `${renderFile?.path ?? primaryFile?.path ?? ""}|${rendererKind}`
   const annotationStableArtifactIdentity = artifactStableIdentity ?? null
   const annotationStore = useMemo(() => (
     annotationStoreTelemetry ?? emptyCoreviewAnnotationStoreTelemetry()
@@ -597,22 +621,31 @@ export function ArtifactStage({
     setToolMode(nextMode)
     recordToolModeAction(before, nextMode, resetReason)
   }, [recordToolModeAction])
+  // View state resets only when the rendered document changes (path or
+  // renderer). Keying this on the annotation identity caused a pageCount race:
+  // identity often resolves after the PDF reported numPages, clobbering
+  // pageCount back to 1 with no re-emission, leaving multi-page PDFs stuck in
+  // single-page mode.
   useEffect(() => {
     setPageIndex(0)
     setPageCount(1)
     setZoom(1)
-    setFitMode(rendererKind === "pdf" && supportsZoom ? "page" : "custom")
-    setSelectedAnnotationId(null)
+    setFitMode(rendererKind === "pdf" ? "page" : "custom")
     setPdfTextLayout(null)
     setHtmlPreviewText("")
     setHtmlViewState(null)
     htmlCommandTargetRef.current = null
     setPdfFocusRequest(null)
   }, [
-    annotationStableArtifactIdentity,
     rendererKind,
     rendererResetKey,
-    supportsZoom,
+  ])
+
+  useEffect(() => {
+    setSelectedAnnotationId(null)
+  }, [
+    annotationStableArtifactIdentity,
+    rendererResetKey,
   ])
 
   useEffect(() => {
@@ -1592,6 +1625,7 @@ export function ArtifactStage({
       data-testid="artifact-review-room"
       data-review-state={reviewSurfaceState}
       data-artifact-renderer-kind={rendererKind}
+      data-artifact-canvas-preview-kind={canvasPreviewKind ?? undefined}
       data-artifact-view-signature={artifactViewSignature ?? undefined}
       tabIndex={0}
       onKeyDown={handleStageKeyDown}
@@ -1681,7 +1715,7 @@ export function ArtifactStage({
         files={files}
         typeLabel={typeLabel}
         previewFile={viewportPrimaryFile}
-        previewHref={openHref}
+        previewHref={renderHref}
         artifactTextRegistration={artifactTextRegistration}
         onVisualCaptureStatusChange={onVisualCaptureStatusChange}
         onHtmlTextChange={setHtmlPreviewText}

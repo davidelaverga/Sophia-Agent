@@ -67,6 +67,15 @@ const markdownBuilderArtifact = {
   userNextAction: "Review the rendered brief.",
 }
 
+const pptxBuilderArtifact = {
+  ...builderArtifact,
+  artifactTitle: "Sophia deck",
+  artifactType: "presentation",
+  artifactPath: "mnt/user-data/outputs/sophia-deck.pptx",
+  supportingFiles: ["mnt/user-data/outputs/sophia-deck.preview.pdf"],
+  userNextAction: "Review the deck in the canvas.",
+}
+
 const htmlBuilderArtifact = {
   ...builderArtifact,
   artifactTitle: "Launch site",
@@ -527,6 +536,180 @@ describe("ArtifactStage", () => {
     await user.click(screen.getByLabelText("Previous page"))
     expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument()
     await waitFor(() => expect(pdf.getPage).toHaveBeenLastCalledWith(2))
+  })
+
+  it("renders a PPTX deliverable through its .preview.pdf sibling while downloads keep the deck", async () => {
+    let voiceTarget: ArtifactReviewVoiceCommandTarget | null = null
+    const pdf = mockPdfDocument({ pageCount: 3 })
+    renderStage({
+      artifact: pptxBuilderArtifact,
+      artifactId: "artifact-deck-1",
+      exactTextAvailable: false,
+      onVoiceCommandTargetChange: (target) => {
+        voiceTarget = target
+      },
+    })
+
+    const stage = screen.getByRole("region", { name: /generated artifact/i })
+    expect(stage).toHaveAttribute("data-artifact-renderer-kind", "pdf")
+    expect(stage).toHaveAttribute("data-artifact-canvas-preview-kind", "pptx_pdf_preview")
+    expect(await screen.findByLabelText("Artifact PDF preview")).toBeInTheDocument()
+    expect(pdf.fetchPdf).toHaveBeenCalledWith(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/sophia-deck.preview.pdf",
+      expect.objectContaining({ method: "GET" }),
+    )
+    expect(await screen.findByText("Page 1 of 3")).toBeInTheDocument()
+
+    // Download / open-original affordances keep pointing at the PPTX.
+    expect(screen.getByLabelText("Open Sophia deck in new tab")).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/sophia-deck.pptx",
+    )
+    const downloadLink = screen.getByLabelText("Download original Sophia deck")
+    expect(downloadLink).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/sophia-deck.pptx?download=true",
+    )
+    expect(downloadLink).toHaveAttribute("download", "sophia-deck.pptx")
+    expect(screen.getByText("Presentation")).toBeInTheDocument()
+
+    // Voice paging unlocks through the PDF capability contract.
+    await waitFor(() => expect(voiceTarget?.pageCount).toBe(3))
+    expect(voiceTarget?.supportsPagination).toBe(true)
+    let result: ReturnType<ArtifactReviewVoiceCommandTarget["applyCommand"]> | null = null
+    act(() => {
+      result = voiceTarget?.applyCommand({ kind: "next_page" }) ?? null
+    })
+    expect(result).toMatchObject({ applied: true, artifactCurrentPageIndex: 1 })
+    expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument()
+  })
+
+  it("renders a PPTX through a library-only preview sibling not listed in supporting files", async () => {
+    const pdf = mockPdfDocument({ pageCount: 2 })
+    renderStage({
+      artifact: { ...pptxBuilderArtifact, supportingFiles: [] },
+      artifactLibrary: [
+        {
+          path: "mnt/user-data/outputs/sophia-deck.pptx",
+          name: "sophia-deck.pptx",
+        },
+        {
+          path: "mnt/user-data/outputs/sophia-deck.preview.pdf",
+          name: "sophia-deck.preview.pdf",
+          mimeType: "application/pdf",
+        },
+      ],
+      exactTextAvailable: false,
+    })
+
+    expect(await screen.findByLabelText("Artifact PDF preview")).toBeInTheDocument()
+    expect(pdf.fetchPdf).toHaveBeenCalledWith(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/sophia-deck.preview.pdf",
+      expect.objectContaining({ method: "GET" }),
+    )
+    expect(screen.getByLabelText("Download original Sophia deck")).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/sophia-deck.pptx?download=true",
+    )
+  })
+
+  it("keeps the metadata placeholder for a PPTX without any preview sibling", () => {
+    renderStage({
+      artifact: { ...pptxBuilderArtifact, supportingFiles: [] },
+      exactTextAvailable: false,
+    })
+
+    const stage = screen.getByRole("region", { name: /generated artifact/i })
+    expect(stage).toHaveAttribute("data-artifact-renderer-kind", "download_only")
+    expect(stage).not.toHaveAttribute("data-artifact-canvas-preview-kind")
+    expect(screen.queryByLabelText("Artifact PDF preview")).not.toBeInTheDocument()
+  })
+
+  it("shows an always-available in-canvas pager for multi-page PDFs", async () => {
+    const user = userEvent.setup()
+    mockPdfDocument({ pageCount: 3 })
+    renderStage({ artifact: pdfBuilderArtifact, exactTextAvailable: false })
+
+    expect(await screen.findByText("Page 1 of 3")).toBeInTheDocument()
+    const pager = screen.getByTestId("artifact-pdf-pager")
+    expect(pager.className).not.toContain("hidden")
+    expect(within(pager).getByTestId("artifact-pdf-pager-indicator")).toHaveTextContent("1 / 3")
+    expect(within(pager).getByLabelText("Go to previous page")).toBeDisabled()
+
+    await user.click(within(pager).getByLabelText("Go to next page"))
+    expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument()
+    expect(within(pager).getByTestId("artifact-pdf-pager-indicator")).toHaveTextContent("2 / 3")
+    expect(within(pager).getByLabelText("Go to previous page")).toBeEnabled()
+
+    await user.click(within(pager).getByLabelText("Go to next page"))
+    expect(await screen.findByText("Page 3 of 3")).toBeInTheDocument()
+    expect(within(pager).getByLabelText("Go to next page")).toBeDisabled()
+
+    await user.click(within(pager).getByLabelText("Go to previous page"))
+    expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument()
+  })
+
+  it("hides the in-canvas pager for single-page PDFs", async () => {
+    mockPdfDocument({ pageCount: 1 })
+    renderStage({ artifact: pdfBuilderArtifact, exactTextAvailable: false })
+
+    expect(await screen.findByLabelText("PDF page 1")).toBeInTheDocument()
+    expect(screen.queryByTestId("artifact-pdf-pager")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("artifact-page-rail")).not.toBeInTheDocument()
+  })
+
+  it("changes pages with arrow keys when the PDF canvas itself has focus", async () => {
+    mockPdfDocument({ pageCount: 3 })
+    renderStage({ artifact: pdfBuilderArtifact, artifactId: "artifact-1", exactTextAvailable: false })
+
+    expect(await screen.findByText("Page 1 of 3")).toBeInTheDocument()
+    const panLayer = screen.getByTestId("artifact-pdf-pan-layer")
+
+    fireEvent.keyDown(panLayer, { key: "ArrowRight" })
+    expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument()
+
+    fireEvent.keyDown(panLayer, { key: "PageDown" })
+    expect(await screen.findByText("Page 3 of 3")).toBeInTheDocument()
+
+    fireEvent.keyDown(panLayer, { key: "ArrowLeft" })
+    expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument()
+
+    fireEvent.keyDown(panLayer, { key: "PageUp" })
+    expect(await screen.findByText("Page 1 of 3")).toBeInTheDocument()
+  })
+
+  it("keeps the reported page count when the artifact identity resolves after the PDF loads", async () => {
+    mockPdfDocument({ pageCount: 3 })
+    const onStartReview = vi.fn()
+    const onStopReview = vi.fn()
+    const baseProps = {
+      builderArtifact: pdfBuilderArtifact,
+      threadId: "thread-1",
+      artifactId: "artifact-1",
+      artifactStableIdentity: null,
+      reviewState: initialCoReviewState(supportedTransportStatus.kind),
+      transportStatus: supportedTransportStatus,
+      exactTextAvailable: false,
+      onStartReview,
+      onStopReview,
+    }
+
+    const view = render(<ControlledArtifactStage {...baseProps} />)
+    expect(await screen.findByText("Page 1 of 3")).toBeInTheDocument()
+
+    // The stable identity often resolves after the PDF reported numPages —
+    // it must not clobber the page count back to single-page mode.
+    view.rerender(
+      <ControlledArtifactStage
+        {...baseProps}
+        artifactStableIdentity="user:test-user|thread:thread-1|path:mnt/user-data/outputs/launch-brief.pdf|renderer:pdf"
+      />,
+    )
+
+    expect(screen.getByText("Page 1 of 3")).toBeInTheDocument()
+    expect(screen.queryByText("Page 1 of 1")).not.toBeInTheDocument()
+    expect(screen.getByTestId("artifact-pdf-pager-indicator")).toHaveTextContent("1 / 3")
+    expect(screen.getByTestId("artifact-page-rail")).toBeInTheDocument()
   })
 
   it("applies PDF page voice commands through the registered stage target", async () => {

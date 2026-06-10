@@ -6,6 +6,7 @@ export {
   buildThreadArtifactHref,
   formatBuilderArtifactTypeLabel,
   getBuilderArtifactFiles,
+  resolveCanvasRenderFile,
 } from "../../lib/builder-artifacts"
 export {
   coreviewArtifactCapabilityTelemetry,

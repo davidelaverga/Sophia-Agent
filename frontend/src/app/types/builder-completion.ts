@@ -85,10 +85,15 @@ export type BuilderCompletionEventV1 = {
   artifact_title?: string | null;
   artifact_type?: string | null;
   artifact_filename?: string | null;
+  /** Rendered PDF preview sibling uploaded next to a PPTX deliverable. */
+  artifact_preview_filename?: string | null;
   requested_artifact_ext?: string | null;
   artifact_ext?: string | null;
   artifact_is_fallback?: boolean | null;
   fallback_reason?: string | null;
+  /** Honest quality note, e.g. "visuals_not_embedded". */
+  quality_warning?: string | null;
+  visuals_missing?: boolean | null;
   image_generation_status?: string | null;
   image_generation_reason?: string | null;
   source_artifact_path?: string | null;

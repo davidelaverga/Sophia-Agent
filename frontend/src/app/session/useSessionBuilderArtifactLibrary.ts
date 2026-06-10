@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { normalizeBuilderArtifactPath } from '../lib/builder-artifacts';
+import { normalizeBuilderArtifactPath, rankBuilderArtifactLibraryItems } from '../lib/builder-artifacts';
 import type { BuilderArtifactLibraryItemV1 } from '../types/builder-artifact';
 
 type BuilderArtifactLibraryResponse = {
@@ -21,7 +21,7 @@ function normalizeBuilderArtifactLibrary(
     return [];
   }
 
-  return payload.artifacts
+  const items = payload.artifacts
     .filter((item): item is NonNullable<BuilderArtifactLibraryResponse['artifacts']>[number] => Boolean(item))
     .map((item): BuilderArtifactLibraryItemV1 | null => {
       const path = normalizeBuilderArtifactPath(item.path);
@@ -40,6 +40,11 @@ function normalizeBuilderArtifactLibrary(
       };
     })
     .filter((item): item is BuilderArtifactLibraryItemV1 => item !== null);
+
+  // The gateway sorts by mtime DESC, which can surface render sources
+  // (report.pdf.md) or deck previews (deck.preview.pdf) above the requested
+  // deliverable. Rank so the primary deliverable always leads.
+  return rankBuilderArtifactLibraryItems(items);
 }
 
 async function fetchBuilderArtifactLibrary(

@@ -252,6 +252,77 @@ describe("ArtifactCanvasViewport", () => {
     expect(screen.getByTestId("artifact-preview-state").className).not.toMatch(/\bfixed\b|\binset-0\b/)
   })
 
+  it("renders a PPTX deliverable through its preview PDF sibling when routed to the PDF pipeline", async () => {
+    mockCanvasApis()
+    mockPdfDocument({ pageCount: 3 })
+
+    const pptxArtifact = {
+      ...builderArtifact,
+      artifactType: "presentation",
+      artifactPath: "mnt/user-data/outputs/sophia-deck.pptx",
+      supportingFiles: ["mnt/user-data/outputs/sophia-deck.preview.pdf"],
+    } satisfies BuilderArtifactV1
+    const previewFile = {
+      path: "mnt/user-data/outputs/sophia-deck.preview.pdf",
+      name: "sophia-deck.preview.pdf",
+      label: "sophia-deck.preview.pdf",
+      isPrimary: false,
+      mimeType: "application/pdf",
+    }
+
+    render(
+      <ArtifactCanvasViewport
+        artifact={pptxArtifact}
+        files={[
+          {
+            path: "mnt/user-data/outputs/sophia-deck.pptx",
+            name: "sophia-deck.pptx",
+            label: "sophia-deck.pptx",
+            isPrimary: true,
+          },
+          previewFile,
+        ]}
+        typeLabel="Presentation"
+        previewFile={previewFile}
+        previewHref="/api/threads/thread-1/artifacts/mnt/user-data/outputs/sophia-deck.preview.pdf"
+        rendererKind="pdf"
+      />,
+    )
+
+    const documentPage = await screen.findByTestId("artifact-document-page")
+    expect(documentPage).toHaveAttribute("data-renderer-kind", "pdf")
+    expect(screen.getByLabelText("Artifact PDF preview")).toBeInTheDocument()
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/sophia-deck.preview.pdf",
+      expect.objectContaining({ method: "GET" }),
+    )
+    expect(await screen.findByTestId("artifact-pdf-pager")).toBeInTheDocument()
+  })
+
+  it("keeps a plain PPTX without a preview sibling on the metadata page", () => {
+    const pptxArtifact = {
+      ...builderArtifact,
+      artifactType: "presentation",
+      artifactPath: "mnt/user-data/outputs/sophia-deck.pptx",
+    } satisfies BuilderArtifactV1
+
+    render(
+      <ArtifactCanvasViewport
+        artifact={pptxArtifact}
+        files={[{
+          path: "mnt/user-data/outputs/sophia-deck.pptx",
+          name: "sophia-deck.pptx",
+          label: "sophia-deck.pptx",
+          isPrimary: true,
+        }]}
+        typeLabel="Presentation"
+      />,
+    )
+
+    expect(screen.queryByLabelText("Artifact PDF preview")).not.toBeInTheDocument()
+    expect(screen.getByTestId("artifact-document-page")).not.toHaveAttribute("data-renderer-kind")
+  })
+
   it("keeps the PDF rail fixed while the PDF pan layer owns zoom overflow", async () => {
     mockCanvasApis()
     const pdf = mockPdfDocument({ pageCount: 2 })

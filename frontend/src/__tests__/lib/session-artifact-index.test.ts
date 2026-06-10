@@ -150,6 +150,63 @@ describe("session artifact index", () => {
     expect(listSessionArtifacts(restored)[0]?.artifactId).toBe(opened.record?.artifactId)
   })
 
+  it("lists deliverables before newer source and preview siblings", () => {
+    registerArtifactInSessionIndex({
+      context: CONTEXT,
+      localPath: "mnt/user-data/outputs/sophia-roadmap.pdf",
+      title: "sophia-roadmap.pdf",
+      artifactType: "pdf",
+      rendererKind: "pdf",
+      updatedAt: "2026-06-10T12:00:00.000Z",
+    })
+    registerArtifactInSessionIndex({
+      context: CONTEXT,
+      localPath: "mnt/user-data/outputs/sophia-roadmap.pdf.md",
+      title: "sophia-roadmap.pdf.md",
+      artifactType: "document",
+      rendererKind: "markdown",
+      updatedAt: "2026-06-10T12:05:00.000Z",
+    })
+    registerArtifactInSessionIndex({
+      context: CONTEXT,
+      localPath: "mnt/user-data/outputs/deck.preview.pdf",
+      title: "deck.preview.pdf",
+      artifactType: "pdf",
+      rendererKind: "pdf",
+      updatedAt: "2026-06-10T12:06:00.000Z",
+    })
+
+    const listed = listSessionArtifacts(loadArtifactSessionIndex(CONTEXT))
+    // The deliverable leads even though both siblings are newer; the
+    // non-deliverables keep recency order among themselves.
+    expect(listed.map((artifact) => artifact.title)).toEqual([
+      "sophia-roadmap.pdf",
+      "deck.preview.pdf",
+      "sophia-roadmap.pdf.md",
+    ])
+  })
+
+  it("still lets an explicitly opened source sibling lead the recents list", () => {
+    registerArtifactInSessionIndex({
+      context: CONTEXT,
+      localPath: "mnt/user-data/outputs/sophia-roadmap.pdf",
+      title: "sophia-roadmap.pdf",
+      artifactType: "pdf",
+      rendererKind: "pdf",
+    })
+    const source = registerArtifactInSessionIndex({
+      context: CONTEXT,
+      localPath: "mnt/user-data/outputs/sophia-roadmap.pdf.md",
+      title: "sophia-roadmap.pdf.md",
+      artifactType: "document",
+      rendererKind: "markdown",
+    })
+    openArtifactInSessionIndex(CONTEXT, source.record?.artifactId)
+
+    const listed = listSessionArtifacts(loadArtifactSessionIndex(CONTEXT))
+    expect(listed[0]?.title).toBe("sophia-roadmap.pdf.md")
+  })
+
   it("does not use voiceAgentSessionId in the storage key", () => {
     const firstKey = getArtifactSessionIndexStorageKeyForTests({
       ...CONTEXT,

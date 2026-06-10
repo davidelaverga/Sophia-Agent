@@ -13,6 +13,8 @@ export interface BuilderArtifactV1 {
   artifactPath?: string;
   artifactType: BuilderArtifactType;
   artifactTitle: string;
+  /** Rendered PDF preview sibling for PPTX deliverables (e.g. "deck.preview.pdf"). */
+  artifactPreviewFilename?: string;
   supportingFiles?: string[];
   stepsCompleted?: number;
   decisionsMade: string[];
