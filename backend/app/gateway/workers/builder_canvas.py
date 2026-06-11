@@ -33,6 +33,11 @@ _PHASE_LABELS = {
     "researching": "Researching",
     "drafting": "Creating artifact",
     "finalizing": "Creating artifact",
+    # VQ repair iterations (BuilderProgressMiddleware emits "refining" when
+    # build_iterations > 0). Codex P3 PR #131: without this entry the web
+    # canvas dropped refining events and fell back to stale tool activity
+    # while Telegram showed the phase.
+    "refining": "Refining artifact",
     "done": "Packaging artifact",
 }
 _CHECK_COMMAND_PREFIXES = ("test", "pytest", "pnpm", "npm", "yarn", "uv", "ruff", "mypy", "tsc")
@@ -182,6 +187,9 @@ def _phase_activity(data: Any) -> dict[str, str] | None:
         "researching": "researching",
         "drafting": "creating_artifact",
         "finalizing": "creating_artifact",
+        # "creating_artifact" is a frontend-known action (icon/color); the
+        # distinct "Refining artifact" label carries the user-facing meaning.
+        "refining": "creating_artifact",
         "done": "packaging_artifact",
     }[phase]
     category = {
@@ -189,6 +197,7 @@ def _phase_activity(data: Any) -> dict[str, str] | None:
         "researching": "research",
         "drafting": "draft",
         "finalizing": "package",
+        "refining": "draft",
         "done": "finalize",
     }[phase]
     if phase == "done":
