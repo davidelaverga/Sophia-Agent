@@ -46,6 +46,18 @@ from deerflow.sophia.builder_provider_fallback import (
 _PLACEHOLDER_KEY = "test-openai-key-placeholder-never-real"
 
 
+@pytest.fixture(autouse=True)
+def _reset_primary_cooldown():
+    """The primary-cooldown state is module-global; without this reset, a
+    test that triggers a primary error arms the cooldown and every later
+    test in the file sees the primary bypassed (e.g.
+    ``test_async_path_retries_once`` fails in file order but passes in
+    isolation). The feature ships this hook for exactly this purpose."""
+    mw_module.reset_builder_primary_cooldown_for_tests()
+    yield
+    mw_module.reset_builder_primary_cooldown_for_tests()
+
+
 class _ProviderStatusError(Exception):
     """Shape double for provider HTTP errors (anthropic-style status_code)."""
 
