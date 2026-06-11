@@ -77,7 +77,9 @@ def test_visual_pdf_emit_without_embedded_visuals_gets_quality_warning(tmp_path)
         {"artifact_path": "/mnt/user-data/outputs/report.pdf"}, state
     ) is True
 
-    state["builder_visual_embed_rejections"] = 1
+    # VQ-10: the gate consults the SHARED iteration budget — exhausting
+    # build_iterations (cap default 3) soft-passes with a quality warning.
+    state["build_iterations"] = 3
     assert BuilderArtifactMiddleware._visual_gate_blocks_emit(
         {"artifact_path": "/mnt/user-data/outputs/report.pdf"}, state
     ) is False

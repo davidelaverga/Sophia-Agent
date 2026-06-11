@@ -69,6 +69,8 @@ _PHASE_LABELS: dict[str, str] = {
     "researching": "Researching",
     "drafting": "Drafting",
     "finalizing": "Finalizing",
+    # VQ-10: the build-to-condition loop is polishing the deliverable.
+    "refining": "Refining",
     "done": "Done",
     # Phase 4F: non-terminal degraded states so the placeholder
     # honestly reflects "we couldn't observe the run" or

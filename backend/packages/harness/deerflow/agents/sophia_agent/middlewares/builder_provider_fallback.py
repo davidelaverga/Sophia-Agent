@@ -149,7 +149,29 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
     # Sync + async model-call wrappers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _forced_provider_request(request):
+        """VQ-9 eval hook: SOPHIA_BUILDER_FORCE_PROVIDER=openai routes every
+        model call through the fallback model so the provider matrix can test
+        the OpenAI path deterministically. Absent/other values = no-op; never
+        set in production."""
+        import os as _os
+
+        forced = _os.environ.get("SOPHIA_BUILDER_FORCE_PROVIDER", "").strip().lower()
+        if forced != "openai":
+            return request
+        fallback_model = BuilderProviderFallbackMiddleware._fallback_model_or_none("forced_for_eval")
+        if fallback_model is None:
+            logger.warning(
+                "[BuilderProviderFallback] SOPHIA_BUILDER_FORCE_PROVIDER=openai set "
+                "but no fallback model is configured — running primary provider"
+            )
+            return request
+        logger.info("[BuilderProviderFallback] forced_provider=openai (eval hook)")
+        return request.override(model=fallback_model)
+
     def wrap_model_call(self, request, handler):  # type: ignore[override]
+        request = self._forced_provider_request(request)
         try:
             return handler(request)
         except Exception as primary_exc:
@@ -172,6 +194,7 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
             return self._success_response(response, error_class)
 
     async def awrap_model_call(self, request, handler):  # type: ignore[override]
+        request = self._forced_provider_request(request)
         try:
             return await handler(request)
         except Exception as primary_exc:

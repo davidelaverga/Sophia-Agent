@@ -8,6 +8,14 @@ Use this card only for requested `.pdf` builds.
    visual asset with `generate_visual_asset` under
    `/mnt/user-data/outputs/visuals/`. Use the generated `.png` path for PDF
    embedding; SVG is useful for HTML but Pandoc/XeLaTeX should receive PNG.
+2b. Generated imagery is ON BY DEFAULT for visuals-requested PDFs: run
+   `python /mnt/skills/public/image-generation/scripts/generate.py --preflight`
+   first (on failure, continue chart/text-only — the skip is recorded
+   honestly), then generate 1 cover image (16:9) saved as
+   `/mnt/user-data/outputs/visuals/cover-<desc>.png` — the renderer places it
+   on the title page automatically. Optionally 1 section-divider image. HARD
+   CAP: 2 image-generation calls for PDF builds. An image failure must never
+   stall the render.
 3. Create Markdown or HTML source under `/mnt/user-data/outputs/`. Name the
    source after the document stem (for example `report.md` for `report.pdf`).
    Source creation is not completion.

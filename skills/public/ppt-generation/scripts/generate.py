@@ -36,6 +36,7 @@ def generate_ppt(
         Status message
     """
     plan = load_plan(plan_file)
+    _emit_plan_lint(plan)
     slide_width, slide_height = slide_dimensions(plan)
     prs = Presentation()
     prs.slide_width = slide_width
@@ -131,6 +132,36 @@ THEMES = {
         "title_font": "Arial",
         "body_font": "Arial",
     },
+    # Sage & Terracotta (60/30/10: warm paper dominant, paper-white cards
+    # supporting, sage accent ~10% with terracotta reserved for highlights).
+    "terra": {
+        "background": RGBColor(0xF4, 0xF1, 0xDE),
+        "title": RGBColor(0x2C, 0x2C, 0x2C),
+        "body": RGBColor(0x44, 0x40, 0x3A),
+        "accent": RGBColor(0x87, 0xA9, 0x6B),
+        "card": RGBColor(0xFA, 0xF7, 0xEC),
+        "border": RGBColor(0xDC, 0xD5, 0xBF),
+        "accent_deep": RGBColor(0xE0, 0x7A, 0x5F),
+        "overlay": RGBColor(0x2C, 0x2C, 0x2C),
+        "overlay_text": RGBColor(0xF4, 0xF1, 0xDE),
+        "title_font": "Georgia",
+        "body_font": "Calibri",
+    },
+    # Black & Gold (60/30/10: near-black dominant, charcoal cards supporting,
+    # gold accent ~10%; pure-black divider/closing slides).
+    "noir": {
+        "background": RGBColor(0x11, 0x11, 0x11),
+        "title": RGBColor(0xF4, 0xF6, 0xF6),
+        "body": RGBColor(0xC8, 0xC8, 0xC3),
+        "accent": RGBColor(0xBF, 0x9A, 0x4A),
+        "card": RGBColor(0x1C, 0x1C, 0x1C),
+        "border": RGBColor(0x3A, 0x33, 0x21),
+        "accent_deep": RGBColor(0x00, 0x00, 0x00),
+        "overlay": RGBColor(0x00, 0x00, 0x00),
+        "overlay_text": RGBColor(0xF4, 0xF6, 0xF6),
+        "title_font": "Georgia",
+        "body_font": "Calibri",
+    },
 }
 
 _STYLE_ALIASES = {
@@ -141,6 +172,10 @@ _STYLE_ALIASES = {
     "minimal": "mist",
     "academic": "mist",
     "creative": "ember",
+    "earthy": "terra",
+    "organic": "terra",
+    "luxury": "noir",
+    "premium-dark": "noir",
 }
 
 
@@ -181,6 +216,52 @@ def apply_slide_background(slide, theme: dict) -> None:
     bg.fore_color.rgb = theme["background"]
 
 
+def _add_accent_shape(slide, theme: dict, shape_type, left, top, width, height):
+    shape = slide.shapes.add_shape(shape_type, left, top, width, height)
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = theme["accent"]
+    shape.line.color.rgb = theme["accent"]
+    return shape
+
+
+def _motif_rule(slide, theme: dict, slide_width) -> None:
+    # Thin accent underline below the title block.
+    _add_accent_shape(slide, theme, MSO_SHAPE.RECTANGLE, Inches(0.78), Inches(1.42), Inches(1.9), Inches(0.045))
+
+
+def _motif_corner(slide, theme: dict, slide_width) -> None:
+    # L-shaped bracket in the top-left corner (two thin accent rects).
+    _add_accent_shape(slide, theme, MSO_SHAPE.RECTANGLE, Inches(0.3), Inches(0.3), Inches(0.85), Inches(0.05))
+    _add_accent_shape(slide, theme, MSO_SHAPE.RECTANGLE, Inches(0.3), Inches(0.3), Inches(0.05), Inches(0.85))
+
+
+def _motif_dot_grid(slide, theme: dict, slide_width) -> None:
+    # 3x3 grid of 4px accent dots, top-right corner.
+    dot = int(Pt(4))
+    spacing = int(Inches(0.18))
+    grid_extent = 2 * spacing + dot
+    left_base = int(slide_width) - int(Inches(0.7)) - grid_extent
+    top_base = int(Inches(0.4))
+    for row in range(3):
+        for col in range(3):
+            _add_accent_shape(slide, theme, MSO_SHAPE.OVAL, left_base + col * spacing, top_base + row * spacing, dot, dot)
+
+
+_MOTIF_RENDERERS = {
+    "rule": _motif_rule,
+    "corner": _motif_corner,
+    "dot_grid": _motif_dot_grid,
+}
+
+
+def apply_motif(slide, motif, theme: dict, slide_width) -> None:
+    """Render the plan-level repeated accent motif. Absent/unknown motif is a no-op."""
+    renderer = _MOTIF_RENDERERS.get(str(motif or "").strip().lower())
+    if renderer is None:
+        return
+    renderer(slide, theme, int(slide_width) if slide_width else int(Inches(13.333)))
+
+
 def add_title_and_subtitle(slide, slide_info: dict, plan: dict, theme: dict) -> None:
     title = str(slide_info.get("title") or plan.get("title") or "Untitled")
     subtitle = str(slide_info.get("subtitle") or "")
@@ -210,6 +291,7 @@ def add_text_layout_slide(slide, slide_info: dict, plan: dict, image_path: str |
     theme = slide_theme(plan)
     apply_slide_background(slide, theme)
     add_title_and_subtitle(slide, slide_info, plan, theme)
+    apply_motif(slide, plan.get("motif"), theme, slide_width)
     points = slide_points(slide_info)
 
     accent_bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.75), Inches(2.25), Inches(0.08), Inches(4.35))
@@ -236,6 +318,7 @@ def add_content_with_image_slide(slide, slide_info: dict, plan: dict, image_path
     theme = slide_theme(plan)
     apply_slide_background(slide, theme)
     add_title_and_subtitle(slide, slide_info, plan, theme)
+    apply_motif(slide, plan.get("motif"), theme, slide_width)
     points = slide_points(slide_info)
     if not points:
         points = [str(slide_info.get("summary") or slide_info.get("body") or "")]
@@ -403,6 +486,7 @@ def add_two_column_slide(slide, slide_info: dict, plan: dict, image_path: str | 
     theme = slide_theme(plan)
     apply_slide_background(slide, theme)
     add_title_and_subtitle(slide, slide_info, plan, theme)
+    apply_motif(slide, plan.get("motif"), theme, slide_width)
 
     columns = [column for column in (slide_info.get("columns") or []) if isinstance(column, dict)]
     if not columns:
@@ -481,6 +565,49 @@ def add_closing_slide(slide, slide_info: dict, plan: dict, image_path: str | Non
         p.font.name = theme["body_font"]
 
 
+def _add_stat_column(slide, theme: dict, stat: dict, left, column_width) -> None:
+    value_box = slide.shapes.add_textbox(left, Inches(2.85), column_width, Inches(1.3))
+    value_frame = value_box.text_frame
+    value_frame.word_wrap = True
+    value_frame.clear()
+    p = value_frame.paragraphs[0]
+    p.text = str(stat.get("value") or "")
+    p.alignment = PP_ALIGN.CENTER
+    p.font.bold = True
+    p.font.size = Pt(54)
+    p.font.color.rgb = theme["accent"]
+    p.font.name = theme["title_font"]
+
+    label_box = slide.shapes.add_textbox(left, Inches(4.2), column_width, Inches(0.7))
+    label_frame = label_box.text_frame
+    label_frame.word_wrap = True
+    label_frame.clear()
+    p = label_frame.paragraphs[0]
+    p.text = str(stat.get("label") or "")
+    p.alignment = PP_ALIGN.CENTER
+    p.font.size = Pt(14)
+    p.font.color.rgb = theme["body"]
+    p.font.name = theme["body_font"]
+
+
+def add_stat_band_slide(slide, slide_info: dict, plan: dict, image_path: str | None, slide_width, slide_height) -> None:
+    stats = [stat for stat in (slide_info.get("stats") or []) if isinstance(stat, dict)][:4]
+    if not stats:
+        # No stats to feature: degrade to the two_column treatment.
+        add_two_column_slide(slide, slide_info, plan, image_path, slide_width, slide_height)
+        return
+    theme = slide_theme(plan)
+    apply_slide_background(slide, theme)
+    if slide_info.get("title"):
+        add_title_and_subtitle(slide, slide_info, plan, theme)
+    apply_motif(slide, plan.get("motif"), theme, slide_width)
+
+    margin = int(Inches(0.75))
+    column_width = int((int(slide_width) - 2 * margin) / len(stats))
+    for index, stat in enumerate(stats):
+        _add_stat_column(slide, theme, stat, margin + index * column_width, column_width)
+
+
 LAYOUT_DISPATCH = {
     "title": add_title_slide,
     "content_text": add_text_layout_slide,
@@ -490,7 +617,85 @@ LAYOUT_DISPATCH = {
     "quote": add_quote_slide,
     "two_column": add_two_column_slide,
     "closing": add_closing_slide,
+    "stat_band": add_stat_band_slide,
 }
+
+
+_VISUAL_ANCHOR_LAYOUTS = {"full_bleed_image", "content_image", "section_divider", "quote", "stat_band"}
+
+
+def _has_image_ref(slide_info: dict) -> bool:
+    raw = slide_info.get("image") or slide_info.get("chart_path") or slide_info.get("visual_path")
+    return isinstance(raw, str) and bool(raw.strip())
+
+
+def _lint_resolved_layout(slide_info: dict) -> str:
+    # Silent mirror of resolve_layout (no stderr) using the raw image ref as the
+    # image signal — lint runs before any on-disk existence checks.
+    explicit = str(slide_info.get("layout") or "").strip().lower()
+    if explicit in LAYOUT_DISPATCH:
+        return explicit
+    if str(slide_info.get("type") or "").lower() == "title":
+        return "title"
+    return "content_image" if _has_image_ref(slide_info) else "content_text"
+
+
+def _lint_slide_fact(slide_info: dict, position: int) -> dict:
+    layout = _lint_resolved_layout(slide_info)
+    return {
+        "number": slide_info.get("slide_number") or position,
+        "layout": layout,
+        "anchor": layout in _VISUAL_ANCHOR_LAYOUTS or _has_image_ref(slide_info),
+        "title": str(slide_info.get("title") or ""),
+    }
+
+
+def _lint_consecutive_layouts(facts: list[dict]) -> list[str]:
+    return [
+        f"slides {prev['number']} and {curr['number']} both use layout '{curr['layout']}' — vary the rhythm: reorder so a different layout (section_divider, quote, stat_band, or an image slide) sits between them, or merge the content"
+        for prev, curr in zip(facts, facts[1:])
+        if prev["layout"] == curr["layout"]
+    ]
+
+
+def _dry_stretch_warning(run: list[dict]) -> str:
+    return f"slides {run[0]['number']}-{run[-1]['number']} are a text-only stretch with no visual anchor (full_bleed_image, content_image, section_divider, quote, or stat_band) — aim for at least one anchor every 3 slides"
+
+
+def _lint_visual_cadence(facts: list[dict]) -> list[str]:
+    warnings: list[str] = []
+    run: list[dict] = []
+    for fact in facts:
+        if fact["anchor"]:
+            if len(run) >= 3:
+                warnings.append(_dry_stretch_warning(run))
+            run = []
+        else:
+            run.append(fact)
+    if len(run) >= 3:
+        warnings.append(_dry_stretch_warning(run))
+    return warnings
+
+
+def _lint_title_lengths(facts: list[dict]) -> list[str]:
+    return [f"slide {fact['number']} title is {len(fact['title'])} chars (>60) — long titles wrap in most layouts; tighten it" for fact in facts if len(fact["title"]) > 60]
+
+
+def lint_plan(plan: dict) -> list[str]:
+    """Cadence/design warnings for a presentation plan. Advisory only — never fails the build."""
+    slides = [slide for slide in (plan.get("slides") or []) if isinstance(slide, dict)]
+    if not slides:
+        return []
+    facts = [_lint_slide_fact(slide, position) for position, slide in enumerate(slides, start=1)]
+    return _lint_consecutive_layouts(facts) + _lint_visual_cadence(facts) + _lint_title_lengths(facts)
+
+
+def _emit_plan_lint(plan: dict) -> None:
+    warnings = lint_plan(plan)
+    for warning in warnings:
+        print(f"PLAN_LINT: {warning}", file=sys.stderr)
+    if warnings:
+        print(f"PLAN_LINT: {len(warnings)} warning(s)", file=sys.stderr)
 
 
 def add_overlay_band(slide, theme: dict, slide_width, slide_height, title: str, subtitle: str) -> None:

@@ -77,6 +77,37 @@ DEFAULT_BUILDER_BUDGET: dict[str, Any] = {
 # spend into the cost ceiling + telemetry.
 _IMAGE_GEN_COST_USD = 0.07
 
+# VQ-10 budget pre-grant: a repair iteration is granted only when the
+# remaining cost ceiling covers its estimate (one Sonnet repair turn plus a
+# possible image-generation call).
+_ITERATION_COST_ESTIMATE_USD = 0.25
+
+
+def estimate_run_cost_usd(state: dict) -> float:
+    """Current estimated spend for this run (tokens + image calls)."""
+    totals = _sum_usage(state.get("messages", []) or [])
+    budget = state.get("builder_budget")
+    key = budget.get("cost_model_key") if isinstance(budget, dict) else None
+    cost = _estimate_cost_usd(totals, _price_for(key if isinstance(key, str) else None))
+    image_attempts = int(
+        (state.get("builder_pptx_diagnostics") or {}).get("image_generation_attempt_count", 0) or 0
+    )
+    return cost + image_attempts * _IMAGE_GEN_COST_USD
+
+
+def budget_allows_iteration(state: dict) -> bool:
+    """VQ-10 pre-grant: never grant a repair iteration the ceiling can't pay for."""
+    budget = state.get("builder_budget")
+    if not isinstance(budget, dict):
+        budget = DEFAULT_BUILDER_BUDGET
+    try:
+        max_cost = float(budget.get("max_cost_usd", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        max_cost = 0.0
+    if max_cost <= 0:
+        return True  # cost cap disabled
+    return estimate_run_cost_usd(state) + _ITERATION_COST_ESTIMATE_USD <= max_cost
+
 
 def _price_for(key: str | None) -> dict[str, float]:
     if key:

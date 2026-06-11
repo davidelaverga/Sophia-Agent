@@ -1203,3 +1203,130 @@ def test_integration_renders_themed_pdf_end_to_end(tmp_path, monkeypatch):
     assert result["template_fallback"] is False
     assert result["theme"] == "boardroom"
     assert (outputs / "themed.pdf").stat().st_size > 0
+
+
+# ---- Template parse guard (prod 2026-06-11: rc=5 from a $if$ token in a
+# header COMMENT — pandoc's template engine reads every $ in the file,
+# LaTeX comments included) -----------------------------------------------
+
+
+def _template_path() -> Path:
+    return Path(render_pdf.__file__).resolve().parent.parent / "assets" / "sophia.latex"
+
+
+def test_template_has_no_bare_dollar_directives():
+    """The exact prod bug class: `$if$` (no parens) anywhere — including
+    comments — is a doctemplates parse error."""
+    text = _template_path().read_text(encoding="utf-8")
+    import re as _re
+
+    # Only $if$/$for$ REQUIRE parentheses in doctemplates; $endif$/$else$/
+    # $endfor$/$sep$ are legal bare closers.
+    bare = _re.findall(r"\$(?:if|for)\$", text)
+    assert bare == [], f"bare template directives found (parse error in pandoc): {bare}"
+
+
+@pytest.mark.skipif(shutil.which("pandoc") is None, reason="pandoc not installed")
+def test_template_parses_with_real_pandoc(tmp_path):
+    """Full doctemplates parse via whatever pandoc is on PATH (CI installs
+    pandoc; the container smoke validates the exact 2.17 version)."""
+    md = tmp_path / "t.md"
+    md.write_text("# Title\n\nbody\n")
+    out = tmp_path / "t.tex"
+    for vars_ in (
+        [],
+        ["-V", "titlepage=true", "-V", "accentcolor=1F6FB2", "-V", "coverimage=/tmp/x.png"],
+        ["--toc", "--toc-depth=2"],
+    ):
+        completed = subprocess.run(
+            ["pandoc", "--standalone", str(md), "-o", str(out), f"--template={_template_path()}", *vars_],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, f"template failed with {vars_}: {completed.stderr[:400]}"
+
+
+# ---- VQ-5 cover image plumbing ----------------------------------------------
+
+
+def test_cover_image_variable_passed_when_cover_exists(tmp_path, monkeypatch):
+    outputs = tmp_path / "thread" / "outputs"
+    visuals = outputs / "visuals"
+    visuals.mkdir(parents=True)
+    (outputs / "report.md").write_text("# Report\n")
+    (visuals / "cover-launch.png").write_bytes(b"\x89PNG fake")
+    thread_data = {
+        "workspace_path": str(tmp_path / "thread" / "workspace"),
+        "uploads_path": str(tmp_path / "thread" / "uploads"),
+        "outputs_path": str(outputs),
+    }
+    monkeypatch.setattr(
+        "deerflow.sophia.tools.render_markdown_to_pdf.shutil.which",
+        lambda binary: f"/fake/{binary}",
+    )
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF-1.4 fake")
+
+        class _Completed:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
+        return _Completed()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = _parse(_impl(
+        markdown_path=f"{_OUTPUTS_PREFIX}report.md",
+        pdf_path=f"{_OUTPUTS_PREFIX}report.pdf",
+        pdf_engine=None,
+        thread_data=thread_data,
+    ))
+
+    assert result["success"] is True
+    joined = " ".join(captured["cmd"])
+    assert "coverimage=" in joined and "cover-launch.png" in joined
+    assert "titlepage=true" in joined
+
+
+def test_no_cover_variable_without_cover_file(tmp_path, monkeypatch):
+    outputs = tmp_path / "thread" / "outputs"
+    outputs.mkdir(parents=True)
+    (outputs / "report.md").write_text("# Report\n")
+    thread_data = {
+        "workspace_path": str(tmp_path / "thread" / "workspace"),
+        "uploads_path": str(tmp_path / "thread" / "uploads"),
+        "outputs_path": str(outputs),
+    }
+    monkeypatch.setattr(
+        "deerflow.sophia.tools.render_markdown_to_pdf.shutil.which",
+        lambda binary: f"/fake/{binary}",
+    )
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF-1.4 fake")
+
+        class _Completed:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
+        return _Completed()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = _parse(_impl(
+        markdown_path=f"{_OUTPUTS_PREFIX}report.md",
+        pdf_path=f"{_OUTPUTS_PREFIX}report.pdf",
+        pdf_engine=None,
+        thread_data=thread_data,
+    ))
+
+    assert result["success"] is True
+    assert "coverimage=" not in " ".join(captured["cmd"])

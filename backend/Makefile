@@ -19,3 +19,26 @@ lint:
 
 format:
 	uvx ruff check . --fix && uvx ruff format .
+
+# Renders a themed fixture PDF inside the langgraph container — validates the
+# pandoc template against the EXACT container pandoc/xelatex/texlive set
+# (prod 2026-06-11: a template parse error only reproducible at the container
+# pandoc version shipped silently). Slow (~10 min first build); run before
+# deploys that touch sophia.latex or the Dockerfile.
+pdf-template-smoke:
+	cd .. && docker build -f backend/Dockerfile.langgraph -t sophia-langgraph-smoke .
+	docker run --rm --entrypoint bash sophia-langgraph-smoke -lc '\
+		set -e; cd /tmp; printf "# Smoke\n\nbody\n" > t.md; \
+		for theme_vars in "-V accentcolor=1F6FB2 -V headingcolor=10243E -V titlepagecolor=10243E -V titlepagetextcolor=F8FAFC -V titlepage=true" "-V accentcolor=334155" ""; do \
+			pandoc --standalone t.md -o t.pdf --pdf-engine=xelatex \
+				--template=/app/backend/packages/harness/deerflow/sophia/assets/sophia.latex $$theme_vars; \
+			echo "OK: $$theme_vars"; \
+		done'
+
+# G-VIS provider matrix (Spec VQ-9): live fixture builds (deck/pdf/html)
+# against a running langgraph (boot `make dev` first, or point
+# SOPHIA_EVAL_LANGGRAPH_URL at a deployed service). Real API spend —
+# on-demand + nightly only, never per-PR.
+eval-visuals:
+	PYTHONPATH=. uv run python tests/evals/visuals/run_matrix.py --provider anthropic
+	SOPHIA_BUILDER_FORCE_PROVIDER=openai PYTHONPATH=. uv run python tests/evals/visuals/run_matrix.py --provider openai

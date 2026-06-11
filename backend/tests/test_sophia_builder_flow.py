@@ -195,7 +195,7 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
 
 
 def test_builder_agent_anthropic_timeout_and_retries(monkeypatch) -> None:
-    """PR-F (Phase 2.3): builder agent uses 120s timeout and 1 retry.
+    """F1 (2026-06-11): 240s timeout, 1 retry, 32k output tokens.
 
     The builder generates large documents (5k+ tokens) which can take 45-90s.
     A 120s timeout gives headroom without letting a stalled connection hang
@@ -220,10 +220,12 @@ def test_builder_agent_anthropic_timeout_and_retries(monkeypatch) -> None:
 
     builder_module._create_builder_agent(user_id="user_123")
 
-    assert captured["kwargs"]["timeout"] == 120.0
+    assert captured["kwargs"]["timeout"] == 240.0
     assert captured["kwargs"]["max_retries"] == 1
     assert captured["kwargs"]["streaming"] is True
-    assert captured["kwargs"]["max_tokens"] == 8192
+    # 32k output: a complete standalone HTML document must fit ONE
+    # write_file call (prod F1: 8192 truncated tool-call JSON -> args lost).
+    assert captured["kwargs"]["max_tokens"] == 32768
 
 
 # ---------------------------------------------------------------------------

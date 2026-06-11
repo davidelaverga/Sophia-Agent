@@ -322,6 +322,8 @@ def _image_generation_enabled(
     Image targets and explicit requests keep the legacy behavior. For
     presentations / visual reports, generated imagery is ON BY DEFAULT
     (product decision 2026-06-11) unless the brief signals a plain deck.
+    VQ-5: visuals-requested PDFs also enrich (a generated cover) — scoped by
+    the gate, not by task-type routing luck.
     """
     if artifact_target_ext in _IMAGE_OUTPUT_EXTENSIONS:
         return True
@@ -333,6 +335,7 @@ def _image_generation_enabled(
     enrichment_target = (
         str(task_type or "").lower() in _IMAGE_ENRICHMENT_TASK_TYPES
         or artifact_target_ext == ".pptx"
+        or (artifact_target_ext == ".pdf" and _visuals_requested(delegation_context))
     )
     if not enrichment_target:
         return False
@@ -346,22 +349,41 @@ def _visuals_requested(delegation_context: dict[str, Any]) -> bool:
     return any(marker in combined for marker in _VISUAL_REQUEST_MARKERS)
 
 
-def _image_enrichment_section() -> str:
+def _image_enrichment_section(artifact_target_ext: str = ".pptx") -> str:
+    if artifact_target_ext == ".pdf":
+        plan_lines = (
+            "- STEP 0 (required): run the preflight check FIRST — "
+            "`python /mnt/skills/public/image-generation/scripts/generate.py --preflight`. "
+            "If it fails, proceed chart/text-only immediately; the harness records why.\n"
+            "- Generate 1 cover image (16:9, named "
+            "/mnt/user-data/outputs/visuals/cover-<desc>.png — the renderer "
+            "automatically places it on the title page) and optionally 1 section "
+            "divider image. HARD CAP: 2 image-generation script calls for PDF "
+            "builds — calls beyond the cap are rejected by the harness.\n"
+        )
+    else:
+        plan_lines = (
+            "- STEP 0 (required): run the preflight check FIRST — "
+            "`python /mnt/skills/public/image-generation/scripts/generate.py --preflight`. "
+            "If it fails, proceed chart/text-only immediately; the harness records why.\n"
+            "- Generate 1 hero image (16:9, for the title slide — wire it with "
+            "`\"layout\": \"full_bleed_image\"` on slide 1) and up to 2 supporting "
+            "images (section dividers or illustrative content). HARD CAP: 3 "
+            "image-generation script calls per build — calls beyond the cap are "
+            "rejected by the harness.\n"
+        )
     return (
         "<image_enrichment>\n"
         "Generated imagery is ON BY DEFAULT for this deliverable. Policy:\n"
-        "- Generate 1 hero image (16:9, for the title slide / cover) and up to 2 "
-        "supporting images (section dividers or illustrative content) with the "
-        "image-generation skill. HARD CAP: 3 image-generation script calls per "
-        "build — calls beyond the cap are rejected by the harness.\n"
+        f"{plan_lines}"
         "- Charts, diagrams, timelines, and data visuals stay on the deterministic "
         "generate_visual_asset path (no API cost; does not count toward the cap).\n"
         "- Save generated images under /mnt/user-data/outputs/visuals/ "
-        "(hero-<desc>.png, slide-<n>-<desc>.png) and reference them from the "
-        "plan/source before composing.\n"
+        "(hero-<desc>.png, slide-<n>-<desc>.png, cover-<desc>.png) and reference "
+        "them from the plan/source before composing.\n"
         "- A failed image call must NEVER stall the deliverable: at most ONE retry "
         "with a simplified prompt, then continue with charts and text — a "
-        "chart/text-only deck is a valid deliverable.\n"
+        "chart/text-only deliverable is valid.\n"
         "- Skip generated imagery entirely if the brief asks for a plain, "
         "text-only, or minimal deliverable.\n"
         "</image_enrichment>"
@@ -733,9 +755,9 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             sections.append(skills_block)
         if image_generation_enabled and (
             str(task_type or "").lower() in _IMAGE_ENRICHMENT_TASK_TYPES
-            or artifact_target_ext == ".pptx"
+            or artifact_target_ext in {".pptx", ".pdf"}
         ):
-            sections.append(_image_enrichment_section())
+            sections.append(_image_enrichment_section(artifact_target_ext))
 
         workflow_sections = _builder_workflow_sections(
             artifact_target_ext=artifact_target_ext,
@@ -819,7 +841,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "MULTIPLE times to the SAME path — the FIRST call writes the opening chunk (omit append or pass "
             "append=False), then SUBSEQUENT calls extend the file with append=True. Each chunk costs ~one turn; "
             "building a 12k-word document in 2-3 chunked `write_file(..., append=True)` calls is the correct "
-            "pattern. Use str_replace_tool for targeted edits to existing content.\n"
+            "pattern. **HTML deliverables chunk BY DEFAULT**: a complete styled page rarely fits one output — "
+            "first call doctype+<head>+styles, then append body sections (~200-300 lines per call), then the "
+            "closing tags. A truncated single-call write fails with missing tool arguments and wastes turns. "
+            "Use str_replace_tool for targeted edits to existing content.\n"
             "NEVER use bash_tool to author text file content. The following bash patterns are FORBIDDEN as "
             "substitutes for write_file:\n"
             "    * cat > file.md << 'EOF' ... EOF  (heredoc redirect)\n"

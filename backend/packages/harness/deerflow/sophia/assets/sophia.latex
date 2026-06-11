@@ -4,7 +4,7 @@
 % (the pandoc version shipped by Debian bookworm, the langgraph container
 % base). All stock blocks (highlighting-macros, longtable/booktabs tables,
 % fontspec branch, hyperref, CSL) are preserved unchanged; Sophia-specific
-% customizations are additive, individually $if$-guarded, and use ONLY
+% customizations are additive, individually if-guarded, and use ONLY
 % packages available in the container texlive set (texlive-xetex,
 % texlive-latex-recommended, texlive-latex-extra, texlive-fonts-recommended,
 % lmodern, fonts-dejavu-core, fonts-liberation):
@@ -224,6 +224,13 @@ $if(verbatim-in-note)$
 \usepackage{fancyvrb}
 $endif$
 \usepackage{xcolor}
+% Sophia: generated cover image (VQ-5). graphicx loads conditionally in the
+% stock template only when the BODY has images; a cover-only document still
+% needs it, so guard-load here (duplicate usepackage with no options is a
+% LaTeX no-op).
+$if(coverimage)$
+\usepackage{graphicx}
+$endif$
 % Sophia: theme colors. Each variable is individually guarded with a
 % "minimal"-theme default so a render with no -V theme variables (or a
 % partial set) always compiles.
@@ -512,6 +519,11 @@ $if(titlepage)$
 \color{titlepagetextcolor}%
 \setlength{\parindent}{0pt}%
 \vspace*{\stretch{2}}
+$if(coverimage)$
+% Sophia: full-width generated cover graphic (VQ-5).
+\begin{center}\includegraphics[width=0.92\textwidth,height=0.42\textheight,keepaspectratio]{$coverimage$}\end{center}
+\vspace{1.4em}
+$endif$
 {\color{accentcolor}\rule{0.22\textwidth}{2.5pt}\par}
 \vspace{1.6em}
 $if(title)$

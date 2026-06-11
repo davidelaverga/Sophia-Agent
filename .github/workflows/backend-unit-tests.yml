@@ -26,6 +26,14 @@ jobs:
       - name: Install uv
         run: python -m pip install --upgrade pip uv
 
+      # pandoc enables the PDF-template parse tests (prod 2026-06-11: a
+      # template parse error shipped because the only full-parse check was
+      # container-gated and never ran). ubuntu-latest apt pandoc is close
+      # to the container's Debian pandoc; the exact-version smoke lives in
+      # the docker target.
+      - name: Install pandoc (template parse tests)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pandoc
+
       - name: Install backend dependencies
         working-directory: backend
         run: uv sync --group dev

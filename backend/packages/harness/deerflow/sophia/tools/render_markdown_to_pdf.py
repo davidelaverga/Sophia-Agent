@@ -385,6 +385,29 @@ def _resolve_theme_name(theme_param: str | None, meta: dict[str, str]) -> str:
     return candidate
 
 
+def _cover_image_path(thread_data: dict[str, Any] | None) -> Path | None:
+    """Newest generated cover graphic under outputs/visuals (``cover-*.png``).
+
+    VQ-5: the image-generation skill writes PDF covers as
+    ``visuals/cover-<desc>.png``; when one exists it rides the title page via
+    the template's ``$coverimage$`` hook. Best-effort — any error means no
+    cover, never a failed render.
+    """
+    outputs_path = (thread_data or {}).get("outputs_path")
+    if not isinstance(outputs_path, str) or not outputs_path:
+        return None
+    try:
+        visuals = Path(outputs_path) / "visuals"
+        candidates = sorted(
+            (p for p in visuals.glob("cover-*.png") if p.is_file()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return None
+    return candidates[0] if candidates else None
+
+
 def _theme_variables(theme_name: str, meta: dict[str, str]) -> list[str]:
     """Build the ``-V key=value`` pandoc arguments for a theme.
 
@@ -698,6 +721,13 @@ def _impl(
         theme_name = _resolve_theme_name(theme, meta)
         extra_vars = _theme_variables(theme_name, meta)
         toc = _source_word_count(md_file) > _TOC_WORD_THRESHOLD
+        cover = _cover_image_path(thread_data)
+        if cover is not None:
+            # VQ-5: generated cover graphic on the title page. Forces the
+            # titlepage on — a cover image without a cover page is invisible.
+            extra_vars.extend(["-V", f"coverimage={cover.as_posix()}"])
+            if "titlepage=true" not in " ".join(extra_vars):
+                extra_vars.extend(["-V", "titlepage=true"])
 
     # ---- Invocation -----------------------------------------------------
     cmd, public_cmd = _pandoc_command(

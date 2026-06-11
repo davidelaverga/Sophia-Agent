@@ -54,6 +54,7 @@ Create a JSON file in `/mnt/user-data/workspace/` with the presentation structur
 {
   "title": "Presentation Title",
   "theme": "boardroom",
+  "motif": "rule",
   "style": "keynote",
   "style_guidelines": {
     "color_palette": "Deep black backgrounds, white text, single accent color (blue or orange)",
@@ -117,7 +118,7 @@ Create a JSON file in `/mnt/user-data/workspace/` with the presentation structur
 
 #### Compositor Themes
 
-The composition script renders the deck with one of four deterministic themes:
+The composition script renders the deck with one of six deterministic themes:
 
 | Theme | Palette | Best For |
 |-------|---------|----------|
@@ -125,8 +126,10 @@ The composition script renders the deck with one of four deterministic themes:
 | **daylight** | Light background, blue accent, Calibri | Business default |
 | **ember** | Warm charcoal background, amber accent, Georgia headlines | Creative, storytelling |
 | **mist** | Gray-blue light background, slate accent, Arial | Minimal, academic |
+| **terra** | Warm paper background, ink text, sage accent, terracotta highlights, Georgia headlines | Sustainability, wellness, human-centered stories |
+| **noir** | Near-black background, ivory text, gold accent, Georgia headlines | Luxury, premium-dark, high-end launches |
 
-Prefer the `theme` field. When `theme` is absent, the legacy `style` value is mapped automatically: `dark-premium` / `keynote` / `glassmorphism` → boardroom, `business` → daylight, `minimal` / `academic` → mist, `creative` → ember. Anything else falls back to daylight.
+Prefer the `theme` field. When `theme` is absent, the legacy `style` value is mapped automatically: `dark-premium` / `keynote` / `glassmorphism` → boardroom, `business` → daylight, `minimal` / `academic` → mist, `creative` → ember, `earthy` / `organic` → terra, `luxury` / `premium-dark` → noir. Anything else falls back to daylight.
 
 #### Slide Layouts
 
@@ -139,9 +142,12 @@ Prefer the `theme` field. When `theme` is absent, the legacy `style` value is ma
 | `section_divider` | Chapter break with oversized section number | `title` (`section_number`, `subtitle` optional) |
 | `quote` | Pull quote with decorative quotation mark | `quote` (falls back to first key point; `attribution` optional) |
 | `two_column` | Comparisons, before/after, pros/cons | `title`, `columns` as `[{"heading": str, "points": [str]}]` (falls back to `key_points` split in half) |
+| `stat_band` | Big-number row: 2-4 oversized metrics with small labels; explicit `layout` only — never inferred | `stats` as `[{"value": str, "label": str}]` (`title` optional; falls back to `two_column` when `stats` is empty) |
 | `closing` | Final slide | none (`title` defaults to "Thank You", `subtitle` optional) |
 
 `layout` is optional. Without it the script infers the layout: `"type": "title"` gets the title treatment, a slide with an image reference gets `content_image`, everything else gets `content_text`. Unknown layout names fall back to the same inference. If an image-dependent layout references an image that is missing on disk, the slide degrades to a text layout (with a stderr note) instead of failing the whole deck.
+
+**Plan-level `motif` field** (optional): set `"motif"` at the top level of the plan to repeat a small accent shape on content-bearing slides (`content_text`, `content_image`, `two_column`, `stat_band`). Values: `"rule"` (thin accent underline below the title — the subtle default), `"corner"` (thin L-shaped accent bracket, top-left), `"dot_grid"` (3×3 grid of small accent dots, top-right). Absent or unknown values render nothing. See the Design Ideas section below for when to use each.
 
 **Image field priority**: each slide may reference a local PNG/JPEG via `image`, `chart_path`, or `visual_path` — only the FIRST non-empty of `image` > `chart_path` > `visual_path` is used.
 
@@ -259,6 +265,64 @@ valid Office PPTX package. (A missing plan-referenced `image`/`chart_path`/
 `visual_path` does NOT fail the deck — that slide degrades to a text layout
 with a stderr note.) If it fails after one correction, create an explicit
 Markdown or HTML fallback instead of writing ad hoc `python-pptx` code.
+
+## Design Ideas
+
+Authoring guidance for the compositor path. The script renders exactly what the plan says — deck quality is decided when you write the plan JSON, so apply these rules up front.
+
+### Palette Discipline — Pick One Theme, Stay In It
+
+| Theme | Palette anchors | Use when |
+|-------|-----------------|----------|
+| **boardroom** | navy `#0E1A2B` bg · ivory titles · blue `#3B82C4` accent | executive reviews, investor decks, premium business |
+| **daylight** | light `#F8FAFC` bg · ink titles · blue `#1C7ED6` accent | the business default; reports, project updates |
+| **ember** | charcoal `#1C1410` bg · warm ivory · amber `#E08A00` accent | creative, storytelling, brand narratives |
+| **mist** | gray-blue `#F1F5F9` bg · slate `#475569` accent | minimal, academic, technical documentation |
+| **terra** | warm paper `#F4F1DE` bg · ink `#2C2C2C` · sage `#87A96B` accent · terracotta `#E07A5F` highlights | sustainability, wellness, food, human-centered topics |
+| **noir** | black `#111111` bg · ivory `#F4F6F6` · gold `#BF9A4A` accent | luxury, premium launches, awards, executive keynotes |
+
+**60/30/10 dominance rule**: every theme is built so the background family carries ~60% of the slide, supporting surfaces (cards, body text) ~30%, and the accent ~10%. Respect this when authoring content: the accent is for emphasis — rules, stat values, column headings. If everything is accented, nothing is. Never introduce colors beyond the theme palette.
+
+### Layout ↔ Content Matching
+
+- **Chart slides**: use `content_image` (bullets beside the chart card) or `two_column` — a side-by-side 40/60 split. NEVER vertically stack a chart below a block of text in one column; side-by-side keeps both readable.
+- **Column count = item count**: 2 comparable things → `two_column`; 2-4 headline numbers → `stat_band`; 5+ points → split across two slides instead of shrinking the font.
+- **One message per slide**: a memorable line gets `quote`, a chapter break gets `section_divider`, a hero visual gets `full_bleed_image`. Don't fold them into bullet slides.
+
+### Slide Cadence
+
+The compositor lints the plan and prints `PLAN_LINT:` warnings to stderr (advisory only — they never fail the build). Author to these rules from the start:
+
+- **No two consecutive identical layouts.** Back-to-back `content_text` slides read as a wall of sameness — insert a `section_divider`, `quote`, or `stat_band` between them, or merge the content.
+- **At least one visual anchor every 3 slides.** An anchor is any slide resolving to `full_bleed_image`, `content_image`, `section_divider`, `quote`, or `stat_band` — or any slide referencing an image.
+- **Keep titles ≤ 60 characters.** Longer titles wrap in most layouts.
+
+### Motif — Repetition Builds Identity
+
+Set the plan-level `motif` field so one small accent shape repeats across content-bearing slides; the repetition is what makes the deck feel designed. Pick exactly one per deck:
+
+| Motif | Rendering | Feels like |
+|-------|-----------|------------|
+| `rule` | thin accent underline below the title | quiet, editorial — the subtle default |
+| `corner` | thin L-shaped accent bracket, top-left | structured, architectural |
+| `dot_grid` | 3×3 grid of small accent dots, top-right | playful, technical |
+
+### Typography Contrast — Big Numbers Beat Big Sentences
+
+When the content is quantitative, use `stat_band`: it renders 2-4 values at display size (54pt bold, accent color) over 14pt labels — the size jump itself is the design. Request it explicitly via `layout` (it is never inferred); with no usable `stats` it falls back to `two_column`.
+
+```json
+{
+  "slide_number": 5,
+  "layout": "stat_band",
+  "title": "Adoption at a Glance",
+  "stats": [
+    {"value": "87%", "label": "weekly active adoption"},
+    {"value": "3x", "label": "throughput vs Q1"},
+    {"value": "12", "label": "markets live"}
+  ]
+}
+```
 
 ## Complete Example: Glassmorphism Style With Generated Images (最现代前卫)
 

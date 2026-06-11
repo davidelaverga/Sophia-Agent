@@ -18,7 +18,7 @@ import pytest
 from PIL import Image
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE
-from pptx.util import Inches
+from pptx.util import Inches, Pt
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPT_PATH = _REPO_ROOT / "skills" / "public" / "ppt-generation" / "scripts" / "generate.py"
@@ -33,6 +33,7 @@ _ALL_LAYOUTS = {
     "quote",
     "two_column",
     "closing",
+    "stat_band",
 }
 
 
@@ -51,6 +52,23 @@ def _write_png(path: Path, size=(320, 180)) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", size, color=(40, 140, 180)).save(path)
     return path
+
+
+def _blank_slide():
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    return prs, prs.slides.add_slide(prs.slide_layouts[6])
+
+
+def _slide_paragraphs(slide):
+    for shape in slide.shapes:
+        if shape.has_text_frame:
+            yield from shape.text_frame.paragraphs
+
+
+def _slide_texts(slide) -> list[str]:
+    return [paragraph.text for paragraph in _slide_paragraphs(slide)]
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +276,43 @@ class TestGeneratePptLayouts:
         # Legacy dark styles keep resolving to a dark theme.
         assert gen.slide_theme(plan) is gen.THEMES["boardroom"]
 
+    def test_design_language_deck_terra_and_noir(self, tmp_path: Path) -> None:
+        png = _write_png(tmp_path / "visuals" / "chart.png")
+        for theme_name in ("terra", "noir"):
+            plan = {
+                "title": "Design Language",
+                "theme": theme_name,
+                "motif": "dot_grid",
+                "aspect_ratio": "16:9",
+                "slides": [
+                    {"slide_number": 1, "layout": "title", "title": "Design Language", "subtitle": "VQ-8"},
+                    {"slide_number": 2, "layout": "stat_band", "title": "By The Numbers", "stats": [{"value": "87%", "label": "adoption"}, {"value": "3x", "label": "throughput"}, {"value": "12", "label": "markets"}]},
+                    {"slide_number": 3, "layout": "content_image", "title": "Architecture", "key_points": ["Capture", "Plan"], "image": str(png)},
+                    {"slide_number": 4, "layout": "quote", "quote": "Repetition builds identity.", "attribution": "Composio"},
+                    {"slide_number": 5, "layout": "full_bleed_image", "title": "The Vision", "image": str(png)},
+                    {"slide_number": 6, "layout": "closing", "subtitle": "sophia-ei.com"},
+                ],
+            }
+            plan_file = tmp_path / f"plan-{theme_name}.json"
+            plan_file.write_text(json.dumps(plan), encoding="utf-8")
+            output = tmp_path / f"deck-{theme_name}.pptx"
+
+            message = gen.generate_ppt(str(plan_file), [], str(output))
+
+            assert message == "Successfully generated presentation with 6 slides (picture_count=2)"
+            with zipfile.ZipFile(output) as archive:
+                names = set(archive.namelist())
+                assert _REQUIRED_OFFICE_ENTRIES.issubset(names)
+                assert any(name.startswith("ppt/media/") for name in names)
+            prs = Presentation(str(output))
+            assert len(prs.slides) == 6
+            # stat_band slide carries oversized accent values + a dot_grid motif (9 dots).
+            stat_slide = prs.slides[1]
+            texts = _slide_texts(stat_slide)
+            assert "87%" in texts and "adoption" in texts
+            dots = [shape for shape in stat_slide.shapes if shape.width == Pt(4) and shape.height == Pt(4)]
+            assert len(dots) == 9
+
     def test_cli_diagnostics_contract_is_unchanged(self, tmp_path: Path) -> None:
         plan = {
             "title": "Contract",
@@ -283,3 +338,322 @@ class TestGeneratePptLayouts:
         assert "PPT generation diagnostics:" in result.stderr
         assert "picture_count=0" in result.stderr
         assert "output_ext=.pptx" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# New themes (terra / noir) + palette discipline
+# ---------------------------------------------------------------------------
+
+
+class TestDesignLanguageThemes:
+    def test_theme_registry_has_six_themes(self) -> None:
+        assert set(gen.THEMES) == {"boardroom", "daylight", "ember", "mist", "terra", "noir"}
+
+    def test_terra_palette_anchors(self) -> None:
+        terra = gen.THEMES["terra"]
+        assert str(terra["background"]) == "F4F1DE"
+        assert str(terra["title"]) == "2C2C2C"
+        assert str(terra["accent"]) == "87A96B"
+        assert str(terra["accent_deep"]) == "E07A5F"
+
+    def test_noir_palette_anchors(self) -> None:
+        noir = gen.THEMES["noir"]
+        assert str(noir["background"]) == "111111"
+        assert str(noir["title"]) == "F4F6F6"
+        assert str(noir["accent"]) == "BF9A4A"
+        assert str(noir["accent_deep"]) == "000000"
+
+    @pytest.mark.parametrize(
+        "style, expected",
+        [
+            ("earthy", "terra"),
+            ("organic", "terra"),
+            ("luxury", "noir"),
+            ("premium-dark", "noir"),
+        ],
+    )
+    def test_new_style_aliases(self, style: str, expected: str) -> None:
+        assert gen.slide_theme({"style": style}) is gen.THEMES[expected]
+
+    def test_every_alias_targets_a_known_theme(self) -> None:
+        for alias, target in gen._STYLE_ALIASES.items():
+            assert target in gen.THEMES, f"alias {alias} points at unknown theme {target}"
+
+
+# ---------------------------------------------------------------------------
+# apply_motif
+# ---------------------------------------------------------------------------
+
+
+class TestApplyMotif:
+    def test_rule_motif_adds_one_accent_shape(self) -> None:
+        _, slide = _blank_slide()
+        theme = gen.THEMES["terra"]
+        gen.apply_motif(slide, "rule", theme, Inches(13.333))
+        shapes = list(slide.shapes)
+        assert len(shapes) == 1
+        assert shapes[0].fill.fore_color.rgb == theme["accent"]
+
+    def test_corner_motif_adds_two_accent_shapes(self) -> None:
+        _, slide = _blank_slide()
+        theme = gen.THEMES["noir"]
+        gen.apply_motif(slide, "corner", theme, Inches(13.333))
+        shapes = list(slide.shapes)
+        assert len(shapes) == 2
+        assert all(shape.fill.fore_color.rgb == theme["accent"] for shape in shapes)
+
+    def test_dot_grid_motif_adds_nine_dots_top_right(self) -> None:
+        _, slide = _blank_slide()
+        theme = gen.THEMES["boardroom"]
+        slide_width = Inches(13.333)
+        gen.apply_motif(slide, "dot_grid", theme, slide_width)
+        shapes = list(slide.shapes)
+        assert len(shapes) == 9
+        for shape in shapes:
+            assert shape.width == Pt(4)
+            assert shape.height == Pt(4)
+            assert shape.left > int(slide_width) / 2
+            assert shape.fill.fore_color.rgb == theme["accent"]
+
+    @pytest.mark.parametrize("motif", [None, "", "zigzag", 42])
+    def test_absent_or_unknown_motif_is_noop(self, motif) -> None:
+        _, slide = _blank_slide()
+        gen.apply_motif(slide, motif, gen.THEMES["daylight"], Inches(13.333))
+        assert len(list(slide.shapes)) == 0
+
+    def test_motif_is_normalized(self) -> None:
+        _, slide = _blank_slide()
+        gen.apply_motif(slide, "  Rule ", gen.THEMES["daylight"], Inches(13.333))
+        assert len(list(slide.shapes)) == 1
+
+    @pytest.mark.parametrize("layout_name", ["content_text", "content_image", "two_column", "stat_band"])
+    def test_titled_layouts_render_plan_motif(self, layout_name: str, tmp_path: Path) -> None:
+        slide_info = {"slide_number": 1, "title": "T", "key_points": ["a", "b"]}
+        image_path = None
+        if layout_name == "content_image":
+            image_path = str(_write_png(tmp_path / "chart.png"))
+        if layout_name == "stat_band":
+            slide_info["stats"] = [{"value": "1", "label": "one"}, {"value": "2", "label": "two"}]
+
+        _, plain_slide = _blank_slide()
+        gen.LAYOUT_DISPATCH[layout_name](plain_slide, slide_info, {"theme": "terra"}, image_path, Inches(13.333), Inches(7.5))
+        _, motif_slide = _blank_slide()
+        gen.LAYOUT_DISPATCH[layout_name](motif_slide, slide_info, {"theme": "terra", "motif": "rule"}, image_path, Inches(13.333), Inches(7.5))
+
+        assert len(list(motif_slide.shapes)) == len(list(plain_slide.shapes)) + 1
+
+
+# ---------------------------------------------------------------------------
+# stat_band layout
+# ---------------------------------------------------------------------------
+
+
+class TestStatBandLayout:
+    def test_explicit_layout_resolves_but_is_never_inferred(self) -> None:
+        assert gen.resolve_layout({"layout": "stat_band"}, None) == "stat_band"
+        assert gen.resolve_layout({"title": "x", "stats": [{"value": "1", "label": "l"}]}, None) == "content_text"
+
+    def test_values_and_labels_render_with_display_typography(self) -> None:
+        _, slide = _blank_slide()
+        theme = gen.THEMES["noir"]
+        slide_info = {
+            "slide_number": 2,
+            "title": "Numbers",
+            "stats": [{"value": "87%", "label": "adoption"}, {"value": "3x", "label": "throughput"}],
+        }
+        gen.add_stat_band_slide(slide, slide_info, {"theme": "noir"}, None, Inches(13.333), Inches(7.5))
+
+        texts = _slide_texts(slide)
+        assert {"87%", "adoption", "3x", "throughput"}.issubset(set(texts))
+        value_paragraph = next(p for p in _slide_paragraphs(slide) if p.text == "87%")
+        assert value_paragraph.font.size == Pt(54)
+        assert value_paragraph.font.bold is True
+        assert value_paragraph.font.color.rgb == theme["accent"]
+        label_paragraph = next(p for p in _slide_paragraphs(slide) if p.text == "adoption")
+        assert label_paragraph.font.size == Pt(14)
+
+    def test_caps_at_four_stats(self) -> None:
+        _, slide = _blank_slide()
+        stats = [{"value": f"v{i}", "label": f"l{i}"} for i in range(1, 6)]
+        gen.add_stat_band_slide(slide, {"stats": stats}, {}, None, Inches(13.333), Inches(7.5))
+        texts = set(_slide_texts(slide))
+        assert {"v1", "v2", "v3", "v4"}.issubset(texts)
+        assert "v5" not in texts
+
+    def test_falls_back_to_two_column_without_stats(self) -> None:
+        _, stat_slide = _blank_slide()
+        slide_info = {"slide_number": 1, "title": "T", "key_points": ["alpha", "beta"]}
+        gen.add_stat_band_slide(stat_slide, slide_info, {}, None, Inches(13.333), Inches(7.5))
+        _, two_col_slide = _blank_slide()
+        gen.add_two_column_slide(two_col_slide, slide_info, {}, None, Inches(13.333), Inches(7.5))
+
+        assert {"alpha", "beta"}.issubset(set(_slide_texts(stat_slide)))
+        assert len(list(stat_slide.shapes)) == len(list(two_col_slide.shapes))
+
+    def test_optional_title_is_skipped_when_absent(self) -> None:
+        _, slide = _blank_slide()
+        gen.add_stat_band_slide(slide, {"stats": [{"value": "9", "label": "nine"}]}, {"title": "Deck Title"}, None, Inches(13.333), Inches(7.5))
+        assert "Deck Title" not in set(_slide_texts(slide))
+
+    def test_stat_band_renders_through_generate_ppt(self, tmp_path: Path) -> None:
+        plan = {
+            "title": "Stats",
+            "theme": "terra",
+            "slides": [{"slide_number": 1, "layout": "stat_band", "title": "KPIs", "stats": [{"value": "42", "label": "answers"}]}],
+        }
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(json.dumps(plan), encoding="utf-8")
+        output = tmp_path / "deck.pptx"
+
+        message = gen.generate_ppt(str(plan_file), [], str(output))
+
+        assert message == "Successfully generated presentation with 1 slides (picture_count=0)"
+        prs = Presentation(str(output))
+        assert {"42", "answers"}.issubset(set(_slide_texts(prs.slides[0])))
+
+
+# ---------------------------------------------------------------------------
+# lint_plan
+# ---------------------------------------------------------------------------
+
+
+class TestLintPlan:
+    def test_clean_plan_has_no_warnings(self) -> None:
+        plan = {
+            "title": "Clean",
+            "slides": [
+                {"slide_number": 1, "layout": "title", "title": "Clean"},
+                {"slide_number": 2, "layout": "content_text", "title": "Context", "key_points": ["a"]},
+                {"slide_number": 3, "layout": "section_divider", "title": "Part"},
+                {"slide_number": 4, "layout": "two_column", "title": "Tradeoffs"},
+                {"slide_number": 5, "layout": "quote", "quote": "q"},
+                {"slide_number": 6, "layout": "closing"},
+            ],
+        }
+        assert gen.lint_plan(plan) == []
+
+    def test_consecutive_identical_layouts_warn_with_slide_numbers(self) -> None:
+        plan = {
+            "slides": [
+                {"slide_number": 1, "layout": "content_text", "title": "A"},
+                {"slide_number": 2, "layout": "content_text", "title": "B"},
+                {"slide_number": 3, "layout": "quote", "quote": "q"},
+            ],
+        }
+        warnings = gen.lint_plan(plan)
+        assert len(warnings) == 1
+        assert "slides 1 and 2" in warnings[0]
+        assert "content_text" in warnings[0]
+        assert "reorder" in warnings[0].lower()
+
+    def test_visual_cadence_warning_names_the_dry_stretch(self) -> None:
+        plan = {
+            "slides": [
+                {"slide_number": 1, "layout": "content_text", "title": "A"},
+                {"slide_number": 2, "layout": "two_column", "title": "B"},
+                {"slide_number": 3, "layout": "content_text", "title": "C"},
+                {"slide_number": 4, "layout": "two_column", "title": "D"},
+            ],
+        }
+        warnings = gen.lint_plan(plan)
+        assert len(warnings) == 1
+        assert "slides 1-4" in warnings[0]
+        assert "visual anchor" in warnings[0]
+
+    def test_image_bearing_slide_counts_as_visual_anchor(self) -> None:
+        plan = {
+            "slides": [
+                {"slide_number": 1, "layout": "content_text", "title": "A"},
+                {"slide_number": 2, "layout": "two_column", "title": "B", "image": "/mnt/user-data/outputs/visuals/x.png"},
+                {"slide_number": 3, "layout": "content_text", "title": "C"},
+                {"slide_number": 4, "layout": "two_column", "title": "D"},
+            ],
+        }
+        assert gen.lint_plan(plan) == []
+
+    def test_cadence_uses_inferred_layouts(self) -> None:
+        # No explicit layout fields at all: inference yields content_text x3.
+        plan = {
+            "slides": [
+                {"slide_number": 1, "title": "A", "key_points": ["x"]},
+                {"slide_number": 2, "title": "B", "key_points": ["y"]},
+                {"slide_number": 3, "title": "C", "key_points": ["z"]},
+            ],
+        }
+        warnings = gen.lint_plan(plan)
+        assert any("visual anchor" in warning for warning in warnings)
+        assert any("content_text" in warning for warning in warnings)
+
+    def test_long_title_warns(self) -> None:
+        long_title = "T" * 61
+        plan = {"slides": [{"slide_number": 1, "layout": "quote", "title": long_title, "quote": "q"}]}
+        warnings = gen.lint_plan(plan)
+        assert len(warnings) == 1
+        assert ">60" in warnings[0]
+        assert "slide 1" in warnings[0]
+
+    def test_lint_tolerates_empty_or_missing_slides(self) -> None:
+        assert gen.lint_plan({}) == []
+        assert gen.lint_plan({"slides": []}) == []
+
+    def test_generate_ppt_emits_plan_lint_to_stderr_without_failing(self, tmp_path: Path, capsys) -> None:
+        plan = {
+            "title": "Lint Me",
+            "slides": [
+                {"slide_number": 1, "layout": "content_text", "title": "A", "key_points": ["x"]},
+                {"slide_number": 2, "layout": "content_text", "title": "B", "key_points": ["y"]},
+                {"slide_number": 3, "layout": "content_text", "title": "C", "key_points": ["z"]},
+            ],
+        }
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(json.dumps(plan), encoding="utf-8")
+        output = tmp_path / "deck.pptx"
+
+        message = gen.generate_ppt(str(plan_file), [], str(output))
+
+        # Success-message contract unchanged; warnings only land on stderr.
+        assert message == "Successfully generated presentation with 3 slides (picture_count=0)"
+        err = capsys.readouterr().err
+        # 2 consecutive-layout warnings + 1 cadence warning + summary line.
+        assert err.count("PLAN_LINT:") == 4
+        assert "PLAN_LINT: 3 warning(s)" in err
+
+    def test_clean_plan_emits_no_plan_lint_lines(self, tmp_path: Path, capsys) -> None:
+        plan = {
+            "title": "Quiet",
+            "slides": [
+                {"slide_number": 1, "layout": "title", "title": "Quiet"},
+                {"slide_number": 2, "layout": "content_text", "title": "Body", "key_points": ["a"]},
+            ],
+        }
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(json.dumps(plan), encoding="utf-8")
+        output = tmp_path / "deck.pptx"
+
+        gen.generate_ppt(str(plan_file), [], str(output))
+
+        assert "PLAN_LINT" not in capsys.readouterr().err
+
+    def test_cli_keeps_diagnostics_contract_and_appends_lint(self, tmp_path: Path) -> None:
+        plan = {
+            "title": "CLI Lint",
+            "slides": [
+                {"slide_number": 1, "layout": "content_text", "title": "T" * 61, "key_points": ["a"]},
+                {"slide_number": 2, "layout": "quote", "quote": "q"},
+            ],
+        }
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(json.dumps(plan), encoding="utf-8")
+        output = tmp_path / "deck.pptx"
+
+        result = subprocess.run(
+            [sys.executable, str(_SCRIPT_PATH), "--plan-file", str(plan_file), "--output-file", str(output)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "Successfully generated presentation with 2 slides (picture_count=0)" in result.stdout
+        assert "PPT generation diagnostics:" in result.stderr
+        assert "PLAN_LINT: 1 warning(s)" in result.stderr

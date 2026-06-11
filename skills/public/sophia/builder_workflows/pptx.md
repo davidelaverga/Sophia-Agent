@@ -16,10 +16,12 @@ Use this card only for requested `.pptx` or slide-deck builds.
    will be rejected at emit time when visuals were requested. Do not use
    the generated support PNG as the final artifact.
 4. Generated imagery is ON BY DEFAULT for decks (unless the brief asks for a
-   plain/text-only/minimal deck): use
-   `/mnt/skills/public/image-generation/scripts/generate.py` to create 1 hero
-   image (16:9, for the title slide) and up to 2 supporting images. HARD CAP:
-   3 image-generation calls per build — calls beyond the cap are rejected.
+   plain/text-only/minimal deck): FIRST run
+   `python /mnt/skills/public/image-generation/scripts/generate.py --preflight`
+   (on failure, continue chart/text-only — the skip is recorded honestly),
+   then use the script to create 1 hero image (16:9, for the title slide)
+   and up to 2 supporting images. HARD CAP: 3 image-generation calls per
+   build — calls beyond the cap are rejected.
    Save them under `/mnt/user-data/outputs/visuals/` and wire them into the
    plan: hero → slide 1 with `"layout": "full_bleed_image"` and `"image":
    <hero path>`; supporting images → `section_divider`/`content_image`

@@ -46,6 +46,9 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "fallback_reason",
     "image_generation_status",
     "image_generation_reason",
+    "image_generation_outcome",
+    "iterations_used",
+    "unmet_conditions",
     "artifact_preview_filename",
     "quality_warning",
     "visuals_missing",
@@ -82,6 +85,9 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "fallback_reason",
         "image_generation_status",
         "image_generation_reason",
+        "image_generation_outcome",
+        "iterations_used",
+        "unmet_conditions",
         "artifact_preview_filename",
         "quality_warning",
         "visuals_missing",
@@ -256,6 +262,13 @@ class BuilderCompletionEvent(BaseModel):
     fallback_reason: str | None = None
     image_generation_status: str | None = None
     image_generation_reason: str | None = None
+    image_generation_outcome: dict[str, Any] | None = Field(
+        None,
+        description="VQ-3 harness-stamped enrichment outcome: "
+        "{attempted: int, succeeded: int, skip_reason?: str}.",
+    )
+    iterations_used: int | None = None
+    unmet_conditions: list[str] | None = None
     artifact_preview_filename: str | None = Field(
         None,
         description="Canvas preview sibling (e.g. <deck>.preview.pdf rendered "

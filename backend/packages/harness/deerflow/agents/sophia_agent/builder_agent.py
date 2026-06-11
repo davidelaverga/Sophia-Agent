@@ -102,7 +102,15 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
     model = ChatAnthropic(
         model=resolved_model,
         api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
-        max_tokens=8192,
+        # 32k output. Prod 2026-06-11 (F1): at 8192 a complete standalone
+        # HTML document cannot fit one write_file call — the tool-call JSON
+        # truncates at the cap (budget logs showed out += exactly 8192 across
+        # four attempts), args go missing, and the build dies after the
+        # 4-strike arg-error stop. Sonnet 4.6 supports 64k out; only actual
+        # usage is billed and the budget circuit-breaker caps runaways. The
+        # truncation-specific correction in BuilderArtifactMiddleware is the
+        # belt to this suspender.
+        max_tokens=32768,
         # streaming=True is critical: without it, the Anthropic SDK makes a
         # synchronous HTTP request and waits for the ENTIRE response before
         # returning any data.  For Sonnet generating large documents (5k+
@@ -112,12 +120,13 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         # apart) keeping the connection alive regardless of total generation
         # time.
         streaming=True,
-        # PR-F (Phase 2.3): 120s timeout + 1 retry.
-        # Sonnet can take 45-90s for large documents; 120s gives headroom while
-        # preventing the builder from hanging indefinitely on a stalled connection.
-        # 1 retry (not 2) balances recovery from transient blips without burning
-        # extra budget when the model is genuinely struggling.
-        timeout=120.0,
+        # PR-F (Phase 2.3), raised with the 32k max_tokens: the httpx timeout
+        # applies between streamed chunks (streaming=True keeps bytes
+        # flowing), but a 32k-token turn can run several minutes wall-clock —
+        # give generous headroom while still bounding a stalled connection.
+        # 1 retry (not 2) balances recovery from transient blips without
+        # burning extra budget when the model is genuinely struggling.
+        timeout=240.0,
         max_retries=1,
     )
 

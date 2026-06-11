@@ -622,6 +622,13 @@ def _artifact_completion_fields(
         "fallback_reason": artifact.get("fallback_reason"),
         "image_generation_status": artifact.get("image_generation_status"),
         "image_generation_reason": artifact.get("image_generation_reason"),
+        # VQ-3: harness-stamped enrichment outcome — attempted/succeeded/
+        # skip_reason. A build with image generation enabled never ends
+        # ambiguous.
+        "image_generation_outcome": artifact.get("image_generation_outcome"),
+        # VQ-10: loop honesty — how hard we tried and what stayed unmet.
+        "iterations_used": artifact.get("iterations_used"),
+        "unmet_conditions": artifact.get("unmet_conditions"),
         "source_artifact_path": artifact.get("source_artifact_path"),
         "revision_of_artifact_path": artifact.get("revision_of_artifact_path"),
         "summary": artifact.get("companion_summary"),
