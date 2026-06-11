@@ -41,6 +41,7 @@ __all__ = [
     "FALLBACK_MAX_RETRIES_ENV",
     "FALLBACK_MODEL_ENV",
     "FALLBACK_TIMEOUT_ENV",
+    "PRIMARY_COOLDOWN_ENV",
     "PRIMARY_PROVIDER",
     "FALLBACK_PROVIDER",
     "build_fallback_chat_model",
@@ -53,6 +54,7 @@ __all__ = [
     "model_provider_label",
     "normalize_tool_choice_for_model",
     "openai_api_key_present",
+    "primary_cooldown_seconds",
     "provider_fallback_failure_diagnostic",
     "provider_fallback_snapshot",
     "safe_provider_error_message",
@@ -65,9 +67,11 @@ FALLBACK_ENABLED_ENV = "SOPHIA_BUILDER_OPENAI_FALLBACK_ENABLED"
 FALLBACK_MODEL_ENV = "SOPHIA_BUILDER_OPENAI_FALLBACK_MODEL"
 FALLBACK_TIMEOUT_ENV = "SOPHIA_BUILDER_OPENAI_FALLBACK_TIMEOUT_SECONDS"
 FALLBACK_MAX_RETRIES_ENV = "SOPHIA_BUILDER_OPENAI_FALLBACK_MAX_RETRIES"
+PRIMARY_COOLDOWN_ENV = "SOPHIA_BUILDER_PRIMARY_COOLDOWN_SECONDS"
 _OPENAI_KEY_ENV = "OPENAI_API_KEY"
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
+_PRIMARY_COOLDOWN_DEFAULT_SECONDS = 300.0
 
 # Anthropic returns "Your credit balance is too low ..." as a 400
 # BadRequestError (invalid_request_error), NOT a 402/403/429. This is a
@@ -121,6 +125,21 @@ def fallback_max_retries() -> int:
     except ValueError:
         return 1
     return value if value >= 0 else 1
+
+
+def primary_cooldown_seconds() -> float:
+    """TTL for temporary Builder primary-provider bypass.
+
+    After a classified Anthropic availability failure, Builder turns inside
+    this window call the configured OpenAI fallback directly. ``0`` disables
+    the cooldown so every model turn retries Anthropic first.
+    """
+    raw = os.environ.get(PRIMARY_COOLDOWN_ENV, "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return _PRIMARY_COOLDOWN_DEFAULT_SECONDS
+    return value if value >= 0 else _PRIMARY_COOLDOWN_DEFAULT_SECONDS
 
 
 def openai_api_key_present() -> bool:
@@ -358,6 +377,8 @@ def provider_fallback_snapshot(
     error_class: str,
     fallback_attempted: bool,
     fallback_result: str,
+    primary_bypassed: bool = False,
+    bypass_reason: str | None = None,
 ) -> dict[str, Any]:
     """Sanitized snapshot for state + diagnostics. Allowlisted fields only.
 
@@ -373,6 +394,9 @@ def provider_fallback_snapshot(
         "fallback_reason": error_class,
         "fallback_result": fallback_result,
         "fallback_model_configured": fallback_model_name() is not None,
+        "fallback_primary_bypassed": bool(primary_bypassed),
+        "fallback_bypass_reason": bypass_reason,
+        "final_provider": FALLBACK_PROVIDER if fallback_attempted else PRIMARY_PROVIDER,
         "provider_error_class": error_class,
         "provider_error_safe_message": safe_provider_error_message(error_class),
         "raw_provider_payload_excluded": True,

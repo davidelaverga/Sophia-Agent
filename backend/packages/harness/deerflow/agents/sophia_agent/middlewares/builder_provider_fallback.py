@@ -40,6 +40,7 @@ allowlisted fields in ``provider_fallback_snapshot``.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, NotRequired
 
 from langchain.agents import AgentState
@@ -53,11 +54,46 @@ from deerflow.sophia.builder_provider_fallback import (
     fallback_enabled,
     fallback_model_name,
     openai_api_key_present,
+    primary_cooldown_seconds,
     provider_fallback_failure_diagnostic,
     provider_fallback_snapshot,
 )
 
 logger = logging.getLogger(__name__)
+
+_primary_cooldown: dict[str, Any] = {"until": 0.0, "error_class": None}
+
+
+def _set_primary_cooldown(error_class: str) -> None:
+    ttl = primary_cooldown_seconds()
+    if ttl <= 0:
+        return
+    _primary_cooldown["until"] = time.monotonic() + ttl
+    _primary_cooldown["error_class"] = error_class
+
+
+def _clear_primary_cooldown() -> None:
+    _primary_cooldown["until"] = 0.0
+    _primary_cooldown["error_class"] = None
+
+
+def _active_primary_cooldown_error_class() -> str | None:
+    if time.monotonic() >= _primary_cooldown["until"]:
+        return None
+    error_class = _primary_cooldown.get("error_class")
+    return error_class if isinstance(error_class, str) and error_class else None
+
+
+def reset_builder_primary_cooldown_for_tests() -> None:
+    _clear_primary_cooldown()
+
+
+def _bypass_reason(error_class: str) -> str:
+    return (
+        "provider_credit_depleted"
+        if error_class == "permission_or_payment_error"
+        else "provider_unavailable"
+    )
 
 
 class BuilderProviderFallbackState(AgentState):
@@ -108,16 +144,27 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
             return None
 
     @staticmethod
-    def _success_response(response: Any, error_class: str) -> ExtendedModelResponse:
+    def _success_response(
+        response: Any,
+        error_class: str,
+        *,
+        primary_bypassed: bool = False,
+    ) -> ExtendedModelResponse:
+        bypass_reason = _bypass_reason(error_class) if primary_bypassed else None
         snapshot = provider_fallback_snapshot(
             error_class=error_class,
             fallback_attempted=True,
             fallback_result="success",
+            primary_bypassed=primary_bypassed,
+            bypass_reason=bypass_reason,
         )
         logger.warning(
             "[BuilderProviderFallback] OpenAI fallback succeeded "
-            "provider_error_class=%s fallback_attempted=true fallback_result=success",
+            "provider_error_class=%s fallback_attempted=true fallback_result=success "
+            "primary_provider_bypassed=%s fallback_bypass_reason=%s final_provider=openai",
             error_class,
+            "true" if primary_bypassed else "false",
+            bypass_reason or "none",
         )
         return ExtendedModelResponse(
             model_response=response,
@@ -170,10 +217,39 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
         logger.info("[BuilderProviderFallback] forced_provider=openai (eval hook)")
         return request.override(model=fallback_model)
 
+    @staticmethod
+    def _cooldown_fallback_model_or_none() -> tuple[str, Any] | None:
+        error_class = _active_primary_cooldown_error_class()
+        if error_class is None:
+            return None
+        fallback_model = BuilderProviderFallbackMiddleware._fallback_model_or_none(error_class)
+        if fallback_model is None:
+            return None
+        logger.warning(
+            "[BuilderProviderFallback] bypassing primary provider during cooldown "
+            "provider_error_class=%s fallback_attempted=true primary_provider_bypassed=true "
+            "fallback_bypass_reason=%s",
+            error_class,
+            _bypass_reason(error_class),
+        )
+        return error_class, fallback_model
+
     def wrap_model_call(self, request, handler):  # type: ignore[override]
         request = self._forced_provider_request(request)
+        cooldown = self._cooldown_fallback_model_or_none()
+        if cooldown is not None:
+            error_class, fallback_model = cooldown
+            try:
+                response = handler(request.override(model=fallback_model))
+            except Exception as fallback_exc:
+                _clear_primary_cooldown()
+                self._log_fallback_failed(error_class, fallback_exc)
+                raise
+            return self._success_response(response, error_class, primary_bypassed=True)
         try:
-            return handler(request)
+            response = handler(request)
+            _clear_primary_cooldown()
+            return response
         except Exception as primary_exc:
             error_class = classify_provider_error(primary_exc)
             if error_class is None:
@@ -181,6 +257,7 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
             fallback_model = self._fallback_model_or_none(error_class)
             if fallback_model is None:
                 raise
+            _set_primary_cooldown(error_class)
             logger.warning(
                 "[BuilderProviderFallback] retrying once via OpenAI "
                 "provider_error_class=%s fallback_attempted=true",
@@ -189,14 +266,27 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
             try:
                 response = handler(request.override(model=fallback_model))
             except Exception as fallback_exc:
+                _clear_primary_cooldown()
                 self._log_fallback_failed(error_class, fallback_exc)
                 raise fallback_exc from primary_exc
             return self._success_response(response, error_class)
 
     async def awrap_model_call(self, request, handler):  # type: ignore[override]
         request = self._forced_provider_request(request)
+        cooldown = self._cooldown_fallback_model_or_none()
+        if cooldown is not None:
+            error_class, fallback_model = cooldown
+            try:
+                response = await handler(request.override(model=fallback_model))
+            except Exception as fallback_exc:
+                _clear_primary_cooldown()
+                self._log_fallback_failed(error_class, fallback_exc)
+                raise
+            return self._success_response(response, error_class, primary_bypassed=True)
         try:
-            return await handler(request)
+            response = await handler(request)
+            _clear_primary_cooldown()
+            return response
         except Exception as primary_exc:
             error_class = classify_provider_error(primary_exc)
             if error_class is None:
@@ -204,6 +294,7 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
             fallback_model = self._fallback_model_or_none(error_class)
             if fallback_model is None:
                 raise
+            _set_primary_cooldown(error_class)
             logger.warning(
                 "[BuilderProviderFallback] retrying once via OpenAI "
                 "provider_error_class=%s fallback_attempted=true",
@@ -212,6 +303,7 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
             try:
                 response = await handler(request.override(model=fallback_model))
             except Exception as fallback_exc:
+                _clear_primary_cooldown()
                 self._log_fallback_failed(error_class, fallback_exc)
                 raise fallback_exc from primary_exc
             return self._success_response(response, error_class)

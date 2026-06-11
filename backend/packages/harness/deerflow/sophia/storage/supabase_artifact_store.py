@@ -156,7 +156,7 @@ def _folder_prefix_from_list_record(root_prefix: str, current_prefix: str, recor
     relative = _relative_list_name(root_prefix, current_prefix, raw_name).strip().strip("/")
     if not relative:
         return None
-    if _is_uploads_relative_name(relative):
+    if _is_internal_relative_name(relative):
         return None
     return f"{root_prefix}{relative}/"
 
@@ -164,6 +164,28 @@ def _folder_prefix_from_list_record(root_prefix: str, current_prefix: str, recor
 def _is_uploads_relative_name(filename: str) -> bool:
     normalized = filename.strip().lstrip("/")
     return normalized == UPLOADS_PREFIX.rstrip("/") or normalized.startswith(UPLOADS_PREFIX)
+
+
+def is_ledger_object_name(filename: str) -> bool:
+    """True when ``filename`` addresses the delegation-ledger keyspace.
+
+    The ledger (Spec D D-1) is INTERNAL conversation content — never a
+    user-facing artifact. Codex P1 PR #131 (2026-06-11): without this
+    filter, ``{thread_id}/ledger/session.jsonl`` surfaced in artifact
+    listings as ``mnt/user-data/outputs/ledger/session.jsonl`` and was
+    downloadable via the artifact GET proxy. Shared by the list filters
+    below AND the gateway's Supabase serve fallback so every read surface
+    excludes the same keyspace.
+    """
+    normalized = filename.strip().lstrip("/")
+    return normalized == LEDGER_PREFIX.rstrip("/") or normalized.startswith(LEDGER_PREFIX)
+
+
+def _is_internal_relative_name(filename: str) -> bool:
+    """Keyspaces that must never appear in artifact listings: uploads
+    (surfaced through the attachments UI instead) and the delegation
+    ledger (internal conversation record, AD-6)."""
+    return _is_uploads_relative_name(filename) or is_ledger_object_name(filename)
 
 
 def _record_name(record: Any) -> str | None:
@@ -200,7 +222,7 @@ def _info_from_list_record(
     filename = filename.strip().lstrip("/")
     if not filename or filename.endswith("/"):
         return None
-    if _is_uploads_relative_name(filename):
+    if _is_internal_relative_name(filename):
         return None
     size = _coerce_size(_metadata_value(record, "size", "contentLength", "content_length"))
     return SupabaseArtifactInfo(

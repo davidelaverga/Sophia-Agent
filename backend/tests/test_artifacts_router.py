@@ -341,6 +341,35 @@ def test_quick_patch_builder_task_source_homes_revision_under_parent_thread(tmp_
     assert source_path.read_text(encoding="utf-8") == original_html
 
 
+def test_supabase_fallback_refuses_delegation_ledger_keyspace(monkeypatch) -> None:
+    """Codex P1 PR #131: mnt/user-data/outputs/ledger/session.jsonl maps to
+    the mirrored delegation ledger — internal conversation content. The
+    Supabase serve fallback must refuse it WITHOUT downloading."""
+
+    def _must_not_download(**_kwargs):
+        raise AssertionError("ledger keyspace must never be downloaded via the artifact proxy")
+
+    monkeypatch.setattr(
+        artifacts_router.supabase_artifact_store, "download_artifact", _must_not_download
+    )
+
+    response = artifacts_router._try_serve_from_supabase(
+        "thread-1", "mnt/user-data/outputs/ledger/session.jsonl", http_request()
+    )
+    assert response is None
+
+    # Sibling names outside the keyspace still reach the download path.
+    monkeypatch.setattr(
+        artifacts_router.supabase_artifact_store,
+        "download_artifact",
+        lambda **_kwargs: (b"content", "text/markdown"),
+    )
+    served = artifacts_router._try_serve_from_supabase(
+        "thread-1", "mnt/user-data/outputs/ledgers-overview.md", http_request()
+    )
+    assert served is not None
+
+
 def test_get_artifact_serves_local_pptx_as_attachment(tmp_path, monkeypatch) -> None:
     artifact_path = tmp_path / "deck.pptx"
     artifact_path.write_bytes(b"pptx-bytes")

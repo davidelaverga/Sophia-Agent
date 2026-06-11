@@ -147,15 +147,22 @@ _PDF_OUTPUT_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
-_REQUESTED_OUTPUT_EXTENSION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("pdf", _PDF_OUTPUT_RE),
-    ("pptx", re.compile(r"\b(?:pptx|powerpoint|slide\s+deck|slides?)\b", re.IGNORECASE)),
-    ("docx", re.compile(r"\b(?:docx|word\s+document)\b", re.IGNORECASE)),
-    ("xlsx", re.compile(r"\b(?:xlsx|spreadsheet|excel)\b", re.IGNORECASE)),
-    ("html", _HTML_OUTPUT_RE),
-    ("md", re.compile(r"\b(?:markdown|md)\b", re.IGNORECASE)),
-    ("csv", re.compile(r"\bcsv\b", re.IGNORECASE)),
-    ("json", re.compile(r"\bjson\b", re.IGNORECASE)),
+_PPTX_OUTPUT_RE = re.compile(
+    r"\b(?:pptx|powerpoint|power\s*point|slide\s+deck|slides?)\b",
+    re.IGNORECASE,
+)
+_REQUESTED_OUTPUT_EXTENSION_PATTERNS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
+    # Explicit deck language must beat incidental PDF mentions from previous
+    # artifact filenames or context. A phrase like "presentation in PDF
+    # format" has no PPTX marker, so it still resolves to PDF below.
+    ("pptx", "explicit_presentation_deck", _PPTX_OUTPUT_RE),
+    ("pdf", "explicit_pdf_deliverable", _PDF_OUTPUT_RE),
+    ("docx", "explicit_word_document", re.compile(r"\b(?:docx|word\s+document)\b", re.IGNORECASE)),
+    ("xlsx", "explicit_spreadsheet", re.compile(r"\b(?:xlsx|spreadsheet|excel)\b", re.IGNORECASE)),
+    ("html", "explicit_html_deliverable", _HTML_OUTPUT_RE),
+    ("md", "explicit_markdown_deliverable", re.compile(r"\b(?:markdown|md)\b", re.IGNORECASE)),
+    ("csv", "explicit_csv_deliverable", re.compile(r"\bcsv\b", re.IGNORECASE)),
+    ("json", "explicit_json_deliverable", re.compile(r"\bjson\b", re.IGNORECASE)),
 )
 _SIMPLE_PRODUCT_REVIEW_RE = re.compile(
     r"\bproduct\s+review\b",
@@ -266,13 +273,17 @@ def _slugify_for_filename(text: str, max_len: int = 40) -> str:
     return cleaned[:max_len].rstrip("-") or _FALLBACK_TASK_SLUG
 
 
-def _requested_output_extension(description: str | None) -> str | None:
+def _requested_output_extension_match(description: str | None) -> tuple[str | None, str | None]:
     if not isinstance(description, str) or not description.strip():
-        return None
-    for ext, pattern in _REQUESTED_OUTPUT_EXTENSION_PATTERNS:
+        return None, None
+    for ext, reason, pattern in _REQUESTED_OUTPUT_EXTENSION_PATTERNS:
         if pattern.search(description):
-            return ext
-    return None
+            return ext, reason
+    return None, None
+
+
+def _requested_output_extension(description: str | None) -> str | None:
+    return _requested_output_extension_match(description)[0]
 
 
 def _suggest_artifact_filename(task_type: str | None, description: str | None) -> str:

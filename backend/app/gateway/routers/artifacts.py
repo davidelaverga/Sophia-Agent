@@ -564,6 +564,16 @@ def _try_serve_from_supabase(thread_id: str, path: str, request: Request) -> Res
     relative = _relative_output_artifact_path(path)
     if relative is None or relative == "":
         return None
+    # The delegation ledger (Spec D) is internal conversation content,
+    # mirrored under {thread_id}/ledger/ — never user-facing. Without this
+    # guard, mnt/user-data/outputs/ledger/session.jsonl would download the
+    # mirror through the artifact proxy (Codex P1 PR #131).
+    if supabase_artifact_store.is_ledger_object_name(relative):
+        logger.info(
+            "Refusing artifact serve for internal ledger keyspace: thread_id=%s",
+            thread_id,
+        )
+        return None
     try:
         result = supabase_artifact_store.download_artifact(
             thread_id=thread_id,
