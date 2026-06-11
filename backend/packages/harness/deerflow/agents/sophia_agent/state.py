@@ -220,6 +220,10 @@ class SophiaState(AgentState):
     platform: NotRequired[str]  # "voice" | "text" | "ios_voice"
     active_mode: NotRequired[str]  # "companion" | "builder"
     turn_count: NotRequired[int]
+    # Spec D D-3: set True by SophiaSummarizationMiddleware on compaction;
+    # stamped into delegation_context at dispatch as a brief-extraction
+    # trigger input.
+    was_summarized: NotRequired[bool]
 
     # User context
     user_id: NotRequired[str]

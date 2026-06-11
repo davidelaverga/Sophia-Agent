@@ -37,6 +37,94 @@ from deerflow.agents.sophia_agent.utils import log_middleware
 logger = logging.getLogger(__name__)
 
 
+def _delegation_boundary_sections(
+    delegation_context: dict[str, Any],
+    task_type: str,
+    existing_schema: dict[str, Any] | None = None,
+) -> tuple[list[str], dict[str, Any]]:
+    """Spec D briefing sections (D-3 schema, D-4 recall line, D-5 gate).
+
+    Returns ``(sections, state_updates)``. Everything degrades to
+    ``([], {})`` — missing ledger, disabled flags, extraction failure all
+    mean the briefing is exactly what it is today. Kept module-level so
+    ``before_agent``'s complexity stays flat (sentrux CC<=15).
+
+    ``existing_schema`` makes the extraction idempotent across runs:
+    ``before_agent`` re-fires on every follow-up run on the same builder
+    thread (update_async_task resumes), and a schema already extracted —
+    and already rendered into an earlier briefing block — must not
+    trigger a second model call or a duplicate section.
+    """
+    import json as _json
+
+    from deerflow.sophia import brief_extraction, build_condition, delegation_ledger
+    from deerflow.sophia.tools.read_session_context import read_tool_enabled
+
+    sections: list[str] = []
+    state_updates: dict[str, Any] = {}
+
+    stats = delegation_context.get("delegation_ledger")
+    ledger_available = bool(isinstance(stats, dict) and stats.get("available"))
+    parent_user_id = delegation_context.get("parent_user_id")
+    parent_thread_id = delegation_context.get("parent_thread_id")
+
+    # D-4: teach the recall tool only when it is registered AND a ledger exists.
+    if read_tool_enabled() and ledger_available:
+        sections.append(
+            "<session_recall>\n"
+            "If the brief is ambiguous or missing a detail the user likely "
+            "stated (audience, exact figures, style constraints, exclusions), "
+            "call read_session_context(query) BEFORE assuming (max 4 calls).\n"
+            "</session_recall>"
+        )
+
+    # D-3: one-shot schema extraction on the deterministic trigger.
+    # A schema already in state means a prior run extracted AND rendered it
+    # — skip both the model call and the duplicate section.
+    brief_schema: dict[str, Any] | None = None
+    if isinstance(existing_schema, dict):
+        pass
+    elif (
+        brief_extraction.extraction_enabled()
+        and brief_extraction.extraction_triggered(stats)
+        and isinstance(parent_user_id, str)
+        and isinstance(parent_thread_id, str)
+    ):
+        entries = delegation_ledger.read_ledger_with_fallback(parent_user_id, parent_thread_id)
+        brief_schema = brief_extraction.extract_brief(entries, task_type)
+        if brief_schema is not None:
+            sections.append(
+                "<build_brief_schema>\n"
+                + _json.dumps(brief_schema, indent=2, ensure_ascii=False)
+                + "\n</build_brief_schema>"
+            )
+            state_updates["brief_schema"] = brief_schema
+
+    # D-5: briefing-directive gate over the extracted schema.
+    if brief_schema is not None and build_condition.brief_gate_enabled():
+        ok, missing = build_condition.brief_complete(task_type, brief_schema)
+        if not ok:
+            fields = ", ".join(missing)
+            sections.append(
+                "<brief_gate>\n"
+                f"The brief schema is missing required fields for this "
+                f"task_type: {fields}.\n"
+                "BEFORE planning: for each missing field, call "
+                "read_session_context with a targeted query — the parent "
+                "conversation likely contains it (you have at most 4 calls).\n"
+                "If a field is genuinely not in the conversation, choose a "
+                "sensible stated assumption and continue — NEVER ask the "
+                "user.\n"
+                "Report every assumption you made in "
+                "emit_builder_artifact.brief_assumptions (one short string "
+                "each). If you filled all fields from the conversation, pass "
+                "an empty list.\n"
+                "</brief_gate>"
+            )
+            state_updates["brief_gate_missing_fields"] = missing
+    return sections, state_updates
+
+
 # PR #94: max number of files to enumerate in the CRITICAL endgame block.
 # Keeps the prompt budget bounded even on chaotic builds with dozens of
 # scratch files; the model only needs the most recently-modified
@@ -543,6 +631,13 @@ class BuilderTaskState(AgentState):
     builder_non_artifact_turns: NotRequired[int]
     builder_last_tool_names: NotRequired[list[str]]
     builder_artifact_target_path: NotRequired[str]
+    # Spec D D-4: read_session_context's self-enforced call counter — the
+    # tool's Command update persists only because the key is declared here.
+    builder_session_context_reads: NotRequired[int]
+    # Spec D D-3/D-5: extracted brief schema + the gate's missing fields,
+    # written by this middleware's briefing pass, read at emit acceptance.
+    brief_schema: NotRequired[dict | None]
+    brief_gate_missing_fields: NotRequired[list[str]]
     # NOTE: builder_search_sources is NOT redeclared here. SophiaState already
     # declares it with the `_merge_search_sources` reducer; redeclaring it as
     # plain `NotRequired[list[dict]]` would shadow that reducer via
@@ -668,6 +763,16 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             capped = relevant_memories[:5]
             memory_lines = [f"- {m}" for m in capped]
             sections.append("<memories>\n" + "\n".join(memory_lines) + "\n</memories>")
+
+        # Spec D (delegation boundary): D-4 recall line, D-3 extracted brief
+        # schema, D-5 completeness-gate directive. All flag-gated and
+        # degrade to no-ops when the parent ledger is unavailable.
+        boundary_sections, boundary_state_updates = _delegation_boundary_sections(
+            delegation_context,
+            task_type,
+            existing_schema=state.get("brief_schema"),
+        )
+        sections.extend(boundary_sections)
 
         # Task type
         sections.append(f"<task_type>{task_type}</task_type>")
@@ -1010,7 +1115,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             f"non_artifact_turns={non_artifact_turns}",
             _t0,
         )
-        return {"system_prompt_blocks": blocks}
+        return {"system_prompt_blocks": blocks, **boundary_state_updates}
 
     # ------------------------------------------------------------------
     # Private helpers

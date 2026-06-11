@@ -42,3 +42,12 @@ pdf-template-smoke:
 eval-visuals:
 	PYTHONPATH=. uv run python tests/evals/visuals/run_matrix.py --provider anthropic
 	SOPHIA_BUILDER_FORCE_PROVIDER=openai PYTHONPATH=. uv run python tests/evals/visuals/run_matrix.py --provider openai
+
+# G-DEL live lane (Spec D): the 40-turn delegation fixture against a
+# running langgraph that SHARES this working directory (local `make dev`
+# or the nightly CI job) — the runner materializes the parent-session
+# ledger straight onto the shared disk. Real API spend — on-demand +
+# nightly only, never per-PR.
+eval-delegation:
+	PYTHONPATH=.:tests uv run python tests/evals/delegation/run_matrix.py --provider anthropic
+	SOPHIA_BUILDER_FORCE_PROVIDER=openai PYTHONPATH=.:tests uv run python tests/evals/delegation/run_matrix.py --provider openai

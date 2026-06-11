@@ -34,6 +34,10 @@ from deerflow.sophia.tools.builder_web_search import builder_web_search
 from deerflow.sophia.tools.create_pdf_artifact import create_pdf_artifact
 from deerflow.sophia.tools.emit_builder_artifact import emit_builder_artifact
 from deerflow.sophia.tools.generate_visual_asset import generate_visual_asset
+from deerflow.sophia.tools.read_session_context import (
+    read_session_context,
+    read_tool_enabled,
+)
 from deerflow.sophia.tools.render_markdown_to_pdf import render_markdown_to_pdf
 from deerflow.tools.builtins.view_image_tool import view_image_tool
 
@@ -178,6 +182,13 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
     # back into the next turn is also in the chain.
     if vision_enabled:
         tools.append(view_image_tool)
+
+    # Spec D D-4: scoped recall over the parent companion session's
+    # delegation ledger — the floor beneath the brief. Flag-gated so
+    # SOPHIA_DELEGATION_READ_TOOL=0 removes the tool AND the briefing
+    # line that teaches it (BuilderTaskMiddleware checks the same flag).
+    if read_tool_enabled():
+        tools.append(read_session_context)
 
     # D7 / C2 recursion guard (Phase-3 Stage 1 spec):
     # Builder must NEVER spawn AsyncSubAgents (no `start_async_task`) and

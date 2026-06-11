@@ -696,10 +696,55 @@ def _file_target_directive_block(target_path: str, task_type: str | None) -> str
     )
 
 
+_DELTA_DIGEST_CAP_CHARS = 700
+
+
+def _delta_digest_block(
+    state: dict | None,
+    delegation_context: dict[str, Any] | None,
+) -> str:
+    """Spec D D-2: digest of companion turns SINCE dispatch, for a running build.
+
+    Reads the delegation ledger (this wrapper runs companion-side, so the
+    current session's ledger is local) and renders entries with
+    ``turn_number > dispatched_at_turn`` — both sides of that comparison
+    use LEDGER numbering, which survives compaction. Returns "" whenever
+    anything is missing — the directive is unchanged in that case.
+    """
+    from deerflow.sophia import delegation_ledger
+
+    if not isinstance(delegation_context, dict) or not delegation_ledger.digest_enabled():
+        return ""
+    dispatched_at_turn = delegation_context.get("dispatched_at_turn")
+    parent_thread_id = delegation_context.get("parent_thread_id")
+    user_id = None
+    if isinstance(state, dict):
+        user_id = state.get("user_id")
+    user_id = user_id or delegation_context.get("parent_user_id")
+    if not isinstance(dispatched_at_turn, int) or not parent_thread_id or not user_id:
+        return ""
+    entries = delegation_ledger.read_ledger(str(user_id), str(parent_thread_id))
+    delta = [
+        entry
+        for entry in entries
+        if isinstance(entry.get("turn_number"), int)
+        and entry["turn_number"] > dispatched_at_turn
+    ]
+    if not delta:
+        return ""
+    digest = delegation_ledger.build_digest(
+        delta, cap_chars=_DELTA_DIGEST_CAP_CHARS, min_entries=1
+    )
+    if not digest:
+        return ""
+    return f"[Conversation since dispatch]\n{digest}\n\n"
+
+
 def _augment_update_message(
     message: str,
     tracked: dict[str, Any] | None,
     delegation_context: dict[str, Any] | None,
+    state: dict | None = None,
 ) -> str:
     """PREFIX the user's update message with a "resume not restart" directive
     that gives the builder a concrete file target and steers it away from
@@ -741,11 +786,13 @@ def _augment_update_message(
             "before editing the deliverable.\n"
         )
 
+    delta_block = _delta_digest_block(state, delegation_context)
     directive = (
         f"{_FILE_TARGET_HINT_MARKER}\n"
         f"You are RESUMING (not restarting) a build that was interrupted by "
         f"this update message. {research_block}"
         f"\n"
+        f"{delta_block}"
         f"{target_block}\n"
         f"\n"
         f"User's update message:\n"
@@ -897,6 +944,7 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
             message,
             _resolve_tracked(state, task_id),
             state.get("delegation_context") if isinstance(state, dict) else None,
+            state=state if isinstance(state, dict) else None,
         )
         explicit_update_urls = extract_explicit_user_urls(message)
         if explicit_update_urls:
@@ -973,6 +1021,7 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
             message,
             _resolve_tracked(state, task_id),
             state.get("delegation_context") if isinstance(state, dict) else None,
+            state=state if isinstance(state, dict) else None,
         )
         explicit_update_urls = extract_explicit_user_urls(message)
         if explicit_update_urls:

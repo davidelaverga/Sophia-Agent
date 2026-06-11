@@ -629,6 +629,9 @@ def _artifact_completion_fields(
         # VQ-10: loop honesty — how hard we tried and what stayed unmet.
         "iterations_used": artifact.get("iterations_used"),
         "unmet_conditions": artifact.get("unmet_conditions"),
+        # Spec D D-5: assumptions the builder stated for brief fields not
+        # present in the parent conversation — the companion names them.
+        "brief_assumptions": artifact.get("brief_assumptions"),
         "source_artifact_path": artifact.get("source_artifact_path"),
         "revision_of_artifact_path": artifact.get("revision_of_artifact_path"),
         "summary": artifact.get("companion_summary"),

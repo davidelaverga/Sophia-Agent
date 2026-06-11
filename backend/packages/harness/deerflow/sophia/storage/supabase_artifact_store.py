@@ -40,6 +40,14 @@ _MAX_LIST_DEPTH = 8
 # companion read tools so both address the exact same object.
 UPLOADS_PREFIX = "uploads/"
 
+# Delegation-ledger keyspace (Spec D D-1). The per-session conversation
+# ledger mirrors under ``{thread_id}/ledger/session.jsonl`` — its own
+# prefix for the same collision reason as ``UPLOADS_PREFIX``. Shared by
+# the langgraph-side mirror writer (``delegation_ledger.mirror_ledger``)
+# AND the gateway-side session-delete cleanup so both address the exact
+# same object.
+LEDGER_PREFIX = "ledger/"
+
 
 @dataclass(frozen=True)
 class SupabaseConfig:
@@ -212,6 +220,16 @@ def uploads_object_name(filename: str) -> str:
     keyspace ``{thread_id}/report.pdf``.
     """
     return f"{UPLOADS_PREFIX}{filename.strip().lstrip('/')}"
+
+
+def ledger_object_name() -> str:
+    """Object name of the per-session delegation ledger (Spec D D-1).
+
+    The ``{thread_id}/`` folder is prepended by ``_object_path`` at call
+    time, yielding ``{thread_id}/ledger/session.jsonl``. One ledger per
+    session and session_id == thread_id, so the name is constant.
+    """
+    return f"{LEDGER_PREFIX}session.jsonl"
 
 
 def upload_artifact(

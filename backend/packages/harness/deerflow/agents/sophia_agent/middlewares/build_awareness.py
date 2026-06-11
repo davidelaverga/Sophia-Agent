@@ -322,6 +322,16 @@ def _render_terminal_block(task: dict) -> str:
             "build), mention this plainly in one sentence and offer a revision via "
             "edit_builder_artifact. Never call the deliverable a fallback.\n"
         )
+    assumptions = result.get("brief_assumptions")
+    if isinstance(assumptions, list) and assumptions:
+        rendered_assumptions = "; ".join(str(item) for item in assumptions[:4])
+        quality_note += (
+            "ASSUMPTIONS NOTE (Spec D): the builder filled gaps in the brief with "
+            f"stated assumptions: {rendered_assumptions}. Name them to the user in "
+            "one natural sentence and offer edit_builder_artifact to correct any "
+            "that are wrong — never present an assumption as something the user "
+            "said.\n"
+        )
     return (
         "<build_status>\n"
         f"The builder just finished a task ({minutes_ago} min ago, task_id: {task_id}, "

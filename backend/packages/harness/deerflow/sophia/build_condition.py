@@ -64,6 +64,78 @@ def iteration_cap() -> int:
     return max(1, value)
 
 
+# ---------------------------------------------------------------------------
+# Brief-completeness gate (Spec D D-5)
+# ---------------------------------------------------------------------------
+
+# Required brief-schema fields per task_type. ``*`` in a tuple entry means
+# "at least one of the alternatives" — encoded as a nested tuple.
+_REQUIRED_BRIEF_FIELDS: dict[str, tuple[Any, ...]] = {
+    "presentation": ("audience", "purpose", "format_and_length", ("must_include", "sources_and_examples")),
+    "visual_report": ("audience", "purpose", "format_and_length", ("must_include", "sources_and_examples")),
+    "document": ("audience", "purpose", "format_and_length", ("must_include", "sources_and_examples")),
+    "frontend": ("purpose", "format_and_length", "must_include"),
+    "code": ("purpose", "format_and_length", "must_include"),
+}
+
+
+def brief_gate_enabled() -> bool:
+    """SOPHIA_DELEGATION_BRIEF_GATE flag (default on)."""
+    raw = os.environ.get("SOPHIA_DELEGATION_BRIEF_GATE", "").strip().lower()
+    return raw not in {"0", "false", "off", "no"}
+
+
+def _brief_field_present(schema: dict[str, Any], field: str) -> bool:
+    value = schema.get(field)
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return bool(value)
+    return value is not None
+
+
+def brief_complete(task_type: str, brief_schema: dict[str, Any] | None) -> tuple[bool, list[str]]:
+    """Pure predicate: is the extracted brief schema complete for this task_type?
+
+    Returns ``(ok, missing_fields)``. No schema (extraction skipped/failed)
+    or an unknown task_type → ``(True, [])`` — the gate only ever acts on
+    a schema that exists, so extraction failure can never block a build.
+    """
+    if not isinstance(brief_schema, dict):
+        return True, []
+    required = _REQUIRED_BRIEF_FIELDS.get(str(task_type or "").strip().lower())
+    if not required:
+        return True, []
+    missing: list[str] = []
+    for requirement in required:
+        if isinstance(requirement, tuple):
+            if not any(_brief_field_present(brief_schema, field) for field in requirement):
+                missing.append("|".join(requirement))
+        elif not _brief_field_present(brief_schema, requirement):
+            missing.append(requirement)
+    return (not missing), missing
+
+
+def brief_gate_unmet_conditions(state: dict[str, Any], artifact: dict[str, Any]) -> list[str]:
+    """Honesty stamp at emit acceptance (Spec D D-5 — "never silent").
+
+    When the gate flagged missing fields and the model neither recovered
+    them (zero ``read_session_context`` calls) nor stated assumptions
+    (empty ``brief_assumptions``), the gaps ship NAMED in the existing
+    ``unmet_conditions[]`` payload field. Zero loop risk — observability
+    only, no rejection.
+    """
+    missing = state.get("brief_gate_missing_fields") or []
+    if not missing:
+        return []
+    assumptions = artifact.get("brief_assumptions")
+    if isinstance(assumptions, list) and assumptions:
+        return []
+    if int(state.get("builder_session_context_reads", 0) or 0) > 0:
+        return []
+    return [f"brief_incomplete:{field}" for field in missing]
+
+
 def iterations_used(state: dict[str, Any]) -> int:
     return int(state.get("build_iterations", 0) or 0)
 

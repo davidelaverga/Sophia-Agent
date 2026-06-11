@@ -819,6 +819,7 @@ def _build_enriched_description(
     active_ritual: str | None,
     ritual_phase: str | None,
     explicit_user_urls: list[str],
+    delegation_digest: str | None = None,
 ) -> str:
     """Embed live session context into the builder's task description.
 
@@ -836,6 +837,14 @@ def _build_enriched_description(
         sections.append(description.strip())
     else:
         sections.append(f"{prefix} {description.strip()}")
+
+    # Spec D D-2: the harness — not the model's one-shot memory — carries
+    # the conversation's build-relevant substance into the brief. Placed
+    # directly after the description, before memories.
+    if delegation_digest:
+        sections.append(
+            f"Conversation decisions relevant to this build:\n{delegation_digest}"
+        )
 
     if memory_snippets:
         formatted = "\n".join(f"- {m}" for m in memory_snippets[:5])
@@ -922,13 +931,15 @@ def _build_delegation_context(
     explicit_user_urls: list[str],
     builder_web_budget: dict[str, Any],
     handoff_resolution: dict[str, Any],
+    delegation_ledger_stats: dict[str, Any] | None = None,
+    dispatched_at_turn: int | None = None,
 ) -> dict[str, Any]:
     """Build the ``delegation_context`` dict the builder middlewares read.
 
     Shape mirrors ``switch_to_builder``'s emission so the builder side
     (BuilderTaskMiddleware, BuilderResearchPolicyMiddleware) is unchanged.
     """
-    return {
+    context = {
         "task": description,
         "task_type": task_type,
         "artifact_target_path": artifact_target_path,
@@ -943,6 +954,48 @@ def _build_delegation_context(
         "builder_web_budget": builder_web_budget,
         "handoff_resolution": handoff_resolution,
     }
+    # Spec D: additive keys the builder-side extraction trigger (D-3) and
+    # the update-delta digest (D-2) consume. Builder middlewares ignore
+    # unknown keys, so both are backward compatible.
+    if delegation_ledger_stats is not None:
+        context["delegation_ledger"] = delegation_ledger_stats
+    if dispatched_at_turn is not None:
+        context["dispatched_at_turn"] = dispatched_at_turn
+    return context
+
+
+def _resolve_dispatch_digest(
+    state: SophiaState,
+    user_id: str,
+    parent_thread_id: str | None,
+) -> tuple[str | None, dict[str, Any] | None, int]:
+    """Read the delegation ledger once at dispatch (Spec D D-2 + D-3 inputs).
+
+    Returns ``(digest, ledger_stats, dispatched_at_turn)``. Digest/stats
+    are None when the digest flag is off, the ledger is missing, or the
+    session is short — every downstream consumer treats that as "feature
+    silently off".
+
+    ``dispatched_at_turn`` is the LEDGER turn number the in-flight turn
+    will receive (last entry + 1) — NOT ``state["turn_count"]``, which
+    collapses after compaction while ledger numbering continues. The
+    update-delta digest filters ``turn_number > dispatched_at_turn``
+    against ledger numbering, so the watermark must share its scale.
+    """
+    from deerflow.sophia import delegation_ledger
+
+    fallback_turn = int(state.get("turn_count", 0) or 0) + 1
+    if parent_thread_id is None or not delegation_ledger.digest_enabled():
+        return None, None, fallback_turn
+    entries = delegation_ledger.read_ledger_with_fallback(user_id, parent_thread_id)
+    if not entries:
+        return None, None, fallback_turn
+    stats: dict[str, Any] = delegation_ledger.ledger_stats(entries)
+    stats["was_summarized"] = bool(state.get("was_summarized"))
+    stats["available"] = True
+    last = entries[-1].get("turn_number")
+    dispatched_at_turn = (last + 1) if isinstance(last, int) else fallback_turn
+    return delegation_ledger.build_digest(entries), stats, dispatched_at_turn
 
 
 # Server-trusted filename allow-list for current-turn attachments.
@@ -1640,6 +1693,10 @@ async def _start_builder_task_impl(
     parent_thread_id = _resolve_thread_id(runtime)
     parent_model = _runtime_parent_model(runtime)
 
+    delegation_digest, delegation_ledger_stats, dispatched_at_turn = _resolve_dispatch_digest(
+        state, user_id, parent_thread_id
+    )
+
     enriched_description = _build_enriched_description(
         description,
         task_type,
@@ -1648,6 +1705,7 @@ async def _start_builder_task_impl(
         active_ritual=active_ritual,
         ritual_phase=ritual_phase,
         explicit_user_urls=explicit_user_urls,
+        delegation_digest=delegation_digest,
     )
 
     delegation_context = _build_delegation_context(
@@ -1662,6 +1720,8 @@ async def _start_builder_task_impl(
         explicit_user_urls=explicit_user_urls,
         builder_web_budget=builder_web_budget,
         handoff_resolution=handoff_resolution,
+        delegation_ledger_stats=delegation_ledger_stats,
+        dispatched_at_turn=dispatched_at_turn,
     )
     dispatch_edit_context = _attach_edit_context(
         delegation_context,

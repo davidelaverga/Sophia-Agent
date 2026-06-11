@@ -28,6 +28,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_command import BuilderComm
 from deerflow.agents.sophia_agent.middlewares.companion_provider_fallback import CompanionProviderFallbackMiddleware
 from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
 from deerflow.agents.sophia_agent.middlewares.crisis_check import CrisisCheckMiddleware
+from deerflow.agents.sophia_agent.middlewares.delegation_ledger import DelegationLedgerMiddleware
 from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
 from deerflow.agents.sophia_agent.middlewares.lifecycle_tool_observer import LifecycleToolObserverMiddleware
 from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
@@ -388,6 +389,14 @@ def make_sophia_agent(config: RunnableConfig):
         LifecycleToolObserverMiddleware(),
         # 14. Artifact system
         ArtifactMiddleware(SKILLS_PATH / "artifact_instructions.md"),
+        # 14a. Delegation ledger (Spec D D-1) — appends one entry per turn
+        # to the append-only per-session JSONL the delegation digest /
+        # brief extraction / read_session_context all read. Positioned
+        # immediately after Artifact so this turn's current_artifact is
+        # rotated in, and BEFORE summarization (appended last) so entries
+        # are written from un-wiped messages. Local append is sub-ms;
+        # the Supabase mirror runs fire-and-forget.
+        DelegationLedgerMiddleware(),
         # 14b. Vision — injects base64 image content blocks into the next
         # turn when view_user_image (or upstream view_image) calls have
         # completed. Conditional on the companion model supporting vision;

@@ -543,6 +543,7 @@ def _completion_from_terminal_task(
         "image_generation_outcome": artifact.get("image_generation_outcome"),
         "iterations_used": artifact.get("iterations_used"),
         "unmet_conditions": artifact.get("unmet_conditions"),
+        "brief_assumptions": artifact.get("brief_assumptions"),
         "artifact_preview_filename": artifact.get("artifact_preview_filename"),
         "quality_warning": artifact.get("quality_warning"),
         "visuals_missing": artifact.get("visuals_missing"),

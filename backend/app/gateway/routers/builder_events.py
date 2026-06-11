@@ -49,6 +49,7 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "image_generation_outcome",
     "iterations_used",
     "unmet_conditions",
+    "brief_assumptions",
     "artifact_preview_filename",
     "quality_warning",
     "visuals_missing",
@@ -88,6 +89,7 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "image_generation_outcome",
         "iterations_used",
         "unmet_conditions",
+        "brief_assumptions",
         "artifact_preview_filename",
         "quality_warning",
         "visuals_missing",
@@ -269,6 +271,12 @@ class BuilderCompletionEvent(BaseModel):
     )
     iterations_used: int | None = None
     unmet_conditions: list[str] | None = None
+    brief_assumptions: list[str] | None = Field(
+        None,
+        description="Spec D D-5: assumptions the builder stated for brief "
+        "fields not present in the parent conversation — relayed by the "
+        "companion, never presented as something the user said.",
+    )
     artifact_preview_filename: str | None = Field(
         None,
         description="Canvas preview sibling (e.g. <deck>.preview.pdf rendered "

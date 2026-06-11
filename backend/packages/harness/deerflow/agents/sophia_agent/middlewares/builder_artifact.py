@@ -37,6 +37,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_task import (
 from deerflow.agents.sophia_agent.utils import log_middleware
 from deerflow.sophia.build_condition import (
     advisory_review,
+    brief_gate_unmet_conditions,
     iteration_available,
     iteration_cap,
     iterations_used,
@@ -1292,6 +1293,10 @@ def _unmet_conditions_from_state(artifact: dict[str, Any], state: dict[str, Any]
         honest_skip = bool(skip) or error_class in _IMAGE_GENERATION_TERMINAL_ERRORS or error_class == "content_blocked"
         if succeeded == 0 and not honest_skip:
             unmet.append("hero_missing" if _requested_artifact_ext(state) == "pptx" else "cover_missing")
+    # Spec D D-5 honesty stamp: gate-flagged brief gaps the model neither
+    # recovered (read_session_context) nor disclosed (brief_assumptions)
+    # ship NAMED — observability only, never a rejection.
+    unmet.extend(brief_gate_unmet_conditions(state, artifact))
     return unmet
 
 
