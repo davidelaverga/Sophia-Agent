@@ -3,16 +3,20 @@ FROM python:3.12-slim
 
 ARG NODE_MAJOR=22
 
+# NOTE: keep every package on the continued `apt-get install` line — a `#`
+# comment inside a `\`-continued shell command terminates the command early
+# (the comment swallows the rest of the joined line), so the trailing packages
+# would run as bare commands and the image build would fail. Package notes:
+#   libreoffice-impress + fonts-liberation — headless PPTX→PDF conversion for the
+#     artifact canvas preview (deerflow/sophia/pptx_preview.py). Without soffice
+#     the preview is skipped and decks stay download-only in the webapp canvas.
+#   poppler-utils — pdftoppm rasterizes preview pages for the builder's
+#     repair-turn self-review + advisory pass (deerflow/sophia/build_condition.py).
 RUN apt-get update && apt-get install -y \
     curl build-essential gnupg ca-certificates \
     pandoc texlive-xetex texlive-latex-recommended texlive-latex-extra texlive-fonts-recommended \
     lmodern fonts-dejavu-core libcairo2 libcairo2-dev libpango-1.0-0 libpangocairo-1.0-0 pkg-config \
-    # libreoffice-impress: headless PPTX→PDF conversion for the artifact
-    # canvas preview (deerflow/sophia/pptx_preview.py). Without soffice the
-    # preview is skipped and decks stay download-only in the webapp canvas.
     libreoffice-impress fonts-liberation \
-    # poppler-utils: pdftoppm rasterizes preview pages for the builder's
-    # repair-turn self-review + advisory pass (deerflow/sophia/build_condition.py).
     poppler-utils \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /etc/apt/keyrings/nodesource.gpg \

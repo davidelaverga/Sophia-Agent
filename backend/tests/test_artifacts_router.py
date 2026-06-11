@@ -264,6 +264,83 @@ def test_quick_patch_html_response_excludes_raw_html(tmp_path, monkeypatch) -> N
     assert "<html" not in serialized.lower()
 
 
+def test_quick_patch_builder_task_source_homes_revision_under_parent_thread(tmp_path, monkeypatch) -> None:
+    """Regression (PR #131 codex P2): when the source HTML resolves from an
+    associated builder task, the quick-patch revision must be written AND
+    Supabase-mirrored under the PARENT thread. The browser only receives
+    ``revision_artifact_path`` and re-fetches it through the parent
+    ``/api/threads/{thread_id}/artifacts/...`` route, whose Supabase fallback
+    (``_try_serve_from_supabase``) only ever looks under the parent thread_id.
+    Homing the revision under the builder-task id would 404 it after a
+    disk-wiping restart even though it was mirrored.
+    """
+    parent_data = tmp_path / "parent"
+    task_data = tmp_path / "task"
+    (parent_data / "outputs").mkdir(parents=True)
+    (task_data / "outputs").mkdir(parents=True)
+    # Source HTML lives ONLY under the builder-task thread's outputs dir.
+    source_path = task_data / "outputs" / "site.html"
+    original_html = (
+        "<!doctype html><html><head><title>Original Title</title></head>"
+        "<body><main><h1>Original Title</h1></main></body></html>"
+    )
+    source_path.write_text(original_html, encoding="utf-8")
+
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        thread_user_data_resolver({"parent-thread": parent_data, "task-thread": task_data}),
+    )
+
+    async def _fake_task_ids(_parent: str):
+        return ("task-thread",)
+
+    monkeypatch.setattr(artifacts_router, "_builder_task_thread_ids_to_check", _fake_task_ids)
+
+    uploads: list[dict] = []
+
+    def _capture_upload(**kwargs):
+        uploads.append(kwargs)
+        return None
+
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "upload_artifact", _capture_upload)
+
+    response = asyncio.run(
+        artifacts_router.quick_patch_html_artifact(
+            "parent-thread",
+            artifacts_router.HtmlQuickPatchRequest(
+                artifact_path="mnt/user-data/outputs/site.html",
+                renderer_kind="html",
+                user_update_request="Change the main title to Sophia Workspace Version Two",
+                requested_change_summary="Change the main title to Sophia Workspace Version Two",
+                quick_edit_kind="title",
+                target_fields={"titleText": "Sophia Workspace Version Two"},
+            ),
+            authenticated_user_id=None,
+        )
+    )
+
+    assert response.ok is True
+    assert response.result == "patched"
+    assert response.revision_artifact_path is not None
+
+    revision_relative = response.revision_artifact_path.removeprefix("mnt/user-data/")
+    parent_revision = parent_data / revision_relative
+    task_revision = task_data / revision_relative
+    # Local copy is homed under the PARENT thread (where the parent route's
+    # local resolution checks first), NOT the builder-task thread.
+    assert parent_revision.exists(), "revision must be written under the parent thread"
+    assert not task_revision.exists(), "revision must NOT be written under the builder-task thread"
+    assert "<title>Sophia Workspace Version Two</title>" in parent_revision.read_text(encoding="utf-8")
+
+    # Supabase mirror is keyed by the PARENT thread_id so the parent route's
+    # Supabase fallback resolves it post-restart.
+    assert uploads, "expected a Supabase mirror upload"
+    assert all(call["thread_id"] == "parent-thread" for call in uploads)
+    # The original under the builder task is untouched.
+    assert source_path.read_text(encoding="utf-8") == original_html
+
+
 def test_get_artifact_serves_local_pptx_as_attachment(tmp_path, monkeypatch) -> None:
     artifact_path = tmp_path / "deck.pptx"
     artifact_path.write_bytes(b"pptx-bytes")
