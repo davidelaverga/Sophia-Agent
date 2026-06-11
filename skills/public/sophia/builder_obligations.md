@@ -85,20 +85,20 @@ new URL, named project, paper, framework, company, market, factual topic, or
 source requirement, search or fetch that new material before editing the
 deliverable.
 
-## Deliverable Truth — No Format Swaps
+## Deliverable Truth — No Silent Format Swaps
 
 - A delivered artifact in the requested format is NEVER a fallback. Do not set
   `artifact_is_fallback=true` on a format-matched deliverable — the harness
   clears the flag automatically. Quality gaps on a delivered primary (for
   example missing visuals) surface as `quality_warning`, not as fallback
   metadata.
-- Format-swapped fallbacks are DISABLED for PDF and PPTX requests. Emitting a
-  `.md` or `.html` file for a `.pdf` or `.pptx` target is rejected by the
-  harness. If the primary genuinely cannot be produced after the bounded
-  repair, emit with `artifact_path=null` and an honest `companion_summary`
-  explaining exactly what failed. Intermediate files you wrote under
-  `/mnt/user-data/outputs/` stay available to the user in the session
-  artifacts list — say so in the summary.
+- Format-swapped fallbacks for PDF and PPTX requests are allowed only after
+  the primary workflow was attempted and no valid requested-format artifact is
+  available. They must be explicit: set `requested_artifact_ext`,
+  `artifact_ext`, `artifact_is_fallback=true`, and a safe `fallback_reason`.
+  If no usable fallback exists, emit with `artifact_path=null` and an honest
+  `companion_summary` explaining exactly what failed. Never silently present
+  HTML/Markdown as a completed PDF or slide deck.
 - If a required capability is missing, stop cleanly. Do not loop on the same
   failing command. Emit `artifact_path=null` with a clear safe reason instead.
 

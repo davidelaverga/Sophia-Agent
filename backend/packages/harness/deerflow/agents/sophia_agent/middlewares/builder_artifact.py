@@ -145,7 +145,8 @@ _SIMPLE_PDF_REQUEST_MARKERS = (
     "simple .pdf",
     "simple product review",
     "artifact canvas smoke test",
-    "pdf artifact",
+    "pdf smoke test",
+    "demo pdf",
 )
 _SAFE_BASH_COMMAND_RE = re.compile(
     r"^\s*(?:pwd|ls|find|cat|sed|head|tail|grep|rg|wc|file|du|stat|jq)\b"
@@ -1473,7 +1474,7 @@ def _requested_simple_pdf_artifact(state: dict[str, Any]) -> bool:
     task_text = _requested_task_text(state)
     if not task_text:
         return False
-    if "product review" in task_text and "pdf" in task_text:
+    if "simple product review" in task_text and "pdf" in task_text:
         return True
     return any(marker in task_text for marker in _SIMPLE_PDF_REQUEST_MARKERS)
 
@@ -1586,11 +1587,9 @@ def _pdf_fallback_rejection_reason(suffix: str, state: dict[str, Any]) -> str | 
         return None
     if not _render_markdown_to_pdf_attempted(state):
         return "pdf_fallback_before_render_attempt"
-    # Format-swapped fallbacks are disabled for PDF requests: a .md/.html
-    # emission is never the deliverable. Either the rendered .pdf is emitted
-    # or the build reports an honest failure (the source stays available in
-    # the session artifacts list).
-    return "pdf_fallback_disabled"
+    if _successful_pdf_ready_to_emit(state):
+        return "pdf_fallback_when_valid_pdf_exists"
+    return None
 
 
 def _pdf_source_candidate_paths(state: dict[str, Any]) -> list[Path]:
@@ -2436,15 +2435,17 @@ def _pptx_skill_correction_message(state: dict[str, Any]) -> str:
         "3. Compose the deck by running "
         "`/mnt/skills/public/ppt-generation/scripts/generate.py` with "
         "`--plan-file` and `--output-file` only.\n"
-        "4. Generated imagery is on by default for decks (1 hero + up to 2 "
-        "supporting images, max 3 calls — enforced) unless the brief asks for a "
-        "plain/minimal deck. If image generation fails, continue with a "
+        "4. If image-generation is enabled for this run, use it only for the "
+        "bounded visual/polished-deck pass (1 hero + up to 2 supporting images, "
+        "max 3 calls — enforced). If image generation fails, continue with a "
         "chart/text deck — never let imagery block the deliverable.\n"
         "5. Emit only after the `.pptx` exists and is a valid PowerPoint package.\n\n"
         "If deck composition or validation cannot complete after this correction, "
-        "emit with artifact_path=null and an honest companion_summary — "
-        "format-swapped fallbacks are disabled for slide-deck requests. Do not "
-        "emit placeholder/tiny/corrupt `.pptx` files, Python scripts, or test files."
+        "emit a real .html/.md fallback only if it is marked with "
+        "requested_artifact_ext='pptx', artifact_is_fallback=true, and a safe "
+        "fallback_reason. Otherwise emit artifact_path=null with an honest "
+        "companion_summary. Do not emit placeholder/tiny/corrupt `.pptx` files, "
+        "Python scripts, or test files."
     )
 
 
@@ -2482,9 +2483,9 @@ def _pdf_render_correction_message(source_path: str, pdf_path: str) -> str:
         "has not been attempted. Your next action must be:\n"
         f"`render_markdown_to_pdf(markdown_path='{source_path}', pdf_path='{pdf_path}')`.\n"
         "If rendering succeeds, immediately emit that `.pdf`. If rendering "
-        "genuinely cannot complete, emit with artifact_path=null and an honest "
-        "companion_summary — format-swapped fallbacks are disabled for PDF "
-        "requests."
+        "genuinely cannot complete, emit a real .md/.html fallback only when it "
+        "is marked with requested_artifact_ext='pdf', artifact_is_fallback=true, "
+        "and a safe fallback_reason; otherwise emit artifact_path=null."
     )
 
 
@@ -4247,23 +4248,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return False
         canonical_suffix = PurePosixPath(canonical_primary).suffix.lower()
         if canonical_suffix in _PPTX_FALLBACK_EXTENSIONS:
-            # Format-swapped fallbacks are disabled for slide-deck requests:
-            # either a valid .pptx is emitted or the build reports an honest
-            # failure. Keep the specific diagnostic reasons for traceability.
             if not _pptx_fallback_generation_attempt_satisfied(state):
                 rejection = "pptx_fallback_before_generation_attempt"
             elif BuilderArtifactMiddleware._has_valid_pptx_output(state):
                 rejection = "pptx_fallback_when_valid_deck_exists"
             else:
-                rejection = "pptx_fallback_disabled"
-            _log_pptx_diagnostics(
-                phase="emit_rejected",
-                state=state,
-                artifact_path=primary,
-                integrity_reason=rejection,
-            )
-            BuilderArtifactMiddleware._log_pptx_artifact_rejection(primary, rejection)
-            return False
+                rejection = None
+            if rejection is not None:
+                _log_pptx_diagnostics(
+                    phase="emit_rejected",
+                    state=state,
+                    artifact_path=primary,
+                    integrity_reason=rejection,
+                )
+                BuilderArtifactMiddleware._log_pptx_artifact_rejection(primary, rejection)
+                return False
         integrity_rejection = _pptx_path_integrity_rejection_reason(canonical_primary, state, runtime)
         if integrity_rejection is not None:
             _log_pptx_diagnostics(
@@ -4357,7 +4356,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if rejection_reason is not None:
             BuilderArtifactMiddleware._log_pdf_artifact_rejection(primary, rejection_reason, state)
             return False
-        return BuilderArtifactMiddleware._canonicalize_pdf_artifact_path(artifact_args, primary)
+        return BuilderArtifactMiddleware._canonicalize_pdf_artifact_path(artifact_args, primary, state)
 
     @staticmethod
     def _log_pdf_artifact_rejection(
@@ -4385,11 +4384,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     def _canonicalize_pdf_artifact_path(
         artifact_args: dict[str, Any],
         primary: object,
+        state: BuilderArtifactState,
     ) -> bool:
         canonical_primary = _canonical_outputs_artifact_path(primary)
         if canonical_primary is None:
             return False
         artifact_args["artifact_path"] = canonical_primary
+        _apply_artifact_request_metadata(
+            artifact_args,
+            state,
+            fallback_reason="pdf_generation_failed",
+        )
         return True
 
     @classmethod
@@ -4499,15 +4504,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "so you must attempt render_markdown_to_pdf before emitting. "
                         "Fix the Markdown source if needed and render the real .pdf."
                     )
-                if reason == "pdf_fallback_disabled":
+                if reason == "pdf_fallback_when_valid_pdf_exists":
                     return (
                         "Error: emit_builder_artifact rejected — this is a PDF request "
-                        "and format-swapped fallbacks (.md/.html) are disabled. Repair "
-                        "the Markdown source, run render_markdown_to_pdf again, and emit "
-                        "the rendered .pdf. If rendering genuinely cannot complete, emit "
-                        "with artifact_path=null and an honest companion_summary "
-                        "explaining the failure — the source file stays available in the "
-                        "session artifacts."
+                        "and a valid rendered .pdf already exists. Emit the rendered .pdf "
+                        "instead of a .md/.html fallback."
                     )
                 return (
                     "Error: emit_builder_artifact rejected — this is a PDF request. "
@@ -4519,15 +4520,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if _requested_pptx_artifact(state):
             return (
                 "Error: emit_builder_artifact rejected — this is a slide-deck "
-                "request and format-swapped fallbacks (.md/.html) are disabled. "
-                "The final artifact must be a structurally valid .pptx PowerPoint "
-                "package under /mnt/user-data/outputs/. Use the ppt-generation "
-                "skill workflow, then emit only the valid deck. Do not emit "
-                "Python files, placeholder decks, tiny/corrupt .pptx files, bare "
-                "paths, or files outside outputs. If deck generation genuinely "
-                "cannot complete, emit with artifact_path=null and an honest "
-                "companion_summary explaining the failure — intermediate files "
-                "stay available in the session artifacts."
+                "request. The normal final artifact must be a structurally valid "
+                ".pptx PowerPoint package under /mnt/user-data/outputs/. A .md/.html "
+                "fallback is allowed only after ppt-generation has been attempted, "
+                "no valid deck exists, and the fallback is marked with "
+                "requested_artifact_ext='pptx', artifact_is_fallback=true, and a "
+                "safe fallback_reason. Do not emit Python files, placeholder decks, "
+                "tiny/corrupt .pptx files, bare paths, or files outside outputs."
             )
         if _requested_html_artifact(state):
             return (

@@ -385,6 +385,22 @@ _VISUAL_REQUEST_MARKERS = (
     "quadrant",
 )
 
+_POLISHED_DECK_IMAGE_MARKERS = (
+    "polished visual",
+    "visual storytelling",
+    "visual treatment",
+    "premium deck",
+    "beautiful deck",
+    "keynote style",
+    "keynote-style",
+    "cinematic",
+    "hero image",
+    "hero slide",
+    "image-heavy",
+    "full-bleed",
+    "full bleed",
+)
+
 
 _PLAIN_DECK_MARKERS = (
     "plain",
@@ -407,11 +423,11 @@ def _image_generation_enabled(
 ) -> bool:
     """Whether the image-generation skill is offered to the builder.
 
-    Image targets and explicit requests keep the legacy behavior. For
-    presentations / visual reports, generated imagery is ON BY DEFAULT
-    (product decision 2026-06-11) unless the brief signals a plain deck.
-    VQ-5: visuals-requested PDFs also enrich (a generated cover) — scoped by
-    the gate, not by task-type routing luck.
+    Image targets and explicit requests keep legacy behavior. PPTX keeps the
+    DeerFlow-native image-first path for visual/polished deck requests unless
+    the brief asks for a plain/minimal deck. PDF/HTML chart and diagram work
+    uses deterministic local visual assets unless the user explicitly asks
+    for generated imagery.
     """
     if artifact_target_ext in _IMAGE_OUTPUT_EXTENSIONS:
         return True
@@ -420,14 +436,11 @@ def _image_generation_enabled(
     combined = f"{task}\n{description}"
     if any(marker in combined for marker in _EXPLICIT_IMAGE_GENERATION_MARKERS):
         return True
-    enrichment_target = (
-        str(task_type or "").lower() in _IMAGE_ENRICHMENT_TASK_TYPES
-        or artifact_target_ext == ".pptx"
-        or (artifact_target_ext == ".pdf" and _visuals_requested(delegation_context))
-    )
-    if not enrichment_target:
+    if artifact_target_ext != ".pptx":
         return False
-    return not any(marker in combined for marker in _PLAIN_DECK_MARKERS)
+    if any(marker in combined for marker in _PLAIN_DECK_MARKERS):
+        return False
+    return _polished_deck_images_requested(delegation_context)
 
 
 def _visuals_requested(delegation_context: dict[str, Any]) -> bool:
@@ -435,6 +448,13 @@ def _visuals_requested(delegation_context: dict[str, Any]) -> bool:
     description = str(delegation_context.get("description") or "").lower()
     combined = f"{task}\n{description}"
     return any(marker in combined for marker in _VISUAL_REQUEST_MARKERS)
+
+
+def _polished_deck_images_requested(delegation_context: dict[str, Any]) -> bool:
+    task = str(delegation_context.get("task") or "").lower()
+    description = str(delegation_context.get("description") or "").lower()
+    combined = f"{task}\n{description}"
+    return any(marker in combined for marker in _POLISHED_DECK_IMAGE_MARKERS)
 
 
 def _image_enrichment_section(artifact_target_ext: str = ".pptx") -> str:
@@ -462,7 +482,8 @@ def _image_enrichment_section(artifact_target_ext: str = ".pptx") -> str:
         )
     return (
         "<image_enrichment>\n"
-        "Generated imagery is ON BY DEFAULT for this deliverable. Policy:\n"
+        "Generated imagery is available for this run because the user asked "
+        "for generated/illustrative imagery or a visual/polished deck. Policy:\n"
         f"{plan_lines}"
         "- Charts, diagrams, timelines, and data visuals stay on the deterministic "
         "generate_visual_asset path (no API cost; does not count toward the cap).\n"
@@ -481,10 +502,11 @@ def _image_enrichment_section(artifact_target_ext: str = ".pptx") -> str:
 def _critical_emit_guidance(artifact_target_ext: str) -> str:
     if artifact_target_ext == ".pdf":
         return (
-            "for this PDF target, emit the valid .pdf if it exists. Format-swapped "
-            "fallbacks (.md/.html) are disabled and will be rejected. If no usable "
-            "PDF can be rendered, emit with artifact_path=null and an honest "
-            "companion_summary. Do NOT emit a generator .py as a PDF deliverable.\n"
+            "for this PDF target, emit the valid .pdf if it exists. A .md/.html "
+            "fallback is allowed only after render failure or unusable PDF quality, "
+            "and it must be explicitly marked with requested_artifact_ext='pdf', "
+            "artifact_is_fallback=true, and fallback_reason. Do NOT emit a "
+            "generator .py as a PDF deliverable.\n"
         )
     return (
         "if no user-facing deliverable exists, do NOT emit a generator script "
@@ -550,8 +572,10 @@ def _terminal_artifact_format_line(artifact_target_ext: str) -> str:
         return (
             "- This is a PDF target: the deliverable is a real .pdf rendered via "
             "render_markdown_to_pdf. Call emit_builder_artifact with "
-            "artifact_type=\"pdf\". Format-swapped fallbacks are disabled; if "
-            "rendering genuinely fails, emit with artifact_path=null and an "
+            "artifact_type=\"pdf\". If rendering genuinely fails after the "
+            "bounded repair, a .md/.html fallback must be explicitly marked "
+            "with requested_artifact_ext, artifact_is_fallback=true, and "
+            "fallback_reason; otherwise emit with artifact_path=null and an "
             "honest companion_summary.\n"
         )
     return ""
@@ -855,6 +879,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         skills_block = self._build_skills_inventory_block(
             include_image_generation=image_generation_enabled,
             include_visual_design=_visuals_requested(delegation_context),
+            include_pdf_report=artifact_target_ext == ".pdf",
         )
         if skills_block:
             sections.append(skills_block)
@@ -928,10 +953,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             f"Currently on turn {non_artifact_turns}/{_HARD_CEILING} ({remaining} remaining).\n"
             f"{wall_clock_line}"
             "BEFORE planning, check <skill_system> above. If a listed skill matches "
-            "the deliverable type (e.g. chart-visualization for any chart, "
-            "ppt-generation for slide decks, image-generation for deck/report "
-            "enrichment when listed (max 3 images; never block the deliverable on "
-            "image failures), data-analysis for tabular data), USE IT — read its SKILL.md "
+            "the deliverable type (e.g. pdf-report for PDF reports, "
+            "chart-visualization for any chart, ppt-generation for slide decks, "
+            "image-generation only when listed for explicit/generated imagery or "
+            "visual/polished deck mode, data-analysis for tabular data), USE IT — read its SKILL.md "
             "via read_file_tool and follow its workflow. Workflow cards are authoritative "
             "for PDF, PPTX, HTML, and research tasks. Do not replace them with ad hoc "
             "matplotlib/reportlab/python-pptx generator code; that is the fragile path "
@@ -969,9 +994,9 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "unless Sophia asks for one layout repair.\n"
             "    * **PPTX / presentation**: follow the PPTX workflow card. Reading SKILL.md alone is not "
             "completion; normal success requires deck composition and a valid .pptx. When image-generation "
-            "is listed in <skill_system>, generated imagery is ON BY DEFAULT for decks (1 hero + up to 2 "
-            "supporting images, max 3 calls — enforced); skip it when the brief asks for a plain/text-only/"
-            "minimal deck, and never let an image failure stall the deck.\n"
+            "is listed in <skill_system>, the run is in explicit/generated imagery or visual/polished deck "
+            "mode: use it for a bounded hero/supporting-image pass, but never let an image failure stall "
+            "a valid deck.\n"
             "    * **HTML**: follow the HTML workflow card. Standalone browser-renderable HTML is a text "
             "deliverable, not a frontend app unless the user requested app behavior.\n"
             "    * **Standalone chart / image**: use the chart-visualization or image-generation skill. The "
@@ -1130,6 +1155,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
     _BUILDER_RELEVANT_SKILLS: tuple[str, ...] = (
         "chart-visualization",
         "visual-design",
+        "pdf-report",
         "ppt-generation",
         "image-generation",
         "data-analysis",
@@ -1141,6 +1167,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         *,
         include_image_generation: bool = True,
         include_visual_design: bool = False,
+        include_pdf_report: bool = False,
     ) -> str | None:
         """Return a ``<skill_system>`` block listing builder-relevant skills.
 
@@ -1181,6 +1208,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             allowed_skill_names.discard("image-generation")
         if not include_visual_design:
             allowed_skill_names.discard("visual-design")
+        if not include_pdf_report:
+            allowed_skill_names.discard("pdf-report")
         relevant = [s for s in skills if getattr(s, "name", None) in allowed_skill_names]
         # Log either way so "did the builder see skills this run?" is
         # answerable from a single grep on the langgraph-server logs.

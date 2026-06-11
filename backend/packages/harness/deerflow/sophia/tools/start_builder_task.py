@@ -139,7 +139,7 @@ _HTML_OUTPUT_RE = re.compile(
 _PDF_OUTPUT_RE = re.compile(
     r"\b(?:"
     r"pdf\s+(?:document|file|report|summary|brief|article|explainer|deliverable|artifact|output)"
-    r"|(?:document|file|report|summary|brief|article|explainer|deliverable|artifact|output|final|export)"
+    r"|(?:document|file|report|summary|brief|article|explainer|presentation|slides?|deck|deliverable|artifact|output|final|export)"
     r"\s+(?:as|in|to)\s+(?:an?\s+)?pdf"
     r"|(?:build|create|make|generate|produce|write|render|export)\s+(?:an?\s+)?pdf\b"
     r"|(?:build|create|make|generate|produce|write|render|export)\s+[^.?!\n]{0,80}?\s+as\s+(?:an?\s+)?pdf\b"
@@ -1696,10 +1696,13 @@ async def _start_builder_task_impl(
     allow_web_research = should_allow_builder_web_research(task_type, description)
     explicit_user_urls = extract_explicit_user_urls(description)
     builder_web_budget = make_builder_web_budget(task_type)
+    _requested_ext, requested_ext_reason = _requested_output_extension_match(description)
     artifact_target_path = (
         _canonical_output_artifact_path(artifact_target_path_override)
         or _suggest_artifact_target_path(task_type, description)
     )
+    target_ext = Path(artifact_target_path).suffix.lower().lstrip(".")
+    target_ext_source = requested_ext_reason or f"task_type_default:{task_type or 'unknown'}"
 
     parent_thread_id = _resolve_thread_id(runtime)
     parent_model = _runtime_parent_model(runtime)
@@ -1744,7 +1747,7 @@ async def _start_builder_task_impl(
         "[Builder] start_builder_task dispatching: task_type=%s allow_web_research=%s "
         "demo=%s tone=%s ritual=%s parent_thread=%s parent_model=%s user_id=%s "
         "user_id_source=%s artifact_source=%s explicit_url_count=%s search_limit=%s "
-        "fetch_limit=%s target_ext=%s",
+        "fetch_limit=%s target_ext=%s target_ext_source=%s",
         task_type,
         allow_web_research,
         demo_mode,
@@ -1758,7 +1761,8 @@ async def _start_builder_task_impl(
         len(explicit_user_urls),
         builder_web_budget.get("search_limit"),
         builder_web_budget.get("fetch_limit"),
-        Path(artifact_target_path).suffix.lower().lstrip("."),
+        target_ext,
+        target_ext_source,
     )
 
     # Codex P1/P2 PR #132 (latest iteration): the filenames the user
@@ -1798,7 +1802,7 @@ async def _start_builder_task_impl(
     )
 
     logger.info(
-        "[Builder] start_builder_task launched: task_id=%s run_id=%s trace=%s allow_web_research=%s explicit_url_count=%s search_limit=%s fetch_limit=%s target_ext=%s",
+        "[Builder] start_builder_task launched: task_id=%s run_id=%s trace=%s allow_web_research=%s explicit_url_count=%s search_limit=%s fetch_limit=%s target_ext=%s target_ext_source=%s",
         task_id,
         run_id,
         trace_id,
@@ -1806,7 +1810,8 @@ async def _start_builder_task_impl(
         len(explicit_user_urls),
         builder_web_budget.get("search_limit"),
         builder_web_budget.get("fetch_limit"),
-        Path(artifact_target_path).suffix.lower().lstrip("."),
+        target_ext,
+        target_ext_source,
     )
 
     return Command(

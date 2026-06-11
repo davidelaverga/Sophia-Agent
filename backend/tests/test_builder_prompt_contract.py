@@ -59,18 +59,35 @@ def test_pptx_workflow_card_requires_deerflow_native_sequence() -> None:
     # the "compose a no-image deck first" instruction shipped text-only decks).
     assert "BEFORE composing the deck" in card
     assert "The plan must reference" in card
-    # Enrichment policy (2026-06-11): generated imagery is on by default
-    # for decks, hard-capped, with a plain-deck opt-out.
-    assert "ON BY DEFAULT" in card
+    # Enrichment policy: generated imagery is reserved for visual/polished
+    # deck mode or explicit generated-image requests, not every deck.
+    assert "Visual/polished deck mode" in card
     assert "HARD CAP" in card
     assert "plain/text-only/minimal" in card
     assert "PPTX" in card
     assert "passes structural validation" in card
-    # Format-swapped fallbacks are disabled — the card must state the
-    # honest-failure policy instead of instructing .md/.html fallbacks.
-    assert "Format-swapped fallbacks are DISABLED" in card
-    assert "artifact_path=null" in card
-    assert "artifact_is_fallback=true" not in card
+    assert "No Silent Format Swaps" in card
+    assert "artifact_is_fallback=true" in card
+
+
+def test_pdf_workflow_card_uses_pdf_report_skill_not_default_imagegen() -> None:
+    card = _sophia_prompt("builder_workflows/pdf.md")
+
+    assert "/mnt/skills/public/pdf-report/SKILL.md" in card
+    assert "render_markdown_to_pdf" in card
+    assert "Do not use image-generation for normal charts/diagrams" in card
+    assert "ON BY DEFAULT" not in card
+    assert "artifact_is_fallback=true" in card
+
+
+def test_pdf_report_skill_is_source_first_and_renderer_backed() -> None:
+    skill = Path(__file__).resolve().parents[2] / "skills/public/pdf-report/SKILL.md"
+    text = skill.read_text()
+
+    assert "Do not use `create_pdf_artifact` for normal reports" in text
+    assert "render_markdown_to_pdf" in text
+    assert "generate_visual_asset" in text
+    assert "artifact_is_fallback=true" in text
 
 
 def test_visuals_workflow_card_requires_design_skill_and_local_assets() -> None:

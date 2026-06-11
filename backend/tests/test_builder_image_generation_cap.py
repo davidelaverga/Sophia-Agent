@@ -1,10 +1,10 @@
-"""Image-generation enrichment discipline (2026-06-11 product decision).
+"""Image-generation enrichment discipline.
 
-Generated imagery is on by default for decks, so the discipline must be
-harness-enforced: a hard per-build call cap, a terminal-error short-circuit,
-and a one-shot stop directive after repeated failures. These tests cover the
-deterministic guards in BuilderArtifactMiddleware plus the gating flip in
-builder_task and the budget cost telemetry.
+Generated imagery is opt-in for real image requests and polished deck mode, so
+the discipline must be harness-enforced: a hard per-build call cap, a
+terminal-error short-circuit, and a one-shot stop directive after repeated
+failures. These tests cover the deterministic guards in BuilderArtifactMiddleware
+plus the gating policy in builder_task and the budget cost telemetry.
 """
 
 from __future__ import annotations
@@ -168,22 +168,46 @@ def test_stop_directive_not_emitted_after_success():
     assert BuilderArtifactMiddleware()._maybe_inject_image_generation_stop(state) is None
 
 
-# ---- gating flip (enrichment by default) ------------------------------------
+# ---- gating policy ----------------------------------------------------------
 
 
-def test_presentation_task_enables_image_generation_by_default():
+def test_plain_presentation_task_does_not_enable_image_generation_by_default():
     assert _image_generation_enabled(
         {"task": "Build an investor deck about our roadmap"},
+        artifact_target_ext=".pptx",
+        task_type="presentation",
+    ) is False
+
+
+def test_polished_presentation_task_enables_image_generation():
+    assert _image_generation_enabled(
+        {"task": "Build a polished visual keynote-style deck about our roadmap"},
         artifact_target_ext=".pptx",
         task_type="presentation",
     ) is True
 
 
-def test_visual_report_task_enables_image_generation_by_default():
+def test_chart_only_presentation_uses_deterministic_visual_assets():
+    assert _image_generation_enabled(
+        {"task": "Build a deck with charts and diagrams about our roadmap"},
+        artifact_target_ext=".pptx",
+        task_type="presentation",
+    ) is False
+
+
+def test_visual_report_task_does_not_enable_image_generation_by_default():
     assert _image_generation_enabled(
         {"task": "Quarterly visual report"},
         artifact_target_ext=".html",
         task_type="visual_report",
+    ) is False
+
+
+def test_explicit_image_request_enables_generation():
+    assert _image_generation_enabled(
+        {"task": "Build a deck and generate an image for the title slide"},
+        artifact_target_ext=".pptx",
+        task_type="presentation",
     ) is True
 
 

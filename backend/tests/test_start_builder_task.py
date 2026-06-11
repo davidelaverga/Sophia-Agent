@@ -316,6 +316,28 @@ def test_pdf_request_with_html_charts_still_targets_pdf():
     assert target.endswith(".pdf")
 
 
+def test_powerpoint_request_beats_incidental_pdf_context():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "presentation",
+        "Create a PowerPoint slide presentation. Prior artifact: open-claw-report.pdf.",
+    )
+
+    assert target.endswith(".pptx")
+
+
+def test_presentation_in_pdf_format_targets_pdf():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "presentation",
+        "Create a presentation in PDF format for the leadership review.",
+    )
+
+    assert target.endswith(".pdf")
+
+
 def test_simple_product_review_pdf_targets_stable_filename():
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
 

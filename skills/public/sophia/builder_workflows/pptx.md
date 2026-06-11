@@ -15,13 +15,15 @@ Use this card only for requested `.pptx` or slide-deck builds.
    the PNGs before you run the generator — a deck composed without them
    will be rejected at emit time when visuals were requested. Do not use
    the generated support PNG as the final artifact.
-4. Generated imagery is ON BY DEFAULT for decks (unless the brief asks for a
-   plain/text-only/minimal deck): FIRST run
+4. Visual/polished deck mode: when the user asks for polished visuals,
+   visual storytelling, generated imagery, or image-heavy slides (and did
+   not ask for a plain/text-only/minimal deck), FIRST run
    `python /mnt/skills/public/image-generation/scripts/generate.py --preflight`
    (on failure, continue chart/text-only — the skip is recorded honestly),
    then use the script to create 1 hero image (16:9, for the title slide)
    and up to 2 supporting images. HARD CAP: 3 image-generation calls per
-   build — calls beyond the cap are rejected.
+   build — calls beyond the cap are rejected. For data/chart-heavy decks,
+   prefer `generate_visual_asset` PNGs over generated raster illustrations.
    Save them under `/mnt/user-data/outputs/visuals/` and wire them into the
    plan: hero → slide 1 with `"layout": "full_bleed_image"` and `"image":
    <hero path>`; supporting images → `section_divider`/`content_image`
@@ -42,14 +44,14 @@ generic `.py` files, or HTML before trying the skill workflow is drift.
 A text-only deck does not satisfy a user request for charts, diagrams, or
 visual explanations.
 
-## Failure Policy — No Format Swaps
+## Failure Policy — No Silent Format Swaps
 
-Format-swapped fallbacks are DISABLED for slide-deck requests: a `.md` or
-`.html` emission for a `.pptx` request is rejected by the harness. If deck
-composition or validation fails after one correction, emit with
+A valid `.pptx` always wins. If deck composition or validation fails after
+one correction and you have a real `.html` or `.md` user-facing fallback,
+emit it only with `requested_artifact_ext="pptx"`,
+`artifact_is_fallback=true`, and a safe `fallback_reason` such as
+`pptx_generation_not_completed`. If no usable fallback exists, emit with
 `artifact_path=null` and an honest `companion_summary` explaining exactly
 what failed (for example "the ppt-generation script rejected the plan
-JSON"). Intermediate files you wrote under `/mnt/user-data/outputs/` stay
-available to the user in the session artifacts list — say so in the
-summary. Never emit a tiny/corrupt `.pptx`, `.py`, helper script, or test
-file as a slide deck.
+JSON"). Never emit a PNG support asset, tiny/corrupt `.pptx`, `.py`, helper
+script, or test file as a slide deck.

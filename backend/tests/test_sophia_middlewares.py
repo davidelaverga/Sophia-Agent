@@ -3770,7 +3770,7 @@ class TestBuilderArtifactMiddleware:
         assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
         assert args["artifact_path"] == "/mnt/user-data/outputs/report.pdf"
 
-    def test_pdf_artifact_files_exist_rejects_markdown_even_after_render_attempt(self, tmp_path):
+    def test_pdf_artifact_files_exist_accepts_marked_markdown_fallback_after_render_attempt(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -3786,9 +3786,11 @@ class TestBuilderArtifactMiddleware:
         }
         args = {"artifact_path": "/mnt/user-data/outputs/report.md"}
 
-        # Format-swapped fallbacks are disabled for PDF requests: a .md
-        # emission is rejected even after a render attempt.
-        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
+        assert args["requested_artifact_ext"] == "pdf"
+        assert args["artifact_ext"] == "md"
+        assert args["artifact_is_fallback"] is True
+        assert args["fallback_reason"] == "pdf_generation_failed"
 
     def test_pdf_artifact_files_exist_rejects_markdown_before_render_attempt(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -3805,7 +3807,7 @@ class TestBuilderArtifactMiddleware:
 
         assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
 
-    def test_pdf_artifact_files_exist_rejects_html_fallback(self, tmp_path):
+    def test_pdf_artifact_files_exist_accepts_marked_html_fallback(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -3825,9 +3827,11 @@ class TestBuilderArtifactMiddleware:
         }
         args = {"artifact_path": "/mnt/user-data/outputs/report.html"}
 
-        # Format-swapped fallbacks are disabled for PDF requests, visual or
-        # not — the .html emission is rejected.
-        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
+        assert args["requested_artifact_ext"] == "pdf"
+        assert args["artifact_ext"] == "html"
+        assert args["artifact_is_fallback"] is True
+        assert args["fallback_reason"] == "pdf_generation_failed"
 
         text_only_state = {
             **state,
@@ -3888,7 +3892,7 @@ class TestBuilderArtifactMiddleware:
 
         assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
 
-    def test_pptx_artifact_files_exist_rejects_markdown_fallback(self, tmp_path):
+    def test_pptx_artifact_files_exist_accepts_marked_markdown_fallback(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -3906,11 +3910,13 @@ class TestBuilderArtifactMiddleware:
         }
         args = {"artifact_path": "/mnt/user-data/outputs/deck.md"}
 
-        # Format-swapped fallbacks are disabled for slide-deck requests: the
-        # .md emission is rejected even after a generation attempt.
-        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
+        assert args["requested_artifact_ext"] == "pptx"
+        assert args["artifact_ext"] == "md"
+        assert args["artifact_is_fallback"] is True
+        assert args["fallback_reason"] == "pptx_generation_not_completed"
 
-    def test_pptx_artifact_files_exist_rejects_valid_html_fallback(self, tmp_path):
+    def test_pptx_artifact_files_exist_accepts_marked_valid_html_fallback(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -3934,9 +3940,12 @@ class TestBuilderArtifactMiddleware:
         }
         args = {"artifact_path": "/mnt/user-data/outputs/deck.html"}
 
-        # Even a complete, visual HTML page is rejected as a deck deliverable
-        # — honest failure beats a silent format swap.
-        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
+        assert args["requested_artifact_ext"] == "pptx"
+        assert args["artifact_ext"] == "html"
+        assert args["artifact_is_fallback"] is True
+        assert args["fallback_reason"] == "pptx_generation_not_completed"
+        assert args["artifact_type"] == "webpage"
 
     def test_pptx_artifact_files_exist_rejects_fallback_before_generator_attempt(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -3973,7 +3982,7 @@ class TestBuilderArtifactMiddleware:
 
         assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
 
-    def test_pptx_artifact_files_exist_rejects_fallback_even_after_plan_retry(self, tmp_path):
+    def test_pptx_artifact_files_exist_accepts_fallback_after_plan_retry(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -3991,8 +4000,9 @@ class TestBuilderArtifactMiddleware:
         }
         args = {"artifact_path": "/mnt/user-data/outputs/deck.md"}
 
-        # Plan retries do not unlock a format swap either.
-        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
+        assert args["requested_artifact_ext"] == "pptx"
+        assert args["artifact_is_fallback"] is True
 
     def test_pptx_artifact_files_exist_rejects_invalid_html_fallback(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware

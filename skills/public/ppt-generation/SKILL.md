@@ -1,19 +1,19 @@
 ---
 name: ppt-generation
-description: Use this skill when the user requests to generate, create, or make presentations (PPT/PPTX). Creates a valid PowerPoint file from a structured plan, with optional AI-generated slide images when explicitly requested.
+description: Use this skill when the user requests to generate, create, or make presentations (PPT/PPTX). Creates a valid PowerPoint file from a structured plan, with optional AI-generated slide images for visual/polished decks or explicit image requests.
 ---
 
 # PPT Generation Skill
 
 ## Overview
 
-This skill generates professional PowerPoint presentations from a structured plan. By default it creates a valid text/layout deck directly from the plan. If the user explicitly asks for generated images, illustrations, visual scenes, or image-heavy slides, it can also generate slide images sequentially and compose them into the final deck.
+This skill generates professional PowerPoint presentations from a structured plan. By default it creates a valid text/layout deck directly from the plan. If the user asks for a polished visual deck, image-heavy slides, generated images, illustrations, or visual scenes, it can also generate slide images sequentially and compose them into the final deck.
 
 ## Core Capabilities
 
 - Plan and structure multi-slide presentations with unified visual style
 - Support multiple presentation styles: Business, Academic, Minimal, Apple Keynote, Creative
-- Optionally generate AI images for each slide using image-generation skill when explicitly requested
+- Optionally generate AI images for visual/polished decks or explicit image requests
 - Maintain visual consistency by using previous slide as reference image when image generation is used
 - Compose the plan, optional generated slide images, and optional local chart/diagram
   assets into a professional PPTX file
@@ -157,10 +157,11 @@ slide. SVG can be kept for HTML, but PPTX embedding should use PNG.
 
 ### Step 3: Decide Whether Images Are Needed
 
-Generated images are optional. Skip image generation unless the user explicitly
-asks for generated images, illustrations, visual scenes, or an image-heavy deck.
-For normal slide decks, use the plan-only composition path in Step 4 with no
-`--slide-images` argument.
+Generated images are optional for plain/minimal decks, but they are the
+preferred DeerFlow-native path for polished visual decks. Use image generation
+when the user asks for visual polish, image-heavy slides, generated images,
+illustrations, or visual scenes. For plain/minimal/text-only decks, use the
+plan-only composition path in Step 4 with no `--slide-images` argument.
 
 ### Step 3A: Optional Generated Slide Images
 
