@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
-import { isHtmlArtifactFile, resolveCanvasRenderFile } from "../../lib/builder-artifacts"
 import {
   coreviewFeedbackFromActionResult,
   coreviewFeedbackFromBuilderActionResult,
@@ -17,7 +16,6 @@ import {
   type CoreviewArtifactVersionState,
   type CoreviewArtifactVersionTelemetry,
 } from "../../lib/coreview-artifact-version-store"
-import { requestCoreviewHtmlQuickPatch } from "../../lib/coreview-html-quick-edit"
 import type { ArtifactRecord, ArtifactSessionIndex, RegisterArtifactInput } from "../../lib/session-artifact-index"
 import type { ArtifactToolMode } from "../../types/artifact-annotations"
 import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../types/builder-artifact"
@@ -25,7 +23,6 @@ import type { BuilderCompletionEventV1 } from "../../types/builder-completion"
 import type { BuilderTaskV1 } from "../../types/builder-task"
 import type { RitualArtifacts } from "../../types/session"
 
-import type { ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
 import {
   ArtifactReviewBuilderUpdateCard,
   type ArtifactReviewBuilderUpdateCardStatus,
@@ -58,6 +55,7 @@ import {
   haptic,
   hashCoreviewWorkspaceKey,
   isCoreviewStillFrameReviewEnabled,
+  isHtmlArtifactFile,
   isRealReflection,
   normalizeBuilderArtifactPath,
   normalizeCoreviewArtifactKey,
@@ -67,6 +65,8 @@ import {
   reconcileCoreviewBuilderTaskStateForContext,
   registerCoreviewBuilderToolBridge,
   registerCoreviewToolBridge,
+  requestCoreviewHtmlQuickPatch,
+  resolveCanvasRenderFile,
   resolveCoreviewBuilderActionAvailability,
   safeArtifactViewTelemetry,
   useArtifactCoReview,
@@ -80,6 +80,7 @@ import {
   type ArtifactReviewVoiceCommandRouteResult,
   type ArtifactReviewVoiceCommandRouter,
   type ArtifactViewState,
+  type ArtifactVisualCaptureStatus,
   type CoReviewMediaTransport,
   type CoreviewActionBus,
   type CoreviewActionResult,
@@ -642,6 +643,184 @@ function coreviewFocusCommandAlreadyHandled(sinceMs: number): boolean {
   })
 }
 
+function shouldSkipHandledFallbackCommand(
+  command: ArtifactReviewVoiceCommand,
+  nativeToolsPrimary: boolean,
+  startedAtMs: number,
+): boolean {
+  if (!nativeToolsPrimary) {
+    return false
+  }
+  if (command.kind === "add_annotation") {
+    return coreviewAnnotationCommandAlreadyHandled(command, startedAtMs)
+  }
+  if (command.kind === "focus_anchor") {
+    return coreviewFocusCommandAlreadyHandled(startedAtMs)
+  }
+  return false
+}
+
+function dispatchCoreviewFallbackCommand(
+  bus: CoreviewActionBus,
+  command: ArtifactReviewVoiceCommand,
+  commandView: CoreviewCurrentView,
+  lastFocusedAnchorType: CoreviewAnnotationAnchor["type"] | null,
+): Promise<CoreviewActionResult> | CoreviewActionResult {
+  if (command.kind === "refresh_view") {
+    return bus.refreshView({ reason: "voice command fallback" }, "frontend_fallback")
+  }
+  if (command.kind === "add_annotation") {
+    return bus.addAnnotation(
+      coreviewAddAnnotationInputFromVoiceCommand(command, commandView, lastFocusedAnchorType),
+      "frontend_fallback",
+    )
+  }
+  if (command.kind === "focus_anchor") {
+    return bus.focusAnchor(
+      coreviewFocusAnchorInputFromVoiceCommand(command, commandView, lastFocusedAnchorType),
+      "frontend_fallback",
+    )
+  }
+  return bus.setView(coreviewSetViewInputFromVoiceCommand(command, commandView), "frontend_fallback")
+}
+
+type ReviewVoiceCommandTelemetryDetails = {
+  command: ArtifactReviewVoiceCommand
+  commands?: ArtifactReviewVoiceCommand[]
+  applied: boolean
+  blockedReason: ArtifactReviewVoiceCommandRouteResult["blockedReason"]
+  triggeredRefresh: boolean
+  refreshResult: ArtifactReviewVoiceCommandRefreshResult
+  artifactCurrentPageIndex: number
+  artifactCurrentPageCount: number
+  staleAfterPageChange?: boolean
+  waitedForViewReady?: boolean
+  autoRefreshTiming?: string | null
+  autoRefreshBlockedReason?: string | null
+  transportStateBefore?: string | null
+  transportStateAfter?: string | null
+  hardIntercept?: boolean
+  annotationFallbackAttempted?: boolean
+  annotationFallbackResult?: "success" | "partial_success" | "blocked" | "not_attempted" | "annotation_commit_failed" | null
+  annotationFallbackBlockedReason?: string | null
+  recentAnnotationActionSucceeded?: boolean
+  annotationCommitAttempted?: boolean
+  annotationCommitResult?: string | null
+  annotationCommitCountBefore?: number | null
+  annotationCommitCountAfter?: number | null
+  annotationCommitVerified?: boolean
+  annotationCommandPreventedNavigation?: boolean
+  annotationCommandKeptArtifactMounted?: boolean
+  annotationViewReadyTimedOut?: boolean
+  annotationPartialSuccess?: boolean
+  sessionLeaveGuardSuppressedForAnnotation?: boolean
+}
+
+type FallbackAnnotationTelemetryFields = Pick<
+  ReviewVoiceCommandTelemetryDetails,
+  | "annotationFallbackAttempted"
+  | "annotationFallbackResult"
+  | "annotationFallbackBlockedReason"
+  | "recentAnnotationActionSucceeded"
+  | "annotationCommitAttempted"
+  | "annotationCommitResult"
+  | "annotationCommitCountBefore"
+  | "annotationCommitCountAfter"
+  | "annotationCommitVerified"
+  | "annotationCommandPreventedNavigation"
+  | "annotationCommandKeptArtifactMounted"
+  | "annotationViewReadyTimedOut"
+  | "annotationPartialSuccess"
+  | "sessionLeaveGuardSuppressedForAnnotation"
+>
+
+function buildFallbackAnnotationTelemetryFields(
+  annotationCommand: boolean,
+  result: CoreviewActionResult,
+  annotationCommandKeptArtifactMounted: boolean,
+): FallbackAnnotationTelemetryFields {
+  const recentAnnotationActionSucceeded = coreviewAnnotationStateChanged(result)
+  if (!annotationCommand) {
+    return {
+      annotationFallbackAttempted: false,
+      annotationFallbackResult: null,
+      annotationFallbackBlockedReason: null,
+      recentAnnotationActionSucceeded,
+      annotationCommitAttempted: false,
+      annotationCommitResult: null,
+      annotationCommitCountBefore: null,
+      annotationCommitCountAfter: null,
+      annotationCommitVerified: false,
+      annotationCommandPreventedNavigation: false,
+      annotationCommandKeptArtifactMounted,
+      annotationViewReadyTimedOut: false,
+      annotationPartialSuccess: false,
+      sessionLeaveGuardSuppressedForAnnotation: false,
+    }
+  }
+  return {
+    annotationFallbackAttempted: true,
+    annotationFallbackResult: annotationFallbackResultFromCoreview(result),
+    annotationFallbackBlockedReason: result.blocked_reason,
+    recentAnnotationActionSucceeded,
+    annotationCommitAttempted: result.annotation_commit_attempted,
+    annotationCommitResult: result.annotation_commit_result,
+    annotationCommitCountBefore: result.annotation_commit_count_before,
+    annotationCommitCountAfter: result.annotation_commit_count_after,
+    annotationCommitVerified: result.annotation_commit_verified,
+    annotationCommandPreventedNavigation: true,
+    annotationCommandKeptArtifactMounted,
+    annotationViewReadyTimedOut: result.annotation_view_ready_timed_out,
+    annotationPartialSuccess: result.annotation_partial_success,
+    sessionLeaveGuardSuppressedForAnnotation: true,
+  }
+}
+
+function buildFallbackCommandTelemetry(input: {
+  nextCommand: ArtifactReviewVoiceCommand
+  commands: ArtifactReviewVoiceCommand[]
+  result: CoreviewActionResult
+  commandView: CoreviewCurrentView
+  annotationCommandKeptArtifactMounted: boolean
+  transportStateBefore: ReviewVoiceCommandTelemetryDetails["transportStateBefore"]
+  transportStateAfter: ReviewVoiceCommandTelemetryDetails["transportStateAfter"]
+}): ReviewVoiceCommandTelemetryDetails {
+  const { nextCommand, result, commandView } = input
+  const annotationCommand = nextCommand.kind === "add_annotation"
+  return {
+    command: nextCommand,
+    commands: input.commands,
+    applied: annotationCommand
+      ? coreviewAnnotationStateChanged(result)
+      : (
+          result.ok
+          || routeBlockedReasonFromCoreview(result.blocked_reason) === null
+          || result.blocked_reason === "refresh_unavailable"
+          || result.blocked_reason === "review_not_active"
+        ),
+    blockedReason: result.ok ? null : routeBlockedReasonFromCoreview(result.blocked_reason),
+    triggeredRefresh: result.refresh_attempted,
+    refreshResult: result.refresh_attempted
+      ? refreshResultFromCoreview(result.refresh_result)
+      : "not_requested",
+    artifactCurrentPageIndex: result.page_index ?? commandView.pageIndex,
+    artifactCurrentPageCount: result.page_count ?? Math.max(1, commandView.pageCount),
+    staleAfterPageChange: result.stale,
+    waitedForViewReady: result.view_ready_wait_ms !== null,
+    autoRefreshTiming: result.view_ready_wait_ms !== null
+      ? `after_view_ready:${result.view_ready_wait_ms}ms`
+      : null,
+    autoRefreshBlockedReason: result.blocked_reason,
+    transportStateBefore: input.transportStateBefore,
+    transportStateAfter: input.transportStateAfter,
+    ...buildFallbackAnnotationTelemetryFields(
+      annotationCommand,
+      result,
+      input.annotationCommandKeptArtifactMounted,
+    ),
+  }
+}
+
 function buildSelectedArtifactFromExisting(builderArtifact: BuilderArtifactV1, path: string): BuilderArtifactV1 | null {
   const files = getBuilderArtifactFiles(builderArtifact)
   const selectedFile = files.find((file) => file.path === path)
@@ -860,6 +1039,11 @@ type PendingCoreviewHtmlAutoApply = {
 
 const COREVIEW_HTML_AUTO_APPLY_RENDER_TIMEOUT_MS = 2500
 
+type CoreviewHtmlUpdateTrackedTask = {
+  builderTaskId?: string | null
+  builderRunId?: string | null
+}
+
 function matchCoreviewHtmlBuilderCompletion({
   context,
   completion,
@@ -876,10 +1060,7 @@ function matchCoreviewHtmlBuilderCompletion({
   selectedBuilderArtifactPath: string | null | undefined
   stageArtifactPath: string | null | undefined
   artifactStableIdentity: string | null | undefined
-  trackedTask?: {
-    builderTaskId?: string | null
-    builderRunId?: string | null
-  } | null
+  trackedTask?: CoreviewHtmlUpdateTrackedTask | null
   allowContextIdentityMatch?: boolean
 }): CoreviewHtmlUpdateMatchedBy | null {
   if (context?.rendererKind !== "html" || !isHtmlBuilderOutput(output)) {
@@ -899,6 +1080,24 @@ function matchCoreviewHtmlBuilderCompletion({
       normalizeBuilderArtifactPath(stageArtifactPath),
     ].filter((path): path is string => Boolean(path)),
   )
+  return (
+    matchCompletionPathEvidence(completion, knownOriginalPaths)
+    ?? matchContextIdentityEvidence({
+      allowContextIdentityMatch,
+      completion,
+      trackedTask,
+      context,
+      artifactStableIdentity,
+      knownOriginalPaths,
+      contextPath,
+    })
+  )
+}
+
+function matchCompletionPathEvidence(
+  completion: BuilderCompletionEventV1 | null | undefined,
+  knownOriginalPaths: ReadonlySet<string>,
+): CoreviewHtmlUpdateMatchedBy | null {
   const revisionPath = normalizeBuilderArtifactPath(completion?.revision_of_artifact_path)
   if (revisionPath && knownOriginalPaths.has(revisionPath)) {
     return "revision_of_artifact_path"
@@ -907,32 +1106,61 @@ function matchCoreviewHtmlBuilderCompletion({
   if (sourcePath && knownOriginalPaths.has(sourcePath)) {
     return "source_artifact_path"
   }
+  return null
+}
 
+function matchTrackedTaskEvidence(
+  completion: BuilderCompletionEventV1 | null | undefined,
+  trackedTask: CoreviewHtmlUpdateTrackedTask | null | undefined,
+): CoreviewHtmlUpdateMatchedBy | null {
   const completionTaskId = normalizeCoreviewToken(completion?.task_id)
   const completionRunId = normalizeCoreviewToken(completion?.run_id)
   const trackedTaskId = normalizeCoreviewToken(trackedTask?.builderTaskId)
   const trackedRunId = normalizeCoreviewToken(trackedTask?.builderRunId)
-  if (allowContextIdentityMatch && completionTaskId && trackedTaskId && completionTaskId === trackedTaskId) {
+  if (completionTaskId && trackedTaskId && completionTaskId === trackedTaskId) {
     return "builder_task_id"
   }
-  if (allowContextIdentityMatch && completionRunId && trackedRunId && completionRunId === trackedRunId) {
+  if (completionRunId && trackedRunId && completionRunId === trackedRunId) {
     return "builder_run_id"
   }
-  if (allowContextIdentityMatch && ((trackedTaskId && !completionTaskId) || (trackedRunId && !completionRunId))) {
+  if ((trackedTaskId && !completionTaskId) || (trackedRunId && !completionRunId)) {
     return "active_coreview_task"
   }
+  return null
+}
 
+function matchContextIdentityEvidence({
+  allowContextIdentityMatch,
+  completion,
+  trackedTask,
+  context,
+  artifactStableIdentity,
+  knownOriginalPaths,
+  contextPath,
+}: {
+  allowContextIdentityMatch: boolean
+  completion: BuilderCompletionEventV1 | null | undefined
+  trackedTask: CoreviewHtmlUpdateTrackedTask | null | undefined
+  context: CoreviewArtifactUpdateContext
+  artifactStableIdentity: string | null | undefined
+  knownOriginalPaths: ReadonlySet<string>
+  contextPath: string
+}): CoreviewHtmlUpdateMatchedBy | null {
+  if (!allowContextIdentityMatch) {
+    return null
+  }
+  const trackedMatch = matchTrackedTaskEvidence(completion, trackedTask)
+  if (trackedMatch) {
+    return trackedMatch
+  }
   if (
-    allowContextIdentityMatch
-    && (
     context.artifactStableIdentity
     && artifactStableIdentity
     && context.artifactStableIdentity === artifactStableIdentity
-    )
   ) {
     return "artifact_stable_identity"
   }
-  if (allowContextIdentityMatch && knownOriginalPaths.has(contextPath)) {
+  if (knownOriginalPaths.has(contextPath)) {
     return "original_artifact_path"
   }
   return null
@@ -1852,37 +2080,7 @@ export function PresenceArtifactPanel({
     voiceAgentSessionId,
   ])
 
-  const recordReviewVoiceCommandTelemetry = useCallback((details: {
-    command: ArtifactReviewVoiceCommand
-    commands?: ArtifactReviewVoiceCommand[]
-    applied: boolean
-    blockedReason: ArtifactReviewVoiceCommandRouteResult["blockedReason"]
-    triggeredRefresh: boolean
-    refreshResult: ArtifactReviewVoiceCommandRefreshResult
-    artifactCurrentPageIndex: number
-    artifactCurrentPageCount: number
-    staleAfterPageChange?: boolean
-    waitedForViewReady?: boolean
-    autoRefreshTiming?: string | null
-    autoRefreshBlockedReason?: string | null
-    transportStateBefore?: string | null
-    transportStateAfter?: string | null
-    hardIntercept?: boolean
-    annotationFallbackAttempted?: boolean
-    annotationFallbackResult?: "success" | "partial_success" | "blocked" | "not_attempted" | "annotation_commit_failed" | null
-    annotationFallbackBlockedReason?: string | null
-    recentAnnotationActionSucceeded?: boolean
-    annotationCommitAttempted?: boolean
-    annotationCommitResult?: string | null
-    annotationCommitCountBefore?: number | null
-    annotationCommitCountAfter?: number | null
-    annotationCommitVerified?: boolean
-    annotationCommandPreventedNavigation?: boolean
-    annotationCommandKeptArtifactMounted?: boolean
-    annotationViewReadyTimedOut?: boolean
-    annotationPartialSuccess?: boolean
-    sessionLeaveGuardSuppressedForAnnotation?: boolean
-  }) => {
+  const recordReviewVoiceCommandTelemetry = useCallback((details: ReviewVoiceCommandTelemetryDetails) => {
     const annotationIntentDetected = details.command.kind === "add_annotation"
     const annotationFallbackKind = annotationFallbackUtteranceKind(details.command, details.commands)
     recordSophiaCaptureEvent({
@@ -4018,103 +4216,40 @@ export function PresenceArtifactPanel({
 
       const executeFallbackCommands = async () => {
         for (const nextCommand of commands) {
-          if (
-            nativeToolsPrimary
-            && nextCommand.kind === "add_annotation"
-            && coreviewAnnotationCommandAlreadyHandled(nextCommand, startedAtMs)
-          ) {
-            continue
-          }
-          if (
-            nativeToolsPrimary
-            && nextCommand.kind === "focus_anchor"
-            && coreviewFocusCommandAlreadyHandled(startedAtMs)
-          ) {
+          if (shouldSkipHandledFallbackCommand(nextCommand, nativeToolsPrimary, startedAtMs)) {
             continue
           }
 
           const commandView = coreviewCurrentViewRef.current ?? currentView
-          const result = await runCoreviewAction((bus) => {
-            if (nextCommand.kind === "refresh_view") {
-              return bus.refreshView({ reason: "voice command fallback" }, "frontend_fallback")
-            }
-            if (nextCommand.kind === "add_annotation") {
-              return bus.addAnnotation(
-                coreviewAddAnnotationInputFromVoiceCommand(
-                  nextCommand,
-                  commandView,
-                  lastCoreviewFocusedAnchorTypeRef.current,
-                ),
-                "frontend_fallback",
-              )
-            }
-            if (nextCommand.kind === "focus_anchor") {
-              return bus.focusAnchor(
-                coreviewFocusAnchorInputFromVoiceCommand(
-                  nextCommand,
-                  commandView,
-                  lastCoreviewFocusedAnchorTypeRef.current,
-                ),
-                "frontend_fallback",
-              )
-            }
-            return bus.setView(coreviewSetViewInputFromVoiceCommand(nextCommand, commandView), "frontend_fallback")
-          }, {
-            voiceTriggered: true,
-            commandKind: nextCommand.kind,
-            dedupePrefix: `voice:${startedAtMs}`,
-          })
-          const annotationStateChanged = coreviewAnnotationStateChanged(result)
-          const annotationFallbackResult = annotationFallbackResultFromCoreview(result)
-          const annotationCommand = nextCommand.kind === "add_annotation"
+          const result = await runCoreviewAction(
+            (bus) => dispatchCoreviewFallbackCommand(
+              bus,
+              nextCommand,
+              commandView,
+              lastCoreviewFocusedAnchorTypeRef.current,
+            ),
+            {
+              voiceTriggered: true,
+              commandKind: nextCommand.kind,
+              dedupePrefix: `voice:${startedAtMs}`,
+            },
+          )
           const annotationCommandKeptArtifactMounted = Boolean(
-            annotationCommand
+            nextCommand.kind === "add_annotation"
             && isVisible
             && builderStageActive
             && builderVoiceCommandTargetRef.current,
           )
 
-          recordReviewVoiceCommandTelemetry({
-            command: nextCommand,
+          recordReviewVoiceCommandTelemetry(buildFallbackCommandTelemetry({
+            nextCommand,
             commands,
-            applied: annotationCommand
-              ? annotationStateChanged
-              : (
-                  result.ok
-                  || routeBlockedReasonFromCoreview(result.blocked_reason) === null
-                  || result.blocked_reason === "refresh_unavailable"
-                  || result.blocked_reason === "review_not_active"
-                ),
-            blockedReason: result.ok ? null : routeBlockedReasonFromCoreview(result.blocked_reason),
-            triggeredRefresh: result.refresh_attempted,
-            refreshResult: result.refresh_attempted
-              ? refreshResultFromCoreview(result.refresh_result)
-              : "not_requested",
-            artifactCurrentPageIndex: result.page_index ?? commandView.pageIndex,
-            artifactCurrentPageCount: result.page_count ?? Math.max(1, commandView.pageCount),
-            staleAfterPageChange: result.stale,
-            waitedForViewReady: result.view_ready_wait_ms !== null,
-            autoRefreshTiming: result.view_ready_wait_ms !== null
-              ? `after_view_ready:${result.view_ready_wait_ms}ms`
-              : null,
-            autoRefreshBlockedReason: result.blocked_reason,
+            result,
+            commandView,
+            annotationCommandKeptArtifactMounted,
             transportStateBefore,
             transportStateAfter: builderArtifactCoReview.transportStatus.statusText,
-            annotationFallbackAttempted: annotationCommand,
-            annotationFallbackResult: annotationCommand ? annotationFallbackResult : null,
-            annotationFallbackBlockedReason: annotationCommand ? result.blocked_reason : null,
-            recentAnnotationActionSucceeded: annotationStateChanged,
-            annotationCommitAttempted: annotationCommand ? result.annotation_commit_attempted : false,
-            annotationCommitResult: annotationCommand ? result.annotation_commit_result : null,
-            annotationCommitCountBefore: annotationCommand ? result.annotation_commit_count_before : null,
-            annotationCommitCountAfter: annotationCommand ? result.annotation_commit_count_after : null,
-            annotationCommitVerified: annotationCommand ? result.annotation_commit_verified : false,
-            annotationCommandPreventedNavigation: annotationCommand,
-            annotationCommandKeptArtifactMounted,
-            annotationViewReadyTimedOut: annotationCommand ? result.annotation_view_ready_timed_out : false,
-            annotationPartialSuccess: annotationCommand ? result.annotation_partial_success : false,
-            sessionLeaveGuardSuppressedForAnnotation: annotationCommand,
-          })
+          }))
         }
       }
 

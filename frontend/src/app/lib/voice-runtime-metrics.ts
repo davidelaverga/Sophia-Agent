@@ -3020,73 +3020,94 @@ function safeReviewVoiceCommandSummary(record: Record<string, unknown>): ReviewV
   }
 }
 
-function buildCoreviewExactTextTelemetry(activeEvents: NormalizedVoiceCaptureEvent[]): CoreviewExactTextTelemetry {
-  const exactText = buildDefaultCoreviewTelemetry().exactText
-  const readEvents = activeEvents.filter((event) => (
-    event.name === "gemini-tool-loop-diagnostic"
+const READ_ARTIFACT_TEXT_FINAL_PHASES = new Set(["tool_response_sent", "tool_response_send_failed", "tool_response_send_suppressed", "tool_execution_rejected"])
+const READ_ARTIFACT_TEXT_RESOLVED_PHASES = new Set(["tool_response_sent", "tool_response_send_suppressed", "tool_execution_rejected"])
+
+function isReadArtifactTextDiagnosticEvent(event: NormalizedVoiceCaptureEvent): boolean {
+  return event.name === "gemini-tool-loop-diagnostic"
     && geminiToolName(event) === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME
-  ))
-  const finalPhases = new Set(["tool_response_sent", "tool_response_send_failed", "tool_response_send_suppressed", "tool_execution_rejected"])
-  const resolvedPhases = new Set(["tool_response_sent", "tool_response_send_suppressed", "tool_execution_rejected"])
+}
 
-  exactText.exactTextCallCount = countWhere(readEvents, (event) => asString(eventData(event)?.phase) === "tool_call_received")
+function isReadArtifactTextTimeout(
+  status: string,
+  backendResponse: Record<string, unknown> | null,
+  diagnostic: Record<string, unknown> | null,
+): boolean {
+  return status === "timeout"
+    || asBoolean(backendResponse?.review_tool_timed_out) === true
+    || asBoolean(diagnostic?.reviewToolTimedOut) === true
+}
 
-  for (const event of readEvents) {
-    const data = eventData(event)
-    const phase = asString(data?.phase)
-    if (!phase || !finalPhases.has(phase)) continue
+function isReadArtifactTextPdfExtractionStatus(
+  backendResponse: Record<string, unknown> | null,
+  status: string,
+): boolean {
+  return asString(backendResponse?.source) === "pdf_text_extraction"
+    || status === "extraction_pending"
+    || status === "extraction_unavailable"
+    || status === "extraction_failed"
+}
 
-    const diagnostic = asRecord(data?.diagnostic)
-    const backendResponse = coreviewReadArtifactTextResponse(diagnostic)
-    const success = asBoolean(data?.success) === true
-      || asBoolean(diagnostic?.success) === true
-      || asBoolean(backendResponse?.ok) === true
-    const status = success ? "success" : asString(backendResponse?.status) ?? phase
-    const source = normalizeCoreviewExactTextSource(asString(backendResponse?.source), success)
-    const latency = numberFromKeys(backendResponse, ["latency_ms", "latencyMs"])
-      ?? numberFromKeys(diagnostic, ["latency_ms", "latencyMs"])
+type ReadArtifactTextOutcome = {
+  success: boolean
+  status: string
+  source: CoreviewExactTextSource
+  latency: number | null
+}
 
-    if (success) {
-      exactText.exactTextSuccessCount += 1
-    } else {
-      exactText.exactTextFailureCount += 1
-    }
-    if (
-      status === "timeout"
-      || asBoolean(backendResponse?.review_tool_timed_out) === true
-      || asBoolean(diagnostic?.reviewToolTimedOut) === true
-    ) {
-      exactText.readArtifactTextTimeoutCount += 1
-    }
-    exactText.exactTextSources[source] += 1
-    exactText.lastExactTextStatus = status
-    exactText.lastExactTextSource = source
-    exactText.readArtifactTextLastStatus = status
-    exactText.exactTextRegistrySource = success ? source : exactText.exactTextRegistrySource
-    exactText.lastExactTextCharCount = numberFromKeys(backendResponse, ["char_count", "charCount"]) ?? 0
-    exactText.lastExactTextTruncated = asBoolean(backendResponse?.truncated) ?? false
-    exactText.lastExactTextLatencyMs = latency
-    if (
-      asString(backendResponse?.source) === "pdf_text_extraction"
-      || status === "extraction_pending"
-      || status === "extraction_unavailable"
-      || status === "extraction_failed"
-    ) {
-      exactText.readArtifactTextPdfExtractionStatus = status
-    }
+function resolveReadArtifactTextOutcome(
+  phase: string,
+  data: Record<string, unknown> | null,
+  diagnostic: Record<string, unknown> | null,
+  backendResponse: Record<string, unknown> | null,
+): ReadArtifactTextOutcome {
+  const success = asBoolean(data?.success) === true
+    || asBoolean(diagnostic?.success) === true
+    || asBoolean(backendResponse?.ok) === true
+  return {
+    success,
+    status: success ? "success" : asString(backendResponse?.status) ?? phase,
+    source: normalizeCoreviewExactTextSource(asString(backendResponse?.source), success),
+    latency: numberFromKeys(backendResponse, ["latency_ms", "latencyMs"])
+      ?? numberFromKeys(diagnostic, ["latency_ms", "latencyMs"]),
   }
+}
 
-  exactText.exactTextCallCount = Math.max(
-    exactText.exactTextCallCount,
-    exactText.exactTextSuccessCount + exactText.exactTextFailureCount,
-  )
-  exactText.readArtifactTextCallCount = exactText.exactTextCallCount
-  exactText.readArtifactTextResolvedCount = countWhere(readEvents, (event) => resolvedPhases.has(asString(eventData(event)?.phase) ?? ""))
-  exactText.readArtifactTextUnresolvedCount = Math.max(
-    exactText.readArtifactTextCallCount - exactText.readArtifactTextResolvedCount,
-    0,
-  )
-  const latestPdfTextExtraction = activeEvents
+function applyReadArtifactTextResolutionEvent(
+  exactText: CoreviewExactTextTelemetry,
+  event: NormalizedVoiceCaptureEvent,
+): void {
+  const data = eventData(event)
+  const phase = asString(data?.phase)
+  if (!phase || !READ_ARTIFACT_TEXT_FINAL_PHASES.has(phase)) return
+
+  const diagnostic = asRecord(data?.diagnostic)
+  const backendResponse = coreviewReadArtifactTextResponse(diagnostic)
+  const { success, status, source, latency } = resolveReadArtifactTextOutcome(phase, data, diagnostic, backendResponse)
+
+  if (success) {
+    exactText.exactTextSuccessCount += 1
+  } else {
+    exactText.exactTextFailureCount += 1
+  }
+  if (isReadArtifactTextTimeout(status, backendResponse, diagnostic)) {
+    exactText.readArtifactTextTimeoutCount += 1
+  }
+  exactText.exactTextSources[source] += 1
+  exactText.lastExactTextStatus = status
+  exactText.lastExactTextSource = source
+  exactText.readArtifactTextLastStatus = status
+  exactText.exactTextRegistrySource = success ? source : exactText.exactTextRegistrySource
+  exactText.lastExactTextCharCount = numberFromKeys(backendResponse, ["char_count", "charCount"]) ?? 0
+  exactText.lastExactTextTruncated = asBoolean(backendResponse?.truncated) ?? false
+  exactText.lastExactTextLatencyMs = latency
+  if (isReadArtifactTextPdfExtractionStatus(backendResponse, status)) {
+    exactText.readArtifactTextPdfExtractionStatus = status
+  }
+}
+
+function latestPdfTextExtractionRecord(activeEvents: NormalizedVoiceCaptureEvent[]): Record<string, unknown> | undefined {
+  return activeEvents
     .filter((event) => (
       (event.category === "artifacts-runtime" && event.name === "pdf-text-extraction")
       || event.name === "select-stage-artifact"
@@ -3094,29 +3115,69 @@ function buildCoreviewExactTextTelemetry(activeEvents: NormalizedVoiceCaptureEve
     .map((event) => event.payloadRecord)
     .filter((value): value is Record<string, unknown> => value !== null)
     .at(-1)
-  exactText.readArtifactTextPdfExtractionStatus = exactText.readArtifactTextPdfExtractionStatus
-    ?? asString(latestPdfTextExtraction?.pdfTextExtractionStatus)
-  const latestPdfTextExtractionStatus = asString(latestPdfTextExtraction?.pdfTextExtractionStatus)
+}
+
+function applySuccessfulPdfExtractionFallback(
+  exactText: CoreviewExactTextTelemetry,
+  latestPdfTextExtraction: Record<string, unknown> | undefined,
+  latestPdfTextExtractionStatus: string | null,
+): void {
   const latestPdfTextExtractionSource = normalizeCoreviewExactTextSource(
     asString(latestPdfTextExtraction?.pdfTextExtractionSource),
     latestPdfTextExtractionStatus === "success",
   )
   if (
-    latestPdfTextExtractionStatus === "success"
-    && latestPdfTextExtractionSource === "pdf_text_extraction"
+    latestPdfTextExtractionStatus !== "success"
+    || latestPdfTextExtractionSource !== "pdf_text_extraction"
   ) {
-    if (exactText.exactTextSources.pdf_text_extraction === 0) {
-      exactText.exactTextSources.pdf_text_extraction += 1
-    }
-    exactText.exactTextSuccessCount = Math.max(exactText.exactTextSuccessCount, 1)
-    exactText.lastExactTextStatus = exactText.lastExactTextStatus ?? "success"
-    exactText.lastExactTextSource = exactText.lastExactTextSource ?? "pdf_text_extraction"
-    exactText.lastExactTextCharCount = exactText.lastExactTextCharCount
-      ?? numberFromKeys(latestPdfTextExtraction, ["pdfTextExtractionCharCount"])
-    exactText.lastExactTextTruncated = exactText.lastExactTextTruncated
-      ?? asBoolean(latestPdfTextExtraction?.pdfTextExtractionTruncated)
-    exactText.exactTextRegistrySource = exactText.exactTextRegistrySource ?? "pdf_text_extraction"
+    return
   }
+  if (exactText.exactTextSources.pdf_text_extraction === 0) {
+    exactText.exactTextSources.pdf_text_extraction += 1
+  }
+  exactText.exactTextSuccessCount = Math.max(exactText.exactTextSuccessCount, 1)
+  exactText.lastExactTextStatus = exactText.lastExactTextStatus ?? "success"
+  exactText.lastExactTextSource = exactText.lastExactTextSource ?? "pdf_text_extraction"
+  exactText.lastExactTextCharCount = exactText.lastExactTextCharCount
+    ?? numberFromKeys(latestPdfTextExtraction, ["pdfTextExtractionCharCount"])
+  exactText.lastExactTextTruncated = exactText.lastExactTextTruncated
+    ?? asBoolean(latestPdfTextExtraction?.pdfTextExtractionTruncated)
+  exactText.exactTextRegistrySource = exactText.exactTextRegistrySource ?? "pdf_text_extraction"
+}
+
+function isReadArtifactTextCallReceivedEvent(event: NormalizedVoiceCaptureEvent): boolean {
+  return asString(eventData(event)?.phase) === "tool_call_received"
+}
+
+function isReadArtifactTextResolvedEvent(event: NormalizedVoiceCaptureEvent): boolean {
+  return READ_ARTIFACT_TEXT_RESOLVED_PHASES.has(asString(eventData(event)?.phase) ?? "")
+}
+
+function buildCoreviewExactTextTelemetry(activeEvents: NormalizedVoiceCaptureEvent[]): CoreviewExactTextTelemetry {
+  const exactText = buildDefaultCoreviewTelemetry().exactText
+  const readEvents = activeEvents.filter(isReadArtifactTextDiagnosticEvent)
+
+  exactText.exactTextCallCount = countWhere(readEvents, isReadArtifactTextCallReceivedEvent)
+
+  for (const event of readEvents) {
+    applyReadArtifactTextResolutionEvent(exactText, event)
+  }
+
+  exactText.exactTextCallCount = Math.max(
+    exactText.exactTextCallCount,
+    exactText.exactTextSuccessCount + exactText.exactTextFailureCount,
+  )
+  exactText.readArtifactTextCallCount = exactText.exactTextCallCount
+  exactText.readArtifactTextResolvedCount = countWhere(readEvents, isReadArtifactTextResolvedEvent)
+  exactText.readArtifactTextUnresolvedCount = Math.max(
+    exactText.readArtifactTextCallCount - exactText.readArtifactTextResolvedCount,
+    0,
+  )
+  const latestPdfTextExtraction = latestPdfTextExtractionRecord(activeEvents)
+  exactText.readArtifactTextPdfExtractionStatus = exactText.readArtifactTextPdfExtractionStatus
+    ?? asString(latestPdfTextExtraction?.pdfTextExtractionStatus)
+  const latestPdfTextExtractionStatus = asString(latestPdfTextExtraction?.pdfTextExtractionStatus)
+  applySuccessfulPdfExtractionFallback(exactText, latestPdfTextExtraction, latestPdfTextExtractionStatus)
   exactText.readArtifactTextLastStatus = exactText.readArtifactTextLastStatus
     ?? exactText.lastExactTextStatus
     ?? latestPdfTextExtractionStatus

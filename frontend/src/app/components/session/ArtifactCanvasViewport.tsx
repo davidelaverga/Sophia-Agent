@@ -37,8 +37,19 @@ import type {
 } from "../../types/artifact-annotations"
 import type { BuilderArtifactFileV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 
+import type {
+  ArtifactPdfFocusRequest,
+  ArtifactPdfTextExtractionStatus,
+  ArtifactVisualCaptureStatus,
+  ArtifactVisualCaptureUnavailableReason,
+} from "./ArtifactCanvasShared"
 import { ArtifactMarkdownPreview } from "./ArtifactMarkdownPreview"
-import { ArtifactPdfPreview, type ArtifactPdfFocusRequest, type ArtifactPdfTextExtractionStatus } from "./ArtifactPdfPreview"
+import { ArtifactPdfPreview } from "./ArtifactPdfPreview"
+
+export type {
+  ArtifactVisualCaptureStatus,
+  ArtifactVisualCaptureUnavailableReason,
+} from "./ArtifactCanvasShared"
 
 type ArtifactViewportFile = BuilderArtifactFileV1 & {
   mimeType?: string
@@ -51,28 +62,6 @@ type HtmlCaptureRegistrationResult =
   | "context_unavailable"
   | "draw_failed"
   | "unregistered"
-
-export type ArtifactVisualCaptureUnavailableReason =
-  | "no_selected_artifact"
-  | "preview_not_ready"
-  | "capture_target_missing"
-  | "capture_failed"
-  | "exact_text_only_no_visual_source"
-
-export interface ArtifactVisualCaptureStatus {
-  ready: boolean
-  reason: ArtifactVisualCaptureUnavailableReason | null
-  source: "markdown_preview_canvas" | "html_preview_canvas" | "metadata_canvas" | "pdf_page_canvas" | "none"
-  exactTextAvailable: boolean
-  artifactPath?: string | null
-  previewHref?: string | null
-  pdfTextExtractionStatus?: ArtifactPdfTextExtractionStatus["status"] | null
-  pdfTextExtractionSource?: ArtifactPdfTextExtractionStatus["source"] | null
-  pdfTextExtractionPageCount?: number | null
-  pdfTextExtractionCharCount?: number | null
-  pdfTextExtractionTruncated?: boolean | null
-  annotationOverlayCaptured?: boolean | null
-}
 
 export interface ArtifactHtmlViewState {
   rendererKind: "html"

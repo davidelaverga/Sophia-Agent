@@ -27,15 +27,6 @@ import type {
   CoreviewResolveAnnotationAnchorResult,
   CoreviewSetViewAdapterResult,
 } from "../../lib/coreview-actions"
-import {
-  COREVIEW_ANNOTATION_STORAGE_VERSION,
-  type CoreviewAnnotationStoreTelemetry,
-} from "../../lib/coreview-annotation-store"
-import { htmlNavigationResultTelemetry } from "../../lib/coreview-html-navigation-controller"
-import {
-  resolveCoreviewPdfTextAnchor,
-  type CoreviewPdfTextLayout,
-} from "../../lib/coreview-pdf-text-layout"
 import type {
   CoreviewArtifactCapabilities,
 } from "../../lib/coreview-workspace-contract"
@@ -57,18 +48,23 @@ import {
   type ArtifactHtmlViewState,
   type ArtifactVisualCaptureStatus,
 } from "./ArtifactCanvasViewport"
-import type { ArtifactPdfFocusRequest } from "./ArtifactPdfPreview"
 import { ArtifactReviewStatus, hasConfirmedStillFrame } from "./ArtifactReviewStatus"
 import {
   buildThreadArtifactHref,
   cn,
+  COREVIEW_ANNOTATION_STORAGE_VERSION,
   coreviewArtifactCapabilityTelemetry,
   formatBuilderArtifactTypeLabel,
   getBuilderArtifactFiles,
   getCoreviewArtifactCapabilitiesForFile,
+  htmlNavigationResultTelemetry,
   recordSophiaCaptureEvent,
   RefreshCw,
   resolveCanvasRenderFile,
+  resolveCoreviewPdfTextAnchor,
+  type ArtifactPdfFocusRequest,
+  type CoreviewAnnotationStoreTelemetry,
+  type CoreviewPdfTextLayout,
 } from "./ArtifactStageDeps"
 import { ArtifactToolbar } from "./ArtifactToolbar"
 import { ReviewWithSophiaButton } from "./ReviewWithSophiaButton"

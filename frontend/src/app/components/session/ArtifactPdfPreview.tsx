@@ -23,27 +23,19 @@ import type {
 } from "../../types/artifact-annotations"
 import type { BuilderArtifactFileV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 
-import type { ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
+import type {
+  ArtifactPdfFocusRequest,
+  ArtifactPdfTextExtractionStatus,
+  ArtifactPdfTextExtractionStatusValue,
+  ArtifactVisualCaptureStatus,
+} from "./ArtifactCanvasShared"
 import { ArtifactPdfPageRail } from "./ArtifactPdfPageRail"
 
-export type ArtifactPdfTextExtractionStatusValue = "loading" | "success" | "failed" | "unavailable"
-
-export interface ArtifactPdfTextExtractionStatus {
-  status: ArtifactPdfTextExtractionStatusValue
-  source: "pdf_text_extraction"
-  pageCount: number
-  charCount: number
-  truncated: boolean
-  safeReason: string | null
-  text?: string
-  layout?: CoreviewPdfTextLayout
-}
-
-export interface ArtifactPdfFocusRequest {
-  id: string
-  pageIndex: number
-  rect: NormalizedArtifactRect
-}
+export type {
+  ArtifactPdfFocusRequest,
+  ArtifactPdfTextExtractionStatus,
+  ArtifactPdfTextExtractionStatusValue,
+} from "./ArtifactCanvasShared"
 
 interface ArtifactPdfPreviewProps {
   artifact: BuilderArtifactV1

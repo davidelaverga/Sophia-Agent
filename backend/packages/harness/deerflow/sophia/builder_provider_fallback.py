@@ -180,38 +180,58 @@ def classify_provider_error(exc: BaseException) -> str | None:
         anthropic = None  # type: ignore[assignment]
 
     if anthropic is not None:
-        # Order matters: RateLimitError etc. subclass APIStatusError.
-        if isinstance(exc, anthropic.AuthenticationError):
-            return "auth_error"
-        if isinstance(exc, anthropic.PermissionDeniedError):
-            return "permission_or_payment_error"
-        if isinstance(exc, anthropic.RateLimitError):
-            return "rate_limit_or_quota"
-        if isinstance(exc, anthropic.APIConnectionError):
-            return "provider_unreachable"
-        # Narrow billing-400: Anthropic delivers "credit balance is too low"
-        # as a BadRequestError (400). Treat ONLY the billing variant as a
-        # payment outage; generic 400s still fall through to None below.
-        if isinstance(exc, anthropic.BadRequestError) and _has_billing_signal(exc):
-            return "permission_or_payment_error"
-        if isinstance(exc, anthropic.APIStatusError):
-            status = getattr(exc, "status_code", None)
-            if isinstance(status, int) and status >= 500:
-                return "provider_unavailable"
-            return None
+        anthropic_class = _classify_anthropic_error(anthropic, exc)
+        if anthropic_class is not _UNMATCHED:
+            return anthropic_class
 
-    # Generic shape match (test doubles, httpx-style errors): classify by
-    # status_code attribute only — never by message-text sniffing.
-    status = getattr(exc, "status_code", None)
-    if isinstance(status, int):
-        if status == 401:
-            return "auth_error"
-        if status == 402 or status == 403:
-            return "permission_or_payment_error"
-        if status == 429:
-            return "rate_limit_or_quota"
-        if status >= 500:
+    return _classify_by_status_code(getattr(exc, "status_code", None))
+
+
+# Sentinel distinguishing "Anthropic branch decided None (do not fall back)"
+# from "not an Anthropic exception — try the generic status-code shape".
+_UNMATCHED = object()
+
+_STATUS_CODE_CLASSES: tuple[tuple[tuple[int, ...], str], ...] = (
+    ((401,), "auth_error"),
+    ((402, 403), "permission_or_payment_error"),
+    ((429,), "rate_limit_or_quota"),
+)
+
+
+def _classify_anthropic_error(anthropic: Any, exc: Exception) -> Any:
+    """Classify Anthropic SDK exceptions; ``_UNMATCHED`` when not one."""
+    # Order matters: RateLimitError etc. subclass APIStatusError.
+    typed: tuple[tuple[type, str], ...] = (
+        (anthropic.AuthenticationError, "auth_error"),
+        (anthropic.PermissionDeniedError, "permission_or_payment_error"),
+        (anthropic.RateLimitError, "rate_limit_or_quota"),
+        (anthropic.APIConnectionError, "provider_unreachable"),
+    )
+    for exc_type, error_class in typed:
+        if isinstance(exc, exc_type):
+            return error_class
+    # Narrow billing-400: Anthropic delivers "credit balance is too low"
+    # as a BadRequestError (400). Treat ONLY the billing variant as a
+    # payment outage; generic 400s still fall through to None below.
+    if isinstance(exc, anthropic.BadRequestError) and _has_billing_signal(exc):
+        return "permission_or_payment_error"
+    if isinstance(exc, anthropic.APIStatusError):
+        status = getattr(exc, "status_code", None)
+        if isinstance(status, int) and status >= 500:
             return "provider_unavailable"
+        return None
+    return _UNMATCHED
+
+
+def _classify_by_status_code(status: Any) -> str | None:
+    """Generic shape match (test doubles, httpx-style errors) — never message-text sniffing."""
+    if not isinstance(status, int):
+        return None
+    for codes, error_class in _STATUS_CODE_CLASSES:
+        if status in codes:
+            return error_class
+    if status >= 500:
+        return "provider_unavailable"
     return None
 
 

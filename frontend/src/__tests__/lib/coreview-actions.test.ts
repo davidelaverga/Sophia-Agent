@@ -8,42 +8,36 @@ import {
   createCoreviewActionBus,
   coreviewGeminiFunctionDeclarations,
   withCoreviewGeminiToolDeclarations,
+  type CoreviewAddAnnotationAdapterInput,
+  type CoreviewAddAnnotationAdapterResult,
+  type CoreviewAnnotationAnchor,
+  type CoreviewArtifactRebindInput,
+  type CoreviewArtifactRebindResult,
   type CoreviewCurrentView,
+  type CoreviewFocusAnchorAdapterInput,
+  type CoreviewFocusAnchorAdapterResult,
+  type CoreviewRefreshAdapterResult,
   type CoreviewRendererAdapter,
+  type CoreviewResolveAnnotationAnchorResult,
   type CoreviewResolvedAnnotationAnchor,
   type CoreviewSetViewAdapterInput,
   type CoreviewSetViewAdapterResult,
   type CoreviewToolBlockedReason,
   type CoreviewToolRefreshResult,
+  type CoreviewViewReadyResult,
 } from "../../app/lib/coreview-actions"
 import { getCoreviewArtifactCapabilities } from "../../app/lib/coreview-artifact-capabilities"
 
-function createHarness(options: Partial<CoreviewCurrentView> & {
-  refreshOk?: boolean
-  waitOk?: boolean
-  annotationCommitNoop?: boolean
-  htmlSetViewFailure?: CoreviewToolBlockedReason
-  htmlFocusFailure?: CoreviewToolBlockedReason
-  rebindCurrent?: Partial<CoreviewCurrentView>
-  rebindOk?: boolean
-  rebindReason?: string | null
-} = {}) {
-  const {
-    refreshOk = true,
-    waitOk = true,
-    annotationCommitNoop = false,
-    htmlSetViewFailure,
-    htmlFocusFailure,
-    rebindCurrent,
-    rebindOk = true,
-    rebindReason = null,
-    ...currentOptions
-  } = options
-  let refreshes = 0
-  let focusCalls = 0
-  let staleSignature: string | null = null
-  let annotations: Array<{ kind: "highlight" | "comment" | "underline" | "arrow" }> = []
-  const focusedAnchors: CoreviewResolvedAnnotationAnchor[] = []
+interface HarnessState {
+  current: CoreviewCurrentView
+  refreshes: number
+  focusCalls: number
+  staleSignature: string | null
+  annotations: Array<{ kind: "highlight" | "comment" | "underline" | "arrow" }>
+  focusedAnchors: CoreviewResolvedAnnotationAnchor[]
+}
+
+function buildHarnessCurrent(currentOptions: Partial<CoreviewCurrentView>): CoreviewCurrentView {
   const defaultCapabilities = getCoreviewArtifactCapabilities({
     rendererKind: "pdf",
     artifactPath: "outputs/report.pdf",
@@ -51,7 +45,7 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
     textExtractionStatus: "success",
     layoutAnchorsAvailable: true,
   })
-  let current: CoreviewCurrentView = {
+  const current: CoreviewCurrentView = {
     artifactId: "artifact-1",
     artifactPath: "outputs/report.pdf",
     artifactTitle: "report.pdf",
@@ -99,343 +93,451 @@ function createHarness(options: Partial<CoreviewCurrentView> & {
     zoom: current.zoom,
     fitMode: current.fitMode,
   })
+  return current
+}
 
-  const adapter: CoreviewRendererAdapter = {
-    getCurrentViewState: () => current,
-    setView: (view: CoreviewSetViewAdapterInput): CoreviewSetViewAdapterResult | void => {
-      const htmlScrollAttempted = current.rendererKind === "html" && (
-        typeof view.htmlScrollDelta === "number"
-        || Boolean(view.htmlScrollPosition)
-      )
-      if (htmlScrollAttempted && htmlSetViewFailure) {
-        const commandKind = typeof view.htmlScrollDelta === "number"
-          ? view.htmlScrollDelta >= 0 ? "scroll_down" : "scroll_up"
-          : view.htmlScrollPosition === "bottom"
-            ? "go_bottom"
-            : "go_top"
-        return {
-          ok: false,
-          blockedReason: htmlSetViewFailure,
-          method: "heading",
-          scrolled: false,
-          htmlNavigationControllerActive: true,
-          htmlNavigationRouterUsed: true,
-          htmlNavigationCommandKind: commandKind,
-          htmlNavigationTargetSafe: view.htmlScrollPosition ?? null,
-          htmlNavigationTargetKind: view.htmlScrollPosition ?? "unknown",
-          htmlNavigationResult: htmlSetViewFailure,
-          htmlNavigationFailureReason: htmlSetViewFailure,
-          htmlNavigationScrollTopBefore: current.scrollTop ?? null,
-          htmlNavigationScrollTopAfter: current.scrollTop ?? null,
-          htmlNavigationScrolled: false,
-          htmlNavigationCommandId: "test-html-command",
-          htmlNavigationTimedOut: htmlSetViewFailure === "iframe_not_ready",
-          htmlNavigationWaitedForReady: htmlSetViewFailure === "iframe_not_ready",
-          htmlNavigationPreventedPdfFallback: true,
-          htmlVoiceNavigationUsedSameResolver: true,
-          htmlNavigationResultConfirmedBeforeFeedback: false,
-        }
-      }
-      const beforeScrollTop = current.scrollTop ?? 0
-      const nextScrollTop = typeof view.htmlScrollDelta === "number"
-        ? Math.max(0, beforeScrollTop + view.htmlScrollDelta)
-        : view.htmlScrollPosition === "top"
-          ? 0
-          : view.htmlScrollPosition === "bottom"
-            ? Math.max(0, (current.scrollHeight ?? 0) - (current.viewportHeight ?? 0))
-            : current.scrollTop
-      current = {
-        ...current,
-        pageIndex: view.pageIndex,
-        zoom: view.zoom,
-        fitMode: view.fitMode,
-        scrollTop: nextScrollTop,
-        viewSignature: buildArtifactViewSignature({
-          artifactId: current.artifactId,
-          filePath: current.artifactPath,
-          rendererKind: current.rendererKind,
-          pageIndex: view.pageIndex,
-          pageCount: current.pageCount,
-          zoom: view.zoom,
-          fitMode: view.fitMode,
-        }),
-      }
-      if (htmlScrollAttempted) {
-        const commandKind = typeof view.htmlScrollDelta === "number"
-          ? view.htmlScrollDelta >= 0 ? "scroll_down" : "scroll_up"
-          : view.htmlScrollPosition === "bottom"
-            ? "go_bottom"
-            : "go_top"
-        return {
-          ok: true,
-          blockedReason: null,
-          method: typeof view.htmlScrollDelta === "number" ? "scroll_by" : "scroll_to",
-          scrolled: nextScrollTop !== beforeScrollTop,
-          htmlNavigationControllerActive: true,
-          htmlNavigationRouterUsed: true,
-          htmlNavigationCommandKind: commandKind,
-          htmlNavigationTargetSafe: view.htmlScrollPosition ?? (commandKind === "scroll_down" ? "scroll down" : "scroll up"),
-          htmlNavigationTargetKind: view.htmlScrollPosition ?? (commandKind === "scroll_down" ? "bottom" : "top"),
-          htmlNavigationResult: "success",
-          htmlNavigationFailureReason: null,
-          htmlNavigationScrollTopBefore: beforeScrollTop,
-          htmlNavigationScrollTopAfter: nextScrollTop,
-          htmlNavigationScrolled: nextScrollTop !== beforeScrollTop,
-          htmlNavigationCommandId: "test-html-command",
-          htmlNavigationTimedOut: false,
-          htmlNavigationWaitedForReady: false,
-          htmlNavigationPreventedPdfFallback: true,
-          htmlVoiceNavigationUsedSameResolver: view.htmlNavigationSource === "voice",
-          htmlNavigationResultConfirmedBeforeFeedback: true,
-        }
-      }
-    },
-    refreshView: () => {
-      refreshes += 1
-      const refreshResult: CoreviewToolRefreshResult = refreshOk ? "success" : "error"
-      return {
-        ok: refreshOk,
-        refreshResult,
-        blockedReason: refreshOk ? null : "refresh_unavailable",
-      }
-    },
-    waitForViewReady: async (_viewSignature) => ({
-      ok: waitOk,
-      waitMs: waitOk ? 12 : 2500,
-      blockedReason: waitOk ? null : "view_ready_timeout",
-    }),
-    markViewStale: (viewSignature) => {
-      staleSignature = viewSignature
-      current = { ...current, stale: true, visualFrameFresh: false }
-    },
-    clearViewStale: (viewSignature) => {
-      if (!viewSignature || staleSignature === viewSignature) {
-        staleSignature = null
-        current = { ...current, stale: false, visualFrameFresh: true }
-      }
-    },
-    resolveAnnotationAnchor: ({ anchor, pageIndex }) => {
-      if (current.rendererKind !== "pdf") {
-        return { ok: false, blockedReason: "unsupported_renderer" }
-      }
-      if (anchor.type === "current_title") {
-        return {
+function harnessViewSignature(
+  current: CoreviewCurrentView,
+  view: Pick<CoreviewSetViewAdapterInput, "pageIndex" | "zoom" | "fitMode">,
+) {
+  return buildArtifactViewSignature({
+    artifactId: current.artifactId,
+    filePath: current.artifactPath,
+    rendererKind: current.rendererKind,
+    pageIndex: view.pageIndex,
+    pageCount: current.pageCount,
+    zoom: view.zoom,
+    fitMode: view.fitMode,
+  })
+}
+
+function harnessScrollCommandKind(view: CoreviewSetViewAdapterInput): string {
+  if (typeof view.htmlScrollDelta === "number") {
+    return view.htmlScrollDelta >= 0 ? "scroll_down" : "scroll_up"
+  }
+  return view.htmlScrollPosition === "bottom" ? "go_bottom" : "go_top"
+}
+
+function harnessHtmlSetViewFailureResult(
+  state: HarnessState,
+  view: CoreviewSetViewAdapterInput,
+  failure: CoreviewToolBlockedReason,
+): CoreviewSetViewAdapterResult {
+  return {
+    ok: false,
+    blockedReason: failure,
+    method: "heading",
+    scrolled: false,
+    htmlNavigationControllerActive: true,
+    htmlNavigationRouterUsed: true,
+    htmlNavigationCommandKind: harnessScrollCommandKind(view),
+    htmlNavigationTargetSafe: view.htmlScrollPosition ?? null,
+    htmlNavigationTargetKind: view.htmlScrollPosition ?? "unknown",
+    htmlNavigationResult: failure,
+    htmlNavigationFailureReason: failure,
+    htmlNavigationScrollTopBefore: state.current.scrollTop ?? null,
+    htmlNavigationScrollTopAfter: state.current.scrollTop ?? null,
+    htmlNavigationScrolled: false,
+    htmlNavigationCommandId: "test-html-command",
+    htmlNavigationTimedOut: failure === "iframe_not_ready",
+    htmlNavigationWaitedForReady: failure === "iframe_not_ready",
+    htmlNavigationPreventedPdfFallback: true,
+    htmlVoiceNavigationUsedSameResolver: true,
+    htmlNavigationResultConfirmedBeforeFeedback: false,
+  }
+}
+
+function harnessNextScrollTop(
+  state: HarnessState,
+  view: CoreviewSetViewAdapterInput,
+  beforeScrollTop: number,
+): number | null | undefined {
+  if (typeof view.htmlScrollDelta === "number") {
+    return Math.max(0, beforeScrollTop + view.htmlScrollDelta)
+  }
+  if (view.htmlScrollPosition === "top") {
+    return 0
+  }
+  if (view.htmlScrollPosition === "bottom") {
+    return Math.max(0, (state.current.scrollHeight ?? 0) - (state.current.viewportHeight ?? 0))
+  }
+  return state.current.scrollTop
+}
+
+function harnessHtmlSetViewSuccessResult(
+  view: CoreviewSetViewAdapterInput,
+  beforeScrollTop: number,
+  nextScrollTop: number | null | undefined,
+): CoreviewSetViewAdapterResult {
+  const commandKind = harnessScrollCommandKind(view)
+  return {
+    ok: true,
+    blockedReason: null,
+    method: typeof view.htmlScrollDelta === "number" ? "scroll_by" : "scroll_to",
+    scrolled: nextScrollTop !== beforeScrollTop,
+    htmlNavigationControllerActive: true,
+    htmlNavigationRouterUsed: true,
+    htmlNavigationCommandKind: commandKind,
+    htmlNavigationTargetSafe: view.htmlScrollPosition ?? (commandKind === "scroll_down" ? "scroll down" : "scroll up"),
+    htmlNavigationTargetKind: view.htmlScrollPosition ?? (commandKind === "scroll_down" ? "bottom" : "top"),
+    htmlNavigationResult: "success",
+    htmlNavigationFailureReason: null,
+    htmlNavigationScrollTopBefore: beforeScrollTop,
+    htmlNavigationScrollTopAfter: nextScrollTop,
+    htmlNavigationScrolled: nextScrollTop !== beforeScrollTop,
+    htmlNavigationCommandId: "test-html-command",
+    htmlNavigationTimedOut: false,
+    htmlNavigationWaitedForReady: false,
+    htmlNavigationPreventedPdfFallback: true,
+    htmlVoiceNavigationUsedSameResolver: view.htmlNavigationSource === "voice",
+    htmlNavigationResultConfirmedBeforeFeedback: true,
+  }
+}
+
+function harnessSetView(
+  state: HarnessState,
+  htmlSetViewFailure: CoreviewToolBlockedReason | undefined,
+  view: CoreviewSetViewAdapterInput,
+): CoreviewSetViewAdapterResult | undefined {
+  const htmlScrollAttempted = state.current.rendererKind === "html" && (
+    typeof view.htmlScrollDelta === "number"
+    || Boolean(view.htmlScrollPosition)
+  )
+  if (htmlScrollAttempted && htmlSetViewFailure) {
+    return harnessHtmlSetViewFailureResult(state, view, htmlSetViewFailure)
+  }
+  const beforeScrollTop = state.current.scrollTop ?? 0
+  const nextScrollTop = harnessNextScrollTop(state, view, beforeScrollTop)
+  state.current = {
+    ...state.current,
+    pageIndex: view.pageIndex,
+    zoom: view.zoom,
+    fitMode: view.fitMode,
+    scrollTop: nextScrollTop,
+    viewSignature: harnessViewSignature(state.current, view),
+  }
+  if (htmlScrollAttempted) {
+    return harnessHtmlSetViewSuccessResult(view, beforeScrollTop, nextScrollTop)
+  }
+  return undefined
+}
+
+function harnessRefreshView(state: HarnessState, refreshOk: boolean): CoreviewRefreshAdapterResult {
+  state.refreshes += 1
+  const refreshResult: CoreviewToolRefreshResult = refreshOk ? "success" : "error"
+  return {
+    ok: refreshOk,
+    refreshResult,
+    blockedReason: refreshOk ? null : "refresh_unavailable",
+  }
+}
+
+function harnessWaitForViewReady(waitOk: boolean): CoreviewViewReadyResult {
+  return {
+    ok: waitOk,
+    waitMs: waitOk ? 12 : 2500,
+    blockedReason: waitOk ? null : "view_ready_timeout",
+  }
+}
+
+function harnessMarkViewStale(state: HarnessState, viewSignature: string | null): void {
+  state.staleSignature = viewSignature
+  state.current = { ...state.current, stale: true, visualFrameFresh: false }
+}
+
+function harnessClearViewStale(state: HarnessState, viewSignature: string | null): void {
+  if (!viewSignature || state.staleSignature === viewSignature) {
+    state.staleSignature = null
+    state.current = { ...state.current, stale: false, visualFrameFresh: true }
+  }
+}
+
+function harnessResolveAnnotationAnchor(
+  state: HarnessState,
+  { anchor, pageIndex }: { anchor: CoreviewAnnotationAnchor; pageIndex: number },
+): CoreviewResolveAnnotationAnchorResult {
+  if (state.current.rendererKind !== "pdf") {
+    return { ok: false, blockedReason: "unsupported_renderer" }
+  }
+  if (anchor.type === "current_title") {
+    return {
+      ok: true,
+      anchor: {
+        anchorType: "current_title",
+        pageIndex,
+        rect: { x: 0.12, y: 0.08, width: 0.62, height: 0.07 },
+        point: null,
+      },
+    }
+  }
+  if (anchor.type === "text_quote") {
+    return /budget/iu.test(anchor.text)
+      ? {
           ok: true,
           anchor: {
-            anchorType: "current_title",
+            anchorType: "text_quote",
             pageIndex,
-            rect: { x: 0.12, y: 0.08, width: 0.62, height: 0.07 },
+            rect: { x: 0.2, y: 0.32, width: 0.38, height: 0.04 },
             point: null,
           },
         }
-      }
-      if (anchor.type === "text_quote") {
-        return /budget/iu.test(anchor.text)
-          ? {
-              ok: true,
-              anchor: {
-                anchorType: "text_quote",
-                pageIndex,
-                rect: { x: 0.2, y: 0.32, width: 0.38, height: 0.04 },
-                point: null,
-              },
-            }
-          : { ok: false, blockedReason: "anchor_not_found" }
-      }
-      if (anchor.type === "rect") {
-        return {
-          ok: true,
-          anchor: {
-            anchorType: "rect",
-            pageIndex,
-            rect: { x: anchor.x, y: anchor.y, width: anchor.width, height: anchor.height },
-            point: null,
-          },
-        }
-      }
-      if (anchor.type === "point") {
-        return {
-          ok: true,
-          anchor: {
-            anchorType: "point",
-            pageIndex,
-            rect: null,
-            point: { x: anchor.x, y: anchor.y },
-          },
-        }
-      }
-      return { ok: false, blockedReason: "anchor_not_found" }
-    },
-    addAnnotation: (input) => {
-      if (annotationCommitNoop) {
-        return {
-          ok: true,
-          annotationId: `${input.kind}-noop`,
-          blockedReason: null,
-          annotationCount: current.annotationCount,
-          highlightCount: current.highlightCount,
-          commentCount: current.commentCount,
-          underlineCount: current.underlineCount ?? 0,
-          arrowCount: current.arrowCount ?? 0,
-          drawPathCount: current.drawPathCount ?? 0,
-        }
-      }
-      annotations = [...annotations, { kind: input.kind }]
-      const highlightCount = annotations.filter((annotation) => annotation.kind === "highlight").length
-      const commentCount = annotations.filter((annotation) => annotation.kind === "comment").length
-      const underlineCount = annotations.filter((annotation) => annotation.kind === "underline").length
-      const arrowCount = annotations.filter((annotation) => annotation.kind === "arrow").length
-      current = {
-        ...current,
-        annotationOverlayCaptured: annotations.length > 0,
-        annotationCount: annotations.length,
-        highlightCount,
-        commentCount,
-        underlineCount,
-        arrowCount,
-        drawPathCount: 0,
-      }
-      return {
-        ok: true,
-        annotationId: `${input.kind}-${annotations.length}`,
-        blockedReason: null,
-        annotationCount: annotations.length,
-        highlightCount,
-        commentCount,
-        underlineCount,
-        arrowCount,
-        drawPathCount: 0,
-      }
-    },
-    focusAnnotationAnchor: (input) => {
-      focusCalls += 1
-      focusedAnchors.push(input.anchor)
-      if (current.rendererKind === "html") {
-        const beforeScrollTop = current.scrollTop ?? 0
-        const nextScrollTop = beforeScrollTop + 240
-        if (htmlFocusFailure) {
-          return {
-            ok: false,
-            blockedReason: htmlFocusFailure,
-            method: null,
-            scrolled: false,
-            htmlNavigation: {
-              htmlNavigationControllerActive: true,
-              htmlNavigationRouterUsed: true,
-              htmlNavigationCommandKind: "focus_section",
-              htmlNavigationTargetSafe: input.anchor.text ?? null,
-              htmlNavigationTargetKind: "unknown",
-              htmlNavigationResult: htmlFocusFailure,
-              htmlNavigationFailureReason: htmlFocusFailure,
-              htmlNavigationScrollTopBefore: beforeScrollTop,
-              htmlNavigationScrollTopAfter: beforeScrollTop,
-              htmlNavigationScrolled: false,
-              htmlNavigationCommandId: "test-html-focus",
-              htmlNavigationTimedOut: htmlFocusFailure === "command_timeout",
-              htmlNavigationWaitedForReady: htmlFocusFailure === "iframe_not_ready",
-              htmlNavigationPreventedPdfFallback: true,
-              htmlVoiceNavigationUsedSameResolver: input.htmlNavigationSource === "voice",
-              htmlNavigationResultConfirmedBeforeFeedback: false,
-            },
-          }
-        }
-        current = {
-          ...current,
-          pageIndex: input.pageIndex,
-          zoom: input.zoom,
-          fitMode: input.fitMode,
-          scrollTop: nextScrollTop,
-          viewSignature: buildArtifactViewSignature({
-            artifactId: current.artifactId,
-            filePath: current.artifactPath,
-            rendererKind: current.rendererKind,
-            pageIndex: input.pageIndex,
-            pageCount: current.pageCount,
-            zoom: input.zoom,
-            fitMode: input.fitMode,
-          }),
-        }
-        return {
-          ok: true,
-          blockedReason: null,
-          method: "heading",
-          scrolled: true,
-          htmlNavigation: {
-            htmlNavigationControllerActive: true,
-            htmlNavigationRouterUsed: true,
-            htmlNavigationCommandKind: "focus_section",
-            htmlNavigationTargetSafe: input.anchor.text ?? "top",
-            htmlNavigationTargetKind: "heading",
-            htmlNavigationResult: "success",
-            htmlNavigationFailureReason: null,
-            htmlNavigationScrollTopBefore: beforeScrollTop,
-            htmlNavigationScrollTopAfter: nextScrollTop,
-            htmlNavigationScrolled: true,
-            htmlNavigationCommandId: "test-html-focus",
-            htmlNavigationTimedOut: false,
-            htmlNavigationWaitedForReady: false,
-            htmlNavigationPreventedPdfFallback: true,
-            htmlVoiceNavigationUsedSameResolver: input.htmlNavigationSource === "voice",
-            htmlNavigationResultConfirmedBeforeFeedback: true,
-          },
-        }
-      }
-      current = {
-        ...current,
-        pageIndex: input.pageIndex,
-        zoom: input.zoom,
-        fitMode: input.fitMode,
-        viewSignature: buildArtifactViewSignature({
-          artifactId: current.artifactId,
-          filePath: current.artifactPath,
-          rendererKind: current.rendererKind,
-          pageIndex: input.pageIndex,
-          pageCount: current.pageCount,
-          zoom: input.zoom,
-          fitMode: input.fitMode,
-        }),
-      }
-      return {
-        ok: true,
-        blockedReason: null,
-      }
+      : { ok: false, blockedReason: "anchor_not_found" }
+  }
+  if (anchor.type === "rect") {
+    return {
+      ok: true,
+      anchor: {
+        anchorType: "rect",
+        pageIndex,
+        rect: { x: anchor.x, y: anchor.y, width: anchor.width, height: anchor.height },
+        point: null,
+      },
+    }
+  }
+  if (anchor.type === "point") {
+    return {
+      ok: true,
+      anchor: {
+        anchorType: "point",
+        pageIndex,
+        rect: null,
+        point: { x: anchor.x, y: anchor.y },
+      },
+    }
+  }
+  return { ok: false, blockedReason: "anchor_not_found" }
+}
+
+function harnessAddAnnotation(
+  state: HarnessState,
+  annotationCommitNoop: boolean,
+  input: CoreviewAddAnnotationAdapterInput,
+): CoreviewAddAnnotationAdapterResult {
+  if (annotationCommitNoop) {
+    return {
+      ok: true,
+      annotationId: `${input.kind}-noop`,
+      blockedReason: null,
+      annotationCount: state.current.annotationCount,
+      highlightCount: state.current.highlightCount,
+      commentCount: state.current.commentCount,
+      underlineCount: state.current.underlineCount ?? 0,
+      arrowCount: state.current.arrowCount ?? 0,
+      drawPathCount: state.current.drawPathCount ?? 0,
+    }
+  }
+  state.annotations = [...state.annotations, { kind: input.kind }]
+  const highlightCount = state.annotations.filter((annotation) => annotation.kind === "highlight").length
+  const commentCount = state.annotations.filter((annotation) => annotation.kind === "comment").length
+  const underlineCount = state.annotations.filter((annotation) => annotation.kind === "underline").length
+  const arrowCount = state.annotations.filter((annotation) => annotation.kind === "arrow").length
+  state.current = {
+    ...state.current,
+    annotationOverlayCaptured: state.annotations.length > 0,
+    annotationCount: state.annotations.length,
+    highlightCount,
+    commentCount,
+    underlineCount,
+    arrowCount,
+    drawPathCount: 0,
+  }
+  return {
+    ok: true,
+    annotationId: `${input.kind}-${state.annotations.length}`,
+    blockedReason: null,
+    annotationCount: state.annotations.length,
+    highlightCount,
+    commentCount,
+    underlineCount,
+    arrowCount,
+    drawPathCount: 0,
+  }
+}
+
+function harnessFocusHtmlAnchor(
+  state: HarnessState,
+  htmlFocusFailure: CoreviewToolBlockedReason | undefined,
+  input: CoreviewFocusAnchorAdapterInput,
+): CoreviewFocusAnchorAdapterResult {
+  const beforeScrollTop = state.current.scrollTop ?? 0
+  const nextScrollTop = beforeScrollTop + 240
+  if (htmlFocusFailure) {
+    return {
+      ok: false,
+      blockedReason: htmlFocusFailure,
+      method: null,
+      scrolled: false,
+      htmlNavigation: {
+        htmlNavigationControllerActive: true,
+        htmlNavigationRouterUsed: true,
+        htmlNavigationCommandKind: "focus_section",
+        htmlNavigationTargetSafe: input.anchor.text ?? null,
+        htmlNavigationTargetKind: "unknown",
+        htmlNavigationResult: htmlFocusFailure,
+        htmlNavigationFailureReason: htmlFocusFailure,
+        htmlNavigationScrollTopBefore: beforeScrollTop,
+        htmlNavigationScrollTopAfter: beforeScrollTop,
+        htmlNavigationScrolled: false,
+        htmlNavigationCommandId: "test-html-focus",
+        htmlNavigationTimedOut: htmlFocusFailure === "command_timeout",
+        htmlNavigationWaitedForReady: htmlFocusFailure === "iframe_not_ready",
+        htmlNavigationPreventedPdfFallback: true,
+        htmlVoiceNavigationUsedSameResolver: input.htmlNavigationSource === "voice",
+        htmlNavigationResultConfirmedBeforeFeedback: false,
+      },
+    }
+  }
+  state.current = {
+    ...state.current,
+    pageIndex: input.pageIndex,
+    zoom: input.zoom,
+    fitMode: input.fitMode,
+    scrollTop: nextScrollTop,
+    viewSignature: harnessViewSignature(state.current, input),
+  }
+  return {
+    ok: true,
+    blockedReason: null,
+    method: "heading",
+    scrolled: true,
+    htmlNavigation: {
+      htmlNavigationControllerActive: true,
+      htmlNavigationRouterUsed: true,
+      htmlNavigationCommandKind: "focus_section",
+      htmlNavigationTargetSafe: input.anchor.text ?? "top",
+      htmlNavigationTargetKind: "heading",
+      htmlNavigationResult: "success",
+      htmlNavigationFailureReason: null,
+      htmlNavigationScrollTopBefore: beforeScrollTop,
+      htmlNavigationScrollTopAfter: nextScrollTop,
+      htmlNavigationScrolled: true,
+      htmlNavigationCommandId: "test-html-focus",
+      htmlNavigationTimedOut: false,
+      htmlNavigationWaitedForReady: false,
+      htmlNavigationPreventedPdfFallback: true,
+      htmlVoiceNavigationUsedSameResolver: input.htmlNavigationSource === "voice",
+      htmlNavigationResultConfirmedBeforeFeedback: true,
     },
   }
+}
+
+function harnessFocusAnnotationAnchor(
+  state: HarnessState,
+  htmlFocusFailure: CoreviewToolBlockedReason | undefined,
+  input: CoreviewFocusAnchorAdapterInput,
+): CoreviewFocusAnchorAdapterResult {
+  state.focusCalls += 1
+  state.focusedAnchors.push(input.anchor)
+  if (state.current.rendererKind === "html") {
+    return harnessFocusHtmlAnchor(state, htmlFocusFailure, input)
+  }
+  state.current = {
+    ...state.current,
+    pageIndex: input.pageIndex,
+    zoom: input.zoom,
+    fitMode: input.fitMode,
+    viewSignature: harnessViewSignature(state.current, input),
+  }
+  return {
+    ok: true,
+    blockedReason: null,
+  }
+}
+
+function harnessRebindVisibleArtifact(
+  state: HarnessState,
+  options: {
+    rebindCurrent: Partial<CoreviewCurrentView>
+    rebindOk: boolean
+    rebindReason: string | null
+  },
+  input: CoreviewArtifactRebindInput,
+): CoreviewArtifactRebindResult {
+  state.current = {
+    ...state.current,
+    ...options.rebindCurrent,
+    rebindStatus: options.rebindOk ? "success" : "failed",
+  }
+  return {
+    ok: options.rebindOk,
+    status: options.rebindOk ? "success" : "failed",
+    reason: options.rebindReason ?? input.reason,
+    currentView: state.current,
+  }
+}
+
+function createHarness(options: Partial<CoreviewCurrentView> & {
+  refreshOk?: boolean
+  waitOk?: boolean
+  annotationCommitNoop?: boolean
+  htmlSetViewFailure?: CoreviewToolBlockedReason
+  htmlFocusFailure?: CoreviewToolBlockedReason
+  rebindCurrent?: Partial<CoreviewCurrentView>
+  rebindOk?: boolean
+  rebindReason?: string | null
+} = {}) {
+  const {
+    refreshOk = true,
+    waitOk = true,
+    annotationCommitNoop = false,
+    htmlSetViewFailure,
+    htmlFocusFailure,
+    rebindCurrent,
+    rebindOk = true,
+    rebindReason = null,
+    ...currentOptions
+  } = options
+  const state: HarnessState = {
+    current: buildHarnessCurrent(currentOptions),
+    refreshes: 0,
+    focusCalls: 0,
+    staleSignature: null,
+    annotations: [],
+    focusedAnchors: [],
+  }
+
+  const adapter: CoreviewRendererAdapter = {
+    getCurrentViewState: () => state.current,
+    setView: (view: CoreviewSetViewAdapterInput): CoreviewSetViewAdapterResult | void => (
+      harnessSetView(state, htmlSetViewFailure, view)
+    ),
+    refreshView: () => harnessRefreshView(state, refreshOk),
+    waitForViewReady: async (_viewSignature) => harnessWaitForViewReady(waitOk),
+    markViewStale: (viewSignature) => {
+      harnessMarkViewStale(state, viewSignature)
+    },
+    clearViewStale: (viewSignature) => {
+      harnessClearViewStale(state, viewSignature)
+    },
+    resolveAnnotationAnchor: (input) => harnessResolveAnnotationAnchor(state, input),
+    addAnnotation: (input) => harnessAddAnnotation(state, annotationCommitNoop, input),
+    focusAnnotationAnchor: (input) => harnessFocusAnnotationAnchor(state, htmlFocusFailure, input),
+  }
   if (rebindCurrent) {
-    adapter.rebindVisibleArtifact = (input) => {
-      current = {
-        ...current,
-        ...rebindCurrent,
-        rebindStatus: rebindOk ? "success" : "failed",
-      }
-      return {
-        ok: rebindOk,
-        status: rebindOk ? "success" : "failed",
-        reason: rebindReason ?? input.reason,
-        currentView: current,
-      }
-    }
+    adapter.rebindVisibleArtifact = (input) => (
+      harnessRebindVisibleArtifact(state, { rebindCurrent, rebindOk, rebindReason }, input)
+    )
   }
 
   return {
     bus: createCoreviewActionBus(adapter),
     get refreshes() {
-      return refreshes
+      return state.refreshes
     },
     get staleSignature() {
-      return staleSignature
+      return state.staleSignature
     },
     get focusCalls() {
-      return focusCalls
+      return state.focusCalls
     },
     get focusedAnchors() {
-      return focusedAnchors
+      return state.focusedAnchors
     },
     get annotations() {
-      return annotations
+      return state.annotations
     },
     get current() {
-      return current
+      return state.current
     },
   }
 }

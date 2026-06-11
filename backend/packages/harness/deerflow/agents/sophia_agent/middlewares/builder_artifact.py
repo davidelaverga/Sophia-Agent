@@ -177,6 +177,156 @@ def _image_generation_invocations_in_command(command: str) -> int:
     # without /public) — count the shared canonical suffix instead of summing
     # marker hits, which would double-count a single invocation.
     return command.count("image-generation/scripts/generate.py")
+
+
+def _autowire_plan_path(request: "ToolCallRequest") -> str | None:
+    """Plan-file path when the bash call is an autowire-eligible pptx run."""
+    tool_name = str(request.tool_call.get("name") or "")
+    if tool_name not in {"bash", "bash_tool"}:
+        return None
+    args = request.tool_call.get("args") or {}
+    command = str(args.get("command") or "") if isinstance(args, dict) else ""
+    if not any(marker in command for marker in _PPTX_GENERATOR_PATH_MARKERS):
+        return None
+    if _command_flag_values(command, "--slide-images"):
+        return None
+    return _command_flag_value(command, "--plan-file")
+
+
+def _load_plan_slides(host_plan: Path) -> tuple[dict | None, list | None]:
+    try:
+        plan = json.loads(host_plan.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    slides = plan.get("slides") if isinstance(plan, dict) else None
+    if not isinstance(slides, list) or not slides:
+        return None, None
+    return plan, slides
+
+
+def _drop_invalid_slide_image_refs(slides: list, state: dict[str, Any]) -> tuple[int, bool]:
+    """Strip refs to nonexistent files; return (valid_ref_count, changed)."""
+    referenced = 0
+    changed = False
+    for slide in slides:
+        if not isinstance(slide, dict):
+            continue
+        for key in ("image", "chart_path", "visual_path"):
+            ref = slide.get(key)
+            if not isinstance(ref, str) or not ref.strip():
+                continue
+            exists, _bytes, _reason = _virtual_output_status(state, ref.strip())
+            if exists:
+                referenced += 1
+            else:
+                slide.pop(key, None)
+                changed = True
+                logger.warning(
+                    "[BuilderVisualDiagnostics] phase=plan_invalid_image_ref_dropped "
+                    "slide_title=%s ref=%s",
+                    slide.get("title"),
+                    ref,
+                )
+    return referenced, changed
+
+
+def _existing_asset_paths(state: dict[str, Any], candidates: list, suffixes: set[str]) -> list[str]:
+    assets = []
+    for asset in candidates:
+        if not isinstance(asset, str):
+            continue
+        if PurePosixPath(asset).suffix.lower() not in suffixes:
+            continue
+        exists, _bytes, _reason = _virtual_output_status(state, asset)
+        if exists:
+            assets.append(asset)
+    return assets
+
+
+def _hero_wire_targets(slides: list) -> list[dict]:
+    targets = [
+        slide
+        for slide in slides
+        if isinstance(slide, dict)
+        and (
+            str(slide.get("type") or "").lower() == "title"
+            or str(slide.get("layout") or "").lower() in {"title", "section_divider", "full_bleed_image"}
+        )
+        and not slide.get("image")
+    ]
+    if not targets and slides and isinstance(slides[0], dict) and not slides[0].get("image"):
+        targets = [slides[0]]
+    return targets
+
+
+def _wire_hero_assets(slides: list, hero_assets: list[str]) -> int:
+    wired = 0
+    for slide, asset in zip(_hero_wire_targets(slides), hero_assets, strict=False):
+        slide["image"] = asset
+        if not slide.get("layout"):
+            slide["layout"] = "full_bleed_image"
+        wired += 1
+    return wired
+
+
+def _chart_wire_targets(slides: list) -> list[dict]:
+    targets = [
+        slide
+        for slide in slides
+        if isinstance(slide, dict)
+        and str(slide.get("type") or "").lower() != "title"
+        and not slide.get("image")
+    ]
+    if not targets and len(slides) > 1:
+        targets = [slide for slide in slides[1:] if isinstance(slide, dict) and not slide.get("image")]
+    return targets
+
+
+def _wire_chart_assets(slides: list, chart_assets: list[str]) -> int:
+    wired = 0
+    for slide, asset in zip(_chart_wire_targets(slides), chart_assets, strict=False):
+        slide["image"] = asset
+        wired += 1
+    return wired
+
+
+def _wire_plan_visual_assets(slides: list, state: dict[str, Any]) -> bool:
+    """Wire hero images (GPT-generated) and chart PNGs into unreferenced slides.
+
+    Two asset pools: GPT-generated hero/illustrative images from the
+    image-generation skill (previously NEVER autowired) and deterministic
+    chart PNGs from generate_visual_asset.
+    """
+    hero_assets = _existing_asset_paths(
+        state,
+        _pptx_diagnostics(state).get("image_output_paths") or [],
+        {".png", ".jpg", ".jpeg"},
+    )
+    chart_assets = _existing_asset_paths(state, _visual_asset_paths(state), {".png"})
+    hero_wired = _wire_hero_assets(slides, hero_assets) if hero_assets else 0
+    chart_wired = _wire_chart_assets(slides, chart_assets) if chart_assets else 0
+    if hero_wired or chart_wired:
+        logger.warning(
+            "[BuilderVisualDiagnostics] phase=plan_visuals_autowired "
+            "hero_wired=%d chart_wired=%d hero_assets=%d chart_assets=%d slide_count=%d",
+            hero_wired,
+            chart_wired,
+            len(hero_assets),
+            len(chart_assets),
+            len(slides),
+        )
+    return bool(hero_wired or chart_wired)
+
+
+def _write_plan_file(host_plan: Path, plan: dict, plan_path: str) -> None:
+    try:
+        host_plan.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        logger.warning(
+            "[BuilderVisualDiagnostics] phase=plan_autowire_write_failed plan=%s",
+            plan_path,
+            exc_info=True,
+        )
 _PATH_CORRECTABLE_WRITE_ERROR_CLASSES = {
     "path_is_directory",
     "path_not_outputs",
@@ -2303,44 +2453,76 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         runtime: Runtime,
     ) -> tuple[str | None, bool]:
         primary = artifact_args.get("artifact_path")
+        format_rejection = cls._format_specific_rejection(primary, state, runtime)
+        if format_rejection is not None:
+            return format_rejection, False
+        return cls._candidate_rejection(artifact_args, primary, state, runtime)
+
+    @classmethod
+    def _format_specific_rejection(
+        cls,
+        primary: Any,
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> str | None:
         if _requested_pdf_artifact(state):
             rejection_reason = _pdf_artifact_path_rejection_reason(primary, state)
             if rejection_reason is not None:
-                return cls._path_sensitive_rejection_reason(primary, rejection_reason), False
+                return cls._path_sensitive_rejection_reason(primary, rejection_reason)
         if _requested_pptx_artifact(state):
-            rejection_reason = _pptx_artifact_path_rejection_reason(primary, state)
-            if rejection_reason is not None:
-                return cls._path_sensitive_rejection_reason(primary, rejection_reason), False
-            canonical_primary = _canonical_outputs_artifact_path(primary)
-            if canonical_primary is not None:
-                integrity_rejection = _pptx_path_integrity_rejection_reason(canonical_primary, state, runtime)
-                if integrity_rejection is not None:
-                    return integrity_rejection, False
-                html_rejection = _pptx_html_fallback_integrity_rejection_reason(
-                    canonical_primary,
-                    state,
-                    runtime,
-                )
-                if html_rejection is not None:
-                    return html_rejection, False
+            rejection = cls._pptx_format_rejection(primary, state, runtime)
+            if rejection is not None:
+                return rejection
         if _requested_html_artifact(state):
-            rejection_reason = _html_artifact_path_rejection_reason(primary)
-            if rejection_reason is not None:
-                return cls._path_sensitive_rejection_reason(primary, rejection_reason), False
-            canonical_primary = _canonical_outputs_artifact_path(primary)
-            if canonical_primary is not None:
-                integrity_rejection = _html_artifact_integrity_rejection_reason(
-                    canonical_primary,
-                    state,
-                    runtime,
-                )
-                if integrity_rejection is not None:
-                    return integrity_rejection, False
+            rejection = cls._html_format_rejection(primary, state, runtime)
+            if rejection is not None:
+                return rejection
+        return None
 
+    @classmethod
+    def _pptx_format_rejection(
+        cls,
+        primary: Any,
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> str | None:
+        rejection_reason = _pptx_artifact_path_rejection_reason(primary, state)
+        if rejection_reason is not None:
+            return cls._path_sensitive_rejection_reason(primary, rejection_reason)
+        canonical_primary = _canonical_outputs_artifact_path(primary)
+        if canonical_primary is None:
+            return None
+        integrity_rejection = _pptx_path_integrity_rejection_reason(canonical_primary, state, runtime)
+        if integrity_rejection is not None:
+            return integrity_rejection
+        return _pptx_html_fallback_integrity_rejection_reason(canonical_primary, state, runtime)
+
+    @classmethod
+    def _html_format_rejection(
+        cls,
+        primary: Any,
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> str | None:
+        rejection_reason = _html_artifact_path_rejection_reason(primary)
+        if rejection_reason is not None:
+            return cls._path_sensitive_rejection_reason(primary, rejection_reason)
+        canonical_primary = _canonical_outputs_artifact_path(primary)
+        if canonical_primary is None:
+            return None
+        return _html_artifact_integrity_rejection_reason(canonical_primary, state, runtime)
+
+    @classmethod
+    def _candidate_rejection(
+        cls,
+        artifact_args: dict[str, Any],
+        primary: Any,
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> tuple[str | None, bool]:
         candidates = _emit_candidate_paths(artifact_args)
         if not candidates:
             return "artifact_file_missing", False
-
         thread_data = state.get("thread_data") or {}
         outputs_host_path = (
             thread_data.get("outputs_path")
@@ -5647,141 +5829,25 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         hook (a) drops slide image refs pointing at nonexistent files (which
         would abort composition with FileNotFoundError) and (b) if visuals
         were requested but no slide references one, assigns the existing
-        PNG assets round-robin across content slides.
+        assets (hero images first, then chart PNGs) across the slides.
         """
-        tool_name = str(request.tool_call.get("name") or "")
-        if tool_name not in {"bash", "bash_tool"}:
-            return
-        args = request.tool_call.get("args") or {}
-        command = str(args.get("command") or "") if isinstance(args, dict) else ""
-        if not any(marker in command for marker in _PPTX_GENERATOR_PATH_MARKERS):
-            return
-        if _command_flag_values(command, "--slide-images"):
-            return
-        plan_path = _command_flag_value(command, "--plan-file")
-        if not plan_path:
-            return
         state = request.state or {}
+        plan_path = _autowire_plan_path(request)
+        if plan_path is None:
+            return
         host_plan = cls._host_path_for_plan_file(state, plan_path)
         if host_plan is None or not host_plan.is_file():
             return
-        try:
-            plan = json.loads(host_plan.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return
-        slides = plan.get("slides") if isinstance(plan, dict) else None
-        if not isinstance(slides, list) or not slides:
+        plan, slides = _load_plan_slides(host_plan)
+        if plan is None or slides is None:
             return
 
-        outputs_root = _outputs_root_from_state(state)
-        changed = False
-        referenced = 0
-        for slide in slides:
-            if not isinstance(slide, dict):
-                continue
-            for key in ("image", "chart_path", "visual_path"):
-                ref = slide.get(key)
-                if not isinstance(ref, str) or not ref.strip():
-                    continue
-                exists, _bytes, _reason = _virtual_output_status(state, ref.strip())
-                if exists:
-                    referenced += 1
-                else:
-                    slide.pop(key, None)
-                    changed = True
-                    logger.warning(
-                        "[BuilderVisualDiagnostics] phase=plan_invalid_image_ref_dropped "
-                        "slide_title=%s ref=%s",
-                        slide.get("title"),
-                        ref,
-                    )
-
-        if referenced == 0 and _visuals_requested(state) and outputs_root is not None:
-            # Two asset pools: GPT-generated hero/illustrative images (from
-            # the image-generation skill — these were previously NEVER
-            # autowired) and deterministic chart PNGs from
-            # generate_visual_asset.
-            hero_assets = []
-            for asset in (_pptx_diagnostics(state).get("image_output_paths") or []):
-                if not isinstance(asset, str):
-                    continue
-                if PurePosixPath(asset).suffix.lower() not in {".png", ".jpg", ".jpeg"}:
-                    continue
-                exists, _bytes, _reason = _virtual_output_status(state, asset)
-                if exists:
-                    hero_assets.append(asset)
-            chart_assets = []
-            for asset in _visual_asset_paths(state):
-                if not asset.endswith(".png"):
-                    continue
-                exists, _bytes, _reason = _virtual_output_status(state, asset)
-                if exists:
-                    chart_assets.append(asset)
-
-            hero_wired = 0
-            if hero_assets:
-                hero_targets = [
-                    slide
-                    for slide in slides
-                    if isinstance(slide, dict)
-                    and (
-                        str(slide.get("type") or "").lower() == "title"
-                        or str(slide.get("layout") or "").lower() in {"title", "section_divider", "full_bleed_image"}
-                    )
-                    and not slide.get("image")
-                ]
-                if not hero_targets and slides and isinstance(slides[0], dict) and not slides[0].get("image"):
-                    hero_targets = [slides[0]]
-                for slide, asset in zip(hero_targets, hero_assets, strict=False):
-                    slide["image"] = asset
-                    if not slide.get("layout"):
-                        slide["layout"] = "full_bleed_image"
-                    hero_wired += 1
-                if hero_wired:
-                    changed = True
-
-            if chart_assets:
-                content_slides = [
-                    slide
-                    for slide in slides
-                    if isinstance(slide, dict)
-                    and str(slide.get("type") or "").lower() != "title"
-                    and not slide.get("image")
-                ]
-                if not content_slides and len(slides) > 1:
-                    content_slides = [
-                        slide for slide in slides[1:] if isinstance(slide, dict) and not slide.get("image")
-                    ]
-                wired = 0
-                for index, asset in enumerate(chart_assets):
-                    if index >= len(content_slides):
-                        break
-                    content_slides[index]["image"] = asset
-                    wired += 1
-                if wired:
-                    changed = True
-            else:
-                wired = 0
-            if hero_wired or wired:
-                logger.warning(
-                    "[BuilderVisualDiagnostics] phase=plan_visuals_autowired "
-                    "hero_wired=%d chart_wired=%d hero_assets=%d chart_assets=%d slide_count=%d",
-                    hero_wired,
-                    wired,
-                    len(hero_assets),
-                    len(chart_assets),
-                    len(slides),
-                )
+        referenced, changed = _drop_invalid_slide_image_refs(slides, state)
+        if referenced == 0 and _visuals_requested(state) and _outputs_root_from_state(state) is not None:
+            changed = _wire_plan_visual_assets(slides, state) or changed
 
         if changed:
-            try:
-                host_plan.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
-            except OSError:
-                logger.warning(
-                    "[BuilderVisualDiagnostics] phase=plan_autowire_write_failed plan=%s",
-                    plan_path,
-                    exc_info=True,
-                )
+            _write_plan_file(host_plan, plan, plan_path)
 
     @staticmethod
     def _pptx_generation_bash_delta(

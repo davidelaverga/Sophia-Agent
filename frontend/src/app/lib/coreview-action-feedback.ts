@@ -120,6 +120,113 @@ export function dedupeCoreviewActionFeedback(
   }
 }
 
+function builderFeedbackArtifactKey(result: CoreviewBuilderActionResult): string {
+  return result.context?.artifactStableIdentity
+    ?? result.context?.artifactPath
+    ?? result.rendererKind
+    ?? "artifact"
+}
+
+function builderFeedbackOutputKey(result: CoreviewBuilderActionResult): string {
+  return result.htmlQuickPatch?.revisionPathHash
+    ?? result.latestOutput?.artifactPath
+    ?? result.taskId
+    ?? result.runId
+    ?? "no-output"
+}
+
+function builderFeedbackDedupeKey(result: CoreviewBuilderActionResult, prefix: string): string {
+  return [
+    prefix,
+    result.action,
+    result.result,
+    builderFeedbackArtifactKey(result),
+    builderFeedbackOutputKey(result),
+    result.blockedReason ?? "ok",
+  ].join(":")
+}
+
+function cancelUpdateFeedback(
+  result: CoreviewBuilderActionResult,
+  voiceTriggered: boolean,
+  baseKey: string,
+): CoreviewActionFeedback {
+  if (result.result === "no_active_builder_task") {
+    return createCoreviewActionFeedback({
+      actionKind: "cancel_update",
+      status: "no_op",
+      displayMessage: "No active update to cancel.",
+      spokenMessage: "There is no active update to cancel.",
+      shouldSpeak: voiceTriggered,
+      dedupeKey: baseKey,
+    })
+  }
+  const cancelled = result.ok && result.result === "cancelled"
+  return createCoreviewActionFeedback({
+    actionKind: "cancel_update",
+    status: cancelled ? "completed" : "failed",
+    displayMessage: cancelled ? "Update cancelled." : "Could not cancel the update.",
+    spokenMessage: cancelled ? "Update cancelled." : "I couldn't cancel the update.",
+    shouldSpeak: voiceTriggered,
+    dedupeKey: baseKey,
+  })
+}
+
+function builderStatusFeedback(result: CoreviewBuilderActionResult, baseKey: string): CoreviewActionFeedback {
+  const noActiveTask = result.result === "no_active_builder_task"
+  return createCoreviewActionFeedback({
+    actionKind: "status",
+    status: noActiveTask ? "no_op" : "completed",
+    displayMessage: noActiveTask ? "No active update." : "Update status refreshed.",
+    spokenMessage: noActiveTask ? "No active update." : "Update status refreshed.",
+    shouldSpeak: false,
+    shouldShowToastOrCard: false,
+    dedupeKey: baseKey,
+  })
+}
+
+function isQuickPatchFailureResult(result: CoreviewBuilderActionResult): boolean {
+  return Boolean(result.htmlQuickPatch?.attempted && !result.ok && result.result === "failed")
+}
+
+function isBuilderUpdateDispatchedResult(result: CoreviewBuilderActionResult): boolean {
+  return result.ok && (result.result === "task_started" || result.result === "update_requested")
+}
+
+function builderUpdateStartedFeedback(
+  result: CoreviewBuilderActionResult,
+  voiceTriggered: boolean,
+  baseKey: string,
+): CoreviewActionFeedback {
+  const usedFullBuilder = result.htmlQuickPatch?.eligible === true
+    && result.htmlQuickPatch.usedFullBuilder === true
+  return createCoreviewActionFeedback({
+    actionKind: "builder_update",
+    status: "started",
+    displayMessage: usedFullBuilder ? "Builder update started." : "Artifact update started.",
+    spokenMessage: usedFullBuilder
+      ? "That needs a deeper update. I'm starting the builder."
+      : "I'm starting the update.",
+    shouldSpeak: voiceTriggered,
+    dedupeKey: baseKey,
+  })
+}
+
+function builderUpdateCompletionFeedback(
+  result: CoreviewBuilderActionResult,
+  voiceTriggered: boolean,
+  baseKey: string,
+): CoreviewActionFeedback {
+  return createCoreviewActionFeedback({
+    actionKind: "builder_update",
+    status: result.ok ? "completed" : "failed",
+    displayMessage: result.ok ? "Artifact update ready." : "Artifact update failed.",
+    spokenMessage: result.ok ? "The update is ready." : "I couldn't update that artifact.",
+    shouldSpeak: voiceTriggered,
+    dedupeKey: baseKey,
+  })
+}
+
 export function coreviewFeedbackFromBuilderActionResult(
   result: CoreviewBuilderActionResult,
   options: {
@@ -130,46 +237,14 @@ export function coreviewFeedbackFromBuilderActionResult(
 ): CoreviewActionFeedback {
   const voiceTriggered = options.voiceTriggered === true
   const prefix = normalizeFeedbackToken(options.dedupePrefix) ?? "builder"
-  const baseKey = [
-    prefix,
-    result.action,
-    result.result,
-    result.context?.artifactStableIdentity ?? result.context?.artifactPath ?? result.rendererKind ?? "artifact",
-    result.htmlQuickPatch?.revisionPathHash ?? result.latestOutput?.artifactPath ?? result.taskId ?? result.runId ?? "no-output",
-    result.blockedReason ?? "ok",
-  ].join(":")
+  const baseKey = builderFeedbackDedupeKey(result, prefix)
 
   if (result.action === "coreview_cancel_builder_task") {
-    if (result.result === "no_active_builder_task") {
-      return createCoreviewActionFeedback({
-        actionKind: "cancel_update",
-        status: "no_op",
-        displayMessage: "No active update to cancel.",
-        spokenMessage: "There is no active update to cancel.",
-        shouldSpeak: voiceTriggered,
-        dedupeKey: baseKey,
-      })
-    }
-    return createCoreviewActionFeedback({
-      actionKind: "cancel_update",
-      status: result.ok && result.result === "cancelled" ? "completed" : "failed",
-      displayMessage: result.ok && result.result === "cancelled" ? "Update cancelled." : "Could not cancel the update.",
-      spokenMessage: result.ok && result.result === "cancelled" ? "Update cancelled." : "I couldn't cancel the update.",
-      shouldSpeak: voiceTriggered,
-      dedupeKey: baseKey,
-    })
+    return cancelUpdateFeedback(result, voiceTriggered, baseKey)
   }
 
   if (result.action === "coreview_get_builder_status") {
-    return createCoreviewActionFeedback({
-      actionKind: "status",
-      status: result.result === "no_active_builder_task" ? "no_op" : "completed",
-      displayMessage: result.result === "no_active_builder_task" ? "No active update." : "Update status refreshed.",
-      spokenMessage: result.result === "no_active_builder_task" ? "No active update." : "Update status refreshed.",
-      shouldSpeak: false,
-      shouldShowToastOrCard: false,
-      dedupeKey: baseKey,
-    })
+    return builderStatusFeedback(result, baseKey)
   }
 
   if (result.result === "quick_patch_applied") {
@@ -183,7 +258,7 @@ export function coreviewFeedbackFromBuilderActionResult(
     })
   }
 
-  if (result.htmlQuickPatch?.attempted && !result.ok && result.result === "failed") {
+  if (isQuickPatchFailureResult(result)) {
     return createCoreviewActionFeedback({
       actionKind: "quick_patch",
       status: "failed",
@@ -205,27 +280,170 @@ export function coreviewFeedbackFromBuilderActionResult(
     })
   }
 
-  if (result.ok && (result.result === "task_started" || result.result === "update_requested")) {
-    const usedFullBuilder = result.htmlQuickPatch?.eligible === true
-      && result.htmlQuickPatch.usedFullBuilder === true
-    return createCoreviewActionFeedback({
-      actionKind: "builder_update",
-      status: "started",
-      displayMessage: usedFullBuilder ? "Builder update started." : "Artifact update started.",
-      spokenMessage: usedFullBuilder
-        ? "That needs a deeper update. I'm starting the builder."
-        : "I'm starting the update.",
-      shouldSpeak: voiceTriggered,
-      dedupeKey: baseKey,
-    })
+  if (isBuilderUpdateDispatchedResult(result)) {
+    return builderUpdateStartedFeedback(result, voiceTriggered, baseKey)
   }
 
+  return builderUpdateCompletionFeedback(result, voiceTriggered, baseKey)
+}
+
+function actionFeedbackViewKey(result: CoreviewActionResult): string | number {
+  return result.annotation_id
+    ?? result.view_signature_after
+    ?? result.view_signature
+    ?? result.zoom
+    ?? result.fit_mode
+    ?? "view"
+}
+
+function actionFeedbackDedupeKey(result: CoreviewActionResult, prefix: string): string {
+  return [
+    prefix,
+    result.action,
+    result.blocked_reason ?? "ok",
+    result.artifact_stable_identity ?? result.artifact_id ?? result.artifact_path ?? "artifact",
+    result.html_navigation_command_id ?? "no-html-command",
+    actionFeedbackViewKey(result),
+  ].join(":")
+}
+
+function blockedActionFeedbackKind(result: CoreviewActionResult): CoreviewActionFeedbackKind {
+  if (result.action === "add_annotation") {
+    return "annotation"
+  }
+  if (result.action === "set_view") {
+    return result.html_scroll_attempted === true || result.html_navigation_router_used === true
+      ? "navigation"
+      : "zoom"
+  }
+  return "status"
+}
+
+function blockedActionFeedbackShouldSpeak(result: CoreviewActionResult, voiceTriggered: boolean): boolean {
+  return voiceTriggered && (
+    result.action === "add_annotation"
+    || result.action === "focus_anchor"
+    || result.html_scroll_attempted === true
+  )
+}
+
+function blockedActionFeedback(
+  result: CoreviewActionResult,
+  blockedReason: string,
+  voiceTriggered: boolean,
+  baseKey: string,
+): CoreviewActionFeedback {
   return createCoreviewActionFeedback({
-    actionKind: "builder_update",
-    status: result.ok ? "completed" : "failed",
-    displayMessage: result.ok ? "Artifact update ready." : "Artifact update failed.",
-    spokenMessage: result.ok ? "The update is ready." : "I couldn't update that artifact.",
+    actionKind: blockedActionFeedbackKind(result),
+    status: unsupportedFeedbackStatus(blockedReason),
+    displayMessage: blockedFeedbackDisplayMessage(blockedReason),
+    spokenMessage: blockedFeedbackSpokenMessage(blockedReason),
+    shouldSpeak: blockedActionFeedbackShouldSpeak(result, voiceTriggered),
+    dedupeKey: baseKey,
+  })
+}
+
+function annotationActionFeedback(
+  result: CoreviewActionResult,
+  voiceTriggered: boolean,
+  baseKey: string,
+): CoreviewActionFeedback {
+  const kind = result.annotation_kind ?? "highlight"
+  const annotationCreated = result.annotation_created !== false
+    && result.annotation_commit_verified !== false
+  return createCoreviewActionFeedback({
+    actionKind: "annotation",
+    status: annotationCreated ? "applied" : "failed",
+    displayMessage: annotationDisplayMessage(kind, annotationCreated),
+    spokenMessage: annotationSpokenMessage(kind, annotationCreated),
     shouldSpeak: voiceTriggered,
+    dedupeKey: baseKey,
+  })
+}
+
+function navigationFailureReason(result: CoreviewActionResult): string {
+  return result.html_navigation_failure_reason ?? result.blocked_reason ?? "section_not_found"
+}
+
+function htmlScrollActionFeedback(
+  result: CoreviewActionResult,
+  voiceTriggered: boolean,
+  baseKey: string,
+): CoreviewActionFeedback {
+  const confirmed = result.html_navigation_result_confirmed_before_feedback !== false
+  const applied = result.ok && confirmed
+  const successMessage = result.html_navigation_target_kind === "top" ? "Back at the top." : "Scrolled."
+  return createCoreviewActionFeedback({
+    actionKind: "navigation",
+    status: applied ? "applied" : "failed",
+    displayMessage: applied ? successMessage : blockedFeedbackDisplayMessage(navigationFailureReason(result)),
+    spokenMessage: applied ? successMessage : blockedFeedbackSpokenMessage(navigationFailureReason(result)),
+    shouldSpeak: voiceTriggered,
+    shouldShowToastOrCard: false,
+    dedupeKey: baseKey,
+  })
+}
+
+function focusAnchorActionFeedback(
+  result: CoreviewActionResult,
+  voiceTriggered: boolean,
+  baseKey: string,
+): CoreviewActionFeedback {
+  const htmlFocus = result.renderer_kind === "html" || result.html_focus_anchor_attempted === true
+  const confirmed = result.html_navigation_result_confirmed_before_feedback !== false
+  const applied = result.ok && confirmed
+  const successMessage = htmlFocus ? "Scrolled." : "Focused."
+  return createCoreviewActionFeedback({
+    actionKind: "navigation",
+    status: applied ? "applied" : "failed",
+    displayMessage: applied ? successMessage : blockedFeedbackDisplayMessage(navigationFailureReason(result)),
+    spokenMessage: applied ? successMessage : blockedFeedbackSpokenMessage(navigationFailureReason(result)),
+    shouldSpeak: voiceTriggered,
+    shouldShowToastOrCard: false,
+    dedupeKey: baseKey,
+  })
+}
+
+function viewChangeActionFeedback(
+  result: CoreviewActionResult,
+  commandKind: string | null,
+  baseKey: string,
+): CoreviewActionFeedback {
+  const actionKind: CoreviewActionFeedbackKind = isZoomCommand(commandKind)
+    ? "zoom"
+    : "navigation"
+  return createCoreviewActionFeedback({
+    actionKind,
+    status: result.ok ? "applied" : "failed",
+    displayMessage: actionKind === "zoom" ? "View zoom updated." : "View updated.",
+    spokenMessage: actionKind === "zoom" ? "Zoom updated." : "View updated.",
+    shouldSpeak: false,
+    shouldShowToastOrCard: false,
+    dedupeKey: baseKey,
+  })
+}
+
+function refreshViewActionFeedback(result: CoreviewActionResult, baseKey: string): CoreviewActionFeedback {
+  const refreshed = result.refresh_result === "success"
+  return createCoreviewActionFeedback({
+    actionKind: "status",
+    status: refreshed ? "completed" : "no_op",
+    displayMessage: refreshed ? "View refreshed." : "Refresh requested.",
+    spokenMessage: refreshed ? "View refreshed." : "Refresh requested.",
+    shouldSpeak: false,
+    shouldShowToastOrCard: false,
+    dedupeKey: baseKey,
+  })
+}
+
+function defaultActionFeedback(result: CoreviewActionResult, baseKey: string): CoreviewActionFeedback {
+  return createCoreviewActionFeedback({
+    actionKind: "status",
+    status: result.ok ? "completed" : "failed",
+    displayMessage: result.ok ? "Coreview action completed." : "Coreview action failed.",
+    spokenMessage: result.ok ? "Done." : "That action failed.",
+    shouldSpeak: false,
+    shouldShowToastOrCard: false,
     dedupeKey: baseKey,
   })
 }
@@ -241,113 +459,33 @@ export function coreviewFeedbackFromActionResult(
 ): CoreviewActionFeedback {
   const voiceTriggered = options.voiceTriggered === true
   const prefix = normalizeFeedbackToken(options.dedupePrefix) ?? "action"
-  const baseKey = [
-    prefix,
-    result.action,
-    result.blocked_reason ?? "ok",
-    result.artifact_stable_identity ?? result.artifact_id ?? result.artifact_path ?? "artifact",
-    result.html_navigation_command_id ?? "no-html-command",
-    result.annotation_id ?? result.view_signature_after ?? result.view_signature ?? result.zoom ?? result.fit_mode ?? "view",
-  ].join(":")
+  const baseKey = actionFeedbackDedupeKey(result, prefix)
 
   if (!result.ok && result.blocked_reason) {
-    return createCoreviewActionFeedback({
-      actionKind: result.action === "add_annotation"
-        ? "annotation"
-        : result.action === "set_view"
-          ? result.html_scroll_attempted === true || result.html_navigation_router_used === true
-            ? "navigation"
-            : "zoom"
-        : "status",
-      status: unsupportedFeedbackStatus(result.blocked_reason),
-      displayMessage: blockedFeedbackDisplayMessage(result.blocked_reason),
-      spokenMessage: blockedFeedbackSpokenMessage(result.blocked_reason),
-      shouldSpeak: voiceTriggered && (
-        result.action === "add_annotation"
-        || result.action === "focus_anchor"
-        || result.html_scroll_attempted === true
-      ),
-      dedupeKey: baseKey,
-    })
+    return blockedActionFeedback(result, result.blocked_reason, voiceTriggered, baseKey)
   }
 
   if (result.action === "add_annotation") {
-    const kind = result.annotation_kind ?? "highlight"
-    const annotationCreated = result.annotation_created !== false
-      && result.annotation_commit_verified !== false
-    return createCoreviewActionFeedback({
-      actionKind: "annotation",
-      status: annotationCreated ? "applied" : "failed",
-      displayMessage: annotationDisplayMessage(kind, annotationCreated),
-      spokenMessage: annotationSpokenMessage(kind, annotationCreated),
-      shouldSpeak: voiceTriggered,
-      dedupeKey: baseKey,
-    })
+    return annotationActionFeedback(result, voiceTriggered, baseKey)
   }
 
-  if (result.action === "set_view" || result.action === "focus_anchor") {
-    if (result.action === "set_view" && result.html_scroll_attempted === true) {
-      const confirmed = result.html_navigation_result_confirmed_before_feedback !== false
-      const successMessage = result.html_navigation_target_kind === "top" ? "Back at the top." : "Scrolled."
-      return createCoreviewActionFeedback({
-        actionKind: "navigation",
-        status: result.ok && confirmed ? "applied" : "failed",
-        displayMessage: result.ok && confirmed ? successMessage : blockedFeedbackDisplayMessage(result.html_navigation_failure_reason ?? result.blocked_reason ?? "section_not_found"),
-        spokenMessage: result.ok && confirmed ? successMessage : blockedFeedbackSpokenMessage(result.html_navigation_failure_reason ?? result.blocked_reason ?? "section_not_found"),
-        shouldSpeak: voiceTriggered,
-        shouldShowToastOrCard: false,
-        dedupeKey: baseKey,
-      })
-    }
-    if (result.action === "focus_anchor") {
-      const htmlFocus = result.renderer_kind === "html" || result.html_focus_anchor_attempted === true
-      const confirmed = result.html_navigation_result_confirmed_before_feedback !== false
-      return createCoreviewActionFeedback({
-        actionKind: "navigation",
-        status: result.ok && confirmed ? "applied" : "failed",
-        displayMessage: result.ok && confirmed ? (htmlFocus ? "Scrolled." : "Focused.") : blockedFeedbackDisplayMessage(result.html_navigation_failure_reason ?? result.blocked_reason ?? "section_not_found"),
-        spokenMessage: result.ok && confirmed ? (htmlFocus ? "Scrolled." : "Focused.") : blockedFeedbackSpokenMessage(result.html_navigation_failure_reason ?? result.blocked_reason ?? "section_not_found"),
-        shouldSpeak: voiceTriggered,
-        shouldShowToastOrCard: false,
-        dedupeKey: baseKey,
-      })
-    }
-    const commandKind = options.commandKind ?? null
-    const actionKind: CoreviewActionFeedbackKind = isZoomCommand(commandKind)
-      ? "zoom"
-      : "navigation"
-    return createCoreviewActionFeedback({
-      actionKind,
-      status: result.ok ? "applied" : "failed",
-      displayMessage: actionKind === "zoom" ? "View zoom updated." : "View updated.",
-      spokenMessage: actionKind === "zoom" ? "Zoom updated." : "View updated.",
-      shouldSpeak: false,
-      shouldShowToastOrCard: false,
-      dedupeKey: baseKey,
-    })
+  if (result.action === "set_view" && result.html_scroll_attempted === true) {
+    return htmlScrollActionFeedback(result, voiceTriggered, baseKey)
+  }
+
+  if (result.action === "focus_anchor") {
+    return focusAnchorActionFeedback(result, voiceTriggered, baseKey)
+  }
+
+  if (result.action === "set_view") {
+    return viewChangeActionFeedback(result, options.commandKind ?? null, baseKey)
   }
 
   if (result.action === "refresh_view") {
-    return createCoreviewActionFeedback({
-      actionKind: "status",
-      status: result.refresh_result === "success" ? "completed" : "no_op",
-      displayMessage: result.refresh_result === "success" ? "View refreshed." : "Refresh requested.",
-      spokenMessage: result.refresh_result === "success" ? "View refreshed." : "Refresh requested.",
-      shouldSpeak: false,
-      shouldShowToastOrCard: false,
-      dedupeKey: baseKey,
-    })
+    return refreshViewActionFeedback(result, baseKey)
   }
 
-  return createCoreviewActionFeedback({
-    actionKind: "status",
-    status: result.ok ? "completed" : "failed",
-    displayMessage: result.ok ? "Coreview action completed." : "Coreview action failed.",
-    spokenMessage: result.ok ? "Done." : "That action failed.",
-    shouldSpeak: false,
-    shouldShowToastOrCard: false,
-    dedupeKey: baseKey,
-  })
+  return defaultActionFeedback(result, baseKey)
 }
 
 export function coreviewFeedbackTelemetryPayload(

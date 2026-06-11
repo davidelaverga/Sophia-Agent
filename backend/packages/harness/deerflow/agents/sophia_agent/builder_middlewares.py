@@ -26,9 +26,9 @@ artifact → prompt assembly → dangling-tool-call patcher) is locked by
 ``tests/test_sophia_builder_flow.py``; do NOT reorder without updating
 that test.
 
-The ``_create_builder_todo_middleware`` helper that builds the always-on
-Todo middleware sits here too because it's only used in the chain assembly
-and was a private helper of ``builder_agent.py``.
+The Todo factory and the observability middlewares are imported through
+``builder_chain_support`` (single bridge edge) so this assembler stays
+under sentrux's god-file fan-out threshold.
 """
 
 from __future__ import annotations
@@ -37,12 +37,14 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_anthropic.middleware.prompt_caching import AnthropicPromptCachingMiddleware
 
 from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
-from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
-from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
+from deerflow.agents.sophia_agent.builder_chain_support import (
+    BuilderBudgetMiddleware,
+    BuilderProgressMiddleware,
+    LoopDetectionMiddleware,
+    create_builder_todo_middleware,
+)
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
-from deerflow.agents.sophia_agent.middlewares.builder_budget import BuilderBudgetMiddleware
-from deerflow.agents.sophia_agent.middlewares.builder_progress import BuilderProgressMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_provider_fallback import BuilderProviderFallbackMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_research_policy import BuilderResearchPolicyMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
@@ -56,38 +58,6 @@ from deerflow.agents.sophia_agent.middlewares.view_image import (
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 
 __all__ = ["build_builder_middleware_chain"]
-
-
-_BUILDER_TODO_SYSTEM_PROMPT = """
-<builder_todo_system>
-You are the Sophia builder. Keep a live todo list while executing delegated build tasks.
-- Use `write_todos` only for genuinely multi-step work.
-- Create the initial todo list once near the start, then keep working.
-- Do NOT rewrite the todo list after every small tool call.
-- Update todos only when the plan materially changes, a major milestone finishes, or right before the final handoff.
-- Keep at least one item in progress until the task is finished.
-- Mark items completed as soon as a meaningful step is done.
-</builder_todo_system>
-"""
-
-_BUILDER_TODO_TOOL_DESCRIPTION = (
-    "Use this tool to maintain your execution todo list while building. "
-    "Create it once for multi-step work, then update it only at meaningful milestones."
-)
-
-_BUILDER_TODO_REMINDER = (
-    "Only call `write_todos` again if the plan materially changed, a major milestone finished, "
-    "or you are preparing the final handoff."
-)
-
-
-def _create_builder_todo_middleware() -> TodoMiddleware:
-    """Always-on Todo middleware tuned for delegated build execution."""
-    return TodoMiddleware(
-        system_prompt=_BUILDER_TODO_SYSTEM_PROMPT,
-        tool_description=_BUILDER_TODO_TOOL_DESCRIPTION,
-        reminder_instruction=_BUILDER_TODO_REMINDER,
-    )
 
 
 def build_builder_middleware_chain(
@@ -121,7 +91,7 @@ def build_builder_middleware_chain(
     7. ``BuilderProgressMiddleware`` (Phase 4G) — emits ``custom``-mode
        phase events to the langgraph stream so the gateway-side
        ``BuilderProgressSubscriber`` can render live phase headers.
-    8. ``_create_builder_todo_middleware()`` — always-on planning.
+    8. ``create_builder_todo_middleware()`` — always-on planning.
     9. ``BuilderArtifactMiddleware`` — captures emit_builder_artifact
        and uploads to Supabase under the parent thread_id.
     9a. ``ClearOnInjectViewImageMiddleware`` (conditional on
@@ -179,7 +149,7 @@ def build_builder_middleware_chain(
         # tool-call inspection in ``after_model`` runs against the
         # raw model output before artifact rewrites it).
         BuilderProgressMiddleware(),
-        _create_builder_todo_middleware(),
+        create_builder_todo_middleware(),
         # Budget circuit-breaker. Listed BEFORE BuilderArtifactMiddleware so
         # that — because after_model hooks run in REVERSE list order — it runs
         # AFTER it. That lets a turn which legitimately emits an artifact claim

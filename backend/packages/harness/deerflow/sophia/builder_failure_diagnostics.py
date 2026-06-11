@@ -436,39 +436,51 @@ def safe_output_path(value: Any, *, outputs_root: Path | None = None) -> str | N
     return None
 
 
+_EXACT_FAILURE_CODES: dict[str, str] = {
+    "html_markdown_fence": "html_markdown_fence",
+    "html_escaped": "html_escaped_as_text",
+    "html_too_small": "html_missing_standalone_structure",
+    "html_missing_document_root": "html_missing_standalone_structure",
+    "html_missing_body": "html_missing_standalone_structure",
+    "html_not_utf8": "html_missing_standalone_structure",
+    "html_internal_filename": "html_missing_standalone_structure",
+    "html_read_failed": "html_missing_standalone_structure",
+    "html_artifact_missing": "artifact_file_missing",
+    "html_fallback_missing": "artifact_file_missing",
+    "missing": "artifact_file_missing",
+    "artifact_file_missing": "artifact_file_missing",
+    "supporting_file_missing": "supporting_file_missing",
+}
+
+def _is_traversal_reason(raw: str) -> bool:
+    return "traversal" in raw or "/../" in raw or raw.endswith("/..")
+
+
+_OUTSIDE_OUTPUTS_MARKERS = ("not_under_outputs", "outside_outputs", "path_not_under_outputs")
+
+_PREFIX_FAILURE_CODES: tuple[tuple[str, str], ...] = (
+    ("html_invalid_artifact_extension", "html_invalid_artifact_extension"),
+    ("pdf_", "pdf_integrity_failed"),
+    ("pptx_", "pptx_integrity_failed"),
+)
+
+
 def normalize_emit_failure_code(reason: str | None, *, is_supporting_file: bool = False) -> str:
     if is_supporting_file:
         return "supporting_file_missing"
     if reason is None:
         return "unknown_emit_validation_error"
     raw = str(reason).strip().lower()
-    if "traversal" in raw or "/../" in raw or raw.endswith("/.."):
+    if _is_traversal_reason(raw):
         return "artifact_path_traversal"
-    if "not_under_outputs" in raw or "outside_outputs" in raw or "path_not_under_outputs" in raw:
+    if any(marker in raw for marker in _OUTSIDE_OUTPUTS_MARKERS):
         return "artifact_path_outside_outputs"
-    if raw.startswith("html_invalid_artifact_extension"):
-        return "html_invalid_artifact_extension"
-    if raw == "html_markdown_fence":
-        return "html_markdown_fence"
-    if raw == "html_escaped":
-        return "html_escaped_as_text"
-    if raw in {
-        "html_too_small",
-        "html_missing_document_root",
-        "html_missing_body",
-        "html_not_utf8",
-        "html_internal_filename",
-        "html_read_failed",
-    }:
-        return "html_missing_standalone_structure"
-    if raw in {"html_artifact_missing", "html_fallback_missing", "missing"}:
-        return "artifact_file_missing"
-    if raw.startswith("pdf_"):
-        return "pdf_integrity_failed"
-    if raw.startswith("pptx_"):
-        return "pptx_integrity_failed"
-    if raw in {"artifact_file_missing", "supporting_file_missing"}:
-        return raw
+    exact = _EXACT_FAILURE_CODES.get(raw)
+    if exact is not None:
+        return exact
+    for prefix, code in _PREFIX_FAILURE_CODES:
+        if raw.startswith(prefix):
+            return code
     return "unknown_emit_validation_error"
 
 

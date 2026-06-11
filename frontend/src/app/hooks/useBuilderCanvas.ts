@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
 import type {
@@ -293,6 +293,151 @@ function applyEvent(state: BuilderCanvasState, event: BuilderCanvasEventV1): Bui
   };
 }
 
+type BuilderCanvasFeedContext = {
+  parentThreadId: string;
+  basePath: string;
+  isCancelled: () => boolean;
+  artifactReviewActiveRef: { current: boolean };
+  snapshotTelemetrySignatureRef: { current: string | null };
+  setState: Dispatch<SetStateAction<BuilderCanvasState>>;
+};
+
+function recordEmptyPassiveSnapshotTelemetry(
+  context: BuilderCanvasFeedContext,
+  current: BuilderCanvasState,
+  activeArtifactReview: boolean,
+): void {
+  const protectedExistingState = Boolean(current.activeTask || current.completion || current.recentEvents.length > 0);
+  const signature = [
+    context.parentThreadId,
+    protectedExistingState ? 'protected' : 'empty',
+    activeArtifactReview ? 'artifact-review-active' : 'artifact-review-inactive',
+  ].join('|');
+  if (context.snapshotTelemetrySignatureRef.current === signature) {
+    return;
+  }
+  context.snapshotTelemetrySignatureRef.current = signature;
+  if (activeArtifactReview) {
+    logCanvasClient('builderSnapshotIgnoredForActiveArtifact', {
+      parent_thread_id: shortId(context.parentThreadId),
+      protected_existing_state: protectedExistingState,
+    });
+  }
+  recordSophiaCaptureEvent({
+    category: 'builder-ui',
+    name: 'builder-canvas-snapshot-hydration',
+    payload: {
+      builderSnapshotEmptyPassive: true,
+      builderSnapshotIgnoredForActiveArtifact: activeArtifactReview,
+      artifactStageProtectedFromSnapshot: activeArtifactReview,
+      artifactStageUnmountPrevented: activeArtifactReview,
+      parentThreadIdPresent: Boolean(context.parentThreadId),
+      activeTaskPresentBeforeSnapshot: Boolean(current.activeTask),
+      activeCompletionPresentBeforeSnapshot: Boolean(current.completion),
+      recentEventCountBeforeSnapshot: current.recentEvents.length,
+      rawArtifactTextExcluded: true,
+      rawCommentTextExcluded: true,
+      rawFrameExcluded: true,
+    },
+  });
+}
+
+async function applyBuilderCanvasSnapshotResponse(
+  context: BuilderCanvasFeedContext,
+  response: Response,
+): Promise<void> {
+  logCanvasClient('snapshot-response', {
+    parent_thread_id: shortId(context.parentThreadId),
+    status: response.status,
+    ok: response.ok,
+  });
+  if (!response.ok || context.isCancelled()) return;
+  const snapshot = await response.json() as BuilderCanvasSnapshotV1;
+  logCanvasClient('snapshot-hydrated', {
+    parent_thread_id: shortId(context.parentThreadId),
+    active_task_id: shortId(snapshot.active_task?.task_id),
+    active_run_id: shortId(snapshot.active_task?.run_id),
+    active_status: snapshot.active_task?.status ?? null,
+    recent_events: snapshot.recent_events.length,
+  });
+  const emptyPassiveSnapshot = isEmptyPassiveSnapshot(snapshot);
+  const activeArtifactReview = context.artifactReviewActiveRef.current;
+  if (emptyPassiveSnapshot) {
+    logCanvasClient('builderSnapshotEmptyPassive', {
+      parent_thread_id: shortId(context.parentThreadId),
+      active_artifact_review: activeArtifactReview,
+    });
+  }
+  context.setState((current) => {
+    const next = applySnapshot(current, snapshot, { artifactReviewActive: activeArtifactReview });
+    if (emptyPassiveSnapshot) {
+      recordEmptyPassiveSnapshotTelemetry(context, current, activeArtifactReview);
+    }
+    return next;
+  });
+}
+
+function hydrateBuilderCanvasSnapshot(context: BuilderCanvasFeedContext): Promise<void> {
+  return fetch(`${context.basePath}/snapshot`, { cache: 'no-store' })
+    .then((response) => applyBuilderCanvasSnapshotResponse(context, response))
+    .catch((error) => {
+      logCanvasClient('snapshot-error', {
+        parent_thread_id: shortId(context.parentThreadId),
+        error: error instanceof Error ? error.name : 'unknown',
+      });
+    });
+}
+
+function handleBuilderCanvasSseMessage(context: BuilderCanvasFeedContext, message: MessageEvent): void {
+  if (context.isCancelled()) return;
+  try {
+    const event = JSON.parse(message.data) as BuilderCanvasEventV1;
+    logCanvasClient('event', {
+      parent_thread_id: shortId(context.parentThreadId),
+      event_id: shortId(event.event_id),
+      task_id: shortId(event.task_id),
+      run_id: shortId(event.run_id),
+      sequence: event.sequence,
+      kind: event.kind,
+      status: event.status,
+    });
+    context.setState((current) => applyEvent(current, event));
+  } catch {
+    // Ignore malformed server data and leave the last truthful state visible.
+    logCanvasClient('event-malformed', {
+      parent_thread_id: shortId(context.parentThreadId),
+    });
+  }
+}
+
+function handleBuilderCanvasSseError(context: BuilderCanvasFeedContext): void {
+  if (context.isCancelled()) return;
+  logCanvasClient('sse-error', {
+    parent_thread_id: shortId(context.parentThreadId),
+  });
+  logCanvasClient('sse-timeout-reconnect', {
+    parent_thread_id: shortId(context.parentThreadId),
+  });
+  context.setState((current) => ({ ...current, reconnecting: true }));
+  void hydrateBuilderCanvasSnapshot(context);
+}
+
+function handleBuilderCanvasSseOpen(context: BuilderCanvasFeedContext): void {
+  if (context.isCancelled()) return;
+  logCanvasClient('sse-open', {
+    parent_thread_id: shortId(context.parentThreadId),
+  });
+  context.setState((current) => ({ ...current, reconnecting: false }));
+}
+
+function createBuilderCanvasEventSource(context: BuilderCanvasFeedContext): EventSource {
+  const source = new EventSource(`${context.basePath}/events`);
+  source.onmessage = (message) => handleBuilderCanvasSseMessage(context, message);
+  source.onerror = () => handleBuilderCanvasSseError(context);
+  source.onopen = () => handleBuilderCanvasSseOpen(context);
+  return source;
+}
+
 export function useBuilderCanvas(
   parentThreadId: string | null | undefined,
   options?: { enabled?: boolean; artifactReviewActive?: boolean },
@@ -316,81 +461,18 @@ export function useBuilderCanvas(
     if (!enabled || !parentThreadId) {
       return;
     }
-    const encodedThreadId = encodeURIComponent(parentThreadId);
-    const basePath = `/api/sophia/builder/threads/${encodedThreadId}/canvas`;
     let cancelled = false;
-    const hydrateSnapshot = () => fetch(`${basePath}/snapshot`, { cache: 'no-store' })
-      .then(async (response) => {
-        logCanvasClient('snapshot-response', {
-          parent_thread_id: shortId(parentThreadId),
-          status: response.status,
-          ok: response.ok,
-        });
-        if (!response.ok || cancelled) return;
-        const snapshot = await response.json() as BuilderCanvasSnapshotV1;
-        logCanvasClient('snapshot-hydrated', {
-          parent_thread_id: shortId(parentThreadId),
-          active_task_id: shortId(snapshot.active_task?.task_id),
-          active_run_id: shortId(snapshot.active_task?.run_id),
-          active_status: snapshot.active_task?.status ?? null,
-          recent_events: snapshot.recent_events.length,
-        });
-        const emptyPassiveSnapshot = isEmptyPassiveSnapshot(snapshot);
-        const activeArtifactReview = artifactReviewActiveRef.current;
-        if (emptyPassiveSnapshot) {
-          logCanvasClient('builderSnapshotEmptyPassive', {
-            parent_thread_id: shortId(parentThreadId),
-            active_artifact_review: activeArtifactReview,
-          });
-        }
-        setState((current) => {
-          const next = applySnapshot(current, snapshot, { artifactReviewActive: activeArtifactReview });
-          if (emptyPassiveSnapshot) {
-            const protectedExistingState = Boolean(current.activeTask || current.completion || current.recentEvents.length > 0);
-            const signature = [
-              parentThreadId ?? '',
-              protectedExistingState ? 'protected' : 'empty',
-              activeArtifactReview ? 'artifact-review-active' : 'artifact-review-inactive',
-            ].join('|');
-            if (snapshotTelemetrySignatureRef.current !== signature) {
-              snapshotTelemetrySignatureRef.current = signature;
-              if (activeArtifactReview) {
-                logCanvasClient('builderSnapshotIgnoredForActiveArtifact', {
-                  parent_thread_id: shortId(parentThreadId),
-                  protected_existing_state: protectedExistingState,
-                });
-              }
-              recordSophiaCaptureEvent({
-                category: 'builder-ui',
-                name: 'builder-canvas-snapshot-hydration',
-                payload: {
-                  builderSnapshotEmptyPassive: true,
-                  builderSnapshotIgnoredForActiveArtifact: activeArtifactReview,
-                  artifactStageProtectedFromSnapshot: activeArtifactReview,
-                  artifactStageUnmountPrevented: activeArtifactReview,
-                  parentThreadIdPresent: Boolean(parentThreadId),
-                  activeTaskPresentBeforeSnapshot: Boolean(current.activeTask),
-                  activeCompletionPresentBeforeSnapshot: Boolean(current.completion),
-                  recentEventCountBeforeSnapshot: current.recentEvents.length,
-                  rawArtifactTextExcluded: true,
-                  rawCommentTextExcluded: true,
-                  rawFrameExcluded: true,
-                },
-              });
-            }
-          }
-          return next;
-        });
-      })
-      .catch((error) => {
-        logCanvasClient('snapshot-error', {
-          parent_thread_id: shortId(parentThreadId),
-          error: error instanceof Error ? error.name : 'unknown',
-        });
-      });
-    void hydrateSnapshot();
+    const context: BuilderCanvasFeedContext = {
+      parentThreadId,
+      basePath: `/api/sophia/builder/threads/${encodeURIComponent(parentThreadId)}/canvas`,
+      isCancelled: () => cancelled,
+      artifactReviewActiveRef,
+      snapshotTelemetrySignatureRef,
+      setState,
+    };
+    void hydrateBuilderCanvasSnapshot(context);
     const reconcileTimer = setInterval(() => {
-      void hydrateSnapshot();
+      void hydrateBuilderCanvasSnapshot(context);
     }, SNAPSHOT_RECONCILE_MS);
 
     if (typeof EventSource !== 'function') {
@@ -399,48 +481,7 @@ export function useBuilderCanvas(
         clearInterval(reconcileTimer);
       };
     }
-    const source = new EventSource(`${basePath}/events`);
-    source.onmessage = (message) => {
-      if (cancelled) return;
-      try {
-        const event = JSON.parse(message.data) as BuilderCanvasEventV1;
-        logCanvasClient('event', {
-          parent_thread_id: shortId(parentThreadId),
-          event_id: shortId(event.event_id),
-          task_id: shortId(event.task_id),
-          run_id: shortId(event.run_id),
-          sequence: event.sequence,
-          kind: event.kind,
-          status: event.status,
-        });
-        setState((current) => applyEvent(current, event));
-      } catch {
-        // Ignore malformed server data and leave the last truthful state visible.
-        logCanvasClient('event-malformed', {
-          parent_thread_id: shortId(parentThreadId),
-        });
-      }
-    };
-    source.onerror = () => {
-      if (!cancelled) {
-        logCanvasClient('sse-error', {
-          parent_thread_id: shortId(parentThreadId),
-        });
-        logCanvasClient('sse-timeout-reconnect', {
-          parent_thread_id: shortId(parentThreadId),
-        });
-        setState((current) => ({ ...current, reconnecting: true }));
-        void hydrateSnapshot();
-      }
-    };
-    source.onopen = () => {
-      if (!cancelled) {
-        logCanvasClient('sse-open', {
-          parent_thread_id: shortId(parentThreadId),
-        });
-        setState((current) => ({ ...current, reconnecting: false }));
-      }
-    };
+    const source = createBuilderCanvasEventSource(context);
     return () => {
       cancelled = true;
       clearInterval(reconcileTimer);

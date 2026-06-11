@@ -69,61 +69,90 @@ const WHOLE_PAGE_REDESIGN_RE = /\b(redesign|rebuild|rework|revamp|remake|overhau
 const CONVERSION_RE = /\b(convert|export|turn (?:it|this) into|make (?:it|this) a (?:pdf|pptx|docx|markdown|sheet|spreadsheet))\b/iu
 const NON_HTML_EXTENSION_RE = /\.(?:pdf|pptx?|docx?|xlsx?|csv|md|markdown)(?:$|[?#])/iu
 
-export function classifyCoreviewHtmlQuickEdit(
-  input: ClassifyCoreviewHtmlQuickEditInput,
-): CoreviewHtmlQuickEditClassification {
-  const request = normalizeRequest(input.userUpdateRequest)
-  const requestedChangeSummary = summarizeQuickEditRequest(request)
-  const normalizedPath = normalizeBuilderArtifactPath(input.artifactPath)
+type QuickEditTextRule = {
+  kind: CoreviewHtmlQuickEditKind
+  patterns: RegExp[]
+  toFields: (text: string) => CoreviewHtmlQuickEditTargetFields
+}
 
+const QUICK_EDIT_TEXT_RULES: readonly QuickEditTextRule[] = [
+  {
+    kind: "title",
+    patterns: [
+      /\b(?:change|set|update|rename|make)\s+(?:the\s+)?(?:(?:main|hero)\s+)?title\s+(?:to|as)\s+(.+)$/iu,
+      /\b(?:change|set|update|rename|make)\s+(?:the\s+)?(?:h1|headline|heading)\s+(?:to|as)\s+(.+)$/iu,
+    ],
+    toFields: (titleText) => ({ titleText }),
+  },
+  {
+    kind: "subtitle",
+    patterns: [
+      /\b(?:change|set|update|rename|make)\s+(?:the\s+)?(?:subtitle|subheading|subhead|tagline)\s+(?:to|as)\s+(.+)$/iu,
+    ],
+    toFields: (subtitleText) => ({ subtitleText }),
+  },
+  {
+    kind: "button_text",
+    patterns: [
+      /\b(?:change|set|update|rename|make)\s+(?:the\s+)?(?:button|cta|call to action|call-to-action)(?:\s+text)?\s+(?:to|as)\s+(.+)$/iu,
+    ],
+    toFields: (buttonText) => ({ buttonText }),
+  },
+  {
+    kind: "paragraph",
+    patterns: [
+      /\b(?:add|insert)\s+(?:a\s+)?short\s+paragraph\s+(?:that\s+says|saying|with|to)\s+(.+)$/iu,
+      /\b(?:change|update)\s+(?:the\s+)?(?:intro|introductory|lead)\s+paragraph\s+(?:to|as)\s+(.+)$/iu,
+    ],
+    toFields: (paragraphText) => ({ paragraphText }),
+  },
+]
+
+const CARDS_DARKER_RES = [
+  /\b(?:make|turn|set|darken)\s+(?:the\s+)?cards?\s+(?:a\s+bit\s+)?darker\b/iu,
+  /\bdarken\s+(?:the\s+)?cards?\b/iu,
+]
+
+function quickEditUnsupportedReason(
+  input: ClassifyCoreviewHtmlQuickEditInput,
+  request: string,
+  normalizedPath: string | null,
+): string | null {
   if (input.rendererKind !== "html") {
-    return unsupported(requestedChangeSummary, "renderer_not_html")
+    return "renderer_not_html"
   }
   if (normalizedPath && NON_HTML_EXTENSION_RE.test(normalizedPath)) {
-    return unsupported(requestedChangeSummary, "artifact_not_html")
+    return "artifact_not_html"
   }
   if (input.updateMode === "convert_format" || CONVERSION_RE.test(request)) {
-    return unsupported(requestedChangeSummary, "format_conversion")
+    return "format_conversion"
   }
   if (WHOLE_PAGE_REDESIGN_RE.test(request)) {
-    return unsupported(requestedChangeSummary, "major_or_ambiguous_layout_change")
+    return "major_or_ambiguous_layout_change"
   }
+  return null
+}
 
-  const titleText = extractTargetText(request, [
-    /\b(?:change|set|update|rename|make)\s+(?:the\s+)?(?:(?:main|hero)\s+)?title\s+(?:to|as)\s+(.+)$/iu,
-    /\b(?:change|set|update|rename|make)\s+(?:the\s+)?(?:h1|headline|heading)\s+(?:to|as)\s+(.+)$/iu,
-  ])
-  if (titleText) {
-    return supported("title", requestedChangeSummary, { titleText })
+function matchQuickEditTextRule(
+  request: string,
+  requestedChangeSummary: string,
+): CoreviewHtmlQuickEditClassification | null {
+  for (const rule of QUICK_EDIT_TEXT_RULES) {
+    const text = extractTargetText(request, rule.patterns)
+    if (text) {
+      return supported(rule.kind, requestedChangeSummary, rule.toFields(text))
+    }
   }
+  return null
+}
 
-  const subtitleText = extractTargetText(request, [
-    /\b(?:change|set|update|rename|make)\s+(?:the\s+)?(?:subtitle|subheading|subhead|tagline)\s+(?:to|as)\s+(.+)$/iu,
-  ])
-  if (subtitleText) {
-    return supported("subtitle", requestedChangeSummary, { subtitleText })
-  }
-
-  const buttonText = extractTargetText(request, [
-    /\b(?:change|set|update|rename|make)\s+(?:the\s+)?(?:button|cta|call to action|call-to-action)(?:\s+text)?\s+(?:to|as)\s+(.+)$/iu,
-  ])
-  if (buttonText) {
-    return supported("button_text", requestedChangeSummary, { buttonText })
-  }
-
-  const paragraphText = extractTargetText(request, [
-    /\b(?:add|insert)\s+(?:a\s+)?short\s+paragraph\s+(?:that\s+says|saying|with|to)\s+(.+)$/iu,
-    /\b(?:change|update)\s+(?:the\s+)?(?:intro|introductory|lead)\s+paragraph\s+(?:to|as)\s+(.+)$/iu,
-  ])
-  if (paragraphText) {
-    return supported("paragraph", requestedChangeSummary, { paragraphText })
-  }
-
-  if (/\b(?:make|turn|set|darken)\s+(?:the\s+)?cards?\s+(?:a\s+bit\s+)?darker\b/iu.test(request)
-    || /\bdarken\s+(?:the\s+)?cards?\b/iu.test(request)) {
+function matchQuickEditColorRule(
+  request: string,
+  requestedChangeSummary: string,
+): CoreviewHtmlQuickEditClassification | null {
+  if (CARDS_DARKER_RES.some((pattern) => pattern.test(request))) {
     return supported("cards_darker", requestedChangeSummary, {})
   }
-
   const colorValue = extractColorValue(request)
   if (colorValue && /\bcards?\b/iu.test(request)) {
     return supported("card_color", requestedChangeSummary, { colorValue })
@@ -131,8 +160,24 @@ export function classifyCoreviewHtmlQuickEdit(
   if (colorValue && /\baccent\b/iu.test(request)) {
     return supported("accent_color", requestedChangeSummary, { colorValue })
   }
+  return null
+}
 
-  return unsupported(requestedChangeSummary, "unsupported_or_ambiguous_quick_edit")
+export function classifyCoreviewHtmlQuickEdit(
+  input: ClassifyCoreviewHtmlQuickEditInput,
+): CoreviewHtmlQuickEditClassification {
+  const request = normalizeRequest(input.userUpdateRequest)
+  const requestedChangeSummary = summarizeQuickEditRequest(request)
+  const normalizedPath = normalizeBuilderArtifactPath(input.artifactPath)
+
+  const unsupportedReason = quickEditUnsupportedReason(input, request, normalizedPath)
+  if (unsupportedReason) {
+    return unsupported(requestedChangeSummary, unsupportedReason)
+  }
+
+  return matchQuickEditTextRule(request, requestedChangeSummary)
+    ?? matchQuickEditColorRule(request, requestedChangeSummary)
+    ?? unsupported(requestedChangeSummary, "unsupported_or_ambiguous_quick_edit")
 }
 
 export async function requestCoreviewHtmlQuickPatch(

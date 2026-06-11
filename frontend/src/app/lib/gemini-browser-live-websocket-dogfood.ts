@@ -3626,27 +3626,46 @@ function normalizeReviewToolTimeoutMs(value: number | null | undefined): number 
   return Math.min(1_500, Math.max(25, Math.floor(value)));
 }
 
-function splitFrontendReviewToolCallsFromProviderEvent(
-  event: Record<string, unknown>,
-  artifactReviewContext: GeminiArtifactReviewRelayContext | null = null,
-): {
+type GeminiReviewToolCallSplitResult = {
   frontendCalls: GeminiFrontendReviewToolCallInput[];
   suppressedEmitArtifactCalls: GeminiSuppressedEmitArtifactToolCallInput[];
   suppressedGenericBuilderCalls: GeminiSuppressedGenericBuilderToolCallInput[];
   relayEvent: Record<string, unknown> | null;
-} {
+};
+
+type GeminiRoutedReviewFunctionCalls = {
+  frontendCalls: GeminiFrontendReviewToolCallInput[];
+  suppressedEmitArtifactCalls: GeminiSuppressedEmitArtifactToolCallInput[];
+  suppressedGenericBuilderCalls: GeminiSuppressedGenericBuilderToolCallInput[];
+  relayFunctionCalls: unknown[];
+};
+
+type GeminiReviewToolCallRoute =
+  | { kind: 'relay' }
+  | { kind: 'frontend'; call: GeminiFrontendReviewToolCallInput; markCoreviewRouted?: boolean }
+  | { kind: 'suppressed_emit_artifact'; call: GeminiSuppressedEmitArtifactToolCallInput }
+  | { kind: 'suppressed_generic_builder'; call: GeminiSuppressedGenericBuilderToolCallInput };
+
+type LocatedProviderFunctionCalls = {
+  toolCallKey: 'toolCall' | 'tool_call';
+  toolCall: Record<string, unknown>;
+  functionCallsKey: 'functionCalls' | 'function_calls';
+  functionCalls: unknown[];
+};
+
+function locateProviderFunctionCalls(event: Record<string, unknown>): LocatedProviderFunctionCalls | null {
   const toolCallKey = isRecord(event.toolCall)
     ? 'toolCall'
     : isRecord(event.tool_call)
       ? 'tool_call'
       : null;
   if (!toolCallKey) {
-    return { frontendCalls: [], suppressedEmitArtifactCalls: [], suppressedGenericBuilderCalls: [], relayEvent: event };
+    return null;
   }
 
   const toolCall = event[toolCallKey];
   if (!isRecord(toolCall)) {
-    return { frontendCalls: [], suppressedEmitArtifactCalls: [], suppressedGenericBuilderCalls: [], relayEvent: event };
+    return null;
   }
 
   const functionCallsKey = Array.isArray(toolCall.functionCalls)
@@ -3655,18 +3674,168 @@ function splitFrontendReviewToolCallsFromProviderEvent(
       ? 'function_calls'
       : null;
   if (!functionCallsKey) {
-    return { frontendCalls: [], suppressedEmitArtifactCalls: [], suppressedGenericBuilderCalls: [], relayEvent: event };
+    return null;
   }
 
   const functionCalls = toolCall[functionCallsKey];
   if (!Array.isArray(functionCalls)) {
-    return { frontendCalls: [], suppressedEmitArtifactCalls: [], suppressedGenericBuilderCalls: [], relayEvent: event };
+    return null;
   }
-  const batchHasCoreviewArtifactUpdate = functionCalls.some((functionCall) => (
-    isRecord(functionCall)
-    && stringFromAnyKey(functionCall, 'name') === COREVIEW_REQUEST_ARTIFACT_UPDATE_TOOL_NAME
-  ));
-  let coreviewUpdateAlreadyRoutedInBatch = batchHasCoreviewArtifactUpdate;
+  return { toolCallKey, toolCall, functionCallsKey, functionCalls };
+}
+
+function isCoreviewArtifactUpdateFunctionCall(functionCall: unknown): boolean {
+  return isRecord(functionCall)
+    && stringFromAnyKey(functionCall, 'name') === COREVIEW_REQUEST_ARTIFACT_UPDATE_TOOL_NAME;
+}
+
+function routeSuppressedEmitArtifactReviewCall(
+  functionCall: Record<string, unknown>,
+  name: string | null,
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null,
+): GeminiReviewToolCallRoute | null {
+  if (
+    name !== GEMINI_EMIT_ARTIFACT_TOOL_NAME
+    || !shouldSuppressEmitArtifactToolCallForArtifactReview(artifactReviewContext)
+  ) {
+    return null;
+  }
+  return {
+    kind: 'suppressed_emit_artifact',
+    call: {
+      id: stringFromAnyKey(functionCall, 'id'),
+      name,
+      args: readGeminiFunctionCallArgs(functionCall) ?? {},
+    },
+  };
+}
+
+function routeDirectEditBuilderReviewCall(
+  functionCall: Record<string, unknown>,
+  name: string | null,
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null,
+  coreviewUpdateAlreadyRoutedInBatch: boolean,
+): GeminiReviewToolCallRoute | null {
+  if (
+    name !== GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME
+    || !shouldRouteDirectEditBuilderArtifactThroughCoreview(artifactReviewContext)
+  ) {
+    return null;
+  }
+  const args = readGeminiFunctionCallArgs(functionCall) ?? {};
+  if (coreviewUpdateAlreadyRoutedInBatch) {
+    return {
+      kind: 'suppressed_generic_builder',
+      call: {
+        id: stringFromAnyKey(functionCall, 'id'),
+        name,
+        args,
+        duplicateOfCoreviewUpdate: true,
+      },
+    };
+  }
+  return {
+    kind: 'frontend',
+    call: {
+      id: stringFromAnyKey(functionCall, 'id'),
+      name,
+      args,
+      routeKind: 'direct_edit_builder_artifact',
+      coreviewCall: {
+        id: stringFromAnyKey(functionCall, 'id'),
+        name: COREVIEW_REQUEST_ARTIFACT_UPDATE_TOOL_NAME,
+        args: coreviewRequestArtifactUpdateArgsFromEditBuilderArtifactArgs(args),
+      },
+    },
+    markCoreviewRouted: true,
+  };
+}
+
+function routeGenericBuilderStatusReviewCall(
+  functionCall: Record<string, unknown>,
+  name: string | null,
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null,
+): GeminiReviewToolCallRoute | null {
+  if (
+    (name !== 'check_async_task' && name !== 'list_async_tasks')
+    || !shouldRouteGenericBuilderStatusThroughCoreview(artifactReviewContext)
+  ) {
+    return null;
+  }
+  const args = readGeminiFunctionCallArgs(functionCall) ?? {};
+  return {
+    kind: 'frontend',
+    call: {
+      id: stringFromAnyKey(functionCall, 'id'),
+      name,
+      args,
+      routeKind: 'generic_builder_status',
+      coreviewCall: {
+        id: stringFromAnyKey(functionCall, 'id'),
+        name: COREVIEW_GET_BUILDER_STATUS_TOOL_NAME,
+        args: {
+          reason: stringFromAnyKey(args, 'reason', 'message', 'query')
+            ?? 'Check selected artifact update status.',
+          source_actor: 'sophia',
+        },
+      },
+    },
+  };
+}
+
+function routeSuppressedGenericBuilderReviewCall(
+  functionCall: Record<string, unknown>,
+  name: string | null,
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null,
+): GeminiReviewToolCallRoute | null {
+  if (
+    typeof name !== 'string'
+    || !GEMINI_GENERIC_BUILDER_TOOL_NAMES.has(name)
+    || !shouldSuppressGenericBuilderToolCallForArtifactReviewUpdate(artifactReviewContext, name)
+  ) {
+    return null;
+  }
+  return {
+    kind: 'suppressed_generic_builder',
+    call: {
+      id: stringFromAnyKey(functionCall, 'id'),
+      name,
+      args: readGeminiFunctionCallArgs(functionCall) ?? {},
+    },
+  };
+}
+
+function routeReviewFunctionCall(
+  functionCall: Record<string, unknown>,
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null,
+  coreviewUpdateAlreadyRoutedInBatch: boolean,
+): GeminiReviewToolCallRoute {
+  const name = stringFromAnyKey(functionCall, 'name');
+  const routed = routeSuppressedEmitArtifactReviewCall(functionCall, name, artifactReviewContext)
+    ?? routeDirectEditBuilderReviewCall(functionCall, name, artifactReviewContext, coreviewUpdateAlreadyRoutedInBatch)
+    ?? routeGenericBuilderStatusReviewCall(functionCall, name, artifactReviewContext)
+    ?? routeSuppressedGenericBuilderReviewCall(functionCall, name, artifactReviewContext);
+  if (routed) {
+    return routed;
+  }
+  if (!isCoreviewToolName(name) && !isCoreviewBuilderToolName(name) && name !== GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
+    return { kind: 'relay' };
+  }
+  return {
+    kind: 'frontend',
+    call: {
+      id: stringFromAnyKey(functionCall, 'id'),
+      name,
+      args: readGeminiFunctionCallArgs(functionCall) ?? {},
+    } as GeminiFrontendReviewToolCallInput,
+  };
+}
+
+function splitReviewFunctionCalls(
+  functionCalls: unknown[],
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null,
+): GeminiRoutedReviewFunctionCalls {
+  let coreviewUpdateAlreadyRoutedInBatch = functionCalls.some(isCoreviewArtifactUpdateFunctionCall);
 
   const frontendCalls: GeminiFrontendReviewToolCallInput[] = [];
   const suppressedEmitArtifactCalls: GeminiSuppressedEmitArtifactToolCallInput[] = [];
@@ -3677,91 +3846,32 @@ function splitFrontendReviewToolCallsFromProviderEvent(
       relayFunctionCalls.push(functionCall);
       continue;
     }
-    const name = stringFromAnyKey(functionCall, 'name');
-    if (
-      name === GEMINI_EMIT_ARTIFACT_TOOL_NAME
-      && shouldSuppressEmitArtifactToolCallForArtifactReview(artifactReviewContext)
-    ) {
-      suppressedEmitArtifactCalls.push({
-        id: stringFromAnyKey(functionCall, 'id'),
-        name,
-        args: readGeminiFunctionCallArgs(functionCall) ?? {},
-      });
-      continue;
+    const route = routeReviewFunctionCall(functionCall, artifactReviewContext, coreviewUpdateAlreadyRoutedInBatch);
+    switch (route.kind) {
+      case 'frontend':
+        frontendCalls.push(route.call);
+        coreviewUpdateAlreadyRoutedInBatch = coreviewUpdateAlreadyRoutedInBatch || route.markCoreviewRouted === true;
+        break;
+      case 'suppressed_emit_artifact':
+        suppressedEmitArtifactCalls.push(route.call);
+        break;
+      case 'suppressed_generic_builder':
+        suppressedGenericBuilderCalls.push(route.call);
+        break;
+      default:
+        relayFunctionCalls.push(functionCall);
+        break;
     }
-    if (
-      name === GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME
-      && shouldRouteDirectEditBuilderArtifactThroughCoreview(artifactReviewContext)
-    ) {
-      const args = readGeminiFunctionCallArgs(functionCall) ?? {};
-      if (coreviewUpdateAlreadyRoutedInBatch) {
-        suppressedGenericBuilderCalls.push({
-          id: stringFromAnyKey(functionCall, 'id'),
-          name,
-          args,
-          duplicateOfCoreviewUpdate: true,
-        });
-        continue;
-      }
-      frontendCalls.push({
-        id: stringFromAnyKey(functionCall, 'id'),
-        name,
-        args,
-        routeKind: 'direct_edit_builder_artifact',
-        coreviewCall: {
-          id: stringFromAnyKey(functionCall, 'id'),
-          name: COREVIEW_REQUEST_ARTIFACT_UPDATE_TOOL_NAME,
-          args: coreviewRequestArtifactUpdateArgsFromEditBuilderArtifactArgs(args),
-        },
-      });
-      coreviewUpdateAlreadyRoutedInBatch = true;
-      continue;
-    }
-    if (
-      (name === 'check_async_task' || name === 'list_async_tasks')
-      && shouldRouteGenericBuilderStatusThroughCoreview(artifactReviewContext)
-    ) {
-      const args = readGeminiFunctionCallArgs(functionCall) ?? {};
-      frontendCalls.push({
-        id: stringFromAnyKey(functionCall, 'id'),
-        name,
-        args,
-        routeKind: 'generic_builder_status',
-        coreviewCall: {
-          id: stringFromAnyKey(functionCall, 'id'),
-          name: COREVIEW_GET_BUILDER_STATUS_TOOL_NAME,
-          args: {
-            reason: stringFromAnyKey(args, 'reason', 'message', 'query')
-              ?? 'Check selected artifact update status.',
-            source_actor: 'sophia',
-          },
-        },
-      });
-      continue;
-    }
-    if (
-      typeof name === 'string'
-      && GEMINI_GENERIC_BUILDER_TOOL_NAMES.has(name)
-      && shouldSuppressGenericBuilderToolCallForArtifactReviewUpdate(artifactReviewContext, name)
-    ) {
-      suppressedGenericBuilderCalls.push({
-        id: stringFromAnyKey(functionCall, 'id'),
-        name,
-        args: readGeminiFunctionCallArgs(functionCall) ?? {},
-      });
-      continue;
-    }
-    if (!isCoreviewToolName(name) && !isCoreviewBuilderToolName(name) && name !== GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
-      relayFunctionCalls.push(functionCall);
-      continue;
-    }
-    frontendCalls.push({
-      id: stringFromAnyKey(functionCall, 'id'),
-      name,
-      args: readGeminiFunctionCallArgs(functionCall) ?? {},
-    } as GeminiFrontendReviewToolCallInput);
   }
+  return { frontendCalls, suppressedEmitArtifactCalls, suppressedGenericBuilderCalls, relayFunctionCalls };
+}
 
+function buildReviewToolCallSplitResult(
+  event: Record<string, unknown>,
+  located: LocatedProviderFunctionCalls,
+  routed: GeminiRoutedReviewFunctionCalls,
+): GeminiReviewToolCallSplitResult {
+  const { frontendCalls, suppressedEmitArtifactCalls, suppressedGenericBuilderCalls, relayFunctionCalls } = routed;
   if (frontendCalls.length === 0 && suppressedEmitArtifactCalls.length === 0 && suppressedGenericBuilderCalls.length === 0) {
     return { frontendCalls, suppressedEmitArtifactCalls, suppressedGenericBuilderCalls, relayEvent: event };
   }
@@ -3773,22 +3883,34 @@ function splitFrontendReviewToolCallsFromProviderEvent(
       suppressedGenericBuilderCalls,
       relayEvent: {
         ...event,
-        [toolCallKey]: {
-          ...toolCall,
-          [functionCallsKey]: relayFunctionCalls,
+        [located.toolCallKey]: {
+          ...located.toolCall,
+          [located.functionCallsKey]: relayFunctionCalls,
         },
       },
     };
   }
 
   const relayEvent = { ...event };
-  delete relayEvent[toolCallKey];
+  delete relayEvent[located.toolCallKey];
   return {
     frontendCalls,
     suppressedEmitArtifactCalls,
     suppressedGenericBuilderCalls,
     relayEvent: Object.keys(relayEvent).length > 0 ? relayEvent : null,
   };
+}
+
+function splitFrontendReviewToolCallsFromProviderEvent(
+  event: Record<string, unknown>,
+  artifactReviewContext: GeminiArtifactReviewRelayContext | null = null,
+): GeminiReviewToolCallSplitResult {
+  const located = locateProviderFunctionCalls(event);
+  if (!located) {
+    return { frontendCalls: [], suppressedEmitArtifactCalls: [], suppressedGenericBuilderCalls: [], relayEvent: event };
+  }
+  const routed = splitReviewFunctionCalls(located.functionCalls, artifactReviewContext);
+  return buildReviewToolCallSplitResult(event, located, routed);
 }
 
 function shouldSuppressEmitArtifactToolCallForArtifactReview(
@@ -4841,27 +4963,34 @@ function artifactReviewAssistantLeakageMarker(
   return null;
 }
 
+const PROMPT_OR_TOOL_LEAKAGE_MARKER_RULES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\bemit_artifact\b/u, 'emit_artifact'],
+  [/\bread_artifact_text\b/u, 'read_artifact_text'],
+  [/\bcoreview_request_artifact_update\b/u, 'coreview_request_artifact_update'],
+  [/\bcoreview_get_builder_status\b/u, 'coreview_get_builder_status'],
+  [/\b(?:start_builder_task|edit_builder_artifact|check_async_task|update_async_task|cancel_async_task|list_async_tasks)\b/u, 'generic_builder_lifecycle_tool'],
+  [/\bartifact_id\b/u, 'artifact_id'],
+  [/\btask[_\s-]?id\b/u, 'task_id'],
+  [/\basync\s+task\b/u, 'async_task'],
+  [/\btracking\s+that\s+specific\s+task\b/u, 'task_tracking_recovery'],
+  [/\b(?:listing\s+all\s+(?:the\s+)?builds|try\s+listing\s+all\s+(?:the\s+)?builds|list(?:ing)?\s+builds)\b/u, 'list_builds_recovery'],
+  [/\bactive_goal\s*:/u, 'active_goal'],
+  [/\btool_call_id\b/u, 'tool_call_id'],
+  [/\btool\s+(?:call|response|result|name|mechanic|mechanics)\b/u, 'tool_mechanics'],
+  [/^(?:tool\s+)?schema$/u, 'tool_schema'],
+  [/\btool\s+schema\b/u, 'tool_schema'],
+  [/\b(?:system|developer|internal|behavior)\s+prompt\b/u, 'internal_prompt'],
+  [/\bdeveloper\s+instructions\b/u, 'internal_prompt'],
+  [/\bfunction\s*declarations?\b|\bfunctiondeclarations\b|\btool\s+payload\b/u, 'tool_schema'],
+  [/\btool\b/u, 'tool_word'],
+];
+
 function promptOrToolLeakageMarker(text: string): string | null {
   const normalized = text.replace(/\s+/g, ' ').trim().toLowerCase();
   if (!normalized) return null;
-  if (/\bemit_artifact\b/u.test(normalized)) return 'emit_artifact';
-  if (/\bread_artifact_text\b/u.test(normalized)) return 'read_artifact_text';
-  if (/\bcoreview_request_artifact_update\b/u.test(normalized)) return 'coreview_request_artifact_update';
-  if (/\bcoreview_get_builder_status\b/u.test(normalized)) return 'coreview_get_builder_status';
-  if (/\b(?:start_builder_task|edit_builder_artifact|check_async_task|update_async_task|cancel_async_task|list_async_tasks)\b/u.test(normalized)) return 'generic_builder_lifecycle_tool';
-  if (/\bartifact_id\b/u.test(normalized)) return 'artifact_id';
-  if (/\btask[_\s-]?id\b/u.test(normalized)) return 'task_id';
-  if (/\basync\s+task\b/u.test(normalized)) return 'async_task';
-  if (/\btracking\s+that\s+specific\s+task\b/u.test(normalized)) return 'task_tracking_recovery';
-  if (/\b(?:listing\s+all\s+(?:the\s+)?builds|try\s+listing\s+all\s+(?:the\s+)?builds|list(?:ing)?\s+builds)\b/u.test(normalized)) return 'list_builds_recovery';
-  if (/\bactive_goal\s*:/u.test(normalized)) return 'active_goal';
-  if (/\btool_call_id\b/u.test(normalized)) return 'tool_call_id';
-  if (/\btool\s+(?:call|response|result|name|mechanic|mechanics)\b/u.test(normalized)) return 'tool_mechanics';
-  if (/^(?:tool\s+)?schema$/u.test(normalized) || /\btool\s+schema\b/u.test(normalized)) return 'tool_schema';
-  if (/\b(?:system|developer|internal|behavior)\s+prompt\b/u.test(normalized)) return 'internal_prompt';
-  if (/\bdeveloper\s+instructions\b/u.test(normalized)) return 'internal_prompt';
-  if (/\bfunction\s*declarations?\b|\bfunctiondeclarations\b|\btool\s+payload\b/u.test(normalized)) return 'tool_schema';
-  if (/\btool\b/u.test(normalized)) return 'tool_word';
+  for (const [pattern, marker] of PROMPT_OR_TOOL_LEAKAGE_MARKER_RULES) {
+    if (pattern.test(normalized)) return marker;
+  }
   return null;
 }
 
@@ -5370,104 +5499,98 @@ function responseSummaryFromFunctionResponse(functionResponse: Record<string, un
   return previewJson(response, 140);
 }
 
-function redactToolCallArgsForTelemetry(
-  toolName: string | null,
-  args: Record<string, unknown> | null,
-): Record<string, unknown> | null {
-  if (isCoreviewToolName(toolName) && args) {
-    const reason = stringFromAnyKey(args, 'reason');
-    const commentText = stringFromAnyKey(args, 'comment_text', 'commentText', 'note', 'text');
-    const textQuote = stringFromAnyKey(args, 'text_quote', 'textQuote');
-    return {
-      artifact_id: stringFromAnyKey(args, 'artifact_id', 'artifactId'),
-      page_index: numberFromAnyKey(args, 'page_index', 'pageIndex'),
-      page_number: numberFromAnyKey(args, 'page_number', 'pageNumber'),
-      page_label_present: Boolean(stringFromAnyKey(args, 'page_label', 'pageLabel')),
-      zoom: numberFromAnyKey(args, 'zoom'),
-      zoom_delta: numberFromAnyKey(args, 'zoom_delta', 'zoomDelta'),
-      fit_mode: stringFromAnyKey(args, 'fit_mode', 'fitMode'),
-      kind: stringFromAnyKey(args, 'kind'),
-      anchor_type: stringFromAnyKey(args, 'anchor_type', 'anchorType'),
-      color: stringFromAnyKey(args, 'color'),
-      occurrence: numberFromAnyKey(args, 'occurrence'),
-      rect_present: Boolean(recordFromAnyKey(args, 'rect')),
-      point_present: Boolean(recordFromAnyKey(args, 'point')),
-      comment_text_length: commentText?.length ?? 0,
-      text_quote_length: textQuote?.length ?? 0,
-      text_quote_fingerprint: textQuote ? telemetryTextFingerprint(textQuote) : null,
-      reason_length: reason?.length ?? 0,
-      raw_reason_excluded: true,
-      raw_comment_text_excluded: true,
-      raw_text_quote_excluded: true,
-      raw_artifact_text_excluded: true,
-      raw_frame_excluded: true,
-    };
-  }
+function redactCoreviewToolArgsForTelemetry(args: Record<string, unknown>): Record<string, unknown> {
+  const reason = stringFromAnyKey(args, 'reason');
+  const commentText = stringFromAnyKey(args, 'comment_text', 'commentText', 'note', 'text');
+  const textQuote = stringFromAnyKey(args, 'text_quote', 'textQuote');
+  return {
+    artifact_id: stringFromAnyKey(args, 'artifact_id', 'artifactId'),
+    page_index: numberFromAnyKey(args, 'page_index', 'pageIndex'),
+    page_number: numberFromAnyKey(args, 'page_number', 'pageNumber'),
+    page_label_present: Boolean(stringFromAnyKey(args, 'page_label', 'pageLabel')),
+    zoom: numberFromAnyKey(args, 'zoom'),
+    zoom_delta: numberFromAnyKey(args, 'zoom_delta', 'zoomDelta'),
+    fit_mode: stringFromAnyKey(args, 'fit_mode', 'fitMode'),
+    kind: stringFromAnyKey(args, 'kind'),
+    anchor_type: stringFromAnyKey(args, 'anchor_type', 'anchorType'),
+    color: stringFromAnyKey(args, 'color'),
+    occurrence: numberFromAnyKey(args, 'occurrence'),
+    rect_present: Boolean(recordFromAnyKey(args, 'rect')),
+    point_present: Boolean(recordFromAnyKey(args, 'point')),
+    comment_text_length: commentText?.length ?? 0,
+    text_quote_length: textQuote?.length ?? 0,
+    text_quote_fingerprint: textQuote ? telemetryTextFingerprint(textQuote) : null,
+    reason_length: reason?.length ?? 0,
+    raw_reason_excluded: true,
+    raw_comment_text_excluded: true,
+    raw_text_quote_excluded: true,
+    raw_artifact_text_excluded: true,
+    raw_frame_excluded: true,
+  };
+}
 
-  if (isCoreviewBuilderToolName(toolName) && args) {
-    const request = stringFromAnyKey(
-      args,
-      'user_update_request',
-      'userUpdateRequest',
-      'requested_change_summary',
-      'requestedChangeSummary',
-      'request',
-      'summary',
-    );
-    const reason = stringFromAnyKey(args, 'reason');
-    return {
-      user_update_request_length: request?.length ?? 0,
-      user_update_request_fingerprint: request ? telemetryTextFingerprint(request) : null,
-      update_mode: stringFromAnyKey(args, 'update_mode', 'updateMode'),
-      reason_length: reason?.length ?? 0,
-      raw_user_update_request_excluded: true,
-      raw_reason_excluded: true,
-      raw_comment_text_excluded: true,
-      raw_artifact_text_excluded: true,
-      raw_frame_excluded: true,
-    };
-  }
+function redactCoreviewBuilderToolArgsForTelemetry(args: Record<string, unknown>): Record<string, unknown> {
+  const request = stringFromAnyKey(
+    args,
+    'user_update_request',
+    'userUpdateRequest',
+    'requested_change_summary',
+    'requestedChangeSummary',
+    'request',
+    'summary',
+  );
+  const reason = stringFromAnyKey(args, 'reason');
+  return {
+    user_update_request_length: request?.length ?? 0,
+    user_update_request_fingerprint: request ? telemetryTextFingerprint(request) : null,
+    update_mode: stringFromAnyKey(args, 'update_mode', 'updateMode'),
+    reason_length: reason?.length ?? 0,
+    raw_user_update_request_excluded: true,
+    raw_reason_excluded: true,
+    raw_comment_text_excluded: true,
+    raw_artifact_text_excluded: true,
+    raw_frame_excluded: true,
+  };
+}
 
-  if (toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME && args) {
-    const query = stringFromAnyKey(args, 'query');
-    const reason = stringFromAnyKey(args, 'reason');
-    return {
-      artifact_id: stringFromAnyKey(args, 'artifact_id', 'artifactId'),
-      query_length: query?.length ?? 0,
-      query_fingerprint: query ? telemetryTextFingerprint(query) : null,
-      reason_length: reason?.length ?? 0,
-      raw_query_excluded: true,
-    };
-  }
+function redactReadArtifactTextArgsForTelemetry(args: Record<string, unknown>): Record<string, unknown> {
+  const query = stringFromAnyKey(args, 'query');
+  const reason = stringFromAnyKey(args, 'reason');
+  return {
+    artifact_id: stringFromAnyKey(args, 'artifact_id', 'artifactId'),
+    query_length: query?.length ?? 0,
+    query_fingerprint: query ? telemetryTextFingerprint(query) : null,
+    reason_length: reason?.length ?? 0,
+    raw_query_excluded: true,
+  };
+}
 
-  if (toolName && GEMINI_GENERIC_BUILDER_TOOL_NAMES.has(toolName) && args) {
-    const description = stringFromAnyKey(args, 'description', 'task', 'brief', 'message', 'request', 'summary');
-    const rawTaskId = stringFromAnyKey(args, 'task_id', 'taskId');
-    const rawRunId = stringFromAnyKey(args, 'run_id', 'runId');
-    const taskId = rawTaskId && !isPlaceholderBuilderTaskId(rawTaskId) ? rawTaskId : null;
-    const runId = rawRunId && !isPlaceholderBuilderTaskId(rawRunId) ? rawRunId : null;
-    return {
-      description_length: description?.length ?? 0,
-      description_fingerprint: description ? telemetryTextFingerprint(description) : null,
-      task_type: stringFromAnyKey(args, 'task_type', 'taskType'),
-      task_id: taskId,
-      taskId,
-      task_id_present: Boolean(rawTaskId),
-      task_id_placeholder: Boolean(rawTaskId && isPlaceholderBuilderTaskId(rawTaskId)),
-      run_id: runId,
-      runId,
-      run_id_present: Boolean(rawRunId),
-      run_id_placeholder: Boolean(rawRunId && isPlaceholderBuilderTaskId(rawRunId)),
-      artifact_path_present: Boolean(stringFromAnyKey(args, 'artifact_path', 'artifactPath', 'source_artifact_path', 'sourceArtifactPath')),
-      raw_description_excluded: true,
-      raw_artifact_text_excluded: true,
-      raw_frame_excluded: true,
-    };
-  }
+function redactGenericBuilderToolArgsForTelemetry(args: Record<string, unknown>): Record<string, unknown> {
+  const description = stringFromAnyKey(args, 'description', 'task', 'brief', 'message', 'request', 'summary');
+  const rawTaskId = stringFromAnyKey(args, 'task_id', 'taskId');
+  const rawRunId = stringFromAnyKey(args, 'run_id', 'runId');
+  const taskId = rawTaskId && !isPlaceholderBuilderTaskId(rawTaskId) ? rawTaskId : null;
+  const runId = rawRunId && !isPlaceholderBuilderTaskId(rawRunId) ? rawRunId : null;
+  return {
+    description_length: description?.length ?? 0,
+    description_fingerprint: description ? telemetryTextFingerprint(description) : null,
+    task_type: stringFromAnyKey(args, 'task_type', 'taskType'),
+    task_id: taskId,
+    taskId,
+    task_id_present: Boolean(rawTaskId),
+    task_id_placeholder: Boolean(rawTaskId && isPlaceholderBuilderTaskId(rawTaskId)),
+    run_id: runId,
+    runId,
+    run_id_present: Boolean(rawRunId),
+    run_id_placeholder: Boolean(rawRunId && isPlaceholderBuilderTaskId(rawRunId)),
+    artifact_path_present: Boolean(stringFromAnyKey(args, 'artifact_path', 'artifactPath', 'source_artifact_path', 'sourceArtifactPath')),
+    raw_description_excluded: true,
+    raw_artifact_text_excluded: true,
+    raw_frame_excluded: true,
+  };
+}
 
-  if (toolName !== GEMINI_RETRIEVE_MEMORIES_TOOL_NAME || !args) {
-    return args;
-  }
+function redactRetrieveMemoriesArgsForTelemetry(args: Record<string, unknown>): Record<string, unknown> {
   const query = stringFromAnyKey(args, 'query');
   const ignoredModelArgNames = ['user_id', 'categories', 'category', 'filters', 'memory_provider']
     .filter((name) => Object.prototype.hasOwnProperty.call(args, name));
@@ -5477,6 +5600,31 @@ function redactToolCallArgsForTelemetry(
     raw_query_excluded: true,
     ignored_model_arg_names: ignoredModelArgNames,
   };
+}
+
+function redactToolCallArgsForTelemetry(
+  toolName: string | null,
+  args: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (!args) {
+    return args;
+  }
+  if (isCoreviewToolName(toolName)) {
+    return redactCoreviewToolArgsForTelemetry(args);
+  }
+  if (isCoreviewBuilderToolName(toolName)) {
+    return redactCoreviewBuilderToolArgsForTelemetry(args);
+  }
+  if (toolName === GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME) {
+    return redactReadArtifactTextArgsForTelemetry(args);
+  }
+  if (toolName && GEMINI_GENERIC_BUILDER_TOOL_NAMES.has(toolName)) {
+    return redactGenericBuilderToolArgsForTelemetry(args);
+  }
+  if (toolName !== GEMINI_RETRIEVE_MEMORIES_TOOL_NAME) {
+    return args;
+  }
+  return redactRetrieveMemoriesArgsForTelemetry(args);
 }
 
 function redactBackendResponseForToolTelemetry(
@@ -5534,6 +5682,26 @@ function redactBackendResponseForToolTelemetry(
   };
 }
 
+function anyKeyEqualsBoolean(value: Record<string, unknown>, keys: string[], expected: boolean): boolean {
+  for (const key of keys) {
+    if (value[key] === expected) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function trueFromAnyKey(value: Record<string, unknown>, ...keys: string[]): boolean {
+  return anyKeyEqualsBoolean(value, keys, true);
+}
+
+function triStateBooleanFromAnyKey(value: Record<string, unknown>, ...keys: string[]): boolean | null {
+  if (anyKeyEqualsBoolean(value, keys, true)) {
+    return true;
+  }
+  return anyKeyEqualsBoolean(value, keys, false) ? false : null;
+}
+
 function redactCoreviewActionResponseForTelemetry(
   response: Record<string, unknown>,
 ): Record<string, unknown> {
@@ -5548,27 +5716,23 @@ function redactCoreviewActionResponseForTelemetry(
     zoom: numberFromAnyKey(response, 'zoom'),
     fit_mode: stringFromAnyKey(response, 'fit_mode', 'fitMode'),
     stale: response.stale === true,
-    refresh_attempted: response.refresh_attempted === true || response.refreshAttempted === true,
+    refresh_attempted: trueFromAnyKey(response, 'refresh_attempted', 'refreshAttempted'),
     refresh_result: stringFromAnyKey(response, 'refresh_result', 'refreshResult'),
     blocked_reason: stringFromAnyKey(response, 'blocked_reason', 'blockedReason'),
     result_summary: stringFromAnyKey(response, 'result_summary', 'resultSummary'),
     command_source: stringFromAnyKey(response, 'command_source', 'commandSource'),
-    preserved_mic: response.preserved_mic === true || response.preservedMic === true,
-    preserved_review: response.preserved_review === true || response.preservedReview === true,
+    preserved_mic: trueFromAnyKey(response, 'preserved_mic', 'preservedMic'),
+    preserved_review: trueFromAnyKey(response, 'preserved_review', 'preservedReview'),
     view_ready_wait_ms: numberFromAnyKey(response, 'view_ready_wait_ms', 'viewReadyWaitMs'),
     view_signature_before_present: Boolean(stringFromAnyKey(response, 'view_signature_before', 'viewSignatureBefore')),
     view_signature_after_present: Boolean(stringFromAnyKey(response, 'view_signature_after', 'viewSignatureAfter')),
-    exact_text_available: response.exact_text_available === true || response.exactTextAvailable === true,
-    visual_frame_fresh: response.visual_frame_fresh === true || response.visualFrameFresh === true,
-    visual_fresh: response.visual_fresh === true || response.visualFresh === true || response.visual_frame_fresh === true || response.visualFrameFresh === true,
-    frame_sent: response.frame_sent === true || response.frameSent === true,
-    review_active: response.review_active === true || response.reviewActive === true,
+    exact_text_available: trueFromAnyKey(response, 'exact_text_available', 'exactTextAvailable'),
+    visual_frame_fresh: trueFromAnyKey(response, 'visual_frame_fresh', 'visualFrameFresh'),
+    visual_fresh: trueFromAnyKey(response, 'visual_fresh', 'visualFresh', 'visual_frame_fresh', 'visualFrameFresh'),
+    frame_sent: trueFromAnyKey(response, 'frame_sent', 'frameSent'),
+    review_active: trueFromAnyKey(response, 'review_active', 'reviewActive'),
     current_view_summary: stringFromAnyKey(response, 'current_view_summary', 'currentViewSummary'),
-    annotation_overlay_captured: response.annotation_overlay_captured === true || response.annotationOverlayCaptured === true
-      ? true
-      : response.annotation_overlay_captured === false || response.annotationOverlayCaptured === false
-        ? false
-        : null,
+    annotation_overlay_captured: triStateBooleanFromAnyKey(response, 'annotation_overlay_captured', 'annotationOverlayCaptured'),
     annotation_id_present: Boolean(stringFromAnyKey(response, 'annotation_id', 'annotationId')),
     annotation_kind: stringFromAnyKey(response, 'annotation_kind', 'annotationKind'),
     annotation_anchor_type: stringFromAnyKey(response, 'annotation_anchor_type', 'annotationAnchorType'),
@@ -5581,8 +5745,8 @@ function redactCoreviewActionResponseForTelemetry(
     focus_anchor_type: stringFromAnyKey(response, 'focus_anchor_type', 'focusAnchorType'),
     focused_rect_present: Boolean(recordFromAnyKey(response, 'focused_rect', 'focusedRect')),
     navigation_model: stringFromAnyKey(response, 'navigation_model', 'navigationModel'),
-    html_navigation_controller_active: response.html_navigation_controller_active === true || response.htmlNavigationControllerActive === true,
-    html_navigation_router_used: response.html_navigation_router_used === true || response.htmlNavigationRouterUsed === true,
+    html_navigation_controller_active: trueFromAnyKey(response, 'html_navigation_controller_active', 'htmlNavigationControllerActive'),
+    html_navigation_router_used: trueFromAnyKey(response, 'html_navigation_router_used', 'htmlNavigationRouterUsed'),
     html_navigation_command_kind: stringFromAnyKey(response, 'html_navigation_command_kind', 'htmlNavigationCommandKind'),
     html_navigation_target_safe: stringFromAnyKey(response, 'html_navigation_target_safe', 'htmlNavigationTargetSafe'),
     html_navigation_target_kind: stringFromAnyKey(response, 'html_navigation_target_kind', 'htmlNavigationTargetKind'),
@@ -5590,22 +5754,22 @@ function redactCoreviewActionResponseForTelemetry(
     html_navigation_failure_reason: stringFromAnyKey(response, 'html_navigation_failure_reason', 'htmlNavigationFailureReason'),
     html_navigation_scroll_top_before: numberFromAnyKey(response, 'html_navigation_scroll_top_before', 'htmlNavigationScrollTopBefore'),
     html_navigation_scroll_top_after: numberFromAnyKey(response, 'html_navigation_scroll_top_after', 'htmlNavigationScrollTopAfter'),
-    html_navigation_scrolled: response.html_navigation_scrolled === true || response.htmlNavigationScrolled === true,
+    html_navigation_scrolled: trueFromAnyKey(response, 'html_navigation_scrolled', 'htmlNavigationScrolled'),
     html_navigation_command_id: stringFromAnyKey(response, 'html_navigation_command_id', 'htmlNavigationCommandId'),
-    html_navigation_timed_out: response.html_navigation_timed_out === true || response.htmlNavigationTimedOut === true,
-    html_navigation_waited_for_ready: response.html_navigation_waited_for_ready === true || response.htmlNavigationWaitedForReady === true,
-    html_navigation_feedback_emitted: response.html_navigation_feedback_emitted === true || response.htmlNavigationFeedbackEmitted === true,
-    html_navigation_prevented_pdf_fallback: response.html_navigation_prevented_pdf_fallback === true || response.htmlNavigationPreventedPdfFallback === true,
+    html_navigation_timed_out: trueFromAnyKey(response, 'html_navigation_timed_out', 'htmlNavigationTimedOut'),
+    html_navigation_waited_for_ready: trueFromAnyKey(response, 'html_navigation_waited_for_ready', 'htmlNavigationWaitedForReady'),
+    html_navigation_feedback_emitted: trueFromAnyKey(response, 'html_navigation_feedback_emitted', 'htmlNavigationFeedbackEmitted'),
+    html_navigation_prevented_pdf_fallback: trueFromAnyKey(response, 'html_navigation_prevented_pdf_fallback', 'htmlNavigationPreventedPdfFallback'),
     html_navigation_blocked_generic_tool_count: numberFromAnyKey(response, 'html_navigation_blocked_generic_tool_count', 'htmlNavigationBlockedGenericToolCount'),
-    html_internal_navigation_used_same_resolver: response.html_internal_navigation_used_same_resolver === true || response.htmlInternalNavigationUsedSameResolver === true,
-    html_voice_navigation_used_same_resolver: response.html_voice_navigation_used_same_resolver === true || response.htmlVoiceNavigationUsedSameResolver === true,
-    html_navigation_suppressed_emit_artifact: response.html_navigation_suppressed_emit_artifact === true || response.htmlNavigationSuppressedEmitArtifact === true,
-    html_navigation_suppressed_builder_tool: response.html_navigation_suppressed_builder_tool === true || response.htmlNavigationSuppressedBuilderTool === true,
-    html_navigation_result_confirmed_before_feedback: response.html_navigation_result_confirmed_before_feedback === true || response.htmlNavigationResultConfirmedBeforeFeedback === true,
+    html_internal_navigation_used_same_resolver: trueFromAnyKey(response, 'html_internal_navigation_used_same_resolver', 'htmlInternalNavigationUsedSameResolver'),
+    html_voice_navigation_used_same_resolver: trueFromAnyKey(response, 'html_voice_navigation_used_same_resolver', 'htmlVoiceNavigationUsedSameResolver'),
+    html_navigation_suppressed_emit_artifact: trueFromAnyKey(response, 'html_navigation_suppressed_emit_artifact', 'htmlNavigationSuppressedEmitArtifact'),
+    html_navigation_suppressed_builder_tool: trueFromAnyKey(response, 'html_navigation_suppressed_builder_tool', 'htmlNavigationSuppressedBuilderTool'),
+    html_navigation_result_confirmed_before_feedback: trueFromAnyKey(response, 'html_navigation_result_confirmed_before_feedback', 'htmlNavigationResultConfirmedBeforeFeedback'),
     raw_comment_text_excluded: true,
-    review_tool_timed_out: response.review_tool_timed_out === true || response.reviewToolTimedOut === true,
+    review_tool_timed_out: trueFromAnyKey(response, 'review_tool_timed_out', 'reviewToolTimedOut'),
     review_tool_timeout_name: stringFromAnyKey(response, 'review_tool_timeout_name', 'reviewToolTimeoutName'),
-    review_tool_timeout_result_sent: response.review_tool_timeout_result_sent === true || response.reviewToolTimeoutResultSent === true,
+    review_tool_timeout_result_sent: trueFromAnyKey(response, 'review_tool_timeout_result_sent', 'reviewToolTimeoutResultSent'),
     raw_artifact_text_excluded: true,
     raw_frame_excluded: true,
   };
