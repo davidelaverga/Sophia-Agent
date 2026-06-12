@@ -277,8 +277,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     app.include_router(sophia.internal_router)
     app.include_router(builder_canvas.router)
 
-    # Builder events: internal webhook delivery remains; browsers consume
-    # the authenticated builder-canvas route instead of the legacy public SSE.
+    # Builder events: keep the legacy public SSE mounted for cached clients
+    # and internal consumers while the authenticated builder-canvas route is
+    # the primary browser path.
+    app.include_router(builder_events.public_router)
     app.include_router(builder_events.internal_router)
 
     @app.get("/health", tags=["health"])
