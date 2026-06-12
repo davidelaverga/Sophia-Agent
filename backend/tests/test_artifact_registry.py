@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -556,11 +557,20 @@ def test_artifact_id_endpoints_do_not_require_live_session_record(tmp_path, monk
     registry = LocalArtifactRegistry(tmp_path / "artifact-registry")
     store = SessionStore(tmp_path / "users")
     actual_file = tmp_path / "served" / "orphaned-session.md"
+    parent_missing_file = tmp_path / "missing-parent" / "orphaned-session.md"
     actual_file.parent.mkdir(parents=True)
     actual_file.write_text("# Still here", encoding="utf-8")
     monkeypatch.setattr(artifacts_router, "_artifact_registry", registry)
     monkeypatch.setattr(artifacts_router, "_session_store", store)
-    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: actual_file)
+
+    def resolve_path(thread_id: str, _virtual_path: str) -> Path:
+        if thread_id == "thread-1":
+            return parent_missing_file
+        if thread_id == "task-thread-1":
+            return actual_file
+        raise AssertionError(f"Unexpected thread id: {thread_id}")
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", resolve_path)
 
     app = FastAPI()
     app.include_router(artifacts_router.router)
@@ -568,6 +578,7 @@ def test_artifact_id_endpoints_do_not_require_live_session_record(tmp_path, monk
     client = TestClient(app)
     artifact = registry.upsert(
         _request(
+            task_id="task-thread-1",
             local_path="outputs/orphaned-session.md",
             renderer_kind="markdown",
             artifact_type="markdown",

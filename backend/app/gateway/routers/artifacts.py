@@ -244,32 +244,73 @@ async def _serve_registry_artifact(
     *,
     force_download: bool,
 ) -> Response:
-    resolution = await _resolve_artifact_path_for_request(record.thread_id, record.local_path)
-    actual_path = resolution.actual_path
+    missing_resolution: ArtifactPathResolution | None = None
+    for thread_id in _registry_artifact_thread_ids(record):
+        resolution = await _resolve_artifact_path_for_request(thread_id, record.local_path)
+        actual_path = resolution.actual_path
+        if not actual_path.exists():
+            missing_resolution = missing_resolution or resolution
+            continue
+        if not actual_path.is_file():
+            raise HTTPException(status_code=400, detail=f"Path is not a file: {record.local_path}")
+        return _serve_local_artifact(
+            thread_id,
+            actual_path,
+            request,
+            force_download=force_download,
+        )
 
-    if not actual_path.exists():
+    for thread_id in _registry_artifact_thread_ids(record):
         supabase_response = _try_serve_from_supabase(
-            record.thread_id,
+            thread_id,
             record.local_path,
             request,
             force_download=force_download,
         )
         if supabase_response is not None:
             return supabase_response
-        raise HTTPException(
-            status_code=404,
-            detail=_artifact_not_found_detail(record.thread_id, record.local_path, resolution),
+
+    if missing_resolution is None:
+        missing_resolution = ArtifactPathResolution(
+            actual_path=_resolve_artifact_path(record.thread_id, record.local_path),
+            requested_thread_id=record.thread_id,
+            requested_path=record.local_path,
+            normalized_path=record.local_path,
+            resolution_scope="registry_record",
         )
-
-    if not actual_path.is_file():
-        raise HTTPException(status_code=400, detail=f"Path is not a file: {record.local_path}")
-
-    return _serve_local_artifact(
-        record.thread_id,
-        actual_path,
-        request,
-        force_download=force_download,
+    raise HTTPException(
+        status_code=404,
+        detail=_artifact_not_found_detail(record.thread_id, record.local_path, missing_resolution),
     )
+
+
+def _registry_artifact_thread_ids(record: ArtifactRecord) -> tuple[str, ...]:
+    thread_ids: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str | None) -> None:
+        if not isinstance(value, str) or not value.strip():
+            return
+        normalized = value.strip()
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        thread_ids.append(normalized)
+
+    add(record.thread_id)
+    add(record.task_id)
+    add(record.run_id)
+    add(record.parent_thread_id)
+    storage_thread_id = _thread_id_from_storage_object_path(record.storage_object_path)
+    add(storage_thread_id)
+    return tuple(thread_ids)
+
+
+def _thread_id_from_storage_object_path(storage_object_path: str | None) -> str | None:
+    if not isinstance(storage_object_path, str) or "/" not in storage_object_path:
+        return None
+    thread_id = storage_object_path.split("/", 1)[0].strip()
+    return thread_id or None
 
 
 def _is_builder_internal(name: str) -> bool:
