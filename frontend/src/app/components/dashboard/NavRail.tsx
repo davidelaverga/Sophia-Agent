@@ -10,7 +10,7 @@
 
 'use client';
 
-import { BookOpen, Clock, Settings } from 'lucide-react';
+import { Archive, BookOpen, Clock, Settings } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
 import { haptic } from '../../hooks/useHaptics';
@@ -97,6 +97,7 @@ interface NavRailProps {
   sessionsExpanded: boolean;
   sessionCount: number;
   onOpenSettings: () => void;
+  activeItem?: 'sessions' | 'artifacts' | 'journal' | 'settings';
 }
 
 export function NavRail({
@@ -104,9 +105,11 @@ export function NavRail({
   sessionsExpanded,
   sessionCount,
   onOpenSettings,
+  activeItem,
 }: NavRailProps) {
   const router = useRouter();
   const sweepRef = useSweepGlow();
+  const sessionsActive = activeItem ? activeItem === 'sessions' : sessionsExpanded;
 
   return (
     <nav
@@ -121,13 +124,20 @@ export function NavRail({
         <NavRailItem
           icon={Clock}
           label="Sessions"
-          active={sessionsExpanded}
+          active={sessionsActive}
           badge={sessionCount}
           onClick={onToggleSessions}
         />
         <NavRailItem
+          icon={Archive}
+          label="Artifacts"
+          active={activeItem === 'artifacts'}
+          onClick={() => router.push('/artifacts')}
+        />
+        <NavRailItem
           icon={BookOpen}
           label="Journal"
+          active={activeItem === 'journal'}
           onClick={() => router.push('/journal')}
         />
       </div>
@@ -136,7 +146,12 @@ export function NavRail({
       <div className="flex-1" />
 
       {/* Settings — bottom */}
-      <NavRailItem icon={Settings} label="Settings" onClick={onOpenSettings} />
+      <NavRailItem
+        icon={Settings}
+        label="Settings"
+        active={activeItem === 'settings'}
+        onClick={onOpenSettings}
+      />
     </nav>
   );
 }
@@ -193,9 +208,15 @@ interface MobileNavBarProps {
   onOpenSessions: () => void;
   sessionCount: number;
   onOpenSettings: () => void;
+  activeItem?: 'sessions' | 'artifacts' | 'journal' | 'settings';
 }
 
-export function MobileNavBar({ onOpenSessions, sessionCount, onOpenSettings }: MobileNavBarProps) {
+export function MobileNavBar({
+  onOpenSessions,
+  sessionCount,
+  onOpenSettings,
+  activeItem,
+}: MobileNavBarProps) {
   const router = useRouter();
 
   return (
@@ -212,15 +233,28 @@ export function MobileNavBar({ onOpenSessions, sessionCount, onOpenSettings }: M
       <MobileNavItem
         icon={Clock}
         label="Sessions"
+        active={activeItem === 'sessions'}
         badge={sessionCount}
         onClick={onOpenSessions}
       />
       <MobileNavItem
+        icon={Archive}
+        label="Artifacts"
+        active={activeItem === 'artifacts'}
+        onClick={() => router.push('/artifacts')}
+      />
+      <MobileNavItem
         icon={BookOpen}
         label="Journal"
+        active={activeItem === 'journal'}
         onClick={() => router.push('/journal')}
       />
-      <MobileNavItem icon={Settings} label="Settings" onClick={onOpenSettings} />
+      <MobileNavItem
+        icon={Settings}
+        label="Settings"
+        active={activeItem === 'settings'}
+        onClick={onOpenSettings}
+      />
     </nav>
   );
 }

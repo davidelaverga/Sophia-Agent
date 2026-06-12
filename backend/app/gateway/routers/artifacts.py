@@ -8,10 +8,19 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import quote, unquote
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
+from app.gateway.artifact_registry import (
+    ArtifactListResponse,
+    ArtifactOpenResponse,
+    ArtifactRegistryFilters,
+    ArtifactSource,
+    ArtifactUpsertRequest,
+    LocalArtifactRegistry,
+    open_response_for_record,
+)
 from app.gateway.auth import require_authenticated_user
 from app.gateway.html_quick_patch import (
     apply_html_quick_patch,
@@ -31,6 +40,7 @@ _WORKSPACE_OUTPUTS_VIRTUAL_PATH = "mnt/user-data/workspace/outputs"
 _OFFICE_DOWNLOAD_EXTENSIONS = frozenset({".pptx", ".ppt", ".docx", ".xlsx"})
 _BUILDER_ARTIFACT_TASK_STATUSES = frozenset({"success", "completed"})
 _session_store = SessionStore()
+_artifact_registry = LocalArtifactRegistry()
 
 
 @dataclass(frozen=True)
@@ -87,6 +97,110 @@ class HtmlQuickPatchResponse(BaseModel):
     preserved_original: bool = True
     raw_html_excluded: bool = True
     raw_artifact_text_excluded: bool = True
+
+
+@router.get(
+    "/artifacts",
+    response_model=ArtifactListResponse,
+    summary="List User Artifacts",
+    description="List safe artifact metadata for the authenticated user.",
+)
+async def list_user_artifacts(
+    artifact_type: str | None = Query(default=None),
+    source: ArtifactSource | None = Query(default=None),
+    thread_id: str | None = Query(default=None),
+    session_id: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+    created_after: str | None = Query(default=None),
+    created_before: str | None = Query(default=None),
+    recent_after: str | None = Query(default=None),
+    sort: str = Query(default="updated"),
+    limit: int = Query(default=100, ge=1, le=250),
+    authenticated_user_id: str = Depends(require_authenticated_user),
+) -> ArtifactListResponse:
+    selected_sort = sort if sort in {"updated", "created", "recent", "title"} else "updated"
+    return _artifact_registry.list(
+        user_id=authenticated_user_id,
+        filters=ArtifactRegistryFilters(
+            artifact_type=artifact_type,
+            source=source,
+            thread_id=thread_id,
+            session_id=session_id,
+            search=search,
+            created_after=created_after,
+            created_before=created_before,
+            recent_after=recent_after,
+            sort=selected_sort,
+            limit=limit,
+        ),
+    )
+
+
+@router.post(
+    "/artifacts/upsert",
+    response_model=ArtifactOpenResponse,
+    summary="Upsert Artifact Metadata",
+    description="Idempotently persist safe artifact metadata for the authenticated user.",
+)
+async def upsert_user_artifact(
+    request_body: ArtifactUpsertRequest,
+    authenticated_user_id: str = Depends(require_authenticated_user),
+) -> ArtifactOpenResponse:
+    _require_thread_owner(authenticated_user_id, request_body.thread_id)
+    record = _artifact_registry.upsert(request_body, user_id=authenticated_user_id)
+    return open_response_for_record(record)
+
+
+@router.get(
+    "/artifacts/{artifact_id}",
+    response_model=ArtifactOpenResponse,
+    summary="Get Artifact Metadata",
+)
+async def get_user_artifact(
+    artifact_id: str,
+    authenticated_user_id: str = Depends(require_authenticated_user),
+) -> ArtifactOpenResponse:
+    record = _artifact_registry.get(artifact_id, user_id=authenticated_user_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    _require_thread_owner(authenticated_user_id, record.thread_id)
+    return open_response_for_record(record)
+
+
+@router.post(
+    "/artifacts/{artifact_id}/open",
+    response_model=ArtifactOpenResponse,
+    summary="Open Artifact",
+)
+async def open_user_artifact(
+    artifact_id: str,
+    authenticated_user_id: str = Depends(require_authenticated_user),
+) -> ArtifactOpenResponse:
+    existing = _artifact_registry.get(artifact_id, user_id=authenticated_user_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    _require_thread_owner(authenticated_user_id, existing.thread_id)
+    opened = _artifact_registry.mark_opened(artifact_id, user_id=authenticated_user_id) or existing
+    return open_response_for_record(opened)
+
+
+@router.get(
+    "/artifacts/{artifact_id}/download",
+    summary="Download Artifact",
+)
+async def download_user_artifact(
+    artifact_id: str,
+    authenticated_user_id: str = Depends(require_authenticated_user),
+) -> RedirectResponse:
+    record = _artifact_registry.get(artifact_id, user_id=authenticated_user_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    _enforce_artifact_owner(authenticated_user_id, record.thread_id, record.local_path)
+    encoded_path = quote(record.local_path, safe="/")
+    return RedirectResponse(
+        url=f"/api/threads/{quote(record.thread_id, safe='')}/artifacts/{encoded_path}?download=true",
+        status_code=307,
+    )
 
 
 def _is_builder_internal(name: str) -> bool:
@@ -985,7 +1099,7 @@ async def quick_patch_html_artifact(
         stable_path_hash(revision_path),
         request_body.quick_edit_kind,
     )
-    return _quick_patch_response(
+    response = _quick_patch_response(
         ok=True,
         result="patched",
         request=request_body,
@@ -994,6 +1108,53 @@ async def quick_patch_html_artifact(
         patched_content=patch.html,
         safe_summary=patch.safe_summary,
     )
+    if authenticated_user_id:
+        _upsert_quick_patch_revision_artifact(
+            authenticated_user_id=authenticated_user_id,
+            thread_id=thread_id,
+            session_id=request_body.session_id,
+            response=response,
+        )
+    return response
+
+
+def _upsert_quick_patch_revision_artifact(
+    *,
+    authenticated_user_id: str,
+    thread_id: str,
+    session_id: str | None,
+    response: HtmlQuickPatchResponse,
+) -> None:
+    if not response.ok or not response.revision_artifact_path:
+        return
+    try:
+        _artifact_registry.upsert(
+            ArtifactUpsertRequest(
+                user_id=authenticated_user_id,
+                thread_id=thread_id,
+                session_id=session_id,
+                title=Path(response.revision_artifact_path).name,
+                filename=Path(response.revision_artifact_path).name,
+                artifact_type="html",
+                renderer_kind="html",
+                mime_type="text/html",
+                safe_summary=response.safe_summary,
+                source="quick_edit",
+                local_path=response.revision_artifact_path,
+                content_hash=response.content_hash,
+                storage_status="available",
+                raw_content_excluded=True,
+                signed_url_excluded=True,
+            ),
+            user_id=authenticated_user_id,
+        )
+    except Exception:  # noqa: BLE001 - registry is best-effort for quick edit.
+        logger.warning(
+            "Quick HTML patch artifact registry upsert failed: thread_id=%s revision_path_hash=%s",
+            _short_id(thread_id),
+            stable_path_hash(response.revision_artifact_path),
+            exc_info=True,
+        )
 
 
 @router.get(

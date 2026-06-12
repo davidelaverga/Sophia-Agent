@@ -60,6 +60,7 @@ import {
   restoreArtifactCanvasOpenState,
   type ArtifactCanvasRestoreContext,
 } from '../lib/artifact-canvas-restore-state';
+import { consumeArtifactLibraryOpenHandoff } from '../lib/artifact-library-open-handoff';
 import { detectArtifactRendererKind, type ArtifactRendererKind } from '../lib/artifact-renderers';
 import type { ArtifactReviewVoiceCommandRouter } from '../lib/artifact-review-voice-commands';
 import { buildThreadArtifactHref, getBuilderArtifactFiles, normalizeBuilderArtifactPath } from '../lib/builder-artifacts';
@@ -682,6 +683,7 @@ function SessionPageContent() {
   ));
   const sessionArtifactIndexDedupedCountRef = useRef(0);
   const sessionArtifactIndexRestoreCountRef = useRef(0);
+  const artifactRegistryBackfillKeysRef = useRef(new Set<string>());
   const canvasRestoreContext = useMemo<ArtifactCanvasRestoreContext>(() => ({
     userId: userId ?? null,
     threadId: resolvedThreadId ?? null,
@@ -880,8 +882,7 @@ function SessionPageContent() {
     if (builderTask.phase !== 'running') {
       setBuilderLibraryBaseline((current) => {
         if (
-          current
-          && current.taskId === builderTask.taskId
+          current?.taskId === builderTask.taskId
           && builderRunMatches(current.runId, builderTask.runId)
         ) {
           return current;
@@ -1213,6 +1214,66 @@ function SessionPageContent() {
       },
     });
   }, []);
+
+  useEffect(() => {
+    if (!sessionArtifactIndexContext.userId || !sessionArtifactIndexContext.threadId) {
+      return;
+    }
+    for (const artifact of sessionArtifactIndex.artifacts) {
+      const normalizedPath = normalizeBuilderArtifactPath(artifact.localPath);
+      if (!normalizedPath) {
+        continue;
+      }
+      const key = [
+        artifact.artifactId,
+        artifact.versionId,
+        artifact.updatedAt,
+      ].join('|');
+      if (artifactRegistryBackfillKeysRef.current.has(key)) {
+        continue;
+      }
+      artifactRegistryBackfillKeysRef.current.add(key);
+      void fetch('/api/artifacts/upsert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_id: sessionArtifactIndexContext.userId,
+          thread_id: artifact.threadId,
+          session_id: artifact.sessionId ?? sessionArtifactIndexContext.sessionId ?? null,
+          parent_thread_id: artifact.parentThreadId ?? null,
+          task_id: artifact.taskId ?? null,
+          run_id: artifact.runId ?? null,
+          artifact_id: artifact.artifactId,
+          logical_artifact_id: artifact.logicalArtifactId,
+          version_id: artifact.versionId,
+          parent_version_id: artifact.parentVersionId ?? null,
+          title: artifact.title,
+          artifact_type: artifact.artifactType,
+          renderer_kind: artifact.rendererKind,
+          mime_type: artifact.mimeType ?? null,
+          safe_summary: artifact.safeSummary ?? null,
+          source: 'file_library_backfill',
+          local_path: normalizedPath,
+          storage_provider: artifact.storageProvider,
+          storage_bucket: artifact.storageBucket ?? null,
+          storage_object_path: artifact.storageObjectPath ?? null,
+          content_hash: artifact.contentHash ?? null,
+          storage_status: artifact.review?.missing ? 'missing' : 'available',
+          created_at: artifact.createdAt,
+          updated_at: artifact.updatedAt,
+          raw_content_excluded: true,
+          signed_url_excluded: true,
+        }),
+      }).catch(() => {
+        artifactRegistryBackfillKeysRef.current.delete(key);
+      });
+    }
+  }, [
+    sessionArtifactIndex.artifacts,
+    sessionArtifactIndexContext.sessionId,
+    sessionArtifactIndexContext.threadId,
+    sessionArtifactIndexContext.userId,
+  ]);
 
   const registerSessionArtifact = useCallback((
     localPath: string | null | undefined,
@@ -1570,6 +1631,28 @@ function SessionPageContent() {
     recordSessionArtifactIndexTelemetry,
     sessionArtifactIndex.activeArtifactId,
     sessionArtifactIndex.artifacts.length,
+    setShowArtifacts,
+    setUserOpenedArtifacts,
+  ]);
+
+  useEffect(() => {
+    const handoff = consumeArtifactLibraryOpenHandoff(sessionArtifactIndexContext);
+    if (!handoff) {
+      return;
+    }
+    const record = registerSessionArtifactByPath(handoff.artifactPath, {
+      ...handoff.metadata,
+      rendererKind: handoff.rendererKind,
+      source: handoff.metadata.source ?? 'manual',
+    });
+    handleSelectBuilderArtifactPath(record?.localPath ?? handoff.artifactPath);
+    setShowArtifacts(true);
+    setUserOpenedArtifacts(true);
+  }, [
+    handleSelectBuilderArtifactPath,
+    registerSessionArtifactByPath,
+    sessionArtifactIndexContext,
+    sessionArtifactIndexContextSignature,
     setShowArtifacts,
     setUserOpenedArtifacts,
   ]);

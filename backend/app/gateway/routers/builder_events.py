@@ -30,9 +30,14 @@ from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.gateway.artifact_registry import (
+    LocalArtifactRegistry,
+    builder_completion_upsert_request,
+)
 from app.gateway.workers.builder_canvas import get_builder_canvas_worker
 from app.gateway.workers.builder_events import get_builder_events_worker
 from app.gateway.workers.companion_wakeup import get_companion_wakeup_or_none
+from deerflow.sophia.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +54,8 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "error_message",
     "trace_id",
 )
+_artifact_registry = LocalArtifactRegistry()
+_session_store = SessionStore()
 
 
 def _langgraph_url() -> str:
@@ -211,6 +218,14 @@ async def _persist_builder_terminal_state(payload: dict[str, Any]) -> None:
         )
 
 
+def _upsert_builder_terminal_artifact(payload: dict[str, Any]) -> None:
+    request = builder_completion_upsert_request(payload, session_store=_session_store)
+    if request is None:
+        return
+    user_id, upsert_request = request
+    _artifact_registry.upsert(upsert_request, user_id=user_id)
+
+
 # ---- Request model ---------------------------------------------------------
 
 
@@ -319,6 +334,15 @@ async def receive_builder_event(event: BuilderCompletionEvent, request: Request)
     """
     payload = await _hydrate_missing_run_id(event.model_dump())
     await _persist_builder_terminal_state(payload)
+    try:
+        _upsert_builder_terminal_artifact(payload)
+    except Exception:  # noqa: BLE001 - artifact registry must not block delivery.
+        logger.warning(
+            "Builder terminal artifact registry upsert failed task_id=%s thread_id=%s",
+            payload.get("task_id"),
+            payload.get("thread_id"),
+            exc_info=True,
+        )
     worker = get_builder_events_worker(request.app)
     delivered = await worker.publish(payload)
     try:
