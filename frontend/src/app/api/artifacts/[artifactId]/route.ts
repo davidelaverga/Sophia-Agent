@@ -9,3 +9,11 @@ export async function GET(
   const { artifactId } = await params;
   return proxyArtifactRegistryRequest(req, `/${encodeURIComponent(artifactId)}`, { method: 'GET' });
 }
+
+export async function DELETE(
+  req: NextRequest,
+  { params }: { params: Promise<{ artifactId: string }> },
+) {
+  const { artifactId } = await params;
+  return proxyArtifactRegistryRequest(req, `/${encodeURIComponent(artifactId)}`, { method: 'DELETE' });
+}

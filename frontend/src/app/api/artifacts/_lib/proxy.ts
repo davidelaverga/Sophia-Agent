@@ -29,7 +29,7 @@ function copyResponseHeaders(source: Headers): Headers {
 export async function proxyArtifactRegistryRequest(
   req: NextRequest,
   path: string,
-  init: { method: 'GET' | 'POST'; body?: string | null },
+  init: { method: 'DELETE' | 'GET' | 'POST'; body?: string | null },
 ): Promise<Response> {
   const authHeader = await getUserScopedAuthHeader();
   if (!authHeader) {
