@@ -31,6 +31,8 @@ const baseArtifact: ArtifactRegistryRecord = {
   size_bytes: 1200,
   content_hash: 'hash-not-rendered',
   storage_status: 'available',
+  artifact_role: 'primary',
+  is_library_visible: true,
   created_at: '2026-06-01T10:00:00+00:00',
   updated_at: '2026-06-02T10:00:00+00:00',
   last_opened_at: null,

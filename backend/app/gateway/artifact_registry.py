@@ -31,6 +31,7 @@ ArtifactSource = Literal[
     "file_library_backfill",
 ]
 ArtifactStorageProvider = Literal["local", "supabase", "hybrid"]
+ArtifactRole = Literal["primary", "wrapper", "support", "internal"]
 
 _DEFAULT_BASE_PATH = Path("users")
 _FORBIDDEN_EXTRA_KEYS = {
@@ -52,6 +53,35 @@ _FORBIDDEN_EXTRA_KEYS = {
 }
 _OUTPUTS_PREFIX = "mnt/user-data/outputs"
 _WORKSPACE_OUTPUTS_PREFIX = "mnt/user-data/workspace/outputs"
+_SUPPORT_ARTIFACT_DIRS = {"visuals", "sources", "source_artifact", ".builder"}
+_SUPPORT_ARTIFACT_SUFFIXES = (
+    ".source.md",
+    ".source.html",
+    ".plan.json",
+    ".manifest.json",
+    ".metadata.json",
+    ".meta.json",
+    ".diagnostics.json",
+)
+_HTML_WRAPPER_TEXT_MARKERS = (
+    "handoff wrapper",
+    "artifact wrapper",
+    "builder wrapper",
+    "render wrapper",
+    "preview wrapper",
+    "internal wrapper",
+    "support wrapper",
+)
+_ACTION_HTML_PREFIXES = (
+    "build-",
+    "create-",
+    "draft-",
+    "generate-",
+    "make-",
+    "render-",
+    "write-",
+)
+_NON_HTML_TARGET_HINTS = ("markdown", ".md", " pdf", ".pdf", "pptx", ".pptx")
 
 
 def _now_iso() -> str:
@@ -145,6 +175,16 @@ def _relative_output_path(path: str) -> str | None:
     return None
 
 
+def _relative_any_output_path(path: str) -> str | None:
+    if path == _OUTPUTS_PREFIX or path == _WORKSPACE_OUTPUTS_PREFIX:
+        return ""
+    if path.startswith(f"{_OUTPUTS_PREFIX}/"):
+        return path[len(_OUTPUTS_PREFIX) + 1 :]
+    if path.startswith(f"{_WORKSPACE_OUTPUTS_PREFIX}/"):
+        return path[len(_WORKSPACE_OUTPUTS_PREFIX) + 1 :]
+    return None
+
+
 def _infer_mime_type(filename: str, mime_type: str | None) -> str | None:
     return mime_type or mimetypes.guess_type(filename)[0]
 
@@ -207,6 +247,110 @@ def _parse_timestamp(value: str | None) -> float:
         return 0.0
 
 
+def _normalize_extension(value: str | None) -> str | None:
+    normalized = (value or "").strip().lower().lstrip(".")
+    if not normalized:
+        return None
+    if normalized == "markdown":
+        return "md"
+    if normalized == "htm":
+        return "html"
+    return normalized
+
+
+def _is_builder_internal_name(name: str) -> bool:
+    lowered = name.lower()
+    return (
+        name.startswith("_")
+        and lowered.endswith((".py", ".sh", ".ps1"))
+        or lowered.startswith("test_")
+        and lowered.endswith((".py", ".sh", ".ps1"))
+    )
+
+
+def _is_support_artifact_path(local_path: str) -> bool:
+    relative = _relative_any_output_path(local_path)
+    if relative is None:
+        return False
+    normalized = relative.strip().lstrip("/").replace("\\", "/")
+    if not normalized:
+        return False
+    parts = [part for part in normalized.split("/") if part]
+    if not parts:
+        return False
+    if parts[0].lower() in _SUPPORT_ARTIFACT_DIRS:
+        return True
+    name = parts[-1].lower()
+    return _is_builder_internal_name(parts[-1]) or name.endswith(_SUPPORT_ARTIFACT_SUFFIXES)
+
+
+def _looks_like_html_wrapper(
+    *,
+    local_path: str,
+    filename: str,
+    title: str | None,
+    requested_artifact_ext: str | None = None,
+    artifact_is_fallback: bool | None = None,
+) -> bool:
+    suffix = PurePosixPath(local_path).suffix.lower()
+    if suffix not in {".html", ".htm"}:
+        return False
+
+    lowered_name = filename.lower()
+    lowered_title = (title or "").lower()
+    combined = f"{lowered_title} {lowered_name} {local_path.lower()}"
+    if any(marker in combined for marker in _HTML_WRAPPER_TEXT_MARKERS):
+        return True
+    if "handoff" in combined and "wrapper" in combined:
+        return True
+    if "wrapper" in lowered_name and any(marker in combined for marker in ("render", "preview", "handoff")):
+        return True
+
+    requested_ext = _normalize_extension(requested_artifact_ext)
+    if requested_ext and requested_ext != "html" and artifact_is_fallback is not True:
+        return True
+
+    if lowered_name.startswith(_ACTION_HTML_PREFIXES) and any(hint in combined for hint in _NON_HTML_TARGET_HINTS):
+        return True
+
+    return False
+
+
+def _detect_artifact_role(
+    *,
+    local_path: str,
+    filename: str,
+    title: str | None,
+    artifact_type: str,
+    renderer_kind: str,
+    requested_artifact_ext: str | None = None,
+    artifact_is_fallback: bool | None = None,
+) -> ArtifactRole:
+    if _is_support_artifact_path(local_path):
+        return "support"
+    if _looks_like_html_wrapper(
+        local_path=local_path,
+        filename=filename,
+        title=title,
+        requested_artifact_ext=requested_artifact_ext,
+        artifact_is_fallback=artifact_is_fallback,
+    ):
+        return "wrapper"
+    if renderer_kind in {"metadata", "unsupported"} and artifact_type in {"metadata", "other"}:
+        return "internal"
+    return "primary"
+
+
+def _extra_token(request: ArtifactUpsertRequest, key: str) -> str | None:
+    value = request.model_extra.get(key) if request.model_extra else None
+    return _normalize_token(value)
+
+
+def _extra_bool(request: ArtifactUpsertRequest, key: str) -> bool | None:
+    value = request.model_extra.get(key) if request.model_extra else None
+    return value if isinstance(value, bool) else None
+
+
 class ArtifactRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -235,6 +379,8 @@ class ArtifactRecord(BaseModel):
     size_bytes: int | None = Field(default=None, ge=0)
     content_hash: str | None = None
     storage_status: str = "available"
+    artifact_role: ArtifactRole = "primary"
+    is_library_visible: bool = True
     created_at: str
     updated_at: str
     last_opened_at: str | None = None
@@ -253,6 +399,21 @@ class ArtifactRecord(BaseModel):
         if value is not True:
             raise ValueError("artifact registry rows must exclude raw content and signed URLs")
         return True
+
+    @model_validator(mode="after")
+    def _normalize_library_visibility(self) -> ArtifactRecord:
+        detected_role = _detect_artifact_role(
+            local_path=self.local_path,
+            filename=self.filename,
+            title=self.title,
+            artifact_type=self.artifact_type,
+            renderer_kind=self.renderer_kind,
+        )
+        role = detected_role if detected_role != "primary" else self.artifact_role
+        visible = self.is_library_visible if role == "primary" else False
+        object.__setattr__(self, "artifact_role", role)
+        object.__setattr__(self, "is_library_visible", bool(visible))
+        return self
 
 
 class ArtifactUpsertRequest(BaseModel):
@@ -283,6 +444,8 @@ class ArtifactUpsertRequest(BaseModel):
     size_bytes: int | None = Field(default=None, ge=0)
     content_hash: str | None = None
     storage_status: str | None = None
+    artifact_role: ArtifactRole | None = None
+    is_library_visible: bool | None = None
     created_at: str | None = None
     updated_at: str | None = None
     raw_content_excluded: bool = True
@@ -339,6 +502,23 @@ class ArtifactUpsertRequest(BaseModel):
         )
         updated_at = _normalize_iso(self.updated_at) or now
         title = _normalize_token(self.title) or (existing.title if existing else None) or filename
+        detected_role = _detect_artifact_role(
+            local_path=local_path,
+            filename=filename,
+            title=title,
+            artifact_type=artifact_type,
+            renderer_kind=renderer_kind,
+            requested_artifact_ext=_extra_token(self, "requested_artifact_ext"),
+            artifact_is_fallback=_extra_bool(self, "artifact_is_fallback"),
+        )
+        requested_role = self.artifact_role or (existing.artifact_role if existing else "primary")
+        artifact_role = detected_role if detected_role != "primary" else requested_role
+        requested_visibility = (
+            self.is_library_visible
+            if self.is_library_visible is not None
+            else (existing.is_library_visible if existing else True)
+        )
+        is_library_visible = bool(requested_visibility and artifact_role == "primary")
         storage_object_path = _normalize_token(self.storage_object_path)
         if storage_object_path is None:
             relative = _relative_output_path(local_path)
@@ -377,6 +557,8 @@ class ArtifactUpsertRequest(BaseModel):
             storage_status=_normalize_token(self.storage_status)
             or (existing.storage_status if existing else None)
             or "available",
+            artifact_role=artifact_role,
+            is_library_visible=is_library_visible,
             created_at=created_at,
             updated_at=updated_at,
             last_opened_at=existing.last_opened_at if existing else None,
@@ -416,6 +598,7 @@ class ArtifactRegistryFilters(BaseModel):
     created_after: str | None = None
     created_before: str | None = None
     recent_after: str | None = None
+    include_hidden: bool = False
     sort: Literal["updated", "created", "recent", "title"] = "updated"
     limit: int = Field(default=100, ge=1, le=250)
 
@@ -553,6 +736,8 @@ class LocalArtifactRegistry:
         filters: ArtifactRegistryFilters,
     ) -> list[ArtifactRecord]:
         result = records
+        if not filters.include_hidden:
+            result = [record for record in result if record.is_library_visible]
         if filters.artifact_type:
             artifact_type = filters.artifact_type.strip().lower()
             result = [record for record in result if record.artifact_type == artifact_type]
@@ -655,6 +840,11 @@ def builder_completion_upsert_request(
         title=_normalize_token(payload.get("artifact_title")) or _normalize_token(payload.get("artifact_filename")),
         filename=_normalize_token(payload.get("artifact_filename")),
         artifact_type=_normalize_token(payload.get("artifact_type")),
+        requested_artifact_ext=_normalize_token(payload.get("requested_artifact_ext")),
+        artifact_ext=_normalize_token(payload.get("artifact_ext")),
+        artifact_is_fallback=payload.get("artifact_is_fallback")
+        if isinstance(payload.get("artifact_is_fallback"), bool)
+        else None,
         mime_type=None,
         safe_summary=_normalize_token(payload.get("summary")) or _normalize_token(payload.get("user_next_action")),
         source="builder",

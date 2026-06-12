@@ -142,6 +142,128 @@ def test_registry_list_filters_by_type_source_thread_date_and_search(tmp_path) -
     assert [artifact.filename for artifact in searched.artifacts] == ["report.pdf"]
 
 
+def test_registry_hides_builder_handoff_wrappers_by_default(tmp_path) -> None:
+    registry = LocalArtifactRegistry(tmp_path)
+    markdown = registry.upsert(
+        _request(
+            title="Durable Registry Smoke Markdown",
+            artifact_type="markdown",
+            renderer_kind="markdown",
+            mime_type="text/markdown",
+            local_path="outputs/durable-registry-smoke-markdown.md",
+        ),
+        user_id="user-1",
+    )
+    wrapper = registry.upsert(
+        _request(
+            title="Durable Artifact Registry Smoke Test - Handoff Wrapper",
+            artifact_type="html",
+            renderer_kind="html",
+            mime_type="text/html",
+            local_path="outputs/create-a-real-markdown-artifact-file-nam.html",
+        ),
+        user_id="user-1",
+    )
+
+    assert markdown.artifact_role == "primary"
+    assert markdown.is_library_visible is True
+    assert wrapper.artifact_role == "wrapper"
+    assert wrapper.is_library_visible is False
+    assert [artifact.filename for artifact in registry.list(user_id="user-1").artifacts] == [
+        "durable-registry-smoke-markdown.md"
+    ]
+
+    hidden = registry.list(user_id="user-1", filters=ArtifactRegistryFilters(include_hidden=True))
+    assert {artifact.filename for artifact in hidden.artifacts} == {
+        "durable-registry-smoke-markdown.md",
+        "create-a-real-markdown-artifact-file-nam.html",
+    }
+
+
+def test_registry_hides_backfilled_support_and_wrapper_artifacts(tmp_path) -> None:
+    registry = LocalArtifactRegistry(tmp_path)
+    registry.upsert(
+        _request(
+            source="file_library_backfill",
+            artifact_type="html",
+            renderer_kind="html",
+            title="Durable Artifact Registry Smoke Test - Handoff Wrapper",
+            local_path="outputs/create-a-real-markdown-artifact-file-nam.html",
+        ),
+        user_id="user-1",
+    )
+    registry.upsert(
+        _request(
+            source="file_library_backfill",
+            artifact_type="image",
+            renderer_kind="image",
+            title="Support Chart",
+            local_path="outputs/visuals/chart.png",
+        ),
+        user_id="user-1",
+    )
+    registry.upsert(
+        _request(
+            source="file_library_backfill",
+            artifact_type="markdown",
+            renderer_kind="markdown",
+            title="Readable Notes",
+            local_path="outputs/readable-notes.md",
+        ),
+        user_id="user-1",
+    )
+
+    visible = registry.list(user_id="user-1")
+    assert [artifact.filename for artifact in visible.artifacts] == ["readable-notes.md"]
+
+    all_records = registry.list(user_id="user-1", filters=ArtifactRegistryFilters(include_hidden=True))
+    by_name = {artifact.filename: artifact for artifact in all_records.artifacts}
+    assert by_name["create-a-real-markdown-artifact-file-nam.html"].artifact_role == "wrapper"
+    assert by_name["chart.png"].artifact_role == "support"
+    assert by_name["readable-notes.md"].artifact_role == "primary"
+
+
+def test_registry_keeps_explicit_html_artifacts_library_visible(tmp_path) -> None:
+    registry = LocalArtifactRegistry(tmp_path)
+    record = registry.upsert(
+        _request(
+            title="Interactive Launch Page",
+            artifact_type="webpage",
+            renderer_kind="html",
+            mime_type="text/html",
+            local_path="outputs/interactive-launch-page.html",
+            requested_artifact_ext="html",
+            artifact_ext="html",
+        ),
+        user_id="user-1",
+    )
+
+    assert record.artifact_type == "html"
+    assert record.artifact_role == "primary"
+    assert record.is_library_visible is True
+    assert registry.list(user_id="user-1").artifacts[0].filename == "interactive-launch-page.html"
+
+
+def test_registry_classifies_non_fallback_html_for_markdown_request_as_wrapper(tmp_path) -> None:
+    registry = LocalArtifactRegistry(tmp_path)
+    wrapper = registry.upsert(
+        _request(
+            title="Create a real markdown artifact file",
+            artifact_type="html",
+            renderer_kind="html",
+            local_path="outputs/create-a-real-markdown-artifact-file-nam.html",
+            requested_artifact_ext="md",
+            artifact_ext="html",
+            artifact_is_fallback=False,
+        ),
+        user_id="user-1",
+    )
+
+    assert wrapper.artifact_role == "wrapper"
+    assert wrapper.is_library_visible is False
+    assert registry.list(user_id="user-1").total == 0
+
+
 def test_open_endpoint_returns_canvas_target(tmp_path, monkeypatch) -> None:
     client, registry = _owned_app(tmp_path, monkeypatch)
     artifact = registry.upsert(_request(), user_id="user-1")
@@ -161,6 +283,62 @@ def test_open_endpoint_returns_canvas_target(tmp_path, monkeypatch) -> None:
         "review_room_supported": True,
     }
     assert body["artifact"]["opened_count"] == 1
+
+
+def test_open_endpoint_still_returns_canvas_target_for_visible_markdown(tmp_path, monkeypatch) -> None:
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    artifact = registry.upsert(
+        _request(
+            title="Durable Registry Smoke Markdown",
+            artifact_type="markdown",
+            renderer_kind="markdown",
+            mime_type="text/markdown",
+            local_path="outputs/durable-registry-smoke-markdown.md",
+        ),
+        user_id="user-1",
+    )
+
+    response = client.post(f"/api/artifacts/{artifact.artifact_id}/open")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["artifact"]["is_library_visible"] is True
+    assert body["canvas_target"]["artifact_path"] == "mnt/user-data/outputs/durable-registry-smoke-markdown.md"
+    assert body["canvas_target"]["renderer_kind"] == "markdown"
+
+
+def test_list_endpoint_hides_wrappers_by_default(tmp_path, monkeypatch) -> None:
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    registry.upsert(
+        _request(
+            title="Durable Registry Smoke Markdown",
+            artifact_type="markdown",
+            renderer_kind="markdown",
+            local_path="outputs/durable-registry-smoke-markdown.md",
+        ),
+        user_id="user-1",
+    )
+    registry.upsert(
+        _request(
+            title="Durable Artifact Registry Smoke Test - Handoff Wrapper",
+            artifact_type="html",
+            renderer_kind="html",
+            local_path="outputs/create-a-real-markdown-artifact-file-nam.html",
+        ),
+        user_id="user-1",
+    )
+
+    response = client.get("/api/artifacts")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert [artifact["filename"] for artifact in body["artifacts"]] == ["durable-registry-smoke-markdown.md"]
+
+    hidden_response = client.get("/api/artifacts?include_hidden=true")
+    assert hidden_response.status_code == 200
+    hidden_body = hidden_response.json()
+    assert hidden_body["total"] == 2
 
 
 def test_download_endpoint_redirects_to_existing_thread_artifact_route(tmp_path, monkeypatch) -> None:
@@ -213,6 +391,8 @@ def test_builder_terminal_event_upserts_registry_metadata(tmp_path, monkeypatch)
     assert record.run_id == "run-1"
     assert record.filename == "brief.md"
     assert record.artifact_type == "markdown"
+    assert record.artifact_role == "primary"
+    assert record.is_library_visible is True
     assert record.safe_summary == "Safe brief summary"
     serialized = record.model_dump_json()
     assert "signed.example" not in serialized

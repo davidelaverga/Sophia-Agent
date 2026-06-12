@@ -61,6 +61,7 @@ import {
   type ArtifactCanvasRestoreContext,
 } from '../lib/artifact-canvas-restore-state';
 import { consumeArtifactLibraryOpenHandoff } from '../lib/artifact-library-open-handoff';
+import { isArtifactRegistryLibraryVisibleCandidate } from '../lib/artifact-registry';
 import { detectArtifactRendererKind, type ArtifactRendererKind } from '../lib/artifact-renderers';
 import type { ArtifactReviewVoiceCommandRouter } from '../lib/artifact-review-voice-commands';
 import { buildThreadArtifactHref, getBuilderArtifactFiles, normalizeBuilderArtifactPath } from '../lib/builder-artifacts';
@@ -1222,6 +1223,14 @@ function SessionPageContent() {
     for (const artifact of sessionArtifactIndex.artifacts) {
       const normalizedPath = normalizeBuilderArtifactPath(artifact.localPath);
       if (!normalizedPath) {
+        continue;
+      }
+      if (!isArtifactRegistryLibraryVisibleCandidate({
+        localPath: normalizedPath,
+        title: artifact.title,
+        artifactType: artifact.artifactType,
+        rendererKind: artifact.rendererKind,
+      })) {
         continue;
       }
       const key = [
