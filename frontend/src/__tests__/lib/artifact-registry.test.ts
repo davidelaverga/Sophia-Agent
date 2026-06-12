@@ -1,11 +1,22 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
+import {
+  clearArtifactLibraryOpenHandoff,
+  peekArtifactLibraryOpenHandoff,
+  saveArtifactLibraryOpenHandoff,
+} from '../../app/lib/artifact-library-open-handoff';
 import {
   dedupeVisibleArtifactRegistryRecords,
   isArtifactRegistryLibraryVisibleCandidate,
   normalizeRegistryArtifactPath,
   type ArtifactRegistryRecord,
 } from '../../app/lib/artifact-registry';
+import {
+  clearArtifactSessionIndexForTests,
+  loadArtifactSessionIndex,
+  openArtifactInSessionIndex,
+  registerArtifactInSessionIndex,
+} from '../../app/lib/session-artifact-index';
 
 const baseRecord: ArtifactRegistryRecord = {
   artifact_id: 'artifact-builder',
@@ -45,6 +56,12 @@ const baseRecord: ArtifactRegistryRecord = {
 };
 
 describe('artifact registry library visibility candidates', () => {
+  beforeEach(() => {
+    window.sessionStorage.clear();
+    window.localStorage.clear();
+    clearArtifactSessionIndexForTests();
+  });
+
   it('keeps requested deliverables visible for backfill', () => {
     expect(isArtifactRegistryLibraryVisibleCandidate({
       localPath: 'mnt/user-data/outputs/durable-registry-smoke-markdown.md',
@@ -112,5 +129,99 @@ describe('artifact registry library visibility candidates', () => {
     expect(dedupeVisibleArtifactRegistryRecords([wrapperRecord, unsafeRecord, baseRecord])).toEqual([baseRecord]);
     expect(normalizeRegistryArtifactPath('C:/Users/alice/secret.html')).toBeNull();
     expect(normalizeRegistryArtifactPath('outputs/../secret.html')).toBeNull();
+  });
+
+  it('keeps dashboard handoff until the session route opens the artifact', () => {
+    const context = {
+      userId: 'user-1',
+      threadId: 'thread-1',
+      sessionId: 'session-1',
+    };
+
+    expect(saveArtifactLibraryOpenHandoff({
+      artifact: baseRecord,
+      canvas_target: {
+        artifact_id: baseRecord.artifact_id,
+        thread_id: baseRecord.thread_id,
+        session_id: baseRecord.session_id,
+        artifact_path: baseRecord.local_path,
+        renderer_kind: baseRecord.renderer_kind,
+        mime_type: baseRecord.mime_type,
+        title: baseRecord.title,
+        review_room_supported: true,
+      },
+    })).toBe(true);
+
+    const handoff = peekArtifactLibraryOpenHandoff(context);
+    expect(handoff).toMatchObject({
+      artifactId: 'artifact-builder',
+      threadId: 'thread-1',
+      sessionId: 'session-1',
+      artifactPath: 'mnt/user-data/outputs/explicit-html-library-test.html',
+      rendererKind: 'html',
+      title: 'Explicit HTML Library Test',
+      filename: 'explicit-html-library-test.html',
+    });
+    expect(window.sessionStorage.getItem('sophia:artifact-library-open:v1')).toContain('artifact-builder');
+    if (!handoff) {
+      throw new Error('Expected handoff');
+    }
+
+    const registered = registerArtifactInSessionIndex({
+      ...handoff.metadata,
+      context,
+      localPath: handoff.artifactPath,
+      rendererKind: handoff.rendererKind,
+      source: handoff.metadata.source ?? 'manual',
+    });
+    const opened = openArtifactInSessionIndex(context, registered.record?.artifactId);
+    clearArtifactLibraryOpenHandoff();
+
+    expect(registered.result).toBe('registered');
+    expect(opened.result).toBe('opened');
+    expect(opened.index.activeArtifactId).toBe(registered.record?.artifactId);
+    expect(window.sessionStorage.getItem('sophia:artifact-library-open:v1')).toBeNull();
+  });
+
+  it('does not repeatedly reopen an already consumed dashboard handoff after refresh', () => {
+    const context = {
+      userId: 'user-1',
+      threadId: 'thread-1',
+      sessionId: 'session-1',
+    };
+    const registered = registerArtifactInSessionIndex({
+      context,
+      localPath: baseRecord.local_path,
+      title: baseRecord.title,
+      rendererKind: 'html',
+      artifactType: 'html',
+    });
+    openArtifactInSessionIndex(context, registered.record?.artifactId);
+    clearArtifactLibraryOpenHandoff();
+
+    expect(peekArtifactLibraryOpenHandoff(context)).toBeNull();
+    expect(loadArtifactSessionIndex(context).activeArtifactId).toBe(registered.record?.artifactId);
+  });
+
+  it('clears invalid dashboard handoff paths safely', () => {
+    window.sessionStorage.setItem('sophia:artifact-library-open:v1', JSON.stringify({
+      version: 1,
+      createdAt: new Date().toISOString(),
+      userId: 'user-1',
+      threadId: 'thread-1',
+      sessionId: 'session-1',
+      artifactId: 'artifact-invalid',
+      artifactPath: 'outputs/../secret.html',
+      rendererKind: 'html',
+      title: 'Invalid artifact',
+      metadata: {},
+    }));
+
+    expect(peekArtifactLibraryOpenHandoff({
+      userId: 'user-1',
+      threadId: 'thread-1',
+      sessionId: 'session-1',
+    })).toBeNull();
+    expect(window.sessionStorage.getItem('sophia:artifact-library-open:v1')).toBeNull();
   });
 });

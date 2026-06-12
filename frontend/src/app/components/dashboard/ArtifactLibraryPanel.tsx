@@ -113,7 +113,9 @@ export function ArtifactLibraryPanel() {
     setError(null);
     try {
       const response = await openArtifactRegistryRecord(artifact.artifact_id);
-      saveArtifactLibraryOpenHandoff(response);
+      if (!saveArtifactLibraryOpenHandoff(response)) {
+        throw new Error('artifact_library_handoff_save_failed');
+      }
       const target = response.canvas_target;
       const targetSessionId = target.session_id ?? response.artifact.session_id ?? target.thread_id;
       if (target.thread_id && targetSessionId) {

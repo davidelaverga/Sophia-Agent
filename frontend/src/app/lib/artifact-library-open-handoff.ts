@@ -21,6 +21,8 @@ export type ArtifactLibraryOpenHandoff = {
   artifactId: string;
   artifactPath: string;
   rendererKind: ArtifactRendererKind;
+  title: string;
+  filename?: string | null;
   metadata: Partial<Omit<RegisterArtifactInput, 'context' | 'localPath'>>;
 };
 
@@ -60,6 +62,8 @@ export function buildArtifactLibraryOpenHandoff(
     artifactId: record.artifact_id,
     artifactPath,
     rendererKind: normalizeRendererKind(target.renderer_kind),
+    title: target.title || record.title || record.filename,
+    filename: record.filename,
     metadata: artifactRegistryRecordToSessionMetadata({
       ...record,
       renderer_kind: target.renderer_kind,
@@ -69,6 +73,16 @@ export function buildArtifactLibraryOpenHandoff(
 }
 
 export function consumeArtifactLibraryOpenHandoff(
+  context: ArtifactSessionIndexContext,
+): ArtifactLibraryOpenHandoff | null {
+  const handoff = peekArtifactLibraryOpenHandoff(context);
+  if (handoff) {
+    clearArtifactLibraryOpenHandoff();
+  }
+  return handoff;
+}
+
+export function peekArtifactLibraryOpenHandoff(
   context: ArtifactSessionIndexContext,
 ): ArtifactLibraryOpenHandoff | null {
   const storage = getSessionStorage();
@@ -87,7 +101,7 @@ export function consumeArtifactLibraryOpenHandoff(
   }
 
   if (Date.now() - Date.parse(handoff.createdAt) > HANDOFF_TTL_MS) {
-    storage.removeItem(HANDOFF_STORAGE_KEY);
+    clearArtifactLibraryOpenHandoff();
     return null;
   }
 
@@ -98,8 +112,19 @@ export function consumeArtifactLibraryOpenHandoff(
     return null;
   }
 
-  storage.removeItem(HANDOFF_STORAGE_KEY);
   return handoff;
+}
+
+export function clearArtifactLibraryOpenHandoff(): void {
+  const storage = getSessionStorage();
+  if (!storage) {
+    return;
+  }
+  try {
+    storage.removeItem(HANDOFF_STORAGE_KEY);
+  } catch {
+    // Storage cleanup is best-effort.
+  }
 }
 
 function readArtifactLibraryOpenHandoff(raw: string | null): ArtifactLibraryOpenHandoff | null {
@@ -128,11 +153,23 @@ function readArtifactLibraryOpenHandoff(raw: string | null): ArtifactLibraryOpen
       artifactId: parsed.artifactId,
       artifactPath,
       rendererKind: normalizeRendererKind(parsed.rendererKind),
+      title: typeof parsed.title === 'string' && parsed.title.trim()
+        ? parsed.title.trim()
+        : typeof parsed.metadata?.title === 'string' && parsed.metadata.title.trim()
+          ? parsed.metadata.title.trim()
+          : filenameFromPath(artifactPath),
+      filename: typeof parsed.filename === 'string' && parsed.filename.trim()
+        ? parsed.filename.trim()
+        : filenameFromPath(artifactPath),
       metadata: parsed.metadata ?? {},
     };
   } catch {
     return null;
   }
+}
+
+function filenameFromPath(path: string): string {
+  return path.split('/').filter(Boolean).pop() ?? 'artifact';
 }
 
 function getSessionStorage(): Storage | null {

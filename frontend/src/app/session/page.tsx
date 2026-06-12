@@ -60,7 +60,10 @@ import {
   restoreArtifactCanvasOpenState,
   type ArtifactCanvasRestoreContext,
 } from '../lib/artifact-canvas-restore-state';
-import { consumeArtifactLibraryOpenHandoff } from '../lib/artifact-library-open-handoff';
+import {
+  clearArtifactLibraryOpenHandoff,
+  peekArtifactLibraryOpenHandoff,
+} from '../lib/artifact-library-open-handoff';
 import { isArtifactRegistryLibraryVisibleCandidate } from '../lib/artifact-registry';
 import { detectArtifactRendererKind, type ArtifactRendererKind } from '../lib/artifact-renderers';
 import type { ArtifactReviewVoiceCommandRouter } from '../lib/artifact-review-voice-commands';
@@ -1590,7 +1593,7 @@ function SessionPageContent() {
     if (!normalizedPath) {
       setSelectedBuilderArtifactPath(null);
       clearSelectedBuilderCanvasState('selection_cleared');
-      return;
+      return null;
     }
 
     canvasRestoreClosedByUserRef.current = false;
@@ -1599,6 +1602,7 @@ function SessionPageContent() {
     const nextPath = persistedPath ?? normalizedPath;
     openSessionArtifactRecord(record?.artifactId ?? nextPath, 'view_in_canvas');
     setSelectedBuilderArtifactPath(nextPath);
+    return nextPath;
   }, [
     clearSelectedBuilderCanvasState,
     openSessionArtifactRecord,
@@ -1640,28 +1644,6 @@ function SessionPageContent() {
     recordSessionArtifactIndexTelemetry,
     sessionArtifactIndex.activeArtifactId,
     sessionArtifactIndex.artifacts.length,
-    setShowArtifacts,
-    setUserOpenedArtifacts,
-  ]);
-
-  useEffect(() => {
-    const handoff = consumeArtifactLibraryOpenHandoff(sessionArtifactIndexContext);
-    if (!handoff) {
-      return;
-    }
-    const record = registerSessionArtifactByPath(handoff.artifactPath, {
-      ...handoff.metadata,
-      rendererKind: handoff.rendererKind,
-      source: handoff.metadata.source ?? 'manual',
-    });
-    handleSelectBuilderArtifactPath(record?.localPath ?? handoff.artifactPath);
-    setShowArtifacts(true);
-    setUserOpenedArtifacts(true);
-  }, [
-    handleSelectBuilderArtifactPath,
-    registerSessionArtifactByPath,
-    sessionArtifactIndexContext,
-    sessionArtifactIndexContextSignature,
     setShowArtifacts,
     setUserOpenedArtifacts,
   ]);
@@ -1978,6 +1960,83 @@ function SessionPageContent() {
     handleSelectBuilderArtifactPath(event.artifact_path ?? builderPrimaryFile?.path ?? null);
     handleOpenArtifactsPanel();
   }, [builderPrimaryFile?.path, handleOpenArtifactsPanel, handleSelectBuilderArtifactPath]);
+
+  useEffect(() => {
+    const handoff = peekArtifactLibraryOpenHandoff(sessionArtifactIndexContext);
+    if (!handoff) {
+      return;
+    }
+
+    const normalizedPath = normalizeBuilderArtifactPath(handoff.artifactPath);
+    if (!normalizedPath) {
+      clearArtifactLibraryOpenHandoff();
+      recordSophiaCaptureEvent({
+        category: 'artifacts-runtime',
+        name: 'artifact-library-open-handoff',
+        payload: {
+          artifactLibraryOpenHandoffResult: 'invalid_path',
+          artifactLibraryOpenHandoffArtifactId: handoff.artifactId,
+          rawArtifactContentExcluded: true,
+          rawArtifactTextExcluded: true,
+        },
+      });
+      showToast({
+        message: 'Could not open that artifact in canvas.',
+        variant: 'warning',
+        durationMs: 3200,
+      });
+      return;
+    }
+
+    const record = registerSessionArtifactByPath(normalizedPath, {
+      ...handoff.metadata,
+      title: handoff.metadata.title ?? handoff.title ?? handoff.filename ?? getBuilderArtifactFilename(normalizedPath),
+      rendererKind: handoff.rendererKind,
+      source: handoff.metadata.source ?? 'manual',
+    });
+    const selectedPath = handleSelectBuilderArtifactPath(record?.localPath ?? normalizedPath);
+    if (!selectedPath) {
+      clearArtifactLibraryOpenHandoff();
+      recordSophiaCaptureEvent({
+        category: 'artifacts-runtime',
+        name: 'artifact-library-open-handoff',
+        payload: {
+          artifactLibraryOpenHandoffResult: 'open_failed',
+          artifactLibraryOpenHandoffArtifactId: handoff.artifactId,
+          rawArtifactContentExcluded: true,
+          rawArtifactTextExcluded: true,
+        },
+      });
+      showToast({
+        message: 'Could not open that artifact in canvas.',
+        variant: 'warning',
+        durationMs: 3200,
+      });
+      return;
+    }
+
+    handleOpenArtifactsPanel();
+    clearArtifactLibraryOpenHandoff();
+    recordSophiaCaptureEvent({
+      category: 'artifacts-runtime',
+      name: 'artifact-library-open-handoff',
+      payload: {
+        artifactLibraryOpenHandoffResult: 'opened',
+        artifactLibraryOpenHandoffArtifactId: handoff.artifactId,
+        artifactLibraryOpenHandoffRendererKind: handoff.rendererKind,
+        sessionArtifactIndexEnabled: true,
+        rawArtifactContentExcluded: true,
+        rawArtifactTextExcluded: true,
+      },
+    });
+  }, [
+    handleOpenArtifactsPanel,
+    handleSelectBuilderArtifactPath,
+    registerSessionArtifactByPath,
+    sessionArtifactIndexContext,
+    sessionArtifactIndexContextSignature,
+    showToast,
+  ]);
 
   useEffect(() => {
     if (selectedBuilderArtifactPath || showArtifacts || canvasRestoreClosedByUserRef.current) {

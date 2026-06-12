@@ -2,6 +2,22 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const routerPushMock = vi.hoisted(() => vi.fn());
+
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({
+    push: routerPushMock,
+    replace: vi.fn(),
+    back: vi.fn(),
+    forward: vi.fn(),
+    refresh: vi.fn(),
+    prefetch: vi.fn(),
+  }),
+  usePathname: () => '/',
+  useSearchParams: () => new URLSearchParams(),
+  useParams: () => ({}),
+}));
+
 import { ArtifactLibraryPanel } from '../../app/components/dashboard/ArtifactLibraryPanel';
 import type { ArtifactRegistryRecord } from '../../app/lib/artifact-registry';
 import { useSessionStore } from '../../app/stores/session-store';
@@ -60,6 +76,7 @@ describe('ArtifactLibraryPanel', () => {
     window.localStorage.clear();
     useSessionStore.setState({ session: null });
     fetchMock().mockReset();
+    routerPushMock.mockReset();
   });
 
   it('renders dashboard artifacts from the registry', async () => {
@@ -175,7 +192,25 @@ describe('ArtifactLibraryPanel', () => {
         method: 'POST',
       }));
     });
-    expect(window.sessionStorage.getItem('sophia:artifact-library-open:v1')).toContain('artifact-1');
+    const handoff = JSON.parse(window.sessionStorage.getItem('sophia:artifact-library-open:v1') ?? '{}') as {
+      artifactId?: string;
+      threadId?: string;
+      sessionId?: string | null;
+      artifactPath?: string;
+      rendererKind?: string;
+      title?: string;
+      filename?: string;
+    };
+    expect(handoff).toMatchObject({
+      artifactId: 'artifact-1',
+      threadId: 'thread-1',
+      sessionId: 'session-1',
+      artifactPath: 'mnt/user-data/outputs/launch.html',
+      rendererKind: 'html',
+      title: 'Launch Page',
+      filename: 'launch.html',
+    });
+    expect(routerPushMock).toHaveBeenCalledWith('/session');
     expect(useSessionStore.getState().session).toMatchObject({
       sessionId: 'session-1',
       threadId: 'thread-1',
