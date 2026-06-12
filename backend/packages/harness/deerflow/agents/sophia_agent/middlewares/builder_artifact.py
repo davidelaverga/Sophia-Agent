@@ -1053,6 +1053,81 @@ def _requested_target_suffix(state: dict[str, Any]) -> str:
     return PurePosixPath(target.strip()).suffix.lower()
 
 
+# Correction wave 2026-06-12 — emit-time format-conflict guard.
+#
+# Prod incident: dispatch misderived target_ext=pptx for an explicit "actual
+# PDF report (not a presentation)" ask; the builder rendered a correct
+# 9-page PDF and the ext gate rejected it on every emit — one run failed
+# terminally, another shipped an unwanted PPTX. The dispatch-side fix
+# (current-turn-first resolution) is the primary cure; this guard is the
+# backstop for when target truth is still wrong.
+#
+# NOT a weakening of the no-format-swap invariant: the invariant bans
+# DEGRADED SUBSTITUTES for the requested format. This path fires only when
+# the emitted format literally IS the user's explicitly stated current-turn
+# format (the C1 stamp), and the emitted format's own integrity gates still
+# apply after the target is re-pointed. .md/.html-for-binary fallback shapes
+# never qualify unless the user literally asked for them.
+_FORMAT_CONFLICT_RESOLVABLE_EXTS = frozenset({"pdf", "pptx", "docx", "xlsx", "html"})
+
+
+def _format_conflict_user_override(args: dict[str, Any], state: dict[str, Any]) -> dict[str, str] | None:
+    """Return a target-path overlay honoring explicit user format, or None.
+
+    Fires ONLY when ALL hold:
+      1. ``delegation_context["user_requested_ext"]`` present (stamped at
+         dispatch from the CURRENT user turn, negation-vetoed) and in the
+         resolvable whitelist;
+      2. it differs from the resolved target ext (a real conflict);
+      3. the emitted artifact ext EQUALS the user-requested ext exactly;
+      4. the state target still equals the dispatch target and no update
+         epoch has advanced — a newer in-build user instruction
+         (post-interrupt target rewrite) outranks the dispatch-time stamp.
+    """
+    delegation = state.get("delegation_context")
+    if not isinstance(delegation, dict):
+        return None
+    user_ext = delegation.get("user_requested_ext")
+    if not isinstance(user_ext, str) or user_ext not in _FORMAT_CONFLICT_RESOLVABLE_EXTS:
+        return None
+    target_ext = _requested_target_suffix(state).lstrip(".")
+    if not target_ext or target_ext == user_ext:
+        return None
+    emitted_ext = _artifact_ext_from_path(args.get("artifact_path"))
+    if emitted_ext != user_ext:
+        return None
+    dispatch_target = delegation.get("artifact_target_path")
+    state_target = state.get("builder_artifact_target_path")
+    if (
+        isinstance(state_target, str)
+        and isinstance(dispatch_target, str)
+        and state_target != dispatch_target
+    ):
+        return None  # post-interrupt target update outranks the dispatch stamp
+    if int(state.get("builder_update_epoch", 0) or 0) > 0:
+        return None
+    target = state_target if isinstance(state_target, str) else dispatch_target
+    if not isinstance(target, str) or not target.strip():
+        return None
+    repointed = str(PurePosixPath(target.strip()).with_suffix(f".{user_ext}"))
+    return {"builder_artifact_target_path": repointed}
+
+
+def _stamp_format_conflict_metadata(
+    args: dict[str, Any], original_target_ext: str, user_ext: str
+) -> None:
+    """Observability stamps: every occurrence is a dispatch-resolution-failed
+    signal, not business-as-usual."""
+    args["format_conflict_resolved"] = "user_intent"
+    args["format_conflict_original_target_ext"] = original_target_ext
+    logger.warning(
+        "[BuilderArtifact] format_conflict_resolved=user_intent "
+        "original_target_ext=%s user_requested_ext=%s",
+        original_target_ext,
+        user_ext,
+    )
+
+
 def _requested_pdf_artifact(state: dict[str, Any]) -> bool:
     return _requested_target_suffix(state) == ".pdf"
 
@@ -6299,6 +6374,19 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return self._tool_result_command(request, handler(request))
 
         args = request.tool_call.get("args", {})
+        # Correction wave 2026-06-12: the user-intent override must run BEFORE
+        # _authoritative_pdf_emit_args — in the reverse conflict (target=pdf,
+        # user explicitly asked pptx) that helper would otherwise hijack the
+        # emit and rewrite artifact_path to a rendered PDF.
+        format_conflict = _format_conflict_user_override(args, request.state)
+        if format_conflict is not None:
+            original_target_ext = _requested_target_suffix(request.state).lstrip(".")
+            request.state = {**request.state, **format_conflict}
+            _stamp_format_conflict_metadata(
+                args,
+                original_target_ext,
+                _requested_target_suffix(request.state).lstrip("."),
+            )
         authoritative_pdf_args = self._authoritative_pdf_emit_args(args, request.state, request.runtime)
         if authoritative_pdf_args is not None:
             request.tool_call["args"] = authoritative_pdf_args
@@ -6603,6 +6691,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return self._tool_result_command(request, await handler(request))
 
         args = request.tool_call.get("args", {})
+        # Correction wave 2026-06-12: see wrap_tool_call — the user-intent
+        # override must precede _authoritative_pdf_emit_args.
+        format_conflict = _format_conflict_user_override(args, request.state)
+        if format_conflict is not None:
+            original_target_ext = _requested_target_suffix(request.state).lstrip(".")
+            request.state = {**request.state, **format_conflict}
+            _stamp_format_conflict_metadata(
+                args,
+                original_target_ext,
+                _requested_target_suffix(request.state).lstrip("."),
+            )
         authoritative_pdf_args = self._authoritative_pdf_emit_args(args, request.state, request.runtime)
         if authoritative_pdf_args is not None:
             request.tool_call["args"] = authoritative_pdf_args
@@ -6690,6 +6789,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     # Incrementing lets the hard ceiling (10) trigger after a few
                     # retries and terminate the run instead of spinning forever.
                     args = self._recover_missing_emit_args_if_possible(args, state, runtime)
+
+                    # Correction wave 2026-06-12: explicit current-turn user
+                    # format beats a misderived dispatch target. Rebinding the
+                    # local ``state`` makes every downstream gate — files-exist,
+                    # visual/hero gates, and the acceptance-path metadata
+                    # stamper — evaluate under the corrected target.
+                    format_conflict = _format_conflict_user_override(args, state)
+                    if format_conflict is not None:
+                        original_target_ext = _requested_target_suffix(state).lstrip(".")
+                        state = {**state, **format_conflict}
+                        _stamp_format_conflict_metadata(
+                            args,
+                            original_target_ext,
+                            _requested_target_suffix(state).lstrip("."),
+                        )
 
                     emit_files_ok = self._artifact_files_exist(args, state, runtime)
                     visual_gate_blocked = emit_files_ok and self._visual_gate_blocks_emit(args, state)

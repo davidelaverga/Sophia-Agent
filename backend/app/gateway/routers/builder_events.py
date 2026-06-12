@@ -44,6 +44,8 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "requested_artifact_ext",
     "artifact_is_fallback",
     "fallback_reason",
+    "format_conflict_resolved",
+    "format_conflict_original_target_ext",
     "image_generation_status",
     "image_generation_reason",
     "image_generation_outcome",
@@ -84,6 +86,8 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "artifact_ext",
         "artifact_is_fallback",
         "fallback_reason",
+        "format_conflict_resolved",
+        "format_conflict_original_target_ext",
         "image_generation_status",
         "image_generation_reason",
         "image_generation_outcome",
@@ -262,6 +266,13 @@ class BuilderCompletionEvent(BaseModel):
     artifact_ext: str | None = None
     artifact_is_fallback: bool | None = None
     fallback_reason: str | None = None
+    format_conflict_resolved: str | None = Field(
+        None,
+        description="Correction wave 2026-06-12: 'user_intent' when the "
+        "emit-time guard honored the user's explicit current-turn format "
+        "over a misderived dispatch target.",
+    )
+    format_conflict_original_target_ext: str | None = None
     image_generation_status: str | None = None
     image_generation_reason: str | None = None
     image_generation_outcome: dict[str, Any] | None = Field(

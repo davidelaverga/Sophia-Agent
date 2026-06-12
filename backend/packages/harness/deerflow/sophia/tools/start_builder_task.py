@@ -42,6 +42,7 @@ import logging
 import re
 import shutil
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -273,29 +274,138 @@ def _slugify_for_filename(text: str, max_len: int = 40) -> str:
     return cleaned[:max_len].rstrip("-") or _FALLBACK_TASK_SLUG
 
 
-def _requested_output_extension_match(description: str | None) -> tuple[str | None, str | None]:
-    if not isinstance(description, str) or not description.strip():
-        return None, None
+# Correction wave 2026-06-12 (prod incident): a format-word mention preceded
+# by negation ("an actual PDF report, NOT a presentation", "no slides") must
+# never claim the target. The veto inspects a short window immediately
+# before each regex hit; a pattern only wins when at least one of its
+# matches is affirmative.
+_NEGATION_BEFORE_MATCH_RE = re.compile(
+    r"(?:\bnot?\b|\bnever\b|\bdon'?t\s+(?:want|need|make|build|create)\b"
+    r"|\bdo\s+not\s+(?:want|need|make|build|create)\b"
+    r"|\binstead\s+of\b|\brather\s+than\b|\bwithout\b|\bavoid\b|\bskip\b)"
+    r"\s*(?:an?\s+|the\s+|any\s+|another\s+|more\s+)?$",
+    re.IGNORECASE,
+)
+_NEGATION_LOOKBACK_CHARS = 32
+
+
+def _pattern_affirmative_match(pattern: re.Pattern[str], text: str) -> bool:
+    """True when ``pattern`` has at least one non-negated hit in ``text``."""
+    for match in pattern.finditer(text):
+        prefix = text[max(0, match.start() - _NEGATION_LOOKBACK_CHARS) : match.start()]
+        if not _NEGATION_BEFORE_MATCH_RE.search(prefix):
+            return True
+    return False
+
+
+def _requested_output_extension_match_with_vetoes(
+    text: str | None,
+) -> tuple[str | None, str | None, list[str]]:
+    """First affirmative format match plus the rule names vetoed by negation."""
+    vetoed: list[str] = []
+    if not isinstance(text, str) or not text.strip():
+        return None, None, vetoed
     for ext, reason, pattern in _REQUESTED_OUTPUT_EXTENSION_PATTERNS:
-        if pattern.search(description):
-            return ext, reason
-    return None, None
+        if not pattern.search(text):
+            continue
+        if _pattern_affirmative_match(pattern, text):
+            return ext, reason, vetoed
+        vetoed.append(reason)
+    return None, None, vetoed
+
+
+def _requested_output_extension_match(description: str | None) -> tuple[str | None, str | None]:
+    ext, reason, _vetoed = _requested_output_extension_match_with_vetoes(description)
+    return ext, reason
 
 
 def _requested_output_extension(description: str | None) -> str | None:
     return _requested_output_extension_match(description)[0]
 
 
-def _suggest_artifact_filename(task_type: str | None, description: str | None) -> str:
-    ext = _requested_output_extension(description) or _TASK_TYPE_EXTENSIONS.get(task_type or "", "md")
+@dataclass(frozen=True)
+class _TargetFormatResolution:
+    """Two-tier output-format truth (correction wave 2026-06-12).
+
+    The 2026-06-12 incident: companion-authored descriptions carry prior
+    artifact context (deck words, old filenames), and pptx is matched
+    before pdf — so "an actual PDF report (not a presentation)" dispatched
+    as target_ext=pptx. The CURRENT user turn now has absolute precedence;
+    description-derived context only fills in when the turn is silent.
+    """
+
+    final_ext: str
+    rule: str  # matched rule name, or task_type_default:<type>
+    source: str  # current_user_turn | description | task_type_default
+    user_requested_ext: str | None
+    context_inferred_ext: str | None
+    vetoed_rules: tuple[str, ...]
+
+
+def _resolve_target_format(
+    *,
+    current_user_text: str | None,
+    description: str | None,
+    task_type: str | None,
+) -> _TargetFormatResolution:
+    user_ext, user_rule, user_vetoed = _requested_output_extension_match_with_vetoes(
+        current_user_text
+    )
+    context_ext, context_rule, context_vetoed = _requested_output_extension_match_with_vetoes(
+        description
+    )
+    vetoed = tuple(dict.fromkeys([*user_vetoed, *context_vetoed]))
+    if user_ext:
+        return _TargetFormatResolution(
+            final_ext=user_ext,
+            rule=user_rule or "explicit_user_request",
+            source="current_user_turn",
+            user_requested_ext=user_ext,
+            context_inferred_ext=context_ext,
+            vetoed_rules=vetoed,
+        )
+    if context_ext:
+        return _TargetFormatResolution(
+            final_ext=context_ext,
+            rule=context_rule or "context_inferred",
+            source="description",
+            user_requested_ext=None,
+            context_inferred_ext=context_ext,
+            vetoed_rules=vetoed,
+        )
+    default_ext = _TASK_TYPE_EXTENSIONS.get(task_type or "", "md")
+    return _TargetFormatResolution(
+        final_ext=default_ext,
+        rule=f"task_type_default:{task_type or 'unknown'}",
+        source="task_type_default",
+        user_requested_ext=None,
+        context_inferred_ext=None,
+        vetoed_rules=vetoed,
+    )
+
+
+def _suggest_artifact_filename(
+    task_type: str | None,
+    description: str | None,
+    ext_override: str | None = None,
+) -> str:
+    ext = (
+        ext_override
+        or _requested_output_extension(description)
+        or _TASK_TYPE_EXTENSIONS.get(task_type or "", "md")
+    )
     if ext == "pdf" and isinstance(description, str) and _SIMPLE_PRODUCT_REVIEW_RE.search(description):
         return "simple-product-review.pdf"
     slug = _slugify_for_filename(description or _FALLBACK_TASK_SLUG)
     return f"{slug}.{ext}"
 
 
-def _suggest_artifact_target_path(task_type: str | None, description: str | None) -> str:
-    return f"/mnt/user-data/outputs/{_suggest_artifact_filename(task_type, description)}"
+def _suggest_artifact_target_path(
+    task_type: str | None,
+    description: str | None,
+    ext_override: str | None = None,
+) -> str:
+    return f"/mnt/user-data/outputs/{_suggest_artifact_filename(task_type, description, ext_override)}"
 
 
 def _rewrite_output_artifact_prefix(cleaned: str) -> str | None:
@@ -944,6 +1054,8 @@ def _build_delegation_context(
     handoff_resolution: dict[str, Any],
     delegation_ledger_stats: dict[str, Any] | None = None,
     dispatched_at_turn: int | None = None,
+    user_requested_ext: str | None = None,
+    format_resolution_source: str | None = None,
 ) -> dict[str, Any]:
     """Build the ``delegation_context`` dict the builder middlewares read.
 
@@ -972,6 +1084,13 @@ def _build_delegation_context(
         context["delegation_ledger"] = delegation_ledger_stats
     if dispatched_at_turn is not None:
         context["dispatched_at_turn"] = dispatched_at_turn
+    # Correction wave 2026-06-12: format-truth stamps. user_requested_ext is
+    # the CURRENT-user-turn format (negation-vetoed) — the emit-time
+    # format-conflict guard honors it over a misderived target.
+    if user_requested_ext is not None:
+        context["user_requested_ext"] = user_requested_ext
+    if format_resolution_source is not None:
+        context["format_resolution_source"] = format_resolution_source
     return context
 
 
@@ -1696,13 +1815,53 @@ async def _start_builder_task_impl(
     allow_web_research = should_allow_builder_web_research(task_type, description)
     explicit_user_urls = extract_explicit_user_urls(description)
     builder_web_budget = make_builder_web_budget(task_type)
-    _requested_ext, requested_ext_reason = _requested_output_extension_match(description)
-    artifact_target_path = (
-        _canonical_output_artifact_path(artifact_target_path_override)
-        or _suggest_artifact_target_path(task_type, description)
+
+    # Correction wave 2026-06-12: output-format truth is current-turn-first.
+    # The companion-authored description carries prior artifact context
+    # (deck words, old filenames) that misrouted "an actual PDF report
+    # (not a presentation)" to target_ext=pptx in prod. The user's literal
+    # current turn now has absolute precedence; description-derived context
+    # fills in only when the turn is silent about format. Lazy import:
+    # same circular-import dodge as _validate_user_id above.
+    from deerflow.agents.sophia_agent.utils import extract_last_human_text
+
+    current_user_text = extract_last_human_text(state.get("messages", []) or [])
+    format_resolution = _resolve_target_format(
+        current_user_text=current_user_text,
+        description=description,
+        task_type=task_type,
+    )
+    override_path = _canonical_output_artifact_path(artifact_target_path_override)
+    if (
+        override_path
+        and format_resolution.user_requested_ext
+        and Path(override_path).suffix.lower().lstrip(".") != format_resolution.user_requested_ext
+    ):
+        # Edit flows derive the override from the SOURCE artifact's path; an
+        # explicit current-turn format ask ("make this an actual PDF") is a
+        # conversion/rebuild, not "continue editing this .pptx" — re-suffix
+        # the target to the user's format. The materialized source stays
+        # readable in the sandbox either way.
+        override_path = str(
+            Path(override_path).with_suffix(f".{format_resolution.user_requested_ext}")
+        )
+        format_resolution = _TargetFormatResolution(
+            final_ext=format_resolution.user_requested_ext,
+            rule=format_resolution.rule,
+            source="current_user_turn_conversion",
+            user_requested_ext=format_resolution.user_requested_ext,
+            context_inferred_ext=format_resolution.context_inferred_ext,
+            vetoed_rules=format_resolution.vetoed_rules,
+        )
+    artifact_target_path = override_path or _suggest_artifact_target_path(
+        task_type, description, ext_override=format_resolution.final_ext
     )
     target_ext = Path(artifact_target_path).suffix.lower().lstrip(".")
-    target_ext_source = requested_ext_reason or f"task_type_default:{task_type or 'unknown'}"
+    target_ext_source = (
+        format_resolution.rule
+        if override_path is None or format_resolution.source == "current_user_turn_conversion"
+        else "explicit_target_override"
+    )
 
     parent_thread_id = _resolve_thread_id(runtime)
     parent_model = _runtime_parent_model(runtime)
@@ -1736,6 +1895,8 @@ async def _start_builder_task_impl(
         handoff_resolution=handoff_resolution,
         delegation_ledger_stats=delegation_ledger_stats,
         dispatched_at_turn=dispatched_at_turn,
+        user_requested_ext=format_resolution.user_requested_ext,
+        format_resolution_source=format_resolution.source,
     )
     dispatch_edit_context = _attach_edit_context(
         delegation_context,
@@ -1747,7 +1908,9 @@ async def _start_builder_task_impl(
         "[Builder] start_builder_task dispatching: task_type=%s allow_web_research=%s "
         "demo=%s tone=%s ritual=%s parent_thread=%s parent_model=%s user_id=%s "
         "user_id_source=%s artifact_source=%s explicit_url_count=%s search_limit=%s "
-        "fetch_limit=%s target_ext=%s target_ext_source=%s",
+        "fetch_limit=%s target_ext=%s target_ext_source=%s "
+        "format_resolution_source=%s user_requested_ext=%s context_inferred_ext=%s "
+        "negation_vetoed_rules=%s",
         task_type,
         allow_web_research,
         demo_mode,
@@ -1763,6 +1926,12 @@ async def _start_builder_task_impl(
         builder_web_budget.get("fetch_limit"),
         target_ext,
         target_ext_source,
+        # Rule names + text-source labels only — never prompt text (audit
+        # logging rule, 2026-06-12).
+        format_resolution.source,
+        format_resolution.user_requested_ext,
+        format_resolution.context_inferred_ext,
+        ",".join(format_resolution.vetoed_rules) or "none",
     )
 
     # Codex P1/P2 PR #132 (latest iteration): the filenames the user

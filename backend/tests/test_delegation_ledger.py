@@ -218,6 +218,47 @@ def test_chain_position_after_artifact_before_summarization(monkeypatch):
         assert ledger_index < names.index("SophiaSummarizationMiddleware")
 
 
+def test_expected_mirror_miss_logs_debug_not_warning(tmp_path, monkeypatch, caplog):
+    """Correction wave 2026-06-12: Supabase answers 400 for the expected
+    no-mirror-yet first-turn shape — that must not produce a warning
+    traceback (1 of the 2026-06-12 window's 3 prod tracebacks was this
+    non-event). Real transport failures keep the loud path."""
+    import logging
+
+    import httpx
+
+    monkeypatch.setattr(delegation_ledger, "USERS_DIR", tmp_path / "users")
+
+    def _make_store(status_code: int):
+        def _raise_download(_t, _o):
+            request = httpx.Request("GET", "https://supabase.example/object")
+            response = httpx.Response(status_code, request=request)
+            raise httpx.HTTPStatusError("boom", request=request, response=response)
+
+        return SimpleNamespace(
+            is_configured=lambda: True,
+            download_artifact=_raise_download,
+            upload_artifact=lambda *a, **k: "path",
+            ledger_object_name=lambda: "ledger/session.jsonl",
+        )
+
+    monkeypatch.setattr(delegation_ledger, "_store", lambda: _make_store(400))
+    with caplog.at_level(logging.DEBUG):
+        assert delegation_ledger._materialize_from_mirror(USER_ID, THREAD_ID) is False
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not warnings
+    assert "no mirror yet" in caplog.text
+
+    caplog.clear()
+    monkeypatch.setattr(delegation_ledger, "_store", lambda: _make_store(503))
+    with caplog.at_level(logging.DEBUG):
+        assert delegation_ledger._materialize_from_mirror(USER_ID, THREAD_ID) is False
+    assert any(
+        r.levelno >= logging.WARNING and "mirror_download_failed" in r.message
+        for r in caplog.records
+    )
+
+
 def test_cleanup_failure_never_raises(monkeypatch):
     from app.gateway.routers import sessions as sessions_router
 

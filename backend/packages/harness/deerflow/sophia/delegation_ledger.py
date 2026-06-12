@@ -314,7 +314,18 @@ def _materialize_from_mirror(user_id: str, session_id: str) -> bool:
         return False
     try:
         result = store.download_artifact(session_id, store.ledger_object_name())
-    except Exception:  # noqa: BLE001 — best-effort cross-service fetch
+    except Exception as exc:  # noqa: BLE001 — best-effort cross-service fetch
+        # Prod 2026-06-12: Supabase answers 400 (not only 404) for the
+        # missing-object shape, and ``download_artifact`` maps only 404 to
+        # None — so every session's expected first-turn no-mirror-yet case
+        # logged a full warning traceback. Expected-missing is debug; real
+        # transport failures keep the loud path.
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        if status_code in (400, 404):
+            logger.debug(
+                "[DelegationLedger] no mirror yet thread=%s status=%s", session_id, status_code
+            )
+            return False
         logger.warning(
             "[DelegationLedger] mirror_download_failed thread=%s", session_id, exc_info=True
         )

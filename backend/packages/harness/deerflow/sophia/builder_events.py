@@ -620,6 +620,12 @@ def _artifact_completion_fields(
         "artifact_ext": artifact.get("artifact_ext"),
         "artifact_is_fallback": artifact.get("artifact_is_fallback"),
         "fallback_reason": artifact.get("fallback_reason"),
+        # Correction wave 2026-06-12: emit-time format-conflict guard — the
+        # delivered format honored the user's explicit current-turn ask over
+        # a misderived dispatch target. Every occurrence is a dispatch-
+        # resolution failure signal worth monitoring.
+        "format_conflict_resolved": artifact.get("format_conflict_resolved"),
+        "format_conflict_original_target_ext": artifact.get("format_conflict_original_target_ext"),
         "image_generation_status": artifact.get("image_generation_status"),
         "image_generation_reason": artifact.get("image_generation_reason"),
         # VQ-3: harness-stamped enrichment outcome — attempted/succeeded/

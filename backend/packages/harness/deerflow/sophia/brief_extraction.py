@@ -157,11 +157,15 @@ def _parse_and_validate(text: str) -> dict[str, Any] | None:
 
 
 def extract_brief(entries: list[dict[str, Any]], task_type: str) -> dict[str, Any] | None:
-    """One Haiku call over the ledger → validated brief schema, or None.
+    """One model call over the ledger → validated brief schema, or None.
 
-    Never raises; never retries. Any failure logs
-    ``[BriefExtraction] skipped reason=…`` and returns None — the build
-    proceeds digest-only.
+    Never raises. Provider-resilient (correction wave 2026-06-12): a
+    provider-classified failure on the Anthropic primary (the 2026-06-12
+    outage was a 401 on every call) gets ONE retry through the configured
+    OpenAI fallback model — Spec D extraction survives primary outages
+    instead of dying for their whole duration. The skip reason names the
+    provider error class instead of a generic ``model_error``. Any double
+    failure still degrades to digest-only.
     """
     if not extraction_enabled():
         return None
@@ -172,22 +176,9 @@ def extract_brief(entries: list[dict[str, Any]], task_type: str) -> dict[str, An
     if not selected:
         logger.info("[BriefExtraction] skipped reason=no_selectable_entries")
         return None
-    try:
-        from langchain_anthropic import ChatAnthropic
-        from langchain_core.messages import HumanMessage
-
-        model = ChatAnthropic(
-            model=_EXTRACTION_MODEL,
-            api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
-            max_tokens=_EXTRACTION_MAX_TOKENS,
-            timeout=_EXTRACTION_TIMEOUT_SECONDS,
-            max_retries=0,
-        )
-        prompt = _extraction_prompt(task_type, _render_entries(selected))
-        reply = model.invoke([HumanMessage(content=prompt)])
-        text = reply.text() if callable(getattr(reply, "text", None)) else str(reply.content)
-    except Exception:  # noqa: BLE001 — extraction is strictly best-effort
-        logger.warning("[BriefExtraction] skipped reason=model_error", exc_info=True)
+    prompt = _extraction_prompt(task_type, _render_entries(selected))
+    text = _invoke_extraction_model(prompt)
+    if text is None:
         return None
     schema = _parse_and_validate(text or "")
     if schema is None:
@@ -198,3 +189,68 @@ def extract_brief(entries: list[dict[str, Any]], task_type: str) -> dict[str, An
         "[BriefExtraction] ok entries=%d populated_fields=%d", len(selected), populated
     )
     return schema
+
+
+def _invoke_extraction_model(prompt: str) -> str | None:
+    """Primary (Haiku) call with one provider-classified fallback retry."""
+    from langchain_core.messages import HumanMessage
+
+    try:
+        from langchain_anthropic import ChatAnthropic
+
+        model = ChatAnthropic(
+            model=_EXTRACTION_MODEL,
+            api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
+            max_tokens=_EXTRACTION_MAX_TOKENS,
+            timeout=_EXTRACTION_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
+        reply = model.invoke([HumanMessage(content=prompt)])
+        return reply.text() if callable(getattr(reply, "text", None)) else str(reply.content)
+    except Exception as exc:  # noqa: BLE001 — extraction is strictly best-effort
+        # Same sophia-layer classifier the builder fallback uses: auth /
+        # quota / rate-limit / 5xx are provider-availability errors worth
+        # one fallback attempt; anything else (prompt bugs, local errors)
+        # is not.
+        from deerflow.sophia.builder_provider_fallback import classify_provider_error
+
+        error_class = classify_provider_error(exc)
+        if error_class is None:
+            logger.warning("[BriefExtraction] skipped reason=model_error", exc_info=True)
+            return None
+        text = _invoke_fallback_extraction_model(prompt, error_class)
+        if text is None:
+            logger.warning(
+                "[BriefExtraction] skipped reason=%s fallback_attempted=true", error_class
+            )
+        return text
+
+
+def _invoke_fallback_extraction_model(prompt: str, error_class: str) -> str | None:
+    """One retry via the configured OpenAI fallback model. Best-effort."""
+    from langchain_core.messages import HumanMessage
+
+    from deerflow.sophia.builder_provider_fallback import (
+        build_fallback_chat_model,
+        fallback_enabled,
+        fallback_model_name,
+        openai_api_key_present,
+    )
+
+    if not (fallback_enabled() and openai_api_key_present() and fallback_model_name()):
+        logger.warning(
+            "[BriefExtraction] skipped reason=%s fallback_attempted=false "
+            "fallback_result=fallback_not_configured",
+            error_class,
+        )
+        return None
+    try:
+        model = build_fallback_chat_model()
+        reply = model.invoke([HumanMessage(content=prompt)])
+        logger.info(
+            "[BriefExtraction] fallback ok provider_error_class=%s final_provider=openai",
+            error_class,
+        )
+        return reply.text() if callable(getattr(reply, "text", None)) else str(reply.content)
+    except Exception:  # noqa: BLE001 — double failure degrades to digest-only
+        return None

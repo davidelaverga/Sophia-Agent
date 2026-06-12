@@ -130,6 +130,109 @@ def test_model_exception_returns_none(monkeypatch):
     assert brief_extraction.extract_brief(fixture_entries(), "presentation") is None
 
 
+# ---- provider-resilient fallback (correction wave 2026-06-12) -------------------
+
+
+class _ProviderStatusError(Exception):
+    """Shape double for provider HTTP errors (anthropic-style status_code)."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"provider error {status_code}")
+        self.status_code = status_code
+
+
+def _arm_fallback(monkeypatch, reply_text: str | None) -> dict:
+    """Enable the fallback config and capture fallback invocations."""
+    calls: dict = {"count": 0}
+    monkeypatch.setenv("SOPHIA_BUILDER_OPENAI_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("SOPHIA_BUILDER_OPENAI_FALLBACK_MODEL", "openai-model-placeholder")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-placeholder-never-real")
+
+    class _FallbackModel:
+        def invoke(self, _messages):
+            calls["count"] += 1
+            if reply_text is None:
+                raise RuntimeError("fallback also down")
+            return _FakeReply(reply_text)
+
+    monkeypatch.setattr(
+        "deerflow.sophia.builder_provider_fallback.build_fallback_chat_model",
+        lambda: _FallbackModel(),
+    )
+    return calls
+
+
+def _arm_primary_401(monkeypatch) -> None:
+    class _AuthBoom:
+        def __init__(self, **_kwargs):
+            pass
+
+        def invoke(self, _messages):
+            raise _ProviderStatusError(401)
+
+    monkeypatch.setattr("langchain_anthropic.ChatAnthropic", lambda **_k: _AuthBoom())
+
+
+def test_provider_error_retries_via_fallback_and_succeeds(monkeypatch):
+    """The 2026-06-12 outage shape: Anthropic 401 on every call. Extraction
+    must survive via the configured OpenAI fallback instead of dying."""
+    import json as _json
+
+    _arm_primary_401(monkeypatch)
+    calls = _arm_fallback(monkeypatch, _json.dumps(_CANNED_SCHEMA))
+
+    schema = brief_extraction.extract_brief(fixture_entries(), "presentation")
+
+    assert calls["count"] == 1
+    assert schema is not None
+    assert schema["must_exclude"] == ["pricing slides [t25]"]
+
+
+def test_provider_error_with_fallback_unconfigured_skips_with_class(monkeypatch, caplog):
+    import logging
+
+    _arm_primary_401(monkeypatch)
+    monkeypatch.delenv("SOPHIA_BUILDER_OPENAI_FALLBACK_ENABLED", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    with caplog.at_level(logging.WARNING):
+        result = brief_extraction.extract_brief(fixture_entries(), "presentation")
+
+    assert result is None
+    # The skip reason names the provider error class, not generic model_error.
+    assert "reason=auth_error" in caplog.text
+    assert "fallback_not_configured" in caplog.text
+
+
+def test_double_provider_failure_degrades_to_digest_only(monkeypatch, caplog):
+    import logging
+
+    _arm_primary_401(monkeypatch)
+    calls = _arm_fallback(monkeypatch, None)  # fallback raises too
+
+    with caplog.at_level(logging.WARNING):
+        result = brief_extraction.extract_brief(fixture_entries(), "presentation")
+
+    assert result is None
+    assert calls["count"] == 1
+    assert "reason=auth_error fallback_attempted=true" in caplog.text
+
+
+def test_non_provider_error_never_invokes_fallback(monkeypatch):
+    class _LocalBoom:
+        def __init__(self, **_kwargs):
+            pass
+
+        def invoke(self, _messages):
+            raise ValueError("prompt bug")
+
+    monkeypatch.setattr("langchain_anthropic.ChatAnthropic", lambda **_k: _LocalBoom())
+    calls = _arm_fallback(monkeypatch, "{}")
+
+    assert brief_extraction.extract_brief(fixture_entries(), "presentation") is None
+    assert calls["count"] == 0
+
+
 def test_flag_off_skips_extraction(monkeypatch):
     monkeypatch.setenv("SOPHIA_DELEGATION_EXTRACTION", "0")
     monkeypatch.setattr(

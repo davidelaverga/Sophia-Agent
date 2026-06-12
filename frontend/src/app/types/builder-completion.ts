@@ -91,6 +91,10 @@ export type BuilderCompletionEventV1 = {
   artifact_ext?: string | null;
   artifact_is_fallback?: boolean | null;
   fallback_reason?: string | null;
+  /** "user_intent" when the emit-time guard honored the user's explicit
+   * current-turn format over a misderived dispatch target (2026-06-12). */
+  format_conflict_resolved?: string | null;
+  format_conflict_original_target_ext?: string | null;
   /** Honest quality note, e.g. "visuals_not_embedded". */
   quality_warning?: string | null;
   visuals_missing?: boolean | null;

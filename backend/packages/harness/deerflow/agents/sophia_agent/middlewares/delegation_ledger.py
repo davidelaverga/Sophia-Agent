@@ -126,6 +126,13 @@ class DelegationLedgerMiddleware(AgentMiddleware[AgentState]):
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
+            # Correction wave 2026-06-12: a silent mirror skip leaves the
+            # gateway-side deletion path and restart durability blind for
+            # the session — degraded, so say so (once per occurrence).
+            logger.warning(
+                "[DelegationLedger] mirror skipped: no running event loop thread=%s",
+                thread_id,
+            )
             return None
         # mirror_ledger does blocking I/O (httpx.Client) — run it off-loop.
         task = loop.create_task(
