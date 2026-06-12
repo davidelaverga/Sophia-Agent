@@ -2,25 +2,8 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const routerPushMock = vi.hoisted(() => vi.fn());
-
-vi.mock('next/navigation', () => ({
-  useRouter: () => ({
-    push: routerPushMock,
-    replace: vi.fn(),
-    back: vi.fn(),
-    forward: vi.fn(),
-    refresh: vi.fn(),
-    prefetch: vi.fn(),
-  }),
-  usePathname: () => '/',
-  useSearchParams: () => new URLSearchParams(),
-  useParams: () => ({}),
-}));
-
 import { ArtifactLibraryPanel } from '../../app/components/dashboard/ArtifactLibraryPanel';
 import type { ArtifactRegistryRecord } from '../../app/lib/artifact-registry';
-import { useSessionStore } from '../../app/stores/session-store';
 
 const baseArtifact: ArtifactRegistryRecord = {
   artifact_id: 'artifact-1',
@@ -74,9 +57,7 @@ describe('ArtifactLibraryPanel', () => {
   beforeEach(() => {
     window.sessionStorage.clear();
     window.localStorage.clear();
-    useSessionStore.setState({ session: null });
     fetchMock().mockReset();
-    routerPushMock.mockReset();
   });
 
   it('renders dashboard artifacts from the registry', async () => {
@@ -199,60 +180,19 @@ describe('ArtifactLibraryPanel', () => {
       'src',
       '/api/artifacts/artifact-1/content',
     );
-    expect(routerPushMock).not.toHaveBeenCalled();
     expect(window.sessionStorage.getItem('sophia:artifact-library-open:v1')).toBeNull();
   });
 
-  it('opens an artifact in session canvas through the secondary handoff flow', async () => {
-    fetchMock()
-      .mockResolvedValueOnce(jsonResponse({ artifacts: [baseArtifact], total: 1 }))
-      .mockResolvedValueOnce(jsonResponse({
-        artifact: baseArtifact,
-        canvas_target: {
-          artifact_id: baseArtifact.artifact_id,
-          thread_id: baseArtifact.thread_id,
-          session_id: baseArtifact.session_id,
-          artifact_path: baseArtifact.local_path,
-          renderer_kind: baseArtifact.renderer_kind,
-          mime_type: baseArtifact.mime_type,
-          title: baseArtifact.title,
-          review_room_supported: true,
-        },
-      }));
+  it('does not render session handoff actions from the artifact library', async () => {
+    fetchMock().mockResolvedValueOnce(jsonResponse({ artifacts: [baseArtifact], total: 1 }));
 
     render(<ArtifactLibraryPanel />);
 
     await screen.findByText('Launch Page');
-    await userEvent.click(screen.getByRole('button', { name: /open launch page in session canvas/i }));
-
-    await waitFor(() => {
-      expect(fetchMock()).toHaveBeenCalledWith('/api/artifacts/artifact-1/open', expect.objectContaining({
-        method: 'POST',
-      }));
-    });
-    const handoff = JSON.parse(window.sessionStorage.getItem('sophia:artifact-library-open:v1') ?? '{}') as {
-      artifactId?: string;
-      threadId?: string;
-      sessionId?: string | null;
-      artifactPath?: string;
-      rendererKind?: string;
-      title?: string;
-      filename?: string;
-    };
-    expect(handoff).toMatchObject({
-      artifactId: 'artifact-1',
-      threadId: 'thread-1',
-      sessionId: 'session-1',
-      artifactPath: 'mnt/user-data/outputs/launch.html',
-      rendererKind: 'html',
-      title: 'Launch Page',
-      filename: 'launch.html',
-    });
-    expect(routerPushMock).toHaveBeenCalledWith('/session');
-    expect(useSessionStore.getState().session).toMatchObject({
-      sessionId: 'session-1',
-      threadId: 'thread-1',
-    });
+    expect(screen.queryByRole('button', { name: /session canvas/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Session$/u)).not.toBeInTheDocument();
+    expect(screen.queryByText('Session Canvas')).not.toBeInTheDocument();
+    expect(window.sessionStorage.getItem('sophia:artifact-library-open:v1')).toBeNull();
   });
 
   it('loads markdown previews through the artifact id content endpoint', async () => {
@@ -333,7 +273,6 @@ describe('ArtifactLibraryPanel', () => {
     await userEvent.click(screen.getByRole('button', { name: /open missing notes inline/i }));
 
     expect(await screen.findByTestId('artifact-library-preview-unavailable')).toHaveTextContent('Unable to load preview');
-    expect(routerPushMock).not.toHaveBeenCalled();
   });
 
   it('uses the artifact id endpoint for downloads', async () => {

@@ -516,34 +516,77 @@ def test_list_endpoint_hides_wrappers_by_default(tmp_path, monkeypatch) -> None:
     assert hidden_body["total"] == 2
 
 
-def test_download_endpoint_redirects_to_existing_thread_artifact_route(tmp_path, monkeypatch) -> None:
+def test_download_endpoint_serves_visible_artifact_by_registry_id(tmp_path, monkeypatch) -> None:
     client, registry = _owned_app(tmp_path, monkeypatch)
+    actual_file = tmp_path / "served" / "Quarterly Report.pdf"
+    actual_file.parent.mkdir(parents=True)
+    actual_file.write_bytes(b"%PDF-1.4")
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: actual_file)
     artifact = registry.upsert(
         _request(local_path="outputs/Quarterly Report.pdf", renderer_kind="pdf", artifact_type="pdf"),
         user_id="user-1",
     )
 
-    response = client.get(f"/api/artifacts/{artifact.artifact_id}/download", follow_redirects=False)
+    response = client.get(f"/api/artifacts/{artifact.artifact_id}/download")
 
-    assert response.status_code == 307
-    assert response.headers["location"] == (
-        "/api/threads/thread-1/artifacts/mnt/user-data/outputs/Quarterly%20Report.pdf?download=true"
-    )
+    assert response.status_code == 200
+    assert response.content == b"%PDF-1.4"
+    assert response.headers["content-disposition"] == "attachment; filename*=UTF-8''Quarterly%20Report.pdf"
 
 
-def test_content_endpoint_redirects_to_existing_thread_artifact_route(tmp_path, monkeypatch) -> None:
+def test_content_endpoint_serves_visible_artifact_by_registry_id(tmp_path, monkeypatch) -> None:
     client, registry = _owned_app(tmp_path, monkeypatch)
+    actual_file = tmp_path / "served" / "launch page.html"
+    actual_file.parent.mkdir(parents=True)
+    actual_file.write_text("<html><body>launch</body></html>", encoding="utf-8")
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: actual_file)
     artifact = registry.upsert(
         _request(local_path="outputs/launch page.html", renderer_kind="html", artifact_type="webpage"),
         user_id="user-1",
     )
 
-    response = client.get(f"/api/artifacts/{artifact.artifact_id}/content", follow_redirects=False)
+    response = client.get(f"/api/artifacts/{artifact.artifact_id}/content")
 
-    assert response.status_code == 307
-    assert response.headers["location"] == (
-        "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch%20page.html"
+    assert response.status_code == 200
+    assert response.text == "<html><body>launch</body></html>"
+    assert "location" not in response.headers
+
+
+def test_artifact_id_endpoints_do_not_require_live_session_record(tmp_path, monkeypatch) -> None:
+    registry = LocalArtifactRegistry(tmp_path / "artifact-registry")
+    store = SessionStore(tmp_path / "users")
+    actual_file = tmp_path / "served" / "orphaned-session.md"
+    actual_file.parent.mkdir(parents=True)
+    actual_file.write_text("# Still here", encoding="utf-8")
+    monkeypatch.setattr(artifacts_router, "_artifact_registry", registry)
+    monkeypatch.setattr(artifacts_router, "_session_store", store)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: actual_file)
+
+    app = FastAPI()
+    app.include_router(artifacts_router.router)
+    app.dependency_overrides[require_authenticated_user] = lambda: "user-1"
+    client = TestClient(app)
+    artifact = registry.upsert(
+        _request(
+            local_path="outputs/orphaned-session.md",
+            renderer_kind="markdown",
+            artifact_type="markdown",
+            mime_type="text/markdown",
+        ),
+        user_id="user-1",
     )
+
+    metadata = client.get(f"/api/artifacts/{artifact.artifact_id}")
+    opened = client.post(f"/api/artifacts/{artifact.artifact_id}/open")
+    content = client.get(f"/api/artifacts/{artifact.artifact_id}/content")
+    download = client.get(f"/api/artifacts/{artifact.artifact_id}/download")
+
+    assert metadata.status_code == 200
+    assert opened.status_code == 200
+    assert content.status_code == 200
+    assert content.text == "# Still here"
+    assert download.status_code == 200
+    assert download.headers["content-disposition"] == "attachment; filename*=UTF-8''orphaned-session.md"
 
 
 def test_hidden_artifact_id_endpoints_return_404(tmp_path, monkeypatch) -> None:

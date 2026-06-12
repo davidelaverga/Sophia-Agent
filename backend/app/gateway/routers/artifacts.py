@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import quote, unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
 from app.gateway.artifact_registry import (
@@ -193,7 +193,6 @@ async def delete_user_artifact(
     existing = _artifact_registry.get(artifact_id, user_id=authenticated_user_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
-    _require_thread_owner(authenticated_user_id, existing.thread_id)
     deleted = _artifact_registry.mark_deleted(artifact_id, user_id=authenticated_user_id) or existing
     return open_response_for_record(deleted)
 
@@ -204,15 +203,11 @@ async def delete_user_artifact(
 )
 async def preview_user_artifact(
     artifact_id: str,
+    request: Request,
     authenticated_user_id: str = Depends(require_authenticated_user),
-) -> RedirectResponse:
+) -> Response:
     record = _get_visible_user_artifact(artifact_id, authenticated_user_id)
-    _enforce_artifact_owner(authenticated_user_id, record.thread_id, record.local_path)
-    encoded_path = quote(record.local_path, safe="/")
-    return RedirectResponse(
-        url=f"/api/threads/{quote(record.thread_id, safe='')}/artifacts/{encoded_path}",
-        status_code=307,
-    )
+    return await _serve_registry_artifact(record, request, force_download=False)
 
 
 @router.get(
@@ -221,22 +216,17 @@ async def preview_user_artifact(
 )
 async def download_user_artifact(
     artifact_id: str,
+    request: Request,
     authenticated_user_id: str = Depends(require_authenticated_user),
-) -> RedirectResponse:
+) -> Response:
     record = _get_visible_user_artifact(artifact_id, authenticated_user_id)
-    _enforce_artifact_owner(authenticated_user_id, record.thread_id, record.local_path)
-    encoded_path = quote(record.local_path, safe="/")
-    return RedirectResponse(
-        url=f"/api/threads/{quote(record.thread_id, safe='')}/artifacts/{encoded_path}?download=true",
-        status_code=307,
-    )
+    return await _serve_registry_artifact(record, request, force_download=True)
 
 
 def _get_visible_user_artifact(artifact_id: str, authenticated_user_id: str) -> ArtifactRecord:
     record = _artifact_registry.get(artifact_id, user_id=authenticated_user_id)
     if record is None or not _is_visible_primary_artifact(record):
         raise HTTPException(status_code=404, detail="Artifact not found")
-    _require_thread_owner(authenticated_user_id, record.thread_id)
     return record
 
 
@@ -245,6 +235,40 @@ def _is_visible_primary_artifact(record: ArtifactRecord) -> bool:
         record.deleted_at is None
         and record.is_library_visible is True
         and record.artifact_role == "primary"
+    )
+
+
+async def _serve_registry_artifact(
+    record: ArtifactRecord,
+    request: Request,
+    *,
+    force_download: bool,
+) -> Response:
+    resolution = await _resolve_artifact_path_for_request(record.thread_id, record.local_path)
+    actual_path = resolution.actual_path
+
+    if not actual_path.exists():
+        supabase_response = _try_serve_from_supabase(
+            record.thread_id,
+            record.local_path,
+            request,
+            force_download=force_download,
+        )
+        if supabase_response is not None:
+            return supabase_response
+        raise HTTPException(
+            status_code=404,
+            detail=_artifact_not_found_detail(record.thread_id, record.local_path, resolution),
+        )
+
+    if not actual_path.is_file():
+        raise HTTPException(status_code=400, detail=f"Path is not a file: {record.local_path}")
+
+    return _serve_local_artifact(
+        record.thread_id,
+        actual_path,
+        request,
+        force_download=force_download,
     )
 
 
@@ -712,7 +736,13 @@ def _enforce_artifact_owner(authenticated_user_id: str | None, thread_id: str, p
     _require_thread_owner(authenticated_user_id, thread_id)
 
 
-def _try_serve_from_supabase(thread_id: str, path: str, request: Request) -> Response | None:
+def _try_serve_from_supabase(
+    thread_id: str,
+    path: str,
+    request: Request,
+    *,
+    force_download: bool = False,
+) -> Response | None:
     """Serve the artifact from the ``sophia_builder`` Supabase bucket when missing locally.
 
     Layout: ``sophia_builder/{thread_id}/{relative_output_path}``. Returns
@@ -747,8 +777,15 @@ def _try_serve_from_supabase(thread_id: str, path: str, request: Request) -> Res
         len(content),
     )
 
-    if request.query_params.get("download") or _is_office_download(filename):
-        return _supabase_attachment_response(thread_id, filename, content, mime_type, request)
+    if force_download or request.query_params.get("download") or _is_office_download(filename):
+        return _supabase_attachment_response(
+            thread_id,
+            filename,
+            content,
+            mime_type,
+            request,
+            force_download=force_download,
+        )
 
     return _supabase_inline_response(filename, content, mime_type)
 
@@ -759,12 +796,14 @@ def _supabase_attachment_response(
     content: bytes,
     mime_type: str | None,
     request: Request,
+    *,
+    force_download: bool = False,
 ) -> Response:
     logger.info(
         "Serving artifact with attachment disposition: thread_id=%s ext=%s source=supabase download=%s bytes=%d",
         thread_id,
         Path(filename).suffix.lower().lstrip(".") or None,
-        bool(request.query_params.get("download")),
+        bool(force_download or request.query_params.get("download")),
         len(content),
     )
     return Response(
@@ -1297,7 +1336,13 @@ def _skill_archive_content_response(content: bytes, internal_path: str) -> Respo
         return Response(content=content, media_type=mime_type or "application/octet-stream", headers=cache_headers)
 
 
-def _serve_local_artifact(thread_id: str, actual_path: Path, request: Request) -> Response:
+def _serve_local_artifact(
+    thread_id: str,
+    actual_path: Path,
+    request: Request,
+    *,
+    force_download: bool = False,
+) -> Response:
     mime_type, _ = mimetypes.guess_type(actual_path)
     # Encode filename for Content-Disposition header (RFC 5987)
     encoded_filename = quote(actual_path.name)
@@ -1305,12 +1350,12 @@ def _serve_local_artifact(thread_id: str, actual_path: Path, request: Request) -
     # if `download` query parameter is true, return the file as a download.
     # Office binaries are also attachment-first because browsers cannot
     # preview authenticated PPTX/DOCX/XLSX files reliably.
-    if request.query_params.get("download") or _is_office_download(actual_path):
+    if force_download or request.query_params.get("download") or _is_office_download(actual_path):
         logger.info(
             "Serving artifact with attachment disposition: thread_id=%s ext=%s source=local download=%s bytes=%d",
             thread_id,
             actual_path.suffix.lower().lstrip(".") or None,
-            bool(request.query_params.get("download")),
+            bool(force_download or request.query_params.get("download")),
             actual_path.stat().st_size,
         )
         return FileResponse(path=actual_path, filename=actual_path.name, media_type=mime_type, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"})

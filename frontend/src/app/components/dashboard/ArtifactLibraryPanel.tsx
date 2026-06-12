@@ -2,7 +2,6 @@
 
 import {
   Download,
-  ExternalLink,
   FileText,
   Loader2,
   PanelRightOpen,
@@ -11,11 +10,9 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { saveArtifactLibraryOpenHandoff } from '../../lib/artifact-library-open-handoff';
 import {
   buildArtifactRegistryContentHref,
   buildArtifactRegistryDownloadHref,
@@ -28,7 +25,6 @@ import {
   type ArtifactRegistryRecord,
 } from '../../lib/artifact-registry';
 import { cn } from '../../lib/utils';
-import { useSessionStore } from '../../stores/session-store';
 import { ArtifactMarkdownPreview } from '../session/ArtifactMarkdownPreview';
 
 type ArtifactTypeFilter = 'all' | 'html' | 'pdf' | 'markdown' | 'pptx' | 'image';
@@ -60,10 +56,6 @@ const DATE_OPTIONS: Array<{ value: ArtifactDateFilter; label: string }> = [
 ];
 
 export function ArtifactLibraryPanel() {
-  const router = useRouter();
-  const currentSession = useSessionStore((state) => state.session);
-  const createSession = useSessionStore((state) => state.createSession);
-  const updateFromBackend = useSessionStore((state) => state.updateFromBackend);
   const [artifacts, setArtifacts] = useState<ArtifactRegistryRecord[]>([]);
   const [total, setTotal] = useState(0);
   const [typeFilter, setTypeFilter] = useState<ArtifactTypeFilter>('all');
@@ -75,7 +67,6 @@ export function ArtifactLibraryPanel() {
   const [error, setError] = useState<string | null>(null);
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [openingArtifactId, setOpeningArtifactId] = useState<string | null>(null);
-  const [sessionOpeningArtifactId, setSessionOpeningArtifactId] = useState<string | null>(null);
   const [deletingArtifactId, setDeletingArtifactId] = useState<string | null>(null);
   const [selectedArtifact, setSelectedArtifact] = useState<ArtifactRegistryRecord | null>(null);
   const [previewLoadingArtifactId, setPreviewLoadingArtifactId] = useState<string | null>(null);
@@ -152,30 +143,6 @@ export function ArtifactLibraryPanel() {
       setOpeningArtifactId(null);
     }
   }, []);
-
-  const handleOpenInSessionCanvas = useCallback(async (artifact: ArtifactRegistryRecord) => {
-    setSessionOpeningArtifactId(artifact.artifact_id);
-    setError(null);
-    try {
-      const response = await openArtifactRegistryRecord(artifact.artifact_id);
-      if (!saveArtifactLibraryOpenHandoff(response)) {
-        throw new Error('artifact_library_handoff_save_failed');
-      }
-      const target = response.canvas_target;
-      const targetSessionId = target.session_id ?? response.artifact.session_id ?? target.thread_id;
-      if (target.thread_id && targetSessionId) {
-        if (!currentSession) {
-          createSession(response.artifact.user_id || 'anonymous', 'open', 'life');
-        }
-        updateFromBackend(targetSessionId, target.thread_id);
-      }
-      router.push('/session');
-    } catch {
-      setError('Unable to open artifact');
-    } finally {
-      setSessionOpeningArtifactId(null);
-    }
-  }, [createSession, currentSession, router, updateFromBackend]);
 
   const handleDeleteArtifact = useCallback(async (artifact: ArtifactRegistryRecord) => {
     const label = artifact.title || artifact.filename;
@@ -273,7 +240,7 @@ export function ArtifactLibraryPanel() {
             options={DATE_OPTIONS}
           />
           <label className="block">
-            <span className="sr-only">Session or thread</span>
+            <span className="sr-only">Thread</span>
             <input
               value={threadFilter}
               onChange={(event) => setThreadFilter(event.target.value)}
@@ -320,10 +287,8 @@ export function ArtifactLibraryPanel() {
                     artifact={artifact}
                     selected={selectedArtifact?.artifact_id === artifact.artifact_id}
                     opening={openingArtifactId === artifact.artifact_id}
-                    sessionOpening={sessionOpeningArtifactId === artifact.artifact_id}
                     deleting={deletingArtifactId === artifact.artifact_id}
                     onOpenInline={() => handleOpenInline(artifact)}
-                    onOpenInSession={() => handleOpenInSessionCanvas(artifact)}
                     onDelete={() => handleDeleteArtifact(artifact)}
                   />
                 ))}
@@ -337,14 +302,12 @@ export function ArtifactLibraryPanel() {
               previewText={previewText}
               previewLoading={previewLoadingArtifactId === selectedArtifact.artifact_id}
               previewError={previewError}
-              sessionOpening={sessionOpeningArtifactId === selectedArtifact.artifact_id}
               deleting={deletingArtifactId === selectedArtifact.artifact_id}
               onClose={() => {
                 setSelectedArtifact(null);
                 setPreviewText(null);
                 setPreviewError(null);
               }}
-              onOpenInSession={() => handleOpenInSessionCanvas(selectedArtifact)}
               onDelete={() => handleDeleteArtifact(selectedArtifact)}
             />
           )}
@@ -392,22 +355,17 @@ function ArtifactLibraryRow({
   artifact,
   selected,
   opening,
-  sessionOpening,
   deleting,
   onOpenInline,
-  onOpenInSession,
   onDelete,
 }: {
   artifact: ArtifactRegistryRecord;
   selected: boolean;
   opening: boolean;
-  sessionOpening: boolean;
   deleting: boolean;
   onOpenInline: () => void;
-  onOpenInSession: () => void;
   onDelete: () => void;
 }) {
-  const openHref = buildArtifactRegistryContentHref(artifact.artifact_id);
   const downloadHref = buildArtifactRegistryDownloadHref(artifact.artifact_id);
   const label = artifact.title || artifact.filename;
 
@@ -445,7 +403,7 @@ function ArtifactLibraryRow({
         <button
           type="button"
           onClick={onOpenInline}
-          disabled={opening || sessionOpening || deleting}
+          disabled={opening || deleting}
           className="cosmic-focus-ring inline-flex h-9 items-center gap-2 rounded-full px-3 text-[12px] font-medium transition-all hover:bg-white/[0.06] disabled:cursor-wait disabled:opacity-60"
           aria-label={`Open ${label} inline`}
           style={{ color: 'var(--cosmic-text)' }}
@@ -453,27 +411,6 @@ function ArtifactLibraryRow({
           {opening ? <Loader2 className="h-4 w-4 animate-spin" /> : <PanelRightOpen className="h-4 w-4" />}
           Open
         </button>
-        <button
-          type="button"
-          onClick={onOpenInSession}
-          disabled={opening || sessionOpening || deleting}
-          className="cosmic-focus-ring inline-flex h-9 items-center gap-2 rounded-full px-3 text-[12px] font-medium transition-all hover:bg-white/[0.06] disabled:cursor-wait disabled:opacity-60"
-          aria-label={`Open ${label} in Session Canvas`}
-          style={{ color: 'var(--cosmic-text-muted)' }}
-        >
-          {sessionOpening ? <Loader2 className="h-4 w-4 animate-spin" /> : <PanelRightOpen className="h-4 w-4" />}
-          Session
-        </button>
-        <a
-          href={openHref}
-          target="_blank"
-          rel="noreferrer"
-          className="cosmic-focus-ring inline-flex h-9 w-9 items-center justify-center rounded-full transition-all hover:bg-white/[0.06]"
-          aria-label={`Open ${label} preview in new tab`}
-          style={{ color: 'var(--cosmic-text-muted)' }}
-        >
-          <ExternalLink className="h-4 w-4" />
-        </a>
         <a
           href={downloadHref}
           className="cosmic-focus-ring inline-flex h-9 w-9 items-center justify-center rounded-full transition-all hover:bg-white/[0.06]"
@@ -485,7 +422,7 @@ function ArtifactLibraryRow({
         <button
           type="button"
           onClick={onDelete}
-          disabled={deleting || opening || sessionOpening}
+          disabled={deleting || opening}
           className="cosmic-focus-ring inline-flex h-9 w-9 items-center justify-center rounded-full transition-all hover:bg-white/[0.06] disabled:cursor-wait disabled:opacity-60"
           aria-label={`Delete ${label}`}
           style={{ color: 'var(--cosmic-text-muted)' }}
@@ -502,20 +439,16 @@ function ArtifactLibraryDetailPanel({
   previewText,
   previewLoading,
   previewError,
-  sessionOpening,
   deleting,
   onClose,
-  onOpenInSession,
   onDelete,
 }: {
   artifact: ArtifactRegistryRecord;
   previewText: string | null;
   previewLoading: boolean;
   previewError: string | null;
-  sessionOpening: boolean;
   deleting: boolean;
   onClose: () => void;
-  onOpenInSession: () => void;
   onDelete: () => void;
 }) {
   const label = artifact.title || artifact.filename;
@@ -582,32 +515,10 @@ function ArtifactLibraryDetailPanel({
           <Download className="h-4 w-4" />
           Download
         </a>
-        <a
-          href={contentHref}
-          target="_blank"
-          rel="noreferrer"
-          className="cosmic-focus-ring inline-flex h-9 items-center gap-2 rounded-full px-3 text-[12px] font-medium transition-all hover:bg-white/[0.06]"
-          aria-label={`Open ${label} preview in new tab`}
-          style={{ color: 'var(--cosmic-text-muted)' }}
-        >
-          <ExternalLink className="h-4 w-4" />
-          Open tab
-        </a>
-        <button
-          type="button"
-          onClick={onOpenInSession}
-          disabled={sessionOpening || deleting}
-          className="cosmic-focus-ring inline-flex h-9 items-center gap-2 rounded-full px-3 text-[12px] font-medium transition-all hover:bg-white/[0.06] disabled:cursor-wait disabled:opacity-60"
-          aria-label={`Open ${label} in Session Canvas`}
-          style={{ color: 'var(--cosmic-text-muted)' }}
-        >
-          {sessionOpening ? <Loader2 className="h-4 w-4 animate-spin" /> : <PanelRightOpen className="h-4 w-4" />}
-          Session Canvas
-        </button>
         <button
           type="button"
           onClick={onDelete}
-          disabled={deleting || sessionOpening}
+          disabled={deleting}
           className="cosmic-focus-ring ml-auto inline-flex h-9 items-center gap-2 rounded-full px-3 text-[12px] font-medium transition-all hover:bg-white/[0.06] disabled:cursor-wait disabled:opacity-60"
           aria-label={`Delete ${label}`}
           style={{ color: 'var(--cosmic-text-muted)' }}
