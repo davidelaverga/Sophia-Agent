@@ -47,6 +47,23 @@ def client(app: FastAPI) -> httpx.AsyncClient:
 # ---- Worker unit tests -----------------------------------------------------
 
 
+def test_terminal_task_update_preserves_url_only_deliverable():
+    payload = {
+        "thread_id": "parent-thread",
+        "task_id": "builder-task",
+        "run_id": "run-1",
+        "status": "success",
+        "artifact_url": "https://signed.example/report.pdf",
+        "artifact_title": "Report",
+    }
+
+    update = routes._terminal_async_task_update(payload)
+
+    assert update["builder_result"]["artifact_url"] == "https://signed.example/report.pdf"
+    assert "artifact_path" not in update["builder_result"]
+    assert routes._should_persist_last_builder_artifact(payload) is True
+
+
 @pytest.mark.anyio
 async def test_publish_fans_out_to_thread_subscribers():
     worker = BuilderEventsWorker()

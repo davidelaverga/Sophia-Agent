@@ -105,7 +105,16 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "completed_at",
         "source",
     )
-    return {key: payload.get(key) for key in result_keys if payload.get(key) is not None}
+    result = {key: payload.get(key) for key in result_keys if payload.get(key) is not None}
+    artifact_path = payload.get("artifact_path")
+    artifact_url = payload.get("artifact_url")
+    if (
+        not (isinstance(artifact_path, str) and artifact_path.strip())
+        and isinstance(artifact_url, str)
+        and artifact_url.strip()
+    ):
+        result["artifact_url"] = artifact_url
+    return result
 
 
 def _present_payload_fields(payload: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
@@ -196,10 +205,13 @@ async def _hydrate_missing_run_id(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _should_persist_last_builder_artifact(payload: dict[str, Any]) -> bool:
     artifact_path = payload.get("artifact_path")
+    artifact_url = payload.get("artifact_url")
     return (
         str(payload.get("status") or "").lower() in _SUCCESSFUL_BUILDER_STATUSES
-        and isinstance(artifact_path, str)
-        and bool(artifact_path.strip())
+        and (
+            (isinstance(artifact_path, str) and bool(artifact_path.strip()))
+            or (isinstance(artifact_url, str) and bool(artifact_url.strip()))
+        )
     )
 
 
