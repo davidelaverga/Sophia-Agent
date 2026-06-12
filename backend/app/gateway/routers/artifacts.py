@@ -165,6 +165,8 @@ async def get_user_artifact(
     record = _artifact_registry.get(artifact_id, user_id=authenticated_user_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
+    if record.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Artifact not found")
     _require_thread_owner(authenticated_user_id, record.thread_id)
     return open_response_for_record(record)
 
@@ -181,9 +183,28 @@ async def open_user_artifact(
     existing = _artifact_registry.get(artifact_id, user_id=authenticated_user_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
+    if existing.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Artifact not found")
     _require_thread_owner(authenticated_user_id, existing.thread_id)
     opened = _artifact_registry.mark_opened(artifact_id, user_id=authenticated_user_id) or existing
     return open_response_for_record(opened)
+
+
+@router.delete(
+    "/artifacts/{artifact_id}",
+    response_model=ArtifactOpenResponse,
+    summary="Hide Artifact",
+)
+async def delete_user_artifact(
+    artifact_id: str,
+    authenticated_user_id: str = Depends(require_authenticated_user),
+) -> ArtifactOpenResponse:
+    existing = _artifact_registry.get(artifact_id, user_id=authenticated_user_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    _require_thread_owner(authenticated_user_id, existing.thread_id)
+    deleted = _artifact_registry.mark_deleted(artifact_id, user_id=authenticated_user_id) or existing
+    return open_response_for_record(deleted)
 
 
 @router.get(
@@ -196,6 +217,8 @@ async def download_user_artifact(
 ) -> RedirectResponse:
     record = _artifact_registry.get(artifact_id, user_id=authenticated_user_id)
     if record is None:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    if record.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Artifact not found")
     _enforce_artifact_owner(authenticated_user_id, record.thread_id, record.local_path)
     encoded_path = quote(record.local_path, safe="/")

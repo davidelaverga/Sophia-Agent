@@ -29,6 +29,7 @@ ArtifactSource = Literal[
     "quick_edit",
     "coreview_version",
     "file_library_backfill",
+    "backfill",
 ]
 ArtifactStorageProvider = Literal["local", "supabase", "hybrid"]
 ArtifactRole = Literal["primary", "wrapper", "support", "internal"]
@@ -82,6 +83,15 @@ _ACTION_HTML_PREFIXES = (
     "write-",
 )
 _NON_HTML_TARGET_HINTS = ("markdown", ".md", " pdf", ".pdf", "pptx", ".pptx")
+_BACKFILL_SOURCES = {"file_library_backfill", "backfill"}
+_SOURCE_PRIORITY: dict[str, int] = {
+    "builder": 10,
+    "quick_edit": 20,
+    "coreview_version": 30,
+    "upload": 40,
+    "file_library_backfill": 50,
+    "backfill": 50,
+}
 
 
 def _now_iso() -> str:
@@ -247,6 +257,10 @@ def _parse_timestamp(value: str | None) -> float:
         return 0.0
 
 
+def _source_priority(source: str | None) -> int:
+    return _SOURCE_PRIORITY.get(source or "", 100)
+
+
 def _normalize_extension(value: str | None) -> str | None:
     normalized = (value or "").strip().lower().lstrip(".")
     if not normalized:
@@ -341,6 +355,72 @@ def _detect_artifact_role(
     return "primary"
 
 
+def _effective_artifact_role(record: Any) -> ArtifactRole:
+    detected_role = _detect_artifact_role(
+        local_path=record.local_path,
+        filename=record.filename,
+        title=record.title,
+        artifact_type=record.artifact_type,
+        renderer_kind=record.renderer_kind,
+    )
+    if detected_role != "primary":
+        return detected_role
+    if record.artifact_role in {"wrapper", "support", "internal"}:
+        return record.artifact_role
+    return "primary"
+
+
+def _is_effectively_visible(record: Any) -> bool:
+    return (
+        getattr(record, "deleted_at", None) is None
+        and getattr(record, "is_library_visible", False) is True
+        and _effective_artifact_role(record) == "primary"
+    )
+
+
+def _canonical_thread_identity(thread_id: str | None, parent_thread_id: str | None) -> str:
+    return (_normalize_token(parent_thread_id) or _normalize_token(thread_id) or "").lower()
+
+
+def _canonical_path_identity(local_path: str | None, storage_object_path: str | None) -> str:
+    normalized_local_path = _normalize_token(local_path)
+    if normalized_local_path:
+        return normalized_local_path.replace("\\", "/").strip("/").lower()
+    normalized_storage_path = _normalize_token(storage_object_path)
+    return normalized_storage_path.replace("\\", "/").strip("/").lower() if normalized_storage_path else ""
+
+
+def _canonical_artifact_identity(
+    *,
+    user_id: str,
+    thread_id: str | None,
+    parent_thread_id: str | None,
+    local_path: str | None,
+    storage_object_path: str | None,
+    renderer_kind: str | None,
+    artifact_type: str | None,
+) -> tuple[str, str, str, str, str]:
+    return (
+        user_id,
+        _canonical_thread_identity(thread_id, parent_thread_id),
+        _canonical_path_identity(local_path, storage_object_path),
+        (renderer_kind or "").strip().lower(),
+        (artifact_type or "").strip().lower(),
+    )
+
+
+def _record_artifact_identity(record: Any) -> tuple[str, str, str, str, str]:
+    return _canonical_artifact_identity(
+        user_id=record.user_id,
+        thread_id=record.thread_id,
+        parent_thread_id=record.parent_thread_id,
+        local_path=record.local_path,
+        storage_object_path=record.storage_object_path,
+        renderer_kind=record.renderer_kind,
+        artifact_type=record.artifact_type,
+    )
+
+
 def _extra_token(request: ArtifactUpsertRequest, key: str) -> str | None:
     value = request.model_extra.get(key) if request.model_extra else None
     return _normalize_token(value)
@@ -383,6 +463,7 @@ class ArtifactRecord(BaseModel):
     is_library_visible: bool = True
     created_at: str
     updated_at: str
+    deleted_at: str | None = None
     last_opened_at: str | None = None
     opened_count: int = Field(default=0, ge=0)
     raw_content_excluded: bool = True
@@ -402,15 +483,9 @@ class ArtifactRecord(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_library_visibility(self) -> ArtifactRecord:
-        detected_role = _detect_artifact_role(
-            local_path=self.local_path,
-            filename=self.filename,
-            title=self.title,
-            artifact_type=self.artifact_type,
-            renderer_kind=self.renderer_kind,
-        )
+        detected_role = _effective_artifact_role(self)
         role = detected_role if detected_role != "primary" else self.artifact_role
-        visible = self.is_library_visible if role == "primary" else False
+        visible = self.is_library_visible if role == "primary" and self.deleted_at is None else False
         object.__setattr__(self, "artifact_role", role)
         object.__setattr__(self, "is_library_visible", bool(visible))
         return self
@@ -448,6 +523,7 @@ class ArtifactUpsertRequest(BaseModel):
     is_library_visible: bool | None = None
     created_at: str | None = None
     updated_at: str | None = None
+    deleted_at: str | None = None
     raw_content_excluded: bool = True
     signed_url_excluded: bool = True
 
@@ -473,7 +549,14 @@ class ArtifactUpsertRequest(BaseModel):
             raise ValueError("artifact registry rows must exclude raw content and signed URLs")
         return True
 
-    def to_record(self, *, user_id: str, existing: ArtifactRecord | None = None) -> ArtifactRecord:
+    def to_record(
+        self,
+        *,
+        user_id: str,
+        existing: ArtifactRecord | None = None,
+        preserve_existing_identity: bool = False,
+        preserve_existing_source: bool = False,
+    ) -> ArtifactRecord:
         now = _now_iso()
         local_path = normalize_artifact_registry_path(self.local_path)
         filename = _normalize_token(self.filename) or _filename_from_path(local_path)
@@ -481,17 +564,20 @@ class ArtifactUpsertRequest(BaseModel):
         artifact_type = _normalize_artifact_type(self.artifact_type, local_path, mime_type)
         renderer_kind = _normalize_renderer_kind(self.renderer_kind, artifact_type)
         logical_artifact_id = (
-            _normalize_token(self.logical_artifact_id)
+            (existing.logical_artifact_id if existing and preserve_existing_identity else None)
+            or _normalize_token(self.logical_artifact_id)
             or (existing.logical_artifact_id if existing else None)
             or _hash_id("logical", user_id, self.thread_id, local_path, renderer_kind)
         )
         version_id = (
-            _normalize_token(self.version_id)
+            (existing.version_id if existing and preserve_existing_identity else None)
+            or _normalize_token(self.version_id)
             or (existing.version_id if existing else None)
             or f"{logical_artifact_id}::v1"
         )
         artifact_id = (
-            _normalize_token(self.artifact_id)
+            (existing.artifact_id if existing and preserve_existing_identity else None)
+            or _normalize_token(self.artifact_id)
             or (existing.artifact_id if existing else None)
             or _hash_id("artifact", user_id, self.thread_id, local_path, renderer_kind, self.source, version_id)
         )
@@ -518,7 +604,8 @@ class ArtifactUpsertRequest(BaseModel):
             if self.is_library_visible is not None
             else (existing.is_library_visible if existing else True)
         )
-        is_library_visible = bool(requested_visibility and artifact_role == "primary")
+        deleted_at = _normalize_iso(self.deleted_at) or (existing.deleted_at if existing else None)
+        is_library_visible = bool(requested_visibility and artifact_role == "primary" and deleted_at is None)
         storage_object_path = _normalize_token(self.storage_object_path)
         if storage_object_path is None:
             relative = _relative_output_path(local_path)
@@ -547,7 +634,7 @@ class ArtifactUpsertRequest(BaseModel):
             renderer_kind=renderer_kind,
             mime_type=mime_type,
             safe_summary=_safe_summary(self.safe_summary) or (existing.safe_summary if existing else None),
-            source=self.source,
+            source=existing.source if existing and preserve_existing_source else self.source,
             local_path=local_path,
             storage_provider=storage_provider,
             storage_bucket=_normalize_token(self.storage_bucket) or (existing.storage_bucket if existing else None),
@@ -561,6 +648,7 @@ class ArtifactUpsertRequest(BaseModel):
             is_library_visible=is_library_visible,
             created_at=created_at,
             updated_at=updated_at,
+            deleted_at=deleted_at,
             last_opened_at=existing.last_opened_at if existing else None,
             opened_count=existing.opened_count if existing else 0,
             raw_content_excluded=True,
@@ -652,7 +740,18 @@ class LocalArtifactRegistry:
         records = self._read_records(user_id)
         existing_index = self._find_existing_index(records, request, user_id=user_id)
         existing = records[existing_index] if existing_index is not None else None
-        record = request.to_record(user_id=user_id, existing=existing)
+        preserve_existing_priority = (
+            existing is not None
+            and _source_priority(existing.source) <= _source_priority(request.source)
+        )
+        record = request.to_record(
+            user_id=user_id,
+            existing=existing,
+            preserve_existing_identity=preserve_existing_priority,
+            preserve_existing_source=preserve_existing_priority,
+        )
+        if request.source in _BACKFILL_SOURCES and existing is None and record.artifact_role != "primary":
+            return record
         if existing_index is None:
             records.append(record)
         else:
@@ -669,8 +768,10 @@ class LocalArtifactRegistry:
 
     def list(self, *, user_id: str, filters: ArtifactRegistryFilters | None = None) -> ArtifactListResponse:
         filters = filters if filters is not None else ArtifactRegistryFilters()
-        records = [record for record in self._read_records(user_id)]
+        records = [self._with_effective_visibility(record) for record in self._read_records(user_id)]
         records = self._apply_filters(records, filters)
+        if not filters.include_hidden:
+            records = self._dedupe_visible(records)
         records = self._sort(records, filters.sort)
         limited = records[: filters.limit]
         return ArtifactListResponse(artifacts=limited, total=len(records))
@@ -687,6 +788,26 @@ class LocalArtifactRegistry:
                     "last_opened_at": opened_at,
                     "opened_count": record.opened_count + 1,
                     "updated_at": opened_at,
+                }
+            )
+            records[index] = updated
+            break
+        if updated is not None:
+            self._write_records(user_id, records)
+        return updated
+
+    def mark_deleted(self, artifact_id: str, *, user_id: str) -> ArtifactRecord | None:
+        records = self._read_records(user_id)
+        deleted_at = _now_iso()
+        updated: ArtifactRecord | None = None
+        for index, record in enumerate(records):
+            if record.artifact_id != artifact_id:
+                continue
+            updated = record.model_copy(
+                update={
+                    "deleted_at": deleted_at,
+                    "is_library_visible": False,
+                    "updated_at": deleted_at,
                 }
             )
             records[index] = updated
@@ -715,6 +836,19 @@ class LocalArtifactRegistry:
             renderer_kind,
         )
         version_id = _normalize_token(request.version_id) or f"{logical_artifact_id}::v1"
+        storage_object_path = _normalize_token(request.storage_object_path)
+        if storage_object_path is None:
+            relative = _relative_output_path(local_path)
+            storage_object_path = f"{request.thread_id}/{relative}" if relative else None
+        request_identity = _canonical_artifact_identity(
+            user_id=user_id,
+            thread_id=request.thread_id,
+            parent_thread_id=request.parent_thread_id,
+            local_path=local_path,
+            storage_object_path=storage_object_path,
+            renderer_kind=renderer_kind,
+            artifact_type=artifact_type,
+        )
 
         for index, record in enumerate(records):
             if request.artifact_id and record.artifact_id == request.artifact_id:
@@ -728,6 +862,8 @@ class LocalArtifactRegistry:
                 and record.version_id == version_id
             ):
                 return index
+            if _record_artifact_identity(record) == request_identity:
+                return index
         return None
 
     def _apply_filters(
@@ -737,7 +873,7 @@ class LocalArtifactRegistry:
     ) -> list[ArtifactRecord]:
         result = records
         if not filters.include_hidden:
-            result = [record for record in result if record.is_library_visible]
+            result = [record for record in result if _is_effectively_visible(record)]
         if filters.artifact_type:
             artifact_type = filters.artifact_type.strip().lower()
             result = [record for record in result if record.artifact_type == artifact_type]
@@ -766,6 +902,54 @@ class LocalArtifactRegistry:
             lower = _parse_timestamp(filters.recent_after)
             result = [record for record in result if _parse_timestamp(record.last_opened_at) >= lower]
         return result
+
+    @staticmethod
+    def _with_effective_visibility(record: ArtifactRecord) -> ArtifactRecord:
+        role = _effective_artifact_role(record)
+        visible = bool(record.is_library_visible and role == "primary" and record.deleted_at is None)
+        if role == record.artifact_role and visible == record.is_library_visible:
+            return record
+        return record.model_copy(update={"artifact_role": role, "is_library_visible": visible})
+
+    @staticmethod
+    def _dedupe_visible(records: list[ArtifactRecord]) -> list[ArtifactRecord]:
+        by_identity: dict[tuple[str, str, str, str, str], ArtifactRecord] = {}
+        for record in records:
+            identity = _record_artifact_identity(record)
+            current = by_identity.get(identity)
+            if current is None:
+                by_identity[identity] = record
+                continue
+            by_identity[identity] = LocalArtifactRegistry._choose_dedupe_record(current, record)
+        return list(by_identity.values())
+
+    @staticmethod
+    def _choose_dedupe_record(left: ArtifactRecord, right: ArtifactRecord) -> ArtifactRecord:
+        left_key = (
+            _source_priority(left.source),
+            -_parse_timestamp(left.last_opened_at),
+            -_parse_timestamp(left.updated_at),
+            left.title.lower(),
+        )
+        right_key = (
+            _source_priority(right.source),
+            -_parse_timestamp(right.last_opened_at),
+            -_parse_timestamp(right.updated_at),
+            right.title.lower(),
+        )
+        selected, fallback = (left, right) if left_key <= right_key else (right, left)
+        return selected.model_copy(
+            update={
+                "safe_summary": selected.safe_summary or fallback.safe_summary,
+                "mime_type": selected.mime_type or fallback.mime_type,
+                "size_bytes": selected.size_bytes if selected.size_bytes is not None else fallback.size_bytes,
+                "content_hash": selected.content_hash or fallback.content_hash,
+                "storage_bucket": selected.storage_bucket or fallback.storage_bucket,
+                "storage_object_path": selected.storage_object_path or fallback.storage_object_path,
+                "last_opened_at": selected.last_opened_at or fallback.last_opened_at,
+                "opened_count": max(selected.opened_count, fallback.opened_count),
+            }
+        )
 
     @staticmethod
     def _sort(records: list[ArtifactRecord], sort: str) -> list[ArtifactRecord]:

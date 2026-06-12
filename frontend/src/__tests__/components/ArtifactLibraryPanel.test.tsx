@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ArtifactLibraryPanel } from '../../app/components/dashboard/ArtifactLibraryPanel';
 import type { ArtifactRegistryRecord } from '../../app/lib/artifact-registry';
+import { useSessionStore } from '../../app/stores/session-store';
 
 const baseArtifact: ArtifactRegistryRecord = {
   artifact_id: 'artifact-1',
@@ -39,6 +40,7 @@ const baseArtifact: ArtifactRegistryRecord = {
   opened_count: 0,
   raw_content_excluded: true,
   signed_url_excluded: true,
+  deleted_at: null,
 };
 
 function jsonResponse(body: unknown, status = 200) {
@@ -55,6 +57,8 @@ function fetchMock() {
 describe('ArtifactLibraryPanel', () => {
   beforeEach(() => {
     window.sessionStorage.clear();
+    window.localStorage.clear();
+    useSessionStore.setState({ session: null });
     fetchMock().mockReset();
   });
 
@@ -69,6 +73,55 @@ describe('ArtifactLibraryPanel', () => {
     expect(within(row).getByText('launch.html')).toBeInTheDocument();
     expect(within(row).getByText('HTML')).toBeInTheDocument();
     expect(within(row).getByText('Builder')).toBeInTheDocument();
+  });
+
+  it('renders one dashboard row for duplicate builder and backfill records', async () => {
+    const backfillArtifact: ArtifactRegistryRecord = {
+      ...baseArtifact,
+      artifact_id: 'artifact-backfill',
+      logical_artifact_id: 'logical-backfill',
+      version_id: 'logical-backfill::v1',
+      source: 'file_library_backfill',
+      updated_at: '2026-06-03T10:00:00+00:00',
+    };
+    fetchMock().mockResolvedValueOnce(jsonResponse({
+      artifacts: [backfillArtifact, baseArtifact],
+      total: 2,
+    }));
+
+    render(<ArtifactLibraryPanel />);
+
+    expect(await screen.findByText('Launch Page')).toBeInTheDocument();
+    const row = screen.getByTestId('artifact-library-row');
+    expect(screen.getAllByTestId('artifact-library-row')).toHaveLength(1);
+    expect(screen.getByTestId('artifact-library-count')).toHaveTextContent('1 total');
+    expect(within(row).getByText('Builder')).toBeInTheDocument();
+    expect(within(row).queryByText('Backfill')).not.toBeInTheDocument();
+  });
+
+  it('does not render wrapper records leaked by an old registry response', async () => {
+    fetchMock().mockResolvedValueOnce(jsonResponse({
+      artifacts: [
+        {
+          ...baseArtifact,
+          artifact_id: 'artifact-wrapper',
+          title: 'Durable Artifact Registry Smoke Test - Handoff Wrapper',
+          filename: 'create-a-real-markdown-artifact-file-nam.html',
+          local_path: 'mnt/user-data/outputs/create-a-real-markdown-artifact-file-nam.html',
+          source: 'backfill',
+          artifact_role: 'primary',
+          is_library_visible: true,
+        },
+        baseArtifact,
+      ],
+      total: 2,
+    }));
+
+    render(<ArtifactLibraryPanel />);
+
+    expect(await screen.findByText('Launch Page')).toBeInTheDocument();
+    expect(screen.queryByText('Durable Artifact Registry Smoke Test - Handoff Wrapper')).not.toBeInTheDocument();
+    expect(screen.getAllByTestId('artifact-library-row')).toHaveLength(1);
   });
 
   it('updates query filters and search', async () => {
@@ -123,6 +176,61 @@ describe('ArtifactLibraryPanel', () => {
       }));
     });
     expect(window.sessionStorage.getItem('sophia:artifact-library-open:v1')).toContain('artifact-1');
+    expect(useSessionStore.getState().session).toMatchObject({
+      sessionId: 'session-1',
+      threadId: 'thread-1',
+    });
+  });
+
+  it('uses the artifact id endpoint for downloads', async () => {
+    fetchMock().mockResolvedValueOnce(jsonResponse({ artifacts: [baseArtifact], total: 1 }));
+
+    render(<ArtifactLibraryPanel />);
+
+    await screen.findByText('Launch Page');
+    expect(screen.getByRole('link', { name: /download launch page/i })).toHaveAttribute(
+      'href',
+      '/api/artifacts/artifact-1/download',
+    );
+  });
+
+  it('deletes an artifact after confirmation and removes the row', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    fetchMock()
+      .mockResolvedValueOnce(jsonResponse({ artifacts: [baseArtifact], total: 1 }))
+      .mockResolvedValueOnce(jsonResponse({
+        artifact: {
+          ...baseArtifact,
+          is_library_visible: false,
+          deleted_at: '2026-06-04T10:00:00+00:00',
+        },
+        canvas_target: {
+          artifact_id: baseArtifact.artifact_id,
+          thread_id: baseArtifact.thread_id,
+          session_id: baseArtifact.session_id,
+          artifact_path: baseArtifact.local_path,
+          renderer_kind: baseArtifact.renderer_kind,
+          mime_type: baseArtifact.mime_type,
+          title: baseArtifact.title,
+          review_room_supported: true,
+        },
+      }));
+
+    render(<ArtifactLibraryPanel />);
+
+    await screen.findByText('Launch Page');
+    await userEvent.click(screen.getByRole('button', { name: /delete launch page/i }));
+
+    await waitFor(() => {
+      expect(fetchMock()).toHaveBeenCalledWith('/api/artifacts/artifact-1', expect.objectContaining({
+        method: 'DELETE',
+      }));
+    });
+    expect(confirmSpy).toHaveBeenCalledWith('Hide "Launch Page" from the artifact dashboard?');
+    await waitFor(() => {
+      expect(screen.queryByText('Launch Page')).not.toBeInTheDocument();
+    });
+    expect(screen.getByTestId('artifact-library-empty')).toHaveTextContent('No artifacts yet');
   });
 
   it('renders a polished empty state', async () => {

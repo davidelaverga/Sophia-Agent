@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
@@ -182,7 +184,7 @@ def test_registry_hides_builder_handoff_wrappers_by_default(tmp_path) -> None:
 
 def test_registry_hides_backfilled_support_and_wrapper_artifacts(tmp_path) -> None:
     registry = LocalArtifactRegistry(tmp_path)
-    registry.upsert(
+    wrapper = registry.upsert(
         _request(
             source="file_library_backfill",
             artifact_type="html",
@@ -192,7 +194,7 @@ def test_registry_hides_backfilled_support_and_wrapper_artifacts(tmp_path) -> No
         ),
         user_id="user-1",
     )
-    registry.upsert(
+    support = registry.upsert(
         _request(
             source="file_library_backfill",
             artifact_type="image",
@@ -218,9 +220,124 @@ def test_registry_hides_backfilled_support_and_wrapper_artifacts(tmp_path) -> No
 
     all_records = registry.list(user_id="user-1", filters=ArtifactRegistryFilters(include_hidden=True))
     by_name = {artifact.filename: artifact for artifact in all_records.artifacts}
-    assert by_name["create-a-real-markdown-artifact-file-nam.html"].artifact_role == "wrapper"
-    assert by_name["chart.png"].artifact_role == "support"
+    assert wrapper.artifact_role == "wrapper"
+    assert support.artifact_role == "support"
+    assert "create-a-real-markdown-artifact-file-nam.html" not in by_name
+    assert "chart.png" not in by_name
     assert by_name["readable-notes.md"].artifact_role == "primary"
+
+
+def test_registry_filters_old_visible_wrapper_records_at_read_time(tmp_path) -> None:
+    registry = LocalArtifactRegistry(tmp_path)
+    visible = registry.upsert(
+        _request(
+            title="Durable Registry Smoke Markdown",
+            artifact_type="markdown",
+            renderer_kind="markdown",
+            mime_type="text/markdown",
+            local_path="outputs/durable-registry-smoke-markdown.md",
+        ),
+        user_id="user-1",
+    )
+    wrapper_payload = visible.model_dump(mode="json")
+    wrapper_payload.update({
+        "artifact_id": "artifact_legacy_wrapper",
+        "logical_artifact_id": "logical_legacy_wrapper",
+        "version_id": "logical_legacy_wrapper::v1",
+        "title": "Durable Artifact Registry Smoke Test - Handoff Wrapper",
+        "filename": "create-a-real-markdown-artifact-file-nam.html",
+        "artifact_type": "html",
+        "renderer_kind": "html",
+        "mime_type": "text/html",
+        "source": "builder",
+        "local_path": "mnt/user-data/outputs/create-a-real-markdown-artifact-file-nam.html",
+        "artifact_role": "primary",
+        "is_library_visible": True,
+    })
+    registry_path = registry._registry_path("user-1")
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps({"version": 1, "artifacts": [visible.model_dump(mode="json"), wrapper_payload]}),
+        encoding="utf-8",
+    )
+
+    listed = registry.list(user_id="user-1")
+    assert [artifact.filename for artifact in listed.artifacts] == ["durable-registry-smoke-markdown.md"]
+
+    hidden = registry.list(user_id="user-1", filters=ArtifactRegistryFilters(include_hidden=True))
+    hidden_by_name = {artifact.filename: artifact for artifact in hidden.artifacts}
+    assert hidden_by_name["create-a-real-markdown-artifact-file-nam.html"].artifact_role == "wrapper"
+    assert hidden_by_name["create-a-real-markdown-artifact-file-nam.html"].is_library_visible is False
+
+
+def test_registry_dedupes_builder_and_backfill_records_by_visible_identity(tmp_path) -> None:
+    registry = LocalArtifactRegistry(tmp_path)
+    builder = registry.upsert(
+        _request(
+            source="builder",
+            title="Explicit HTML Library Test",
+            local_path="outputs/explicit-html-library-test.html",
+            artifact_type="webpage",
+            renderer_kind="html",
+            created_at="2026-06-01T10:00:00+00:00",
+            updated_at="2026-06-01T10:00:00+00:00",
+        ),
+        user_id="user-1",
+    )
+    backfill_payload = builder.model_copy(
+        update={
+            "artifact_id": "artifact_backfill_duplicate",
+            "logical_artifact_id": "logical_backfill_duplicate",
+            "version_id": "logical_backfill_duplicate::v1",
+            "source": "file_library_backfill",
+            "title": "Explicit HTML Library Test",
+            "updated_at": "2026-06-02T10:00:00+00:00",
+        }
+    )
+    registry._write_records("user-1", [backfill_payload, builder])
+
+    listed = registry.list(user_id="user-1")
+
+    assert listed.total == 1
+    assert listed.artifacts[0].artifact_id == builder.artifact_id
+    assert listed.artifacts[0].source == "builder"
+
+
+def test_registry_backfill_upsert_merges_into_existing_builder_record(tmp_path) -> None:
+    registry = LocalArtifactRegistry(tmp_path)
+    builder = registry.upsert(
+        _request(
+            source="builder",
+            title="Explicit HTML Library Test",
+            local_path="outputs/explicit-html-library-test.html",
+            artifact_type="webpage",
+            renderer_kind="html",
+        ),
+        user_id="user-1",
+    )
+
+    backfill = registry.upsert(
+        _request(
+            artifact_id="artifact_backfill_duplicate",
+            logical_artifact_id="logical_backfill_duplicate",
+            version_id="logical_backfill_duplicate::v1",
+            source="file_library_backfill",
+            title="Explicit HTML Library Test from Backfill",
+            local_path="outputs/explicit-html-library-test.html",
+            artifact_type="webpage",
+            renderer_kind="html",
+            safe_summary="Backfill had a safe summary.",
+        ),
+        user_id="user-1",
+    )
+
+    listed = registry.list(user_id="user-1")
+
+    assert backfill.artifact_id == builder.artifact_id
+    assert backfill.source == "builder"
+    assert backfill.safe_summary == "Backfill had a safe summary."
+    assert listed.total == 1
+    assert listed.artifacts[0].source == "builder"
 
 
 def test_registry_keeps_explicit_html_artifacts_library_visible(tmp_path) -> None:
@@ -354,6 +471,32 @@ def test_download_endpoint_redirects_to_existing_thread_artifact_route(tmp_path,
     assert response.headers["location"] == (
         "/api/threads/thread-1/artifacts/mnt/user-data/outputs/Quarterly%20Report.pdf?download=true"
     )
+
+
+def test_delete_endpoint_hides_artifact_without_deleting_bytes(tmp_path, monkeypatch) -> None:
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    output_file = tmp_path / "outputs" / "launch.html"
+    output_file.parent.mkdir(parents=True)
+    output_file.write_text("<html>launch</html>", encoding="utf-8")
+    artifact = registry.upsert(_request(), user_id="user-1")
+
+    response = client.delete(f"/api/artifacts/{artifact.artifact_id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["artifact"]["deleted_at"] is not None
+    assert body["artifact"]["is_library_visible"] is False
+    assert output_file.read_text(encoding="utf-8") == "<html>launch</html>"
+
+    listed = client.get("/api/artifacts")
+    assert listed.status_code == 200
+    assert listed.json()["artifacts"] == []
+    assert listed.json()["total"] == 0
+
+    hidden = client.get("/api/artifacts?include_hidden=true")
+    assert hidden.status_code == 200
+    assert hidden.json()["total"] == 1
+    assert hidden.json()["artifacts"][0]["artifact_id"] == artifact.artifact_id
 
 
 def test_builder_terminal_event_upserts_registry_metadata(tmp_path, monkeypatch) -> None:

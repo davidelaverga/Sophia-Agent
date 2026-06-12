@@ -7,7 +7,8 @@ export type ArtifactRegistrySource =
   | 'upload'
   | 'quick_edit'
   | 'coreview_version'
-  | 'file_library_backfill';
+  | 'file_library_backfill'
+  | 'backfill';
 
 export type ArtifactRegistryRole = 'primary' | 'wrapper' | 'support' | 'internal';
 
@@ -41,6 +42,7 @@ export type ArtifactRegistryRecord = {
   is_library_visible: boolean;
   created_at: string;
   updated_at: string;
+  deleted_at?: string | null;
   last_opened_at?: string | null;
   opened_count: number;
   raw_content_excluded: true;
@@ -75,6 +77,16 @@ export type ArtifactRegistryListFilters = {
   sessionId?: string;
   search?: string;
   sort?: 'updated' | 'created' | 'recent' | 'title';
+  includeHidden?: boolean;
+};
+
+const SOURCE_PRIORITY: Record<ArtifactRegistrySource, number> = {
+  builder: 10,
+  quick_edit: 20,
+  coreview_version: 30,
+  upload: 40,
+  file_library_backfill: 50,
+  backfill: 50,
 };
 
 export function buildArtifactRegistryQuery(filters: ArtifactRegistryListFilters): string {
@@ -96,6 +108,9 @@ export function buildArtifactRegistryQuery(filters: ArtifactRegistryListFilters)
   }
   if (filters.sort) {
     params.set('sort', filters.sort);
+  }
+  if (filters.includeHidden) {
+    params.set('include_hidden', 'true');
   }
   const query = params.toString();
   return query ? `?${query}` : '';
@@ -123,10 +138,20 @@ export async function openArtifactRegistryRecord(artifactId: string): Promise<Ar
   return response.json() as Promise<ArtifactOpenResponse>;
 }
 
+export async function deleteArtifactRegistryRecord(artifactId: string): Promise<ArtifactOpenResponse> {
+  const response = await fetch(`/api/artifacts/${encodeURIComponent(artifactId)}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    throw new Error(`artifact_registry_delete_failed:${response.status}`);
+  }
+  return response.json() as Promise<ArtifactOpenResponse>;
+}
+
 export function registrySourceToSessionSource(source: ArtifactRegistrySource): ArtifactRegisterSource {
   if (source === 'quick_edit') return 'quick_patch';
   if (source === 'coreview_version') return 'coreview_version';
-  if (source === 'file_library_backfill') return 'file_library';
+  if (source === 'file_library_backfill' || source === 'backfill') return 'file_library';
   if (source === 'builder') return 'builder_completion';
   return 'manual';
 }
@@ -155,7 +180,21 @@ export function artifactRegistryRecordToSessionMetadata(
 }
 
 export function normalizeRegistryArtifactPath(value: string | null | undefined): string | null {
-  return normalizeBuilderArtifactPath(value);
+  const normalized = normalizeBuilderArtifactPath(value);
+  if (!normalized || /^[a-zA-Z]:\//u.test(normalized) || normalized.startsWith('//')) {
+    return null;
+  }
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.includes('..')) {
+    return null;
+  }
+  if (
+    normalized.startsWith('mnt/user-data/outputs/')
+    || normalized.startsWith('mnt/user-data/workspace/outputs/')
+  ) {
+    return normalized;
+  }
+  return null;
 }
 
 export function isArtifactRegistryLibraryVisibleCandidate(input: {
@@ -164,7 +203,7 @@ export function isArtifactRegistryLibraryVisibleCandidate(input: {
   artifactType?: string | null;
   rendererKind?: string | null;
 }): boolean {
-  const localPath = normalizeBuilderArtifactPath(input.localPath);
+  const localPath = normalizeRegistryArtifactPath(input.localPath);
   if (!localPath) {
     return false;
   }
@@ -202,6 +241,25 @@ export function isArtifactRegistryLibraryVisibleCandidate(input: {
   return true;
 }
 
+export function dedupeVisibleArtifactRegistryRecords(
+  records: ArtifactRegistryRecord[],
+): ArtifactRegistryRecord[] {
+  const byIdentity = new Map<string, ArtifactRegistryRecord>();
+  for (const record of records) {
+    if (!isVisibleRegistryRecord(record)) {
+      continue;
+    }
+    const identity = registryRecordIdentity(record);
+    const current = byIdentity.get(identity);
+    if (!current) {
+      byIdentity.set(identity, record);
+      continue;
+    }
+    byIdentity.set(identity, chooseRegistryRecord(current, record));
+  }
+  return Array.from(byIdentity.values());
+}
+
 export function normalizeRendererKind(value: string | null | undefined): ArtifactRendererKind {
   const normalized = value?.trim() as ArtifactRendererKind | undefined;
   if (
@@ -233,6 +291,63 @@ function relativeOutputPath(path: string): string | null {
     return path.slice('mnt/user-data/workspace/outputs/'.length);
   }
   return null;
+}
+
+function isVisibleRegistryRecord(record: ArtifactRegistryRecord): boolean {
+  if (
+    !record.is_library_visible
+    || record.deleted_at
+    || record.artifact_role !== 'primary'
+  ) {
+    return false;
+  }
+  return isArtifactRegistryLibraryVisibleCandidate({
+    localPath: record.local_path,
+    title: record.title,
+    artifactType: record.artifact_type,
+    rendererKind: record.renderer_kind,
+  });
+}
+
+function registryRecordIdentity(record: ArtifactRegistryRecord): string {
+  return [
+    record.user_id,
+    (record.parent_thread_id || record.thread_id || '').trim().toLowerCase(),
+    normalizeRegistryArtifactPath(record.local_path) ?? (record.storage_object_path ?? '').trim().toLowerCase(),
+    String(record.renderer_kind || '').trim().toLowerCase(),
+    String(record.artifact_type || '').trim().toLowerCase(),
+  ].join('|');
+}
+
+function chooseRegistryRecord(
+  left: ArtifactRegistryRecord,
+  right: ArtifactRegistryRecord,
+): ArtifactRegistryRecord {
+  const leftPriority = SOURCE_PRIORITY[left.source] ?? 100;
+  const rightPriority = SOURCE_PRIORITY[right.source] ?? 100;
+  if (leftPriority !== rightPriority) {
+    return mergeRegistryMetadata(leftPriority < rightPriority ? left : right, leftPriority < rightPriority ? right : left);
+  }
+  const leftUpdatedAt = Date.parse(left.updated_at || '') || 0;
+  const rightUpdatedAt = Date.parse(right.updated_at || '') || 0;
+  return mergeRegistryMetadata(leftUpdatedAt >= rightUpdatedAt ? left : right, leftUpdatedAt >= rightUpdatedAt ? right : left);
+}
+
+function mergeRegistryMetadata(
+  selected: ArtifactRegistryRecord,
+  fallback: ArtifactRegistryRecord,
+): ArtifactRegistryRecord {
+  return {
+    ...selected,
+    safe_summary: selected.safe_summary ?? fallback.safe_summary ?? null,
+    mime_type: selected.mime_type ?? fallback.mime_type ?? null,
+    size_bytes: selected.size_bytes ?? fallback.size_bytes ?? null,
+    content_hash: selected.content_hash ?? fallback.content_hash ?? null,
+    storage_bucket: selected.storage_bucket ?? fallback.storage_bucket ?? null,
+    storage_object_path: selected.storage_object_path ?? fallback.storage_object_path ?? null,
+    last_opened_at: selected.last_opened_at ?? fallback.last_opened_at ?? null,
+    opened_count: Math.max(selected.opened_count, fallback.opened_count),
+  };
 }
 
 function isSupportArtifactPath(path: string): boolean {

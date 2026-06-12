@@ -8,6 +8,7 @@ import {
   PanelRightOpen,
   RefreshCw,
   Search,
+  Trash2,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -15,6 +16,8 @@ import type { ReactNode } from 'react';
 
 import { saveArtifactLibraryOpenHandoff } from '../../lib/artifact-library-open-handoff';
 import {
+  dedupeVisibleArtifactRegistryRecords,
+  deleteArtifactRegistryRecord,
   fetchArtifactRegistryList,
   openArtifactRegistryRecord,
   type ArtifactRegistryListFilters,
@@ -54,6 +57,8 @@ const DATE_OPTIONS: Array<{ value: ArtifactDateFilter; label: string }> = [
 
 export function ArtifactLibraryPanel() {
   const router = useRouter();
+  const currentSession = useSessionStore((state) => state.session);
+  const createSession = useSessionStore((state) => state.createSession);
   const updateFromBackend = useSessionStore((state) => state.updateFromBackend);
   const [artifacts, setArtifacts] = useState<ArtifactRegistryRecord[]>([]);
   const [total, setTotal] = useState(0);
@@ -66,6 +71,7 @@ export function ArtifactLibraryPanel() {
   const [error, setError] = useState<string | null>(null);
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [openingArtifactId, setOpeningArtifactId] = useState<string | null>(null);
+  const [deletingArtifactId, setDeletingArtifactId] = useState<string | null>(null);
 
   const filters = useMemo<ArtifactRegistryListFilters>(() => ({
     artifactType: typeFilter,
@@ -82,8 +88,9 @@ export function ArtifactLibraryPanel() {
     fetchArtifactRegistryList(filters)
       .then((response) => {
         if (cancelled) return;
-        setArtifacts(response.artifacts);
-        setTotal(response.total);
+        const visibleArtifacts = dedupeVisibleArtifactRegistryRecords(response.artifacts);
+        setArtifacts(visibleArtifacts);
+        setTotal(visibleArtifacts.length);
       })
       .catch(() => {
         if (cancelled) return;
@@ -108,8 +115,12 @@ export function ArtifactLibraryPanel() {
       const response = await openArtifactRegistryRecord(artifact.artifact_id);
       saveArtifactLibraryOpenHandoff(response);
       const target = response.canvas_target;
-      if (target.session_id) {
-        updateFromBackend(target.session_id, target.thread_id);
+      const targetSessionId = target.session_id ?? response.artifact.session_id ?? target.thread_id;
+      if (target.thread_id && targetSessionId) {
+        if (!currentSession) {
+          createSession(response.artifact.user_id || 'anonymous', 'open', 'life');
+        }
+        updateFromBackend(targetSessionId, target.thread_id);
       }
       router.push('/session');
     } catch {
@@ -117,7 +128,25 @@ export function ArtifactLibraryPanel() {
     } finally {
       setOpeningArtifactId(null);
     }
-  }, [router, updateFromBackend]);
+  }, [createSession, currentSession, router, updateFromBackend]);
+
+  const handleDeleteArtifact = useCallback(async (artifact: ArtifactRegistryRecord) => {
+    const label = artifact.title || artifact.filename;
+    if (!window.confirm(`Hide "${label}" from the artifact dashboard?`)) {
+      return;
+    }
+    setDeletingArtifactId(artifact.artifact_id);
+    setError(null);
+    try {
+      await deleteArtifactRegistryRecord(artifact.artifact_id);
+      setArtifacts((current) => current.filter((item) => item.artifact_id !== artifact.artifact_id));
+      setTotal((current) => Math.max(0, current - 1));
+    } catch {
+      setError('Unable to delete artifact');
+    } finally {
+      setDeletingArtifactId(null);
+    }
+  }, []);
 
   return (
     <section
@@ -228,7 +257,9 @@ export function ArtifactLibraryPanel() {
                   key={artifact.artifact_id}
                   artifact={artifact}
                   opening={openingArtifactId === artifact.artifact_id}
+                  deleting={deletingArtifactId === artifact.artifact_id}
                   onOpenInCanvas={() => handleOpenInCanvas(artifact)}
+                  onDelete={() => handleDeleteArtifact(artifact)}
                 />
               ))}
             </div>
@@ -276,11 +307,15 @@ function FilterSelect({
 function ArtifactLibraryRow({
   artifact,
   opening,
+  deleting,
   onOpenInCanvas,
+  onDelete,
 }: {
   artifact: ArtifactRegistryRecord;
   opening: boolean;
+  deleting: boolean;
   onOpenInCanvas: () => void;
+  onDelete: () => void;
 }) {
   const openHref = buildThreadArtifactHref(artifact.thread_id, artifact.local_path);
   const downloadHref = `/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/download`;
@@ -318,7 +353,7 @@ function ArtifactLibraryRow({
         <button
           type="button"
           onClick={onOpenInCanvas}
-          disabled={opening}
+          disabled={opening || deleting}
           className="cosmic-focus-ring inline-flex h-9 items-center gap-2 rounded-full px-3 text-[12px] font-medium transition-all hover:bg-white/[0.06] disabled:cursor-wait disabled:opacity-60"
           style={{ color: 'var(--cosmic-text)' }}
         >
@@ -345,6 +380,16 @@ function ArtifactLibraryRow({
         >
           <Download className="h-4 w-4" />
         </a>
+        <button
+          type="button"
+          onClick={onDelete}
+          disabled={deleting || opening}
+          className="cosmic-focus-ring inline-flex h-9 w-9 items-center justify-center rounded-full transition-all hover:bg-white/[0.06] disabled:cursor-wait disabled:opacity-60"
+          aria-label={`Delete ${artifact.title || artifact.filename}`}
+          style={{ color: 'var(--cosmic-text-muted)' }}
+        >
+          {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+        </button>
       </div>
     </article>
   );
@@ -402,7 +447,7 @@ function formatArtifactType(value: string): string {
 function formatSource(value: ArtifactRegistryRecord['source']): string {
   if (value === 'quick_edit') return 'Quick edit';
   if (value === 'coreview_version') return 'Coreview';
-  if (value === 'file_library_backfill') return 'Backfill';
+  if (value === 'file_library_backfill' || value === 'backfill') return 'Backfill';
   if (value === 'builder') return 'Builder';
   return 'Upload';
 }
