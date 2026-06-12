@@ -134,6 +134,13 @@ _HTML_OUTPUT_RE = re.compile(
     r"\b(?:html\s+(?:artifact|document|file|report|summary|brief|article|explainer|page|site|website)"
     r"|(?:artifact|document|file|report|summary|brief|article|explainer|page|site|website)\s+(?:as|in)\s+html"
     r"|(?:build|create|make|generate|produce|write)\s+(?:an?\s+)?html\b"
+    # Prod 2026-06-12 (evening window): the user asked for a web deliverable
+    # without the literal word "html" — the current turn then matched
+    # nothing and the deck-contaminated description tier won
+    # (task_type=frontend dispatched with target_ext=pptx). Bare
+    # web-deliverable nouns unambiguously mean an html target.
+    r"|web\s*page|website|web\s+site|landing\s+page|web\s+app(?:lication)?"
+    r"|single[- ]page\s+(?:app|site)"
     r"|\.html\b)",
     re.IGNORECASE,
 )

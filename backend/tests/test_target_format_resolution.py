@@ -263,3 +263,37 @@ def test_source_veto_does_not_break_plain_deck_requests():
         )[0]
         == "pptx"
     )
+
+
+# ---- bare web-deliverable nouns (prod 2026-06-12, evening window) -----------------
+
+
+def test_webpage_without_the_word_html_resolves_to_html():
+    """Prod gap: 'convert the architecture summary into a web page' carried
+    no literal 'html' — the current turn matched nothing and the
+    deck-contaminated description tier won (task_type=frontend dispatched
+    with target_ext=pptx, delivered convert-the-...-summary.pptx)."""
+    resolution = _resolve_target_format(
+        current_user_text="convert the sophia architecture summary into a web page",
+        description=(
+            "[frontend] Convert the Sophia architecture summary into an "
+            "interactive page, drawing on the slide deck we made (deck.pptx)."
+        ),
+        task_type="frontend",
+    )
+    assert resolution.final_ext == "html"
+    assert resolution.source == "current_user_turn"
+    assert resolution.user_requested_ext == "html"
+
+
+def test_website_and_landing_page_nouns_resolve_to_html():
+    assert _requested_output_extension_match("build me a website about the launch")[0] == "html"
+    assert _requested_output_extension_match("a landing page for the product")[0] == "html"
+    assert _requested_output_extension_match("make a web app that shows the data")[0] == "html"
+
+
+def test_web_nouns_do_not_hijack_deck_requests():
+    ext, _reason = _requested_output_extension_match(
+        "make a slide deck about our website redesign"
+    )
+    assert ext == "pptx"  # pptx is matched first; website mention is incidental
