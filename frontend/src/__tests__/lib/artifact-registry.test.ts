@@ -6,6 +6,8 @@ import {
   saveArtifactLibraryOpenHandoff,
 } from '../../app/lib/artifact-library-open-handoff';
 import {
+  buildArtifactRegistryContentHref,
+  buildArtifactRegistryDownloadHref,
   dedupeVisibleArtifactRegistryRecords,
   isArtifactRegistryLibraryVisibleCandidate,
   normalizeRegistryArtifactPath,
@@ -129,6 +131,11 @@ describe('artifact registry library visibility candidates', () => {
     expect(dedupeVisibleArtifactRegistryRecords([wrapperRecord, unsafeRecord, baseRecord])).toEqual([baseRecord]);
     expect(normalizeRegistryArtifactPath('C:/Users/alice/secret.html')).toBeNull();
     expect(normalizeRegistryArtifactPath('outputs/../secret.html')).toBeNull();
+  });
+
+  it('builds artifact id endpoints for preview and download actions', () => {
+    expect(buildArtifactRegistryContentHref('artifact 1')).toBe('/api/artifacts/artifact%201/content');
+    expect(buildArtifactRegistryDownloadHref('artifact 1')).toBe('/api/artifacts/artifact%201/download');
   });
 
   it('keeps dashboard handoff until the session route opens the artifact', () => {

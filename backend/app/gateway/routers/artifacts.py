@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from app.gateway.artifact_registry import (
     ArtifactListResponse,
     ArtifactOpenResponse,
+    ArtifactRecord,
     ArtifactRegistryFilters,
     ArtifactSource,
     ArtifactUpsertRequest,
@@ -162,12 +163,7 @@ async def get_user_artifact(
     artifact_id: str,
     authenticated_user_id: str = Depends(require_authenticated_user),
 ) -> ArtifactOpenResponse:
-    record = _artifact_registry.get(artifact_id, user_id=authenticated_user_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="Artifact not found")
-    if record.deleted_at is not None:
-        raise HTTPException(status_code=404, detail="Artifact not found")
-    _require_thread_owner(authenticated_user_id, record.thread_id)
+    record = _get_visible_user_artifact(artifact_id, authenticated_user_id)
     return open_response_for_record(record)
 
 
@@ -180,12 +176,7 @@ async def open_user_artifact(
     artifact_id: str,
     authenticated_user_id: str = Depends(require_authenticated_user),
 ) -> ArtifactOpenResponse:
-    existing = _artifact_registry.get(artifact_id, user_id=authenticated_user_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Artifact not found")
-    if existing.deleted_at is not None:
-        raise HTTPException(status_code=404, detail="Artifact not found")
-    _require_thread_owner(authenticated_user_id, existing.thread_id)
+    existing = _get_visible_user_artifact(artifact_id, authenticated_user_id)
     opened = _artifact_registry.mark_opened(artifact_id, user_id=authenticated_user_id) or existing
     return open_response_for_record(opened)
 
@@ -208,6 +199,23 @@ async def delete_user_artifact(
 
 
 @router.get(
+    "/artifacts/{artifact_id}/content",
+    summary="Preview Artifact Content",
+)
+async def preview_user_artifact(
+    artifact_id: str,
+    authenticated_user_id: str = Depends(require_authenticated_user),
+) -> RedirectResponse:
+    record = _get_visible_user_artifact(artifact_id, authenticated_user_id)
+    _enforce_artifact_owner(authenticated_user_id, record.thread_id, record.local_path)
+    encoded_path = quote(record.local_path, safe="/")
+    return RedirectResponse(
+        url=f"/api/threads/{quote(record.thread_id, safe='')}/artifacts/{encoded_path}",
+        status_code=307,
+    )
+
+
+@router.get(
     "/artifacts/{artifact_id}/download",
     summary="Download Artifact",
 )
@@ -215,16 +223,28 @@ async def download_user_artifact(
     artifact_id: str,
     authenticated_user_id: str = Depends(require_authenticated_user),
 ) -> RedirectResponse:
-    record = _artifact_registry.get(artifact_id, user_id=authenticated_user_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="Artifact not found")
-    if record.deleted_at is not None:
-        raise HTTPException(status_code=404, detail="Artifact not found")
+    record = _get_visible_user_artifact(artifact_id, authenticated_user_id)
     _enforce_artifact_owner(authenticated_user_id, record.thread_id, record.local_path)
     encoded_path = quote(record.local_path, safe="/")
     return RedirectResponse(
         url=f"/api/threads/{quote(record.thread_id, safe='')}/artifacts/{encoded_path}?download=true",
         status_code=307,
+    )
+
+
+def _get_visible_user_artifact(artifact_id: str, authenticated_user_id: str) -> ArtifactRecord:
+    record = _artifact_registry.get(artifact_id, user_id=authenticated_user_id)
+    if record is None or not _is_visible_primary_artifact(record):
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    _require_thread_owner(authenticated_user_id, record.thread_id)
+    return record
+
+
+def _is_visible_primary_artifact(record: ArtifactRecord) -> bool:
+    return (
+        record.deleted_at is None
+        and record.is_library_visible is True
+        and record.artifact_role == "primary"
     )
 
 

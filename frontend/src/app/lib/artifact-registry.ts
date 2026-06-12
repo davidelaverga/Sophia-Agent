@@ -148,6 +148,24 @@ export async function deleteArtifactRegistryRecord(artifactId: string): Promise<
   return response.json() as Promise<ArtifactOpenResponse>;
 }
 
+export function buildArtifactRegistryContentHref(artifactId: string): string {
+  return `/api/artifacts/${encodeURIComponent(artifactId)}/content`;
+}
+
+export function buildArtifactRegistryDownloadHref(artifactId: string): string {
+  return `/api/artifacts/${encodeURIComponent(artifactId)}/download`;
+}
+
+export async function fetchArtifactRegistryTextPreview(artifactId: string): Promise<string> {
+  const response = await fetch(buildArtifactRegistryContentHref(artifactId), {
+    cache: 'no-store',
+  });
+  if (!response.ok) {
+    throw new Error(`artifact_registry_preview_failed:${response.status}`);
+  }
+  return response.text();
+}
+
 export function registrySourceToSessionSource(source: ArtifactRegistrySource): ArtifactRegisterSource {
   if (source === 'quick_edit') return 'quick_patch';
   if (source === 'coreview_version') return 'coreview_version';

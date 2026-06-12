@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+import app.gateway.artifact_registry as artifact_registry_module
 import app.gateway.routers.artifacts as artifacts_router
 import app.gateway.routers.builder_events as builder_events_router
 from app.gateway.artifact_registry import (
@@ -50,6 +51,14 @@ def _owned_app(tmp_path, monkeypatch) -> tuple[TestClient, LocalArtifactRegistry
     return TestClient(app), registry
 
 
+def test_registry_default_storage_base_is_backend_users(monkeypatch) -> None:
+    monkeypatch.delenv("SOPHIA_ARTIFACT_REGISTRY_BASE_PATH", raising=False)
+
+    registry = LocalArtifactRegistry()
+
+    assert registry._base == artifact_registry_module._BACKEND_ROOT / "users"
+
+
 def test_registry_upsert_is_idempotent(tmp_path) -> None:
     registry = LocalArtifactRegistry(tmp_path)
     first = registry.upsert(_request(), user_id="user-1")
@@ -81,12 +90,50 @@ def test_registry_rejects_unsafe_paths_and_raw_content(tmp_path) -> None:
     else:  # pragma: no cover - defensive assertion.
         raise AssertionError("unsafe path was accepted")
 
+    try:
+        registry.upsert(_request(local_path="outputs/../secrets.html"), user_id="user-1")
+    except HTTPException as exc:
+        assert exc.status_code == 403
+    else:  # pragma: no cover - defensive assertion.
+        raise AssertionError("traversal path was accepted")
+
     with pytest.raises(ValidationError, match="raw content"):
         ArtifactUpsertRequest(**{
             "thread_id": "thread-1",
             "local_path": "outputs/private.html",
             "raw_content": "<html>secret</html>",
         })
+
+
+def test_registry_persists_records_across_store_restart(tmp_path) -> None:
+    base_path = tmp_path / "artifact-registry"
+    first_registry = LocalArtifactRegistry(base_path)
+    artifact = first_registry.upsert(_request(), user_id="user-1")
+
+    second_registry = LocalArtifactRegistry(base_path)
+    listed = second_registry.list(user_id="user-1")
+
+    assert listed.total == 1
+    assert listed.artifacts[0].artifact_id == artifact.artifact_id
+    serialized = (base_path / "user-1" / "artifacts" / "registry.json").read_text(encoding="utf-8")
+    assert "<html" not in serialized
+    assert "signed.example" not in serialized
+    assert "artifact_url" not in serialized
+
+
+def test_registry_soft_delete_persists_across_store_restart(tmp_path) -> None:
+    base_path = tmp_path / "artifact-registry"
+    first_registry = LocalArtifactRegistry(base_path)
+    artifact = first_registry.upsert(_request(), user_id="user-1")
+    assert first_registry.mark_deleted(artifact.artifact_id, user_id="user-1") is not None
+
+    second_registry = LocalArtifactRegistry(base_path)
+
+    assert second_registry.list(user_id="user-1").total == 0
+    hidden = second_registry.list(user_id="user-1", filters=ArtifactRegistryFilters(include_hidden=True))
+    assert hidden.total == 1
+    assert hidden.artifacts[0].deleted_at is not None
+    assert hidden.artifacts[0].is_library_visible is False
 
 
 def test_registry_list_filters_by_type_source_thread_date_and_search(tmp_path) -> None:
@@ -268,6 +315,17 @@ def test_registry_filters_old_visible_wrapper_records_at_read_time(tmp_path) -> 
     hidden_by_name = {artifact.filename: artifact for artifact in hidden.artifacts}
     assert hidden_by_name["create-a-real-markdown-artifact-file-nam.html"].artifact_role == "wrapper"
     assert hidden_by_name["create-a-real-markdown-artifact-file-nam.html"].is_library_visible is False
+
+    reloaded = LocalArtifactRegistry(tmp_path)
+    assert [artifact.filename for artifact in reloaded.list(user_id="user-1").artifacts] == [
+        "durable-registry-smoke-markdown.md"
+    ]
+    reloaded_hidden = reloaded.list(user_id="user-1", filters=ArtifactRegistryFilters(include_hidden=True))
+    reloaded_wrapper = {
+        artifact.filename: artifact for artifact in reloaded_hidden.artifacts
+    }["create-a-real-markdown-artifact-file-nam.html"]
+    assert reloaded_wrapper.artifact_role == "wrapper"
+    assert reloaded_wrapper.is_library_visible is False
 
 
 def test_registry_dedupes_builder_and_backfill_records_by_visible_identity(tmp_path) -> None:
@@ -473,6 +531,44 @@ def test_download_endpoint_redirects_to_existing_thread_artifact_route(tmp_path,
     )
 
 
+def test_content_endpoint_redirects_to_existing_thread_artifact_route(tmp_path, monkeypatch) -> None:
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    artifact = registry.upsert(
+        _request(local_path="outputs/launch page.html", renderer_kind="html", artifact_type="webpage"),
+        user_id="user-1",
+    )
+
+    response = client.get(f"/api/artifacts/{artifact.artifact_id}/content", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == (
+        "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch%20page.html"
+    )
+
+
+def test_hidden_artifact_id_endpoints_return_404(tmp_path, monkeypatch) -> None:
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    artifact = registry.upsert(
+        _request(
+            title="Durable Artifact Registry Smoke Test - Handoff Wrapper",
+            artifact_type="html",
+            renderer_kind="html",
+            local_path="outputs/create-a-real-markdown-artifact-file-nam.html",
+        ),
+        user_id="user-1",
+    )
+
+    assert artifact.is_library_visible is False
+    for method, path in (
+        ("get", f"/api/artifacts/{artifact.artifact_id}"),
+        ("post", f"/api/artifacts/{artifact.artifact_id}/open"),
+        ("get", f"/api/artifacts/{artifact.artifact_id}/content"),
+        ("get", f"/api/artifacts/{artifact.artifact_id}/download"),
+    ):
+        response = getattr(client, method)(path, follow_redirects=False)
+        assert response.status_code == 404
+
+
 def test_delete_endpoint_hides_artifact_without_deleting_bytes(tmp_path, monkeypatch) -> None:
     client, registry = _owned_app(tmp_path, monkeypatch)
     output_file = tmp_path / "outputs" / "launch.html"
@@ -497,6 +593,15 @@ def test_delete_endpoint_hides_artifact_without_deleting_bytes(tmp_path, monkeyp
     assert hidden.status_code == 200
     assert hidden.json()["total"] == 1
     assert hidden.json()["artifacts"][0]["artifact_id"] == artifact.artifact_id
+
+    for method, path in (
+        ("get", f"/api/artifacts/{artifact.artifact_id}"),
+        ("post", f"/api/artifacts/{artifact.artifact_id}/open"),
+        ("get", f"/api/artifacts/{artifact.artifact_id}/content"),
+        ("get", f"/api/artifacts/{artifact.artifact_id}/download"),
+    ):
+        response_after_delete = getattr(client, method)(path, follow_redirects=False)
+        assert response_after_delete.status_code == 404
 
 
 def test_builder_terminal_event_upserts_registry_metadata(tmp_path, monkeypatch) -> None:

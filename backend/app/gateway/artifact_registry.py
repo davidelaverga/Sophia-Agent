@@ -12,6 +12,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -34,7 +35,8 @@ ArtifactSource = Literal[
 ArtifactStorageProvider = Literal["local", "supabase", "hybrid"]
 ArtifactRole = Literal["primary", "wrapper", "support", "internal"]
 
-_DEFAULT_BASE_PATH = Path("users")
+_BACKEND_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_BASE_PATH = _BACKEND_ROOT / "users"
 _FORBIDDEN_EXTRA_KEYS = {
     "artifact_url",
     "artifactUrl",
@@ -731,7 +733,13 @@ class LocalArtifactRegistry:
             "updated_at": _now_iso(),
             "artifacts": [record.model_dump(mode="json") for record in records],
         }
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        temporary_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path.exists():
+                temporary_path.unlink()
 
     def upsert(self, request: ArtifactUpsertRequest, *, user_id: str) -> ArtifactRecord:
         if request.user_id is not None and request.user_id != user_id:

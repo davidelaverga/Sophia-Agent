@@ -9,6 +9,7 @@ import {
   RefreshCw,
   Search,
   Trash2,
+  X,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -16,16 +17,19 @@ import type { ReactNode } from 'react';
 
 import { saveArtifactLibraryOpenHandoff } from '../../lib/artifact-library-open-handoff';
 import {
+  buildArtifactRegistryContentHref,
+  buildArtifactRegistryDownloadHref,
   dedupeVisibleArtifactRegistryRecords,
   deleteArtifactRegistryRecord,
+  fetchArtifactRegistryTextPreview,
   fetchArtifactRegistryList,
   openArtifactRegistryRecord,
   type ArtifactRegistryListFilters,
   type ArtifactRegistryRecord,
 } from '../../lib/artifact-registry';
-import { buildThreadArtifactHref } from '../../lib/builder-artifacts';
 import { cn } from '../../lib/utils';
 import { useSessionStore } from '../../stores/session-store';
+import { ArtifactMarkdownPreview } from '../session/ArtifactMarkdownPreview';
 
 type ArtifactTypeFilter = 'all' | 'html' | 'pdf' | 'markdown' | 'pptx' | 'image';
 type ArtifactSourceFilter = 'all' | 'builder' | 'upload' | 'quick_edit' | 'coreview_version' | 'file_library_backfill';
@@ -71,7 +75,12 @@ export function ArtifactLibraryPanel() {
   const [error, setError] = useState<string | null>(null);
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [openingArtifactId, setOpeningArtifactId] = useState<string | null>(null);
+  const [sessionOpeningArtifactId, setSessionOpeningArtifactId] = useState<string | null>(null);
   const [deletingArtifactId, setDeletingArtifactId] = useState<string | null>(null);
+  const [selectedArtifact, setSelectedArtifact] = useState<ArtifactRegistryRecord | null>(null);
+  const [previewLoadingArtifactId, setPreviewLoadingArtifactId] = useState<string | null>(null);
+  const [previewText, setPreviewText] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   const filters = useMemo<ArtifactRegistryListFilters>(() => ({
     artifactType: typeFilter,
@@ -91,6 +100,10 @@ export function ArtifactLibraryPanel() {
         const visibleArtifacts = dedupeVisibleArtifactRegistryRecords(response.artifacts);
         setArtifacts(visibleArtifacts);
         setTotal(visibleArtifacts.length);
+        setSelectedArtifact((current) => {
+          if (!current) return null;
+          return visibleArtifacts.find((artifact) => artifact.artifact_id === current.artifact_id) ?? null;
+        });
       })
       .catch(() => {
         if (cancelled) return;
@@ -108,8 +121,40 @@ export function ArtifactLibraryPanel() {
     };
   }, [filters, refreshNonce]);
 
-  const handleOpenInCanvas = useCallback(async (artifact: ArtifactRegistryRecord) => {
+  const handleOpenInline = useCallback(async (artifact: ArtifactRegistryRecord) => {
     setOpeningArtifactId(artifact.artifact_id);
+    setError(null);
+    setPreviewError(null);
+    setPreviewText(null);
+    try {
+      const response = await openArtifactRegistryRecord(artifact.artifact_id);
+      const openedArtifact = response.artifact;
+      setSelectedArtifact(openedArtifact);
+      setArtifacts((current) => current.map((item) => (
+        item.artifact_id === openedArtifact.artifact_id ? openedArtifact : item
+      )));
+      if (shouldLoadTextPreview(openedArtifact)) {
+        setPreviewLoadingArtifactId(openedArtifact.artifact_id);
+        try {
+          setPreviewText(await fetchArtifactRegistryTextPreview(openedArtifact.artifact_id));
+        } catch {
+          setPreviewError('Unable to load preview');
+        } finally {
+          setPreviewLoadingArtifactId((current) => (
+            current === openedArtifact.artifact_id ? null : current
+          ));
+        }
+      }
+    } catch {
+      setError('Unable to open artifact');
+      setSelectedArtifact(null);
+    } finally {
+      setOpeningArtifactId(null);
+    }
+  }, []);
+
+  const handleOpenInSessionCanvas = useCallback(async (artifact: ArtifactRegistryRecord) => {
+    setSessionOpeningArtifactId(artifact.artifact_id);
     setError(null);
     try {
       const response = await openArtifactRegistryRecord(artifact.artifact_id);
@@ -128,7 +173,7 @@ export function ArtifactLibraryPanel() {
     } catch {
       setError('Unable to open artifact');
     } finally {
-      setOpeningArtifactId(null);
+      setSessionOpeningArtifactId(null);
     }
   }, [createSession, currentSession, router, updateFromBackend]);
 
@@ -143,12 +188,20 @@ export function ArtifactLibraryPanel() {
       await deleteArtifactRegistryRecord(artifact.artifact_id);
       setArtifacts((current) => current.filter((item) => item.artifact_id !== artifact.artifact_id));
       setTotal((current) => Math.max(0, current - 1));
+      setSelectedArtifact((current) => (
+        current?.artifact_id === artifact.artifact_id ? null : current
+      ));
+      if (previewLoadingArtifactId === artifact.artifact_id) {
+        setPreviewLoadingArtifactId(null);
+      }
+      setPreviewText(null);
+      setPreviewError(null);
     } catch {
       setError('Unable to delete artifact');
     } finally {
       setDeletingArtifactId(null);
     }
-  }, []);
+  }, [previewLoadingArtifactId]);
 
   return (
     <section
@@ -247,24 +300,53 @@ export function ArtifactLibraryPanel() {
           </div>
         )}
 
-        <div className="min-h-[360px]" data-testid="artifact-library-panel">
-          {loading ? (
-            <ArtifactLibraryLoading />
-          ) : artifacts.length === 0 ? (
-            <ArtifactLibraryEmptyState />
-          ) : (
-            <div className="flex flex-col gap-2" data-testid="artifact-library-list">
-              {artifacts.map((artifact) => (
-                <ArtifactLibraryRow
-                  key={artifact.artifact_id}
-                  artifact={artifact}
-                  opening={openingArtifactId === artifact.artifact_id}
-                  deleting={deletingArtifactId === artifact.artifact_id}
-                  onOpenInCanvas={() => handleOpenInCanvas(artifact)}
-                  onDelete={() => handleDeleteArtifact(artifact)}
-                />
-              ))}
-            </div>
+        <div
+          className={cn(
+            'grid min-h-[360px] gap-4',
+            selectedArtifact && !loading ? 'xl:grid-cols-[minmax(0,1fr)_430px]' : '',
+          )}
+          data-testid="artifact-library-panel"
+        >
+          <div>
+            {loading ? (
+              <ArtifactLibraryLoading />
+            ) : artifacts.length === 0 ? (
+              <ArtifactLibraryEmptyState />
+            ) : (
+              <div className="flex flex-col gap-2" data-testid="artifact-library-list">
+                {artifacts.map((artifact) => (
+                  <ArtifactLibraryRow
+                    key={artifact.artifact_id}
+                    artifact={artifact}
+                    selected={selectedArtifact?.artifact_id === artifact.artifact_id}
+                    opening={openingArtifactId === artifact.artifact_id}
+                    sessionOpening={sessionOpeningArtifactId === artifact.artifact_id}
+                    deleting={deletingArtifactId === artifact.artifact_id}
+                    onOpenInline={() => handleOpenInline(artifact)}
+                    onOpenInSession={() => handleOpenInSessionCanvas(artifact)}
+                    onDelete={() => handleDeleteArtifact(artifact)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+
+          {selectedArtifact && !loading && (
+            <ArtifactLibraryDetailPanel
+              artifact={selectedArtifact}
+              previewText={previewText}
+              previewLoading={previewLoadingArtifactId === selectedArtifact.artifact_id}
+              previewError={previewError}
+              sessionOpening={sessionOpeningArtifactId === selectedArtifact.artifact_id}
+              deleting={deletingArtifactId === selectedArtifact.artifact_id}
+              onClose={() => {
+                setSelectedArtifact(null);
+                setPreviewText(null);
+                setPreviewError(null);
+              }}
+              onOpenInSession={() => handleOpenInSessionCanvas(selectedArtifact)}
+              onDelete={() => handleDeleteArtifact(selectedArtifact)}
+            />
           )}
         </div>
       </div>
@@ -308,19 +390,26 @@ function FilterSelect({
 
 function ArtifactLibraryRow({
   artifact,
+  selected,
   opening,
+  sessionOpening,
   deleting,
-  onOpenInCanvas,
+  onOpenInline,
+  onOpenInSession,
   onDelete,
 }: {
   artifact: ArtifactRegistryRecord;
+  selected: boolean;
   opening: boolean;
+  sessionOpening: boolean;
   deleting: boolean;
-  onOpenInCanvas: () => void;
+  onOpenInline: () => void;
+  onOpenInSession: () => void;
   onDelete: () => void;
 }) {
-  const openHref = buildThreadArtifactHref(artifact.thread_id, artifact.local_path);
-  const downloadHref = `/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/download`;
+  const openHref = buildArtifactRegistryContentHref(artifact.artifact_id);
+  const downloadHref = buildArtifactRegistryDownloadHref(artifact.artifact_id);
+  const label = artifact.title || artifact.filename;
 
   return (
     <article
@@ -329,11 +418,12 @@ function ArtifactLibraryRow({
         'sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center',
       )}
       style={{
-        borderColor: 'var(--cosmic-border-soft)',
+        borderColor: selected ? 'var(--sophia-purple)' : 'var(--cosmic-border-soft)',
         background: 'color-mix(in srgb, var(--cosmic-panel) 74%, transparent)',
         boxShadow: '0 18px 48px rgba(0, 0, 0, 0.10)',
       }}
       data-testid="artifact-library-row"
+      data-selected={selected ? 'true' : 'false'}
     >
       <div className="min-w-0">
         <div className="flex min-w-0 items-center gap-2">
@@ -351,33 +441,43 @@ function ArtifactLibraryRow({
         </div>
       </div>
 
-      <div className="flex items-center gap-2 sm:justify-end">
+      <div className="flex flex-wrap items-center gap-2 sm:justify-end">
         <button
           type="button"
-          onClick={onOpenInCanvas}
-          disabled={opening || deleting}
+          onClick={onOpenInline}
+          disabled={opening || sessionOpening || deleting}
           className="cosmic-focus-ring inline-flex h-9 items-center gap-2 rounded-full px-3 text-[12px] font-medium transition-all hover:bg-white/[0.06] disabled:cursor-wait disabled:opacity-60"
+          aria-label={`Open ${label} inline`}
           style={{ color: 'var(--cosmic-text)' }}
         >
           {opening ? <Loader2 className="h-4 w-4 animate-spin" /> : <PanelRightOpen className="h-4 w-4" />}
-          Canvas
+          Open
         </button>
-        {openHref && (
-          <a
-            href={openHref}
-            target="_blank"
-            rel="noreferrer"
-            className="cosmic-focus-ring inline-flex h-9 w-9 items-center justify-center rounded-full transition-all hover:bg-white/[0.06]"
-            aria-label={`Open ${artifact.title || artifact.filename}`}
-            style={{ color: 'var(--cosmic-text-muted)' }}
-          >
-            <ExternalLink className="h-4 w-4" />
-          </a>
-        )}
+        <button
+          type="button"
+          onClick={onOpenInSession}
+          disabled={opening || sessionOpening || deleting}
+          className="cosmic-focus-ring inline-flex h-9 items-center gap-2 rounded-full px-3 text-[12px] font-medium transition-all hover:bg-white/[0.06] disabled:cursor-wait disabled:opacity-60"
+          aria-label={`Open ${label} in Session Canvas`}
+          style={{ color: 'var(--cosmic-text-muted)' }}
+        >
+          {sessionOpening ? <Loader2 className="h-4 w-4 animate-spin" /> : <PanelRightOpen className="h-4 w-4" />}
+          Session
+        </button>
+        <a
+          href={openHref}
+          target="_blank"
+          rel="noreferrer"
+          className="cosmic-focus-ring inline-flex h-9 w-9 items-center justify-center rounded-full transition-all hover:bg-white/[0.06]"
+          aria-label={`Open ${label} preview in new tab`}
+          style={{ color: 'var(--cosmic-text-muted)' }}
+        >
+          <ExternalLink className="h-4 w-4" />
+        </a>
         <a
           href={downloadHref}
           className="cosmic-focus-ring inline-flex h-9 w-9 items-center justify-center rounded-full transition-all hover:bg-white/[0.06]"
-          aria-label={`Download ${artifact.title || artifact.filename}`}
+          aria-label={`Download ${label}`}
           style={{ color: 'var(--cosmic-text-muted)' }}
         >
           <Download className="h-4 w-4" />
@@ -385,15 +485,237 @@ function ArtifactLibraryRow({
         <button
           type="button"
           onClick={onDelete}
-          disabled={deleting || opening}
+          disabled={deleting || opening || sessionOpening}
           className="cosmic-focus-ring inline-flex h-9 w-9 items-center justify-center rounded-full transition-all hover:bg-white/[0.06] disabled:cursor-wait disabled:opacity-60"
-          aria-label={`Delete ${artifact.title || artifact.filename}`}
+          aria-label={`Delete ${label}`}
           style={{ color: 'var(--cosmic-text-muted)' }}
         >
           {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
         </button>
       </div>
     </article>
+  );
+}
+
+function ArtifactLibraryDetailPanel({
+  artifact,
+  previewText,
+  previewLoading,
+  previewError,
+  sessionOpening,
+  deleting,
+  onClose,
+  onOpenInSession,
+  onDelete,
+}: {
+  artifact: ArtifactRegistryRecord;
+  previewText: string | null;
+  previewLoading: boolean;
+  previewError: string | null;
+  sessionOpening: boolean;
+  deleting: boolean;
+  onClose: () => void;
+  onOpenInSession: () => void;
+  onDelete: () => void;
+}) {
+  const label = artifact.title || artifact.filename;
+  const contentHref = buildArtifactRegistryContentHref(artifact.artifact_id);
+  const downloadHref = buildArtifactRegistryDownloadHref(artifact.artifact_id);
+
+  return (
+    <aside
+      className="cosmic-surface-panel sticky top-6 flex max-h-[calc(100vh-3rem)] min-h-[520px] flex-col overflow-hidden rounded-[14px] border"
+      style={{
+        borderColor: 'var(--cosmic-border-soft)',
+        background: 'color-mix(in srgb, var(--cosmic-panel) 88%, transparent)',
+      }}
+      data-testid="artifact-library-detail"
+      aria-label={`${label} artifact viewer`}
+    >
+      <div className="flex items-start justify-between gap-3 border-b p-4" style={{ borderColor: 'var(--cosmic-border-soft)' }}>
+        <div className="min-w-0">
+          <p className="text-[11px] font-medium uppercase" style={{ color: 'var(--cosmic-text-whisper)' }}>
+            Artifact
+          </p>
+          <h2 className="mt-1 truncate text-[17px] font-medium" style={{ color: 'var(--cosmic-text-strong)' }}>
+            {label}
+          </h2>
+          <p className="mt-1 truncate text-[12px]" style={{ color: 'var(--cosmic-text-muted)' }}>
+            {artifact.filename}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="cosmic-focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-all hover:bg-white/[0.06]"
+          aria-label="Close artifact viewer"
+          style={{ color: 'var(--cosmic-text-muted)' }}
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+
+      <dl className="grid grid-cols-2 gap-3 border-b p-4 text-[12px]" style={{ borderColor: 'var(--cosmic-border-soft)' }}>
+        <MetadataItem label="Type" value={formatArtifactType(artifact.artifact_type)} />
+        <MetadataItem label="Source" value={formatSource(artifact.source)} />
+        <MetadataItem label="Created" value={formatDate(artifact.created_at)} />
+        <MetadataItem label="Storage" value={formatStorageStatus(artifact.storage_status)} />
+      </dl>
+
+      <div className="flex min-h-0 flex-1 flex-col">
+        <ArtifactLibraryPreview
+          artifact={artifact}
+          contentHref={contentHref}
+          previewText={previewText}
+          previewLoading={previewLoading}
+          previewError={previewError}
+        />
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 border-t p-4" style={{ borderColor: 'var(--cosmic-border-soft)' }}>
+        <a
+          href={downloadHref}
+          className="cosmic-focus-ring inline-flex h-9 items-center gap-2 rounded-full px-3 text-[12px] font-medium transition-all hover:bg-white/[0.06]"
+          aria-label={`Download ${label}`}
+          style={{ color: 'var(--cosmic-text)' }}
+        >
+          <Download className="h-4 w-4" />
+          Download
+        </a>
+        <a
+          href={contentHref}
+          target="_blank"
+          rel="noreferrer"
+          className="cosmic-focus-ring inline-flex h-9 items-center gap-2 rounded-full px-3 text-[12px] font-medium transition-all hover:bg-white/[0.06]"
+          aria-label={`Open ${label} preview in new tab`}
+          style={{ color: 'var(--cosmic-text-muted)' }}
+        >
+          <ExternalLink className="h-4 w-4" />
+          Open tab
+        </a>
+        <button
+          type="button"
+          onClick={onOpenInSession}
+          disabled={sessionOpening || deleting}
+          className="cosmic-focus-ring inline-flex h-9 items-center gap-2 rounded-full px-3 text-[12px] font-medium transition-all hover:bg-white/[0.06] disabled:cursor-wait disabled:opacity-60"
+          aria-label={`Open ${label} in Session Canvas`}
+          style={{ color: 'var(--cosmic-text-muted)' }}
+        >
+          {sessionOpening ? <Loader2 className="h-4 w-4 animate-spin" /> : <PanelRightOpen className="h-4 w-4" />}
+          Session Canvas
+        </button>
+        <button
+          type="button"
+          onClick={onDelete}
+          disabled={deleting || sessionOpening}
+          className="cosmic-focus-ring ml-auto inline-flex h-9 items-center gap-2 rounded-full px-3 text-[12px] font-medium transition-all hover:bg-white/[0.06] disabled:cursor-wait disabled:opacity-60"
+          aria-label={`Delete ${label}`}
+          style={{ color: 'var(--cosmic-text-muted)' }}
+        >
+          {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+          Delete
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+function ArtifactLibraryPreview({
+  artifact,
+  contentHref,
+  previewText,
+  previewLoading,
+  previewError,
+}: {
+  artifact: ArtifactRegistryRecord;
+  contentHref: string;
+  previewText: string | null;
+  previewLoading: boolean;
+  previewError: string | null;
+}) {
+  const label = artifact.title || artifact.filename;
+  if (shouldLoadTextPreview(artifact)) {
+    if (previewLoading) {
+      return (
+        <div className="flex flex-1 items-center justify-center" data-testid="artifact-library-preview-loading">
+          <Loader2 className="h-5 w-5 animate-spin" style={{ color: 'var(--sophia-purple)' }} />
+        </div>
+      );
+    }
+    if (previewError) {
+      return <PreviewUnavailable message={previewError} />;
+    }
+    if (previewText !== null) {
+      return (
+        <div className="min-h-0 flex-1 overflow-auto p-4" data-testid="artifact-library-markdown-preview">
+          <ArtifactMarkdownPreview markdown={previewText} />
+        </div>
+      );
+    }
+    return <PreviewUnavailable message="Preview unavailable" />;
+  }
+
+  if (isHtmlArtifact(artifact)) {
+    return (
+      <iframe
+        src={contentHref}
+        title={`${label} preview`}
+        sandbox=""
+        className="min-h-[440px] w-full flex-1 border-0 bg-white"
+        data-testid="artifact-library-html-preview"
+      />
+    );
+  }
+
+  if (isPdfArtifact(artifact)) {
+    return (
+      <iframe
+        src={contentHref}
+        title={`${label} PDF preview`}
+        className="min-h-[440px] w-full flex-1 border-0 bg-white"
+        data-testid="artifact-library-pdf-preview"
+      />
+    );
+  }
+
+  if (isImageArtifact(artifact)) {
+    return (
+      <div className="flex flex-1 items-center justify-center overflow-auto p-4">
+        <img
+          src={contentHref}
+          alt={label}
+          className="max-h-full max-w-full rounded-[10px] object-contain"
+          data-testid="artifact-library-image-preview"
+        />
+      </div>
+    );
+  }
+
+  return <PreviewUnavailable message="Native preview unavailable" />;
+}
+
+function PreviewUnavailable({ message }: { message: string }) {
+  return (
+    <div
+      className="flex flex-1 items-center justify-center px-6 text-center text-[13px]"
+      style={{ color: 'var(--cosmic-text-muted)' }}
+      data-testid="artifact-library-preview-unavailable"
+    >
+      {message}
+    </div>
+  );
+}
+
+function MetadataItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-[10px] font-medium uppercase" style={{ color: 'var(--cosmic-text-whisper)' }}>
+        {label}
+      </dt>
+      <dd className="mt-1 truncate" style={{ color: 'var(--cosmic-text)' }}>
+        {value}
+      </dd>
+    </div>
   );
 }
 
@@ -467,4 +789,63 @@ function formatDate(value: string | null | undefined): string {
     day: 'numeric',
     year: 'numeric',
   }).format(new Date(timestamp));
+}
+
+function formatStorageStatus(value: string | null | undefined): string {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return 'Unknown';
+  if (normalized === 'available') return 'Available';
+  if (normalized === 'missing') return 'Missing';
+  if (normalized === 'supabase') return 'Supabase';
+  return normalized.replace(/_/gu, ' ');
+}
+
+function shouldLoadTextPreview(artifact: ArtifactRegistryRecord): boolean {
+  const rendererKind = String(artifact.renderer_kind || '').toLowerCase();
+  const artifactType = artifact.artifact_type.toLowerCase();
+  const mimeType = artifact.mime_type?.split(';')[0]?.toLowerCase() ?? '';
+  const filename = artifact.filename.toLowerCase();
+  return (
+    rendererKind === 'markdown'
+    || artifactType === 'markdown'
+    || mimeType === 'text/markdown'
+    || mimeType === 'text/x-markdown'
+    || filename.endsWith('.md')
+    || filename.endsWith('.markdown')
+  );
+}
+
+function isHtmlArtifact(artifact: ArtifactRegistryRecord): boolean {
+  const rendererKind = String(artifact.renderer_kind || '').toLowerCase();
+  const artifactType = artifact.artifact_type.toLowerCase();
+  const mimeType = artifact.mime_type?.split(';')[0]?.toLowerCase() ?? '';
+  const filename = artifact.filename.toLowerCase();
+  return (
+    rendererKind === 'html'
+    || artifactType === 'html'
+    || artifactType === 'webpage'
+    || mimeType === 'text/html'
+    || filename.endsWith('.html')
+    || filename.endsWith('.htm')
+  );
+}
+
+function isPdfArtifact(artifact: ArtifactRegistryRecord): boolean {
+  const rendererKind = String(artifact.renderer_kind || '').toLowerCase();
+  const artifactType = artifact.artifact_type.toLowerCase();
+  const mimeType = artifact.mime_type?.split(';')[0]?.toLowerCase() ?? '';
+  const filename = artifact.filename.toLowerCase();
+  return (
+    rendererKind === 'pdf'
+    || artifactType === 'pdf'
+    || mimeType === 'application/pdf'
+    || filename.endsWith('.pdf')
+  );
+}
+
+function isImageArtifact(artifact: ArtifactRegistryRecord): boolean {
+  const rendererKind = String(artifact.renderer_kind || '').toLowerCase();
+  const artifactType = artifact.artifact_type.toLowerCase();
+  const mimeType = artifact.mime_type?.split(';')[0]?.toLowerCase() ?? '';
+  return rendererKind === 'image' || artifactType === 'image' || mimeType.startsWith('image/');
 }

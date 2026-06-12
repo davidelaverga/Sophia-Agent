@@ -165,7 +165,7 @@ describe('ArtifactLibraryPanel', () => {
     });
   });
 
-  it('opens an artifact in canvas through the handoff flow', async () => {
+  it('opens an artifact inline without navigating to session', async () => {
     fetchMock()
       .mockResolvedValueOnce(jsonResponse({ artifacts: [baseArtifact], total: 1 }))
       .mockResolvedValueOnce(jsonResponse({
@@ -185,7 +185,45 @@ describe('ArtifactLibraryPanel', () => {
     render(<ArtifactLibraryPanel />);
 
     await screen.findByText('Launch Page');
-    await userEvent.click(screen.getByRole('button', { name: /canvas/i }));
+    await userEvent.click(screen.getByRole('button', { name: /open launch page inline/i }));
+
+    await waitFor(() => {
+      expect(fetchMock()).toHaveBeenCalledWith('/api/artifacts/artifact-1/open', expect.objectContaining({
+        method: 'POST',
+      }));
+    });
+    const detail = await screen.findByTestId('artifact-library-detail');
+    expect(detail).toHaveTextContent('Launch Page');
+    expect(detail).toHaveTextContent('launch.html');
+    expect(screen.getByTestId('artifact-library-html-preview')).toHaveAttribute(
+      'src',
+      '/api/artifacts/artifact-1/content',
+    );
+    expect(routerPushMock).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem('sophia:artifact-library-open:v1')).toBeNull();
+  });
+
+  it('opens an artifact in session canvas through the secondary handoff flow', async () => {
+    fetchMock()
+      .mockResolvedValueOnce(jsonResponse({ artifacts: [baseArtifact], total: 1 }))
+      .mockResolvedValueOnce(jsonResponse({
+        artifact: baseArtifact,
+        canvas_target: {
+          artifact_id: baseArtifact.artifact_id,
+          thread_id: baseArtifact.thread_id,
+          session_id: baseArtifact.session_id,
+          artifact_path: baseArtifact.local_path,
+          renderer_kind: baseArtifact.renderer_kind,
+          mime_type: baseArtifact.mime_type,
+          title: baseArtifact.title,
+          review_room_supported: true,
+        },
+      }));
+
+    render(<ArtifactLibraryPanel />);
+
+    await screen.findByText('Launch Page');
+    await userEvent.click(screen.getByRole('button', { name: /open launch page in session canvas/i }));
 
     await waitFor(() => {
       expect(fetchMock()).toHaveBeenCalledWith('/api/artifacts/artifact-1/open', expect.objectContaining({
@@ -215,6 +253,87 @@ describe('ArtifactLibraryPanel', () => {
       sessionId: 'session-1',
       threadId: 'thread-1',
     });
+  });
+
+  it('loads markdown previews through the artifact id content endpoint', async () => {
+    const markdownArtifact: ArtifactRegistryRecord = {
+      ...baseArtifact,
+      artifact_id: 'artifact-markdown',
+      title: 'Research Notes',
+      filename: 'research-notes.md',
+      artifact_type: 'markdown',
+      renderer_kind: 'markdown',
+      mime_type: 'text/markdown',
+      local_path: 'mnt/user-data/outputs/research-notes.md',
+    };
+    fetchMock()
+      .mockResolvedValueOnce(jsonResponse({ artifacts: [markdownArtifact], total: 1 }))
+      .mockResolvedValueOnce(jsonResponse({
+        artifact: markdownArtifact,
+        canvas_target: {
+          artifact_id: markdownArtifact.artifact_id,
+          thread_id: markdownArtifact.thread_id,
+          session_id: markdownArtifact.session_id,
+          artifact_path: markdownArtifact.local_path,
+          renderer_kind: markdownArtifact.renderer_kind,
+          mime_type: markdownArtifact.mime_type,
+          title: markdownArtifact.title,
+          review_room_supported: true,
+        },
+      }))
+      .mockResolvedValueOnce(new Response('# Research Notes\n\nA safe preview.', {
+        status: 200,
+        headers: { 'Content-Type': 'text/markdown' },
+      }));
+
+    render(<ArtifactLibraryPanel />);
+
+    await screen.findByText('Research Notes');
+    await userEvent.click(screen.getByRole('button', { name: /open research notes inline/i }));
+
+    await waitFor(() => {
+      expect(fetchMock()).toHaveBeenCalledWith('/api/artifacts/artifact-markdown/content', expect.objectContaining({
+        cache: 'no-store',
+      }));
+    });
+    expect(await screen.findByTestId('artifact-library-markdown-preview')).toHaveTextContent('A safe preview.');
+  });
+
+  it('fails markdown preview safely when artifact content is unavailable', async () => {
+    const markdownArtifact: ArtifactRegistryRecord = {
+      ...baseArtifact,
+      artifact_id: 'artifact-missing',
+      title: 'Missing Notes',
+      filename: 'missing-notes.md',
+      artifact_type: 'markdown',
+      renderer_kind: 'markdown',
+      mime_type: 'text/markdown',
+      local_path: 'mnt/user-data/outputs/missing-notes.md',
+    };
+    fetchMock()
+      .mockResolvedValueOnce(jsonResponse({ artifacts: [markdownArtifact], total: 1 }))
+      .mockResolvedValueOnce(jsonResponse({
+        artifact: markdownArtifact,
+        canvas_target: {
+          artifact_id: markdownArtifact.artifact_id,
+          thread_id: markdownArtifact.thread_id,
+          session_id: markdownArtifact.session_id,
+          artifact_path: markdownArtifact.local_path,
+          renderer_kind: markdownArtifact.renderer_kind,
+          mime_type: markdownArtifact.mime_type,
+          title: markdownArtifact.title,
+          review_room_supported: true,
+        },
+      }))
+      .mockResolvedValueOnce(new Response('not found', { status: 404 }));
+
+    render(<ArtifactLibraryPanel />);
+
+    await screen.findByText('Missing Notes');
+    await userEvent.click(screen.getByRole('button', { name: /open missing notes inline/i }));
+
+    expect(await screen.findByTestId('artifact-library-preview-unavailable')).toHaveTextContent('Unable to load preview');
+    expect(routerPushMock).not.toHaveBeenCalled();
   });
 
   it('uses the artifact id endpoint for downloads', async () => {
@@ -266,6 +385,12 @@ describe('ArtifactLibraryPanel', () => {
       expect(screen.queryByText('Launch Page')).not.toBeInTheDocument();
     });
     expect(screen.getByTestId('artifact-library-empty')).toHaveTextContent('No artifacts yet');
+
+    fetchMock().mockResolvedValueOnce(jsonResponse({ artifacts: [], total: 0 }));
+    await userEvent.click(screen.getByRole('button', { name: /refresh artifacts/i }));
+    await waitFor(() => {
+      expect(screen.getByTestId('artifact-library-empty')).toHaveTextContent('No artifacts yet');
+    });
   });
 
   it('renders a polished empty state', async () => {
