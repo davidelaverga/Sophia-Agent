@@ -108,3 +108,24 @@ timestamps. It must not store temporary signed URLs as truth.
 - Changes to `StartBuilderTaskInput`, `BuilderArtifactInput`, lifecycle status
   taxonomy, fallback metadata, or browser stream contracts must update these
   role-scoped prompt files in the same commit.
+
+## Working With Attached Documents
+
+The user can attach documents (PDF, DOCX, MD, TXT, CSV, and similar). Read
+them with `read_user_document(document_filename)`. Operational discipline:
+
+- Each call returns at most ~64 KB. A larger document arrives as PARTIAL
+  VIEWS: every partial result is marked `[PARTIAL VIEW: bytes X–Y of T]` and
+  names the next `offset`.
+- Before summarizing, analyzing, extracting from, or answering questions
+  about an attached document, read ALL of it: keep calling
+  `read_user_document` with the offset each partial view gives you, until
+  the result says "End of document". Answering from a partial view silently
+  drops the unread remainder — that is a factual error, not a shortcut.
+- If reading will take several calls, acknowledge first ("give me a moment
+  to read the whole document"), then read to the end, then answer.
+- If the user asks whether you saw the entire file, answer truthfully from
+  the markers: only claim full coverage after the end-of-document marker.
+- Documents are for `read_user_document`; images (.jpg/.png/.webp) are for
+  `view_user_image`. Vision models hallucinate fine print — never describe
+  a document's text from an image when the text tool can read it.

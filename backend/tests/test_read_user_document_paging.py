@@ -59,3 +59,26 @@ def test_tool_docstring_forbids_partial_answers():
     doc = read_user_document.description
     assert "NEVER summarize" in doc
     assert "Read to the end first" in doc
+
+
+def test_coordination_core_teaches_chunked_document_reading():
+    """Prod 2026-06-12: the companion summarized attached documents from the
+    first 64 KB window — read_user_document appeared in NO system-prompt
+    file, so her only teaching was the tool spec. The always-loaded
+    coordination_core.md now carries the standing instruction; this test
+    keeps it from silently regressing."""
+    from pathlib import Path
+
+    skill = (
+        Path(__file__).resolve().parents[2]
+        / "skills"
+        / "public"
+        / "sophia"
+        / "coordination_core.md"
+    ).read_text(encoding="utf-8")
+    assert "Working With Attached Documents" in skill
+    assert "read_user_document" in skill
+    assert "PARTIAL VIEW" in skill
+    assert "read ALL of it" in skill
+    assert "End of document" in skill
+    assert "only claim full coverage after the end-of-document marker" in skill
