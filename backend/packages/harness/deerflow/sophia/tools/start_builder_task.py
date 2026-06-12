@@ -286,15 +286,38 @@ _NEGATION_BEFORE_MATCH_RE = re.compile(
     r"\s*(?:an?\s+|the\s+|any\s+|another\s+|more\s+)?$",
     re.IGNORECASE,
 )
+# Conversion phrasing: a deck-word mention positioned as the SOURCE of a
+# transformation ("turn the DECK into an html page", "convert the slides
+# to a pdf", "from the presentation") is the input, not the requested
+# output — it must not claim the target. Applied ONLY to the bare-word
+# pptx pattern: it is checked first and its alternations are bare format
+# words, so it collides with conversion asks; the pdf/html patterns are
+# phrase-shaped (their matches BEGIN at words like "presentation in PDF",
+# so a prefix veto would wrongly kill target asks like "turn the
+# presentation into a PDF"). Target-position markers ("to/into/as ...")
+# are deliberately NOT in this list.
+_SOURCE_CONTEXT_BEFORE_MATCH_RE = re.compile(
+    r"(?:\bfrom\b|\bbased\s+on\b|\bout\s+of\b|\bsourced?\s+from\b"
+    r"|\b(?:convert|converting|turn|turning|transform|transforming|rework|reworking)\s+(?:the|this|that|my|our|its)\b)"
+    r"\s*(?:existing\s+|current\s+|previous\s+|prior\s+|old\s+)?(?:an?\s+|the\s+)?$",
+    re.IGNORECASE,
+)
+_SOURCE_VETO_RULES = frozenset({"explicit_presentation_deck"})
 _NEGATION_LOOKBACK_CHARS = 32
 
 
-def _pattern_affirmative_match(pattern: re.Pattern[str], text: str) -> bool:
-    """True when ``pattern`` has at least one non-negated hit in ``text``."""
+def _pattern_affirmative_match(
+    pattern: re.Pattern[str], text: str, *, source_veto: bool = False
+) -> bool:
+    """True when ``pattern`` has at least one hit that is neither negated
+    nor (for source-veto rules) positioned as the source of a conversion."""
     for match in pattern.finditer(text):
         prefix = text[max(0, match.start() - _NEGATION_LOOKBACK_CHARS) : match.start()]
-        if not _NEGATION_BEFORE_MATCH_RE.search(prefix):
-            return True
+        if _NEGATION_BEFORE_MATCH_RE.search(prefix):
+            continue
+        if source_veto and _SOURCE_CONTEXT_BEFORE_MATCH_RE.search(prefix):
+            continue
+        return True
     return False
 
 
@@ -308,7 +331,9 @@ def _requested_output_extension_match_with_vetoes(
     for ext, reason, pattern in _REQUESTED_OUTPUT_EXTENSION_PATTERNS:
         if not pattern.search(text):
             continue
-        if _pattern_affirmative_match(pattern, text):
+        if _pattern_affirmative_match(
+            pattern, text, source_veto=reason in _SOURCE_VETO_RULES
+        ):
             return ext, reason, vetoed
         vetoed.append(reason)
     return None, None, vetoed

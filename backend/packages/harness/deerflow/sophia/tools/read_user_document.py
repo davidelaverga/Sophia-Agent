@@ -199,15 +199,30 @@ def _page_for_context(text: str, offset: int = 0) -> str:
     chunk = window.decode("utf-8", errors="ignore")
     next_offset = offset + len(window)
     if next_offset < total:
-        chunk += (
-            f"\n\n[Showing bytes {offset}–{next_offset} of {total}. "
-            f"To continue reading this document, call read_user_document again "
-            f"with offset={next_offset}.]"
+        # Prod 2026-06-12: with only a polite trailing footer, the companion
+        # summarized whole documents from the FIRST 64 KB window and stopped
+        # — the user had to ask "can you read it in chunks?" before she
+        # continued. Partial pages now announce partiality AT THE TOP (models
+        # weight beginnings) and the footer is imperative about not
+        # answering from a partial read.
+        pct = int(round(next_offset / total * 100)) if total else 100
+        header = (
+            f"[PARTIAL VIEW: bytes {offset}–{next_offset} of {total} "
+            f"({pct}% of the document read after this chunk). This is NOT "
+            f"the whole document.]\n\n"
+        )
+        chunk = header + chunk + (
+            f"\n\n[PARTIAL VIEW continues. If the task needs the full document "
+            f"(summary, analysis, extraction, comparison), do NOT answer yet — "
+            f"call read_user_document again with offset={next_offset} and keep "
+            f"reading until the end-of-document marker. Answering from a "
+            f"partial read silently drops the remaining {total - next_offset} "
+            f"bytes.]"
         )
     elif offset > 0:
         # Final page of a multi-page read — confirm the tail arrived so the
         # model knows it has now seen the whole document.
-        chunk += f"\n\n[End of document — showed bytes {offset}–{next_offset} of {total}.]"
+        chunk += f"\n\n[End of document — showed bytes {offset}–{next_offset} of {total}. You have now seen the whole document.]"
     return chunk
 
 
@@ -225,11 +240,13 @@ async def read_user_document(
     text-reading over view_user_image for textual content. Supported:
     PDF, DOCX, PPTX, XLSX, MD, TXT, CSV, JSON, YAML.
 
-    Each call returns up to ~64 KB. For a larger document the result ends
-    with a footer reporting the next byte offset — call this tool again
-    with that ``offset`` to keep reading, repeating until the footer says
-    you have reached the end. Nothing is truncated away; large documents
-    are read in full across multiple calls.
+    Each call returns up to ~64 KB. A larger document arrives as PARTIAL
+    VIEWS: each partial result names the next byte offset — call this tool
+    again with that ``offset``, repeating until the end-of-document marker.
+    Nothing is truncated away; large documents are read in full across
+    multiple calls. NEVER summarize, analyze, or answer questions about a
+    document from a partial view — that silently drops the unread
+    remainder. Read to the end first.
 
     When NOT to use:
     - For images (.jpg/.jpeg/.png/.webp) — use ``view_user_image``.

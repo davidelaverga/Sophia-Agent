@@ -203,3 +203,63 @@ def test_dispatch_stamps_user_requested_ext_and_targets_pdf(monkeypatch):
     assert delegation["user_requested_ext"] == "pdf"
     assert delegation["format_resolution_source"] == "current_user_turn"
     assert run_input["builder_artifact_target_path"].endswith(".pdf")
+
+
+# ---- HTML incident shapes (prod 2026-06-12, second report) ----------------------
+
+
+def test_html_current_turn_beats_deck_contaminated_description():
+    """Prod report: 'requesting html file but the builder delivered
+    presentations'. Pre-fix cause: deck words in the model-authored
+    description won over the html ask (pptx is matched first)."""
+    resolution = _resolve_target_format(
+        current_user_text="create an html file summarizing our architecture",
+        description=(
+            "[presentation] Create an html file summarizing the architecture, "
+            "in the style of the slide deck we made earlier (deck.pptx)."
+        ),
+        task_type="presentation",
+    )
+    assert resolution.final_ext == "html"
+    assert resolution.source == "current_user_turn"
+    assert resolution.user_requested_ext == "html"
+
+
+def test_turn_the_deck_into_an_html_page_resolves_to_html():
+    """Conversion phrasing: the deck is the SOURCE, html is the target —
+    bare deck words in source position must not claim the target."""
+    resolution = _resolve_target_format(
+        current_user_text="turn the deck into an html page",
+        description="turn the deck into an html page",
+        task_type="presentation",
+    )
+    assert resolution.final_ext == "html"
+    assert resolution.source == "current_user_turn"
+
+
+def test_convert_the_slides_to_a_pdf_resolves_to_pdf():
+    resolution = _resolve_target_format(
+        current_user_text="convert the slides to a pdf report",
+        description="convert the slides to a pdf report",
+        task_type="presentation",
+    )
+    assert resolution.final_ext == "pdf"
+
+
+def test_turn_the_presentation_into_a_pdf_unaffected_by_source_veto():
+    """The pdf pattern is phrase-shaped (match begins at 'presentation') —
+    the source veto must not kill target asks of this shape."""
+    ext, _reason = _requested_output_extension_match(
+        "turn the presentation in pdf format please"
+    )
+    assert ext == "pdf"
+
+
+def test_source_veto_does_not_break_plain_deck_requests():
+    assert _requested_output_extension_match("make another slide deck")[0] == "pptx"
+    assert (
+        _requested_output_extension_match(
+            "build a PowerPoint deck based on a PDF source document"
+        )[0]
+        == "pptx"
+    )

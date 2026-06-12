@@ -267,3 +267,21 @@ def test_conflict_fields_whitelisted_in_all_payload_sites():
     from app.gateway.routers import builder_canvas
 
     assert "format_conflict_resolved" in inspect.getsource(builder_canvas)
+
+
+def test_html_emit_accepted_for_misderived_pptx_target(tmp_path):
+    """The 2026-06-12 second report shape: user explicitly asked for html,
+    dispatch misderived pptx — an emitted .html matching the user stamp is
+    conflict-resolved instead of rejected."""
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "site.html").write_text("<!doctype html><html><body>ok</body></html>")
+    state = _state(
+        outputs,
+        target="/mnt/user-data/outputs/deck.pptx",
+        user_requested_ext="html",
+    )
+    override = _format_conflict_user_override(
+        {"artifact_path": "/mnt/user-data/outputs/site.html"}, state
+    )
+    assert override == {"builder_artifact_target_path": "/mnt/user-data/outputs/deck.html"}
