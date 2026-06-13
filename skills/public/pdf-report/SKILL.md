@@ -26,10 +26,12 @@ explicit smoke tests, demos, or "simple PDF" checks.
    fetch at least one approved result with `builder_web_fetch`.
 3. For charts, diagrams, visual explanations, or visual reports, use
    `/mnt/skills/public/chart-visualization/SKILL.md` to choose chart/diagram
-   forms and data shape. Then create embeddable local assets with
-   `generate_visual_asset` under `/mnt/user-data/outputs/visuals/`. Read
-   `/mnt/skills/public/visual-design/SKILL.md` as design guidance, not as a
-   replacement for the report content.
+   forms and data shape. Then create embeddable local assets under
+   `/mnt/user-data/outputs/visuals/`: use `generate_excalidraw_diagram` for
+   architecture, process, sequence, timeline, system-map, comparison, cycle,
+   or concept-map diagrams; use `generate_visual_asset` for numeric charts
+   and simple data-shaped visuals. Read `/mnt/skills/public/visual-design/SKILL.md`
+   as design guidance, not as a replacement for the report content.
 4. Write a report source under `/mnt/user-data/outputs/`, usually
    `/mnt/user-data/outputs/<slug>.md`. Use HTML source only when the layout
    needs richer visual structure.
@@ -61,10 +63,12 @@ render_markdown_to_pdf(markdown_path="/mnt/user-data/outputs/<slug>.md", pdf_pat
 
 ## Visual Rules
 
-- Use `chart-visualization` to decide the right visual grammar and
-  `generate_visual_asset` for local embeddable bar/line/pie charts, timelines,
-  process flows, architecture diagrams, comparison matrices, quadrants, and
-  concept maps.
+- Use `chart-visualization` to decide the right visual grammar.
+- Use `generate_excalidraw_diagram` for technical diagrams: architecture,
+  process flows, concept maps, timelines, cycles, system maps, comparisons,
+  and sequences.
+- Use `generate_visual_asset` for local embeddable bar/line/pie charts,
+  comparison matrices, quadrants, and compact data visuals.
 - Use image-generation only when the user explicitly asks for generated
   images, illustrations, visual scenes, or artwork.
 - Never use remote chart URLs as final visual evidence. All deliverable

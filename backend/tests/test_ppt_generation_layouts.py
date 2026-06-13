@@ -276,6 +276,40 @@ class TestGeneratePptLayouts:
         # Legacy dark styles keep resolving to a dark theme.
         assert gen.slide_theme(plan) is gen.THEMES["boardroom"]
 
+    def test_slide_images_are_composed_with_editable_text_not_image_album(self, tmp_path: Path) -> None:
+        hero = _write_png(tmp_path / "hero.png")
+        plan = {
+            "title": "Open Claw",
+            "theme": "boardroom",
+            "slides": [
+                {
+                    "slide_number": 1,
+                    "layout": "title",
+                    "title": "Open Claw Assistant",
+                    "subtitle": "A safer operator workflow",
+                },
+                {
+                    "slide_number": 2,
+                    "layout": "content_image",
+                    "title": "Runtime Loop",
+                    "key_points": ["Observe", "Plan", "Act", "Verify"],
+                },
+            ],
+        }
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(json.dumps(plan), encoding="utf-8")
+        output = tmp_path / "deck.pptx"
+
+        message = gen.generate_ppt(str(plan_file), [str(hero), str(hero)], str(output))
+
+        assert message == "Successfully generated presentation with 2 slides (picture_count=2)"
+        prs = Presentation(str(output))
+        assert "Open Claw Assistant" in _slide_texts(prs.slides[0])
+        assert "Runtime Loop" in _slide_texts(prs.slides[1])
+        body_text = " ".join(_slide_texts(prs.slides[1]))
+        assert "Observe" in body_text
+        assert "Verify" in body_text
+
     def test_design_language_deck_terra_and_noir(self, tmp_path: Path) -> None:
         png = _write_png(tmp_path / "visuals" / "chart.png")
         for theme_name in ("terra", "noir"):

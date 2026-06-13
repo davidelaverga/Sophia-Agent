@@ -1077,8 +1077,10 @@ def _visual_expectations_line(description: str, task_type: str) -> str | None:
     styles = [kw for kw in _VISUAL_STYLE_KEYWORDS if kw in lowered]
     style_note = f" Preferred style cues from the user: {', '.join(styles[:3])}." if styles else ""
     return (
-        "Visual expectations: enrich with generated imagery per the image "
-        f"enrichment policy (sequential slide images, max 8 for PPTX).{style_note}"
+        "Visual expectations: create a polished, visual artifact. Use generated "
+        "imagery for hero/section/illustrative assets when useful; use charts "
+        "and Excalidraw-style diagrams for factual visuals. For PPTX, keep the "
+        f"deck editable rather than image-only.{style_note}"
     )
 
 

@@ -522,7 +522,7 @@ _VISUAL_DESIGN_SKILL_PATH_MARKERS = (
     "/skills/visual-design/SKILL.md",
     "/mnt/skills/visual-design/SKILL.md",
 )
-_VISUAL_ASSET_TOOL_NAMES = frozenset({"generate_visual_asset"})
+_VISUAL_ASSET_TOOL_NAMES = frozenset({"generate_visual_asset", "generate_excalidraw_diagram"})
 _VISUAL_ASSET_EXTENSIONS = frozenset({".svg", ".png", ".jpg", ".jpeg", ".webp"})
 _WRITE_ERROR_CLASS_MARKERS = (
     ("missing_thread_id", ("thread id not available", "nonetype' object has no attribute 'get")),
@@ -2516,11 +2516,14 @@ def _pptx_skill_correction_message(state: dict[str, Any]) -> str:
         "`/mnt/user-data/workspace/`.\n"
         "3. Compose the deck by running "
         "`/mnt/skills/public/ppt-generation/scripts/generate.py` with "
-        "`--plan-file` and `--output-file` only.\n"
-        "4. If image-generation is enabled for this run, use the DeerFlow-native "
-        "sequential slide-image workflow (one image per slide, previous slide as "
-        "reference, max 8 calls — enforced). If image generation fails, continue "
-        "with a chart/text deck — never let imagery block the deliverable.\n"
+        "`--plan-file` and `--output-file`. Reference local images/charts/diagrams "
+        "inside the plan; pass `--slide-images` only for a small set of hero or "
+        "section visual assets, never as a replacement for editable slide text.\n"
+        "4. If image-generation is enabled for this run, use it for covers, "
+        "section openers, or illustrative assets. Use generate_visual_asset for "
+        "charts and generate_excalidraw_diagram for technical diagrams. If image "
+        "generation fails, continue with diagram/chart/text layouts — never let "
+        "imagery block the deliverable.\n"
         "5. Emit only after the `.pptx` exists and is a valid PowerPoint package.\n\n"
         "If deck composition or validation cannot complete after this correction, "
         "emit a real .html/.md fallback only if it is marked with "
@@ -4579,9 +4582,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "Error: emit_builder_artifact rejected — the user requested charts, "
                 "diagrams, or visuals, but the artifact does not contain verified "
                 "visual evidence yet. Read /mnt/skills/public/visual-design/SKILL.md "
-                "if you have not already, create a local visual with generate_visual_asset "
-                "under /mnt/user-data/outputs/visuals/, then embed or reference it before "
-                "emitting. Inline SVG in HTML also counts."
+                "if you have not already, create a local visual under "
+                "/mnt/user-data/outputs/visuals/ with generate_visual_asset for charts "
+                "or generate_excalidraw_diagram for technical diagrams, then embed or "
+                "reference it before emitting. Inline SVG in HTML also counts."
             )
         if _requested_pdf_artifact(state):
             primary = artifact_args.get("artifact_path")
@@ -5648,8 +5652,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         f"{attempts} times with no usable output "
                         f"(last error: {diagnostics.get('image_generation_error_class') or 'unknown'}). "
                         "Stop calling the image-generation script in this build. Compose the "
-                        "deliverable now using generate_visual_asset charts/diagrams and text "
-                        "layouts — a chart/text-only deliverable is valid."
+                        "deliverable now using generate_visual_asset charts, "
+                        "generate_excalidraw_diagram technical diagrams, and text layouts — "
+                        "a chart/diagram/text deliverable is valid."
                     )
                 )
             ],
@@ -6445,8 +6450,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if attempts >= 1 and successes == 0 and error_class in _IMAGE_GENERATION_TERMINAL_ERRORS:
             rejection = (
                 f"Error: image generation is unavailable in this environment ({error_class}). "
-                "Do not call it again. Proceed with generate_visual_asset charts and text "
-                "layouts — a chart/text deliverable is valid."
+                "Do not call it again. Proceed with generate_visual_asset charts, "
+                "generate_excalidraw_diagram technical diagrams, and text layouts — "
+                "a chart/diagram/text deliverable is valid."
             )
         elif attempts + in_command > _image_generation_max_calls(state):
             generated = [

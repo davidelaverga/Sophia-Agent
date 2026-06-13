@@ -55,13 +55,11 @@ def test_pptx_workflow_card_requires_deerflow_native_sequence() -> None:
 
     assert "image-generation/scripts/generate.py" in card
     assert "ppt-generation/scripts/generate.py" in card
-    # Normal decks default to the DeerFlow image-first path. The no-image path
-    # is only for explicit plain/text-only/no-visual briefs or imagegen outage.
-    assert "Normal slide decks default to the DeerFlow visual path" in card
-    assert "one 16:9 slide image per slide" in card
-    assert "previous slide image as the reference" in card
-    assert "HARD CAP" in card
-    assert "plain/text-only/no-visual" in card
+    assert "Normal decks default to polished visual treatment" in card
+    assert "generate_excalidraw_diagram" in card
+    assert "editable text" in card
+    assert "slide-image album" in card
+    assert "plain, text-only, or no-visual" in card
     assert "PPTX" in card
     assert "passes structural validation" in card
     assert "No Silent Format Swaps" in card
@@ -76,6 +74,7 @@ def test_pdf_workflow_card_uses_pdf_report_skill_not_default_imagegen() -> None:
     assert "academic-paper-review" in card
     assert "systematic-literature-review" in card
     assert "chart-visualization" in card
+    assert "generate_excalidraw_diagram" in card
     assert "render_markdown_to_pdf" in card
     assert "Do not use image-generation for normal charts/diagrams" in card
     assert "ON BY DEFAULT" not in card
@@ -93,6 +92,7 @@ def test_pdf_report_skill_is_source_first_and_renderer_backed() -> None:
     assert "chart-visualization" in text
     assert "render_markdown_to_pdf" in text
     assert "generate_visual_asset" in text
+    assert "generate_excalidraw_diagram" in text
     assert "artifact_is_fallback=true" in text
 
 
@@ -101,5 +101,6 @@ def test_visuals_workflow_card_requires_design_skill_and_local_assets() -> None:
 
     assert "/mnt/skills/public/visual-design/SKILL.md" in card
     assert "generate_visual_asset" in card
+    assert "generate_excalidraw_diagram" in card
     assert "/mnt/user-data/outputs/visuals/" in card
     assert "remote chart URLs" in card

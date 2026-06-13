@@ -112,12 +112,13 @@ deliverable.
   visuals.
 - The harness validates visual evidence with at most one bounded repair turn;
   it should prevent false visual success, not author the creative solution.
-- Choose the right visual path: use `generate_visual_asset` for data charts,
-  flowcharts, timelines, matrices, and architecture diagrams (deterministic,
-  fast, no API cost). Use the image-generation skill for illustrative
-  content: normal PPTX slide images, hero images, section covers, conceptual
-  scenes (bounded by the image-generation cap; an image-generation failure must
-  never stall the deliverable — continue with charts and text).
+- Choose the right visual path: use `generate_visual_asset` for numeric/data
+  charts and compact matrices; use `generate_excalidraw_diagram` for
+  architecture diagrams, process flows, timelines, concept maps, system maps,
+  cycles, comparisons, and sequences; use the image-generation skill for
+  illustrative content such as hero images, section covers, or conceptual
+  scenes. Image-generation failure must never stall the deliverable — continue
+  with charts, Excalidraw diagrams, and text.
 - For PDF and PPTX, support visuals must be embedded into the final PDF/deck.
   Generated assets under `/mnt/user-data/outputs/visuals/` are support files,
   not deliverables. Use PNG assets in PDF sources and PPTX plans; keep SVG for

@@ -12,9 +12,11 @@ Use this card only for requested `.pdf` builds.
 4. If the user requested charts, diagrams, or visuals, use
    `/mnt/skills/public/chart-visualization/SKILL.md` to choose the right
    chart/diagram form, read `/mnt/skills/public/visual-design/SKILL.md` for
-   design guidance, then create at least one local visual asset with
-   `generate_visual_asset` under
-   `/mnt/user-data/outputs/visuals/`. Use the generated `.png` path for PDF
+   design guidance, then create local visual assets under
+   `/mnt/user-data/outputs/visuals/`. Use `generate_excalidraw_diagram` for
+   architecture, process, timeline, sequence, system-map, comparison, cycle,
+   or concept-map diagrams. Use `generate_visual_asset` for numeric charts
+   and simple data-shaped visuals. Use the generated `.png` path for PDF
    embedding; SVG is useful for HTML but Pandoc/XeLaTeX should receive PNG.
    Do not use image-generation for normal charts/diagrams; use it only when
    the user explicitly asks for generated illustrations or images.

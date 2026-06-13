@@ -433,10 +433,10 @@ def _image_generation_enabled(
     """Whether the image-generation skill is offered to the builder.
 
     Image targets and explicit requests keep legacy behavior. PPTX defaults to
-    DeerFlow's image-first presentation path unless the brief explicitly asks
-    for a plain/text-only/no-visual deck. PDF/HTML chart and diagram work uses
-    deterministic local visual assets unless the user explicitly asks for
-    generated imagery.
+    polished visual treatment unless the brief explicitly asks for a
+    plain/text-only/no-visual deck, but generated images are support assets
+    inside an editable deck. PDF/HTML chart and diagram work uses local visual
+    assets unless the user explicitly asks for generated imagery.
     """
     if artifact_target_ext in _IMAGE_OUTPUT_EXTENSIONS:
         return True
@@ -478,7 +478,7 @@ def _image_enrichment_section(artifact_target_ext: str = ".pptx") -> str:
         plan_lines = (
             "- STEP 0 (required): run the preflight check FIRST — "
             "`python /mnt/skills/public/image-generation/scripts/generate.py --preflight`. "
-            "If it fails, proceed chart/text-only immediately; the harness records why.\n"
+            "If it fails, proceed diagram/chart/text-only immediately; the harness records why.\n"
             "- Generate 1 cover image (16:9, named "
             "/mnt/user-data/outputs/visuals/cover-<desc>.png — the renderer "
             "automatically places it on the title page) and optionally 1 section "
@@ -489,11 +489,14 @@ def _image_enrichment_section(artifact_target_ext: str = ".pptx") -> str:
         plan_lines = (
             "- STEP 0 (required): run the preflight check FIRST — "
             "`python /mnt/skills/public/image-generation/scripts/generate.py --preflight`. "
-            "If it fails, proceed chart/text-only immediately; the harness records why.\n"
-            "- For PPTX, follow the DeerFlow-native image-first path by generating "
-            "one 16:9 slide image per slide, sequentially, using the previous slide "
-            "as a reference image. HARD CAP: 8 image-generation script calls per "
-            "presentation build — calls beyond the cap are rejected by the harness.\n"
+            "If it fails, proceed diagram/chart/text-only immediately; the harness records why.\n"
+            "- For PPTX, generated images are support assets for covers, section "
+            "openers, or illustrative scenes inside an editable PowerPoint deck. "
+            "Do NOT make the deck a folder of full-slide screenshots. Use the "
+            "ppt-generation plan/compiler so titles, body text, notes, charts, "
+            "and diagrams remain editable. HARD CAP: 8 image-generation script "
+            "calls per presentation build — calls beyond the cap are rejected by "
+            "the harness.\n"
         )
     return (
         "<image_enrichment>\n"
@@ -501,14 +504,15 @@ def _image_enrichment_section(artifact_target_ext: str = ".pptx") -> str:
         "deliverable, an explicit generated-image request, or a PPTX deck that "
         "did not ask to be plain/text-only/no-visual. Policy:\n"
         f"{plan_lines}"
-        "- Charts, diagrams, timelines, and data visuals stay on the deterministic "
-        "generate_visual_asset path (no API cost; does not count toward the cap).\n"
+        "- Charts and data visuals use generate_visual_asset; technical diagrams "
+        "use generate_excalidraw_diagram. These support assets do not count "
+        "toward the image-generation cap.\n"
         "- Save generated images under /mnt/user-data/outputs/visuals/ "
         "(hero-<desc>.png, slide-<n>-<desc>.png, cover-<desc>.png) and reference "
         "them from the plan/source before composing.\n"
         "- A failed image call must NEVER stall the deliverable: at most ONE retry "
-        "with a simplified prompt, then continue with charts and text — a "
-        "chart/text-only deliverable is valid.\n"
+        "with a simplified prompt, then continue with diagrams, charts, and text — "
+        "a diagram/chart/text deliverable is valid.\n"
         "- Skip generated imagery entirely only if the brief clearly asks for a "
         "plain, text-only, or no-visual deliverable.\n"
         "</image_enrichment>"
@@ -1010,10 +1014,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "    * **PDF**: follow the PDF workflow card. A valid render is terminal-ready; emit immediately "
             "unless Sophia asks for one layout repair.\n"
             "    * **PPTX / presentation**: follow the PPTX workflow card. Reading SKILL.md alone is not "
-            "completion; normal success requires deck composition and a valid .pptx. When image-generation "
-            "is listed in <skill_system>, use the DeerFlow-native sequential slide-image workflow unless "
-            "the brief explicitly asks for a plain/text-only/no-visual deck. Never let an image failure "
-            "stall a valid deck; fall back to chart/text composition with honest diagnostics.\n"
+            "completion; normal success requires deck composition and a valid .pptx with editable text. "
+            "When image-generation is listed in <skill_system>, use it for hero/section/illustrative "
+            "assets inside the deck, not as a replacement for slide structure. Never let an image failure "
+            "stall a valid deck; fall back to diagram/chart/text composition with honest diagnostics.\n"
             "    * **HTML**: follow the HTML workflow card. Standalone browser-renderable HTML is a text "
             "deliverable, not a frontend app unless the user requested app behavior.\n"
             "    * **Standalone chart / image**: use the chart-visualization or image-generation skill. The "

@@ -1054,7 +1054,7 @@ def test_start_builder_task_treats_failed_status_as_terminal(monkeypatch):
     assert "new-1" in response.update["async_tasks"]
 
 
-# ---- visual expectations brief line (enrichment-by-default, 2026-06-11) -----
+# ---- visual expectations brief line (editable visual decks, 2026-06-13) -----
 
 
 def test_presentation_brief_gains_visual_expectations_line():
@@ -1063,7 +1063,8 @@ def test_presentation_brief_gains_visual_expectations_line():
     line = _visual_expectations_line("Build an investor deck about our roadmap", "presentation")
     assert line is not None
     assert "Visual expectations" in line
-    assert "max 8" in line
+    assert "deck editable rather than image-only" in line
+    assert "Excalidraw-style diagrams" in line
 
 
 def test_plain_deck_brief_gets_opt_out_line():
@@ -1080,7 +1081,7 @@ def test_explaining_deck_does_not_trigger_plain_opt_out_line():
     line = _visual_expectations_line("Build a deck explaining OpenClaw", "presentation")
     assert line is not None
     assert "do NOT use generated imagery" not in line
-    assert "max 8" in line
+    assert "deck editable rather than image-only" in line
 
 
 def test_style_keywords_surface_in_brief():

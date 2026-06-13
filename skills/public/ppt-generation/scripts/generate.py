@@ -1,5 +1,7 @@
 import json
 import os
+import shutil
+import subprocess
 import sys
 import zipfile
 from io import BytesIO
@@ -19,6 +21,63 @@ _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 _IMAGE_DEPENDENT_LAYOUTS = {"full_bleed_image", "content_image"}
 
 
+def _pptxgenjs_enabled() -> bool:
+    return os.getenv("SOPHIA_PPTXGENJS", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _candidate_js_runtime_dirs() -> list[Path]:
+    configured = os.getenv("SOPHIA_ARTIFACT_JS_RUNTIME")
+    candidates: list[Path] = []
+    if configured:
+        candidates.append(Path(configured))
+    candidates.append(Path("/app/backend/packages/harness/deerflow/sophia/js"))
+    script_path = Path(__file__).resolve()
+    for parent in script_path.parents:
+        candidates.append(parent / "backend/packages/harness/deerflow/sophia/js")
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved not in seen:
+            unique.append(resolved)
+            seen.add(resolved)
+    return unique
+
+
+def _pptxgenjs_script() -> Path | None:
+    for runtime_dir in _candidate_js_runtime_dirs():
+        script = runtime_dir / "compile_pptx.mjs"
+        if script.exists():
+            return script
+    return None
+
+
+def _generate_with_pptxgenjs(plan_file: str, slide_images: list[str], output_file: str) -> str:
+    script = _pptxgenjs_script()
+    node = shutil.which("node")
+    if script is None or node is None:
+        raise RuntimeError("PptxGenJS runtime is unavailable")
+    command = [
+        node,
+        str(script),
+        "--plan-file",
+        plan_file,
+        "--output-file",
+        output_file,
+    ]
+    if slide_images:
+        command.append("--slide-images")
+        command.extend(slide_images)
+    result = subprocess.run(command, check=False, text=True, capture_output=True)
+    if result.stdout:
+        print(result.stdout.rstrip())
+    if result.stderr:
+        print(result.stderr.rstrip(), file=sys.stderr)
+    if result.returncode != 0:
+        raise RuntimeError(f"PptxGenJS compiler failed with exit code {result.returncode}")
+    return "Successfully generated presentation with PptxGenJS"
+
+
 def generate_ppt(
     plan_file: str,
     slide_images: list[str],
@@ -35,6 +94,9 @@ def generate_ppt(
     Returns:
         Status message
     """
+    if _pptxgenjs_enabled():
+        return _generate_with_pptxgenjs(plan_file, slide_images, output_file)
+
     plan = load_plan(plan_file)
     _emit_plan_lint(plan)
     slide_width, slide_height = slide_dimensions(plan)
@@ -47,33 +109,36 @@ def generate_ppt(
     if not slides_info:
         slides_info = [{"slide_number": 1, "type": "title", "title": plan.get("title", "Presentation")}]
 
-    if slide_images:
-        for i, image_path in enumerate(slide_images):
-            slide = prs.slides.add_slide(blank_layout)
-            add_slide_image(slide, image_path, slide_width, slide_height)
-            if i < len(slides_info):
-                add_speaker_notes(slide, slides_info[i])
-    else:
-        for slide_info in slides_info:
-            slide = prs.slides.add_slide(blank_layout)
-            image_path = slide_visual_image_path(slide_info, plan_file, output_file)
-            if image_path and not os.path.exists(image_path):
-                # Degrade to the text layout instead of aborting the whole
-                # deck (or leaving an empty visual card) on a missing file.
-                print(
-                    f"Slide image missing, using text layout: {image_path}",
-                    file=sys.stderr,
-                )
-                image_path = None
-            layout_name = resolve_layout(slide_info, image_path)
-            if image_path is None and layout_name in _IMAGE_DEPENDENT_LAYOUTS:
-                # Explicit image layout without a usable image: re-resolve as if
-                # no layout was requested. Title-typed slides keep the title
-                # treatment; everything else falls back to content_text.
-                print(f"Layout '{layout_name}' requires an image, using text layout", file=sys.stderr)
-                layout_name = "title" if str(slide_info.get("type") or "").lower() == "title" else "content_text"
-            LAYOUT_DISPATCH[layout_name](slide, slide_info, plan, image_path, slide_width, slide_height)
-            add_speaker_notes(slide, slide_info)
+    if slide_images and len(slide_images) != len(slides_info):
+        print(
+            "Slide image count does not match plan slide count; extra slides "
+            "will use plan-referenced visuals or text layouts",
+            file=sys.stderr,
+        )
+
+    for index, slide_info in enumerate(slides_info):
+        slide = prs.slides.add_slide(blank_layout)
+        image_from_cli = index < len(slide_images)
+        image_path = slide_images[index] if image_from_cli else slide_visual_image_path(slide_info, plan_file, output_file)
+        if image_path and not os.path.exists(image_path):
+            if image_from_cli:
+                raise FileNotFoundError(f"Slide image not found: {image_path}")
+            # Degrade to the text layout instead of aborting the whole deck
+            # (or leaving an empty visual card) on a missing file.
+            print(
+                f"Slide image missing, using text layout: {image_path}",
+                file=sys.stderr,
+            )
+            image_path = None
+        layout_name = resolve_layout(slide_info, image_path)
+        if image_path is None and layout_name in _IMAGE_DEPENDENT_LAYOUTS:
+            # Explicit image layout without a usable image: re-resolve as if
+            # no layout was requested. Title-typed slides keep the title
+            # treatment; everything else falls back to content_text.
+            print(f"Layout '{layout_name}' requires an image, using text layout", file=sys.stderr)
+            layout_name = "title" if str(slide_info.get("type") or "").lower() == "title" else "content_text"
+        LAYOUT_DISPATCH[layout_name](slide, slide_info, plan, image_path, slide_width, slide_height)
+        add_speaker_notes(slide, slide_info)
 
     picture_count = save_and_validate_pptx(prs, output_file)
     return f"Successfully generated presentation with {len(prs.slides)} slides (picture_count={picture_count})"

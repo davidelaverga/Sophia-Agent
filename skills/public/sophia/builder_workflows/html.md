@@ -10,6 +10,8 @@ Use this card for requested `.html` files and for HTML fallback artifacts.
 - For chart/diagram/visual requests, read
   `/mnt/skills/public/visual-design/SKILL.md`, then create inline SVG/CSS/HTML
   diagrams or embed local visual assets from `/mnt/user-data/outputs/visuals/`.
+  Prefer `generate_excalidraw_diagram` for technical process/system diagrams
+  and `generate_visual_asset` for numeric charts.
 - Emit the `.html` file only after it exists and can be rendered by a browser.
 
 When HTML is a fallback for a requested `.pptx` or `.pdf`, mark it explicitly
