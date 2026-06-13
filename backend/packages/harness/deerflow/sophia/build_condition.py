@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MAX_ITERATIONS = 3
 _PDFTOPPM_TIMEOUT_SECONDS = 60
 _RASTER_DPI = "110"
-_RASTER_MAX_PAGES = 3
+_RASTER_MAX_PAGES = 6
 
 # Adapted verbatim-in-spirit from the Anthropic/Composio pptx skill's
 # thumbnail-validation instructions — the checklist the model reviews the
@@ -144,7 +144,33 @@ def iteration_available(state: dict[str, Any]) -> bool:
     return iterations_used(state) < iteration_cap()
 
 
-def rasterize_preview_pages(pdf_path: Path, max_pages: int = _RASTER_MAX_PAGES) -> list[bytes]:
+def _raster_max_pages() -> int:
+    raw = os.environ.get("SOPHIA_BUILDER_VISION_REVIEW_MAX_PAGES", "").strip()
+    try:
+        return max(1, int(raw)) if raw else _RASTER_MAX_PAGES
+    except ValueError:
+        return _RASTER_MAX_PAGES
+
+
+def _pdf_page_count(pdf_path: Path) -> int | None:
+    try:
+        from pypdf import PdfReader
+
+        return len(PdfReader(str(pdf_path)).pages)
+    except Exception:
+        return None
+
+
+def _sample_pages(page_count: int | None, max_pages: int) -> list[int]:
+    if not page_count or page_count <= max_pages:
+        return list(range(1, (page_count or max_pages) + 1))
+    candidates = {1, 2, page_count - 1, page_count}
+    middle = max(1, page_count // 2)
+    candidates.update({middle - 1, middle, middle + 1})
+    return sorted(page for page in candidates if 1 <= page <= page_count)[:max_pages]
+
+
+def rasterize_preview_pages(pdf_path: Path, max_pages: int | None = None) -> list[bytes]:
     """First pages of ``pdf_path`` as PNG bytes via pdftoppm. Best-effort.
 
     Returns [] when poppler is unavailable or rasterization fails — a repair
@@ -156,35 +182,43 @@ def rasterize_preview_pages(pdf_path: Path, max_pages: int = _RASTER_MAX_PAGES) 
         return []
     if not pdf_path.is_file():
         return []
+    page_cap = max_pages or _raster_max_pages()
+    page_count = _pdf_page_count(pdf_path)
+    pages_to_render = _sample_pages(page_count, page_cap)
     try:
         with tempfile.TemporaryDirectory(prefix="vq-raster-") as tmp_dir:
-            prefix = Path(tmp_dir) / "page"
-            completed = subprocess.run(  # noqa: S603 — binary from shutil.which
-                [
-                    pdftoppm,
-                    "-png",
-                    "-f",
-                    "1",
-                    "-l",
-                    str(max_pages),
-                    "-r",
-                    _RASTER_DPI,
-                    str(pdf_path),
-                    str(prefix),
-                ],
-                capture_output=True,
-                timeout=_PDFTOPPM_TIMEOUT_SECONDS,
-                check=False,
-            )
-            if completed.returncode != 0:
-                logger.warning(
-                    "[BuildCondition] pdftoppm failed rc=%s stderr=%s",
-                    completed.returncode,
-                    (completed.stderr or b"")[:300],
+            output: list[bytes] = []
+            for page in pages_to_render:
+                prefix = Path(tmp_dir) / f"page-{page}"
+                completed = subprocess.run(  # noqa: S603 — binary from shutil.which
+                    [
+                        pdftoppm,
+                        "-png",
+                        "-f",
+                        str(page),
+                        "-l",
+                        str(page),
+                        "-r",
+                        _RASTER_DPI,
+                        str(pdf_path),
+                        str(prefix),
+                    ],
+                    capture_output=True,
+                    timeout=_PDFTOPPM_TIMEOUT_SECONDS,
+                    check=False,
                 )
-                return []
-            pages = sorted(Path(tmp_dir).glob("page*.png"))
-            return [page.read_bytes() for page in pages[:max_pages]]
+                if completed.returncode != 0:
+                    logger.warning(
+                        "[BuildCondition] pdftoppm failed page=%s rc=%s stderr=%s",
+                        page,
+                        completed.returncode,
+                        (completed.stderr or b"")[:300],
+                    )
+                    continue
+                produced = sorted(Path(tmp_dir).glob(f"page-{page}*.png"))
+                if produced:
+                    output.append(produced[0].read_bytes())
+            return output
     except (OSError, subprocess.TimeoutExpired):
         logger.warning("[BuildCondition] rasterization failed", exc_info=True)
         return []
@@ -218,8 +252,63 @@ def advisory_enabled() -> bool:
     return os.environ.get("SOPHIA_BUILDER_VQ_ADVISORY", "1").strip().lower() not in {"0", "false", "off"}
 
 
-def advisory_review(pdf_path: Path) -> str | None:
-    """ONE advisory holistic pass (VQ-10): Haiku + vision over the rasters.
+def _review_model_name() -> str | None:
+    explicit = os.environ.get("SOPHIA_BUILDER_VISION_REVIEW_MODEL", "").strip()
+    if explicit:
+        return explicit
+    try:
+        from deerflow.config.app_config import get_app_config
+        from deerflow.agents.sophia_agent.vision_gate import supports_vision
+
+        for model in get_app_config().models:
+            name = getattr(model, "name", None)
+            provider_model = getattr(model, "model", None)
+            for candidate in (name, provider_model):
+                if isinstance(candidate, str) and supports_vision(candidate):
+                    return name if isinstance(name, str) else candidate
+    except Exception:
+        logger.warning("[BuildCondition] vision review model discovery failed", exc_info=True)
+    return None
+
+
+def _model_invoke(messages: list[Any]) -> Any:
+    model_name = _review_model_name()
+    if not model_name:
+        raise RuntimeError("vision_review_model_unavailable")
+    from deerflow.models.factory import create_chat_model
+
+    return create_chat_model(name=model_name, max_tokens=800, timeout=60.0, max_retries=0).invoke(messages)
+
+
+def _parse_review_verdict(text: str) -> dict[str, Any] | None:
+    clean = (text or "").strip()
+    if not clean:
+        return None
+    if clean.upper().startswith("PASS"):
+        return {"verdict": "pass", "findings": []}
+    try:
+        import json
+
+        start = clean.find("{")
+        end = clean.rfind("}")
+        if start >= 0 and end > start:
+            payload = json.loads(clean[start : end + 1])
+            verdict = str(payload.get("verdict") or "").lower()
+            findings = payload.get("findings")
+            if verdict in {"pass", "repair", "severe_fail"}:
+                return {
+                    "verdict": verdict,
+                    "findings": [str(item)[:240] for item in findings if isinstance(item, str)][:5]
+                    if isinstance(findings, list)
+                    else [],
+                }
+    except Exception:
+        pass
+    return {"verdict": "repair", "findings": [clean[:500]]}
+
+
+def rendered_artifact_review(pdf_path: Path) -> dict[str, Any] | None:
+    """ONE rendered-artifact vision pass over PDF/PPTX preview rasters.
 
     Condition-only judgment — returns findings text for the repair prompt or
     ``None`` for "no findings / unavailable". Strictly best-effort: any error
@@ -227,29 +316,23 @@ def advisory_review(pdf_path: Path) -> str | None:
     """
     if not advisory_enabled():
         return None
-    rasters = rasterize_preview_pages(pdf_path, max_pages=2)
+    rasters = rasterize_preview_pages(pdf_path, max_pages=_raster_max_pages())
     if not rasters:
         return None
     try:
-        from langchain_anthropic import ChatAnthropic
         from langchain_core.messages import HumanMessage
 
-        model = ChatAnthropic(
-            model="claude-haiku-4-5-20251001",
-            api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
-            max_tokens=600,
-            timeout=45.0,
-            max_retries=0,
-        )
         content: list[dict[str, Any]] = [
             {
                 "type": "text",
                 "text": (
                     "You are reviewing rendered pages of a generated deliverable. "
-                    "Judge ONLY: legibility (no cutoff/overlapping text), layout "
-                    "coherence, and whether figures look complete. Reply with "
-                    "either exactly 'PASS' or a short bullet list of concrete "
-                    "defects (max 5 bullets, each actionable)."
+                    "Judge ONLY visible artifact quality: legibility, contrast, "
+                    "text overlap, clipped/cutoff charts or labels, empty/sparse "
+                    "pages, and whether slides/pages look polished enough for a "
+                    "professional deliverable. Reply as JSON only: "
+                    "{\"verdict\":\"pass|repair|severe_fail\",\"findings\":[\"...\"]}. "
+                    "Use severe_fail only when the artifact is unusable or mostly blank."
                 ),
             }
         ]
@@ -264,12 +347,23 @@ def advisory_review(pdf_path: Path) -> str | None:
                     },
                 }
             )
-        reply = model.invoke([HumanMessage(content=content)])
+        reply = _model_invoke([HumanMessage(content=content)])
         text = reply.text() if callable(getattr(reply, "text", None)) else str(reply.content)
-        text = (text or "").strip()
-        if not text or text.upper().startswith("PASS"):
+        verdict = _parse_review_verdict(text)
+        if not verdict or verdict["verdict"] == "pass":
             return None
-        return text[:1500]
+        return verdict
     except Exception:  # noqa: BLE001 — advisory is strictly best-effort
-        logger.warning("[BuildCondition] advisory review failed", exc_info=True)
+        logger.warning("[BuildCondition] rendered artifact review failed", exc_info=True)
         return None
+
+
+def advisory_review(pdf_path: Path) -> str | None:
+    """Backward-compatible wrapper for older tests/callers."""
+    result = rendered_artifact_review(pdf_path)
+    if not result:
+        return None
+    findings = result.get("findings")
+    if isinstance(findings, list) and findings:
+        return "\n".join(f"- {item}" for item in findings[:5])
+    return str(result.get("verdict") or "repair")

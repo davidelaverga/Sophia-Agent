@@ -22,6 +22,8 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
 )
 from deerflow.agents.sophia_agent.middlewares.builder_budget import (
     budget_allows_iteration,
+    builder_budget_for_task,
+    max_non_artifact_turns,
 )
 from deerflow.sophia.build_condition import (
     iteration_available,
@@ -59,8 +61,39 @@ def test_iteration_cap_env_override(monkeypatch):
 def test_iteration_cap_never_below_one(monkeypatch):
     monkeypatch.setenv("SOPHIA_BUILDER_MAX_ITERATIONS", "0")
     assert iteration_cap() == 1
+
+
+def test_iteration_cap_invalid_env_uses_default(monkeypatch):
     monkeypatch.setenv("SOPHIA_BUILDER_MAX_ITERATIONS", "junk")
     assert iteration_cap() == 3
+
+
+def test_builder_budget_policy_uses_complex_tier_for_pdf_and_pptx(monkeypatch):
+    monkeypatch.delenv("SOPHIA_BUILDER_MAX_COST_USD", raising=False)
+    monkeypatch.delenv("SOPHIA_BUILDER_MAX_TOTAL_TOKENS", raising=False)
+    for prefix in ("SOPHIA_BUILDER_SIMPLE_BUDGET", "SOPHIA_BUILDER_COMPLEX_BUDGET"):
+        for key in (
+            "MAX_COST_USD",
+            "MAX_TOTAL_TOKENS",
+            "MAX_NON_ARTIFACT_TURNS",
+            "FORCE_EMIT_REMAINING_TURNS",
+            "SOFT_WARN_AT_TURN",
+            "FORCE_EMIT_WALL_CLOCK_FRACTION",
+            "REPAIR_RESERVE_USD",
+        ):
+            monkeypatch.delenv(f"{prefix}_{key}", raising=False)
+    simple = builder_budget_for_task(task_type="frontend", artifact_ext="html")
+    pdf = builder_budget_for_task(task_type="document", artifact_ext="pdf")
+    deck = builder_budget_for_task(task_type="presentation", artifact_ext="pptx")
+
+    assert simple["tier"] == "simple"
+    assert simple["max_cost_usd"] == 5.0
+    assert max_non_artifact_turns({"builder_budget": simple}) == 30
+    assert pdf["tier"] == "complex_artifact"
+    assert pdf["max_cost_usd"] == 12.0
+    assert max_non_artifact_turns({"builder_budget": pdf}) == 45
+    assert deck["tier"] == "complex_artifact"
+    assert max_non_artifact_turns({"builder_budget": deck}) == 45
 
 
 def test_iteration_available_respects_counter(monkeypatch):
@@ -170,8 +203,8 @@ def test_advisory_consumes_at_most_one_iteration(tmp_path, monkeypatch):
     # requested); advisory fires once with findings, then never again.
     state["builder_artifact_target_path"] = "/mnt/user-data/outputs/report.pdf"
     monkeypatch.setattr(
-        "deerflow.agents.sophia_agent.middlewares.builder_artifact.advisory_review",
-        lambda _pdf: "- the title overlaps the figure",
+        "deerflow.agents.sophia_agent.middlewares.builder_artifact.rendered_artifact_review",
+        lambda _pdf: {"verdict": "repair", "findings": ["the title overlaps the figure"]},
     )
     request = SimpleNamespace(
         tool_call={"id": "tc", "name": "emit_builder_artifact", "args": {}},
@@ -203,7 +236,7 @@ def test_advisory_pass_returns_none_on_pass(tmp_path, monkeypatch):
         messages=[],
     )
     monkeypatch.setattr(
-        "deerflow.agents.sophia_agent.middlewares.builder_artifact.advisory_review",
+        "deerflow.agents.sophia_agent.middlewares.builder_artifact.rendered_artifact_review",
         lambda _pdf: None,
     )
     assert mw._advisory_rejection_text(

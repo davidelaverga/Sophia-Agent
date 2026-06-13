@@ -7,9 +7,10 @@ description: Use this skill when the builder needs to create a polished PDF repo
 
 ## Purpose
 
-Create a high-quality PDF by authoring a rich Markdown or HTML source document
-first, then compiling it with `render_markdown_to_pdf`. The renderer packages
-the report; it is not the creative author.
+Create a high-quality PDF by orchestrating DeerFlow research/data/chart skills,
+authoring a rich Markdown or HTML source document, then compiling it with
+`render_markdown_to_pdf`. The renderer packages the report; it is not the
+creative author.
 
 Do not use `create_pdf_artifact` for normal reports. That helper is only for
 explicit smoke tests, demos, or "simple PDF" checks.
@@ -17,12 +18,18 @@ explicit smoke tests, demos, or "simple PDF" checks.
 ## Workflow
 
 1. Plan with `write_todos`.
-2. Research before writing when the topic depends on external facts. If
-   `builder_web_search` returns usable factual sources, fetch at least one
-   approved result with `builder_web_fetch`.
-3. If the user requested charts, diagrams, visual explanations, or a visual
-   report, read `/mnt/skills/public/visual-design/SKILL.md` and create local
-   visual assets with `generate_visual_asset`.
+2. For factual reports, use DeerFlow's research skills before writing:
+   `/mnt/skills/public/deep-research/SKILL.md` for general source synthesis,
+   `/mnt/skills/public/academic-paper-review/SKILL.md` for one paper, or
+   `/mnt/skills/public/systematic-literature-review/SKILL.md` for a survey
+   across papers. If `builder_web_search` returns usable factual sources,
+   fetch at least one approved result with `builder_web_fetch`.
+3. For charts, diagrams, visual explanations, or visual reports, use
+   `/mnt/skills/public/chart-visualization/SKILL.md` to choose chart/diagram
+   forms and data shape. Then create embeddable local assets with
+   `generate_visual_asset` under `/mnt/user-data/outputs/visuals/`. Read
+   `/mnt/skills/public/visual-design/SKILL.md` as design guidance, not as a
+   replacement for the report content.
 4. Write a report source under `/mnt/user-data/outputs/`, usually
    `/mnt/user-data/outputs/<slug>.md`. Use HTML source only when the layout
    needs richer visual structure.
@@ -45,6 +52,8 @@ render_markdown_to_pdf(markdown_path="/mnt/user-data/outputs/<slug>.md", pdf_pat
   shorter when the user explicitly asks for a concise document.
 - Use strong section hierarchy, compact tables, source notes, and concrete
   examples.
+- Use DeerFlow research skills to shape the substance; use this skill to turn
+  that substance into a durable PDF source/render pipeline.
 - Avoid one-section-per-page layouts, excessive page breaks, mostly empty
   continuation pages, and oversized tables that waste pages.
 - For visual requests, include at least one actual embedded chart/diagram
@@ -52,9 +61,10 @@ render_markdown_to_pdf(markdown_path="/mnt/user-data/outputs/<slug>.md", pdf_pat
 
 ## Visual Rules
 
-- Use `generate_visual_asset` for bar/line/pie charts, timelines, process
-  flows, architecture diagrams, comparison matrices, quadrants, and concept
-  maps.
+- Use `chart-visualization` to decide the right visual grammar and
+  `generate_visual_asset` for local embeddable bar/line/pie charts, timelines,
+  process flows, architecture diagrams, comparison matrices, quadrants, and
+  concept maps.
 - Use image-generation only when the user explicitly asks for generated
   images, illustrations, visual scenes, or artwork.
 - Never use remote chart URLs as final visual evidence. All deliverable

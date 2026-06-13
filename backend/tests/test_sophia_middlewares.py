@@ -2325,7 +2325,7 @@ class TestBuilderTaskMiddleware:
         from deerflow.agents.sophia_agent.middlewares import builder_task as builder_task_module
         from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
 
-        # Construct fake Skill objects matching the four whitelisted names.
+        # Construct fake Skill objects matching the whitelisted builder names.
         # Each has ``enabled=False`` to simulate the failure mode (missing
         # ``extensions_config.json`` leaves every skill ``enabled=False``).
         class _FakeSkill:
@@ -2339,8 +2339,12 @@ class TestBuilderTaskMiddleware:
 
         fake_skills = [
             _FakeSkill("chart-visualization"),
+            _FakeSkill("pdf-report"),
             _FakeSkill("ppt-generation"),
             _FakeSkill("image-generation"),
+            _FakeSkill("deep-research"),
+            _FakeSkill("academic-paper-review"),
+            _FakeSkill("systematic-literature-review"),
             _FakeSkill("data-analysis"),
             _FakeSkill("unrelated-skill"),  # filtered out by whitelist
         ]
@@ -2363,17 +2367,21 @@ class TestBuilderTaskMiddleware:
             block = BuilderTaskMiddleware._build_skills_inventory_block()
 
         assert block is not None
-        # All four whitelisted skills are present, regardless of enabled state.
+        # All whitelisted skills are present, regardless of enabled state.
         assert "<skill_system>" in block
         assert "chart-visualization" in block
+        assert "pdf-report" in block
         assert "ppt-generation" in block
         assert "image-generation" in block
+        assert "deep-research" in block
+        assert "academic-paper-review" in block
+        assert "systematic-literature-review" in block
         assert "data-analysis" in block
         # The unrelated skill is filtered out by the whitelist.
         assert "unrelated-skill" not in block
         # Observability: the INFO breadcrumb fires either way.
         assert any(
-            "skills_inventory: 4 skills injected" in rec.message for rec in caplog.records
+            "skills_inventory: 8 skills injected" in rec.message for rec in caplog.records
         )
 
     def test_skills_inventory_block_can_omit_image_generation(
@@ -2393,6 +2401,7 @@ class TestBuilderTaskMiddleware:
         fake_skills = [
             _FakeSkill("ppt-generation"),
             _FakeSkill("image-generation"),
+            _FakeSkill("deep-research"),
             _FakeSkill("data-analysis"),
         ]
 
@@ -2406,6 +2415,7 @@ class TestBuilderTaskMiddleware:
 
         assert block is not None
         assert "ppt-generation" in block
+        assert "deep-research" in block
         assert "data-analysis" in block
         assert "image-generation" not in block
 
@@ -4121,7 +4131,8 @@ class TestBuilderArtifactMiddleware:
     # a builder is making genuine progress but each turn is expensive, the
     # turn-count force window (turn 17+) doesn't open before the per-run cap
     # fires. These tests verify that force-emit also activates on wall-clock
-    # crossing 70% of the per-run budget, regardless of turn count.
+    # crossing the configured wall-clock fraction of the per-run budget,
+    # regardless of turn count.
 
     def test_force_choice_triggered_by_wall_clock_with_file(self, tmp_path):
         """1300s elapsed of 1800s (72%) with a real file on disk and turn
@@ -4165,7 +4176,7 @@ class TestBuilderArtifactMiddleware:
 
     def test_force_choice_below_threshold_no_op(self, tmp_path):
         """900s elapsed of 1800s (50%) → no forcing, regardless of file
-        state. Wall-clock gate must only fire above 70%."""
+        state. Wall-clock gate must only fire above the configured threshold."""
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"

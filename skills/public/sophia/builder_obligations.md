@@ -110,15 +110,14 @@ deliverable.
   `/mnt/user-data/outputs/visuals/`. Prose descriptions do not satisfy the
   visual requirement. Remote chart URLs also do not count as completed local
   visuals.
-- The harness enforces a one-repair-turn visual gate: the first emit of a
-  visuals-requested PDF/PPTX with no embedded visuals is rejected with the
-  list of already-generated assets; embed them and emit again.
+- The harness validates visual evidence with at most one bounded repair turn;
+  it should prevent false visual success, not author the creative solution.
 - Choose the right visual path: use `generate_visual_asset` for data charts,
   flowcharts, timelines, matrices, and architecture diagrams (deterministic,
   fast, no API cost). Use the image-generation skill for illustrative
-  content: hero images, section covers, conceptual scenes (max 3 generated
-  images per build; an image-generation failure must never stall the
-  deliverable — continue with charts and text).
+  content: normal PPTX slide images, hero images, section covers, conceptual
+  scenes (bounded by the image-generation cap; an image-generation failure must
+  never stall the deliverable — continue with charts and text).
 - For PDF and PPTX, support visuals must be embedded into the final PDF/deck.
   Generated assets under `/mnt/user-data/outputs/visuals/` are support files,
   not deliverables. Use PNG assets in PDF sources and PPTX plans; keep SVG for

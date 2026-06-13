@@ -1,7 +1,5 @@
 from types import SimpleNamespace
 
-from langgraph.types import Command
-
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     BuilderArtifactMiddleware,
     _apply_visual_missing_quality_metadata,
@@ -26,17 +24,17 @@ def _visual_state(outputs, *, target="/mnt/user-data/outputs/report.pdf") -> dic
     }
 
 
-def test_visual_design_correction_is_injected_before_visual_artifact_work(tmp_path) -> None:
+def test_visual_design_missing_is_diagnostic_not_prompt_injection(tmp_path) -> None:
     state = _visual_state(tmp_path / "outputs")
 
     update = BuilderArtifactMiddleware().before_model(state, _runtime())
 
     assert update is not None
     assert update["builder_visual_design_correction_emitted"] is True
-    assert "/mnt/skills/public/visual-design/SKILL.md" in update["messages"][0].content
+    assert "messages" not in update
 
 
-def test_generate_visual_asset_is_blocked_until_design_skill_is_read(tmp_path) -> None:
+def test_generate_visual_asset_is_not_blocked_until_design_skill_is_read(tmp_path) -> None:
     state = _visual_state(tmp_path / "outputs")
     state["builder_tool_turn_summaries"] = [
         {"tool_names": ["builder_web_search"]},
@@ -48,14 +46,11 @@ def test_generate_visual_asset_is_blocked_until_design_skill_is_read(tmp_path) -
         state=state,
         runtime=_runtime(),
     )
+    handler = lambda _request: "handled"
 
-    result = BuilderArtifactMiddleware().wrap_tool_call(request, lambda _request: "unexpected")
+    result = BuilderArtifactMiddleware().wrap_tool_call(request, handler)
 
-    assert isinstance(result, Command)
-    assert result.goto == "model"
-    message = result.update["messages"][0]
-    assert message.status == "error"
-    assert "visual-design enforcement blocked" in message.content
+    assert result == "handled"
 
 
 def test_visual_pdf_emit_without_embedded_visuals_gets_quality_warning(tmp_path) -> None:
@@ -64,22 +59,15 @@ def test_visual_pdf_emit_without_embedded_visuals_gets_quality_warning(tmp_path)
     (outputs / "report.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
     state = _visual_state(outputs)
 
-    # The files-exist predicate stays permissive (recovery and override
-    # helpers rely on it), but the emit-time visual gate blocks the first
-    # attempt and grants one repair turn.
+    # The files-exist predicate and emit-time visual gate are both permissive:
+    # visual generation is creative guidance, while rendered vision QA owns
+    # the single bounded repair pass.
     ok = BuilderArtifactMiddleware._artifact_files_exist(
         {"artifact_path": "/mnt/user-data/outputs/report.pdf"},
         state,
         _runtime(),
     )
     assert ok is True
-    assert BuilderArtifactMiddleware._visual_gate_blocks_emit(
-        {"artifact_path": "/mnt/user-data/outputs/report.pdf"}, state
-    ) is True
-
-    # VQ-10: the gate consults the SHARED iteration budget — exhausting
-    # build_iterations (cap default 3) soft-passes with a quality warning.
-    state["build_iterations"] = 3
     assert BuilderArtifactMiddleware._visual_gate_blocks_emit(
         {"artifact_path": "/mnt/user-data/outputs/report.pdf"}, state
     ) is False

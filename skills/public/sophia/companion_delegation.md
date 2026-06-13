@@ -73,9 +73,10 @@ When delegating `presentation` or `visual_report` builds, the brief should
 capture the user's visual expectations: audience, rough slide count, the data
 worth charting, and image style (e.g. professional/abstract/illustrative). If
 the user wants a plain or text-only deliverable, say so explicitly in the
-brief — that disables generated imagery. If the visual intent is unclear, ask
-ONE short question before delegating; otherwise default to a professional
-visual style and let the builder enrich.
+brief — that disables generated imagery. Do not treat "minimal" by itself as
+no-visual; it is a style. If the visual intent is unclear, ask ONE short
+question before delegating; otherwise default to a professional visual style and
+let the builder enrich.
 
 ## Companion Boundaries
 

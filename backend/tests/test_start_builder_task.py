@@ -1063,7 +1063,7 @@ def test_presentation_brief_gains_visual_expectations_line():
     line = _visual_expectations_line("Build an investor deck about our roadmap", "presentation")
     assert line is not None
     assert "Visual expectations" in line
-    assert "max 3" in line
+    assert "max 8" in line
 
 
 def test_plain_deck_brief_gets_opt_out_line():
@@ -1072,6 +1072,15 @@ def test_plain_deck_brief_gets_opt_out_line():
     line = _visual_expectations_line("A plain text-only deck please", "presentation")
     assert line is not None
     assert "do NOT use generated imagery" in line
+
+
+def test_explaining_deck_does_not_trigger_plain_opt_out_line():
+    from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
+
+    line = _visual_expectations_line("Build a deck explaining OpenClaw", "presentation")
+    assert line is not None
+    assert "do NOT use generated imagery" not in line
+    assert "max 8" in line
 
 
 def test_style_keywords_surface_in_brief():

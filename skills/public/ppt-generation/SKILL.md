@@ -1,21 +1,21 @@
 ---
 name: ppt-generation
-description: Use this skill when the user requests to generate, create, or make presentations (PPT/PPTX). Creates a valid PowerPoint file from a structured plan, with optional AI-generated slide images for visual/polished decks or explicit image requests.
+description: Use this skill when the user requests to generate, create, or make presentations (PPT/PPTX). Creates visually rich slides by generating slide images sequentially and composing them into a valid PowerPoint file.
 ---
 
 # PPT Generation Skill
 
 ## Overview
 
-This skill generates professional PowerPoint presentations from a structured plan. By default it creates a valid text/layout deck directly from the plan. If the user asks for a polished visual deck, image-heavy slides, generated images, illustrations, or visual scenes, it can also generate slide images sequentially and compose them into the final deck.
+This skill generates professional PowerPoint presentations by planning the deck, generating slide images sequentially, and composing them into a valid PPTX file. A normal deck should use the visual image-first path. Use the no-image plan-only path only when the brief clearly asks for plain, text-only, or no-visual slides, or when image generation is unavailable and the deck must continue truthfully.
 
 ## Core Capabilities
 
 - Plan and structure multi-slide presentations with unified visual style
 - Support multiple presentation styles: Business, Academic, Minimal, Apple Keynote, Creative
-- Optionally generate AI images for visual/polished decks or explicit image requests
+- Generate AI slide images for normal polished presentations, unless the user explicitly asks for a plain/text-only/no-visual deck
 - Maintain visual consistency by using previous slide as reference image when image generation is used
-- Compose the plan, optional generated slide images, and optional local chart/diagram
+- Compose the plan, generated slide images, and optional local chart/diagram
   assets into a professional PPTX file
 
 ## Presentation Styles
@@ -48,7 +48,7 @@ When a user requests presentation generation, identify:
 
 ### Step 2: Create Presentation Plan
 
-Create a JSON file in `/mnt/user-data/workspace/` with the presentation structure. **Important**: Include the `theme` field (compositor color palette) and a per-slide `layout` field to produce varied, professional decks. The `style` / `style_guidelines` fields still describe the visual language for optional image generation.
+Create a JSON file in `/mnt/user-data/workspace/` with the presentation structure. **Important**: Include the `theme` field (compositor color palette) and a per-slide `layout` field to produce varied, professional decks. The `style` / `style_guidelines` fields describe the visual language for slide image generation.
 
 ```json
 {
@@ -85,7 +85,7 @@ Create a JSON file in `/mnt/user-data/workspace/` with the presentation structur
       "layout": "content_image",
       "title": "Slide Title",
       "key_points": ["Point 1", "Point 2", "Point 3"],
-      "visual_description": "Detailed description for image generation only if explicitly requested",
+      "visual_description": "Detailed description for slide image generation",
       "chart_path": "/mnt/user-data/outputs/visuals/example-chart.png"
     },
     {
@@ -155,15 +155,12 @@ For deterministic charts/diagrams created with `generate_visual_asset`, referenc
 the generated PNG in `image`, `chart_path`, or `visual_path` on the relevant
 slide. SVG can be kept for HTML, but PPTX embedding should use PNG.
 
-### Step 3: Decide Whether Images Are Needed
+### Step 3: Generate Slide Images Sequentially
 
-Generated images are optional for plain/minimal decks, but they are the
-preferred DeerFlow-native path for polished visual decks. Use image generation
-when the user asks for visual polish, image-heavy slides, generated images,
-illustrations, or visual scenes. For plain/minimal/text-only decks, use the
-plan-only composition path in Step 4 with no `--slide-images` argument.
-
-### Step 3A: Optional Generated Slide Images
+Generated slide images are the preferred DeerFlow-native path for normal
+presentations. Skip this step only when the brief clearly asks for a
+plain/text-only/no-visual deck, or when the image-generation preflight fails and
+you need to continue with a chart/text deck honestly.
 
 **IMPORTANT**: Generate slides **strictly one by one, in order**. Do NOT parallelize or batch image generation. Each slide depends on the previous slide's output as a reference image. Generating slides in parallel will break visual consistency and is not allowed.
 
@@ -228,17 +225,8 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 
 ### Step 4: Compose PPT
 
-For the default no-image path, call the composition script with just the plan and
-output file:
-
-```bash
-python /mnt/skills/public/ppt-generation/scripts/generate.py \
-  --plan-file /mnt/user-data/workspace/presentation-plan.json \
-  --output-file /mnt/user-data/outputs/presentation.pptx
-```
-
-If generated slide images were explicitly requested and successfully produced,
-pass them in order:
+After slide images are generated, call the composition script with the plan and
+the slide images in order:
 
 ```bash
 python /mnt/skills/public/ppt-generation/scripts/generate.py \
@@ -247,10 +235,19 @@ python /mnt/skills/public/ppt-generation/scripts/generate.py \
   --output-file /mnt/user-data/outputs/presentation.pptx
 ```
 
+If the brief explicitly asked for a plain/text-only/no-visual deck, or image
+generation is unavailable, use the no-image composition command instead:
+
+```bash
+python /mnt/skills/public/ppt-generation/scripts/generate.py \
+  --plan-file /mnt/user-data/workspace/presentation-plan.json \
+  --output-file /mnt/user-data/outputs/presentation.pptx
+```
+
 Parameters:
 
 - `--plan-file`: Absolute path to the presentation plan JSON file (required)
-- `--slide-images`: Optional absolute paths to slide images in order
+- `--slide-images`: Absolute paths to generated slide images in order for the visual path; omit only for explicit plain/text-only/no-visual decks or unavailable image generation
 - `--output-file`: Absolute path to output PPTX file (required)
 
 Plan-level slide fields `image`, `chart_path`, or `visual_path` may also point
@@ -327,9 +324,9 @@ When the content is quantitative, use `stat_band`: it renders 2-4 values at disp
 
 ## Complete Example: Glassmorphism Style With Generated Images (最现代前卫)
 
-Use this example only when the user explicitly asks for generated images or an
-image-heavy visual deck. For ordinary PPTX requests, skip the image-generation
-steps and use the no-image composition command from Step 4.
+Use this example as the default visual presentation path. For explicit
+plain/text-only/no-visual requests, skip the image-generation steps and use the
+no-image composition command from Step 4.
 
 User request: "Create a presentation about AI product launch"
 

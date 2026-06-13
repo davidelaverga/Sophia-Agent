@@ -55,6 +55,7 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "artifact_preview_filename",
     "quality_warning",
     "visuals_missing",
+    "budget_stop_reason",
     "error_message",
     "trace_id",
 )
@@ -97,6 +98,7 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "artifact_preview_filename",
         "quality_warning",
         "visuals_missing",
+        "budget_stop_reason",
         "source_artifact_path",
         "revision_of_artifact_path",
         "summary",
@@ -312,6 +314,7 @@ class BuilderCompletionEvent(BaseModel):
         "visuals_not_embedded) — never a fallback flag.",
     )
     visuals_missing: bool | None = None
+    budget_stop_reason: str | None = None
     source_artifact_path: str | None = None
     revision_of_artifact_path: str | None = None
     summary: str | None = None

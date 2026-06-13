@@ -648,6 +648,7 @@ def _artifact_completion_fields(
         "artifact_preview_filename": artifact.get("artifact_preview_filename"),
         "quality_warning": artifact.get("quality_warning"),
         "visuals_missing": artifact.get("visuals_missing"),
+        "budget_stop_reason": artifact.get("budget_stop_reason"),
     }
 
 

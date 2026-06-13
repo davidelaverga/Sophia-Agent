@@ -549,6 +549,7 @@ def _completion_from_terminal_task(
         "artifact_preview_filename": artifact.get("artifact_preview_filename"),
         "quality_warning": artifact.get("quality_warning"),
         "visuals_missing": artifact.get("visuals_missing"),
+        "budget_stop_reason": artifact.get("budget_stop_reason") or task.get("budget_stop_reason"),
         "source_artifact_path": _completion_provenance_path(task, artifact, "source_artifact_path"),
         "revision_of_artifact_path": _completion_provenance_path(task, artifact, "revision_of_artifact_path"),
         "summary": artifact.get("companion_summary") or artifact.get("summary"),

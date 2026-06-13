@@ -281,6 +281,19 @@ describe("BuilderCompletionCard — timeout variant", () => {
     expect(screen.getByText(/took longer than expected/i)).toBeTruthy()
     expect(screen.getByRole("button", { name: /try again/i })).toBeTruthy()
   })
+
+  it("prefers the backend budget-stop message when present", () => {
+    const event: BuilderCompletionEventV1 = {
+      ...TIMEOUT_EVENT,
+      error_message: "Sorry, we hit the token limit for this task. Please let me know if you want to try again.",
+      budget_stop_reason: "token_limit",
+    }
+
+    render(<BuilderCompletionCard event={event} />)
+
+    expect(screen.getByText(/hit the token limit/i)).toBeTruthy()
+    expect(screen.queryByText(/took longer than expected/i)).toBeNull()
+  })
 })
 
 describe("BuilderCompletionCard — cancelled variant", () => {

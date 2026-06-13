@@ -3,33 +3,38 @@
 Use this card only for requested `.pdf` builds.
 
 1. Plan with `write_todos`.
-2. Read `/mnt/skills/public/pdf-report/SKILL.md`. Treat it as the report
-   writing workflow: research, outline, rich source, local visuals, render,
-   inspect, emit.
-3. If the user requested charts, diagrams, or visuals, first read
-   `/mnt/skills/public/visual-design/SKILL.md`, then create at least one local
-   visual asset with `generate_visual_asset` under
+2. Read `/mnt/skills/public/pdf-report/SKILL.md`. It is a wrapper around
+   DeerFlow research/data/chart skills plus Sophia's renderer: research,
+   outline, rich source, local visuals, render, inspect, emit.
+3. For factual reports, follow the relevant research skill that matches the
+   request: `deep-research` for general topics, `academic-paper-review` for
+   one paper, or `systematic-literature-review` for multi-paper surveys.
+4. If the user requested charts, diagrams, or visuals, use
+   `/mnt/skills/public/chart-visualization/SKILL.md` to choose the right
+   chart/diagram form, read `/mnt/skills/public/visual-design/SKILL.md` for
+   design guidance, then create at least one local visual asset with
+   `generate_visual_asset` under
    `/mnt/user-data/outputs/visuals/`. Use the generated `.png` path for PDF
    embedding; SVG is useful for HTML but Pandoc/XeLaTeX should receive PNG.
    Do not use image-generation for normal charts/diagrams; use it only when
    the user explicitly asks for generated illustrations or images.
-4. Create Markdown or HTML source under `/mnt/user-data/outputs/`. Name the
+5. Create Markdown or HTML source under `/mnt/user-data/outputs/`. Name the
    source after the document stem (for example `report.md` for `report.pdf`).
    Source creation is not completion.
    Reference generated PNGs before rendering, either with relative paths such
    as `![Diagram](visuals/diagram.png)` or with the full virtual path
    `![Diagram](/mnt/user-data/outputs/visuals/diagram.png)` — both resolve.
-5. Your next substantive action after source creation must be
+6. Your next substantive action after source creation must be
    `render_markdown_to_pdf(markdown_path=<source>, pdf_path=<target .pdf>)`.
-6. Check the render result. If it reports `images_missing: true` or lists
+7. Check the render result. If it reports `images_missing: true` or lists
    `missing_resources`, fix the image references in the source and render
    once more — a visuals-requested PDF with zero embedded images will be
    rejected at emit time with one repair turn.
-7. If rendering succeeds and layout quality is `ok`, that rendered `.pdf` is
+8. If rendering succeeds and layout quality is `ok`, that rendered `.pdf` is
    authoritative. Immediately emit that exact `.pdf`. Do not emit the `.md`
    or `.html` source as the artifact, and do not run extra `bash`, replan,
    or render again.
-8. If the harness injects a layout repair message, revise the source once,
+9. If the harness injects a layout repair message, revise the source once,
    render once more, then emit the best usable PDF.
 
 Styling: pick a theme with `render_markdown_to_pdf(theme=...)` or a

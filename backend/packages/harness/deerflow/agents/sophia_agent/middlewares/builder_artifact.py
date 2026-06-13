@@ -29,19 +29,26 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
-from deerflow.agents.sophia_agent.middlewares.builder_budget import budget_allows_iteration
+from deerflow.agents.sophia_agent.middlewares.builder_budget import (
+    USER_BUDGET_TIMEOUT_MESSAGE,
+    budget_allows_iteration,
+    force_emit_remaining_turns,
+    force_emit_wall_clock_fraction,
+    max_non_artifact_turns,
+    soft_warn_at_turn,
+)
 from deerflow.agents.sophia_agent.middlewares.builder_task import (
     BuilderTaskMiddleware,
     _image_generation_enabled,
 )
 from deerflow.agents.sophia_agent.utils import log_middleware
 from deerflow.sophia.build_condition import (
-    advisory_review,
     brief_gate_unmet_conditions,
     iteration_available,
     iteration_cap,
     iterations_used,
     preview_review_blocks,
+    rendered_artifact_review,
 )
 from deerflow.sophia.builder_events import fire_completion_webhook_from_artifact
 from deerflow.sophia.builder_failure_diagnostics import (
@@ -179,7 +186,7 @@ _IMAGE_GENERATION_PATH_MARKERS = (
 # bash interception time. Terminal error classes short-circuit retries —
 # when the environment cannot generate images at all, the build must
 # continue with charts/text instead of burning turns.
-_IMAGE_GENERATION_MAX_CALLS = 3
+_IMAGE_GENERATION_MAX_CALLS = 8
 # VQ-5: PDF builds enrich with a cover (+ optional divider) only.
 _IMAGE_GENERATION_MAX_CALLS_PDF = 2
 _IMAGE_GENERATION_TERMINAL_ERRORS = frozenset(
@@ -2510,10 +2517,10 @@ def _pptx_skill_correction_message(state: dict[str, Any]) -> str:
         "3. Compose the deck by running "
         "`/mnt/skills/public/ppt-generation/scripts/generate.py` with "
         "`--plan-file` and `--output-file` only.\n"
-        "4. If image-generation is enabled for this run, use it only for the "
-        "bounded visual/polished-deck pass (1 hero + up to 2 supporting images, "
-        "max 3 calls — enforced). If image generation fails, continue with a "
-        "chart/text deck — never let imagery block the deliverable.\n"
+        "4. If image-generation is enabled for this run, use the DeerFlow-native "
+        "sequential slide-image workflow (one image per slide, previous slide as "
+        "reference, max 8 calls — enforced). If image generation fails, continue "
+        "with a chart/text deck — never let imagery block the deliverable.\n"
         "5. Emit only after the `.pptx` exists and is a valid PowerPoint package.\n\n"
         "If deck composition or validation cannot complete after this correction, "
         "emit a real .html/.md fallback only if it is marked with "
@@ -3101,37 +3108,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if allow_web_research and sources_empty:
             logger.warning("[BuilderResearchDiagnostics] reason=research_enabled_empty_sources_used")
 
-    # Ceiling enforcement — MUST stay in sync with _HARD_CEILING in after_model
-    # and with builder_task.py's _HARD_CEILING. When the model is within this
-    # many turns of termination, we force Anthropic tool_choice to emit so the
-    # model literally cannot call any other tool. Prompt-level escalation is
-    # not reliable mid-retry-loop; the API-level constraint is.
-    #
-    # PR-B (2026-04-28): bumped ceiling 20 → 30 after run ``c130c516`` (PDF
-    # with diagrams) hit the 20-turn cap mid-progress: write→bash→fix cycles
-    # for binary deliverables legitimately need 12-15 turns of build pipeline
-    # plus initial planning + final emit. At 20 the model ran out of budget
-    # while still iterating productively, then got trapped in 3 wasted forced-
-    # write turns (LLM emitted near-empty content because the recovery path
-    # for binary tasks is bash, not write_file). Soft warn rescaled to 18
-    # (60%) and force-emit at remaining<=3 (turn 27+). Wall-clock force-emit
-    # at 70% of per-run timeout (1260s of 1800s) is the backstop for runaway
-    # text deliverables — those rarely need 30 turns.
-    #
-    # PR-A history (2026-04-27): bumped 10 → 20 after a research-heavy task
-    # in log ``019dcfbf-f219-7d83-86a4-ffb161ebddf7`` proved 10 too tight.
-    # PR-C F6 history (2026-04-24): lowered 20 → 10 because the original
-    # ceiling let pathological retries burn the budget. PR-A fixes those
-    # retries at the source (two-stage forced-emit + empty-path rejection)
-    # so the larger budget no longer enables runaway retry loops.
+    # Legacy defaults retained for compatibility with older tests/importers.
+    # Runtime decisions now read per-run caps from ``builder_budget`` through
+    # the helper functions imported above, so complex PDF/PPTX work can get a
+    # larger budget without globally relaxing simple HTML/Markdown builds.
     _FORCE_EMIT_REMAINING = 3
     _CEILING_FOR_FORCE = 30
     _SOFT_WARN_AT = 18
-    # Wall-clock fraction of the per-run timeout at which we activate
-    # force-emit even if the turn-count ceiling hasn't been hit. Each
-    # write_file LLM call costs ~95s on long-form deliverables; with
-    # _resolve_builder_limits returning timeout=1800s, 0.70 leaves ~540s of
-    # slack — enough for one final write + emit + network buffer.
+    # Legacy wall-clock fraction; active value comes from ``builder_budget``.
     _FORCE_EMIT_WALL_CLOCK_FRACTION = 0.70
     # PR #94: when the model emits ``artifact_path=None`` (or any empty
     # path) under forced ``tool_choice=emit_builder_artifact``, we reject
@@ -3147,8 +3131,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     @staticmethod
     def _should_force_emit(state: BuilderArtifactState) -> bool:
         non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0)
-        remaining = BuilderArtifactMiddleware._CEILING_FOR_FORCE - non_artifact_turns
-        return remaining <= BuilderArtifactMiddleware._FORCE_EMIT_REMAINING and non_artifact_turns > 0
+        remaining = max_non_artifact_turns(state) - non_artifact_turns
+        return remaining <= force_emit_remaining_turns(state) and non_artifact_turns > 0
 
     @staticmethod
     def _should_force_emit_by_clock(state: BuilderArtifactState, runtime: Runtime | None = None) -> bool:
@@ -3185,7 +3169,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return False
 
         elapsed_ms = max(0, int(time.time() * 1000) - int(started_ms))
-        return elapsed_ms / (timeout_s * 1000) >= BuilderArtifactMiddleware._FORCE_EMIT_WALL_CLOCK_FRACTION
+        return elapsed_ms / (timeout_s * 1000) >= force_emit_wall_clock_fraction(state)
 
     @staticmethod
     def _forced_tool_choice() -> dict[str, Any]:
@@ -3264,15 +3248,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if not _visuals_requested(state):
             return None
         if not _visual_design_skill_read_seen(state):
-            logger.warning("BuilderArtifact: forcing tool_choice=read_file for visual-design skill")
-            return self._forced_read_tool_choice()
+            logger.warning(
+                "[BuilderVisualDiagnostics] visual-design skill not read yet; "
+                "leaving creative workflow unforced"
+            )
+            return None
         if (
             state.get("builder_visual_asset_correction_emitted")
             and _visual_asset_success_count(state) <= 0
             and _visual_asset_attempt_count(state) <= 0
         ):
-            logger.warning("BuilderArtifact: forcing tool_choice=generate_visual_asset after visual correction")
-            return self._forced_visual_asset_tool_choice()
+            logger.warning(
+                "[BuilderVisualDiagnostics] visual asset correction exists with no "
+                "asset attempts; leaving creative workflow unforced"
+            )
+            return None
         return None
 
     def _completion_tool_choice_for_state(
@@ -3309,7 +3299,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "(non_artifact_turns=%s, ceiling=%s, reason=%s, no output file yet — "
             "force prevents phantom-emit loop)",
             non_artifact_turns,
-            self._CEILING_FOR_FORCE,
+            max_non_artifact_turns(state),
             force_reason,
         )
         return self._forced_write_tool_choice()
@@ -3326,7 +3316,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "before PDF fallback emit (non_artifact_turns=%s, "
                 "ceiling=%s, reason=%s)",
                 non_artifact_turns,
-                self._CEILING_FOR_FORCE,
+                max_non_artifact_turns(state),
                 force_reason,
             )
             return self._forced_pdf_render_tool_choice()
@@ -3334,7 +3324,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "BuilderArtifact: forcing tool_choice=emit_builder_artifact "
             "(non_artifact_turns=%s, ceiling=%s, reason=%s)",
             non_artifact_turns,
-            self._CEILING_FOR_FORCE,
+            max_non_artifact_turns(state),
             force_reason,
         )
         return self._forced_tool_choice()
@@ -3359,7 +3349,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "forcing write_file to create a Markdown source/fallback instead "
                 "(non_artifact_turns=%s, ceiling=%s, reason=%s)",
                 non_artifact_turns,
-                self._CEILING_FOR_FORCE,
+                max_non_artifact_turns(state),
                 force_reason,
             )
             return self._forced_write_tool_choice()
@@ -3390,7 +3380,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "model a chance to RUN the generator instead of writing yet "
             "another one)",
             non_artifact_turns,
-            self._CEILING_FOR_FORCE,
+            max_non_artifact_turns(state),
             force_reason,
         )
         return self._forced_bash_tool_choice()
@@ -3818,7 +3808,27 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
     @staticmethod
     def _fallback_completion_status(fallback: dict[str, Any]) -> str:
-        return "completed" if fallback.get("artifact_path") else "failed"
+        if fallback.get("artifact_path"):
+            return "completed"
+        if fallback.get("budget_stop_reason"):
+            return "timed_out"
+        return "failed"
+
+    @staticmethod
+    def _budget_stop_fallback(fallback: dict[str, Any], reason: str) -> dict[str, Any]:
+        if fallback.get("artifact_path"):
+            return fallback
+        if reason != "hard_ceiling" and "consecutive_empty_emit_rejections" not in reason:
+            return fallback
+        updated = dict(fallback)
+        updated["budget_stop_reason"] = "turn_limit"
+        updated["companion_summary"] = USER_BUDGET_TIMEOUT_MESSAGE
+        updated["user_next_action"] = "Tell me if you want me to try again with a narrower scope."
+        diagnostics = dict(updated.get("builder_failure_diagnostics") or {})
+        diagnostics["failure_code"] = diagnostics.get("failure_code") or "builder_budget_exceeded"
+        diagnostics["budget_stop_reason"] = "turn_limit"
+        updated["builder_failure_diagnostics"] = diagnostics
+        return updated
 
     @staticmethod
     def _log_missing_pdf_render_attempt_if_needed(
@@ -3946,14 +3956,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             steps_completed=steps_completed,
         )
         if fallback is not None:
-            return fallback
+            return BuilderArtifactMiddleware._budget_stop_fallback(fallback, reason)
         fallback = BuilderArtifactMiddleware._requested_pptx_without_generation_fallback(
             state,
             promoted_path=promoted_path,
             steps_completed=steps_completed,
         )
         if fallback is not None:
-            return fallback
+            return BuilderArtifactMiddleware._budget_stop_fallback(fallback, reason)
         if promoted_path:
             promoted_suffix = PurePosixPath(promoted_path).suffix.lower()
             # Format-swapped promotion is disabled for pdf/pptx requests:
@@ -3970,10 +3980,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 failure = BuilderArtifactMiddleware._pdf_no_deliverable_fallback(
                     steps_completed=steps_completed,
                 )
-                return _apply_artifact_request_metadata(
-                    failure,
-                    state,
-                    fallback_reason="pdf_generation_failed",
+                return BuilderArtifactMiddleware._budget_stop_fallback(
+                    _apply_artifact_request_metadata(
+                        failure,
+                        state,
+                        fallback_reason="pdf_generation_failed",
+                    ),
+                    reason,
                 )
             if requested_pptx and promoted_suffix != ".pptx":
                 logger.warning(
@@ -3985,10 +3998,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 failure = BuilderArtifactMiddleware._pptx_no_deliverable_fallback(
                     steps_completed=steps_completed,
                 )
-                return _apply_artifact_request_metadata(
-                    failure,
-                    state,
-                    fallback_reason="pptx_generation_not_completed",
+                return BuilderArtifactMiddleware._budget_stop_fallback(
+                    _apply_artifact_request_metadata(
+                        failure,
+                        state,
+                        fallback_reason="pptx_generation_not_completed",
+                    ),
+                    reason,
                 )
             fallback = BuilderArtifactMiddleware._recovered_deliverable_fallback(
                 promoted_path,
@@ -4006,7 +4022,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             steps_completed=steps_completed,
         )
         if fallback is not None:
-            return fallback
+            return BuilderArtifactMiddleware._budget_stop_fallback(fallback, reason)
         promoted_generator_path = BuilderArtifactMiddleware._promoted_generator_from_outputs(
             state,
             requested_pdf=requested_pdf,
@@ -4024,19 +4040,31 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             fallback = BuilderArtifactMiddleware._pdf_no_deliverable_fallback(
                 steps_completed=steps_completed,
             )
-            return _apply_artifact_request_metadata(fallback, state, fallback_reason=reason)
+            return BuilderArtifactMiddleware._budget_stop_fallback(
+                _apply_artifact_request_metadata(fallback, state, fallback_reason=reason),
+                reason,
+            )
         if requested_pptx:
             fallback = BuilderArtifactMiddleware._pptx_no_deliverable_fallback(
                 steps_completed=steps_completed,
             )
-            return _apply_artifact_request_metadata(fallback, state, fallback_reason=reason)
+            return BuilderArtifactMiddleware._budget_stop_fallback(
+                _apply_artifact_request_metadata(fallback, state, fallback_reason=reason),
+                reason,
+            )
         if requested_html:
             fallback = BuilderArtifactMiddleware._html_no_deliverable_fallback(
                 steps_completed=steps_completed,
             )
-            return _apply_artifact_request_metadata(fallback, state, fallback_reason="html_generation_failed")
-        return BuilderArtifactMiddleware._generic_no_deliverable_fallback(
-            steps_completed=steps_completed,
+            return BuilderArtifactMiddleware._budget_stop_fallback(
+                _apply_artifact_request_metadata(fallback, state, fallback_reason="html_generation_failed"),
+                reason,
+            )
+        return BuilderArtifactMiddleware._budget_stop_fallback(
+            BuilderArtifactMiddleware._generic_no_deliverable_fallback(
+                steps_completed=steps_completed,
+            ),
+            reason,
         )
 
     @staticmethod
@@ -4269,37 +4297,23 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         artifact_args: dict[str, Any],
         state: BuilderArtifactState,
     ) -> bool:
-        """Hard visual gate, bounded to ONE repair turn.
+        """Visual presence telemetry.
 
-        Prod 2026-06-10: two decks shipped with slide_image_count=0 while the
-        generated chart PNGs sat unused on disk — the soft-pass let them
-        through on the first emit. Applied ONLY at emit decision points
-        (after_model accept + wrap_tool_call), never inside
-        _artifact_files_exist, so recovery/override helpers keep working.
+        Visual asset generation is creative guidance, not a hard precondition.
+        Rendered vision QA owns the bounded repair turn for PDF/PPTX polish.
         """
         if not _visuals_requested(state):
             return False
         if _visual_presence_validated(artifact_args, state):
             return False
-        if not _repair_iteration_grantable(state):
-            logger.warning(
-                "[BuilderVisualDiagnostics] phase=emit_visual_repair_spent "
-                "requested_ext=%s iterations=%d/%d — delivering with a quality warning",
-                _requested_artifact_ext(state),
-                iterations_used(state),
-                iteration_cap(),
-            )
-            return False
         logger.warning(
-            "[BuilderVisualDiagnostics] phase=emit_visual_missing_hard_reject "
-            "requested_ext=%s final_ext=%s iteration=%d/%d — granting a repair "
-            "turn to embed the generated visual assets",
+            "[BuilderVisualDiagnostics] phase=emit_visual_missing_diagnostic "
+            "requested_ext=%s final_ext=%s — visual assets are advisory; "
+            "rendered vision QA will judge final quality when available",
             _requested_artifact_ext(state),
             _artifact_path_suffix_label(artifact_args.get("artifact_path")),
-            iterations_used(state) + 1,
-            iteration_cap(),
         )
-        return True
+        return False
 
     @staticmethod
     def _pptx_artifact_args_valid(
@@ -5701,10 +5715,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if state.get("builder_visual_design_correction_emitted"):
             return None
         logger.warning(
-            "[BuilderVisualDiagnostics] phase=design_skill_required design_skill_read=false"
+            "[BuilderVisualDiagnostics] phase=design_skill_missing_diagnostic design_skill_read=false"
         )
         return {
-            "messages": [HumanMessage(content=_visual_design_skill_message())],
             "builder_visual_design_correction_emitted": True,
         }
 
@@ -5723,12 +5736,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if non_artifact_turns < 2:
             return None
         logger.warning(
-            "[BuilderVisualDiagnostics] phase=asset_required requested_ext=%s "
+            "[BuilderVisualDiagnostics] phase=asset_missing_diagnostic requested_ext=%s "
             "asset_success_count=0",
             _requested_artifact_ext(state),
         )
         return {
-            "messages": [HumanMessage(content=_visual_asset_required_message(state))],
             "builder_visual_asset_correction_emitted": True,
         }
 
@@ -5755,11 +5767,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         visual_design = self._maybe_inject_visual_design_correction(state)
         if isinstance(visual_design, dict):
             update.update(visual_design)
-            return update
         visual_asset = self._maybe_inject_visual_asset_correction(state)
         if isinstance(visual_asset, dict):
             update.update(visual_asset)
-            return update
         pdf_render = self._maybe_inject_pdf_render_source_correction(state)
         if isinstance(pdf_render, dict):
             update.update(pdf_render)
@@ -5911,31 +5921,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if _visual_design_skill_read_seen(request.state):
             return None
 
-        tool_call_id = request.tool_call.get("id", "")
         logger.warning(
-            "[BuilderVisualDiagnostics] blocked_visual_asset_before_design_skill "
+            "[BuilderVisualDiagnostics] visual_asset_before_design_skill_soft_guidance "
             "tool=%s",
             tool_name,
         )
-        return Command(
-            update={
-                "messages": [
-                    ToolMessage(
-                        content=(
-                            "Error: visual-design enforcement blocked this tool call. "
-                            "Before creating chart or diagram assets, read the design "
-                            "skill with `read_file(description='read visual design skill', "
-                            "path='/mnt/skills/public/visual-design/SKILL.md')`, then "
-                            "call generate_visual_asset again."
-                        ),
-                        tool_call_id=tool_call_id,
-                        name=str(tool_name or "generate_visual_asset"),
-                        status="error",
-                    ),
-                ],
-            },
-            goto="model",
-        )
+        return None
 
     @staticmethod
     def _normalized_write_path(tool_call: dict[str, Any]) -> str | None:
@@ -6558,18 +6549,23 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         preview = self._repair_preview_pdf(args, state)
         if preview is None:
             return None
-        findings = advisory_review(preview)
-        if not findings:
+        review = rendered_artifact_review(preview)
+        if not review:
             return None
+        findings = review.get("findings")
+        findings_text = "\n".join(f"- {item}" for item in findings[:5]) if isinstance(findings, list) else ""
+        if not findings_text:
+            findings_text = str(review.get("verdict") or "repair")
         logger.warning(
-            "[BuilderVQ] phase=advisory_findings iteration=%d/%d",
+            "[BuilderVQ] phase=rendered_review_findings verdict=%s iteration=%d/%d",
+            review.get("verdict"),
             iterations_used(state) + 1,
             iteration_cap(),
         )
         return (
             "Error: emit_builder_artifact deferred — a review of the rendered "
             "preview found concrete polish issues:\n"
-            f"{findings}\n"
+            f"{findings_text}\n"
             "Fix these (regenerate the affected figures/sections), then emit "
             "again. This review happens at most once."
         )
@@ -6639,35 +6635,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         error_class = str(diagnostics.get("image_generation_error_class") or "")
         if error_class and (error_class in _IMAGE_GENERATION_TERMINAL_ERRORS or error_class == "content_blocked"):
             return False  # attempts failed for environment/policy reasons — honest skip
-        if int(state.get("builder_hero_gate_rejections", 0) or 0) >= 1:
-            # The hero condition itself retries at most once even inside the
-            # shared loop — a second hero rejection would re-litigate the
-            # exact same instruction.
-            logger.warning(
-                "[BuilderImageGeneration] phase=hero_gate_repair_spent requested_ext=%s "
-                "— delivering with a quality warning",
-                _requested_artifact_ext(state),
-            )
-            return False
-        if not _repair_iteration_grantable(state):
-            logger.warning(
-                "[BuilderImageGeneration] phase=hero_gate_budget_exhausted requested_ext=%s "
-                "iterations=%d/%d — delivering with a quality warning",
-                _requested_artifact_ext(state),
-                iterations_used(state),
-                iteration_cap(),
-            )
-            return False
         logger.warning(
-            "[BuilderImageGeneration] phase=hero_gate_hard_reject requested_ext=%s "
-            "attempts=%d iteration=%d/%d — granting a repair turn to generate the "
-            "hero/cover image",
+            "[BuilderImageGeneration] phase=hero_missing_diagnostic requested_ext=%s "
+            "attempts=%d — generated imagery is guided by the workflow; rendered "
+            "vision QA will judge final quality when available",
             _requested_artifact_ext(state),
             int(diagnostics.get("image_generation_attempt_count", 0) or 0),
-            iterations_used(state) + 1,
-            iteration_cap(),
         )
-        return True
+        return False
 
     @override
     async def awrap_tool_call(
@@ -6936,7 +6911,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 "routing to ceiling fallback to avoid GraphRecursionError.",
                                 consecutive_rejections,
                                 non_artifact_turns,
-                                self._CEILING_FOR_FORCE,
+                                max_non_artifact_turns(state),
                             )
                             fallback = self._build_ceiling_fallback(
                                 state,
@@ -7183,15 +7158,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 # PR-C F6 (2026-04-24): soft-warn halfway so the model sees
                 # an early wrap-up signal in logs (and future trace events).
                 # Emitted exactly once per task, at the ``_SOFT_WARN_AT`` turn.
-                if non_artifact_turns == self._SOFT_WARN_AT:
+                hard_ceiling = max_non_artifact_turns(state)
+                soft_warn = soft_warn_at_turn(state)
+                if non_artifact_turns == soft_warn:
                     logger.warning(
                         "BuilderArtifact: soft ceiling warning at turn=%d "
                         "(hard_ceiling=%d, remaining=%d). Builder should wrap up "
                         "— emit_builder_artifact with what's on disk instead of "
                         "continuing to iterate.",
                         non_artifact_turns,
-                        self._CEILING_FOR_FORCE,
-                        self._CEILING_FOR_FORCE - non_artifact_turns,
+                        hard_ceiling,
+                        hard_ceiling - non_artifact_turns,
                     )
 
                 # Hard ceiling: force end before hitting the recursion limit.
@@ -7200,7 +7177,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 # already on disk than letting bash thrash. PR #94 extracted
                 # the fallback-construction logic into ``_build_ceiling_fallback``
                 # so the consecutive-rejection short-circuit can reuse it.
-                _HARD_CEILING = self._CEILING_FOR_FORCE
+                _HARD_CEILING = hard_ceiling
                 if non_artifact_turns >= _HARD_CEILING:
                     logger.warning(
                         "BuilderArtifact: hard ceiling reached at turn=%d, tools=%s — forcing end with fallback",

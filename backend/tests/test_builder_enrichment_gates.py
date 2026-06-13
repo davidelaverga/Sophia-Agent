@@ -1,16 +1,15 @@
-"""Spec VQ-3/4/5 — enrichment outcome accounting, hero/cover gate, PDF scope.
+"""Spec VQ-3/4/5 — enrichment outcome accounting, image diagnostics, PDF scope.
 
 Prod 2026-06-11 (F5): Sonnet silently skipped gpt-image enrichment on the
 primary provider — prompt-only policy produced zero generated images with no
-signal. These gates make the outcome explicit and the hero enforced (one
-bounded repair turn), and extend enrichment to visuals-requested PDFs.
+signal. The middleware now records the outcome and lets rendered artifact QA
+own the bounded repair pass; PDFs use deterministic/report visuals unless the
+user explicitly asks for generated imagery.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
-
-from langgraph.types import Command
 
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     BuilderArtifactMiddleware,
@@ -50,9 +49,17 @@ def _pdf_state(task: str = "Create a technical PDF with diagrams and visuals", *
 # ---- VQ-5: PDF enrichment scope ----------------------------------------------
 
 
-def test_visuals_requested_pdf_enables_enrichment():
+def test_visuals_requested_pdf_uses_deterministic_visuals_by_default():
     assert _image_generation_enabled(
         {"task": "Create a technical PDF with diagrams and visuals"},
+        artifact_target_ext=".pdf",
+        task_type="document",
+    ) is False
+
+
+def test_explicit_image_pdf_enables_enrichment():
+    assert _image_generation_enabled(
+        {"task": "Create a technical PDF with generated illustrations"},
         artifact_target_ext=".pdf",
         task_type="document",
     ) is True
@@ -68,7 +75,7 @@ def test_plain_pdf_stays_off():
 
 def test_enrichment_enabled_mirror_reads_state():
     assert _builder_image_enrichment_enabled(_deck_state()) is True
-    assert _builder_image_enrichment_enabled(_pdf_state()) is True
+    assert _builder_image_enrichment_enabled(_pdf_state()) is False
     assert _builder_image_enrichment_enabled(_pdf_state(task="plain text summary")) is False
 
 
@@ -78,7 +85,7 @@ def test_pdf_cap_is_two():
     )
 
     assert _image_generation_max_calls(_pdf_state()) == 2
-    assert _image_generation_max_calls(_deck_state()) == 3
+    assert _image_generation_max_calls(_deck_state()) == 8
 
 
 # ---- VQ-3: preflight delta + outcome accounting -------------------------------
@@ -183,11 +190,11 @@ def test_outcome_stamped_into_artifact_metadata():
 # ---- VQ-4: hero/cover gate ----------------------------------------------------
 
 
-def test_hero_gate_blocks_first_emit_with_zero_generated_images():
+def test_hero_gate_is_diagnostic_with_zero_generated_images():
     state = _deck_state(builder_pptx_diagnostics={})
     assert BuilderArtifactMiddleware._hero_gate_blocks_emit(
         {"artifact_path": "/mnt/user-data/outputs/deck.pptx"}, state
-    ) is True
+    ) is False
 
 
 def test_hero_gate_passes_with_successful_image():
@@ -242,7 +249,7 @@ def test_hero_gate_off_for_plain_decks():
     ) is False
 
 
-def test_hero_gate_rejection_command_increments_counter():
+def test_hero_gate_rejection_command_does_not_block_without_render_review():
     mw = BuilderArtifactMiddleware()
     state = _deck_state(builder_pptx_diagnostics={})
     request = SimpleNamespace(
@@ -253,16 +260,10 @@ def test_hero_gate_rejection_command_increments_counter():
     result = mw._visual_gate_rejection_command(
         request, {"artifact_path": "/mnt/user-data/outputs/deck.pptx"}
     )
-    assert isinstance(result, Command)
-    assert result.update["builder_hero_gate_rejections"] == 1
-    message = result.update["messages"][0]
-    assert "--preflight" in message.content
-    assert "full_bleed_image" in message.content
+    assert result is None
 
 
-def test_pdf_hero_gate_message_names_cover():
-    # Visual presence satisfied (charts embedded) so the visual gate defers
-    # to the hero/cover gate — realistic sequence: charts first, cover next.
+def test_pdf_without_image_enrichment_uses_normal_missing_file_message():
     mw = BuilderArtifactMiddleware()
     state = _pdf_state(
         builder_pptx_diagnostics={},
@@ -271,7 +272,8 @@ def test_pdf_hero_gate_message_names_cover():
     message = mw._emit_rejection_message(
         {"artifact_path": "/mnt/user-data/outputs/report.pdf"}, state
     )
-    assert "cover-<desc>.png" in message
+    assert "cover-<desc>.png" not in message
+    assert "does not exist on disk" in message
 
 
 def test_hero_missing_quality_warning_after_spent_repair():

@@ -22,6 +22,7 @@ export type BuilderFailureDiagnosticsV1 = {
   failure_stage?: string | null;
   failure_reason?: string | null;
   failure_code?: string | null;
+  budget_stop_reason?: string | null;
   emit_attempted?: boolean | null;
   emit_tool_call_seen?: boolean | null;
   sanitized_emit_args?: {
@@ -98,6 +99,7 @@ export type BuilderCompletionEventV1 = {
   /** Honest quality note, e.g. "visuals_not_embedded". */
   quality_warning?: string | null;
   visuals_missing?: boolean | null;
+  budget_stop_reason?: string | null;
   image_generation_status?: string | null;
   image_generation_reason?: string | null;
   source_artifact_path?: string | null;

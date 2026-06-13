@@ -1,7 +1,8 @@
 """Image-generation enrichment discipline.
 
-Generated imagery is opt-in for real image requests and polished deck mode, so
-the discipline must be harness-enforced: a hard per-build call cap, a
+Generated imagery is default-on for PPTX decks (unless explicitly no-visual)
+and opt-in for non-deck/generated-image requests, so the discipline must be
+harness-enforced: a hard per-build call cap, a
 terminal-error short-circuit, and a one-shot stop directive after repeated
 failures. These tests cover the deterministic guards in BuilderArtifactMiddleware
 plus the gating policy in builder_task and the budget cost telemetry.
@@ -87,7 +88,7 @@ def test_call_beyond_cap_is_rejected_with_generated_assets_listed():
 
 
 def test_chained_command_that_would_exceed_cap_is_rejected():
-    state = _state_with_image_diagnostics(image_generation_attempt_count=1)
+    state = _state_with_image_diagnostics(image_generation_attempt_count=_IMAGE_GENERATION_MAX_CALLS - 1)
     command = f"python {_SCRIPT} --a && python {_SCRIPT} --b && python {_SCRIPT} --c"
     result = BuilderArtifactMiddleware()._image_generation_block_command(
         _bash_request(command, state)
@@ -171,12 +172,12 @@ def test_stop_directive_not_emitted_after_success():
 # ---- gating policy ----------------------------------------------------------
 
 
-def test_plain_presentation_task_does_not_enable_image_generation_by_default():
+def test_presentation_task_enables_image_generation_by_default():
     assert _image_generation_enabled(
         {"task": "Build an investor deck about our roadmap"},
         artifact_target_ext=".pptx",
         task_type="presentation",
-    ) is False
+    ) is True
 
 
 def test_polished_presentation_task_enables_image_generation():
@@ -187,12 +188,12 @@ def test_polished_presentation_task_enables_image_generation():
     ) is True
 
 
-def test_chart_only_presentation_uses_deterministic_visual_assets():
+def test_chart_presentation_still_enables_deck_images():
     assert _image_generation_enabled(
         {"task": "Build a deck with charts and diagrams about our roadmap"},
         artifact_target_ext=".pptx",
         task_type="presentation",
-    ) is False
+    ) is True
 
 
 def test_visual_report_task_does_not_enable_image_generation_by_default():
@@ -219,12 +220,20 @@ def test_plain_deck_marker_opts_out():
     ) is False
 
 
-def test_minimal_marker_opts_out():
+def test_explain_does_not_match_plain_opt_out():
+    assert _image_generation_enabled(
+        {"task": "Build a presentation explaining the architecture"},
+        artifact_target_ext=".pptx",
+        task_type="presentation",
+    ) is True
+
+
+def test_minimal_style_no_longer_opts_out():
     assert _image_generation_enabled(
         {"task": "A minimal deck, just bullets"},
         artifact_target_ext=".pptx",
         task_type="presentation",
-    ) is False
+    ) is True
 
 
 def test_document_task_stays_off_without_explicit_markers():

@@ -125,11 +125,13 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 When enriching slide decks, visual reports, or PDFs (the default for Sophia
 builder presentation tasks), follow this discipline:
 
-**Budget**: HARD CAP of 3 image-generation calls per build (enforced — calls
-beyond the cap are rejected). Plan before generating: 1 hero image first,
-then up to 2 supporting images. Charts, diagrams, and data visuals are NOT
-this skill's job — use the deterministic `generate_visual_asset` tool for
-those (no cap, no API cost).
+**Budget**: PPTX presentation builds have a HARD CAP of 8 image-generation
+calls so a typical deck can generate one image per slide. PDF/report
+enrichment remains capped lower by the harness. Plan before generating:
+presentations generate slide 1 first, then each subsequent slide with the
+previous slide as reference. Charts, diagrams, and data visuals are NOT this
+skill's job — use the deterministic `generate_visual_asset` tool for those
+(no cap, no API cost).
 
 **Subjects that work for business content**: abstract/conceptual
 compositions (gradients, geometric forms, light fields), product and object

@@ -1024,13 +1024,17 @@ def _build_enriched_description(
 
 _PLAIN_VISUAL_OPT_OUT_MARKERS = (
     "plain",
+    "plain deck",
+    "plain slides",
     "text-only",
     "text only",
+    "text-only deck",
+    "text only deck",
     "no images",
     "no imagery",
     "no illustrations",
-    "minimal",
-    "charts only",
+    "no visuals",
+    "without visuals",
 )
 _VISUAL_STYLE_KEYWORDS = (
     "professional",
@@ -1049,6 +1053,13 @@ _VISUAL_STYLE_KEYWORDS = (
 )
 
 
+def _plain_visual_opt_out_requested(text: str) -> bool:
+    return any(
+        re.search(rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])", text)
+        for marker in _PLAIN_VISUAL_OPT_OUT_MARKERS
+    )
+
+
 def _visual_expectations_line(description: str, task_type: str) -> str | None:
     """One explicit visual-expectations line for visual deliverable briefs.
 
@@ -1058,16 +1069,16 @@ def _visual_expectations_line(description: str, task_type: str) -> str | None:
     if task_type not in {"presentation", "visual_report"}:
         return None
     lowered = description.lower()
-    if any(marker in lowered for marker in _PLAIN_VISUAL_OPT_OUT_MARKERS):
+    if _plain_visual_opt_out_requested(lowered):
         return (
-            "Visual expectations: the user asked for a plain/minimal deliverable — "
-            "do NOT use generated imagery; charts only if explicitly requested."
+            "Visual expectations: the user explicitly asked for a plain/text-only/no-visual "
+            "deliverable — do NOT use generated imagery; charts only if explicitly requested."
         )
     styles = [kw for kw in _VISUAL_STYLE_KEYWORDS if kw in lowered]
     style_note = f" Preferred style cues from the user: {', '.join(styles[:3])}." if styles else ""
     return (
         "Visual expectations: enrich with generated imagery per the image "
-        f"enrichment policy (1 hero + up to 2 supporting, max 3).{style_note}"
+        f"enrichment policy (sequential slide images, max 8 for PPTX).{style_note}"
     )
 
 
@@ -1535,6 +1546,7 @@ async def _dispatch_via_asgi(
     allow_web_research: bool,
     explicit_user_urls: list[str],
     builder_web_budget: dict[str, Any],
+    builder_budget: dict[str, Any],
     user_id: str,
     parent_thread_id: str | None,
     parent_model: str | None,
@@ -1599,15 +1611,9 @@ async def _dispatch_via_asgi(
         "allow_web_research": allow_web_research,
         "explicit_user_urls": explicit_user_urls,
         "builder_web_budget": builder_web_budget,
-        # Hard cost/token circuit-breaker enforced by ``BuilderBudgetMiddleware``
-        # (constraints over instructions — runs regardless of model/loop). Mirrors
-        # ``DEFAULT_BUILDER_BUDGET`` in builder_budget.py; ``0``/``0.0`` disables a
-        # cap. Tune ``max_cost_usd`` from the measured $/build (spec §2).
-        "builder_budget": {
-            "max_cost_usd": 5.0,
-            "max_total_tokens": 2_000_000,
-            "cost_model_key": "claude-sonnet-4-6",
-        },
+        # Hard cost/token/turn circuit-breaker enforced by the builder
+        # middlewares. Tiered by deliverable complexity and env-overridable.
+        "builder_budget": builder_budget,
         "builder_artifact_target_path": delegation_context.get("artifact_target_path"),
     }
     if materialized_edit_context is not None:
@@ -1894,9 +1900,16 @@ async def _start_builder_task_impl(
         if override_path is None or format_resolution.source == "current_user_turn_conversion"
         else "explicit_target_override"
     )
-
     parent_thread_id = _resolve_thread_id(runtime)
     parent_model = _runtime_parent_model(runtime)
+
+    from deerflow.agents.sophia_agent.middlewares.builder_budget import builder_budget_for_task
+
+    builder_budget = builder_budget_for_task(
+        task_type=task_type,
+        artifact_ext=target_ext,
+        cost_model_key=parent_model,
+    )
 
     delegation_digest, delegation_ledger_stats, dispatched_at_turn = _resolve_dispatch_digest(
         state, user_id, parent_thread_id
@@ -1942,6 +1955,7 @@ async def _start_builder_task_impl(
         "user_id_source=%s artifact_source=%s explicit_url_count=%s search_limit=%s "
         "fetch_limit=%s target_ext=%s target_ext_source=%s "
         "format_resolution_source=%s user_requested_ext=%s context_inferred_ext=%s "
+        "builder_budget_tier=%s max_cost_usd=%s max_total_tokens=%s max_turns=%s "
         "negation_vetoed_rules=%s",
         task_type,
         allow_web_research,
@@ -1963,6 +1977,10 @@ async def _start_builder_task_impl(
         format_resolution.source,
         format_resolution.user_requested_ext,
         format_resolution.context_inferred_ext,
+        builder_budget.get("tier"),
+        builder_budget.get("max_cost_usd"),
+        builder_budget.get("max_total_tokens"),
+        builder_budget.get("max_non_artifact_turns"),
         ",".join(format_resolution.vetoed_rules) or "none",
     )
 
@@ -1982,6 +2000,7 @@ async def _start_builder_task_impl(
             allow_web_research=allow_web_research,
             explicit_user_urls=explicit_user_urls,
             builder_web_budget=builder_web_budget,
+            builder_budget=builder_budget,
             user_id=user_id,
             parent_thread_id=parent_thread_id,
             parent_model=parent_model,
@@ -2003,7 +2022,7 @@ async def _start_builder_task_impl(
     )
 
     logger.info(
-        "[Builder] start_builder_task launched: task_id=%s run_id=%s trace=%s allow_web_research=%s explicit_url_count=%s search_limit=%s fetch_limit=%s target_ext=%s target_ext_source=%s",
+        "[Builder] start_builder_task launched: task_id=%s run_id=%s trace=%s allow_web_research=%s explicit_url_count=%s search_limit=%s fetch_limit=%s target_ext=%s target_ext_source=%s builder_budget_tier=%s max_cost_usd=%s max_total_tokens=%s max_turns=%s",
         task_id,
         run_id,
         trace_id,
@@ -2013,6 +2032,10 @@ async def _start_builder_task_impl(
         builder_web_budget.get("fetch_limit"),
         target_ext,
         target_ext_source,
+        builder_budget.get("tier"),
+        builder_budget.get("max_cost_usd"),
+        builder_budget.get("max_total_tokens"),
+        builder_budget.get("max_non_artifact_turns"),
     )
 
     return Command(

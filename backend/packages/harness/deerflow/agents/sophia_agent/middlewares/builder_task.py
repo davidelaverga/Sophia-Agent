@@ -33,6 +33,10 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.utils import log_middleware
+from deerflow.agents.sophia_agent.middlewares.builder_budget import (
+    force_emit_wall_clock_fraction,
+    max_non_artifact_turns,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -404,13 +408,18 @@ _POLISHED_DECK_IMAGE_MARKERS = (
 
 _PLAIN_DECK_MARKERS = (
     "plain",
+    "plain deck",
+    "plain slide",
+    "plain slides",
     "text-only",
     "text only",
+    "text-only deck",
+    "text only deck",
     "no images",
     "no imagery",
     "no illustrations",
-    "minimal",  # deliberately also opts out "minimal" style decks
-    "charts only",
+    "no visuals",
+    "without visuals",
 )
 _IMAGE_ENRICHMENT_TASK_TYPES = frozenset({"presentation", "visual_report"})
 
@@ -423,11 +432,11 @@ def _image_generation_enabled(
 ) -> bool:
     """Whether the image-generation skill is offered to the builder.
 
-    Image targets and explicit requests keep legacy behavior. PPTX keeps the
-    DeerFlow-native image-first path for visual/polished deck requests unless
-    the brief asks for a plain/minimal deck. PDF/HTML chart and diagram work
-    uses deterministic local visual assets unless the user explicitly asks
-    for generated imagery.
+    Image targets and explicit requests keep legacy behavior. PPTX defaults to
+    DeerFlow's image-first presentation path unless the brief explicitly asks
+    for a plain/text-only/no-visual deck. PDF/HTML chart and diagram work uses
+    deterministic local visual assets unless the user explicitly asks for
+    generated imagery.
     """
     if artifact_target_ext in _IMAGE_OUTPUT_EXTENSIONS:
         return True
@@ -438,9 +447,16 @@ def _image_generation_enabled(
         return True
     if artifact_target_ext != ".pptx":
         return False
-    if any(marker in combined for marker in _PLAIN_DECK_MARKERS):
+    if _plain_deck_requested(combined):
         return False
-    return _polished_deck_images_requested(delegation_context)
+    return True
+
+
+def _plain_deck_requested(text: str) -> bool:
+    return any(
+        re.search(rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])", text)
+        for marker in _PLAIN_DECK_MARKERS
+    )
 
 
 def _visuals_requested(delegation_context: dict[str, Any]) -> bool:
@@ -474,16 +490,16 @@ def _image_enrichment_section(artifact_target_ext: str = ".pptx") -> str:
             "- STEP 0 (required): run the preflight check FIRST — "
             "`python /mnt/skills/public/image-generation/scripts/generate.py --preflight`. "
             "If it fails, proceed chart/text-only immediately; the harness records why.\n"
-            "- Generate 1 hero image (16:9, for the title slide — wire it with "
-            "`\"layout\": \"full_bleed_image\"` on slide 1) and up to 2 supporting "
-            "images (section dividers or illustrative content). HARD CAP: 3 "
-            "image-generation script calls per build — calls beyond the cap are "
-            "rejected by the harness.\n"
+            "- For PPTX, follow the DeerFlow-native image-first path by generating "
+            "one 16:9 slide image per slide, sequentially, using the previous slide "
+            "as a reference image. HARD CAP: 8 image-generation script calls per "
+            "presentation build — calls beyond the cap are rejected by the harness.\n"
         )
     return (
         "<image_enrichment>\n"
-        "Generated imagery is available for this run because the user asked "
-        "for generated/illustrative imagery or a visual/polished deck. Policy:\n"
+        "Generated imagery is available for this run because this is an image "
+        "deliverable, an explicit generated-image request, or a PPTX deck that "
+        "did not ask to be plain/text-only/no-visual. Policy:\n"
         f"{plan_lines}"
         "- Charts, diagrams, timelines, and data visuals stay on the deterministic "
         "generate_visual_asset path (no API cost; does not count toward the cap).\n"
@@ -493,8 +509,8 @@ def _image_enrichment_section(artifact_target_ext: str = ".pptx") -> str:
         "- A failed image call must NEVER stall the deliverable: at most ONE retry "
         "with a simplified prompt, then continue with charts and text — a "
         "chart/text-only deliverable is valid.\n"
-        "- Skip generated imagery entirely if the brief asks for a plain, "
-        "text-only, or minimal deliverable.\n"
+        "- Skip generated imagery entirely only if the brief clearly asks for a "
+        "plain, text-only, or no-visual deliverable.\n"
         "</image_enrichment>"
     )
 
@@ -880,6 +896,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             include_image_generation=image_generation_enabled,
             include_visual_design=_visuals_requested(delegation_context),
             include_pdf_report=artifact_target_ext == ".pdf",
+            include_research_skills=artifact_target_ext == ".pdf"
+            or task_type in {"research", "document", "visual_report"},
         )
         if skills_block:
             sections.append(skills_block)
@@ -929,20 +947,18 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
 
         # Completion instruction — always present, includes budget so the model
         # plans from turn 0 instead of discovering the limit mid-loop.
-        # MUST stay in sync with BuilderArtifactMiddleware._CEILING_FOR_FORCE in
-        # builder_artifact.py — otherwise the model's budget math lies and it
-        # over-commits to retries past its advertised limit.
-        # PR-B (2026-04-28): bumped 20 → 30 so binary deliverables (PDF/PPTX
-        # with diagrams) have room for write→bash→fix cycles before being
-        # forced to emit. See builder_artifact.py for the full rationale.
-        _HARD_CEILING = 30
+        # Sourced from the per-run builder_budget tier so prompt math matches
+        # the middleware's force-emit threshold for simple and complex builds.
+        _HARD_CEILING = max_non_artifact_turns(state)
         remaining = max(_HARD_CEILING - non_artifact_turns, 0)
+        wall_clock_force_fraction = force_emit_wall_clock_fraction(state)
+        wall_clock_force_pct = int(round(wall_clock_force_fraction * 100))
 
         wall_clock_line = ""
         if wall_clock_pct is not None and wall_clock_elapsed_s is not None:
             wall_clock_line = (
                 f"Wall-clock budget: {wall_clock_elapsed_s}s of {builder_timeout_seconds}s used "
-                f"({wall_clock_pct}%). Once you cross 70% of the wall-clock budget, your NEXT action "
+                f"({wall_clock_pct}%). Once you cross {wall_clock_force_pct}% of the wall-clock budget, your NEXT action "
                 "MUST be emit_builder_artifact regardless of remaining turn count. Each long write "
                 "costs 90+ seconds of LLM output, so re-writing the same file twice burns the budget.\n"
             )
@@ -954,9 +970,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             f"{wall_clock_line}"
             "BEFORE planning, check <skill_system> above. If a listed skill matches "
             "the deliverable type (e.g. pdf-report for PDF reports, "
-            "chart-visualization for any chart, ppt-generation for slide decks, "
-            "image-generation only when listed for explicit/generated imagery or "
-            "visual/polished deck mode, data-analysis for tabular data), USE IT — read its SKILL.md "
+            "deep-research / academic-paper-review / systematic-literature-review for research-backed reports, "
+            "chart-visualization for chart/data design, ppt-generation for slide decks, "
+            "image-generation when listed for image deliverables, explicit generated imagery, or normal PPTX visual decks, "
+            "data-analysis for tabular data), USE IT — read its SKILL.md "
             "via read_file_tool and follow its workflow. Workflow cards are authoritative "
             "for PDF, PPTX, HTML, and research tasks. Do not replace them with ad hoc "
             "matplotlib/reportlab/python-pptx generator code; that is the fragile path "
@@ -994,9 +1011,9 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "unless Sophia asks for one layout repair.\n"
             "    * **PPTX / presentation**: follow the PPTX workflow card. Reading SKILL.md alone is not "
             "completion; normal success requires deck composition and a valid .pptx. When image-generation "
-            "is listed in <skill_system>, the run is in explicit/generated imagery or visual/polished deck "
-            "mode: use it for a bounded hero/supporting-image pass, but never let an image failure stall "
-            "a valid deck.\n"
+            "is listed in <skill_system>, use the DeerFlow-native sequential slide-image workflow unless "
+            "the brief explicitly asks for a plain/text-only/no-visual deck. Never let an image failure "
+            "stall a valid deck; fall back to chart/text composition with honest diagnostics.\n"
             "    * **HTML**: follow the HTML workflow card. Standalone browser-renderable HTML is a text "
             "deliverable, not a frontend app unless the user requested app behavior.\n"
             "    * **Standalone chart / image**: use the chart-visualization or image-generation skill. The "
@@ -1043,13 +1060,11 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             # (remaining<=6) so the model gets graduated wrap-up pressure.
             #
             # Wall-clock-aware promotion: when the per-run wall-clock budget
-            # has crossed 70%, escalate to CRITICAL even if turn-count
-            # remaining > 3. This matches BuilderArtifactMiddleware's
-            # _FORCE_EMIT_WALL_CLOCK_FRACTION so the prompt and the API-level
-            # tool_choice forcing agree.
+            # has crossed the configured force fraction, escalate to CRITICAL
+            # even if turn-count remaining is still high.
             wall_clock_critical = (
                 wall_clock_pct is not None
-                and wall_clock_pct >= 70
+                and wall_clock_pct >= wall_clock_force_pct
             )
             if remaining <= 3 or wall_clock_critical:
                 escalation += (
@@ -1158,6 +1173,9 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         "pdf-report",
         "ppt-generation",
         "image-generation",
+        "deep-research",
+        "academic-paper-review",
+        "systematic-literature-review",
         "data-analysis",
     )
 
@@ -1167,7 +1185,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         *,
         include_image_generation: bool = True,
         include_visual_design: bool = False,
-        include_pdf_report: bool = False,
+        include_pdf_report: bool = True,
+        include_research_skills: bool = True,
     ) -> str | None:
         """Return a ``<skill_system>`` block listing builder-relevant skills.
 
@@ -1210,6 +1229,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             allowed_skill_names.discard("visual-design")
         if not include_pdf_report:
             allowed_skill_names.discard("pdf-report")
+        if not include_research_skills:
+            allowed_skill_names.difference_update(
+                {"deep-research", "academic-paper-review", "systematic-literature-review"}
+            )
         relevant = [s for s in skills if getattr(s, "name", None) in allowed_skill_names]
         # Log either way so "did the builder see skills this run?" is
         # answerable from a single grep on the langgraph-server logs.
