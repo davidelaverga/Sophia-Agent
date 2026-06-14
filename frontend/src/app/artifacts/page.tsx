@@ -3,7 +3,6 @@
 import { useRouter } from 'next/navigation';
 
 import { ArtifactLibraryPanel } from '../components/dashboard/ArtifactLibraryPanel';
-import { EnhancedFieldBackground } from '../components/dashboard/EnhancedFieldBackground';
 import { MobileNavBar, NavRail } from '../components/dashboard/NavRail';
 import { ProtectedRoute } from '../components/ProtectedRoute';
 import { selectOpenSessionCount, useSessionStore } from '../stores/session-store';
@@ -13,8 +12,7 @@ function ArtifactLibraryPageContent() {
   const openSessionCount = useSessionStore(selectOpenSessionCount);
 
   return (
-    <div className="relative min-h-screen overflow-hidden">
-      <EnhancedFieldBackground contextMode="life" />
+    <div className="relative min-h-screen overflow-hidden bg-[#010106]">
       <NavRail
         activeItem="artifacts"
         onToggleSessions={() => router.push('/')}
