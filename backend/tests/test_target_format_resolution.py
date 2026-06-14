@@ -62,6 +62,29 @@ def test_presentation_in_pdf_format_resolves_to_pdf():
     assert resolution.final_ext == "pdf"
 
 
+def test_slide_deck_in_pdf_format_resolves_to_pdf():
+    resolution = _resolve_target_format(
+        current_user_text="make the slide deck in PDF format",
+        description="make the slide deck in PDF format",
+        task_type="presentation",
+    )
+    assert resolution.final_ext == "pdf"
+    assert resolution.source == "current_user_turn"
+    assert resolution.user_requested_ext == "pdf"
+
+
+def test_export_slides_to_pdf_resolves_to_pdf():
+    ext, reason = _requested_output_extension_match("export the slides to PDF")
+    assert ext == "pdf"
+    assert reason == "explicit_pdf_deck_deliverable"
+
+
+def test_pdf_slide_deck_resolves_to_pdf():
+    ext, reason = _requested_output_extension_match("build a PDF slide deck for the board")
+    assert ext == "pdf"
+    assert reason == "explicit_pdf_deck_deliverable"
+
+
 def test_powerpoint_deck_from_pdf_source_resolves_to_pptx():
     resolution = _resolve_target_format(
         current_user_text="build a PowerPoint deck based on a PDF source document",

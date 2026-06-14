@@ -159,10 +159,20 @@ _PPTX_OUTPUT_RE = re.compile(
     r"\b(?:pptx|powerpoint|power\s*point|slide\s+deck|slides?)\b",
     re.IGNORECASE,
 )
+_PDF_DECK_DELIVERY_RE = re.compile(
+    r"\b(?:"
+    r"(?:slides?|slide\s+deck|deck|presentation)\s+(?:as|in|to|into)\s+(?:an?\s+)?pdf(?:\s+format)?"
+    r"|(?:export|render|convert|save|download|deliver|produce|make|create|build)\s+[^.?!\n]{0,80}?"
+    r"\b(?:slides?|slide\s+deck|deck|presentation)\b[^.?!\n]{0,80}?"
+    r"\b(?:as|to|in|into)\s+(?:an?\s+)?pdf(?:\s+format)?"
+    r"|pdf\s+(?:slides?|slide\s+deck|deck|presentation)"
+    r")",
+    re.IGNORECASE,
+)
 _REQUESTED_OUTPUT_EXTENSION_PATTERNS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
     # Explicit deck language must beat incidental PDF mentions from previous
-    # artifact filenames or context. A phrase like "presentation in PDF
-    # format" has no PPTX marker, so it still resolves to PDF below.
+    # artifact filenames or source context. A higher-priority precheck below
+    # handles target-position PDF deck requests such as "export slides to PDF".
     ("pptx", "explicit_presentation_deck", _PPTX_OUTPUT_RE),
     ("pdf", "explicit_pdf_deliverable", _PDF_OUTPUT_RE),
     ("docx", "explicit_word_document", re.compile(r"\b(?:docx|word\s+document)\b", re.IGNORECASE)),
@@ -335,6 +345,8 @@ def _requested_output_extension_match_with_vetoes(
     vetoed: list[str] = []
     if not isinstance(text, str) or not text.strip():
         return None, None, vetoed
+    if _PDF_DECK_DELIVERY_RE.search(text) and _pattern_affirmative_match(_PDF_DECK_DELIVERY_RE, text):
+        return "pdf", "explicit_pdf_deck_deliverable", vetoed
     for ext, reason, pattern in _REQUESTED_OUTPUT_EXTENSION_PATTERNS:
         if not pattern.search(text):
             continue
