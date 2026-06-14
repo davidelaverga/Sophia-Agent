@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from deerflow.agents.sophia_agent.middlewares import builder_provider_fallback as mw_module
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
@@ -204,6 +205,32 @@ class _FakeRequest:
         return _FakeRequest(model=overrides.get("model", self.model))
 
 
+class _CacheyFakeRequest:
+    def __init__(
+        self,
+        *,
+        model: object = "primary-model",
+        messages: list | None = None,
+        system_message: object | None = None,
+        tools: list | None = None,
+        model_settings: dict | None = None,
+    ) -> None:
+        self.model = model
+        self.messages = messages or []
+        self.system_message = system_message
+        self.tools = tools or []
+        self.model_settings = model_settings or {}
+
+    def override(self, **overrides):
+        return _CacheyFakeRequest(
+            model=overrides.get("model", self.model),
+            messages=overrides.get("messages", self.messages),
+            system_message=overrides.get("system_message", self.system_message),
+            tools=overrides.get("tools", self.tools),
+            model_settings=overrides.get("model_settings", self.model_settings),
+        )
+
+
 class _StatusError(Exception):
     def __init__(self, status_code: int) -> None:
         super().__init__("provider error")
@@ -221,6 +248,20 @@ class _Handler:
         if self.calls == 1:
             raise self.primary_exc
         raise self.fallback_exc
+
+
+def _contains_cache_control(value) -> bool:
+    if isinstance(value, dict):
+        return any(key == "cache_control" or _contains_cache_control(item) for key, item in value.items())
+    if isinstance(value, list | tuple):
+        return any(_contains_cache_control(item) for item in value)
+    if hasattr(value, "content") and _contains_cache_control(value.content):
+        return True
+    if hasattr(value, "additional_kwargs") and _contains_cache_control(value.additional_kwargs):
+        return True
+    if hasattr(value, "response_metadata") and _contains_cache_control(value.response_metadata):
+        return True
+    return False
 
 
 def _enable_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -267,3 +308,67 @@ class TestFallbackFailureLogging:
         joined = " ".join(r.getMessage() for r in caplog.records)
         assert "builderFailureCode=builder_provider_fallback_failed" in joined
         assert "builderFailureDiagnosticAvailable=true" in joined
+
+
+class TestFallbackStripsAnthropicCacheMetadata:
+    def test_openai_retry_removes_cache_control_from_request(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _enable_fallback(monkeypatch)
+        captured_fallback_request = None
+
+        request = _CacheyFakeRequest(
+            messages=[
+                HumanMessage(
+                    content=[
+                        {
+                            "type": "text",
+                            "text": "cached user text",
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                    additional_kwargs={"cache_control": {"type": "ephemeral"}},
+                )
+            ],
+            system_message=SystemMessage(
+                content=[
+                    {
+                        "type": "text",
+                        "text": "cached system text",
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                response_metadata={"cache_control": {"type": "ephemeral"}},
+            ),
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "parameters": {
+                            "type": "object",
+                            "cache_control": {"type": "ephemeral"},
+                        },
+                    },
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            model_settings={"extra_body": {"cache_control": {"type": "ephemeral"}}},
+        )
+
+        def handler(next_request):
+            nonlocal captured_fallback_request
+            if captured_fallback_request is None:
+                captured_fallback_request = next_request
+                raise _StatusError(401)
+            captured_fallback_request = next_request
+            return "fallback-ok"
+
+        result = BuilderProviderFallbackMiddleware().wrap_model_call(request, handler)
+
+        assert result.model_response == "fallback-ok"
+        assert isinstance(captured_fallback_request.model, ChatOpenAI)
+        assert not _contains_cache_control(captured_fallback_request.messages)
+        assert not _contains_cache_control(captured_fallback_request.system_message)
+        assert not _contains_cache_control(captured_fallback_request.tools)
+        assert not _contains_cache_control(captured_fallback_request.model_settings)

@@ -62,6 +62,7 @@ from deerflow.sophia.builder_provider_fallback import (
 logger = logging.getLogger(__name__)
 
 _primary_cooldown: dict[str, Any] = {"until": 0.0, "error_class": None}
+_CACHE_CONTROL_KEY = "cache_control"
 
 
 def _set_primary_cooldown(error_class: str) -> None:
@@ -94,6 +95,71 @@ def _bypass_reason(error_class: str) -> str:
         if error_class == "permission_or_payment_error"
         else "provider_unavailable"
     )
+
+
+def _strip_anthropic_cache_control(value: Any) -> Any:
+    """Remove Anthropic prompt-cache metadata before OpenAI fallback calls.
+
+    ``AnthropicPromptCachingMiddleware`` can attach ``cache_control`` fields to
+    message content blocks, system blocks, tool schemas, or model settings.
+    Those fields are provider-specific and OpenAI rejects them. Keep this
+    sanitizer narrow: it preserves all other structure and only removes the
+    exact Anthropic key.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _strip_anthropic_cache_control(item)
+            for key, item in value.items()
+            if key != _CACHE_CONTROL_KEY
+        }
+    if isinstance(value, list):
+        return [_strip_anthropic_cache_control(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_strip_anthropic_cache_control(item) for item in value)
+    return value
+
+
+def _strip_cache_control_from_message(message: Any) -> Any:
+    updates: dict[str, Any] = {}
+    for attr in ("content", "additional_kwargs", "response_metadata"):
+        if not hasattr(message, attr):
+            continue
+        original = getattr(message, attr)
+        stripped = _strip_anthropic_cache_control(original)
+        if stripped != original:
+            updates[attr] = stripped
+    if not updates:
+        return message
+    if hasattr(message, "model_copy"):
+        return message.model_copy(update=updates)
+    copied = message
+    for attr, value in updates.items():
+        try:
+            setattr(copied, attr, value)
+        except Exception:  # noqa: BLE001 - best-effort for non-message test doubles
+            pass
+    return copied
+
+
+def _openai_fallback_request(request: Any, fallback_model: Any) -> Any:
+    overrides: dict[str, Any] = {"model": fallback_model}
+    if hasattr(request, "messages"):
+        messages = getattr(request, "messages")
+        if isinstance(messages, list):
+            overrides["messages"] = [_strip_cache_control_from_message(message) for message in messages]
+    if hasattr(request, "system_message"):
+        system_message = getattr(request, "system_message")
+        if system_message is not None:
+            overrides["system_message"] = _strip_cache_control_from_message(system_message)
+    if hasattr(request, "tools"):
+        tools = getattr(request, "tools")
+        if isinstance(tools, list):
+            overrides["tools"] = _strip_anthropic_cache_control(tools)
+    if hasattr(request, "model_settings"):
+        settings = getattr(request, "model_settings")
+        if isinstance(settings, dict):
+            overrides["model_settings"] = _strip_anthropic_cache_control(settings)
+    return request.override(**overrides)
 
 
 class BuilderProviderFallbackState(AgentState):
@@ -215,7 +281,7 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
             )
             return request
         logger.info("[BuilderProviderFallback] forced_provider=openai (eval hook)")
-        return request.override(model=fallback_model)
+        return _openai_fallback_request(request, fallback_model)
 
     @staticmethod
     def _cooldown_fallback_model_or_none() -> tuple[str, Any] | None:
@@ -240,7 +306,7 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
         if cooldown is not None:
             error_class, fallback_model = cooldown
             try:
-                response = handler(request.override(model=fallback_model))
+                response = handler(_openai_fallback_request(request, fallback_model))
             except Exception as fallback_exc:
                 _clear_primary_cooldown()
                 self._log_fallback_failed(error_class, fallback_exc)
@@ -264,7 +330,7 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
                 error_class,
             )
             try:
-                response = handler(request.override(model=fallback_model))
+                response = handler(_openai_fallback_request(request, fallback_model))
             except Exception as fallback_exc:
                 _clear_primary_cooldown()
                 self._log_fallback_failed(error_class, fallback_exc)
@@ -277,7 +343,7 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
         if cooldown is not None:
             error_class, fallback_model = cooldown
             try:
-                response = await handler(request.override(model=fallback_model))
+                response = await handler(_openai_fallback_request(request, fallback_model))
             except Exception as fallback_exc:
                 _clear_primary_cooldown()
                 self._log_fallback_failed(error_class, fallback_exc)
@@ -301,7 +367,7 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
                 error_class,
             )
             try:
-                response = await handler(request.override(model=fallback_model))
+                response = await handler(_openai_fallback_request(request, fallback_model))
             except Exception as fallback_exc:
                 _clear_primary_cooldown()
                 self._log_fallback_failed(error_class, fallback_exc)

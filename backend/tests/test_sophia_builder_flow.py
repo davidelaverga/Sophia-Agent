@@ -177,6 +177,10 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     assert "DanglingToolCallMiddleware" in builder_types
     assert "PromptAssemblyMiddleware" in builder_types
     assert "AnthropicPromptCachingMiddleware" in builder_types
+    builder_cache_middleware = next(
+        mw for mw in captured_builder["middleware"] if type(mw).__name__ == "AnthropicPromptCachingMiddleware"
+    )
+    assert builder_cache_middleware.unsupported_model_behavior == "ignore"
     assert (
         builder_types.index("PromptAssemblyMiddleware")
         < builder_types.index("DanglingToolCallMiddleware")

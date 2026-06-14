@@ -173,7 +173,7 @@ def build_builder_middleware_chain(
             # On the direct Anthropic API this caches system + tools + an
             # incremental message-prefix breakpoint that advances as the
             # conversation grows.
-            AnthropicPromptCachingMiddleware(ttl="5m"),
+            AnthropicPromptCachingMiddleware(ttl="5m", unsupported_model_behavior="ignore"),
         ]
     )
     middlewares.extend(chain_tail)
