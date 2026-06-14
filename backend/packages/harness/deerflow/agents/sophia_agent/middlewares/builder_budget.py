@@ -66,6 +66,9 @@ _DEFAULT_PRICE: dict[str, float] = {"in": 3.0, "out": 15.0}
 USER_BUDGET_TIMEOUT_MESSAGE = (
     "Sorry, we hit the token limit for this task. Please let me know if you want to try again."
 )
+USER_BUDGET_COST_MESSAGE = (
+    "Sorry, we hit the cost limit for this task. Please let me know if you want to try again."
+)
 
 # Default per-run caps. ``0`` / ``0.0`` disables a cap. ``start_builder_task``
 # seeds an explicit copy into ``run_input["builder_budget"]``; this is the
@@ -248,6 +251,16 @@ def budget_allows_iteration(state: dict) -> bool:
     return estimate_run_cost_usd(state) + max(reserve, 0.0) <= max_cost
 
 
+def _budget_stop_copy(budget_stop_reason: str) -> str:
+    if budget_stop_reason == "cost_limit":
+        return USER_BUDGET_COST_MESSAGE
+    return USER_BUDGET_TIMEOUT_MESSAGE
+
+
+def _budget_error_message(*, budget_stop_reason: str, detail: str) -> str:
+    return f"{_budget_stop_copy(budget_stop_reason)} Builder budget exceeded: {detail}."
+
+
 def _price_for(key: str | None) -> dict[str, float]:
     if key:
         for known, price in _MODEL_PRICES.items():
@@ -361,6 +374,11 @@ class BuilderBudgetMiddleware(AgentMiddleware[BuilderBudgetState]):
 
         budget_stop_reason = "cost_limit" if over_cost else "token_limit"
         reason = f"cost=${cost:.2f}>=${max_cost:.2f}" if over_cost else f"tokens={total_tokens}>={max_tokens}"
+        companion_summary = _budget_stop_copy(budget_stop_reason)
+        terminal_error_message = _budget_error_message(
+            budget_stop_reason=budget_stop_reason,
+            detail=reason,
+        )
         logger.error(
             "[BuilderBudget] BUDGET EXCEEDED: %s (est_cost=$%.4f total_tokens=%d) — terminating builder run",
             reason,
@@ -384,11 +402,11 @@ class BuilderBudgetMiddleware(AgentMiddleware[BuilderBudgetState]):
                         "budget_stop_reason": budget_stop_reason,
                     },
                     "budget_stop_reason": budget_stop_reason,
-                    "companion_summary": USER_BUDGET_TIMEOUT_MESSAGE,
+                    "companion_summary": companion_summary,
                     "user_next_action": "Tell me if you want me to try again with a narrower scope.",
                 },
                 status="timed_out",
-                error_message=USER_BUDGET_TIMEOUT_MESSAGE,
+                error_message=terminal_error_message,
             )
         except Exception:  # noqa: BLE001 — the breaker must never itself crash the run
             logger.warning("[BuilderBudget] completion webhook dispatch failed", exc_info=True)

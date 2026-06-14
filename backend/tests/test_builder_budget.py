@@ -18,6 +18,8 @@ from langchain_core.messages import AIMessage
 from deerflow.agents.sophia_agent.middlewares import builder_budget as bb_mod
 from deerflow.agents.sophia_agent.middlewares.builder_budget import (
     BuilderBudgetMiddleware,
+    USER_BUDGET_COST_MESSAGE,
+    USER_BUDGET_TIMEOUT_MESSAGE,
     _estimate_cost_usd,
     _price_for,
     _sum_usage,
@@ -121,7 +123,8 @@ def test_token_cap_trips_fires_timed_out_and_strips_tool_calls(monkeypatch):
     # Terminal webhook fired with a native terminal status + budget reason.
     assert len(calls) == 1
     assert calls[0]["status"] == "timed_out"
-    assert calls[0]["artifact"] == {}
+    assert calls[0]["artifact"]["budget_stop_reason"] == "token_limit"
+    assert calls[0]["artifact"]["companion_summary"] == USER_BUDGET_TIMEOUT_MESSAGE
     assert "budget exceeded" in calls[0]["error_message"].lower()
     assert "tokens=1200>=1000" in calls[0]["error_message"]
 
@@ -137,7 +140,11 @@ def test_cost_cap_trips(monkeypatch):
     out = mw.after_model(state, _runtime())
     assert out is not None and out["jump_to"] == "end"
     assert calls[0]["status"] == "timed_out"
+    assert calls[0]["artifact"]["budget_stop_reason"] == "cost_limit"
+    assert calls[0]["artifact"]["companion_summary"] == USER_BUDGET_COST_MESSAGE
+    assert "cost limit" in calls[0]["error_message"]
     assert "cost=$" in calls[0]["error_message"]
+    assert "token limit" not in calls[0]["error_message"]
 
 
 def test_caps_disabled_never_trips(monkeypatch):
