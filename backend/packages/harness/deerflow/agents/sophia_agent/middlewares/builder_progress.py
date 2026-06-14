@@ -550,6 +550,10 @@ class BuilderProgressMiddleware(AgentMiddleware[BuilderProgressState]):
             log_middleware("BuilderProgress", "no tool_calls in latest AI msg", _t0)
             return None
         new_phase = _pick_strongest_phase(tool_calls)
+        # VQ-10: once the build-to-condition loop has spent a repair
+        # iteration, drafting/finalizing activity is honestly "refining".
+        if int(state.get("build_iterations", 0) or 0) > 0 and new_phase in {_PHASE_DRAFTING, _PHASE_FINALIZING}:
+            new_phase = "refining"
         task_id, run_id = _resolve_task_id_and_run_id(runtime)
         if task_id is None or run_id is None:
             log_middleware("BuilderProgress", "no task_id/run_id; skip POST", _t0)

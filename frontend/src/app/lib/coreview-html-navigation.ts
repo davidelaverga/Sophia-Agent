@@ -90,6 +90,172 @@ const INDEX_SELECTORS = {
   text: "main p,main li,section p,section li,article p,article li,p,li,blockquote,td,th,[data-text-anchor]",
 }
 
+type SectionIndexEntryBuilder = (element: Element) => CoreviewHtmlSectionIndexEntry | null
+
+function idLikeSectionEntry(element: Element, attribute: "id" | "name"): CoreviewHtmlSectionIndexEntry | null {
+  const value = safeHtmlNavigationLabel(element.getAttribute(attribute))
+  if (!value) return null
+  return {
+    targetKind: "id",
+    targetLabelSafe: value,
+    labels: [
+      value,
+      labelForElement(element),
+      cleanHtmlNavigationTarget(value),
+    ],
+    element,
+  }
+}
+
+function idSectionEntry(element: Element): CoreviewHtmlSectionIndexEntry | null {
+  return idLikeSectionEntry(element, "id")
+}
+
+function nameSectionEntry(element: Element): CoreviewHtmlSectionIndexEntry | null {
+  return idLikeSectionEntry(element, "name")
+}
+
+function headingSectionEntry(element: Element): CoreviewHtmlSectionIndexEntry | null {
+  const label = labelForElement(element, TEXT_INDEX_MAX_LENGTH)
+  if (!label) return null
+  return {
+    targetKind: "heading",
+    targetLabelSafe: label,
+    labels: [
+      label,
+      element.getAttribute("id") ?? "",
+      element.getAttribute("aria-label") ?? "",
+    ],
+    element,
+  }
+}
+
+function navLikeSectionEntry(element: Element, fallbackLabel: string): CoreviewHtmlSectionIndexEntry | null {
+  const label = labelForElement(element, TEXT_INDEX_MAX_LENGTH)
+  const hrefTarget = hrefTargetFromElement(element)
+  if (!label && !hrefTarget) return null
+  return {
+    targetKind: "nav",
+    targetLabelSafe: label || hrefTarget || fallbackLabel,
+    labels: [
+      label,
+      hrefTarget,
+      cleanHtmlNavigationTarget(element.getAttribute("href") ?? ""),
+    ],
+    hrefTargetSafe: hrefTarget,
+    element,
+  }
+}
+
+function navSectionEntry(element: Element): CoreviewHtmlSectionIndexEntry | null {
+  return navLikeSectionEntry(element, "navigation")
+}
+
+function linkSectionEntry(element: Element): CoreviewHtmlSectionIndexEntry | null {
+  return navLikeSectionEntry(element, "link")
+}
+
+function buttonOrTextTargetKind(element: Element): CoreviewHtmlNavigationTargetKind {
+  return element.matches("button,[role='button']") ? "button" : "text"
+}
+
+function dataTargetSectionEntry(element: Element): CoreviewHtmlSectionIndexEntry | null {
+  const target = dataNavigationTargetFromElement(element)
+  if (!target) return null
+  const visibleLabel = safeHtmlNavigationLabel(element.textContent, TEXT_INDEX_MAX_LENGTH)
+  return {
+    targetKind: buttonOrTextTargetKind(element),
+    targetLabelSafe: visibleLabel || labelForElement(element) || target,
+    labels: [
+      target,
+      visibleLabel,
+      labelForElement(element, TEXT_INDEX_MAX_LENGTH),
+    ],
+    hrefTargetSafe: target,
+    element,
+  }
+}
+
+function ariaLabelSectionEntry(element: Element): CoreviewHtmlSectionIndexEntry | null {
+  const label = safeHtmlNavigationLabel(element.getAttribute("aria-label"), TEXT_INDEX_MAX_LENGTH)
+  if (!label) return null
+  return {
+    targetKind: buttonOrTextTargetKind(element),
+    targetLabelSafe: label,
+    labels: [
+      label,
+      element.getAttribute("id") ?? "",
+      dataNavigationTargetFromElement(element),
+      hrefTargetFromElement(element),
+    ],
+    hrefTargetSafe: dataNavigationTargetFromElement(element) || hrefTargetFromElement(element),
+    element,
+  }
+}
+
+function buttonSectionEntry(element: Element): CoreviewHtmlSectionIndexEntry | null {
+  const label = labelForElement(element, TEXT_INDEX_MAX_LENGTH)
+  if (!label) return null
+  return {
+    targetKind: "button",
+    targetLabelSafe: label,
+    labels: [label],
+    hrefTargetSafe: dataNavigationTargetFromElement(element),
+    element,
+  }
+}
+
+function textSectionEntry(element: Element): CoreviewHtmlSectionIndexEntry | null {
+  const label = labelForElement(element, TEXT_INDEX_MAX_LENGTH)
+  if (!label) return null
+  return {
+    targetKind: "text",
+    targetLabelSafe: label,
+    labels: [label],
+    element,
+  }
+}
+
+const SECTION_INDEX_COLLECTORS: ReadonlyArray<readonly [string, SectionIndexEntryBuilder]> = [
+  [INDEX_SELECTORS.id, idSectionEntry],
+  [INDEX_SELECTORS.name, nameSectionEntry],
+  [INDEX_SELECTORS.headings, headingSectionEntry],
+  [INDEX_SELECTORS.nav, navSectionEntry],
+  [INDEX_SELECTORS.links, linkSectionEntry],
+  [INDEX_SELECTORS.dataTargets, dataTargetSectionEntry],
+  [INDEX_SELECTORS.ariaLabels, ariaLabelSectionEntry],
+  [INDEX_SELECTORS.buttons, buttonSectionEntry],
+  [INDEX_SELECTORS.text, textSectionEntry],
+]
+
+function pushSectionIndexEntry(
+  entries: CoreviewHtmlSectionIndexEntry[],
+  seen: Set<string>,
+  entry: CoreviewHtmlSectionIndexEntry,
+): void {
+  const labels = uniqueSafeLabels(entry.labels)
+  const targetLabelSafe = safeHtmlNavigationLabel(entry.targetLabelSafe || labels[0])
+  if (!targetLabelSafe && labels.length === 0) {
+    return
+  }
+  const normalizedKey = [
+    entry.targetKind,
+    targetLabelSafe,
+    labels.map(htmlNavigationMatchKey).join(","),
+    safeHtmlNavigationLabel(entry.hrefTargetSafe),
+  ].join("|")
+  if (seen.has(normalizedKey)) {
+    return
+  }
+  seen.add(normalizedKey)
+  entries.push({
+    ...entry,
+    targetLabelSafe: targetLabelSafe || labels[0] || "section",
+    labels,
+    hrefTargetSafe: safeHtmlNavigationLabel(entry.hrefTargetSafe) || null,
+  })
+}
+
 export function buildCoreviewHtmlSectionIndex(documentRef: Document | null | undefined): CoreviewHtmlSectionIndex {
   if (!documentRef) {
     return emptyIndex("document_unavailable")
@@ -98,165 +264,15 @@ export function buildCoreviewHtmlSectionIndex(documentRef: Document | null | und
   try {
     const entries: CoreviewHtmlSectionIndexEntry[] = []
     const seen = new Set<string>()
-    const pushEntry = (entry: CoreviewHtmlSectionIndexEntry) => {
-      const labels = uniqueSafeLabels(entry.labels)
-      const targetLabelSafe = safeHtmlNavigationLabel(entry.targetLabelSafe || labels[0])
-      if (!targetLabelSafe && labels.length === 0) {
-        return
+
+    for (const [selector, buildEntry] of SECTION_INDEX_COLLECTORS) {
+      for (const element of queryElements(documentRef, selector)) {
+        const entry = buildEntry(element)
+        if (entry) {
+          pushSectionIndexEntry(entries, seen, entry)
+        }
       }
-      const normalizedKey = [
-        entry.targetKind,
-        targetLabelSafe,
-        labels.map(htmlNavigationMatchKey).join(","),
-        safeHtmlNavigationLabel(entry.hrefTargetSafe),
-      ].join("|")
-      if (seen.has(normalizedKey)) {
-        return
-      }
-      seen.add(normalizedKey)
-      entries.push({
-        ...entry,
-        targetLabelSafe: targetLabelSafe || labels[0] || "section",
-        labels,
-        hrefTargetSafe: safeHtmlNavigationLabel(entry.hrefTargetSafe) || null,
-      })
     }
-
-    queryElements(documentRef, INDEX_SELECTORS.id).forEach((element) => {
-      const id = safeHtmlNavigationLabel(element.getAttribute("id"))
-      if (!id) return
-      pushEntry({
-        targetKind: "id",
-        targetLabelSafe: id,
-        labels: [
-          id,
-          labelForElement(element),
-          cleanHtmlNavigationTarget(id),
-        ],
-        element,
-      })
-    })
-
-    queryElements(documentRef, INDEX_SELECTORS.name).forEach((element) => {
-      const name = safeHtmlNavigationLabel(element.getAttribute("name"))
-      if (!name) return
-      pushEntry({
-        targetKind: "id",
-        targetLabelSafe: name,
-        labels: [
-          name,
-          labelForElement(element),
-          cleanHtmlNavigationTarget(name),
-        ],
-        element,
-      })
-    })
-
-    queryElements(documentRef, INDEX_SELECTORS.headings).forEach((element) => {
-      const label = labelForElement(element, TEXT_INDEX_MAX_LENGTH)
-      if (!label) return
-      pushEntry({
-        targetKind: "heading",
-        targetLabelSafe: label,
-        labels: [
-          label,
-          element.getAttribute("id") ?? "",
-          element.getAttribute("aria-label") ?? "",
-        ],
-        element,
-      })
-    })
-
-    queryElements(documentRef, INDEX_SELECTORS.nav).forEach((element) => {
-      const label = labelForElement(element, TEXT_INDEX_MAX_LENGTH)
-      const hrefTarget = hrefTargetFromElement(element)
-      if (!label && !hrefTarget) return
-      pushEntry({
-        targetKind: "nav",
-        targetLabelSafe: label || hrefTarget || "navigation",
-        labels: [
-          label,
-          hrefTarget,
-          cleanHtmlNavigationTarget(element.getAttribute("href") ?? ""),
-        ],
-        hrefTargetSafe: hrefTarget,
-        element,
-      })
-    })
-
-    queryElements(documentRef, INDEX_SELECTORS.links).forEach((element) => {
-      const label = labelForElement(element, TEXT_INDEX_MAX_LENGTH)
-      const hrefTarget = hrefTargetFromElement(element)
-      if (!label && !hrefTarget) return
-      pushEntry({
-        targetKind: "nav",
-        targetLabelSafe: label || hrefTarget || "link",
-        labels: [
-          label,
-          hrefTarget,
-          cleanHtmlNavigationTarget(element.getAttribute("href") ?? ""),
-        ],
-        hrefTargetSafe: hrefTarget,
-        element,
-      })
-    })
-
-    queryElements(documentRef, INDEX_SELECTORS.dataTargets).forEach((element) => {
-      const target = dataNavigationTargetFromElement(element)
-      if (!target) return
-      const visibleLabel = safeHtmlNavigationLabel(element.textContent, TEXT_INDEX_MAX_LENGTH)
-      pushEntry({
-        targetKind: element.matches("button,[role='button']") ? "button" : "text",
-        targetLabelSafe: visibleLabel || labelForElement(element) || target,
-        labels: [
-          target,
-          visibleLabel,
-          labelForElement(element, TEXT_INDEX_MAX_LENGTH),
-        ],
-        hrefTargetSafe: target,
-        element,
-      })
-    })
-
-    queryElements(documentRef, INDEX_SELECTORS.ariaLabels).forEach((element) => {
-      const label = safeHtmlNavigationLabel(element.getAttribute("aria-label"), TEXT_INDEX_MAX_LENGTH)
-      if (!label) return
-      pushEntry({
-        targetKind: element.matches("button,[role='button']") ? "button" : "text",
-        targetLabelSafe: label,
-        labels: [
-          label,
-          element.getAttribute("id") ?? "",
-          dataNavigationTargetFromElement(element),
-          hrefTargetFromElement(element),
-        ],
-        hrefTargetSafe: dataNavigationTargetFromElement(element) || hrefTargetFromElement(element),
-        element,
-      })
-    })
-
-    queryElements(documentRef, INDEX_SELECTORS.buttons).forEach((element) => {
-      const label = labelForElement(element, TEXT_INDEX_MAX_LENGTH)
-      if (!label) return
-      pushEntry({
-        targetKind: "button",
-        targetLabelSafe: label,
-        labels: [label],
-        hrefTargetSafe: dataNavigationTargetFromElement(element),
-        element,
-      })
-    })
-
-    queryElements(documentRef, INDEX_SELECTORS.text).forEach((element) => {
-      const label = labelForElement(element, TEXT_INDEX_MAX_LENGTH)
-      if (!label) return
-      pushEntry({
-        targetKind: "text",
-        targetLabelSafe: label,
-        labels: [label],
-        element,
-      })
-    })
 
     return {
       ok: true,

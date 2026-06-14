@@ -33,8 +33,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess  # noqa: S404 — invoking pandoc by absolute path
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +64,49 @@ _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 _PANDOC_TIMEOUT_SECONDS = 90
 _SHORT_PAGE_WORD_THRESHOLD = 80
 _DEFAULT_MAX_PAGES = 15
+
+# Vendored pandoc LaTeX template (pandoc 2.17.1.1 default.latex + guarded
+# Sophia customizations). The tool runs IN-PROCESS in the langgraph
+# container, so a package-relative path is valid at runtime.
+_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "assets" / "sophia.latex"
+
+# Named themes — every variable is also $if$-guarded in the template, so a
+# partial or absent set never breaks compilation. Fonts come from the
+# container's fonts-liberation / fonts-dejavu-core packages.
+_PDF_THEMES: dict[str, dict[str, str]] = {
+    "boardroom": {
+        "accentcolor": "1F6FB2",
+        "headingcolor": "10243E",
+        "titlepagecolor": "10243E",
+        "titlepagetextcolor": "F8FAFC",
+        "mainfont": "Liberation Serif",
+        "sansfont": "Liberation Sans",
+    },
+    "minimal": {
+        "accentcolor": "334155",
+        "headingcolor": "0F172A",
+        "titlepagecolor": "F8FAFC",
+        "titlepagetextcolor": "0F172A",
+        "mainfont": "DejaVu Sans",
+        "sansfont": "DejaVu Sans",
+    },
+    "warm": {
+        "accentcolor": "C2410C",
+        "headingcolor": "431407",
+        "titlepagecolor": "FFF7ED",
+        "titlepagetextcolor": "431407",
+        "mainfont": "DejaVu Serif",
+        "sansfont": "DejaVu Sans",
+    },
+}
+_DEFAULT_PDF_THEME = "minimal"
+
+# Documents longer than this (word count of the Markdown source) get an
+# automatic --toc --toc-depth=2.
+_TOC_WORD_THRESHOLD = 3500
+
+# Frontmatter keys the cheap parser extracts (theme + cover-page fields).
+_FRONTMATTER_KEYS = {"title", "subtitle", "author", "date", "sophia-theme"}
 
 
 def _ensure_relative_to_outputs(label: str, path: str) -> str | None:
@@ -279,6 +324,118 @@ def _log_pandoc_capability(engine: str | None, engine_msg: str) -> None:
     )
 
 
+def _resolve_pdf_template() -> Path | None:
+    """Return the vendored template path, or None (with a warning) if absent.
+
+    None means "render with pandoc's built-in default template" — the exact
+    pre-template behavior — so a packaging mistake degrades styling, never
+    deliverability.
+    """
+    if _TEMPLATE_PATH.is_file():
+        return _TEMPLATE_PATH
+    logger.warning(
+        "render_markdown_to_pdf: template_missing path=%s; rendering with pandoc's default template",
+        _TEMPLATE_PATH,
+    )
+    return None
+
+
+def _frontmatter_meta(md_file: Path) -> dict[str, str]:
+    """Cheap line-based parse of a leading ``---`` YAML block.
+
+    Only flat ``key: value`` lines are read (no yaml dependency, no nested
+    structures). Returns {} when there is no well-formed leading block.
+    """
+    try:
+        text = md_file.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return {}
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    meta: dict[str, str] = {}
+    for line in lines[1:200]:
+        stripped = line.strip()
+        if stripped in {"---", "..."}:
+            return meta
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip().lower()
+        value = value.strip().strip("\"'")
+        if key in _FRONTMATTER_KEYS and value:
+            meta[key] = value
+    # No closing fence — not a frontmatter block.
+    return {}
+
+
+def _resolve_theme_name(theme_param: str | None, meta: dict[str, str]) -> str:
+    """Resolve the theme: explicit param → frontmatter sophia-theme → default.
+
+    Unknown names fall back to the default with a warning — never an error.
+    """
+    candidate = (theme_param or meta.get("sophia-theme") or _DEFAULT_PDF_THEME).strip().lower()
+    if candidate not in _PDF_THEMES:
+        logger.warning(
+            "render_markdown_to_pdf: unknown_theme %r; falling back to %r",
+            candidate,
+            _DEFAULT_PDF_THEME,
+        )
+        return _DEFAULT_PDF_THEME
+    return candidate
+
+
+def _cover_image_path(thread_data: dict[str, Any] | None) -> Path | None:
+    """Newest generated cover graphic under outputs/visuals (``cover-*.png``).
+
+    VQ-5: the image-generation skill writes PDF covers as
+    ``visuals/cover-<desc>.png``; when one exists it rides the title page via
+    the template's ``$coverimage$`` hook. Best-effort — any error means no
+    cover, never a failed render.
+    """
+    outputs_path = (thread_data or {}).get("outputs_path")
+    if not isinstance(outputs_path, str) or not outputs_path:
+        return None
+    try:
+        visuals = Path(outputs_path) / "visuals"
+        candidates = sorted(
+            (p for p in visuals.glob("cover-*.png") if p.is_file()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return None
+    return candidates[0] if candidates else None
+
+
+def _theme_variables(theme_name: str, meta: dict[str, str]) -> list[str]:
+    """Build the ``-V key=value`` pandoc arguments for a theme.
+
+    Frontmatter wins by pandoc semantics anyway (metadata overrides -V), but
+    we only inject author/date when absent so we never even compete. The
+    cover page is requested only when the document has a title.
+    """
+    theme = _PDF_THEMES.get(theme_name, _PDF_THEMES[_DEFAULT_PDF_THEME])
+    variables: list[str] = []
+    for key, value in theme.items():
+        variables += ["-V", f"{key}={value}"]
+    if meta.get("title"):
+        variables += ["-V", "titlepage=true"]
+    if not meta.get("author"):
+        variables += ["-V", "author=Sophia"]
+    if not meta.get("date"):
+        variables += ["-V", f"date={date.today().isoformat()}"]
+    return variables
+
+
+def _source_word_count(md_file: Path) -> int:
+    try:
+        text = md_file.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return 0
+    return len(text.split())
+
+
 def _pandoc_command(
     *,
     pandoc_bin: str,
@@ -287,6 +444,10 @@ def _pandoc_command(
     md_file: Path,
     pdf_file: Path,
     engine: str | None,
+    resource_dirs: list[Path] | None = None,
+    template_path: Path | None = None,
+    extra_vars: list[str] | None = None,
+    toc: bool = False,
 ) -> tuple[list[str], list[str]]:
     source_format = "html" if md_file.suffix.lower() in {".html", ".htm"} else "markdown+smart+yaml_metadata_block"
     cmd = [
@@ -304,13 +465,30 @@ def _pandoc_command(
         "-o",
         pdf_path,
     ]
+    if resource_dirs:
+        # Pandoc resolves relative image refs against the resource path, NOT
+        # the input file's directory. Without this, the workflow-card-prescribed
+        # `![Diagram](visuals/diagram.png)` silently drops the image (pandoc
+        # warns on stderr but exits 0) and the PDF ships text-only.
+        resource_path = ":".join(str(d) for d in resource_dirs)
+        cmd.append(f"--resource-path={resource_path}")
+        public_cmd.append("--resource-path=<outputs>")
     if engine is not None:
         cmd.append(f"--pdf-engine={engine}")
         public_cmd.append(f"--pdf-engine={engine}")
+    if template_path is not None:
+        cmd.append(f"--template={template_path}")
+        public_cmd.append(f"--template={template_path.name}")
+    if extra_vars:
+        cmd.extend(extra_vars)
+        public_cmd.extend(extra_vars)
+    if toc:
+        cmd.extend(["--toc", "--toc-depth=2"])
+        public_cmd.extend(["--toc", "--toc-depth=2"])
     return cmd, public_cmd
 
 
-def _run_pandoc(cmd: list[str]) -> subprocess.CompletedProcess[str] | str:
+def _run_pandoc(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str] | str:
     try:
         return subprocess.run(  # noqa: S603 — pandoc binary path is from shutil.which
             cmd,
@@ -318,6 +496,7 @@ def _run_pandoc(cmd: list[str]) -> subprocess.CompletedProcess[str] | str:
             text=True,
             timeout=_PANDOC_TIMEOUT_SECONDS,
             check=False,
+            cwd=str(cwd) if cwd is not None else None,
         )
     except subprocess.TimeoutExpired:
         return _result(
@@ -402,20 +581,51 @@ def _rewrite_virtual_image_refs(md_file: Path, thread_data: dict[str, Any] | Non
     return normalized
 
 
+_IMAGE_REF_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)", re.MULTILINE)
+_HTML_IMAGE_REF_RE = re.compile(r"<img[^>]+src=[\"']([^\"']+)", re.IGNORECASE)
+_MISSING_RESOURCE_RE = re.compile(r"Could not fetch resource ['\"]?([^'\":\n]+)", re.IGNORECASE)
+
+
+def _source_image_refs(md_file: Path) -> list[str]:
+    """Image references declared in the source (markdown + inline HTML)."""
+    try:
+        text = md_file.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    refs = _IMAGE_REF_RE.findall(text) + _HTML_IMAGE_REF_RE.findall(text)
+    return [ref for ref in refs if ref.strip()]
+
+
+def _missing_resources_from_stderr(stderr: str) -> list[str]:
+    return sorted({match.strip() for match in _MISSING_RESOURCE_RE.findall(stderr or "")})
+
+
 def _pdf_success_result(
     *,
     pdf_path: str,
     pdf_file: Path,
     engine: str | None,
     engine_msg: str,
+    source_image_ref_count: int = 0,
+    missing_resources: list[str] | None = None,
+    thread_data: dict[str, Any] | None = None,
+    template_used: bool = False,
+    theme: str | None = None,
+    template_fallback: bool = False,
 ) -> str:
     size_bytes = _pdf_size(pdf_file)
     layout = _inspect_pdf_layout(pdf_file)
+    images_missing = source_image_ref_count > 0 and int(layout.get("image_count") or 0) == 0
+    masked_missing = [
+        _mask_local_output(item, thread_data) for item in (missing_resources or [])
+    ]
     logger.info(
         "render_markdown_to_pdf: render_success selected_engine=%s "
         "final_artifact_ext=%s size_bytes=%s page_count=%s "
         "blank_page_count=%s short_page_count=%s image_count=%s "
-        "layout_quality=%s layout_warning=%s",
+        "source_image_ref_count=%s images_missing=%s missing_resources=%s "
+        "layout_quality=%s layout_warning=%s "
+        "template_used=%s theme=%s template_fallback=%s",
         engine or "pandoc_default",
         pdf_file.suffix.lower().lstrip(".") or "unknown",
         size_bytes,
@@ -423,16 +633,38 @@ def _pdf_success_result(
         layout.get("blank_page_count"),
         layout.get("short_page_count"),
         layout.get("image_count"),
+        source_image_ref_count,
+        images_missing,
+        ",".join(masked_missing) or "none",
         layout.get("layout_quality"),
         layout.get("layout_warning"),
+        template_used,
+        theme,
+        template_fallback,
     )
+    extra: dict[str, Any] = {
+        "source_image_ref_count": source_image_ref_count,
+        "images_missing": images_missing,
+    }
+    if masked_missing:
+        extra["missing_resources"] = masked_missing
+    if images_missing:
+        extra["images_missing_hint"] = (
+            "The source references images but none were embedded in the PDF. "
+            "Verify the image paths exist under /mnt/user-data/outputs/ and "
+            "re-render before emitting."
+        )
     return _result(
         success=True,
         pdf_path=pdf_path,
         size_bytes=size_bytes,
         engine=engine or "default",
         engine_message=engine_msg,
+        template_used=template_used,
+        theme=theme,
+        template_fallback=template_fallback,
         **layout,
+        **extra,
     )
 
 
@@ -441,6 +673,7 @@ def _impl(
     pdf_path: str,
     pdf_engine: str | None,
     thread_data: dict[str, Any] | None = None,
+    theme: str | None = None,
 ) -> str:
     """Concrete pandoc invocation. Tested independently of the @tool wrapper."""
     # ---- Path validation -----------------------------------------------
@@ -464,6 +697,38 @@ def _impl(
     pdf_file = _host_path_for_virtual_output(pdf_path, thread_data)
     pdf_file.parent.mkdir(parents=True, exist_ok=True)
 
+    # Relative image refs (e.g. ``visuals/diagram.png``) must resolve against
+    # the source file's directory and the outputs root — pandoc resolves them
+    # against the resource path / cwd, not the input file location.
+    source_dir = md_file.parent
+    resource_dirs = [source_dir]
+    outputs_path = (thread_data or {}).get("outputs_path")
+    if isinstance(outputs_path, str) and outputs_path:
+        outputs_root = Path(outputs_path).resolve()
+        if outputs_root != source_dir:
+            resource_dirs.append(outputs_root)
+
+    # ---- Template + theme -------------------------------------------------
+    # The vendored template is best-effort: when missing we render exactly
+    # the pre-template command (no vars, no toc). Theme resolution never
+    # errors — unknown names fall back to the default theme.
+    template_path = _resolve_pdf_template()
+    theme_name: str | None = None
+    extra_vars: list[str] = []
+    toc = False
+    if template_path is not None:
+        meta = _frontmatter_meta(md_file)
+        theme_name = _resolve_theme_name(theme, meta)
+        extra_vars = _theme_variables(theme_name, meta)
+        toc = _source_word_count(md_file) > _TOC_WORD_THRESHOLD
+        cover = _cover_image_path(thread_data)
+        if cover is not None:
+            # VQ-5: generated cover graphic on the title page. Forces the
+            # titlepage on — a cover image without a cover page is invisible.
+            extra_vars.extend(["-V", f"coverimage={cover.as_posix()}"])
+            if "titlepage=true" not in " ".join(extra_vars):
+                extra_vars.extend(["-V", "titlepage=true"])
+
     # ---- Invocation -----------------------------------------------------
     cmd, public_cmd = _pandoc_command(
         pandoc_bin=pandoc_bin,
@@ -472,10 +737,40 @@ def _impl(
         md_file=pandoc_source_file,
         pdf_file=pdf_file,
         engine=engine,
+        resource_dirs=resource_dirs,
+        template_path=template_path,
+        extra_vars=extra_vars,
+        toc=toc,
     )
-    completed = _run_pandoc(cmd)
+    completed = _run_pandoc(cmd, cwd=source_dir)
     if isinstance(completed, str):
         return completed
+
+    template_used = template_path is not None
+    template_fallback = False
+    if completed.returncode != 0 and template_path is not None:
+        # A template-induced failure must never make rendering worse than
+        # the pre-template baseline: retry ONCE with today's exact plain
+        # command (no template, no theme vars, no toc).
+        logger.warning(
+            "render_markdown_to_pdf: template_render_failed returncode=%s theme=%s; retrying once without template",
+            completed.returncode,
+            theme_name,
+        )
+        cmd, public_cmd = _pandoc_command(
+            pandoc_bin=pandoc_bin,
+            markdown_path=markdown_path,
+            pdf_path=pdf_path,
+            md_file=pandoc_source_file,
+            pdf_file=pdf_file,
+            engine=engine,
+            resource_dirs=resource_dirs,
+        )
+        completed = _run_pandoc(cmd, cwd=source_dir)
+        if isinstance(completed, str):
+            return completed
+        template_used = False
+        template_fallback = completed.returncode == 0
 
     if completed.returncode != 0:
         return _pandoc_error_result(
@@ -494,6 +789,12 @@ def _impl(
         pdf_file=pdf_file,
         engine=engine,
         engine_msg=engine_msg,
+        source_image_ref_count=len(_source_image_refs(pandoc_source_file)),
+        missing_resources=_missing_resources_from_stderr(completed.stderr),
+        thread_data=thread_data,
+        template_used=template_used,
+        theme=theme_name if template_used else None,
+        template_fallback=template_fallback,
     )
 
 
@@ -503,6 +804,7 @@ def render_markdown_to_pdf(
     markdown_path: str,
     pdf_path: str,
     pdf_engine: str | None = None,
+    theme: str | None = None,
 ) -> str:
     """Convert a Markdown file to a PDF using pandoc.
 
@@ -511,6 +813,11 @@ def render_markdown_to_pdf(
     you generated with the chart-visualization skill — then call this
     tool to produce the PDF. Both paths must be under
     ``/mnt/user-data/outputs/``.
+
+    Rendering uses a styled template with named themes. Adding ``title:``
+    (and optionally ``subtitle:``) YAML frontmatter to the source produces
+    a colored cover page; a table of contents is added automatically for
+    long documents.
 
     DO NOT write your own ``_generate_*.py`` script using matplotlib or
     reportlab to produce a PDF. That pattern is unreliable. This tool
@@ -537,10 +844,16 @@ def render_markdown_to_pdf(
             under /mnt/user-data/outputs/.
         pdf_engine: Optional pandoc PDF engine override, such as xelatex,
             lualatex, or wkhtmltopdf.
+        theme: Optional visual theme, one of boardroom (navy/serif, formal
+            reports), minimal (slate/sans, the default), or warm
+            (terracotta, personal documents). Can also be set with a
+            sophia-theme key in the source's YAML frontmatter; this
+            parameter wins when both are present.
     """
     return _impl(
         markdown_path=markdown_path,
         pdf_path=pdf_path,
         pdf_engine=pdf_engine,
         thread_data=get_thread_data(runtime),
+        theme=theme,
     )

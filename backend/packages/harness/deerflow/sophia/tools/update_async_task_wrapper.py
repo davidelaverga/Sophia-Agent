@@ -432,16 +432,34 @@ _TASK_TYPE_EXTENSIONS = {
 }
 
 _HTML_OUTPUT_RE = re.compile(
-    r"\bhtml\b|\bhtml\s+(?:document|file|report|summary|brief|article|explainer)\b",
+    r"\b(?:html\s+(?:artifact|document|file|report|summary|brief|article|explainer|page|site|website)"
+    r"|(?:artifact|document|file|report|summary|brief|article|explainer|page|site|website)\s+(?:as|in)\s+html"
+    r"|(?:build|create|make|generate|produce|write)\s+(?:an?\s+)?html\b"
+    r"|\.html\b)",
+    re.IGNORECASE,
+)
+_PDF_OUTPUT_RE = re.compile(
+    r"\b(?:"
+    r"pdf\s+(?:document|file|report|summary|brief|article|explainer|deliverable|artifact|output)"
+    r"|(?:document|file|report|summary|brief|article|explainer|presentation|slides?|deck|deliverable|artifact|output|final|export)"
+    r"\s+(?:as|in|to)\s+(?:an?\s+)?pdf"
+    r"|(?:build|create|make|generate|produce|write|render|export)\s+(?:an?\s+)?pdf\b"
+    r"|(?:build|create|make|generate|produce|write|render|export)\s+[^.?!\n]{0,80}?\s+as\s+(?:an?\s+)?pdf\b"
+    r"|\.pdf\b"
+    r")",
+    re.IGNORECASE,
+)
+_PPTX_OUTPUT_RE = re.compile(
+    r"\b(?:pptx|powerpoint|power\s*point|slide\s+deck|slides?)\b",
     re.IGNORECASE,
 )
 _REQUESTED_OUTPUT_EXTENSION_PATTERNS = (
-    ("html", _HTML_OUTPUT_RE),
-    ("md", re.compile(r"\b(?:markdown|md)\b", re.IGNORECASE)),
-    ("pdf", re.compile(r"\bpdf\b", re.IGNORECASE)),
-    ("pptx", re.compile(r"\b(?:pptx|powerpoint|slide\s+deck|slides?)\b", re.IGNORECASE)),
+    ("pptx", _PPTX_OUTPUT_RE),
+    ("pdf", _PDF_OUTPUT_RE),
     ("docx", re.compile(r"\b(?:docx|word\s+document)\b", re.IGNORECASE)),
     ("xlsx", re.compile(r"\b(?:xlsx|spreadsheet|excel)\b", re.IGNORECASE)),
+    ("html", _HTML_OUTPUT_RE),
+    ("md", re.compile(r"\b(?:markdown|md)\b", re.IGNORECASE)),
     ("csv", re.compile(r"\bcsv\b", re.IGNORECASE)),
     ("json", re.compile(r"\bjson\b", re.IGNORECASE)),
 )
@@ -647,9 +665,12 @@ def _file_target_directive_block(target_path: str, task_type: str | None) -> str
             "  - Read `/mnt/skills/public/ppt-generation/SKILL.md` if needed, "
             "then compose the deck with "
             "`/mnt/skills/public/ppt-generation/scripts/generate.py`.\n"
-            "  - Use `/mnt/skills/public/image-generation/scripts/generate.py` "
-            "only if the user explicitly requested generated images or illustrations. "
-            "If image generation fails, continue with a no-image PPTX.\n"
+            "  - Keep the deck editable. Use "
+            "`/mnt/skills/public/image-generation/scripts/generate.py` only for "
+            "hero, section, or illustrative assets; use generate_visual_asset for "
+            "charts and generate_excalidraw_diagram for technical diagrams. If "
+            "image generation fails, continue with a valid diagram/chart/text PPTX "
+            "and record the limitation honestly.\n"
             "  - Do NOT call `write_file` to author the PPTX binary and do NOT "
             "create Python deck scripts as the user-ready artifact.\n"
             "  - Emit only after a valid `.pptx` exists under "
@@ -696,10 +717,55 @@ def _file_target_directive_block(target_path: str, task_type: str | None) -> str
     )
 
 
+_DELTA_DIGEST_CAP_CHARS = 700
+
+
+def _delta_digest_block(
+    state: dict | None,
+    delegation_context: dict[str, Any] | None,
+) -> str:
+    """Spec D D-2: digest of companion turns SINCE dispatch, for a running build.
+
+    Reads the delegation ledger (this wrapper runs companion-side, so the
+    current session's ledger is local) and renders entries with
+    ``turn_number > dispatched_at_turn`` — both sides of that comparison
+    use LEDGER numbering, which survives compaction. Returns "" whenever
+    anything is missing — the directive is unchanged in that case.
+    """
+    from deerflow.sophia import delegation_ledger
+
+    if not isinstance(delegation_context, dict) or not delegation_ledger.digest_enabled():
+        return ""
+    dispatched_at_turn = delegation_context.get("dispatched_at_turn")
+    parent_thread_id = delegation_context.get("parent_thread_id")
+    user_id = None
+    if isinstance(state, dict):
+        user_id = state.get("user_id")
+    user_id = user_id or delegation_context.get("parent_user_id")
+    if not isinstance(dispatched_at_turn, int) or not parent_thread_id or not user_id:
+        return ""
+    entries = delegation_ledger.read_ledger(str(user_id), str(parent_thread_id))
+    delta = [
+        entry
+        for entry in entries
+        if isinstance(entry.get("turn_number"), int)
+        and entry["turn_number"] > dispatched_at_turn
+    ]
+    if not delta:
+        return ""
+    digest = delegation_ledger.build_digest(
+        delta, cap_chars=_DELTA_DIGEST_CAP_CHARS, min_entries=1
+    )
+    if not digest:
+        return ""
+    return f"[Conversation since dispatch]\n{digest}\n\n"
+
+
 def _augment_update_message(
     message: str,
     tracked: dict[str, Any] | None,
     delegation_context: dict[str, Any] | None,
+    state: dict | None = None,
 ) -> str:
     """PREFIX the user's update message with a "resume not restart" directive
     that gives the builder a concrete file target and steers it away from
@@ -741,11 +807,13 @@ def _augment_update_message(
             "before editing the deliverable.\n"
         )
 
+    delta_block = _delta_digest_block(state, delegation_context)
     directive = (
         f"{_FILE_TARGET_HINT_MARKER}\n"
         f"You are RESUMING (not restarting) a build that was interrupted by "
         f"this update message. {research_block}"
         f"\n"
+        f"{delta_block}"
         f"{target_block}\n"
         f"\n"
         f"User's update message:\n"
@@ -897,6 +965,7 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
             message,
             _resolve_tracked(state, task_id),
             state.get("delegation_context") if isinstance(state, dict) else None,
+            state=state if isinstance(state, dict) else None,
         )
         explicit_update_urls = extract_explicit_user_urls(message)
         if explicit_update_urls:
@@ -973,6 +1042,7 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
             message,
             _resolve_tracked(state, task_id),
             state.get("delegation_context") if isinstance(state, dict) else None,
+            state=state if isinstance(state, dict) else None,
         )
         explicit_update_urls = extract_explicit_user_urls(message)
         if explicit_update_urls:

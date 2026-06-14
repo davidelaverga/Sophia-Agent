@@ -620,12 +620,35 @@ def _artifact_completion_fields(
         "artifact_ext": artifact.get("artifact_ext"),
         "artifact_is_fallback": artifact.get("artifact_is_fallback"),
         "fallback_reason": artifact.get("fallback_reason"),
+        # Correction wave 2026-06-12: emit-time format-conflict guard — the
+        # delivered format honored the user's explicit current-turn ask over
+        # a misderived dispatch target. Every occurrence is a dispatch-
+        # resolution failure signal worth monitoring.
+        "format_conflict_resolved": artifact.get("format_conflict_resolved"),
+        "format_conflict_original_target_ext": artifact.get("format_conflict_original_target_ext"),
         "image_generation_status": artifact.get("image_generation_status"),
         "image_generation_reason": artifact.get("image_generation_reason"),
+        # VQ-3: harness-stamped enrichment outcome — attempted/succeeded/
+        # skip_reason. A build with image generation enabled never ends
+        # ambiguous.
+        "image_generation_outcome": artifact.get("image_generation_outcome"),
+        # VQ-10: loop honesty — how hard we tried and what stayed unmet.
+        "iterations_used": artifact.get("iterations_used"),
+        "unmet_conditions": artifact.get("unmet_conditions"),
+        # Spec D D-5: assumptions the builder stated for brief fields not
+        # present in the parent conversation — the companion names them.
+        "brief_assumptions": artifact.get("brief_assumptions"),
         "source_artifact_path": artifact.get("source_artifact_path"),
         "revision_of_artifact_path": artifact.get("revision_of_artifact_path"),
         "summary": artifact.get("companion_summary"),
         "user_next_action": artifact.get("user_next_action"),
+        # Canvas preview sibling (e.g. <deck>.preview.pdf rendered from a
+        # .pptx via LibreOffice) — lets the webapp render binary formats it
+        # has no native renderer for through the existing PDF canvas.
+        "artifact_preview_filename": artifact.get("artifact_preview_filename"),
+        "quality_warning": artifact.get("quality_warning"),
+        "visuals_missing": artifact.get("visuals_missing"),
+        "budget_stop_reason": artifact.get("budget_stop_reason"),
     }
 
 

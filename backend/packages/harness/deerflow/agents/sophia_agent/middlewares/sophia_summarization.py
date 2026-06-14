@@ -47,6 +47,8 @@ logger = logging.getLogger(__name__)
 
 class SophiaSummarizationState(AgentState):
     system_prompt_blocks: NotRequired[list[str]]
+    # Spec D D-3: sticky compaction marker for the brief-extraction trigger.
+    was_summarized: NotRequired[bool]
 
 
 class SophiaSummarizationMiddleware(SummarizationMiddleware):
@@ -159,6 +161,12 @@ class SophiaSummarizationMiddleware(SummarizationMiddleware):
                 *preserved_messages,
             ],
             "system_prompt_blocks": blocks,
+            # Spec D D-3: deterministic compaction marker. The brief-extraction
+            # trigger reads this (via delegation_context stamping at dispatch)
+            # — inferring compaction from the <prior_context_state> block is
+            # fragile because the block only exists when an emotional arc was
+            # extracted.
+            "was_summarized": True,
         }
 
 

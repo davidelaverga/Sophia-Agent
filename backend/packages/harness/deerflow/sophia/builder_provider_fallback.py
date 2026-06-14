@@ -41,6 +41,7 @@ __all__ = [
     "FALLBACK_MAX_RETRIES_ENV",
     "FALLBACK_MODEL_ENV",
     "FALLBACK_TIMEOUT_ENV",
+    "PRIMARY_COOLDOWN_ENV",
     "PRIMARY_PROVIDER",
     "FALLBACK_PROVIDER",
     "build_fallback_chat_model",
@@ -53,6 +54,7 @@ __all__ = [
     "model_provider_label",
     "normalize_tool_choice_for_model",
     "openai_api_key_present",
+    "primary_cooldown_seconds",
     "provider_fallback_failure_diagnostic",
     "provider_fallback_snapshot",
     "safe_provider_error_message",
@@ -65,9 +67,11 @@ FALLBACK_ENABLED_ENV = "SOPHIA_BUILDER_OPENAI_FALLBACK_ENABLED"
 FALLBACK_MODEL_ENV = "SOPHIA_BUILDER_OPENAI_FALLBACK_MODEL"
 FALLBACK_TIMEOUT_ENV = "SOPHIA_BUILDER_OPENAI_FALLBACK_TIMEOUT_SECONDS"
 FALLBACK_MAX_RETRIES_ENV = "SOPHIA_BUILDER_OPENAI_FALLBACK_MAX_RETRIES"
+PRIMARY_COOLDOWN_ENV = "SOPHIA_BUILDER_PRIMARY_COOLDOWN_SECONDS"
 _OPENAI_KEY_ENV = "OPENAI_API_KEY"
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
+_PRIMARY_COOLDOWN_DEFAULT_SECONDS = 300.0
 
 # Anthropic returns "Your credit balance is too low ..." as a 400
 # BadRequestError (invalid_request_error), NOT a 402/403/429. This is a
@@ -121,6 +125,21 @@ def fallback_max_retries() -> int:
     except ValueError:
         return 1
     return value if value >= 0 else 1
+
+
+def primary_cooldown_seconds() -> float:
+    """TTL for temporary Builder primary-provider bypass.
+
+    After a classified Anthropic availability failure, Builder turns inside
+    this window call the configured OpenAI fallback directly. ``0`` disables
+    the cooldown so every model turn retries Anthropic first.
+    """
+    raw = os.environ.get(PRIMARY_COOLDOWN_ENV, "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return _PRIMARY_COOLDOWN_DEFAULT_SECONDS
+    return value if value >= 0 else _PRIMARY_COOLDOWN_DEFAULT_SECONDS
 
 
 def openai_api_key_present() -> bool:
@@ -180,38 +199,58 @@ def classify_provider_error(exc: BaseException) -> str | None:
         anthropic = None  # type: ignore[assignment]
 
     if anthropic is not None:
-        # Order matters: RateLimitError etc. subclass APIStatusError.
-        if isinstance(exc, anthropic.AuthenticationError):
-            return "auth_error"
-        if isinstance(exc, anthropic.PermissionDeniedError):
-            return "permission_or_payment_error"
-        if isinstance(exc, anthropic.RateLimitError):
-            return "rate_limit_or_quota"
-        if isinstance(exc, anthropic.APIConnectionError):
-            return "provider_unreachable"
-        # Narrow billing-400: Anthropic delivers "credit balance is too low"
-        # as a BadRequestError (400). Treat ONLY the billing variant as a
-        # payment outage; generic 400s still fall through to None below.
-        if isinstance(exc, anthropic.BadRequestError) and _has_billing_signal(exc):
-            return "permission_or_payment_error"
-        if isinstance(exc, anthropic.APIStatusError):
-            status = getattr(exc, "status_code", None)
-            if isinstance(status, int) and status >= 500:
-                return "provider_unavailable"
-            return None
+        anthropic_class = _classify_anthropic_error(anthropic, exc)
+        if anthropic_class is not _UNMATCHED:
+            return anthropic_class
 
-    # Generic shape match (test doubles, httpx-style errors): classify by
-    # status_code attribute only — never by message-text sniffing.
-    status = getattr(exc, "status_code", None)
-    if isinstance(status, int):
-        if status == 401:
-            return "auth_error"
-        if status == 402 or status == 403:
-            return "permission_or_payment_error"
-        if status == 429:
-            return "rate_limit_or_quota"
-        if status >= 500:
+    return _classify_by_status_code(getattr(exc, "status_code", None))
+
+
+# Sentinel distinguishing "Anthropic branch decided None (do not fall back)"
+# from "not an Anthropic exception — try the generic status-code shape".
+_UNMATCHED = object()
+
+_STATUS_CODE_CLASSES: tuple[tuple[tuple[int, ...], str], ...] = (
+    ((401,), "auth_error"),
+    ((402, 403), "permission_or_payment_error"),
+    ((429,), "rate_limit_or_quota"),
+)
+
+
+def _classify_anthropic_error(anthropic: Any, exc: Exception) -> Any:
+    """Classify Anthropic SDK exceptions; ``_UNMATCHED`` when not one."""
+    # Order matters: RateLimitError etc. subclass APIStatusError.
+    typed: tuple[tuple[type, str], ...] = (
+        (anthropic.AuthenticationError, "auth_error"),
+        (anthropic.PermissionDeniedError, "permission_or_payment_error"),
+        (anthropic.RateLimitError, "rate_limit_or_quota"),
+        (anthropic.APIConnectionError, "provider_unreachable"),
+    )
+    for exc_type, error_class in typed:
+        if isinstance(exc, exc_type):
+            return error_class
+    # Narrow billing-400: Anthropic delivers "credit balance is too low"
+    # as a BadRequestError (400). Treat ONLY the billing variant as a
+    # payment outage; generic 400s still fall through to None below.
+    if isinstance(exc, anthropic.BadRequestError) and _has_billing_signal(exc):
+        return "permission_or_payment_error"
+    if isinstance(exc, anthropic.APIStatusError):
+        status = getattr(exc, "status_code", None)
+        if isinstance(status, int) and status >= 500:
             return "provider_unavailable"
+        return None
+    return _UNMATCHED
+
+
+def _classify_by_status_code(status: Any) -> str | None:
+    """Generic shape match (test doubles, httpx-style errors) — never message-text sniffing."""
+    if not isinstance(status, int):
+        return None
+    for codes, error_class in _STATUS_CODE_CLASSES:
+        if status in codes:
+            return error_class
+    if status >= 500:
+        return "provider_unavailable"
     return None
 
 
@@ -338,6 +377,8 @@ def provider_fallback_snapshot(
     error_class: str,
     fallback_attempted: bool,
     fallback_result: str,
+    primary_bypassed: bool = False,
+    bypass_reason: str | None = None,
 ) -> dict[str, Any]:
     """Sanitized snapshot for state + diagnostics. Allowlisted fields only.
 
@@ -353,6 +394,9 @@ def provider_fallback_snapshot(
         "fallback_reason": error_class,
         "fallback_result": fallback_result,
         "fallback_model_configured": fallback_model_name() is not None,
+        "fallback_primary_bypassed": bool(primary_bypassed),
+        "fallback_bypass_reason": bypass_reason,
+        "final_provider": FALLBACK_PROVIDER if fallback_attempted else PRIMARY_PROVIDER,
         "provider_error_class": error_class,
         "provider_error_safe_message": safe_provider_error_message(error_class),
         "raw_provider_payload_excluded": True,

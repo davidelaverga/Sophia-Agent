@@ -22,6 +22,7 @@ export type BuilderFailureDiagnosticsV1 = {
   failure_stage?: string | null;
   failure_reason?: string | null;
   failure_code?: string | null;
+  budget_stop_reason?: string | null;
   emit_attempted?: boolean | null;
   emit_tool_call_seen?: boolean | null;
   sanitized_emit_args?: {
@@ -85,10 +86,20 @@ export type BuilderCompletionEventV1 = {
   artifact_title?: string | null;
   artifact_type?: string | null;
   artifact_filename?: string | null;
+  /** Rendered PDF preview sibling uploaded next to a PPTX deliverable. */
+  artifact_preview_filename?: string | null;
   requested_artifact_ext?: string | null;
   artifact_ext?: string | null;
   artifact_is_fallback?: boolean | null;
   fallback_reason?: string | null;
+  /** "user_intent" when the emit-time guard honored the user's explicit
+   * current-turn format over a misderived dispatch target (2026-06-12). */
+  format_conflict_resolved?: string | null;
+  format_conflict_original_target_ext?: string | null;
+  /** Honest quality note, e.g. "visuals_not_embedded". */
+  quality_warning?: string | null;
+  visuals_missing?: boolean | null;
+  budget_stop_reason?: string | null;
   image_generation_status?: string | null;
   image_generation_reason?: string | null;
   source_artifact_path?: string | null;

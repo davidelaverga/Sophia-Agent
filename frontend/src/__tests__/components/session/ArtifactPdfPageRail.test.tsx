@@ -37,6 +37,38 @@ describe("ArtifactPdfPageRail", () => {
     vi.restoreAllMocks()
   })
 
+  it("renders nothing for single-page documents and appears once multi-page is known", () => {
+    const document = createMockPdfDocument()
+
+    const { rerender } = render(
+      <ArtifactPdfPageRail
+        document={document}
+        pageCount={1}
+        pageIndex={0}
+      />,
+    )
+
+    expect(screen.queryByTestId("artifact-page-rail")).not.toBeInTheDocument()
+
+    // As soon as the document reports more pages the rail must appear — no
+    // path may leave the UI in single-page mode after numPages > 1 is known.
+    rerender(
+      <ArtifactPdfPageRail
+        document={document}
+        pageCount={3}
+        pageIndex={0}
+      />,
+    )
+
+    const rail = screen.getByTestId("artifact-page-rail")
+    expect(rail).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Page 1" })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Page 3" })).toBeInTheDocument()
+    // The thumbnail rail itself stays a >=sm affordance; mobile paging is
+    // covered by the toolbar pager and the in-canvas PDF pager.
+    expect(rail.className).toContain("sm:flex")
+  })
+
   it("shows truthful per-page annotation badges and remains clickable", async () => {
     const user = userEvent.setup()
     const document = createMockPdfDocument()

@@ -3,7 +3,7 @@
 import type { ComponentProps } from "react"
 
 import { haptic } from "../../hooks/useHaptics"
-import { buildThreadArtifactHref, formatBuilderArtifactFileSize, formatBuilderArtifactTypeLabel, getBuilderArtifactFiles, isMarkdownArtifactFile } from "../../lib/builder-artifacts"
+import { buildThreadArtifactHref, classifyBuilderArtifactFileRole, formatBuilderArtifactFileRoleLabel, formatBuilderArtifactFileSize, formatBuilderArtifactTypeLabel, getBuilderArtifactFiles, isMarkdownArtifactFile } from "../../lib/builder-artifacts"
 import { listSessionArtifacts, type ArtifactRecord, type ArtifactSessionIndex } from "../../lib/session-artifact-index"
 import { cn } from "../../lib/utils"
 import { isRealReflection } from "../../session/artifacts"
@@ -164,6 +164,7 @@ function BuilderArtifactLibraryList({
         <BuilderArtifactLibraryRow
           key={file.path}
           file={file}
+          roleLabel={formatBuilderArtifactFileRoleLabel(classifyBuilderArtifactFileRole(file, builderArtifactLibrary))}
           isSelected={stageBuilderArtifact?.artifactPath === file.path}
           threadId={threadId}
           onSelectedBuilderArtifactPathChange={onSelectedBuilderArtifactPathChange}
@@ -259,7 +260,12 @@ function SessionArtifactTrayRow({
   const downloadHref = missing ? null : buildThreadArtifactHref(threadId, artifact.localPath, { download: true })
   const openHref = missing ? null : buildThreadArtifactHref(threadId, artifact.localPath)
   const versionLabel = getSessionArtifactVersionLabel(artifact, artifacts)
+  const roleLabel = formatBuilderArtifactFileRoleLabel(classifyBuilderArtifactFileRole(
+    { path: artifact.localPath },
+    artifacts.map((sibling) => ({ path: sibling.localPath })),
+  ))
   const meta = [
+    roleLabel,
     formatRendererKindLabel(artifact.rendererKind),
     formatBuilderArtifactTypeLabel(artifact.artifactType),
     versionLabel,
@@ -344,18 +350,20 @@ function SessionArtifactTrayRow({
 
 function BuilderArtifactLibraryRow({
   file,
+  roleLabel,
   isSelected,
   threadId,
   onSelectedBuilderArtifactPathChange,
 }: {
   file: BuilderArtifactLibraryItemV1
+  roleLabel?: string | null
   isSelected: boolean
   threadId?: string
   onSelectedBuilderArtifactPathChange?: (path: string | null) => void
 }) {
   const downloadHref = buildThreadArtifactHref(threadId, file.path, { download: true })
   const openHref = buildThreadArtifactHref(threadId, file.path)
-  const meta = [formatBuilderArtifactFileSize(file.sizeBytes), file.mimeType]
+  const meta = [roleLabel, formatBuilderArtifactFileSize(file.sizeBytes), file.mimeType]
     .filter(Boolean)
     .join(' • ')
 

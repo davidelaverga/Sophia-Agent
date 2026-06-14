@@ -38,6 +38,7 @@ is skipped. ``0`` / ``0.0`` disables a given cap (preserving prior behavior).
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, NotRequired
 
 from langchain.agents import AgentState
@@ -62,14 +63,202 @@ _MODEL_PRICES: dict[str, dict[str, float]] = {
 # would rather trip slightly early than let a runaway through).
 _DEFAULT_PRICE: dict[str, float] = {"in": 3.0, "out": 15.0}
 
+USER_BUDGET_TIMEOUT_MESSAGE = (
+    "Sorry, we hit the token limit for this task. Please let me know if you want to try again."
+)
+USER_BUDGET_COST_MESSAGE = (
+    "Sorry, we hit the cost limit for this task. Please let me know if you want to try again."
+)
+
 # Default per-run caps. ``0`` / ``0.0`` disables a cap. ``start_builder_task``
 # seeds an explicit copy into ``run_input["builder_budget"]``; this is the
 # back-stop when state doesn't carry it.
 DEFAULT_BUILDER_BUDGET: dict[str, Any] = {
+    "tier": "simple",
     "max_cost_usd": 5.0,
     "max_total_tokens": 2_000_000,
+    "max_non_artifact_turns": 30,
+    "force_emit_remaining_turns": 3,
+    "soft_warn_at_turn": 18,
+    "force_emit_wall_clock_fraction": 0.70,
+    "repair_reserve_usd": 0.25,
     "cost_model_key": "claude-sonnet-4-6",
+    "budget_stop_message": USER_BUDGET_TIMEOUT_MESSAGE,
 }
+
+COMPLEX_BUILDER_BUDGET: dict[str, Any] = {
+    **DEFAULT_BUILDER_BUDGET,
+    "tier": "complex_artifact",
+    "max_cost_usd": 12.0,
+    "max_total_tokens": 5_000_000,
+    "max_non_artifact_turns": 45,
+    "force_emit_remaining_turns": 4,
+    "soft_warn_at_turn": 27,
+}
+
+# Flat estimate per gpt-image-2 call (image-generation skill, enrichment-by-
+# default). The CALL COUNT cap lives in BuilderArtifactMiddleware's bash
+# interception (_IMAGE_GENERATION_MAX_CALLS); this constant only folds the
+# spend into the cost ceiling + telemetry.
+_IMAGE_GEN_COST_USD = 0.07
+
+# VQ-10 budget pre-grant: a repair iteration is granted only when the
+# remaining cost ceiling covers its estimate (one Sonnet repair turn plus a
+# possible image-generation call).
+_ITERATION_COST_ESTIMATE_USD = 0.25
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("[BuilderBudget] invalid float env %s=%r; using %.2f", name, raw, default)
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("[BuilderBudget] invalid int env %s=%r; using %d", name, raw, default)
+        return default
+
+
+def _budget_with_env(defaults: dict[str, Any], prefix: str) -> dict[str, Any]:
+    budget = dict(defaults)
+    budget["max_cost_usd"] = _env_float(f"{prefix}_MAX_COST_USD", float(budget["max_cost_usd"]))
+    budget["max_total_tokens"] = _env_int(f"{prefix}_MAX_TOTAL_TOKENS", int(budget["max_total_tokens"]))
+    budget["max_non_artifact_turns"] = _env_int(
+        f"{prefix}_MAX_NON_ARTIFACT_TURNS",
+        int(budget["max_non_artifact_turns"]),
+    )
+    budget["force_emit_remaining_turns"] = _env_int(
+        f"{prefix}_FORCE_EMIT_REMAINING_TURNS",
+        int(budget["force_emit_remaining_turns"]),
+    )
+    budget["soft_warn_at_turn"] = _env_int(f"{prefix}_SOFT_WARN_AT_TURN", int(budget["soft_warn_at_turn"]))
+    budget["force_emit_wall_clock_fraction"] = _env_float(
+        f"{prefix}_FORCE_EMIT_WALL_CLOCK_FRACTION",
+        float(budget["force_emit_wall_clock_fraction"]),
+    )
+    budget["repair_reserve_usd"] = _env_float(f"{prefix}_REPAIR_RESERVE_USD", float(budget["repair_reserve_usd"]))
+    return budget
+
+
+def builder_budget_for_task(
+    *,
+    task_type: str | None,
+    artifact_ext: str | None,
+    cost_model_key: str | None = None,
+) -> dict[str, Any]:
+    """Return the per-run budget tier for a builder task.
+
+    PDF/PPTX and visual-report/presentation tasks get more room for render,
+    validation, and one bounded vision repair. Simple HTML/MD/code tasks keep
+    the historical cap.
+    """
+    ext = str(artifact_ext or "").lower().lstrip(".")
+    task = str(task_type or "").lower().strip()
+    complex_task = ext in {"pdf", "pptx", "ppt"} or task in {"presentation", "visual_report"}
+    defaults = COMPLEX_BUILDER_BUDGET if complex_task else DEFAULT_BUILDER_BUDGET
+    prefix = "SOPHIA_BUILDER_COMPLEX_BUDGET" if complex_task else "SOPHIA_BUILDER_SIMPLE_BUDGET"
+    budget = _budget_with_env(defaults, prefix)
+    # Legacy escape hatch: lets operators globally tune without adopting the
+    # tiered names immediately.
+    if os.environ.get("SOPHIA_BUILDER_MAX_COST_USD"):
+        budget["max_cost_usd"] = _env_float("SOPHIA_BUILDER_MAX_COST_USD", float(budget["max_cost_usd"]))
+    if os.environ.get("SOPHIA_BUILDER_MAX_TOTAL_TOKENS"):
+        budget["max_total_tokens"] = _env_int("SOPHIA_BUILDER_MAX_TOTAL_TOKENS", int(budget["max_total_tokens"]))
+    if cost_model_key:
+        budget["cost_model_key"] = cost_model_key
+    return budget
+
+
+def max_non_artifact_turns(state: dict[str, Any]) -> int:
+    budget = state.get("builder_budget")
+    if not isinstance(budget, dict):
+        budget = DEFAULT_BUILDER_BUDGET
+    try:
+        return max(1, int(budget.get("max_non_artifact_turns", DEFAULT_BUILDER_BUDGET["max_non_artifact_turns"])))
+    except (TypeError, ValueError):
+        return int(DEFAULT_BUILDER_BUDGET["max_non_artifact_turns"])
+
+
+def force_emit_remaining_turns(state: dict[str, Any]) -> int:
+    budget = state.get("builder_budget")
+    if not isinstance(budget, dict):
+        budget = DEFAULT_BUILDER_BUDGET
+    try:
+        return max(1, int(budget.get("force_emit_remaining_turns", DEFAULT_BUILDER_BUDGET["force_emit_remaining_turns"])))
+    except (TypeError, ValueError):
+        return int(DEFAULT_BUILDER_BUDGET["force_emit_remaining_turns"])
+
+
+def soft_warn_at_turn(state: dict[str, Any]) -> int:
+    budget = state.get("builder_budget")
+    if not isinstance(budget, dict):
+        budget = DEFAULT_BUILDER_BUDGET
+    try:
+        return max(1, int(budget.get("soft_warn_at_turn", DEFAULT_BUILDER_BUDGET["soft_warn_at_turn"])))
+    except (TypeError, ValueError):
+        return int(DEFAULT_BUILDER_BUDGET["soft_warn_at_turn"])
+
+
+def force_emit_wall_clock_fraction(state: dict[str, Any]) -> float:
+    budget = state.get("builder_budget")
+    if not isinstance(budget, dict):
+        budget = DEFAULT_BUILDER_BUDGET
+    try:
+        value = float(budget.get("force_emit_wall_clock_fraction", DEFAULT_BUILDER_BUDGET["force_emit_wall_clock_fraction"]))
+    except (TypeError, ValueError):
+        value = float(DEFAULT_BUILDER_BUDGET["force_emit_wall_clock_fraction"])
+    return min(max(value, 0.05), 0.95)
+
+
+def estimate_run_cost_usd(state: dict) -> float:
+    """Current estimated spend for this run (tokens + image calls)."""
+    totals = _sum_usage(state.get("messages", []) or [])
+    budget = state.get("builder_budget")
+    key = budget.get("cost_model_key") if isinstance(budget, dict) else None
+    cost = _estimate_cost_usd(totals, _price_for(key if isinstance(key, str) else None))
+    image_attempts = int(
+        (state.get("builder_pptx_diagnostics") or {}).get("image_generation_attempt_count", 0) or 0
+    )
+    return cost + image_attempts * _IMAGE_GEN_COST_USD
+
+
+def budget_allows_iteration(state: dict) -> bool:
+    """VQ-10 pre-grant: never grant a repair iteration the ceiling can't pay for."""
+    budget = state.get("builder_budget")
+    if not isinstance(budget, dict):
+        budget = DEFAULT_BUILDER_BUDGET
+    try:
+        max_cost = float(budget.get("max_cost_usd", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        max_cost = 0.0
+    try:
+        reserve = float(budget.get("repair_reserve_usd", _ITERATION_COST_ESTIMATE_USD) or 0.0)
+    except (TypeError, ValueError):
+        reserve = _ITERATION_COST_ESTIMATE_USD
+    if max_cost <= 0:
+        return True  # cost cap disabled
+    return estimate_run_cost_usd(state) + max(reserve, 0.0) <= max_cost
+
+
+def _budget_stop_copy(budget_stop_reason: str) -> str:
+    if budget_stop_reason == "cost_limit":
+        return USER_BUDGET_COST_MESSAGE
+    return USER_BUDGET_TIMEOUT_MESSAGE
+
+
+def _budget_error_message(*, budget_stop_reason: str, detail: str) -> str:
+    return f"{_budget_stop_copy(budget_stop_reason)} Builder budget exceeded: {detail}."
 
 
 def _price_for(key: str | None) -> dict[str, float]:
@@ -153,15 +342,28 @@ class BuilderBudgetMiddleware(AgentMiddleware[BuilderBudgetState]):
         totals = _sum_usage(messages)
         total_tokens = totals["input"] + totals["output"]
         cost = _estimate_cost_usd(totals, _price_for(cost_key))
+        # Image-generation spend (enrichment-by-default). Read the diagnostics
+        # channel dynamically — do NOT redeclare ``builder_pptx_diagnostics``
+        # in BuilderBudgetState: a plain NotRequired redeclaration would
+        # shadow the accumulating reducer down to LastValue (see the
+        # documented trap in builder_task.py).
+        image_attempts = int(
+            (state.get("builder_pptx_diagnostics") or {}).get("image_generation_attempt_count", 0) or 0
+        )
+        image_cost = image_attempts * _IMAGE_GEN_COST_USD
+        cost += image_cost
 
         # Telemetry (Phase 2a): per-turn cumulative usage so cache reads ≫
         # writes can be confirmed and $/build measured from logs.
         logger.info(
-            "[BuilderBudget] usage in=%d out=%d cache_read=%d cache_creation=%d est_cost=$%.4f",
+            "[BuilderBudget] usage in=%d out=%d cache_read=%d cache_creation=%d "
+            "image_calls=%d image_cost=$%.2f est_cost=$%.4f",
             totals["input"],
             totals["output"],
             totals["cache_read"],
             totals["cache_creation"],
+            image_attempts,
+            image_cost,
             cost,
         )
 
@@ -170,10 +372,12 @@ class BuilderBudgetMiddleware(AgentMiddleware[BuilderBudgetState]):
         if not (over_cost or over_tokens):
             return None
 
-        reason = (
-            f"cost=${cost:.2f}>=${max_cost:.2f}"
-            if over_cost
-            else f"tokens={total_tokens}>={max_tokens}"
+        budget_stop_reason = "cost_limit" if over_cost else "token_limit"
+        reason = f"cost=${cost:.2f}>=${max_cost:.2f}" if over_cost else f"tokens={total_tokens}>={max_tokens}"
+        companion_summary = _budget_stop_copy(budget_stop_reason)
+        terminal_error_message = _budget_error_message(
+            budget_stop_reason=budget_stop_reason,
+            detail=reason,
         )
         logger.error(
             "[BuilderBudget] BUDGET EXCEEDED: %s (est_cost=$%.4f total_tokens=%d) — terminating builder run",
@@ -192,9 +396,17 @@ class BuilderBudgetMiddleware(AgentMiddleware[BuilderBudgetState]):
             fire_completion_webhook_from_artifact(
                 state=state,
                 runtime=runtime,
-                artifact={},  # no deliverable on a budget kill
+                artifact={
+                    "builder_failure_diagnostics": {
+                        "failure_code": "builder_budget_exceeded",
+                        "budget_stop_reason": budget_stop_reason,
+                    },
+                    "budget_stop_reason": budget_stop_reason,
+                    "companion_summary": companion_summary,
+                    "user_next_action": "Tell me if you want me to try again with a narrower scope.",
+                },
                 status="timed_out",
-                error_message=f"Builder stopped: run budget exceeded ({reason}).",
+                error_message=terminal_error_message,
             )
         except Exception:  # noqa: BLE001 — the breaker must never itself crash the run
             logger.warning("[BuilderBudget] completion webhook dispatch failed", exc_info=True)

@@ -3,17 +3,29 @@ FROM python:3.12-slim
 
 ARG NODE_MAJOR=22
 
+# NOTE: keep every package on the continued `apt-get install` line — a `#`
+# comment inside a `\`-continued shell command terminates the command early
+# (the comment swallows the rest of the joined line), so the trailing packages
+# would run as bare commands and the image build would fail. Package notes:
+#   libreoffice-impress + fonts-liberation — headless PPTX→PDF conversion for the
+#     artifact canvas preview (deerflow/sophia/pptx_preview.py). Without soffice
+#     the preview is skipped and decks stay download-only in the webapp canvas.
+#   poppler-utils — pdftoppm rasterizes preview pages for the builder's
+#     repair-turn self-review + advisory pass (deerflow/sophia/build_condition.py).
 RUN apt-get update && apt-get install -y \
     curl build-essential gnupg ca-certificates \
     pandoc texlive-xetex texlive-latex-recommended texlive-latex-extra texlive-fonts-recommended \
     lmodern fonts-dejavu-core libcairo2 libcairo2-dev libpango-1.0-0 libpangocairo-1.0-0 pkg-config \
+    libreoffice-impress fonts-liberation \
+    chromium \
+    poppler-utils \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /etc/apt/keyrings/nodesource.gpg \
     && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
     && apt-get update && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pandoc --version >/dev/null && xelatex --version >/dev/null
+RUN pandoc --version >/dev/null && xelatex --version >/dev/null && chromium --version >/dev/null
 
 COPY --from=ghcr.io/astral-sh/uv:0.7.20 /uv /uvx /usr/local/bin/
 
@@ -24,6 +36,16 @@ COPY skills ./skills
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     sh -c "cd backend && uv sync"
+
+RUN --mount=type=cache,target=/root/.npm \
+    cd /app/backend/packages/harness/deerflow/sophia/js \
+    && npm ci --omit=dev --no-audit --no-fund \
+    && test -f compile_pptx.mjs \
+    && test -f compile_diagram.mjs \
+    && node -e "const r=require('module').createRequire(process.cwd() + '/'); r.resolve('pptxgenjs'); r.resolve('@excalidraw/excalidraw'); r.resolve('@excalidraw/mermaid-to-excalidraw'); r.resolve('mermaid'); r.resolve('jsdom'); r.resolve('dompurify'); r.resolve('playwright-core')"
+
+ENV SOPHIA_ARTIFACT_JS_RUNTIME=/app/backend/packages/harness/deerflow/sophia/js
+ENV SOPHIA_PPTXGENJS=1
 
 # Phase 4L: pre-install readabilipy's Node.js dependency (jsdom) at
 # image build time. readabilipy's ``simple_json_from_html_string``

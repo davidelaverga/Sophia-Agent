@@ -316,6 +316,28 @@ def test_pdf_request_with_html_charts_still_targets_pdf():
     assert target.endswith(".pdf")
 
 
+def test_powerpoint_request_beats_incidental_pdf_context():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "presentation",
+        "Create a PowerPoint slide presentation. Prior artifact: open-claw-report.pdf.",
+    )
+
+    assert target.endswith(".pptx")
+
+
+def test_presentation_in_pdf_format_targets_pdf():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    target = module._suggest_artifact_target_path(
+        "presentation",
+        "Create a presentation in PDF format for the leadership review.",
+    )
+
+    assert target.endswith(".pdf")
+
+
 def test_simple_product_review_pdf_targets_stable_filename():
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
 
@@ -1030,3 +1052,47 @@ def test_start_builder_task_treats_failed_status_as_terminal(monkeypatch):
     )
     assert isinstance(response, Command)
     assert "new-1" in response.update["async_tasks"]
+
+
+# ---- visual expectations brief line (editable visual decks, 2026-06-13) -----
+
+
+def test_presentation_brief_gains_visual_expectations_line():
+    from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
+
+    line = _visual_expectations_line("Build an investor deck about our roadmap", "presentation")
+    assert line is not None
+    assert "Visual expectations" in line
+    assert "deck editable rather than image-only" in line
+    assert "Excalidraw-style diagrams" in line
+
+
+def test_plain_deck_brief_gets_opt_out_line():
+    from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
+
+    line = _visual_expectations_line("A plain text-only deck please", "presentation")
+    assert line is not None
+    assert "do NOT use generated imagery" in line
+
+
+def test_explaining_deck_does_not_trigger_plain_opt_out_line():
+    from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
+
+    line = _visual_expectations_line("Build a deck explaining OpenClaw", "presentation")
+    assert line is not None
+    assert "do NOT use generated imagery" not in line
+    assert "deck editable rather than image-only" in line
+
+
+def test_style_keywords_surface_in_brief():
+    from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
+
+    line = _visual_expectations_line("A bold modern investor deck", "presentation")
+    assert line is not None
+    assert "bold" in line and "modern" in line
+
+
+def test_document_brief_gets_no_visual_line():
+    from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
+
+    assert _visual_expectations_line("Write a markdown report", "document") is None

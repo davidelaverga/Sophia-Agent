@@ -1,9 +1,9 @@
 """Visual capability prompt tests.
 
-Image generation is now opt-in for builder tasks. Presentation and visual
-report tasks should not hard-stop when ``OPENAI_API_KEY`` is missing; the
-builder should create no-image PPTX/PDF/HTML deliverables unless the user
-explicitly asks for generated raster images.
+Image generation is default-on for PPTX decks and opt-in for other builder
+tasks. Presentation and visual report tasks should not hard-stop when
+``OPENAI_API_KEY`` is missing; the builder should create valid chart/text
+PPTX/PDF/HTML deliverables when generated raster images are unavailable.
 """
 
 from __future__ import annotations
@@ -99,7 +99,7 @@ class TestVisualCapabilityPrompt:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Empty Render env vars should not block presentation builds because
-        # generated images are optional.
+        # a valid chart/text PPTX can still be delivered.
         monkeypatch.setenv("OPENAI_API_KEY", "")
         result = BuilderTaskMiddleware().before_agent(_make_state("presentation"), _make_runtime())
         briefing = _briefing(result)

@@ -179,3 +179,46 @@ def test_active_block_recall_path_does_not_hardcode_running_filter():
     # doesn't quietly re-introduce the narrower filter).
     lower = block.lower()
     assert "pending" in lower or "interrupted" in lower or "no status_filter" in lower
+
+
+def test_terminal_block_surfaces_quality_warning_on_success():
+    """A successful build whose visuals did not embed carries
+    quality_warning/visuals_missing in the durable result; the block must
+    teach the companion to mention it plainly and offer a revision —
+    never to call the deliverable a fallback."""
+    task = _terminal_task("success")
+    task["builder_result"] = {
+        "artifact_path": "/mnt/user-data/outputs/deck.pptx",
+        "quality_warning": "visuals_not_embedded",
+        "visuals_missing": True,
+    }
+    block = _render_terminal_block(task)
+    assert "QUALITY NOTE" in block
+    assert "edit_builder_artifact" in block
+    assert "Never call the deliverable a fallback" in block
+
+
+def test_terminal_block_success_without_warning_has_no_quality_note():
+    task = _terminal_task("success")
+    task["builder_result"] = {"artifact_path": "/mnt/user-data/outputs/deck.pptx"}
+    block = _render_terminal_block(task)
+    assert "QUALITY NOTE" not in block
+
+
+def test_terminal_block_failed_relays_builder_summary():
+    """Honest failures complete with a companion_summary explaining what
+    failed; the block must surface it (and the salvageable intermediates)
+    so the companion can relay rather than improvise."""
+    task = _terminal_task("failed")
+    task["builder_result"] = {
+        "summary": "The ppt-generation script rejected the plan JSON twice.",
+    }
+    block = _render_terminal_block(task)
+    assert "rejected the plan JSON" in block
+    assert "session artifacts" in block
+
+
+def test_terminal_block_failed_without_summary_stays_compact():
+    task = _terminal_task("failed")
+    block = _render_terminal_block(task)
+    assert "session artifacts" not in block

@@ -2325,7 +2325,7 @@ class TestBuilderTaskMiddleware:
         from deerflow.agents.sophia_agent.middlewares import builder_task as builder_task_module
         from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
 
-        # Construct fake Skill objects matching the four whitelisted names.
+        # Construct fake Skill objects matching the whitelisted builder names.
         # Each has ``enabled=False`` to simulate the failure mode (missing
         # ``extensions_config.json`` leaves every skill ``enabled=False``).
         class _FakeSkill:
@@ -2339,8 +2339,12 @@ class TestBuilderTaskMiddleware:
 
         fake_skills = [
             _FakeSkill("chart-visualization"),
+            _FakeSkill("pdf-report"),
             _FakeSkill("ppt-generation"),
             _FakeSkill("image-generation"),
+            _FakeSkill("deep-research"),
+            _FakeSkill("academic-paper-review"),
+            _FakeSkill("systematic-literature-review"),
             _FakeSkill("data-analysis"),
             _FakeSkill("unrelated-skill"),  # filtered out by whitelist
         ]
@@ -2363,17 +2367,21 @@ class TestBuilderTaskMiddleware:
             block = BuilderTaskMiddleware._build_skills_inventory_block()
 
         assert block is not None
-        # All four whitelisted skills are present, regardless of enabled state.
+        # All whitelisted skills are present, regardless of enabled state.
         assert "<skill_system>" in block
         assert "chart-visualization" in block
+        assert "pdf-report" in block
         assert "ppt-generation" in block
         assert "image-generation" in block
+        assert "deep-research" in block
+        assert "academic-paper-review" in block
+        assert "systematic-literature-review" in block
         assert "data-analysis" in block
         # The unrelated skill is filtered out by the whitelist.
         assert "unrelated-skill" not in block
         # Observability: the INFO breadcrumb fires either way.
         assert any(
-            "skills_inventory: 4 skills injected" in rec.message for rec in caplog.records
+            "skills_inventory: 8 skills injected" in rec.message for rec in caplog.records
         )
 
     def test_skills_inventory_block_can_omit_image_generation(
@@ -2393,6 +2401,7 @@ class TestBuilderTaskMiddleware:
         fake_skills = [
             _FakeSkill("ppt-generation"),
             _FakeSkill("image-generation"),
+            _FakeSkill("deep-research"),
             _FakeSkill("data-analysis"),
         ]
 
@@ -2406,6 +2415,7 @@ class TestBuilderTaskMiddleware:
 
         assert block is not None
         assert "ppt-generation" in block
+        assert "deep-research" in block
         assert "data-analysis" in block
         assert "image-generation" not in block
 
@@ -3514,11 +3524,14 @@ class TestBuilderArtifactMiddleware:
             reason="test",
         )
 
-        assert result["artifact_path"] == "/mnt/user-data/outputs/report.md"
-        assert result["artifact_type"] == "md"
-        assert result["confidence"] == 0.5
+        # Format-swapped promotion is disabled for PDF requests: the build
+        # reports an honest failure instead of delivering the .md source.
+        assert result["artifact_path"] is None
+        assert result["requested_artifact_ext"] == "pdf"
+        assert result["fallback_reason"] == "pdf_generation_failed"
+        assert result["confidence"] == 0.2
 
-    def test_hard_ceiling_pdf_visual_target_falls_back_to_html(self, tmp_path):
+    def test_hard_ceiling_pdf_visual_target_refuses_html_swap(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -3544,9 +3557,12 @@ class TestBuilderArtifactMiddleware:
             reason="test",
         )
 
-        assert result["artifact_path"] == "/mnt/user-data/outputs/report.html"
-        assert result["artifact_type"] == "html"
-        assert result["confidence"] == 0.5
+        # Format-swapped promotion is disabled for PDF requests even when a
+        # visual HTML fallback exists — honest failure instead.
+        assert result["artifact_path"] is None
+        assert result["requested_artifact_ext"] == "pdf"
+        assert result["fallback_reason"] == "pdf_generation_failed"
+        assert result["confidence"] == 0.2
 
     def test_hard_ceiling_pdf_source_without_render_attempt_fails_truthfully(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -3764,7 +3780,7 @@ class TestBuilderArtifactMiddleware:
         assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
         assert args["artifact_path"] == "/mnt/user-data/outputs/report.pdf"
 
-    def test_pdf_artifact_files_exist_accepts_markdown_after_render_attempt(self, tmp_path):
+    def test_pdf_artifact_files_exist_accepts_marked_markdown_fallback_after_render_attempt(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -3781,6 +3797,10 @@ class TestBuilderArtifactMiddleware:
         args = {"artifact_path": "/mnt/user-data/outputs/report.md"}
 
         assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
+        assert args["requested_artifact_ext"] == "pdf"
+        assert args["artifact_ext"] == "md"
+        assert args["artifact_is_fallback"] is True
+        assert args["fallback_reason"] == "pdf_generation_failed"
 
     def test_pdf_artifact_files_exist_rejects_markdown_before_render_attempt(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -3797,7 +3817,7 @@ class TestBuilderArtifactMiddleware:
 
         assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
 
-    def test_pdf_artifact_files_exist_accepts_html_only_for_visual_fallback(self, tmp_path):
+    def test_pdf_artifact_files_exist_accepts_marked_html_fallback(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -3818,6 +3838,10 @@ class TestBuilderArtifactMiddleware:
         args = {"artifact_path": "/mnt/user-data/outputs/report.html"}
 
         assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
+        assert args["requested_artifact_ext"] == "pdf"
+        assert args["artifact_ext"] == "html"
+        assert args["artifact_is_fallback"] is True
+        assert args["fallback_reason"] == "pdf_generation_failed"
 
         text_only_state = {
             **state,
@@ -3878,7 +3902,7 @@ class TestBuilderArtifactMiddleware:
 
         assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
 
-    def test_pptx_artifact_files_exist_accepts_markdown_fallback(self, tmp_path):
+    def test_pptx_artifact_files_exist_accepts_marked_markdown_fallback(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -3902,7 +3926,7 @@ class TestBuilderArtifactMiddleware:
         assert args["artifact_is_fallback"] is True
         assert args["fallback_reason"] == "pptx_generation_not_completed"
 
-    def test_pptx_artifact_files_exist_accepts_valid_html_fallback_with_metadata(self, tmp_path):
+    def test_pptx_artifact_files_exist_accepts_marked_valid_html_fallback(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -3927,11 +3951,11 @@ class TestBuilderArtifactMiddleware:
         args = {"artifact_path": "/mnt/user-data/outputs/deck.html"}
 
         assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
-        assert args["artifact_path"] == "/mnt/user-data/outputs/deck.html"
         assert args["requested_artifact_ext"] == "pptx"
         assert args["artifact_ext"] == "html"
         assert args["artifact_is_fallback"] is True
         assert args["fallback_reason"] == "pptx_generation_not_completed"
+        assert args["artifact_type"] == "webpage"
 
     def test_pptx_artifact_files_exist_rejects_fallback_before_generator_attempt(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -3987,6 +4011,8 @@ class TestBuilderArtifactMiddleware:
         args = {"artifact_path": "/mnt/user-data/outputs/deck.md"}
 
         assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
+        assert args["requested_artifact_ext"] == "pptx"
+        assert args["artifact_is_fallback"] is True
 
     def test_pptx_artifact_files_exist_rejects_invalid_html_fallback(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -4060,7 +4086,7 @@ class TestBuilderArtifactMiddleware:
         content = result["messages"][0].content
         assert "Reading SKILL.md is useful, but it is not completion" in content
         assert "/mnt/skills/public/ppt-generation/scripts/generate.py" in content
-        assert "write_file(description=" in content
+        assert "artifact_path=null" in content
 
     def test_pptx_generator_invocation_suppresses_skill_correction(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -4105,7 +4131,8 @@ class TestBuilderArtifactMiddleware:
     # a builder is making genuine progress but each turn is expensive, the
     # turn-count force window (turn 17+) doesn't open before the per-run cap
     # fires. These tests verify that force-emit also activates on wall-clock
-    # crossing 70% of the per-run budget, regardless of turn count.
+    # crossing the configured wall-clock fraction of the per-run budget,
+    # regardless of turn count.
 
     def test_force_choice_triggered_by_wall_clock_with_file(self, tmp_path):
         """1300s elapsed of 1800s (72%) with a real file on disk and turn
@@ -4149,7 +4176,7 @@ class TestBuilderArtifactMiddleware:
 
     def test_force_choice_below_threshold_no_op(self, tmp_path):
         """900s elapsed of 1800s (50%) → no forcing, regardless of file
-        state. Wall-clock gate must only fire above 70%."""
+        state. Wall-clock gate must only fire above the configured threshold."""
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"

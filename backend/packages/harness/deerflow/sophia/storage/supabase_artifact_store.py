@@ -40,6 +40,14 @@ _MAX_LIST_DEPTH = 8
 # companion read tools so both address the exact same object.
 UPLOADS_PREFIX = "uploads/"
 
+# Delegation-ledger keyspace (Spec D D-1). The per-session conversation
+# ledger mirrors under ``{thread_id}/ledger/session.jsonl`` — its own
+# prefix for the same collision reason as ``UPLOADS_PREFIX``. Shared by
+# the langgraph-side mirror writer (``delegation_ledger.mirror_ledger``)
+# AND the gateway-side session-delete cleanup so both address the exact
+# same object.
+LEDGER_PREFIX = "ledger/"
+
 
 @dataclass(frozen=True)
 class SupabaseConfig:
@@ -168,7 +176,7 @@ def _folder_prefix_from_list_record(root_prefix: str, current_prefix: str, recor
     relative = _relative_list_name(root_prefix, current_prefix, raw_name).strip().strip("/")
     if not relative:
         return None
-    if _is_uploads_relative_name(relative):
+    if _is_internal_relative_name(relative):
         return None
     return f"{root_prefix}{relative}/"
 
@@ -176,6 +184,28 @@ def _folder_prefix_from_list_record(root_prefix: str, current_prefix: str, recor
 def _is_uploads_relative_name(filename: str) -> bool:
     normalized = filename.strip().lstrip("/")
     return normalized == UPLOADS_PREFIX.rstrip("/") or normalized.startswith(UPLOADS_PREFIX)
+
+
+def is_ledger_object_name(filename: str) -> bool:
+    """True when ``filename`` addresses the delegation-ledger keyspace.
+
+    The ledger (Spec D D-1) is INTERNAL conversation content — never a
+    user-facing artifact. Codex P1 PR #131 (2026-06-11): without this
+    filter, ``{thread_id}/ledger/session.jsonl`` surfaced in artifact
+    listings as ``mnt/user-data/outputs/ledger/session.jsonl`` and was
+    downloadable via the artifact GET proxy. Shared by the list filters
+    below AND the gateway's Supabase serve fallback so every read surface
+    excludes the same keyspace.
+    """
+    normalized = filename.strip().lstrip("/")
+    return normalized == LEDGER_PREFIX.rstrip("/") or normalized.startswith(LEDGER_PREFIX)
+
+
+def _is_internal_relative_name(filename: str) -> bool:
+    """Keyspaces that must never appear in artifact listings: uploads
+    (surfaced through the attachments UI instead) and the delegation
+    ledger (internal conversation record, AD-6)."""
+    return _is_uploads_relative_name(filename) or is_ledger_object_name(filename)
 
 
 def _record_name(record: Any) -> str | None:
@@ -212,7 +242,7 @@ def _info_from_list_record(
     filename = filename.strip().lstrip("/")
     if not filename or filename.endswith("/"):
         return None
-    if _is_uploads_relative_name(filename):
+    if _is_internal_relative_name(filename):
         return None
     size = _coerce_size(_metadata_value(record, "size", "contentLength", "content_length"))
     return SupabaseArtifactInfo(
@@ -232,6 +262,16 @@ def uploads_object_name(filename: str) -> str:
     keyspace ``{thread_id}/report.pdf``.
     """
     return f"{UPLOADS_PREFIX}{filename.strip().lstrip('/')}"
+
+
+def ledger_object_name() -> str:
+    """Object name of the per-session delegation ledger (Spec D D-1).
+
+    The ``{thread_id}/`` folder is prepended by ``_object_path`` at call
+    time, yielding ``{thread_id}/ledger/session.jsonl``. One ledger per
+    session and session_id == thread_id, so the name is constant.
+    """
+    return f"{LEDGER_PREFIX}session.jsonl"
 
 
 def upload_artifact(

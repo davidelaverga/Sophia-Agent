@@ -252,6 +252,77 @@ describe("ArtifactCanvasViewport", () => {
     expect(screen.getByTestId("artifact-preview-state").className).not.toMatch(/\bfixed\b|\binset-0\b/)
   })
 
+  it("renders a PPTX deliverable through its preview PDF sibling when routed to the PDF pipeline", async () => {
+    mockCanvasApis()
+    mockPdfDocument({ pageCount: 3 })
+
+    const pptxArtifact = {
+      ...builderArtifact,
+      artifactType: "presentation",
+      artifactPath: "mnt/user-data/outputs/sophia-deck.pptx",
+      supportingFiles: ["mnt/user-data/outputs/sophia-deck.preview.pdf"],
+    } satisfies BuilderArtifactV1
+    const previewFile = {
+      path: "mnt/user-data/outputs/sophia-deck.preview.pdf",
+      name: "sophia-deck.preview.pdf",
+      label: "sophia-deck.preview.pdf",
+      isPrimary: false,
+      mimeType: "application/pdf",
+    }
+
+    render(
+      <ArtifactCanvasViewport
+        artifact={pptxArtifact}
+        files={[
+          {
+            path: "mnt/user-data/outputs/sophia-deck.pptx",
+            name: "sophia-deck.pptx",
+            label: "sophia-deck.pptx",
+            isPrimary: true,
+          },
+          previewFile,
+        ]}
+        typeLabel="Presentation"
+        previewFile={previewFile}
+        previewHref="/api/threads/thread-1/artifacts/mnt/user-data/outputs/sophia-deck.preview.pdf"
+        rendererKind="pdf"
+      />,
+    )
+
+    const documentPage = await screen.findByTestId("artifact-document-page")
+    expect(documentPage).toHaveAttribute("data-renderer-kind", "pdf")
+    expect(screen.getByLabelText("Artifact PDF preview")).toBeInTheDocument()
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/sophia-deck.preview.pdf",
+      expect.objectContaining({ method: "GET" }),
+    )
+    expect(await screen.findByTestId("artifact-pdf-pager")).toBeInTheDocument()
+  })
+
+  it("keeps a plain PPTX without a preview sibling on the metadata page", () => {
+    const pptxArtifact = {
+      ...builderArtifact,
+      artifactType: "presentation",
+      artifactPath: "mnt/user-data/outputs/sophia-deck.pptx",
+    } satisfies BuilderArtifactV1
+
+    render(
+      <ArtifactCanvasViewport
+        artifact={pptxArtifact}
+        files={[{
+          path: "mnt/user-data/outputs/sophia-deck.pptx",
+          name: "sophia-deck.pptx",
+          label: "sophia-deck.pptx",
+          isPrimary: true,
+        }]}
+        typeLabel="Presentation"
+      />,
+    )
+
+    expect(screen.queryByLabelText("Artifact PDF preview")).not.toBeInTheDocument()
+    expect(screen.getByTestId("artifact-document-page")).not.toHaveAttribute("data-renderer-kind")
+  })
+
   it("keeps the PDF rail fixed while the PDF pan layer owns zoom overflow", async () => {
     mockCanvasApis()
     const pdf = mockPdfDocument({ pageCount: 2 })
@@ -360,10 +431,7 @@ describe("ArtifactCanvasViewport", () => {
     const iframe = await screen.findByTitle("Preview of launch-brief.html")
 
     expect(previewRegion).toContainElement(iframe)
-    expect(iframe).toHaveAttribute(
-      "sandbox",
-      "allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-scripts",
-    )
+    expect(iframe).toHaveAttribute("sandbox", "allow-scripts")
     expect(iframe).toHaveAttribute("data-html-visible-renderer-interactive", "true")
     expect(iframe).toHaveAttribute("data-html-iframe-pointer-events", "auto")
     expect(iframe).toHaveAttribute("srcdoc", expect.stringContaining("<h1>Deck fallback</h1>"))
@@ -482,6 +550,53 @@ describe("ArtifactCanvasViewport", () => {
     expect(layer).toHaveAttribute("data-html-overlay-pointer-events-mode", "passthrough")
     expect(layer).toHaveAttribute("data-html-annotation-overlay-capturing", "false")
     expect(layer.className).toContain("pointer-events-none")
+  })
+
+  it("strips artifact scripts while keeping the preview bridge sandboxed", async () => {
+    mockCanvasApis()
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        [
+          "<!doctype html><html><body>",
+          "<a id='unsafe-link' href='javascript:window.open(\"https://evil.example\")' onclick='window.open(\"https://evil.example\")'>Open</a>",
+          "<script>window.open('https://evil.example')</script>",
+          "<main><h1>Safe preview</h1></main>",
+          "</body></html>",
+        ].join(""),
+        {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        },
+      ),
+    )
+
+    render(
+      <ArtifactCanvasViewport
+        artifact={htmlArtifact}
+        files={[{
+          path: "mnt/user-data/outputs/launch-brief.html",
+          name: "launch-brief.html",
+          label: "launch-brief.html",
+          isPrimary: true,
+          mimeType: "text/html",
+        }]}
+        typeLabel="Webpage"
+        previewHref="/artifact.html"
+        artifactTextRegistration={{
+          artifactId: "artifact-1",
+          threadId: "thread-1",
+        }}
+        toolMode="select"
+      />,
+    )
+
+    const iframe = await screen.findByTestId("artifact-html-preview-iframe")
+    const srcDoc = iframe.getAttribute("srcdoc") ?? ""
+
+    expect(iframe).toHaveAttribute("sandbox", "allow-scripts")
+    expect(srcDoc).not.toContain("evil.example")
+    expect(srcDoc).not.toContain("onclick=")
+    expect(srcDoc).toContain("htmlBridgeReady")
   })
 
   it("routes internal HTML links inside the iframe and blocks unsafe navigations", async () => {

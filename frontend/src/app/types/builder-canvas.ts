@@ -5,7 +5,7 @@ export type BuilderCanvasStatus = 'running' | 'completed' | 'failed' | 'timed_ou
 export type BuilderCanvasActivity =
   | {
     kind: 'phase';
-    phase: 'starting' | 'researching' | 'drafting' | 'finalizing' | 'done';
+    phase: 'starting' | 'researching' | 'drafting' | 'finalizing' | 'refining' | 'done';
     category?: BuilderCanvasActivityCategory;
     action?: BuilderCanvasActivityAction;
     label: string;

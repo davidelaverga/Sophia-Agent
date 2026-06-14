@@ -1,5 +1,5 @@
 import type { ArtifactRendererKind } from "./artifact-renderers"
-import { normalizeBuilderArtifactPath } from "./builder-artifacts"
+import { classifyBuilderArtifactFileRole, normalizeBuilderArtifactPath } from "./builder-artifacts"
 import { buildCoreviewArtifactStableIdentity } from "./coreview-artifact-identity"
 
 export const ARTIFACT_SESSION_INDEX_STORAGE_VERSION = 1
@@ -338,11 +338,22 @@ export function openArtifactInSessionIndex(
 
 export function listSessionArtifacts(index: ArtifactSessionIndex): ArtifactRecord[] {
   const recentOrder = new Map(index.recentlyOpenedArtifactIds.map((artifactId, order) => [artifactId, order]))
+  const siblingFiles = index.artifacts.map((record) => ({ path: record.localPath }))
+  // Render sources (report.pdf.md) and deck previews (deck.preview.pdf) must
+  // never outrank the deliverable they belong to, so they sort after
+  // deliverables unless the user explicitly opened them recently.
+  const roleRank = (record: ArtifactRecord) => (
+    classifyBuilderArtifactFileRole({ path: record.localPath }, siblingFiles) === "deliverable" ? 0 : 1
+  )
   return [...index.artifacts].sort((left, right) => {
     const leftRecent = recentOrder.get(left.artifactId)
     const rightRecent = recentOrder.get(right.artifactId)
     if (leftRecent !== undefined || rightRecent !== undefined) {
       return (leftRecent ?? Number.MAX_SAFE_INTEGER) - (rightRecent ?? Number.MAX_SAFE_INTEGER)
+    }
+    const roleDelta = roleRank(left) - roleRank(right)
+    if (roleDelta !== 0) {
+      return roleDelta
     }
     return Date.parse(right.updatedAt) - Date.parse(left.updatedAt)
   })

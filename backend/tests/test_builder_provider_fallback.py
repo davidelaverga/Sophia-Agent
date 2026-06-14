@@ -39,11 +39,24 @@ from deerflow.agents.sophia_agent.middlewares.builder_provider_fallback import (
 from deerflow.sophia.builder_provider_fallback import (
     FALLBACK_ENABLED_ENV,
     FALLBACK_MODEL_ENV,
+    PRIMARY_COOLDOWN_ENV,
     classify_provider_error,
     provider_fallback_snapshot,
 )
 
 _PLACEHOLDER_KEY = "test-openai-key-placeholder-never-real"
+
+
+@pytest.fixture(autouse=True)
+def _reset_primary_cooldown():
+    """The primary-cooldown state is module-global; without this reset, a
+    test that triggers a primary error arms the cooldown and every later
+    test in the file sees the primary bypassed (e.g.
+    ``test_async_path_retries_once`` fails in file order but passes in
+    isolation). The feature ships this hook for exactly this purpose."""
+    mw_module.reset_builder_primary_cooldown_for_tests()
+    yield
+    mw_module.reset_builder_primary_cooldown_for_tests()
 
 
 class _ProviderStatusError(Exception):
@@ -69,10 +82,18 @@ class _FakeRequest:
 _FALLBACK_MODEL_SENTINEL = object()
 
 
+@pytest.fixture(autouse=True)
+def _reset_builder_provider_cooldown():
+    mw_module.reset_builder_primary_cooldown_for_tests()
+    yield
+    mw_module.reset_builder_primary_cooldown_for_tests()
+
+
 def _enable_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(FALLBACK_ENABLED_ENV, "true")
     monkeypatch.setenv(FALLBACK_MODEL_ENV, "openai-model-placeholder")
     monkeypatch.setenv("OPENAI_API_KEY", _PLACEHOLDER_KEY)
+    monkeypatch.setenv(PRIMARY_COOLDOWN_ENV, "300")
     monkeypatch.setattr(mw_module, "build_fallback_chat_model", lambda: _FALLBACK_MODEL_SENTINEL)
 
 
@@ -192,6 +213,27 @@ class TestFallbackEnabledAndConfigured:
         assert update["fallback_attempted"] is True
         assert update["fallback_result"] == "success"
         assert update["provider_error_class"] == "auth_error"
+        assert update["fallback_primary_bypassed"] is False
+        assert update["final_provider"] == "openai"
+
+    def test_primary_cooldown_bypasses_anthropic_on_next_turn(self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+        _enable_fallback(monkeypatch)
+        middleware = BuilderProviderFallbackMiddleware()
+        first_handler = _Handler(_ProviderStatusError(401), response="fallback-ok")
+        second_handler = _Handler(primary_exc=None, response="cooldown-fallback-ok")
+
+        middleware.wrap_model_call(_FakeRequest(), first_handler)
+        with caplog.at_level(logging.WARNING):
+            second = middleware.wrap_model_call(_FakeRequest(), second_handler)
+
+        assert len(first_handler.calls) == 2
+        assert len(second_handler.calls) == 1
+        assert second_handler.calls[0].model is _FALLBACK_MODEL_SENTINEL
+        update = second.command.update["builder_provider_fallback"]
+        assert second.model_response == "cooldown-fallback-ok"
+        assert update["fallback_primary_bypassed"] is True
+        assert update["fallback_bypass_reason"] == "provider_unavailable"
+        assert "primary_provider_bypassed=true" in caplog.text
 
     def test_async_path_retries_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable_fallback(monkeypatch)

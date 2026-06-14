@@ -33,6 +33,11 @@ _PHASE_LABELS = {
     "researching": "Researching",
     "drafting": "Creating artifact",
     "finalizing": "Creating artifact",
+    # VQ repair iterations (BuilderProgressMiddleware emits "refining" when
+    # build_iterations > 0). Codex P3 PR #131: without this entry the web
+    # canvas dropped refining events and fell back to stale tool activity
+    # while Telegram showed the phase.
+    "refining": "Refining artifact",
     "done": "Packaging artifact",
 }
 _CHECK_COMMAND_PREFIXES = ("test", "pytest", "pnpm", "npm", "yarn", "uv", "ruff", "mypy", "tsc")
@@ -182,6 +187,9 @@ def _phase_activity(data: Any) -> dict[str, str] | None:
         "researching": "researching",
         "drafting": "creating_artifact",
         "finalizing": "creating_artifact",
+        # "creating_artifact" is a frontend-known action (icon/color); the
+        # distinct "Refining artifact" label carries the user-facing meaning.
+        "refining": "creating_artifact",
         "done": "packaging_artifact",
     }[phase]
     category = {
@@ -189,6 +197,7 @@ def _phase_activity(data: Any) -> dict[str, str] | None:
         "researching": "research",
         "drafting": "draft",
         "finalizing": "package",
+        "refining": "draft",
         "done": "finalize",
     }[phase]
     if phase == "done":
@@ -491,7 +500,7 @@ class BuilderCanvasWorker:
             "sequence=%s event_name=%s activity_kind=%s activity_category=%s status=%s "
             "activity_action=%s has_artifact_url=%s has_artifact_path=%s "
             "requested_artifact_ext=%s artifact_ext=%s artifact_is_fallback=%s fallback_reason=%s "
-            "image_generation_status=%s image_generation_reason=%s",
+            "image_generation_status=%s image_generation_reason=%s budget_stop_reason=%s",
             decision,
             event.get("kind"),
             reason,
@@ -512,6 +521,7 @@ class BuilderCanvasWorker:
             completion.get("fallback_reason") if isinstance(completion, dict) else None,
             completion.get("image_generation_status") if isinstance(completion, dict) else None,
             completion.get("image_generation_reason") if isinstance(completion, dict) else None,
+            completion.get("budget_stop_reason") if isinstance(completion, dict) else None,
         )
 
     def _record_event_locked(self, event: dict[str, Any], key: tuple[str, str, str], sequence: int) -> None:

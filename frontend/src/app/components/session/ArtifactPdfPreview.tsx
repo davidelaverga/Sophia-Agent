@@ -1,6 +1,6 @@
 "use client"
 
-import { FileText, Layers } from "lucide-react"
+import { ChevronLeft, ChevronRight, FileText, Layers } from "lucide-react"
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type RefObject, type TouchEvent } from "react"
 
 import type { ArtifactFitMode } from "../../lib/artifact-renderers"
@@ -23,27 +23,19 @@ import type {
 } from "../../types/artifact-annotations"
 import type { BuilderArtifactFileV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 
-import type { ArtifactVisualCaptureStatus } from "./ArtifactCanvasViewport"
+import type {
+  ArtifactPdfFocusRequest,
+  ArtifactPdfTextExtractionStatus,
+  ArtifactPdfTextExtractionStatusValue,
+  ArtifactVisualCaptureStatus,
+} from "./ArtifactCanvasShared"
 import { ArtifactPdfPageRail } from "./ArtifactPdfPageRail"
 
-export type ArtifactPdfTextExtractionStatusValue = "loading" | "success" | "failed" | "unavailable"
-
-export interface ArtifactPdfTextExtractionStatus {
-  status: ArtifactPdfTextExtractionStatusValue
-  source: "pdf_text_extraction"
-  pageCount: number
-  charCount: number
-  truncated: boolean
-  safeReason: string | null
-  text?: string
-  layout?: CoreviewPdfTextLayout
-}
-
-export interface ArtifactPdfFocusRequest {
-  id: string
-  pageIndex: number
-  rect: NormalizedArtifactRect
-}
+export type {
+  ArtifactPdfFocusRequest,
+  ArtifactPdfTextExtractionStatus,
+  ArtifactPdfTextExtractionStatusValue,
+} from "./ArtifactCanvasShared"
 
 interface ArtifactPdfPreviewProps {
   artifact: BuilderArtifactV1
@@ -294,6 +286,15 @@ export function ArtifactPdfPreview({
       }
     }
   }, [])
+
+  // Re-announce the page count whenever the document is ready so a parent
+  // that reset its page state after numPages was first reported (e.g. a late
+  // artifact identity change) cannot get stuck in single-page mode.
+  useEffect(() => {
+    if (documentState.status === "ready") {
+      onPageCountChangeRef.current?.(Math.max(1, documentState.document.numPages))
+    }
+  }, [documentState, onPageCountChange])
 
   const pageNumber = documentState.status === "ready"
     ? clampPdfPageNumber(pageIndex + 1, documentState.document.numPages)
@@ -965,7 +966,65 @@ export function ArtifactPdfPreview({
           </div>
         </div>
       </div>
+
+      {documentState.status === "ready" && documentState.document.numPages > 1 ? (
+        <ArtifactPdfPager
+          pageNumber={pageNumber}
+          pageCount={documentState.document.numPages}
+          onPageIndexChange={onPageIndexChange}
+        />
+      ) : null}
     </div>
+  )
+}
+
+function ArtifactPdfPager({
+  pageNumber,
+  pageCount,
+  onPageIndexChange,
+}: {
+  pageNumber: number
+  pageCount: number
+  onPageIndexChange?: (pageIndex: number) => void
+}) {
+  const pagerButtonClassName = cn(
+    "cosmic-focus-ring inline-flex h-8 w-8 items-center justify-center rounded-md border border-[color:var(--cosmic-border-soft)] text-[color:var(--cosmic-text)] transition hover:bg-[color:var(--cosmic-panel-soft)]",
+    "disabled:cursor-not-allowed disabled:opacity-35",
+  )
+
+  return (
+    <nav
+      data-testid="artifact-pdf-pager"
+      aria-label="PDF page navigation"
+      className="flex shrink-0 items-center justify-center gap-3 border-t border-[color:var(--cosmic-border-soft)] bg-[color:color-mix(in_srgb,var(--cosmic-panel)_94%,var(--bg))] px-4 py-2"
+    >
+      <button
+        type="button"
+        aria-label="Go to previous page"
+        disabled={pageNumber <= 1}
+        onClick={() => onPageIndexChange?.(Math.max(0, pageNumber - 2))}
+        className={pagerButtonClassName}
+      >
+        <ChevronLeft className="h-4 w-4" aria-hidden="true" />
+      </button>
+      <span
+        data-testid="artifact-pdf-pager-indicator"
+        aria-label={`Page ${pageNumber} of ${pageCount}`}
+        aria-live="polite"
+        className="min-w-[56px] text-center text-xs font-medium tabular-nums text-[color:var(--cosmic-text)]"
+      >
+        {pageNumber} / {pageCount}
+      </span>
+      <button
+        type="button"
+        aria-label="Go to next page"
+        disabled={pageNumber >= pageCount}
+        onClick={() => onPageIndexChange?.(Math.min(pageCount - 1, pageNumber))}
+        className={pagerButtonClassName}
+      >
+        <ChevronRight className="h-4 w-4" aria-hidden="true" />
+      </button>
+    </nav>
   )
 }
 

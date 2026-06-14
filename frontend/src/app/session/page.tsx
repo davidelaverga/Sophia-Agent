@@ -1048,11 +1048,22 @@ function SessionPageContent() {
     if (!matchesBuilderTask && !matchesBuilderCompletion) {
       return null;
     }
-    return builderArtifactLibrary.find((item) => (
+    const newItems = builderArtifactLibrary.filter((item) => (
       !builderLibraryBaseline.items.has(builderLibraryItemSignature(item))
-    )) ?? null;
+    ));
+    // The completion event names the requested primary deliverable — prefer it
+    // over any render-source/preview sibling uploaded in the same run.
+    const completionFilename = builderCompletion?.artifact_filename?.trim().toLowerCase();
+    if (completionFilename) {
+      const completionMatch = newItems.find((item) => item.name.toLowerCase() === completionFilename);
+      if (completionMatch) {
+        return completionMatch;
+      }
+    }
+    return newItems[0] ?? null;
   }, [
     builderArtifactLibrary,
+    builderCompletion?.artifact_filename,
     builderCompletion?.run_id,
     builderCompletion?.task_id,
     builderLibraryBaseline,

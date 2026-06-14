@@ -46,14 +46,14 @@ def test_gateway_app_mounts_sessions_and_bootstrap_routes(tmp_path, monkeypatch)
     }
 
 
-def test_gateway_does_not_mount_legacy_public_builder_completion_stream():
+def test_gateway_mounts_legacy_public_builder_completion_stream_for_compatibility():
     from app.gateway.app import create_app
 
     app = create_app()
     with TestClient(app) as client:
         response = client.get("/api/threads/thread-1/builder-events/last")
 
-    assert response.status_code == 404
+    assert response.status_code == 204
 
 
 def test_gateway_app_mounts_voice_connect_route(monkeypatch):

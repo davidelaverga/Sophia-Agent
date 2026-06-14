@@ -48,6 +48,14 @@ class BuilderArtifactInput(BaseModel):
     source_artifact_path: str | None = Field(default=None, description="Optional original artifact path when this output revises a completed builder artifact.")
     revision_of_artifact_path: str | None = Field(default=None, description="Optional original artifact path that this output revises.")
     confidence: float = Field(ge=0.0, le=1.0, description="Self-assessed quality confidence (0.0-1.0).")
+    brief_assumptions: list[str] | None = Field(
+        default=None,
+        description=(
+            "Assumptions stated for brief fields not present in the parent "
+            "conversation (Spec D D-5). Empty/omitted when the brief was "
+            "complete or every gap was recovered via read_session_context."
+        ),
+    )
 
 
 @tool(args_schema=BuilderArtifactInput, return_direct=True)

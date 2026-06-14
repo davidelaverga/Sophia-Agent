@@ -316,3 +316,60 @@ def test_upload_rejects_blank_thread_or_filename(monkeypatch) -> None:
         supabase_artifact_store.upload_artifact(
             thread_id="thread-1", filename=" ", content=b"x"
         )
+
+
+def test_list_artifacts_excludes_delegation_ledger(monkeypatch) -> None:
+    """Codex P1 PR #131: the mirrored delegation ledger
+    ({thread_id}/ledger/session.jsonl) is internal conversation content —
+    it must never surface as a user-facing artifact. The list filter must
+    skip both the ledger FOLDER (no recursion into it) and any flat
+    ledger-prefixed file record, exactly like the uploads keyspace."""
+    _configure(monkeypatch)
+    prefixes: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode())
+        prefixes.append(payload["prefix"])
+        if payload["prefix"] == "thread-1/":
+            return httpx.Response(200, json=[
+                {"name": "ledger", "id": None, "metadata": None},
+                {
+                    "name": "ledger/session.jsonl",
+                    "id": "file-ledger-direct",
+                    "metadata": {"size": 4096, "mimetype": "application/x-ndjson"},
+                    "updated_at": "2026-06-11T20:02:00Z",
+                },
+                {
+                    "name": "builder-output.md",
+                    "id": "file-output",
+                    "metadata": {"size": 12, "mimetype": "text/markdown"},
+                    "updated_at": "2026-06-11T20:00:00Z",
+                },
+            ])
+        if payload["prefix"] == "thread-1/ledger/":
+            return httpx.Response(200, json=[
+                {
+                    "name": "session.jsonl",
+                    "id": "file-ledger",
+                    "metadata": {"size": 4096, "mimetype": "application/x-ndjson"},
+                    "updated_at": "2026-06-11T20:01:00Z",
+                },
+            ])
+        return httpx.Response(200, json=[])
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    artifacts = supabase_artifact_store.list_artifacts(thread_id="thread-1", client=client)
+
+    assert prefixes == ["thread-1/"]  # never descended into ledger/
+    assert [artifact.filename for artifact in artifacts] == ["builder-output.md"]
+
+
+def test_is_ledger_object_name_covers_keyspace_and_descendants() -> None:
+    assert supabase_artifact_store.is_ledger_object_name("ledger/session.jsonl") is True
+    assert supabase_artifact_store.is_ledger_object_name("ledger") is True
+    assert supabase_artifact_store.is_ledger_object_name("/ledger/session.jsonl") is True
+    assert supabase_artifact_store.is_ledger_object_name("ledger/sub/dir.jsonl") is True
+    assert supabase_artifact_store.is_ledger_object_name("report.pdf") is False
+    assert supabase_artifact_store.is_ledger_object_name("ledgers/notes.md") is False
+    assert supabase_artifact_store.is_ledger_object_name("uploads/ledger.csv") is False

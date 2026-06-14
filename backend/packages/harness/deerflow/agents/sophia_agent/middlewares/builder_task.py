@@ -31,10 +31,102 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
+from deerflow.agents.sophia_agent.middlewares.builder_budget import (
+    force_emit_wall_clock_fraction,
+    max_non_artifact_turns,
+)
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.utils import log_middleware
 
 logger = logging.getLogger(__name__)
+
+
+def _delegation_boundary_sections(
+    delegation_context: dict[str, Any],
+    task_type: str,
+    existing_schema: dict[str, Any] | None = None,
+) -> tuple[list[str], dict[str, Any]]:
+    """Spec D briefing sections (D-3 schema, D-4 recall line, D-5 gate).
+
+    Returns ``(sections, state_updates)``. Everything degrades to
+    ``([], {})`` — missing ledger, disabled flags, extraction failure all
+    mean the briefing is exactly what it is today. Kept module-level so
+    ``before_agent``'s complexity stays flat (sentrux CC<=15).
+
+    ``existing_schema`` makes the extraction idempotent across runs:
+    ``before_agent`` re-fires on every follow-up run on the same builder
+    thread (update_async_task resumes), and a schema already extracted —
+    and already rendered into an earlier briefing block — must not
+    trigger a second model call or a duplicate section.
+    """
+    import json as _json
+
+    from deerflow.sophia import brief_extraction, build_condition, delegation_ledger
+    from deerflow.sophia.tools.read_session_context import read_tool_enabled
+
+    sections: list[str] = []
+    state_updates: dict[str, Any] = {}
+
+    stats = delegation_context.get("delegation_ledger")
+    ledger_available = bool(isinstance(stats, dict) and stats.get("available"))
+    parent_user_id = delegation_context.get("parent_user_id")
+    parent_thread_id = delegation_context.get("parent_thread_id")
+
+    # D-4: teach the recall tool only when it is registered AND a ledger exists.
+    if read_tool_enabled() and ledger_available:
+        sections.append(
+            "<session_recall>\n"
+            "If the brief is ambiguous or missing a detail the user likely "
+            "stated (audience, exact figures, style constraints, exclusions), "
+            "call read_session_context(query) BEFORE assuming (max 4 calls).\n"
+            "</session_recall>"
+        )
+
+    # D-3: one-shot schema extraction on the deterministic trigger.
+    # A schema already in state means a prior run extracted AND rendered it
+    # — skip both the model call and the duplicate section.
+    brief_schema: dict[str, Any] | None = None
+    if isinstance(existing_schema, dict):
+        pass
+    elif (
+        brief_extraction.extraction_enabled()
+        and brief_extraction.extraction_triggered(stats)
+        and isinstance(parent_user_id, str)
+        and isinstance(parent_thread_id, str)
+    ):
+        entries = delegation_ledger.read_ledger_with_fallback(parent_user_id, parent_thread_id)
+        brief_schema = brief_extraction.extract_brief(entries, task_type)
+        if brief_schema is not None:
+            sections.append(
+                "<build_brief_schema>\n"
+                + _json.dumps(brief_schema, indent=2, ensure_ascii=False)
+                + "\n</build_brief_schema>"
+            )
+            state_updates["brief_schema"] = brief_schema
+
+    # D-5: briefing-directive gate over the extracted schema.
+    if brief_schema is not None and build_condition.brief_gate_enabled():
+        ok, missing = build_condition.brief_complete(task_type, brief_schema)
+        if not ok:
+            fields = ", ".join(missing)
+            sections.append(
+                "<brief_gate>\n"
+                f"The brief schema is missing required fields for this "
+                f"task_type: {fields}.\n"
+                "BEFORE planning: for each missing field, call "
+                "read_session_context with a targeted query — the parent "
+                "conversation likely contains it (you have at most 4 calls).\n"
+                "If a field is genuinely not in the conversation, choose a "
+                "sensible stated assumption and continue — NEVER ask the "
+                "user.\n"
+                "Report every assumption you made in "
+                "emit_builder_artifact.brief_assumptions (one short string "
+                "each). If you filled all fields from the conversation, pass "
+                "an empty list.\n"
+                "</brief_gate>"
+            )
+            state_updates["brief_gate_missing_fields"] = missing
+    return sections, state_updates
 
 
 # PR #94: max number of files to enumerate in the CRITICAL endgame block.
@@ -297,18 +389,74 @@ _VISUAL_REQUEST_MARKERS = (
     "quadrant",
 )
 
+_POLISHED_DECK_IMAGE_MARKERS = (
+    "polished visual",
+    "visual storytelling",
+    "visual treatment",
+    "premium deck",
+    "beautiful deck",
+    "keynote style",
+    "keynote-style",
+    "cinematic",
+    "hero image",
+    "hero slide",
+    "image-heavy",
+    "full-bleed",
+    "full bleed",
+)
 
-def _image_generation_explicitly_requested(
+
+_PLAIN_DECK_MARKERS = (
+    "plain",
+    "plain deck",
+    "plain slide",
+    "plain slides",
+    "text-only",
+    "text only",
+    "text-only deck",
+    "text only deck",
+    "no images",
+    "no imagery",
+    "no illustrations",
+    "no visuals",
+    "without visuals",
+)
+_IMAGE_ENRICHMENT_TASK_TYPES = frozenset({"presentation", "visual_report"})
+
+
+def _image_generation_enabled(
     delegation_context: dict[str, Any],
     *,
     artifact_target_ext: str,
+    task_type: str = "",
 ) -> bool:
+    """Whether the image-generation skill is offered to the builder.
+
+    Image targets and explicit requests keep legacy behavior. PPTX defaults to
+    polished visual treatment unless the brief explicitly asks for a
+    plain/text-only/no-visual deck, but generated images are support assets
+    inside an editable deck. PDF/HTML chart and diagram work uses local visual
+    assets unless the user explicitly asks for generated imagery.
+    """
     if artifact_target_ext in _IMAGE_OUTPUT_EXTENSIONS:
         return True
     task = str(delegation_context.get("task") or "").lower()
     description = str(delegation_context.get("description") or "").lower()
     combined = f"{task}\n{description}"
-    return any(marker in combined for marker in _EXPLICIT_IMAGE_GENERATION_MARKERS)
+    if any(marker in combined for marker in _EXPLICIT_IMAGE_GENERATION_MARKERS):
+        return True
+    if artifact_target_ext != ".pptx":
+        return False
+    if _plain_deck_requested(combined):
+        return False
+    return True
+
+
+def _plain_deck_requested(text: str) -> bool:
+    return any(
+        re.search(rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])", text)
+        for marker in _PLAIN_DECK_MARKERS
+    )
 
 
 def _visuals_requested(delegation_context: dict[str, Any]) -> bool:
@@ -318,18 +466,73 @@ def _visuals_requested(delegation_context: dict[str, Any]) -> bool:
     return any(marker in combined for marker in _VISUAL_REQUEST_MARKERS)
 
 
+def _polished_deck_images_requested(delegation_context: dict[str, Any]) -> bool:
+    task = str(delegation_context.get("task") or "").lower()
+    description = str(delegation_context.get("description") or "").lower()
+    combined = f"{task}\n{description}"
+    return any(marker in combined for marker in _POLISHED_DECK_IMAGE_MARKERS)
+
+
+def _image_enrichment_section(artifact_target_ext: str = ".pptx") -> str:
+    if artifact_target_ext == ".pdf":
+        plan_lines = (
+            "- STEP 0 (required): run the preflight check FIRST — "
+            "`python /mnt/skills/public/image-generation/scripts/generate.py --preflight`. "
+            "If it fails, proceed diagram/chart/text-only immediately; the harness records why.\n"
+            "- Generate 1 cover image (16:9, named "
+            "/mnt/user-data/outputs/visuals/cover-<desc>.png — the renderer "
+            "automatically places it on the title page) and optionally 1 section "
+            "divider image. HARD CAP: 2 image-generation script calls for PDF "
+            "builds — calls beyond the cap are rejected by the harness.\n"
+        )
+    else:
+        plan_lines = (
+            "- STEP 0 (required): run the preflight check FIRST — "
+            "`python /mnt/skills/public/image-generation/scripts/generate.py --preflight`. "
+            "If it fails, proceed diagram/chart/text-only immediately; the harness records why.\n"
+            "- For PPTX, generated images are support assets for covers, section "
+            "openers, or illustrative scenes inside an editable PowerPoint deck. "
+            "Do NOT make the deck a folder of full-slide screenshots. Use the "
+            "ppt-generation plan/compiler so titles, body text, notes, charts, "
+            "and diagrams remain editable. HARD CAP: 3 image-generation script "
+            "calls per presentation build — calls beyond the cap are rejected by "
+            "the harness.\n"
+        )
+    return (
+        "<image_enrichment>\n"
+        "Generated imagery is available for this run because this is an image "
+        "deliverable, an explicit generated-image request, or a PPTX deck that "
+        "did not ask to be plain/text-only/no-visual. Policy:\n"
+        f"{plan_lines}"
+        "- Charts and data visuals use generate_visual_asset with explicit "
+        "labeled {label, value} data; technical diagrams use "
+        "generate_excalidraw_diagram with raw Mermaid definitions. These support "
+        "assets do not count toward the image-generation cap.\n"
+        "- Save generated images under /mnt/user-data/outputs/visuals/ "
+        "(hero-<desc>.png, slide-<n>-<desc>.png, cover-<desc>.png) and reference "
+        "them from the plan/source before composing.\n"
+        "- A failed image call must NEVER stall the deliverable: at most ONE retry "
+        "with a simplified prompt, then continue with diagrams, charts, and text — "
+        "a diagram/chart/text deliverable is valid.\n"
+        "- Skip generated imagery entirely only if the brief clearly asks for a "
+        "plain, text-only, or no-visual deliverable.\n"
+        "</image_enrichment>"
+    )
+
+
 def _critical_emit_guidance(artifact_target_ext: str) -> str:
     if artifact_target_ext == ".pdf":
         return (
-            "for this PDF target, emit the valid .pdf if it exists. Only if no "
-            "usable PDF exists may you emit an approved Markdown/HTML fallback "
-            "with explicit fallback metadata. Do NOT emit a generator .py as a "
-            "PDF fallback.\n"
+            "for this PDF target, emit the valid .pdf if it exists. A .md/.html "
+            "fallback is allowed only after render failure or unusable PDF quality, "
+            "and it must be explicitly marked with requested_artifact_ext='pdf', "
+            "artifact_is_fallback=true, and fallback_reason. Do NOT emit a "
+            "generator .py as a PDF deliverable.\n"
         )
     return (
         "if no user-facing deliverable exists, do NOT emit a generator script "
-        "unless the user explicitly requested source code. Emit a verified "
-        "fallback or fail cleanly with a safe companion_tone_hint.\n"
+        "unless the user explicitly requested source code. Emit with "
+        "artifact_path=null and an honest companion_summary instead.\n"
     )
 
 
@@ -337,7 +540,8 @@ def _critical_pick_guidance(artifact_target_ext: str) -> str:
     if artifact_target_ext == ".pdf":
         return (
             "first file marked 'deliverable'. If only generator files exist, "
-            "do not emit them; create a verified .md/.html fallback or fail cleanly.\n"
+            "do not emit them; emit with artifact_path=null and an honest "
+            "companion_summary instead.\n"
         )
     return "first file marked 'deliverable'. Do not choose generator scripts as user-facing artifacts. "
 
@@ -349,7 +553,7 @@ def _generator_listing_tag(
     has_generator: bool,
 ) -> tuple[str, bool]:
     if artifact_target_ext == ".pdf":
-        return "(generator script — do NOT emit for PDF; use .pdf or approved .md/.html fallback instead)", has_generator
+        return "(generator script — do NOT emit for PDF; render and emit the real .pdf)", has_generator
     if not has_deliverable and has_generator:
         return "(generator script — do NOT emit unless the user explicitly asked for source code)", False
     return "(generator script)", has_generator
@@ -387,9 +591,13 @@ def _terminal_artifact_format_line(artifact_target_ext: str) -> str:
         )
     if artifact_target_ext == ".pdf":
         return (
-            "- This is a PDF target: the deliverable is a real .pdf. Call "
-            "emit_builder_artifact with artifact_type=\"pdf\" (or an approved fallback "
-            "with explicit fallback metadata when rendering genuinely fails).\n"
+            "- This is a PDF target: the deliverable is a real .pdf rendered via "
+            "render_markdown_to_pdf. Call emit_builder_artifact with "
+            "artifact_type=\"pdf\". If rendering genuinely fails after the "
+            "bounded repair, a .md/.html fallback must be explicitly marked "
+            "with requested_artifact_ext, artifact_is_fallback=true, and "
+            "fallback_reason; otherwise emit with artifact_path=null and an "
+            "honest companion_summary.\n"
         )
     return ""
 
@@ -468,6 +676,13 @@ class BuilderTaskState(AgentState):
     builder_non_artifact_turns: NotRequired[int]
     builder_last_tool_names: NotRequired[list[str]]
     builder_artifact_target_path: NotRequired[str]
+    # Spec D D-4: read_session_context's self-enforced call counter — the
+    # tool's Command update persists only because the key is declared here.
+    builder_session_context_reads: NotRequired[int]
+    # Spec D D-3/D-5: extracted brief schema + the gate's missing fields,
+    # written by this middleware's briefing pass, read at emit acceptance.
+    brief_schema: NotRequired[dict | None]
+    brief_gate_missing_fields: NotRequired[list[str]]
     # NOTE: builder_search_sources is NOT redeclared here. SophiaState already
     # declares it with the `_merge_search_sources` reducer; redeclaring it as
     # plain `NotRequired[list[dict]]` would shadow that reducer via
@@ -594,6 +809,16 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             memory_lines = [f"- {m}" for m in capped]
             sections.append("<memories>\n" + "\n".join(memory_lines) + "\n</memories>")
 
+        # Spec D (delegation boundary): D-4 recall line, D-3 extracted brief
+        # schema, D-5 completeness-gate directive. All flag-gated and
+        # degrade to no-ops when the parent ledger is unavailable.
+        boundary_sections, boundary_state_updates = _delegation_boundary_sections(
+            delegation_context,
+            task_type,
+            existing_schema=state.get("brief_schema"),
+        )
+        sections.extend(boundary_sections)
+
         # Task type
         sections.append(f"<task_type>{task_type}</task_type>")
 
@@ -667,15 +892,25 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         # data-analysis) are available. Without this block the model
         # falls back to writing its own matplotlib/reportlab code, which
         # is the failure pattern PR #93/#94 spent recovery machinery on.
+        image_generation_enabled = _image_generation_enabled(
+            delegation_context,
+            artifact_target_ext=artifact_target_ext,
+            task_type=task_type,
+        )
         skills_block = self._build_skills_inventory_block(
-            include_image_generation=_image_generation_explicitly_requested(
-                delegation_context,
-                artifact_target_ext=artifact_target_ext,
-            ),
+            include_image_generation=image_generation_enabled,
             include_visual_design=_visuals_requested(delegation_context),
+            include_pdf_report=artifact_target_ext == ".pdf",
+            include_research_skills=artifact_target_ext == ".pdf"
+            or task_type in {"research", "document", "visual_report"},
         )
         if skills_block:
             sections.append(skills_block)
+        if image_generation_enabled and (
+            str(task_type or "").lower() in _IMAGE_ENRICHMENT_TASK_TYPES
+            or artifact_target_ext in {".pptx", ".pdf"}
+        ):
+            sections.append(_image_enrichment_section(artifact_target_ext))
 
         workflow_sections = _builder_workflow_sections(
             artifact_target_ext=artifact_target_ext,
@@ -717,20 +952,18 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
 
         # Completion instruction — always present, includes budget so the model
         # plans from turn 0 instead of discovering the limit mid-loop.
-        # MUST stay in sync with BuilderArtifactMiddleware._CEILING_FOR_FORCE in
-        # builder_artifact.py — otherwise the model's budget math lies and it
-        # over-commits to retries past its advertised limit.
-        # PR-B (2026-04-28): bumped 20 → 30 so binary deliverables (PDF/PPTX
-        # with diagrams) have room for write→bash→fix cycles before being
-        # forced to emit. See builder_artifact.py for the full rationale.
-        _HARD_CEILING = 30
+        # Sourced from the per-run builder_budget tier so prompt math matches
+        # the middleware's force-emit threshold for simple and complex builds.
+        _HARD_CEILING = max_non_artifact_turns(state)
         remaining = max(_HARD_CEILING - non_artifact_turns, 0)
+        wall_clock_force_fraction = force_emit_wall_clock_fraction(state)
+        wall_clock_force_pct = int(round(wall_clock_force_fraction * 100))
 
         wall_clock_line = ""
         if wall_clock_pct is not None and wall_clock_elapsed_s is not None:
             wall_clock_line = (
                 f"Wall-clock budget: {wall_clock_elapsed_s}s of {builder_timeout_seconds}s used "
-                f"({wall_clock_pct}%). Once you cross 70% of the wall-clock budget, your NEXT action "
+                f"({wall_clock_pct}%). Once you cross {wall_clock_force_pct}% of the wall-clock budget, your NEXT action "
                 "MUST be emit_builder_artifact regardless of remaining turn count. Each long write "
                 "costs 90+ seconds of LLM output, so re-writing the same file twice burns the budget.\n"
             )
@@ -741,9 +974,11 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             f"Currently on turn {non_artifact_turns}/{_HARD_CEILING} ({remaining} remaining).\n"
             f"{wall_clock_line}"
             "BEFORE planning, check <skill_system> above. If a listed skill matches "
-            "the deliverable type (e.g. chart-visualization for any chart, "
-            "ppt-generation for slide decks, image-generation for explicit generated "
-            "images, data-analysis for tabular data), USE IT — read its SKILL.md "
+            "the deliverable type (e.g. pdf-report for PDF reports, "
+            "deep-research / academic-paper-review / systematic-literature-review for research-backed reports, "
+            "chart-visualization for chart/data design, ppt-generation for slide decks, "
+            "image-generation when listed for image deliverables, explicit generated imagery, or normal PPTX visual decks, "
+            "data-analysis for tabular data), USE IT — read its SKILL.md "
             "via read_file_tool and follow its workflow. Workflow cards are authoritative "
             "for PDF, PPTX, HTML, and research tasks. Do not replace them with ad hoc "
             "matplotlib/reportlab/python-pptx generator code; that is the fragile path "
@@ -758,7 +993,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "MULTIPLE times to the SAME path — the FIRST call writes the opening chunk (omit append or pass "
             "append=False), then SUBSEQUENT calls extend the file with append=True. Each chunk costs ~one turn; "
             "building a 12k-word document in 2-3 chunked `write_file(..., append=True)` calls is the correct "
-            "pattern. Use str_replace_tool for targeted edits to existing content.\n"
+            "pattern. **HTML deliverables chunk BY DEFAULT**: a complete styled page rarely fits one output — "
+            "first call doctype+<head>+styles, then append body sections (~200-300 lines per call), then the "
+            "closing tags. A truncated single-call write fails with missing tool arguments and wastes turns. "
+            "Use str_replace_tool for targeted edits to existing content.\n"
             "NEVER use bash_tool to author text file content. The following bash patterns are FORBIDDEN as "
             "substitutes for write_file:\n"
             "    * cat > file.md << 'EOF' ... EOF  (heredoc redirect)\n"
@@ -777,8 +1015,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "    * **PDF**: follow the PDF workflow card. A valid render is terminal-ready; emit immediately "
             "unless Sophia asks for one layout repair.\n"
             "    * **PPTX / presentation**: follow the PPTX workflow card. Reading SKILL.md alone is not "
-            "completion; normal success requires deck composition and a valid .pptx. Use image-generation "
-            "only when the user explicitly requested generated images/illustrations or the workflow truly depends on raster assets.\n"
+            "completion; normal success requires deck composition and a valid .pptx with editable text. "
+            "When image-generation is listed in <skill_system>, use it for hero/section/illustrative "
+            "assets inside the deck, not as a replacement for slide structure. Never let an image failure "
+            "stall a valid deck; fall back to diagram/chart/text composition with honest diagnostics.\n"
             "    * **HTML**: follow the HTML workflow card. Standalone browser-renderable HTML is a text "
             "deliverable, not a frontend app unless the user requested app behavior.\n"
             "    * **Standalone chart / image**: use the chart-visualization or image-generation skill. The "
@@ -790,7 +1030,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "fragile. Prefer a skill if at all possible. If you must use a generator script: keep it under "
             "120 lines, run it with bash_tool, verify the real requested output with ls_tool, and at most "
             "2 fix-and-retry cycles. Never ship the generator script as the artifact unless the user "
-            "explicitly asked for code; emit a verified fallback or fail cleanly.\n"
+            "explicitly asked for code; emit with artifact_path=null and an honest companion_summary instead.\n"
             "    Libraries listed in <preinstalled_libraries> are already available — do NOT pip install.\n"
             "- After each meaningful step (write_file, successful skill invocation, render_markdown_to_pdf), "
             "call write_todos again to mark the corresponding item 'completed' or 'in-progress'. This is how "
@@ -825,13 +1065,11 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             # (remaining<=6) so the model gets graduated wrap-up pressure.
             #
             # Wall-clock-aware promotion: when the per-run wall-clock budget
-            # has crossed 70%, escalate to CRITICAL even if turn-count
-            # remaining > 3. This matches BuilderArtifactMiddleware's
-            # _FORCE_EMIT_WALL_CLOCK_FRACTION so the prompt and the API-level
-            # tool_choice forcing agree.
+            # has crossed the configured force fraction, escalate to CRITICAL
+            # even if turn-count remaining is still high.
             wall_clock_critical = (
                 wall_clock_pct is not None
-                and wall_clock_pct >= 70
+                and wall_clock_pct >= wall_clock_force_pct
             )
             if remaining <= 3 or wall_clock_critical:
                 escalation += (
@@ -922,7 +1160,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             f"non_artifact_turns={non_artifact_turns}",
             _t0,
         )
-        return {"system_prompt_blocks": blocks}
+        return {"system_prompt_blocks": blocks, **boundary_state_updates}
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -937,8 +1175,13 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
     _BUILDER_RELEVANT_SKILLS: tuple[str, ...] = (
         "chart-visualization",
         "visual-design",
+        "hallmark",
+        "pdf-report",
         "ppt-generation",
         "image-generation",
+        "deep-research",
+        "academic-paper-review",
+        "systematic-literature-review",
         "data-analysis",
     )
 
@@ -948,6 +1191,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         *,
         include_image_generation: bool = True,
         include_visual_design: bool = False,
+        include_pdf_report: bool = True,
+        include_research_skills: bool = True,
     ) -> str | None:
         """Return a ``<skill_system>`` block listing builder-relevant skills.
 
@@ -988,6 +1233,13 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             allowed_skill_names.discard("image-generation")
         if not include_visual_design:
             allowed_skill_names.discard("visual-design")
+            allowed_skill_names.discard("hallmark")
+        if not include_pdf_report:
+            allowed_skill_names.discard("pdf-report")
+        if not include_research_skills:
+            allowed_skill_names.difference_update(
+                {"deep-research", "academic-paper-review", "systematic-literature-review"}
+            )
         relevant = [s for s in skills if getattr(s, "name", None) in allowed_skill_names]
         # Log either way so "did the builder see skills this run?" is
         # answerable from a single grep on the langgraph-server logs.

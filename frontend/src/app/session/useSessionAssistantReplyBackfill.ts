@@ -3,7 +3,6 @@ import { useCallback, useEffect, useRef } from 'react';
 import { getSessionMessages, isError } from '../lib/api/sessions-api';
 import {
   hasRenderableAssistantText,
-  isEquivalentAssistantText,
   normalizeAssistantTextForDedupe,
 } from '../lib/assistant-message-dedupe';
 import { debugLog } from '../lib/debug-logger';
@@ -28,6 +27,7 @@ type BackfillReason = 'stream-missing-final' | 'builder-completion';
 
 type BackfillOutcome =
   | 'appended'
+  | 'replaced'
   | 'dedupe-suppressed'
   | 'no-candidate'
   | 'skipped'
@@ -68,6 +68,18 @@ function messageText(message: ChatMessageLike): string {
 function builderCompletionKey(event: BuilderCompletionEventV1 | null): string | null {
   if (!event?.task_id) return null;
   return `${event.task_id}:${event.run_id ?? ''}`;
+}
+
+function visibleAssistantTextCoversCandidate(visibleText: string, candidateText: string): boolean {
+  const visible = normalizeAssistantTextForDedupe(visibleText);
+  const candidate = normalizeAssistantTextForDedupe(candidateText);
+  return Boolean(visible && candidate && (visible === candidate || visible.includes(candidate)));
+}
+
+function candidateExtendsVisibleAssistantText(visibleText: string, candidateText: string): boolean {
+  const visible = normalizeAssistantTextForDedupe(visibleText);
+  const candidate = normalizeAssistantTextForDedupe(candidateText);
+  return Boolean(visible && candidate && candidate.length > visible.length && candidate.includes(visible));
 }
 
 /**
@@ -188,9 +200,14 @@ export function useSessionAssistantReplyBackfill({
         return 'dedupe-suppressed';
       }
 
+      const replacementTarget = chatMessagesRef.current.find((message) => (
+        message.role === 'assistant'
+        && candidateExtendsVisibleAssistantText(messageText(message), candidateContent)
+      ));
       const isVisibleEquivalent = (message: ChatMessageLike) => (
-        message.id === candidateId
-        || (message.role === 'assistant' && isEquivalentAssistantText(messageText(message), candidateContent))
+        message.role === 'assistant'
+        && !candidateExtendsVisibleAssistantText(messageText(message), candidateContent)
+        && (message.id === candidateId || visibleAssistantTextCoversCandidate(messageText(message), candidateContent))
       );
       if (chatMessagesRef.current.some(isVisibleEquivalent)) {
         appendedIdsRef.current.add(candidateId);
@@ -200,7 +217,25 @@ export function useSessionAssistantReplyBackfill({
 
       appendedIdsRef.current.add(candidateId);
       const createdAt = finalMessage.created_at || new Date().toISOString();
-      setMessageTimestamp(candidateId, createdAt);
+      setMessageTimestamp(replacementTarget?.id ?? candidateId, createdAt);
+      if (replacementTarget) {
+        setChatMessages((prev) => prev.map((message) => (
+          message.id === replacementTarget.id
+            ? {
+              ...message,
+              parts: [{ type: 'text' as const, text: candidateContent }],
+            }
+            : message
+        )));
+        debugLog('AssistantReplyBackfill', 'replaced partial assistant reply', {
+          reason,
+          candidateIdPresent: Boolean(finalMessage.id),
+          contentLength: normalizeAssistantTextForDedupe(candidateContent).length,
+        });
+        recordOutcome(reason, 'replaced');
+        return 'replaced';
+      }
+
       setChatMessages((prev) => {
         if (prev.some(isVisibleEquivalent)) {
           return prev;
@@ -244,7 +279,7 @@ export function useSessionAssistantReplyBackfill({
         void runBackfillOnce(reason).then((outcome) => {
           // Once resolved (appended or already visible), later retries for
           // this batch are unnecessary — invalidate them.
-          if (outcome === 'appended' || outcome === 'dedupe-suppressed') {
+          if (outcome === 'appended' || outcome === 'replaced' || outcome === 'dedupe-suppressed') {
             clearScheduledAttempts();
           }
         });

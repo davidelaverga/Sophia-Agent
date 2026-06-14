@@ -5,6 +5,7 @@ SessionStore implementation. Creates LangGraph threads and persists session
 records plus durable transcript messages.
 """
 
+import logging
 import os
 import re
 import uuid
@@ -22,6 +23,8 @@ from deerflow.sophia.session_store import (
     canonical_visible_messages,
     derive_message_id,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 
@@ -488,24 +491,55 @@ async def update_session(
     return _record_to_info(record)
 
 
+def _cleanup_session_ledger(owner_user_id: str, thread_id: str | None) -> None:
+    """Best-effort delegation-ledger cleanup on session deletion (Spec D D-1).
+
+    The ledger is conversation content: deletion must reach it. Two copies
+    exist — the langgraph-local file (unreachable from this gateway process
+    in the Render split topology; the unlink below covers single-disk dev)
+    and the Supabase mirror (the authoritative prod copy, reachable from
+    here; ``delete_artifact`` is 404-idempotent). Cleanup failure never
+    fails the HTTP response.
+    """
+    if not thread_id:
+        return
+    try:
+        from deerflow.sophia import delegation_ledger
+        from deerflow.sophia.storage import supabase_artifact_store
+
+        delegation_ledger.delete_ledger_local(owner_user_id, thread_id)
+        if supabase_artifact_store.is_configured():
+            supabase_artifact_store.delete_artifact(
+                thread_id, supabase_artifact_store.ledger_object_name()
+            )
+    except Exception:  # noqa: BLE001 — cleanup is strictly best-effort
+        logger.warning(
+            "Delegation-ledger cleanup failed: thread_id=%s", thread_id, exc_info=True
+        )
+
+
 @router.delete("/bulk", response_model=SessionBulkDeleteResponse)
 async def delete_all_sessions(
     user_id: str = Query(default="dev-user"),
 ) -> SessionBulkDeleteResponse:
     """Delete all persisted session records for the resolved user."""
     normalized_user_id = _normalize_user_id(user_id)
+    owner_user_id = normalized_user_id
     deleted_records = _store.delete_all(normalized_user_id)
 
     if not deleted_records:
         legacy_user_id = _legacy_user_id_for(normalized_user_id)
         if legacy_user_id is not None:
             deleted_records = _store.delete_all(legacy_user_id)
+            if deleted_records:
+                owner_user_id = legacy_user_id
 
     if deleted_records:
         from app.gateway.inactivity_watcher import unregister_thread
 
         for record in deleted_records:
             unregister_thread(record.thread_id)
+            _cleanup_session_ledger(owner_user_id, record.thread_id)
 
     return SessionBulkDeleteResponse(
         ok=True,
@@ -521,10 +555,11 @@ async def delete_session(
 ) -> SessionDeleteResponse:
     """Delete a persisted session record."""
     normalized_user_id = _normalize_user_id(user_id)
-    owner_user_id, _ = _resolve_session_record(normalized_user_id, session_id)
+    owner_user_id, record = _resolve_session_record(normalized_user_id, session_id)
     deleted = _store.delete(owner_user_id, session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found.")
+    _cleanup_session_ledger(owner_user_id, record.thread_id if record else None)
     return SessionDeleteResponse(ok=True, session_id=session_id)
 
 

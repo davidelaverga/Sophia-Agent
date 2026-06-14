@@ -118,3 +118,73 @@ def test_multiple_dangling_tool_calls_are_all_patched() -> None:
     assert patched[1].tool_call_id == "toolu_1"
     assert isinstance(patched[4], ToolMessage)
     assert patched[4].tool_call_id == "toolu_2"
+
+
+# ---- Duplicate tool_result hardening (prod 2026-06-11, F2) -------------------
+#
+# Anthropic 400: "each tool_use must have a single result. Found multiple
+# tool_result blocks with id: toolu_...". The patcher previously assumed
+# duplicates-later-in-history were tolerated; they are not. Every same-id
+# tool_result after the first must be dropped from the request.
+
+
+def _ai_with_call(call_id: str, name: str = "write_file") -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": name, "args": {}, "id": call_id, "type": "tool_call"}],
+    )
+
+
+def test_duplicate_tool_result_is_dropped():
+    messages = [
+        HumanMessage(content="go"),
+        _ai_with_call("tc-1"),
+        ToolMessage(content="ok", tool_call_id="tc-1"),
+        ToolMessage(content="ok again (duplicate)", tool_call_id="tc-1"),
+    ]
+    patched = patch_dangling_tool_call_messages(messages)
+    assert patched is not None
+    result_ids = [m.tool_call_id for m in patched if isinstance(m, ToolMessage)]
+    assert result_ids == ["tc-1"]
+    # The FIRST result is the one kept.
+    kept = next(m for m in patched if isinstance(m, ToolMessage))
+    assert kept.content == "ok"
+
+
+def test_duplicate_scattered_later_in_history_is_dropped():
+    messages = [
+        _ai_with_call("tc-1"),
+        ToolMessage(content="ok", tool_call_id="tc-1"),
+        AIMessage(content="thinking"),
+        HumanMessage(content="continue"),
+        ToolMessage(content="stray duplicate", tool_call_id="tc-1"),
+    ]
+    patched = patch_dangling_tool_call_messages(messages)
+    assert patched is not None
+    result_ids = [m.tool_call_id for m in patched if isinstance(m, ToolMessage)]
+    assert result_ids == ["tc-1"]
+
+
+def test_duplicate_and_dangling_combination():
+    # tc-1 duplicated AND tc-2 dangling: both fixed in one pass.
+    messages = [
+        _ai_with_call("tc-1"),
+        ToolMessage(content="ok", tool_call_id="tc-1"),
+        ToolMessage(content="dup", tool_call_id="tc-1"),
+        _ai_with_call("tc-2"),
+        AIMessage(content="moved on without a result"),
+    ]
+    patched = patch_dangling_tool_call_messages(messages)
+    assert patched is not None
+    result_ids = [m.tool_call_id for m in patched if isinstance(m, ToolMessage)]
+    assert result_ids.count("tc-1") == 1
+    assert result_ids.count("tc-2") == 1
+
+
+def test_well_formed_history_still_returns_none():
+    messages = [
+        _ai_with_call("tc-1"),
+        ToolMessage(content="ok", tool_call_id="tc-1"),
+        AIMessage(content="done"),
+    ]
+    assert patch_dangling_tool_call_messages(messages) is None

@@ -105,7 +105,7 @@ function deriveBody(event: BuilderCompletionEventV1): string | null {
     return event.error_message || diagnosticFailureBody(event) || FAILURE_BODY;
   }
   if (event.status === 'timeout') {
-    return TIMEOUT_BODY;
+    return event.error_message || event.summary || TIMEOUT_BODY;
   }
   return CANCELLED_BODY;
 }

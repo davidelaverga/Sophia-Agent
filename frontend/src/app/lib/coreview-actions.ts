@@ -5,6 +5,10 @@ import {
   type ArtifactRendererKind,
 } from "./artifact-renderers"
 import {
+  type CoreviewArtifactRebindStatus,
+  type CoreviewCurrentView,
+} from "./coreview-action-shared"
+import {
   buildCoreviewCapabilitySummary,
   getCoreviewArtifactCapabilities,
 } from "./coreview-artifact-capabilities"
@@ -14,6 +18,8 @@ import {
   type CoreviewArtifactCapabilities,
   type CoreviewCurrentViewCapabilitySummary,
 } from "./coreview-workspace-contract"
+
+export type { CoreviewArtifactRebindStatus, CoreviewCurrentView } from "./coreview-action-shared"
 
 export const COREVIEW_SET_VIEW_TOOL_NAME = "coreview_set_view"
 export const COREVIEW_REFRESH_VIEW_TOOL_NAME = "coreview_refresh_view"
@@ -170,58 +176,11 @@ export interface CoreviewToolCallInput {
   args: Record<string, unknown>
 }
 
-export interface CoreviewCurrentView {
-  artifactId: string | null
-  artifactPath: string | null
-  artifactTitle: string | null
-  artifactStableIdentity?: string | null
-  rendererKind: ArtifactRendererKind
-  capabilities: CoreviewArtifactCapabilities
-  supportsPagination: boolean
-  supportsZoom: boolean
-  pageIndex: number
-  pageCount: number
-  zoom: number
-  fitMode: ArtifactFitMode
-  scrollTop?: number | null
-  scrollHeight?: number | null
-  documentHeight?: number | null
-  viewportHeight?: number | null
-  viewportWidth?: number | null
-  scale?: number | null
-  visibleTextSummary?: string | null
-  visibleHeadings?: string[]
-  currentSection?: string | null
-  htmlBridgeReady?: boolean | null
-  htmlSectionIndexReady?: boolean | null
-  htmlSectionIndexEntryCount?: number | null
-  htmlSectionIndexBuildResult?: string | null
-  stillFrameAvailable?: boolean | null
-  viewSignature: string | null
-  stale: boolean
-  refreshInProgress: boolean
-  canRefresh: boolean
-  reviewActive: boolean
-  reviewHasFrame: boolean
-  exactTextAvailable: boolean
-  visualFrameFresh: boolean
-  annotationOverlayCaptured: boolean | null
-  annotationCount: number
-  highlightCount: number
-  commentCount: number
-  underlineCount?: number
-  arrowCount?: number
-  drawPathCount?: number
-  rebindStatus?: CoreviewArtifactRebindStatus
-}
-
 export type CoreviewArtifactRebindSource =
   | "voice_connect"
   | "review_start"
   | "coreview_tool"
   | "artifact_stage_mount"
-
-export type CoreviewArtifactRebindStatus = "not_attempted" | "success" | "failed" | "not_needed"
 
 export interface CoreviewArtifactRebindInput {
   source: CoreviewArtifactRebindSource
@@ -611,20 +570,13 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
 
     const normalized = normalizeSetViewInput(input, before)
     if (normalized.ok === false) {
-      const blockedReason = normalized.blockedReason
-      return buildCoreviewResult({
+      return blockedCoreviewResult({
         action: "set_view",
         source,
         current: before,
-        ok: false,
-        blockedReason,
-        resultSummary: blockedSummary(blockedReason),
-        refreshAttempted: false,
-        refreshResult: "not_requested",
-        viewReadyWaitMs: null,
+        blockedReason: normalized.blockedReason,
         viewSignatureBefore: initialBefore.viewSignature,
-        viewSignatureAfter: before.viewSignature,
-        ...resolved.rebind,
+        rebind: resolved.rebind,
       })
     }
 
@@ -639,95 +591,46 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
     })
     const changed = expectedViewSignature !== before.viewSignature
 
-    if (changed && before.reviewHasFrame) {
-      adapter.markViewStale(expectedViewSignature)
-    }
-    const htmlScrollAttempted = before.rendererKind === "html" && (
-      normalized.htmlScrollDelta !== null
-      || Boolean(normalized.htmlScrollPosition)
-    )
-    const htmlNavigationSource = source === "gemini_tool" ? "tool" : input.reason?.includes("voice command") ? "voice" : "manual"
+    markStaleIfChanged(adapter, changed, before.reviewHasFrame, expectedViewSignature)
+    const htmlScrollAttempted = isHtmlScrollCommand(before, normalized)
+    const htmlNavigationSource = htmlNavigationSourceForCommand(source, input.reason)
     const setViewResult = await adapter.setView({
       ...normalized,
       htmlNavigationSource,
     })
-    const structuredSetViewResult = isCoreviewSetViewAdapterResult(setViewResult)
-      ? setViewResult
-      : null
+    const structuredSetViewResult = structuredSetViewResultOrNull(setViewResult)
     if (htmlScrollAttempted && structuredSetViewResult?.ok === false) {
-      const afterFailedScroll = adapter.getCurrentViewState()
-      return buildCoreviewResult({
-        action: "set_view",
+      return buildHtmlScrollFailedResult({
+        adapter,
         source,
-        current: afterFailedScroll,
-        ok: false,
-        blockedReason: structuredSetViewResult.blockedReason ?? "section_not_found",
-        resultSummary: blockedSummary(structuredSetViewResult.blockedReason ?? "section_not_found"),
-        refreshAttempted: false,
-        refreshResult: "not_requested",
-        viewReadyWaitMs: null,
-        viewSignatureBefore: initialBefore.viewSignature,
-        viewSignatureAfter: afterFailedScroll.viewSignature,
-        htmlScrollAttempted,
-        htmlScrollResult: structuredSetViewResult.blockedReason ?? "failed",
-        htmlNavigation: htmlNavigationTelemetryFromAdapterResult(structuredSetViewResult, {
-          commandKind: htmlNavigationCommandKindForSetView(normalized.htmlScrollDelta, normalized.htmlScrollPosition),
-          fallbackResult: structuredSetViewResult.blockedReason ?? "failed",
-        }),
-        ...resolved.rebind,
+        initialViewSignature: initialBefore.viewSignature,
+        structured: structuredSetViewResult,
+        htmlScrollDelta: normalized.htmlScrollDelta,
+        htmlScrollPosition: normalized.htmlScrollPosition,
+        rebind: resolved.rebind,
       })
     }
 
     const ready = await adapter.waitForViewReady(expectedViewSignature)
     if (!ready.ok) {
-      return buildCoreviewResult({
+      return blockedCoreviewResult({
         action: "set_view",
         source,
         current: adapter.getCurrentViewState(),
-        ok: false,
-        blockedReason: ready.blockedReason ?? "view_ready_timeout",
-        resultSummary: blockedSummary(ready.blockedReason ?? "view_ready_timeout"),
-        refreshAttempted: false,
-        refreshResult: "not_requested",
-        viewReadyWaitMs: ready.waitMs,
+        blockedReason: viewReadyTimeoutBlockedReason(ready),
         viewSignatureBefore: initialBefore.viewSignature,
-        viewSignatureAfter: adapter.getCurrentViewState().viewSignature,
-        ...resolved.rebind,
+        rebind: resolved.rebind,
+        extras: { viewReadyWaitMs: ready.waitMs },
       })
     }
 
-    const readyView = adapter.getCurrentViewState()
-    let refreshAttempted = false
-    let refreshResult: CoreviewToolRefreshResult = "not_requested"
-    let blockedReason: CoreviewToolBlockedReason | null = null
-    let refreshSummary = ""
-    let forceVisualFrameFresh: boolean | null = null
-    let forceStale: boolean | null = null
-
-    if (readyView.canRefresh) {
-      refreshAttempted = true
-      const refresh = await adapter.refreshView({ reason: input.reason })
-      refreshResult = normalizeSetViewRefreshResult(refresh.refreshResult)
-      blockedReason = refresh.ok ? null : refresh.blockedReason ?? "refresh_unavailable"
-      if (refresh.ok) {
-        adapter.clearViewStale(expectedViewSignature)
-        forceVisualFrameFresh = true
-        forceStale = false
-        refreshSummary = " Refresh succeeded."
-      } else {
-        forceVisualFrameFresh = false
-        forceStale = changed && before.reviewHasFrame ? true : null
-        refreshSummary = " Visual refresh failed."
-      }
-    } else if (readyView.reviewActive || readyView.reviewHasFrame || changed) {
-      refreshResult = "unavailable"
-      blockedReason = readyView.reviewActive ? "refresh_unavailable" : "review_not_active"
-      forceVisualFrameFresh = false
-      forceStale = changed && readyView.reviewHasFrame ? true : null
-      refreshSummary = readyView.reviewActive
-        ? " Visual refresh unavailable."
-        : " Visual review is not active."
-    }
+    const outcome = await refreshAfterCoreviewViewChange(adapter, {
+      readyView: adapter.getCurrentViewState(),
+      reason: input.reason,
+      expectedViewSignature,
+      changed,
+      beforeReviewHasFrame: before.reviewHasFrame,
+    })
 
     const after = adapter.getCurrentViewState()
     return buildCoreviewResult({
@@ -735,27 +638,20 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       source,
       current: after,
       ok: true,
-      blockedReason,
-      resultSummary: htmlScrollAttempted
-        ? `Scrolled the HTML document.${refreshSummary}`
-        : `Switched to ${pageSummary(after)}.${refreshSummary}`,
-      refreshAttempted,
-      refreshResult,
+      blockedReason: outcome.blockedReason,
+      resultSummary: setViewSuccessSummary(htmlScrollAttempted, after, outcome.refreshSummary),
+      refreshAttempted: outcome.refreshAttempted,
+      refreshResult: outcome.refreshResult,
       viewReadyWaitMs: ready.waitMs,
       viewSignatureBefore: initialBefore.viewSignature,
       viewSignatureAfter: after.viewSignature,
-      staleOverride: forceStale,
-      visualFrameFreshOverride: forceVisualFrameFresh,
+      staleOverride: outcome.forceStale,
+      visualFrameFreshOverride: outcome.forceVisualFrameFresh,
       htmlScrollAttempted,
       htmlScrollResult: htmlScrollAttempted
-        ? structuredSetViewResult?.htmlNavigationResult ?? (structuredSetViewResult?.ok === false ? structuredSetViewResult.blockedReason ?? "failed" : "success")
+        ? setViewHtmlScrollResultValue(structuredSetViewResult)
         : null,
-      htmlNavigation: htmlNavigationTelemetryFromAdapterResult(structuredSetViewResult, {
-        commandKind: htmlScrollAttempted
-          ? htmlNavigationCommandKindForSetView(normalized.htmlScrollDelta, normalized.htmlScrollPosition)
-          : null,
-        fallbackResult: htmlScrollAttempted ? "success" : null,
-      }),
+      htmlNavigation: setViewSuccessHtmlNavigation(structuredSetViewResult, htmlScrollAttempted, normalized),
       ...resolved.rebind,
     })
   }
@@ -775,177 +671,102 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
     const baseBlockedReason = currentViewBlockedReason(before, input.artifactId)
     const blockedAfterRebind = blockedReasonAfterRebind(baseBlockedReason, resolved)
     if (blockedAfterRebind) {
-      return buildCoreviewResult({
+      return blockedCoreviewResult({
         action: "add_annotation",
         source,
         current: before,
-        ok: false,
         blockedReason: blockedAfterRebind,
-        resultSummary: blockedSummary(blockedAfterRebind),
-        refreshAttempted: false,
-        refreshResult: "not_requested",
-        viewReadyWaitMs: null,
         viewSignatureBefore: initialBefore.viewSignature,
-        viewSignatureAfter: before.viewSignature,
-        annotationKind: normalizeAnnotationKindValue(input.kind),
-        annotationAnchorType: input.anchor?.type ?? null,
-        annotationColor: input.color ?? null,
-        annotationActionSource: input.source,
-        unsupportedAnnotationKind: unsupportedAnnotationKindFromValue(input.kind),
-        ...resolved.rebind,
+        rebind: resolved.rebind,
+        extras: annotationInputExtras(input),
       })
     }
 
     const requestedKind = normalizeAnnotationKindValue(input.kind)
-    const unsupportedAnnotationKind = unsupportedAnnotationKindFromValue(input.kind)
     if (!requestedKind) {
-      return buildCoreviewResult({
+      return blockedCoreviewResult({
         action: "add_annotation",
         source,
         current: before,
-        ok: false,
         blockedReason: "unsupported_annotation_kind",
-        resultSummary: blockedSummary("unsupported_annotation_kind"),
-        refreshAttempted: false,
-        refreshResult: "not_requested",
-        viewReadyWaitMs: null,
         viewSignatureBefore: initialBefore.viewSignature,
-        viewSignatureAfter: before.viewSignature,
-        annotationKind: null,
-        annotationAnchorType: input.anchor?.type ?? null,
-        annotationColor: input.color ?? null,
-        annotationActionSource: input.source,
-        annotationCount: before.annotationCount,
-        highlightCount: before.highlightCount,
-        commentCount: before.commentCount,
-        underlineCount: before.underlineCount ?? 0,
-        arrowCount: before.arrowCount ?? 0,
-        drawPathCount: before.drawPathCount ?? 0,
-        unsupportedAnnotationKind,
-        ...resolved.rebind,
+        rebind: resolved.rebind,
+        extras: {
+          ...annotationInputExtras(input),
+          ...annotationCountExtras(before),
+        },
       })
     }
 
     if (!annotationKindSupportedByCapabilities(requestedKind, before.capabilities)) {
-      return buildCoreviewResult({
+      return blockedCoreviewResult({
         action: "add_annotation",
         source,
         current: before,
-        ok: false,
         blockedReason: "annotations_not_supported",
-        resultSummary: blockedSummary("annotations_not_supported"),
-        refreshAttempted: false,
-        refreshResult: "not_requested",
-        viewReadyWaitMs: null,
         viewSignatureBefore: initialBefore.viewSignature,
-        viewSignatureAfter: before.viewSignature,
-        annotationKind: requestedKind,
-        annotationAnchorType: input.anchor?.type ?? null,
-        annotationColor: input.color ?? null,
-        annotationActionSource: input.source,
-        unsupportedAnnotationKind: null,
-        ...resolved.rebind,
+        rebind: resolved.rebind,
+        extras: annotationInputExtras(input),
       })
     }
 
     if (!adapter.resolveAnnotationAnchor || !adapter.addAnnotation) {
-      return buildCoreviewResult({
+      return blockedCoreviewResult({
         action: "add_annotation",
         source,
         current: before,
-        ok: false,
         blockedReason: "annotation_target_unavailable",
-        resultSummary: blockedSummary("annotation_target_unavailable"),
-        refreshAttempted: false,
-        refreshResult: "not_requested",
-        viewReadyWaitMs: null,
         viewSignatureBefore: initialBefore.viewSignature,
-        viewSignatureAfter: before.viewSignature,
-        annotationKind: normalizeAnnotationKindValue(input.kind),
-        annotationAnchorType: input.anchor?.type ?? null,
-        annotationColor: input.color ?? null,
-        annotationActionSource: input.source,
-        unsupportedAnnotationKind: unsupportedAnnotationKindFromValue(input.kind),
-        ...resolved.rebind,
+        rebind: resolved.rebind,
+        extras: annotationInputExtras(input),
       })
     }
 
     const normalized = normalizeAddAnnotationInput(input, before)
     if (normalized.ok === false) {
-      const blockedReason = normalized.blockedReason
-      return buildCoreviewResult({
+      return blockedCoreviewResult({
         action: "add_annotation",
         source,
         current: before,
-        ok: false,
-        blockedReason,
-        resultSummary: blockedSummary(blockedReason),
-        refreshAttempted: false,
-        refreshResult: "not_requested",
-        viewReadyWaitMs: null,
+        blockedReason: normalized.blockedReason,
         viewSignatureBefore: initialBefore.viewSignature,
-        viewSignatureAfter: before.viewSignature,
-        annotationKind: normalizeAnnotationKindValue(input.kind),
-        unsupportedAnnotationKind: normalized.unsupportedAnnotationKind ?? null,
-        annotationAnchorType: input.anchor?.type ?? null,
-        annotationColor: input.color ?? null,
-        annotationActionSource: input.source,
-        annotationCount: before.annotationCount,
-        highlightCount: before.highlightCount,
-        commentCount: before.commentCount,
-        underlineCount: before.underlineCount ?? 0,
-        arrowCount: before.arrowCount ?? 0,
-        drawPathCount: before.drawPathCount ?? 0,
-        ...resolved.rebind,
+        rebind: resolved.rebind,
+        extras: annotationNormalizationFailureExtras(input, before, normalized.unsupportedAnnotationKind),
       })
     }
 
+    const normalizedAnnotationExtras = {
+      annotationKind: normalized.kind,
+      annotationAnchorType: normalized.anchor.type,
+      annotationColor: normalized.color,
+      annotationActionSource: normalized.source,
+    }
     const resolvedAnchor = adapter.resolveAnnotationAnchor({
       anchor: normalized.anchor,
       pageIndex: normalized.pageIndex,
     })
     if (resolvedAnchor.ok === false) {
-      const blockedReason = resolvedAnchor.blockedReason
-      return buildCoreviewResult({
+      return blockedCoreviewResult({
         action: "add_annotation",
         source,
         current: adapter.getCurrentViewState(),
-        ok: false,
-        blockedReason,
-        resultSummary: blockedSummary(blockedReason),
-        refreshAttempted: false,
-        refreshResult: "not_requested",
-        viewReadyWaitMs: null,
+        blockedReason: resolvedAnchor.blockedReason,
         viewSignatureBefore: initialBefore.viewSignature,
-        viewSignatureAfter: adapter.getCurrentViewState().viewSignature,
-        annotationKind: normalized.kind,
-        annotationAnchorType: normalized.anchor.type,
-        annotationColor: normalized.color,
-        annotationActionSource: normalized.source,
-        ...resolved.rebind,
+        rebind: resolved.rebind,
+        extras: normalizedAnnotationExtras,
       })
     }
 
     const annotationTarget = annotationTargetFromResolvedAnchor(normalized.kind, resolvedAnchor.anchor)
     if (annotationTarget.ok === false) {
-      const blockedReason = annotationTarget.blockedReason
-      return buildCoreviewResult({
+      return blockedCoreviewResult({
         action: "add_annotation",
         source,
         current: adapter.getCurrentViewState(),
-        ok: false,
-        blockedReason,
-        resultSummary: blockedSummary(blockedReason),
-        refreshAttempted: false,
-        refreshResult: "not_requested",
-        viewReadyWaitMs: null,
+        blockedReason: annotationTarget.blockedReason,
         viewSignatureBefore: initialBefore.viewSignature,
-        viewSignatureAfter: adapter.getCurrentViewState().viewSignature,
-        annotationKind: normalized.kind,
-        annotationAnchorType: normalized.anchor.type,
-        annotationColor: normalized.color,
-        annotationActionSource: normalized.source,
-        ...resolved.rebind,
+        rebind: resolved.rebind,
+        extras: normalizedAnnotationExtras,
       })
     }
 
@@ -963,45 +784,21 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       source: normalized.source,
     })
     const annotationCountAfter = added.annotationCount
-    const kindCountAfter = annotationKindCount(added, normalized.kind)
-    const commitVerified = Boolean(
-      added.ok
-      && added.annotationId
-      && annotationCountAfter > annotationCountBefore
-      && kindCountAfter > kindCountBefore,
-    )
-    if (!added.ok || !commitVerified) {
-      const blockedReason = added.blockedReason ?? "annotation_commit_failed"
-      return buildCoreviewResult({
-        action: "add_annotation",
+    const commitVerified = isAnnotationCommitVerified({
+      added,
+      annotationCountBefore,
+      kindCountBefore,
+      kindCountAfter: annotationKindCount(added, normalized.kind),
+    })
+    if (!commitVerified) {
+      return annotationCommitFailedResult({
+        adapter,
         source,
-        current: adapter.getCurrentViewState(),
-        ok: false,
-        blockedReason,
-        resultSummary: blockedSummary(blockedReason),
-        refreshAttempted: false,
-        refreshResult: "not_requested",
-        viewReadyWaitMs: null,
-        viewSignatureBefore: initialBefore.viewSignature,
-        viewSignatureAfter: adapter.getCurrentViewState().viewSignature,
-        annotationKind: normalized.kind,
-        annotationAnchorType: normalized.anchor.type,
-        annotationColor: normalized.color,
-        annotationPageIndex: normalized.pageIndex,
-        annotationActionSource: normalized.source,
-        annotationCount: added.annotationCount,
-        highlightCount: added.highlightCount,
-        commentCount: added.commentCount,
-        underlineCount: added.underlineCount ?? 0,
-        arrowCount: added.arrowCount ?? 0,
-        drawPathCount: added.drawPathCount ?? 0,
-        annotationCommitAttempted: true,
-        annotationCommitResult: blockedReason,
-        annotationCommitCountBefore: annotationCountBefore,
-        annotationCommitCountAfter: annotationCountAfter,
-        annotationCommitVerified: false,
-        annotationCreated: false,
-        ...resolved.rebind,
+        initialViewSignature: initialBefore.viewSignature,
+        normalized,
+        added,
+        annotationCountBefore,
+        rebind: resolved.rebind,
       })
     }
 
@@ -1010,73 +807,33 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       adapter.markViewStale(staleSignature)
     }
     const ready = await adapter.waitForViewReady(staleSignature)
-    const readyView = adapter.getCurrentViewState()
-    let refreshAttempted = false
-    let refreshResult: CoreviewToolRefreshResult = "not_requested"
-    let blockedReason: CoreviewToolBlockedReason | null = null
-    let visualFrameFreshOverride: boolean | null = null
-    let staleOverride: boolean | null = before.reviewHasFrame ? true : null
-    let refreshSummary = ""
-
-    if (ready.ok && readyView.canRefresh) {
-      refreshAttempted = true
-      const refresh = await adapter.refreshView({ reason: "coreview annotation changed" })
-      refreshResult = normalizeSetViewRefreshResult(refresh.refreshResult)
-      blockedReason = refresh.ok ? null : refresh.blockedReason ?? "refresh_unavailable"
-      if (refresh.ok) {
-        adapter.clearViewStale(staleSignature)
-        visualFrameFreshOverride = true
-        staleOverride = false
-        refreshSummary = " Refresh succeeded."
-      } else {
-        visualFrameFreshOverride = false
-        staleOverride = before.reviewHasFrame ? true : null
-        refreshSummary = " Visual refresh failed."
-      }
-    } else if (!ready.ok) {
-      blockedReason = ready.blockedReason ?? "view_ready_timeout"
-      refreshResult = "view_ready_timeout"
-      visualFrameFreshOverride = false
-      staleOverride = before.reviewHasFrame ? true : null
-      refreshSummary = " Refresh timed out; annotation remains visible."
-    } else if (readyView.reviewActive || readyView.reviewHasFrame) {
-      refreshResult = "unavailable"
-      blockedReason = readyView.reviewActive ? "refresh_unavailable" : "review_not_active"
-      visualFrameFreshOverride = false
-      staleOverride = before.reviewHasFrame ? true : null
-      refreshSummary = readyView.reviewActive
-        ? " Visual refresh unavailable."
-        : " Visual review is not active."
-    }
+    const outcome = await refreshAfterCoreviewAnnotationChange(adapter, {
+      ready,
+      readyView: adapter.getCurrentViewState(),
+      staleSignature,
+      beforeReviewHasFrame: before.reviewHasFrame,
+    })
 
     const after = adapter.getCurrentViewState()
-    const viewReadyTimedOut = blockedReason === "view_ready_timeout"
+    const viewReadyTimedOut = outcome.blockedReason === "view_ready_timeout"
     return buildCoreviewResult({
       action: "add_annotation",
       source,
       current: after,
       ok: true,
-      blockedReason,
-      resultSummary: `${annotationSummary(normalized.kind, normalized.anchor.type, normalized.color, normalized.pageIndex)}${refreshSummary}`,
-      refreshAttempted,
-      refreshResult,
+      blockedReason: outcome.blockedReason,
+      resultSummary: `${annotationSummary(normalized.kind, normalized.anchor.type, normalized.color, normalized.pageIndex)}${outcome.refreshSummary}`,
+      refreshAttempted: outcome.refreshAttempted,
+      refreshResult: outcome.refreshResult,
       viewReadyWaitMs: ready.waitMs,
       viewSignatureBefore: initialBefore.viewSignature,
       viewSignatureAfter: after.viewSignature,
-      staleOverride,
-      visualFrameFreshOverride,
+      staleOverride: outcome.forceStale,
+      visualFrameFreshOverride: outcome.forceVisualFrameFresh,
       annotationId: added.annotationId,
-      annotationKind: normalized.kind,
-      annotationAnchorType: normalized.anchor.type,
-      annotationColor: normalized.color,
+      ...normalizedAnnotationExtras,
       annotationPageIndex: normalized.pageIndex,
-      annotationActionSource: normalized.source,
-      annotationCount: added.annotationCount,
-      highlightCount: added.highlightCount,
-      commentCount: added.commentCount,
-      underlineCount: added.underlineCount ?? 0,
-      arrowCount: added.arrowCount ?? 0,
-      drawPathCount: added.drawPathCount ?? 0,
+      ...annotationCountExtras(added),
       annotationCommitAttempted: true,
       annotationCommitResult: viewReadyTimedOut ? "partial_success" : "success",
       annotationCommitCountBefore: annotationCountBefore,
@@ -1104,126 +861,76 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
     const baseBlockedReason = currentViewBlockedReason(before, input.artifactId)
     const blockedAfterRebind = blockedReasonAfterRebind(baseBlockedReason, resolved)
     if (blockedAfterRebind) {
-      return buildCoreviewResult({
+      return blockedCoreviewResult({
         action: "focus_anchor",
         source,
         current: before,
-        ok: false,
         blockedReason: blockedAfterRebind,
-        resultSummary: blockedSummary(blockedAfterRebind),
-        refreshAttempted: false,
-        refreshResult: "not_requested",
-        viewReadyWaitMs: null,
         viewSignatureBefore: initialBefore.viewSignature,
-        viewSignatureAfter: before.viewSignature,
-        focusAnchorType: input.anchor?.type ?? null,
-        ...resolved.rebind,
+        rebind: resolved.rebind,
+        extras: focusAnchorTypeExtras(input),
       })
     }
 
-    const capabilityBlock = focusCapabilityBlockedReason(input.anchor ?? { type: "current_selection" }, before.capabilities)
+    const capabilityBlock = focusCapabilityBlockedReasonForInput(input, before.capabilities)
     if (capabilityBlock) {
-      return buildCoreviewResult({
+      return blockedCoreviewResult({
         action: "focus_anchor",
         source,
         current: before,
-        ok: false,
         blockedReason: capabilityBlock,
-        resultSummary: blockedSummary(capabilityBlock),
-        refreshAttempted: false,
-        refreshResult: "not_requested",
-        viewReadyWaitMs: null,
         viewSignatureBefore: initialBefore.viewSignature,
-        viewSignatureAfter: before.viewSignature,
-        focusAnchorType: input.anchor?.type ?? "current_selection",
-        ...resolved.rebind,
+        rebind: resolved.rebind,
+        extras: focusAnchorTypeExtras(input, "current_selection"),
       })
     }
 
     if (!adapter.resolveAnnotationAnchor || !adapter.focusAnnotationAnchor) {
-      return buildCoreviewResult({
+      return blockedCoreviewResult({
         action: "focus_anchor",
         source,
         current: before,
-        ok: false,
         blockedReason: "annotation_target_unavailable",
-        resultSummary: blockedSummary("annotation_target_unavailable"),
-        refreshAttempted: false,
-        refreshResult: "not_requested",
-        viewReadyWaitMs: null,
         viewSignatureBefore: initialBefore.viewSignature,
-        viewSignatureAfter: before.viewSignature,
-        focusAnchorType: input.anchor?.type ?? null,
-        ...resolved.rebind,
+        rebind: resolved.rebind,
+        extras: focusAnchorTypeExtras(input),
       })
     }
 
     const normalized = normalizeFocusAnchorInput(input, before)
     if (normalized.ok === false) {
-      const blockedReason = normalized.blockedReason
-      return buildCoreviewResult({
+      return blockedCoreviewResult({
         action: "focus_anchor",
         source,
         current: before,
-        ok: false,
-        blockedReason,
-        resultSummary: blockedSummary(blockedReason),
-        refreshAttempted: false,
-        refreshResult: "not_requested",
-        viewReadyWaitMs: null,
+        blockedReason: normalized.blockedReason,
         viewSignatureBefore: initialBefore.viewSignature,
-        viewSignatureAfter: before.viewSignature,
-        focusAnchorType: input.anchor?.type ?? null,
-        ...resolved.rebind,
+        rebind: resolved.rebind,
+        extras: focusAnchorTypeExtras(input),
       })
     }
 
-    const resolvedAnchorResult = adapter.resolveAnnotationAnchor({
+    const anchorTarget = focusAnchorTargetFromResolution({
+      resolution: adapter.resolveAnnotationAnchor({
+        anchor: normalized.anchor,
+        pageIndex: normalized.pageIndex,
+      }),
+      rendererKind: before.rendererKind,
       anchor: normalized.anchor,
       pageIndex: normalized.pageIndex,
     })
-    let resolvedAnchor: CoreviewResolvedAnnotationAnchor | null = resolvedAnchorResult.ok
-      ? resolvedAnchorResult.anchor
-      : null
-    if (!resolvedAnchor && before.rendererKind === "html" && normalized.anchor.type === "text_quote") {
-      resolvedAnchor = buildHtmlFocusTextAnchor(normalized.anchor.text, normalized.pageIndex)
-    }
-    if (!resolvedAnchor) {
-      const blockedReason = resolvedAnchorResult.ok === false ? resolvedAnchorResult.blockedReason : "anchor_not_found"
-      return buildCoreviewResult({
+    if (anchorTarget.ok === false) {
+      return blockedCoreviewResult({
         action: "focus_anchor",
         source,
         current: adapter.getCurrentViewState(),
-        ok: false,
-        blockedReason,
-        resultSummary: blockedSummary(blockedReason),
-        refreshAttempted: false,
-        refreshResult: "not_requested",
-        viewReadyWaitMs: null,
+        blockedReason: anchorTarget.blockedReason,
         viewSignatureBefore: initialBefore.viewSignature,
-        viewSignatureAfter: adapter.getCurrentViewState().viewSignature,
-        focusAnchorType: normalized.anchor.type,
-        ...resolved.rebind,
+        rebind: resolved.rebind,
+        extras: { focusAnchorType: normalized.anchor.type },
       })
     }
-    if (!resolvedAnchor.rect && !(before.rendererKind === "html" && resolvedAnchor.text)) {
-      const blockedReason: CoreviewToolBlockedReason = "anchor_not_found"
-      return buildCoreviewResult({
-        action: "focus_anchor",
-        source,
-        current: adapter.getCurrentViewState(),
-        ok: false,
-        blockedReason,
-        resultSummary: blockedSummary(blockedReason),
-        refreshAttempted: false,
-        refreshResult: "not_requested",
-        viewReadyWaitMs: null,
-        viewSignatureBefore: initialBefore.viewSignature,
-        viewSignatureAfter: adapter.getCurrentViewState().viewSignature,
-        focusAnchorType: normalized.anchor.type,
-        ...resolved.rebind,
-      })
-    }
+    const resolvedAnchor = anchorTarget.anchor
 
     const expectedViewSignature = buildArtifactViewSignature({
       artifactId: before.artifactId,
@@ -1235,93 +942,51 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       fitMode: normalized.fitMode,
     })
     const changed = expectedViewSignature !== before.viewSignature
-    if (changed && before.reviewHasFrame) {
-      adapter.markViewStale(expectedViewSignature)
-    }
+    markStaleIfChanged(adapter, changed, before.reviewHasFrame, expectedViewSignature)
 
     const focused = await adapter.focusAnnotationAnchor({
       pageIndex: normalized.pageIndex,
       anchor: resolvedAnchor,
       zoom: normalized.zoom,
       fitMode: normalized.fitMode,
-      htmlNavigationSource: source === "gemini_tool" ? "tool" : input.reason?.includes("voice command") ? "voice" : "manual",
+      htmlNavigationSource: htmlNavigationSourceForCommand(source, input.reason),
     })
     if (!focused.ok) {
-      return buildCoreviewResult({
+      return blockedCoreviewResult({
         action: "focus_anchor",
         source,
         current: adapter.getCurrentViewState(),
-        ok: false,
         blockedReason: focused.blockedReason ?? "annotation_target_unavailable",
-        resultSummary: blockedSummary(focused.blockedReason ?? "annotation_target_unavailable"),
-        refreshAttempted: false,
-        refreshResult: "not_requested",
-        viewReadyWaitMs: null,
         viewSignatureBefore: initialBefore.viewSignature,
-        viewSignatureAfter: adapter.getCurrentViewState().viewSignature,
-        focusAnchorType: normalized.anchor.type,
-        focusedRect: resolvedAnchor.rect,
-        htmlFocusAnchorAttempted: before.rendererKind === "html",
-        htmlFocusAnchorResult: before.rendererKind === "html" ? focused.blockedReason ?? "failed" : null,
-        htmlFocusAnchorMethod: focused.method ?? null,
-        htmlFocusAnchorScrolled: focused.scrolled ?? null,
-        htmlNavigation: focused.htmlNavigation ?? null,
-        ...resolved.rebind,
+        rebind: resolved.rebind,
+        extras: focusAdapterFailedExtras(before, focused, normalized.anchor.type, resolvedAnchor.rect),
       })
     }
 
     const ready = await adapter.waitForViewReady(expectedViewSignature)
     if (!ready.ok) {
-      return buildCoreviewResult({
+      return blockedCoreviewResult({
         action: "focus_anchor",
         source,
         current: adapter.getCurrentViewState(),
-        ok: false,
-        blockedReason: ready.blockedReason ?? "view_ready_timeout",
-        resultSummary: blockedSummary(ready.blockedReason ?? "view_ready_timeout"),
-        refreshAttempted: false,
-        refreshResult: "not_requested",
-        viewReadyWaitMs: ready.waitMs,
+        blockedReason: viewReadyTimeoutBlockedReason(ready),
         viewSignatureBefore: initialBefore.viewSignature,
-        viewSignatureAfter: adapter.getCurrentViewState().viewSignature,
-        focusAnchorType: normalized.anchor.type,
-        focusedRect: resolvedAnchor.rect,
-        ...resolved.rebind,
+        rebind: resolved.rebind,
+        extras: {
+          viewReadyWaitMs: ready.waitMs,
+          focusAnchorType: normalized.anchor.type,
+          focusedRect: resolvedAnchor.rect,
+        },
       })
     }
 
-    const readyView = adapter.getCurrentViewState()
-    let refreshAttempted = false
-    let refreshResult: CoreviewToolRefreshResult = "not_requested"
-    let blockedReason: CoreviewToolBlockedReason | null = null
-    let forceVisualFrameFresh: boolean | null = null
-    let forceStale: boolean | null = null
-    let refreshSummary = ""
-
-    if (readyView.canRefresh) {
-      refreshAttempted = true
-      const refresh = await adapter.refreshView({ reason: input.reason })
-      refreshResult = normalizeSetViewRefreshResult(refresh.refreshResult)
-      blockedReason = refresh.ok ? null : refresh.blockedReason ?? "refresh_unavailable"
-      if (refresh.ok) {
-        adapter.clearViewStale(expectedViewSignature)
-        forceVisualFrameFresh = true
-        forceStale = false
-        refreshSummary = " Refresh succeeded."
-      } else {
-        forceVisualFrameFresh = false
-        forceStale = changed && before.reviewHasFrame ? true : null
-        refreshSummary = " Visual refresh failed."
-      }
-    } else if (readyView.reviewActive || readyView.reviewHasFrame || changed) {
-      refreshResult = "unavailable"
-      blockedReason = readyView.reviewActive ? "refresh_unavailable" : "review_not_active"
-      forceVisualFrameFresh = false
-      forceStale = changed && readyView.reviewHasFrame ? true : null
-      refreshSummary = readyView.reviewActive
-        ? " Visual refresh unavailable."
-        : " Visual review is not active."
-    }
+    const outcome = await refreshAfterCoreviewViewChange(adapter, {
+      readyView: adapter.getCurrentViewState(),
+      reason: input.reason,
+      expectedViewSignature,
+      changed,
+      beforeReviewHasFrame: before.reviewHasFrame,
+    })
 
     const after = adapter.getCurrentViewState()
     return buildCoreviewResult({
@@ -1329,24 +994,16 @@ export function createCoreviewActionBus(adapter: CoreviewRendererAdapter): Corev
       source,
       current: after,
       ok: true,
-      blockedReason,
-      resultSummary: before.rendererKind === "html"
-        ? `Focused the HTML section.${refreshSummary}`
-        : `Focused ${anchorLabel(normalized.anchor.type)} on ${pageSummary(after)}.${refreshSummary}`,
-      refreshAttempted,
-      refreshResult,
+      blockedReason: outcome.blockedReason,
+      resultSummary: focusAnchorSuccessSummary(before, normalized.anchor.type, after, outcome.refreshSummary),
+      refreshAttempted: outcome.refreshAttempted,
+      refreshResult: outcome.refreshResult,
       viewReadyWaitMs: ready.waitMs,
       viewSignatureBefore: initialBefore.viewSignature,
       viewSignatureAfter: after.viewSignature,
-      staleOverride: forceStale,
-      visualFrameFreshOverride: forceVisualFrameFresh,
-      focusAnchorType: normalized.anchor.type,
-      focusedRect: resolvedAnchor.rect,
-      htmlFocusAnchorAttempted: before.rendererKind === "html",
-      htmlFocusAnchorResult: before.rendererKind === "html" ? "success" : null,
-      htmlFocusAnchorMethod: focused.method ?? null,
-      htmlFocusAnchorScrolled: focused.scrolled ?? null,
-      htmlNavigation: focused.htmlNavigation ?? null,
+      staleOverride: outcome.forceStale,
+      visualFrameFreshOverride: outcome.forceVisualFrameFresh,
+      ...focusAdapterSuccessExtras(before, focused, normalized.anchor.type, resolvedAnchor.rect),
       ...resolved.rebind,
     })
   }
@@ -1730,50 +1387,508 @@ function blockedReasonAfterRebind(
   return blockedReason
 }
 
-function normalizeSetViewInput(
-  input: CoreviewSetViewInput,
-  current: CoreviewCurrentView,
-): (
-  | { ok: true; pageIndex: number; zoom: number; fitMode: ArtifactFitMode; htmlScrollDelta?: number | null; htmlScrollPosition?: "top" | "bottom" | null }
-  | { ok: false; blockedReason: CoreviewToolBlockedReason }
-) {
-  let pageIndex = current.pageIndex
-  if (typeof input.pageIndex === "number" && Number.isFinite(input.pageIndex)) {
-    pageIndex = Math.floor(input.pageIndex)
-  } else if (typeof input.pageNumber === "number" && Number.isFinite(input.pageNumber)) {
-    pageIndex = Math.floor(input.pageNumber) - 1
-  } else if (input.pageLabel) {
-    const parsed = Number.parseInt(input.pageLabel.replace(/[^0-9]/gu, ""), 10)
-    if (Number.isFinite(parsed)) {
-      pageIndex = parsed - 1
+type BuildCoreviewResultParams = Parameters<typeof buildCoreviewResult>[0]
+
+function blockedCoreviewResult(params: {
+  action: CoreviewActionName
+  source: CoreviewToolCommandSource
+  current: CoreviewCurrentView
+  blockedReason: CoreviewToolBlockedReason
+  viewSignatureBefore: string | null
+  rebind?: CoreviewRebindMetadata
+  extras?: Partial<BuildCoreviewResultParams>
+}): CoreviewActionResult {
+  return buildCoreviewResult({
+    action: params.action,
+    source: params.source,
+    current: params.current,
+    ok: false,
+    blockedReason: params.blockedReason,
+    resultSummary: blockedSummary(params.blockedReason),
+    refreshAttempted: false,
+    refreshResult: "not_requested",
+    viewReadyWaitMs: null,
+    viewSignatureBefore: params.viewSignatureBefore,
+    viewSignatureAfter: params.current.viewSignature,
+    ...params.rebind,
+    ...params.extras,
+  })
+}
+
+interface CoreviewRefreshOutcome {
+  refreshAttempted: boolean
+  refreshResult: CoreviewToolRefreshResult
+  blockedReason: CoreviewToolBlockedReason | null
+  forceVisualFrameFresh: boolean | null
+  forceStale: boolean | null
+  refreshSummary: string
+}
+
+const NO_REFRESH_OUTCOME: CoreviewRefreshOutcome = {
+  refreshAttempted: false,
+  refreshResult: "not_requested",
+  blockedReason: null,
+  forceVisualFrameFresh: null,
+  forceStale: null,
+  refreshSummary: "",
+}
+
+function staleOverrideFlag(changed: boolean, reviewHasFrame: boolean): true | null {
+  return changed && reviewHasFrame ? true : null
+}
+
+async function runCoreviewViewRefresh(
+  adapter: CoreviewRendererAdapter,
+  reason: string | undefined,
+  clearSignature: string | null,
+  staleWhenFailed: boolean | null,
+): Promise<CoreviewRefreshOutcome> {
+  const refresh = await adapter.refreshView({ reason })
+  const refreshResult = normalizeSetViewRefreshResult(refresh.refreshResult)
+  if (refresh.ok) {
+    adapter.clearViewStale(clearSignature)
+    return {
+      refreshAttempted: true,
+      refreshResult,
+      blockedReason: null,
+      forceVisualFrameFresh: true,
+      forceStale: false,
+      refreshSummary: " Refresh succeeded.",
     }
   }
+  return {
+    refreshAttempted: true,
+    refreshResult,
+    blockedReason: refresh.blockedReason ?? "refresh_unavailable",
+    forceVisualFrameFresh: false,
+    forceStale: staleWhenFailed,
+    refreshSummary: " Visual refresh failed.",
+  }
+}
 
-  const pageRequested = typeof input.pageIndex === "number"
+function unavailableCoreviewRefreshOutcome(
+  reviewActive: boolean,
+  staleFlag: boolean | null,
+): CoreviewRefreshOutcome {
+  return {
+    refreshAttempted: false,
+    refreshResult: "unavailable",
+    blockedReason: reviewActive ? "refresh_unavailable" : "review_not_active",
+    forceVisualFrameFresh: false,
+    forceStale: staleFlag,
+    refreshSummary: reviewActive
+      ? " Visual refresh unavailable."
+      : " Visual review is not active.",
+  }
+}
+
+async function refreshAfterCoreviewViewChange(
+  adapter: CoreviewRendererAdapter,
+  params: {
+    readyView: CoreviewCurrentView
+    reason: string | undefined
+    expectedViewSignature: string | null
+    changed: boolean
+    beforeReviewHasFrame: boolean
+  },
+): Promise<CoreviewRefreshOutcome> {
+  const { readyView, changed } = params
+  if (readyView.canRefresh) {
+    return runCoreviewViewRefresh(
+      adapter,
+      params.reason,
+      params.expectedViewSignature,
+      staleOverrideFlag(changed, params.beforeReviewHasFrame),
+    )
+  }
+  if (readyView.reviewActive || readyView.reviewHasFrame || changed) {
+    return unavailableCoreviewRefreshOutcome(
+      readyView.reviewActive,
+      staleOverrideFlag(changed, readyView.reviewHasFrame),
+    )
+  }
+  return { ...NO_REFRESH_OUTCOME }
+}
+
+async function refreshAfterCoreviewAnnotationChange(
+  adapter: CoreviewRendererAdapter,
+  params: {
+    ready: CoreviewViewReadyResult
+    readyView: CoreviewCurrentView
+    staleSignature: string | null
+    beforeReviewHasFrame: boolean
+  },
+): Promise<CoreviewRefreshOutcome> {
+  const staleWhenBlocked = params.beforeReviewHasFrame ? true : null
+  if (params.ready.ok && params.readyView.canRefresh) {
+    return runCoreviewViewRefresh(adapter, "coreview annotation changed", params.staleSignature, staleWhenBlocked)
+  }
+  if (!params.ready.ok) {
+    return {
+      refreshAttempted: false,
+      refreshResult: "view_ready_timeout",
+      blockedReason: params.ready.blockedReason ?? "view_ready_timeout",
+      forceVisualFrameFresh: false,
+      forceStale: staleWhenBlocked,
+      refreshSummary: " Refresh timed out; annotation remains visible.",
+    }
+  }
+  if (params.readyView.reviewActive || params.readyView.reviewHasFrame) {
+    return unavailableCoreviewRefreshOutcome(params.readyView.reviewActive, staleWhenBlocked)
+  }
+  return { ...NO_REFRESH_OUTCOME, forceStale: staleWhenBlocked }
+}
+
+function viewReadyTimeoutBlockedReason(ready: CoreviewViewReadyResult): CoreviewToolBlockedReason {
+  return ready.blockedReason ?? "view_ready_timeout"
+}
+
+function htmlNavigationSourceForCommand(
+  source: CoreviewToolCommandSource,
+  reason: string | undefined,
+): "voice" | "tool" | "manual" {
+  if (source === "gemini_tool") {
+    return "tool"
+  }
+  return reason?.includes("voice command") ? "voice" : "manual"
+}
+
+function markStaleIfChanged(
+  adapter: CoreviewRendererAdapter,
+  changed: boolean,
+  reviewHasFrame: boolean,
+  signature: string | null,
+): void {
+  if (changed && reviewHasFrame) {
+    adapter.markViewStale(signature)
+  }
+}
+
+function isHtmlScrollCommand(
+  current: CoreviewCurrentView,
+  normalized: { htmlScrollDelta?: number | null; htmlScrollPosition?: "top" | "bottom" | null },
+): boolean {
+  return current.rendererKind === "html" && (
+    normalized.htmlScrollDelta !== null
+    || Boolean(normalized.htmlScrollPosition)
+  )
+}
+
+function structuredSetViewResultOrNull(
+  result: CoreviewSetViewAdapterResult | void | null | undefined,
+): CoreviewSetViewAdapterResult | null {
+  return isCoreviewSetViewAdapterResult(result) ? result : null
+}
+
+function setViewHtmlScrollResultValue(structured: CoreviewSetViewAdapterResult | null): string {
+  if (structured?.htmlNavigationResult != null) {
+    return structured.htmlNavigationResult
+  }
+  if (structured?.ok === false) {
+    return structured.blockedReason ?? "failed"
+  }
+  return "success"
+}
+
+function setViewSuccessHtmlNavigation(
+  structured: CoreviewSetViewAdapterResult | null,
+  htmlScrollAttempted: boolean,
+  normalized: { htmlScrollDelta?: number | null; htmlScrollPosition?: "top" | "bottom" | null },
+): CoreviewHtmlNavigationTelemetry | null {
+  return htmlNavigationTelemetryFromAdapterResult(structured, {
+    commandKind: htmlScrollAttempted
+      ? htmlNavigationCommandKindForSetView(normalized.htmlScrollDelta, normalized.htmlScrollPosition)
+      : null,
+    fallbackResult: htmlScrollAttempted ? "success" : null,
+  })
+}
+
+function setViewSuccessSummary(
+  htmlScrollAttempted: boolean,
+  after: CoreviewCurrentView,
+  refreshSummary: string,
+): string {
+  return htmlScrollAttempted
+    ? `Scrolled the HTML document.${refreshSummary}`
+    : `Switched to ${pageSummary(after)}.${refreshSummary}`
+}
+
+function buildHtmlScrollFailedResult(params: {
+  adapter: CoreviewRendererAdapter
+  source: CoreviewToolCommandSource
+  initialViewSignature: string | null
+  structured: CoreviewSetViewAdapterResult
+  htmlScrollDelta: number | null | undefined
+  htmlScrollPosition: "top" | "bottom" | null | undefined
+  rebind: CoreviewRebindMetadata
+}): CoreviewActionResult {
+  const afterFailedScroll = params.adapter.getCurrentViewState()
+  const blockedReason = params.structured.blockedReason ?? "section_not_found"
+  return buildCoreviewResult({
+    action: "set_view",
+    source: params.source,
+    current: afterFailedScroll,
+    ok: false,
+    blockedReason,
+    resultSummary: blockedSummary(blockedReason),
+    refreshAttempted: false,
+    refreshResult: "not_requested",
+    viewReadyWaitMs: null,
+    viewSignatureBefore: params.initialViewSignature,
+    viewSignatureAfter: afterFailedScroll.viewSignature,
+    htmlScrollAttempted: true,
+    htmlScrollResult: params.structured.blockedReason ?? "failed",
+    htmlNavigation: htmlNavigationTelemetryFromAdapterResult(params.structured, {
+      commandKind: htmlNavigationCommandKindForSetView(params.htmlScrollDelta, params.htmlScrollPosition),
+      fallbackResult: params.structured.blockedReason ?? "failed",
+    }),
+    ...params.rebind,
+  })
+}
+
+function annotationInputExtras(input: CoreviewAddAnnotationInput): Partial<BuildCoreviewResultParams> {
+  return {
+    annotationKind: normalizeAnnotationKindValue(input.kind),
+    annotationAnchorType: input.anchor?.type ?? null,
+    annotationColor: input.color ?? null,
+    annotationActionSource: input.source,
+    unsupportedAnnotationKind: unsupportedAnnotationKindFromValue(input.kind),
+  }
+}
+
+function annotationCountExtras(
+  counts: Pick<CoreviewCurrentView, "annotationCount" | "highlightCount" | "commentCount" | "underlineCount" | "arrowCount" | "drawPathCount">,
+): Partial<BuildCoreviewResultParams> {
+  return {
+    annotationCount: counts.annotationCount,
+    highlightCount: counts.highlightCount,
+    commentCount: counts.commentCount,
+    underlineCount: counts.underlineCount ?? 0,
+    arrowCount: counts.arrowCount ?? 0,
+    drawPathCount: counts.drawPathCount ?? 0,
+  }
+}
+
+function annotationNormalizationFailureExtras(
+  input: CoreviewAddAnnotationInput,
+  before: CoreviewCurrentView,
+  unsupportedKind: string | null | undefined,
+): Partial<BuildCoreviewResultParams> {
+  return {
+    ...annotationInputExtras(input),
+    unsupportedAnnotationKind: unsupportedKind ?? null,
+    ...annotationCountExtras(before),
+  }
+}
+
+function isAnnotationCommitVerified(params: {
+  added: CoreviewAddAnnotationAdapterResult
+  annotationCountBefore: number
+  kindCountBefore: number
+  kindCountAfter: number
+}): boolean {
+  return Boolean(
+    params.added.ok
+    && params.added.annotationId
+    && params.added.annotationCount > params.annotationCountBefore
+    && params.kindCountAfter > params.kindCountBefore,
+  )
+}
+
+function annotationCommitFailedResult(params: {
+  adapter: CoreviewRendererAdapter
+  source: CoreviewToolCommandSource
+  initialViewSignature: string | null
+  normalized: { kind: CoreviewAnnotationKind; anchor: CoreviewAnnotationAnchor; color: CoreviewAnnotationColor; pageIndex: number; source: "sophia" | "user" }
+  added: CoreviewAddAnnotationAdapterResult
+  annotationCountBefore: number
+  rebind: CoreviewRebindMetadata
+}): CoreviewActionResult {
+  const blockedReason = params.added.blockedReason ?? "annotation_commit_failed"
+  return blockedCoreviewResult({
+    action: "add_annotation",
+    source: params.source,
+    current: params.adapter.getCurrentViewState(),
+    blockedReason,
+    viewSignatureBefore: params.initialViewSignature,
+    rebind: params.rebind,
+    extras: {
+      annotationKind: params.normalized.kind,
+      annotationAnchorType: params.normalized.anchor.type,
+      annotationColor: params.normalized.color,
+      annotationPageIndex: params.normalized.pageIndex,
+      annotationActionSource: params.normalized.source,
+      ...annotationCountExtras(params.added),
+      annotationCommitAttempted: true,
+      annotationCommitResult: blockedReason,
+      annotationCommitCountBefore: params.annotationCountBefore,
+      annotationCommitCountAfter: params.added.annotationCount,
+      annotationCommitVerified: false,
+      annotationCreated: false,
+    },
+  })
+}
+
+function focusCapabilityBlockedReasonForInput(
+  input: CoreviewFocusAnchorInput,
+  capabilities: CoreviewArtifactCapabilities,
+): CoreviewToolBlockedReason | null {
+  return focusCapabilityBlockedReason(input.anchor ?? { type: "current_selection" }, capabilities)
+}
+
+function focusAnchorTypeExtras(
+  input: CoreviewFocusAnchorInput,
+  fallback: CoreviewAnnotationAnchor["type"] | null = null,
+): Partial<BuildCoreviewResultParams> {
+  return { focusAnchorType: input.anchor?.type ?? fallback }
+}
+
+function focusAnchorTargetFromResolution(params: {
+  resolution: CoreviewResolveAnnotationAnchorResult
+  rendererKind: ArtifactRendererKind
+  anchor: CoreviewAnnotationAnchor
+  pageIndex: number
+}): (
+  | { ok: true; anchor: CoreviewResolvedAnnotationAnchor }
+  | { ok: false; blockedReason: CoreviewToolBlockedReason }
+) {
+  let resolvedAnchor: CoreviewResolvedAnnotationAnchor | null = params.resolution.ok
+    ? params.resolution.anchor
+    : null
+  if (!resolvedAnchor && params.rendererKind === "html" && params.anchor.type === "text_quote") {
+    resolvedAnchor = buildHtmlFocusTextAnchor(params.anchor.text, params.pageIndex)
+  }
+  if (!resolvedAnchor) {
+    return {
+      ok: false,
+      blockedReason: params.resolution.ok === false ? params.resolution.blockedReason : "anchor_not_found",
+    }
+  }
+  if (!resolvedAnchor.rect && !(params.rendererKind === "html" && resolvedAnchor.text)) {
+    return { ok: false, blockedReason: "anchor_not_found" }
+  }
+  return { ok: true, anchor: resolvedAnchor }
+}
+
+function focusAdapterFailedExtras(
+  before: CoreviewCurrentView,
+  focused: CoreviewFocusAnchorAdapterResult,
+  anchorType: CoreviewAnnotationAnchor["type"],
+  focusedRect: CoreviewNormalizedRect | null,
+): Partial<BuildCoreviewResultParams> {
+  return {
+    focusAnchorType: anchorType,
+    focusedRect,
+    htmlFocusAnchorAttempted: before.rendererKind === "html",
+    htmlFocusAnchorResult: before.rendererKind === "html" ? focused.blockedReason ?? "failed" : null,
+    htmlFocusAnchorMethod: focused.method ?? null,
+    htmlFocusAnchorScrolled: focused.scrolled ?? null,
+    htmlNavigation: focused.htmlNavigation ?? null,
+  }
+}
+
+function focusAdapterSuccessExtras(
+  before: CoreviewCurrentView,
+  focused: CoreviewFocusAnchorAdapterResult,
+  anchorType: CoreviewAnnotationAnchor["type"],
+  focusedRect: CoreviewNormalizedRect | null,
+): Partial<BuildCoreviewResultParams> {
+  return {
+    focusAnchorType: anchorType,
+    focusedRect,
+    htmlFocusAnchorAttempted: before.rendererKind === "html",
+    htmlFocusAnchorResult: before.rendererKind === "html" ? "success" : null,
+    htmlFocusAnchorMethod: focused.method ?? null,
+    htmlFocusAnchorScrolled: focused.scrolled ?? null,
+    htmlNavigation: focused.htmlNavigation ?? null,
+  }
+}
+
+function focusAnchorSuccessSummary(
+  before: CoreviewCurrentView,
+  anchorType: CoreviewAnnotationAnchor["type"],
+  after: CoreviewCurrentView,
+  refreshSummary: string,
+): string {
+  return before.rendererKind === "html"
+    ? `Focused the HTML section.${refreshSummary}`
+    : `Focused ${anchorLabel(anchorType)} on ${pageSummary(after)}.${refreshSummary}`
+}
+
+function requestedSetViewPageIndex(
+  input: CoreviewSetViewInput,
+  current: CoreviewCurrentView,
+): number {
+  if (typeof input.pageIndex === "number" && Number.isFinite(input.pageIndex)) {
+    return Math.floor(input.pageIndex)
+  }
+  if (typeof input.pageNumber === "number" && Number.isFinite(input.pageNumber)) {
+    return Math.floor(input.pageNumber) - 1
+  }
+  if (input.pageLabel) {
+    const parsed = Number.parseInt(input.pageLabel.replace(/[^0-9]/gu, ""), 10)
+    if (Number.isFinite(parsed)) {
+      return parsed - 1
+    }
+  }
+  return current.pageIndex
+}
+
+function isSetViewPageRequested(input: CoreviewSetViewInput): boolean {
+  return typeof input.pageIndex === "number"
     || typeof input.pageNumber === "number"
     || Boolean(input.pageLabel)
-  if (pageRequested && !current.capabilities.supportsPages) {
-    return { ok: false, blockedReason: "pages_not_supported" }
-  }
-  if (pageRequested && (pageIndex < 0 || pageIndex >= Math.max(1, current.pageCount))) {
-    return { ok: false, blockedReason: "requested_page_out_of_bounds" }
-  }
+}
 
+function setViewPageBlockedReason(
+  input: CoreviewSetViewInput,
+  current: CoreviewCurrentView,
+  pageIndex: number,
+): CoreviewToolBlockedReason | null {
+  if (!isSetViewPageRequested(input)) {
+    return null
+  }
+  if (!current.capabilities.supportsPages) {
+    return "pages_not_supported"
+  }
+  if (pageIndex < 0 || pageIndex >= Math.max(1, current.pageCount)) {
+    return "requested_page_out_of_bounds"
+  }
+  return null
+}
+
+function setViewZoomScrollBlockedReason(
+  input: CoreviewSetViewInput,
+  current: CoreviewCurrentView,
+  scroll: { htmlScrollDelta: number | null; htmlScrollPosition: "top" | "bottom" | null },
+): CoreviewToolBlockedReason | null {
   const zoomRequested = typeof input.zoom === "number" || typeof input.fitMode === "string"
   if (zoomRequested && !current.capabilities.supportsZoom) {
-    return { ok: false, blockedReason: "zoom_not_supported" }
+    return "zoom_not_supported"
   }
+  if ((scroll.htmlScrollDelta !== null || scroll.htmlScrollPosition) && current.rendererKind !== "html") {
+    return "layout_anchor_not_supported"
+  }
+  return null
+}
 
+function normalizedSetViewHtmlScroll(input: CoreviewSetViewInput): {
+  htmlScrollDelta: number | null
+  htmlScrollPosition: "top" | "bottom" | null
+} {
   const htmlScrollDelta = typeof input.htmlScrollDelta === "number" && Number.isFinite(input.htmlScrollDelta)
     ? input.htmlScrollDelta
     : null
   const htmlScrollPosition = input.htmlScrollPosition === "top" || input.htmlScrollPosition === "bottom"
     ? input.htmlScrollPosition
     : null
-  if ((htmlScrollDelta !== null || htmlScrollPosition) && current.rendererKind !== "html") {
-    return { ok: false, blockedReason: "layout_anchor_not_supported" }
-  }
+  return { htmlScrollDelta, htmlScrollPosition }
+}
 
+function resolvedSetViewZoomAndFit(
+  input: CoreviewSetViewInput,
+  current: CoreviewCurrentView,
+): { zoom: number; fitMode: ArtifactFitMode } {
   const fitMode = current.rendererKind === "html" && input.fitMode === "page"
     ? "width"
     : input.fitMode ?? current.fitMode
@@ -1782,8 +1897,25 @@ function normalizeSetViewInput(
     : fitMode === "custom"
       ? current.zoom
       : 1
+  return { zoom, fitMode }
+}
 
-  return { ok: true, pageIndex, zoom, fitMode, htmlScrollDelta, htmlScrollPosition }
+function normalizeSetViewInput(
+  input: CoreviewSetViewInput,
+  current: CoreviewCurrentView,
+): (
+  | { ok: true; pageIndex: number; zoom: number; fitMode: ArtifactFitMode; htmlScrollDelta?: number | null; htmlScrollPosition?: "top" | "bottom" | null }
+  | { ok: false; blockedReason: CoreviewToolBlockedReason }
+) {
+  const pageIndex = requestedSetViewPageIndex(input, current)
+  const scroll = normalizedSetViewHtmlScroll(input)
+  const blockedReason = setViewPageBlockedReason(input, current, pageIndex)
+    ?? setViewZoomScrollBlockedReason(input, current, scroll)
+  if (blockedReason) {
+    return { ok: false, blockedReason }
+  }
+  const { zoom, fitMode } = resolvedSetViewZoomAndFit(input, current)
+  return { ok: true, pageIndex, zoom, fitMode, htmlScrollDelta: scroll.htmlScrollDelta, htmlScrollPosition: scroll.htmlScrollPosition }
 }
 
 function buildCoreviewResult(params: {

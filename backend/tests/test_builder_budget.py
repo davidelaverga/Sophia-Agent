@@ -17,6 +17,8 @@ from langchain_core.messages import AIMessage
 
 from deerflow.agents.sophia_agent.middlewares import builder_budget as bb_mod
 from deerflow.agents.sophia_agent.middlewares.builder_budget import (
+    USER_BUDGET_COST_MESSAGE,
+    USER_BUDGET_TIMEOUT_MESSAGE,
     BuilderBudgetMiddleware,
     _estimate_cost_usd,
     _price_for,
@@ -121,7 +123,8 @@ def test_token_cap_trips_fires_timed_out_and_strips_tool_calls(monkeypatch):
     # Terminal webhook fired with a native terminal status + budget reason.
     assert len(calls) == 1
     assert calls[0]["status"] == "timed_out"
-    assert calls[0]["artifact"] == {}
+    assert calls[0]["artifact"]["budget_stop_reason"] == "token_limit"
+    assert calls[0]["artifact"]["companion_summary"] == USER_BUDGET_TIMEOUT_MESSAGE
     assert "budget exceeded" in calls[0]["error_message"].lower()
     assert "tokens=1200>=1000" in calls[0]["error_message"]
 
@@ -137,7 +140,11 @@ def test_cost_cap_trips(monkeypatch):
     out = mw.after_model(state, _runtime())
     assert out is not None and out["jump_to"] == "end"
     assert calls[0]["status"] == "timed_out"
+    assert calls[0]["artifact"]["budget_stop_reason"] == "cost_limit"
+    assert calls[0]["artifact"]["companion_summary"] == USER_BUDGET_COST_MESSAGE
+    assert "cost limit" in calls[0]["error_message"]
     assert "cost=$" in calls[0]["error_message"]
+    assert "token limit" not in calls[0]["error_message"]
 
 
 def test_caps_disabled_never_trips(monkeypatch):
@@ -172,3 +179,32 @@ def test_async_after_model_enforces_too(monkeypatch):
     out = asyncio.run(mw.aafter_model(state, _runtime()))
     assert out is not None and out["jump_to"] == "end"
     assert calls[0]["status"] == "timed_out"
+
+
+def test_image_generation_cost_counts_toward_cost_cap(monkeypatch):
+    calls = _capture_webhook(monkeypatch)
+    mw = BuilderBudgetMiddleware()
+    # Token cost alone is tiny (~$0.0045); 10 tracked image calls add $0.70
+    # and push the total over a $0.50 cap.
+    state = {
+        "builder_budget": {"max_cost_usd": 0.5, "max_total_tokens": 0, "cost_model_key": "claude-sonnet-4-6"},
+        "messages": [_ai(input_tokens=1000, output_tokens=100)],
+        "builder_pptx_diagnostics": {"image_generation_attempt_count": 10},
+    }
+    out = mw.after_model(state, _runtime())
+    assert out is not None
+    assert out["jump_to"] == "end"
+    assert len(calls) == 1
+    assert calls[0]["status"] == "timed_out"
+
+
+def test_image_generation_cost_under_cap_is_noop(monkeypatch):
+    calls = _capture_webhook(monkeypatch)
+    mw = BuilderBudgetMiddleware()
+    state = {
+        "builder_budget": {"max_cost_usd": 5.0, "max_total_tokens": 0, "cost_model_key": "claude-sonnet-4-6"},
+        "messages": [_ai(input_tokens=1000, output_tokens=100)],
+        "builder_pptx_diagnostics": {"image_generation_attempt_count": 3},
+    }
+    assert mw.after_model(state, _runtime()) is None
+    assert calls == []

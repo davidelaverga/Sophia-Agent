@@ -273,6 +273,23 @@ The companion and builder can both see images and read documents in-process via 
 
 **Deployment fact that is load-bearing:** on Render, `sophia-gateway` and `sophia-langgraph` are **separate web services with separate ephemeral disks** (no shared/persistent disk). Uploads land on the gateway disk but the companion read tools run in langgraph — so every upload is **mirrored to Supabase Storage** under `{thread_id}/uploads/{name}` and the read tools download from the mirror on a local miss. Any change to upload/read/delete paths must keep the gateway mirror and the langgraph fallback in sync, and **both services must redeploy together**.
 
+### Builder deliverable truth + visual reliability (2026-06-10)
+
+Hard invariants after the 2026-06-10 incident (text-only decks/PDFs, rendered primaries mislabeled as fallbacks, `.pdf.md` source surfaced over the real PDF):
+
+1. **A delivered artifact in the requested format is never a fallback.** Missing visuals become `quality_warning="visuals_not_embedded"` + capped confidence — never `artifact_is_fallback=true`.
+2. **Format-swapped fallbacks are disabled for pdf/pptx requests.** A `.md`/`.html` emission for a pdf/pptx target is rejected; if the primary genuinely cannot be produced, the build completes as an honest failure (`artifact_path=null` + truthful `companion_summary`). Sources stay in session artifacts.
+3. **Visuals must actually embed.** One bounded repair turn (`_visual_gate_blocks_emit`), harness auto-wiring of generated PNGs into the slide plan, pandoc `cwd`/`--resource-path` so relative image refs resolve.
+4. **PPTX gets a canvas preview.** `<deck>.preview.pdf` (headless LibreOffice, langgraph image) rides along with the completion payload as `artifact_preview_filename`; the webapp renders decks through the PDF canvas, downloads keep serving the `.pptx`.
+
+Full detail: **`backend/CLAUDE.md` → "Builder deliverable truth + visual reliability"**.
+
+Follow-up wave (2026-06-11): generated imagery (gpt-image-2) is **on by default for decks** — 1 hero + up to 2 supporting images, hard cap 3 calls/build (harness-enforced with a terminal-error short-circuit and per-image cost in the budget breaker), plain/minimal briefs opt out; the PPTX compositor gained 8 layouts + 4 themes; PDFs render through a themed pandoc template (cover page, footer, auto-TOC, template-less retry on failure). Requires `OPENAI_API_KEY` on sophia-langgraph. Detail: **`backend/CLAUDE.md` → "Image-gen enrichment + artifact-skill quality"**.
+
+Spec VQ wave (2026-06-11): three prod bugs fixed (HTML max_tokens truncation loop → 32k output + chunking correction; duplicate tool_result 400 → duplicate-proof dangling patcher; PDF template rc=5 → a `$if$` token in its own header comment) and the visual-quality constraint set landed: text-fit engine + 10 distinct diagram kinds (G-VIS-1/2 goldens), harness-stamped `image_generation_outcome` + `--preflight`, hero/cover gate, PDF cover enrichment, preview-raster self-review on repair turns, variety guard, design-language themes, and the build-to-condition loop at cap 3 (`SOPHIA_BUILDER_MAX_ITERATIONS`; payload carries `iterations_used`/`unmet_conditions`). Provider matrix: `make eval-visuals` + nightly visual-evals workflow. Detail: **`backend/CLAUDE.md` → "Spec VQ wave"**.
+
+Spec D wave (2026-06-11): the delegation boundary gains a flush and a floor. Per-turn append-only **delegation ledger** (`users/{user_id}/traces/{thread_id}.ledger.jsonl`, compaction-immune, Supabase-mirrored for gateway-side deletion + restart durability), deterministic **conversation digest** in every long-session brief + `[Conversation since dispatch]` deltas on updates, **builder-side Haiku brief extraction** (`[t{n}]`-provenance-validated schema; never companion-side — voice latency), builder tool **`read_session_context`** (parent-session recall, scope-locked, 4 calls/build), and the **brief-completeness gate** (briefing directive + `brief_assumptions[]` emit field the companion relays + `brief_incomplete:*` honesty stamps in `unmet_conditions`). Five `SOPHIA_DELEGATION_*` flags, all default ON, each independently revertible. `make eval-delegation` live lane. Detail: **`backend/CLAUDE.md` → "Spec D — Delegation Boundary"**.
+
 ### Builder progress streaming (webhook relay)
 
 PR #128 shipped the live `[ Researching ]` → `[ Drafting ]` → `[ Finalizing ]` → `[ Done ]` placeholder UX via a webhook relay (NOT SDK streaming — `langgraph_runtime_inmem` doesn't deliver events to late-joining HTTP `runs.join_stream` consumers across processes; verified in production smoke tests).

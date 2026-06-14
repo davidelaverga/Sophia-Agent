@@ -58,6 +58,36 @@ describe("ArtifactToolbar", () => {
     expect(screen.getByLabelText("Reset zoom")).toBeInTheDocument()
   })
 
+  it("keeps the multi-page pager visible on every screen size", async () => {
+    const user = userEvent.setup()
+    const onPreviousPage = vi.fn()
+    const onNextPage = vi.fn()
+
+    render(
+      <ArtifactToolbar
+        title="Launch PDF"
+        pageIndex={0}
+        pageCount={3}
+        supportsPagination
+        onPreviousPage={onPreviousPage}
+        onNextPage={onNextPage}
+      />,
+    )
+
+    expect(screen.getByText("Page 1 of 3")).toBeInTheDocument()
+    const previous = screen.getByLabelText("Previous page")
+    const next = screen.getByLabelText("Next page")
+    // The pager must not be responsively hidden (no `hidden sm:flex` pattern
+    // like the thumbnail rail) — mobile users page from the toolbar.
+    for (const element of [previous, next, previous.parentElement, next.parentElement]) {
+      expect(element?.className ?? "").not.toMatch(/(?:^|\s)hidden(?:\s|$)/)
+    }
+    expect(previous).toBeDisabled()
+
+    await user.click(next)
+    expect(onNextPage).toHaveBeenCalledTimes(1)
+  })
+
   it("shows HTML zoom and annotation tools without page or arrow controls", () => {
     render(
       <ArtifactToolbar

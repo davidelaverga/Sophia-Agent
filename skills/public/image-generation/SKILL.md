@@ -120,6 +120,50 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
   --aspect-ratio 16:9
 ```
 
+## Business Deck & Report Enrichment
+
+When enriching slide decks, visual reports, or PDFs (the default for Sophia
+builder presentation tasks), follow this discipline:
+
+**Budget**: PPTX presentation builds have a HARD CAP of 8 image-generation
+calls, but generated images are support assets for editable decks: hero
+images, section openers, atmospheric backgrounds, or illustrative scenes. Do
+not generate one screenshot per slide as the final presentation. PDF/report
+enrichment remains capped lower by the harness. Plan before generating:
+create the most important hero image first, then pass it via
+`--reference-images` to related image calls so the set stays coherent. Charts,
+technical diagrams, and data visuals are NOT this skill's job — use
+`generate_visual_asset` for charts and `generate_excalidraw_diagram` for
+technical diagrams (no image-generation cap, no API cost).
+
+**Subjects that work for business content**: abstract/conceptual
+compositions (gradients, geometric forms, light fields), product and object
+renders, landscapes and architecture, textures, metaphoric scenes (paths,
+horizons, networks). AVOID: photorealistic identifiable people and faces,
+celebrities or public figures, brand logos and trademarks, stock-photo
+clichés (handshakes, suited crowds), and text inside images — rendered text
+is unreliable; the deck supplies the words.
+
+**Coherence**: all images in one deliverable must share an aesthetic. Anchor
+every prompt to the deck's theme/palette (e.g. "deep navy and warm gold
+accents, premium boardroom aesthetic" for the boardroom theme). Generate the
+hero FIRST, then pass it via `--reference-images` to subsequent related image
+calls so the set stays visually consistent.
+
+**Aspect ratios**: `16:9` for hero/full-bleed/section-divider images; `4:3`
+for content-card images placed beside text.
+
+**Naming**: write to `/mnt/user-data/outputs/visuals/hero-<desc>.png` and
+`/mnt/user-data/outputs/visuals/slide-<N>-<desc>.png`, then reference those
+paths from the presentation plan (`"layout": "full_bleed_image"`, `"image":
+...`) or the Markdown source before composing/rendering.
+
+**Failure handling**: if a call fails (content policy, auth, network), retry
+at most ONCE with a simplified, safer prompt. After that, continue the build
+with charts and text — never stall or fail a deliverable over imagery. If the
+failure is `content_policy`, drop the problematic concept entirely rather
+than rephrasing it.
+
 ## Common Scenarios
 
 Use different JSON schemas for different scenarios.

@@ -848,6 +848,16 @@ def _try_serve_from_supabase(
     relative = _relative_output_artifact_path(path)
     if relative is None or relative == "":
         return None
+    # The delegation ledger (Spec D) is internal conversation content,
+    # mirrored under {thread_id}/ledger/ — never user-facing. Without this
+    # guard, mnt/user-data/outputs/ledger/session.jsonl would download the
+    # mirror through the artifact proxy (Codex P1 PR #131).
+    if supabase_artifact_store.is_ledger_object_name(relative):
+        logger.info(
+            "Refusing artifact serve for internal ledger keyspace: thread_id=%s",
+            thread_id,
+        )
+        return None
     try:
         result = supabase_artifact_store.download_artifact(
             thread_id=thread_id,
@@ -1259,14 +1269,22 @@ async def quick_patch_html_artifact(
         )
 
     revision_path = revision_artifact_path(path, patch.html, request_body.user_update_request)
-    write_thread_id = resolution.resolved_task_thread_id or thread_id
+    # The revision is a user-facing derived artifact: the browser only receives
+    # `revision_artifact_path` and re-fetches it through the parent
+    # `/api/threads/{thread_id}/artifacts/...` route. That route's local
+    # resolution checks the parent thread first and its Supabase fallback
+    # (`_try_serve_from_supabase`) only ever looks under the parent `thread_id`.
+    # Writing/mirroring under the source builder-task id (when the source
+    # resolved from an associated task) would 404 the revision after a
+    # disk-wiping restart even though it was mirrored. Home the revision —
+    # local copy and Supabase mirror both — under the parent thread.
     _write_quick_patch_revision(
-        thread_id=write_thread_id,
+        thread_id=thread_id,
         revision_path=revision_path,
         content=patch.html,
     )
     _mirror_quick_patch_revision(
-        thread_id=write_thread_id,
+        thread_id=thread_id,
         revision_path=revision_path,
         content=patch.html,
     )

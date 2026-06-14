@@ -192,26 +192,70 @@ def generate_image(
     return f"IMAGEGEN_OK model={_MODEL} output_file={output_file}"
 
 
+def preflight() -> int:
+    """Cheap environment check BEFORE any generation attempt (Spec VQ-3).
+
+    Prints exactly one JSON line so the harness can record WHY image
+    generation was skipped instead of inferring it from silence:
+      {"preflight": "ok"} → exit 0
+      {"preflight": "failed", "reason": "env_missing"|"auth_invalid"|...} → exit 1
+    """
+    import json as _json
+
+    def _emit(status: str, reason: str | None = None) -> int:
+        payload: dict[str, str] = {"preflight": status}
+        if reason:
+            payload["reason"] = reason
+        print(_json.dumps(payload))
+        return 0 if status == "ok" else 1
+
+    if not os.environ.get("OPENAI_API_KEY", "").strip():
+        return _emit("failed", "env_missing")
+    try:
+        from openai import OpenAI  # transitive dep via langchain-openai
+
+        client = OpenAI(timeout=10.0, max_retries=0)
+        client.models.retrieve("gpt-image-2")
+    except Exception as exc:  # noqa: BLE001 — classify, never crash preflight
+        reason = _classify_exception(exc)
+        # An unknown-model 404 still proves key+egress work; only hard
+        # env/auth/egress failures should block enrichment.
+        if reason not in {"auth_invalid", "egress_blocked", "org_not_verified"}:
+            return _emit("ok")
+        return _emit("failed", reason)
+    return _emit("ok")
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate images using OpenAI gpt-image-2")
-    parser.add_argument("--prompt-file", required=True, help="Absolute path to JSON prompt file")
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="Check OPENAI_API_KEY + API reachability; print one JSON line; exit 0/1. No generation.",
+    )
+    parser.add_argument("--prompt-file", help="Absolute path to JSON prompt file")
     parser.add_argument(
         "--reference-images",
         nargs="*",
         default=[],
         help="Absolute paths to reference images (space-separated)",
     )
-    parser.add_argument("--output-file", required=True, help="Output path for the generated image")
+    parser.add_argument("--output-file", help="Output path for the generated image")
     parser.add_argument(
         "--aspect-ratio",
         default="16:9",
         help="Aspect ratio of the generated image (1:1, 16:9, 4:3, 9:16, 2:3, 3:2)",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if not args.preflight and (not args.prompt_file or not args.output_file):
+        parser.error("--prompt-file and --output-file are required unless --preflight is used")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    if args.preflight:
+        return preflight()
     print(
         generate_image(
             args.prompt_file,

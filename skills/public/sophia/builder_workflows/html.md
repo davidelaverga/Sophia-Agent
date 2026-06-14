@@ -8,8 +8,12 @@ Use this card for requested `.html` files and for HTML fallback artifacts.
 - Do not wrap HTML in Markdown fences.
 - Do not HTML-escape the document as text (`&lt;html` is invalid for delivery).
 - For chart/diagram/visual requests, read
-  `/mnt/skills/public/visual-design/SKILL.md`, then create inline SVG/CSS/HTML
+  `/mnt/skills/public/visual-design/SKILL.md` and, when available,
+  `/mnt/skills/public/hallmark/SKILL.md`, then create inline SVG/CSS/HTML
   diagrams or embed local visual assets from `/mnt/user-data/outputs/visuals/`.
+  Prefer `generate_excalidraw_diagram` with raw Mermaid for technical
+  process/system diagrams and `generate_visual_asset` with explicit labeled
+  `{label, value}` data for numeric charts.
 - Emit the `.html` file only after it exists and can be rendered by a browser.
 
 When HTML is a fallback for a requested `.pptx` or `.pdf`, mark it explicitly

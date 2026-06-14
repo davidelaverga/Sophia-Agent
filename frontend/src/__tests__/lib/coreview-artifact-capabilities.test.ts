@@ -49,6 +49,33 @@ describe("Coreview artifact capability matrix", () => {
     expect(capabilities.unsupportedUpdateReason).toContain("PDF native editing")
   })
 
+  it("treats a PPTX rendered via its .preview.pdf sibling like a PDF with deck-honest labels", () => {
+    const capabilities = getCoreviewArtifactCapabilities({
+      rendererKind: "pdf",
+      artifactPath: "outputs/deck.preview.pdf",
+      title: "deck.preview.pdf",
+      pptxPreviewPdf: true,
+    })
+
+    expect(capabilities).toMatchObject({
+      canRender: true,
+      renderMode: "canvas",
+      supportsPages: true,
+      supportsPageRail: true,
+      supportsZoom: true,
+      supportsPan: true,
+      supportsAnnotations: true,
+      supportsStillFrame: true,
+      supportsOriginalDownload: true,
+      supportsPptxNativeRender: false,
+      supportsArtifactUpdate: false,
+      fallbackReason: null,
+    })
+    expect(capabilities.unsupportedUpdateReason).toContain("PPTX native editing")
+    expect(capabilities.userFacingTruth).toContain("PDF preview")
+    expect(capabilities.userFacingTruth).toContain("PPTX")
+  })
+
   it("returns truthful PPTX metadata fallback capabilities", () => {
     const capabilities = getCoreviewArtifactCapabilities({
       rendererKind: "download_only",

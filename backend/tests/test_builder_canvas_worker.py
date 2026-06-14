@@ -396,6 +396,34 @@ async def test_done_phase_is_projected_as_non_terminal_packaging_activity() -> N
 
 
 @pytest.mark.anyio
+async def test_refining_phase_is_projected_to_the_canvas() -> None:
+    """Codex P3 PR #131: BuilderProgressMiddleware emits phase="refining"
+    during VQ repair iterations; the canvas worker must project it (Telegram
+    already renders it) instead of dropping it to stale tool activity."""
+    worker = BuilderCanvasWorker()
+    delivered = await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "refining"},
+        }
+    )
+    assert delivered is not None
+    events = await worker.recent_events("parent-1")
+    assert events[0]["activity"] == {
+        "kind": "phase",
+        "phase": "refining",
+        "category": "draft",
+        # A frontend-known action (icon/color); the label carries the meaning.
+        "action": "creating_artifact",
+        "label": "Refining artifact",
+    }
+
+
+@pytest.mark.anyio
 async def test_out_of_order_paired_progress_events_are_retained_in_sequence_order() -> None:
     worker = BuilderCanvasWorker()
     await worker.publish_progress(

@@ -55,12 +55,45 @@ def test_pptx_workflow_card_requires_deerflow_native_sequence() -> None:
 
     assert "image-generation/scripts/generate.py" in card
     assert "ppt-generation/scripts/generate.py" in card
-    assert "Compose a valid no-image deck first" in card
-    assert "only when the" in card
-    assert "user explicitly requests generated images" in card
-    assert "no-image" in card
+    assert "Normal decks default to polished visual treatment" in card
+    assert "generate_excalidraw_diagram" in card
+    assert "editable text" in card
+    assert "slide-image album" in card
+    assert "plain, text-only, or no-visual" in card
     assert "PPTX" in card
     assert "passes structural validation" in card
+    assert "No Silent Format Swaps" in card
+    assert "artifact_is_fallback=true" in card
+
+
+def test_pdf_workflow_card_uses_pdf_report_skill_not_default_imagegen() -> None:
+    card = _sophia_prompt("builder_workflows/pdf.md")
+
+    assert "/mnt/skills/public/pdf-report/SKILL.md" in card
+    assert "deep-research" in card
+    assert "academic-paper-review" in card
+    assert "systematic-literature-review" in card
+    assert "chart-visualization" in card
+    assert "generate_excalidraw_diagram" in card
+    assert "render_markdown_to_pdf" in card
+    assert "Do not use image-generation for normal charts/diagrams" in card
+    assert "ON BY DEFAULT" not in card
+    assert "artifact_is_fallback=true" in card
+
+
+def test_pdf_report_skill_is_source_first_and_renderer_backed() -> None:
+    skill = Path(__file__).resolve().parents[2] / "skills/public/pdf-report/SKILL.md"
+    text = skill.read_text()
+
+    assert "Do not use `create_pdf_artifact` for normal reports" in text
+    assert "deep-research" in text
+    assert "academic-paper-review" in text
+    assert "systematic-literature-review" in text
+    assert "chart-visualization" in text
+    assert "render_markdown_to_pdf" in text
+    assert "generate_visual_asset" in text
+    assert "generate_excalidraw_diagram" in text
+    assert "artifact_is_fallback=true" in text
 
 
 def test_visuals_workflow_card_requires_design_skill_and_local_assets() -> None:
@@ -68,5 +101,6 @@ def test_visuals_workflow_card_requires_design_skill_and_local_assets() -> None:
 
     assert "/mnt/skills/public/visual-design/SKILL.md" in card
     assert "generate_visual_asset" in card
+    assert "generate_excalidraw_diagram" in card
     assert "/mnt/user-data/outputs/visuals/" in card
     assert "remote chart URLs" in card

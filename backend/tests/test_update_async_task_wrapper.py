@@ -557,6 +557,28 @@ def test_directive_visual_report_pdf_target_keeps_binary_guidance():
     assert "generator script" in augmented.lower()
 
 
+def test_update_filename_resolver_preserves_explicit_pptx_over_incidental_pdf():
+    from deerflow.sophia.tools.update_async_task_wrapper import _suggest_artifact_filename
+
+    filename = _suggest_artifact_filename(
+        "presentation",
+        "Create a PowerPoint slide deck. Prior source artifact was report.pdf.",
+    )
+
+    assert filename.endswith(".pptx")
+
+
+def test_update_filename_resolver_supports_presentation_in_pdf_format():
+    from deerflow.sophia.tools.update_async_task_wrapper import _suggest_artifact_filename
+
+    filename = _suggest_artifact_filename(
+        "presentation",
+        "Create a presentation in PDF format for the board.",
+    )
+
+    assert filename.endswith(".pdf")
+
+
 # ---- F.1: slug-derived filename + resume-not-restart directive ------------
 
 

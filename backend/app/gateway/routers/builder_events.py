@@ -49,8 +49,18 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "requested_artifact_ext",
     "artifact_is_fallback",
     "fallback_reason",
+    "format_conflict_resolved",
+    "format_conflict_original_target_ext",
     "image_generation_status",
     "image_generation_reason",
+    "image_generation_outcome",
+    "iterations_used",
+    "unmet_conditions",
+    "brief_assumptions",
+    "artifact_preview_filename",
+    "quality_warning",
+    "visuals_missing",
+    "budget_stop_reason",
     "error_message",
     "trace_id",
 )
@@ -84,8 +94,18 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "artifact_ext",
         "artifact_is_fallback",
         "fallback_reason",
+        "format_conflict_resolved",
+        "format_conflict_original_target_ext",
         "image_generation_status",
         "image_generation_reason",
+        "image_generation_outcome",
+        "iterations_used",
+        "unmet_conditions",
+        "brief_assumptions",
+        "artifact_preview_filename",
+        "quality_warning",
+        "visuals_missing",
+        "budget_stop_reason",
         "source_artifact_path",
         "revision_of_artifact_path",
         "summary",
@@ -94,7 +114,16 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "completed_at",
         "source",
     )
-    return {key: payload.get(key) for key in result_keys if payload.get(key) is not None}
+    result = {key: payload.get(key) for key in result_keys if payload.get(key) is not None}
+    artifact_path = payload.get("artifact_path")
+    artifact_url = payload.get("artifact_url")
+    if (
+        not (isinstance(artifact_path, str) and artifact_path.strip())
+        and isinstance(artifact_url, str)
+        and artifact_url.strip()
+    ):
+        result["artifact_url"] = artifact_url
+    return result
 
 
 def _present_payload_fields(payload: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
@@ -185,10 +214,13 @@ async def _hydrate_missing_run_id(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _should_persist_last_builder_artifact(payload: dict[str, Any]) -> bool:
     artifact_path = payload.get("artifact_path")
+    artifact_url = payload.get("artifact_url")
     return (
         str(payload.get("status") or "").lower() in _SUCCESSFUL_BUILDER_STATUSES
-        and isinstance(artifact_path, str)
-        and bool(artifact_path.strip())
+        and (
+            (isinstance(artifact_path, str) and bool(artifact_path.strip()))
+            or (isinstance(artifact_url, str) and bool(artifact_url.strip()))
+        )
     )
 
 
@@ -263,8 +295,41 @@ class BuilderCompletionEvent(BaseModel):
     artifact_ext: str | None = None
     artifact_is_fallback: bool | None = None
     fallback_reason: str | None = None
+    format_conflict_resolved: str | None = Field(
+        None,
+        description="Correction wave 2026-06-12: 'user_intent' when the "
+        "emit-time guard honored the user's explicit current-turn format "
+        "over a misderived dispatch target.",
+    )
+    format_conflict_original_target_ext: str | None = None
     image_generation_status: str | None = None
     image_generation_reason: str | None = None
+    image_generation_outcome: dict[str, Any] | None = Field(
+        None,
+        description="VQ-3 harness-stamped enrichment outcome: "
+        "{attempted: int, succeeded: int, skip_reason?: str}.",
+    )
+    iterations_used: int | None = None
+    unmet_conditions: list[str] | None = None
+    brief_assumptions: list[str] | None = Field(
+        None,
+        description="Spec D D-5: assumptions the builder stated for brief "
+        "fields not present in the parent conversation — relayed by the "
+        "companion, never presented as something the user said.",
+    )
+    artifact_preview_filename: str | None = Field(
+        None,
+        description="Canvas preview sibling (e.g. <deck>.preview.pdf rendered "
+        "from a .pptx) so the webapp can render binary formats through the "
+        "PDF canvas.",
+    )
+    quality_warning: str | None = Field(
+        None,
+        description="Honest quality note on a delivered primary (e.g. "
+        "visuals_not_embedded) — never a fallback flag.",
+    )
+    visuals_missing: bool | None = None
+    budget_stop_reason: str | None = None
     source_artifact_path: str | None = None
     revision_of_artifact_path: str | None = None
     summary: str | None = None

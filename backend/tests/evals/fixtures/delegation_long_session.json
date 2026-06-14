@@ -1,0 +1,337 @@
+{
+  "description": "Spec D G-DEL shared fixture: 40-turn session. Seeded requirements: audience@t3, style@t12, data@t18, exclusion@t25, include@t31, dispatch@t40. Forced compaction at turn 30 in tests.",
+  "seeded": {
+    "audience_turn": 3,
+    "style_turn": 12,
+    "data_turn": 18,
+    "exclusion_turn": 25
+  },
+  "turns": [
+    {
+      "turn_number": 1,
+      "user_text": "Hey. Rough week, want to think out loud about the launch.",
+      "artifact": {
+        "session_goal": "decompress after the launch planning week",
+        "tone_estimate": 1.8
+      }
+    },
+    {
+      "turn_number": 2,
+      "user_text": "I keep circling on whether to push the launch.",
+      "artifact": {
+        "session_goal": "decompress after the launch planning week",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 3,
+      "user_text": "The audience is our enterprise customers' CTOs — keep it technical, they hate fluff.",
+      "artifact": {
+        "session_goal": "decompress after the launch planning week",
+        "takeaway": "Audience: enterprise CTOs, technical depth expected",
+        "tone_estimate": 2.0
+      }
+    },
+    {
+      "turn_number": 4,
+      "user_text": "Feeling a bit better about it now.",
+      "artifact": {
+        "session_goal": "decompress after the launch planning week",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 5,
+      "user_text": "Maybe. Let me think about that.",
+      "artifact": {
+        "session_goal": "decompress after the launch planning week",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 6,
+      "user_text": "Ha, true. Okay.",
+      "artifact": {
+        "session_goal": "decompress after the launch planning week",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 7,
+      "user_text": "That's fair, I hadn't seen it that way.",
+      "artifact": {
+        "session_goal": "decompress after the launch planning week",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 8,
+      "user_text": "Work stuff mostly. The migration is dragging.",
+      "artifact": {
+        "session_goal": "decompress after the launch planning week",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 9,
+      "user_text": "Not really, just tired.",
+      "artifact": {
+        "session_goal": "decompress after the launch planning week",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 10,
+      "user_text": "Long day honestly, the standup ran over again.",
+      "artifact": {
+        "session_goal": "decompress after the launch planning week",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 11,
+      "user_text": "Yeah that helped, thanks.",
+      "artifact": {
+        "session_goal": "decompress after the launch planning week",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 12,
+      "user_text": "For the visuals I want a hand-drawn style, never corporate stock imagery.",
+      "artifact": {
+        "session_goal": "decompress after the launch planning week",
+        "takeaway": "Style constraint: hand-drawn, never corporate stock",
+        "tone_estimate": 2.4
+      }
+    },
+    {
+      "turn_number": 13,
+      "user_text": "He said he'd review it but never did.",
+      "artifact": {
+        "session_goal": "decompress after the launch planning week",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 14,
+      "user_text": "Feeling a bit better about it now.",
+      "artifact": {
+        "session_goal": "decompress after the launch planning week",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 15,
+      "user_text": "Maybe. Let me think about that.",
+      "artifact": {
+        "session_goal": "decompress after the launch planning week",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 16,
+      "user_text": "Ha, true. Okay.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 17,
+      "user_text": "That's fair, I hadn't seen it that way.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 18,
+      "user_text": "When we get to the numbers, use the Q3 numbers: 4.2M revenue, 38% margin.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "takeaway": "Data: Q3 — 4.2M revenue, 38% margin",
+        "tone_estimate": 2.6
+      }
+    },
+    {
+      "turn_number": 19,
+      "user_text": "Not really, just tired.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 20,
+      "user_text": "Long day honestly, the standup ran over again.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 21,
+      "user_text": "Yeah that helped, thanks.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 22,
+      "user_text": "I keep circling on whether to push the launch.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 23,
+      "user_text": "He said he'd review it but never did.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 24,
+      "user_text": "Feeling a bit better about it now.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 25,
+      "user_text": "One more thing — exclude pricing slides entirely, legal hasn't signed off.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "takeaway": "Exclusion: no pricing slides (legal)",
+        "tone_estimate": 2.5
+      }
+    },
+    {
+      "turn_number": 26,
+      "user_text": "Ha, true. Okay.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 27,
+      "user_text": "That's fair, I hadn't seen it that way.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 28,
+      "user_text": "Work stuff mostly. The migration is dragging.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 29,
+      "user_text": "Not really, just tired.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 30,
+      "user_text": "Long day honestly, the standup ran over again.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 31,
+      "user_text": "We should include a section on the migration timeline too.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "takeaway": "Include migration timeline section",
+        "tone_estimate": 2.7
+      }
+    },
+    {
+      "turn_number": 32,
+      "user_text": "I keep circling on whether to push the launch.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 33,
+      "user_text": "He said he'd review it but never did.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 34,
+      "user_text": "Feeling a bit better about it now.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 35,
+      "user_text": "Maybe. Let me think about that.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 36,
+      "user_text": "Ha, true. Okay.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 37,
+      "user_text": "That's fair, I hadn't seen it that way.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 38,
+      "user_text": "Work stuff mostly. The migration is dragging.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 39,
+      "user_text": "Not really, just tired.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "tone_estimate": 2.2
+      }
+    },
+    {
+      "turn_number": 40,
+      "user_text": "Okay, build the deck now — 10 slides like we discussed.",
+      "artifact": {
+        "session_goal": "turn the launch narrative into an investor-ready deck",
+        "takeaway": "Dispatch: 10-slide deck",
+        "tone_estimate": 3.0
+      }
+    }
+  ]
+}

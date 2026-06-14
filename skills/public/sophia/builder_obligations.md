@@ -85,7 +85,24 @@ new URL, named project, paper, framework, company, market, factual topic, or
 source requirement, search or fetch that new material before editing the
 deliverable.
 
-## Fallback Truth
+## Deliverable Truth — No Silent Format Swaps
+
+- A delivered artifact in the requested format is NEVER a fallback. Do not set
+  `artifact_is_fallback=true` on a format-matched deliverable — the harness
+  clears the flag automatically. Quality gaps on a delivered primary (for
+  example missing visuals) surface as `quality_warning`, not as fallback
+  metadata.
+- Format-swapped fallbacks for PDF and PPTX requests are allowed only after
+  the primary workflow was attempted and no valid requested-format artifact is
+  available. They must be explicit: set `requested_artifact_ext`,
+  `artifact_ext`, `artifact_is_fallback=true`, and a safe `fallback_reason`.
+  If no usable fallback exists, emit with `artifact_path=null` and an honest
+  `companion_summary` explaining exactly what failed. Never silently present
+  HTML/Markdown as a completed PDF or slide deck.
+- If a required capability is missing, stop cleanly. Do not loop on the same
+  failing command. Emit `artifact_path=null` with a clear safe reason instead.
+
+## Visual Strategy
 
 - When the user requests charts, diagrams, visuals, or visual explanations, a
   successful artifact must contain verified visual evidence: inline SVG,
@@ -93,24 +110,21 @@ deliverable.
   `/mnt/user-data/outputs/visuals/`. Prose descriptions do not satisfy the
   visual requirement. Remote chart URLs also do not count as completed local
   visuals.
+- The harness validates visual evidence with at most one bounded repair turn;
+  it should prevent false visual success, not author the creative solution.
+- Choose the right visual path: use `generate_visual_asset` for numeric/data
+  charts and compact matrices with explicit labeled data; never invent
+  placeholder labels or fake values. Use `generate_excalidraw_diagram` with raw
+  Mermaid for
+  architecture diagrams, process flows, timelines, concept maps, system maps,
+  cycles, comparisons, and sequences; use the image-generation skill for
+  illustrative content such as hero images, section covers, or conceptual
+  scenes. Image-generation failure must never stall the deliverable — continue
+  with charts, Excalidraw diagrams, and text.
 - For PDF and PPTX, support visuals must be embedded into the final PDF/deck.
   Generated assets under `/mnt/user-data/outputs/visuals/` are support files,
   not deliverables. Use PNG assets in PDF sources and PPTX plans; keep SVG for
   HTML/inline web output.
-- A fallback can be a successful user-facing artifact only when a usable file
-  exists and fallback metadata is explicit.
-- For requested slide decks, normal success requires a structurally valid
-  `.pptx`. HTML or Markdown may be emitted only as degraded fallback with
-  `requested_artifact_ext="pptx"`, `artifact_is_fallback=true`, and a safe
-  `fallback_reason`. If a valid `.pptx` exists, it wins over any fallback.
-- For requested PDFs, normal success requires a real `.pdf`. Markdown or HTML
-  fallback is allowed only when rendering failed, was unavailable, or produced
-  an unusable PDF after the bounded repair. PDF fallback must use
-  `requested_artifact_ext="pdf"`, `artifact_is_fallback=true`, and a safe
-  `fallback_reason`. If a valid `.pdf` exists, it wins over any fallback.
-- If a required capability is missing, stop cleanly. Do not loop on the same
-  failing command. Emit the best verified fallback if one exists; otherwise
-  surface a failed terminal artifact with a clear safe reason.
 
 ## Turn Budget
 

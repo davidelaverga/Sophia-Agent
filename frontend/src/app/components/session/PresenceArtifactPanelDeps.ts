@@ -20,9 +20,16 @@ export {
   type ArtifactReviewVoiceCommandRouteResult,
   type ArtifactReviewVoiceCommandRouter,
 } from "../../lib/artifact-review-voice-commands"
-export { getBuilderArtifactFiles, normalizeBuilderArtifactPath } from "../../lib/builder-artifacts"
+export {
+  getBuilderArtifactFiles,
+  isHtmlArtifactFile,
+  normalizeBuilderArtifactPath,
+  resolveCanvasRenderFile,
+} from "../../lib/builder-artifacts"
+export { requestCoreviewHtmlQuickPatch } from "../../lib/coreview-html-quick-edit"
 export * from "./PresenceArtifactPanelCoreviewDeps"
 export { recordSophiaCaptureEvent } from "../../lib/session-capture"
 export { cn } from "../../lib/utils"
 export { isRealReflection } from "../../session/artifacts"
 export { usePresenceStore } from "../../stores/presence-store"
+export type { ArtifactVisualCaptureStatus } from "./ArtifactCanvasShared"
