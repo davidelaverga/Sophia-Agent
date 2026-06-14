@@ -127,6 +127,18 @@ function hasRenderCallForCanvas(
   })
 }
 
+async function waitForRenderedPdfPage(pageNumber = 1) {
+  const canvas = await screen.findByLabelText(`PDF page ${pageNumber}`)
+  await waitFor(() => {
+    expect(canvas).toHaveAttribute("data-artifact-page-number", String(pageNumber))
+    expect(canvas.getAttribute("data-artifact-pdf-scale")).toBeTruthy()
+    const frame = screen.getByTestId("artifact-pdf-page-frame")
+    expect(frame.classList.contains("hidden")).toBe(false)
+    expect(frame.classList.contains("opacity-35")).toBe(false)
+  })
+  return canvas
+}
+
 function mockPdfDocument({
   pageCount = 3,
   renderTaskForPage = () => immediateRenderTask(),
@@ -613,7 +625,7 @@ describe("ArtifactPdfPreview", () => {
     mockPdfDocument({ pageCount: 2 })
     renderAnnotationPreview({ initialToolMode: "highlight" })
 
-    expect(await screen.findByLabelText("PDF page 1")).toBeInTheDocument()
+    await waitForRenderedPdfPage(1)
     const layer = screen.getByTestId("artifact-pdf-annotation-layer")
     mockAnnotationLayerBounds(layer)
 
@@ -636,7 +648,7 @@ describe("ArtifactPdfPreview", () => {
     mockPdfDocument({ pageCount: 2 })
     renderAnnotationPreview({ initialToolMode: "underline" })
 
-    expect(await screen.findByLabelText("PDF page 1")).toBeInTheDocument()
+    await waitForRenderedPdfPage(1)
     const layer = screen.getByTestId("artifact-pdf-annotation-layer")
     mockAnnotationLayerBounds(layer)
 
@@ -661,7 +673,7 @@ describe("ArtifactPdfPreview", () => {
     mockPdfDocument({ pageCount: 2 })
     renderAnnotationPreview({ initialToolMode: "arrow" })
 
-    expect(await screen.findByLabelText("PDF page 1")).toBeInTheDocument()
+    await waitForRenderedPdfPage(1)
     const layer = screen.getByTestId("artifact-pdf-annotation-layer")
     mockAnnotationLayerBounds(layer)
 
