@@ -122,6 +122,13 @@ function slideVisualPath(slideInfo, planFile, outputFile) {
   );
 }
 
+function normalizeLayout(value) {
+  return asString(value, "")
+    .toLowerCase()
+    .replaceAll("-", "_")
+    .replace(/\s+/g, "_");
+}
+
 function addFooter(slide, theme, index, total) {
   slide.addShape(SHAPE.line, {
     x: 0.6,
@@ -212,11 +219,39 @@ function addVisual(slide, visualPath, box) {
 }
 
 function slideBullets(slideInfo) {
-  return listFrom(slideInfo.key_points).concat(listFrom(slideInfo.bullets), listFrom(slideInfo.points)).slice(0, 7);
+  const directBullets = listFrom(slideInfo.key_points).concat(listFrom(slideInfo.bullets), listFrom(slideInfo.points));
+  if (directBullets.length) {
+    return directBullets.slice(0, 7);
+  }
+  return slideColumns(slideInfo)
+    .flatMap((column) => {
+      const heading = columnHeading(column);
+      return heading ? [heading, ...columnPoints(column)] : columnPoints(column);
+    })
+    .slice(0, 7);
 }
 
 function slideType(slideInfo) {
-  return asString(slideInfo.type, "content").toLowerCase().replaceAll("-", "_");
+  return normalizeLayout(slideInfo.layout) || normalizeLayout(slideInfo.type) || "content";
+}
+
+function slideColumns(slideInfo) {
+  if (!Array.isArray(slideInfo.columns)) {
+    return [];
+  }
+  return slideInfo.columns.filter((column) => column && typeof column === "object").slice(0, 2);
+}
+
+function columnHeading(column) {
+  return asString(column.heading || column.title || column.label, "");
+}
+
+function columnPoints(column) {
+  return listFrom(column.points).concat(listFrom(column.key_points), listFrom(column.bullets)).slice(0, 6);
+}
+
+function isTwoColumnType(type) {
+  return ["two_column", "two_columns", "2_column", "2_columns", "comparison", "matrix"].includes(type);
 }
 
 function renderTitleSlide(pptx, slideInfo, plan, theme, visualPath) {
@@ -287,8 +322,17 @@ function renderComparisonSlide(pptx, slideInfo, theme, visualPath) {
   const slide = pptx.addSlide();
   slide.background = { color: theme.background };
   addTitle(slide, asString(slideInfo.title, "Comparison"), theme);
+  const explicitColumns = slideColumns(slideInfo);
   const items = slideBullets(slideInfo);
-  const columns = [items.filter((_, i) => i % 2 === 0), items.filter((_, i) => i % 2 === 1)];
+  const columns = explicitColumns.length
+    ? [
+        { heading: columnHeading(explicitColumns[0]), points: columnPoints(explicitColumns[0]) },
+        { heading: columnHeading(explicitColumns[1] || {}), points: columnPoints(explicitColumns[1] || {}) },
+      ]
+    : [
+        { heading: "", points: items.filter((_, i) => i % 2 === 0) },
+        { heading: "", points: items.filter((_, i) => i % 2 === 1) },
+      ];
   [0, 1].forEach((columnIndex) => {
     const x = 0.82 + columnIndex * 6.1;
     slide.addShape(SHAPE.roundRect, {
@@ -300,7 +344,28 @@ function renderComparisonSlide(pptx, slideInfo, theme, visualPath) {
       fill: { color: theme.card },
       line: { color: theme.border, transparency: 15 },
     });
-    addBullets(slide, columns[columnIndex], theme, { x: x + 0.32, y: 2.0, w: 4.9, h: 3.7, fontSize: 13 });
+    const heading = columns[columnIndex].heading;
+    if (heading) {
+      slide.addText(heading, {
+        x: x + 0.34,
+        y: 1.86,
+        w: 4.9,
+        h: 0.34,
+        fontFace: "Aptos Display",
+        fontSize: 15,
+        bold: true,
+        color: theme.title,
+        fit: "shrink",
+        margin: 0,
+      });
+    }
+    addBullets(slide, columns[columnIndex].points, theme, {
+      x: x + 0.32,
+      y: heading ? 2.34 : 2.0,
+      w: 4.9,
+      h: heading ? 3.35 : 3.7,
+      fontSize: 13,
+    });
   });
   if (visualPath) addVisual(slide, visualPath, { x: 5.85, y: 5.65, w: 1.65, h: 0.78 });
   return slide;
@@ -343,7 +408,7 @@ async function compilePptx(args) {
     const type = slideType(slideInfo);
     const slide = type === "title"
       ? renderTitleSlide(pptx, slideInfo, plan, theme, visualPath)
-      : type === "comparison" || type === "matrix"
+      : isTwoColumnType(type)
         ? renderComparisonSlide(pptx, slideInfo, theme, visualPath)
         : renderContentSlide(pptx, slideInfo, theme, visualPath);
     addFooter(slide, theme, index, slidesInfo.length);

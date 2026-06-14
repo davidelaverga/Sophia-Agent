@@ -22,6 +22,7 @@ from pptx.util import Inches, Pt
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPT_PATH = _REPO_ROOT / "skills" / "public" / "ppt-generation" / "scripts" / "generate.py"
+_JS_COMPILER_PATH = _REPO_ROOT / "backend" / "packages" / "harness" / "deerflow" / "sophia" / "js" / "compile_pptx.mjs"
 
 _REQUIRED_OFFICE_ENTRIES = {"[Content_Types].xml", "_rels/.rels", "ppt/presentation.xml"}
 _ALL_LAYOUTS = {
@@ -226,6 +227,14 @@ class TestGeneratePptLayouts:
             # 3 picture shapes, but python-pptx dedupes identical image bytes into one
             # media part (title + full_bleed share the same cover JPEG payload).
             assert sum(1 for name in names if name.startswith("ppt/media/")) >= 2
+
+    def test_js_compiler_honors_skill_native_layout_and_columns(self) -> None:
+        source = _JS_COMPILER_PATH.read_text(encoding="utf-8")
+
+        assert "normalizeLayout(slideInfo.layout)" in source
+        assert "slideInfo.columns" in source
+        assert "function columnPoints" in source
+        assert "isTwoColumnType(type)" in source
 
     def test_missing_full_bleed_image_degrades_without_exception(self, tmp_path: Path, capsys) -> None:
         plan = {
