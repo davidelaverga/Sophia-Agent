@@ -155,11 +155,11 @@ vec3 renderSky(vec2 uv, vec2 p) {
   mwCol = mix(mwCol, corePink, coreBlend * pinkN * 0.28);
 
   float coreBreath = 0.88 + 0.12 * sin(t * 0.045);
-  sky += mwCol * nebula * bandMask * 0.50;
-  sky += coreHot * coreMask * nebula * 0.12 * coreBreath;
+  sky += mwCol * nebula * bandMask * 0.64;
+  sky += coreHot * coreMask * nebula * 0.13 * coreBreath;
 
   float haloMask = smoothstep(bandHW * 4.0, bandHW * 0.6, mwDist) * aboveHorizon;
-  sky += vec3(0.022, 0.018, 0.042) * haloMask * (0.32 + cL * 0.38);
+  sky += vec3(0.028, 0.023, 0.052) * haloMask * (0.42 + cL * 0.46);
 
   float agZone = smoothstep(horizonY + 0.28, horizonY + 0.02, q.y) * smoothstep(-0.7, 0.25, q.x);
   float agN = authFbm4(vec2(q.x * 2.0 + t * 0.01, q.y * 4.0 + 3.0));
@@ -231,6 +231,9 @@ vec3 renderSky(vec2 uv, vec2 p) {
     sky += (core + glow + sH + sV) * sc * twk * aboveHorizon;
   }
 
+  vec3 passingComets = renderComets(uv, 1.08);
+  sky += passingComets * aboveHorizon;
+
   float mistY = smoothstep(horizonY + 0.12, horizonY - 0.02, q.y);
   float mistN1 = authFbm4(vec2(q.x * 2.0 + t * 0.012, q.y * 6.0 + 1.0));
   float mistN2 = authFbm4(vec2(q.x * 3.5 - t * 0.008 + 5.0, q.y * 8.0 + 3.0));
@@ -243,10 +246,46 @@ vec3 renderSky(vec2 uv, vec2 p) {
   sky *= smoothstep(-0.10, 0.55, vig);
 
   float peak = max(max(sky.r, sky.g), sky.b);
-  vec3 compressedSky = sky / (1.0 + peak * 0.92);
-  sky = mix(sky, compressedSky, smoothstep(0.34, 1.08, peak));
+  vec3 compressedSky = sky / (1.0 + peak * 0.70);
+  sky = mix(sky, compressedSky, smoothstep(0.42, 1.30, peak));
 
-  return sky * 0.92;
+  return sky * 1.10;
+}
+`;
+
+const REFINED_COMETS = `
+float cometShape(vec2 uv, vec2 head, vec2 dir, float lengthScale, float widthScale, float phase) {
+  dir = normalize(dir);
+  vec2 n = vec2(-dir.y, dir.x);
+  vec2 q = uv - head;
+  float along = dot(q, dir);
+  float acrossSigned = dot(q, n);
+  float across = abs(acrossSigned);
+  float trail = clamp(-along / lengthScale, 0.0, 1.0);
+  float gate = smoothstep(0.0, 0.014, -along) * (1.0 - smoothstep(lengthScale * 0.70, lengthScale, -along));
+  float air = fbm(vec2(trail * 12.0 + phase * 2.1 - u_time * 0.055, across * 66.0 + phase * 1.3));
+  float ribbonWave = sin(trail * 38.0 + phase * 7.2 + air * 2.8) * 0.5 + 0.5;
+  float tailWidth = widthScale * (0.52 + trail * 5.4) * (0.82 + air * 0.28);
+  float body = exp(-pow(across / max(tailWidth, 0.0007), 1.78)) * exp(-trail * 2.72) * gate;
+  float inner = exp(-pow(across / max(widthScale * (0.62 + trail * 1.55), 0.0007), 2.28)) * exp(-trail * 4.10) * gate;
+  float ribbonOffset = (ribbonWave - 0.5) * tailWidth * 0.62;
+  float ribbon = exp(-pow(abs(acrossSigned - ribbonOffset) / max(tailWidth * 0.28, 0.0006), 2.0)) * exp(-trail * 3.35) * gate;
+  float headCore = exp(-dot(q / vec2(widthScale * 1.12, widthScale * 0.86), q / vec2(widthScale * 1.12, widthScale * 0.86)) * 24.0);
+  float coma = exp(-dot(q / vec2(widthScale * 5.6, widthScale * 3.4), q / vec2(widthScale * 5.6, widthScale * 3.4)) * 4.2);
+  float bow = exp(-pow(length((q + dir * widthScale * 0.95) / vec2(widthScale * 4.8, widthScale * 1.7)), 1.32) * 4.4);
+  float ember = smoothstep(0.991, 1.0, noise(vec2(uv.x * 520.0 + phase * 19.0 - u_time * 0.42, uv.y * 300.0 + trail * 23.0))) * body * (1.0 - trail * 0.55);
+  return body * 0.46 + inner * 0.48 + ribbon * 0.26 + headCore * 2.12 + coma * 0.36 + bow * 0.16 + ember * 0.12;
+}
+
+vec3 renderComets(vec2 uv, float intensity) {
+  float pass = fract(u_time * 0.020 + 0.18);
+  vec2 head = vec2(-0.26 + pass * 1.56, 0.83 - pass * 0.25 + sin(pass * 6.283) * 0.010);
+  vec2 dir = normalize(vec2(1.0, -0.17));
+  float fade = smoothstep(0.11, 0.22, pass) * (1.0 - smoothstep(0.58, 0.74, pass));
+  vec3 tint = mix(vec3(0.55, 0.85, 0.94), vec3(0.88, 0.82, 1.0), 0.64);
+  vec3 comet = tint * cometShape(uv, head, dir, 0.56, 0.0056, pass) * fade;
+
+  return comet * intensity;
 }
 `;
 
@@ -268,7 +307,12 @@ function replaceShaderSection(source: string, startMarker: string, endMarker: st
 }
 
 const SCENE_PUNCH = replaceShaderSection(
-  insertShaderSection(SCENE, 'float sdCapsule', LOGIN_SKY_UTILS),
+  replaceShaderSection(
+    insertShaderSection(SCENE, 'float sdCapsule', LOGIN_SKY_UTILS),
+    'float cometShape(vec2 uv, vec2 head, vec2 dir, float lengthScale, float widthScale, float phase) {',
+    'vec2 telescopeBase',
+    REFINED_COMETS,
+  ),
   'vec3 renderSky(vec2 uv, vec2 p) {',
   'void drawVolumetrics',
   LOGIN_STYLE_SKY,
@@ -301,6 +345,102 @@ const SCENE_PUNCH = replaceShaderSection(
   col -= vec3(0.012, 0.011, 0.018) * weathering * 0.055;
   col += vec3(0.95, 0.72, 0.42) * serviceLight * 0.16;
   col += mix(u_accent, vec3(0.86, 0.90, 1.0), 0.40) * domeSheen * 0.044;`,
+  )
+  .replace(
+    `float longWave = sin(x * 2.3 + u_time * 0.09) * 0.010;
+  float crossWave = sin(x * 7.2 - u_time * 0.16) * 0.004;
+  return -0.745 + longWave + crossWave + fbm(vec2(x * 1.8 + 12.0, u_time * 0.018)) * 0.010;`,
+    `float longWave = sin(x * 2.3 + u_time * 0.09) * 0.014;
+  float crossWave = sin(x * 7.2 - u_time * 0.16) * 0.006;
+  return -0.660 + longWave + crossWave + fbm(vec2(x * 1.8 + 12.0, u_time * 0.018)) * 0.013;`,
+  )
+  .replace(
+    `float waterBody = 1.0 - smoothstep(water - 0.010, water + 0.024, p.y);
+  float openWater = waterBody * (1.0 - islandSolid * 0.98);
+  float depthFade = clamp((water - p.y) / 0.42, 0.0, 1.0);
+  float edgeFade = 1.0 - smoothstep(1.26, 1.62, abs(p.x));
+  float perspective = clamp((water - p.y) / 0.42, 0.0, 1.0);
+  vec2 rippleUv = vec2(p.x * 6.2 + u_time * 0.080, p.y * 30.0 - u_time * 0.135);
+  float ripple = fbm(rippleUv);
+  float longRipple = fbm(vec2(p.x * 2.0 - u_time * 0.030, p.y * 8.0 + 7.0));
+  float microRipple = noise(vec2(p.x * 84.0 + u_time * 0.42, p.y * 160.0 + longRipple * 3.4));`,
+    `float waterBody = 1.0 - smoothstep(water - 0.014, water + 0.034, p.y);
+  float openWater = waterBody * (1.0 - islandSolid * 0.98);
+  float depthFade = clamp((water - p.y) / 0.50, 0.0, 1.0);
+  float edgeFade = 1.0 - smoothstep(1.28, 1.68, abs(p.x));
+  float perspective = clamp((water - p.y) / 0.50, 0.0, 1.0);
+  vec2 rippleUv = vec2(p.x * 5.2 + u_time * 0.075, p.y * 24.0 - u_time * 0.125);
+  float ripple = fbm(rippleUv);
+  float longRipple = fbm(vec2(p.x * 1.6 - u_time * 0.028, p.y * 6.5 + 7.0));
+  float crossCurrent = fbm(vec2(p.x * 4.6 + u_time * 0.052, p.y * 15.0 - u_time * 0.090));
+  float microRipple = noise(vec2(p.x * 74.0 + u_time * 0.34, p.y * 138.0 + longRipple * 3.4 + crossCurrent));`,
+  )
+  .replace(
+    `vec2 reflectedUv = vec2(
+    uv.x + (ripple - 0.5) * 0.052 + (microRipple - 0.5) * 0.007,
+    0.48 + perspective * 0.64 + (ripple - 0.5) * 0.040
+  );`,
+    `vec2 reflectedUv = vec2(
+    uv.x + (ripple - 0.5) * 0.070 + (microRipple - 0.5) * 0.010 + (crossCurrent - 0.5) * 0.018,
+    0.38 + pow(perspective, 0.82) * 0.70 + (ripple - 0.5) * 0.052
+  );`,
+  )
+  .replace(
+    `float mirrorBand = smoothstep(0.12, 0.82, skyReflection.b + skyReflection.r * 0.62);
+  float waterSheen = openWater * edgeFade * (0.62 + depthFade * 0.48);
+  float waterline = exp(-pow((p.y - water) * 90.0, 2.0)) * edgeFade;
+  vec3 waterBase = vec3(0.0016, 0.0040, 0.0135);
+  waterBase += vec3(0.004, 0.018, 0.026) * longRipple * 0.34;
+  waterBase += vec3(0.020, 0.015, 0.037) * smoothstep(0.30, 0.95, ripple) * 0.12;
+  col = mix(col, waterBase, waterSheen * 0.92);`,
+    `float skyEnergy = max(max(skyReflection.r, skyReflection.g), skyReflection.b);
+  float mirrorBand = smoothstep(0.055, 0.34, skyEnergy);
+  float waterSheen = openWater * edgeFade * (0.92 + depthFade * 0.74);
+  float waterline = exp(-pow((p.y - water) * 70.0, 2.0)) * edgeFade;
+  float horizonMirror = exp(-pow((p.y - water + 0.046) * 11.0, 2.0)) * edgeFade;
+  vec3 waterBase = vec3(0.0026, 0.0100, 0.0260);
+  waterBase += vec3(0.010, 0.036, 0.054) * longRipple * 0.50;
+  waterBase += vec3(0.045, 0.032, 0.074) * smoothstep(0.20, 0.94, ripple) * 0.23;
+  waterBase += vec3(0.018, 0.040, 0.062) * crossCurrent * 0.23;
+  col = mix(col, waterBase, clamp(waterSheen, 0.0, 1.0));
+  col += skyReflection * horizonMirror * openWater * (0.30 + mirrorBand * 0.34);`,
+  )
+  .replace(
+    `float shimmer = smoothstep(0.58, 0.99, noise(vec2(p.x * 128.0 - u_time * 1.05, p.y * 32.0 + ripple * 3.4)));
+  float waveLines = exp(-abs(fract((water - p.y) * 46.0 + ripple * 1.8 - u_time * 0.42) - 0.5) * 18.0);
+  float waveGrid = smoothstep(0.88, 1.0, noise(vec2(p.x * 48.0 + u_time * 0.22, p.y * 92.0 - u_time * 0.52)));`,
+    `float shimmer = smoothstep(0.52, 0.98, noise(vec2(p.x * 128.0 - u_time * 1.05, p.y * 32.0 + ripple * 3.4)));
+  float waveLines = exp(-abs(fract((water - p.y) * 42.0 + ripple * 1.8 + crossCurrent * 0.7 - u_time * 0.42) - 0.5) * 14.0);
+  float mirrorLines = exp(-abs(fract((water - p.y) * 31.0 + longRipple * 2.2 - u_time * 0.20) - 0.5) * 10.0);
+  float waveGrid = smoothstep(0.84, 1.0, noise(vec2(p.x * 48.0 + u_time * 0.22, p.y * 92.0 - u_time * 0.52)));`,
+  )
+  .replace(
+    `float cometEnergy = max(max(cometReflection.r, cometReflection.g), cometReflection.b);
+
+  col += skyReflection * waterSheen * (0.125 + mirrorBand * 0.215);
+  col += cometReflection * waterSheen * (0.210 + shimmer * 0.090 + waveLines * 0.038);
+  col += vec3(0.83, 0.77, 1.0) * waterline * waterSheen * 0.132;
+  col += mix(vec3(0.35, 0.75, 0.68), vec3(0.83, 0.77, 1.0), 0.38) * caustic * (0.180 + cometEnergy * 0.18);
+  col += u_accent * waterSheen * (beamReflection * (0.135 + shimmer * 0.105) + pool * 0.145 + domeColumn * (0.090 + domeBroken * 0.055));
+  col += mix(u_accent, vec3(0.72, 0.84, 1.0), 0.40) * waterSheen * waveLines * (0.024 + pool * 0.044 + beamReflection * 0.060);`,
+    `float cometEnergy = max(max(cometReflection.r, cometReflection.g), cometReflection.b);
+  float galaxyWake = mirrorBand * waterSheen * smoothstep(0.08, 0.88, perspective);
+  float reflectedDust = smoothstep(0.18, 0.72, fbm(vec2(reflectedUv.x * 9.0 + u_time * 0.010, reflectedUv.y * 5.5)));
+  float starGlints = smoothstep(0.975, 1.0, noise(vec2(p.x * 220.0 + u_time * 0.30, p.y * 118.0 + ripple * 8.0))) * galaxyWake;
+  vec3 milkyMirror = mix(vec3(0.26, 0.38, 0.58), vec3(0.72, 0.52, 0.86), smoothstep(0.08, 0.55, skyReflection.r + skyReflection.b));
+
+  col += skyReflection * waterSheen * (0.340 + mirrorBand * 0.520);
+  col += milkyMirror * galaxyWake * mirrorLines * (0.095 + reflectedDust * 0.145);
+  col += cometReflection * waterSheen * (0.260 + shimmer * 0.105 + waveLines * 0.070 + mirrorLines * 0.044);
+  col += vec3(0.83, 0.77, 1.0) * waterline * waterSheen * 0.230;
+  col += mix(vec3(0.35, 0.75, 0.68), vec3(0.83, 0.77, 1.0), 0.38) * caustic * (0.310 + cometEnergy * 0.18 + mirrorBand * 0.18);
+  col += u_accent * waterSheen * (beamReflection * (0.170 + shimmer * 0.150) + pool * 0.195 + domeColumn * (0.130 + domeBroken * 0.090));
+  col += mix(u_accent, vec3(0.72, 0.84, 1.0), 0.40) * waterSheen * waveLines * (0.052 + pool * 0.066 + beamReflection * 0.092);
+  col += mix(vec3(0.82, 0.86, 1.0), milkyMirror, 0.46) * starGlints * (0.086 + mirrorLines * 0.084);`,
+  )
+  .replace(
+    `vec3 cometReflection = renderComets(reflectedUv + vec2((microRipple - 0.5) * 0.009, (ripple - 0.5) * 0.016), 0.90);`,
+    `vec3 cometReflection = renderComets(reflectedUv + vec2((microRipple - 0.5) * 0.012, (ripple - 0.5) * 0.020), 0.95);`,
   );
 
 const BRIGHT = "#version 300 es\nprecision highp float;\nin vec2 v_uv;\nout vec4 fragColor;\nuniform sampler2D u_tex;\nvoid main() {\n  vec3 c = texture(u_tex, v_uv).rgb;\n  float l = max(max(c.r, c.g), c.b);\n  float m = smoothstep(0.12, 0.58, l);\n  fragColor = vec4(c * m, 1.0);\n}";
@@ -331,12 +471,12 @@ const COMP_PUNCH = COMP
     `vec3 hdr = scene + bloom * 1.66;
   vec3 mapped = vec3(1.0) - exp(-hdr * 1.48);
   mapped = pow(mapped, vec3(0.92));`,
-    `vec3 hdr = scene + bloom * 0.72;
-  vec3 mapped = vec3(1.0) - exp(-hdr * 1.06);
-  mapped = pow(mapped, vec3(1.04));
+    `vec3 hdr = scene + bloom * 0.74;
+  vec3 mapped = vec3(1.0) - exp(-hdr * 1.18);
+  mapped = pow(mapped, vec3(0.98));
   mapped = smoothstep(vec3(0.010), vec3(1.0), mapped);`,
   )
-  .replace('mapped *= mix(0.50, 1.05, vignette);', 'mapped *= mix(0.44, 1.01, vignette);');
+  .replace('mapped *= mix(0.50, 1.05, vignette);', 'mapped *= mix(0.58, 1.08, vignette);');
 
 export type ArtifactObservatoryRenderTarget = {
   x: number;

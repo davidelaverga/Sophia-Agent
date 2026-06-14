@@ -73,6 +73,7 @@
 .topRight,
 .artifactPlate,
 .focusRail,
+.controlDeck,
 .filterStrip,
 .artifactLayer,
 .toast {
@@ -84,7 +85,7 @@
   left: 34px;
   top: 28px;
   z-index: 18;
-  max-width: min(560px, calc(100vw - 420px));
+  max-width: min(500px, calc(100vw - 520px));
 }
 
 .kicker {
@@ -119,7 +120,7 @@
 }
 
 .subtitle {
-  width: min(460px, 82vw);
+  width: min(390px, 82vw);
   margin-top: 14px;
   color: rgba(214, 207, 230, 0.56);
   font-size: 13px;
@@ -177,18 +178,40 @@
     rgba(12, 9, 22, 0.74);
 }
 
-.filterStrip {
+.controlDeck {
   position: fixed;
-  left: 50%;
-  top: 128px;
+  left: 28px;
+  top: min(248px, 31vh);
   z-index: 18;
+  display: grid;
+  width: min(386px, calc(100vw - 72px));
+  justify-items: stretch;
+  gap: 8px;
+}
+
+.finderSurface {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid rgba(226, 214, 255, 0.060);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.020), rgba(255, 255, 255, 0.006)),
+    rgba(3, 3, 10, 0.28);
+  box-shadow:
+    0 18px 52px rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.030);
+  backdrop-filter: blur(18px) saturate(1.04);
+}
+
+.filterStrip {
   display: flex;
-  max-width: min(820px, calc(100vw - 64px));
+  max-width: 100%;
   align-items: center;
-  gap: 7px;
+  justify-content: flex-start;
+  gap: 5px;
   overflow-x: auto;
-  padding: 2px 2px 7px;
-  transform: translateX(-50%);
+  padding: 0 1px 1px;
   scrollbar-width: none;
 }
 
@@ -198,18 +221,27 @@
 
 .searchField {
   position: relative;
-  flex: 0 0 190px;
-  height: 36px;
-  border-radius: 999px;
+  display: flex;
+  width: 100%;
+  height: 38px;
+  align-items: center;
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at 18% 0%, color-mix(in srgb, var(--active-accent, var(--purple)) 8%, transparent), transparent 60%),
+    rgba(8, 7, 16, 0.46);
+  box-shadow:
+    inset 0 0 0 1px rgba(226, 214, 255, 0.085),
+    inset 0 1px 0 rgba(255, 255, 255, 0.045);
 }
 
 .searchField svg {
-  position: absolute;
-  left: 12px;
-  top: 50%;
+  position: relative;
+  left: auto;
+  top: auto;
   width: 13px;
   height: 13px;
-  transform: translateY(-50%);
+  margin-left: 13px;
+  transform: none;
   color: rgba(143, 135, 164, 0.72);
 }
 
@@ -220,7 +252,7 @@
   outline: 0;
   background: transparent;
   color: var(--text);
-  padding: 0 13px 0 34px;
+  padding: 0 13px 0 10px;
   font-size: 11px;
 }
 
@@ -230,13 +262,13 @@
 
 .filter {
   flex: 0 0 auto;
-  min-height: 31px;
+  min-height: 26px;
   border: 1px solid transparent;
   border-radius: 999px;
-  background: rgba(4, 4, 11, 0.22);
+  background: rgba(4, 4, 11, 0.18);
   color: rgba(214, 207, 230, 0.46);
-  padding: 0 14px;
-  font-size: 10px;
+  padding: 0 10px;
+  font-size: 9.5px;
   letter-spacing: 0.04em;
   backdrop-filter: blur(10px);
   transition: color 160ms ease, border-color 160ms ease, background 160ms ease;
@@ -251,6 +283,129 @@
     rgba(9, 8, 18, 0.58);
 }
 
+.filterConsole {
+  position: relative;
+  display: grid;
+  max-width: 100%;
+  gap: 8px;
+  overflow: hidden;
+  padding: 10px 10px 10px 42px;
+  border: 1px solid rgba(226, 214, 255, 0.080);
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at 8% 0%, color-mix(in srgb, var(--active-accent, var(--purple)) 9%, transparent), transparent 42%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0.010)),
+    rgba(3, 3, 10, 0.48);
+  box-shadow:
+    0 18px 54px rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.040);
+  backdrop-filter: blur(22px) saturate(1.10);
+}
+
+.consoleGlyph {
+  position: absolute;
+  left: 9px;
+  top: 10px;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 1px solid rgba(226, 214, 255, 0.11);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.030);
+  color: rgba(214, 207, 230, 0.58);
+}
+
+.consoleGlyph svg {
+  width: 12px;
+  height: 12px;
+}
+
+.consoleField {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+  padding: 0 9px;
+  border: 1px solid rgba(226, 214, 255, 0.075);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.020);
+  color: rgba(214, 207, 230, 0.72);
+}
+
+.consoleField span {
+  color: rgba(143, 135, 164, 0.82);
+  font-size: 8.5px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.consoleField select,
+.consoleField input {
+  min-width: 74px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: rgba(240, 236, 247, 0.88);
+  font-size: 10.5px;
+}
+
+.consoleField select {
+  cursor: pointer;
+}
+
+.consoleField input {
+  width: min(178px, 52vw);
+  text-align: right;
+}
+
+.consoleField input::placeholder {
+  color: rgba(143, 135, 164, 0.48);
+}
+
+.filterGroup {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.filterGroupLabel {
+  color: rgba(143, 135, 164, 0.78);
+  font-size: 8.5px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.filterGroupOptions {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.filterOption {
+  min-height: 24px;
+  border: 1px solid rgba(226, 214, 255, 0.065);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.018);
+  color: rgba(214, 207, 230, 0.48);
+  padding: 0 9px;
+  font-size: 9.5px;
+  line-height: 1;
+  transition: color 150ms ease, border-color 150ms ease, background 150ms ease, transform 150ms ease;
+}
+
+.filterOption:hover,
+.filterOptionActive {
+  color: rgba(240, 236, 247, 0.90);
+  border-color: color-mix(in srgb, var(--active-accent, var(--purple)) 28%, transparent);
+  background:
+    radial-gradient(circle at 50% 0%, color-mix(in srgb, var(--active-accent, var(--purple)) 15%, transparent), transparent 68%),
+    rgba(255, 255, 255, 0.035);
+}
+
 .artifactLayer {
   position: fixed;
   inset: 0;
@@ -261,15 +416,16 @@
   --accent: var(--purple);
   --glow: rgba(184, 164, 232, 0.74);
   position: absolute;
-  width: 30px;
-  height: 30px;
-  margin: -15px 0 0 -15px;
+  width: 44px;
+  height: 44px;
+  margin: -22px 0 0 -22px;
   border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
   border-radius: 50%;
   background:
     radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--accent) 72%, white 6%) 0 6%, transparent 7%),
     radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--accent) 18%, transparent) 0 24%, transparent 56%);
   color: inherit;
+  cursor: pointer;
   transform: translate3d(0, 0, 0);
   box-shadow:
     0 0 0 1px rgba(255, 255, 255, 0.020),
@@ -281,7 +437,7 @@
 .celestialArtifact::before {
   content: "";
   position: absolute;
-  inset: 12px;
+  inset: 18px;
   border-radius: inherit;
   background: color-mix(in srgb, var(--accent) 86%, white 14%);
   box-shadow:
@@ -294,7 +450,7 @@
 .celestialArtifact::after {
   content: "";
   position: absolute;
-  inset: -12px;
+  inset: -16px;
   border-radius: inherit;
   border: 1px solid color-mix(in srgb, var(--accent) 16%, transparent);
   background:
@@ -333,13 +489,27 @@
     0 0 86px color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
+.celestialArtifact:focus-visible {
+  outline: 0;
+  box-shadow:
+    0 0 0 2px rgba(240, 236, 247, 0.58),
+    0 0 0 7px color-mix(in srgb, var(--accent) 22%, transparent),
+    0 0 76px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
 .starTag {
   position: absolute;
-  left: 45px;
-  top: 1px;
+  left: 56px;
+  top: -5px;
   width: max-content;
-  max-width: 210px;
-  opacity: 0.20;
+  max-width: 260px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 12%, transparent);
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at 0% 0%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 58%),
+    rgba(3, 3, 10, 0.42);
+  opacity: 0.44;
   transform: translateY(6px);
   color: rgba(240, 236, 247, 0.82);
   font-size: 10px;
@@ -347,6 +517,7 @@
   text-align: left;
   text-shadow: 0 4px 18px rgba(0, 0, 0, 0.9);
   transition: opacity 180ms ease, transform 180ms ease;
+  backdrop-filter: blur(12px);
   pointer-events: none;
 }
 
@@ -361,8 +532,19 @@
   display: block;
 }
 
+.starTag .starTagHeader {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
 .starTag strong {
+  min-width: 0;
+  overflow: hidden;
   font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .starTag span {
@@ -370,22 +552,35 @@
   color: rgba(214, 207, 230, 0.60);
 }
 
+.starTag .starAction {
+  display: inline-flex;
+  flex: 0 0 auto;
+  margin-top: 0;
+  padding: 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
+  border-radius: 999px;
+  color: color-mix(in srgb, var(--accent) 72%, white 14%);
+  font-size: 8px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
 .artifactPlate {
   position: fixed;
-  right: 34px;
-  bottom: 36px;
+  right: 30px;
+  bottom: 34px;
   z-index: 20;
-  width: min(430px, calc(100vw - 68px));
+  width: min(438px, calc(100vw - 64px));
   overflow: hidden;
-  border: 1px solid rgba(226, 214, 255, 0.105);
-  border-radius: 14px;
+  border: 1px solid rgba(226, 214, 255, 0.090);
+  border-radius: 12px;
   background:
-    radial-gradient(circle at 22% 0%, color-mix(in srgb, var(--active-accent, var(--purple)) 9%, transparent), transparent 34%),
-    linear-gradient(180deg, rgba(5, 5, 12, 0.90), rgba(1, 1, 5, 0.96));
+    radial-gradient(circle at 22% -4%, color-mix(in srgb, var(--active-accent, var(--purple)) 10%, transparent), transparent 38%),
+    linear-gradient(180deg, rgba(8, 7, 16, 0.84), rgba(2, 2, 8, 0.95));
   box-shadow:
-    0 32px 120px rgba(0, 0, 0, 0.68),
+    0 24px 92px rgba(0, 0, 0, 0.62),
     inset 0 1px 0 rgba(255, 255, 255, 0.045);
-  backdrop-filter: blur(38px) saturate(1.05);
+  backdrop-filter: blur(34px) saturate(1.06);
 }
 
 .artifactPlate::before {
@@ -398,10 +593,22 @@
   background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--active-accent, var(--purple)) 48%, transparent), transparent);
 }
 
+.artifactPlate::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.050), transparent) 0 0 / 220% 1px no-repeat,
+    radial-gradient(circle at 82% 16%, color-mix(in srgb, var(--active-accent, var(--purple)) 8%, transparent), transparent 34%);
+  opacity: 0.42;
+  pointer-events: none;
+  animation: plateSweep 8s ease-in-out infinite;
+}
+
 .plateHead {
   display: grid;
-  gap: 9px;
-  padding: 20px 20px 16px;
+  gap: 8px;
+  padding: 18px 20px 14px;
   border-bottom: 1px solid rgba(196, 181, 232, 0.10);
 }
 
@@ -422,6 +629,32 @@
   line-height: 1.12;
 }
 
+.plateStatus {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: color-mix(in srgb, var(--active-accent, var(--purple)) 66%, rgba(214, 207, 230, 0.62));
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.plateStatusDot {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--active-accent, var(--purple));
+  box-shadow: 0 0 14px color-mix(in srgb, var(--active-accent, var(--purple)) 80%, transparent);
+}
+
+.plateStatusOpen {
+  color: rgba(240, 236, 247, 0.86);
+}
+
 .plateFilename {
   overflow: hidden;
   margin: -2px 0 0;
@@ -434,30 +667,49 @@
 .plateSummary {
   color: rgba(214, 207, 230, 0.66);
   font-size: 12px;
-  line-height: 1.55;
+  line-height: 1.50;
 }
 
 .previewLens {
   position: relative;
   min-height: 196px;
-  padding: 18px;
+  padding: 14px 18px 16px;
   display: grid;
-  place-items: center;
+  align-items: stretch;
+}
+
+.previewLensOpen {
+  min-height: 388px;
+  padding: 16px;
+  place-items: stretch;
 }
 
 .previewLens::before {
   content: "";
   position: absolute;
-  inset: 20px 34px;
-  border: 1px solid color-mix(in srgb, var(--active-accent, var(--purple)) 20%, transparent);
-  border-radius: 50%;
+  inset: 10px 18px;
+  border: 1px solid color-mix(in srgb, var(--active-accent, var(--purple)) 12%, transparent);
+  border-radius: 8px;
   background:
-    radial-gradient(circle at 42% 40%, color-mix(in srgb, var(--active-accent, var(--purple)) 8%, transparent), transparent 26%),
-    radial-gradient(circle at 50% 50%, rgba(0, 0, 0, 0.60), rgba(0, 0, 0, 0.96) 68%);
+    radial-gradient(circle at 80% 20%, color-mix(in srgb, var(--active-accent, var(--purple)) 9%, transparent), transparent 38%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.040), transparent 32%),
+    linear-gradient(180deg, rgba(12, 11, 22, 0.44), rgba(2, 2, 8, 0.72));
   box-shadow:
-    inset 0 0 0 22px rgba(255, 255, 255, 0.008),
-    inset 0 0 82px rgba(0, 0, 0, 0.92),
-    0 0 46px color-mix(in srgb, var(--active-accent, var(--purple)) 10%, transparent);
+    inset 0 1px 0 rgba(255, 255, 255, 0.035),
+    inset 0 0 54px rgba(0, 0, 0, 0.44),
+    0 0 42px color-mix(in srgb, var(--active-accent, var(--purple)) 6%, transparent);
+}
+
+.previewLensOpen::before {
+  inset: 12px;
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at 84% 0%, color-mix(in srgb, var(--active-accent, var(--purple)) 8%, transparent), transparent 42%),
+    linear-gradient(180deg, rgba(12, 10, 22, 0.76), rgba(3, 3, 9, 0.95));
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.030),
+    inset 0 0 94px rgba(0, 0, 0, 0.58),
+    0 0 52px color-mix(in srgb, var(--active-accent, var(--purple)) 8%, transparent);
 }
 
 .previewLens::after {
@@ -465,19 +717,23 @@
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(circle at 25% 24%, rgba(255, 255, 255, 0.12), transparent 3%),
-    radial-gradient(circle at 72% 52%, color-mix(in srgb, var(--active-accent, var(--purple)) 22%, transparent), transparent 4%);
+    linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.060), transparent) 50% 14px / 80% 1px no-repeat,
+    radial-gradient(circle at 72% 52%, color-mix(in srgb, var(--active-accent, var(--purple)) 14%, transparent), transparent 5%);
   mix-blend-mode: screen;
-  opacity: 0.38;
+  opacity: 0.26;
   pointer-events: none;
+}
+
+.previewLensOpen::after {
+  opacity: 0.18;
 }
 
 .previewCard,
 .realPreview {
   position: relative;
   z-index: 2;
-  width: 70%;
-  min-height: 128px;
+  width: 100%;
+  min-height: 118px;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.070);
   border-radius: 8px;
@@ -485,13 +741,75 @@
     radial-gradient(circle at 78% 0%, color-mix(in srgb, var(--active-accent, var(--purple)) 10%, transparent), transparent 34%),
     linear-gradient(180deg, rgba(8, 7, 16, 0.90), rgba(2, 2, 7, 0.94));
   box-shadow:
-    0 24px 68px rgba(0, 0, 0, 0.64),
+    0 18px 54px rgba(0, 0, 0, 0.54),
     inset 0 1px 0 rgba(255, 255, 255, 0.045);
-  transform: perspective(700px) rotateX(2deg) rotateY(-5deg);
+  transform: none;
 }
 
 .previewCard {
-  padding: 12px 14px;
+  padding: 12px 14px 13px;
+}
+
+.previewOpenShell {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  width: 100%;
+  min-height: 168px;
+  align-content: center;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(226, 214, 255, 0.070);
+  border-radius: 8px;
+  background:
+    radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--active-accent, var(--purple)) 8%, transparent), transparent 44%),
+    rgba(255, 255, 255, 0.014);
+  color: inherit;
+  cursor: pointer;
+}
+
+.previewOpenShell:disabled {
+  cursor: wait;
+}
+
+.previewOpenShell:focus-visible {
+  outline: 0;
+}
+
+.previewOpenShell:focus-visible .previewCard {
+  border-color: rgba(240, 236, 247, 0.38);
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--active-accent, var(--purple)) 22%, transparent),
+    0 26px 74px rgba(0, 0, 0, 0.70),
+    inset 0 1px 0 rgba(255, 255, 255, 0.065);
+}
+
+.previewOpenShell:hover .previewCard {
+  border-color: color-mix(in srgb, var(--active-accent, var(--purple)) 30%, transparent);
+  transform: translateY(-1px);
+}
+
+.lensAction {
+  position: relative;
+  bottom: auto;
+  left: auto;
+  display: inline-flex;
+  min-height: 31px;
+  align-items: center;
+  gap: 8px;
+  justify-self: start;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--active-accent, var(--purple)) 22%, transparent);
+  border-radius: 999px;
+  background:
+    radial-gradient(circle at 50% 0%, color-mix(in srgb, var(--active-accent, var(--purple)) 17%, transparent), transparent 64%),
+    rgba(4, 4, 11, 0.74);
+  color: rgba(240, 236, 247, 0.88);
+  font-size: 11px;
+  font-weight: 650;
+  transform: none;
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.46);
+  backdrop-filter: blur(18px);
 }
 
 .previewCard::before {
@@ -506,15 +824,59 @@
 }
 
 .realPreview {
-  width: 86%;
-  height: 230px;
-  max-height: 260px;
-  transform: perspective(900px) rotateX(1deg) rotateY(-2deg);
+  display: grid;
+  width: 100%;
+  height: 356px;
+  max-height: 380px;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  border-color: rgba(226, 214, 255, 0.115);
+  background:
+    radial-gradient(circle at 84% 0%, color-mix(in srgb, var(--active-accent, var(--purple)) 10%, transparent), transparent 34%),
+    linear-gradient(180deg, rgba(9, 8, 18, 0.96), rgba(2, 2, 8, 0.98));
+  transform: none;
+  box-shadow:
+    0 26px 74px rgba(0, 0, 0, 0.58),
+    inset 0 1px 0 rgba(255, 255, 255, 0.052);
 }
 
 .realPreview :global(.prose),
 .realPreview :global(article) {
   color: rgba(240, 236, 247, 0.86);
+}
+
+.realPreviewChrome {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 14px;
+  border-bottom: 1px solid rgba(226, 214, 255, 0.075);
+  color: rgba(143, 135, 164, 0.82);
+  font-size: 8.5px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.realPreviewChrome::before {
+  content: "";
+  display: block;
+  width: 38px;
+  height: 6px;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle, color-mix(in srgb, var(--active-accent, var(--purple)) 62%, rgba(255, 255, 255, 0.25)) 0 46%, transparent 52%) 0 0 / 13px 6px repeat-x;
+  opacity: 0.78;
+}
+
+.realPreviewChrome span:first-child {
+  margin-right: auto;
+}
+
+.realPreviewBody {
+  min-height: 0;
+  overflow: hidden;
 }
 
 .previewChrome {
@@ -544,7 +906,7 @@
   margin-top: 8px;
   color: var(--text-strong);
   font-family: var(--font-cormorant), "Cormorant Garamond", Georgia, serif;
-  font-size: 23px;
+  font-size: 21px;
   line-height: 0.98;
 }
 
@@ -646,9 +1008,52 @@
 .markdownPreview {
   height: 100%;
   overflow: auto;
-  padding: 14px;
+  padding: 28px 32px 34px;
   color: rgba(240, 236, 247, 0.88);
-  background: rgba(5, 4, 10, 0.88);
+  background:
+    radial-gradient(circle at 82% 8%, color-mix(in srgb, var(--active-accent, var(--purple)) 8%, transparent), transparent 34%),
+    linear-gradient(180deg, rgba(10, 9, 18, 0.96), rgba(3, 3, 9, 0.98));
+  scrollbar-color: color-mix(in srgb, var(--active-accent, var(--purple)) 26%, transparent) transparent;
+}
+
+.markdownPreview :global(.artifact-markdown-preview) {
+  max-width: 72ch;
+  margin: 0 auto;
+  color: rgba(226, 219, 238, 0.86);
+}
+
+.markdownPreview :global(.artifact-markdown-preview h1),
+.markdownPreview :global(.artifact-markdown-preview h2),
+.markdownPreview :global(.artifact-markdown-preview h3) {
+  color: rgba(250, 248, 255, 0.96);
+  font-family: var(--font-cormorant), "Cormorant Garamond", Georgia, serif;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.markdownPreview :global(.artifact-markdown-preview h1) {
+  font-size: 30px;
+  line-height: 1.02;
+}
+
+.markdownPreview :global(.artifact-markdown-preview p),
+.markdownPreview :global(.artifact-markdown-preview li) {
+  color: rgba(214, 207, 230, 0.78);
+  font-size: 13px;
+  line-height: 1.68;
+}
+
+.markdownPreview :global(.artifact-markdown-preview code) {
+  border: 1px solid rgba(226, 214, 255, 0.09);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.045);
+  color: color-mix(in srgb, var(--active-accent, var(--purple)) 56%, rgba(255, 255, 255, 0.78));
+}
+
+.markdownPreview :global(.artifact-markdown-preview pre) {
+  border: 1px solid rgba(226, 214, 255, 0.09);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.34);
 }
 
 .previewLoading,
@@ -670,17 +1075,22 @@
 .plateData {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  border-top: 1px solid rgba(196, 181, 232, 0.10);
-  border-bottom: 1px solid rgba(196, 181, 232, 0.10);
+  gap: 8px;
+  padding: 0 18px 14px;
+  border: 0;
 }
 
 .datum {
-  padding: 12px 14px;
-  border-right: 1px solid rgba(196, 181, 232, 0.10);
+  padding: 9px 10px;
+  border: 1px solid rgba(196, 181, 232, 0.075);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.026), rgba(255, 255, 255, 0.008)),
+    rgba(2, 2, 8, 0.26);
 }
 
 .datum:last-child {
-  border-right: 0;
+  border-right: 1px solid rgba(196, 181, 232, 0.075);
 }
 
 .datum span,
@@ -708,7 +1118,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 15px 18px 18px;
+  padding: 0 18px 18px;
 }
 
 .action {
@@ -746,6 +1156,16 @@
   width: min(540px, calc(100vw - 520px));
   transform: translateX(-50%);
   opacity: 0.72;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .railCopy {
@@ -881,6 +1301,16 @@
   }
 }
 
+@keyframes plateSweep {
+  0%,
+  100% {
+    background-position: -120% 0, 0 0;
+  }
+  50% {
+    background-position: 120% 0, 0 0;
+  }
+}
+
 @media (max-width: 900px) {
   .topLeft {
     left: 22px;
@@ -903,8 +1333,26 @@
   }
 
   .filterStrip {
-    top: 104px;
     max-width: calc(100vw - 28px);
+  }
+
+  .controlDeck {
+    left: 14px;
+    top: 104px;
+    width: calc(100vw - 28px);
+  }
+
+  .filterConsole {
+    padding-left: 10px;
+  }
+
+  .consoleGlyph {
+    display: none;
+  }
+
+  .filterGroup {
+    grid-template-columns: 1fr;
+    gap: 5px;
   }
 
   .artifactPlate {
@@ -916,7 +1364,24 @@
   }
 
   .previewLens {
+    min-height: 188px;
+    padding: 10px;
+  }
+
+  .previewLens::before,
+  .previewLens::after {
     display: none;
+  }
+
+  .previewCard {
+    width: 86%;
+  }
+
+  .realPreview {
+    width: 100%;
+    height: 230px;
+    max-height: 230px;
+    transform: none;
   }
 
   .focusRail {

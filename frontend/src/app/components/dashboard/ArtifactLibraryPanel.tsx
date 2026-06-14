@@ -1,9 +1,14 @@
 'use client';
 
 import {
+  Download,
+  Eye,
   FileText,
   Loader2,
   RefreshCw,
+  Search,
+  SlidersHorizontal,
+  Trash2,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
@@ -317,7 +322,7 @@ export function ArtifactLibraryPanel() {
             Artifact Observatory
           </h1>
           <p className={styles.subtitle}>
-            A dark room for the durable things Sophia made with you. Point the telescope, bring one star into focus, and open it here.
+            Durable works made with Sophia, suspended in a night field.
           </p>
         </header>
 
@@ -350,29 +355,72 @@ export function ArtifactLibraryPanel() {
           </button>
         </div>
 
-        <div className={styles.filterStrip}>
-          {OBSERVATORY_FILTERS.map((filter) => (
-            <button
-              key={filter.value}
-              type="button"
-              className={cn(styles.filter, activeFilter === filter.value && styles.filterActive)}
-              onClick={() => setActiveFilter(filter.value)}
-              aria-pressed={activeFilter === filter.value}
-            >
-              {filter.label}
-            </button>
-          ))}
+        <div className={styles.controlDeck} data-testid="artifact-library-filters">
+          <div className={styles.finderSurface}>
+            <label className={styles.searchField}>
+              <Search aria-hidden="true" />
+              <span className={styles.srOnly}>Search artifacts</span>
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                aria-label="Search artifacts"
+                className={styles.searchInput}
+                placeholder="Search artifacts"
+                spellCheck={false}
+              />
+            </label>
+            <div className={styles.filterStrip}>
+              {OBSERVATORY_FILTERS.map((filter) => (
+                <button
+                  key={filter.value}
+                  type="button"
+                  className={cn(styles.filter, activeFilter === filter.value && styles.filterActive)}
+                  onClick={() => setActiveFilter(filter.value)}
+                  aria-pressed={activeFilter === filter.value}
+                >
+                  {filter.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {atlasMode && (
+            <div className={styles.filterConsole}>
+              <span className={styles.consoleGlyph} aria-hidden="true">
+                <SlidersHorizontal />
+              </span>
+              <FilterButtonGroup
+                label="Type"
+                value={typeFilter}
+                onChange={(value) => setTypeFilter(value as ArtifactTypeFilter)}
+                options={TYPE_OPTIONS}
+              />
+              <FilterButtonGroup
+                label="Source"
+                value={sourceFilter}
+                onChange={(value) => setSourceFilter(value as ArtifactSourceFilter)}
+                options={SOURCE_OPTIONS}
+              />
+              <FilterButtonGroup
+                label="Date"
+                value={dateFilter}
+                onChange={(value) => setDateFilter(value as ArtifactDateFilter)}
+                options={DATE_OPTIONS}
+              />
+              <label className={styles.consoleField}>
+                <span>Thread</span>
+                <input
+                  value={threadFilter}
+                  onChange={(event) => setThreadFilter(event.target.value)}
+                  aria-label="Thread"
+                  placeholder="Thread"
+                />
+              </label>
+            </div>
+          )}
         </div>
 
-        <div className={styles.hiddenControls} data-testid="artifact-library-filters">
-          <label>
-            <span>Search artifacts</span>
-            <input
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              aria-label="Search artifacts"
-            />
-          </label>
+        <div className={styles.hiddenControls}>
           <FilterSelect
             label="Type"
             value={typeFilter}
@@ -391,14 +439,6 @@ export function ArtifactLibraryPanel() {
             onChange={(value) => setDateFilter(value as ArtifactDateFilter)}
             options={DATE_OPTIONS}
           />
-          <label>
-            <span>Thread</span>
-            <input
-              value={threadFilter}
-              onChange={(event) => setThreadFilter(event.target.value)}
-              aria-label="Thread"
-            />
-          </label>
         </div>
 
         {error && (
@@ -467,7 +507,7 @@ function FilterSelect({
   onChange: (value: string) => void;
 }) {
   return (
-    <label>
+    <label className={styles.consoleField}>
       <span>{label}</span>
       <select
         value={value}
@@ -481,6 +521,37 @@ function FilterSelect({
         ))}
       </select>
     </label>
+  );
+}
+
+function FilterButtonGroup({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: Array<{ value: string; label: string }>;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className={styles.filterGroup} role="group" aria-label={`Filter by ${label}`}>
+      <span className={styles.filterGroupLabel}>{label}</span>
+      <div className={styles.filterGroupOptions}>
+        {options.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            className={cn(styles.filterOption, value === option.value && styles.filterOptionActive)}
+            onClick={() => onChange(option.value)}
+            aria-pressed={value === option.value}
+          >
+            {compactFilterLabel(option.label)}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -515,7 +586,10 @@ function ArtifactStar({
       aria-label={`Select ${label}`}
     >
       <span className={styles.starTag}>
-        <strong>{label}</strong>
+        <span className={styles.starTagHeader}>
+          <strong>{label}</strong>
+          <span className={styles.starAction}>Focus</span>
+        </span>
         <span>{artifact.kindLabel} - {artifact.sourceLabel}</span>
         <span className={styles.testQuerySuffix}>{artifact.kindLabel}</span>
         <span className={styles.testQuerySuffix}>{artifact.sourceLabel}</span>
@@ -561,6 +635,10 @@ function ObservationPlate({
           <span>{artifact.kindLabel}</span>
           <span>{artifact.shortDateLabel}</span>
         </div>
+        <div className={cn(styles.plateStatus, isOpen && styles.plateStatusOpen)}>
+          <span className={styles.plateStatusDot} aria-hidden="true" />
+          <span>{isOpen ? 'Opened in lens' : 'Focused star'}</span>
+        </div>
         <h2 className={styles.plateTitle}>
           <SplitText text={label} />
         </h2>
@@ -568,19 +646,37 @@ function ObservationPlate({
         <p className={styles.plateSummary}>{artifact.summary}</p>
       </div>
 
-      <div className={styles.previewLens}>
+      <div className={cn(styles.previewLens, isOpen && styles.previewLensOpen)}>
         {isOpen || previewLoading || previewError ? (
           <div className={styles.realPreview}>
-            <ArtifactLibraryPreview
-              artifact={artifact}
-              contentHref={contentHref}
-              previewText={previewText}
-              previewLoading={previewLoading}
-              previewError={previewError}
-            />
+            <div className={styles.realPreviewChrome}>
+              <span>Lens preview</span>
+              <span>{artifact.kindLabel}</span>
+            </div>
+            <div className={styles.realPreviewBody}>
+              <ArtifactLibraryPreview
+                artifact={artifact}
+                contentHref={contentHref}
+                previewText={previewText}
+                previewLoading={previewLoading}
+                previewError={previewError}
+              />
+            </div>
           </div>
         ) : (
-          <PreviewCard artifact={artifact} />
+          <button
+            type="button"
+            onClick={onOpen}
+            disabled={opening || deleting}
+            className={styles.previewOpenShell}
+            aria-label={`Open ${label} inline`}
+          >
+            <PreviewCard artifact={artifact} />
+            <span className={styles.lensAction}>
+              {opening ? <Loader2 className="h-4 w-4 animate-spin" /> : <Eye className="h-4 w-4" />}
+              Open
+            </span>
+          </button>
         )}
       </div>
 
@@ -591,21 +687,12 @@ function ObservationPlate({
       </dl>
 
       <div className={styles.plateActions}>
-        <button
-          type="button"
-          onClick={onOpen}
-          disabled={opening || deleting}
-          className={styles.action}
-          aria-label={`Open ${label} inline`}
-        >
-          {opening && <Loader2 className="h-4 w-4 animate-spin" />}
-          Open here
-        </button>
         <a
           href={downloadHref}
           className={styles.action}
           aria-label={`Download ${label}`}
         >
+          <Download className="h-4 w-4" aria-hidden="true" />
           Download
         </a>
         <button
@@ -616,6 +703,7 @@ function ObservationPlate({
           aria-label={`Delete ${label}`}
         >
           {deleting && <Loader2 className="h-4 w-4 animate-spin" />}
+          {!deleting && <Trash2 className="h-4 w-4" aria-hidden="true" />}
           Hide
         </button>
       </div>
@@ -690,6 +778,14 @@ function isGraphicPreviewCard(artifact: ObservatoryArtifact): boolean {
 
 function formatOpenedCount(count: number): string {
   return count === 1 ? '1 time' : `${count} times`;
+}
+
+function compactFilterLabel(label: string): string {
+  if (label === 'All types' || label === 'All sources') return 'All';
+  if (label === 'Quick edit') return 'Edit';
+  if (label === 'Coreview') return 'Review';
+  if (label === 'Markdown') return 'MD';
+  return label;
 }
 
 function ArtifactLibraryPreview({
