@@ -16,10 +16,10 @@ from app.gateway.artifact_registry import (
     ArtifactListResponse,
     ArtifactOpenResponse,
     ArtifactRecord,
+    ArtifactRegistry,
     ArtifactRegistryFilters,
     ArtifactSource,
     ArtifactUpsertRequest,
-    LocalArtifactRegistry,
     open_response_for_record,
 )
 from app.gateway.auth import require_authenticated_user
@@ -41,7 +41,7 @@ _WORKSPACE_OUTPUTS_VIRTUAL_PATH = "mnt/user-data/workspace/outputs"
 _OFFICE_DOWNLOAD_EXTENSIONS = frozenset({".pptx", ".ppt", ".docx", ".xlsx"})
 _BUILDER_ARTIFACT_TASK_STATUSES = frozenset({"success", "completed"})
 _session_store = SessionStore()
-_artifact_registry = LocalArtifactRegistry()
+_artifact_registry = ArtifactRegistry()
 
 
 @dataclass(frozen=True)
@@ -259,6 +259,10 @@ async def _serve_registry_artifact(
             request,
             force_download=force_download,
         )
+
+    object_response = _try_serve_registry_storage_object(record, request, force_download=force_download)
+    if object_response is not None:
+        return object_response
 
     for thread_id in _registry_artifact_thread_ids(record):
         supabase_response = _try_serve_from_supabase(
@@ -775,6 +779,56 @@ def _enforce_artifact_owner(authenticated_user_id: str | None, thread_id: str, p
         )
         return
     _require_thread_owner(authenticated_user_id, thread_id)
+
+
+def _try_serve_registry_storage_object(
+    record: ArtifactRecord,
+    request: Request,
+    *,
+    force_download: bool = False,
+) -> Response | None:
+    object_path = record.storage_object_path
+    if not isinstance(object_path, str) or not object_path.strip():
+        return None
+    if record.storage_provider not in {"supabase", "hybrid"}:
+        return None
+    try:
+        result = supabase_artifact_store.download_artifact_object(object_path)
+    except ValueError as exc:
+        logger.warning(
+            "Unsafe artifact storage object path rejected: artifact_id=%s error=%s",
+            record.artifact_id,
+            exc,
+        )
+        raise HTTPException(status_code=403, detail="Unsafe artifact storage path") from exc
+    except Exception:  # noqa: BLE001 — network/transport failure
+        logger.exception(
+            "Supabase object download failed: artifact_id=%s storage_provider=%s",
+            record.artifact_id,
+            record.storage_provider,
+        )
+        return None
+    if result is None:
+        return None
+
+    content, supabase_mime = result
+    filename = record.filename or Path(object_path).name
+    mime_type = supabase_mime or record.mime_type or mimetypes.guess_type(filename)[0]
+    logger.info(
+        "Serving registry artifact from Supabase object storage: artifact_id=%s bytes=%d",
+        record.artifact_id,
+        len(content),
+    )
+    if force_download or request.query_params.get("download") or _is_office_download(filename):
+        return _supabase_attachment_response(
+            record.thread_id,
+            filename,
+            content,
+            mime_type,
+            request,
+            force_download=force_download,
+        )
+    return _supabase_inline_response(filename, content, mime_type)
 
 
 def _try_serve_from_supabase(

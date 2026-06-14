@@ -1194,48 +1194,133 @@ function drawIslandAndObservatory(ctx: CanvasRenderingContext2D, width: number, 
 
   ctx.save();
   const island = ctx.createLinearGradient(0, baseY - 90, 0, baseY + 70);
-  island.addColorStop(0, 'rgba(20, 18, 34, 0.96)');
-  island.addColorStop(0.58, 'rgba(7, 7, 15, 0.98)');
+  island.addColorStop(0, 'rgba(28, 24, 42, 0.96)');
+  island.addColorStop(0.42, 'rgba(10, 10, 20, 0.99)');
+  island.addColorStop(0.72, 'rgba(4, 4, 10, 1)');
   island.addColorStop(1, 'rgba(1, 1, 5, 1)');
   ctx.fillStyle = island;
   ctx.beginPath();
-  ctx.moveTo(centerX - 180, baseY + 22);
-  ctx.bezierCurveTo(centerX - 150, baseY - 58, centerX - 86, baseY - 86, centerX - 18, baseY - 70);
-  ctx.bezierCurveTo(centerX + 46, baseY - 100, centerX + 144, baseY - 46, centerX + 184, baseY + 26);
-  ctx.quadraticCurveTo(centerX, baseY + 58, centerX - 180, baseY + 22);
+  ctx.moveTo(centerX - 192, baseY + 24);
+  ctx.bezierCurveTo(centerX - 168, baseY - 28, centerX - 118, baseY - 76, centerX - 42, baseY - 78);
+  ctx.bezierCurveTo(centerX - 10, baseY - 106, centerX + 48, baseY - 96, centerX + 78, baseY - 70);
+  ctx.bezierCurveTo(centerX + 132, baseY - 56, centerX + 172, baseY - 10, centerX + 194, baseY + 28);
+  ctx.quadraticCurveTo(centerX + 48, baseY + 62, centerX - 192, baseY + 24);
   ctx.closePath();
   ctx.fill();
 
-  ctx.strokeStyle = 'rgba(184, 164, 232, 0.14)';
+  const ridge = ctx.createLinearGradient(centerX - 170, baseY - 86, centerX + 170, baseY + 28);
+  ridge.addColorStop(0, 'rgba(184, 164, 232, 0.04)');
+  ridge.addColorStop(0.5, 'rgba(214, 202, 246, 0.22)');
+  ridge.addColorStop(1, 'rgba(97, 200, 187, 0.08)');
+  ctx.strokeStyle = ridge;
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(centerX - 170, baseY + 20);
-  ctx.bezierCurveTo(centerX - 80, baseY + 42, centerX + 70, baseY + 44, centerX + 178, baseY + 24);
+  ctx.moveTo(centerX - 144, baseY - 52);
+  ctx.bezierCurveTo(centerX - 78, baseY - 72, centerX + 42, baseY - 76, centerX + 132, baseY - 36);
+  ctx.stroke();
+
+  ctx.globalAlpha = 0.62;
+  for (let index = 0; index < 9; index += 1) {
+    const offset = index - 4;
+    const x = centerX + offset * 34 + Math.sin(index * 2.1) * 9;
+    ctx.strokeStyle = index % 2 === 0 ? 'rgba(184, 164, 232, 0.075)' : 'rgba(97, 200, 187, 0.045)';
+    ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    ctx.moveTo(x, baseY - 58 + Math.sin(index) * 8);
+    ctx.bezierCurveTo(x - 18, baseY - 10, x - 8, baseY + 18, x - 42, baseY + 42);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.strokeStyle = 'rgba(214, 202, 246, 0.10)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(centerX - 92, baseY - 35);
+  ctx.bezierCurveTo(centerX - 46, baseY - 46, centerX + 42, baseY - 45, centerX + 92, baseY - 28);
+  ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(97, 200, 187, 0.10)';
+  ctx.beginPath();
+  ctx.moveTo(centerX - 172, baseY + 18);
+  ctx.bezierCurveTo(centerX - 82, baseY + 42, centerX + 70, baseY + 44, centerX + 180, baseY + 22);
   ctx.stroke();
 
   const domeY = baseY - 70;
-  ctx.fillStyle = 'rgba(6, 6, 13, 0.98)';
-  ctx.fillRect(centerX - 54, domeY + 42, 108, 30);
-  const domeGradient = ctx.createRadialGradient(centerX - 22, domeY + 4, 10, centerX, domeY + 34, 72);
-  domeGradient.addColorStop(0, 'rgba(196, 181, 232, 0.28)');
-  domeGradient.addColorStop(0.44, 'rgba(32, 28, 48, 0.94)');
-  domeGradient.addColorStop(1, 'rgba(5, 5, 12, 1)');
+  ctx.fillStyle = 'rgba(3, 3, 9, 0.98)';
+  ctx.fillRect(centerX - 72, domeY + 50, 144, 18);
+  ctx.fillStyle = 'rgba(8, 8, 16, 0.98)';
+  ctx.fillRect(centerX - 62, domeY + 32, 124, 31);
+  ctx.fillStyle = 'rgba(4, 4, 11, 0.99)';
+  ctx.fillRect(centerX - 58, domeY + 36, 116, 20);
+
+  ctx.strokeStyle = 'rgba(214, 202, 246, 0.055)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.ellipse(centerX, domeY + 52, 82, 11, 0, 0, Math.PI * 2);
+  ctx.stroke();
+
+  const domeGradient = ctx.createRadialGradient(centerX - 24, domeY + 2, 8, centerX, domeY + 35, 70);
+  domeGradient.addColorStop(0, 'rgba(216, 205, 248, 0.30)');
+  domeGradient.addColorStop(0.34, 'rgba(44, 39, 62, 0.92)');
+  domeGradient.addColorStop(0.72, 'rgba(10, 10, 20, 0.98)');
+  domeGradient.addColorStop(1, 'rgba(3, 3, 9, 1)');
   ctx.fillStyle = domeGradient;
   ctx.beginPath();
   ctx.arc(centerX, domeY + 42, 58, Math.PI, Math.PI * 2);
   ctx.closePath();
   ctx.fill();
-  ctx.strokeStyle = 'rgba(240, 236, 247, 0.10)';
+
+  ctx.fillStyle = 'rgba(4, 4, 10, 0.96)';
+  ctx.fillRect(centerX - 57, domeY + 40, 114, 10);
+
+  ctx.strokeStyle = 'rgba(240, 236, 247, 0.13)';
   ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(184, 164, 232, 0.18)';
+  ctx.lineWidth = 0.8;
+  for (let index = -2; index <= 2; index += 1) {
+    ctx.beginPath();
+    ctx.moveTo(centerX + index * 18, domeY + 42);
+    ctx.quadraticCurveTo(centerX + index * 9, domeY + 10, centerX, domeY - 15);
+    ctx.stroke();
+  }
+  ctx.beginPath();
+  ctx.ellipse(centerX, domeY + 30, 44, 12, 0, Math.PI, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(184, 164, 232, 0.10)';
+  for (const x of [-42, 0, 42]) {
+    ctx.beginPath();
+    ctx.moveTo(centerX + x, domeY + 37);
+    ctx.lineTo(centerX + x, domeY + 58);
+    ctx.stroke();
+  }
 
   ctx.save();
   ctx.translate(centerX, domeY + 42);
   ctx.rotate(-0.58 + Math.sin(now * 0.18) * 0.025);
-  ctx.fillStyle = 'rgba(16, 15, 26, 0.98)';
-  ctx.fillRect(-10, -64, 20, 66);
-  ctx.fillStyle = 'rgba(38, 34, 56, 0.98)';
-  ctx.fillRect(-18, -76, 36, 18);
+  const aperture = ctx.createLinearGradient(0, -70, 0, -12);
+  aperture.addColorStop(0, 'rgba(184, 164, 232, 0.38)');
+  aperture.addColorStop(0.42, 'rgba(20, 18, 32, 0.98)');
+  aperture.addColorStop(1, 'rgba(2, 2, 7, 1)');
+  ctx.fillStyle = aperture;
+  ctx.fillRect(-9, -64, 18, 66);
+  ctx.strokeStyle = 'rgba(214, 202, 246, 0.15)';
+  ctx.strokeRect(-9, -64, 18, 66);
+  ctx.fillStyle = 'rgba(48, 42, 66, 0.98)';
+  ctx.fillRect(-19, -76, 38, 18);
+  ctx.fillStyle = 'rgba(184, 164, 232, 0.38)';
+  ctx.beginPath();
+  ctx.ellipse(0, -67, 17, 8, 0, 0, Math.PI * 2);
+  ctx.fill();
   ctx.restore();
+
+  ctx.fillStyle = 'rgba(245, 190, 110, 0.55)';
+  for (const [x, y, r] of [[-66, 42, 1.2], [72, 49, 1], [-28, 82, 0.8]] as const) {
+    ctx.beginPath();
+    ctx.arc(centerX + x, domeY + y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
 
   ctx.restore();
 }

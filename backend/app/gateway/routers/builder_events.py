@@ -31,7 +31,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.gateway.artifact_registry import (
-    LocalArtifactRegistry,
+    ArtifactRegistry,
     builder_completion_upsert_request,
 )
 from app.gateway.workers.builder_canvas import get_builder_canvas_worker
@@ -54,7 +54,7 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "error_message",
     "trace_id",
 )
-_artifact_registry = LocalArtifactRegistry()
+_artifact_registry = ArtifactRegistry()
 _session_store = SessionStore()
 
 

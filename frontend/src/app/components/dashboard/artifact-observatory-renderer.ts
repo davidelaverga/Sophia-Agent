@@ -317,13 +317,25 @@ const SCENE_PUNCH = replaceShaderSection(
   'void drawVolumetrics',
   LOGIN_STYLE_SKY,
 )
+  .replace('float s = 0.58;', 'float s = 0.78;')
+  .replace('float observatoryScale = 0.58;', 'float observatoryScale = 0.78;')
   .replace(
     `float domeSheen = smoothstep(0.62, 1.0, panelNoise) * domeMask * smoothstep(domeCenter.x - 0.11 * s, domeCenter.x + 0.04 * s, p.x);
   float beamFacing = max(dot(normalize(aperture - p + vec2(0.0, 0.010)), normalize(dir + vec2(0.0, 0.14))), 0.0);`,
     `float domeSheen = smoothstep(0.62, 1.0, panelNoise) * domeMask * smoothstep(domeCenter.x - 0.11 * s, domeCenter.x + 0.04 * s, p.x);
   float domeMeridian = exp(-abs(p.x - domeCenter.x) * 260.0) * domeMask * smoothstep(domeCenter.y - 0.030 * s, domeCenter.y + 0.050 * s, p.y);
   float domeLatitude = exp(-abs(p.y - (domeCenter.y + 0.004 * s)) * 190.0) * domeMask;
+  float domeLatitudeUpper = exp(-abs(p.y - (domeCenter.y + 0.028 * s)) * 210.0) * domeMask * smoothstep(0.104 * s, 0.030 * s, abs(p.x - domeCenter.x));
+  float domePanelLeft = exp(-abs((p.x - domeCenter.x) + 0.044 * s + sin((p.y - domeCenter.y) * 28.0) * 0.003) * 210.0) * domeMask;
+  float domePanelRight = exp(-abs((p.x - domeCenter.x) - 0.044 * s + sin((p.y - domeCenter.y) * 26.0 + 1.4) * 0.003) * 210.0) * domeMask;
+  float rotatorRing = exp(-abs(p.y - (domeCenter.y - 0.030 * s)) * 260.0) * smoothstep(0.122 * s, 0.064 * s, abs(p.x - domeCenter.x));
+  float domeDrum = 1.0 - smoothstep(0.0, 0.0038, sdBox(p, base + vec2(0.0, 0.045 * s), vec2(0.104, 0.027) * s));
+  float domeSkirt = 1.0 - smoothstep(0.0, 0.0040, sdCapsule(p, base + vec2(-0.112 * s, 0.066 * s), base + vec2(0.112 * s, 0.066 * s), 0.010 * s));
+  float drumPanels = (exp(-abs(p.x - (base.x - 0.058 * s)) * 230.0) + exp(-abs(p.x - base.x) * 250.0) + exp(-abs(p.x - (base.x + 0.058 * s)) * 230.0)) * domeDrum;
+  float catwalk = 1.0 - smoothstep(0.0, 0.0028, sdCapsule(p, base + vec2(-0.136 * s, -0.002 * s), base + vec2(0.136 * s, -0.002 * s), 0.0032 * s));
+  float apertureBloom = exp(-length((p - aperture) / (vec2(0.054, 0.030) * s)) * 13.0) * slitInside;
   float serviceLight = exp(-length((p - (base + vec2(-0.054 * s, 0.004 * s))) / (vec2(0.010, 0.006) * s)) * 38.0);
+  float serviceLightB = exp(-length((p - (base + vec2(0.066 * s, -0.006 * s))) / (vec2(0.009, 0.005) * s)) * 42.0);
   float weathering = smoothstep(0.52, 0.92, fbm(vec2(p.x * 88.0 + 6.0, p.y * 44.0 + 3.0))) * (foundation + domeMask);
   float beamFacing = max(dot(normalize(aperture - p + vec2(0.0, 0.010)), normalize(dir + vec2(0.0, 0.14))), 0.0);`,
   )
@@ -334,17 +346,67 @@ const SCENE_PUNCH = replaceShaderSection(
   vec3 domeSkin = vec3(0.0045, 0.0055, 0.0130);`,
   )
   .replace(
+    `over(col, silhouette, lowerDeck * 0.98);
+  over(col, concrete, foundation * 0.94);
+  over(col, domeSkin, domeMask * 0.96);`,
+    `over(col, silhouette, lowerDeck * 0.98);
+  over(col, concrete, foundation * 0.94);
+  over(col, vec3(0.0035, 0.0040, 0.0095), domeDrum * 0.98);
+  over(col, vec3(0.0020, 0.0024, 0.0060), domeSkirt * 0.92);
+  over(col, domeSkin, domeMask * 0.96);`,
+  )
+  .replace(
     `col += vec3(0.052, 0.047, 0.078) * panels * 0.14;
   col += vec3(0.080, 0.076, 0.120) * domeRim * 0.055;
   col += vec3(0.075, 0.066, 0.105) * horizonRim * 0.045;
   col += mix(u_accent, vec3(0.86, 0.90, 1.0), 0.40) * domeSheen * 0.035;`,
     `col += vec3(0.064, 0.060, 0.090) * panels * 0.15;
-  col += vec3(0.115, 0.108, 0.150) * domeRim * 0.076;
-  col += vec3(0.105, 0.094, 0.132) * horizonRim * 0.064;
-  col += vec3(0.070, 0.066, 0.102) * (domeMeridian + domeLatitude) * 0.060;
-  col -= vec3(0.012, 0.011, 0.018) * weathering * 0.055;
-  col += vec3(0.95, 0.72, 0.42) * serviceLight * 0.16;
-  col += mix(u_accent, vec3(0.86, 0.90, 1.0), 0.40) * domeSheen * 0.044;`,
+  col += vec3(0.150, 0.142, 0.190) * domeRim * 0.120;
+  col += vec3(0.075, 0.068, 0.100) * horizonRim * 0.035;
+  col += vec3(0.110, 0.104, 0.148) * (domeMeridian + domeLatitude + domeLatitudeUpper + domePanelLeft + domePanelRight) * 0.125;
+  col += vec3(0.090, 0.082, 0.120) * rotatorRing * 0.045;
+  col += vec3(0.072, 0.066, 0.100) * drumPanels * 0.090;
+  col += mix(u_accent, vec3(0.84, 0.92, 1.0), 0.42) * catwalk * 0.070;
+  col -= vec3(0.012, 0.011, 0.018) * weathering * 0.045;
+  col += mix(u_accent, vec3(0.92, 0.96, 1.0), 0.52) * apertureBloom * 0.310;
+  col += vec3(0.95, 0.72, 0.42) * (serviceLight + serviceLightB * 0.82) * 0.360;
+  col += mix(u_accent, vec3(0.86, 0.90, 1.0), 0.36) * domeSheen * 0.105;`,
+  )
+  .replace(
+    `float summitPad = exp(-length((p - (obsBase - vec2(0.0, 0.020))) / vec2(0.145, 0.040)) * 4.2) * islandSolid;
+  float anchorShadow = exp(-length((p - (obsBase - vec2(0.0, 0.034))) / vec2(0.170, 0.030)) * 5.0) * islandSolid;`,
+    `float summitPad = exp(-length((p - (obsBase - vec2(0.0, 0.020))) / vec2(0.145, 0.040)) * 4.2) * islandSolid;
+  float anchorShadow = exp(-length((p - (obsBase - vec2(0.0, 0.034))) / vec2(0.170, 0.030)) * 5.0) * islandSolid;
+  float terrace = exp(-abs(p.y - (obsBase.y - 0.040)) * 48.0) * smoothstep(0.260, 0.034, abs(p.x - obsBase.x)) * islandSolid;
+  float lowerTerrace = exp(-abs(p.y - (obsBase.y - 0.090)) * 38.0) * smoothstep(0.420, 0.105, abs(p.x - obsBase.x)) * cliffFace;
+  float accessPath = exp(-abs(p.x - (obsBase.x - 0.040 * sin((p.y - water) * 9.0))) * 20.0) * cliffFace * smoothstep(0.02, 0.76, islandRise);
+  float basaltRibs = exp(-abs(fract((p.x - obsBase.x) * 13.0 + fbm(vec2(p.y * 8.0, 4.0)) * 0.8) - 0.5) * 9.0) * cliffFace;
+  float fractureLines = smoothstep(0.70, 0.98, fbm(vec2(p.x * 38.0 + 2.0, p.y * 72.0 + 8.0))) * cliffFace;
+  float obsidianFacets = smoothstep(0.58, 0.94, fbm(vec2(p.x * 21.0 - 5.0, p.y * 33.0 + 12.0))) * cliffFace * smoothstep(0.0, 0.74, ridgeLight);
+  float scaleLightA = exp(-length((p - (obsBase + vec2(-0.120, -0.058))) / vec2(0.008, 0.005)) * 38.0) * islandSolid;
+  float scaleLightB = exp(-length((p - (obsBase + vec2(0.138, -0.076))) / vec2(0.008, 0.005)) * 38.0) * islandSolid;
+  float scaleLightC = exp(-length((p - (obsBase + vec2(-0.030, -0.112))) / vec2(0.007, 0.004)) * 42.0) * islandSolid;`,
+  )
+  .replace(
+    `mtn += vec3(0.026, 0.020, 0.034) * cliffFace;
+  mtn += vec3(0.070, 0.058, 0.088) * cliffFace * cliffStrata * 0.16;
+  mtn -= vec3(0.010, 0.008, 0.014) * cliffFace * cliffCuts * 0.24;`,
+    `mtn += vec3(0.026, 0.020, 0.034) * cliffFace;
+  mtn += vec3(0.085, 0.072, 0.110) * cliffFace * cliffStrata * 0.34;
+  mtn += vec3(0.095, 0.086, 0.130) * basaltRibs * 0.095;
+  mtn += vec3(0.120, 0.104, 0.150) * obsidianFacets * 0.120;
+  mtn -= vec3(0.010, 0.008, 0.014) * cliffFace * cliffCuts * 0.24;
+  mtn -= vec3(0.012, 0.010, 0.018) * fractureLines * 0.070;`,
+  )
+  .replace(
+    `mtn += vec3(0.030, 0.028, 0.045) * summitPad * 0.55;
+  mtn -= vec3(0.018, 0.016, 0.028) * anchorShadow * 0.46;`,
+    `mtn += vec3(0.030, 0.028, 0.045) * summitPad * 0.55;
+  mtn += vec3(0.118, 0.102, 0.150) * terrace * 0.250;
+  mtn += vec3(0.082, 0.074, 0.112) * lowerTerrace * 0.180;
+  mtn += mix(u_accent, vec3(0.82, 0.90, 1.0), 0.42) * accessPath * 0.105;
+  mtn += vec3(0.95, 0.72, 0.42) * (scaleLightA + scaleLightB * 0.90 + scaleLightC * 0.72) * 0.220;
+  mtn -= vec3(0.018, 0.016, 0.028) * anchorShadow * 0.46;`,
   )
   .replace(
     `float longWave = sin(x * 2.3 + u_time * 0.09) * 0.010;

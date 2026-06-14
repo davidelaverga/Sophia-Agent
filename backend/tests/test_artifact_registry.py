@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import parse_qs
 
+import httpx
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
@@ -12,9 +14,13 @@ import app.gateway.artifact_registry as artifact_registry_module
 import app.gateway.routers.artifacts as artifacts_router
 import app.gateway.routers.builder_events as builder_events_router
 from app.gateway.artifact_registry import (
+    ArtifactRegistry,
+    ArtifactRegistryConfigurationError,
     ArtifactRegistryFilters,
     ArtifactUpsertRequest,
     LocalArtifactRegistry,
+    SupabaseArtifactRegistry,
+    SupabaseArtifactRegistryConfig,
 )
 from app.gateway.auth import require_authenticated_user
 from deerflow.sophia.session_store import SessionRecord, SessionStore
@@ -50,6 +56,50 @@ def _owned_app(tmp_path, monkeypatch) -> tuple[TestClient, LocalArtifactRegistry
     app.include_router(artifacts_router.router)
     app.dependency_overrides[require_authenticated_user] = lambda: "user-1"
     return TestClient(app), registry
+
+
+class FakeSupabaseArtifactPostgrest:
+    def __init__(self) -> None:
+        self.rows: dict[str, dict] = {}
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        table = request.url.path.rstrip("/").split("/")[-1]
+        if table != "artifact_registry_records":
+            return httpx.Response(404, json={"error": "unknown table"})
+        params = {key: values[-1] for key, values in parse_qs(request.url.query.decode()).items()}
+        if request.method == "POST":
+            rows = json.loads(request.content.decode("utf-8")) if request.content else []
+            for row in rows:
+                artifact_id = row["artifact_id"]
+                merged = dict(self.rows.get(artifact_id, {}))
+                merged.update(row)
+                self.rows[artifact_id] = merged
+            return httpx.Response(201, json=[self.rows[row["artifact_id"]] for row in rows])
+        if request.method == "GET":
+            rows = [row for row in self.rows.values() if self._matches(row, params)]
+            rows.sort(key=lambda row: row.get("updated_at") or "", reverse=True)
+            if limit := params.get("limit"):
+                rows = rows[: int(limit)]
+            return httpx.Response(200, json=rows)
+        return httpx.Response(405)
+
+    def _matches(self, row: dict, params: dict[str, str]) -> bool:
+        for key in ("artifact_id", "user_id", "thread_id", "session_id"):
+            value = params.get(key)
+            if value and value.startswith("eq.") and str(row.get(key)) != value[3:]:
+                return False
+        return True
+
+
+def _supabase_registry(fake: FakeSupabaseArtifactPostgrest) -> SupabaseArtifactRegistry:
+    client = httpx.Client(transport=httpx.MockTransport(fake.handler))
+    return SupabaseArtifactRegistry(
+        SupabaseArtifactRegistryConfig(
+            url="https://example.supabase.co",
+            service_role_key="service-role",
+        ),
+        client=client,
+    )
 
 
 def test_registry_default_storage_base_is_backend_users(monkeypatch) -> None:
@@ -135,6 +185,144 @@ def test_registry_soft_delete_persists_across_store_restart(tmp_path) -> None:
     assert hidden.total == 1
     assert hidden.artifacts[0].deleted_at is not None
     assert hidden.artifacts[0].is_library_visible is False
+
+
+def test_supabase_registry_persists_metadata_across_store_recreation() -> None:
+    fake = FakeSupabaseArtifactPostgrest()
+    first_registry = _supabase_registry(fake)
+    artifact = first_registry.upsert(_request(), user_id="user-1")
+
+    second_registry = _supabase_registry(fake)
+    opened = second_registry.mark_opened(artifact.artifact_id, user_id="user-1")
+    assert opened is not None
+    assert opened.opened_count == 1
+
+    deleted = second_registry.mark_deleted(artifact.artifact_id, user_id="user-1")
+    assert deleted is not None
+    assert deleted.deleted_at is not None
+
+    third_registry = _supabase_registry(fake)
+    assert third_registry.list(user_id="user-1").total == 0
+    hidden = third_registry.list(user_id="user-1", filters=ArtifactRegistryFilters(include_hidden=True))
+    assert hidden.total == 1
+    assert hidden.artifacts[0].artifact_id == artifact.artifact_id
+    serialized = json.dumps(fake.rows[artifact.artifact_id], sort_keys=True)
+    assert "<html" not in serialized
+    assert "signed.example" not in serialized
+    assert "artifact_url" not in serialized
+
+
+def test_supabase_registry_dedupes_builder_and_backfill_and_hides_wrappers() -> None:
+    fake = FakeSupabaseArtifactPostgrest()
+    registry = _supabase_registry(fake)
+    builder = registry.upsert(
+        _request(
+            source="builder",
+            title="Explicit HTML Library Test",
+            local_path="outputs/explicit-html-library-test.html",
+            artifact_type="webpage",
+            renderer_kind="html",
+        ),
+        user_id="user-1",
+    )
+    registry.upsert_record(
+        builder.model_copy(
+            update={
+                "artifact_id": "artifact_backfill_duplicate",
+                "logical_artifact_id": "logical_backfill_duplicate",
+                "version_id": "logical_backfill_duplicate::v1",
+                "source": "file_library_backfill",
+                "updated_at": "2026-06-02T10:00:00+00:00",
+            }
+        ),
+        user_id="user-1",
+    )
+    wrapper = registry.upsert(
+        _request(
+            title="Durable Artifact Registry Smoke Test - Handoff Wrapper",
+            artifact_type="html",
+            renderer_kind="html",
+            local_path="outputs/create-a-real-markdown-artifact-file-nam.html",
+        ),
+        user_id="user-1",
+    )
+
+    visible = registry.list(user_id="user-1")
+    assert visible.total == 1
+    assert visible.artifacts[0].artifact_id == builder.artifact_id
+    assert visible.artifacts[0].source == "builder"
+    assert wrapper.is_library_visible is False
+    hidden = registry.list(user_id="user-1", filters=ArtifactRegistryFilters(include_hidden=True))
+    assert {artifact.filename for artifact in hidden.artifacts} == {
+        "explicit-html-library-test.html",
+        "create-a-real-markdown-artifact-file-nam.html",
+    }
+
+
+def test_artifact_registry_factory_requires_supabase_in_production(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.delenv("SOPHIA_ARTIFACT_REGISTRY_STORE", raising=False)
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+
+    with pytest.raises(ArtifactRegistryConfigurationError) as exc_info:
+        ArtifactRegistry()
+
+    message = str(exc_info.value)
+    assert "SOPHIA_ARTIFACT_REGISTRY_STORE=supabase" in message
+    assert "service-role" not in message
+
+
+def test_local_registry_migration_writes_supabase_metadata_and_uploads_bytes(tmp_path, monkeypatch) -> None:
+    import scripts.migrate_artifact_registry_to_supabase as migration
+
+    base_path = tmp_path / "users"
+    local_registry = LocalArtifactRegistry(base_path)
+    artifact = local_registry.upsert(
+        _request(
+            local_path="outputs/report.md",
+            renderer_kind="markdown",
+            artifact_type="markdown",
+            mime_type="text/markdown",
+        ),
+        user_id="user-1",
+    )
+    local_file = tmp_path / "outputs" / "report.md"
+    local_file.parent.mkdir(parents=True)
+    local_file.write_text("# Report", encoding="utf-8")
+    monkeypatch.setattr(migration, "resolve_thread_virtual_path", lambda _thread_id, _path: local_file)
+
+    uploads: list[tuple[str, bytes, str | None]] = []
+
+    def upload_object(object_path: str, content: bytes, *, content_type: str | None = None):
+        uploads.append((object_path, content, content_type))
+        return object_path
+
+    monkeypatch.setattr(migration.supabase_artifact_store, "upload_artifact_object", upload_object)
+    fake = FakeSupabaseArtifactPostgrest()
+    target_registry = _supabase_registry(fake)
+
+    summary = migration.migrate(base_path=base_path, execute=True, registry=target_registry)
+
+    assert summary.records_seen == 1
+    assert summary.records_written == 1
+    assert summary.bytes_uploaded == 1
+    assert uploads == [
+        (
+            f"artifacts/user-1/session-1/{artifact.artifact_id}/report.md",
+            b"# Report",
+            "text/markdown",
+        )
+    ]
+    stored_payload = fake.rows[artifact.artifact_id]["record_payload"]
+    assert stored_payload["storage_provider"] == "supabase"
+    assert stored_payload["storage_object_path"] == uploads[0][0]
+    assert stored_payload["size_bytes"] == len(b"# Report")
+    serialized = json.dumps(stored_payload, sort_keys=True)
+    assert "# Report" not in serialized
+    assert "artifact_url" not in serialized
+    assert stored_payload["raw_content_excluded"] is True
+    assert stored_payload["signed_url_excluded"] is True
 
 
 def test_registry_list_filters_by_type_source_thread_date_and_search(tmp_path) -> None:
@@ -551,6 +739,61 @@ def test_content_endpoint_serves_visible_artifact_by_registry_id(tmp_path, monke
     assert response.status_code == 200
     assert response.text == "<html><body>launch</body></html>"
     assert "location" not in response.headers
+
+
+def test_content_endpoint_serves_registry_artifact_from_supabase_object(tmp_path, monkeypatch) -> None:
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    missing_file = tmp_path / "missing" / "remote.md"
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: missing_file)
+
+    requested_paths: list[str] = []
+
+    def download_object(object_path: str):
+        requested_paths.append(object_path)
+        return b"# Remote\n\nstored in supabase", "text/markdown"
+
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "download_artifact_object", download_object)
+    artifact = registry.upsert(
+        _request(
+            local_path="outputs/remote.md",
+            renderer_kind="markdown",
+            artifact_type="markdown",
+            mime_type="text/markdown",
+            storage_provider="supabase",
+            storage_bucket="sophia_builder",
+            storage_object_path="artifacts/user-1/session-1/artifact-1/remote.md",
+        ),
+        user_id="user-1",
+    )
+
+    response = client.get(f"/api/artifacts/{artifact.artifact_id}/content")
+
+    assert response.status_code == 200
+    assert response.text == "# Remote\n\nstored in supabase"
+    assert requested_paths == ["artifacts/user-1/session-1/artifact-1/remote.md"]
+
+
+def test_content_endpoint_rejects_unsafe_supabase_object_path(tmp_path, monkeypatch) -> None:
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    missing_file = tmp_path / "missing" / "remote.md"
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: missing_file)
+    artifact = registry.upsert(
+        _request(
+            local_path="outputs/remote.md",
+            renderer_kind="markdown",
+            artifact_type="markdown",
+            mime_type="text/markdown",
+            storage_provider="supabase",
+            storage_bucket="sophia_builder",
+            storage_object_path="../secret.md",
+        ),
+        user_id="user-1",
+    )
+
+    response = client.get(f"/api/artifacts/{artifact.artifact_id}/content")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Unsafe artifact storage path"
 
 
 def test_artifact_id_endpoints_do_not_require_live_session_record(tmp_path, monkeypatch) -> None:

@@ -13,11 +13,13 @@ import json
 import mimetypes
 import os
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from urllib.parse import unquote
 
+import httpx
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -693,6 +695,68 @@ class ArtifactRegistryFilters(BaseModel):
     limit: int = Field(default=100, ge=1, le=250)
 
 
+class ArtifactRegistryConfigurationError(RuntimeError):
+    """Raised when the configured artifact registry backend cannot start."""
+
+
+class ArtifactRegistryStoreError(RuntimeError):
+    """Raised when the durable artifact registry backend fails unexpectedly."""
+
+
+@dataclass(frozen=True)
+class SupabaseArtifactRegistryConfig:
+    url: str
+    service_role_key: str
+    table: str = "artifact_registry_records"
+
+
+def _truthy_env(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_production_runtime() -> bool:
+    return any(
+        _truthy_env(os.getenv(name))
+        for name in ("RENDER", "VERCEL", "RAILWAY_ENVIRONMENT")
+    ) or (os.getenv("SOPHIA_ENV") or os.getenv("APP_ENV") or os.getenv("ENVIRONMENT") or "").lower() in {
+        "prod",
+        "production",
+        "staging",
+    }
+
+
+def _load_supabase_artifact_registry_config() -> SupabaseArtifactRegistryConfig:
+    url = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
+    service_role_key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+    missing = [
+        name
+        for name, value in (
+            ("SUPABASE_URL", url),
+            ("SUPABASE_SERVICE_ROLE_KEY", service_role_key),
+        )
+        if not value
+    ]
+    if missing:
+        raise ArtifactRegistryConfigurationError(
+            "SOPHIA_ARTIFACT_REGISTRY_STORE=supabase requires backend env vars: "
+            + ", ".join(missing)
+        )
+    table = (os.getenv("SOPHIA_ARTIFACT_REGISTRY_TABLE") or "artifact_registry_records").strip()
+    return SupabaseArtifactRegistryConfig(
+        url=url,
+        service_role_key=service_role_key,
+        table=table or "artifact_registry_records",
+    )
+
+
+def _supabase_registry_read_limit() -> int:
+    try:
+        configured = int(os.getenv("SOPHIA_ARTIFACT_REGISTRY_READ_LIMIT", "5000"))
+    except ValueError:
+        configured = 5000
+    return max(250, configured)
+
+
 class LocalArtifactRegistry:
     """JSON-backed artifact metadata store scoped by user id."""
 
@@ -764,9 +828,25 @@ class LocalArtifactRegistry:
             records.append(record)
         else:
             records[existing_index] = record
+        self._write_sorted_records(user_id, records)
+        return record
+
+    def upsert_record(self, record: ArtifactRecord, *, user_id: str) -> ArtifactRecord:
+        if record.user_id != user_id:
+            raise HTTPException(status_code=403, detail="Artifact user scope mismatch")
+        records = self._read_records(user_id)
+        for index, existing in enumerate(records):
+            if existing.artifact_id == record.artifact_id:
+                records[index] = record
+                self._write_sorted_records(user_id, records)
+                return record
+        records.append(record)
+        self._write_sorted_records(user_id, records)
+        return record
+
+    def _write_sorted_records(self, user_id: str, records: list[ArtifactRecord]) -> None:
         records.sort(key=lambda item: (_parse_timestamp(item.updated_at), item.title.lower()), reverse=True)
         self._write_records(user_id, records)
-        return record
 
     def get(self, artifact_id: str, *, user_id: str) -> ArtifactRecord | None:
         for record in self._read_records(user_id):
@@ -975,6 +1055,348 @@ class LocalArtifactRegistry:
                 reverse=True,
             )
         return sorted(records, key=lambda record: _parse_timestamp(record.updated_at), reverse=True)
+
+
+class SupabaseArtifactRegistry(LocalArtifactRegistry):
+    """Supabase Postgres-backed artifact metadata store.
+
+    Artifact bytes stay in local/Supabase object storage and are served through
+    the gateway. This store persists only safe metadata rows via PostgREST.
+    """
+
+    def __init__(
+        self,
+        config: SupabaseArtifactRegistryConfig | None = None,
+        *,
+        client: httpx.Client | None = None,
+    ) -> None:
+        self._config = config or _load_supabase_artifact_registry_config()
+        self._client = client or httpx.Client(timeout=10.0)
+        self._read_limit = _supabase_registry_read_limit()
+
+    def _headers(self, *, prefer: str | None = None) -> dict[str, str]:
+        headers = {
+            "Authorization": f"Bearer {self._config.service_role_key}",
+            "apikey": self._config.service_role_key,
+        }
+        if prefer:
+            headers["Prefer"] = prefer
+            headers["Content-Type"] = "application/json"
+        return headers
+
+    def _table_url(self) -> str:
+        return f"{self._config.url}/rest/v1/{self._config.table}"
+
+    def _request(
+        self,
+        method: str,
+        *,
+        params: dict[str, str] | None = None,
+        json_body: object | None = None,
+        prefer: str | None = None,
+    ) -> object:
+        try:
+            response = self._client.request(
+                method,
+                self._table_url(),
+                headers=self._headers(prefer=prefer),
+                params=params,
+                json=json_body,
+            )
+        except httpx.HTTPError as exc:
+            raise ArtifactRegistryStoreError(f"Supabase artifact registry request failed: {exc}") from exc
+
+        if response.status_code >= 400:
+            raise ArtifactRegistryStoreError(
+                "Supabase artifact registry request failed "
+                f"status={response.status_code} body={response.text[:200]!r}"
+            )
+
+        if not response.text:
+            return None
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise ArtifactRegistryStoreError("Supabase artifact registry returned invalid JSON") from exc
+
+    def _row_from_record(self, record: ArtifactRecord) -> dict[str, object]:
+        payload = record.model_dump(mode="json")
+        return {
+            "artifact_id": record.artifact_id,
+            "user_id": record.user_id,
+            "thread_id": record.thread_id,
+            "session_id": record.session_id,
+            "parent_thread_id": record.parent_thread_id,
+            "task_id": record.task_id,
+            "run_id": record.run_id,
+            "trace_id": record.trace_id,
+            "logical_artifact_id": record.logical_artifact_id,
+            "version_id": record.version_id,
+            "parent_version_id": record.parent_version_id,
+            "title": record.title,
+            "filename": record.filename,
+            "artifact_type": record.artifact_type,
+            "renderer_kind": record.renderer_kind,
+            "mime_type": record.mime_type,
+            "safe_summary": record.safe_summary,
+            "source": record.source,
+            "local_path": record.local_path,
+            "storage_provider": record.storage_provider,
+            "storage_bucket": record.storage_bucket,
+            "storage_object_path": record.storage_object_path,
+            "size_bytes": record.size_bytes,
+            "content_hash": record.content_hash,
+            "storage_status": record.storage_status,
+            "artifact_role": record.artifact_role,
+            "is_library_visible": record.is_library_visible,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+            "deleted_at": record.deleted_at,
+            "last_opened_at": record.last_opened_at,
+            "opened_count": record.opened_count,
+            "raw_content_excluded": record.raw_content_excluded,
+            "signed_url_excluded": record.signed_url_excluded,
+            "record_payload": payload,
+        }
+
+    def _record_from_row(self, row: object) -> ArtifactRecord | None:
+        if not isinstance(row, dict):
+            return None
+        payload = row.get("record_payload")
+        raw = payload if isinstance(payload, dict) else row
+        try:
+            return ArtifactRecord.model_validate(raw)
+        except Exception:
+            return None
+
+    def _read_records(self, user_id: str) -> list[ArtifactRecord]:
+        result = self._request(
+            "GET",
+            params={
+                "select": "*",
+                "user_id": f"eq.{user_id}",
+                "order": "updated_at.desc",
+                "limit": str(self._read_limit),
+            },
+        )
+        rows = result if isinstance(result, list) else []
+        return [record for record in (self._record_from_row(row) for row in rows) if record]
+
+    def upsert(self, request: ArtifactUpsertRequest, *, user_id: str) -> ArtifactRecord:
+        if request.user_id is not None and request.user_id != user_id:
+            raise HTTPException(status_code=403, detail="Artifact user scope mismatch")
+
+        records = self._read_records(user_id)
+        existing_index = self._find_existing_index(records, request, user_id=user_id)
+        existing = records[existing_index] if existing_index is not None else None
+        preserve_existing_priority = (
+            existing is not None
+            and _source_priority(existing.source) <= _source_priority(request.source)
+        )
+        record = request.to_record(
+            user_id=user_id,
+            existing=existing,
+            preserve_existing_identity=preserve_existing_priority,
+            preserve_existing_source=preserve_existing_priority,
+        )
+        if request.source in _BACKFILL_SOURCES and existing is None and record.artifact_role != "primary":
+            return record
+        return self.upsert_record(record, user_id=user_id)
+
+    def upsert_record(self, record: ArtifactRecord, *, user_id: str) -> ArtifactRecord:
+        if record.user_id != user_id:
+            raise HTTPException(status_code=403, detail="Artifact user scope mismatch")
+        result = self._request(
+            "POST",
+            params={"on_conflict": "artifact_id"},
+            json_body=[self._row_from_record(record)],
+            prefer="resolution=merge-duplicates,return=representation",
+        )
+        rows = result if isinstance(result, list) else []
+        stored = self._record_from_row(rows[0]) if rows else None
+        return stored or record
+
+    def get(self, artifact_id: str, *, user_id: str) -> ArtifactRecord | None:
+        result = self._request(
+            "GET",
+            params={
+                "select": "*",
+                "artifact_id": f"eq.{artifact_id}",
+                "user_id": f"eq.{user_id}",
+                "limit": "1",
+            },
+        )
+        rows = result if isinstance(result, list) else []
+        if not rows:
+            return None
+        return self._record_from_row(rows[0])
+
+    def list(self, *, user_id: str, filters: ArtifactRegistryFilters | None = None) -> ArtifactListResponse:
+        filters = filters if filters is not None else ArtifactRegistryFilters()
+        records = [self._with_effective_visibility(record) for record in self._read_records(user_id)]
+        records = self._apply_filters(records, filters)
+        if not filters.include_hidden:
+            records = self._dedupe_visible(records)
+        records = self._sort(records, filters.sort)
+        limited = records[: filters.limit]
+        return ArtifactListResponse(artifacts=limited, total=len(records))
+
+    def mark_opened(self, artifact_id: str, *, user_id: str) -> ArtifactRecord | None:
+        record = self.get(artifact_id, user_id=user_id)
+        if record is None:
+            return None
+        opened_at = _now_iso()
+        updated = record.model_copy(
+            update={
+                "last_opened_at": opened_at,
+                "opened_count": record.opened_count + 1,
+                "updated_at": opened_at,
+            }
+        )
+        return self.upsert_record(updated, user_id=user_id)
+
+    def mark_deleted(self, artifact_id: str, *, user_id: str) -> ArtifactRecord | None:
+        record = self.get(artifact_id, user_id=user_id)
+        if record is None:
+            return None
+        deleted_at = _now_iso()
+        updated = record.model_copy(
+            update={
+                "deleted_at": deleted_at,
+                "is_library_visible": False,
+                "updated_at": deleted_at,
+            }
+        )
+        return self.upsert_record(updated, user_id=user_id)
+
+
+class HybridArtifactRegistry(LocalArtifactRegistry):
+    """Supabase-primary registry with local JSON fallback for migration windows."""
+
+    def __init__(
+        self,
+        *,
+        local_registry: LocalArtifactRegistry | None = None,
+        supabase_registry: SupabaseArtifactRegistry | None = None,
+    ) -> None:
+        self._local = local_registry or LocalArtifactRegistry()
+        self._supabase = supabase_registry or SupabaseArtifactRegistry()
+
+    def _read_merged_records(self, user_id: str) -> list[ArtifactRecord]:
+        records: list[ArtifactRecord] = []
+        seen_artifact_ids: set[str] = set()
+        seen_identities: set[tuple[str, str, str, str, str]] = set()
+
+        for record in self._supabase._read_records(user_id):
+            records.append(record)
+            seen_artifact_ids.add(record.artifact_id)
+            seen_identities.add(_record_artifact_identity(record))
+
+        for record in self._local._read_records(user_id):
+            identity = _record_artifact_identity(record)
+            if record.artifact_id in seen_artifact_ids or identity in seen_identities:
+                continue
+            records.append(record)
+            seen_artifact_ids.add(record.artifact_id)
+            seen_identities.add(identity)
+
+        return records
+
+    def upsert(self, request: ArtifactUpsertRequest, *, user_id: str) -> ArtifactRecord:
+        record = self._supabase.upsert(request, user_id=user_id)
+        try:
+            self._local.upsert_record(record, user_id=user_id)
+        except Exception:
+            pass
+        return record
+
+    def upsert_record(self, record: ArtifactRecord, *, user_id: str) -> ArtifactRecord:
+        stored = self._supabase.upsert_record(record, user_id=user_id)
+        try:
+            self._local.upsert_record(stored, user_id=user_id)
+        except Exception:
+            pass
+        return stored
+
+    def get(self, artifact_id: str, *, user_id: str) -> ArtifactRecord | None:
+        return self._supabase.get(artifact_id, user_id=user_id) or self._local.get(
+            artifact_id,
+            user_id=user_id,
+        )
+
+    def list(self, *, user_id: str, filters: ArtifactRegistryFilters | None = None) -> ArtifactListResponse:
+        filters = filters if filters is not None else ArtifactRegistryFilters()
+        records = [self._with_effective_visibility(record) for record in self._read_merged_records(user_id)]
+        records = self._apply_filters(records, filters)
+        if not filters.include_hidden:
+            records = self._dedupe_visible(records)
+        records = self._sort(records, filters.sort)
+        limited = records[: filters.limit]
+        return ArtifactListResponse(artifacts=limited, total=len(records))
+
+    def mark_opened(self, artifact_id: str, *, user_id: str) -> ArtifactRecord | None:
+        if self._supabase.get(artifact_id, user_id=user_id) is not None:
+            opened = self._supabase.mark_opened(artifact_id, user_id=user_id)
+            if opened is not None:
+                try:
+                    self._local.upsert_record(opened, user_id=user_id)
+                except Exception:
+                    pass
+            return opened
+        return self._local.mark_opened(artifact_id, user_id=user_id)
+
+    def mark_deleted(self, artifact_id: str, *, user_id: str) -> ArtifactRecord | None:
+        if self._supabase.get(artifact_id, user_id=user_id) is not None:
+            deleted = self._supabase.mark_deleted(artifact_id, user_id=user_id)
+            if deleted is not None:
+                try:
+                    self._local.upsert_record(deleted, user_id=user_id)
+                except Exception:
+                    pass
+            return deleted
+        return self._local.mark_deleted(artifact_id, user_id=user_id)
+
+
+def ArtifactRegistry(
+    base_path: Path | str | None = None,
+    *,
+    backend: Literal["local", "supabase", "hybrid"] | None = None,
+    client: httpx.Client | None = None,
+) -> LocalArtifactRegistry:
+    """Return the configured artifact metadata registry.
+
+    Local development defaults to the JSON-backed store. Production-like
+    runtimes default to Supabase so artifact metadata does not silently depend
+    on an ephemeral filesystem.
+    """
+
+    if base_path is not None:
+        return LocalArtifactRegistry(base_path)
+
+    selected = (backend or os.getenv("SOPHIA_ARTIFACT_REGISTRY_STORE") or "").strip().lower()
+    if not selected:
+        selected = "supabase" if _is_production_runtime() else "local"
+
+    if selected == "local":
+        if _is_production_runtime() and not _truthy_env(os.getenv("SOPHIA_ALLOW_LOCAL_ARTIFACT_REGISTRY_IN_PRODUCTION")):
+            raise ArtifactRegistryConfigurationError(
+                "Production runtime requires SOPHIA_ARTIFACT_REGISTRY_STORE=supabase; "
+                "local artifact registry metadata is not durable on ephemeral filesystems."
+            )
+        return LocalArtifactRegistry()
+
+    if selected == "supabase":
+        return SupabaseArtifactRegistry(client=client)
+
+    if selected == "hybrid":
+        return HybridArtifactRegistry(
+            local_registry=LocalArtifactRegistry(),
+            supabase_registry=SupabaseArtifactRegistry(client=client),
+        )
+
+    raise ArtifactRegistryConfigurationError(
+        "SOPHIA_ARTIFACT_REGISTRY_STORE must be one of: local, supabase, hybrid"
+    )
 
 
 def open_response_for_record(record: ArtifactRecord) -> ArtifactOpenResponse:

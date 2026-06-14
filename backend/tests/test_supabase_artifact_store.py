@@ -115,6 +115,38 @@ def test_upload_encodes_object_path_segments(monkeypatch) -> None:
     )
 
 
+def test_upload_artifact_object_posts_to_explicit_safe_path(monkeypatch) -> None:
+    _configure(monkeypatch)
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["content"] = request.content
+        return httpx.Response(200)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    object_path = supabase_artifact_store.upload_artifact_object(
+        "artifacts/user-1/session-1/artifact-1/report #1.md",
+        b"# report",
+        content_type="text/markdown",
+        client=client,
+    )
+
+    assert object_path == "artifacts/user-1/session-1/artifact-1/report #1.md"
+    assert captured["url"] == (
+        "https://example.supabase.co/storage/v1/object/"
+        "sophia_builder/artifacts/user-1/session-1/artifact-1/report%20%231.md"
+    )
+    assert captured["content"] == b"# report"
+
+
+def test_artifact_object_path_rejects_traversal_even_when_unconfigured() -> None:
+    with pytest.raises(ValueError):
+        supabase_artifact_store.download_artifact_object("../secret.md")
+    with pytest.raises(ValueError):
+        supabase_artifact_store.upload_artifact_object("C:/Users/alice/secret.md", b"x")
+
+
 def test_download_returns_none_on_404(monkeypatch) -> None:
     _configure(monkeypatch)
 
@@ -126,6 +158,31 @@ def test_download_returns_none_on_404(monkeypatch) -> None:
         thread_id="thread-1", filename="note.md", client=client
     )
     assert result is None
+
+
+def test_download_artifact_object_returns_bytes(monkeypatch) -> None:
+    _configure(monkeypatch)
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            content=b"stored object",
+            headers={"content-type": "text/markdown"},
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    result = supabase_artifact_store.download_artifact_object(
+        "artifacts/user-1/session-1/artifact-1/note.md",
+        client=client,
+    )
+
+    assert result == (b"stored object", "text/markdown")
+    assert captured["url"] == (
+        "https://example.supabase.co/storage/v1/object/"
+        "sophia_builder/artifacts/user-1/session-1/artifact-1/note.md"
+    )
 
 
 def test_download_returns_bytes_and_content_type(monkeypatch) -> None:

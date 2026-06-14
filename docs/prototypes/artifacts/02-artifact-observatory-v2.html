@@ -1,0 +1,2226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sophia - Artifact Observatory V2</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Cormorant+Garamond:wght@400;500&display=swap');
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --void: #010106;
+  --panel: rgba(7, 6, 14, 0.72);
+  --panel-strong: rgba(7, 6, 14, 0.90);
+  --line: rgba(196, 181, 232, 0.14);
+  --line-strong: rgba(196, 181, 232, 0.24);
+  --text-strong: #f0ecf7;
+  --text: #d6cfe6;
+  --muted: #8f87a4;
+  --whisper: #5d566f;
+  --purple: #b8a4e8;
+  --teal: #61c8bb;
+  --amber: #d7b070;
+  --rose: #d48cab;
+  --danger: #ef8f9d;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--void);
+  color: var(--text);
+  font-family: Inter, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+body::before,
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+
+body::before {
+  background:
+    radial-gradient(circle at 50% 108%, rgba(0, 0, 0, 0.46), transparent 43%),
+    radial-gradient(ellipse at 50% 96%, rgba(89, 190, 173, 0.070), transparent 30%),
+    radial-gradient(ellipse at 42% 98%, rgba(184, 164, 232, 0.060), transparent 36%),
+    radial-gradient(circle at 8% 84%, rgba(184, 164, 232, 0.08), transparent 22%),
+    radial-gradient(circle at 92% 18%, rgba(97, 200, 187, 0.05), transparent 24%),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.48), transparent 16%, transparent 84%, rgba(0, 0, 0, 0.50));
+  mix-blend-mode: multiply;
+}
+
+body::after {
+  opacity: 0.030;
+  background-image: radial-gradient(circle at 24% 20%, rgba(255, 255, 255, 0.13) 0 0.65px, transparent 1.9px);
+  background-size: 26px 26px;
+  background-position: 0 0;
+  filter: blur(0.35px);
+  mix-blend-mode: overlay;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+#cinema {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  width: 100vw;
+  height: 100vh;
+  display: block;
+  background: #010106;
+}
+
+.stage {
+  position: fixed;
+  inset: 0;
+  z-index: 8;
+  pointer-events: none;
+}
+
+.top-left,
+.top-right,
+.artifact-plate,
+.focus-rail,
+.filter-strip,
+.artifact-layer,
+.toast {
+  pointer-events: auto;
+}
+
+.top-left {
+  position: fixed;
+  left: 34px;
+  top: 28px;
+  z-index: 18;
+  max-width: min(560px, calc(100vw - 420px));
+}
+
+.kicker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--whisper);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+
+.kicker::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--teal);
+  box-shadow: 0 0 16px rgba(97, 200, 187, 0.88);
+}
+
+.title {
+  margin-top: 8px;
+  color: var(--text-strong);
+  font-family: "Cormorant Garamond", Georgia, serif;
+  font-size: clamp(42px, 5.6vw, 82px);
+  font-weight: 400;
+  line-height: 0.9;
+  text-shadow:
+    0 2px 24px rgba(0, 0, 0, 0.75),
+    0 0 34px rgba(184, 164, 232, 0.10);
+}
+
+.subtitle {
+  width: min(460px, 82vw);
+  margin-top: 14px;
+  color: rgba(214, 207, 230, 0.68);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.top-right {
+  position: fixed;
+  right: 30px;
+  top: 28px;
+  z-index: 18;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.instrument-pill,
+.mode-button {
+  border: 1px solid rgba(196, 181, 232, 0.12);
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.015)),
+    rgba(9, 7, 18, 0.62);
+  color: rgba(240, 236, 247, 0.84);
+  box-shadow:
+    0 14px 34px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(22px) saturate(1.2);
+}
+
+.instrument-pill {
+  padding: 10px 14px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.mode-button {
+  height: 42px;
+  padding: 0 15px;
+  font-size: 12px;
+  transition: transform 180ms ease, border-color 180ms ease, background 180ms ease;
+}
+
+.mode-button:hover,
+.mode-button.active {
+  transform: translateY(-1px);
+  border-color: rgba(184, 164, 232, 0.24);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(184, 164, 232, 0.18), transparent 62%),
+    rgba(12, 9, 22, 0.74);
+}
+
+.filter-strip {
+  position: fixed;
+  left: 50%;
+  top: 128px;
+  z-index: 18;
+  display: flex;
+  max-width: min(820px, calc(100vw - 64px));
+  gap: 7px;
+  overflow-x: auto;
+  padding: 2px 2px 7px;
+  transform: translateX(-50%);
+  scrollbar-width: none;
+}
+
+.filter-strip::-webkit-scrollbar { display: none; }
+
+.filter {
+  flex: 0 0 auto;
+  min-height: 31px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: rgba(8, 7, 16, 0.22);
+  color: rgba(214, 207, 230, 0.54);
+  padding: 0 14px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  backdrop-filter: blur(10px);
+  transition: color 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+
+.filter:hover,
+.filter.active {
+  color: rgba(240, 236, 247, 0.92);
+  border-color: rgba(184, 164, 232, 0.18);
+  background: rgba(184, 164, 232, 0.075);
+}
+
+.artifact-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 12;
+}
+
+.celestial-artifact {
+  --accent: var(--purple);
+  --glow: rgba(184, 164, 232, 0.74);
+  position: absolute;
+  width: 38px;
+  height: 38px;
+  margin: -19px 0 0 -19px;
+  border: 1px solid color-mix(in srgb, var(--accent) 46%, transparent);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--accent) 24%, transparent) 0 9%, transparent 10% 100%),
+    conic-gradient(from 0deg, transparent 0 22%, color-mix(in srgb, var(--accent) 58%, transparent) 23% 27%, transparent 28% 47%, color-mix(in srgb, var(--accent) 46%, transparent) 48% 52%, transparent 53% 72%, color-mix(in srgb, var(--accent) 58%, transparent) 73% 77%, transparent 78% 100%);
+  color: inherit;
+  transform: translate3d(0, 0, 0);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.045),
+    0 0 18px color-mix(in srgb, var(--accent) 18%, transparent);
+  transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
+}
+
+.celestial-artifact::before {
+  content: "";
+  position: absolute;
+  inset: 13px;
+  border-radius: inherit;
+  background: var(--accent);
+  box-shadow:
+    0 0 9px var(--glow),
+    0 0 32px color-mix(in srgb, var(--accent) 30%, transparent);
+  animation: artifactBeacon 4.2s ease-in-out infinite;
+  animation-delay: var(--delay, 0ms);
+}
+
+.celestial-artifact::after {
+  content: "";
+  position: absolute;
+  inset: -8px;
+  border-radius: inherit;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  background:
+    linear-gradient(color-mix(in srgb, var(--accent) 36%, transparent), color-mix(in srgb, var(--accent) 36%, transparent)) center/1px 100% no-repeat,
+    linear-gradient(90deg, color-mix(in srgb, var(--accent) 36%, transparent), color-mix(in srgb, var(--accent) 36%, transparent)) center/100% 1px no-repeat;
+  opacity: 0.46;
+  transform: scale(0.72);
+  animation: artifactReticle 9s linear infinite;
+  transition: opacity 220ms ease, transform 220ms ease, border-color 220ms ease;
+}
+
+.celestial-artifact:hover::after,
+.celestial-artifact.active::after {
+  opacity: 0.92;
+  transform: scale(1);
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.celestial-artifact.active::before {
+  background: var(--accent);
+  box-shadow:
+    0 0 14px var(--glow),
+    0 0 38px color-mix(in srgb, var(--accent) 42%, transparent);
+  transform: scale(1.45);
+}
+
+.celestial-artifact:hover,
+.celestial-artifact.active {
+  transform: translate3d(0, 0, 0) scale(1.08);
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent),
+    0 0 28px color-mix(in srgb, var(--accent) 32%, transparent),
+    0 0 72px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.celestial-artifact:hover::before {
+  background: var(--accent);
+  box-shadow:
+    0 0 12px var(--glow),
+    0 0 30px color-mix(in srgb, var(--accent) 34%, transparent);
+}
+
+.star-tag {
+  position: absolute;
+  left: 45px;
+  top: 1px;
+  width: max-content;
+  max-width: 210px;
+  opacity: 0.40;
+  transform: translateY(6px);
+  color: rgba(240, 236, 247, 0.92);
+  font-size: 10px;
+  line-height: 1.35;
+  text-align: left;
+  text-shadow: 0 4px 18px rgba(0, 0, 0, 0.9);
+  transition: opacity 180ms ease, transform 180ms ease;
+  pointer-events: none;
+}
+
+.celestial-artifact:hover .star-tag,
+.celestial-artifact.active .star-tag {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.star-tag strong,
+.star-tag span {
+  display: block;
+}
+
+.star-tag strong {
+  font-weight: 600;
+}
+
+.star-tag span {
+  margin-top: 2px;
+  color: rgba(214, 207, 230, 0.60);
+}
+
+.artifact-plate {
+  position: fixed;
+  right: 34px;
+  bottom: 36px;
+  z-index: 20;
+  width: min(430px, calc(100vw - 68px));
+  overflow: hidden;
+  border: 1px solid rgba(196, 181, 232, 0.14);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 20% 0%, color-mix(in srgb, var(--active-accent, var(--purple)) 13%, transparent), transparent 35%),
+    linear-gradient(180deg, rgba(11, 9, 21, 0.88), rgba(4, 4, 9, 0.94));
+  box-shadow:
+    0 28px 92px rgba(0, 0, 0, 0.56),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(34px) saturate(1.18);
+}
+
+.artifact-plate::before {
+  content: "";
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  top: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--active-accent, var(--purple)) 48%, transparent), transparent);
+}
+
+.plate-head {
+  display: grid;
+  gap: 9px;
+  padding: 20px 20px 16px;
+  border-bottom: 1px solid rgba(196, 181, 232, 0.10);
+}
+
+.plate-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--whisper);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.plate-title {
+  color: var(--text-strong);
+  font-size: 23px;
+  font-weight: 600;
+  line-height: 1.12;
+}
+
+.plate-summary {
+  color: rgba(214, 207, 230, 0.66);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.preview-lens {
+  position: relative;
+  min-height: 196px;
+  padding: 18px;
+  display: grid;
+  place-items: center;
+}
+
+.preview-lens::before {
+  content: "";
+  position: absolute;
+  inset: 20px 34px;
+  border: 1px solid color-mix(in srgb, var(--active-accent, var(--purple)) 26%, transparent);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 42% 40%, color-mix(in srgb, var(--active-accent, var(--purple)) 12%, transparent), transparent 28%),
+    radial-gradient(circle at 50% 50%, rgba(0, 0, 0, 0.48), rgba(0, 0, 0, 0.94) 68%);
+  box-shadow:
+    inset 0 0 0 22px rgba(255, 255, 255, 0.012),
+    inset 0 0 72px rgba(0, 0, 0, 0.88),
+    0 0 44px color-mix(in srgb, var(--active-accent, var(--purple)) 13%, transparent);
+}
+
+.preview-lens::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 25% 24%, rgba(255, 255, 255, 0.12), transparent 3%),
+    radial-gradient(circle at 72% 52%, color-mix(in srgb, var(--active-accent, var(--purple)) 22%, transparent), transparent 4%);
+  mix-blend-mode: screen;
+  opacity: 0.65;
+}
+
+.preview-card {
+  position: relative;
+  z-index: 2;
+  width: 70%;
+  min-height: 128px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at 78% 0%, color-mix(in srgb, var(--active-accent, var(--purple)) 14%, transparent), transparent 36%),
+    linear-gradient(180deg, rgba(13, 11, 22, 0.86), rgba(3, 3, 8, 0.90));
+  box-shadow:
+    0 20px 58px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  transform: perspective(700px) rotateX(2deg) rotateY(-5deg);
+}
+
+.preview-card::before {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  border-radius: 8px;
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.030) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.022) 1px, transparent 1px);
+  background-size: 16px 16px;
+  opacity: 0.20;
+  mask-image: radial-gradient(circle at 78% 22%, black, transparent 72%);
+  pointer-events: none;
+}
+
+.preview-chrome,
+.preview-type,
+.preview-title,
+.preview-body,
+.preview-foot {
+  position: relative;
+  z-index: 1;
+}
+
+.preview-chrome {
+  display: flex;
+  gap: 5px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.preview-chrome span {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--active-accent, var(--purple)) 44%, rgba(255, 255, 255, 0.35));
+  opacity: 0.72;
+}
+
+.preview-type {
+  margin-top: 11px;
+  color: var(--active-accent, var(--purple));
+  font-size: 9px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.preview-title {
+  margin-top: 8px;
+  color: var(--text-strong);
+  font-family: "Cormorant Garamond", Georgia, serif;
+  font-size: 23px;
+  line-height: 0.98;
+}
+
+.preview-body {
+  min-height: 36px;
+  margin-top: 13px;
+}
+
+.preview-lines {
+  display: grid;
+  gap: 7px;
+}
+
+.preview-lines span {
+  display: block;
+  height: 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--active-accent, var(--purple)) 28%, transparent);
+}
+
+.preview-lines span:nth-child(2) { width: 74%; }
+.preview-lines span:nth-child(3) { width: 52%; }
+
+.preview-card.preview-html .preview-body,
+.preview-card.preview-pdf .preview-body,
+.preview-card.preview-image .preview-body {
+  min-height: 54px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+}
+
+.preview-card.preview-html .preview-body {
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--active-accent, var(--purple)) 16%, transparent) 0 20%, transparent 20%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06) 0 16px, transparent 16px),
+    radial-gradient(circle at 72% 70%, color-mix(in srgb, var(--active-accent, var(--purple)) 20%, transparent), transparent 30%);
+}
+
+.preview-card.preview-pdf .preview-body {
+  background:
+    linear-gradient(90deg, transparent 0 72%, color-mix(in srgb, var(--active-accent, var(--purple)) 17%, transparent) 72%),
+    repeating-linear-gradient(180deg, rgba(240, 236, 247, 0.16) 0 3px, transparent 3px 11px);
+}
+
+.preview-card.preview-image .preview-body {
+  background:
+    radial-gradient(circle at 38% 38%, color-mix(in srgb, var(--active-accent, var(--purple)) 48%, transparent), transparent 21%),
+    radial-gradient(circle at 72% 66%, rgba(215, 176, 112, 0.18), transparent 24%),
+    linear-gradient(135deg, rgba(184, 164, 232, 0.12), rgba(97, 200, 187, 0.07));
+}
+
+.preview-card.preview-deck .preview-body {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.preview-card.preview-deck .preview-body span {
+  min-height: 40px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 6px;
+  background:
+    radial-gradient(circle at 62% 22%, rgba(255, 255, 255, 0.14), transparent 24%),
+    linear-gradient(180deg, color-mix(in srgb, var(--active-accent, var(--purple)) 18%, transparent), rgba(255, 255, 255, 0.024));
+}
+
+.preview-foot {
+  margin-top: 12px;
+  color: var(--whisper);
+  font-size: 8.5px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+.plate-data {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border-top: 1px solid rgba(196, 181, 232, 0.10);
+  border-bottom: 1px solid rgba(196, 181, 232, 0.10);
+}
+
+.datum {
+  padding: 12px 14px;
+  border-right: 1px solid rgba(196, 181, 232, 0.10);
+}
+
+.datum:last-child { border-right: 0; }
+
+.datum span {
+  display: block;
+  color: var(--whisper);
+  font-size: 9px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+.datum strong {
+  display: block;
+  margin-top: 5px;
+  overflow: hidden;
+  color: rgba(240, 236, 247, 0.82);
+  font-size: 11px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plate-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 15px 18px 18px;
+}
+
+.action {
+  min-height: 36px;
+  border: 1px solid rgba(196, 181, 232, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.035);
+  color: rgba(240, 236, 247, 0.88);
+  padding: 0 14px;
+  font-size: 11px;
+  transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+
+.action:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--active-accent, var(--purple)) 30%, transparent);
+  background: color-mix(in srgb, var(--active-accent, var(--purple)) 11%, transparent);
+}
+
+.action.danger {
+  margin-left: auto;
+  color: var(--danger);
+}
+
+.focus-rail {
+  position: fixed;
+  left: 50%;
+  bottom: 30px;
+  z-index: 18;
+  width: min(540px, calc(100vw - 520px));
+  transform: translateX(-50%);
+  opacity: 0.86;
+}
+
+.rail-copy {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  color: rgba(214, 207, 230, 0.58);
+  font-family: "Cormorant Garamond", Georgia, serif;
+  font-size: 15px;
+  letter-spacing: 0.05em;
+}
+
+.rail-track {
+  position: relative;
+  height: 28px;
+  margin-top: 8px;
+}
+
+.rail-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 14px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(184, 164, 232, 0.28), transparent);
+}
+
+.rail-dot {
+  position: absolute;
+  top: 14px;
+  width: 5px;
+  height: 5px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(214, 207, 230, 0.42);
+  transform: translate(-50%, -50%);
+}
+
+.rail-dot.active {
+  background: var(--active-accent, var(--purple));
+  box-shadow: 0 0 18px color-mix(in srgb, var(--active-accent, var(--purple)) 76%, transparent);
+  transform: translate(-50%, -50%) scale(1.42);
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 94px;
+  z-index: 40;
+  opacity: 0;
+  transform: translate(-50%, 8px);
+  border: 1px solid rgba(196, 181, 232, 0.16);
+  border-radius: 999px;
+  background: rgba(7, 6, 14, 0.88);
+  color: rgba(240, 236, 247, 0.9);
+  padding: 10px 15px;
+  font-size: 11px;
+  backdrop-filter: blur(24px);
+  transition: opacity 180ms ease, transform 180ms ease;
+  pointer-events: none;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.gl-fallback {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: none;
+  place-items: center;
+  padding: 24px;
+  background: #03030a;
+  color: var(--text);
+  text-align: center;
+}
+
+body.no-gl .gl-fallback { display: grid; }
+
+@keyframes starBreath {
+  0%, 100% { opacity: 0.72; filter: saturate(1); }
+  50% { opacity: 1; filter: saturate(1.35); }
+}
+
+@keyframes artifactBeacon {
+  0%, 100% {
+    opacity: 0.76;
+    filter: brightness(0.95) saturate(1.1);
+    transform: scale(0.86);
+  }
+  48% {
+    opacity: 1;
+    filter: brightness(1.3) saturate(1.55);
+    transform: scale(1.12);
+  }
+}
+
+@keyframes artifactReticle {
+  to { rotate: 360deg; }
+}
+
+@media (max-width: 1080px) {
+  .top-left {
+    max-width: calc(100vw - 68px);
+  }
+
+  .filter-strip {
+    top: 142px;
+  }
+
+  .artifact-plate {
+    right: 18px;
+    bottom: 72px;
+    width: min(400px, calc(100vw - 36px));
+  }
+
+  .focus-rail {
+    left: 18px;
+    right: 18px;
+    bottom: 18px;
+    width: auto;
+    transform: none;
+  }
+}
+
+@media (max-width: 680px) {
+  .top-left {
+    left: 18px;
+    top: 18px;
+    max-width: calc(100vw - 128px);
+  }
+
+  .title {
+    margin-top: 5px;
+    font-size: 34px;
+  }
+
+  .subtitle,
+  .instrument-pill {
+    display: none;
+  }
+
+  .top-right {
+    right: 14px;
+    top: 18px;
+    gap: 6px;
+  }
+
+  .mode-button {
+    height: 38px;
+    padding: 0 12px;
+  }
+
+  .filter-strip {
+    left: 18px;
+    right: 18px;
+    top: 112px;
+    max-width: none;
+    transform: none;
+  }
+
+  .filter {
+    min-height: 29px;
+    padding: 0 11px;
+  }
+
+  .star-tag {
+    max-width: 160px;
+    font-size: 9px;
+  }
+
+  .artifact-plate {
+    left: 16px;
+    right: 16px;
+    bottom: 66px;
+    width: auto;
+    max-height: 50vh;
+    overflow: auto;
+    border-radius: 16px;
+  }
+
+  .plate-head {
+    padding: 15px 16px 12px;
+  }
+
+  .plate-title {
+    font-size: 19px;
+  }
+
+  .plate-summary {
+    font-size: 11.5px;
+    line-height: 1.45;
+  }
+
+  .preview-lens {
+    min-height: 154px;
+    padding: 12px;
+  }
+
+  .preview-lens::before {
+    inset: 12px 20px;
+  }
+
+  .preview-card {
+    width: 74%;
+    min-height: 104px;
+    padding: 10px 12px;
+  }
+
+  .preview-title {
+    font-size: 19px;
+  }
+
+  .plate-data {
+    display: none;
+  }
+
+  .plate-actions {
+    padding: 11px 14px 14px;
+  }
+
+  .focus-rail {
+    bottom: 12px;
+  }
+}
+</style>
+</head>
+<body>
+<canvas id="cinema" aria-hidden="true"></canvas>
+<div class="gl-fallback">This prototype needs WebGL2 to render the cinematic observatory.</div>
+
+<main class="stage" aria-label="Sophia Artifact Observatory V2 prototype">
+  <header class="top-left">
+    <div class="kicker">Sophia Observatory</div>
+    <h1 class="title">Artifact Observatory</h1>
+    <p class="subtitle">A dark room for the durable things Sophia made with you. Point the telescope, bring one star into focus, open it here.</p>
+  </header>
+
+  <div class="top-right">
+    <div class="instrument-pill"><span id="visibleCount">9</span> durable works</div>
+    <button class="mode-button active" id="observeMode" type="button">Observe</button>
+    <button class="mode-button" id="atlasMode" type="button">Atlas</button>
+  </div>
+
+  <nav class="filter-strip" aria-label="Artifact filters">
+    <button class="filter active" type="button" data-filter="all">Deep field</button>
+    <button class="filter" type="button" data-filter="builder">Sophia-made</button>
+    <button class="filter" type="button" data-filter="recent">Recent light</button>
+    <button class="filter" type="button" data-filter="document">Documents</button>
+    <button class="filter" type="button" data-filter="visual">Visual bodies</button>
+  </nav>
+
+  <section class="artifact-layer" id="artifactLayer" aria-label="Artifact sky"></section>
+
+  <aside class="artifact-plate" id="artifactPlate" style="--active-accent: var(--purple)" aria-label="Selected artifact">
+    <div class="plate-head">
+      <div class="plate-meta">
+        <span id="plateKind">Markdown</span>
+        <span id="plateDate">Jun 12</span>
+      </div>
+      <h2 class="plate-title" id="plateTitle">Artifact Registry Dashboard Final Smoke</h2>
+      <p class="plate-summary" id="plateSummary">A durable markdown proof that the library can remember and reopen what Sophia made.</p>
+    </div>
+    <div class="preview-lens">
+      <div class="preview-card" id="previewCard">
+        <div class="preview-chrome"><span></span><span></span><span></span></div>
+        <div class="preview-type" id="previewType">Markdown preview</div>
+        <div class="preview-title" id="previewTitle">Registry Smoke</div>
+        <div class="preview-body" id="previewBody">
+          <div class="preview-lines"><span></span><span></span><span></span></div>
+        </div>
+        <div class="preview-foot" id="previewFoot">Sophia Builder - Supabase</div>
+      </div>
+    </div>
+    <div class="plate-data">
+      <div class="datum"><span>Origin</span><strong id="plateOrigin">Sophia Builder</strong></div>
+      <div class="datum"><span>Storage</span><strong id="plateStorage">Supabase</strong></div>
+      <div class="datum"><span>Opened</span><strong id="plateOpened">2 times</strong></div>
+    </div>
+    <div class="plate-actions">
+      <button class="action" type="button" id="openAction">Open here</button>
+      <button class="action" type="button" id="downloadAction">Download</button>
+      <button class="action danger" type="button" id="hideAction">Hide</button>
+    </div>
+  </aside>
+
+  <div class="focus-rail" aria-label="Artifact focus rail">
+    <div class="rail-copy">
+      <span id="railDate">Jun 12</span>
+      <span id="railCount">9 works in view</span>
+    </div>
+    <div class="rail-track" id="railTrack">
+      <div class="rail-line"></div>
+    </div>
+  </div>
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite">Prototype action</div>
+
+<script>
+const artifacts = [
+  {
+    id: 'artifact-registry-smoke',
+    title: 'Artifact Registry Dashboard Final Smoke',
+    file: 'create-a-real-markdown-artifact-file-with-context.md',
+    kind: 'Markdown',
+    family: 'document',
+    source: 'builder',
+    sourceLabel: 'Sophia Builder',
+    summary: 'A durable markdown proof that the library can remember and reopen what Sophia made.',
+    storage: 'Supabase',
+    opened: 2,
+    date: 'Jun 12',
+    x: 0.36,
+    y: 0.32,
+    accent: '#b8a4e8',
+    glow: 'rgba(184,164,232,0.86)',
+  },
+  {
+    id: 'html-library-test',
+    title: 'Explicit HTML Library Test',
+    file: 'explicit-html-library-test.html',
+    kind: 'HTML',
+    family: 'document',
+    source: 'builder',
+    sourceLabel: 'Sophia Builder',
+    summary: 'A user-facing HTML work, separated from internal handoff wrappers.',
+    storage: 'Supabase',
+    opened: 1,
+    date: 'Jun 12',
+    x: 0.60,
+    y: 0.24,
+    accent: '#61c8bb',
+    glow: 'rgba(97,200,187,0.86)',
+  },
+  {
+    id: 'launch-deck',
+    title: 'Launch Narrative Deck',
+    file: 'launch-narrative-deck.pptx',
+    kind: 'PPTX',
+    family: 'deck',
+    source: 'builder',
+    sourceLabel: 'Sophia Builder',
+    summary: 'A presentation shaped from session intent, ready to download or review.',
+    storage: 'Supabase',
+    opened: 4,
+    date: 'Jun 10',
+    x: 0.75,
+    y: 0.43,
+    accent: '#d7b070',
+    glow: 'rgba(215,176,112,0.86)',
+  },
+  {
+    id: 'memory-map',
+    title: 'Memory Constellation Map',
+    file: 'memory-constellation-map.png',
+    kind: 'Image',
+    family: 'visual',
+    source: 'quick_edit',
+    sourceLabel: 'Quick edit',
+    summary: 'A visual map connecting remembered decisions, lessons, and patterns.',
+    storage: 'Supabase',
+    opened: 3,
+    date: 'Jun 09',
+    x: 0.49,
+    y: 0.56,
+    accent: '#8db7e4',
+    glow: 'rgba(141,183,228,0.86)',
+  },
+  {
+    id: 'strategy-pdf',
+    title: 'Quiet Strategy Brief',
+    file: 'quiet-strategy-brief.pdf',
+    kind: 'PDF',
+    family: 'document',
+    source: 'coreview_version',
+    sourceLabel: 'Coreview',
+    summary: 'A polished PDF version of a strategy note after review-room edits.',
+    storage: 'Supabase',
+    opened: 5,
+    date: 'Jun 07',
+    x: 0.23,
+    y: 0.58,
+    accent: '#d48cab',
+    glow: 'rgba(212,140,171,0.86)',
+  },
+  {
+    id: 'voice-session-brief',
+    title: 'Voice Session Brief',
+    file: 'voice-session-brief.md',
+    kind: 'Markdown',
+    family: 'document',
+    source: 'builder',
+    sourceLabel: 'Sophia Builder',
+    summary: 'A short takeaway from a voice session, written as a durable artifact.',
+    storage: 'Supabase',
+    opened: 0,
+    date: 'Jun 04',
+    x: 0.66,
+    y: 0.65,
+    accent: '#9ed7c7',
+    glow: 'rgba(158,215,199,0.86)',
+  },
+  {
+    id: 'research-notebook',
+    title: 'Research Notebook',
+    file: 'research-notebook.md',
+    kind: 'Markdown',
+    family: 'document',
+    source: 'upload',
+    sourceLabel: 'Upload',
+    summary: 'A kept source document Sophia can reference, inspect, and transform later.',
+    storage: 'Supabase',
+    opened: 1,
+    date: 'May 30',
+    x: 0.16,
+    y: 0.39,
+    accent: '#a6a0d8',
+    glow: 'rgba(166,160,216,0.86)',
+  },
+  {
+    id: 'product-portrait',
+    title: 'Product Portrait',
+    file: 'product-portrait.webp',
+    kind: 'Image',
+    family: 'visual',
+    source: 'builder',
+    sourceLabel: 'Sophia Builder',
+    summary: 'A generated visual direction for a product-focused landing page.',
+    storage: 'Supabase',
+    opened: 2,
+    date: 'May 28',
+    x: 0.83,
+    y: 0.30,
+    accent: '#e1b7cc',
+    glow: 'rgba(225,183,204,0.86)',
+  },
+  {
+    id: 'implementation-handoff',
+    title: 'Implementation Handoff',
+    file: 'implementation-handoff.md',
+    kind: 'Markdown',
+    family: 'document',
+    source: 'quick_edit',
+    sourceLabel: 'Quick edit',
+    summary: 'A refined handoff note for the next build pass, kept as a first-class work.',
+    storage: 'Supabase',
+    opened: 6,
+    date: 'May 26',
+    x: 0.40,
+    y: 0.18,
+    accent: '#f0c987',
+    glow: 'rgba(240,201,135,0.86)',
+  },
+];
+
+const canvas = document.getElementById('cinema');
+const gl = canvas.getContext('webgl2', {
+  alpha: false,
+  antialias: false,
+  depth: false,
+  stencil: false,
+  powerPreference: 'high-performance',
+});
+
+const RENDER_SUPERSAMPLE = 1.35;
+const MAX_RENDER_DPR = 3.25;
+const BLOOM_LEVELS = 4;
+const TARGET_FRAME_MS = 1000 / 45;
+
+const artifactLayer = document.getElementById('artifactLayer');
+const artifactPlate = document.getElementById('artifactPlate');
+const railTrack = document.getElementById('railTrack');
+const filterButtons = [...document.querySelectorAll('.filter')];
+const observeMode = document.getElementById('observeMode');
+const atlasMode = document.getElementById('atlasMode');
+const toast = document.getElementById('toast');
+
+let activeFilter = 'all';
+let selectedId = artifacts[0].id;
+let currentTarget = { x: artifacts[0].x, y: artifacts[0].y };
+let desiredTarget = { x: artifacts[0].x, y: artifacts[0].y };
+let mouse = { x: 0.5, y: 0.5 };
+let width = 1;
+let height = 1;
+let dpr = 1;
+let targets = [];
+let bloomA = [];
+let bloomB = [];
+let lastNow = 0;
+let lastFrameMs = 0;
+
+function selectedArtifact() {
+  return artifacts.find((artifact) => artifact.id === selectedId) || artifacts[0];
+}
+
+function filteredArtifacts() {
+  return artifacts.filter((artifact) => {
+    if (activeFilter === 'all') return true;
+    if (activeFilter === 'recent') return artifact.opened > 0;
+    if (activeFilter === 'builder') return artifact.source === 'builder';
+    if (activeFilter === 'visual') return artifact.family === 'visual' || artifact.family === 'deck';
+    return artifact.family === activeFilter;
+  });
+}
+
+function previewClassFor(artifact) {
+  if (artifact.kind === 'PPTX') return 'preview-deck';
+  if (artifact.kind === 'HTML') return 'preview-html';
+  if (artifact.kind === 'PDF') return 'preview-pdf';
+  if (artifact.family === 'visual' || artifact.kind === 'Image') return 'preview-image';
+  return 'preview-document';
+}
+
+function previewBodyFor(artifact) {
+  if (artifact.kind === 'PPTX') return '<span></span><span></span><span></span>';
+  if (artifact.kind === 'HTML' || artifact.kind === 'PDF' || artifact.family === 'visual') return '';
+  return '<div class="preview-lines"><span></span><span></span><span></span></div>';
+}
+
+function showToast(message) {
+  toast.textContent = message;
+  toast.classList.add('show');
+  window.clearTimeout(showToast.timeout);
+  showToast.timeout = window.setTimeout(() => toast.classList.remove('show'), 1500);
+}
+
+function updatePlate() {
+  const artifact = selectedArtifact();
+  artifactPlate.style.setProperty('--active-accent', artifact.accent);
+  document.documentElement.style.setProperty('--active-accent', artifact.accent);
+  document.getElementById('plateKind').textContent = artifact.kind;
+  document.getElementById('plateDate').textContent = artifact.date;
+  document.getElementById('plateTitle').textContent = artifact.title;
+  document.getElementById('plateSummary').textContent = artifact.summary;
+  document.getElementById('plateOrigin').textContent = artifact.sourceLabel;
+  document.getElementById('plateStorage').textContent = artifact.storage;
+  document.getElementById('plateOpened').textContent = artifact.opened === 1 ? '1 time' : `${artifact.opened} times`;
+  document.getElementById('previewType').textContent = `${artifact.kind} preview`;
+  document.getElementById('previewTitle').textContent = artifact.kind === 'PPTX' ? 'Deck outline' : artifact.title.split(' ').slice(0, 3).join(' ');
+  document.getElementById('previewBody').innerHTML = previewBodyFor(artifact);
+  document.getElementById('previewCard').className = `preview-card ${previewClassFor(artifact)}`;
+  document.getElementById('previewFoot').textContent = `${artifact.sourceLabel} - ${artifact.storage}`;
+  document.getElementById('railDate').textContent = artifact.date;
+}
+
+function renderArtifacts() {
+  const visible = filteredArtifacts();
+  document.getElementById('visibleCount').textContent = visible.length;
+  document.getElementById('railCount').textContent = `${visible.length} ${visible.length === 1 ? 'work' : 'works'} in view`;
+  artifactLayer.innerHTML = visible.map((artifact, index) => `
+    <button
+      class="celestial-artifact ${artifact.id === selectedId ? 'active' : ''}"
+      type="button"
+      data-id="${artifact.id}"
+      style="left:${artifact.x * 100}%; top:${artifact.y * 100}%; --accent:${artifact.accent}; --glow:${artifact.glow}; --delay:${index * -320}ms"
+      aria-label="${artifact.title}"
+    >
+      <span class="star-tag"><strong>${artifact.title}</strong><span>${artifact.kind} - ${artifact.sourceLabel}</span></span>
+    </button>
+  `).join('');
+  artifactLayer.querySelectorAll('.celestial-artifact').forEach((button) => {
+    button.addEventListener('click', () => selectArtifact(button.dataset.id));
+  });
+
+  railTrack.querySelectorAll('.rail-dot').forEach((dot) => dot.remove());
+  visible.forEach((artifact, index) => {
+    const dot = document.createElement('button');
+    dot.type = 'button';
+    dot.className = `rail-dot ${artifact.id === selectedId ? 'active' : ''}`;
+    dot.style.left = `${visible.length <= 1 ? 50 : (index / (visible.length - 1)) * 100}%`;
+    dot.style.setProperty('--active-accent', artifact.accent);
+    dot.setAttribute('aria-label', artifact.title);
+    dot.addEventListener('click', () => selectArtifact(artifact.id));
+    railTrack.appendChild(dot);
+  });
+}
+
+function selectArtifact(id) {
+  if (!artifacts.some((artifact) => artifact.id === id)) return;
+  selectedId = id;
+  const artifact = selectedArtifact();
+  desiredTarget = { x: artifact.x, y: artifact.y };
+  updatePlate();
+  renderArtifacts();
+}
+
+function setFilter(filter) {
+  activeFilter = filter;
+  filterButtons.forEach((button) => button.classList.toggle('active', button.dataset.filter === filter));
+  const visible = filteredArtifacts();
+  if (!visible.some((artifact) => artifact.id === selectedId) && visible[0]) {
+    selectedId = visible[0].id;
+    desiredTarget = { x: visible[0].x, y: visible[0].y };
+  }
+  updatePlate();
+  renderArtifacts();
+}
+
+filterButtons.forEach((button) => button.addEventListener('click', () => setFilter(button.dataset.filter)));
+observeMode.addEventListener('click', () => {
+  observeMode.classList.add('active');
+  atlasMode.classList.remove('active');
+  document.body.classList.remove('atlas-mode');
+});
+atlasMode.addEventListener('click', () => {
+  atlasMode.classList.add('active');
+  observeMode.classList.remove('active');
+  document.body.classList.add('atlas-mode');
+});
+document.getElementById('openAction').addEventListener('click', () => showToast('Opening the artifact inside the observatory.'));
+document.getElementById('downloadAction').addEventListener('click', () => showToast('Download uses the artifact_id endpoint.'));
+document.getElementById('hideAction').addEventListener('click', () => showToast('Hide soft-removes the artifact from the library.'));
+
+const VERT = `#version 300 es
+in vec2 a_position;
+out vec2 v_uv;
+void main() {
+  v_uv = a_position * 0.5 + 0.5;
+  gl_Position = vec4(a_position, 0.0, 1.0);
+}`;
+
+const SCENE = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+
+uniform vec2 u_resolution;
+uniform float u_time;
+uniform vec2 u_mouse;
+uniform vec2 u_target;
+uniform vec3 u_accent;
+
+float hash12(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+
+vec2 hash22(vec2 p) {
+  float n = hash12(p);
+  return vec2(n, hash12(p + n + 19.19));
+}
+
+float noise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  float a = hash12(i);
+  float b = hash12(i + vec2(1.0, 0.0));
+  float c = hash12(i + vec2(0.0, 1.0));
+  float d = hash12(i + vec2(1.0, 1.0));
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+float fbm(vec2 p) {
+  float v = 0.0;
+  float a = 0.5;
+  mat2 m = mat2(1.62, -1.18, 1.18, 1.62);
+  for (int i = 0; i < 4; i++) {
+    v += a * noise(p);
+    p = m * p + 17.7;
+    a *= 0.52;
+  }
+  return v;
+}
+
+float sdCapsule(vec2 p, vec2 a, vec2 b, float r) {
+  vec2 pa = p - a;
+  vec2 ba = b - a;
+  float h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
+  return length(pa - ba * h) - r;
+}
+
+float sdEllipse(vec2 p, vec2 c, vec2 r) {
+  vec2 q = (p - c) / r;
+  return length(q) - 1.0;
+}
+
+float sdBox(vec2 p, vec2 c, vec2 b) {
+  vec2 q = abs(p - c) - b;
+  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+}
+
+float lineDist(vec2 p, vec2 a, vec2 b) {
+  vec2 pa = p - a;
+  vec2 ba = b - a;
+  float h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
+  return length(pa - ba * h);
+}
+
+float lineAlong(vec2 p, vec2 a, vec2 b) {
+  vec2 pa = p - a;
+  vec2 ba = b - a;
+  return clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
+}
+
+void over(inout vec3 col, vec3 paint, float alpha) {
+  col = mix(col, paint, clamp(alpha, 0.0, 1.0));
+}
+
+vec2 rotate2(vec2 p, float a) {
+  float c = cos(a);
+  float s = sin(a);
+  return mat2(c, -s, s, c) * p;
+}
+
+vec3 starCells(vec2 uv, float scale, float cutoff, float sizeMul, float speed) {
+  vec2 gv = uv * scale;
+  vec2 id = floor(gv);
+  vec2 f = fract(gv);
+  vec2 rnd = hash22(id);
+  vec2 pos = 0.5 + (rnd - 0.5) * 0.78;
+  float d = length(f - pos);
+  float seed = hash12(id + 4.73);
+  float presence = smoothstep(cutoff, 1.0, seed);
+  float size = mix(0.012, 0.050, pow(hash12(id + 8.4), 4.0)) * sizeMul;
+  float core = (1.0 - smoothstep(0.0, size, d)) * presence;
+  float halo = (1.0 - smoothstep(size * 2.0, size * 8.0, d)) * presence * 0.22;
+  float blink = 0.76 + 0.24 * sin(u_time * speed + seed * 60.0);
+  vec3 tint = mix(vec3(0.60, 0.74, 1.0), vec3(1.0, 0.78, 0.55), hash12(id + 11.0));
+  return tint * (core * 3.5 + halo) * blink;
+}
+
+vec3 pinStarField(vec2 uv, float scale, float cutoff, float sharpness, float gain) {
+  vec2 gv = uv * scale;
+  vec2 id = floor(gv);
+  vec2 f = fract(gv);
+  vec2 pos = hash22(id);
+  float seed = hash12(id + 41.3);
+  float presence = smoothstep(cutoff, 1.0, seed);
+  float d = length(f - pos);
+  float size = mix(0.0026, 0.012, pow(hash12(id + 17.0), 5.6));
+  float core = exp(-pow(d / max(size, 0.0006), sharpness)) * presence;
+  float glintX = exp(-abs(f.x - pos.x) * 360.0) * exp(-abs(f.y - pos.y) * 36.0);
+  float glintY = exp(-abs(f.y - pos.y) * 360.0) * exp(-abs(f.x - pos.x) * 36.0);
+  vec3 cold = vec3(0.68, 0.78, 1.0);
+  vec3 warm = vec3(1.0, 0.82, 0.58);
+  vec3 tint = mix(cold, warm, hash12(id + 9.2));
+  return tint * (core * gain + (glintX + glintY) * presence * gain * 0.020);
+}
+
+float mountainProfile(float x) {
+  float base = -0.945;
+  float broad = exp(-pow((x - 0.02) / 0.43, 2.0)) * 0.330;
+  float crown = exp(-pow((x - 0.02) / 0.18, 2.0)) * 0.055;
+  float left = exp(-pow((x + 0.54) / 0.28, 2.0)) * 0.050;
+  float right = exp(-pow((x - 0.56) / 0.34, 2.0)) * 0.056;
+  float noiseA = fbm(vec2(x * 1.4 + 20.0, 3.0)) * 0.036;
+  float noiseB = noise(vec2(x * 7.0 + 11.0, 2.4)) * 0.016;
+  float fine = noise(vec2(x * 18.0 + 9.0, 7.0)) * 0.006;
+  return base + broad + crown + left + right + noiseA + noiseB + fine;
+}
+
+float groundProfile(float x) {
+  return -1.08 + fbm(vec2(x * 2.0 + 8.0, 0.5)) * 0.045 + noise(vec2(x * 9.0, 4.0)) * 0.012;
+}
+
+float waterProfile(float x) {
+  float longWave = sin(x * 2.3 + u_time * 0.09) * 0.010;
+  float crossWave = sin(x * 7.2 - u_time * 0.16) * 0.004;
+  return -0.745 + longWave + crossWave + fbm(vec2(x * 1.8 + 12.0, u_time * 0.018)) * 0.010;
+}
+
+float islandMask(vec2 p) {
+  float water = waterProfile(p.x);
+  float depth = clamp((water + 0.08 - p.y) / 0.25, 0.0, 1.0);
+  float width = mix(0.22, 0.66, depth);
+  float coastNoise = (noise(vec2(p.y * 13.0 + 4.0, p.x * 4.5)) - 0.5) * 0.042;
+  return 1.0 - smoothstep(width - 0.06 + coastNoise, width + 0.10 + coastNoise, abs(p.x));
+}
+
+float waterCaustic(vec2 q) {
+  float c = 0.0;
+  c += pow(abs(sin(q.x * 18.0 + sin(q.y * 7.0 + u_time * 0.34) * 1.7)), 18.0);
+  c += pow(abs(sin(q.y * 23.0 - q.x * 5.0 + u_time * 0.44)), 22.0) * 0.72;
+  c += pow(abs(sin((q.x + q.y) * 16.0 + u_time * 0.30)), 20.0) * 0.52;
+  return c / 2.24;
+}
+
+float cometShape(vec2 uv, vec2 head, vec2 dir, float lengthScale, float widthScale, float phase) {
+  dir = normalize(dir);
+  vec2 n = vec2(-dir.y, dir.x);
+  vec2 q = uv - head;
+  float along = dot(q, dir);
+  float across = abs(dot(q, n));
+  float trail = clamp(-along / lengthScale, 0.0, 1.0);
+  float gate = smoothstep(0.0, 0.018, -along) * (1.0 - smoothstep(lengthScale * 0.78, lengthScale, -along));
+  float width = widthScale * (0.46 + trail * 4.8);
+  float turbulentWidth = 1.0 + fbm(vec2(trail * 18.0 + phase * 3.7, across * 95.0 - u_time * 0.22)) * 0.62;
+  float tail = exp(-pow(across / max(width * turbulentWidth, 0.0008), 1.42)) * exp(-trail * 2.55) * gate;
+  float core = exp(-length(q / vec2(widthScale * 1.05, widthScale * 0.82)) * 20.0);
+  float shock = exp(-length(q / vec2(widthScale * 4.6, widthScale * 2.6)) * 4.3);
+  float sparks = smoothstep(0.982, 1.0, noise(vec2(uv.x * 420.0 + phase * 17.0 - u_time * 0.7, uv.y * 260.0 + trail * 19.0))) * tail;
+  return tail * 0.76 + core * 1.7 + shock * 0.22 + sparks * 0.20;
+}
+
+vec3 renderComets(vec2 uv, float intensity) {
+  float passA = fract(u_time * 0.074 + 0.18);
+  float passB = fract(u_time * 0.058 + 0.53);
+  float passC = fract(u_time * 0.045 + 0.82);
+
+  vec2 headA = vec2(-0.24 + passA * 1.52, 0.84 - passA * 0.24 + sin(passA * 6.283) * 0.020);
+  vec2 dirA = normalize(vec2(1.0, -0.18));
+  float fadeA = smoothstep(0.05, 0.20, passA) * (1.0 - smoothstep(0.78, 0.96, passA));
+  vec3 cometA = mix(vec3(0.65, 0.92, 0.95), vec3(0.92, 0.83, 1.0), 0.55) * cometShape(uv, headA, dirA, 0.46, 0.0066, passA) * fadeA;
+
+  vec2 headB = vec2(-0.18 + passB * 1.44, 0.72 - passB * 0.20 + sin(passB * 9.0) * 0.014);
+  vec2 dirB = normalize(vec2(1.0, -0.14));
+  float fadeB = smoothstep(0.08, 0.24, passB) * (1.0 - smoothstep(0.72, 0.94, passB));
+  vec3 cometB = mix(vec3(0.92, 0.56, 0.30), vec3(0.72, 0.74, 1.0), 0.42) * cometShape(uv, headB, dirB, 0.36, 0.0048, passB + 1.7) * fadeB * 0.72;
+
+  vec2 headC = vec2(-0.20 + passC * 1.34, 0.50 - passC * 0.12 + sin(passC * 7.0) * 0.018);
+  vec2 dirC = normalize(vec2(1.0, -0.09));
+  float fadeC = smoothstep(0.04, 0.22, passC) * (1.0 - smoothstep(0.76, 0.98, passC));
+  vec3 cometC = mix(vec3(0.42, 0.70, 0.78), vec3(0.88, 0.70, 1.0), 0.35) * cometShape(uv, headC, dirC, 0.30, 0.0038, passC + 3.2) * fadeC * 0.38;
+
+  return (cometA + cometB + cometC) * intensity;
+}
+
+vec2 telescopeBase() {
+  float x = 0.02;
+  return vec2(x, mountainProfile(x) + 0.040);
+}
+
+vec3 renderSky(vec2 uv, vec2 p) {
+  vec3 col = vec3(0.00065, 0.00070, 0.0032);
+  float top = smoothstep(0.02, 1.0, uv.y);
+  float horizon = smoothstep(0.18, 0.42, uv.y) * smoothstep(0.80, 0.42, uv.y);
+  col += vec3(0.003, 0.004, 0.012) * pow(top, 1.7);
+  col += vec3(0.018, 0.011, 0.028) * horizon * 0.38;
+
+  vec2 galaxyOrigin = vec2(0.57, 0.64);
+  vec2 galaxyUv = rotate2(uv - galaxyOrigin, -0.18 + sin(u_time * 0.010) * 0.022) + galaxyOrigin;
+  vec2 driftUv = galaxyUv + vec2(u_time * 0.0014, -u_time * 0.00055);
+  vec2 counterDriftUv = galaxyUv + vec2(-u_time * 0.00082, u_time * 0.00036);
+  float gravityWell = exp(-length((uv - vec2(0.55, 0.61)) / vec2(0.22, 0.16)) * 2.4);
+  float bandCenter = 1.00 - galaxyUv.x * 0.43 + 0.040 * sin(galaxyUv.x * 6.0 + u_time * 0.038) + gravityWell * 0.045;
+  float bandDist = abs(uv.y - bandCenter);
+  float band = smoothstep(0.50, 0.018, bandDist) * smoothstep(0.20, 0.42, uv.y);
+  float core = smoothstep(0.155, 0.000, bandDist) * exp(-pow((galaxyUv.x - 0.58) / 0.34, 2.0));
+  float dust = fbm(driftUv * 5.8 + vec2(1.7, 9.2));
+  float dustFine = fbm(counterDriftUv * 15.0 + vec2(8.0, 2.0));
+  float dustUltra = noise(driftUv * 58.0 + vec2(4.0, 9.0));
+  float dustNeedle = noise(counterDriftUv * 124.0 + vec2(11.0, 1.0));
+  float rift = fbm(counterDriftUv * 8.6 + vec2(4.5, 1.5));
+  float rift2 = fbm(driftUv * 22.0 + vec2(1.0, 5.2));
+  float riftNeedle = smoothstep(0.56, 0.82, noise(driftUv * 86.0 + vec2(6.0, 13.0)));
+  float absorption = smoothstep(0.48, 0.72, rift) * 0.54 + smoothstep(0.52, 0.72, rift2) * 0.31 + riftNeedle * 0.16;
+  vec3 mwOuter = vec3(0.018, 0.025, 0.074);
+  vec3 mwMid = vec3(0.082, 0.060, 0.145);
+  vec3 mwWarm = vec3(0.190, 0.105, 0.060);
+  vec3 mwRose = vec3(0.145, 0.048, 0.112);
+  vec3 mw = mix(mwOuter, mwMid, smoothstep(0.22, 0.0, bandDist));
+  mw = mix(mw, mwWarm, core * 0.52);
+  mw = mix(mw, mwRose, core * dustFine * 0.34);
+  float cloudDensity = band * (pow(dust, 1.42) * 0.64 + pow(dustFine, 1.90) * 0.34 + dustUltra * 0.055);
+  col += mw * cloudDensity * (2.14 - absorption * 0.70);
+  col += vec3(0.030, 0.036, 0.092) * band * pow(dustFine, 2.15) * 0.54;
+  float stellarKnots = band * smoothstep(0.70, 0.95, dustFine) * smoothstep(0.52, 0.90, dustUltra);
+  float emberKnots = core * smoothstep(0.66, 0.96, dustNeedle) * smoothstep(0.50, 0.92, dustFine);
+  float darkFilaments = band * (smoothstep(0.54, 0.86, rift2) + riftNeedle * 0.62) * smoothstep(0.31, 0.016, bandDist);
+  col += vec3(0.34, 0.23, 0.14) * stellarKnots * 0.125;
+  col += vec3(0.50, 0.24, 0.16) * emberKnots * 0.095;
+  col *= 1.0 - darkFilaments * 0.112;
+  col *= 1.0 - band * absorption * 0.22;
+  col += vec3(0.25, 0.18, 0.12) * core * pow(dust, 1.65) * 0.25;
+  col += vec3(0.08, 0.07, 0.16) * gravityWell * band * (0.12 + dustFine * 0.18);
+
+  float auroraY = smoothstep(0.42, 0.62, uv.y) * smoothstep(0.84, 0.58, uv.y);
+  float wave = sin(p.x * 5.4 + fbm(vec2(p.x * 2.0 + u_time * 0.025, 5.0)) * 3.0 + u_time * 0.045);
+  float curtain = auroraY * smoothstep(0.42, 0.94, wave * 0.5 + 0.5);
+  col += vec3(0.008, 0.030, 0.020) * curtain * 0.18;
+  col += vec3(0.022, 0.010, 0.032) * curtain * smoothstep(0.54, 0.70, uv.y) * 0.12;
+
+  col += starCells(uv, 42.0, 0.976, 1.14, 1.2) * (0.78 + band * 0.46);
+  col += starCells(uv + vec2(0.0, 0.02), 112.0, 0.988, 0.72, 1.7) * (0.62 + band * 0.28);
+  col += starCells(uv - vec2(0.02, 0.01), 205.0, 0.993, 0.42, 2.4) * (0.42 + band * 0.18);
+  col += pinStarField(uv + vec2(0.012, 0.003), 310.0, 0.9950, 2.6, 0.72) * (0.34 + band * 0.38);
+  col += pinStarField(uv - vec2(0.031, 0.018), 560.0, 0.9980, 2.5, 0.48) * (0.22 + band * 0.24);
+
+  float heroA = exp(-length(p - vec2(-0.72, 0.36)) * 64.0);
+  float heroB = exp(-length(p - vec2(0.84, 0.62)) * 76.0);
+  float crossA = exp(-abs(p.y - 0.36) * 520.0) * exp(-abs(p.x + 0.72) * 32.0);
+  float crossB = exp(-abs(p.x - 0.84) * 520.0) * exp(-abs(p.y - 0.62) * 34.0);
+  col += vec3(0.82, 0.80, 1.0) * heroA * 0.16 + vec3(1.0, 0.84, 0.62) * heroB * 0.13;
+  col += vec3(0.82, 0.80, 1.0) * crossA * 0.032 + vec3(1.0, 0.84, 0.62) * crossB * 0.030;
+  col += renderComets(uv, 0.95);
+
+  float empty = smoothstep(0.08, 0.82, length(p - vec2(-0.06, 0.04)));
+  col *= mix(0.78, 1.0, empty);
+  return col;
+}
+
+void drawVolumetrics(inout vec3 col, vec2 p, vec2 target, vec2 source) {
+  vec2 beam = target - source;
+  vec2 dir = normalize(beam);
+  vec2 normal = vec2(-dir.y, dir.x);
+  float d = lineDist(p, source, target);
+  float along = lineAlong(p, source, target);
+  float mountain = mountainProfile(p.x);
+  float skyMask = smoothstep(mountain + 0.003, mountain + 0.054, p.y);
+  float lift = smoothstep(0.0, 0.10, along) * smoothstep(1.0, 0.08, along);
+  float width = mix(0.010, 0.082, pow(along, 0.72));
+  float tightWidth = mix(0.0045, 0.015, pow(along, 0.82));
+  float fog = fbm(p * 6.2 + vec2(u_time * 0.024, -u_time * 0.014));
+  float fineFog = fbm(p * 18.0 + dir * u_time * 0.085 + vec2(3.0, 9.0));
+  float beamCurrent = fbm(vec2(along * 18.0 - u_time * 0.62, d * 34.0 + fineFog * 2.2));
+  float ribbing = 0.58 + 0.42 * sin(dot(p - source, normal) * 118.0 + along * 52.0 + u_time * 1.35 + beamCurrent * 2.4);
+  float pulse = 0.78 + 0.22 * sin(u_time * 1.12 + along * 10.0 + fog * 4.0);
+  float filament = mix(0.50, 1.22, smoothstep(0.28, 0.86, beamCurrent)) * ribbing * pulse;
+  float brokenAir = mix(fog, fineFog, 0.42) * filament;
+  float body = exp(-pow(d / max(width, 0.0001), 1.72)) * lift * skyMask;
+  float core = exp(-pow(d / max(tightWidth, 0.0001), 2.20)) * lift * skyMask;
+  float outer = exp(-pow(d / max(width * 3.6, 0.0001), 1.18)) * lift * skyMask;
+  float sourceFalloff = exp(-length((p - source) / vec2(0.30, 0.18)) * 3.3);
+  float targetGlow = exp(-length(p - target) * 16.0) * smoothstep(0.64, 1.0, along);
+  float sourceGlow = exp(-length(p - source) * 18.0);
+  float travelingWave = smoothstep(0.58, 0.98, sin(along * 34.0 - u_time * 2.55 + beamCurrent * 4.0) * 0.5 + 0.5);
+  float turbulentVeil = smoothstep(0.48, 0.92, fbm(vec2(along * 10.0 - u_time * 0.44, dot(p, normal) * 20.0 + 7.0)));
+  vec3 tint = mix(u_accent, vec3(0.82, 0.88, 1.0), 0.20);
+  vec3 warmAir = vec3(0.028, 0.022, 0.040);
+
+  col += warmAir * outer * (0.14 + fog * 0.20 + turbulentVeil * 0.08);
+  col += tint * body * (0.030 + brokenAir * 0.120 + sourceFalloff * 0.18 + travelingWave * 0.030);
+  col += tint * core * (0.085 + fineFog * 0.082 + travelingWave * 0.055);
+  col += tint * sourceGlow * skyMask * (0.22 + pulse * 0.08);
+  col += tint * targetGlow * (0.07 + fog * 0.09 + travelingWave * 0.04);
+
+  float horizonMist = smoothstep(-0.58, -0.22, p.y) * smoothstep(0.25, -0.20, p.y);
+  float mist = fbm(vec2(p.x * 2.0 + u_time * 0.010, p.y * 5.0 + 3.0));
+  float beamMist = exp(-pow(d / max(width * 5.0, 0.001), 1.12)) * lift;
+  col += vec3(0.026, 0.020, 0.038) * horizonMist * smoothstep(0.40, 0.80, mist) * 0.42;
+  col += tint * horizonMist * beamMist * skyMask * (0.030 + mist * 0.055);
+
+  float moteField = smoothstep(-0.72, 0.72, p.y) * smoothstep(1.30, 0.20, length(p));
+  vec2 beamSpace = vec2(along * 64.0 - u_time * 2.4, dot(p - source, normal) * 44.0 + u_time * 0.28);
+  vec2 motes = mix(p * 44.0 + vec2(u_time * 0.28, -u_time * 0.12), beamSpace, clamp(body * 1.4, 0.0, 1.0));
+  vec2 id = floor(motes);
+  vec2 f = fract(motes);
+  vec2 pos = hash22(id);
+  float mote = 1.0 - smoothstep(0.0, 0.042, length(f - pos));
+  mote *= smoothstep(0.977, 1.0, hash12(id + 6.2));
+  float beamSpark = smoothstep(0.86, 1.0, beamCurrent) * body + core * 0.55;
+  float streak = exp(-abs(f.y - pos.y) * 44.0) * exp(-abs(f.x - pos.x) * 5.0) * smoothstep(0.986, 1.0, hash12(id + 13.7));
+  col += tint * mote * moteField * (0.030 + body * 0.30 + travelingWave * core * 0.12);
+  col += mix(tint, vec3(1.0, 0.95, 0.82), 0.36) * streak * moteField * beamSpark * 0.11;
+}
+
+void drawLandscape(inout vec3 col, vec2 p, vec2 source, vec2 target) {
+  float mountain = mountainProfile(p.x);
+  float terrain = groundProfile(p.x);
+  float water = waterProfile(p.x);
+  float island = islandMask(p);
+  float isMountain = smoothstep(mountain + 0.006, mountain - 0.004, p.y);
+  float isGround = smoothstep(terrain + 0.006, terrain - 0.006, p.y);
+  float landAboveWater = smoothstep(water - 0.052, water + 0.018, p.y);
+  float islandSolid = isMountain * island * landAboveWater;
+  float islandGround = isGround * island * landAboveWater;
+  float edge = smoothstep(mountain - 0.006, mountain + 0.004, p.y) * smoothstep(mountain + 0.026, mountain + 0.004, p.y) * island * landAboveWater;
+  float beamDistance = lineDist(p, source, target);
+  float beamAlong = lineAlong(p, source, target);
+  float beamWidth = mix(0.016, 0.090, pow(beamAlong, 0.72));
+  float beamPaint = exp(-pow(beamDistance / max(beamWidth * 1.45, 0.001), 1.35)) * smoothstep(0.0, 0.26, beamAlong) * smoothstep(1.0, 0.10, beamAlong);
+  float ridgePool = exp(-length((p - source) / vec2(0.24, 0.11)) * 5.0);
+  float eps = 0.010;
+  float slope = (mountainProfile(p.x + eps) - mountainProfile(p.x - eps)) / (eps * 2.0);
+  vec2 ridgeNormal = normalize(vec2(-slope, 1.0));
+  float ridgeLight = max(dot(ridgeNormal, normalize(source - p + vec2(0.0, 0.025))), 0.0);
+  float wetRock = pow(fbm(vec2(p.x * 18.0 + 2.0, p.y * 24.0 + 7.0)), 3.2);
+  float mica = smoothstep(0.82, 1.0, noise(vec2(p.x * 88.0 + 3.0, p.y * 42.0 + 9.0)));
+  float starSheen = smoothstep(0.74, 1.0, fbm(vec2(p.x * 34.0 - u_time * 0.020, p.y * 11.0 + 4.0)));
+  float grazing = smoothstep(0.0, 0.82, ridgeLight) * edge;
+  float islandRise = clamp((p.y - water) / max(mountain - water, 0.035), 0.0, 1.0);
+  float cliffFace = islandSolid * smoothstep(0.02, 0.95, islandRise) * (1.0 - smoothstep(0.86, 1.0, islandRise));
+  float cliffStrata = smoothstep(0.50, 0.96, noise(vec2(p.x * 34.0 + 1.0, p.y * 88.0 - u_time * 0.025)));
+  float cliffCuts = smoothstep(0.58, 0.94, fbm(vec2(p.x * 16.0 + 8.0, p.y * 42.0)));
+  vec2 obsBase = telescopeBase();
+  float summitPad = exp(-length((p - (obsBase - vec2(0.0, 0.020))) / vec2(0.145, 0.040)) * 4.2) * islandSolid;
+  float anchorShadow = exp(-length((p - (obsBase - vec2(0.0, 0.034))) / vec2(0.170, 0.030)) * 5.0) * islandSolid;
+
+  vec3 mtn = vec3(0.004, 0.004, 0.010);
+  mtn += vec3(0.030, 0.019, 0.042) * edge;
+  mtn += vec3(0.010, 0.007, 0.017) * fbm(vec2(p.x * 8.0, p.y * 5.0 + 4.0)) * islandSolid;
+  mtn += vec3(0.026, 0.020, 0.034) * cliffFace;
+  mtn += vec3(0.070, 0.058, 0.088) * cliffFace * cliffStrata * 0.16;
+  mtn -= vec3(0.010, 0.008, 0.014) * cliffFace * cliffCuts * 0.24;
+  mtn += u_accent * (beamPaint * 0.18 + ridgePool * 0.12) * edge * (0.55 + ridgeLight * 0.90);
+  mtn += vec3(0.070, 0.062, 0.090) * ridgePool * edge * 0.18;
+  mtn += mix(u_accent, vec3(0.80, 0.84, 1.0), 0.35) * wetRock * grazing * ridgePool * 0.18;
+  mtn += vec3(0.20, 0.17, 0.30) * wetRock * starSheen * grazing * 0.030;
+  mtn += mix(u_accent, vec3(0.88, 0.92, 1.0), 0.50) * mica * grazing * (0.018 + beamPaint * 0.035);
+  mtn += vec3(0.030, 0.028, 0.045) * summitPad * 0.55;
+  mtn -= vec3(0.018, 0.016, 0.028) * anchorShadow * 0.46;
+  vec3 ground = vec3(0.0015, 0.0015, 0.0040);
+  ground += vec3(0.008, 0.006, 0.012) * fbm(vec2(p.x * 6.0, p.y * 9.0 + 2.0));
+  ground += u_accent * ridgePool * islandGround * smoothstep(terrain + 0.045, terrain - 0.005, p.y) * 0.025;
+  float groundMirror = exp(-pow((p.y - terrain + 0.034) * 23.0, 2.0)) * islandGround;
+  float mirrorBreakup = smoothstep(0.42, 0.96, fbm(vec2(p.x * 14.0 + u_time * 0.030, p.y * 55.0)));
+  ground += mix(u_accent, vec3(0.72, 0.78, 1.0), 0.38) * groundMirror * mirrorBreakup * (0.018 + ridgePool * 0.050 + beamPaint * 0.065);
+  col = mix(col, mtn, islandSolid * 0.98);
+  col = mix(col, ground, islandGround * 0.96);
+
+  float ridgeMist = exp(-pow((p.y - mountain) * 14.0, 2.0)) * smoothstep(-0.72, -0.12, p.y);
+  col += vec3(0.020, 0.016, 0.032) * ridgeMist * 0.22;
+  col += u_accent * ridgeMist * (beamPaint * 0.16 + ridgePool * 0.08);
+  float shore = exp(-pow((p.y - water) * 82.0, 2.0)) * island * smoothstep(mountain - 0.120, water + 0.050, p.y);
+  float coastSpark = smoothstep(0.52, 0.96, noise(vec2(p.x * 90.0 - u_time * 0.80, p.y * 38.0)));
+  float wetRockLine = exp(-pow((p.y - water + 0.020) * 36.0, 2.0)) * island * landAboveWater;
+  float shoreShadow = exp(-pow((p.y - water - 0.028) * 38.0, 2.0)) * island * landAboveWater;
+  col += vec3(0.11, 0.10, 0.16) * shore * 0.26;
+  col += mix(u_accent, vec3(0.82, 0.92, 1.0), 0.58) * shore * coastSpark * 0.155;
+  col += vec3(0.025, 0.022, 0.035) * wetRockLine * 0.44;
+  col -= vec3(0.006, 0.005, 0.010) * shoreShadow * 0.55;
+}
+
+void drawForegroundReflection(inout vec3 col, vec2 p, vec2 uv, vec2 source, vec2 target) {
+  float water = waterProfile(p.x);
+  float mountain = mountainProfile(p.x);
+  float island = islandMask(p);
+  float landAboveWater = smoothstep(water - 0.052, water + 0.018, p.y);
+  float islandSolid = smoothstep(mountain + 0.006, mountain - 0.004, p.y) * island * landAboveWater;
+  float waterBody = 1.0 - smoothstep(water - 0.010, water + 0.024, p.y);
+  float openWater = waterBody * (1.0 - islandSolid * 0.98);
+  float depthFade = clamp((water - p.y) / 0.42, 0.0, 1.0);
+  float edgeFade = 1.0 - smoothstep(1.26, 1.62, abs(p.x));
+  float perspective = clamp((water - p.y) / 0.42, 0.0, 1.0);
+  vec2 rippleUv = vec2(p.x * 6.2 + u_time * 0.080, p.y * 30.0 - u_time * 0.135);
+  float ripple = fbm(rippleUv);
+  float longRipple = fbm(vec2(p.x * 2.0 - u_time * 0.030, p.y * 8.0 + 7.0));
+  float microRipple = noise(vec2(p.x * 84.0 + u_time * 0.42, p.y * 160.0 + longRipple * 3.4));
+  vec2 reflectedUv = vec2(
+    uv.x + (ripple - 0.5) * 0.052 + (microRipple - 0.5) * 0.007,
+    0.48 + perspective * 0.64 + (ripple - 0.5) * 0.040
+  );
+  reflectedUv = clamp(reflectedUv, vec2(0.0), vec2(1.0));
+  vec3 skyReflection = renderSky(reflectedUv, vec2(p.x, -p.y));
+  vec3 cometReflection = renderComets(reflectedUv + vec2((microRipple - 0.5) * 0.009, (ripple - 0.5) * 0.016), 0.90);
+  float mirrorBand = smoothstep(0.12, 0.82, skyReflection.b + skyReflection.r * 0.62);
+  float waterSheen = openWater * edgeFade * (0.62 + depthFade * 0.48);
+  float waterline = exp(-pow((p.y - water) * 90.0, 2.0)) * edgeFade;
+  vec3 waterBase = vec3(0.0016, 0.0040, 0.0135);
+  waterBase += vec3(0.004, 0.018, 0.026) * longRipple * 0.34;
+  waterBase += vec3(0.020, 0.015, 0.037) * smoothstep(0.30, 0.95, ripple) * 0.12;
+  col = mix(col, waterBase, waterSheen * 0.92);
+
+  vec2 sourceR = vec2(source.x, water * 2.0 - source.y);
+  vec2 targetR = vec2(target.x, water * 2.0 - target.y);
+  float beamReflDist = lineDist(p, sourceR, targetR);
+  float beamReflAlong = lineAlong(p, sourceR, targetR);
+  float beamReflection = exp(-beamReflDist * 15.0) * smoothstep(0.0, 0.18, beamReflAlong) * smoothstep(1.0, 0.06, beamReflAlong);
+  float domeColumn = exp(-abs(p.x - source.x) * 13.0) * exp(-(water - p.y) * 2.25) * smoothstep(0.0, 0.54, perspective);
+  float domeBroken = smoothstep(0.36, 0.96, fbm(vec2(p.x * 18.0 + u_time * 0.10, p.y * 58.0)));
+  float pool = exp(-length((p - vec2(source.x, water - 0.025)) / vec2(0.54, 0.090)) * 3.4);
+  float shimmer = smoothstep(0.58, 0.99, noise(vec2(p.x * 128.0 - u_time * 1.05, p.y * 32.0 + ripple * 3.4)));
+  float waveLines = exp(-abs(fract((water - p.y) * 46.0 + ripple * 1.8 - u_time * 0.42) - 0.5) * 18.0);
+  float waveGrid = smoothstep(0.88, 1.0, noise(vec2(p.x * 48.0 + u_time * 0.22, p.y * 92.0 - u_time * 0.52)));
+  float causticA = waterCaustic(vec2(p.x * 1.35 + ripple * 0.6, (water - p.y) * 2.8 + longRipple * 0.4));
+  float causticB = waterCaustic(vec2(p.x * 2.2 - u_time * 0.06, (water - p.y) * 4.8 + u_time * 0.04));
+  float caustic = (causticA * 0.62 + causticB * 0.38) * waterSheen * smoothstep(0.04, 0.95, perspective);
+
+  float journalCurrent = exp(-abs(sin(p.x * 3.4 + p.y * 7.0 + u_time * 0.55 + ripple * 2.2)) * 8.0);
+  float recapCurrent = exp(-abs(sin(p.x * 4.8 - p.y * 5.5 - u_time * 0.48 + longRipple * 2.0)) * 8.5);
+  journalCurrent *= smoothstep(0.14, 0.82, perspective) * smoothstep(0.20, 0.95, ripple);
+  recapCurrent *= smoothstep(0.05, 0.78, perspective) * smoothstep(0.18, 0.96, microRipple);
+
+  vec2 memoryA = p - vec2(-0.44, water - 0.115);
+  vec2 memoryB = p - vec2(0.38, water - 0.165);
+  vec2 memoryC = p - vec2(0.04, water - 0.235);
+  float ringA = exp(-pow((length(memoryA / vec2(1.0, 0.42)) - (0.14 + 0.018 * sin(u_time * 0.50))) * 22.0, 2.0));
+  float ringB = exp(-pow((length(memoryB / vec2(1.0, 0.44)) - (0.19 + 0.020 * sin(u_time * 0.42 + 1.7))) * 18.0, 2.0));
+  float ringC = exp(-pow((length(memoryC / vec2(1.0, 0.46)) - (0.25 + 0.018 * sin(u_time * 0.38 + 3.1))) * 17.0, 2.0));
+  float memoryRings = (ringA + ringB * 0.85 + ringC * 0.70) * waterSheen * smoothstep(0.10, 0.92, perspective);
+  float settledGlow =
+    exp(-dot(memoryA / vec2(0.17, 0.07), memoryA / vec2(0.17, 0.07))) +
+    exp(-dot(memoryB / vec2(0.19, 0.08), memoryB / vec2(0.19, 0.08))) * 0.86 +
+    exp(-dot(memoryC / vec2(0.24, 0.09), memoryC / vec2(0.24, 0.09))) * 0.78;
+  settledGlow *= waterSheen;
+
+  float shoreGlow = exp(-pow((p.y - water) * 88.0, 2.0)) * island * (1.0 - islandSolid);
+  float shoreFoam = shoreGlow * smoothstep(0.50, 1.0, noise(vec2(p.x * 120.0 - u_time * 0.9, p.y * 20.0)));
+  float cometEnergy = max(max(cometReflection.r, cometReflection.g), cometReflection.b);
+
+  col += skyReflection * waterSheen * (0.125 + mirrorBand * 0.215);
+  col += cometReflection * waterSheen * (0.210 + shimmer * 0.090 + waveLines * 0.038);
+  col += vec3(0.83, 0.77, 1.0) * waterline * waterSheen * 0.132;
+  col += mix(vec3(0.35, 0.75, 0.68), vec3(0.83, 0.77, 1.0), 0.38) * caustic * (0.180 + cometEnergy * 0.18);
+  col += u_accent * waterSheen * (beamReflection * (0.135 + shimmer * 0.105) + pool * 0.145 + domeColumn * (0.090 + domeBroken * 0.055));
+  col += mix(u_accent, vec3(0.72, 0.84, 1.0), 0.40) * waterSheen * waveLines * (0.024 + pool * 0.044 + beamReflection * 0.060);
+  col += vec3(0.30, 0.78, 0.74) * waterSheen * journalCurrent * (0.030 + waveGrid * 0.048);
+  col += vec3(0.62, 0.43, 0.92) * waterSheen * recapCurrent * (0.028 + shimmer * 0.048);
+  col += mix(vec3(0.72, 0.64, 0.91), vec3(0.95, 0.70, 0.42), 0.30) * memoryRings * 0.090;
+  col += mix(vec3(0.72, 0.64, 0.91), vec3(0.35, 0.75, 0.68), 0.45) * settledGlow * 0.105;
+  col += mix(u_accent, vec3(0.86, 0.96, 1.0), 0.60) * shoreFoam * 0.112;
+  col += mix(vec3(0.35, 0.75, 0.68), vec3(0.92, 0.84, 1.0), 0.58) * cometEnergy * caustic * 0.130;
+  col += vec3(0.82, 0.84, 1.0) * cometEnergy * waterline * waterSheen * 0.070;
+}
+
+void drawWaterFog(inout vec3 col, vec2 p, vec2 source, vec2 target) {
+  float water = waterProfile(p.x);
+  float mountain = mountainProfile(p.x);
+  float island = islandMask(p);
+  float islandSolid = smoothstep(mountain + 0.006, mountain - 0.004, p.y) * island;
+  float aboveWater = smoothstep(water - 0.035, water + 0.026, p.y) * (1.0 - smoothstep(water + 0.035, water + 0.330, p.y));
+  float waterShelf = exp(-pow((p.y - water - 0.046) * 6.8, 2.0));
+  float lateral = 1.0 - smoothstep(1.22, 1.70, abs(p.x));
+  float openAir = aboveWater * waterShelf * lateral * (1.0 - islandSolid * 0.72);
+  vec2 q = vec2(p.x * 1.55 + u_time * 0.012, (p.y - water) * 6.5 - u_time * 0.026);
+  float rollingFog = fbm(q + vec2(fbm(q * 1.7), 0.0));
+  float filamentFog = smoothstep(0.44, 0.86, fbm(vec2(p.x * 4.2 - u_time * 0.038, (p.y - water) * 17.0 + 8.0)));
+  float lowVeil = openAir * (0.22 + rollingFog * 0.42 + filamentFog * 0.38);
+  float beamDist = lineDist(p, source, target);
+  float beamAlong = lineAlong(p, source, target);
+  float beamWidth = mix(0.030, 0.140, pow(clamp(beamAlong, 0.0, 1.0), 0.72));
+  float beamFog = exp(-pow(beamDist / max(beamWidth * 2.8, 0.001), 1.22)) * smoothstep(0.0, 0.24, beamAlong) * smoothstep(1.0, 0.04, beamAlong);
+  float shoreBreath = exp(-pow((p.y - water) * 22.0, 2.0)) * island * lateral;
+  float driftSpark = smoothstep(0.965, 1.0, noise(vec2(p.x * 160.0 + u_time * 0.40, p.y * 94.0 - u_time * 0.26))) * lowVeil;
+
+  col += vec3(0.024, 0.024, 0.044) * lowVeil * 0.58;
+  col += vec3(0.10, 0.09, 0.16) * lowVeil * rollingFog * 0.075;
+  col += u_accent * lowVeil * (beamFog * 0.125 + shoreBreath * 0.045);
+  col += mix(u_accent, vec3(0.84, 0.88, 1.0), 0.46) * driftSpark * 0.082;
+}
+
+void drawLensScattering(inout vec3 col, vec2 p, vec2 target, vec2 source) {
+  vec2 dir = normalize(target - source);
+  vec2 normal = vec2(-dir.y, dir.x);
+  vec2 q = p - source;
+  float along = dot(q, dir);
+  float across = abs(dot(q, normal));
+  float aperture = exp(-length(q) * 26.0);
+  float axial = exp(-across * 82.0) * smoothstep(-0.040, 0.035, along) * smoothstep(0.44, 0.0, along);
+  float sideGlow = exp(-length(q / vec2(0.20, 0.10)) * 5.5);
+  float irisRing = abs(length(q) - 0.052);
+  float ring = exp(-irisRing * 90.0) * exp(-abs(along) * 3.8);
+  float mountain = mountainProfile(p.x);
+  float occlusion = smoothstep(mountain - 0.010, mountain + 0.038, p.y);
+  vec3 tint = mix(u_accent, vec3(0.86, 0.90, 1.0), 0.22);
+  col += tint * occlusion * (aperture * 0.34 + axial * 0.16 + sideGlow * 0.08 + ring * 0.055);
+  col += vec3(1.0, 0.94, 0.82) * aperture * occlusion * 0.055;
+}
+
+void drawDistantObservatory(inout vec3 col, vec2 p, vec2 target) {
+  vec2 base = telescopeBase();
+  float s = 0.58;
+  vec2 domeCenter = base + vec2(0.0, 0.052);
+  vec2 dir = normalize(target - domeCenter + vec2(0.0, 0.008));
+  vec2 n = vec2(-dir.y, dir.x);
+  vec2 aperture = domeCenter + dir * (0.088 * s);
+
+  float plinth = 1.0 - smoothstep(0.0, 0.0042, sdBox(p, base - vec2(0.0, 0.022 * s), vec2(0.098, 0.034) * s));
+  float retainingWall = 1.0 - smoothstep(0.0, 0.0038, sdBox(p, base - vec2(0.0, 0.050 * s), vec2(0.122, 0.018) * s));
+  float contactShadow = 1.0 - smoothstep(0.0, 0.0060, sdEllipse(p, base - vec2(0.0, 0.066 * s), vec2(0.150, 0.028) * s));
+  float ledge = 1.0 - smoothstep(0.0, 0.0035, sdCapsule(p, base + vec2(-0.092 * s, -0.003 * s), base + vec2(0.092 * s, -0.003 * s), 0.0045 * s));
+  float foundation = 1.0 - smoothstep(0.0, 0.0045, sdBox(p, base + vec2(0.0, 0.006 * s), vec2(0.112, 0.026) * s));
+  float lowerDeck = 1.0 - smoothstep(0.0, 0.0038, sdBox(p, base + vec2(0.0, -0.018 * s), vec2(0.126, 0.014) * s));
+  float domeEllipse = 1.0 - smoothstep(0.0, 0.0045, sdEllipse(p, domeCenter, vec2(0.104, 0.066) * s));
+  float domeMask = domeEllipse * smoothstep(domeCenter.y - 0.026 * s, domeCenter.y - 0.004 * s, p.y);
+  float domeRim = exp(-abs(sdEllipse(p, domeCenter, vec2(0.104, 0.066) * s)) * 140.0) * domeMask;
+  float horizonRim = exp(-abs(p.y - (domeCenter.y - 0.022 * s)) * 230.0) * smoothstep(0.106 * s, 0.070 * s, abs(p.x - domeCenter.x));
+
+  float slit = 1.0 - smoothstep(0.0, 0.0045, sdCapsule(p, domeCenter - dir * (0.024 * s), domeCenter + dir * (0.096 * s), 0.017 * s));
+  float slitInside = slit * domeMask;
+  float shutterA = 1.0 - smoothstep(0.0, 0.0034, sdCapsule(p, domeCenter - dir * (0.016 * s) + n * (0.020 * s), aperture + n * (0.020 * s), 0.0035 * s));
+  float shutterB = 1.0 - smoothstep(0.0, 0.0034, sdCapsule(p, domeCenter - dir * (0.016 * s) - n * (0.020 * s), aperture - n * (0.020 * s), 0.0035 * s));
+  float telescopeInside = 1.0 - smoothstep(0.0, 0.0040, sdCapsule(p, domeCenter + dir * (0.004 * s), aperture + dir * (0.018 * s), 0.010 * s));
+  float glass = exp(-length((p - aperture) / (vec2(0.024, 0.018) * s)) * 34.0);
+  float glassRim = exp(-abs(length(p - aperture) - 0.020 * s) * 180.0);
+
+  float panelNoise = fbm(vec2(p.x * 42.0 + 2.0, p.y * 28.0 + 4.0));
+  float panels = 0.0;
+  panels += exp(-abs(p.x - (base.x - 0.070 * s)) * 190.0);
+  panels += exp(-abs(p.x - (base.x - 0.034 * s)) * 210.0);
+  panels += exp(-abs(p.x - (base.x + 0.034 * s)) * 210.0);
+  panels += exp(-abs(p.x - (base.x + 0.070 * s)) * 190.0);
+  panels *= foundation * smoothstep(base.y - 0.010 * s, base.y + 0.038 * s, p.y);
+
+  float domeSheen = smoothstep(0.62, 1.0, panelNoise) * domeMask * smoothstep(domeCenter.x - 0.11 * s, domeCenter.x + 0.04 * s, p.x);
+  float beamFacing = max(dot(normalize(aperture - p + vec2(0.0, 0.010)), normalize(dir + vec2(0.0, 0.14))), 0.0);
+
+  vec3 silhouette = vec3(0.001, 0.001, 0.003);
+  vec3 concrete = vec3(0.006, 0.006, 0.012);
+  vec3 domeSkin = vec3(0.007, 0.008, 0.016);
+  over(col, silhouette, contactShadow * 0.46);
+  over(col, vec3(0.004, 0.004, 0.009), retainingWall * 0.92);
+  over(col, vec3(0.007, 0.007, 0.014), plinth * 0.90);
+  col += vec3(0.044, 0.039, 0.060) * retainingWall * 0.10;
+  col += mix(u_accent, vec3(0.78, 0.84, 1.0), 0.55) * ledge * 0.065;
+  over(col, silhouette, lowerDeck * 0.98);
+  over(col, concrete, foundation * 0.94);
+  over(col, domeSkin, domeMask * 0.96);
+  over(col, vec3(0.0006, 0.0007, 0.002), slitInside * 0.96);
+  over(col, silhouette, telescopeInside * slitInside * 0.80);
+  col += vec3(0.052, 0.047, 0.078) * panels * 0.14;
+  col += vec3(0.080, 0.076, 0.120) * domeRim * 0.055;
+  col += vec3(0.075, 0.066, 0.105) * horizonRim * 0.045;
+  col += mix(u_accent, vec3(0.86, 0.90, 1.0), 0.40) * domeSheen * 0.035;
+  col += mix(u_accent, vec3(0.90, 0.95, 1.0), 0.38) * (shutterA + shutterB) * (0.034 + beamFacing * 0.040);
+  col += u_accent * glass * 0.78;
+  col += vec3(0.78, 0.83, 1.0) * glass * 0.18;
+  col += mix(u_accent, vec3(0.92, 0.96, 1.0), 0.52) * glassRim * 0.050;
+}
+
+void main() {
+  vec2 uv = v_uv;
+  float aspect = u_resolution.x / max(u_resolution.y, 1.0);
+  vec2 p = (uv * 2.0 - 1.0) * vec2(aspect, 1.0);
+  vec2 skyUv = uv;
+
+  vec2 target = vec2((u_target.x * 2.0 - 1.0) * aspect, (1.0 - u_target.y) * 2.0 - 1.0);
+  vec2 base = telescopeBase();
+  float observatoryScale = 0.58;
+  vec2 domeCenter = base + vec2(0.0, 0.052);
+  vec2 dir = normalize(target - domeCenter + vec2(0.0, 0.008));
+  vec2 source = domeCenter + dir * (0.088 * observatoryScale);
+
+  vec3 col = renderSky(skyUv, p);
+  float targetGlow = exp(-length(p - target) * 20.0);
+  col += u_accent * targetGlow * 0.24;
+  drawVolumetrics(col, p, target, source);
+  drawLandscape(col, p, source, target);
+  drawForegroundReflection(col, p, uv, source, target);
+  drawWaterFog(col, p, source, target);
+  drawDistantObservatory(col, p, target);
+  drawLensScattering(col, p, target, source);
+
+  float vignette = smoothstep(1.22, 0.20, length((uv - 0.5) * vec2(1.05, 1.0)));
+  col *= mix(0.38, 1.0, vignette);
+  float iris = 1.0 - smoothstep(0.36, 1.08, length((uv - 0.5) * vec2(0.78, 1.0)));
+  col += vec3(0.010, 0.009, 0.018) * iris;
+
+  fragColor = vec4(max(col, 0.0), 1.0);
+}`;
+
+const BRIGHT = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_tex;
+void main() {
+  vec3 c = texture(u_tex, v_uv).rgb;
+  float l = max(max(c.r, c.g), c.b);
+  float m = smoothstep(0.12, 0.58, l);
+  fragColor = vec4(c * m, 1.0);
+}`;
+
+const BLUR = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_tex;
+uniform vec2 u_texel;
+uniform vec2 u_dir;
+void main() {
+  vec2 o = u_texel * u_dir;
+  vec3 c = texture(u_tex, v_uv).rgb * 0.227027;
+  c += texture(u_tex, v_uv + o * 1.384615).rgb * 0.316216;
+  c += texture(u_tex, v_uv - o * 1.384615).rgb * 0.316216;
+  c += texture(u_tex, v_uv + o * 3.230769).rgb * 0.070270;
+  c += texture(u_tex, v_uv - o * 3.230769).rgb * 0.070270;
+  fragColor = vec4(c, 1.0);
+}`;
+
+const DOWN = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_tex;
+uniform vec2 u_texel;
+void main() {
+  vec3 c = texture(u_tex, v_uv).rgb * 0.36;
+  c += texture(u_tex, v_uv + u_texel * vec2( 1.0,  0.0)).rgb * 0.13;
+  c += texture(u_tex, v_uv + u_texel * vec2(-1.0,  0.0)).rgb * 0.13;
+  c += texture(u_tex, v_uv + u_texel * vec2( 0.0,  1.0)).rgb * 0.13;
+  c += texture(u_tex, v_uv + u_texel * vec2( 0.0, -1.0)).rgb * 0.13;
+  c += texture(u_tex, v_uv + u_texel * vec2( 1.0,  1.0)).rgb * 0.055;
+  c += texture(u_tex, v_uv + u_texel * vec2(-1.0,  1.0)).rgb * 0.055;
+  c += texture(u_tex, v_uv + u_texel * vec2( 1.0, -1.0)).rgb * 0.055;
+  c += texture(u_tex, v_uv + u_texel * vec2(-1.0, -1.0)).rgb * 0.055;
+  fragColor = vec4(c, 1.0);
+}`;
+
+const COMP = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_scene;
+uniform sampler2D u_bloom0;
+uniform sampler2D u_bloom1;
+uniform sampler2D u_bloom2;
+uniform sampler2D u_bloom3;
+uniform vec2 u_resolution;
+uniform float u_time;
+
+float hash12(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+
+void main() {
+  vec2 uv = v_uv;
+  vec2 c = uv - 0.5;
+  vec2 ca = c * 0.0010;
+  vec3 scene;
+  scene.r = texture(u_scene, uv + ca).r;
+  scene.g = texture(u_scene, uv).g;
+  scene.b = texture(u_scene, uv - ca).b;
+  vec2 px = 1.0 / u_resolution;
+  vec3 neighbor = (
+    texture(u_scene, uv + vec2( px.x, 0.0)).rgb +
+    texture(u_scene, uv + vec2(-px.x, 0.0)).rgb +
+    texture(u_scene, uv + vec2(0.0,  px.y)).rgb +
+    texture(u_scene, uv + vec2(0.0, -px.y)).rgb
+  ) * 0.25;
+  scene = max(scene + (scene - neighbor) * 0.115, vec3(0.0));
+  vec3 bloom =
+    texture(u_bloom0, uv).rgb * 0.84 +
+    texture(u_bloom1, uv).rgb * 0.66 +
+    texture(u_bloom2, uv).rgb * 0.52 +
+    texture(u_bloom3, uv).rgb * 0.42;
+  vec3 hdr = scene + bloom * 1.66;
+  vec3 mapped = vec3(1.0) - exp(-hdr * 1.48);
+  mapped = pow(mapped, vec3(0.92));
+  float vignette = smoothstep(0.92, 0.22, length(c * vec2(1.16, 1.0)));
+  mapped *= mix(0.50, 1.05, vignette);
+  fragColor = vec4(clamp(mapped, 0.0, 1.0), 1.0);
+}`;
+
+function failGL(message) {
+  console.warn(message);
+  document.body.classList.add('no-gl');
+}
+
+function compile(type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(shader);
+    gl.deleteShader(shader);
+    throw new Error(log || 'Shader compile failed');
+  }
+  return shader;
+}
+
+function program(vertexSource, fragmentSource) {
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, vertexSource));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fragmentSource));
+  gl.bindAttribLocation(prog, 0, 'a_position');
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    const log = gl.getProgramInfoLog(prog);
+    gl.deleteProgram(prog);
+    throw new Error(log || 'Program link failed');
+  }
+  return prog;
+}
+
+function makeTarget(w, h, hdr) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const internal = hdr ? gl.RGBA16F : gl.RGBA;
+  const format = gl.RGBA;
+  const type = hdr ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+  gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, format, type, null);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  return { tex, fbo, w, h };
+}
+
+function destroyTarget(target) {
+  gl.deleteTexture(target.tex);
+  gl.deleteFramebuffer(target.fbo);
+}
+
+let progScene;
+let progBright;
+let progBlur;
+let progDown;
+let progComp;
+let vao;
+let hdrSupported = false;
+
+function initGL() {
+  if (!gl) {
+    failGL('WebGL2 unavailable');
+    return false;
+  }
+  hdrSupported = Boolean(gl.getExtension('EXT_color_buffer_float'));
+  try {
+    progScene = program(VERT, SCENE);
+    progBright = program(VERT, BRIGHT);
+    progBlur = program(VERT, BLUR);
+    progDown = program(VERT, DOWN);
+    progComp = program(VERT, COMP);
+  } catch (error) {
+    failGL(error.message);
+    return false;
+  }
+  vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+  resize();
+  return true;
+}
+
+function useTexture(unit, texture) {
+  gl.activeTexture(gl.TEXTURE0 + unit);
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+}
+
+function drawTo(prog, target) {
+  gl.useProgram(prog);
+  gl.bindVertexArray(vao);
+  if (target) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+    gl.viewport(0, 0, target.w, target.h);
+  } else {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, width, height);
+  }
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+function resize() {
+  const deviceDpr = window.devicePixelRatio || 1;
+  const maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 8192;
+  const maxWidthScale = maxTextureSize / Math.max(window.innerWidth, 1);
+  const maxHeightScale = maxTextureSize / Math.max(window.innerHeight, 1);
+  const textureSafeDpr = Math.max(1, Math.min(maxWidthScale, maxHeightScale) * 0.96);
+  dpr = Math.min(deviceDpr * RENDER_SUPERSAMPLE, MAX_RENDER_DPR, textureSafeDpr);
+  width = Math.max(1, Math.floor(window.innerWidth * dpr));
+  height = Math.max(1, Math.floor(window.innerHeight * dpr));
+  canvas.width = width;
+  canvas.height = height;
+  canvas.style.width = `${window.innerWidth}px`;
+  canvas.style.height = `${window.innerHeight}px`;
+  targets.forEach(destroyTarget);
+  bloomA.forEach(destroyTarget);
+  bloomB.forEach(destroyTarget);
+  targets = [makeTarget(width, height, hdrSupported)];
+  bloomA = [];
+  bloomB = [];
+  let w = Math.max(2, Math.floor(width / 2));
+  let h = Math.max(2, Math.floor(height / 2));
+  for (let i = 0; i < BLOOM_LEVELS; i++) {
+    bloomA.push(makeTarget(w, h, hdrSupported));
+    bloomB.push(makeTarget(w, h, hdrSupported));
+    w = Math.max(2, Math.floor(w / 2));
+    h = Math.max(2, Math.floor(h / 2));
+  }
+}
+
+function render(now) {
+  if (now - lastFrameMs < TARGET_FRAME_MS) {
+    requestAnimationFrame(render);
+    return;
+  }
+  lastFrameMs = now;
+  const t = now * 0.001;
+  const dt = Math.min(0.06, Math.max(0.0, t - lastNow));
+  lastNow = t;
+  const follow = 1.0 - Math.pow(0.018, dt);
+  currentTarget.x += (desiredTarget.x - currentTarget.x) * follow;
+  currentTarget.y += (desiredTarget.y - currentTarget.y) * follow;
+  const artifact = selectedArtifact();
+  const accent = hexToRgb(artifact.accent);
+
+  gl.disable(gl.DEPTH_TEST);
+  gl.disable(gl.BLEND);
+
+  gl.useProgram(progScene);
+  gl.uniform2f(gl.getUniformLocation(progScene, 'u_resolution'), width, height);
+  gl.uniform1f(gl.getUniformLocation(progScene, 'u_time'), t);
+  gl.uniform2f(gl.getUniformLocation(progScene, 'u_mouse'), mouse.x, mouse.y);
+  gl.uniform2f(gl.getUniformLocation(progScene, 'u_target'), currentTarget.x, currentTarget.y);
+  gl.uniform3f(gl.getUniformLocation(progScene, 'u_accent'), accent.r, accent.g, accent.b);
+  drawTo(progScene, targets[0]);
+
+  gl.useProgram(progBright);
+  useTexture(0, targets[0].tex);
+  gl.uniform1i(gl.getUniformLocation(progBright, 'u_tex'), 0);
+  drawTo(progBright, bloomA[0]);
+
+  for (let i = 0; i < bloomA.length; i++) {
+    if (i > 0) {
+      gl.useProgram(progDown);
+      useTexture(0, bloomA[i - 1].tex);
+      gl.uniform1i(gl.getUniformLocation(progDown, 'u_tex'), 0);
+      gl.uniform2f(gl.getUniformLocation(progDown, 'u_texel'), 1 / bloomA[i - 1].w, 1 / bloomA[i - 1].h);
+      drawTo(progDown, bloomA[i]);
+    }
+    gl.useProgram(progBlur);
+    useTexture(0, bloomA[i].tex);
+    gl.uniform1i(gl.getUniformLocation(progBlur, 'u_tex'), 0);
+    gl.uniform2f(gl.getUniformLocation(progBlur, 'u_texel'), 1 / bloomA[i].w, 1 / bloomA[i].h);
+    gl.uniform2f(gl.getUniformLocation(progBlur, 'u_dir'), 1, 0);
+    drawTo(progBlur, bloomB[i]);
+
+    gl.useProgram(progBlur);
+    useTexture(0, bloomB[i].tex);
+    gl.uniform1i(gl.getUniformLocation(progBlur, 'u_tex'), 0);
+    gl.uniform2f(gl.getUniformLocation(progBlur, 'u_texel'), 1 / bloomB[i].w, 1 / bloomB[i].h);
+    gl.uniform2f(gl.getUniformLocation(progBlur, 'u_dir'), 0, 1);
+    drawTo(progBlur, bloomA[i]);
+  }
+
+  gl.useProgram(progComp);
+  useTexture(0, targets[0].tex);
+  useTexture(1, bloomA[0].tex);
+  useTexture(2, bloomA[1].tex);
+  useTexture(3, bloomA[2].tex);
+  useTexture(4, bloomA[3].tex);
+  gl.uniform1i(gl.getUniformLocation(progComp, 'u_scene'), 0);
+  gl.uniform1i(gl.getUniformLocation(progComp, 'u_bloom0'), 1);
+  gl.uniform1i(gl.getUniformLocation(progComp, 'u_bloom1'), 2);
+  gl.uniform1i(gl.getUniformLocation(progComp, 'u_bloom2'), 3);
+  gl.uniform1i(gl.getUniformLocation(progComp, 'u_bloom3'), 4);
+  gl.uniform2f(gl.getUniformLocation(progComp, 'u_resolution'), width, height);
+  gl.uniform1f(gl.getUniformLocation(progComp, 'u_time'), t);
+  drawTo(progComp, null);
+
+  requestAnimationFrame(render);
+}
+
+function hexToRgb(hex) {
+  const clean = hex.replace('#', '');
+  const value = Number.parseInt(clean, 16);
+  return {
+    r: ((value >> 16) & 255) / 255,
+    g: ((value >> 8) & 255) / 255,
+    b: (value & 255) / 255,
+  };
+}
+
+window.addEventListener('resize', resize);
+window.addEventListener('mousemove', (event) => {
+  mouse = {
+    x: event.clientX / Math.max(window.innerWidth, 1),
+    y: event.clientY / Math.max(window.innerHeight, 1),
+  };
+});
+
+updatePlate();
+renderArtifacts();
+if (initGL()) {
+  requestAnimationFrame(render);
+}
+</script>
+</body>
+</html>

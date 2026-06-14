@@ -92,6 +92,26 @@ def _object_path(thread_id: str, filename: str) -> str:
     return f"{safe_thread}/{safe_name}"
 
 
+def normalize_object_path(object_path: str) -> str:
+    """Normalize a full Supabase Storage object path and reject traversal."""
+    decoded = object_path.strip().replace("\\", "/")
+    if decoded.startswith("file://"):
+        decoded = decoded[len("file://") :]
+    if decoded.startswith("/") or decoded.startswith("//") or (len(decoded) >= 2 and decoded[1] == ":"):
+        raise ValueError("Unsafe Supabase object path")
+    parts: list[str] = []
+    for part in decoded.split("/"):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            raise ValueError("Supabase object path traversal detected")
+        parts.append(part)
+    normalized = "/".join(parts)
+    if not normalized:
+        raise ValueError("Supabase object path is required")
+    return normalized
+
+
 def _thread_prefix(thread_id: str) -> str:
     safe_thread = thread_id.strip().strip("/")
     if not safe_thread:
@@ -261,6 +281,48 @@ def upload_artifact(
         len(content),
     )
     return object_path
+
+
+def upload_artifact_object(
+    object_path: str,
+    content: bytes,
+    *,
+    content_type: str | None = None,
+    client: httpx.Client | None = None,
+) -> str | None:
+    """Upload bytes to an explicit safe object path in the artifacts bucket."""
+    normalized_path = normalize_object_path(object_path)
+    config = _load_config()
+    if config is None:
+        logger.debug("Supabase not configured; skipping upload for object_path=%s", normalized_path)
+        return None
+
+    url = _object_url(config, normalized_path)
+    mime_type = content_type or mimetypes.guess_type(normalized_path)[0] or "application/octet-stream"
+    headers = {
+        "Authorization": f"Bearer {config.service_role_key}",
+        "apikey": config.service_role_key,
+        "Content-Type": mime_type,
+        "x-upsert": "true",
+        "Cache-Control": "no-cache",
+    }
+
+    owns_client = client is None
+    http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
+    try:
+        response = http.post(url, content=content, headers=headers)
+        response.raise_for_status()
+    finally:
+        if owns_client:
+            http.close()
+
+    logger.info(
+        "Uploaded artifact object to Supabase: bucket=%s object_path=%s bytes=%d",
+        config.bucket,
+        normalized_path,
+        len(content),
+    )
+    return normalized_path
 
 
 def _list_page(
@@ -632,6 +694,88 @@ def download_artifact(
             or mimetypes.guess_type(filename)[0]
             or "application/octet-stream",
         )
+    finally:
+        if owns_client:
+            http.close()
+
+
+def download_artifact_object(
+    object_path: str,
+    *,
+    client: httpx.Client | None = None,
+) -> tuple[bytes, str] | None:
+    """Download bytes from an explicit safe object path in Supabase Storage."""
+    normalized_path = normalize_object_path(object_path)
+    config = _load_config()
+    if config is None:
+        return None
+
+    url = _object_url(config, normalized_path)
+    headers = {
+        "Authorization": f"Bearer {config.service_role_key}",
+        "apikey": config.service_role_key,
+    }
+
+    owns_client = client is None
+    http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
+    try:
+        response = http.get(url, headers=headers)
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return (
+            response.content,
+            response.headers.get("content-type")
+            or mimetypes.guess_type(normalized_path)[0]
+            or "application/octet-stream",
+        )
+    finally:
+        if owns_client:
+            http.close()
+
+
+def check_artifact_object_exists(
+    object_path: str,
+    *,
+    client: httpx.Client | None = None,
+) -> bool:
+    """Return True when an explicit safe object path exists in Supabase Storage."""
+    try:
+        normalized_path = normalize_object_path(object_path)
+    except ValueError:
+        return False
+
+    config = _load_config()
+    if config is None:
+        return False
+
+    url = _object_url(config, normalized_path)
+    headers = {
+        "Authorization": f"Bearer {config.service_role_key}",
+        "apikey": config.service_role_key,
+    }
+
+    owns_client = client is None
+    http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
+    try:
+        response = http.head(url, headers=headers)
+        if response.status_code == 404:
+            return False
+        if not response.is_success:
+            logger.warning(
+                "Supabase HEAD check failed for object_path=%s status=%s; treating as missing",
+                normalized_path,
+                response.status_code,
+            )
+            return False
+        return True
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "Supabase HEAD check error for object_path=%s error=%s; treating as missing",
+            normalized_path,
+            exc,
+        )
+        return False
     finally:
         if owns_client:
             http.close()
