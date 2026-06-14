@@ -2295,7 +2295,7 @@ function HtmlDocumentPage({
               <iframe
                 ref={iframeRef}
                 title={`Preview of ${file?.name ?? artifact.artifactTitle}`}
-                sandbox="allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-scripts"
+                sandbox="allow-scripts"
                 srcDoc={interactiveSrcDoc}
                 data-testid="artifact-html-preview-iframe"
                 data-html-visible-renderer-kind="iframe"
@@ -2343,14 +2343,23 @@ function resolveHtmlVisiblePreviewScale({
 }
 
 function buildInteractiveHtmlPreviewSrcDoc(html: string): string {
+  const sanitizedHtml = stripArtifactActiveHtmlContent(html)
   const bridge = [
     "<style>[data-coreview-focus-pulse='true']{outline:2px solid #7c3aed;outline-offset:4px;transition:outline-color .2s ease;}</style>",
     `<script>${HTML_PREVIEW_BRIDGE_SCRIPT}</script>`,
   ].join("")
-  if (/<\/body\s*>/iu.test(html)) {
-    return html.replace(/<\/body\s*>/iu, `${bridge}</body>`)
+  if (/<\/body\s*>/iu.test(sanitizedHtml)) {
+    return sanitizedHtml.replace(/<\/body\s*>/iu, `${bridge}</body>`)
   }
-  return `${html}${bridge}`
+  return `${sanitizedHtml}${bridge}`
+}
+
+function stripArtifactActiveHtmlContent(html: string): string {
+  return html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/giu, "")
+    .replace(/\s+on[a-z][\w:-]*\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/giu, "")
+    .replace(/\s+(href|src)\s*=\s*(["'])\s*javascript:[\s\S]*?\2/giu, " $1=\"#\"")
+    .replace(/\s+(href|src)\s*=\s*javascript:[^\s>]+/giu, " $1=\"#\"")
 }
 
 type HtmlPreviewBridgeMessage = {

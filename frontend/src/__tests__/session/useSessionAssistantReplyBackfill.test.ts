@@ -197,6 +197,35 @@ describe('useSessionAssistantReplyBackfill', () => {
     expect(outcomes).not.toContain('appended');
   });
 
+  it('replaces a shorter streamed assistant reply with the recovered final reply', async () => {
+    getSessionMessagesMock.mockResolvedValue(transcriptResponse([
+      { id: 'm-user-1', role: 'user', content: 'Build me a page' },
+      { id: 'm-ai-1', role: 'sophia', content: 'I started the build and attached the finished artifact.' },
+    ]));
+
+    const { result, rerender } = renderHarness({
+      chatStatus: 'ready',
+      builderCompletion: null,
+      initialMessages: [
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Build me a page' }] },
+        { id: 'a1', role: 'assistant', parts: [{ type: 'text', text: 'I started the build.' }] },
+      ],
+    });
+
+    rerender({ chatStatus: 'ready', builderCompletion });
+    await advance(20_000);
+
+    const assistantMessages = result.current.chatMessages.filter((message) => message.role === 'assistant');
+    expect(assistantMessages).toHaveLength(1);
+    expect(assistantMessages[0]).toMatchObject({
+      id: 'a1',
+      parts: [{ type: 'text', text: 'I started the build and attached the finished artifact.' }],
+    });
+    const outcomes = recordCaptureEventMock.mock.calls.map(([event]) => event.payload.assistantMessageBackfillResult);
+    expect(outcomes).toContain('replaced');
+    expect(outcomes).not.toContain('dedupe-suppressed');
+  });
+
   it('retries after builder completion until the wakeup reply lands, then appends once', async () => {
     getSessionMessagesMock
       .mockResolvedValueOnce(transcriptResponse([
