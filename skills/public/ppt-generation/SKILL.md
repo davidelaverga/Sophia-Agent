@@ -10,6 +10,9 @@ description: Use this skill when the user requests presentations, slide decks, P
 Create a real, editable `.pptx` presentation. The final deck should contain
 PowerPoint text, layouts, charts, diagrams, and images as slide elements. Do
 not deliver a folder of images or a deck made only of full-slide screenshots.
+Use safe Office-rendered fonts (`Georgia`, `Calibri`, `Cambria`, or `Arial`);
+do not use Aptos-only layouts, side accent bars, decorative stripes, gradients,
+or placeholder visuals.
 
 This skill is inspired by MIT-safe presentation-generation patterns. The
 compiler and quality gates are Sophia-owned; do not write ad hoc
@@ -25,9 +28,12 @@ fallback is explicitly reported.
 3. For normal decks, use a polished visual treatment unless the user clearly
    asks for plain, text-only, or no-visual slides.
 4. Use the right visual source:
-   - Numeric charts: use chart/data guidance and local PNG/SVG assets.
-   - Technical diagrams: use `generate_excalidraw_diagram`.
-   - Illustrative hero/section visuals: use `image-generation` when helpful.
+   - Numeric charts: use chart/data guidance and `generate_visual_asset` with
+     explicit labeled `{label, value}` data.
+   - Technical diagrams: use `generate_excalidraw_diagram` with raw Mermaid,
+     not hand-placed coordinates.
+   - Illustrative hero/section visuals: use `image-generation` only when
+     helpful, capped to one cover/hero and at most two section visuals.
 5. Reference local PNG/JPEG assets from slide fields `image`, `chart_path`, or
    `visual_path`. Generated images are slide assets, not entire slide canvases.
 6. Run the compiler:
@@ -89,6 +95,8 @@ Use this compact schema:
 ```
 
 Supported `theme`: `boardroom`, `daylight`, `ember`, `mist`, `terra`, `noir`.
+These map to MiniMax-inspired safe palettes. Use only the palette colors, with
+solid fills and high text/background contrast.
 
 Supported `layout`: `title`, `content_text`, `content_image`,
 `full_bleed_image`, `section_divider`, `quote`, `two_column`, `stat_band`,
@@ -102,6 +110,8 @@ Supported `layout`: `title`, `content_text`, `content_image`,
   transition, or conclusion.
 - For charts/diagrams, prefer meaningful local assets with labels, legends,
   and context. Do not use decorative placeholder visuals.
+- Do not invent chart labels like `Item 1` or fake values; if the data is not
+  known, choose a diagram or conceptual slide instead of a fake chart.
 - Use generated imagery for polish, mood, covers, section openers, or
   illustrative scenes. Do not depend on it for factual diagrams or charts.
 - If image generation fails, continue with chart/diagram/text layouts instead

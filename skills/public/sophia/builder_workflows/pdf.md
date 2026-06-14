@@ -11,12 +11,15 @@ Use this card only for requested `.pdf` builds.
    one paper, or `systematic-literature-review` for multi-paper surveys.
 4. If the user requested charts, diagrams, or visuals, use
    `/mnt/skills/public/chart-visualization/SKILL.md` to choose the right
-   chart/diagram form, read `/mnt/skills/public/visual-design/SKILL.md` for
-   design guidance, then create local visual assets under
+   chart/diagram form, read `/mnt/skills/public/visual-design/SKILL.md` and
+   `/mnt/skills/public/hallmark/SKILL.md` for design guidance when Hallmark is
+   available, then create local visual assets under
    `/mnt/user-data/outputs/visuals/`. Use `generate_excalidraw_diagram` for
    architecture, process, timeline, sequence, system-map, comparison, cycle,
-   or concept-map diagrams. Use `generate_visual_asset` for numeric charts
-   and simple data-shaped visuals. Use the generated `.png` path for PDF
+   or concept-map diagrams by passing raw Mermaid. Use `generate_visual_asset`
+   for numeric charts and simple data-shaped visuals with explicit labeled
+   `{label, value}` data; never invent placeholder labels or values. Use the
+   generated `.png` path for PDF
    embedding; SVG is useful for HTML but Pandoc/XeLaTeX should receive PNG.
    Do not use image-generation for normal charts/diagrams; use it only when
    the user explicitly asks for generated illustrations or images.

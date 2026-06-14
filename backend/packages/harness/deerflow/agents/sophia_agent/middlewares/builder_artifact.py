@@ -521,6 +521,10 @@ _VISUAL_DESIGN_SKILL_PATH_MARKERS = (
     "/mnt/skills/public/visual-design/SKILL.md",
     "/skills/visual-design/SKILL.md",
     "/mnt/skills/visual-design/SKILL.md",
+    "/skills/public/hallmark/SKILL.md",
+    "/mnt/skills/public/hallmark/SKILL.md",
+    "/skills/hallmark/SKILL.md",
+    "/mnt/skills/hallmark/SKILL.md",
 )
 _VISUAL_ASSET_TOOL_NAMES = frozenset({"generate_visual_asset", "generate_excalidraw_diagram"})
 _VISUAL_ASSET_EXTENSIONS = frozenset({".svg", ".png", ".jpg", ".jpeg", ".webp"})
@@ -2517,13 +2521,14 @@ def _pptx_skill_correction_message(state: dict[str, Any]) -> str:
         "3. Compose the deck by running "
         "`/mnt/skills/public/ppt-generation/scripts/generate.py` with "
         "`--plan-file` and `--output-file`. Reference local images/charts/diagrams "
-        "inside the plan; pass `--slide-images` only for a small set of hero or "
-        "section visual assets, never as a replacement for editable slide text.\n"
+        "inside the plan; pass `--slide-images` only for one cover/hero image "
+        "and at most two section visual assets, never as a replacement for "
+        "editable slide text.\n"
         "4. If image-generation is enabled for this run, use it for covers, "
         "section openers, or illustrative assets. Use generate_visual_asset for "
-        "charts and generate_excalidraw_diagram for technical diagrams. If image "
-        "generation fails, continue with diagram/chart/text layouts — never let "
-        "imagery block the deliverable.\n"
+        "charts with explicit labeled data and generate_excalidraw_diagram with "
+        "raw Mermaid for technical diagrams. If image generation fails, continue "
+        "with diagram/chart/text layouts — never let imagery block the deliverable.\n"
         "5. Emit only after the `.pptx` exists and is a valid PowerPoint package.\n\n"
         "If deck composition or validation cannot complete after this correction, "
         "emit a real .html/.md fallback only if it is marked with "
@@ -2546,16 +2551,16 @@ def _pptx_plan_correction_message() -> str:
         '  "aspect_ratio": "16:9",\n'
         '  "theme": "boardroom",\n'
         '  "slides": [\n'
-        '    {"slide_number": 1, "type": "title", "title": "Title", "subtitle": "Subtitle", '
-        '"layout": "full_bleed_image", "image": "/mnt/user-data/outputs/visuals/hero-launch.png"},\n'
+        '    {"slide_number": 1, "type": "title", "title": "Title", "subtitle": "Subtitle"},\n'
         '    {"slide_number": 2, "layout": "section_divider", "title": "Part One"},\n'
         '    {"slide_number": 3, "type": "content", "title": "Slide title", '
-        '"key_points": ["Point 1", "Point 2"]}\n'
+        '"key_points": ["Point 1", "Point 2"], '
+        '"visual_path": "/mnt/user-data/outputs/visuals/system-flow.png"}\n'
         "  ]\n"
         "}\n\n"
-        "`theme` is optional (boardroom | daylight | ember | mist). Per-slide "
+        "`theme` is optional (boardroom | daylight | ember | mist | terra | noir). Per-slide "
         "`layout` is optional (title, content_text, content_image, "
-        "full_bleed_image, section_divider, quote, two_column, closing) — omit "
+        "section_divider, quote, two_column, stat_band, closing) — omit "
         "it to infer from the slide fields. A text/layout/chart-only deck is "
         "valid."
     )
@@ -2592,11 +2597,14 @@ def _visual_design_skill_message() -> str:
         "[Sophia/visual-design correction]\n"
         "The user requested charts, diagrams, or visual explanations. Before "
         "creating visual assets or emitting the final artifact, read the visual "
-        "design skill now:\n"
+        "design skill now. For HTML/PDF visual reports, also read Hallmark if it "
+        "is available:\n"
         "`read_file(description='read visual design skill', "
         "path='/mnt/skills/public/visual-design/SKILL.md')`.\n"
-        "Then create local visual assets with `generate_visual_asset` under "
-        "`/mnt/user-data/outputs/visuals/` and embed them in the final artifact."
+        "Charts must use explicit labeled data with `generate_visual_asset`; "
+        "technical diagrams must use `generate_excalidraw_diagram` with a raw "
+        "Mermaid definition. Embed the resulting local SVG/PNG assets in the "
+        "final artifact before emitting."
     )
 
 
@@ -3253,9 +3261,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if not _visual_design_skill_read_seen(state):
             logger.warning(
                 "[BuilderVisualDiagnostics] visual-design skill not read yet; "
-                "leaving creative workflow unforced"
+                "forcing read_file before visual asset creation"
             )
-            return None
+            return self._forced_read_tool_choice()
         if (
             state.get("builder_visual_asset_correction_emitted")
             and _visual_asset_success_count(state) <= 0
@@ -4300,19 +4308,36 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         artifact_args: dict[str, Any],
         state: BuilderArtifactState,
     ) -> bool:
-        """Visual presence telemetry.
+        """Bounded visual discipline gate.
 
-        Visual asset generation is creative guidance, not a hard precondition.
-        Rendered vision QA owns the bounded repair turn for PDF/PPTX polish.
+        The creative side remains model-owned, but requested visual artifacts
+        must first read the design discipline and get one chance to embed
+        generated chart/diagram evidence before terminal success.
         """
         if not _visuals_requested(state):
             return False
+        if not _visual_design_skill_read_seen(state):
+            logger.warning(
+                "[BuilderVisualDiagnostics] phase=emit_blocked_design_skill_unread "
+                "requested_ext=%s final_ext=%s",
+                _requested_artifact_ext(state),
+                _artifact_path_suffix_label(artifact_args.get("artifact_path")),
+            )
+            return True
         if _visual_presence_validated(artifact_args, state):
             return False
+        if int(state.get("builder_visual_embed_rejections", 0) or 0) < 1 and _repair_iteration_grantable(state):
+            logger.warning(
+                "[BuilderVisualDiagnostics] phase=emit_blocked_visual_missing "
+                "requested_ext=%s final_ext=%s",
+                _requested_artifact_ext(state),
+                _artifact_path_suffix_label(artifact_args.get("artifact_path")),
+            )
+            return True
         logger.warning(
             "[BuilderVisualDiagnostics] phase=emit_visual_missing_diagnostic "
-            "requested_ext=%s final_ext=%s — visual assets are advisory; "
-            "rendered vision QA will judge final quality when available",
+            "requested_ext=%s final_ext=%s — visual embed repair already spent; "
+            "shipping with quality warning if otherwise valid",
             _requested_artifact_ext(state),
             _artifact_path_suffix_label(artifact_args.get("artifact_path")),
         )
@@ -5652,8 +5677,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         f"{attempts} times with no usable output "
                         f"(last error: {diagnostics.get('image_generation_error_class') or 'unknown'}). "
                         "Stop calling the image-generation script in this build. Compose the "
-                        "deliverable now using generate_visual_asset charts, "
-                        "generate_excalidraw_diagram technical diagrams, and text layouts — "
+                        "deliverable now using generate_visual_asset charts with "
+                        "explicit labeled data, generate_excalidraw_diagram Mermaid "
+                        "technical diagrams, and text layouts — "
                         "a chart/diagram/text deliverable is valid."
                     )
                 )
@@ -5720,9 +5746,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if state.get("builder_visual_design_correction_emitted"):
             return None
         logger.warning(
-            "[BuilderVisualDiagnostics] phase=design_skill_missing_diagnostic design_skill_read=false"
+            "[BuilderVisualDiagnostics] phase=design_skill_missing_blocking_correction design_skill_read=false"
         )
         return {
+            "messages": [HumanMessage(content=_visual_design_skill_message())],
             "builder_visual_design_correction_emitted": True,
         }
 
@@ -5926,12 +5953,30 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if _visual_design_skill_read_seen(request.state):
             return None
 
+        tool_call_id = request.tool_call.get("id")
         logger.warning(
-            "[BuilderVisualDiagnostics] visual_asset_before_design_skill_soft_guidance "
+            "[BuilderVisualDiagnostics] visual_asset_before_design_skill_blocked "
             "tool=%s",
             tool_name,
         )
-        return None
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=(
+                            "Error: visual asset creation is blocked until you read "
+                            "`/mnt/skills/public/visual-design/SKILL.md`. Then retry "
+                            "with labeled chart data or a raw Mermaid diagram."
+                        ),
+                        tool_call_id=tool_call_id,
+                        name=str(tool_name),
+                        status="error",
+                    )
+                ],
+                "builder_visual_design_correction_emitted": True,
+            },
+            goto="model",
+        )
 
     @staticmethod
     def _normalized_write_path(tool_call: dict[str, Any]) -> str | None:
@@ -6451,7 +6496,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             rejection = (
                 f"Error: image generation is unavailable in this environment ({error_class}). "
                 "Do not call it again. Proceed with generate_visual_asset charts, "
-                "generate_excalidraw_diagram technical diagrams, and text layouts — "
+                "generate_excalidraw_diagram Mermaid technical diagrams, and text layouts — "
                 "a chart/diagram/text deliverable is valid."
             )
         elif attempts + in_command > _image_generation_max_calls(state):

@@ -41,7 +41,8 @@ RUN --mount=type=cache,target=/root/.npm \
     cd /app/backend/packages/harness/deerflow/sophia/js \
     && npm ci --omit=dev --no-audit --no-fund \
     && test -f compile_pptx.mjs \
-    && node -e "const r=require('module').createRequire(process.cwd() + '/'); r.resolve('pptxgenjs'); r.resolve('@excalidraw/excalidraw'); r.resolve('playwright-core')"
+    && test -f compile_diagram.mjs \
+    && node -e "const r=require('module').createRequire(process.cwd() + '/'); r.resolve('pptxgenjs'); r.resolve('@excalidraw/excalidraw'); r.resolve('@excalidraw/mermaid-to-excalidraw'); r.resolve('mermaid'); r.resolve('jsdom'); r.resolve('dompurify'); r.resolve('playwright-core')"
 
 ENV SOPHIA_ARTIFACT_JS_RUNTIME=/app/backend/packages/harness/deerflow/sophia/js
 ENV SOPHIA_PPTXGENJS=1

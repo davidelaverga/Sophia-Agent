@@ -77,6 +77,22 @@ def test_generate_visual_asset_rejects_invalid_dimensions(tmp_path) -> None:
     assert payload["error_type"] == "invalid_dimensions"
 
 
+def test_generate_visual_asset_rejects_unlabeled_chart_data(tmp_path) -> None:
+    payload = _payload(
+        generate_visual_asset.func(
+            runtime=_runtime(tmp_path / "outputs"),
+            visual_type="bar_chart",
+            title="No placeholders",
+            data=[{"value": 42}, {"label": "Known"}],
+            output_name="bad-chart",
+        )
+    )
+
+    assert payload["success"] is False
+    assert payload["error_type"] == "unlabeled_chart_data"
+    assert "placeholder" in payload["hint"]
+
+
 # --- VQ-1: text-fit engine ----------------------------------------------------
 
 

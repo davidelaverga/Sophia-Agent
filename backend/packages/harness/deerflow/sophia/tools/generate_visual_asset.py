@@ -42,6 +42,15 @@ VisualKind = Literal[
 ]
 
 
+class VisualDataError(ValueError):
+    """Public-safe input validation error for visual specs."""
+
+    def __init__(self, error_type: str, hint: str) -> None:
+        super().__init__(hint)
+        self.error_type = error_type
+        self.hint = hint
+
+
 def _result(*, success: bool, **fields: Any) -> str:
     return json.dumps({"success": success, **fields}, ensure_ascii=False)
 
@@ -84,20 +93,38 @@ def _palette(values: list[str] | None) -> tuple[str, ...]:
 
 def _coerce_items(data: Any, *, max_items: int = 8) -> list[tuple[str, float]]:
     items: list[tuple[str, float]] = []
-    if isinstance(data, list):
-        for index, item in enumerate(data[:max_items]):
-            if isinstance(item, dict):
-                label = str(item.get("label") or item.get("name") or item.get("title") or f"Item {index + 1}")
-                raw_value = item.get("value") if "value" in item else item.get("y")
-            else:
-                label = f"Item {index + 1}"
-                raw_value = item
-            try:
-                value = float(raw_value)
-            except (TypeError, ValueError):
-                value = float(index + 1)
-            items.append((label[:96], max(value, 0.0)))
-    return items or [("A", 3.0), ("B", 5.0), ("C", 4.0)]
+    if not isinstance(data, list) or not data:
+        raise VisualDataError(
+            "unlabeled_chart_data",
+            "chart data must be a non-empty list of objects with explicit label and value fields",
+        )
+    for item in data[:max_items]:
+        if not isinstance(item, dict):
+            raise VisualDataError(
+                "unlabeled_chart_data",
+                "every chart data point must be an object with explicit label and value fields",
+            )
+        label = str(item.get("label") or item.get("name") or item.get("title") or "").strip()
+        raw_value = item.get("value") if "value" in item else item.get("y")
+        if not label:
+            raise VisualDataError(
+                "unlabeled_chart_data",
+                "every chart data point needs an explicit label; placeholder Item N labels are not allowed",
+            )
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise VisualDataError(
+                "invalid_chart_value",
+                "every chart data point needs a numeric value; fabricated fallback values are not allowed",
+            ) from exc
+        items.append((label[:96], max(value, 0.0)))
+    if not items:
+        raise VisualDataError(
+            "unlabeled_chart_data",
+            "chart data must contain at least one labeled point",
+        )
+    return items
 
 
 def _coerce_text_items(items: Any, *, max_items: int = 8) -> list[str]:
@@ -1047,7 +1074,10 @@ def generate_visual_asset(
                 hint="reuse the existing asset or choose a different kind/data",
             )
         svg_path.parent.mkdir(parents=True, exist_ok=True)
-        svg = _svg_for(visual_type, str(title or visual_type), data, _palette(palette), width, height, rows=rows, edges=edges, groups=groups)
+        try:
+            svg = _svg_for(visual_type, str(title or visual_type), data, _palette(palette), width, height, rows=rows, edges=edges, groups=groups)
+        except VisualDataError as exc:
+            return _result(success=False, error_type=exc.error_type, hint=exc.hint)
         svg_path.write_text(svg, encoding="utf-8")
         _record_visual(registry_path, registry, fingerprint, svg_virtual)
         png_success, png_error, png_engine, png_validation = _write_png(svg, svg_path, png_path, width, height)

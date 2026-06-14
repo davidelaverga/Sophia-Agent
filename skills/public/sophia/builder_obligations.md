@@ -113,7 +113,9 @@ deliverable.
 - The harness validates visual evidence with at most one bounded repair turn;
   it should prevent false visual success, not author the creative solution.
 - Choose the right visual path: use `generate_visual_asset` for numeric/data
-  charts and compact matrices; use `generate_excalidraw_diagram` for
+  charts and compact matrices with explicit labeled data; never invent
+  placeholder labels or fake values. Use `generate_excalidraw_diagram` with raw
+  Mermaid for
   architecture diagrams, process flows, timelines, concept maps, system maps,
   cycles, comparisons, and sequences; use the image-generation skill for
   illustrative content such as hero images, section covers, or conceptual

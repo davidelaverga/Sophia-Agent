@@ -494,7 +494,7 @@ def _image_enrichment_section(artifact_target_ext: str = ".pptx") -> str:
             "openers, or illustrative scenes inside an editable PowerPoint deck. "
             "Do NOT make the deck a folder of full-slide screenshots. Use the "
             "ppt-generation plan/compiler so titles, body text, notes, charts, "
-            "and diagrams remain editable. HARD CAP: 8 image-generation script "
+            "and diagrams remain editable. HARD CAP: 3 image-generation script "
             "calls per presentation build — calls beyond the cap are rejected by "
             "the harness.\n"
         )
@@ -504,9 +504,10 @@ def _image_enrichment_section(artifact_target_ext: str = ".pptx") -> str:
         "deliverable, an explicit generated-image request, or a PPTX deck that "
         "did not ask to be plain/text-only/no-visual. Policy:\n"
         f"{plan_lines}"
-        "- Charts and data visuals use generate_visual_asset; technical diagrams "
-        "use generate_excalidraw_diagram. These support assets do not count "
-        "toward the image-generation cap.\n"
+        "- Charts and data visuals use generate_visual_asset with explicit "
+        "labeled {label, value} data; technical diagrams use "
+        "generate_excalidraw_diagram with raw Mermaid definitions. These support "
+        "assets do not count toward the image-generation cap.\n"
         "- Save generated images under /mnt/user-data/outputs/visuals/ "
         "(hero-<desc>.png, slide-<n>-<desc>.png, cover-<desc>.png) and reference "
         "them from the plan/source before composing.\n"
@@ -1174,6 +1175,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
     _BUILDER_RELEVANT_SKILLS: tuple[str, ...] = (
         "chart-visualization",
         "visual-design",
+        "hallmark",
         "pdf-report",
         "ppt-generation",
         "image-generation",
@@ -1231,6 +1233,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             allowed_skill_names.discard("image-generation")
         if not include_visual_design:
             allowed_skill_names.discard("visual-design")
+            allowed_skill_names.discard("hallmark")
         if not include_pdf_report:
             allowed_skill_names.discard("pdf-report")
         if not include_research_skills:

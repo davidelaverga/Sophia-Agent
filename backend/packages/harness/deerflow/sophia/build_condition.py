@@ -315,10 +315,20 @@ def rendered_artifact_review(pdf_path: Path) -> dict[str, Any] | None:
     means None; the caller charges at most one iteration for acting on it.
     """
     if not advisory_enabled():
+        logger.info("[BuilderVQ] review_attempted=false skip_reason=disabled")
         return None
     rasters = rasterize_preview_pages(pdf_path, max_pages=_raster_max_pages())
     if not rasters:
+        logger.info(
+            "[BuilderVQ] review_attempted=false skip_reason=no_rasters artifact=%s",
+            pdf_path.name,
+        )
         return None
+    logger.info(
+        "[BuilderVQ] review_attempted=true artifact=%s sampled_pages=%d",
+        pdf_path.name,
+        len(rasters),
+    )
     try:
         from langchain_core.messages import HumanMessage
 
@@ -351,10 +361,25 @@ def rendered_artifact_review(pdf_path: Path) -> dict[str, Any] | None:
         text = reply.text() if callable(getattr(reply, "text", None)) else str(reply.content)
         verdict = _parse_review_verdict(text)
         if not verdict or verdict["verdict"] == "pass":
+            logger.info(
+                "[BuilderVQ] verdict=pass sampled_pages=%d findings_count=0",
+                len(rasters),
+            )
             return None
+        findings = verdict.get("findings")
+        findings_count = len(findings) if isinstance(findings, list) else 0
+        logger.warning(
+            "[BuilderVQ] verdict=%s sampled_pages=%d findings_count=%d",
+            verdict.get("verdict"),
+            len(rasters),
+            findings_count,
+        )
         return verdict
     except Exception:  # noqa: BLE001 — advisory is strictly best-effort
-        logger.warning("[BuildCondition] rendered artifact review failed", exc_info=True)
+        logger.warning(
+            "[BuilderVQ] review_attempted=true skip_reason=review_failed",
+            exc_info=True,
+        )
         return None
 
 

@@ -5,6 +5,10 @@ from __future__ import annotations
 import json
 import math
 import re
+import shutil
+import subprocess
+import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from xml.sax.saxutils import escape
@@ -74,6 +78,7 @@ def _clean_nodes(nodes: list[dict[str, Any]] | None) -> list[dict[str, str]]:
         if not label:
             continue
         node_id = str(node.get("id") or f"n{index}").strip() or f"n{index}"
+        node_id = re.sub(r"[^A-Za-z0-9_]+", "_", node_id).strip("_") or f"n{index}"
         if node_id in seen:
             node_id = f"{node_id}-{index}"
         seen.add(node_id)
@@ -92,8 +97,8 @@ def _clean_edges(edges: list[dict[str, Any]] | None, node_ids: set[str]) -> list
     for edge in edges or []:
         if not isinstance(edge, dict):
             continue
-        source = str(edge.get("from") or edge.get("source") or "").strip()
-        target = str(edge.get("to") or edge.get("target") or "").strip()
+        source = re.sub(r"[^A-Za-z0-9_]+", "_", str(edge.get("from") or edge.get("source") or "").strip()).strip("_")
+        target = re.sub(r"[^A-Za-z0-9_]+", "_", str(edge.get("to") or edge.get("target") or "").strip()).strip("_")
         if source not in node_ids or target not in node_ids or source == target:
             continue
         clean.append(
@@ -407,13 +412,190 @@ def _write_png(
     return False, None, f"{first_error};pillow:{pillow_error}"
 
 
+def _diagram_runtime_dir() -> Path:
+    return Path(__file__).resolve().parents[1] / "js"
+
+
+def _compile_diagram_script() -> Path:
+    return _diagram_runtime_dir() / "compile_diagram.mjs"
+
+
+def _node_binary() -> str | None:
+    return shutil.which("node")
+
+
+def _svg_number(value: str | None, fallback: float = 0.0) -> float:
+    try:
+        return float(str(value or "").removesuffix("px"))
+    except ValueError:
+        return fallback
+
+
+def _svg_canvas_size(root: ET.Element) -> tuple[int, int]:
+    width = int(_svg_number(root.attrib.get("width"), 1280))
+    height = int(_svg_number(root.attrib.get("height"), 720))
+    return max(width, 1), max(height, 1)
+
+
+def _draw_svg_rect(draw: Any, element: ET.Element) -> None:
+    if "%" in element.attrib.get("width", "") or "%" in element.attrib.get("height", ""):
+        return
+    x = _svg_number(element.attrib.get("x"))
+    y = _svg_number(element.attrib.get("y"))
+    width = _svg_number(element.attrib.get("width"))
+    height = _svg_number(element.attrib.get("height"))
+    if width <= 0 or height <= 0:
+        return
+    fill = element.attrib.get("fill", "#ffffff")
+    stroke = element.attrib.get("stroke", "#334155")
+    draw.rounded_rectangle([x, y, x + width, y + height], radius=16, fill=fill, outline=stroke, width=2)
+
+
+def _svg_polyline_points(raw_points: str) -> list[tuple[float, float]]:
+    points: list[tuple[float, float]] = []
+    for raw in raw_points.split():
+        try:
+            px, py = raw.split(",", 1)
+            points.append((float(px), float(py)))
+        except ValueError:
+            continue
+    return points
+
+
+def _draw_svg_polyline(draw: Any, element: ET.Element) -> None:
+    points = _svg_polyline_points(element.attrib.get("points", ""))
+    if len(points) >= 2:
+        draw.line(points, fill="#334155", width=3)
+
+
+def _draw_svg_text(draw: Any, element: ET.Element, font: Any) -> None:
+    text = "".join(element.itertext()).strip()
+    if not text:
+        return
+    x = _svg_number(element.attrib.get("x"))
+    y = _svg_number(element.attrib.get("y"))
+    if element.attrib.get("text-anchor") == "middle":
+        bbox = draw.textbbox((0, 0), text, font=font)
+        x -= (bbox[2] - bbox[0]) / 2
+    draw.text((x, y - 10), text, fill="#0f172a", font=font)
+
+
+def _draw_svg_element(draw: Any, element: ET.Element, font: Any) -> None:
+    tag = element.tag.rsplit("}", 1)[-1]
+    if tag == "rect":
+        _draw_svg_rect(draw, element)
+    elif tag == "polyline":
+        _draw_svg_polyline(draw, element)
+    elif tag == "text":
+        _draw_svg_text(draw, element, font)
+
+
+def _write_png_from_svg_with_pillow(svg_path: Path, png_path: Path) -> tuple[bool, str | None]:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+
+        root = ET.fromstring(svg_path.read_text(encoding="utf-8"))
+        image = Image.new("RGB", _svg_canvas_size(root), "#f8fafc")
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.load_default()
+        for element in root.iter():
+            _draw_svg_element(draw, element, font)
+        png_path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(png_path)
+        return True, None
+    except Exception as exc:  # noqa: BLE001
+        return False, exc.__class__.__name__
+
+
+def _write_png_from_svg(svg_path: Path, png_path: Path) -> tuple[bool, str | None, str | None]:
+    try:
+        import cairosvg
+
+        png_path.parent.mkdir(parents=True, exist_ok=True)
+        cairosvg.svg2png(url=str(svg_path), write_to=str(png_path))
+        return True, "cairosvg", None
+    except Exception as exc:  # noqa: BLE001
+        cairo_error = exc.__class__.__name__
+    pillow_success, pillow_error = _write_png_from_svg_with_pillow(svg_path, png_path)
+    if pillow_success:
+        return True, "pillow_svg_fallback", cairo_error
+    return False, None, f"{cairo_error};pillow:{pillow_error}"
+
+
+def _mermaid_quote(label: str) -> str:
+    return '"' + label.replace('"', "'") + '"'
+
+
+def _mermaid_from_nodes(kind: str, nodes: list[dict[str, str]], edges: list[dict[str, str]]) -> str:
+    direction = "TD" if kind in {"timeline", "sequence"} else "LR"
+    lines = [f"flowchart {direction}"]
+    for node in nodes:
+        lines.append(f"  {node['id']}[{_mermaid_quote(node['label'])}]")
+    if edges:
+        for edge in edges:
+            label = f"|{edge['label']}|" if edge.get("label") else ""
+            lines.append(f"  {edge['from']} -->{label} {edge['to']}")
+    else:
+        for left, right in zip(nodes, nodes[1:], strict=False):
+            lines.append(f"  {left['id']} --> {right['id']}")
+    return "\n".join(lines)
+
+
+def _compile_mermaid_diagram(
+    *,
+    mermaid: str,
+    title: str,
+    excalidraw_path: Path,
+    svg_path: Path,
+    width: int,
+    height: int,
+) -> tuple[bool, str | None]:
+    node = _node_binary()
+    script = _compile_diagram_script()
+    if node is None:
+        return False, "node_unavailable"
+    if not script.is_file():
+        return False, "compile_diagram_missing"
+    with tempfile.TemporaryDirectory(prefix="sophia-diagram-") as tmp_dir:
+        mermaid_path = Path(tmp_dir) / "diagram.mmd"
+        mermaid_path.write_text(mermaid, encoding="utf-8")
+        completed = subprocess.run(
+            [
+                node,
+                str(script),
+                "--mermaid",
+                str(mermaid_path),
+                "--svg",
+                str(svg_path),
+                "--scene",
+                str(excalidraw_path),
+                "--title",
+                title,
+                "--width",
+                str(width),
+                "--height",
+                str(height),
+            ],
+            cwd=str(_diagram_runtime_dir()),
+            capture_output=True,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip().splitlines()[-1:] or ["diagram_compile_failed"]
+        return False, detail[0][:180]
+    return True, None
+
+
 @tool("generate_excalidraw_diagram", parse_docstring=True)
 def generate_excalidraw_diagram(
     runtime: ToolRuntime,
     diagram_type: DiagramKind,
     title: str,
-    nodes: list[dict[str, Any]],
+    nodes: list[dict[str, Any]] | None = None,
     edges: list[dict[str, Any]] | None = None,
+    mermaid: str | None = None,
     output_name: str | None = None,
     width: int = 1280,
     height: int = 720,
@@ -422,16 +604,20 @@ def generate_excalidraw_diagram(
     """Create an Excalidraw-compatible technical diagram asset.
 
     Use this for architecture diagrams, process flows, timelines, system
-    maps, comparison diagrams, concept maps, cycles, and sequences. The tool
-    writes a .excalidraw scene plus SVG/PNG render assets under
-    /mnt/user-data/outputs/visuals/. Embed the PNG in PDF/PPTX, or the SVG in
-    HTML. Do not use this for numeric charts; use chart/data tools instead.
+    maps, comparison diagrams, concept maps, cycles, and sequences. Prefer
+    passing a Mermaid definition in `mermaid`; older nodes/edges calls are
+    converted to Mermaid before rendering. The tool writes a .excalidraw scene
+    plus SVG/PNG render assets under /mnt/user-data/outputs/visuals/. Embed the
+    PNG in PDF/PPTX, or the SVG in HTML. Do not use this for numeric charts;
+    use chart/data tools instead.
 
     Args:
         diagram_type: Diagram family to generate.
         title: Short diagram title.
-        nodes: Semantic nodes with id and label fields.
+        nodes: Optional semantic nodes with id and label fields.
         edges: Optional directed relationships with from/to/label fields.
+        mermaid: Optional Mermaid graph definition. Prefer this for technical
+            diagrams; do not include Markdown fences.
         output_name: Optional output name or virtual output path.
         width: Output width in pixels, between 640 and 2400.
         height: Output height in pixels, between 360 and 1600.
@@ -440,12 +626,19 @@ def generate_excalidraw_diagram(
     if width < 640 or width > 2400 or height < 360 or height > 1600:
         return _result(success=False, error_type="invalid_dimensions")
     clean_nodes = _clean_nodes(nodes)
-    if len(clean_nodes) < 2:
-        return _result(success=False, error_type="insufficient_nodes", hint="provide at least two labeled nodes")
+    mermaid_text = str(mermaid or "").strip()
+    if not mermaid_text:
+        if len(clean_nodes) < 2:
+            return _result(success=False, error_type="insufficient_nodes", hint="provide Mermaid or at least two labeled nodes")
+        node_ids = {node["id"] for node in clean_nodes}
+        clean_edges = _clean_edges(edges, node_ids)
+        if edges and not clean_edges:
+            return _result(success=False, error_type="invalid_edges", hint="edge from/to ids must match node ids")
+        mermaid_text = _mermaid_from_nodes(diagram_type, clean_nodes, clean_edges)
+    elif mermaid_text.startswith("```"):
+        return _result(success=False, error_type="invalid_mermaid", hint="pass raw Mermaid only; do not include Markdown fences")
     node_ids = {node["id"] for node in clean_nodes}
-    clean_edges = _clean_edges(edges, node_ids)
-    if edges and not clean_edges:
-        return _result(success=False, error_type="invalid_edges", hint="edge from/to ids must match node ids")
+    clean_edges = _clean_edges(edges, node_ids) if clean_nodes else []
     excalidraw_virtual = _canonical_output_path(output_name, ".excalidraw")
     svg_virtual = _canonical_output_path(output_name, ".svg")
     png_virtual = _canonical_output_path(output_name, ".png")
@@ -457,38 +650,17 @@ def generate_excalidraw_diagram(
         png_path = _host_path_for_virtual_output(png_virtual, runtime)
         for path in (excalidraw_path, svg_path, png_path):
             path.parent.mkdir(parents=True, exist_ok=True)
-        positions = _positions(diagram_type, len(clean_nodes), width, height)
-        scene = _excalidraw_scene(
+        compiled, compile_error = _compile_mermaid_diagram(
             title=title,
-            kind=diagram_type,
-            nodes=clean_nodes,
-            edges=clean_edges,
+            mermaid=mermaid_text,
+            excalidraw_path=excalidraw_path,
+            svg_path=svg_path,
             width=width,
             height=height,
-            positions=positions,
         )
-        svg = _svg(
-            title=title,
-            kind=diagram_type,
-            nodes=clean_nodes,
-            edges=clean_edges,
-            width=width,
-            height=height,
-            positions=positions,
-        )
-        excalidraw_path.write_text(json.dumps(scene, ensure_ascii=False, indent=2), encoding="utf-8")
-        svg_path.write_text(svg, encoding="utf-8")
-        png_success, png_engine, png_error = _write_png(
-            svg,
-            png_path,
-            title=title,
-            kind=diagram_type,
-            nodes=clean_nodes,
-            edges=clean_edges,
-            width=width,
-            height=height,
-            positions=positions,
-        )
+        if not compiled:
+            return _result(success=False, error_type="invalid_mermaid", hint=compile_error or "Mermaid could not be converted")
+        png_success, png_engine, png_error = _write_png_from_svg(svg_path, png_path)
         return _result(
             success=True,
             visual_type=diagram_type,
@@ -507,6 +679,7 @@ def generate_excalidraw_diagram(
             png_validation_status="ok" if png_success else "png_render_failed",
             validation_status="ok" if png_success else "png_render_failed",
             theme=theme,
+            layout_engine="mermaid_to_excalidraw",
         )
     except Exception as exc:  # noqa: BLE001
         return _result(success=False, error_type=exc.__class__.__name__)
