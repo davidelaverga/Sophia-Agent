@@ -195,14 +195,46 @@ def normalize_artifact_storage_object_path(path: str) -> str:
     return normalized
 
 
+# Reserved Supabase keyspaces that are NEVER user-facing deliverables and must
+# never be served as registry artifacts: the delegation ledger (Spec D internal
+# conversation record), raw uploads (surfaced through the attachments UI), and
+# builder support scratch. Matched as path *segments* so the guard is layout-
+# independent. Mirrors ``supabase_artifact_store._is_internal_relative_name`` and
+# the list-side ``_is_builder_support_artifact_path`` so every read surface
+# excludes the same keyspaces.
+_INTERNAL_STORAGE_OBJECT_SEGMENTS = frozenset(
+    {"ledger", "uploads", ".builder", "sources", "source_artifact"}
+)
+
+
+def _storage_object_addresses_internal_keyspace(relative_object_path: str) -> bool:
+    """True when a thread-relative object path addresses an internal,
+    non-deliverable keyspace that must never be served as a user artifact."""
+    segments = [segment for segment in relative_object_path.split("/") if segment]
+    if any(segment in _INTERNAL_STORAGE_OBJECT_SEGMENTS for segment in segments):
+        return True
+    name = segments[-1].lower() if segments else ""
+    return (
+        name.endswith((".source.md", ".source.html", ".plan.json", ".manifest.json"))
+        or (name.startswith("_") and name.endswith(".py"))
+        or (name.startswith("test_") and name.endswith((".py", ".sh")))
+    )
+
+
 def validate_artifact_storage_object_path(storage_object_path: str | None, *, thread_id: str) -> str | None:
     normalized = _normalize_token(storage_object_path)
     if normalized is None:
         return None
     object_path = normalize_artifact_storage_object_path(normalized)
-    object_thread_id = object_path.split("/", 1)[0].strip()
-    if object_thread_id != thread_id:
+    object_thread_id, _, relative = object_path.partition("/")
+    if object_thread_id.strip() != thread_id:
         raise HTTPException(status_code=403, detail="Artifact storage path must belong to the artifact thread")
+    # Codex P1 PR #131: prefix==thread_id is not sufficient — the object path
+    # may still address an internal keyspace under the owner's OWN thread
+    # (e.g. ``{thread_id}/ledger/session.jsonl``), which leaks internal
+    # conversation state / raw uploads through the SERVICE-ROLE download path.
+    if _storage_object_addresses_internal_keyspace(relative):
+        raise HTTPException(status_code=403, detail="Artifact references an internal keyspace")
     return object_path
 
 

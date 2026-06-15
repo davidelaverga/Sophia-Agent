@@ -973,3 +973,115 @@ def test_builder_terminal_event_upserts_registry_metadata(tmp_path, monkeypatch)
     serialized = record.model_dump_json()
     assert "signed.example" not in serialized
     assert "artifact_url" not in serialized
+
+
+# ---------------------------------------------------------------------------
+# Codex P1 (PR #131) follow-up: close the two gaps left after
+# `validate_artifact_storage_object_path` anchored storage_object_path to
+# thread_id — (1) forged parent_thread_id/task_id/run_id still flowed into the
+# serve-time thread set and were fetched with the service-role key; (2) an
+# object path under the owner's OWN thread could still address an internal
+# keyspace (ledger/uploads/builder support).
+# ---------------------------------------------------------------------------
+
+
+def _set_associated_builder_tasks(monkeypatch, *thread_ids: str) -> None:
+    async def _fake(_parent_thread_id: str):
+        return tuple(thread_ids)
+
+    monkeypatch.setattr(artifacts_router, "_builder_task_thread_ids_to_check", _fake)
+
+
+@pytest.mark.parametrize("field", ["task_id", "run_id", "parent_thread_id"])
+def test_upsert_endpoint_rejects_forged_thread_reference(tmp_path, monkeypatch, field) -> None:
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    _set_associated_builder_tasks(monkeypatch)  # no associated builder tasks
+
+    payload = _request(**{field: "victim-thread"}).model_dump(mode="json", exclude_none=True)
+    response = client.post("/api/artifacts/upsert", json=payload)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Artifact references an unauthorized thread"
+    assert registry.list(user_id="user-1").artifacts == []
+
+
+def test_upsert_endpoint_allows_associated_builder_task_reference(tmp_path, monkeypatch) -> None:
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    _set_associated_builder_tasks(monkeypatch, "builder-task-1")
+
+    payload = _request(task_id="builder-task-1").model_dump(mode="json", exclude_none=True)
+    response = client.post("/api/artifacts/upsert", json=payload)
+
+    assert response.status_code == 200
+    assert len(registry.list(user_id="user-1").artifacts) == 1
+
+
+@pytest.mark.parametrize(
+    "object_path",
+    [
+        "thread-1/ledger/session.jsonl",
+        "thread-1/uploads/secret.pdf",
+        "thread-1/.builder/state.json",
+        "thread-1/outputs/report.plan.json",
+    ],
+)
+def test_upsert_endpoint_rejects_internal_keyspace_object_path(tmp_path, monkeypatch, object_path) -> None:
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    _set_associated_builder_tasks(monkeypatch)
+
+    payload = _request(
+        local_path="outputs/remote.md",
+        renderer_kind="markdown",
+        artifact_type="markdown",
+        mime_type="text/markdown",
+        storage_provider="supabase",
+        storage_bucket="sophia_builder",
+        storage_object_path=object_path,
+    ).model_dump(mode="json", exclude_none=True)
+
+    response = client.post("/api/artifacts/upsert", json=payload)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Artifact references an internal keyspace"
+    assert registry.list(user_id="user-1").artifacts == []
+
+
+def test_content_endpoint_refuses_internal_keyspace_storage_object(tmp_path, monkeypatch) -> None:
+    """Serve-time defense-in-depth: a record whose storage_object_path was
+    injected outside the validated write path (server-side / migrated / legacy)
+    must never serve an internal keyspace object through the service-role key."""
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    missing_file = tmp_path / "missing" / "remote.md"
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _t, _p: missing_file)
+
+    object_calls: list[str] = []
+
+    def download_object(object_path: str):
+        object_calls.append(object_path)
+        return b"INTERNAL LEDGER BYTES", "application/json"
+
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "download_artifact_object", download_object)
+
+    artifact = registry.upsert(
+        _request(
+            local_path="outputs/remote.md",
+            renderer_kind="markdown",
+            artifact_type="markdown",
+            mime_type="text/markdown",
+            storage_provider="supabase",
+            storage_bucket="sophia_builder",
+            storage_object_path="thread-1/outputs/remote.md",
+        ),
+        user_id="user-1",
+    )
+    # Bypass the validated write path to plant an internal-keyspace object path.
+    registry.upsert_record(
+        artifact.model_copy(update={"storage_object_path": "thread-1/ledger/session.jsonl"}),
+        user_id="user-1",
+    )
+
+    response = client.get(f"/api/artifacts/{artifact.artifact_id}/content")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Artifact references an internal keyspace"
+    assert object_calls == []  # ledger object never fetched with the service-role key
