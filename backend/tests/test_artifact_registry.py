@@ -131,6 +131,33 @@ def test_registry_is_user_scoped(tmp_path) -> None:
     assert registry.list(user_id="missing-user").total == 0
 
 
+def test_local_registry_rejects_unsafe_user_ids(tmp_path) -> None:
+    registry = LocalArtifactRegistry(tmp_path)
+
+    with pytest.raises(HTTPException) as exc_info:
+        registry.list(user_id="../user-1")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Invalid artifact user scope"
+    assert not (tmp_path.parent / "user-1" / "artifacts" / "registry.json").exists()
+
+
+def test_artifact_routes_reject_unsafe_authenticated_user_id(tmp_path, monkeypatch) -> None:
+    registry = LocalArtifactRegistry(tmp_path / "artifact-registry")
+    store = SessionStore(tmp_path / "users")
+    monkeypatch.setattr(artifacts_router, "_artifact_registry", registry)
+    monkeypatch.setattr(artifacts_router, "_session_store", store)
+
+    app = FastAPI()
+    app.include_router(artifacts_router.router)
+    app.dependency_overrides[require_authenticated_user] = lambda: "../user-1"
+
+    response = TestClient(app).get("/api/artifacts")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid artifact user scope"
+
+
 def test_registry_rejects_unsafe_paths_and_raw_content(tmp_path) -> None:
     registry = LocalArtifactRegistry(tmp_path)
 

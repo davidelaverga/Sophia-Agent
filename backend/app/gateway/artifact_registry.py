@@ -23,6 +23,7 @@ import httpx
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from deerflow.agents.sophia_agent.utils import safe_user_path
 from deerflow.sophia.session_store import SessionTranscriptStore
 from deerflow.sophia.storage import supabase_artifact_store
 
@@ -830,7 +831,10 @@ class LocalArtifactRegistry:
         self._base = Path(base_path or configured or _DEFAULT_BASE_PATH)
 
     def _user_dir(self, user_id: str) -> Path:
-        return self._base / user_id / "artifacts"
+        try:
+            return safe_user_path(self._base, user_id, "artifacts")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid artifact user scope") from exc
 
     def _registry_path(self, user_id: str) -> Path:
         return self._user_dir(user_id) / "registry.json"

@@ -25,6 +25,13 @@ def _get_bypass_user_id() -> str:
     return (os.getenv("SOPHIA_USER_ID") or "local-dev-user").strip()
 
 
+def _validated_auth_user_id(raw_user_id: str, *, invalid_detail: str) -> str:
+    try:
+        return validate_user_id(raw_user_id.strip())
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail=invalid_detail) from exc
+
+
 def is_auth_bypass_enabled() -> bool:
     """Public accessor for the explicit dev auth-bypass flag.
 
@@ -161,8 +168,14 @@ async def require_authorized_user_scope(request: Request) -> str:
 async def require_authenticated_user(request: Request) -> str:
     """Return the authenticated user for routes without a user_id path segment."""
     if _is_explicit_bypass_enabled():
-        return _get_bypass_user_id()
+        return _validated_auth_user_id(
+            _get_bypass_user_id(),
+            invalid_detail="Auth bypass user is invalid",
+        )
 
     token = _extract_bearer_token(request)
     authenticated_user = await _get_authenticated_user(token)
-    return authenticated_user["id"].strip()
+    return _validated_auth_user_id(
+        authenticated_user["id"],
+        invalid_detail="Auth service returned an invalid user payload",
+    )
