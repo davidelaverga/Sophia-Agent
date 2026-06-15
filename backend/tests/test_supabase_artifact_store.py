@@ -13,6 +13,13 @@ from deerflow.sophia.storage import supabase_artifact_store
 @pytest.fixture(autouse=True)
 def _clear_supabase_env(monkeypatch):
     for var in (
+        "RENDER",
+        "VERCEL",
+        "RAILWAY_ENVIRONMENT",
+        "SOPHIA_ENV",
+        "APP_ENV",
+        "ENVIRONMENT",
+        "SOPHIA_ARTIFACT_REGISTRY_STORE",
         "SUPABASE_URL",
         "SUPABASE_SERVICE_ROLE_KEY",
         "SUPABASE_KEY",
@@ -35,6 +42,49 @@ def test_is_configured_true_when_env_present(monkeypatch) -> None:
     assert supabase_artifact_store.is_configured() is True
 
 
+def test_production_supabase_registry_requires_explicit_bucket(monkeypatch) -> None:
+    _configure(monkeypatch)
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "supabase")
+
+    assert supabase_artifact_store.is_configured() is False
+    assert "SUPABASE_BUILDER_BUCKET" in supabase_artifact_store.missing_required_config()
+
+
+def test_builder_artifact_object_path_is_user_scoped_and_sanitized() -> None:
+    object_path = supabase_artifact_store.builder_artifact_object_path(
+        user_id="auth0|user/one",
+        thread_or_session_id="thread/../one",
+        artifact_id="artifact_abc123",
+        filename="../Quarterly Report ?.md",
+    )
+
+    assert object_path.startswith("artifacts/auth0_user_one/")
+    assert "/artifact_abc123/" in object_path
+    assert object_path.endswith(".md")
+    assert ".." not in object_path.split("/")
+    assert "?" not in object_path
+
+
+def test_builder_artifact_object_path_separates_users_with_same_filename() -> None:
+    first = supabase_artifact_store.builder_artifact_object_path(
+        user_id="user-a",
+        thread_or_session_id="thread-1",
+        artifact_id="artifact-same",
+        filename="report.md",
+    )
+    second = supabase_artifact_store.builder_artifact_object_path(
+        user_id="user-b",
+        thread_or_session_id="thread-1",
+        artifact_id="artifact-same",
+        filename="report.md",
+    )
+
+    assert first != second
+    assert first == "artifacts/user-a/thread-1/artifact-same/report.md"
+    assert second == "artifacts/user-b/thread-1/artifact-same/report.md"
+
+
 def test_upload_noop_when_not_configured() -> None:
     result = supabase_artifact_store.upload_artifact(
         thread_id="thread-1", filename="note.md", content=b"hello"
@@ -50,7 +100,7 @@ def test_upload_posts_to_thread_folder_with_defaults(monkeypatch) -> None:
         captured["url"] = str(request.url)
         captured["headers"] = dict(request.headers)
         captured["content"] = request.content
-        return httpx.Response(200, json={"Key": "sophia_builder/thread-1/note.md"})
+        return httpx.Response(200, json={"Key": "sophia-builder-artifacts/thread-1/note.md"})
 
     transport = httpx.MockTransport(handler)
     client = httpx.Client(transport=transport)
@@ -64,7 +114,7 @@ def test_upload_posts_to_thread_folder_with_defaults(monkeypatch) -> None:
 
     assert object_path == "thread-1/note.md"
     assert captured["url"] == (
-        "https://example.supabase.co/storage/v1/object/sophia_builder/thread-1/note.md"
+        "https://example.supabase.co/storage/v1/object/sophia-builder-artifacts/thread-1/note.md"
     )
     headers = captured["headers"]
     assert headers["authorization"] == "Bearer svc-role-key"
@@ -111,7 +161,7 @@ def test_upload_encodes_object_path_segments(monkeypatch) -> None:
     assert object_path == "thread-1/reports/report #1?.pdf"
     assert captured["url"] == (
         "https://example.supabase.co/storage/v1/object/"
-        "sophia_builder/thread-1/reports/report%20%231%3F.pdf"
+        "sophia-builder-artifacts/thread-1/reports/report%20%231%3F.pdf"
     )
 
 
@@ -135,7 +185,7 @@ def test_upload_artifact_object_posts_to_explicit_safe_path(monkeypatch) -> None
     assert object_path == "artifacts/user-1/session-1/artifact-1/report #1.md"
     assert captured["url"] == (
         "https://example.supabase.co/storage/v1/object/"
-        "sophia_builder/artifacts/user-1/session-1/artifact-1/report%20%231.md"
+        "sophia-builder-artifacts/artifacts/user-1/session-1/artifact-1/report%20%231.md"
     )
     assert captured["content"] == b"# report"
 
@@ -181,7 +231,7 @@ def test_download_artifact_object_returns_bytes(monkeypatch) -> None:
     assert result == (b"stored object", "text/markdown")
     assert captured["url"] == (
         "https://example.supabase.co/storage/v1/object/"
-        "sophia_builder/artifacts/user-1/session-1/artifact-1/note.md"
+        "sophia-builder-artifacts/artifacts/user-1/session-1/artifact-1/note.md"
     )
 
 
@@ -209,7 +259,7 @@ def test_signed_url_request_encodes_object_path_segments(monkeypatch) -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["url"] = str(request.url)
-        return httpx.Response(200, json={"signedURL": "/object/sign/sophia_builder/token"})
+        return httpx.Response(200, json={"signedURL": "/object/sign/sophia-builder-artifacts/token"})
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
     supabase_artifact_store.create_signed_url(
@@ -220,7 +270,7 @@ def test_signed_url_request_encodes_object_path_segments(monkeypatch) -> None:
 
     assert captured["url"] == (
         "https://example.supabase.co/storage/v1/object/sign/"
-        "sophia_builder/thread-1/report%20%231%3F.pdf"
+        "sophia-builder-artifacts/thread-1/report%20%231%3F.pdf"
     )
 
 

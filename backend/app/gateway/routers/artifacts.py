@@ -235,6 +235,7 @@ def _is_visible_primary_artifact(record: ArtifactRecord) -> bool:
         record.deleted_at is None
         and record.is_library_visible is True
         and record.artifact_role == "primary"
+        and record.storage_status == "available"
     )
 
 
@@ -244,6 +245,16 @@ async def _serve_registry_artifact(
     *,
     force_download: bool,
 ) -> Response:
+    if (
+        supabase_artifact_store.requires_durable_artifact_upload()
+        and record.storage_provider in {"supabase", "hybrid"}
+        and record.storage_object_path
+    ):
+        object_response = _try_serve_registry_storage_object(record, request, force_download=force_download)
+        if object_response is not None:
+            return object_response
+        raise HTTPException(status_code=404, detail="Artifact content not found")
+
     missing_resolution: ArtifactPathResolution | None = None
     for thread_id in _registry_artifact_thread_ids(record):
         resolution = await _resolve_artifact_path_for_request(thread_id, record.local_path)
@@ -263,6 +274,8 @@ async def _serve_registry_artifact(
     object_response = _try_serve_registry_storage_object(record, request, force_download=force_download)
     if object_response is not None:
         return object_response
+    if record.storage_provider in {"supabase", "hybrid"} and record.storage_object_path:
+        raise HTTPException(status_code=404, detail="Artifact content not found")
 
     for thread_id in _registry_artifact_thread_ids(record):
         supabase_response = _try_serve_from_supabase(
@@ -313,7 +326,15 @@ def _registry_artifact_thread_ids(record: ArtifactRecord) -> tuple[str, ...]:
 def _thread_id_from_storage_object_path(storage_object_path: str | None) -> str | None:
     if not isinstance(storage_object_path, str) or "/" not in storage_object_path:
         return None
-    thread_id = storage_object_path.split("/", 1)[0].strip()
+    try:
+        normalized = supabase_artifact_store.normalize_object_path(storage_object_path)
+    except ValueError:
+        return None
+    parts = normalized.split("/")
+    if len(parts) >= 3 and parts[0] == "artifacts":
+        thread_id = parts[2].strip()
+        return thread_id or None
+    thread_id = parts[0].strip()
     return thread_id or None
 
 
@@ -838,9 +859,9 @@ def _try_serve_from_supabase(
     *,
     force_download: bool = False,
 ) -> Response | None:
-    """Serve the artifact from the ``sophia_builder`` Supabase bucket when missing locally.
+    """Serve the artifact from the configured Supabase builder bucket when missing locally.
 
-    Layout: ``sophia_builder/{thread_id}/{relative_output_path}``. Returns
+    Legacy layout: ``{thread_id}/{relative_output_path}``. Returns
     ``None`` when Supabase is not configured, the path is not under the
     outputs virtual prefix, or the object is missing. Raises ``HTTPException``
     with 502 only when Supabase responds with an unexpected transport error.

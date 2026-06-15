@@ -765,7 +765,7 @@ PYTHONPATH=. uv run pytest \
   tests/test_uploads_auth.py -v
 ```
 
-**Deploy requirement:** the cross-service bridge means BOTH `sophia-gateway` AND `sophia-langgraph` must redeploy together — the gateway needs the mirror/delete/list code, langgraph needs the download-fallback + builder-materialize code. The Supabase bucket (`SUPABASE_BUILDER_BUCKET`, default `sophia_builder`) must exist; both services already have `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`.
+**Deploy requirement:** the cross-service bridge means BOTH `sophia-gateway` AND `sophia-langgraph` must redeploy together — the gateway needs the mirror/delete/list code, langgraph needs the download-fallback + builder-materialize code. The Supabase bucket (`SUPABASE_BUILDER_BUCKET`, local default `sophia-builder-artifacts`) must exist and must be set explicitly in production; both services need `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`.
 
 ## Code Style
 

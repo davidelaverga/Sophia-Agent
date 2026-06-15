@@ -641,25 +641,151 @@ def _extract_output_relative_path(artifact_path: str | None) -> str | None:
     return relative_path.as_posix()
 
 
+_REQUIRED_SUPABASE_FAILURE_RESULTS = frozenset({
+    "required_context_missing",
+    "required_not_configured",
+    "required_user_missing",
+    "required_upload_failed",
+    "required_verify_failed",
+})
+
+
+def _is_required_supabase_failure(result: str | None) -> bool:
+    return bool(
+        supabase_artifact_store.requires_durable_artifact_upload()
+        and result in _REQUIRED_SUPABASE_FAILURE_RESULTS
+    )
+
+
+def _durable_upload_error_message() -> str:
+    return (
+        "Builder artifact storage could not be verified for durable production delivery. "
+        "Please retry after Supabase artifact storage is configured and healthy."
+    )
+
+
+def _builder_parent_user_id(state: dict[str, Any], runtime: Runtime | None = None) -> str | None:
+    delegation = state.get("delegation_context")
+    if isinstance(delegation, dict):
+        candidate = delegation.get("parent_user_id")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    config = getattr(runtime, "config", None)
+    configurable = config.get("configurable") if isinstance(config, dict) else None
+    if isinstance(configurable, dict):
+        candidate = configurable.get("parent_user_id") or configurable.get("user_id")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
+
+
+def _attach_durable_upload_identity(
+    artifact_args: dict[str, Any],
+    state: dict[str, Any],
+    runtime: Runtime | None,
+) -> None:
+    user_id = _builder_parent_user_id(state, runtime)
+    if user_id and not artifact_args.get("user_id"):
+        artifact_args["user_id"] = user_id
+
+
+def _required_primary_upload_to_supabase(
+    *,
+    thread_id: str,
+    outputs_root: Path,
+    relative: str,
+    artifact_args: dict[str, Any],
+) -> str:
+    if not supabase_artifact_store.is_configured():
+        missing = supabase_artifact_store.missing_required_config()
+        logger.warning(
+            "BuilderArtifact: required Supabase artifact upload skipped; missing_config=%s",
+            ",".join(missing) if missing else "unknown",
+        )
+        return "required_not_configured"
+
+    user_id = artifact_args.get("user_id")
+    if not isinstance(user_id, str) or not user_id.strip():
+        logger.warning("BuilderArtifact: required Supabase artifact upload skipped; missing user scope")
+        return "required_user_missing"
+
+    host_file = outputs_root / relative
+    try:
+        content = host_file.read_bytes()
+    except OSError as exc:
+        logger.warning(
+            "BuilderArtifact: required Supabase artifact upload read failed path=%s error_type=%s",
+            relative,
+            exc.__class__.__name__,
+        )
+        return "required_upload_failed"
+
+    local_path = f"mnt/user-data/outputs/{relative}"
+    filename = PurePosixPath(relative).name or "artifact"
+    renderer_kind = supabase_artifact_store.builder_renderer_kind(
+        local_path,
+        artifact_args.get("artifact_type") if isinstance(artifact_args.get("artifact_type"), str) else None,
+    )
+    artifact_id = artifact_args.get("artifact_id")
+    if not isinstance(artifact_id, str) or not artifact_id.strip():
+        artifact_id = supabase_artifact_store.builder_artifact_record_id(
+            user_id=user_id.strip(),
+            thread_id=thread_id,
+            local_path=local_path,
+            renderer_kind=renderer_kind,
+        )
+
+    object_path = supabase_artifact_store.builder_artifact_object_path(
+        user_id=user_id.strip(),
+        thread_or_session_id=thread_id,
+        artifact_id=artifact_id,
+        filename=filename,
+    )
+
+    try:
+        uploaded_path = supabase_artifact_store.upload_artifact_object(object_path, content)
+        if uploaded_path != object_path:
+            return "required_upload_failed"
+        if not supabase_artifact_store.check_artifact_object_exists(object_path):
+            logger.warning(
+                "BuilderArtifact: required Supabase artifact upload verification failed object_path_hash=%s",
+                supabase_artifact_store.safe_object_path_segment(artifact_id, default="artifact"),
+            )
+            return "required_verify_failed"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "BuilderArtifact: required Supabase artifact upload failed error_type=%s",
+            exc.__class__.__name__,
+        )
+        return "required_upload_failed"
+
+    artifact_args["artifact_id"] = artifact_id
+    artifact_args["storage_provider"] = "supabase"
+    artifact_args["storage_bucket"] = supabase_artifact_store.configured_bucket_name()
+    artifact_args["storage_object_path"] = object_path
+    artifact_args["storage_status"] = "available"
+    return "uploaded"
+
+
 def _upload_builder_outputs_to_supabase(
     thread_id: str | None,
     outputs_host_path: str | None,
     artifact_args: dict[str, Any],
 ) -> str:
-    """Best-effort upload of the builder's outputs to Supabase Storage.
+    """Upload the builder's outputs to Supabase Storage.
 
-    PR-E (Phase 2.2): delegates to ``maybe_mirror_file`` which uses SHA-256
-    hash deduplication. Files that were already mirrored at write time by
-    the tool hooks are skipped automatically. Any failure is logged and
-    swallowed so builder flow never regresses.
+    Local/dev remains best-effort through ``maybe_mirror_file``. Production
+    Supabase registry mode requires the primary artifact to upload to the
+    user-scoped Artifact Observatory path and pass a HEAD existence check.
     """
+    required = supabase_artifact_store.requires_durable_artifact_upload()
     if not thread_id or not outputs_host_path:
         logger.debug(
             "Skipping Supabase upload; missing thread_id=%s outputs_host_path=%s",
             thread_id,
             outputs_host_path,
         )
-        return "skipped"
+        return "required_context_missing" if required and artifact_args.get("artifact_path") else "skipped"
 
     candidates: list[str] = []
     primary = artifact_args.get("artifact_path")
@@ -675,11 +801,24 @@ def _upload_builder_outputs_to_supabase(
 
     result = "skipped"
     outputs_root = Path(outputs_host_path)
-    for candidate in candidates:
+    for index, candidate in enumerate(candidates):
         relative = _extract_output_relative_path(candidate)
         if relative is None:
             continue
         host_file = outputs_root / relative
+        if required and index == 0:
+            result = _merge_supabase_mirror_result(
+                result,
+                _required_primary_upload_to_supabase(
+                    thread_id=thread_id,
+                    outputs_root=outputs_root,
+                    relative=relative,
+                    artifact_args=artifact_args,
+                ),
+            )
+            if _is_required_supabase_failure(result):
+                return result
+            continue
         result = _merge_supabase_mirror_result(
             result,
             maybe_mirror_file(str(host_file), thread_id, outputs_host_path),
@@ -714,6 +853,8 @@ def _is_source_sibling_of_primary(path: str, primary: object) -> bool:
 def _merge_supabase_mirror_result(current: str, update: str | None) -> str:
     if update is None:
         return current
+    if update in _REQUIRED_SUPABASE_FAILURE_RESULTS:
+        return update
     if update == "failed_best_effort":
         return "failed_best_effort"
     if update == "uploaded" and current not in {"failed_best_effort"}:
@@ -2947,15 +3088,18 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     ) -> None:
         if mirror_result == "uploaded":
             return
+        required_failure = _is_required_supabase_failure(mirror_result)
         diagnostic = build_builder_failure_diagnostics(
             state=state,
             runtime=runtime,
             artifact_args=artifact_args,
             failure_stage="storage_mirror",
             failure_reason=(
-                "Supabase mirror did not create a remote copy, but the local artifact path remains available."
+                _durable_upload_error_message()
+                if required_failure
+                else "Supabase mirror did not create a remote copy, but the local artifact path remains available."
             ),
-            failure_code=None,
+            failure_code="durable_storage_unavailable" if required_failure else None,
             emit_attempted=True,
             emit_tool_call_seen=True,
             include_outputs_summary=False,
@@ -4097,15 +4241,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         happy path at ``after_model`` (the lines that resolve
         ``upload_thread_id`` and call ``_upload_builder_outputs_to_supabase``).
 
-        Safe to call when ``fallback["artifact_path"]`` is None:
-        ``maybe_mirror_file`` is a no-op for missing paths, and
-        ``_upload_builder_outputs_to_supabase`` short-circuits when
-        ``outputs_host_path`` or ``thread_id`` is unset. The upload
-        helper also documents "Any failure is logged and swallowed so
-        builder flow never regresses" — so if the upload raises, the
-        webhook still fires (the placeholder is finalized; delivery
-        may still degrade to plaintext, which is the pre-Phase-4L
-        behavior — i.e. no regression).
+        Safe to call when ``fallback["artifact_path"]`` is None. Local/dev
+        upload failures remain best-effort; production Supabase registry
+        mode emits a failed completion if the artifact bytes cannot be
+        uploaded and verified.
         """
         thread_data = state.get("thread_data") or {}
         outputs_host_path = (
@@ -4120,6 +4259,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
         upload_thread_id = parent_thread_id or builder_thread_id
         fallback = _apply_visual_missing_quality_metadata(fallback, state)
+        _attach_durable_upload_identity(fallback, state, runtime)
         mirror_result = _upload_builder_outputs_to_supabase(
             thread_id=upload_thread_id,
             outputs_host_path=outputs_host_path,
@@ -4127,6 +4267,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
         if mirror_result != "uploaded":
             current_diagnostics = fallback.get("builder_failure_diagnostics")
+            required_failure = _is_required_supabase_failure(mirror_result)
             if isinstance(current_diagnostics, dict) and current_diagnostics:
                 fallback["builder_failure_diagnostics"] = merge_builder_failure_diagnostics(
                     current_diagnostics,
@@ -4140,20 +4281,32 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     artifact_args=fallback,
                     failure_stage="storage_mirror",
                     failure_reason=(
-                        "Supabase mirror did not create a remote copy, but the local artifact path remains available."
+                        _durable_upload_error_message()
+                        if required_failure
+                        else "Supabase mirror did not create a remote copy, but the local artifact path remains available."
                     ),
+                    failure_code="durable_storage_unavailable" if required_failure else None,
                     emit_attempted=True,
                     emit_tool_call_seen=True,
                     include_outputs_summary=False,
                     supabase_mirror_attempted=mirror_result not in {"skipped", "not_configured"},
                     supabase_mirror_result=mirror_result,
                 )
-        fire_completion_webhook_from_artifact(
-            state=state,
-            runtime=runtime,
-            artifact=fallback,
-            status=status,
-        )
+        if _is_required_supabase_failure(mirror_result):
+            fire_completion_webhook_from_artifact(
+                state=state,
+                runtime=runtime,
+                artifact=fallback,
+                status="failed",
+                error_message=_durable_upload_error_message(),
+            )
+        else:
+            fire_completion_webhook_from_artifact(
+                state=state,
+                runtime=runtime,
+                artifact=fallback,
+                status=status,
+            )
 
     @staticmethod
     def _has_generator_script(state: BuilderArtifactState) -> bool:
@@ -7122,6 +7275,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         runtime.context.get("thread_id") if runtime.context else None
                     )
                     upload_thread_id = parent_thread_id or builder_thread_id
+                    _attach_durable_upload_identity(args, state, runtime)
                     mirror_result = _upload_builder_outputs_to_supabase(
                         thread_id=upload_thread_id,
                         outputs_host_path=outputs_host_path,
@@ -7150,12 +7304,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     # (and webapp SSE) deliver the artifact bytes to the user.
                     # Replaces the deleted ``SubagentExecutor`` terminal-flip
                     # call site after the Phase-1 async migration.
-                    fire_completion_webhook_from_artifact(
-                        state=state,
-                        runtime=runtime,
-                        artifact=args,
-                        status="completed",
-                    )
+                    if _is_required_supabase_failure(mirror_result):
+                        fire_completion_webhook_from_artifact(
+                            state=state,
+                            runtime=runtime,
+                            artifact=args,
+                            status="failed",
+                            error_message=_durable_upload_error_message(),
+                        )
+                    else:
+                        fire_completion_webhook_from_artifact(
+                            state=state,
+                            runtime=runtime,
+                            artifact=args,
+                            status="completed",
+                        )
                     return {
                         "builder_result": args,
                         "builder_non_artifact_turns": 0,

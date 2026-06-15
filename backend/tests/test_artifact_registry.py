@@ -97,6 +97,7 @@ def _supabase_registry(fake: FakeSupabaseArtifactPostgrest) -> SupabaseArtifactR
         SupabaseArtifactRegistryConfig(
             url="https://example.supabase.co",
             service_role_key="service-role",
+            bucket="sophia-builder-artifacts",
         ),
         client=client,
     )
@@ -155,6 +156,14 @@ def test_registry_rejects_unsafe_paths_and_raw_content(tmp_path) -> None:
             "raw_content": "<html>secret</html>",
         })
 
+    with pytest.raises(ValidationError, match="Unsafe artifact storage path"):
+        ArtifactUpsertRequest(**{
+            "thread_id": "thread-1",
+            "local_path": "outputs/private.html",
+            "storage_provider": "supabase",
+            "storage_object_path": "../secret.md",
+        })
+
 
 def test_registry_persists_records_across_store_restart(tmp_path) -> None:
     base_path = tmp_path / "artifact-registry"
@@ -210,6 +219,61 @@ def test_supabase_registry_persists_metadata_across_store_recreation() -> None:
     assert "<html" not in serialized
     assert "signed.example" not in serialized
     assert "artifact_url" not in serialized
+
+
+def test_production_supabase_upsert_hides_missing_storage_object(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "supabase")
+    monkeypatch.setenv("SUPABASE_BUILDER_BUCKET", "sophia-builder-artifacts")
+    monkeypatch.setattr(
+        artifact_registry_module.supabase_artifact_store,
+        "check_artifact_object_exists",
+        lambda _path: False,
+    )
+    fake = FakeSupabaseArtifactPostgrest()
+    registry = _supabase_registry(fake)
+
+    record = registry.upsert(
+        _request(
+            storage_provider="supabase",
+            storage_bucket="sophia-builder-artifacts",
+            storage_object_path="artifacts/user-1/session-1/artifact-1/launch.html",
+        ),
+        user_id="user-1",
+    )
+
+    assert record.storage_status == "missing"
+    assert record.is_library_visible is False
+    assert registry.list(user_id="user-1").total == 0
+    hidden = registry.list(user_id="user-1", filters=ArtifactRegistryFilters(include_hidden=True))
+    assert hidden.total == 1
+    assert hidden.artifacts[0].storage_status == "missing"
+
+
+def test_production_supabase_upsert_keeps_existing_storage_object_visible(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "supabase")
+    monkeypatch.setenv("SUPABASE_BUILDER_BUCKET", "sophia-builder-artifacts")
+    monkeypatch.setattr(
+        artifact_registry_module.supabase_artifact_store,
+        "check_artifact_object_exists",
+        lambda _path: True,
+    )
+    fake = FakeSupabaseArtifactPostgrest()
+    registry = _supabase_registry(fake)
+
+    record = registry.upsert(
+        _request(
+            storage_provider="supabase",
+            storage_bucket="sophia-builder-artifacts",
+            storage_object_path="artifacts/user-1/session-1/artifact-1/launch.html",
+        ),
+        user_id="user-1",
+    )
+
+    assert record.storage_status == "available"
+    assert record.is_library_visible is True
+    assert registry.list(user_id="user-1").total == 1
 
 
 def test_supabase_registry_dedupes_builder_and_backfill_and_hides_wrappers() -> None:
@@ -271,6 +335,84 @@ def test_artifact_registry_factory_requires_supabase_in_production(monkeypatch) 
     message = str(exc_info.value)
     assert "SOPHIA_ARTIFACT_REGISTRY_STORE=supabase" in message
     assert "service-role" not in message
+
+
+def test_production_supabase_registry_missing_supabase_url_fails_closed(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "supabase")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "placeholder-service-role")
+    monkeypatch.setenv("SUPABASE_BUILDER_BUCKET", "sophia-builder-artifacts")
+
+    with pytest.raises(ArtifactRegistryConfigurationError) as exc_info:
+        ArtifactRegistry()
+
+    message = str(exc_info.value)
+    assert "SUPABASE_URL" in message
+    assert "placeholder-service-role" not in message
+
+
+def test_production_supabase_registry_missing_service_role_key_fails_closed(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "supabase")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    monkeypatch.setenv("SUPABASE_BUILDER_BUCKET", "sophia-builder-artifacts")
+
+    with pytest.raises(ArtifactRegistryConfigurationError) as exc_info:
+        ArtifactRegistry()
+
+    message = str(exc_info.value)
+    assert "SUPABASE_SERVICE_ROLE_KEY" in message
+    assert "example.supabase.co" not in message
+
+
+def test_production_supabase_registry_missing_bucket_fails_closed(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "supabase")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "placeholder-service-role")
+    monkeypatch.delenv("SUPABASE_BUILDER_BUCKET", raising=False)
+
+    with pytest.raises(ArtifactRegistryConfigurationError) as exc_info:
+        ArtifactRegistry()
+
+    message = str(exc_info.value)
+    assert "SUPABASE_BUILDER_BUCKET" in message
+    assert "placeholder-service-role" not in message
+
+
+def test_production_local_registry_rejected_unless_explicit_override(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "local")
+    monkeypatch.delenv("SOPHIA_ALLOW_LOCAL_ARTIFACT_REGISTRY_IN_PRODUCTION", raising=False)
+
+    with pytest.raises(ArtifactRegistryConfigurationError):
+        ArtifactRegistry()
+
+    monkeypatch.setenv("SOPHIA_ALLOW_LOCAL_ARTIFACT_REGISTRY_IN_PRODUCTION", "true")
+    assert isinstance(ArtifactRegistry(), LocalArtifactRegistry)
+
+
+def test_local_dev_registry_still_defaults_to_local(monkeypatch) -> None:
+    for name in ("RENDER", "VERCEL", "RAILWAY_ENVIRONMENT", "SOPHIA_ENV", "APP_ENV", "ENVIRONMENT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("SOPHIA_ARTIFACT_REGISTRY_STORE", raising=False)
+
+    assert isinstance(ArtifactRegistry(), LocalArtifactRegistry)
+
+
+def test_strict_production_rejects_hybrid_registry_mode(monkeypatch) -> None:
+    monkeypatch.setenv("SOPHIA_ENV", "production")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "hybrid")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "placeholder-service-role")
+    monkeypatch.setenv("SUPABASE_BUILDER_BUCKET", "sophia-builder-artifacts")
+
+    with pytest.raises(ArtifactRegistryConfigurationError) as exc_info:
+        ArtifactRegistry()
+
+    assert "migration or staging" in str(exc_info.value)
 
 
 def test_local_registry_migration_writes_supabase_metadata_and_uploads_bytes(tmp_path, monkeypatch) -> None:
@@ -773,10 +915,17 @@ def test_content_endpoint_serves_registry_artifact_from_supabase_object(tmp_path
     assert requested_paths == ["artifacts/user-1/session-1/artifact-1/remote.md"]
 
 
-def test_content_endpoint_rejects_unsafe_supabase_object_path(tmp_path, monkeypatch) -> None:
+def test_content_and_download_return_404_when_registry_object_missing(tmp_path, monkeypatch) -> None:
     client, registry = _owned_app(tmp_path, monkeypatch)
     missing_file = tmp_path / "missing" / "remote.md"
     monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: missing_file)
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "download_artifact_object", lambda _path: None)
+    legacy_calls: list[str] = []
+    monkeypatch.setattr(
+        artifacts_router.supabase_artifact_store,
+        "download_artifact",
+        lambda *, thread_id, filename: legacy_calls.append(filename) or None,
+    )
     artifact = registry.upsert(
         _request(
             local_path="outputs/remote.md",
@@ -785,15 +934,32 @@ def test_content_endpoint_rejects_unsafe_supabase_object_path(tmp_path, monkeypa
             mime_type="text/markdown",
             storage_provider="supabase",
             storage_bucket="sophia_builder",
-            storage_object_path="../secret.md",
+            storage_object_path="artifacts/user-1/session-1/artifact-1/remote.md",
         ),
         user_id="user-1",
     )
 
-    response = client.get(f"/api/artifacts/{artifact.artifact_id}/content")
+    content = client.get(f"/api/artifacts/{artifact.artifact_id}/content")
+    download = client.get(f"/api/artifacts/{artifact.artifact_id}/download")
 
-    assert response.status_code == 403
-    assert response.json()["detail"] == "Unsafe artifact storage path"
+    assert content.status_code == 404
+    assert download.status_code == 404
+    assert "sophia_builder" not in content.text
+    assert "service" not in content.text.lower()
+    assert legacy_calls == []
+
+
+def test_content_endpoint_rejects_unsafe_supabase_object_path() -> None:
+    with pytest.raises(ValidationError, match="Unsafe artifact storage path"):
+        _request(
+            local_path="outputs/remote.md",
+            renderer_kind="markdown",
+            artifact_type="markdown",
+            mime_type="text/markdown",
+            storage_provider="supabase",
+            storage_bucket="sophia_builder",
+            storage_object_path="../secret.md",
+        )
 
 
 def test_artifact_id_endpoints_do_not_require_live_session_record(tmp_path, monkeypatch) -> None:
@@ -871,7 +1037,20 @@ def test_delete_endpoint_hides_artifact_without_deleting_bytes(tmp_path, monkeyp
     output_file = tmp_path / "outputs" / "launch.html"
     output_file.parent.mkdir(parents=True)
     output_file.write_text("<html>launch</html>", encoding="utf-8")
-    artifact = registry.upsert(_request(), user_id="user-1")
+    download_calls: list[str] = []
+    monkeypatch.setattr(
+        artifacts_router.supabase_artifact_store,
+        "download_artifact_object",
+        lambda object_path: download_calls.append(object_path) or (b"<html>launch</html>", "text/html"),
+    )
+    artifact = registry.upsert(
+        _request(
+            storage_provider="supabase",
+            storage_bucket="sophia_builder",
+            storage_object_path="artifacts/user-1/session-1/artifact-1/launch.html",
+        ),
+        user_id="user-1",
+    )
 
     response = client.delete(f"/api/artifacts/{artifact.artifact_id}")
 
@@ -899,6 +1078,7 @@ def test_delete_endpoint_hides_artifact_without_deleting_bytes(tmp_path, monkeyp
     ):
         response_after_delete = getattr(client, method)(path, follow_redirects=False)
         assert response_after_delete.status_code == 404
+    assert download_calls == []
 
 
 def test_builder_terminal_event_upserts_registry_metadata(tmp_path, monkeypatch) -> None:
@@ -942,3 +1122,70 @@ def test_builder_terminal_event_upserts_registry_metadata(tmp_path, monkeypatch)
     serialized = record.model_dump_json()
     assert "signed.example" not in serialized
     assert "artifact_url" not in serialized
+
+
+def test_builder_terminal_event_uses_user_scoped_verified_storage_path(tmp_path, monkeypatch) -> None:
+    registry = LocalArtifactRegistry(tmp_path / "artifact-registry")
+    store = SessionStore(tmp_path / "users")
+    store.create(SessionRecord(session_id="session-1", thread_id="parent-thread", user_id="user-1"))
+    monkeypatch.setattr(builder_events_router, "_artifact_registry", registry)
+    monkeypatch.setattr(builder_events_router, "_session_store", store)
+    monkeypatch.setenv("SUPABASE_BUILDER_BUCKET", "sophia-builder-artifacts")
+    monkeypatch.setattr(
+        "deerflow.sophia.storage.supabase_artifact_store.is_configured",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "deerflow.sophia.storage.supabase_artifact_store.configured_bucket_name",
+        lambda: "sophia-builder-artifacts",
+    )
+
+    builder_events_router._upsert_builder_terminal_artifact({
+        "thread_id": "parent-thread",
+        "task_id": "builder-task",
+        "run_id": "run-1",
+        "status": "success",
+        "artifact_path": "mnt/user-data/outputs/brief.md",
+        "artifact_url": "https://signed.example/temporary",
+        "artifact_title": "Builder Brief",
+        "artifact_type": "document",
+        "summary": "Safe brief summary",
+        "completed_at": "2026-06-01T10:00:00+00:00",
+        "user_id": "user-1",
+    })
+
+    record = registry.list(user_id="user-1").artifacts[0]
+    assert record.storage_provider == "supabase"
+    assert record.storage_bucket == "sophia-builder-artifacts"
+    assert record.storage_object_path is not None
+    assert record.storage_object_path.startswith("artifacts/user-1/session-1/")
+    assert f"/{record.artifact_id}/" in record.storage_object_path
+    assert record.storage_object_path.endswith("/brief.md")
+    serialized = record.model_dump_json()
+    assert "signed.example" not in serialized
+    assert "artifact_url" not in serialized
+
+
+def test_builder_terminal_failed_storage_event_does_not_create_registry_row(tmp_path, monkeypatch) -> None:
+    registry = LocalArtifactRegistry(tmp_path / "artifact-registry")
+    store = SessionStore(tmp_path / "users")
+    store.create(SessionRecord(session_id="session-1", thread_id="parent-thread", user_id="user-1"))
+    monkeypatch.setattr(builder_events_router, "_artifact_registry", registry)
+    monkeypatch.setattr(builder_events_router, "_session_store", store)
+
+    builder_events_router._upsert_builder_terminal_artifact({
+        "thread_id": "parent-thread",
+        "task_id": "builder-task",
+        "run_id": "run-1",
+        "status": "error",
+        "artifact_path": "mnt/user-data/outputs/brief.md",
+        "artifact_title": "Builder Brief",
+        "artifact_type": "document",
+        "builder_failure_diagnostics": {
+            "failure_stage": "storage_mirror",
+            "supabase_mirror_result": "required_upload_failed",
+        },
+        "user_id": "user-1",
+    })
+
+    assert registry.list(user_id="user-1", filters=ArtifactRegistryFilters(include_hidden=True)).total == 0

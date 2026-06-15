@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
+from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder_artifact_module
 from deerflow.sophia import builder_events
 
 
@@ -206,6 +207,36 @@ def test_completion_payload_preserves_artifact_path_when_signed_url_missing():
     assert payload["artifact_url"] is None
 
 
+def test_completion_payload_preserves_verified_storage_metadata():
+    runtime = _make_runtime(
+        builder_thread_id="t-build",
+        builder_run_id="r-1",
+        parent_thread_id="t-parent",
+    )
+    state = _make_state(task_brief="Build a brief about X", task_type="document")
+    artifact = _success_artifact(
+        artifact_id="artifact_123",
+        storage_provider="supabase",
+        storage_bucket="sophia-builder-artifacts",
+        storage_object_path="artifacts/alice/t-parent/artifact_123/foo.md",
+        storage_status="available",
+    )
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=artifact, status="completed"
+        )
+
+    assert payload["artifact_id"] == "artifact_123"
+    assert payload["storage_provider"] == "supabase"
+    assert payload["storage_bucket"] == "sophia-builder-artifacts"
+    assert payload["storage_object_path"] == "artifacts/alice/t-parent/artifact_123/foo.md"
+    assert payload["storage_status"] == "available"
+    serialized = repr(payload)
+    assert "signed.example" not in serialized
+    assert "svc-role" not in serialized
+
+
 def test_completion_payload_records_signed_url_failure_without_dropping_artifact_path():
     runtime = _make_runtime(
         builder_thread_id="t-build",
@@ -230,6 +261,159 @@ def test_completion_payload_records_signed_url_failure_without_dropping_artifact
     assert diagnostic["supabase_mirror_result"] == "signed_url_failed"
     assert diagnostic["signed_url_created"] is False
     assert "https://" not in repr(diagnostic)
+
+
+def test_required_builder_upload_missing_env_fails_closed(tmp_path, monkeypatch, caplog):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "foo.md").write_text("# Foo", encoding="utf-8")
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "supabase")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_BUILDER_BUCKET", raising=False)
+    artifact = {
+        "artifact_path": "/mnt/user-data/outputs/foo.md",
+        "artifact_type": "document",
+        "user_id": "alice",
+    }
+
+    with caplog.at_level("WARNING"):
+        result = builder_artifact_module._upload_builder_outputs_to_supabase(
+            thread_id="thread-1",
+            outputs_host_path=str(outputs),
+            artifact_args=artifact,
+        )
+
+    assert result == "required_not_configured"
+    assert "storage_object_path" not in artifact
+    assert "storage_bucket" not in artifact
+    assert "SUPABASE_URL" in caplog.text
+    assert "SUPABASE_SERVICE_ROLE_KEY" in caplog.text
+    assert "SUPABASE_BUILDER_BUCKET" in caplog.text
+    assert "svc-role" not in caplog.text
+
+
+def test_required_builder_upload_failure_does_not_set_storage_metadata(tmp_path, monkeypatch, caplog):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "foo.md").write_text("# Foo", encoding="utf-8")
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "supabase")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-role-secret")
+    monkeypatch.setenv("SUPABASE_BUILDER_BUCKET", "sophia-builder-artifacts")
+
+    def fail_upload(*_args, **_kwargs):
+        raise RuntimeError("svc-role-secret should not leak")
+
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "upload_artifact_object",
+        fail_upload,
+    )
+    artifact = {
+        "artifact_path": "/mnt/user-data/outputs/foo.md",
+        "artifact_type": "document",
+        "user_id": "alice",
+    }
+
+    with caplog.at_level("WARNING"):
+        result = builder_artifact_module._upload_builder_outputs_to_supabase(
+            thread_id="thread-1",
+            outputs_host_path=str(outputs),
+            artifact_args=artifact,
+        )
+
+    assert result == "required_upload_failed"
+    assert "storage_object_path" not in artifact
+    assert "storage_bucket" not in artifact
+    assert "svc-role-secret" not in caplog.text
+
+
+def test_required_builder_upload_verify_failure_does_not_set_storage_metadata(tmp_path, monkeypatch):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "foo.md").write_text("# Foo", encoding="utf-8")
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "supabase")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-role-placeholder")
+    monkeypatch.setenv("SUPABASE_BUILDER_BUCKET", "sophia-builder-artifacts")
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "upload_artifact_object",
+        lambda object_path, _content, **_kwargs: object_path,
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "check_artifact_object_exists",
+        lambda _path: False,
+    )
+    artifact = {
+        "artifact_path": "/mnt/user-data/outputs/foo.md",
+        "artifact_type": "document",
+        "user_id": "alice",
+    }
+
+    result = builder_artifact_module._upload_builder_outputs_to_supabase(
+        thread_id="thread-1",
+        outputs_host_path=str(outputs),
+        artifact_args=artifact,
+    )
+
+    assert result == "required_verify_failed"
+    assert "storage_object_path" not in artifact
+    assert "storage_bucket" not in artifact
+
+
+def test_required_builder_upload_success_sets_verified_user_scoped_metadata(tmp_path, monkeypatch):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "foo.md").write_text("# Foo", encoding="utf-8")
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "supabase")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-role-placeholder")
+    monkeypatch.setenv("SUPABASE_BUILDER_BUCKET", "sophia-builder-artifacts")
+    uploaded: list[tuple[str, bytes]] = []
+
+    def upload_object(object_path, content, **_kwargs):
+        uploaded.append((object_path, content))
+        return object_path
+
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "upload_artifact_object",
+        upload_object,
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "check_artifact_object_exists",
+        lambda _path: True,
+    )
+    artifact = {
+        "artifact_path": "/mnt/user-data/outputs/foo.md",
+        "artifact_type": "document",
+        "user_id": "alice",
+    }
+
+    result = builder_artifact_module._upload_builder_outputs_to_supabase(
+        thread_id="thread-1",
+        outputs_host_path=str(outputs),
+        artifact_args=artifact,
+    )
+
+    assert result == "uploaded"
+    assert uploaded == [(artifact["storage_object_path"], b"# Foo")]
+    assert artifact["storage_provider"] == "supabase"
+    assert artifact["storage_bucket"] == "sophia-builder-artifacts"
+    assert artifact["storage_status"] == "available"
+    assert artifact["storage_object_path"].startswith("artifacts/alice/thread-1/")
+    assert f"/{artifact['artifact_id']}/" in artifact["storage_object_path"]
+    serialized = repr(artifact)
+    assert "# Foo" not in serialized
+    assert "signed" not in serialized.lower()
 
 
 def test_completion_payload_preserves_fallback_metadata():

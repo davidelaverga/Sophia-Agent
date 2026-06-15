@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 import uuid
@@ -25,6 +26,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from deerflow.sophia.session_store import SessionTranscriptStore
 from deerflow.sophia.storage import supabase_artifact_store
+
+logger = logging.getLogger(__name__)
 
 ArtifactSource = Literal[
     "builder",
@@ -174,6 +177,16 @@ def normalize_artifact_registry_path(path: str) -> str:
     ):
         raise HTTPException(status_code=400, detail="Artifact path must be a virtual output path")
     return normalized
+
+
+def normalize_artifact_storage_object_path(path: str | None) -> str | None:
+    normalized = _normalize_token(path)
+    if normalized is None:
+        return None
+    try:
+        return supabase_artifact_store.normalize_object_path(normalized)
+    except ValueError as exc:
+        raise ValueError("Unsafe artifact storage path") from exc
 
 
 def _filename_from_path(path: str) -> str:
@@ -379,6 +392,7 @@ def _is_effectively_visible(record: Any) -> bool:
         getattr(record, "deleted_at", None) is None
         and getattr(record, "is_library_visible", False) is True
         and _effective_artifact_role(record) == "primary"
+        and getattr(record, "storage_status", "available") == "available"
     )
 
 
@@ -478,6 +492,11 @@ class ArtifactRecord(BaseModel):
     def _validate_local_path(cls, value: str) -> str:
         return normalize_artifact_registry_path(value)
 
+    @field_validator("storage_object_path")
+    @classmethod
+    def _validate_storage_object_path(cls, value: str | None) -> str | None:
+        return normalize_artifact_storage_object_path(value)
+
     @field_validator("raw_content_excluded", "signed_url_excluded")
     @classmethod
     def _must_be_excluded(cls, value: bool) -> bool:
@@ -489,7 +508,11 @@ class ArtifactRecord(BaseModel):
     def _normalize_library_visibility(self) -> ArtifactRecord:
         detected_role = _effective_artifact_role(self)
         role = detected_role if detected_role != "primary" else self.artifact_role
-        visible = self.is_library_visible if role == "primary" and self.deleted_at is None else False
+        visible = (
+            self.is_library_visible
+            if role == "primary" and self.deleted_at is None and self.storage_status == "available"
+            else False
+        )
         object.__setattr__(self, "artifact_role", role)
         object.__setattr__(self, "is_library_visible", bool(visible))
         return self
@@ -545,6 +568,11 @@ class ArtifactUpsertRequest(BaseModel):
     @classmethod
     def _validate_local_path(cls, value: str) -> str:
         return normalize_artifact_registry_path(value)
+
+    @field_validator("storage_object_path")
+    @classmethod
+    def _validate_storage_object_path(cls, value: str | None) -> str | None:
+        return normalize_artifact_storage_object_path(value)
 
     @field_validator("raw_content_excluded", "signed_url_excluded")
     @classmethod
@@ -609,14 +637,27 @@ class ArtifactUpsertRequest(BaseModel):
             else (existing.is_library_visible if existing else True)
         )
         deleted_at = _normalize_iso(self.deleted_at) or (existing.deleted_at if existing else None)
-        is_library_visible = bool(requested_visibility and artifact_role == "primary" and deleted_at is None)
-        storage_object_path = _normalize_token(self.storage_object_path)
-        if storage_object_path is None:
-            relative = _relative_output_path(local_path)
-            storage_object_path = f"{self.thread_id}/{relative}" if relative else None
+        storage_status = (
+            _normalize_token(self.storage_status)
+            or (existing.storage_status if existing else None)
+            or "available"
+        )
+        is_library_visible = bool(
+            requested_visibility
+            and artifact_role == "primary"
+            and deleted_at is None
+            and storage_status == "available"
+        )
+        storage_object_path = normalize_artifact_storage_object_path(self.storage_object_path)
+        effective_storage_object_path = storage_object_path or (existing.storage_object_path if existing else None)
+        effective_storage_bucket = _normalize_token(self.storage_bucket) or (existing.storage_bucket if existing else None)
         storage_provider = self.storage_provider
         if storage_provider is None:
-            storage_provider = "hybrid" if storage_object_path and self.storage_bucket else "local"
+            storage_provider = (
+                existing.storage_provider
+                if existing is not None and effective_storage_object_path
+                else ("supabase" if effective_storage_object_path and effective_storage_bucket else "local")
+            )
 
         return ArtifactRecord(
             artifact_id=artifact_id,
@@ -641,13 +682,11 @@ class ArtifactUpsertRequest(BaseModel):
             source=existing.source if existing and preserve_existing_source else self.source,
             local_path=local_path,
             storage_provider=storage_provider,
-            storage_bucket=_normalize_token(self.storage_bucket) or (existing.storage_bucket if existing else None),
-            storage_object_path=storage_object_path or (existing.storage_object_path if existing else None),
+            storage_bucket=effective_storage_bucket,
+            storage_object_path=effective_storage_object_path,
             size_bytes=self.size_bytes if self.size_bytes is not None else (existing.size_bytes if existing else None),
             content_hash=_normalize_token(self.content_hash) or (existing.content_hash if existing else None),
-            storage_status=_normalize_token(self.storage_status)
-            or (existing.storage_status if existing else None)
-            or "available",
+            storage_status=storage_status,
             artifact_role=artifact_role,
             is_library_visible=is_library_visible,
             created_at=created_at,
@@ -707,6 +746,7 @@ class ArtifactRegistryStoreError(RuntimeError):
 class SupabaseArtifactRegistryConfig:
     url: str
     service_role_key: str
+    bucket: str
     table: str = "artifact_registry_records"
 
 
@@ -725,14 +765,23 @@ def _is_production_runtime() -> bool:
     }
 
 
+def _is_strict_production_runtime() -> bool:
+    env_name = (os.getenv("SOPHIA_ENV") or os.getenv("APP_ENV") or os.getenv("ENVIRONMENT") or "").lower()
+    return env_name in {"prod", "production"} or (
+        _truthy_env(os.getenv("RENDER")) and env_name not in {"staging", "stage"}
+    )
+
+
 def _load_supabase_artifact_registry_config() -> SupabaseArtifactRegistryConfig:
     url = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
     service_role_key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+    bucket = (os.getenv("SUPABASE_BUILDER_BUCKET") or "").strip()
     missing = [
         name
         for name, value in (
             ("SUPABASE_URL", url),
             ("SUPABASE_SERVICE_ROLE_KEY", service_role_key),
+            ("SUPABASE_BUILDER_BUCKET", bucket if _is_production_runtime() else bucket or "local-default"),
         )
         if not value
     ]
@@ -745,6 +794,7 @@ def _load_supabase_artifact_registry_config() -> SupabaseArtifactRegistryConfig:
     return SupabaseArtifactRegistryConfig(
         url=url,
         service_role_key=service_role_key,
+        bucket=bucket or supabase_artifact_store.DEFAULT_BUCKET,
         table=table or "artifact_registry_records",
     )
 
@@ -924,10 +974,7 @@ class LocalArtifactRegistry:
             renderer_kind,
         )
         version_id = _normalize_token(request.version_id) or f"{logical_artifact_id}::v1"
-        storage_object_path = _normalize_token(request.storage_object_path)
-        if storage_object_path is None:
-            relative = _relative_output_path(local_path)
-            storage_object_path = f"{request.thread_id}/{relative}" if relative else None
+        storage_object_path = normalize_artifact_storage_object_path(request.storage_object_path)
         request_identity = _canonical_artifact_identity(
             user_id=user_id,
             thread_id=request.thread_id,
@@ -994,7 +1041,12 @@ class LocalArtifactRegistry:
     @staticmethod
     def _with_effective_visibility(record: ArtifactRecord) -> ArtifactRecord:
         role = _effective_artifact_role(record)
-        visible = bool(record.is_library_visible and role == "primary" and record.deleted_at is None)
+        visible = bool(
+            record.is_library_visible
+            and role == "primary"
+            and record.deleted_at is None
+            and record.storage_status == "available"
+        )
         if role == record.artifact_role and visible == record.is_library_visible:
             return record
         return record.model_copy(update={"artifact_role": role, "is_library_visible": visible})
@@ -1169,6 +1221,32 @@ class SupabaseArtifactRegistry(LocalArtifactRegistry):
         except Exception:
             return None
 
+    def _with_verified_storage(self, record: ArtifactRecord) -> ArtifactRecord:
+        if not _is_production_runtime() or record.deleted_at is not None:
+            return record
+        if record.artifact_role != "primary":
+            return record
+        if record.storage_provider not in {"supabase", "hybrid"} or not record.storage_object_path:
+            if record.is_library_visible:
+                logger.warning(
+                    "Artifact registry hiding unverified production artifact metadata: artifact_id=%s reason=no_storage_object",
+                    record.artifact_id,
+                )
+            return record.model_copy(update={"storage_status": "missing", "is_library_visible": False})
+        exists = supabase_artifact_store.check_artifact_object_exists(record.storage_object_path)
+        if not exists:
+            logger.warning(
+                "Artifact registry hiding production artifact with missing Supabase object: artifact_id=%s",
+                record.artifact_id,
+            )
+            return record.model_copy(update={"storage_status": "missing", "is_library_visible": False})
+        return record.model_copy(
+            update={
+                "storage_bucket": record.storage_bucket or self._config.bucket,
+                "storage_status": "available",
+            }
+        )
+
     def _read_records(self, user_id: str) -> list[ArtifactRecord]:
         result = self._request(
             "GET",
@@ -1201,11 +1279,13 @@ class SupabaseArtifactRegistry(LocalArtifactRegistry):
         )
         if request.source in _BACKFILL_SOURCES and existing is None and record.artifact_role != "primary":
             return record
+        record = self._with_verified_storage(record)
         return self.upsert_record(record, user_id=user_id)
 
     def upsert_record(self, record: ArtifactRecord, *, user_id: str) -> ArtifactRecord:
         if record.user_id != user_id:
             raise HTTPException(status_code=403, detail="Artifact user scope mismatch")
+        record = self._with_verified_storage(record)
         result = self._request(
             "POST",
             params={"on_conflict": "artifact_id"},
@@ -1373,9 +1453,15 @@ def ArtifactRegistry(
     if base_path is not None:
         return LocalArtifactRegistry(base_path)
 
-    selected = (backend or os.getenv("SOPHIA_ARTIFACT_REGISTRY_STORE") or "").strip().lower()
+    configured_backend = os.getenv("SOPHIA_ARTIFACT_REGISTRY_STORE")
+    selected = (backend or configured_backend or "").strip().lower()
     if not selected:
-        selected = "supabase" if _is_production_runtime() else "local"
+        if _is_production_runtime():
+            raise ArtifactRegistryConfigurationError(
+                "Production runtime requires SOPHIA_ARTIFACT_REGISTRY_STORE=supabase; "
+                "artifact registry metadata must not default silently."
+            )
+        selected = "local"
 
     if selected == "local":
         if _is_production_runtime() and not _truthy_env(os.getenv("SOPHIA_ALLOW_LOCAL_ARTIFACT_REGISTRY_IN_PRODUCTION")):
@@ -1389,6 +1475,11 @@ def ArtifactRegistry(
         return SupabaseArtifactRegistry(client=client)
 
     if selected == "hybrid":
+        if _is_strict_production_runtime():
+            raise ArtifactRegistryConfigurationError(
+                "SOPHIA_ARTIFACT_REGISTRY_STORE=hybrid is reserved for migration or staging; "
+                "production must use SOPHIA_ARTIFACT_REGISTRY_STORE=supabase."
+            )
         return HybridArtifactRegistry(
             local_registry=LocalArtifactRegistry(),
             supabase_registry=SupabaseArtifactRegistry(client=client),
@@ -1438,12 +1529,29 @@ def builder_completion_upsert_request(
 
     local_path = normalize_artifact_registry_path(artifact_path)
     relative = _relative_output_path(local_path)
-    bucket = os.getenv("SUPABASE_BUILDER_BUCKET", supabase_artifact_store.DEFAULT_BUCKET)
-    storage_bucket = bucket if relative and supabase_artifact_store.is_configured() else None
-    storage_object_path = f"{thread_id}/{relative}" if relative else None
-    storage_provider: ArtifactStorageProvider = "hybrid" if storage_bucket and storage_object_path else "local"
+    filename = _normalize_token(payload.get("artifact_filename")) or _filename_from_path(local_path)
+    mime_type = _infer_mime_type(filename, None)
+    artifact_type = _normalize_artifact_type(_normalize_token(payload.get("artifact_type")), local_path, mime_type)
+    renderer_kind = _normalize_renderer_kind(_normalize_token(payload.get("renderer_kind")), artifact_type)
+    artifact_id = _normalize_token(payload.get("artifact_id")) or supabase_artifact_store.builder_artifact_record_id(
+        user_id=user_id,
+        thread_id=thread_id,
+        local_path=local_path,
+        renderer_kind=renderer_kind,
+    )
+    storage_bucket = _normalize_token(payload.get("storage_bucket")) or supabase_artifact_store.configured_bucket_name()
+    storage_object_path = normalize_artifact_storage_object_path(payload.get("storage_object_path"))
+    if storage_object_path is None and relative and storage_bucket and supabase_artifact_store.is_configured():
+        storage_object_path = supabase_artifact_store.builder_artifact_object_path(
+            user_id=user_id,
+            thread_or_session_id=getattr(session_record, "session_id", None) or thread_id,
+            artifact_id=artifact_id,
+            filename=filename,
+        )
+    storage_provider: ArtifactStorageProvider = "supabase" if storage_bucket and storage_object_path else "local"
 
     return user_id, ArtifactUpsertRequest(
+        artifact_id=artifact_id,
         user_id=user_id,
         thread_id=thread_id,
         session_id=getattr(session_record, "session_id", None),
@@ -1452,21 +1560,22 @@ def builder_completion_upsert_request(
         run_id=_normalize_token(payload.get("run_id")),
         trace_id=_normalize_token(payload.get("trace_id")),
         title=_normalize_token(payload.get("artifact_title")) or _normalize_token(payload.get("artifact_filename")),
-        filename=_normalize_token(payload.get("artifact_filename")),
-        artifact_type=_normalize_token(payload.get("artifact_type")),
+        filename=filename,
+        artifact_type=artifact_type,
+        renderer_kind=renderer_kind,
         requested_artifact_ext=_normalize_token(payload.get("requested_artifact_ext")),
         artifact_ext=_normalize_token(payload.get("artifact_ext")),
         artifact_is_fallback=payload.get("artifact_is_fallback")
         if isinstance(payload.get("artifact_is_fallback"), bool)
         else None,
-        mime_type=None,
+        mime_type=mime_type,
         safe_summary=_normalize_token(payload.get("summary")) or _normalize_token(payload.get("user_next_action")),
         source="builder",
         local_path=local_path,
         storage_provider=storage_provider,
         storage_bucket=storage_bucket,
         storage_object_path=storage_object_path,
-        storage_status="available",
+        storage_status=_normalize_token(payload.get("storage_status")) or "available",
         created_at=_normalize_iso(payload.get("completed_at")),
         raw_content_excluded=True,
         signed_url_excluded=True,

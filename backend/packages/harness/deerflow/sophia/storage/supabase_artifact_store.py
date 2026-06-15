@@ -1,8 +1,9 @@
 """Supabase Storage adapter for Sophia builder artifacts.
 
-Uploads and downloads builder-generated files to the ``sophia_builder``
-bucket using the Supabase Storage REST API via ``httpx``. One folder per
-``thread_id``, one object per generated document.
+Uploads and downloads builder-generated files to the configured Supabase
+Storage bucket using the Supabase Storage REST API via ``httpx``. Legacy
+builder objects use one folder per ``thread_id``; durable Artifact
+Observatory objects use an explicit user-scoped path.
 
 The adapter is a graceful no-op when the required environment variables
 are missing so local development keeps working without Supabase.
@@ -10,11 +11,14 @@ are missing so local development keeps working without Supabase.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import mimetypes
 import os
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import quote
 
@@ -23,9 +27,10 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_BUCKET = "sophia_builder"
+DEFAULT_BUCKET = "sophia-builder-artifacts"
 _REQUEST_TIMEOUT_SECONDS = 15.0
 _MAX_LIST_DEPTH = 8
+_SAFE_SEGMENT_RE = re.compile(r"[^A-Za-z0-9._=-]+")
 
 # Keyspace separation (Codex P1 PR #132). User UPLOADS mirror under
 # ``{thread_id}/uploads/{name}``; builder OUTPUTS mirror under
@@ -64,13 +69,59 @@ class SupabaseArtifactInfo:
     content_type: str | None = None
 
 
+def _truthy_env(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def is_production_runtime() -> bool:
+    return any(
+        _truthy_env(os.getenv(name))
+        for name in ("RENDER", "VERCEL", "RAILWAY_ENVIRONMENT")
+    ) or (os.getenv("SOPHIA_ENV") or os.getenv("APP_ENV") or os.getenv("ENVIRONMENT") or "").lower() in {
+        "prod",
+        "production",
+        "staging",
+    }
+
+
+def artifact_registry_store_mode() -> str:
+    return (os.getenv("SOPHIA_ARTIFACT_REGISTRY_STORE") or "").strip().lower()
+
+
+def requires_durable_artifact_upload() -> bool:
+    return is_production_runtime() and artifact_registry_store_mode() == "supabase"
+
+
+def missing_required_config() -> tuple[str, ...]:
+    required_service_key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+    service_key = required_service_key or (os.getenv("SUPABASE_KEY") or "").strip()
+    missing: list[str] = []
+    if not (os.getenv("SUPABASE_URL") or "").strip():
+        missing.append("SUPABASE_URL")
+    if requires_durable_artifact_upload():
+        if not required_service_key:
+            missing.append("SUPABASE_SERVICE_ROLE_KEY")
+        if not (os.getenv("SUPABASE_BUILDER_BUCKET") or "").strip():
+            missing.append("SUPABASE_BUILDER_BUCKET")
+    elif not service_key:
+        missing.append("SUPABASE_SERVICE_ROLE_KEY")
+    return tuple(missing)
+
+
 def _load_config() -> SupabaseConfig | None:
-    url = os.getenv("SUPABASE_URL")
-    service_role_key = (
-        os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-        or os.getenv("SUPABASE_KEY")
-    )
-    bucket = os.getenv("SUPABASE_BUILDER_BUCKET", DEFAULT_BUCKET)
+    url = (os.getenv("SUPABASE_URL") or "").strip()
+    if requires_durable_artifact_upload():
+        service_role_key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+    else:
+        service_role_key = (
+            (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+            or (os.getenv("SUPABASE_KEY") or "").strip()
+        )
+    bucket = (os.getenv("SUPABASE_BUILDER_BUCKET") or "").strip()
+    if requires_durable_artifact_upload() and not bucket:
+        return None
+    if not bucket:
+        bucket = DEFAULT_BUCKET
     if not url or not service_role_key:
         return None
     return SupabaseConfig(url=url.rstrip("/"), service_role_key=service_role_key, bucket=bucket)
@@ -78,6 +129,11 @@ def _load_config() -> SupabaseConfig | None:
 
 def is_configured() -> bool:
     return _load_config() is not None
+
+
+def configured_bucket_name() -> str | None:
+    config = _load_config()
+    return config.bucket if config is not None else None
 
 
 def _object_url(config: SupabaseConfig, object_path: str) -> str:
@@ -118,6 +174,86 @@ def normalize_object_path(object_path: str) -> str:
     if not normalized:
         raise ValueError("Supabase object path is required")
     return normalized
+
+
+def safe_object_path_segment(value: object, *, default: str = "segment") -> str:
+    text = str(value or "").strip().replace("\\", "/").strip("/")
+    text = text.replace("/", "_")
+    text = _SAFE_SEGMENT_RE.sub("_", text).strip(" ._")
+    if not text or text in {".", ".."}:
+        text = default
+    return text[:128] or default
+
+
+def safe_filename_segment(value: object, *, default: str = "artifact") -> str:
+    name = PurePosixPath(str(value or "").strip().replace("\\", "/")).name
+    return safe_object_path_segment(name, default=default)
+
+
+def _hash_id(prefix: str, *parts: object) -> str:
+    basis = "\x1f".join("" if part is None else str(part) for part in parts)
+    digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()[:24]
+    return f"{prefix}_{digest}"
+
+
+def _artifact_type_from_path(path: str, artifact_type: str | None = None) -> str:
+    lower_value = (artifact_type or "").strip().lower()
+    suffix = PurePosixPath(path).suffix.lower()
+    if suffix in {".html", ".htm"}:
+        return "html"
+    if suffix == ".pdf":
+        return "pdf"
+    if suffix in {".md", ".markdown"}:
+        return "markdown"
+    if suffix in {".pptx", ".ppt"}:
+        return "pptx"
+    if suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}:
+        return "image"
+    if lower_value in {"html", "pdf", "markdown", "pptx", "image", "visual"}:
+        return "image" if lower_value == "visual" else lower_value
+    if lower_value in {"webpage", "website"}:
+        return "html"
+    if lower_value in {"slide", "slides", "presentation", "deck"}:
+        return "pptx"
+    return lower_value or "other"
+
+
+def builder_renderer_kind(path: str, artifact_type: str | None = None) -> str:
+    normalized_type = _artifact_type_from_path(path, artifact_type)
+    if normalized_type == "pptx":
+        return "download_only"
+    if normalized_type in {"html", "pdf", "markdown", "image"}:
+        return normalized_type
+    return "metadata"
+
+
+def builder_artifact_record_id(
+    *,
+    user_id: str,
+    thread_id: str,
+    local_path: str,
+    renderer_kind: str,
+    source: str = "builder",
+) -> str:
+    logical_artifact_id = _hash_id("logical", user_id, thread_id, local_path, renderer_kind)
+    version_id = f"{logical_artifact_id}::v1"
+    return _hash_id("artifact", user_id, thread_id, local_path, renderer_kind, source, version_id)
+
+
+def builder_artifact_object_path(
+    *,
+    user_id: str,
+    thread_or_session_id: str,
+    artifact_id: str,
+    filename: str,
+) -> str:
+    return normalize_object_path(
+        "artifacts/"
+        f"{safe_object_path_segment(user_id, default='user')}/"
+        f"{safe_object_path_segment(thread_or_session_id, default='thread')}/"
+        f"{safe_object_path_segment(artifact_id, default='artifact')}/"
+        f"{safe_filename_segment(filename)}"
+    )
 
 
 def _thread_prefix(thread_id: str) -> str:
@@ -282,7 +418,7 @@ def upload_artifact(
     content_type: str | None = None,
     client: httpx.Client | None = None,
 ) -> str | None:
-    """Upload ``content`` to ``sophia_builder/{thread_id}/{filename}``.
+    """Upload ``content`` to ``{bucket}/{thread_id}/{filename}``.
 
     Returns the object path on success, ``None`` when Supabase is not
     configured, and raises :class:`httpx.HTTPError` on transport errors.
@@ -468,7 +604,7 @@ def list_artifacts(
     client: httpx.Client | None = None,
     limit: int = 1000,
 ) -> list[SupabaseArtifactInfo]:
-    """List artifacts stored under ``sophia_builder/{thread_id}/``.
+    """List artifacts stored under ``{bucket}/{thread_id}/``.
 
     Returns an empty list when Supabase is not configured or the prefix has no
     objects. Raises :class:`httpx.HTTPError` for transport or unexpected HTTP
