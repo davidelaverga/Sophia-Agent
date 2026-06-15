@@ -181,30 +181,36 @@ class TestBuilderResearchGuidance:
 
 
 class TestBuilderWorkflowCards:
-    def test_pptx_task_gets_pptx_card_without_pdf_card(self) -> None:
+    # Artifact Visual System Phase 5b: the per-type composition cards
+    # (pptx/pdf/html/visuals) are retired — composition guidance now lives in
+    # the always-injected <visual_composition> directives + the per-type
+    # skills. Only the orthogonal research card may still be injected.
+
+    def test_pptx_task_injects_directives_not_retired_pptx_card(self) -> None:
         state = _make_state("presentation")
         state["delegation_context"]["artifact_target_path"] = "/mnt/user-data/outputs/deck.pptx"
 
         result = BuilderTaskMiddleware().before_agent(state, _make_runtime())
         briefing = _briefing(result)
 
-        assert '<builder_workflow_card name="pptx"' in briefing
-        assert "image-generation/scripts/generate.py" in briefing
-        assert "ppt-generation/scripts/generate.py" in briefing
+        assert "<visual_composition>" in briefing
+        assert "ppt-generation" in briefing  # directives §5 name the deck skill
+        assert '<builder_workflow_card name="pptx"' not in briefing
         assert '<builder_workflow_card name="pdf"' not in briefing
 
-    def test_html_task_gets_html_card_without_pptx_card(self) -> None:
+    def test_html_task_injects_directives_not_retired_html_card(self) -> None:
         state = _make_state("document")
         state["delegation_context"]["artifact_target_path"] = "/mnt/user-data/outputs/report.html"
 
         result = BuilderTaskMiddleware().before_agent(state, _make_runtime())
         briefing = _briefing(result)
 
-        assert '<builder_workflow_card name="html"' in briefing
-        assert "standalone browser-renderable document" in briefing
+        assert "<visual_composition>" in briefing
+        assert "hallmark" in briefing  # directives §5 name the HTML design system
+        assert '<builder_workflow_card name="html"' not in briefing
         assert '<builder_workflow_card name="pptx"' not in briefing
 
-    def test_visual_request_gets_visuals_card_and_visual_design_skill(self) -> None:
+    def test_visual_request_injects_directives_not_retired_visuals_card(self) -> None:
         state = _make_state("document")
         state["delegation_context"]["artifact_target_path"] = "/mnt/user-data/outputs/report.pdf"
         state["delegation_context"]["description"] = "Build a PDF report with charts and diagrams"
@@ -212,6 +218,6 @@ class TestBuilderWorkflowCards:
         result = BuilderTaskMiddleware().before_agent(state, _make_runtime())
         briefing = _briefing(result)
 
-        assert '<builder_workflow_card name="visuals"' in briefing
-        assert "/mnt/skills/public/visual-design/SKILL.md" in briefing
-        assert "generate_visual_asset" in briefing
+        assert "<visual_composition>" in briefing
+        assert "pdf-report" in briefing  # directives §5 name the report skill
+        assert '<builder_workflow_card name="visuals"' not in briefing

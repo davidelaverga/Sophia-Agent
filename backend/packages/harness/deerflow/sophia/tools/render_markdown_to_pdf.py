@@ -71,32 +71,44 @@ _DEFAULT_MAX_PAGES = 15
 _TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "assets" / "sophia.latex"
 
 # Named themes — every variable is also $if$-guarded in the template, so a
-# partial or absent set never breaks compilation. Fonts come from the
-# container's fonts-liberation / fonts-dejavu-core packages.
+# partial or absent set never breaks compilation. Colors and fonts are
+# compiled from skills/public/sophia/brand/tokens.md. The brand fonts are
+# TeX Gyre (texlive-fonts-extra); the template guards each with
+# \IfFontExistsTF and falls back to Latin Modern, so an image without
+# texlive-fonts-extra still renders.
+#
+#   ink #1F2A37 · body #3A4658 · muted #6B7787 · surface #F5F7FA
+#   line #E3E8EF · blue #2E5AAC · teal #2A9D8F
+_BRAND_HEADINGFONT = "TeX Gyre Heros"      # sans, headings
+_BRAND_BODYFONT = "TeX Gyre Pagella"       # serif, body
+_BRAND_MONOFONT = "TeX Gyre Cursor"        # mono
 _PDF_THEMES: dict[str, dict[str, str]] = {
     "boardroom": {
-        "accentcolor": "1F6FB2",
-        "headingcolor": "10243E",
-        "titlepagecolor": "10243E",
-        "titlepagetextcolor": "F8FAFC",
-        "mainfont": "Liberation Serif",
-        "sansfont": "Liberation Sans",
+        "accentcolor": "2E5AAC",
+        "headingcolor": "1F2A37",
+        "titlepagecolor": "1F2A37",
+        "titlepagetextcolor": "F5F7FA",
+        "mainfont": _BRAND_BODYFONT,
+        "sansfont": _BRAND_HEADINGFONT,
+        "monofont": _BRAND_MONOFONT,
     },
     "minimal": {
-        "accentcolor": "334155",
-        "headingcolor": "0F172A",
-        "titlepagecolor": "F8FAFC",
-        "titlepagetextcolor": "0F172A",
-        "mainfont": "DejaVu Sans",
-        "sansfont": "DejaVu Sans",
+        "accentcolor": "2E5AAC",
+        "headingcolor": "1F2A37",
+        "titlepagecolor": "F5F7FA",
+        "titlepagetextcolor": "1F2A37",
+        "mainfont": _BRAND_BODYFONT,
+        "sansfont": _BRAND_HEADINGFONT,
+        "monofont": _BRAND_MONOFONT,
     },
     "warm": {
-        "accentcolor": "C2410C",
-        "headingcolor": "431407",
-        "titlepagecolor": "FFF7ED",
-        "titlepagetextcolor": "431407",
-        "mainfont": "DejaVu Serif",
-        "sansfont": "DejaVu Sans",
+        "accentcolor": "2A9D8F",
+        "headingcolor": "1F2A37",
+        "titlepagecolor": "F5F7FA",
+        "titlepagetextcolor": "1F2A37",
+        "mainfont": _BRAND_BODYFONT,
+        "sansfont": _BRAND_HEADINGFONT,
+        "monofont": _BRAND_MONOFONT,
     },
 }
 _DEFAULT_PDF_THEME = "minimal"

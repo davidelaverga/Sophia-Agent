@@ -526,6 +526,14 @@ _VISUAL_DESIGN_SKILL_PATH_MARKERS = (
     "/skills/hallmark/SKILL.md",
     "/mnt/skills/hallmark/SKILL.md",
 )
+
+# Artifact Visual System Phase 5c: the report skill the .pdf target requires.
+_PDF_REPORT_SKILL_PATH_MARKERS = (
+    "/skills/public/pdf-report/SKILL.md",
+    "/mnt/skills/public/pdf-report/SKILL.md",
+    "/skills/pdf-report/SKILL.md",
+    "/mnt/skills/pdf-report/SKILL.md",
+)
 _VISUAL_ASSET_TOOL_NAMES = frozenset({"generate_visual_asset", "generate_excalidraw_diagram"})
 _VISUAL_ASSET_EXTENSIONS = frozenset({".svg", ".png", ".jpg", ".jpeg", ".webp"})
 _WRITE_ERROR_CLASS_MARKERS = (
@@ -2006,6 +2014,10 @@ def _pptx_skill_flags_from_tool_calls(tool_calls: list[dict[str, Any]]) -> dict[
 
 
 def _visual_skill_flags_from_tool_calls(tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
+    # Artifact Visual System Phase 5c: this also records pdf-report reads so
+    # the per-target emit gate can require them (the `**visual_skill_flags`
+    # spread at the summary sites carries every key it returns).
+    flags = {"visual_design_skill_read": False, "pdf_report_skill_read": False}
     for call in tool_calls:
         if call.get("name") not in ("read_file", "read_file_tool"):
             continue
@@ -2014,8 +2026,10 @@ def _visual_skill_flags_from_tool_calls(tool_calls: list[dict[str, Any]]) -> dic
             continue
         path = str(args.get("path") or args.get("file_path") or "")
         if any(marker in path for marker in _VISUAL_DESIGN_SKILL_PATH_MARKERS):
-            return {"visual_design_skill_read": True}
-    return {"visual_design_skill_read": False}
+            flags["visual_design_skill_read"] = True
+        if any(marker in path for marker in _PDF_REPORT_SKILL_PATH_MARKERS):
+            flags["pdf_report_skill_read"] = True
+    return flags
 
 
 def _visual_design_skill_read_seen(state: dict[str, Any]) -> bool:
@@ -2030,6 +2044,40 @@ def _visual_design_skill_read_seen(state: dict[str, Any]) -> bool:
     return isinstance(diagnostics, dict) and bool(
         diagnostics.get("visual_design_skill_read") or diagnostics.get("design_skill_read")
     )
+
+
+def _pdf_report_skill_read_seen(state: dict[str, Any]) -> bool:
+    summaries = state.get("builder_tool_turn_summaries") or []
+    return any(
+        bool(summary.get("pdf_report_skill_read"))
+        for summary in summaries
+        if isinstance(summary, dict)
+    )
+
+
+def _target_skill_read_seen(state: dict[str, Any], target_ext: str) -> bool:
+    """Phase 5c: has the skill REQUIRED for this artifact target been read?
+
+    .pptx → ppt-generation, .pdf → pdf-report, .html → hallmark (the
+    hallmark markers live in the visual-design read set). Targets without a
+    required skill (.md/.csv/…) return True (nothing to gate).
+    """
+    if target_ext == ".pptx":
+        return _pptx_skill_read_seen(state)
+    if target_ext == ".pdf":
+        return _pdf_report_skill_read_seen(state)
+    if target_ext in {".html", ".htm"}:
+        return _visual_design_skill_read_seen(state)
+    return True
+
+
+# Phase 5c: the read_file path + human name for each gated target.
+_TARGET_REQUIRED_SKILL: dict[str, tuple[str, str]] = {
+    ".pptx": ("/mnt/skills/public/ppt-generation/SKILL.md", "ppt-generation"),
+    ".pdf": ("/mnt/skills/public/pdf-report/SKILL.md", "pdf-report"),
+    ".html": ("/mnt/skills/public/hallmark/SKILL.md", "hallmark"),
+    ".htm": ("/mnt/skills/public/hallmark/SKILL.md", "hallmark"),
+}
 
 
 def _visuals_requested(state: dict[str, Any]) -> bool:
@@ -2527,7 +2575,7 @@ def _pptx_skill_correction_message(state: dict[str, Any]) -> str:
         "4. If image-generation is enabled for this run, use it for covers, "
         "section openers, or illustrative assets. Use generate_visual_asset for "
         "charts with explicit labeled data and generate_excalidraw_diagram with "
-        "raw Mermaid for technical diagrams. If image generation fails, continue "
+        "graphviz nodes/edges for technical diagrams. If image generation fails, continue "
         "with diagram/chart/text layouts — never let imagery block the deliverable.\n"
         "5. Emit only after the `.pptx` exists and is a valid PowerPoint package.\n\n"
         "If deck composition or validation cannot complete after this correction, "
@@ -2648,6 +2696,9 @@ class BuilderArtifactState(AgentState):
     builder_non_artifact_turns: NotRequired[int]
     builder_last_tool_names: NotRequired[list[str]]
     builder_tool_turn_summaries: NotRequired[list[dict]]
+    # Phase 5c latch: the per-target skill-read gate forces the skill read at
+    # most ONCE per build (the earlier-churn lesson), then never re-forces.
+    builder_target_skill_read_forced: NotRequired[bool]
     builder_research_diagnostics: NotRequired[dict]
     builder_update_epoch: NotRequired[int]
     builder_update_required_urls: NotRequired[list[str]]
@@ -5966,7 +6017,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         content=(
                             "Error: visual asset creation is blocked until you read "
                             "`/mnt/skills/public/visual-design/SKILL.md`. Then retry "
-                            "with labeled chart data or a raw Mermaid diagram."
+                            "with labeled chart data or graphviz nodes/edges."
                         ),
                         tool_call_id=tool_call_id,
                         name=str(tool_name),
@@ -5974,6 +6025,55 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     )
                 ],
                 "builder_visual_design_correction_emitted": True,
+            },
+            goto="model",
+        )
+
+    def _block_emit_before_target_skill(
+        self,
+        request: ToolCallRequest,
+    ) -> Command | None:
+        """Artifact Visual System Phase 5c: you cannot emit a typed deliverable
+        without first reading its skill.
+
+        For a .pptx/.pdf/.html target whose matching skill
+        (ppt-generation/pdf-report/hallmark) has not been read, force the read
+        ONCE, then latch (``builder_target_skill_read_forced``) so the build is
+        never trapped if the model proceeds anyway — the earlier-churn lesson.
+        """
+        if request.tool_call.get("name") != "emit_builder_artifact":
+            return None
+        target_ext = _requested_target_suffix(request.state)
+        required = _TARGET_REQUIRED_SKILL.get(target_ext)
+        if required is None:
+            return None
+        if _target_skill_read_seen(request.state, target_ext):
+            return None
+        if request.state.get("builder_target_skill_read_forced"):
+            return None  # already forced once — do not trap the build
+        skill_path, skill_name = required
+        tool_call_id = request.tool_call.get("id")
+        logger.warning(
+            "[BuilderArtifact] emit_before_target_skill_blocked target_ext=%s skill=%s",
+            target_ext,
+            skill_name,
+        )
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=(
+                            f"Error: emit_builder_artifact is blocked until you read the "
+                            f"{skill_name} skill for this {target_ext} deliverable. Call "
+                            f"`read_file(path='{skill_path}')` first, follow its design "
+                            "system and workflow, then emit. (This check fires once.)"
+                        ),
+                        tool_call_id=tool_call_id,
+                        name="emit_builder_artifact",
+                        status="error",
+                    )
+                ],
+                "builder_target_skill_read_forced": True,
             },
             goto="model",
         )
@@ -6406,7 +6506,6 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         visual_design_block = self._block_visual_asset_before_design_skill(request)
         if visual_design_block is not None:
             return visual_design_block
-
         if request.tool_call.get("name") != "emit_builder_artifact":
             image_block = self._image_generation_block_command(request)
             if image_block is not None:
@@ -6428,6 +6527,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 original_target_ext,
                 _requested_target_suffix(request.state).lstrip("."),
             )
+        # Phase 5c runs AFTER the format-conflict override so it gates the
+        # RESOLVED target's skill (not a misderived dispatch target).
+        target_skill_block = self._block_emit_before_target_skill(request)
+        if target_skill_block is not None:
+            return target_skill_block
         authoritative_pdf_args = self._authoritative_pdf_emit_args(args, request.state, request.runtime)
         if authoritative_pdf_args is not None:
             request.tool_call["args"] = authoritative_pdf_args
@@ -6708,7 +6812,6 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         visual_design_block = self._block_visual_asset_before_design_skill(request)
         if visual_design_block is not None:
             return visual_design_block
-
         if request.tool_call.get("name") != "emit_builder_artifact":
             image_block = self._image_generation_block_command(request)
             if image_block is not None:
@@ -6728,6 +6831,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 original_target_ext,
                 _requested_target_suffix(request.state).lstrip("."),
             )
+        # Phase 5c runs AFTER the format-conflict override so it gates the
+        # RESOLVED target's skill (not a misderived dispatch target).
+        target_skill_block = self._block_emit_before_target_skill(request)
+        if target_skill_block is not None:
+            return target_skill_block
         authoritative_pdf_args = self._authoritative_pdf_emit_args(args, request.state, request.runtime)
         if authoritative_pdf_args is not None:
             request.tool_call["args"] = authoritative_pdf_args

@@ -14,6 +14,10 @@ def test_langgraph_dockerfile_installs_pdf_runtime() -> None:
         "texlive-latex-recommended",
         "texlive-latex-extra",
         "texlive-fonts-recommended",
+        # Artifact Visual System: TeX Gyre brand fonts (PDF) + graphviz (the
+        # `dot` binary backing the ported diagram tool).
+        "texlive-fonts-extra",
+        "graphviz",
         "lmodern",
         "fonts-dejavu-core",
         "chromium",
@@ -23,10 +27,16 @@ def test_langgraph_dockerfile_installs_pdf_runtime() -> None:
     assert "pandoc --version" in contents
     assert "xelatex --version" in contents
     assert "chromium --version" in contents
+    assert "dot -V" in contents  # graphviz present
     assert "deerflow/sophia/js" in contents
     assert "npm ci" in contents
     assert "compile_pptx.mjs" in contents
     assert "pptxgenjs" in contents
-    assert "@excalidraw/excalidraw" in contents
+    # The mermaid→excalidraw diagram stack was retired (graphviz port); the
+    # Node verify block no longer resolves excalidraw or tests compile_diagram.
+    assert "@excalidraw/excalidraw" not in contents
+    # The build no longer verifies/depends on the retired diagram compiler
+    # (an explanatory comment may still mention the file by name).
+    assert "test -f compile_diagram.mjs" not in contents
     assert "SOPHIA_ARTIFACT_JS_RUNTIME" in contents
     assert "SOPHIA_PPTXGENJS=1" in contents

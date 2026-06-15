@@ -28,11 +28,11 @@ class TestSophiaRolePromptFiles:
             "coordination_core.md",
             "companion_delegation.md",
             "builder_obligations.md",
-            "builder_workflows/pptx.md",
-            "builder_workflows/pdf.md",
-            "builder_workflows/html.md",
+            # Artifact Visual System Phase 5: the per-type composition cards
+            # (pptx/pdf/html/visuals) were retired; composition guidance moved
+            # into the always-injected directives. Research card is orthogonal.
+            "visual_composition.md",
             "builder_workflows/research.md",
-            "builder_workflows/visuals.md",
         ]:
             path = SOPHIA_PROMPT_ROOT / name
             assert path.is_file(), f"missing: {path}"

@@ -901,9 +901,13 @@ def test_template_asset_exists_and_keeps_stock_blocks():
     assert "fancyhdr" in text
     assert "titlesec" in text
     assert "\\nopagecolor" in text
-    # Packages NOT available in the container image must never appear.
+    # Artifact Visual System Phase 3b: tcolorbox (statbox callout) is now an
+    # intentional, \\IfFileExists-guarded part of the brand template — it
+    # ships with texlive-latex-extra (in the image). tikz/fontawesome/
+    # sourcesanspro remain off the whitelist.
+    assert "tcolorbox" in text
+    assert "statbox" in text
     assert "tikz" not in text
-    assert "tcolorbox" not in text
     assert "fontawesome" not in text
     assert "sourcesanspro" not in text
 
@@ -937,12 +941,12 @@ def test_template_and_default_theme_vars_present(tmp_path, monkeypatch):
     assert template_args[0].endswith("sophia.latex")
     # Default theme is minimal.
     assert "-V" in cmd
-    assert "accentcolor=334155" in cmd
-    assert "headingcolor=0F172A" in cmd
-    assert "titlepagecolor=F8FAFC" in cmd
-    assert "titlepagetextcolor=0F172A" in cmd
-    assert "mainfont=DejaVu Sans" in cmd
-    assert "sansfont=DejaVu Sans" in cmd
+    assert "accentcolor=2E5AAC" in cmd
+    assert "headingcolor=1F2A37" in cmd
+    assert "titlepagecolor=F5F7FA" in cmd
+    assert "titlepagetextcolor=1F2A37" in cmd
+    assert "mainfont=TeX Gyre Pagella" in cmd
+    assert "sansfont=TeX Gyre Heros" in cmd
     # No frontmatter → defaults injected, but NO cover page without a title.
     assert "author=Sophia" in cmd
     assert any(arg.startswith("date=") for arg in cmd)
@@ -971,12 +975,12 @@ def test_explicit_theme_param_overrides_frontmatter_theme(tmp_path, monkeypatch)
     assert result["success"] is True
     assert result["theme"] == "boardroom"
     cmd = calls[0]
-    assert "accentcolor=1F6FB2" in cmd
-    assert "headingcolor=10243E" in cmd
-    assert "mainfont=Liberation Serif" in cmd
-    assert "sansfont=Liberation Sans" in cmd
+    assert "accentcolor=2E5AAC" in cmd
+    assert "headingcolor=1F2A37" in cmd
+    assert "mainfont=TeX Gyre Pagella" in cmd
+    assert "sansfont=TeX Gyre Heros" in cmd
     # Frontmatter theme (warm) must NOT leak through.
-    assert "accentcolor=C2410C" not in cmd
+    assert "accentcolor=2A9D8F" not in cmd
     # Title present in frontmatter → cover page requested.
     assert "titlepage=true" in cmd
 
@@ -1001,8 +1005,8 @@ def test_frontmatter_theme_selected_when_param_absent(tmp_path, monkeypatch):
 
     assert result["theme"] == "warm"
     cmd = calls[0]
-    assert "accentcolor=C2410C" in cmd
-    assert "mainfont=DejaVu Serif" in cmd
+    assert "accentcolor=2A9D8F" in cmd
+    assert "mainfont=TeX Gyre Pagella" in cmd
 
 
 def test_frontmatter_author_and_date_suppress_default_vars(tmp_path, monkeypatch):
@@ -1164,7 +1168,7 @@ def test_unknown_theme_falls_back_to_default(tmp_path, monkeypatch):
     # Never errors — silently styled with the default theme.
     assert result["success"] is True
     assert result["theme"] == "minimal"
-    assert "accentcolor=334155" in calls[0]
+    assert "accentcolor=2E5AAC" in calls[0]
 
 
 @pytest.mark.skipif(

@@ -1,90 +1,51 @@
 ---
 name: pdf-report
-description: Use this skill when the builder needs to create a polished PDF report, brief, explainer, technical document, or visual report. The skill guides source-first report writing, local charts/diagrams, PDF rendering, quality inspection, and truthful fallback.
+description: Use this skill whenever the builder must create a PDF report, brief, explainer, or technical document. It preserves the pipeline's strengths (auto table-of-contents, citations, pagination) by authoring source for pandoc+LaTeX, and applies the visual-director logic so figures vary and fit. Read before building any report.
 ---
 
-# PDF Report Skill
+# Sophia Report Skill — PDF
 
-## Purpose
+You are authoring a **report**: substance-forward, prose carries the argument, visuals *earn their place*. Avoid both failures — a wall of text, and a deck-in-disguise where every page is a graphic. Keep it consistent: one design language, figures that look like a set.
 
-Create a high-quality PDF by orchestrating DeerFlow research/data/chart skills,
-authoring a rich Markdown or HTML source document, then compiling it with
-`render_markdown_to_pdf`. The renderer packages the report; it is not the
-creative author.
+The renderer (`render_markdown_to_pdf` → pandoc → xelatex, Sophia template) typesets and handles citations/TOC; *you* author and art-direct.
 
-Do not use `create_pdf_artifact` for normal reports. That helper is only for
-explicit smoke tests, demos, or "simple PDF" checks.
+> **Report type:** this is the research/technical report (pandoc+LaTeX). A *visual report* (magazine/pitch, HTML→Chromium + hallmark) is a separate product — don't use this skill for that.
 
-## Workflow
+## 1. Source-first
+Author **Markdown**, then render. Markdown-first is what lets pandoc do references, TOC, page breaks, footnotes automatically. Plan the section spine and where each visual goes before writing. Add a figure only where it beats the paragraph it replaces.
 
-1. Plan with `write_todos`.
-2. For factual reports, use DeerFlow's research skills before writing:
-   `/mnt/skills/public/deep-research/SKILL.md` for general source synthesis,
-   `/mnt/skills/public/academic-paper-review/SKILL.md` for one paper, or
-   `/mnt/skills/public/systematic-literature-review/SKILL.md` for a survey
-   across papers. If `builder_web_search` returns usable factual sources,
-   fetch at least one approved result with `builder_web_fetch`.
-3. For charts, diagrams, visual explanations, or visual reports, use
-   `/mnt/skills/public/chart-visualization/SKILL.md` to choose chart/diagram
-   forms and data shape. Then create embeddable local assets under
-   `/mnt/user-data/outputs/visuals/`: use `generate_excalidraw_diagram` for
-   architecture, process, sequence, timeline, system-map, comparison, cycle,
-   or concept-map diagrams; use `generate_visual_asset` for numeric charts
-   and simple data-shaped visuals. Read `/mnt/skills/public/visual-design/SKILL.md`
-   as design guidance, not as a replacement for the report content.
-4. Write a report source under `/mnt/user-data/outputs/`, usually
-   `/mnt/user-data/outputs/<slug>.md`. Use HTML source only when the layout
-   needs richer visual structure.
-5. Reference local PNG visuals in the source with relative paths such as
-   `![Architecture](visuals/architecture.png)` or virtual output paths such
-   as `![Architecture](/mnt/user-data/outputs/visuals/architecture.png)`.
-6. Render with:
+## 2. Keep what works — write *for* pandoc
+- **TOC:** generated from clean `#`/`##`/`###` headings — don't fake structure with bold.
+- **Pagination:** xelatex owns page breaks; don't hand-place them.
+- **Citations:** cite inline; pandoc assembles the ordered reference list. Every researched claim carries a citation. **Never invent sources.**
+- **Tables:** Markdown tables for tabular data; the template styles them.
+- Do **not** drop to `reportlab`/`fpdf` or `create_pdf_artifact` — they bypass structure, citations, and design.
 
-```text
-render_markdown_to_pdf(markdown_path="/mnt/user-data/outputs/<slug>.md", pdf_path="/mnt/user-data/outputs/<slug>.pdf")
-```
+## 3. Decide the treatment (full taxonomy in the always-on directives)
+Prose is the default; a visual must beat the paragraph. Connected structure → node diagram (graphviz). Quantitative → chart. Comparison → table/grouped bar. One/few numbers → `tcolorbox` stat callout (not a chart). Time → timeline. Concept/opener with no technical fit → illustration (sparingly, §5). Don't force a node graph on a non-relational idea; a single number is a callout.
 
-7. Inspect the render result. If it reports missing images, sparse layout, or
-   unusable quality, repair the source once and render again.
-8. Emit the valid `.pdf` immediately after quality passes.
+## 4. Variety
+Vary figure types across sections (don't repeat one diagram style section after section — a real prior defect). Not every section needs a figure; some are pure prose. One consistent figure language (shared chart palette, shared graphviz styling, one illustration style).
 
-## Report Quality
+## 5. The substance toolkit
+- **Charts** (`chart-visualization`, `data-analysis`) — the workhorse; **real labels and values**, no "Item N", no fabricated data, no chart without data; clean (no 3-D/chartjunk).
+- **Diagrams** (`generate_excalidraw_diagram`, graphviz) — connected nodes only; short single-line labels.
+- **Illustrations** (`image-generation`) — **sparing accents** (cover, section opener, occasional concept), concrete and beautiful, one style across the document. Heavily-conceptual reports may lean on them more, but they still earn clarity. If preflight fails, drop and let prose/figures carry.
 
-- Default unspecified length: 10-15 pages for substantial technical reports,
-  shorter when the user explicitly asks for a concise document.
-- Use strong section hierarchy, compact tables, source notes, and concrete
-  examples.
-- Use DeerFlow research skills to shape the substance; use this skill to turn
-  that substance into a durable PDF source/render pipeline.
-- Avoid one-section-per-page layouts, excessive page breaks, mostly empty
-  continuation pages, and oversized tables that waste pages.
-- For visual requests, include at least one actual embedded chart/diagram
-  asset. Prose descriptions of visuals are not enough.
+**Embed PNG, not SVG.** xelatex embeds PNG reliably but not SVG — so for every figure in the report use the **`.png`** the tool emits (the graphviz diagram tool produces both PNG and SVG; PNG is for the PDF, SVG is for HTML). Figures enter as `![caption](assets/figure.png)`; the template handles placement, numbering, and captions.
 
-## Visual Rules
+## 6. Design system (LaTeX-native, from brand tokens)
+The look comes from the Sophia LaTeX template — the LaTeX expression of `brand/tokens.md` (brand fonts via fontspec, brand palette in headings/rules/links/`tcolorbox`, modern `titlesec`, branded `fancyhdr`, generous `geometry`). You write clean Markdown; the template applies the system. Hierarchy via type and color, sufficient contrast, no clutter.
 
-- Use `chart-visualization` to decide the right visual grammar.
-- Use `generate_excalidraw_diagram` for technical diagrams: architecture,
-  process flows, concept maps, timelines, cycles, system maps, comparisons,
-  and sequences.
-- Use `generate_visual_asset` for local embeddable bar/line/pie charts,
-  comparison matrices, quadrants, and compact data visuals.
-- Use image-generation only when the user explicitly asks for generated
-  images, illustrations, visual scenes, or artwork.
-- Never use remote chart URLs as final visual evidence. All deliverable
-  visuals must be local assets under `/mnt/user-data/outputs/visuals/` or
-  inline source visuals.
+**Mechanics:** select the brand theme via the `render_markdown_to_pdf(theme=…)` param or a `sophia-theme:` key in the source's YAML frontmatter; `title:` (and optional `subtitle:`) frontmatter produces the cover page; the table of contents is generated automatically for longer documents — no extra flags. Default length when unspecified: ~10–15 pages; avoid forced page breaks, sparse tables, and mostly-empty continuation pages.
 
-## Failure And Fallback
+## 7. Workflow
+1. **Plan** (`write_todos`): section spine + figure placements + variety check.
+2. **Research** with the skill matching the request: `deep-research` (general topic), `academic-paper-review` (one paper), `systematic-literature-review` (multi-paper survey). Capture citations as you go.
+3. **Author the Markdown** — clean headings (drive the TOC), prose-first, tables, inline citations, PNG figure refs.
+4. **Generate visuals** — charts (real labels + data), diagrams (short labels, graphviz, PNG for embedding), any illustrations (one style).
+5. **Render** with `render_markdown_to_pdf` — TOC and references auto-generate. After it returns, **check the result**: if it reports `images_missing`/`missing_resources`, fix the image references and render **once more** (the harness allows one repair turn; a visuals-requested PDF with zero embedded images is rejected).
+6. **Inspect & QA** (§8), fix once, then emit the `.pdf` — it is authoritative; do not emit the `.md`/`.html` source.
 
-A valid rendered PDF is authoritative. If rendering is unavailable or the PDF
-remains unusable after the bounded repair pass, emit a real Markdown or HTML
-fallback only when it is a usable user-facing document and the completion is
-marked with:
-
-- `requested_artifact_ext="pdf"`
-- `artifact_is_fallback=true`
-- `fallback_reason="pdf_generation_failed"` or a similarly safe reason
-
-Never emit helper scripts, test files, missing paths, or raw sources as a
-normal PDF success.
+## 8. QA checklist
+Structure (TOC correct; clean hierarchy; logical order) · Citations (inline → generated ordered references; no invented sources) · Correctness (real chart/diagram labels and values; no "Item N"/blanks; no overflow) · Variety (figure types rotate; not every section a figure) · Legibility & cohesion (brand fonts/palette; contrast; one figure language) · Pagination (no stranded headings/figures). Structurally-correct but monotonous/under-designed fails QA.

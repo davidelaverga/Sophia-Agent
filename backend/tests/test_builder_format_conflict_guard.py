@@ -47,6 +47,9 @@ def _state(
         "builder_update_epoch": update_epoch,
         "builder_tool_turn_summaries": [],
         "builder_web_budget": {"search_calls": 1, "fetch_calls": 1},
+        # These tests exercise the format-conflict guard, not the Phase 5c
+        # per-target skill-read gate — latch it so emit reaches the conflict path.
+        "builder_target_skill_read_forced": True,
     }
 
 
