@@ -21,6 +21,7 @@ from app.gateway.artifact_registry import (
     ArtifactSource,
     ArtifactUpsertRequest,
     open_response_for_record,
+    validate_artifact_storage_object_path,
 )
 from app.gateway.auth import require_authenticated_user
 from app.gateway.html_quick_patch import (
@@ -150,6 +151,7 @@ async def upsert_user_artifact(
     authenticated_user_id: str = Depends(require_authenticated_user),
 ) -> ArtifactOpenResponse:
     _require_thread_owner(authenticated_user_id, request_body.thread_id)
+    await _authorize_artifact_upsert_thread_references(request_body, authenticated_user_id)
     record = _artifact_registry.upsert(request_body, user_id=authenticated_user_id)
     return open_response_for_record(record)
 
@@ -318,8 +320,6 @@ def _registry_artifact_thread_ids(record: ArtifactRecord) -> tuple[str, ...]:
     add(record.task_id)
     add(record.run_id)
     add(record.parent_thread_id)
-    storage_thread_id = _thread_id_from_storage_object_path(record.storage_object_path)
-    add(storage_thread_id)
     return tuple(thread_ids)
 
 
@@ -386,6 +386,57 @@ def _iso_timestamp_value(value: str | None) -> float:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return 0.0
+
+
+async def _authorize_artifact_upsert_thread_references(
+    request_body: ArtifactUpsertRequest,
+    authenticated_user_id: str | None,
+) -> None:
+    """Authorize the thread references on an upsert at the write boundary.
+
+    Codex P1 PR #131: ``storage_object_path`` is anchored to ``thread_id`` by
+    ``validate_artifact_storage_object_path``, but ``parent_thread_id`` /
+    ``task_id`` / ``run_id`` are still accepted verbatim and are added to the
+    serve-time thread set in ``_registry_artifact_thread_ids`` — so a forged
+    ``task_id`` pointing at another thread is fetched with the SERVICE-ROLE key
+    through ``_try_serve_from_supabase``. Authorize these references here, where
+    the live session + builder-task association is available, against the
+    ownership-verified target thread plus its SERVER-DERIVED associated
+    builder-task threads. The serve path then keeps trusting the stored record,
+    so cross-session artifact access (after the session/state is gone) still
+    works for legitimately-created records.
+    """
+    target_thread_id = (request_body.thread_id or "").strip()
+    authorized_thread_ids: set[str] = set()
+    if target_thread_id:
+        authorized_thread_ids.add(target_thread_id)
+        authorized_thread_ids.update(
+            await _builder_task_thread_ids_to_check(target_thread_id)
+        )
+
+    def _thread_reference_ok(value: str | None) -> bool:
+        candidate = (value or "").strip()
+        return (
+            not candidate
+            or candidate in authorized_thread_ids
+            or _is_thread_owner(authenticated_user_id, candidate)
+        )
+
+    for field_name, value in (
+        ("parent_thread_id", request_body.parent_thread_id),
+        ("task_id", request_body.task_id),
+        ("run_id", request_body.run_id),
+    ):
+        if not _thread_reference_ok(value):
+            logger.warning(
+                "Artifact upsert referenced unauthorized %s: user_id=%s thread_id=%s",
+                field_name,
+                _short_id(authenticated_user_id),
+                _short_id(target_thread_id),
+            )
+            raise HTTPException(
+                status_code=403, detail="Artifact references an unauthorized thread"
+            )
 
 
 def _require_thread_owner(authenticated_user_id: str | None, thread_id: str) -> None:
@@ -808,19 +859,26 @@ def _try_serve_registry_storage_object(
     *,
     force_download: bool = False,
 ) -> Response | None:
-    object_path = record.storage_object_path
-    if not isinstance(object_path, str) or not object_path.strip():
-        return None
     if record.storage_provider not in {"supabase", "hybrid"}:
         return None
     try:
+        object_path = validate_artifact_storage_object_path(
+            record.storage_object_path,
+            thread_id=record.thread_id,
+            session_id=record.session_id,
+            user_id=record.user_id,
+        )
+        if object_path is None:
+            return None
         result = supabase_artifact_store.download_artifact_object(object_path)
-    except ValueError as exc:
+    except (HTTPException, ValueError) as exc:
         logger.warning(
             "Unsafe artifact storage object path rejected: artifact_id=%s error=%s",
             record.artifact_id,
             exc,
         )
+        if isinstance(exc, HTTPException):
+            raise exc
         raise HTTPException(status_code=403, detail="Unsafe artifact storage path") from exc
     except Exception:  # noqa: BLE001 — network/transport failure
         logger.exception(

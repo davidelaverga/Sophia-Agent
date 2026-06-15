@@ -47,9 +47,19 @@ jobs:
         run: |
           nohup uv run langgraph dev --host 127.0.0.1 --port 2024 --no-browser \
             --allow-blocking --no-reload --n-jobs-per-worker 4 > /tmp/lg.log 2>&1 &
+          ready=0
           for i in $(seq 1 60); do
-            curl -fsS http://127.0.0.1:2024/ok && break || sleep 2
+            if curl -fsS http://127.0.0.1:2024/ok; then
+              ready=1
+              break
+            fi
+            sleep 2
           done
+          if [ "$ready" -ne 1 ]; then
+            echo "LangGraph did not become ready for anthropic visual evals." >&2
+            tail -n 200 /tmp/lg.log >&2 || true
+            exit 1
+          fi
 
       - name: Matrix — anthropic
         working-directory: backend
@@ -62,9 +72,19 @@ jobs:
           sleep 3
           SOPHIA_BUILDER_FORCE_PROVIDER=openai nohup uv run langgraph dev --host 127.0.0.1 \
             --port 2024 --no-browser --allow-blocking --no-reload --n-jobs-per-worker 4 > /tmp/lg2.log 2>&1 &
+          ready=0
           for i in $(seq 1 60); do
-            curl -fsS http://127.0.0.1:2024/ok && break || sleep 2
+            if curl -fsS http://127.0.0.1:2024/ok; then
+              ready=1
+              break
+            fi
+            sleep 2
           done
+          if [ "$ready" -ne 1 ]; then
+            echo "LangGraph did not become ready for forced-openai visual evals." >&2
+            tail -n 200 /tmp/lg2.log >&2 || true
+            exit 1
+          fi
 
       - name: Matrix — openai (forced)
         working-directory: backend

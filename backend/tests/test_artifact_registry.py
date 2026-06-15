@@ -132,6 +132,33 @@ def test_registry_is_user_scoped(tmp_path) -> None:
     assert registry.list(user_id="missing-user").total == 0
 
 
+def test_local_registry_rejects_unsafe_user_ids(tmp_path) -> None:
+    registry = LocalArtifactRegistry(tmp_path)
+
+    with pytest.raises(HTTPException) as exc_info:
+        registry.list(user_id="../user-1")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Invalid artifact user scope"
+    assert not (tmp_path.parent / "user-1" / "artifacts" / "registry.json").exists()
+
+
+def test_artifact_routes_reject_unsafe_authenticated_user_id(tmp_path, monkeypatch) -> None:
+    registry = LocalArtifactRegistry(tmp_path / "artifact-registry")
+    store = SessionStore(tmp_path / "users")
+    monkeypatch.setattr(artifacts_router, "_artifact_registry", registry)
+    monkeypatch.setattr(artifacts_router, "_session_store", store)
+
+    app = FastAPI()
+    app.include_router(artifacts_router.router)
+    app.dependency_overrides[require_authenticated_user] = lambda: "../user-1"
+
+    response = TestClient(app).get("/api/artifacts")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid artifact user scope"
+
+
 def test_registry_rejects_unsafe_paths_and_raw_content(tmp_path) -> None:
     registry = LocalArtifactRegistry(tmp_path)
 
@@ -903,7 +930,7 @@ def test_content_endpoint_serves_registry_artifact_from_supabase_object(tmp_path
             mime_type="text/markdown",
             storage_provider="supabase",
             storage_bucket="sophia_builder",
-            storage_object_path="artifacts/user-1/session-1/artifact-1/remote.md",
+            storage_object_path="thread-1/outputs/remote.md",
         ),
         user_id="user-1",
     )
@@ -912,7 +939,7 @@ def test_content_endpoint_serves_registry_artifact_from_supabase_object(tmp_path
 
     assert response.status_code == 200
     assert response.text == "# Remote\n\nstored in supabase"
-    assert requested_paths == ["artifacts/user-1/session-1/artifact-1/remote.md"]
+    assert requested_paths == ["thread-1/outputs/remote.md"]
 
 
 def test_content_and_download_return_404_when_registry_object_missing(tmp_path, monkeypatch) -> None:
@@ -926,6 +953,7 @@ def test_content_and_download_return_404_when_registry_object_missing(tmp_path, 
         "download_artifact",
         lambda *, thread_id, filename: legacy_calls.append(filename) or None,
     )
+
     artifact = registry.upsert(
         _request(
             local_path="outputs/remote.md",
@@ -948,6 +976,59 @@ def test_content_and_download_return_404_when_registry_object_missing(tmp_path, 
     assert "service" not in content.text.lower()
     assert legacy_calls == []
 
+
+def test_upsert_endpoint_rejects_cross_thread_supabase_object_path(tmp_path, monkeypatch) -> None:
+    client, _registry = _owned_app(tmp_path, monkeypatch)
+
+    payload = _request(
+        local_path="outputs/remote.md",
+        renderer_kind="markdown",
+        artifact_type="markdown",
+        mime_type="text/markdown",
+        storage_provider="supabase",
+        storage_bucket="sophia_builder",
+        storage_object_path="thread-2/outputs/secret.md",
+    ).model_dump(mode="json", exclude_none=True)
+
+    response = client.post("/api/artifacts/upsert", json=payload)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Artifact storage path must belong to the artifact thread"
+
+
+def test_content_endpoint_rejects_legacy_cross_thread_supabase_object_path(tmp_path, monkeypatch) -> None:
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    missing_file = tmp_path / "missing" / "remote.md"
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: missing_file)
+    requested_paths: list[str] = []
+
+    def download_object(object_path: str):
+        requested_paths.append(object_path)
+        return b"secret", "text/markdown"
+
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "download_artifact_object", download_object)
+    artifact = registry.upsert(
+        _request(
+            local_path="outputs/remote.md",
+            renderer_kind="markdown",
+            artifact_type="markdown",
+            mime_type="text/markdown",
+            storage_provider="supabase",
+            storage_bucket="sophia_builder",
+            storage_object_path="thread-1/outputs/remote.md",
+        ),
+        user_id="user-1",
+    )
+    registry.upsert_record(
+        artifact.model_copy(update={"storage_object_path": "thread-2/outputs/secret.md"}),
+        user_id="user-1",
+    )
+
+    response = client.get(f"/api/artifacts/{artifact.artifact_id}/content")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Artifact storage path must belong to the artifact thread"
+    assert requested_paths == []
 
 def test_content_endpoint_rejects_unsafe_supabase_object_path() -> None:
     with pytest.raises(ValidationError, match="Unsafe artifact storage path"):
@@ -1189,3 +1270,115 @@ def test_builder_terminal_failed_storage_event_does_not_create_registry_row(tmp_
     })
 
     assert registry.list(user_id="user-1", filters=ArtifactRegistryFilters(include_hidden=True)).total == 0
+
+
+# ---------------------------------------------------------------------------
+# Codex P1 (PR #131) follow-up: close the two gaps left after
+# `validate_artifact_storage_object_path` anchored storage_object_path to
+# thread_id — (1) forged parent_thread_id/task_id/run_id still flowed into the
+# serve-time thread set and were fetched with the service-role key; (2) an
+# object path under the owner's OWN thread could still address an internal
+# keyspace (ledger/uploads/builder support).
+# ---------------------------------------------------------------------------
+
+
+def _set_associated_builder_tasks(monkeypatch, *thread_ids: str) -> None:
+    async def _fake(_parent_thread_id: str):
+        return tuple(thread_ids)
+
+    monkeypatch.setattr(artifacts_router, "_builder_task_thread_ids_to_check", _fake)
+
+
+@pytest.mark.parametrize("field", ["task_id", "run_id", "parent_thread_id"])
+def test_upsert_endpoint_rejects_forged_thread_reference(tmp_path, monkeypatch, field) -> None:
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    _set_associated_builder_tasks(monkeypatch)  # no associated builder tasks
+
+    payload = _request(**{field: "victim-thread"}).model_dump(mode="json", exclude_none=True)
+    response = client.post("/api/artifacts/upsert", json=payload)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Artifact references an unauthorized thread"
+    assert registry.list(user_id="user-1").artifacts == []
+
+
+def test_upsert_endpoint_allows_associated_builder_task_reference(tmp_path, monkeypatch) -> None:
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    _set_associated_builder_tasks(monkeypatch, "builder-task-1")
+
+    payload = _request(task_id="builder-task-1").model_dump(mode="json", exclude_none=True)
+    response = client.post("/api/artifacts/upsert", json=payload)
+
+    assert response.status_code == 200
+    assert len(registry.list(user_id="user-1").artifacts) == 1
+
+
+@pytest.mark.parametrize(
+    "object_path",
+    [
+        "thread-1/ledger/session.jsonl",
+        "thread-1/uploads/secret.pdf",
+        "thread-1/.builder/state.json",
+        "thread-1/outputs/report.plan.json",
+    ],
+)
+def test_upsert_endpoint_rejects_internal_keyspace_object_path(tmp_path, monkeypatch, object_path) -> None:
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    _set_associated_builder_tasks(monkeypatch)
+
+    payload = _request(
+        local_path="outputs/remote.md",
+        renderer_kind="markdown",
+        artifact_type="markdown",
+        mime_type="text/markdown",
+        storage_provider="supabase",
+        storage_bucket="sophia_builder",
+        storage_object_path=object_path,
+    ).model_dump(mode="json", exclude_none=True)
+
+    response = client.post("/api/artifacts/upsert", json=payload)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Artifact references an internal keyspace"
+    assert registry.list(user_id="user-1").artifacts == []
+
+
+def test_content_endpoint_refuses_internal_keyspace_storage_object(tmp_path, monkeypatch) -> None:
+    """Serve-time defense-in-depth: a record whose storage_object_path was
+    injected outside the validated write path (server-side / migrated / legacy)
+    must never serve an internal keyspace object through the service-role key."""
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    missing_file = tmp_path / "missing" / "remote.md"
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _t, _p: missing_file)
+
+    object_calls: list[str] = []
+
+    def download_object(object_path: str):
+        object_calls.append(object_path)
+        return b"INTERNAL LEDGER BYTES", "application/json"
+
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "download_artifact_object", download_object)
+
+    artifact = registry.upsert(
+        _request(
+            local_path="outputs/remote.md",
+            renderer_kind="markdown",
+            artifact_type="markdown",
+            mime_type="text/markdown",
+            storage_provider="supabase",
+            storage_bucket="sophia_builder",
+            storage_object_path="thread-1/outputs/remote.md",
+        ),
+        user_id="user-1",
+    )
+    # Bypass the validated write path to plant an internal-keyspace object path.
+    registry.upsert_record(
+        artifact.model_copy(update={"storage_object_path": "thread-1/ledger/session.jsonl"}),
+        user_id="user-1",
+    )
+
+    response = client.get(f"/api/artifacts/{artifact.artifact_id}/content")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Artifact references an internal keyspace"
+    assert object_calls == []  # ledger object never fetched with the service-role key

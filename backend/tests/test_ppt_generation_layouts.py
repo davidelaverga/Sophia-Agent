@@ -228,13 +228,22 @@ class TestGeneratePptLayouts:
             # media part (title + full_bleed share the same cover JPEG payload).
             assert sum(1 for name in names if name.startswith("ppt/media/")) >= 2
 
-    def test_js_compiler_honors_skill_native_layout_and_columns(self) -> None:
+    def test_js_compiler_is_brand_design_system_engine(self) -> None:
+        # Artifact Visual System Phase 3a: the engine is now the brand
+        # design system — Cambria/Calibri, sophia_* token themes, the five
+        # slide renderers (incl. the new stat + full-visual layouts), and a
+        # back-compat type/subtype mapping so older plans still render.
         source = _JS_COMPILER_PATH.read_text(encoding="utf-8")
 
-        assert "normalizeLayout(slideInfo.layout)" in source
-        assert "slideInfo.columns" in source
-        assert "function columnPoints" in source
-        assert "isTwoColumnType(type)" in source
+        assert 'const FONT_HEAD = "Cambria"' in source
+        assert 'const FONT_BODY = "Calibri"' in source
+        assert "sophia_light" in source
+        assert "function slideType" in source       # legacy type → new type
+        assert "function contentSubtype" in source   # subtype dispatch (two-column etc.)
+        assert "function renderCover" in source
+        assert "function renderStat" in source       # new stat callout
+        assert "function renderFullVisual" in source  # new full-visual layout
+        assert "function renderTwoColumn" in source   # two-column layout
 
     def test_missing_full_bleed_image_degrades_without_exception(self, tmp_path: Path, capsys) -> None:
         plan = {

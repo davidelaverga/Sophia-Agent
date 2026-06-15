@@ -14,10 +14,11 @@ ARG NODE_MAJOR=22
 #     repair-turn self-review + advisory pass (deerflow/sophia/build_condition.py).
 RUN apt-get update && apt-get install -y \
     curl build-essential gnupg ca-certificates \
-    pandoc texlive-xetex texlive-latex-recommended texlive-latex-extra texlive-fonts-recommended \
+    pandoc texlive-xetex texlive-latex-recommended texlive-latex-extra texlive-fonts-recommended texlive-fonts-extra \
     lmodern fonts-dejavu-core libcairo2 libcairo2-dev libpango-1.0-0 libpangocairo-1.0-0 pkg-config \
     libreoffice-impress fonts-liberation \
     chromium \
+    graphviz \
     poppler-utils \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /etc/apt/keyrings/nodesource.gpg \
@@ -25,7 +26,7 @@ RUN apt-get update && apt-get install -y \
     && apt-get update && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pandoc --version >/dev/null && xelatex --version >/dev/null && chromium --version >/dev/null
+RUN pandoc --version >/dev/null && xelatex --version >/dev/null && chromium --version >/dev/null && dot -V
 
 COPY --from=ghcr.io/astral-sh/uv:0.7.20 /uv /uvx /usr/local/bin/
 
@@ -37,12 +38,16 @@ COPY skills ./skills
 RUN --mount=type=cache,target=/root/.cache/uv \
     sh -c "cd backend && uv sync"
 
+# Diagrams moved to graphviz (the `dot` binary, installed above) — the
+# Node compile_diagram.mjs + its excalidraw/mermaid-to-excalidraw/jsdom/
+# dompurify deps were retired (Sophia Artifact Visual System, Phase 2).
+# The Node runtime now only backs the PPTX compiler (pptxgenjs) and the
+# HTML→Chromium path (playwright-core); verify exactly those.
 RUN --mount=type=cache,target=/root/.npm \
     cd /app/backend/packages/harness/deerflow/sophia/js \
     && npm ci --omit=dev --no-audit --no-fund \
     && test -f compile_pptx.mjs \
-    && test -f compile_diagram.mjs \
-    && node -e "const r=require('module').createRequire(process.cwd() + '/'); r.resolve('pptxgenjs'); r.resolve('@excalidraw/excalidraw'); r.resolve('@excalidraw/mermaid-to-excalidraw'); r.resolve('mermaid'); r.resolve('jsdom'); r.resolve('dompurify'); r.resolve('playwright-core')"
+    && node -e "const r=require('module').createRequire(process.cwd() + '/'); r.resolve('pptxgenjs'); r.resolve('playwright-core')"
 
 ENV SOPHIA_ARTIFACT_JS_RUNTIME=/app/backend/packages/harness/deerflow/sophia/js
 ENV SOPHIA_PPTXGENJS=1

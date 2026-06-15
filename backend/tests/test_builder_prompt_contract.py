@@ -50,57 +50,62 @@ def test_role_scoped_prompt_files_are_separated() -> None:
     assert "Acknowledgement Matrix" not in builder
 
 
-def test_pptx_workflow_card_requires_deerflow_native_sequence() -> None:
-    card = _sophia_prompt("builder_workflows/pptx.md")
-
-    assert "image-generation/scripts/generate.py" in card
-    assert "ppt-generation/scripts/generate.py" in card
-    assert "Normal decks default to polished visual treatment" in card
-    assert "generate_excalidraw_diagram" in card
-    assert "editable text" in card
-    assert "slide-image album" in card
-    assert "plain, text-only, or no-visual" in card
-    assert "PPTX" in card
-    assert "passes structural validation" in card
-    assert "No Silent Format Swaps" in card
-    assert "artifact_is_fallback=true" in card
+def test_retired_workflow_cards_are_deleted() -> None:
+    # Artifact Visual System Phase 5b: the per-type composition cards are
+    # retired — their guidance moved into the always-injected directives +
+    # the per-type skills. Only the orthogonal research card survives.
+    repo_root = Path(__file__).resolve().parents[2]
+    cards_dir = repo_root / "skills/public/sophia/builder_workflows"
+    for retired in ("pptx.md", "pdf.md", "html.md", "visuals.md"):
+        assert not (cards_dir / retired).exists(), f"{retired} should be deleted"
+    assert (cards_dir / "research.md").exists()
 
 
-def test_pdf_workflow_card_uses_pdf_report_skill_not_default_imagegen() -> None:
-    card = _sophia_prompt("builder_workflows/pdf.md")
+def test_visual_composition_directives_carry_the_toolkit() -> None:
+    # The retired cards' composition guidance now lives in the always-injected
+    # visual director.
+    directives = _sophia_prompt("visual_composition.md")
 
-    assert "/mnt/skills/public/pdf-report/SKILL.md" in card
-    assert "deep-research" in card
-    assert "academic-paper-review" in card
-    assert "systematic-literature-review" in card
-    assert "chart-visualization" in card
-    assert "generate_excalidraw_diagram" in card
-    assert "render_markdown_to_pdf" in card
-    assert "Do not use image-generation for normal charts/diagrams" in card
-    assert "ON BY DEFAULT" not in card
-    assert "artifact_is_fallback=true" in card
+    assert "generate_excalidraw_diagram" in directives
+    assert "graphviz" in directives
+    assert "chart-visualization" in directives
+    assert "image-generation" in directives
+    assert "ppt-generation" in directives
+    assert "pdf-report" in directives
+    assert "hallmark" in directives
+    assert "read the matching skill" in directives
+    assert "monotony" in directives
+
+
+def test_ppt_generation_skill_carries_deck_design_system() -> None:
+    skill = Path(__file__).resolve().parents[2] / "skills/public/ppt-generation/SKILL.md"
+    text = skill.read_text()
+
+    assert "Cambria" in text and "Calibri" in text
+    assert "Never Aptos/Georgia" in text
+    assert "ppt-generation/scripts/generate.py" not in text or "compile_pptx" in text or "plan" in text
+    assert "sophia_light" in text
+    assert "generate_excalidraw_diagram" in text
+    assert "stat" in text  # the five slide types incl. the stat callout
 
 
 def test_pdf_report_skill_is_source_first_and_renderer_backed() -> None:
     skill = Path(__file__).resolve().parents[2] / "skills/public/pdf-report/SKILL.md"
     text = skill.read_text()
 
-    assert "Do not use `create_pdf_artifact` for normal reports" in text
+    assert "Source-first" in text
+    assert "create_pdf_artifact" in text  # the skill forbids dropping to it
     assert "deep-research" in text
     assert "academic-paper-review" in text
     assert "systematic-literature-review" in text
     assert "chart-visualization" in text
     assert "render_markdown_to_pdf" in text
-    assert "generate_visual_asset" in text
     assert "generate_excalidraw_diagram" in text
-    assert "artifact_is_fallback=true" in text
+    assert "Embed PNG, not SVG" in text  # xelatex embeds PNG, not SVG
 
 
-def test_visuals_workflow_card_requires_design_skill_and_local_assets() -> None:
-    card = _sophia_prompt("builder_workflows/visuals.md")
-
-    assert "/mnt/skills/public/visual-design/SKILL.md" in card
-    assert "generate_visual_asset" in card
-    assert "generate_excalidraw_diagram" in card
-    assert "/mnt/user-data/outputs/visuals/" in card
-    assert "remote chart URLs" in card
+def test_brand_tokens_resolve_the_georgia_conflict() -> None:
+    tokens = _sophia_prompt("brand/tokens.md")
+    assert "Never Aptos or Georgia" in tokens
+    assert "Cambria" in tokens
+    assert "graphviz" in tokens  # the diagram palette the toolkit needs

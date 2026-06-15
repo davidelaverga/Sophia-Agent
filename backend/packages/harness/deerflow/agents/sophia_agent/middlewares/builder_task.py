@@ -421,7 +421,6 @@ _PLAIN_DECK_MARKERS = (
     "no visuals",
     "without visuals",
 )
-_IMAGE_ENRICHMENT_TASK_TYPES = frozenset({"presentation", "visual_report"})
 
 
 def _image_generation_enabled(
@@ -473,53 +472,6 @@ def _polished_deck_images_requested(delegation_context: dict[str, Any]) -> bool:
     return any(marker in combined for marker in _POLISHED_DECK_IMAGE_MARKERS)
 
 
-def _image_enrichment_section(artifact_target_ext: str = ".pptx") -> str:
-    if artifact_target_ext == ".pdf":
-        plan_lines = (
-            "- STEP 0 (required): run the preflight check FIRST — "
-            "`python /mnt/skills/public/image-generation/scripts/generate.py --preflight`. "
-            "If it fails, proceed diagram/chart/text-only immediately; the harness records why.\n"
-            "- Generate 1 cover image (16:9, named "
-            "/mnt/user-data/outputs/visuals/cover-<desc>.png — the renderer "
-            "automatically places it on the title page) and optionally 1 section "
-            "divider image. HARD CAP: 2 image-generation script calls for PDF "
-            "builds — calls beyond the cap are rejected by the harness.\n"
-        )
-    else:
-        plan_lines = (
-            "- STEP 0 (required): run the preflight check FIRST — "
-            "`python /mnt/skills/public/image-generation/scripts/generate.py --preflight`. "
-            "If it fails, proceed diagram/chart/text-only immediately; the harness records why.\n"
-            "- For PPTX, generated images are support assets for covers, section "
-            "openers, or illustrative scenes inside an editable PowerPoint deck. "
-            "Do NOT make the deck a folder of full-slide screenshots. Use the "
-            "ppt-generation plan/compiler so titles, body text, notes, charts, "
-            "and diagrams remain editable. HARD CAP: 3 image-generation script "
-            "calls per presentation build — calls beyond the cap are rejected by "
-            "the harness.\n"
-        )
-    return (
-        "<image_enrichment>\n"
-        "Generated imagery is available for this run because this is an image "
-        "deliverable, an explicit generated-image request, or a PPTX deck that "
-        "did not ask to be plain/text-only/no-visual. Policy:\n"
-        f"{plan_lines}"
-        "- Charts and data visuals use generate_visual_asset with explicit "
-        "labeled {label, value} data; technical diagrams use "
-        "generate_excalidraw_diagram with raw Mermaid definitions. These support "
-        "assets do not count toward the image-generation cap.\n"
-        "- Save generated images under /mnt/user-data/outputs/visuals/ "
-        "(hero-<desc>.png, slide-<n>-<desc>.png, cover-<desc>.png) and reference "
-        "them from the plan/source before composing.\n"
-        "- A failed image call must NEVER stall the deliverable: at most ONE retry "
-        "with a simplified prompt, then continue with diagrams, charts, and text — "
-        "a diagram/chart/text deliverable is valid.\n"
-        "- Skip generated imagery entirely only if the brief clearly asks for a "
-        "plain, text-only, or no-visual deliverable.\n"
-        "</image_enrichment>"
-    )
-
-
 def _critical_emit_guidance(artifact_target_ext: str) -> str:
     if artifact_target_ext == ".pdf":
         return (
@@ -566,6 +518,25 @@ def _workflow_card(name: str) -> str | None:
     except OSError:
         logger.warning("BuilderTask: workflow card missing/unreadable name=%s path=%s", name, path)
         return None
+
+
+def _visual_composition_directives() -> str | None:
+    """Always-injected visual-director directives (Artifact Visual System
+    Phase 5a). Supersedes the retired ``_image_enrichment_section``: decide
+    the treatment per idea, vary, use the toolkit, read the per-type skill.
+    """
+    path = SKILLS_PATH / "visual_composition.md"
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        logger.warning("BuilderTask: visual_composition.md missing/unreadable path=%s", path)
+        return None
+    # Drop the YAML frontmatter (name/description) — the model only needs the body.
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) == 3:
+            text = parts[2].strip()
+    return text or None
 
 
 def _terminal_artifact_format_line(artifact_target_ext: str) -> str:
@@ -641,22 +612,17 @@ def _terminal_artifact_handoff_section(artifact_target_path: str, artifact_targe
 
 def _builder_workflow_sections(
     *,
-    artifact_target_ext: str,
     task_type: str,
     allow_web_research: bool,
-    visuals_requested: bool,
 ) -> list[str]:
+    # Artifact Visual System Phase 5b: composition guidance now lives in the
+    # always-injected visual_composition.md directives + the per-type skills
+    # (ppt-generation/pdf-report/hallmark). Only the orthogonal web-research
+    # card is still emitted here — its emit/fallback + HTML-delivery contract
+    # is carried by _critical_emit_guidance / _terminal_artifact_format_line.
     cards: list[str] = []
     if allow_web_research:
         cards.append("research")
-    if visuals_requested:
-        cards.append("visuals")
-    if artifact_target_ext == ".pptx":
-        cards.append("pptx")
-    elif artifact_target_ext == ".pdf":
-        cards.append("pdf")
-    elif artifact_target_ext in {".html", ".htm"}:
-        cards.append("html")
 
     sections: list[str] = []
     for name in dict.fromkeys(cards):
@@ -897,26 +863,30 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             artifact_target_ext=artifact_target_ext,
             task_type=task_type,
         )
+        is_html_target = artifact_target_ext in {".html", ".htm"}
         skills_block = self._build_skills_inventory_block(
             include_image_generation=image_generation_enabled,
-            include_visual_design=_visuals_requested(delegation_context),
+            # hallmark + visual-design surface when visuals are requested OR
+            # the target is HTML (Phase 4c: hallmark is the HTML design system).
+            include_visual_design=_visuals_requested(delegation_context) or is_html_target,
             include_pdf_report=artifact_target_ext == ".pdf",
             include_research_skills=artifact_target_ext == ".pdf"
             or task_type in {"research", "document", "visual_report"},
         )
+        # Artifact Visual System Phase 5a: the always-injected visual director
+        # frames every downstream block, so it goes BEFORE the skills inventory.
+        # It supersedes the retired _image_enrichment_section (image generation
+        # is still gated/capped by _image_generation_enabled; only the prose
+        # guidance moved into these directives).
+        directives = _visual_composition_directives()
+        if directives:
+            sections.append("<visual_composition>\n" + directives + "\n</visual_composition>")
         if skills_block:
             sections.append(skills_block)
-        if image_generation_enabled and (
-            str(task_type or "").lower() in _IMAGE_ENRICHMENT_TASK_TYPES
-            or artifact_target_ext in {".pptx", ".pdf"}
-        ):
-            sections.append(_image_enrichment_section(artifact_target_ext))
 
         workflow_sections = _builder_workflow_sections(
-            artifact_target_ext=artifact_target_ext,
             task_type=task_type,
             allow_web_research=allow_web_research,
-            visuals_requested=_visuals_requested(delegation_context),
         )
         if workflow_sections:
             sections.append(

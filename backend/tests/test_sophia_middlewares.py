@@ -3249,7 +3249,10 @@ class TestBuilderArtifactMiddleware:
             "builder_tool_turn_summaries": [
                 {"tool_names": ["builder_web_search"]},
                 {"tool_names": ["builder_web_fetch"]},
-                {"tool_names": ["render_markdown_to_pdf"]},
+                # Phase 5c per-target gate: the pdf-report skill read is a
+                # precondition for emitting a .pdf — record it so this test
+                # exercises its intended path, not the gate.
+                {"tool_names": ["read_file", "render_markdown_to_pdf"], "pdf_report_skill_read": True},
             ],
             "builder_web_budget": {"search_calls": 1, "fetch_calls": 1},
             "builder_visual_diagnostics": {
@@ -3306,7 +3309,10 @@ class TestBuilderArtifactMiddleware:
             "builder_tool_turn_summaries": [
                 {"tool_names": ["builder_web_search"]},
                 {"tool_names": ["builder_web_fetch"]},
-                {"tool_names": ["render_markdown_to_pdf"]},
+                # Phase 5c per-target gate: the pdf-report skill read is a
+                # precondition for emitting a .pdf — record it so this test
+                # exercises its intended path, not the gate.
+                {"tool_names": ["read_file", "render_markdown_to_pdf"], "pdf_report_skill_read": True},
             ],
             "builder_web_budget": {"search_calls": 1, "fetch_calls": 1},
             "builder_visual_diagnostics": {

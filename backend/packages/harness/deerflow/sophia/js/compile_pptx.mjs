@@ -5,70 +5,39 @@ import PptxGenJS from "pptxgenjs";
 
 const OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/";
 const SHAPE = {
-  line: "line",
   rect: "rect",
   roundRect: "roundRect",
 };
 
-const FONT_HEAD = "Georgia";
+// Office-safe brand fonts (never Aptos or Georgia — wrong metrics under QA renderer).
+const FONT_HEAD = "Cambria";
 const FONT_BODY = "Calibri";
 
+// Brand themes — bare hex only (no leading '#'), compiled from skills/public/sophia/brand/tokens.md.
 const THEMES = {
-  boardroom: {
-    background: "FFFFFF",
-    title: "1F2A37",
+  sophia_light: {
+    bg: "FFFFFF",
+    surface: "F5F7FA",
+    ink: "1F2A37",
     body: "3A4658",
     muted: "6B7787",
+    line: "E3E8EF",
     accent: "2E5AAC",
-    card: "F5F7FA",
-    border: "E3E8EF",
+    accent2: "2A9D8F",
   },
-  daylight: {
-    background: "F8FAFC",
-    title: "121826",
-    body: "2D3748",
-    muted: "64748B",
-    accent: "1C7ED6",
-    card: "FFFFFF",
-    border: "CBD5E1",
-  },
-  ember: {
-    background: "FFF7ED",
-    title: "7C2D12",
-    body: "431407",
-    muted: "9A3412",
-    accent: "EA580C",
-    card: "FFFFFF",
-    border: "FED7AA",
-  },
-  mist: {
-    background: "EDF6F9",
-    title: "006D77",
-    body: "1F2937",
-    muted: "4B5563",
-    accent: "E29578",
-    card: "FFFFFF",
-    border: "83C5BE",
-  },
-  terra: {
-    background: "FEFAE0",
-    title: "283618",
-    body: "3F321A",
-    muted: "606C38",
-    accent: "BC6C25",
-    card: "FFFFFF",
-    border: "DDA15E",
-  },
-  noir: {
-    background: "000814",
-    title: "FFF7D6",
-    body: "D8E2F2",
-    muted: "9AB0CC",
-    accent: "FFC300",
-    card: "001D3D",
-    border: "003566",
+  sophia_warm: {
+    bg: "FFFFFF",
+    surface: "F5F7FA",
+    ink: "1F2A37",
+    body: "3A4658",
+    muted: "6B7787",
+    line: "E3E8EF",
+    accent: "E76F51",
+    accent2: "2A9D8F",
   },
 };
+
+const DEFAULT_THEME = "sophia_light";
 
 function parseArgs(argv) {
   const args = { slideImages: [] };
@@ -149,7 +118,7 @@ function resolveAssetPath(rawPath, planFile, outputFile) {
 
 function slideVisualPath(slideInfo, planFile, outputFile) {
   return resolveAssetPath(
-    slideInfo.image || slideInfo.chart_path || slideInfo.visual_path,
+    slideInfo.image_path || slideInfo.image || slideInfo.chart_path || slideInfo.visual_path,
     planFile,
     outputFile,
   );
@@ -162,14 +131,63 @@ function normalizeLayout(value) {
     .replace(/\s+/g, "_");
 }
 
+// Resolve the canonical slide type, mapping legacy/back-compat names onto the new set.
+function slideType(slideInfo) {
+  const raw = normalizeLayout(slideInfo.type) || normalizeLayout(slideInfo.layout) || "content";
+  if (raw === "title") return "cover";
+  if (["section_divider", "divider"].includes(raw)) return "section";
+  if (["closing", "conclusion", "takeaways"].includes(raw)) return "summary";
+  if (["stat_band", "metrics"].includes(raw)) return "stat";
+  if (["title_visual", "cover"].includes(raw)) return "cover";
+  return raw;
+}
+
+// Resolve the content subtype (only meaningful when type === "content").
+function contentSubtype(slideInfo) {
+  const raw = normalizeLayout(slideInfo.subtype) || normalizeLayout(slideInfo.layout);
+  if (["text_visual", "text+visual"].includes(raw)) return "text+visual";
+  if (["two_column", "two_columns", "2_column", "2_columns", "comparison", "matrix"].includes(raw)) {
+    return "two-column";
+  }
+  if (["full_visual", "full-visual"].includes(raw)) return "full-visual";
+  if (raw === "stat") return "stat";
+  return "text+visual";
+}
+
+// Clone a base options object per addText — never share a mutated object (PptxGenJS bug).
+function withOpts(base, overrides) {
+  return Object.assign({}, base, overrides);
+}
+
+function slideBullets(slideInfo) {
+  const direct = listFrom(slideInfo.body)
+    .concat(listFrom(slideInfo.key_points), listFrom(slideInfo.bullets), listFrom(slideInfo.points));
+  if (direct.length) {
+    return direct;
+  }
+  return slideColumns(slideInfo)
+    .flatMap((column) => {
+      const heading = columnHeading(column);
+      return heading ? [heading, ...columnPoints(column)] : columnPoints(column);
+    });
+}
+
+function slideColumns(slideInfo) {
+  if (!Array.isArray(slideInfo.columns)) {
+    return [];
+  }
+  return slideInfo.columns.filter((column) => column && typeof column === "object").slice(0, 2);
+}
+
+function columnHeading(column) {
+  return asString(column.heading || column.title || column.label, "");
+}
+
+function columnPoints(column) {
+  return listFrom(column.points).concat(listFrom(column.key_points), listFrom(column.bullets)).slice(0, 6);
+}
+
 function addFooter(slide, theme, index, total) {
-  slide.addShape(SHAPE.line, {
-    x: 0.6,
-    y: 6.95,
-    w: 12.1,
-    h: 0,
-    line: { color: theme.border, transparency: 35, width: 1 },
-  });
   slide.addText(`${index + 1}/${total}`, {
     x: 11.7,
     y: 6.98,
@@ -177,46 +195,30 @@ function addFooter(slide, theme, index, total) {
     h: 0.22,
     fontFace: FONT_BODY,
     fontSize: 8,
-    color: theme.body,
+    color: theme.muted,
     align: "right",
     margin: 0,
   });
 }
 
-function addTitle(slide, title, theme, y = 0.52, h = 0.55) {
-  slide.addText(title, {
-    x: 0.72,
-    y,
-    w: 11.8,
-    h,
-    fontFace: FONT_HEAD,
-    fontSize: 25,
-    bold: true,
-    color: theme.title,
-    fit: "shrink",
-    breakLine: false,
-    margin: 0,
-  });
-}
-
-function addSubtitle(slide, subtitle, theme, y = 1.22) {
-  if (!subtitle) return;
-  slide.addText(subtitle, {
-    x: 0.76,
-    y,
-    w: 10.4,
-    h: 0.45,
-    fontFace: FONT_BODY,
-    fontSize: 13,
-    color: theme.body,
-    fit: "shrink",
-    margin: 0,
-  });
+// Add a title clamped to a width budget so it shrinks rather than wrapping into following text.
+function addTitle(slide, title, theme, box) {
+  slide.addText(title, withOpts(
+    {
+      fontFace: FONT_HEAD,
+      bold: true,
+      color: theme.ink,
+      fit: "shrink",
+      breakLine: false,
+      margin: 0,
+    },
+    box,
+  ));
 }
 
 function addBullets(slide, bullets, theme, box) {
   if (!bullets.length) return;
-  const runs = bullets.slice(0, 6).map((bullet) => ({
+  const runs = bullets.slice(0, box.max || 6).map((bullet) => ({
     text: bullet,
     options: { bullet: { type: "bullet" }, breakLine: true },
   }));
@@ -226,12 +228,12 @@ function addBullets(slide, bullets, theme, box) {
     w: box.w,
     h: box.h,
     fontFace: FONT_BODY,
-    fontSize: box.fontSize || 14,
+    fontSize: box.fontSize || 16,
     color: theme.body,
     breakLine: false,
     fit: "shrink",
     margin: 0.06,
-    paraSpaceAfterPt: 4,
+    paraSpaceAfterPt: box.spaceAfter || 8,
   });
 }
 
@@ -251,109 +253,202 @@ function addVisual(slide, visualPath, box) {
   return true;
 }
 
-function slideBullets(slideInfo) {
-  const directBullets = listFrom(slideInfo.key_points).concat(listFrom(slideInfo.bullets), listFrom(slideInfo.points));
-  if (directBullets.length) {
-    return directBullets.slice(0, 7);
-  }
-  return slideColumns(slideInfo)
-    .flatMap((column) => {
-      const heading = columnHeading(column);
-      return heading ? [heading, ...columnPoints(column)] : columnPoints(column);
-    })
-    .slice(0, 7);
+// A surface card with a line border (no stripe). Used by stat / visual surfaces.
+function addCard(slide, theme, box) {
+  slide.addShape(SHAPE.roundRect, {
+    x: box.x,
+    y: box.y,
+    w: box.w,
+    h: box.h,
+    rectRadius: box.radius || 0.12,
+    fill: { color: theme.surface },
+    line: { color: theme.line, width: 1 },
+  });
 }
 
-function slideType(slideInfo) {
-  return normalizeLayout(slideInfo.layout) || normalizeLayout(slideInfo.type) || "content";
-}
-
-function slideColumns(slideInfo) {
-  if (!Array.isArray(slideInfo.columns)) {
-    return [];
-  }
-  return slideInfo.columns.filter((column) => column && typeof column === "object").slice(0, 2);
-}
-
-function columnHeading(column) {
-  return asString(column.heading || column.title || column.label, "");
-}
-
-function columnPoints(column) {
-  return listFrom(column.points).concat(listFrom(column.key_points), listFrom(column.bullets)).slice(0, 6);
-}
-
-function isTwoColumnType(type) {
-  return ["two_column", "two_columns", "2_column", "2_columns", "comparison", "matrix"].includes(type);
-}
-
-function renderTitleSlide(pptx, slideInfo, plan, theme, visualPath) {
+function newSlide(pptx, theme) {
   const slide = pptx.addSlide();
-  slide.background = { color: theme.background };
-  if (visualPath) {
-    addVisual(slide, visualPath, { x: 7.3, y: 0.42, w: 5.35, h: 6.1 });
-    slide.addShape(SHAPE.rect, {
-      x: 0,
-      y: 0,
-      w: 7.6,
-      h: 7.5,
-      fill: { color: theme.background, transparency: 0 },
-      line: { color: theme.background, transparency: 100 },
+  slide.background = { color: theme.bg };
+  return slide;
+}
+
+// 1. cover — title + subtitle, optional image (right-half or full-bleed). No accent bar.
+function renderCover(pptx, slideInfo, plan, theme, visualPath) {
+  const slide = newSlide(pptx, theme);
+  const hasImage = Boolean(visualPath);
+  if (hasImage) {
+    addVisual(slide, visualPath, { x: 7.3, y: 0.42, w: 5.35, h: 6.6 });
+  }
+  const textWidth = hasImage ? 6.0 : 11.3;
+  addTitle(slide, asString(slideInfo.title, plan.title || "Presentation"), theme, {
+    x: 0.82,
+    y: 2.0,
+    w: textWidth,
+    h: 1.6,
+    fontSize: 40,
+  });
+  const subtitle = asString(slideInfo.subtitle, plan.subtitle || "");
+  if (subtitle) {
+    slide.addText(subtitle, {
+      x: 0.84,
+      y: 3.7,
+      w: textWidth,
+      h: 0.7,
+      fontFace: FONT_BODY,
+      fontSize: 18,
+      color: theme.muted,
+      fit: "shrink",
+      breakLine: false,
+      margin: 0,
     });
   }
-  slide.addText(asString(slideInfo.title, plan.title || "Presentation"), {
+  return slide;
+}
+
+// 2. agenda — title + 3–6 numbered items (number accent, text body), generous spacing.
+function renderAgenda(pptx, slideInfo, theme) {
+  const slide = newSlide(pptx, theme);
+  addTitle(slide, asString(slideInfo.title, "Agenda"), theme, {
+    x: 0.72, y: 0.52, w: 11.8, h: 0.7, fontSize: 28,
+  });
+  const items = slideBullets(slideInfo).slice(0, 6);
+  const top = 1.85;
+  const step = items.length ? Math.min(0.92, 4.6 / items.length) : 0.92;
+  items.forEach((item, idx) => {
+    const y = top + idx * step;
+    slide.addText(String(idx + 1), {
+      x: 0.85,
+      y,
+      w: 0.7,
+      h: 0.6,
+      fontFace: FONT_HEAD,
+      fontSize: 26,
+      bold: true,
+      color: theme.accent,
+      align: "left",
+      valign: "top",
+      margin: 0,
+    });
+    slide.addText(item, {
+      x: 1.7,
+      y,
+      w: 10.4,
+      h: 0.6,
+      fontFace: FONT_BODY,
+      fontSize: 18,
+      color: theme.body,
+      valign: "top",
+      fit: "shrink",
+      breakLine: false,
+      margin: 0,
+    });
+  });
+  return slide;
+}
+
+// 3. section — large short title + optional image.
+function renderSection(pptx, slideInfo, theme, visualPath) {
+  const slide = newSlide(pptx, theme);
+  const hasImage = Boolean(visualPath);
+  if (hasImage) {
+    addVisual(slide, visualPath, { x: 7.2, y: 0.75, w: 5.0, h: 5.55 });
+  }
+  addTitle(slide, asString(slideInfo.title, "Section"), theme, {
     x: 0.82,
-    y: 0.96,
-    w: visualPath ? 6.0 : 11.3,
-    h: 1.25,
+    y: 2.7,
+    w: hasImage ? 5.9 : 10.8,
+    h: 1.4,
+    fontSize: 36,
+  });
+  return slide;
+}
+
+// 4a. content / text+visual — bullets left, visual right (column-sized, line border, no overlap).
+function renderTextVisual(pptx, slideInfo, theme, visualPath) {
+  const slide = newSlide(pptx, theme);
+  addTitle(slide, asString(slideInfo.title, "Untitled"), theme, {
+    x: 0.72, y: 0.52, w: 11.8, h: 0.7, fontSize: 26,
+  });
+  if (visualPath) {
+    addCard(slide, theme, { x: 7.15, y: 1.6, w: 5.35, h: 4.85 });
+    addVisual(slide, visualPath, { x: 7.35, y: 1.8, w: 4.95, h: 4.45 });
+    addBullets(slide, slideBullets(slideInfo), theme, {
+      x: 0.82, y: 1.7, w: 5.95, h: 4.7, fontSize: 16, max: 6,
+    });
+  } else {
+    addBullets(slide, slideBullets(slideInfo), theme, {
+      x: 0.9, y: 1.7, w: 10.9, h: 4.7, fontSize: 16, max: 6,
+    });
+  }
+  return slide;
+}
+
+// 4b. content / stat — huge figure (accent), label (muted), optional support. No chart.
+function renderStat(pptx, slideInfo, theme) {
+  const slide = newSlide(pptx, theme);
+  const title = asString(slideInfo.title, "");
+  if (title) {
+    addTitle(slide, title, theme, { x: 0.72, y: 0.52, w: 11.8, h: 0.7, fontSize: 26 });
+  }
+  addCard(slide, theme, { x: 2.6, y: 2.1, w: 8.1, h: 3.2, radius: 0.16 });
+  slide.addText(asString(slideInfo.stat || slideInfo.value || slideInfo.metric, ""), {
+    x: 2.8,
+    y: 2.35,
+    w: 7.7,
+    h: 1.7,
     fontFace: FONT_HEAD,
-    fontSize: 32,
+    fontSize: 72,
     bold: true,
-    color: theme.title,
+    color: theme.accent,
+    align: "center",
     fit: "shrink",
     breakLine: false,
     margin: 0,
   });
-  addSubtitle(slide, asString(slideInfo.subtitle, plan.subtitle || ""), theme, 2.46);
-  const bullets = slideBullets(slideInfo);
-  addBullets(slide, bullets, theme, { x: 1.0, y: 3.15, w: visualPath ? 5.7 : 9.6, h: 2.2, fontSize: 15 });
-  return slide;
-}
-
-function renderContentSlide(pptx, slideInfo, theme, visualPath) {
-  const slide = pptx.addSlide();
-  slide.background = { color: theme.background };
-  addTitle(slide, asString(slideInfo.title, "Untitled"), theme);
-  addSubtitle(slide, asString(slideInfo.subtitle, ""), theme);
-
-  if (visualPath) {
-    slide.addShape(SHAPE.roundRect, {
-      x: 7.15,
-      y: 1.55,
-      w: 5.35,
-      h: 4.72,
-      rectRadius: 0.14,
-      fill: { color: theme.card },
-      line: { color: theme.border, transparency: 15 },
+  slide.addText(asString(slideInfo.stat_label || slideInfo.label, ""), {
+    x: 2.8,
+    y: 4.15,
+    w: 7.7,
+    h: 0.5,
+    fontFace: FONT_BODY,
+    fontSize: 18,
+    color: theme.muted,
+    align: "center",
+    fit: "shrink",
+    breakLine: false,
+    margin: 0,
+  });
+  const support = asString(slideInfo.support || slideInfo.subtitle, "");
+  if (support) {
+    slide.addText(support, {
+      x: 2.6,
+      y: 5.45,
+      w: 8.1,
+      h: 0.7,
+      fontFace: FONT_BODY,
+      fontSize: 14,
+      color: theme.body,
+      align: "center",
+      fit: "shrink",
+      breakLine: false,
+      margin: 0,
     });
-    addVisual(slide, visualPath, { x: 7.35, y: 1.75, w: 4.95, h: 4.3 });
-    addBullets(slide, slideBullets(slideInfo), theme, { x: 0.82, y: 1.72, w: 5.85, h: 4.5, fontSize: 14 });
-  } else {
-    addBullets(slide, slideBullets(slideInfo), theme, { x: 0.95, y: 1.68, w: 10.9, h: 4.7, fontSize: 15 });
   }
   return slide;
 }
 
-function renderComparisonSlide(pptx, slideInfo, theme, visualPath) {
-  const slide = pptx.addSlide();
-  slide.background = { color: theme.background };
-  addTitle(slide, asString(slideInfo.title, "Comparison"), theme);
-  const explicitColumns = slideColumns(slideInfo);
+// 4c. content / two-column — two balanced text (or text+small-visual) columns.
+function renderTwoColumn(pptx, slideInfo, theme) {
+  const slide = newSlide(pptx, theme);
+  addTitle(slide, asString(slideInfo.title, "Comparison"), theme, {
+    x: 0.72, y: 0.52, w: 11.8, h: 0.7, fontSize: 26,
+  });
+  const explicit = slideColumns(slideInfo);
   const items = slideBullets(slideInfo);
-  const columns = explicitColumns.length
+  const columns = explicit.length
     ? [
-        { heading: columnHeading(explicitColumns[0]), points: columnPoints(explicitColumns[0]) },
-        { heading: columnHeading(explicitColumns[1] || {}), points: columnPoints(explicitColumns[1] || {}) },
+        { heading: columnHeading(explicit[0]), points: columnPoints(explicit[0]) },
+        { heading: columnHeading(explicit[1] || {}), points: columnPoints(explicit[1] || {}) },
       ]
     : [
         { heading: "", points: items.filter((_, i) => i % 2 === 0) },
@@ -361,138 +456,123 @@ function renderComparisonSlide(pptx, slideInfo, theme, visualPath) {
       ];
   [0, 1].forEach((columnIndex) => {
     const x = 0.82 + columnIndex * 6.1;
-    slide.addShape(SHAPE.roundRect, {
-      x,
-      y: 1.62,
-      w: 5.55,
-      h: 4.55,
-      rectRadius: 0.14,
-      fill: { color: theme.card },
-      line: { color: theme.border, transparency: 15 },
-    });
+    addCard(slide, theme, { x, y: 1.62, w: 5.55, h: 4.7 });
     const heading = columns[columnIndex].heading;
     if (heading) {
       slide.addText(heading, {
         x: x + 0.34,
         y: 1.86,
         w: 4.9,
-        h: 0.34,
+        h: 0.4,
         fontFace: FONT_HEAD,
-        fontSize: 15,
+        fontSize: 17,
         bold: true,
-        color: theme.title,
+        color: theme.ink,
         fit: "shrink",
+        breakLine: false,
         margin: 0,
       });
     }
     addBullets(slide, columns[columnIndex].points, theme, {
       x: x + 0.32,
-      y: heading ? 2.34 : 2.0,
+      y: heading ? 2.42 : 2.0,
       w: 4.9,
-      h: heading ? 3.35 : 3.7,
-      fontSize: 13,
+      h: heading ? 3.7 : 4.1,
+      fontSize: 14,
+      max: 6,
     });
   });
-  if (visualPath) addVisual(slide, visualPath, { x: 5.85, y: 5.65, w: 1.65, h: 0.78 });
   return slide;
 }
 
-function renderSectionDividerSlide(pptx, slideInfo, theme, visualPath) {
-  const slide = pptx.addSlide();
-  slide.background = { color: theme.background };
-  if (visualPath) {
-    addVisual(slide, visualPath, { x: 7.2, y: 0.75, w: 5.0, h: 5.55 });
+// 4d. content / full-visual — title bar + single large image + optional caption.
+function renderFullVisual(pptx, slideInfo, theme, visualPath) {
+  const slide = newSlide(pptx, theme);
+  const title = asString(slideInfo.title, "");
+  if (title) {
+    addTitle(slide, title, theme, { x: 0.72, y: 0.4, w: 11.8, h: 0.6, fontSize: 24 });
   }
-  slide.addText(asString(slideInfo.title, "Section"), {
-    x: 0.82,
-    y: 2.2,
-    w: visualPath ? 5.9 : 10.8,
-    h: 0.72,
-    fontFace: FONT_HEAD,
-    fontSize: 30,
-    bold: true,
-    color: theme.title,
-    fit: "shrink",
-    margin: 0,
-  });
-  const subtitle = asString(slideInfo.subtitle || slideInfo.kicker, "");
-  if (subtitle) {
-    slide.addText(subtitle, {
-      x: 0.84,
-      y: 3.02,
-      w: visualPath ? 5.8 : 9.5,
-      h: 0.38,
+  const caption = asString(slideInfo.caption, "");
+  const imageTop = title ? 1.15 : 0.55;
+  const imageHeight = caption ? 5.0 : 5.6;
+  addVisual(slide, visualPath, { x: 0.82, y: imageTop, w: 11.7, h: imageHeight });
+  if (caption) {
+    slide.addText(caption, {
+      x: 0.82,
+      y: imageTop + imageHeight + 0.1,
+      w: 11.7,
+      h: 0.4,
       fontFace: FONT_BODY,
-      fontSize: 13,
-      color: theme.muted || theme.body,
+      fontSize: 12,
+      color: theme.muted,
+      align: "center",
       fit: "shrink",
+      breakLine: false,
       margin: 0,
     });
   }
   return slide;
 }
 
-function renderSummarySlide(pptx, slideInfo, theme, visualPath) {
-  const slide = pptx.addSlide();
-  slide.background = { color: theme.background };
-  addTitle(slide, asString(slideInfo.title, "Summary"), theme);
-  const bullets = slideBullets(slideInfo).slice(0, 5);
-  const box = visualPath
-    ? { x: 0.85, y: 1.62, w: 6.1, h: 4.75, fontSize: 15 }
-    : { x: 1.35, y: 1.72, w: 10.2, h: 4.6, fontSize: 16 };
-  addBullets(slide, bullets, theme, box);
-  if (visualPath) {
-    addVisual(slide, visualPath, { x: 7.42, y: 1.42, w: 4.72, h: 4.72 });
-  }
-  return slide;
+function renderContent(pptx, slideInfo, theme, visualPath) {
+  const subtype = contentSubtype(slideInfo);
+  if (subtype === "stat") return renderStat(pptx, slideInfo, theme);
+  if (subtype === "two-column") return renderTwoColumn(pptx, slideInfo, theme);
+  if (subtype === "full-visual") return renderFullVisual(pptx, slideInfo, theme, visualPath);
+  return renderTextVisual(pptx, slideInfo, theme, visualPath);
 }
 
-function renderStatBandSlide(pptx, slideInfo, theme, visualPath) {
-  const slide = pptx.addSlide();
-  slide.background = { color: theme.background };
-  addTitle(slide, asString(slideInfo.title, "Signal"), theme);
-  const stats = Array.isArray(slideInfo.stats) ? slideInfo.stats.slice(0, 3) : [];
-  const bullets = slideBullets(slideInfo);
-  stats.forEach((stat, index) => {
-    const x = 0.82 + index * 4.1;
-    slide.addShape(SHAPE.roundRect, {
-      x,
-      y: 1.64,
-      w: 3.55,
-      h: 1.45,
-      rectRadius: 0.14,
-      fill: { color: theme.card },
-      line: { color: theme.border, transparency: 12 },
-    });
-    slide.addText(asString(stat.value || stat.metric, ""), {
-      x: x + 0.24,
-      y: 1.86,
-      w: 3.05,
-      h: 0.42,
+// 5. summary — title + points mirroring agenda.
+function renderSummary(pptx, slideInfo, theme) {
+  const slide = newSlide(pptx, theme);
+  addTitle(slide, asString(slideInfo.title, "Summary"), theme, {
+    x: 0.72, y: 0.52, w: 11.8, h: 0.7, fontSize: 28,
+  });
+  const items = slideBullets(slideInfo).slice(0, 6);
+  const top = 1.85;
+  const step = items.length ? Math.min(0.92, 4.6 / items.length) : 0.92;
+  items.forEach((item, idx) => {
+    const y = top + idx * step;
+    slide.addText(String(idx + 1), {
+      x: 0.85,
+      y,
+      w: 0.7,
+      h: 0.6,
       fontFace: FONT_HEAD,
-      fontSize: 22,
+      fontSize: 26,
       bold: true,
       color: theme.accent,
-      fit: "shrink",
+      valign: "top",
       margin: 0,
     });
-    slide.addText(asString(stat.label || stat.title, ""), {
-      x: x + 0.24,
-      y: 2.34,
-      w: 3.05,
-      h: 0.28,
+    slide.addText(item, {
+      x: 1.7,
+      y,
+      w: 10.4,
+      h: 0.6,
       fontFace: FONT_BODY,
-      fontSize: 10,
+      fontSize: 18,
       color: theme.body,
+      valign: "top",
       fit: "shrink",
+      breakLine: false,
       margin: 0,
     });
   });
-  addBullets(slide, bullets, theme, { x: 0.9, y: stats.length ? 3.55 : 1.7, w: visualPath ? 5.8 : 10.5, h: 2.85, fontSize: 14 });
-  if (visualPath) {
-    addVisual(slide, visualPath, { x: 7.3, y: 3.35, w: 4.85, h: 2.7 });
-  }
   return slide;
+}
+
+function renderSlide(pptx, slideInfo, plan, theme, visualPath) {
+  const type = slideType(slideInfo);
+  if (type === "cover") return renderCover(pptx, slideInfo, plan, theme, visualPath);
+  if (type === "agenda") return renderAgenda(pptx, slideInfo, theme);
+  if (type === "section") return renderSection(pptx, slideInfo, theme, visualPath);
+  if (type === "summary") return renderSummary(pptx, slideInfo, theme);
+  if (type === "stat") return renderStat(pptx, slideInfo, theme);
+  if (["two_column", "two_columns", "comparison", "matrix"].includes(type)) {
+    return renderTwoColumn(pptx, slideInfo, theme);
+  }
+  return renderContent(pptx, slideInfo, theme, visualPath);
 }
 
 function addNotes(slide, slideInfo) {
@@ -500,6 +580,11 @@ function addNotes(slide, slideInfo) {
   if (notes && typeof slide.addNotes === "function") {
     slide.addNotes(notes);
   }
+}
+
+function resolveTheme(plan) {
+  const requested = asString(plan.theme, DEFAULT_THEME).toLowerCase().replaceAll("-", "_");
+  return THEMES[requested] || THEMES[DEFAULT_THEME];
 }
 
 async function compilePptx(args) {
@@ -517,10 +602,10 @@ async function compilePptx(args) {
     lang: "en-US",
   };
 
-  const theme = THEMES[asString(plan.theme, "boardroom").toLowerCase()] || THEMES.boardroom;
+  const theme = resolveTheme(plan);
   const slidesInfo = Array.isArray(plan.slides) && plan.slides.length
     ? plan.slides
-    : [{ type: "title", title: asString(plan.title, "Presentation") }];
+    : [{ type: "cover", title: asString(plan.title, "Presentation") }];
   let pictureCount = 0;
   let textRunCount = 0;
 
@@ -529,18 +614,7 @@ async function compilePptx(args) {
       ? resolveAssetPath(args.slideImages[index], args.planFile, args.outputFile)
       : null;
     const visualPath = cliImagePath || slideVisualPath(slideInfo, args.planFile, args.outputFile);
-    const type = slideType(slideInfo);
-    const slide = type === "title" || type === "cover"
-      ? renderTitleSlide(pptx, slideInfo, plan, theme, visualPath)
-      : ["section", "section_divider", "divider"].includes(type)
-        ? renderSectionDividerSlide(pptx, slideInfo, theme, visualPath)
-        : ["summary", "closing", "conclusion", "takeaways"].includes(type)
-          ? renderSummarySlide(pptx, slideInfo, theme, visualPath)
-          : ["stat_band", "stat", "metrics"].includes(type)
-            ? renderStatBandSlide(pptx, slideInfo, theme, visualPath)
-            : isTwoColumnType(type)
-              ? renderComparisonSlide(pptx, slideInfo, theme, visualPath)
-              : renderContentSlide(pptx, slideInfo, theme, visualPath);
+    const slide = renderSlide(pptx, slideInfo, plan, theme, visualPath);
     addFooter(slide, theme, index, slidesInfo.length);
     addNotes(slide, slideInfo);
     if (visualPath) pictureCount += 1;

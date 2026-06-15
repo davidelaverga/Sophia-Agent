@@ -24,6 +24,7 @@ import httpx
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from deerflow.agents.sophia_agent.utils import safe_user_path
 from deerflow.sophia.session_store import SessionTranscriptStore
 from deerflow.sophia.storage import supabase_artifact_store
 
@@ -183,10 +184,79 @@ def normalize_artifact_storage_object_path(path: str | None) -> str | None:
     normalized = _normalize_token(path)
     if normalized is None:
         return None
+    decoded = _decode_artifact_virtual_path(normalized)
     try:
-        return supabase_artifact_store.normalize_object_path(normalized)
+        return supabase_artifact_store.normalize_object_path(decoded)
     except ValueError as exc:
         raise ValueError("Unsafe artifact storage path") from exc
+
+
+# Reserved Supabase keyspaces that are NEVER user-facing deliverables and must
+# never be served as registry artifacts: the delegation ledger (Spec D internal
+# conversation record), raw uploads (surfaced through the attachments UI), and
+# builder support scratch. Matched as path *segments* so the guard is layout-
+# independent. Mirrors ``supabase_artifact_store._is_internal_relative_name`` and
+# the list-side ``_is_builder_support_artifact_path`` so every read surface
+# excludes the same keyspaces.
+_INTERNAL_STORAGE_OBJECT_SEGMENTS = frozenset(
+    {"ledger", "uploads", ".builder", "sources", "source_artifact"}
+)
+
+
+def _storage_object_addresses_internal_keyspace(relative_object_path: str) -> bool:
+    """True when a thread-relative object path addresses an internal,
+    non-deliverable keyspace that must never be served as a user artifact."""
+    segments = [segment for segment in relative_object_path.split("/") if segment]
+    if any(segment in _INTERNAL_STORAGE_OBJECT_SEGMENTS for segment in segments):
+        return True
+    name = segments[-1].lower() if segments else ""
+    return (
+        name.endswith((".source.md", ".source.html", ".plan.json", ".manifest.json"))
+        or (name.startswith("_") and name.endswith(".py"))
+        or (name.startswith("test_") and name.endswith((".py", ".sh")))
+    )
+
+
+def _allowed_storage_thread_ids(*values: str | None) -> set[str]:
+    return {value.strip() for value in values if isinstance(value, str) and value.strip()}
+
+
+def _artifact_storage_object_scope(object_path: str) -> tuple[str | None, str | None, str]:
+    parts = object_path.split("/")
+    if parts[0] == "artifacts":
+        if len(parts) < 5:
+            raise HTTPException(status_code=403, detail="Artifact storage path must belong to the artifact thread")
+        return parts[1].strip() or None, parts[2].strip() or None, "/".join(parts[4:])
+    return None, parts[0].strip() or None, "/".join(parts[1:])
+
+
+def validate_artifact_storage_object_path(
+    storage_object_path: str | None,
+    *,
+    thread_id: str,
+    session_id: str | None = None,
+    user_id: str | None = None,
+) -> str | None:
+    try:
+        object_path = normalize_artifact_storage_object_path(storage_object_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="Unsafe artifact storage path") from exc
+    if object_path is None:
+        return None
+    object_user_id, object_thread_id, relative = _artifact_storage_object_scope(object_path)
+    if object_thread_id not in _allowed_storage_thread_ids(thread_id, session_id):
+        raise HTTPException(status_code=403, detail="Artifact storage path must belong to the artifact thread")
+    if user_id and object_user_id is not None:
+        expected_user_id = supabase_artifact_store.safe_object_path_segment(user_id, default="user")
+        if object_user_id != expected_user_id:
+            raise HTTPException(status_code=403, detail="Artifact storage path must belong to the artifact thread")
+    # Codex P1 PR #131: prefix==thread_id is not sufficient — the object path
+    # may still address an internal keyspace under the owner's OWN thread
+    # (e.g. ``{thread_id}/ledger/session.jsonl``), which leaks internal
+    # conversation state / raw uploads through the SERVICE-ROLE download path.
+    if _storage_object_addresses_internal_keyspace(relative):
+        raise HTTPException(status_code=403, detail="Artifact references an internal keyspace")
+    return object_path
 
 
 def _filename_from_path(path: str) -> str:
@@ -648,7 +718,13 @@ class ArtifactUpsertRequest(BaseModel):
             and deleted_at is None
             and storage_status == "available"
         )
-        storage_object_path = normalize_artifact_storage_object_path(self.storage_object_path)
+        session_id = _normalize_token(self.session_id) or (existing.session_id if existing else None)
+        storage_object_path = validate_artifact_storage_object_path(
+            self.storage_object_path,
+            thread_id=self.thread_id,
+            session_id=session_id,
+            user_id=user_id,
+        )
         effective_storage_object_path = storage_object_path or (existing.storage_object_path if existing else None)
         effective_storage_bucket = _normalize_token(self.storage_bucket) or (existing.storage_bucket if existing else None)
         storage_provider = self.storage_provider
@@ -663,7 +739,7 @@ class ArtifactUpsertRequest(BaseModel):
             artifact_id=artifact_id,
             user_id=user_id,
             thread_id=self.thread_id,
-            session_id=_normalize_token(self.session_id) or (existing.session_id if existing else None),
+            session_id=session_id,
             parent_thread_id=_normalize_token(self.parent_thread_id)
             or (existing.parent_thread_id if existing else None),
             task_id=_normalize_token(self.task_id) or (existing.task_id if existing else None),
@@ -815,7 +891,10 @@ class LocalArtifactRegistry:
         self._base = Path(base_path or configured or _DEFAULT_BASE_PATH)
 
     def _user_dir(self, user_id: str) -> Path:
-        return self._base / user_id / "artifacts"
+        try:
+            return safe_user_path(self._base, user_id, "artifacts")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid artifact user scope") from exc
 
     def _registry_path(self, user_id: str) -> Path:
         return self._user_dir(user_id) / "registry.json"
@@ -974,7 +1053,12 @@ class LocalArtifactRegistry:
             renderer_kind,
         )
         version_id = _normalize_token(request.version_id) or f"{logical_artifact_id}::v1"
-        storage_object_path = normalize_artifact_storage_object_path(request.storage_object_path)
+        storage_object_path = validate_artifact_storage_object_path(
+            request.storage_object_path,
+            thread_id=request.thread_id,
+            session_id=request.session_id,
+            user_id=user_id,
+        )
         request_identity = _canonical_artifact_identity(
             user_id=user_id,
             thread_id=request.thread_id,

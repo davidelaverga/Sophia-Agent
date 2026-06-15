@@ -47,11 +47,62 @@ _DEFAULT_SIZE = "1536x1024"
 
 _MODEL = "gpt-image-2"
 
+# Cap raw provider detail so a giant HTML error page or megabyte traceback
+# can't flood the builder's bash buffer. 2000 chars is plenty to diagnose.
+_RAW_ERROR_MAX = 2000
 
-def _fail(reason: str, message: str, *, exit_code: int = 1) -> None:
-    """Emit one machine-readable failure line plus a short safe message."""
-    print(f"IMAGEGEN_FAIL reason={reason}", file=sys.stderr)
+
+def _extract_raw_error(exc: BaseException) -> str:
+    """Best-effort pull of the RAW provider response body / exception text.
+
+    Prod logs only ever showed ``error_class=api_error`` — the actual
+    provider message (e.g. an org-verification or content-policy detail)
+    was swallowed. This digs through the shapes the OpenAI SDK uses for
+    HTTP errors (``response.text``, ``response.json()``, ``.body``) and
+    falls back to ``str(exc)``. It must NEVER raise — diagnostics that
+    crash are worse than no diagnostics.
+    """
+    parts: list[str] = []
+    try:
+        parts.append(f"{type(exc).__name__}: {exc}")
+    except Exception:  # noqa: BLE001 - str(exc) on exotic exceptions can fail
+        parts.append(type(exc).__name__)
+    # OpenAI/httpx APIStatusError carries the raw HTTP response + parsed body.
+    for attr in ("body", "code", "status_code"):
+        try:
+            value = getattr(exc, attr, None)
+            if value not in (None, ""):
+                parts.append(f"{attr}={value!r}")
+        except Exception:  # noqa: BLE001 - attribute access can raise on proxies
+            continue
+    try:
+        response = getattr(exc, "response", None)
+        if response is not None:
+            text = getattr(response, "text", None)
+            if isinstance(text, str) and text.strip():
+                parts.append(f"response.text={text.strip()}")
+    except Exception:  # noqa: BLE001 - never let capture itself raise
+        pass
+    detail = " | ".join(p for p in parts if p)
+    if len(detail) > _RAW_ERROR_MAX:
+        detail = detail[:_RAW_ERROR_MAX] + "...[truncated]"
+    return detail
+
+
+def _fail(reason: str, message: str, *, raw_error: str = "", exit_code: int = 1) -> None:
+    """Emit one machine-readable failure line plus a short safe message.
+
+    ``raw_error`` carries the truncated RAW provider detail so failures are
+    diagnosable from logs alone instead of just ``reason=api_error``. It is
+    surfaced both on the machine-readable line and as its own stderr line.
+    """
+    line = f"IMAGEGEN_FAIL reason={reason}"
+    if raw_error:
+        line += f" raw_error={raw_error!r}"
+    print(line, file=sys.stderr)
     print(message, file=sys.stderr)
+    if raw_error:
+        print(f"raw_error: {raw_error}", file=sys.stderr)
     sys.exit(exit_code)
 
 
@@ -178,12 +229,17 @@ def generate_image(
         _fail(
             _classify_exception(e),
             f"OpenAI image generation failed: {type(e).__name__}",
+            raw_error=_extract_raw_error(e),
         )
 
     try:
         payload = _extract_b64(response)
     except Exception as e:
-        _fail("empty_output", f"OpenAI image response did not include usable image bytes: {type(e).__name__}")
+        _fail(
+            "empty_output",
+            f"OpenAI image response did not include usable image bytes: {type(e).__name__}",
+            raw_error=_extract_raw_error(e),
+        )
     _decode_to_file(payload, output_file)
 
     if not Path(output_file).exists() or Path(output_file).stat().st_size == 0:

@@ -122,13 +122,21 @@ $endif$
   \defaultfontfeatures{Scale=MatchLowercase}
   \defaultfontfeatures[\rmfamily]{Ligatures=TeX,Scale=1}
 $if(mainfont)$
-  \setmainfont[$for(mainfontoptions)$$mainfontoptions$$sep$,$endfor$]{$mainfont$}
+  % Sophia: guard the requested main font — xelatex fails hard on a missing
+  % font, so fall back to Latin Modern Roman (lmodern is always present).
+  \IfFontExistsTF{$mainfont$}{%
+    \setmainfont[$for(mainfontoptions)$$mainfontoptions$$sep$,$endfor$]{$mainfont$}%
+  }{\setmainfont{Latin Modern Roman}}
 $endif$
 $if(sansfont)$
-  \setsansfont[$for(sansfontoptions)$$sansfontoptions$$sep$,$endfor$]{$sansfont$}
+  \IfFontExistsTF{$sansfont$}{%
+    \setsansfont[$for(sansfontoptions)$$sansfontoptions$$sep$,$endfor$]{$sansfont$}%
+  }{\setsansfont{Latin Modern Sans}}
 $endif$
 $if(monofont)$
-  \setmonofont[$for(monofontoptions)$$monofontoptions$$sep$,$endfor$]{$monofont$}
+  \IfFontExistsTF{$monofont$}{%
+    \setmonofont[$for(monofontoptions)$$monofontoptions$$sep$,$endfor$]{$monofont$}%
+  }{\setmonofont{Latin Modern Mono}}
 $endif$
 $for(fontfamilies)$
   \newfontfamily{$fontfamilies.name$}[$for(fontfamilies.options)$$fontfamilies.options$$sep$,$endfor$]{$fontfamilies.font$}
@@ -231,44 +239,82 @@ $endif$
 $if(coverimage)$
 \usepackage{graphicx}
 $endif$
-% Sophia: theme colors. Each variable is individually guarded with a
-% "minimal"-theme default so a render with no -V theme variables (or a
-% partial set) always compiles.
+% Sophia: brand palette (compiled from skills/public/sophia/brand/tokens.md).
+% These named brand colors are always defined so the theme/heading colorlets
+% below have a stable basis even when no -V theme variables are passed.
+\definecolor{brandink}{HTML}{1F2A37}
+\definecolor{brandbody}{HTML}{3A4658}
+\definecolor{brandmuted}{HTML}{6B7787}
+\definecolor{brandsurface}{HTML}{F5F7FA}
+\definecolor{brandline}{HTML}{E3E8EF}
+\definecolor{brandblue}{HTML}{2E5AAC}
+\definecolor{brandteal}{HTML}{2A9D8F}
+% Sophia: theme colors. Each variable is individually guarded; when no -V
+% theme variable is passed the brand palette supplies the default (via
+% \colorlet) so a render with a partial or absent theme set always compiles.
 $if(accentcolor)$
 \definecolor{accentcolor}{HTML}{$accentcolor$}
 $else$
-\definecolor{accentcolor}{HTML}{334155}
+\colorlet{accentcolor}{brandblue}
 $endif$
 $if(headingcolor)$
 \definecolor{headingcolor}{HTML}{$headingcolor$}
 $else$
-\definecolor{headingcolor}{HTML}{0F172A}
+\colorlet{headingcolor}{brandink}
 $endif$
 $if(titlepagecolor)$
 \definecolor{titlepagecolor}{HTML}{$titlepagecolor$}
 $else$
-\definecolor{titlepagecolor}{HTML}{F8FAFC}
+\colorlet{titlepagecolor}{brandsurface}
 $endif$
 $if(titlepagetextcolor)$
 \definecolor{titlepagetextcolor}{HTML}{$titlepagetextcolor$}
 $else$
-\definecolor{titlepagetextcolor}{HTML}{0F172A}
+\colorlet{titlepagetextcolor}{brandink}
 $endif$
+% Sophia: tcolorbox for branded callout/stat boxes. Guarded so a container
+% without texlive-latex-extra still compiles (statbox falls back to a plain
+% quote environment).
+\IfFileExists{tcolorbox.sty}{%
+  \usepackage[most]{tcolorbox}%
+  \newtcolorbox{statbox}{%
+    colback=brandsurface,
+    colframe=brandblue,
+    boxrule=0.6pt,
+    arc=3pt,
+    left=8pt,right=8pt,top=6pt,bottom=6pt,
+  }%
+}{%
+  \newenvironment{statbox}{\begin{quote}}{\end{quote}}%
+}
 $if(beamer)$
 $else$
-% Sophia: colored headings via titlesec (texlive-latex-extra).
+% Sophia: branded headings via titlesec (texlive-latex-extra). Sections use
+% the sans family in the brand ink color with a thin brandline rule beneath;
+% subsections use the brand body color.
 \usepackage{titlesec}
-\titleformat{\section}{\Large\bfseries\sffamily\color{headingcolor}}{\thesection}{1em}{}
-\titleformat{\subsection}{\large\bfseries\sffamily\color{headingcolor}}{\thesubsection}{1em}{}
-\titleformat{\subsubsection}{\normalsize\bfseries\sffamily\color{headingcolor}}{\thesubsubsection}{1em}{}
-% Sophia: footer with document title (left) + page number (right).
+\titleformat{\section}
+  {\sffamily\Large\bfseries\color{headingcolor}}{\thesection}{1em}{}
+  [{\color{brandline}\titlerule[0.6pt]}]
+\titleformat{\subsection}
+  {\sffamily\large\bfseries\color{brandbody}}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}
+  {\sffamily\normalsize\bfseries\color{brandbody}}{\thesubsubsection}{1em}{}
+\titlespacing*{\section}{0pt}{2.4ex plus 1ex minus .2ex}{1.2ex plus .2ex}
+\titlespacing*{\subsection}{0pt}{2.0ex plus 1ex minus .2ex}{0.8ex plus .2ex}
+% Sophia: running header (document title, brand muted) + page footer (brand
+% blue). \@title is only defined when a title was given, so guard it.
 \usepackage{fancyhdr}
+\makeatletter
+\providecommand{\@title}{}
 \pagestyle{fancy}
 \fancyhf{}
-\renewcommand{\headrulewidth}{0pt}
+\fancyhead[L]{\sffamily\footnotesize\color{brandmuted}\@title}
+\fancyfoot[C]{\sffamily\footnotesize\color{brandblue}\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\headrule}{\hbox to\headwidth{\color{brandline}\leaders\hrule height \headrulewidth\hfill}}
 \renewcommand{\footrulewidth}{0pt}
-\fancyfoot[L]{\small\sffamily\color{headingcolor}$if(title)$$title$$endif$}
-\fancyfoot[R]{\small\sffamily\color{headingcolor}\thepage}
+\makeatother
 % Cover / chapter-opening pages stay clean.
 \fancypagestyle{plain}{\fancyhf{}\renewcommand{\headrulewidth}{0pt}\renewcommand{\footrulewidth}{0pt}}
 $endif$
