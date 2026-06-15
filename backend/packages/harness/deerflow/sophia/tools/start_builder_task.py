@@ -657,15 +657,52 @@ def _read_local_source_artifact(
     return None
 
 
+def _download_durable_storage_object(
+    source_object_path: str | None,
+    source_artifact_path: str,
+) -> tuple[bytes, str] | None:
+    """Fetch the source bytes from the registry's durable object path.
+
+    In production (``SOPHIA_ARTIFACT_REGISTRY_STORE=supabase``) the primary
+    deliverable is uploaded to ``storage_object_path`` — which may be the
+    durable ``artifacts/{user_id}/...`` layout, not the legacy
+    ``{thread}/{relative}`` mirror — and the completion path ``continue``s
+    before any legacy mirror is written. After a restart / ephemeral-disk wipe
+    this object is the ONLY place the bytes survive, so the edit flow must try
+    it BEFORE the legacy relative key (Codex P2 PR #131).
+    """
+    object_path = (source_object_path or "").strip()
+    if not object_path:
+        return None
+    try:
+        from deerflow.sophia.storage import supabase_artifact_store
+
+        return supabase_artifact_store.download_artifact_object(object_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[BuilderEdit] durable object materialization failed object_path=%s artifact=%s: %s",
+            object_path,
+            source_artifact_path,
+            exc,
+        )
+        return None
+
+
 def _download_source_artifact_bytes(
     *,
     parent_thread_id: str | None,
     source_task_id: str | None,
     source_artifact_path: str,
+    source_object_path: str | None = None,
 ) -> tuple[bytes, str]:
     relative = _relative_output_artifact_path(source_artifact_path)
     if not relative:
         raise ArtifactMaterializationError("Source artifact path is not an output artifact.")
+    # Durable registry object path first — it survives an ephemeral-disk wipe
+    # even when the legacy {thread}/{relative} mirror was never written.
+    result = _download_durable_storage_object(source_object_path, source_artifact_path)
+    if result is not None:
+        return result
     result = _download_parent_supabase_artifact(parent_thread_id, relative, source_artifact_path)
     if result is not None:
         return result
@@ -692,6 +729,7 @@ def _materialize_edit_source_artifact(
         parent_thread_id=parent_thread_id,
         source_task_id=edit_context.get("source_task_id"),
         source_artifact_path=source_path,
+        source_object_path=edit_context.get("source_object_path"),
     )
     from deerflow.config.paths import get_paths
 
@@ -2178,6 +2216,10 @@ async def _edit_builder_artifact_impl(
         "source_artifact_path": source_path,
         "source_task_id": source.get("source_task_id") or task_id,
         "source_run_id": source.get("source_run_id"),
+        # Durable registry object path (Codex P2 PR #131) — lets the edit flow
+        # recover the source bytes after an ephemeral-disk wipe even when the
+        # legacy {thread}/{relative} mirror was never written.
+        "source_object_path": source.get("storage_object_path"),
         "revision_of_artifact_path": source_path,
         "revision_artifact_path": revision_path,
         "requested_artifact_ext": _artifact_ext_from_path(revision_path),

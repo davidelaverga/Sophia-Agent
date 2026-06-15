@@ -199,6 +199,114 @@ def test_edit_source_materializes_from_parent_supabase(monkeypatch, tmp_path):
     assert materialized.read_bytes() == b"<!doctype html><html><body>Base</body></html>"
 
 
+def test_edit_source_materializes_from_durable_object_path(monkeypatch, tmp_path):
+    # Codex P2 PR #131: in production the durable bytes live at
+    # storage_object_path (the registry object path), and after an
+    # ephemeral-disk wipe the legacy {thread}/{relative} mirror + local disk
+    # are gone. The edit flow must recover from the durable object path first.
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+    object_calls: list[str] = []
+    legacy_calls: list[tuple[str, str]] = []
+
+    def _download_object(object_path: str):
+        object_calls.append(object_path)
+        return b"<!doctype html><html><body>Durable</body></html>", "text/html"
+
+    def _download_legacy(thread_id: str, relative_path: str):
+        legacy_calls.append((thread_id, relative_path))
+        return None  # legacy mirror was never written / wiped
+
+    monkeypatch.setattr(
+        "deerflow.sophia.storage.supabase_artifact_store.download_artifact_object",
+        _download_object,
+    )
+    monkeypatch.setattr(
+        "deerflow.sophia.storage.supabase_artifact_store.download_artifact",
+        _download_legacy,
+    )
+    monkeypatch.setattr(
+        "deerflow.config.paths.get_paths",
+        lambda: _FakeThreadPaths(tmp_path),
+    )
+
+    result = module._materialize_edit_source_artifact(
+        parent_thread_id="parent-thread",
+        builder_thread_id="builder-thread",
+        edit_context={
+            "source_artifact_path": "mnt/user-data/outputs/final-report.html",
+            "source_object_path": "artifacts/alice/session-1/artifact-1/final-report.html",
+        },
+    )
+
+    # Durable object path used, and used BEFORE the legacy relative key.
+    assert object_calls == ["artifacts/alice/session-1/artifact-1/final-report.html"]
+    assert legacy_calls == []
+    assert result["source_artifact_path"] == "/mnt/user-data/outputs/final-report.html"
+    materialized = tmp_path / "builder-thread" / "workspace" / "source_artifact" / "final-report.html"
+    assert materialized.read_bytes() == b"<!doctype html><html><body>Durable</body></html>"
+
+
+def test_edit_source_falls_back_to_legacy_mirror_without_object_path(monkeypatch, tmp_path):
+    # When no durable object path is recorded (older records), the legacy
+    # {thread}/{relative} mirror path still works unchanged.
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+    object_calls: list[str] = []
+    legacy_calls: list[tuple[str, str]] = []
+
+    def _download_object(object_path: str):
+        object_calls.append(object_path)
+        return b"unused", "text/html"
+
+    def _download_legacy(thread_id: str, relative_path: str):
+        legacy_calls.append((thread_id, relative_path))
+        return b"<!doctype html><html><body>Legacy</body></html>", "text/html"
+
+    monkeypatch.setattr(
+        "deerflow.sophia.storage.supabase_artifact_store.download_artifact_object",
+        _download_object,
+    )
+    monkeypatch.setattr(
+        "deerflow.sophia.storage.supabase_artifact_store.download_artifact",
+        _download_legacy,
+    )
+    monkeypatch.setattr(
+        "deerflow.config.paths.get_paths",
+        lambda: _FakeThreadPaths(tmp_path),
+    )
+
+    module._materialize_edit_source_artifact(
+        parent_thread_id="parent-thread",
+        builder_thread_id="builder-thread",
+        edit_context={"source_artifact_path": "mnt/user-data/outputs/final-report.html"},
+    )
+
+    assert object_calls == []  # no object path → durable lookup skipped
+    assert legacy_calls == [("parent-thread", "final-report.html")]
+    materialized = tmp_path / "builder-thread" / "workspace" / "source_artifact" / "final-report.html"
+    assert materialized.read_bytes() == b"<!doctype html><html><body>Legacy</body></html>"
+
+
+def test_edit_source_resolves_storage_object_path_from_builder_result():
+    # The resolved edit source must carry storage_object_path so the dispatch
+    # can thread it into edit_context["source_object_path"].
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+    source = module._resolve_edit_source_artifact(
+        {
+            "last_builder_artifact": {
+                "artifact_path": "mnt/user-data/outputs/final-report.html",
+                "storage_object_path": "artifacts/alice/session-1/artifact-1/final-report.html",
+            }
+        },
+        artifact_path=None,
+        task_id=None,
+    )
+
+    assert source is not None
+    assert source["storage_object_path"] == (
+        "artifacts/alice/session-1/artifact-1/final-report.html"
+    )
+
+
 def test_edit_builder_artifact_dispatch_materializes_source(monkeypatch, tmp_path):
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client(thread_id="edit-builder", run_id="run-edit")
