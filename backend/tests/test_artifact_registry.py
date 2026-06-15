@@ -761,7 +761,7 @@ def test_content_endpoint_serves_registry_artifact_from_supabase_object(tmp_path
             mime_type="text/markdown",
             storage_provider="supabase",
             storage_bucket="sophia_builder",
-            storage_object_path="artifacts/user-1/session-1/artifact-1/remote.md",
+            storage_object_path="thread-1/outputs/remote.md",
         ),
         user_id="user-1",
     )
@@ -770,13 +770,39 @@ def test_content_endpoint_serves_registry_artifact_from_supabase_object(tmp_path
 
     assert response.status_code == 200
     assert response.text == "# Remote\n\nstored in supabase"
-    assert requested_paths == ["artifacts/user-1/session-1/artifact-1/remote.md"]
+    assert requested_paths == ["thread-1/outputs/remote.md"]
 
 
-def test_content_endpoint_rejects_unsafe_supabase_object_path(tmp_path, monkeypatch) -> None:
+def test_upsert_endpoint_rejects_cross_thread_supabase_object_path(tmp_path, monkeypatch) -> None:
+    client, _registry = _owned_app(tmp_path, monkeypatch)
+
+    payload = _request(
+        local_path="outputs/remote.md",
+        renderer_kind="markdown",
+        artifact_type="markdown",
+        mime_type="text/markdown",
+        storage_provider="supabase",
+        storage_bucket="sophia_builder",
+        storage_object_path="thread-2/outputs/secret.md",
+    ).model_dump(mode="json", exclude_none=True)
+
+    response = client.post("/api/artifacts/upsert", json=payload)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Artifact storage path must belong to the artifact thread"
+
+
+def test_content_endpoint_rejects_legacy_cross_thread_supabase_object_path(tmp_path, monkeypatch) -> None:
     client, registry = _owned_app(tmp_path, monkeypatch)
     missing_file = tmp_path / "missing" / "remote.md"
     monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: missing_file)
+    requested_paths: list[str] = []
+
+    def download_object(object_path: str):
+        requested_paths.append(object_path)
+        return b"secret", "text/markdown"
+
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "download_artifact_object", download_object)
     artifact = registry.upsert(
         _request(
             local_path="outputs/remote.md",
@@ -785,15 +811,20 @@ def test_content_endpoint_rejects_unsafe_supabase_object_path(tmp_path, monkeypa
             mime_type="text/markdown",
             storage_provider="supabase",
             storage_bucket="sophia_builder",
-            storage_object_path="../secret.md",
+            storage_object_path="thread-1/outputs/remote.md",
         ),
+        user_id="user-1",
+    )
+    registry.upsert_record(
+        artifact.model_copy(update={"storage_object_path": "thread-2/outputs/secret.md"}),
         user_id="user-1",
     )
 
     response = client.get(f"/api/artifacts/{artifact.artifact_id}/content")
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Unsafe artifact storage path"
+    assert response.json()["detail"] == "Artifact storage path must belong to the artifact thread"
+    assert requested_paths == []
 
 
 def test_artifact_id_endpoints_do_not_require_live_session_record(tmp_path, monkeypatch) -> None:

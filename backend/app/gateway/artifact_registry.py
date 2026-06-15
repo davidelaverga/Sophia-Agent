@@ -176,6 +176,36 @@ def normalize_artifact_registry_path(path: str) -> str:
     return normalized
 
 
+def normalize_artifact_storage_object_path(path: str) -> str:
+    decoded = _decode_artifact_virtual_path(path).strip().replace("\\", "/")
+    if decoded.startswith(("/", "//")) or (len(decoded) >= 2 and decoded[1] == ":"):
+        raise HTTPException(status_code=403, detail="Unsafe artifact storage path")
+
+    parts: list[str] = []
+    for part in PurePosixPath(decoded).parts:
+        if part in {"", "/", "."}:
+            continue
+        if part == "..":
+            raise HTTPException(status_code=403, detail="Unsafe artifact storage path")
+        parts.append(part)
+
+    normalized = "/".join(parts)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Artifact storage path is required")
+    return normalized
+
+
+def validate_artifact_storage_object_path(storage_object_path: str | None, *, thread_id: str) -> str | None:
+    normalized = _normalize_token(storage_object_path)
+    if normalized is None:
+        return None
+    object_path = normalize_artifact_storage_object_path(normalized)
+    object_thread_id = object_path.split("/", 1)[0].strip()
+    if object_thread_id != thread_id:
+        raise HTTPException(status_code=403, detail="Artifact storage path must belong to the artifact thread")
+    return object_path
+
+
 def _filename_from_path(path: str) -> str:
     filename = PurePosixPath(path).name
     return filename or "artifact"
@@ -610,7 +640,10 @@ class ArtifactUpsertRequest(BaseModel):
         )
         deleted_at = _normalize_iso(self.deleted_at) or (existing.deleted_at if existing else None)
         is_library_visible = bool(requested_visibility and artifact_role == "primary" and deleted_at is None)
-        storage_object_path = _normalize_token(self.storage_object_path)
+        storage_object_path = validate_artifact_storage_object_path(
+            self.storage_object_path,
+            thread_id=self.thread_id,
+        )
         if storage_object_path is None:
             relative = _relative_output_path(local_path)
             storage_object_path = f"{self.thread_id}/{relative}" if relative else None
@@ -924,7 +957,10 @@ class LocalArtifactRegistry:
             renderer_kind,
         )
         version_id = _normalize_token(request.version_id) or f"{logical_artifact_id}::v1"
-        storage_object_path = _normalize_token(request.storage_object_path)
+        storage_object_path = validate_artifact_storage_object_path(
+            request.storage_object_path,
+            thread_id=request.thread_id,
+        )
         if storage_object_path is None:
             relative = _relative_output_path(local_path)
             storage_object_path = f"{request.thread_id}/{relative}" if relative else None

@@ -21,6 +21,7 @@ from app.gateway.artifact_registry import (
     ArtifactSource,
     ArtifactUpsertRequest,
     open_response_for_record,
+    validate_artifact_storage_object_path,
 )
 from app.gateway.auth import require_authenticated_user
 from app.gateway.html_quick_patch import (
@@ -305,16 +306,7 @@ def _registry_artifact_thread_ids(record: ArtifactRecord) -> tuple[str, ...]:
     add(record.task_id)
     add(record.run_id)
     add(record.parent_thread_id)
-    storage_thread_id = _thread_id_from_storage_object_path(record.storage_object_path)
-    add(storage_thread_id)
     return tuple(thread_ids)
-
-
-def _thread_id_from_storage_object_path(storage_object_path: str | None) -> str | None:
-    if not isinstance(storage_object_path, str) or "/" not in storage_object_path:
-        return None
-    thread_id = storage_object_path.split("/", 1)[0].strip()
-    return thread_id or None
 
 
 def _is_builder_internal(name: str) -> bool:
@@ -787,19 +779,24 @@ def _try_serve_registry_storage_object(
     *,
     force_download: bool = False,
 ) -> Response | None:
-    object_path = record.storage_object_path
-    if not isinstance(object_path, str) or not object_path.strip():
-        return None
     if record.storage_provider not in {"supabase", "hybrid"}:
         return None
     try:
+        object_path = validate_artifact_storage_object_path(
+            record.storage_object_path,
+            thread_id=record.thread_id,
+        )
+        if object_path is None:
+            return None
         result = supabase_artifact_store.download_artifact_object(object_path)
-    except ValueError as exc:
+    except (HTTPException, ValueError) as exc:
         logger.warning(
             "Unsafe artifact storage object path rejected: artifact_id=%s error=%s",
             record.artifact_id,
             exc,
         )
+        if isinstance(exc, HTTPException):
+            raise exc
         raise HTTPException(status_code=403, detail="Unsafe artifact storage path") from exc
     except Exception:  # noqa: BLE001 — network/transport failure
         logger.exception(
