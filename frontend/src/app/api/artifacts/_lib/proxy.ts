@@ -72,6 +72,30 @@ function payloadShape(body: string | null | undefined): Record<string, unknown> 
   }
 }
 
+function legacyRunIdRetryBody(body: string | null | undefined): string | null {
+  if (!body) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown> | null;
+    if (!parsed || typeof parsed !== 'object') {
+      return null;
+    }
+    if (typeof parsed.run_id !== 'string' || parsed.run_id.trim().length === 0) {
+      return null;
+    }
+    const nextBody = { ...parsed };
+    delete nextBody.run_id;
+    return JSON.stringify(nextBody);
+  } catch {
+    return null;
+  }
+}
+
+function isLegacyRunIdThreadReferenceRejection(status: number, responseText: string): boolean {
+  return status === 403 && responseText.includes('Artifact references an unauthorized thread');
+}
+
 function copyResponseHeaders(source: Headers): Headers {
   const headers = new Headers();
   for (const headerName of [
@@ -107,24 +131,26 @@ export async function proxyArtifactRegistryRequest(
     url.searchParams.set(key, value);
   });
 
-  const execute = (authorization: string) => fetch(url.toString(), {
+  const execute = (authorization: string, body: string | null | undefined = init.body) => fetch(url.toString(), {
     method: init.method,
     headers: {
       Authorization: authorization,
       'x-sophia-artifact-trace-id': traceId,
-      ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
     },
-    body: init.body ?? undefined,
+    body: body ?? undefined,
     cache: 'no-store',
     redirect: 'follow',
   });
 
-  let backendResponse = await execute(authHeader);
+  let authorizationForBackend = authHeader;
+  let backendResponse = await execute(authorizationForBackend);
 
   if (backendResponse.status === 401) {
     const refreshedAuthHeader = await refreshUserScopedAuthHeader();
     if (refreshedAuthHeader && refreshedAuthHeader !== authHeader) {
-      backendResponse = await execute(refreshedAuthHeader);
+      authorizationForBackend = refreshedAuthHeader;
+      backendResponse = await execute(authorizationForBackend);
     }
   }
 
@@ -149,6 +175,44 @@ export async function proxyArtifactRegistryRequest(
       authenticated_user_hash: shortHash(authenticatedUserId),
       payload: payloadShape(init.body),
     });
+
+    if (init.method === 'POST' && path === '/upsert' && isLegacyRunIdThreadReferenceRejection(backendResponse.status, responseText)) {
+      const retryBody = legacyRunIdRetryBody(init.body);
+      if (retryBody) {
+        const retryResponse = await execute(authorizationForBackend, retryBody);
+        if (!retryResponse.ok) {
+          const retryResponseText = await retryResponse.text();
+          console.warn('[artifact-proxy] legacy_run_id_retry_non_2xx', {
+            route: `${init.method} ${req.nextUrl.pathname}`,
+            upstream_path: `/api/artifacts${path}`,
+            trace_id: traceId,
+            upstream_status: retryResponse.status,
+            upstream_body: retryResponseText.slice(0, ARTIFACT_PROXY_LOG_BODY_LIMIT),
+            authorization_sent: true,
+            gateway_host: backendHost,
+            authenticated_user_hash: shortHash(authenticatedUserId),
+            payload: payloadShape(retryBody),
+          });
+          return new Response(retryResponseText, {
+            status: retryResponse.status,
+            headers: copyResponseHeaders(retryResponse.headers),
+          });
+        }
+        console.warn('[artifact-proxy] legacy_run_id_retry_succeeded', {
+          route: `${init.method} ${req.nextUrl.pathname}`,
+          upstream_path: `/api/artifacts${path}`,
+          trace_id: traceId,
+          gateway_host: backendHost,
+          authenticated_user_hash: shortHash(authenticatedUserId),
+          original_payload: payloadShape(init.body),
+          retried_payload: payloadShape(retryBody),
+        });
+        return new Response(retryResponse.body, {
+          status: retryResponse.status,
+          headers: copyResponseHeaders(retryResponse.headers),
+        });
+      }
+    }
 
     return new Response(responseText, {
       status: backendResponse.status,
