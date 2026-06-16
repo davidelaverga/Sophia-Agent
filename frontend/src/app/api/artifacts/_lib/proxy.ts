@@ -193,9 +193,9 @@ export async function proxyArtifactRegistryRequest(
             authenticated_user_hash: shortHash(authenticatedUserId),
             payload: payloadShape(retryBody),
           });
-          return new Response(retryResponseText, {
-            status: retryResponse.status,
-            headers: copyResponseHeaders(retryResponse.headers),
+          return new Response(responseText, {
+            status: backendResponse.status,
+            headers: copyResponseHeaders(backendResponse.headers),
           });
         }
         console.warn('[artifact-proxy] legacy_run_id_retry_succeeded', {
