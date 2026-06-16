@@ -919,6 +919,20 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User wants the team to build a deck"
         ) is None
 
+    def test_audience_for_party_to_does_not_exempt_sophia_request(self):
+        """Codex P2: the redirect guard must not match an AUDIENCE phrase. A
+        Sophia build request whose deliverable is 'for the <party> to review' is
+        still task history — the third party only receives it, it isn't the
+        requestee. (The redirect guard requires the party to follow a request verb.)"""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to build a report for the team to review"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to build a deck for the client to sign off"
+        ) == "task_history"
+
     def test_wants_and_needs_build_requests_are_task_history(self):
         """Codex P2 round 4: want/need wording is a build request too.
 

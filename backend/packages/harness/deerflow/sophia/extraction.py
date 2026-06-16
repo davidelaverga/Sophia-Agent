@@ -162,18 +162,24 @@ _STRONG_DELIVERABLE_NOUN_RE = re.compile(
 # A request involving a third party is a relationship fact, NOT a build request
 # made of Sophia — never drop it. Two shapes: the third party is the asker
 # ("boss asked for a status report", "user's manager requested a deck"), or the
-# third party is the one asked to act ("user wants their boss to deliver the
-# report", "user asked the team to build a deck"). The "<party> to" tail catches
-# the redirect-object shape; Sophia / me / you are NOT third parties, so genuine
-# user→Sophia requests still match.
+# third party is the one asked to act — the *redirected requestee*
+# ("user wants their boss to deliver the report", "user asked the team to build a
+# deck"). The redirect shape requires the party to directly follow a request /
+# causative verb (+ optional determiner) so it does NOT match an audience phrase
+# where the party merely *receives* the deliverable ("asked Sophia to build a
+# report FOR the team to review" — Sophia is still the requester → must drop).
+# Sophia / me / you are NOT third parties, so genuine user→Sophia requests match.
 _THIRD_PARTY = (
     r"boss|manager|supervisor|colleague|co-?worker|client|customer|teammate|"
     r"recruiter|director|investor|stakeholder|ceo|cto|cfo|hr|team|lead"
 )
 _THIRD_PARTY_REQUEST_RE = re.compile(
+    # (1) third party is the asker: "boss asked", "manager requested"
     rf"\b(?:{_THIRD_PARTY})\b\s+"
     r"(?:asked|asks|requested|requests|wanted|wants|told|tells|needs|needed|demanded|demands|require[sd]?)\b"
-    rf"|\b(?:{_THIRD_PARTY})\b\s+to\b"
+    # (2) third party is the redirected requestee: "wants their boss to", "asked the team to"
+    rf"|\b(?:asked|asks|wanted|wants|needed|needs|told|tells|got|had)\s+"
+    rf"(?:(?:the|their|a|an|our|my|your|his|her|its)\s+)?(?:{_THIRD_PARTY})\b\s+to\b"
 )
 _DUPLICATE_STOPWORDS = {
     "a",
