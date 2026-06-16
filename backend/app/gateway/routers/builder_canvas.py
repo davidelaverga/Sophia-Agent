@@ -235,14 +235,19 @@ def _relative_output_artifact_path(path: str | None) -> str | None:
     return relative or None
 
 
-def _signed_artifact_url(thread_id: str, artifact_path: str | None) -> str | None:
+def _signed_artifact_url(
+    thread_id: str,
+    artifact_path: str | None,
+    *,
+    storage_object_path: str | None = None,
+) -> str | None:
     storage_path = _relative_output_artifact_path(artifact_path) or artifact_path
     if not storage_path:
         return None
     try:
         from deerflow.sophia.storage.supabase_artifact_store import create_signed_url
 
-        object_path = storage_path if storage_path.startswith("artifacts/") else None
+        object_path = storage_object_path or (storage_path if storage_path.startswith("artifacts/") else None)
         return create_signed_url(thread_id=thread_id, filename=storage_path, object_path=object_path)
     except Exception:
         return None
@@ -461,7 +466,12 @@ def _completion_artifact_url(parent_thread_id: str, artifact_path: str | None, a
     artifact_url = artifact.get("artifact_url")
     if isinstance(artifact_url, str) and artifact_url.strip():
         return artifact_url
-    return _signed_artifact_url(parent_thread_id, artifact_path)
+    storage_object_path = artifact.get("storage_object_path")
+    return _signed_artifact_url(
+        parent_thread_id,
+        artifact_path,
+        storage_object_path=storage_object_path if isinstance(storage_object_path, str) else None,
+    )
 
 
 def _completion_completed_at(task: dict[str, Any]) -> str | None:
