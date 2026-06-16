@@ -1090,6 +1090,49 @@ def test_artifact_id_endpoints_do_not_require_live_session_record(tmp_path, monk
     assert download.headers["content-disposition"] == "attachment; filename*=UTF-8''orphaned-session.md"
 
 
+def test_thread_artifact_route_falls_back_to_registry_storage(tmp_path, monkeypatch) -> None:
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    missing_file = tmp_path / "missing" / "brief.md"
+    legacy_calls: list[tuple[str, str]] = []
+    object_calls: list[str] = []
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        lambda _thread_id, _path: missing_file,
+    )
+    monkeypatch.setattr(
+        artifacts_router.supabase_artifact_store,
+        "download_artifact",
+        lambda thread_id, filename: legacy_calls.append((thread_id, filename)) or None,
+    )
+    monkeypatch.setattr(
+        artifacts_router.supabase_artifact_store,
+        "download_artifact_object",
+        lambda object_path: object_calls.append(object_path) or (b"# Sophia test", "text/markdown"),
+    )
+    artifact = registry.upsert(
+        _request(
+            title="Sophia Test",
+            local_path="outputs/brief.md",
+            renderer_kind="markdown",
+            artifact_type="markdown",
+            mime_type="text/markdown",
+            storage_provider="supabase",
+            storage_bucket="sophia_builder",
+            storage_object_path="artifacts/user-1/session-1/artifact-1/brief.md",
+        ),
+        user_id="user-1",
+    )
+
+    response = client.get("/api/threads/thread-1/artifacts/mnt/user-data/outputs/brief.md")
+
+    assert response.status_code == 200
+    assert response.text == "# Sophia test"
+    assert response.headers["content-type"].startswith("text/markdown")
+    assert legacy_calls == [("thread-1", "brief.md")]
+    assert object_calls == [artifact.storage_object_path]
+
+
 def test_hidden_artifact_id_endpoints_return_404(tmp_path, monkeypatch) -> None:
     client, registry = _owned_app(tmp_path, monkeypatch)
     artifact = registry.upsert(
@@ -1275,7 +1318,7 @@ def test_builder_terminal_failed_storage_event_does_not_create_registry_row(tmp_
 # ---------------------------------------------------------------------------
 # Codex P1 (PR #131) follow-up: close the two gaps left after
 # `validate_artifact_storage_object_path` anchored storage_object_path to
-# thread_id — (1) forged parent_thread_id/task_id/run_id still flowed into the
+# thread_id — (1) forged parent_thread_id/task_id still flowed into the
 # serve-time thread set and were fetched with the service-role key; (2) an
 # object path under the owner's OWN thread could still address an internal
 # keyspace (ledger/uploads/builder support).
@@ -1289,7 +1332,7 @@ def _set_associated_builder_tasks(monkeypatch, *thread_ids: str) -> None:
     monkeypatch.setattr(artifacts_router, "_builder_task_thread_ids_to_check", _fake)
 
 
-@pytest.mark.parametrize("field", ["task_id", "run_id", "parent_thread_id"])
+@pytest.mark.parametrize("field", ["task_id", "parent_thread_id"])
 def test_upsert_endpoint_rejects_forged_thread_reference(tmp_path, monkeypatch, field) -> None:
     client, registry = _owned_app(tmp_path, monkeypatch)
     _set_associated_builder_tasks(monkeypatch)  # no associated builder tasks
@@ -1302,15 +1345,72 @@ def test_upsert_endpoint_rejects_forged_thread_reference(tmp_path, monkeypatch, 
     assert registry.list(user_id="user-1").artifacts == []
 
 
-def test_upsert_endpoint_allows_associated_builder_task_reference(tmp_path, monkeypatch) -> None:
+def test_upsert_endpoint_allows_associated_builder_task_reference_with_run_metadata(tmp_path, monkeypatch) -> None:
     client, registry = _owned_app(tmp_path, monkeypatch)
     _set_associated_builder_tasks(monkeypatch, "builder-task-1")
 
-    payload = _request(task_id="builder-task-1").model_dump(mode="json", exclude_none=True)
+    payload = _request(
+        parent_thread_id="thread-1",
+        task_id="builder-task-1",
+        run_id="langgraph-run-not-a-thread",
+    ).model_dump(mode="json", exclude_none=True)
     response = client.post("/api/artifacts/upsert", json=payload)
 
     assert response.status_code == 200
-    assert len(registry.list(user_id="user-1").artifacts) == 1
+    records = registry.list(user_id="user-1").artifacts
+    assert len(records) == 1
+    assert records[0].task_id == "builder-task-1"
+    assert records[0].run_id == "langgraph-run-not-a-thread"
+
+
+def test_upsert_endpoint_rejects_forged_task_even_with_owned_run_id(tmp_path, monkeypatch) -> None:
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    _set_associated_builder_tasks(monkeypatch)
+
+    payload = _request(task_id="victim-thread", run_id="thread-1").model_dump(mode="json", exclude_none=True)
+    response = client.post("/api/artifacts/upsert", json=payload)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Artifact references an unauthorized thread"
+    assert registry.list(user_id="user-1").artifacts == []
+
+
+def test_run_id_is_not_used_as_registry_serve_thread() -> None:
+    record = _request(
+        task_id="builder-task-1",
+        run_id="victim-thread",
+        parent_thread_id="thread-1",
+    ).to_record(user_id="user-1")
+
+    assert artifacts_router._registry_artifact_thread_ids(record) == (
+        "thread-1",
+        "builder-task-1",
+    )
+
+
+def test_upsert_endpoint_rejects_mismatched_client_user_id(tmp_path, monkeypatch) -> None:
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    _set_associated_builder_tasks(monkeypatch)
+
+    payload = _request(user_id="victim-user").model_dump(mode="json", exclude_none=True)
+    response = client.post("/api/artifacts/upsert", json=payload)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Artifact user scope mismatch"
+    assert registry.list(user_id="user-1").artifacts == []
+
+
+def test_upsert_endpoint_uses_authenticated_user_when_client_user_id_absent(tmp_path, monkeypatch) -> None:
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    _set_associated_builder_tasks(monkeypatch)
+
+    payload = _request(user_id=None).model_dump(mode="json", exclude_none=True)
+    response = client.post("/api/artifacts/upsert", json=payload)
+
+    assert response.status_code == 200
+    records = registry.list(user_id="user-1").artifacts
+    assert len(records) == 1
+    assert records[0].user_id == "user-1"
 
 
 @pytest.mark.parametrize(

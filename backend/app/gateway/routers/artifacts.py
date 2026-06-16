@@ -150,6 +150,10 @@ async def upsert_user_artifact(
     request_body: ArtifactUpsertRequest,
     authenticated_user_id: str = Depends(require_authenticated_user),
 ) -> ArtifactOpenResponse:
+    request_body = _authorize_artifact_upsert_user_scope(
+        request_body,
+        authenticated_user_id,
+    )
     _require_thread_owner(authenticated_user_id, request_body.thread_id)
     await _authorize_artifact_upsert_thread_references(request_body, authenticated_user_id)
     record = _artifact_registry.upsert(request_body, user_id=authenticated_user_id)
@@ -318,7 +322,6 @@ def _registry_artifact_thread_ids(record: ArtifactRecord) -> tuple[str, ...]:
 
     add(record.thread_id)
     add(record.task_id)
-    add(record.run_id)
     add(record.parent_thread_id)
     return tuple(thread_ids)
 
@@ -372,6 +375,62 @@ def _short_id(value: str | None) -> str | None:
     return value[:12] if value else None
 
 
+def _artifact_upsert_auth_log_context(
+    request_body: ArtifactUpsertRequest,
+    authenticated_user_id: str | None,
+    *,
+    branch: str,
+    status_code: int,
+) -> dict[str, Any]:
+    return {
+        "route": "POST /api/artifacts/upsert",
+        "branch": branch,
+        "status_code": status_code,
+        "authenticated": bool(authenticated_user_id),
+        "user_id": _short_id(authenticated_user_id),
+        "thread_id": _short_id(request_body.thread_id),
+        "parent_thread_id_present": bool((request_body.parent_thread_id or "").strip()),
+        "task_id_present": bool((request_body.task_id or "").strip()),
+        "run_id_present": bool((request_body.run_id or "").strip()),
+        "trace_id": _short_id(request_body.trace_id),
+    }
+
+
+def _log_artifact_upsert_auth_failure(
+    request_body: ArtifactUpsertRequest,
+    authenticated_user_id: str | None,
+    *,
+    branch: str,
+    status_code: int = 403,
+) -> None:
+    logger.warning(
+        "Artifact upsert authorization failed: %s",
+        _artifact_upsert_auth_log_context(
+            request_body,
+            authenticated_user_id,
+            branch=branch,
+            status_code=status_code,
+        ),
+    )
+
+
+def _authorize_artifact_upsert_user_scope(
+    request_body: ArtifactUpsertRequest,
+    authenticated_user_id: str,
+) -> ArtifactUpsertRequest:
+    requested_user_id = (request_body.user_id or "").strip()
+    if requested_user_id and requested_user_id != authenticated_user_id:
+        _log_artifact_upsert_auth_failure(
+            request_body,
+            authenticated_user_id,
+            branch="user_scope_mismatch",
+        )
+        raise HTTPException(status_code=403, detail="Artifact user scope mismatch")
+    if request_body.user_id == authenticated_user_id:
+        return request_body
+    return request_body.model_copy(update={"user_id": authenticated_user_id})
+
+
 def _path_modified_timestamp(path: Path) -> float:
     try:
         return path.stat().st_mtime
@@ -394,17 +453,12 @@ async def _authorize_artifact_upsert_thread_references(
 ) -> None:
     """Authorize the thread references on an upsert at the write boundary.
 
-    Codex P1 PR #131: ``storage_object_path`` is anchored to ``thread_id`` by
-    ``validate_artifact_storage_object_path``, but ``parent_thread_id`` /
-    ``task_id`` / ``run_id`` are still accepted verbatim and are added to the
-    serve-time thread set in ``_registry_artifact_thread_ids`` — so a forged
-    ``task_id`` pointing at another thread is fetched with the SERVICE-ROLE key
-    through ``_try_serve_from_supabase``. Authorize these references here, where
-    the live session + builder-task association is available, against the
-    ownership-verified target thread plus its SERVER-DERIVED associated
-    builder-task threads. The serve path then keeps trusting the stored record,
-    so cross-session artifact access (after the session/state is gone) still
-    works for legitimately-created records.
+    ``storage_object_path`` is anchored to ``thread_id`` by
+    ``validate_artifact_storage_object_path``. Real thread references
+    (``parent_thread_id`` and builder ``task_id``) are authorized here against
+    the ownership-verified target thread plus its SERVER-DERIVED associated
+    builder-task threads. ``run_id`` is LangGraph run metadata, not a thread
+    id, and must not reject an otherwise-authorized artifact.
     """
     target_thread_id = (request_body.thread_id or "").strip()
     authorized_thread_ids: set[str] = set()
@@ -425,18 +479,26 @@ async def _authorize_artifact_upsert_thread_references(
     for field_name, value in (
         ("parent_thread_id", request_body.parent_thread_id),
         ("task_id", request_body.task_id),
-        ("run_id", request_body.run_id),
     ):
         if not _thread_reference_ok(value):
-            logger.warning(
-                "Artifact upsert referenced unauthorized %s: user_id=%s thread_id=%s",
-                field_name,
-                _short_id(authenticated_user_id),
-                _short_id(target_thread_id),
+            _log_artifact_upsert_auth_failure(
+                request_body,
+                authenticated_user_id,
+                branch=f"unauthorized_{field_name}",
             )
             raise HTTPException(
                 status_code=403, detail="Artifact references an unauthorized thread"
             )
+    if (request_body.run_id or "").strip():
+        logger.info(
+            "Artifact upsert accepted run_id as metadata: %s",
+            _artifact_upsert_auth_log_context(
+                request_body,
+                authenticated_user_id,
+                branch="run_id_metadata_only",
+                status_code=200,
+            ),
+        )
 
 
 def _require_thread_owner(authenticated_user_id: str | None, thread_id: str) -> None:
@@ -974,6 +1036,62 @@ def _try_serve_from_supabase(
     return _supabase_inline_response(filename, content, mime_type)
 
 
+async def _try_serve_registry_artifact_for_thread_path(
+    thread_id: str,
+    path: str,
+    request: Request,
+    *,
+    authenticated_user_id: str,
+) -> Response | None:
+    """Resolve a legacy thread/path artifact URL through the durable registry.
+
+    The UI still has older links shaped as
+    ``/api/threads/{thread_id}/artifacts/{local_path}``. If the local runtime
+    file and legacy bucket object are gone, use the authenticated user's
+    registry rows for that same thread/path and let ``_serve_registry_artifact``
+    enforce storage validation.
+    """
+    normalized_path = _normalize_artifact_virtual_path(path)
+    try:
+        records = _artifact_registry.list(
+            user_id=authenticated_user_id,
+            filters=ArtifactRegistryFilters(
+                thread_id=thread_id,
+                include_hidden=False,
+                limit=250,
+            ),
+        ).artifacts
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001 - fallback must not mask local/legacy 404 details.
+        logger.exception(
+            "Artifact registry fallback lookup failed: thread_id=%s requested_path=%s",
+            _short_id(thread_id),
+            normalized_path,
+        )
+        return None
+
+    for record in records:
+        try:
+            record_path = _normalize_artifact_virtual_path(record.local_path)
+        except HTTPException:
+            continue
+        if record_path != normalized_path or not _is_visible_primary_artifact(record):
+            continue
+        logger.info(
+            "Serving thread artifact via registry fallback: thread_id=%s artifact_id=%s storage_provider=%s",
+            _short_id(thread_id),
+            record.artifact_id,
+            record.storage_provider,
+        )
+        return await _serve_registry_artifact(
+            record,
+            request,
+            force_download=bool(request.query_params.get("download")),
+        )
+    return None
+
+
 def _supabase_attachment_response(
     thread_id: str,
     filename: str,
@@ -1487,6 +1605,14 @@ async def get_artifact(
         supabase_response = _try_serve_from_supabase(thread_id, path, request)
         if supabase_response is not None:
             return supabase_response
+        registry_response = await _try_serve_registry_artifact_for_thread_path(
+            thread_id,
+            path,
+            request,
+            authenticated_user_id=authenticated_user_id,
+        )
+        if registry_response is not None:
+            return registry_response
         raise HTTPException(status_code=404, detail=_artifact_not_found_detail(thread_id, path, resolution))
 
     if not actual_path.is_file():

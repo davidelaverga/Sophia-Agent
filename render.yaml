@@ -32,6 +32,8 @@ services:
         sync: false
       - key: SOPHIA_SESSION_STORE
         value: supabase
+      - key: SOPHIA_ARTIFACT_REGISTRY_STORE
+        value: supabase
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
@@ -40,10 +42,10 @@ services:
       # artifact registry reads from the SAME bucket. Pin both (non-secret
       # public values) so the two services agree instead of each silently
       # falling back to DEFAULT_BUCKET (Codex P1 PR #131).
-      - key: SOPHIA_ARTIFACT_REGISTRY_STORE
-        value: supabase
       - key: SUPABASE_BUILDER_BUCKET
         value: sophia-builder-artifacts
+      - key: SOPHIA_GATEWAY_URL
+        sync: false
       - key: LANGCHAIN_TRACING_V2
         value: "false"
 
@@ -65,6 +67,8 @@ services:
         sync: false
       - key: SOPHIA_SESSION_STORE
         value: supabase
+      - key: SOPHIA_ARTIFACT_REGISTRY_STORE
+        value: supabase
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
@@ -74,8 +78,6 @@ services:
       # unless this is set; the supabase store also requires the bucket name.
       # Both are non-secret public values. Codex P1 PR #131: deploying the
       # blueprint without these crashed the gateway before /health could serve.
-      - key: SOPHIA_ARTIFACT_REGISTRY_STORE
-        value: supabase
       - key: SUPABASE_BUILDER_BUCKET
         value: sophia-builder-artifacts
       - key: STREAM_API_KEY

@@ -82,10 +82,19 @@ export type BuilderCompletionEventV1 = {
   task_type?: string | null;
   task_brief?: string | null;
   artifact_path?: string | null;
+  artifact_id?: string | null;
   artifact_url?: string | null;
   artifact_title?: string | null;
   artifact_type?: string | null;
   artifact_filename?: string | null;
+  mime_type?: string | null;
+  content_hash?: string | null;
+  storage_provider?: 'local' | 'supabase' | 'hybrid' | null;
+  storage_bucket?: string | null;
+  storage_object_path?: string | null;
+  storage_status?: string | null;
+  content_url?: string | null;
+  download_url?: string | null;
   /** Rendered PDF preview sibling uploaded next to a PPTX deliverable. */
   artifact_preview_filename?: string | null;
   requested_artifact_ext?: string | null;

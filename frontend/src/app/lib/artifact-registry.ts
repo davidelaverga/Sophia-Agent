@@ -178,7 +178,9 @@ export function artifactRegistryRecordToSessionMetadata(
   record: ArtifactRegistryRecord,
 ): Partial<Omit<RegisterArtifactInput, 'context' | 'localPath'>> {
   return {
+    artifactId: record.artifact_id,
     title: record.title,
+    filename: record.filename,
     artifactType: record.artifact_type,
     rendererKind: normalizeRendererKind(record.renderer_kind),
     mimeType: record.mime_type ?? null,
@@ -191,8 +193,11 @@ export function artifactRegistryRecordToSessionMetadata(
     safeSummary: record.safe_summary ?? null,
     createdAt: record.created_at,
     updatedAt: record.updated_at,
+    storageProvider: record.storage_provider,
     storageBucket: record.storage_bucket ?? null,
     storageObjectPath: record.storage_object_path ?? null,
+    contentUrl: buildArtifactRegistryContentHref(record.artifact_id),
+    downloadUrl: buildArtifactRegistryDownloadHref(record.artifact_id),
     source: registrySourceToSessionSource(record.source),
   };
 }

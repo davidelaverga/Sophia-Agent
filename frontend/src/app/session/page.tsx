@@ -67,7 +67,7 @@ import {
 import { isArtifactRegistryLibraryVisibleCandidate } from '../lib/artifact-registry';
 import { detectArtifactRendererKind, type ArtifactRendererKind } from '../lib/artifact-renderers';
 import type { ArtifactReviewVoiceCommandRouter } from '../lib/artifact-review-voice-commands';
-import { buildThreadArtifactHref, getBuilderArtifactFiles, normalizeBuilderArtifactPath } from '../lib/builder-artifacts';
+import { buildArtifactHref, buildThreadArtifactHref, getBuilderArtifactFiles, normalizeBuilderArtifactPath } from '../lib/builder-artifacts';
 import { GeminiStillFrameTransport } from '../lib/co-review-still-frame-transport';
 import {
   coreviewFeedbackSuppressedTelemetryPayload,
@@ -227,6 +227,17 @@ function ComposerAttachButton({
 
 function getBuilderArtifactFilename(path: string): string {
   return path.split('/').filter(Boolean).pop() || 'Builder deliverable';
+}
+
+function isRegistryBackedSessionArtifact(artifact: ArtifactRecord | null | undefined): boolean {
+  if (!artifact) {
+    return false;
+  }
+  return (
+    artifact.storageProvider !== 'local'
+    || Boolean(artifact.storageObjectPath || artifact.contentUrl || artifact.downloadUrl)
+    || !artifact.artifactId.startsWith('artifact:')
+  );
 }
 
 type SessionArtifactRegisterMetadata = Partial<Omit<RegisterArtifactInput, 'context' | 'localPath'>> & {
@@ -1116,13 +1127,36 @@ function SessionPageContent() {
   const hasRecoveredBuilderArtifact = Boolean(recoveredBuilderLibraryItem);
   const showBuilderTaskNotice = Boolean(builderTask) && !hasRecoveredBuilderArtifact;
   const builderReadyTitle = builderArtifact?.artifactTitle ?? builderPrimaryFile?.name ?? 'Builder deliverable';
+  const builderPrimarySessionRecord = useMemo(() => {
+    const normalizedPath = normalizeBuilderArtifactPath(builderPrimaryFile?.path);
+    if (!normalizedPath) {
+      return null;
+    }
+    return sessionArtifactIndex.artifacts.find((artifact) => (
+      normalizeBuilderArtifactPath(artifact.localPath) === normalizedPath
+    )) ?? null;
+  }, [builderPrimaryFile?.path, sessionArtifactIndex.artifacts]);
   const builderOpenHref = useMemo(
-    () => buildThreadArtifactHref(resolvedThreadId, builderPrimaryFile?.path),
-    [builderPrimaryFile?.path, resolvedThreadId],
+    () => buildArtifactHref({
+      threadId: resolvedThreadId,
+      artifactPath: builderPrimaryFile?.path,
+      artifactId: builderPrimarySessionRecord?.artifactId ?? null,
+      contentUrl: builderPrimarySessionRecord?.contentUrl ?? null,
+      downloadUrl: builderPrimarySessionRecord?.downloadUrl ?? null,
+      preferArtifactId: isRegistryBackedSessionArtifact(builderPrimarySessionRecord),
+    }),
+    [builderPrimaryFile?.path, builderPrimarySessionRecord, resolvedThreadId],
   );
   const builderDownloadHref = useMemo(
-    () => buildThreadArtifactHref(resolvedThreadId, builderPrimaryFile?.path, { download: true }),
-    [builderPrimaryFile?.path, resolvedThreadId],
+    () => buildArtifactHref({
+      threadId: resolvedThreadId,
+      artifactPath: builderPrimaryFile?.path,
+      artifactId: builderPrimarySessionRecord?.artifactId ?? null,
+      contentUrl: builderPrimarySessionRecord?.contentUrl ?? null,
+      downloadUrl: builderPrimarySessionRecord?.downloadUrl ?? null,
+      preferArtifactId: isRegistryBackedSessionArtifact(builderPrimarySessionRecord),
+    }, { download: true }),
+    [builderPrimaryFile?.path, builderPrimarySessionRecord, resolvedThreadId],
   );
   const resolveBuilderCanvasArtifactForPath = useCallback((path: string | null | undefined) => {
     const normalizedPath = normalizeBuilderArtifactPath(path);
@@ -1705,15 +1739,24 @@ function SessionPageContent() {
       source: builderCompletionForDisplay.source === 'artifact_library_recovery'
         ? 'builder_canvas'
         : 'builder_completion',
+      artifactId: builderCompletionForDisplay.artifact_id ?? null,
       title: builderCompletionForDisplay.artifact_title
         ?? builderCompletionForDisplay.artifact_filename
         ?? getBuilderArtifactFilename(completionPath),
+      filename: builderCompletionForDisplay.artifact_filename ?? null,
       artifactType: builderCompletionForDisplay.artifact_type ?? null,
+      mimeType: builderCompletionForDisplay.mime_type ?? null,
       taskId: builderCompletionForDisplay.task_id,
       runId: builderCompletionForDisplay.run_id ?? null,
       sourceArtifactPath: builderCompletionForDisplay.source_artifact_path ?? null,
       revisionOfArtifactPath: builderCompletionForDisplay.revision_of_artifact_path ?? null,
       safeSummary: builderCompletionForDisplay.summary ?? builderCompletionForDisplay.user_next_action ?? null,
+      contentHash: builderCompletionForDisplay.content_hash ?? null,
+      storageProvider: builderCompletionForDisplay.storage_provider ?? null,
+      storageBucket: builderCompletionForDisplay.storage_bucket ?? null,
+      storageObjectPath: builderCompletionForDisplay.storage_object_path ?? null,
+      contentUrl: builderCompletionForDisplay.content_url ?? null,
+      downloadUrl: builderCompletionForDisplay.download_url ?? null,
       createdAt: builderCompletionForDisplay.completed_at ?? null,
     });
   }, [builderCompletionForDisplay, registerSessionArtifactByPath]);

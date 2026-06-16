@@ -3,7 +3,7 @@
 import type { ComponentProps } from "react"
 
 import { haptic } from "../../hooks/useHaptics"
-import { buildThreadArtifactHref, classifyBuilderArtifactFileRole, formatBuilderArtifactFileRoleLabel, formatBuilderArtifactFileSize, formatBuilderArtifactTypeLabel, getBuilderArtifactFiles, isMarkdownArtifactFile } from "../../lib/builder-artifacts"
+import { buildArtifactHref, buildThreadArtifactHref, classifyBuilderArtifactFileRole, formatBuilderArtifactFileRoleLabel, formatBuilderArtifactFileSize, formatBuilderArtifactTypeLabel, getBuilderArtifactFiles, isMarkdownArtifactFile } from "../../lib/builder-artifacts"
 import { listSessionArtifacts, type ArtifactRecord, type ArtifactSessionIndex } from "../../lib/session-artifact-index"
 import { cn } from "../../lib/utils"
 import { isRealReflection } from "../../session/artifacts"
@@ -257,8 +257,27 @@ function SessionArtifactTrayRow({
   onSelectedBuilderArtifactPathChange?: (path: string | null) => void
 }) {
   const missing = artifact.review?.missing === true
-  const downloadHref = missing ? null : buildThreadArtifactHref(threadId, artifact.localPath, { download: true })
-  const openHref = missing ? null : buildThreadArtifactHref(threadId, artifact.localPath)
+  const preferArtifactId = (
+    artifact.storageProvider !== "local"
+    || Boolean(artifact.storageObjectPath || artifact.contentUrl || artifact.downloadUrl)
+    || !artifact.artifactId.startsWith("artifact:")
+  )
+  const downloadHref = missing ? null : buildArtifactHref({
+    threadId,
+    artifactPath: artifact.localPath,
+    artifactId: artifact.artifactId,
+    contentUrl: artifact.contentUrl,
+    downloadUrl: artifact.downloadUrl,
+    preferArtifactId,
+  }, { download: true })
+  const openHref = missing ? null : buildArtifactHref({
+    threadId,
+    artifactPath: artifact.localPath,
+    artifactId: artifact.artifactId,
+    contentUrl: artifact.contentUrl,
+    downloadUrl: artifact.downloadUrl,
+    preferArtifactId,
+  })
   const versionLabel = getSessionArtifactVersionLabel(artifact, artifacts)
   const roleLabel = formatBuilderArtifactFileRoleLabel(classifyBuilderArtifactFileRole(
     { path: artifact.localPath },

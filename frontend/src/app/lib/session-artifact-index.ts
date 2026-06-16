@@ -7,7 +7,7 @@ export const ARTIFACT_SESSION_INDEX_STORAGE_VERSION = 1
 const STORAGE_PREFIX = "sophia:session-artifact-index:v1:"
 const RECENTLY_OPENED_LIMIT = 12
 
-export type ArtifactStorageProvider = "local"
+export type ArtifactStorageProvider = "local" | "supabase" | "hybrid"
 
 export type ArtifactRecordReviewMetadata = {
   openedCount?: number
@@ -31,6 +31,7 @@ export interface ArtifactRecord {
   taskId?: string | null
   runId?: string | null
   title: string
+  filename?: string | null
   artifactType: string
   rendererKind: ArtifactRendererKind
   mimeType?: string | null
@@ -38,6 +39,8 @@ export interface ArtifactRecord {
   storageProvider: ArtifactStorageProvider
   storageBucket?: string | null
   storageObjectPath?: string | null
+  contentUrl?: string | null
+  downloadUrl?: string | null
   signedUrl?: string | null
   signedUrlExpiresAt?: string | null
   createdAt: string
@@ -82,28 +85,54 @@ export type ArtifactRegisterSource =
 
 export interface RegisterArtifactInput {
   context: ArtifactSessionIndexContext
+  artifactId?: string | null
+  artifact_id?: string | null
   localPath?: string | null
+  local_path?: string | null
   title?: string | null
+  filename?: string | null
   artifactType?: string | null
+  artifact_type?: string | null
   rendererKind?: ArtifactRendererKind | null
+  renderer_kind?: ArtifactRendererKind | null
   mimeType?: string | null
+  mime_type?: string | null
   stableArtifactIdentity?: string | null
   logicalArtifactId?: string | null
+  logical_artifact_id?: string | null
   versionId?: string | null
+  version_id?: string | null
   parentVersionId?: string | null
+  parent_version_id?: string | null
   taskId?: string | null
+  task_id?: string | null
   runId?: string | null
+  run_id?: string | null
   sourceArtifactPath?: string | null
+  source_artifact_path?: string | null
   revisionOfArtifactPath?: string | null
+  revision_of_artifact_path?: string | null
   sourceHash?: string | null
   contentHash?: string | null
+  content_hash?: string | null
   capabilities?: ArtifactRecordCapabilitiesSnapshot | null
   review?: ArtifactRecordReviewMetadata | null
   safeSummary?: string | null
+  safe_summary?: string | null
   createdAt?: string | null
+  created_at?: string | null
   updatedAt?: string | null
+  updated_at?: string | null
+  storageProvider?: ArtifactStorageProvider | null
+  storage_provider?: ArtifactStorageProvider | null
   storageBucket?: string | null
+  storage_bucket?: string | null
   storageObjectPath?: string | null
+  storage_object_path?: string | null
+  contentUrl?: string | null
+  content_url?: string | null
+  downloadUrl?: string | null
+  download_url?: string | null
   signedUrl?: string | null
   signedUrlExpiresAt?: string | null
   source?: ArtifactRegisterSource
@@ -173,9 +202,9 @@ export function saveArtifactSessionIndex(
 export function registerArtifactInSessionIndex(input: RegisterArtifactInput): RegisterArtifactResult {
   const normalizedContext = normalizeContext(input.context)
   const index = loadArtifactSessionIndex(normalizedContext)
-  const now = normalizeIsoDate(input.updatedAt) ?? new Date().toISOString()
-  const localPath = normalizeBuilderArtifactPath(input.localPath)
-  const rendererKind = normalizeRendererKind(input.rendererKind)
+  const now = normalizeIsoDate(input.updatedAt ?? input.updated_at) ?? new Date().toISOString()
+  const localPath = normalizeBuilderArtifactPath(input.localPath ?? input.local_path)
+  const rendererKind = normalizeRendererKind(input.rendererKind ?? input.renderer_kind)
 
   if (!normalizedContext.threadId) {
     return { index, record: null, deduped: false, result: "invalid_context" }
@@ -193,8 +222,8 @@ export function registerArtifactInSessionIndex(input: RegisterArtifactInput): Re
       && record.rendererKind === rendererKind
   ))
   const existingRecord = existingIndex >= 0 ? index.artifacts[existingIndex] : null
-  const sourceArtifactPath = normalizeBuilderArtifactPath(input.sourceArtifactPath)
-  const revisionOfArtifactPath = normalizeBuilderArtifactPath(input.revisionOfArtifactPath)
+  const sourceArtifactPath = normalizeBuilderArtifactPath(input.sourceArtifactPath ?? input.source_artifact_path)
+  const revisionOfArtifactPath = normalizeBuilderArtifactPath(input.revisionOfArtifactPath ?? input.revision_of_artifact_path)
   const parentRecord = findParentVersionRecord(index, {
     localPath,
     rendererKind,
@@ -210,33 +239,46 @@ export function registerArtifactInSessionIndex(input: RegisterArtifactInput): Re
       artifactPath: localPath,
       rendererKind,
     }).key
-  const logicalArtifactId = normalizeToken(input.logicalArtifactId)
+  const logicalArtifactId = normalizeToken(input.logicalArtifactId ?? input.logical_artifact_id)
     ?? existingRecord?.logicalArtifactId
     ?? parentRecord?.logicalArtifactId
     ?? stableArtifactIdentity
-  const versionId = normalizeToken(input.versionId)
+  const versionId = normalizeToken(input.versionId ?? input.version_id)
     ?? existingRecord?.versionId
     ?? stableVersionId(stableArtifactIdentity)
-  const parentVersionId = normalizeToken(input.parentVersionId)
+  const parentVersionId = normalizeToken(input.parentVersionId ?? input.parent_version_id)
     ?? existingRecord?.parentVersionId
     ?? parentRecord?.versionId
     ?? null
   const createdAt = existingRecord?.createdAt
-    ?? normalizeIsoDate(input.createdAt)
+    ?? normalizeIsoDate(input.createdAt ?? input.created_at)
     ?? now
+  const artifactId = chooseArtifactId({
+    current: existingRecord?.artifactId,
+    requested: normalizeToken(input.artifactId ?? input.artifact_id),
+    fallback: stableArtifactId(normalizedContext.threadId, localPath, rendererKind),
+  })
   const title = chooseTitle({
     currentTitle: existingRecord?.title,
     nextTitle: input.title,
     path: localPath,
     source: input.source,
   })
-  const artifactType = normalizeToken(input.artifactType)
+  const artifactType = normalizeToken(input.artifactType ?? input.artifact_type)
     ?? existingRecord?.artifactType
     ?? artifactTypeFromPath(localPath, rendererKind)
+  const storageBucket = normalizeToken(input.storageBucket ?? input.storage_bucket) ?? existingRecord?.storageBucket ?? null
+  const storageObjectPath = normalizeToken(input.storageObjectPath ?? input.storage_object_path) ?? existingRecord?.storageObjectPath ?? null
+  const storageProvider = chooseStorageProvider({
+    requested: normalizeStorageProvider(input.storageProvider ?? input.storage_provider),
+    current: existingRecord?.storageProvider,
+    storageBucket,
+    storageObjectPath,
+  })
 
   const record: ArtifactRecord = {
     ...(existingRecord ?? {}),
-    artifactId: existingRecord?.artifactId ?? stableArtifactId(normalizedContext.threadId, localPath, rendererKind),
+    artifactId,
     stableArtifactIdentity,
     logicalArtifactId,
     versionId,
@@ -245,16 +287,19 @@ export function registerArtifactInSessionIndex(input: RegisterArtifactInput): Re
     threadId: normalizedContext.threadId,
     sessionId: normalizedContext.sessionId,
     parentThreadId: normalizedContext.parentThreadId ?? existingRecord?.parentThreadId ?? null,
-    taskId: normalizeToken(input.taskId) ?? existingRecord?.taskId ?? null,
-    runId: normalizeToken(input.runId) ?? existingRecord?.runId ?? null,
+    taskId: normalizeToken(input.taskId ?? input.task_id) ?? existingRecord?.taskId ?? null,
+    runId: normalizeToken(input.runId ?? input.run_id) ?? existingRecord?.runId ?? null,
     title,
+    filename: normalizeToken(input.filename) ?? existingRecord?.filename ?? fallbackTitle(localPath),
     artifactType,
     rendererKind,
-    mimeType: normalizeToken(input.mimeType) ?? existingRecord?.mimeType ?? null,
+    mimeType: normalizeToken(input.mimeType ?? input.mime_type) ?? existingRecord?.mimeType ?? null,
     localPath,
-    storageProvider: "local",
-    storageBucket: normalizeToken(input.storageBucket) ?? existingRecord?.storageBucket ?? null,
-    storageObjectPath: normalizeToken(input.storageObjectPath) ?? existingRecord?.storageObjectPath ?? null,
+    storageProvider,
+    storageBucket,
+    storageObjectPath,
+    contentUrl: normalizeHref(input.contentUrl ?? input.content_url) ?? existingRecord?.contentUrl ?? null,
+    downloadUrl: normalizeHref(input.downloadUrl ?? input.download_url) ?? existingRecord?.downloadUrl ?? null,
     signedUrl: normalizeToken(input.signedUrl) ?? existingRecord?.signedUrl ?? null,
     signedUrlExpiresAt: normalizeIsoDate(input.signedUrlExpiresAt) ?? existingRecord?.signedUrlExpiresAt ?? null,
     createdAt,
@@ -262,10 +307,10 @@ export function registerArtifactInSessionIndex(input: RegisterArtifactInput): Re
     sourceArtifactPath: sourceArtifactPath ?? existingRecord?.sourceArtifactPath ?? null,
     revisionOfArtifactPath: revisionOfArtifactPath ?? existingRecord?.revisionOfArtifactPath ?? null,
     sourceHash: normalizeToken(input.sourceHash) ?? existingRecord?.sourceHash ?? null,
-    contentHash: normalizeToken(input.contentHash) ?? existingRecord?.contentHash ?? null,
+    contentHash: normalizeToken(input.contentHash ?? input.content_hash) ?? existingRecord?.contentHash ?? null,
     capabilities: sanitizeCapabilities(input.capabilities) ?? existingRecord?.capabilities ?? null,
     review: mergeReviewMetadata(existingRecord?.review, input.review),
-    safeSummary: safeSummary(input.safeSummary) ?? existingRecord?.safeSummary ?? null,
+    safeSummary: safeSummary(input.safeSummary ?? input.safe_summary) ?? existingRecord?.safeSummary ?? null,
     rawContentExcluded: true,
   }
 
@@ -278,8 +323,13 @@ export function registerArtifactInSessionIndex(input: RegisterArtifactInput): Re
     threadId: normalizedContext.threadId,
     sessionId: normalizedContext.sessionId,
     artifacts: artifacts.map((item) => ensureVersionRelationship(item, record, parentRecord)),
-    activeArtifactId: index.activeArtifactId,
-    recentlyOpenedArtifactIds: pruneRecentIds(index.recentlyOpenedArtifactIds, artifacts),
+    activeArtifactId: index.activeArtifactId === existingRecord?.artifactId ? record.artifactId : index.activeArtifactId,
+    recentlyOpenedArtifactIds: pruneRecentIds(
+      index.recentlyOpenedArtifactIds.map((artifactId) => (
+        artifactId === existingRecord?.artifactId ? record.artifactId : artifactId
+      )),
+      artifacts,
+    ),
   }
   saveArtifactSessionIndex(normalizedContext, nextIndex)
   return {
@@ -460,13 +510,16 @@ function artifactRecordFromStorage(value: unknown, expectedThreadId: string): Ar
     taskId: normalizeToken(value.taskId),
     runId: normalizeToken(value.runId),
     title,
+    filename: normalizeToken(value.filename),
     artifactType,
     rendererKind,
     mimeType: normalizeToken(value.mimeType),
     localPath,
-    storageProvider: "local",
+    storageProvider: normalizeStorageProvider(value.storageProvider) ?? "local",
     storageBucket: normalizeToken(value.storageBucket),
     storageObjectPath: normalizeToken(value.storageObjectPath),
+    contentUrl: normalizeHref(value.contentUrl),
+    downloadUrl: normalizeHref(value.downloadUrl),
     signedUrl: normalizeToken(value.signedUrl),
     signedUrlExpiresAt: normalizeIsoDate(value.signedUrlExpiresAt),
     createdAt,
@@ -546,6 +599,24 @@ function storageKey(context: ArtifactSessionIndexContext): string {
 
 function stableArtifactId(threadId: string, localPath: string, rendererKind: ArtifactRendererKind): string {
   return `artifact:${stableHash(`thread:${threadId}|path:${localPath}|renderer:${rendererKind}`)}`
+}
+
+function chooseArtifactId({
+  current,
+  requested,
+  fallback,
+}: {
+  current?: string | null
+  requested?: string | null
+  fallback: string
+}): string {
+  if (!current) {
+    return requested ?? fallback
+  }
+  if (requested && current.startsWith("artifact:") && !requested.startsWith("artifact:")) {
+    return requested
+  }
+  return current
 }
 
 function stableVersionId(stableArtifactIdentity: string): string {
@@ -660,8 +731,43 @@ function normalizeRendererKind(value: unknown): ArtifactRendererKind | null {
     : null
 }
 
+function normalizeStorageProvider(value: unknown): ArtifactStorageProvider | null {
+  return value === "local" || value === "supabase" || value === "hybrid" ? value : null
+}
+
+function chooseStorageProvider({
+  requested,
+  current,
+  storageBucket,
+  storageObjectPath,
+}: {
+  requested: ArtifactStorageProvider | null
+  current?: ArtifactStorageProvider | null
+  storageBucket?: string | null
+  storageObjectPath?: string | null
+}): ArtifactStorageProvider {
+  if (requested) {
+    return requested
+  }
+  if (current && (current !== "local" || storageObjectPath || storageBucket)) {
+    return current
+  }
+  return storageObjectPath && storageBucket ? "supabase" : "local"
+}
+
 function normalizeToken(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null
+}
+
+function normalizeHref(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) {
+    return null
+  }
+  const href = value.trim()
+  if (/^(?:javascript|data|vbscript):/iu.test(href)) {
+    return null
+  }
+  return href.slice(0, 2048)
 }
 
 function safeSummary(value: unknown): string | null {

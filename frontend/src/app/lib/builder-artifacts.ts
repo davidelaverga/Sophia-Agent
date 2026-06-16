@@ -372,6 +372,53 @@ export function buildThreadArtifactHref(
   return options?.download ? `${baseHref}?download=true` : baseHref;
 }
 
+export function buildArtifactRegistryHref(
+  artifactId: string | null | undefined,
+  options?: { download?: boolean },
+): string | null {
+  const normalizedArtifactId = artifactId?.trim();
+  if (!normalizedArtifactId) {
+    return null;
+  }
+  const action = options?.download ? 'download' : 'content';
+  return `/api/artifacts/${encodeURIComponent(normalizedArtifactId)}/${action}`;
+}
+
+function normalizeSafeArtifactHref(value: string | null | undefined): string | null {
+  const href = value?.trim();
+  if (!href) {
+    return null;
+  }
+  if (href.startsWith('/api/artifacts/')) {
+    return href;
+  }
+  return null;
+}
+
+export function buildArtifactHref(
+  input: {
+    threadId?: string | null;
+    artifactPath?: string | null;
+    artifactId?: string | null;
+    contentUrl?: string | null;
+    downloadUrl?: string | null;
+    preferArtifactId?: boolean;
+  },
+  options?: { download?: boolean },
+): string | null {
+  const explicitHref = normalizeSafeArtifactHref(options?.download ? input.downloadUrl : input.contentUrl);
+  if (explicitHref) {
+    return explicitHref;
+  }
+  if (input.preferArtifactId) {
+    const registryHref = buildArtifactRegistryHref(input.artifactId, options);
+    if (registryHref) {
+      return registryHref;
+    }
+  }
+  return buildThreadArtifactHref(input.threadId, input.artifactPath, options);
+}
+
 export function isMarkdownArtifactFile(
   file: {
     path?: string | null;

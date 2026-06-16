@@ -4,7 +4,7 @@ import { Download, ExternalLink, Eye, File as FileIcon, FileText, Globe, Image a
 import { useEffect, useMemo, useRef, useState } from "react"
 
 import { haptic } from "../../hooks/useHaptics"
-import { buildThreadArtifactHref, formatBuilderArtifactTypeLabel } from "../../lib/builder-artifacts"
+import { buildArtifactHref, formatBuilderArtifactTypeLabel } from "../../lib/builder-artifacts"
 import { listSessionArtifacts, type ArtifactRecord, type ArtifactSessionIndex } from "../../lib/session-artifact-index"
 import { cn } from "../../lib/utils"
 
@@ -68,6 +68,14 @@ function ArtifactKindIcon({ rendererKind }: { rendererKind: ArtifactRecord["rend
   return <FileIcon className={className} style={style} aria-hidden />
 }
 
+function isRegistryBackedArtifact(artifact: ArtifactRecord): boolean {
+  return (
+    artifact.storageProvider !== "local"
+    || Boolean(artifact.storageObjectPath || artifact.contentUrl || artifact.downloadUrl)
+    || !artifact.artifactId.startsWith("artifact:")
+  )
+}
+
 function SessionArtifactTrayLauncherRow({
   artifact,
   artifacts,
@@ -82,8 +90,23 @@ function SessionArtifactTrayLauncherRow({
   onOpenInCanvas: (artifact: ArtifactRecord) => void
 }) {
   const missing = artifact.review?.missing === true
-  const openHref = missing ? null : buildThreadArtifactHref(threadId, artifact.localPath)
-  const downloadHref = missing ? null : buildThreadArtifactHref(threadId, artifact.localPath, { download: true })
+  const preferArtifactId = isRegistryBackedArtifact(artifact)
+  const openHref = missing ? null : buildArtifactHref({
+    threadId,
+    artifactPath: artifact.localPath,
+    artifactId: artifact.artifactId,
+    contentUrl: artifact.contentUrl,
+    downloadUrl: artifact.downloadUrl,
+    preferArtifactId,
+  })
+  const downloadHref = missing ? null : buildArtifactHref({
+    threadId,
+    artifactPath: artifact.localPath,
+    artifactId: artifact.artifactId,
+    contentUrl: artifact.contentUrl,
+    downloadUrl: artifact.downloadUrl,
+    preferArtifactId,
+  }, { download: true })
   const meta = [
     formatRendererKindLabel(artifact.rendererKind),
     formatBuilderArtifactTypeLabel(artifact.artifactType),
