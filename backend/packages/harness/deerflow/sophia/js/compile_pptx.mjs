@@ -126,6 +126,13 @@ function slideVisualPath(slideInfo, planFile, outputFile) {
   );
 }
 
+function usablePlanVisualPath(visualPath) {
+  if (!visualPath) return null;
+  if (fs.existsSync(visualPath)) return visualPath;
+  console.error(`Slide image missing, using text layout: ${visualPath}`);
+  return null;
+}
+
 function normalizeLayout(value) {
   return asString(value, "")
     .toLowerCase()
@@ -731,7 +738,8 @@ function compiledSlideContext(pptx, args, plan, theme, slidesInfo, slideInfo, in
   const cliImagePath = index < args.slideImages.length
     ? resolveAssetPath(args.slideImages[index], args.planFile, args.outputFile)
     : null;
-  const visualPath = cliImagePath || slideVisualPath(slideInfo, args.planFile, args.outputFile);
+  const planVisualPath = slideVisualPath(slideInfo, args.planFile, args.outputFile);
+  const visualPath = cliImagePath || usablePlanVisualPath(planVisualPath);
   return {
     slide: renderSlide(pptx, slideInfo, plan, theme, visualPath),
     visualPath,

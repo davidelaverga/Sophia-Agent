@@ -247,6 +247,8 @@ class TestGeneratePptLayouts:
         assert "function renderStatement" in source
         assert "function renderImageForward" in source
         assert "function addFullBleedVisual" in source
+        assert "function usablePlanVisualPath" in source
+        assert "Slide image missing, using text layout:" in source
         assert "if (!imageForward)" in source
         assert 'valign: "middle"' in source
         assert '"boardroom":' not in source

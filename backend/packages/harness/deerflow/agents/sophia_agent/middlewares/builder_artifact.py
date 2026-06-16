@@ -330,7 +330,7 @@ def _drop_invalid_slide_image_refs(slides: list, state: dict[str, Any]) -> tuple
     for slide in slides:
         if not isinstance(slide, dict):
             continue
-        for key in ("image", "chart_path", "visual_path"):
+        for key in ("image_path", "image", "chart_path", "visual_path"):
             ref = slide.get(key)
             if not isinstance(ref, str) or not ref.strip():
                 continue
