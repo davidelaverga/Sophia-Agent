@@ -1,3 +1,5 @@
+import hashlib
+import json
 import logging
 import mimetypes
 import os
@@ -41,8 +43,19 @@ _OUTPUTS_VIRTUAL_PATH = "mnt/user-data/outputs"
 _WORKSPACE_OUTPUTS_VIRTUAL_PATH = "mnt/user-data/workspace/outputs"
 _OFFICE_DOWNLOAD_EXTENSIONS = frozenset({".pptx", ".ppt", ".docx", ".xlsx"})
 _BUILDER_ARTIFACT_TASK_STATUSES = frozenset({"success", "completed"})
+_KNOWN_ARTIFACT_ID = "artifact_2f8254e3547d87ab29e56bef"
 _session_store = SessionStore()
 _artifact_registry = ArtifactRegistry()
+
+
+def _safe_user_hash(user_id: str | None) -> str | None:
+    if not user_id:
+        return None
+    return hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:12]
+
+
+def _known_artifact_present(records: list[ArtifactRecord]) -> bool:
+    return any(record.artifact_id == _KNOWN_ARTIFACT_ID for record in records)
 
 
 @dataclass(frozen=True)
@@ -108,6 +121,7 @@ class HtmlQuickPatchResponse(BaseModel):
     description="List safe artifact metadata for the authenticated user.",
 )
 async def list_user_artifacts(
+    request: Request,
     artifact_type: str | None = Query(default=None),
     source: ArtifactSource | None = Query(default=None),
     thread_id: str | None = Query(default=None),
@@ -121,23 +135,68 @@ async def list_user_artifacts(
     limit: int = Query(default=100, ge=1, le=250),
     authenticated_user_id: str = Depends(require_authenticated_user),
 ) -> ArtifactListResponse:
+    trace_id = request.headers.get("x-sophia-artifact-trace-id")
     selected_sort = sort if sort in {"updated", "created", "recent", "title"} else "updated"
-    return _artifact_registry.list(
-        user_id=authenticated_user_id,
-        filters=ArtifactRegistryFilters(
-            artifact_type=artifact_type,
-            source=source,
-            thread_id=thread_id,
-            session_id=session_id,
-            search=search,
-            created_after=created_after,
-            created_before=created_before,
-            recent_after=recent_after,
-            include_hidden=include_hidden,
-            sort=selected_sort,
-            limit=limit,
+    filters = ArtifactRegistryFilters(
+        artifact_type=artifact_type,
+        source=source,
+        thread_id=thread_id,
+        session_id=session_id,
+        search=search,
+        created_after=created_after,
+        created_before=created_before,
+        recent_after=recent_after,
+        include_hidden=include_hidden,
+        sort=selected_sort,
+        limit=limit,
+        diagnostics_trace_id=trace_id,
+    )
+    try:
+        response = _artifact_registry.list(user_id=authenticated_user_id, filters=filters)
+    except Exception as exc:
+        logger.warning(
+            "artifact_registry_list_gateway_result %s",
+            json.dumps(
+                {
+                    "event": "artifact_registry_list_gateway_result",
+                    "trace_id": trace_id,
+                    "authenticated_user_present": bool(authenticated_user_id),
+                    "authenticated_user_hash": _safe_user_hash(authenticated_user_id),
+                    "sort": selected_sort,
+                    "thread_id_present": bool(thread_id),
+                    "limit": limit,
+                    "cursor_present": bool(request.query_params.get("cursor")),
+                    "registry_list_attempted": True,
+                    "response_status": 500,
+                    "error_type": type(exc).__name__,
+                },
+                sort_keys=True,
+            ),
+        )
+        raise
+
+    logger.info(
+        "artifact_registry_list_gateway_result %s",
+        json.dumps(
+            {
+                "event": "artifact_registry_list_gateway_result",
+                "trace_id": trace_id,
+                "authenticated_user_present": bool(authenticated_user_id),
+                "authenticated_user_hash": _safe_user_hash(authenticated_user_id),
+                "sort": selected_sort,
+                "thread_id_present": bool(thread_id),
+                "limit": limit,
+                "cursor_present": bool(request.query_params.get("cursor")),
+                "registry_list_attempted": True,
+                "rows_returned_after_visibility_filtering": response.total,
+                "response_artifact_count": len(response.artifacts),
+                "known_artifact_present": _known_artifact_present(response.artifacts),
+                "response_status": 200,
+            },
+            sort_keys=True,
         ),
     )
+    return response
 
 
 @router.post(

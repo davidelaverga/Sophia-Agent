@@ -1,5 +1,6 @@
-import { type NextRequest, NextResponse } from 'next/server';
 import { createHash, randomUUID } from 'crypto';
+
+import { type NextRequest, NextResponse } from 'next/server';
 
 import {
   getAuthenticatedUserId,
@@ -10,6 +11,20 @@ import { getPrimaryGatewayUrl } from '../../_lib/gateway-url';
 
 const BACKEND_URL = getPrimaryGatewayUrl();
 const ARTIFACT_PROXY_LOG_BODY_LIMIT = 1200;
+const ARTIFACT_LIST_ROUTE = '';
+const KNOWN_ARTIFACT_ID = 'artifact_2f8254e3547d87ab29e56bef';
+
+type DiagnosticSummary = {
+  json_parse_ok: boolean;
+  top_level_type: string;
+  array_length?: number;
+  top_level_keys?: string[];
+  artifacts_length?: number;
+  items_length?: number;
+  records_length?: number;
+  data_length?: number;
+  known_artifact_present: boolean;
+};
 
 function shortHash(value: string | null | undefined): string | null {
   if (!value) {
@@ -72,7 +87,7 @@ function payloadShape(body: string | null | undefined): Record<string, unknown> 
   }
 }
 
-function copyResponseHeaders(source: Headers): Headers {
+function copyResponseHeaders(source: Headers, options?: { omitContentLength?: boolean }): Headers {
   const headers = new Headers();
   for (const headerName of [
     'cache-control',
@@ -82,6 +97,9 @@ function copyResponseHeaders(source: Headers): Headers {
     'etag',
     'last-modified',
   ]) {
+    if (options?.omitContentLength && headerName === 'content-length') {
+      continue;
+    }
     const value = source.get(headerName);
     if (value) {
       headers.set(headerName, value);
@@ -90,17 +108,121 @@ function copyResponseHeaders(source: Headers): Headers {
   return headers;
 }
 
+function getTopLevelType(value: unknown): string {
+  if (Array.isArray(value)) {
+    return 'array';
+  }
+  if (value === null) {
+    return 'null';
+  }
+  return typeof value;
+}
+
+function getArrayLength(value: unknown, key: string): number | undefined {
+  if (!value || Array.isArray(value) || typeof value !== 'object') {
+    return undefined;
+  }
+  const child = (value as Record<string, unknown>)[key];
+  return Array.isArray(child) ? child.length : undefined;
+}
+
+function containsKnownArtifact(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some((item) => containsKnownArtifact(item));
+  }
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  if (
+    record.artifact_id === KNOWN_ARTIFACT_ID ||
+    record.artifactId === KNOWN_ARTIFACT_ID ||
+    record.id === KNOWN_ARTIFACT_ID
+  ) {
+    return true;
+  }
+
+  return ['artifacts', 'items', 'records', 'data'].some((key) => containsKnownArtifact(record[key]));
+}
+
+function summarizeUpstreamJsonBody(bodyText: string): DiagnosticSummary {
+  try {
+    const parsed = JSON.parse(bodyText) as unknown;
+    const topLevelType = getTopLevelType(parsed);
+    const summary: DiagnosticSummary = {
+      json_parse_ok: true,
+      top_level_type: topLevelType,
+      known_artifact_present: containsKnownArtifact(parsed),
+    };
+
+    if (Array.isArray(parsed)) {
+      summary.array_length = parsed.length;
+    } else if (parsed && typeof parsed === 'object') {
+      const record = parsed as Record<string, unknown>;
+      summary.top_level_keys = Object.keys(record).slice(0, 30);
+      summary.artifacts_length = getArrayLength(record, 'artifacts');
+      summary.items_length = getArrayLength(record, 'items');
+      summary.records_length = getArrayLength(record, 'records');
+      summary.data_length = getArrayLength(record, 'data');
+    }
+
+    return summary;
+  } catch {
+    return {
+      json_parse_ok: false,
+      top_level_type: 'string',
+      known_artifact_present: false,
+    };
+  }
+}
+
+function resolveTraceId(req: NextRequest): string {
+  return req.headers.get('x-sophia-artifact-trace-id')?.trim() || randomUUID();
+}
+
+async function getDiagnosticUserId(): Promise<string | null> {
+  try {
+    return await getAuthenticatedUserId();
+  } catch {
+    return null;
+  }
+}
+
+function isRegistryListRequest(path: string, method: string): boolean {
+  return path === ARTIFACT_LIST_ROUTE && method.toUpperCase() === 'GET';
+}
+
 export async function proxyArtifactRegistryRequest(
   req: NextRequest,
   path: string,
   init: { method: 'DELETE' | 'GET' | 'POST'; body?: string | null },
 ): Promise<Response> {
+  const traceId = resolveTraceId(req);
+  const isListRequest = isRegistryListRequest(path, init.method);
+  const diagnosticUserId = isListRequest ? await getDiagnosticUserId() : null;
   const authHeader = await getUserScopedAuthHeader();
   if (!authHeader) {
+    if (isListRequest) {
+      console.info('[artifact-registry-list-proxy]', {
+        event: 'artifact_registry_list_proxy_result',
+        trace_id: traceId,
+        route: '/api/artifacts',
+        method: init.method,
+        authenticated_session_present: Boolean(diagnosticUserId),
+        authenticated_vercel_user_hash: shortHash(diagnosticUserId),
+        backend_auth_header_present: false,
+        upstream_status: null,
+        upstream_content_type: null,
+        json_parse_ok: null,
+        top_level_type: null,
+        known_artifact_present: false,
+        final_response_status: 401,
+      });
+    }
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
-  const authenticatedUserId = await getAuthenticatedUserId();
-  const traceId = randomUUID();
+  const authenticatedUserId = isListRequest ? diagnosticUserId : await getAuthenticatedUserId();
 
   const url = new URL(`${BACKEND_URL}/api/artifacts${path}`);
   req.nextUrl.searchParams.forEach((value, key) => {
@@ -128,6 +250,31 @@ export async function proxyArtifactRegistryRequest(
       authorizationForBackend = refreshedAuthHeader;
       backendResponse = await execute(authorizationForBackend);
     }
+  }
+
+  if (isListRequest) {
+    const responseBody = await backendResponse.text();
+    const upstreamContentType = backendResponse.headers.get('content-type');
+    const summary = summarizeUpstreamJsonBody(responseBody);
+
+    console.info('[artifact-registry-list-proxy]', {
+      event: 'artifact_registry_list_proxy_result',
+      trace_id: traceId,
+      route: '/api/artifacts',
+      method: init.method,
+      authenticated_session_present: Boolean(diagnosticUserId),
+      authenticated_vercel_user_hash: shortHash(diagnosticUserId),
+      backend_auth_header_present: true,
+      upstream_status: backendResponse.status,
+      upstream_content_type: upstreamContentType,
+      ...summary,
+      final_response_status: backendResponse.status,
+    });
+
+    return new Response(responseBody, {
+      status: backendResponse.status,
+      headers: copyResponseHeaders(backendResponse.headers, { omitContentLength: true }),
+    });
   }
 
   if (!backendResponse.ok) {
