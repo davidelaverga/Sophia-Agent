@@ -1977,6 +1977,40 @@ class TestMem0MemoryMiddleware:
 
         assert mock_search.call_args.kwargs["limit"] == 4
 
+    def test_task_history_memories_dropped_before_companion_injection(self):
+        """Codex P1: a stored build-request fact must NOT reach the companion
+        prompt — otherwise the model could echo the prior subject into a new
+        build's start_builder_task description before any downstream filter runs.
+        Durable facts and preferences are still injected."""
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
+
+        results = [
+            {"id": "m1", "content": "User asked for a report about OpenClaw", "category": "fact"},
+            {"id": "m2", "content": "User's name is Davide", "category": "fact"},
+            {"id": "m3", "content": "Prefers concise replies", "category": "preference"},
+        ]
+        mw = Mem0MemoryMiddleware("user-1")
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            return_value=results,
+        ):
+            result = mw.before_agent(
+                {
+                    "messages": [_make_message("build me a report on Hermes")],
+                    "platform": "text",
+                    "context_mode": "work",
+                },
+                _make_runtime(thread_id="thread-th", platform="text"),
+            )
+
+        block = result["system_prompt_blocks"][-1]
+        assert "OpenClaw" not in block  # task-history fact removed
+        assert "Davide" in block
+        assert "concise replies" in block
+        assert result["injected_memories"] == ["m2", "m3"]
+
     def test_voice_reuses_recent_similar_results(self):
         from unittest.mock import patch
 
