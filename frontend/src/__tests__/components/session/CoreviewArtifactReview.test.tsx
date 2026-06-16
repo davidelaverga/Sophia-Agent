@@ -118,6 +118,56 @@ const SELECTED_PDF_ARTIFACT = {
   userNextAction: "Open or download the artifact if the in-canvas preview is unavailable.",
 }
 
+function buildMarkdownSessionIndex(
+  overrides: Partial<NonNullable<ComponentProps<typeof PresenceArtifactPanel>["sessionArtifactIndex"]>["artifacts"][number]> = {},
+): NonNullable<ComponentProps<typeof PresenceArtifactPanel>["sessionArtifactIndex"]> {
+  const artifactId = overrides.artifactId ?? "artifact:local-markdown"
+  return {
+    userId: "user-1",
+    threadId: "thread-1",
+    sessionId: "session-1",
+    activeArtifactId: artifactId,
+    recentlyOpenedArtifactIds: [artifactId],
+    artifacts: [{
+      artifactId,
+      stableArtifactIdentity: "stable-markdown",
+      logicalArtifactId: "logical-markdown",
+      versionId: "logical-markdown::v1",
+      parentVersionId: null,
+      userId: "user-1",
+      threadId: "thread-1",
+      sessionId: "session-1",
+      parentThreadId: null,
+      taskId: null,
+      runId: null,
+      title: "launch-brief.md",
+      filename: "launch-brief.md",
+      artifactType: "document",
+      rendererKind: "markdown",
+      mimeType: "text/markdown",
+      localPath: "mnt/user-data/outputs/launch-brief.md",
+      storageProvider: "local",
+      storageBucket: null,
+      storageObjectPath: null,
+      contentUrl: null,
+      downloadUrl: null,
+      signedUrl: null,
+      signedUrlExpiresAt: null,
+      createdAt: "2026-06-16T12:00:00.000Z",
+      updatedAt: "2026-06-16T12:00:00.000Z",
+      sourceArtifactPath: null,
+      revisionOfArtifactPath: null,
+      sourceHash: null,
+      contentHash: null,
+      capabilities: null,
+      review: null,
+      safeSummary: null,
+      rawContentExcluded: true,
+      ...overrides,
+    }],
+  }
+}
+
 function createTextFetchResponse(
   text: string,
   contentType: string,
@@ -219,6 +269,7 @@ function renderPanel({
   builderArtifactLibrary = [],
   builderTask = null,
   builderCompletion = null,
+  sessionArtifactIndex = null,
   isCancellingBuilderTask = false,
   selectedBuilderArtifactPath,
   isVoiceMode = false,
@@ -251,6 +302,7 @@ function renderPanel({
   builderArtifactLibrary?: NonNullable<ComponentProps<typeof PresenceArtifactPanel>["builderArtifactLibrary"]>
   builderTask?: ComponentProps<typeof PresenceArtifactPanel>["builderTask"]
   builderCompletion?: ComponentProps<typeof PresenceArtifactPanel>["builderCompletion"]
+  sessionArtifactIndex?: ComponentProps<typeof PresenceArtifactPanel>["sessionArtifactIndex"]
   isCancellingBuilderTask?: ComponentProps<typeof PresenceArtifactPanel>["isCancellingBuilderTask"]
   selectedBuilderArtifactPath?: ComponentProps<typeof PresenceArtifactPanel>["selectedBuilderArtifactPath"]
   isVoiceMode?: boolean
@@ -272,6 +324,7 @@ function renderPanel({
       builderArtifactLibrary={builderArtifactLibrary}
       builderTask={builderTask}
       builderCompletion={builderCompletion}
+      sessionArtifactIndex={sessionArtifactIndex}
       isCancellingBuilderTask={isCancellingBuilderTask}
       selectedBuilderArtifactPath={selectedBuilderArtifactPath}
       onSelectedBuilderArtifactPathChange={onSelectedBuilderArtifactPathChange}
@@ -1137,6 +1190,70 @@ describe("Coreview artifact still-frame review", () => {
       expect(serialized).toContain("coreviewBuilderPreservedReview")
       expect(serialized).not.toContain("\"coreviewToolName\":\"emit_artifact\"")
     })
+  })
+
+  it("upgrades an already selected markdown stage when durable registry metadata rehydrates", async () => {
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const href = fetchInputHref(input)
+      if (
+        href === "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md"
+        || href === "/api/artifacts/artifact_registry_123/content"
+      ) {
+        return createTextFetchResponse("# Launch Brief\n\nLoaded through the selected artifact.", "text/markdown")
+      }
+      throw new Error(`Unhandled fetch in CoreviewArtifactReview test: ${href}`)
+    })
+
+    const renderSubject = (
+      sessionArtifactIndex: ComponentProps<typeof PresenceArtifactPanel>["sessionArtifactIndex"],
+    ) => (
+      <PresenceArtifactPanel
+        artifacts={null}
+        builderArtifact={MARKDOWN_BUILDER_ARTIFACT}
+        builderArtifactLibrary={MARKDOWN_LIBRARY}
+        sessionArtifactIndex={sessionArtifactIndex}
+        selectedBuilderArtifactPath="mnt/user-data/outputs/launch-brief.md"
+        sessionId="session-1"
+        normalSessionId="normal-1"
+        threadId="thread-1"
+        isVisible={true}
+        onDismiss={vi.fn()}
+        isVoiceMode={false}
+      />
+    )
+
+    const view = render(renderSubject(buildMarkdownSessionIndex()))
+
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md",
+      expect.objectContaining({
+        cache: "no-store",
+        method: "GET",
+      }),
+    ))
+
+    fetchSpy.mockClear()
+    view.rerender(renderSubject(buildMarkdownSessionIndex({
+      artifactId: "artifact_registry_123",
+      storageProvider: "supabase",
+      storageBucket: "sophia_builder",
+      storageObjectPath: "artifacts/user-1/session-1/artifact_registry_123/launch-brief.md",
+      contentUrl: "/api/artifacts/artifact_registry_123/content",
+      downloadUrl: "/api/artifacts/artifact_registry_123/download",
+      updatedAt: "2026-06-16T12:05:00.000Z",
+    })))
+
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/artifacts/artifact_registry_123/content",
+      expect.objectContaining({
+        cache: "no-store",
+        method: "GET",
+      }),
+    ))
+    expect(fetchSpy).not.toHaveBeenCalledWith(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md",
+      expect.anything(),
+    )
   })
 
   it("routes voice builder cancellation through Coreview cancel actions", async () => {

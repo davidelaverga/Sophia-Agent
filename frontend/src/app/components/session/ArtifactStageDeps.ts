@@ -3,6 +3,7 @@
 export { RefreshCw } from "lucide-react"
 
 export {
+  buildArtifactHref,
   buildThreadArtifactHref,
   formatBuilderArtifactTypeLabel,
   getBuilderArtifactFiles,

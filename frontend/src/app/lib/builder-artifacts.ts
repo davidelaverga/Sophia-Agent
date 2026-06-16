@@ -384,6 +384,26 @@ export function buildArtifactRegistryHref(
   return `/api/artifacts/${encodeURIComponent(normalizedArtifactId)}/${action}`;
 }
 
+export interface ArtifactHrefInput {
+  threadId?: string | null;
+  artifactPath?: string | null;
+  localPath?: string | null;
+  local_path?: string | null;
+  artifactId?: string | null;
+  artifact_id?: string | null;
+  contentUrl?: string | null;
+  content_url?: string | null;
+  downloadUrl?: string | null;
+  download_url?: string | null;
+  storageProvider?: string | null;
+  storage_provider?: string | null;
+  storageBucket?: string | null;
+  storage_bucket?: string | null;
+  storageObjectPath?: string | null;
+  storage_object_path?: string | null;
+  preferArtifactId?: boolean;
+}
+
 function normalizeSafeArtifactHref(value: string | null | undefined): string | null {
   const href = value?.trim();
   if (!href) {
@@ -392,31 +412,81 @@ function normalizeSafeArtifactHref(value: string | null | undefined): string | n
   if (href.startsWith('/api/artifacts/')) {
     return href;
   }
+  if (typeof window !== 'undefined') {
+    try {
+      const url = new URL(href, window.location.origin);
+      if (url.origin === window.location.origin && url.pathname.startsWith('/api/artifacts/')) {
+        return `${url.pathname}${url.search}${url.hash}`;
+      }
+    } catch {
+      return null;
+    }
+  }
   return null;
 }
 
+function normalizeArtifactHrefToken(value: string | null | undefined): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function isLocalGeneratedArtifactId(artifactId: string | null): boolean {
+  return Boolean(artifactId?.startsWith('artifact:'));
+}
+
+export function hasDurableArtifactReference(input: ArtifactHrefInput | null | undefined): boolean {
+  if (!input) {
+    return false;
+  }
+  const artifactId = normalizeArtifactHrefToken(input.artifactId ?? input.artifact_id);
+  const storageProvider = normalizeArtifactHrefToken(input.storageProvider ?? input.storage_provider);
+  return (
+    Boolean(artifactId && !isLocalGeneratedArtifactId(artifactId))
+    || Boolean(storageProvider && storageProvider !== 'local')
+    || Boolean(normalizeArtifactHrefToken(input.storageBucket ?? input.storage_bucket))
+    || Boolean(normalizeArtifactHrefToken(input.storageObjectPath ?? input.storage_object_path))
+    || Boolean(normalizeSafeArtifactHref(input.contentUrl ?? input.content_url))
+    || Boolean(normalizeSafeArtifactHref(input.downloadUrl ?? input.download_url))
+  );
+}
+
 export function buildArtifactHref(
-  input: {
-    threadId?: string | null;
-    artifactPath?: string | null;
-    artifactId?: string | null;
-    contentUrl?: string | null;
-    downloadUrl?: string | null;
-    preferArtifactId?: boolean;
-  },
+  input: ArtifactHrefInput,
   options?: { download?: boolean },
 ): string | null {
-  const explicitHref = normalizeSafeArtifactHref(options?.download ? input.downloadUrl : input.contentUrl);
-  if (explicitHref) {
-    return explicitHref;
-  }
-  if (input.preferArtifactId) {
-    const registryHref = buildArtifactRegistryHref(input.artifactId, options);
+  const artifactId = normalizeArtifactHrefToken(input.artifactId ?? input.artifact_id);
+  const preferArtifactId = Boolean(
+    artifactId
+      && !isLocalGeneratedArtifactId(artifactId)
+      && (input.preferArtifactId ?? hasDurableArtifactReference(input))
+  );
+  const primaryExplicitHref = normalizeSafeArtifactHref(
+    options?.download
+      ? input.downloadUrl ?? input.download_url
+      : input.contentUrl ?? input.content_url,
+  );
+  const alternateExplicitHref = normalizeSafeArtifactHref(
+    options?.download
+      ? input.contentUrl ?? input.content_url
+      : input.downloadUrl ?? input.download_url,
+  );
+
+  if (preferArtifactId) {
+    const registryHref = buildArtifactRegistryHref(artifactId, options);
     if (registryHref) {
       return registryHref;
     }
   }
-  return buildThreadArtifactHref(input.threadId, input.artifactPath, options);
+  if (primaryExplicitHref) {
+    return primaryExplicitHref;
+  }
+  if (alternateExplicitHref) {
+    return alternateExplicitHref;
+  }
+  return buildThreadArtifactHref(
+    input.threadId,
+    input.artifactPath ?? input.localPath ?? input.local_path,
+    options,
+  );
 }
 
 export function isMarkdownArtifactFile(

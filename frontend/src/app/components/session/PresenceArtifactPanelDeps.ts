@@ -22,6 +22,7 @@ export {
 } from "../../lib/artifact-review-voice-commands"
 export {
   getBuilderArtifactFiles,
+  hasDurableArtifactReference,
   isHtmlArtifactFile,
   normalizeBuilderArtifactPath,
   resolveCanvasRenderFile,

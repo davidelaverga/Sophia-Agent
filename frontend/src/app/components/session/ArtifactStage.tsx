@@ -50,6 +50,7 @@ import {
 } from "./ArtifactCanvasViewport"
 import { ArtifactReviewStatus, hasConfirmedStillFrame } from "./ArtifactReviewStatus"
 import {
+  buildArtifactHref,
   buildThreadArtifactHref,
   cn,
   COREVIEW_ANNOTATION_STORAGE_VERSION,
@@ -85,6 +86,12 @@ export interface ArtifactStageProps {
   builderArtifactLibrary?: BuilderArtifactLibraryItemV1[]
   threadId?: string | null
   artifactId?: string | null
+  artifactRegistryId?: string | null
+  artifactContentUrl?: string | null
+  artifactDownloadUrl?: string | null
+  artifactStorageProvider?: string | null
+  artifactStorageBucket?: string | null
+  artifactStorageObjectPath?: string | null
   sessionId?: string | null
   normalSessionId?: string | null
   voiceAgentSessionId?: string | null
@@ -437,6 +444,12 @@ export function ArtifactStage({
   builderArtifactLibrary = [],
   threadId,
   artifactId,
+  artifactRegistryId,
+  artifactContentUrl,
+  artifactDownloadUrl,
+  artifactStorageProvider,
+  artifactStorageBucket,
+  artifactStorageObjectPath,
   sessionId,
   normalSessionId,
   voiceAgentSessionId,
@@ -505,8 +518,26 @@ export function ArtifactStage({
   }, [builderArtifact, builderArtifactLibrary, files])
   const canvasPreviewKind = canvasRenderResolution.previewKind
   const renderFile = canvasRenderResolution.renderFile ?? primaryFile
-  const openHref = buildThreadArtifactHref(threadId, primaryFile?.path)
-  const downloadHref = buildThreadArtifactHref(threadId, primaryFile?.path, { download: true })
+  const openHref = buildArtifactHref({
+    threadId,
+    artifactPath: primaryFile?.path,
+    artifactId: artifactRegistryId,
+    contentUrl: artifactContentUrl,
+    downloadUrl: artifactDownloadUrl,
+    storageProvider: artifactStorageProvider,
+    storageBucket: artifactStorageBucket,
+    storageObjectPath: artifactStorageObjectPath,
+  })
+  const downloadHref = buildArtifactHref({
+    threadId,
+    artifactPath: primaryFile?.path,
+    artifactId: artifactRegistryId,
+    contentUrl: artifactContentUrl,
+    downloadUrl: artifactDownloadUrl,
+    storageProvider: artifactStorageProvider,
+    storageBucket: artifactStorageBucket,
+    storageObjectPath: artifactStorageObjectPath,
+  }, { download: true })
   const renderHref = canvasPreviewKind
     ? buildThreadArtifactHref(threadId, renderFile?.path) ?? openHref
     : openHref

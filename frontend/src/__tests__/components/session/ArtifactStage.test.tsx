@@ -252,6 +252,12 @@ function renderStage({
   artifact = builderArtifact,
   artifactLibrary = [],
   artifactId,
+  artifactRegistryId,
+  artifactContentUrl,
+  artifactDownloadUrl,
+  artifactStorageProvider,
+  artifactStorageBucket,
+  artifactStorageObjectPath,
   artifactStableIdentity,
   sessionId,
   normalSessionId,
@@ -280,6 +286,12 @@ function renderStage({
     modifiedAt?: string
   }>
   artifactId?: string | null
+  artifactRegistryId?: ComponentProps<typeof ArtifactStage>["artifactRegistryId"]
+  artifactContentUrl?: ComponentProps<typeof ArtifactStage>["artifactContentUrl"]
+  artifactDownloadUrl?: ComponentProps<typeof ArtifactStage>["artifactDownloadUrl"]
+  artifactStorageProvider?: ComponentProps<typeof ArtifactStage>["artifactStorageProvider"]
+  artifactStorageBucket?: ComponentProps<typeof ArtifactStage>["artifactStorageBucket"]
+  artifactStorageObjectPath?: ComponentProps<typeof ArtifactStage>["artifactStorageObjectPath"]
   artifactStableIdentity?: string | null
   sessionId?: string | null
   normalSessionId?: string | null
@@ -312,6 +324,12 @@ function renderStage({
       builderArtifactLibrary={artifactLibrary}
       threadId="thread-1"
       artifactId={artifactId}
+      artifactRegistryId={artifactRegistryId}
+      artifactContentUrl={artifactContentUrl}
+      artifactDownloadUrl={artifactDownloadUrl}
+      artifactStorageProvider={artifactStorageProvider}
+      artifactStorageBucket={artifactStorageBucket}
+      artifactStorageObjectPath={artifactStorageObjectPath}
       artifactStableIdentity={resolvedArtifactStableIdentity}
       sessionId={sessionId}
       normalSessionId={normalSessionId}
@@ -404,6 +422,51 @@ describe("ArtifactStage", () => {
     expect(screen.queryByLabelText("Zoom out")).not.toBeInTheDocument()
     expect(screen.queryByLabelText("Zoom in")).not.toBeInTheDocument()
     expect(screen.queryByLabelText("Fit to view")).not.toBeInTheDocument()
+  })
+
+  it("uses durable registry hrefs for markdown canvas preview and actions", async () => {
+    const fetchPreview = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("# Durable Launch Brief\n\nLoaded through the registry.", {
+        status: 200,
+        headers: { "Content-Type": "text/markdown; charset=utf-8" },
+      }),
+    )
+
+    renderStage({
+      artifact: markdownBuilderArtifact,
+      artifactLibrary: [{
+        path: "mnt/user-data/outputs/launch-brief.md",
+        name: "launch-brief.md",
+        mimeType: "text/markdown",
+      }],
+      artifactId: "coreview-launch-brief",
+      artifactRegistryId: "artifact_registry_123",
+      artifactContentUrl: "/api/artifacts/artifact_registry_123/content",
+      artifactDownloadUrl: "/api/artifacts/artifact_registry_123/download",
+      artifactStorageProvider: "supabase",
+      artifactStorageBucket: "sophia_builder",
+      artifactStorageObjectPath: "artifacts/user-1/session-1/artifact_registry_123/launch-brief.md",
+    })
+
+    await waitFor(() => expect(fetchPreview).toHaveBeenCalledWith(
+      "/api/artifacts/artifact_registry_123/content",
+      expect.objectContaining({
+        cache: "no-store",
+        method: "GET",
+      }),
+    ))
+    expect(fetchPreview).not.toHaveBeenCalledWith(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md",
+      expect.anything(),
+    )
+    expect(screen.getByLabelText("Open Launch brief overview in new tab")).toHaveAttribute(
+      "href",
+      "/api/artifacts/artifact_registry_123/content",
+    )
+    expect(screen.getByLabelText("Download original Launch brief overview")).toHaveAttribute(
+      "href",
+      "/api/artifacts/artifact_registry_123/download",
+    )
   })
 
   it("detects and loads a PDF artifact inside the canvas bed", async () => {

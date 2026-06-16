@@ -53,6 +53,7 @@ import {
   getCoreviewArtifactCapabilitiesForFile,
   getCoreviewWorkspaceEventLogTelemetry,
   haptic,
+  hasDurableArtifactReference,
   hashCoreviewWorkspaceKey,
   isCoreviewStillFrameReviewEnabled,
   isHtmlArtifactFile,
@@ -883,6 +884,45 @@ function buildStageBuilderArtifact({
   return null
 }
 
+function isDurableSessionArtifactRecord(record: ArtifactRecord): boolean {
+  return hasDurableArtifactReference({
+    artifactId: record.artifactId,
+    contentUrl: record.contentUrl,
+    downloadUrl: record.downloadUrl,
+    storageProvider: record.storageProvider,
+    storageBucket: record.storageBucket,
+    storageObjectPath: record.storageObjectPath,
+  })
+}
+
+function findStageSessionArtifactRecord(
+  sessionArtifactIndex: ArtifactSessionIndex | null | undefined,
+  stageArtifactPath: string | null | undefined,
+): ArtifactRecord | null {
+  const normalizedStagePath = normalizeBuilderArtifactPath(stageArtifactPath)
+  if (!sessionArtifactIndex || !normalizedStagePath) {
+    return null
+  }
+  const candidates = sessionArtifactIndex.artifacts.filter((artifact) => (
+    normalizeBuilderArtifactPath(artifact.localPath) === normalizedStagePath
+  ))
+  if (candidates.length === 0) {
+    return null
+  }
+  const active = candidates.find((artifact) => artifact.artifactId === sessionArtifactIndex.activeArtifactId)
+  const durableCandidates = candidates.filter(isDurableSessionArtifactRecord)
+  if (active && (isDurableSessionArtifactRecord(active) || durableCandidates.length === 0)) {
+    return active
+  }
+  return [...(durableCandidates.length > 0 ? durableCandidates : candidates)].sort((left, right) => {
+    const durableDelta = Number(isDurableSessionArtifactRecord(right)) - Number(isDurableSessionArtifactRecord(left))
+    if (durableDelta !== 0) {
+      return durableDelta
+    }
+    return Date.parse(right.updatedAt) - Date.parse(left.updatedAt)
+  })[0] ?? null
+}
+
 function getStagePrimaryFileWithMime(
   stageBuilderArtifact: BuilderArtifactV1 | null,
   builderArtifactLibrary: BuilderArtifactLibraryItemV1[],
@@ -1327,6 +1367,9 @@ export function PresenceArtifactPanel({
   const stageUsesPptxPdfPreview = stageCanvasRenderResolution.previewKind === "pptx_pdf_preview"
   const stageRendererKind = detectArtifactRendererKind(stageCanvasRenderFile ?? stagePrimaryFile, stageBuilderArtifact)
   const stageArtifactPath = stagePrimaryFile?.path ?? stageBuilderArtifact?.artifactPath ?? null
+  const stageSessionArtifactRecord = useMemo(() => (
+    findStageSessionArtifactRecord(sessionArtifactIndex, stageArtifactPath)
+  ), [sessionArtifactIndex, stageArtifactPath])
   const stageArtifactCapabilities = useMemo(() => (
     getCoreviewArtifactCapabilitiesForFile({
       file: stageCanvasRenderFile ?? stagePrimaryFile,
@@ -5166,6 +5209,12 @@ export function PresenceArtifactPanel({
                   builderArtifactLibrary={builderArtifactLibrary}
                   threadId={threadId}
                   artifactId={builderArtifactId}
+                  artifactRegistryId={stageSessionArtifactRecord?.artifactId ?? null}
+                  artifactContentUrl={stageSessionArtifactRecord?.contentUrl ?? null}
+                  artifactDownloadUrl={stageSessionArtifactRecord?.downloadUrl ?? null}
+                  artifactStorageProvider={stageSessionArtifactRecord?.storageProvider ?? null}
+                  artifactStorageBucket={stageSessionArtifactRecord?.storageBucket ?? null}
+                  artifactStorageObjectPath={stageSessionArtifactRecord?.storageObjectPath ?? null}
                   sessionId={sessionId}
                   normalSessionId={normalSessionId}
                   voiceAgentSessionId={voiceAgentSessionId}
@@ -5205,6 +5254,12 @@ export function PresenceArtifactPanel({
                   builderArtifactLibrary={builderArtifactLibrary}
                   threadId={threadId}
                   artifactId={builderArtifactId}
+                  artifactRegistryId={stageSessionArtifactRecord?.artifactId ?? null}
+                  artifactContentUrl={stageSessionArtifactRecord?.contentUrl ?? null}
+                  artifactDownloadUrl={stageSessionArtifactRecord?.downloadUrl ?? null}
+                  artifactStorageProvider={stageSessionArtifactRecord?.storageProvider ?? null}
+                  artifactStorageBucket={stageSessionArtifactRecord?.storageBucket ?? null}
+                  artifactStorageObjectPath={stageSessionArtifactRecord?.storageObjectPath ?? null}
                   sessionId={sessionId}
                   normalSessionId={normalSessionId}
                   voiceAgentSessionId={voiceAgentSessionId}

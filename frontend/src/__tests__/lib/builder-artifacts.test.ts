@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import { detectArtifactRendererKind, isPdfArtifactFile } from "../../app/lib/artifact-renderers"
 import {
+  buildArtifactHref,
   buildThreadArtifactHref,
   classifyBuilderArtifactFileRole,
   formatBuilderArtifactFileRoleLabel,
@@ -84,6 +85,69 @@ describe("builder artifact utilities", () => {
     expect(buildThreadArtifactHref("thread-1", "/outputs/brief.md")).toBe(
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/brief.md",
     )
+  })
+
+  it("prefers registry content and download hrefs when a durable artifact id is available", () => {
+    expect(buildArtifactHref({
+      threadId: "thread-1",
+      artifactPath: "/outputs/brief.md",
+      artifactId: "artifact-registry-1",
+      preferArtifactId: true,
+    })).toBe("/api/artifacts/artifact-registry-1/content")
+
+    expect(buildArtifactHref({
+      threadId: "thread-1",
+      artifactPath: "/outputs/brief.md",
+      artifactId: "artifact-registry-1",
+      preferArtifactId: true,
+    }, { download: true })).toBe("/api/artifacts/artifact-registry-1/download")
+  })
+
+  it("uses durable artifact metadata before legacy local paths", () => {
+    expect(buildArtifactHref({
+      threadId: "thread-1",
+      localPath: "/outputs/brief.md",
+      artifactId: "artifact-registry-1",
+      storageProvider: "supabase",
+    })).toBe("/api/artifacts/artifact-registry-1/content")
+
+    expect(buildArtifactHref({
+      threadId: "thread-1",
+      local_path: "/outputs/brief.md",
+      artifact_id: "artifact-registry-1",
+      storage_provider: "supabase",
+    }, { download: true })).toBe("/api/artifacts/artifact-registry-1/download")
+  })
+
+  it("falls back to same-origin content URLs when no registry id is available", () => {
+    expect(buildArtifactHref({
+      threadId: "thread-1",
+      artifactPath: "/outputs/brief.md",
+      contentUrl: "/api/artifacts/artifact-registry-1/content",
+      downloadUrl: "/api/artifacts/artifact-registry-1/download",
+    })).toBe("/api/artifacts/artifact-registry-1/content")
+
+    expect(buildArtifactHref({
+      threadId: "thread-1",
+      artifactPath: "/outputs/brief.md",
+      content_url: "/api/artifacts/artifact-registry-1/content",
+      download_url: "/api/artifacts/artifact-registry-1/download",
+    }, { download: true })).toBe("/api/artifacts/artifact-registry-1/download")
+  })
+
+  it("falls back to thread artifact hrefs for local artifacts", () => {
+    expect(buildArtifactHref({
+      threadId: "thread-1",
+      artifactPath: "/outputs/brief.md",
+      artifactId: "artifact-registry-1",
+      preferArtifactId: false,
+    })).toBe("/api/threads/thread-1/artifacts/mnt/user-data/outputs/brief.md")
+
+    expect(buildArtifactHref({
+      threadId: "thread-1",
+      localPath: "/outputs/brief.md",
+      artifactId: "artifact:local-stable-id",
+    })).toBe("/api/threads/thread-1/artifacts/mnt/user-data/outputs/brief.md")
   })
 
   it("detects PPTX artifacts by extension or content type", () => {
