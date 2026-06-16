@@ -89,6 +89,13 @@ _VOICE_FAST_CACHE_SHORT_QUERY_TOKENS = 8
 _VOICE_FAST_CACHE_MIN_OVERLAP = 0.15
 _VOICE_MEMORY_LIMIT = 4
 _DEFAULT_MEMORY_LIMIT = 10
+# Over-fetch a larger candidate pool than we inject so the in-turn
+# task-history drop (`_drop_task_history_memories`) still leaves genuine
+# memories to fill the prompt. Without this, a contaminated store could return
+# `memory_limit` rows that are ALL build-requests, the drop empties them, and
+# real memories that ranked just below the task-history rows never get a turn.
+# Mirrors the builder retrieval path (`mem0_retrieval._BUILDER_SEARCH_POOL`).
+_MEMORY_SEARCH_POOL = 25
 _VOICE_WARMUP_USER_ID = "__voice_warmup__"
 _QUERY_TOKEN_RE = re.compile(r"[a-z0-9']+")
 _VOICE_LOW_SIGNAL_RE = re.compile(
@@ -418,7 +425,8 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
                     query=query,
                     categories=categories,
                     context_mode=context_mode,
-                    limit=memory_limit,
+                    # Over-fetch; trimmed to memory_limit after the task-history drop.
+                    limit=max(memory_limit, _MEMORY_SEARCH_POOL),
                 )
             except Exception:
                 logger.warning("Mem0 retrieval failed for user %s", self._user_id, exc_info=True)
@@ -442,23 +450,28 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         # Strip build-request (task-history) memories before the companion model
         # ever sees them — otherwise a prior "user asked for a report about X" fact
         # could be echoed into a new build's subject. See fix/builder-memory-contamination.
+        pool_size = len(results)
         results = _drop_task_history_memories(results)
         if not results:
             log_middleware("Mem0Memory", f"all memories were task-history — none injected (search: {search_ms:.0f}ms)", _t0)
             return None
 
+        # Trim the (over-fetched, task-history-stripped) pool to the platform's
+        # injection budget once, then log/inject the same trimmed slice.
+        selected = results[:memory_limit]
+
         # Log per-category breakdown
         category_counts: dict[str, int] = {}
-        for mem in results[:memory_limit]:
+        for mem in selected:
             cat = mem.get("category", "unknown") or "unknown"
             category_counts[cat] = category_counts.get(cat, 0) + 1
         logger.info(
-            "[Mem0Memory] %d results | search: %.0fms | breakdown: %s",
-            len(results), search_ms,
+            "[Mem0Memory] %d injected of %d pool | search: %.0fms | breakdown: %s",
+            len(selected), pool_size, search_ms,
             " | ".join(f"{cat}: {count}" for cat, count in sorted(category_counts.items())),
         )
         # Log each memory's content preview for debugging
-        for i, mem in enumerate(results[:memory_limit]):
+        for i, mem in enumerate(selected):
             logger.debug(
                 "[Mem0Memory]   [%d] [%s] %s",
                 i, mem.get("category", "?"), (mem.get("content", ""))[:100],
@@ -468,7 +481,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         memory_lines = []
         memory_ids = []
         memory_contents = []
-        for mem in results[:memory_limit]:
+        for mem in selected:
             content = mem.get("content", "")
             memory_contents.append(content)
             memory_lines.append(f"- {content}")
@@ -477,7 +490,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
 
         block = "<memories>\n" + "\n".join(memory_lines) + "\n</memories>"
 
-        log_middleware("Mem0Memory", f"{len(results)} memories injected (search: {search_ms:.0f}ms)", _t0)
+        log_middleware("Mem0Memory", f"{len(selected)} memories injected (search: {search_ms:.0f}ms)", _t0)
         return {
             "injected_memories": memory_ids,
             "injected_memory_contents": memory_lines,

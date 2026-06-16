@@ -1060,6 +1060,29 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User wants to reflect on the report card from school"
         ) is None
 
+    def test_temporal_on_before_deliverable_is_not_a_topic_split(self):
+        """Codex P2 (finding 1): the topic split must land on the marker that
+        introduces the SUBJECT, not an earlier temporal/incidental 'on'.
+
+        'asked Sophia ON Monday to build a report about Hermes' splits on the
+        first 'on' under the old single-search logic, leaving an intent with no
+        deliverable noun, so the request wrongly survived. The split now walks
+        every topic marker and picks the first one with the deliverable named
+        before it — here 'about'."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia on Monday to build a report about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User requested a deck on Friday about the Q3 roadmap"
+        ) == "task_history"
+        # The keep side is unchanged: a deliverable named only after a temporal
+        # 'on' (and never built/requested as an artifact) still survives.
+        assert _candidate_policy_rejection_reason(
+            "User wants to check in on Monday about the presentation"
+        ) is None
+
     def test_bare_asked_to_build_is_task_history(self):
         """Codex P2: 'User asked to build a report about X' (bare 'asked to' +
         creation verb) is a build request. 'asked to see/review' an existing

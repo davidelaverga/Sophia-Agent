@@ -757,11 +757,22 @@ def _is_deliverable_request(lowered: str) -> bool:
     if not _DELIVERABLE_REQUEST_RE.search(lowered):
         return False
 
-    topic = _TOPIC_MARKER_RE.search(lowered)
-    if topic:
-        intent = lowered[: topic.start()]
-        if not _DELIVERABLE_NOUN_RE.search(intent):
-            return False  # the requested deliverable is named in the intent, not the subject
+    topic_markers = list(_TOPIC_MARKER_RE.finditer(lowered))
+    if topic_markers:
+        # Split at the topic marker that actually introduces the subject: the
+        # first one with the requested deliverable named BEFORE it. Earlier markers
+        # can be temporal ("asked Sophia ON MONDAY to build a report about X" — the
+        # split must land on "about", not "on Monday", or the intent has no noun).
+        intent = None
+        for marker in topic_markers:
+            candidate = lowered[: marker.start()]
+            if _DELIVERABLE_NOUN_RE.search(candidate):
+                intent = candidate
+                break
+        if intent is None:
+            # A subject is present but the deliverable noun is only AFTER it
+            # ("wants to focus on the presentation") — not a build request.
+            return False
         if _THIRD_PARTY_REQUEST_RE.search(intent):
             return False
         if _DELIVERY_PREFERENCE_RE.search(intent):
