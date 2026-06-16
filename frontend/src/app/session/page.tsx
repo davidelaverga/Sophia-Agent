@@ -687,6 +687,7 @@ function SessionPageContent() {
     userId: userId ?? null,
     threadId: resolvedThreadId ?? null,
     sessionId: coReviewSessionId,
+    parentThreadId: resolvedThreadId ?? null,
   }), [coReviewSessionId, resolvedThreadId, userId]);
   const sessionArtifactIndexContextSignature = useMemo(() => [
     sessionArtifactIndexContext.userId ?? 'unknown',

@@ -41,8 +41,13 @@ function payloadShape(body: string | null | undefined): Record<string, unknown> 
       parent_thread_id: shortText(parsed.parent_thread_id),
       task_id_present: typeof parsed.task_id === 'string' && parsed.task_id.trim().length > 0,
       task_id: shortText(parsed.task_id),
+      task_id_hash: typeof parsed.task_id === 'string' ? shortHash(parsed.task_id) : null,
       run_id_present: typeof parsed.run_id === 'string' && parsed.run_id.trim().length > 0,
       run_id: shortText(parsed.run_id),
+      run_id_hash: typeof parsed.run_id === 'string' ? shortHash(parsed.run_id) : null,
+      task_id_equals_run_id: typeof parsed.task_id === 'string'
+        && typeof parsed.run_id === 'string'
+        && parsed.task_id.trim() === parsed.run_id.trim(),
       user_id_present: typeof parsed.user_id === 'string' && parsed.user_id.trim().length > 0,
       user_id_hash: typeof parsed.user_id === 'string' ? shortHash(parsed.user_id) : null,
       filename_present: typeof parsed.filename === 'string' && parsed.filename.trim().length > 0,
