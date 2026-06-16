@@ -157,12 +157,15 @@ _DEADLINE_RE = re.compile(
 # to a third party for an existing artifact ("asked for HR documents") or the
 # user's own work ("user is building a report tool" — has no request verb).
 # ``buil[dt]s?`` matches build / builds / built (incl. the passive "a PDF built
-# about X") while word boundaries keep it out of "building".
+# about X") while word boundaries keep it out of "building". ``wr(ite|…)``
+# matches bare write / writes / writing / wrote / written (and "write up") so
+# "asked Sophia to write a PDF about X" is recognized as a build cue — the
+# request-verb gate keeps it off the user's own writing ("user wrote a report").
 _DELIVERABLE_CREATION_RE = re.compile(
     r"\bcreat(?:e|es|ed|ing)\b|\bcreation\s+of\b|\bbuil[dt]s?\b|"
     r"\bmake\b|\bmakes\b|\bmaking\b|\bmade\b|\bdraft(?:s|ed|ing)?\b|"
     r"\bgenerat(?:e|es|ed|ing)\b|\bdesign(?:s|ed|ing)?\b|\bproduc(?:e|es|ed|ing)\b|"
-    r"\bprepar(?:e|es|ed|ing)\b|\bput\s+together\b|\bwr(?:ite|ites|iting|ote|itten)\s+up\b"
+    r"\bprepar(?:e|es|ed|ing)\b|\bput\s+together\b|\bwr(?:ite|ites|iting|ote|itten)\b"
 )
 # STRONG deliverable nouns: things one asks Sophia to *produce*. A request verb
 # alone is enough to mark these as task history ("user asked for a report about
@@ -863,18 +866,18 @@ def _classify_task_history_with_llm(contents: list[str], *, client=None) -> set[
     if not isinstance(parsed, list):
         return None
     flagged: set[int] = set()
-    saw_index = False
+    saw_valid_index = False
     for item in parsed:
         # bool is an int subclass — exclude True/False from being read as indices.
         if isinstance(item, bool):
             continue
-        if isinstance(item, int):
-            saw_index = True
-            if 0 <= item < len(contents):
-                flagged.add(item)
-    if parsed and not saw_index:
-        # Non-empty list with no integer indices (e.g. the model returned objects
-        # or prose) — treat as a malformed response, not "flag nothing".
+        if isinstance(item, int) and 0 <= item < len(contents):
+            saw_valid_index = True
+            flagged.add(item)
+    if parsed and not saw_valid_index:
+        # Non-empty list with no VALID in-range indices (objects, prose, or only
+        # out-of-range numbers like [5] for one candidate) — treat as a malformed
+        # response and fall back to lexical, NOT "flag nothing".
         return None
     return flagged
 

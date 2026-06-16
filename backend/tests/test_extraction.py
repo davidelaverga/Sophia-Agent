@@ -1146,6 +1146,22 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked Sophia to put together the onboarding materials"
         ) == "task_history"
 
+    def test_bare_write_is_a_creation_cue_for_weak_nouns(self):
+        """Codex P2: bare 'write' (not just 'write up') is a create cue, so a weak
+        deliverable like 'write a PDF/document about X' drops on the lexical path."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to write a PDF about onboarding"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wanted me to write a document about the reorg"
+        ) == "task_history"
+        # No request verb → the user's own writing is preserved.
+        assert _candidate_policy_rejection_reason(
+            "User wrote a PDF about their trip"
+        ) is None
+
     def test_preference_short_circuit_matches_verb_not_topic(self):
         """Codex P2: the 'prefer' guard keys on the preference verb, not a topic.
 
@@ -1225,6 +1241,17 @@ class TestTaskHistoryLLMClassifier:
 
         client = self._client_returning("[0, 5, true]")
         assert _classify_task_history_with_llm(["only one entry"], client=client) == {0}
+
+    def test_only_out_of_range_indices_returns_none(self):
+        # P2: a non-empty list with NO valid in-range index (e.g. [5] for one
+        # candidate) is a misnumbered response → None (fallback), not an empty set
+        # that would bypass the lexical filter and let a build request through.
+        from deerflow.sophia.extraction import _classify_task_history_with_llm
+
+        client = self._client_returning("[5]")
+        assert _classify_task_history_with_llm(["only one entry"], client=client) is None
+        client = self._client_returning("[5, 6]")
+        assert _classify_task_history_with_llm(["a", "b"], client=client) is None
 
     def test_client_error_returns_none(self):
         # P1: an API error must be a FAILURE (None) → lexical fallback.
