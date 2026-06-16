@@ -1077,7 +1077,7 @@ def test_signed_url_uses_parent_thread_id_when_state_has_it():
 
     captured_thread_id: list[str | None] = []
 
-    def _spy(thread_id, artifact_path, *, storage_object_path=None):
+    def _spy(thread_id, artifact_path, *, storage_object_path=None, authenticated_user_id=None):
         captured_thread_id.append(thread_id)
         return f"https://supabase.test/{thread_id}/{artifact_path}"
 
@@ -1106,7 +1106,7 @@ def test_signed_url_falls_back_to_builder_thread_id_when_parent_missing():
 
     captured_thread_id: list[str | None] = []
 
-    def _spy(thread_id, artifact_path, *, storage_object_path=None):
+    def _spy(thread_id, artifact_path, *, storage_object_path=None, authenticated_user_id=None):
         captured_thread_id.append(thread_id)
         return f"https://supabase.test/{thread_id}/{artifact_path}"
 
@@ -1137,10 +1137,10 @@ def test_signed_url_uses_storage_object_path_when_artifact_has_it():
         storage_provider="supabase",
     )
 
-    captured: list[tuple[str | None, str | None, str | None]] = []
+    captured: list[tuple[str | None, str | None, str | None, str | None]] = []
 
-    def _spy(thread_id, artifact_path, *, storage_object_path=None):
-        captured.append((thread_id, artifact_path, storage_object_path))
+    def _spy(thread_id, artifact_path, *, storage_object_path=None, authenticated_user_id=None):
+        captured.append((thread_id, artifact_path, storage_object_path, authenticated_user_id))
         return f"https://supabase.test/signed/{storage_object_path}"
 
     with patch.object(builder_events, "_signed_artifact_url", side_effect=_spy):
@@ -1153,6 +1153,56 @@ def test_signed_url_uses_storage_object_path_when_artifact_has_it():
             "parent-thread",
             "foo.md",
             "artifacts/alice/parent-thread/artifact_123/report.md",
+            "alice",
         )
     ]
     assert payload["artifact_url"].endswith("/artifacts/alice/parent-thread/artifact_123/report.md")
+
+
+def test_signed_artifact_url_validates_storage_object_path_before_signing(monkeypatch):
+    captured: dict[str, str | None] = {}
+
+    def _create_signed_url(**kwargs):
+        captured.update(kwargs)
+        return "https://supabase.test/signed/report.md"
+
+    monkeypatch.setattr(
+        "deerflow.sophia.storage.supabase_artifact_store.create_signed_url",
+        _create_signed_url,
+    )
+
+    url = builder_events._signed_artifact_url(
+        "parent-thread",
+        "foo.md",
+        storage_object_path="artifacts/alice/parent-thread/artifact_123/report.md",
+        authenticated_user_id="alice",
+    )
+
+    assert url == "https://supabase.test/signed/report.md"
+    assert captured["object_path"] == "artifacts/alice/parent-thread/artifact_123/report.md"
+
+
+def test_signed_url_refuses_internal_storage_object_path(monkeypatch):
+    runtime = _make_runtime(builder_thread_id="builder-thread")
+    state = _make_state(parent_thread_id="parent-thread", parent_user_id="alice")
+    artifact = _success_artifact(
+        storage_object_path="parent-thread/ledger/session.jsonl",
+        storage_provider="supabase",
+    )
+
+    def _create_signed_url(**_kwargs):  # pragma: no cover - must not be reached
+        raise AssertionError("internal storage object paths must not be signed")
+
+    monkeypatch.setattr(
+        "deerflow.sophia.storage.supabase_artifact_store.create_signed_url",
+        _create_signed_url,
+    )
+
+    payload = builder_events.build_completion_payload_from_artifact(
+        state=state,
+        runtime=runtime,
+        artifact=artifact,
+        status="completed",
+    )
+
+    assert payload["artifact_url"] is None

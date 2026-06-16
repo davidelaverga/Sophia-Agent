@@ -167,6 +167,32 @@ def _storage_object_path_for_signing(artifact_path: str | None, storage_object_p
     return storage_object_path or (artifact_path if str(artifact_path or "").startswith("artifacts/") else None)
 
 
+def _validated_storage_object_path_for_signing(
+    *,
+    thread_id: str | None,
+    artifact_path: str | None,
+    storage_object_path: str | None,
+    user_id: str | None,
+) -> str | None:
+    object_path = _storage_object_path_for_signing(artifact_path, storage_object_path)
+    if not object_path:
+        return None
+    if not thread_id:
+        logger.debug("Skipping exact-object signing without a thread scope")
+        return None
+    try:
+        from app.gateway.artifact_registry import validate_artifact_storage_object_path
+
+        return validate_artifact_storage_object_path(
+            object_path,
+            thread_id=thread_id,
+            user_id=user_id,
+        )
+    except Exception:
+        logger.debug("Refusing to sign unvalidated artifact storage path", exc_info=True)
+        return None
+
+
 def _call_create_signed_url(
     *,
     thread_id: str | None,
@@ -191,9 +217,18 @@ def _signed_artifact_url(
     artifact_path: str | None,
     *,
     storage_object_path: str | None = None,
+    authenticated_user_id: str | None = None,
 ) -> str | None:
     """Mint a signed Supabase URL for the artifact, or None on any failure."""
-    object_path = _storage_object_path_for_signing(artifact_path, storage_object_path)
+    raw_object_path = _storage_object_path_for_signing(artifact_path, storage_object_path)
+    object_path = _validated_storage_object_path_for_signing(
+        thread_id=thread_id,
+        artifact_path=artifact_path,
+        storage_object_path=storage_object_path,
+        user_id=authenticated_user_id,
+    )
+    if raw_object_path and not object_path:
+        return None
     if not object_path and (not thread_id or not artifact_path):
         return None
     return _call_create_signed_url(
@@ -483,6 +518,7 @@ def _artifact_signed_url(
     artifact_storage_path: str | None,
     artifact_filename: str | None,
     storage_object_path: str | None,
+    authenticated_user_id: str | None,
 ) -> str | None:
     # Sign against the SAME thread_id ``BuilderArtifactMiddleware`` uploads
     # to: parent_thread_id (the conversation thread). The channel adapter's
@@ -493,6 +529,7 @@ def _artifact_signed_url(
         parent_thread_id or builder_thread_id,
         artifact_storage_path or artifact_filename,
         storage_object_path=storage_object_path,
+        authenticated_user_id=authenticated_user_id,
     )
 
 
@@ -503,6 +540,7 @@ def _artifact_signed_url_with_result(
     artifact_storage_path: str | None,
     artifact_filename: str | None,
     storage_object_path: str | None,
+    authenticated_user_id: str | None,
 ) -> tuple[str | None, str]:
     signing_thread_id = parent_thread_id or builder_thread_id
     signing_path = artifact_storage_path or artifact_filename
@@ -514,6 +552,7 @@ def _artifact_signed_url_with_result(
         artifact_storage_path=artifact_storage_path,
         artifact_filename=artifact_filename,
         storage_object_path=storage_object_path,
+        authenticated_user_id=authenticated_user_id,
     )
     if url:
         return url, "signed_url_created"
@@ -782,6 +821,7 @@ def build_completion_payload_from_artifact(
         artifact_storage_path=artifact_storage_path,
         artifact_filename=artifact_filename,
         storage_object_path=storage_object_path,
+        authenticated_user_id=user_id,
     )
 
     task_brief = _task_brief(delegation)

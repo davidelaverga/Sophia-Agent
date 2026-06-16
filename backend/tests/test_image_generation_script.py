@@ -242,6 +242,17 @@ class TestEditPathWithReferenceImages:
 
 
 class TestSlideVisualMode:
+    def test_slide_visual_reference_size_uses_supported_edit_size(self, script_module) -> None:
+        assert (
+            script_module._resolve_request_size(
+                explicit_size=None,
+                slide_visual=True,
+                aspect_ratio="16:9",
+                has_references=True,
+            )
+            == "1536x1024"
+        )
+
     def test_slide_visual_uses_prompt_field_true_16x9_and_high_quality(
         self, script_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -296,7 +307,7 @@ class TestSlideVisualMode:
             )
 
         kwargs = fake_client.images.edit.call_args.kwargs
-        assert kwargs["size"] == "1536x864"
+        assert kwargs["size"] == "1536x1024"
         assert kwargs["quality"] == "high"
 
 

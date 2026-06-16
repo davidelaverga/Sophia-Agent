@@ -46,6 +46,8 @@ _ASPECT_TO_SIZE = {
 }
 _DEFAULT_SIZE = "1536x1024"
 _SLIDE_VISUAL_SIZE = "1536x864"
+_SLIDE_VISUAL_EDIT_SIZE = "1536x1024"
+_EDIT_SUPPORTED_SIZES = {"auto", "1024x1024", "1536x1024", "1024x1536"}
 
 _MODEL = "gpt-image-2"
 
@@ -161,6 +163,19 @@ def _classify_exception(exc: BaseException) -> str:
 
 def _resolve_size(aspect_ratio: str) -> str:
     return _ASPECT_TO_SIZE.get((aspect_ratio or "").strip(), _DEFAULT_SIZE)
+
+
+def _resolve_request_size(
+    *,
+    explicit_size: str | None,
+    slide_visual: bool,
+    aspect_ratio: str,
+    has_references: bool,
+) -> str:
+    resolved = explicit_size or (_SLIDE_VISUAL_SIZE if slide_visual else _resolve_size(aspect_ratio))
+    if has_references and resolved not in _EDIT_SUPPORTED_SIZES:
+        return _SLIDE_VISUAL_EDIT_SIZE if slide_visual else _DEFAULT_SIZE
+    return resolved
 
 
 def _prompt_field_text(key: str, value: object) -> str | None:
@@ -366,10 +381,15 @@ def generate_image(
     builder's bash subprocess sees a non-zero exit code and stops looping.
     """
     prompt = _build_prompt(prompt_file, slide_visual=slide_visual)
-    resolved_size = size or (_SLIDE_VISUAL_SIZE if slide_visual else _resolve_size(aspect_ratio))
     quality = "high" if slide_visual else None
     client = _openai_client_from_env()
     valid_refs = _filter_valid_references(reference_images or [])
+    resolved_size = _resolve_request_size(
+        explicit_size=size,
+        slide_visual=slide_visual,
+        aspect_ratio=aspect_ratio,
+        has_references=bool(valid_refs),
+    )
 
     response = _call_image_api_or_fail(
         client,
@@ -442,7 +462,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--size",
         default=None,
-        help="Explicit OpenAI image size. Defaults to 1536x864 for --slide-visual, otherwise aspect-ratio mapping.",
+        help=(
+            "Explicit OpenAI image size. Defaults to 1536x864 for --slide-visual generation, "
+            "1536x1024 for --slide-visual edits, otherwise aspect-ratio mapping."
+        ),
     )
     parser.add_argument(
         "--slide-visual",
