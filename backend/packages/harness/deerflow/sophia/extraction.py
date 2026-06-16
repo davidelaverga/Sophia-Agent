@@ -140,6 +140,18 @@ _DELIVERY_STYLE_RE = re.compile(
 # ("report about what the CLIENT REQUESTED"). "for" is excluded (a recipient, not
 # a subject: "report for the board").
 _TOPIC_MARKER_RE = re.compile(r"\b(?:about|on|regarding|concerning|covering|comparing)\b")
+# One-off build signals — distinguish a SINGULAR styled request ("a detailed deck
+# by Monday", "a concise report for the board") from a standing/generic style
+# preference ("reports to be concise"). A singular article directly governing a
+# deliverable, or a deadline, marks a one-off build that must NOT be exempted as a
+# preference (see _is_delivery_preference). Generic/plural deliverables and the
+# "to be …" construction carry neither and stay preferences.
+_SINGULAR_DELIVERABLE_RE = re.compile(
+    r"\ban?\s+(?:[\w-]+\s+){0,3}?(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS) + r")s?\b"
+)
+_DEADLINE_RE = re.compile(
+    r"\bdue\b|\btomorrow\b|\bby\s+(?:\w+day|tomorrow|tonight|noon|eod|cob|next\b|end\b|the\b|\d)"
+)
 # An explicit create/build cue. Combined with a request verb + deliverable noun
 # it marks a build request made *of Sophia*, and distinguishes it from a request
 # to a third party for an existing artifact ("asked for HR documents") or the
@@ -769,15 +781,23 @@ def _is_delivery_preference(lowered: str) -> bool:
 
     Two forms: the explicit preference verb ("prefers concise reports"), or a
     style/format phrasing ("wants reports to be concise and include citations").
-    The style form is recognized only when there is NO build signal — no explicit
-    create/build cue and no "about <topic>" subject — so a styled build request
-    ("make a concise report about Hermes") is still treated as task history.
+    The style form is recognized only when there is NO build signal:
+    - no explicit create/build cue and no "about <topic>" subject (so a styled
+      build request "make a concise report about Hermes" is still task history); and
+    - not a SINGULAR one-off request — a singular article governing a deliverable
+      ("a detailed deck") or a deadline ("by Monday") marks a one-off styled build
+      ("needs a detailed deck by Monday", "wants a concise report for the board"),
+      which is task history, not a standing preference about how deliverables look.
     """
     if _DELIVERY_PREFERENCE_RE.search(lowered):
         return True
     if _DELIVERABLE_CREATION_RE.search(lowered) or _TOPIC_MARKER_RE.search(lowered):
         return False
-    return bool(_DELIVERY_STYLE_RE.search(lowered))
+    if not _DELIVERY_STYLE_RE.search(lowered):
+        return False
+    if _SINGULAR_DELIVERABLE_RE.search(lowered) or _DEADLINE_RE.search(lowered):
+        return False
+    return True
 
 
 # Focused Haiku classifier — the authoritative task-history backstop. The lexical

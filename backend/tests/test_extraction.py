@@ -983,6 +983,26 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User wants a concise report about Hermes"
         ) == "task_history"
 
+    def test_styled_one_off_build_is_not_a_preference(self):
+        """Codex P2: a SINGULAR styled request ("a detailed deck") or one with a
+        deadline is a one-off build, not a standing preference — it must drop even
+        without an 'about'/'on' subject. Generic/plural style preferences stay."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User needs a detailed deck by Monday"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants a concise report for the board"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants concise decks by Friday"
+        ) == "task_history"
+        # A generic/plural style preference (no singular article, no deadline) stays.
+        assert _candidate_policy_rejection_reason(
+            "User wants their reports concise for the board"
+        ) is None
+
     def test_passive_built_is_a_creation_cue(self):
         """Codex P2: 'built' is a passive create/build cue. The old
         build(?:s|t)? never matched 'built', so a weak-noun request like
