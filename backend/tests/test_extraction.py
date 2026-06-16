@@ -1103,6 +1103,40 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked to review the deck before the meeting"
         ) is None
 
+    def test_frontend_web_deliverables_are_task_history(self):
+        """Codex P2 (finding): the frontend dispatch path
+        (start_builder_task._HTML_OUTPUT_RE) treats bare web nouns — website,
+        web page, web site, landing page, web app — as build targets, so a legacy
+        'user asked Sophia to build a website about X' memory must drop as
+        task_history too, or the prior frontend subject contaminates a new build.
+        'webpage' (one word) was already covered; the spaced/missing forms were
+        the gap."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to build a website about OpenClaw"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to build a web page about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants a landing page about the pricing tiers"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User requested a web app about scheduling"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a web site about the launch"
+        ) == "task_history"
+        # No request verb → durable memory about their site, kept.
+        assert _candidate_policy_rejection_reason(
+            "User feels anxious about their website launch next month"
+        ) is None
+        # A skill/activity modified by a web noun is a goal, not a build request.
+        assert _candidate_policy_rejection_reason(
+            "User wants website coaching before the relaunch"
+        ) is None
+
     def test_skill_modifier_nouns_are_not_deliverables(self):
         """Codex P2: a deliverable word MODIFYING a skill/activity is a goal, not a
         build request. 'presentation coaching', 'presentation practice',

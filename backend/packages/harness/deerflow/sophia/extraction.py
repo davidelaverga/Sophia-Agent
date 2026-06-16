@@ -92,6 +92,18 @@ _DELIVERABLE_NOUNS = (
     "html", "material", "deliverable", "artifact", "webpage",
     "infographic", "spreadsheet", "write-up",
 )
+# Frontend / web deliverables. The frontend dispatch path
+# (``start_builder_task._HTML_OUTPUT_RE``) treats these bare nouns as build
+# targets, so a legacy "user asked Sophia to build a website about X" memory must
+# also drop as task_history — otherwise the prior frontend subject contaminates a
+# new build. These are STRONG deliverables (an unambiguous "make me a ___").
+# Kept as a regex fragment (not re.escape'd tuple entries) so the spaced forms
+# allow flexible whitespace; the single-word "webpage" already lives in
+# ``_DELIVERABLE_NOUNS``. The outer ``s?`` in each consuming pattern pluralizes
+# (website → websites, landing page → landing pages, web app → web apps).
+_WEB_DELIVERABLE_FRAGMENT = (
+    r"website|web\s+site|web\s+page|landing\s+page|web\s+app(?:lication)?"
+)
 # A deliverable word that MODIFIES a skill/activity ("presentation coaching",
 # "presentation practice", "report-writing skills") is not the requested
 # deliverable — it names a goal/context. This negative lookahead keeps the noun
@@ -110,7 +122,8 @@ _NOT_SKILL_MODIFIER = (
 # intended case (the real "...educational materials..." build-request snippet
 # still matches) while removing that false-positive class.
 _DELIVERABLE_NOUN_RE = re.compile(
-    r"\b(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS) + r")s?\b" + _NOT_SKILL_MODIFIER
+    r"\b(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
+    + "|" + _WEB_DELIVERABLE_FRAGMENT + r")s?\b" + _NOT_SKILL_MODIFIER
 )
 # A genuine delivery *preference* ("prefers concise reports") is not a build
 # request. Match the preference VERB on a word boundary so a topic noun like
@@ -147,7 +160,8 @@ _TOPIC_MARKER_RE = re.compile(r"\b(?:about|on|regarding|concerning|covering|comp
 # preference (see _is_delivery_preference). Generic/plural deliverables and the
 # "to be …" construction carry neither and stay preferences.
 _SINGULAR_DELIVERABLE_RE = re.compile(
-    r"\ban?\s+(?:[\w-]+\s+){0,3}?(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS) + r")s?\b"
+    r"\ban?\s+(?:[\w-]+\s+){0,3}?(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
+    + "|" + _WEB_DELIVERABLE_FRAGMENT + r")s?\b"
 )
 _DEADLINE_RE = re.compile(
     r"\bdue\b|\btomorrow\b|\bby\s+(?:\w+day|tomorrow|tonight|noon|eod|cob|next\b|end\b|the\b|\d)"
@@ -172,7 +186,8 @@ _DELIVERABLE_CREATION_RE = re.compile(
 # X"), no separate creation cue needed — that distinguishes them from weak nouns
 # (document/pdf/material/…) that could name an existing artifact.
 _STRONG_DELIVERABLE_NOUN_RE = re.compile(
-    r"\b(?:presentation|report|deck|slide|webpage|infographic|spreadsheet|write-up)s?\b" + _NOT_SKILL_MODIFIER
+    r"\b(?:presentation|report|deck|slide|webpage|infographic|spreadsheet|write-up|"
+    + _WEB_DELIVERABLE_FRAGMENT + r")s?\b" + _NOT_SKILL_MODIFIER
 )
 # A request involving a third party is a relationship fact, NOT a build request
 # made of Sophia — never drop it. Two shapes: the third party is the asker
