@@ -122,6 +122,7 @@ The calling code will add to each entry: `user_id`, `agent_id`, `run_id`, `times
 - Session logistics ("let's do the debrief ritual")
 - Content that merely confirms existing Mem0 memories with no new information
 - Generic observations that could apply to anyone ("user wants to be happy")
+- Requests for deliverables or builds — presentations, reports, documents, decks, slides, HTML, and the like — and the subject matter of those builds. These are transient task history, not durable facts about the person. Never store "user requested creation of X," "user asked for a report about Y," or the topic of a deliverable. (A durable *preference* about how the user likes deliverables — e.g., "prefers concise reports, no bullet lists" — is still valid and belongs in `preference`.)
 - Passwords, API keys, tokens, credentials, recovery codes, temporary codenames, or other security-sensitive strings
 
 ## Deduplication Rules

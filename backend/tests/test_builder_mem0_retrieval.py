@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from deerflow.agents.sophia_agent.middlewares.mem0_retrieval import (
+    _BUILDER_SEARCH_POOL,
     _MAX_SNIPPET_CHARS,
     BuilderMem0RetrievalMiddleware,
 )
@@ -124,8 +125,8 @@ class TestRetrievalAsync:
         captured = _patch_search(
             monkeypatch,
             [
-                {"id": "m1", "content": "User prefers concise summaries."},
-                {"id": "m2", "content": "Works in San Francisco."},
+                {"id": "m1", "content": "User prefers concise summaries.", "category": "preference"},
+                {"id": "m2", "content": "Works in San Francisco.", "category": "preference"},
             ],
         )
 
@@ -152,6 +153,63 @@ class TestRetrievalAsync:
         # Ensure search was called with normalized_brief, not raw message.
         assert captured["calls"][0]["query"] == "Compare AR glasses."
         assert captured["calls"][0]["user_id"] == "user-abc"
+        # Builder retrieval is restricted to durable style preferences so prior
+        # task-history (fact/decision "user requested a report on X") can't
+        # hijack the build subject. See fix/builder-memory-contamination.
+        assert captured["calls"][0]["categories"] == ["preference"]
+        # Over-fetch a pool (Mem0 filters categories after the score-ranked
+        # fetch) rather than asking for only top_k. See codex review on PR #137.
+        assert captured["calls"][0]["limit"] == _BUILDER_SEARCH_POOL
+
+    @pytest.mark.anyio
+    async def test_overfetches_pool_then_trims_to_top_k(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Mem0 returns more preference rows than top_k; the middleware over-fetches
+        # a larger pool (so the preference-only filter still has candidates when
+        # task-history dominates the top rows) and then trims to top_k for the
+        # injected-memory budget. See codex review on PR #137.
+        rows = [{"id": f"m{i}", "content": f"pref {i}", "category": "preference"} for i in range(8)]
+        captured = _patch_search(monkeypatch, rows)
+        mw = BuilderMem0RetrievalMiddleware()  # top_k == 5
+        state = {
+            "user_id": "user-abc",
+            "messages": [{"type": "human", "content": "build a deck about AR"}],
+        }
+        result = await mw.abefore_agent(state, runtime=None)
+
+        assert captured["calls"][0]["limit"] == _BUILDER_SEARCH_POOL
+        assert result["injected_memory_contents"] == [f"pref {i}" for i in range(5)]
+        assert result["injected_memories"] == [f"m{i}" for i in range(5)]
+
+    @pytest.mark.anyio
+    async def test_blank_or_nonpreference_category_rows_are_dropped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Mem0 admits blank-category rows (it treats "" as a wildcard match), so a
+        # legacy / metadata-write-failed task-history row can come back even under
+        # categories=['preference']. The middleware must strictly drop anything
+        # that is not explicitly a preference before injecting, or an uncategorized
+        # "user requested creation of X" re-contaminates the brief. See codex
+        # review on PR #137.
+        captured = _patch_search(
+            monkeypatch,
+            [
+                {"id": "m1", "content": "User requested creation of a deck about X", "category": ""},
+                {"id": "m2", "content": "User asked Sophia to build a report on Y", "category": "fact"},
+                {"id": "m3", "content": "Prefers concise summaries", "category": "preference"},
+                {"id": "m4", "content": "Legacy row with no category key at all"},
+            ],
+        )
+        mw = BuilderMem0RetrievalMiddleware()
+        state = {"user_id": "u", "messages": [{"type": "human", "content": "build a deck"}]}
+        result = await mw.abefore_agent(state, runtime=None)
+
+        # Only the genuine preference row survives; the blank-category build
+        # request, the fact, and the category-less legacy row are all dropped.
+        assert result["injected_memory_contents"] == ["Prefers concise summaries"]
+        assert result["injected_memories"] == ["m3"]
+        assert captured["calls"][0]["categories"] == ["preference"]
 
     @pytest.mark.anyio
     async def test_no_user_id_skips(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -231,8 +289,8 @@ class TestRetrievalAsync:
         _patch_search(
             monkeypatch,
             [
-                {"id": "m2", "content": "From Mem0"},  # new
-                {"id": "m1", "content": "Already injected"},  # duplicate — should be deduped
+                {"id": "m2", "content": "From Mem0", "category": "preference"},  # new
+                {"id": "m1", "content": "Already injected", "category": "preference"},  # duplicate — should be deduped
             ],
         )
         mw = BuilderMem0RetrievalMiddleware()
@@ -254,7 +312,7 @@ class TestRetrievalAsync:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         long_text = "x" * (_MAX_SNIPPET_CHARS + 100)
-        _patch_search(monkeypatch, [{"id": "m1", "content": long_text}])
+        _patch_search(monkeypatch, [{"id": "m1", "content": long_text, "category": "preference"}])
         mw = BuilderMem0RetrievalMiddleware()
         state = {
             "user_id": "u",

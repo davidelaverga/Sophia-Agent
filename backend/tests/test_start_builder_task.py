@@ -1204,3 +1204,28 @@ def test_document_brief_gets_no_visual_line():
     from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
 
     assert _visual_expectations_line("Write a markdown report", "document") is None
+
+
+def test_resolve_memory_snippets_drops_companion_task_history():
+    """Codex P2: the companion-embedded snippet path must not leak task history.
+
+    `injected_memory_contents` is populated by the companion's broad-category
+    Mem0 retrieval, so a stored "user asked for a report about X" snippet could
+    be embedded into the builder brief and hijack the build subject. The same
+    policy classifier used at write time filters it here too; genuine
+    preferences and facts pass through.
+    """
+    from deerflow.sophia.tools.start_builder_task import _resolve_memory_snippets
+
+    state = {
+        "injected_memory_contents": [
+            "User asked for a report about Hermes",  # task_history → dropped
+            "Prefers concise slide headlines",  # preference → kept
+            "User's name is Davide",  # fact → kept
+            "User requested creation of a deck about OpenClaw",  # task_history → dropped
+        ],
+    }
+    assert _resolve_memory_snippets(state) == [
+        "Prefers concise slide headlines",
+        "User's name is Davide",
+    ]

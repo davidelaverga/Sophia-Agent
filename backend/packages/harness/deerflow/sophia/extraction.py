@@ -55,6 +55,126 @@ _CREDENTIAL_MARKERS = (
     "recovery code",
 )
 _NON_DURABLE_MARKERS = ("temporary", "one-time", "one time", "codename")
+# Task-history backstop: a build *request* made to Sophia ("user asked for a
+# report about X", "user wants a deck about Y") is transient task history, not a
+# durable fact, and pollutes the builder. The prompt (mem0_extraction.md) is the
+# primary lever; this catches what the model still emits. It fires on a request
+# verb + deliverable noun, but only when the noun is a *strong* "make me a ___"
+# deliverable (report, presentation, deck, slide, webpage) OR a weak/ambiguous
+# noun (document, pdf, material, …) paired with an explicit create/build cue —
+# and never when the requester is a third party ("boss asked for a status report")
+# or it is a delivery preference. This keeps durable memories ("user asked for HR
+# documents", "anxious about a board presentation") while dropping "user asked for
+# a report about Hermes". See fix/builder-memory-contamination.
+#
+# Request verbs span ask / request / want / need. "ask" requires "for" (with an
+# optional recipient: "asked for", "asked me/you/us/sophia for"), a recipient +
+# "to" ("asked me to"), or "to <create>" ("asked to build") — so it never matches
+# "asked about the report" or "asked to see the report"; want/need are bare (they
+# govern the deliverable directly: "wants a report"). The noun + third-party +
+# preference guards bound the recall.
+_DELIVERABLE_REQUEST_RE = re.compile(
+    r"\b(?:requested|requests)\b"
+    # "asked for" / "asked {sophia,me,you,us} for" (recipient optional)
+    r"|\bask(?:ed|s)\s+(?:(?:sophia|me|you|us)\s+)?for\b"
+    # "asked {sophia,me,you,us} to <anything>" (recipient-directed)
+    r"|\bask(?:ed|s)\s+(?:sophia|me|you|us)\s+to\b"
+    # bare "asked sophia" (Sophia-directed)
+    r"|\bask(?:ed|s)\s+sophia\b"
+    # bare "asked to <create>" — gated on a creation stem so "asked to see/review"
+    # an existing artifact is NOT a build request.
+    r"|\bask(?:ed|s)\s+to\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together)"
+    r"|\bwant(?:ed|s)?\b"
+    r"|\bneed(?:ed|s)?\b"
+)
+_DELIVERABLE_NOUNS = (
+    "presentation", "report", "deck", "slide", "document", "pdf",
+    "html", "material", "deliverable", "artifact", "webpage",
+    "infographic", "spreadsheet", "write-up",
+)
+# A deliverable word that MODIFIES a skill/activity ("presentation coaching",
+# "presentation practice", "report-writing skills") is not the requested
+# deliverable — it names a goal/context. This negative lookahead keeps the noun
+# from matching when it is immediately followed by such an activity word or a
+# hyphen-compound, so those durable memories are not dropped as task_history.
+_NOT_SKILL_MODIFIER = (
+    r"(?!\s+(?:coaching|practice|prep|preparation|skills?|training|tips?|feedback|"
+    r"advice|help|anxiety|nerves|jitters|class(?:es)?|courses?|lessons?)|-)"
+)
+# Match the deliverable nouns on WORD BOUNDARIES (optional trailing plural).
+# A bare ``noun in content`` substring test silently fires inside unrelated
+# words — "report" in "reported", "material" in "immaterial", "document" in
+# "documented" — which, combined with a common request verb, would wrongly
+# drop durable feeling/relationship/lesson memories as task_history (an
+# abuse-disclosure case was reproduced in review). Anchoring keeps every
+# intended case (the real "...educational materials..." build-request snippet
+# still matches) while removing that false-positive class.
+_DELIVERABLE_NOUN_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS) + r")s?\b" + _NOT_SKILL_MODIFIER
+)
+# A genuine delivery *preference* ("prefers concise reports") is not a build
+# request. Match the preference VERB on a word boundary so a topic noun like
+# "report on consumer preferences" does NOT exempt itself (the bare substring
+# "prefer" did — letting a real build request escape the filter).
+_DELIVERY_PREFERENCE_RE = re.compile(r"\bprefer(?:s|red|ring)?\b")
+# A standing preference can also be phrased with want/need ("user wants reports
+# to be concise and include citations") — the prompt says these belong in
+# `preference`, so the classifier must not drop them. Recognize the STYLE/format
+# phrasing: a "<deliverable> to be/should be …" construction or a quality/format
+# descriptor. Gated (in _is_delivery_preference) to fire only when there is NO
+# build signal (no create/build cue, no "about <topic>"), so "make a concise
+# report about Hermes" is still a build request, not a preference.
+_DELIVERY_STYLE_RE = re.compile(
+    r"\bto\s+(?:be|include|have|contain|use|avoid|cover)\b|\bshould\s+(?:be|include|have)\b"
+    r"|\b(?:concise|succinct|brief|shorter|longer|detailed|thorough|formal|informal|casual|"
+    r"polished|minimal|skimmable|scannable|punchy|high-level)\b"
+    r"|\b(?:bullet|bullets|citations?|footnotes?|headlines?)\b|\bno\s+(?:jargon|bullets?|paragraphs?|fluff)\b"
+    r"|\bplain\s+language\b|\bexecutive\s+summary\b|\bone[\s-]pager?\b"
+)
+# A topic marker introduces the deliverable's *subject* ("report ABOUT X",
+# "presentation ON Y"). It does double duty: (1) it tells a styled deliverable
+# noun apart from a standing style preference ("concise report about Hermes" is a
+# build, "reports to be concise" is a preference), and (2) it splits the request
+# *intent* (before the marker) from the *subject* (after) so the preference /
+# third-party guards only scan who-is-asking, never incidental words in the topic
+# ("report about what the CLIENT REQUESTED"). "for" is excluded (a recipient, not
+# a subject: "report for the board").
+_TOPIC_MARKER_RE = re.compile(r"\b(?:about|on|regarding|concerning|covering|comparing)\b")
+# An explicit create/build cue. Combined with a request verb + deliverable noun
+# it marks a build request made *of Sophia*, and distinguishes it from a request
+# to a third party for an existing artifact ("asked for HR documents") or the
+# user's own work ("user is building a report tool" — has no request verb).
+# ``buil[dt]s?`` matches build / builds / built (incl. the passive "a PDF built
+# about X") while word boundaries keep it out of "building".
+_DELIVERABLE_CREATION_RE = re.compile(
+    r"\bcreat(?:e|es|ed|ing)\b|\bcreation\s+of\b|\bbuil[dt]s?\b|"
+    r"\bmake\b|\bmakes\b|\bmaking\b|\bmade\b|\bdraft(?:s|ed|ing)?\b|"
+    r"\bgenerat(?:e|es|ed|ing)\b|\bdesign(?:s|ed|ing)?\b|\bproduc(?:e|es|ed|ing)\b|"
+    r"\bprepar(?:e|es|ed|ing)\b|\bput\s+together\b|\bwr(?:ite|ites|iting|ote|itten)\s+up\b"
+)
+# STRONG deliverable nouns: things one asks Sophia to *produce*. A request verb
+# alone is enough to mark these as task history ("user asked for a report about
+# X"), no separate creation cue needed — that distinguishes them from weak nouns
+# (document/pdf/material/…) that could name an existing artifact.
+_STRONG_DELIVERABLE_NOUN_RE = re.compile(
+    r"\b(?:presentation|report|deck|slide|webpage|infographic|spreadsheet|write-up)s?\b" + _NOT_SKILL_MODIFIER
+)
+# A request involving a third party is a relationship fact, NOT a build request
+# made of Sophia — never drop it. Two shapes: the third party is the asker
+# ("boss asked for a status report", "user's manager requested a deck"), or the
+# third party is the one asked to act ("user wants their boss to deliver the
+# report", "user asked the team to build a deck"). The "<party> to" tail catches
+# the redirect-object shape; Sophia / me / you are NOT third parties, so genuine
+# user→Sophia requests still match.
+_THIRD_PARTY = (
+    r"boss|manager|supervisor|colleague|co-?worker|client|customer|teammate|"
+    r"recruiter|director|investor|stakeholder|ceo|cto|cfo|hr|team|lead"
+)
+_THIRD_PARTY_REQUEST_RE = re.compile(
+    rf"\b(?:{_THIRD_PARTY})\b\s+"
+    r"(?:asked|asks|requested|requests|wanted|wants|told|tells|needs|needed|demanded|demands|require[sd]?)\b"
+    rf"|\b(?:{_THIRD_PARTY})\b\s+to\b"
+)
 _DUPLICATE_STOPWORDS = {
     "a",
     "an",
@@ -517,17 +637,55 @@ def _content_tokens(content: str) -> set[str]:
     }
 
 
-def _filter_policy_rejected_entries(extracted: list[dict]) -> list[dict]:
-    filtered: list[dict] = []
+def _filter_policy_rejected_entries(extracted: list[dict], *, llm_classifier=None) -> list[dict]:
+    """Drop policy-rejected extraction candidates.
+
+    ``credential_like`` and ``non_durable`` are unambiguous, deterministic hard
+    drops (never sent to the LLM). ``task_history`` (build/deliverable requests)
+    is decided by ``llm_classifier`` — authoritative — over ALL of the remaining
+    *reviewable* candidates, so a lexical false positive (e.g. "wants presentation
+    coaching") can't pre-empt the LLM by being dropped before it is reviewed. The
+    lexical ``_is_deliverable_request`` signal is the fallback used only when the
+    LLM is unavailable or errors. ``llm_classifier`` takes the reviewable contents
+    and returns the set of indices to drop (best-effort — see
+    ``_classify_task_history_with_llm``).
+    """
     rejection_counts: dict[str, int] = {}
+    reviewable: list[dict] = []
+    reviewable_contents: list[str] = []
+    lexical_task_history: set[int] = set()
 
     for entry in extracted:
         if not isinstance(entry, dict):
             continue
         content = str(entry.get("content") or "")
         reason = _candidate_policy_rejection_reason(content)
-        if reason:
+        if reason in ("credential_like", "non_durable"):
             rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+            continue
+        if reason == "task_history":
+            lexical_task_history.add(len(reviewable))
+        reviewable.append(entry)
+        reviewable_contents.append(content)
+
+    # task_history is LLM-authoritative when the classifier returns a set (incl.
+    # empty). It returns None — or raises — when classification is UNAVAILABLE, in
+    # which case we fall back to the lexical signal. Critically, a None/failure is
+    # NOT treated as "drop nothing": that would let a lexical build-request hit be
+    # written to Mem0 and reopen the contamination bug.
+    llm_drop: set[int] | None = None
+    if llm_classifier is not None and reviewable_contents:
+        try:
+            llm_drop = llm_classifier(reviewable_contents)
+        except Exception:
+            logger.warning("extraction task-history LLM classifier failed; lexical result stands", exc_info=True)
+            llm_drop = None
+    task_history_drop = llm_drop if llm_drop is not None else set(lexical_task_history)
+
+    filtered: list[dict] = []
+    for idx, entry in enumerate(reviewable):
+        if idx in task_history_drop:
+            rejection_counts["task_history"] = rejection_counts.get("task_history", 0) + 1
             continue
         filtered.append(entry)
 
@@ -546,7 +704,153 @@ def _candidate_policy_rejection_reason(content: str) -> str | None:
         return "credential_like"
     if "codename" in lowered or "temporary" in lowered:
         return "non_durable"
+    if _is_deliverable_request(lowered):
+        return "task_history"
     return None
+
+
+def _is_deliverable_request(lowered: str) -> bool:
+    """True for 'user asked for a <deliverable>' task-history snippets.
+
+    Tuned across several review rounds to drop genuine build requests while never
+    dropping a durable memory that merely shares a verb and a noun.
+
+    A build request must carry a request verb (``_DELIVERABLE_REQUEST_RE``) —
+    this separates a request from the user's own work ("user is building a report
+    tool"). The rest splits the request *intent* from the deliverable's *subject*
+    at the first topic marker ("report ABOUT X"), because the guards below
+    describe the request itself and must NOT be tripped by incidental words in the
+    subject ("report about what customers PREFER", "report about what the CLIENT
+    REQUESTED"):
+
+    - With a subject ("<deliverable> about <topic>"): the requested deliverable
+      noun must appear in the intent; the third-party and delivery-preference
+      *verb* guards scan only the intent; then a STRONG noun (report/presentation/
+      deck/slide/webpage) or a create/build cue in the intent marks it task
+      history. Style words ("concise") do NOT exempt a deliverable about a topic.
+    - Without a subject: a standing delivery preference ("prefers concise reports",
+      "wants reports to be concise") is kept (``_is_delivery_preference``); a
+      third-party request ("boss asked for a status report") is kept; otherwise a
+      STRONG noun, or a weak noun + create/build cue, marks it task history.
+    """
+    if not _DELIVERABLE_REQUEST_RE.search(lowered):
+        return False
+
+    topic = _TOPIC_MARKER_RE.search(lowered)
+    if topic:
+        intent = lowered[: topic.start()]
+        if not _DELIVERABLE_NOUN_RE.search(intent):
+            return False  # the requested deliverable is named in the intent, not the subject
+        if _THIRD_PARTY_REQUEST_RE.search(intent):
+            return False
+        if _DELIVERY_PREFERENCE_RE.search(intent):
+            return False  # "prefers reports about X" — an explicit preference verb in the intent
+        return bool(_STRONG_DELIVERABLE_NOUN_RE.search(intent) or _DELIVERABLE_CREATION_RE.search(intent))
+
+    if not _DELIVERABLE_NOUN_RE.search(lowered):
+        return False
+    if _THIRD_PARTY_REQUEST_RE.search(lowered):
+        return False
+    if _is_delivery_preference(lowered):
+        return False
+    if _STRONG_DELIVERABLE_NOUN_RE.search(lowered):
+        return True
+    return bool(_DELIVERABLE_CREATION_RE.search(lowered))
+
+
+def _is_delivery_preference(lowered: str) -> bool:
+    """True when the snippet is a standing *delivery preference*, not a build request.
+
+    Two forms: the explicit preference verb ("prefers concise reports"), or a
+    style/format phrasing ("wants reports to be concise and include citations").
+    The style form is recognized only when there is NO build signal — no explicit
+    create/build cue and no "about <topic>" subject — so a styled build request
+    ("make a concise report about Hermes") is still treated as task history.
+    """
+    if _DELIVERY_PREFERENCE_RE.search(lowered):
+        return True
+    if _DELIVERABLE_CREATION_RE.search(lowered) or _TOPIC_MARKER_RE.search(lowered):
+        return False
+    return bool(_DELIVERY_STYLE_RE.search(lowered))
+
+
+# Focused Haiku classifier — the authoritative task-history backstop. The lexical
+# `_is_deliverable_request` is a fast deterministic approximation; natural-language
+# phrasing of "is this a build request about a subject" is genuinely hard for
+# regexes (seven review rounds of edge cases), so a small dedicated LLM call is
+# more reliable. Runs only in the offline extraction pipeline (no voice latency),
+# batched over all lexical-survivor candidates in one call.
+_TASK_HISTORY_CLASSIFIER_INSTRUCTION = (
+    "You are a strict classifier for a personal AI companion's long-term memory.\n"
+    "\n"
+    "Each numbered statement is a candidate memory written in the third person about a user. "
+    "Identify the ones that are TRANSIENT BUILD/DELIVERABLE REQUESTS: a request that a deliverable be "
+    "produced — a report, presentation, deck, slides, document, PDF, write-up, infographic, webpage, "
+    "spreadsheet, and the like — about some subject. This includes \"asked Sophia to build/create/draft "
+    "<deliverable> about X\", \"asked to build a report about Y\", \"wants a deck on Z\", \"needs a "
+    "presentation about W\". These are one-off task history; the subject of the deliverable must NOT "
+    "become a durable memory because it contaminates future builds.\n"
+    "\n"
+    "Do NOT flag these (they are durable and must be kept):\n"
+    "- Facts, decisions, feelings, relationships, behavioral patterns, lessons, commitments.\n"
+    "- Delivery PREFERENCES — how the user likes deliverables made (\"prefers concise reports\", "
+    "\"wants reports to be short and include citations\").\n"
+    "- The user's OWN work or projects (\"user is building a report tool for their startup\").\n"
+    "- A deliverable requested BY or FROM a third party (\"boss asked for a status report\"; "
+    "\"user's manager requested a deck\").\n"
+    "\n"
+    "Return ONLY a JSON array of the 0-based indices of the statements that ARE transient "
+    "build/deliverable requests. If none qualify, return [].\n"
+    "\n"
+    "Statements:\n"
+    "{statements}"
+)
+
+
+def _classify_task_history_with_llm(contents: list[str], *, client=None) -> set[int] | None:
+    """Haiku pass flagging build/deliverable-request task history.
+
+    Returns a *set* of flagged indices (into ``contents``) on a SUCCESSFUL
+    classification — possibly empty (the model ran and flagged nothing). Returns
+    ``None`` when classification is UNAVAILABLE: missing client, API error,
+    non-JSON / non-list response, or a non-empty response carrying no integer
+    indices. ``None`` is the critical signal — it tells ``_filter_policy_rejected_entries``
+    to fall back to the lexical heuristic rather than treating a failure as
+    "drop nothing" (which would let a lexical build-request hit slip into Mem0).
+    An empty ``contents`` list is a no-op success (empty set).
+    """
+    if not contents:
+        return set()
+    try:
+        client = client or anthropic.Anthropic()
+        numbered = "\n".join(f"{i}. {content}" for i, content in enumerate(contents))
+        prompt = _TASK_HISTORY_CLASSIFIER_INSTRUCTION.replace("{statements}", numbered)
+        response = client.messages.create(
+            model=_PIPELINE_MODEL,
+            max_tokens=256,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        parsed = json.loads(_strip_markdown_fences(response.content[0].text))
+    except Exception:
+        return None  # classifier unavailable → caller falls back to lexical
+
+    if not isinstance(parsed, list):
+        return None
+    flagged: set[int] = set()
+    saw_index = False
+    for item in parsed:
+        # bool is an int subclass — exclude True/False from being read as indices.
+        if isinstance(item, bool):
+            continue
+        if isinstance(item, int):
+            saw_index = True
+            if 0 <= item < len(contents):
+                flagged.add(item)
+    if parsed and not saw_index:
+        # Non-empty list with no integer indices (e.g. the model returned objects
+        # or prose) — treat as a malformed response, not "flag nothing".
+        return None
+    return flagged
 
 
 def _write_extracted_memories(
@@ -797,7 +1101,13 @@ def extract_session_memories(
             return []
         extracted = deterministic_entries
 
-    extracted = _filter_policy_rejected_entries(extracted)
+    # Lexical policy filter + an authoritative Haiku task-history pass (reusing the
+    # extraction client). Runs only over LLM candidates; deterministic entries are
+    # merged in afterwards and bypass the filter.
+    extracted = _filter_policy_rejected_entries(
+        extracted,
+        llm_classifier=lambda survivor_contents: _classify_task_history_with_llm(survivor_contents, client=client),
+    )
     extracted = _merge_deterministic_entries(extracted, deterministic_entries)
 
     logger.info(
