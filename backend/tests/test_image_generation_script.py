@@ -177,6 +177,42 @@ class TestEditPathWithReferenceImages:
         # (not a list) — matches the OpenAI SDK's expectation.
         assert not isinstance(kwargs["image"], list)
 
+    def test_default_mode_preserves_structured_prompt_fields(
+        self, script_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+        prompt_file = tmp_path / "prompt.json"
+        prompt_file.write_text(
+            (
+                '{"prompt": "Portrait of Sophia", '
+                '"style": "editorial watercolor", '
+                '"composition": {"framing": "three-quarter", "negative_space": true}, '
+                '"lighting": ["soft window light", "gold rim"]}'
+            ),
+            encoding="utf-8",
+        )
+        ref_file = tmp_path / "ref.png"
+        ref_file.write_bytes(_real_png_bytes())
+        output_file = tmp_path / "out.png"
+
+        fake_client = MagicMock()
+        fake_client.images.edit.return_value = _make_response_with_b64(_fake_b64_image())
+        with patch("openai.OpenAI", return_value=fake_client):
+            script_module.generate_image(
+                prompt_file=str(prompt_file),
+                reference_images=[str(ref_file)],
+                output_file=str(output_file),
+                aspect_ratio="1:1",
+            )
+
+        prompt = fake_client.images.edit.call_args.kwargs["prompt"]
+        assert "Portrait of Sophia" in prompt
+        assert "style: editorial watercolor" in prompt
+        assert 'composition: {"framing": "three-quarter", "negative_space": true}' in prompt
+        assert 'lighting: ["soft window light", "gold rim"]' in prompt
+        assert script_module._SOPHIA_IMAGE_STYLE in prompt
+
     def test_calls_images_edit_with_list_when_multiple_references(
         self, script_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

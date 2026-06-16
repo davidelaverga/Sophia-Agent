@@ -324,10 +324,16 @@ async def test_snapshot_resigns_durable_artifact_with_storage_object_path(app: F
     async def status(_task: str, _run: str, _fallback: str | None):
         return "completed"
 
-    signed_calls: list[tuple[str, str | None, str | None]] = []
+    signed_calls: list[tuple[str, str | None, str | None, str | None]] = []
 
-    def signed_url(thread_id: str, artifact_path: str | None, *, storage_object_path: str | None = None) -> str:
-        signed_calls.append((thread_id, artifact_path, storage_object_path))
+    def signed_url(
+        thread_id: str,
+        artifact_path: str | None,
+        *,
+        storage_object_path: str | None = None,
+        authenticated_user_id: str | None = None,
+    ) -> str:
+        signed_calls.append((thread_id, artifact_path, storage_object_path, authenticated_user_id))
         return f"https://signed.example/{storage_object_path}"
 
     monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", tasks)
@@ -345,8 +351,50 @@ async def test_snapshot_resigns_durable_artifact_with_storage_object_path(app: F
             "parent-1",
             "mnt/user-data/outputs/report.md",
             "artifacts/user-1/parent-1/artifact_123/report.md",
+            "user-1",
         )
     ]
+
+
+@pytest.mark.anyio
+async def test_snapshot_refuses_internal_storage_object_path(app: FastAPI, monkeypatch) -> None:
+    async def tasks(_parent: str):
+        return [
+            {
+                "agent_name": "sophia_builder",
+                "task_id": "task-1",
+                "run_id": "run-1",
+                "status": "success",
+                "last_updated_at": RECENT_TASK_TIMESTAMP,
+                "builder_result": {
+                    "artifact_path": "mnt/user-data/outputs/report.md",
+                    "storage_object_path": "parent-1/ledger/session.jsonl",
+                    "artifact_title": "Report",
+                    "artifact_type": "document",
+                },
+            }
+        ]
+
+    async def status(_task: str, _run: str, _fallback: str | None):
+        return "completed"
+
+    def create_signed_url(**_kwargs):  # pragma: no cover - must not be reached
+        raise AssertionError("internal storage object paths must not be signed")
+
+    monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", tasks)
+    monkeypatch.setattr(builder_canvas, "_native_run_status", status)
+    monkeypatch.setattr(
+        "deerflow.sophia.storage.supabase_artifact_store.create_signed_url",
+        create_signed_url,
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/sophia/user-1/threads/parent-1/builder-canvas/snapshot")
+
+    assert response.status_code == 200
+    completion = response.json()["active_task"]["completion"]
+    assert completion["artifact_url"] is None
+    assert completion["artifact_path"] == "mnt/user-data/outputs/report.md"
 
 
 @pytest.mark.anyio

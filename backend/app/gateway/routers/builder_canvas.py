@@ -240,14 +240,32 @@ def _signed_artifact_url(
     artifact_path: str | None,
     *,
     storage_object_path: str | None = None,
+    authenticated_user_id: str | None = None,
 ) -> str | None:
     storage_path = _relative_output_artifact_path(artifact_path) or artifact_path
     if not storage_path:
         return None
     try:
+        from app.gateway.artifact_registry import validate_artifact_storage_object_path
         from deerflow.sophia.storage.supabase_artifact_store import create_signed_url
 
-        object_path = storage_object_path or (storage_path if storage_path.startswith("artifacts/") else None)
+        object_path = None
+        if storage_object_path:
+            object_path = validate_artifact_storage_object_path(
+                storage_object_path,
+                thread_id=thread_id,
+                user_id=authenticated_user_id,
+            )
+            if object_path is None:
+                return None
+        elif storage_path.startswith("artifacts/"):
+            object_path = validate_artifact_storage_object_path(
+                storage_path,
+                thread_id=thread_id,
+                user_id=authenticated_user_id,
+            )
+            if object_path is None:
+                return None
         return create_signed_url(thread_id=thread_id, filename=storage_path, object_path=object_path)
     except Exception:
         return None
@@ -462,7 +480,13 @@ def _effective_snapshot_status(
     return native_status, None
 
 
-def _completion_artifact_url(parent_thread_id: str, artifact_path: str | None, artifact: dict[str, Any]) -> str | None:
+def _completion_artifact_url(
+    parent_thread_id: str,
+    artifact_path: str | None,
+    artifact: dict[str, Any],
+    *,
+    authenticated_user_id: str | None,
+) -> str | None:
     artifact_url = artifact.get("artifact_url")
     if isinstance(artifact_url, str) and artifact_url.strip():
         return artifact_url
@@ -471,6 +495,7 @@ def _completion_artifact_url(parent_thread_id: str, artifact_path: str | None, a
         parent_thread_id,
         artifact_path,
         storage_object_path=storage_object_path if isinstance(storage_object_path, str) else None,
+        authenticated_user_id=authenticated_user_id,
     )
 
 
@@ -515,6 +540,7 @@ def _completion_from_terminal_task(
     status: str,
     task_id: str,
     run_id: str,
+    authenticated_user_id: str | None,
     error_message_override: str | None = None,
 ) -> dict[str, Any] | None:
     completion_status = _completion_status(status)
@@ -522,7 +548,12 @@ def _completion_from_terminal_task(
         return None
     artifact = _artifact_payload_from_task(task)
     artifact_path = _canonical_artifact_path(artifact.get("artifact_path"))
-    artifact_url = _completion_artifact_url(parent_thread_id, artifact_path, artifact)
+    artifact_url = _completion_artifact_url(
+        parent_thread_id,
+        artifact_path,
+        artifact,
+        authenticated_user_id=authenticated_user_id,
+    )
     artifact_filename = artifact_path.rsplit("/", 1)[-1] if artifact_path else None
     fallback = _completion_fallback_metadata(task, artifact, artifact_path)
     diagnostics = _completion_failure_diagnostics_from_task(
@@ -902,6 +933,7 @@ async def builder_canvas_snapshot(
             status=status,
             task_id=task_id,
             run_id=run_id,
+            authenticated_user_id=authenticated_user_id,
             error_message_override=error_message_override,
         )
     if completion is not None:

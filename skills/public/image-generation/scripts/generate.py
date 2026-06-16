@@ -163,18 +163,45 @@ def _resolve_size(aspect_ratio: str) -> str:
     return _ASPECT_TO_SIZE.get((aspect_ratio or "").strip(), _DEFAULT_SIZE)
 
 
-def _subject_from_prompt_file(prompt_file: str) -> str:
+def _prompt_field_text(key: str, value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+    else:
+        text = _json.dumps(value, ensure_ascii=False, sort_keys=True)
+    if not text or text in {"[]", "{}"}:
+        return None
+    return f"{key}: {text}"
+
+
+def _prompt_text_from_payload(payload: object, raw: str, *, slide_visual: bool) -> str:
+    if not isinstance(payload, dict):
+        return raw.strip()
+    prompt = str(payload.get("prompt") or "").strip()
+    if slide_visual:
+        return prompt or raw.strip()
+    fields = [prompt] if prompt else []
+    fields.extend(
+        text
+        for key, value in payload.items()
+        if key != "prompt" and (text := _prompt_field_text(str(key), value))
+    )
+    return "\n".join(fields).strip() or raw.strip()
+
+
+def _subject_from_prompt_file(prompt_file: str, *, slide_visual: bool) -> str:
     with open(prompt_file, encoding="utf-8") as f:
         raw = f.read()
     try:
-        subject = str(_json.loads(raw).get("prompt") or raw).strip()
+        subject = _prompt_text_from_payload(_json.loads(raw), raw, slide_visual=slide_visual)
     except Exception:
         subject = raw.strip()
     return subject
 
 
 def _build_prompt(prompt_file: str, *, slide_visual: bool) -> str:
-    subject = _subject_from_prompt_file(prompt_file)
+    subject = _subject_from_prompt_file(prompt_file, slide_visual=slide_visual)
     if slide_visual:
         return f"{subject}\n\n{_SOPHIA_SLIDE_STYLE}\n\n{_SOPHIA_SLIDE_AVOID}"
     return f"{subject}\n\n{_SOPHIA_IMAGE_STYLE}\n\n{_SOPHIA_IMAGE_AVOID}"
