@@ -148,8 +148,10 @@ async def list_user_artifacts(
 )
 async def upsert_user_artifact(
     request_body: ArtifactUpsertRequest,
+    request: Request,
     authenticated_user_id: str = Depends(require_authenticated_user),
 ) -> ArtifactOpenResponse:
+    request_body = _with_artifact_trace_id(request_body, request)
     request_body = _authorize_artifact_upsert_user_scope(
         request_body,
         authenticated_user_id,
@@ -375,6 +377,19 @@ def _short_id(value: str | None) -> str | None:
     return value[:12] if value else None
 
 
+def _with_artifact_trace_id(
+    request_body: ArtifactUpsertRequest,
+    request: Request,
+) -> ArtifactUpsertRequest:
+    trace_id = (request_body.trace_id or "").strip()
+    if trace_id:
+        return request_body
+    header_trace_id = (request.headers.get("x-sophia-artifact-trace-id") or "").strip()
+    if not header_trace_id:
+        return request_body
+    return request_body.model_copy(update={"trace_id": header_trace_id})
+
+
 def _artifact_upsert_auth_log_context(
     request_body: ArtifactUpsertRequest,
     authenticated_user_id: str | None,
@@ -388,10 +403,15 @@ def _artifact_upsert_auth_log_context(
         "status_code": status_code,
         "authenticated": bool(authenticated_user_id),
         "user_id": _short_id(authenticated_user_id),
+        "payload_user_id_present": bool((request_body.user_id or "").strip()),
+        "payload_user_id_matches_auth": (request_body.user_id or "").strip() == (authenticated_user_id or "").strip(),
         "thread_id": _short_id(request_body.thread_id),
         "parent_thread_id_present": bool((request_body.parent_thread_id or "").strip()),
         "task_id_present": bool((request_body.task_id or "").strip()),
         "run_id_present": bool((request_body.run_id or "").strip()),
+        "run_id_metadata_only": bool((request_body.run_id or "").strip()),
+        "storage_provider_present": bool((request_body.storage_provider or "").strip()),
+        "storage_object_path_present": bool((request_body.storage_object_path or "").strip()),
         "trace_id": _short_id(request_body.trace_id),
     }
 
@@ -423,7 +443,7 @@ def _authorize_artifact_upsert_user_scope(
         _log_artifact_upsert_auth_failure(
             request_body,
             authenticated_user_id,
-            branch="user_scope_mismatch",
+            branch="artifact_upsert_denied_user_scope_mismatch",
         )
         raise HTTPException(status_code=403, detail="Artifact user scope mismatch")
     if request_body.user_id == authenticated_user_id:
@@ -484,7 +504,7 @@ async def _authorize_artifact_upsert_thread_references(
             _log_artifact_upsert_auth_failure(
                 request_body,
                 authenticated_user_id,
-                branch=f"unauthorized_{field_name}",
+                branch=f"artifact_upsert_denied_unauthorized_{field_name}",
             )
             raise HTTPException(
                 status_code=403, detail="Artifact references an unauthorized thread"
@@ -495,7 +515,7 @@ async def _authorize_artifact_upsert_thread_references(
             _artifact_upsert_auth_log_context(
                 request_body,
                 authenticated_user_id,
-                branch="run_id_metadata_only",
+                branch="artifact_upsert_run_id_metadata_only",
                 status_code=200,
             ),
         )

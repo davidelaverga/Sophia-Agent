@@ -1,12 +1,71 @@
 import { type NextRequest, NextResponse } from 'next/server';
+import { createHash, randomUUID } from 'crypto';
 
 import {
+  getAuthenticatedUserId,
   getUserScopedAuthHeader,
   refreshUserScopedAuthHeader,
 } from '../../../lib/auth/server-auth';
 import { getPrimaryGatewayUrl } from '../../_lib/gateway-url';
 
 const BACKEND_URL = getPrimaryGatewayUrl();
+const ARTIFACT_PROXY_LOG_BODY_LIMIT = 1200;
+
+function shortHash(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+  return createHash('sha256').update(value).digest('hex').slice(0, 12);
+}
+
+function shortText(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed ? `${trimmed.slice(0, 12)}:${trimmed.length}` : null;
+}
+
+function payloadShape(body: string | null | undefined): Record<string, unknown> {
+  if (!body) {
+    return { body_present: false };
+  }
+
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    return {
+      body_present: true,
+      thread_id_present: typeof parsed.thread_id === 'string' && parsed.thread_id.trim().length > 0,
+      thread_id: shortText(parsed.thread_id),
+      parent_thread_id_present: typeof parsed.parent_thread_id === 'string' && parsed.parent_thread_id.trim().length > 0,
+      parent_thread_id: shortText(parsed.parent_thread_id),
+      task_id_present: typeof parsed.task_id === 'string' && parsed.task_id.trim().length > 0,
+      task_id: shortText(parsed.task_id),
+      run_id_present: typeof parsed.run_id === 'string' && parsed.run_id.trim().length > 0,
+      run_id: shortText(parsed.run_id),
+      user_id_present: typeof parsed.user_id === 'string' && parsed.user_id.trim().length > 0,
+      user_id_hash: typeof parsed.user_id === 'string' ? shortHash(parsed.user_id) : null,
+      filename_present: typeof parsed.filename === 'string' && parsed.filename.trim().length > 0,
+      filename: typeof parsed.filename === 'string' ? parsed.filename.slice(0, 80) : null,
+      local_path_present: typeof parsed.local_path === 'string' && parsed.local_path.trim().length > 0,
+      local_path: typeof parsed.local_path === 'string' ? `${parsed.local_path.slice(0, 120)}:${parsed.local_path.length}` : null,
+      artifact_id_present: typeof parsed.artifact_id === 'string' && parsed.artifact_id.trim().length > 0,
+      artifact_id: shortText(parsed.artifact_id),
+      storage_provider_present: typeof parsed.storage_provider === 'string' && parsed.storage_provider.trim().length > 0,
+      storage_provider: typeof parsed.storage_provider === 'string' ? parsed.storage_provider.slice(0, 40) : null,
+      storage_object_path_present: typeof parsed.storage_object_path === 'string' && parsed.storage_object_path.trim().length > 0,
+      storage_object_path: typeof parsed.storage_object_path === 'string'
+        ? `${parsed.storage_object_path.slice(0, 120)}:${parsed.storage_object_path.length}`
+        : null,
+    };
+  } catch {
+    return {
+      body_present: true,
+      body_json: false,
+      body_length: body.length,
+    };
+  }
+}
 
 function copyResponseHeaders(source: Headers): Headers {
   const headers = new Headers();
@@ -35,6 +94,8 @@ export async function proxyArtifactRegistryRequest(
   if (!authHeader) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
+  const authenticatedUserId = await getAuthenticatedUserId();
+  const traceId = randomUUID();
 
   const url = new URL(`${BACKEND_URL}/api/artifacts${path}`);
   req.nextUrl.searchParams.forEach((value, key) => {
@@ -45,6 +106,7 @@ export async function proxyArtifactRegistryRequest(
     method: init.method,
     headers: {
       Authorization: authorization,
+      'x-sophia-artifact-trace-id': traceId,
       ...(init.body ? { 'Content-Type': 'application/json' } : {}),
     },
     body: init.body ?? undefined,
@@ -59,6 +121,34 @@ export async function proxyArtifactRegistryRequest(
     if (refreshedAuthHeader && refreshedAuthHeader !== authHeader) {
       backendResponse = await execute(refreshedAuthHeader);
     }
+  }
+
+  if (!backendResponse.ok) {
+    const responseText = await backendResponse.text();
+    const backendHost = (() => {
+      try {
+        return new URL(BACKEND_URL).host;
+      } catch {
+        return 'invalid-backend-url';
+      }
+    })();
+
+    console.warn('[artifact-proxy] upstream_non_2xx', {
+      route: `${init.method} ${req.nextUrl.pathname}`,
+      upstream_path: `/api/artifacts${path}`,
+      trace_id: traceId,
+      upstream_status: backendResponse.status,
+      upstream_body: responseText.slice(0, ARTIFACT_PROXY_LOG_BODY_LIMIT),
+      authorization_sent: true,
+      gateway_host: backendHost,
+      authenticated_user_hash: shortHash(authenticatedUserId),
+      payload: payloadShape(init.body),
+    });
+
+    return new Response(responseText, {
+      status: backendResponse.status,
+      headers: copyResponseHeaders(backendResponse.headers),
+    });
   }
 
   return new Response(backendResponse.body, {

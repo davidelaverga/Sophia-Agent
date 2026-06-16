@@ -36,6 +36,21 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+_ARTIFACT_UPSERT_AUTH_PATCH = "artifact_upsert_auth_v2"
+
+
+def _gateway_version_metadata() -> dict[str, str | None]:
+    commit_sha = (
+        os.getenv("RENDER_GIT_COMMIT")
+        or os.getenv("RENDER_GIT_COMMIT_SHA")
+        or os.getenv("GIT_COMMIT_SHA")
+        or os.getenv("SOURCE_COMMIT")
+    )
+    return {
+        "commit_sha": commit_sha,
+        "build_timestamp": os.getenv("RENDER_BUILD_TIMESTAMP") or os.getenv("BUILD_TIMESTAMP"),
+        "artifact_upsert_auth_patch": _ARTIFACT_UPSERT_AUTH_PATCH,
+    }
 
 
 @asynccontextmanager
@@ -290,7 +305,19 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
         Returns:
             Service health status information.
         """
-        return {"status": "healthy", "service": "deer-flow-gateway"}
+        return {
+            "status": "healthy",
+            "service": "deer-flow-gateway",
+            **_gateway_version_metadata(),
+        }
+
+    @app.get("/version", tags=["health"])
+    async def version_check() -> dict:
+        """Return safe build metadata for deployment verification."""
+        return {
+            "service": "deer-flow-gateway",
+            **_gateway_version_metadata(),
+        }
 
     return app
 
