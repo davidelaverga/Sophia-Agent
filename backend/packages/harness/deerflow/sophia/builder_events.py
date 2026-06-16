@@ -163,17 +163,44 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt else None
 
 
-def _signed_artifact_url(thread_id: str | None, artifact_path: str | None) -> str | None:
-    """Mint a signed Supabase URL for the artifact, or None on any failure."""
-    if not thread_id or not artifact_path:
-        return None
+def _storage_object_path_for_signing(artifact_path: str | None, storage_object_path: str | None) -> str | None:
+    return storage_object_path or (artifact_path if str(artifact_path or "").startswith("artifacts/") else None)
+
+
+def _call_create_signed_url(
+    *,
+    thread_id: str | None,
+    artifact_path: str | None,
+    object_path: str | None,
+) -> str | None:
     try:
         from deerflow.sophia.storage.supabase_artifact_store import create_signed_url
 
-        return create_signed_url(thread_id=thread_id, filename=artifact_path)
+        return create_signed_url(
+            thread_id=thread_id or "",
+            filename=artifact_path or "",
+            object_path=object_path,
+        )
     except Exception:  # pragma: no cover - defensive: never let this raise
         logger.debug("Failed to mint signed artifact URL", exc_info=True)
         return None
+
+
+def _signed_artifact_url(
+    thread_id: str | None,
+    artifact_path: str | None,
+    *,
+    storage_object_path: str | None = None,
+) -> str | None:
+    """Mint a signed Supabase URL for the artifact, or None on any failure."""
+    object_path = _storage_object_path_for_signing(artifact_path, storage_object_path)
+    if not object_path and (not thread_id or not artifact_path):
+        return None
+    return _call_create_signed_url(
+        thread_id=thread_id,
+        artifact_path=artifact_path,
+        object_path=object_path,
+    )
 
 
 _ARTIFACT_PATH_PREFIXES = (
@@ -455,6 +482,7 @@ def _artifact_signed_url(
     builder_thread_id: str | None,
     artifact_storage_path: str | None,
     artifact_filename: str | None,
+    storage_object_path: str | None,
 ) -> str | None:
     # Sign against the SAME thread_id ``BuilderArtifactMiddleware`` uploads
     # to: parent_thread_id (the conversation thread). The channel adapter's
@@ -464,6 +492,7 @@ def _artifact_signed_url(
     return _signed_artifact_url(
         parent_thread_id or builder_thread_id,
         artifact_storage_path or artifact_filename,
+        storage_object_path=storage_object_path,
     )
 
 
@@ -473,16 +502,18 @@ def _artifact_signed_url_with_result(
     builder_thread_id: str | None,
     artifact_storage_path: str | None,
     artifact_filename: str | None,
+    storage_object_path: str | None,
 ) -> tuple[str | None, str]:
     signing_thread_id = parent_thread_id or builder_thread_id
     signing_path = artifact_storage_path or artifact_filename
-    if not signing_thread_id or not signing_path:
+    if _skip_artifact_signing(signing_thread_id, signing_path, storage_object_path):
         return None, "skipped"
     url = _artifact_signed_url(
         parent_thread_id=parent_thread_id,
         builder_thread_id=builder_thread_id,
         artifact_storage_path=artifact_storage_path,
         artifact_filename=artifact_filename,
+        storage_object_path=storage_object_path,
     )
     if url:
         return url, "signed_url_created"
@@ -494,6 +525,14 @@ def _artifact_signed_url_with_result(
     except Exception:  # pragma: no cover - defensive only
         logger.debug("Failed to inspect Supabase signing config", exc_info=True)
     return None, "signed_url_failed"
+
+
+def _skip_artifact_signing(
+    signing_thread_id: Any,
+    signing_path: str | None,
+    storage_object_path: str | None,
+) -> bool:
+    return not storage_object_path and (not signing_thread_id or not signing_path)
 
 
 def _coerce_phantom_success(
@@ -734,11 +773,15 @@ def build_completion_payload_from_artifact(
     )
     artifact_storage_path = _relative_output_artifact_path(artifact_path)
     artifact_filename = _artifact_filename(artifact_path)
+    storage_object_path = artifact_dict.get("storage_object_path")
+    if not isinstance(storage_object_path, str) or not storage_object_path.strip():
+        storage_object_path = None
     artifact_url, signed_url_result = _artifact_signed_url_with_result(
         parent_thread_id=parent_thread_id,
         builder_thread_id=builder_thread_id,
         artifact_storage_path=artifact_storage_path,
         artifact_filename=artifact_filename,
+        storage_object_path=storage_object_path,
     )
 
     task_brief = _task_brief(delegation)

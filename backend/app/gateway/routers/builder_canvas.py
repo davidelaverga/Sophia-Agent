@@ -242,7 +242,8 @@ def _signed_artifact_url(thread_id: str, artifact_path: str | None) -> str | Non
     try:
         from deerflow.sophia.storage.supabase_artifact_store import create_signed_url
 
-        return create_signed_url(thread_id=thread_id, filename=storage_path)
+        object_path = storage_path if storage_path.startswith("artifacts/") else None
+        return create_signed_url(thread_id=thread_id, filename=storage_path, object_path=object_path)
     except Exception:
         return None
 

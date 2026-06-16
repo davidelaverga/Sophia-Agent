@@ -12,39 +12,55 @@ The skill carries the **judgment**; the renderer (`compile_pptx.mjs`) enforces t
 ## 1. Art-direct, then build
 Write a **visual plan** first — one line per slide: `Slide N | the one idea | treatment | tool`. Only after the whole plan is checked for variety (§3) do you generate visuals and compose.
 
-## 2. Decide the treatment (see the always-on composition directives for the full taxonomy)
-- Connected components / architecture / multi-step flow → **node diagram** (`generate_excalidraw_diagram`, graphviz).
-- Quantitative → **chart** (`chart-visualization`).
-- Comparison → **table** or grouped bar.
-- One/few hero numbers → **`stat` callout** (typography — not a chart).
-- Time sequence → **timeline**.
-- Concept / metaphor / opener with no technical structure → **illustration** (`image-generation`).
-- A single point → **typographic statement**.
-- Don't force a node diagram where nodes don't connect; a single number is a callout, never a one-bar chart.
+## How slides are built (image-forward)
 
-## 3. Variety & cadence
-- No more than two consecutive slides share a treatment.
-- Alternate technical (diagram/chart/table) and aesthetic (illustration/hero/statement).
-- **Light on technical content → invest heavily in image-gen visuals and typography.** A non-technical deck as bullet lists is the worst outcome.
-- Healthy shape: hero cover → agenda → diagram → stat → section (visual) → chart → illustrated concept → comparison table → statement → summary. No two adjacent slides alike. Squint test: one clear focal point per slide.
+Each slide is generated as a full-slide visual with gpt-image-2 — including its title, text,
+and any technical drawing — using the structured plan + Sophia's brand style as the spec.
+Compose the prompt as an artifact spec (the script appends brand style and anti-patterns, so
+write only the content):
 
-## 4. Image generation for slides
-Use it for heroes, section dividers, **and** concrete illustrations — not only abstract fills. Make illustrations a depicted idea, beautiful and concrete. **Hold one illustration style across the deck** (reuse reference images) for cohesion. Full-bleed for impact; contained beside text for content; background only with a contrast scrim. If preflight fails, route those slides to typographic/charted treatments.
+- Declare the artifact ("a professional presentation slide, 16:9").
+- Wrap EVERY rendered string as "THE TEXT READS: ...". Keep each label 8 words or fewer.
+- State the layout in one explicit sentence (columns, sections, where the visual sits).
+- For a technical drawing, list nodes and labeled connections, each wrapped "THE TEXT READS: ...".
+- Put EXACT data in the prompt; the model renders what you give it and will not invent numbers.
+- Run scripts/generate.py with `--slide-visual` (sets quality=high, 16:9). Generate slide 1
+  first, then pass it as `--reference-images` to every later slide for one consistent look.
+- Always give the cover a generated hero treatment.
 
-## 5. Design system (enforced by the engine)
-- Palette: brand themes (`sophia_light` default), one dominant + one supporting accent. Palette colors only.
-- Fonts: **Cambria** headings, **Calibri** body. Never Aptos/Georgia.
-- No accent bars/stripes; no dark-on-dark; no text-only and no image-album slides. Hierarchy via size/weight/color, not boxes. ≥0.5" margins.
+Routing: concept, architecture, process, section, cover, statement, and qualitative-comparison
+slides are gpt-image-2 full slides. A slide whose point IS hard quantitative data (real numbers
+the audience reads) uses a deterministic chart (generate_visual_asset) embedded in an
+engine-composed slide instead — accuracy must not depend on image rendering.
 
-## 6. Slide types & plan schema
-Cover · Agenda · Section · Content(`text+visual` | `stat` | `two-column` | `full-visual`) · Summary. Emit the plan JSON the engine consumes (charts/diagrams as `visual_path`; illustrations as `image_path`; stats carry no image):
-```json
-{"theme":"sophia_light","slides":[
-  {"type":"cover","title":"...","subtitle":"...","image_path":"assets/hero.png"},
-  {"type":"content","subtype":"text+visual","title":"...","body":["..."],"visual_path":"assets/arch.svg"},
-  {"type":"content","subtype":"stat","title":"...","stat":"3,000+","stat_label":"...","support":"..."},
-  {"type":"summary","title":"...","points":["..."]}
-]}
+QC: every generated slide is checked; a failed slide is regenerated once, then falls back to a
+deterministic engine-composed slide. Never ship a slide with garbled text or wrong data.
+Run the check with `python /mnt/skills/public/image-generation/scripts/slide_qc.py --image-file <slide.png> --spec-file <slide-spec.txt>`; pass slide 1 as `--reference-image` for later slides.
+
+Slide types in the plan: `cover` · `agenda` · `section` · `content` (subtype `text+visual` |
+`stat` | `two-column` | `full-visual`) · `statement` · `summary`. Use at least three distinct
+types and vary deliberately — no more than two consecutive slides share a treatment. Full-slide
+gpt-image-2 visuals use `image_path`; deterministic charts/diagrams use `visual_path`; a
+`statement` slide carries a single `statement` string.
+
+## Per-slide prompt template
+
+```
+A professional presentation slide, 16:9. Title at top: "THE TEXT READS: {title}".
+
+Layout: {one explicit sentence — e.g. "Left third: four short bullet points stacked
+vertically. Right two-thirds: a labeled architecture diagram of boxes connected by arrows."}
+
+Text to render verbatim (each ≤8 words):
+- "THE TEXT READS: {point 1}"
+- "THE TEXT READS: {point 2}"
+{...}
+
+{If a technical drawing: list nodes and connections, each labeled verbatim, e.g.
+"Boxes: 'THE TEXT READS: User', 'THE TEXT READS: Companion Layer'. Arrow from User to
+Companion Layer labeled 'THE TEXT READS: talks to'."}
+
+High-fidelity, sharp, crisp, presentation-grade.
 ```
 
 ## 7. Workflow

@@ -406,23 +406,6 @@ _POLISHED_DECK_IMAGE_MARKERS = (
 )
 
 
-_PLAIN_DECK_MARKERS = (
-    "plain",
-    "plain deck",
-    "plain slide",
-    "plain slides",
-    "text-only",
-    "text only",
-    "text-only deck",
-    "text only deck",
-    "no images",
-    "no imagery",
-    "no illustrations",
-    "no visuals",
-    "without visuals",
-)
-
-
 def _image_generation_enabled(
     delegation_context: dict[str, Any],
     *,
@@ -431,31 +414,25 @@ def _image_generation_enabled(
 ) -> bool:
     """Whether the image-generation skill is offered to the builder.
 
-    Image targets and explicit requests keep legacy behavior. PPTX defaults to
-    polished visual treatment unless the brief explicitly asks for a
-    plain/text-only/no-visual deck, but generated images are support assets
-    inside an editable deck. PDF/HTML chart and diagram work uses local visual
-    assets unless the user explicitly asks for generated imagery.
+    Image targets and explicit requests keep legacy behavior. PPTX builds use
+    gpt-image-2 full-slide visuals as the primary slide path. PDF/HTML chart
+    and diagram work uses local visual tools unless the user explicitly asks
+    for generated imagery.
     """
     if artifact_target_ext in _IMAGE_OUTPUT_EXTENSIONS:
+        return True
+    if _is_pptx_image_generation_target(artifact_target_ext, task_type):
         return True
     task = str(delegation_context.get("task") or "").lower()
     description = str(delegation_context.get("description") or "").lower()
     combined = f"{task}\n{description}"
     if any(marker in combined for marker in _EXPLICIT_IMAGE_GENERATION_MARKERS):
         return True
-    if artifact_target_ext != ".pptx":
-        return False
-    if _plain_deck_requested(combined):
-        return False
-    return True
+    return False
 
 
-def _plain_deck_requested(text: str) -> bool:
-    return any(
-        re.search(rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])", text)
-        for marker in _PLAIN_DECK_MARKERS
-    )
+def _is_pptx_image_generation_target(artifact_target_ext: str, task_type: str) -> bool:
+    return artifact_target_ext == ".pptx" or task_type in {"presentation", "slides", "slide_deck", "deck"}
 
 
 def _visuals_requested(delegation_context: dict[str, Any]) -> bool:
@@ -947,7 +924,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "the deliverable type (e.g. pdf-report for PDF reports, "
             "deep-research / academic-paper-review / systematic-literature-review for research-backed reports, "
             "chart-visualization for chart/data design, ppt-generation for slide decks, "
-            "image-generation when listed for image deliverables, explicit generated imagery, or normal PPTX visual decks, "
+            "image-generation when listed for image deliverables, explicit generated imagery, or PPTX full-slide visuals, "
             "data-analysis for tabular data), USE IT — read its SKILL.md "
             "via read_file_tool and follow its workflow. Workflow cards are authoritative "
             "for PDF, PPTX, HTML, and research tasks. Do not replace them with ad hoc "
@@ -985,10 +962,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "    * **PDF**: follow the PDF workflow card. A valid render is terminal-ready; emit immediately "
             "unless Sophia asks for one layout repair.\n"
             "    * **PPTX / presentation**: follow the PPTX workflow card. Reading SKILL.md alone is not "
-            "completion; normal success requires deck composition and a valid .pptx with editable text. "
-            "When image-generation is listed in <skill_system>, use it for hero/section/illustrative "
-            "assets inside the deck, not as a replacement for slide structure. Never let an image failure "
-            "stall a valid deck; fall back to diagram/chart/text composition with honest diagnostics.\n"
+            "completion; normal success requires deck composition and a valid .pptx. Slides use "
+            "gpt-image-2 full-slide visuals; PDF/HTML diagrams use local visual tools. Hard quantitative "
+            "charts and QC-failed image slides fall back to deterministic chart/diagram/text composition "
+            "with honest diagnostics.\n"
             "    * **HTML**: follow the HTML workflow card. Standalone browser-renderable HTML is a text "
             "deliverable, not a frontend app unless the user requested app behavior.\n"
             "    * **Standalone chart / image**: use the chart-visualization or image-generation skill. The "

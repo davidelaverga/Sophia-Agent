@@ -93,6 +93,35 @@ def test_generate_visual_asset_rejects_unlabeled_chart_data(tmp_path) -> None:
     assert "placeholder" in payload["hint"]
 
 
+def test_bar_chart_dedupes_dimensions_wraps_labels_and_drops_zero_bars(tmp_path) -> None:
+    outputs = tmp_path / "outputs"
+    long_label = "Operational resilience and human escalation readiness"
+
+    payload = _payload(
+        generate_visual_asset.func(
+            runtime=_runtime(outputs),
+            visual_type="bar_chart",
+            title="Capability profile",
+            data=[
+                {"label": long_label, "series": "Baseline", "value": 4},
+                {"label": long_label, "series": "Sophia", "value": 5},
+                {"label": "Memory continuity", "series": "Baseline", "value": 0},
+                {"label": "Memory continuity", "series": "Sophia", "value": 7},
+                {"label": "Zero only", "series": "Baseline", "value": 0},
+            ],
+            output_name="capability-profile",
+        )
+    )
+
+    assert payload["success"] is True
+    svg = (outputs / "visuals" / "capability-profile.svg").read_text(encoding="utf-8")
+    assert long_label in svg
+    assert svg.count(long_label) == 1
+    assert svg.count("Memory continuity") == 1
+    assert "Zero only" not in svg
+    assert ">0<" not in svg
+
+
 # --- VQ-1: text-fit engine ----------------------------------------------------
 
 

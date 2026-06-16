@@ -1,7 +1,7 @@
 """Image-generation enrichment discipline.
 
-Generated imagery is default-on for PPTX decks (unless explicitly no-visual)
-and opt-in for non-deck/generated-image requests, so the discipline must be
+Generated imagery is always offered for PPTX decks and opt-in for
+non-deck/generated-image requests, so the discipline must be
 harness-enforced: a hard per-build call cap, a
 terminal-error short-circuit, and a one-shot stop directive after repeated
 failures. These tests cover the deterministic guards in BuilderArtifactMiddleware
@@ -212,12 +212,12 @@ def test_explicit_image_request_enables_generation():
     ) is True
 
 
-def test_plain_deck_marker_opts_out():
+def test_plain_deck_marker_no_longer_opts_out():
     assert _image_generation_enabled(
         {"task": "Build a plain text-only deck about our roadmap"},
         artifact_target_ext=".pptx",
         task_type="presentation",
-    ) is False
+    ) is True
 
 
 def test_explain_does_not_match_plain_opt_out():

@@ -700,6 +700,7 @@ def create_signed_url(
     thread_id: str,
     filename: str,
     *,
+    object_path: str | None = None,
     expires_in_seconds: int = 7 * 24 * 60 * 60,
     client: httpx.Client | None = None,
 ) -> str | None:
@@ -718,8 +719,8 @@ def create_signed_url(
     if config is None:
         return None
 
-    object_path = _object_path(thread_id, filename)
-    sign_url = f"{config.url}/storage/v1/object/sign/{config.bucket}/{_encoded_object_path(object_path)}"
+    target_object_path = normalize_object_path(object_path) if object_path else _object_path(thread_id, filename)
+    sign_url = f"{config.url}/storage/v1/object/sign/{config.bucket}/{_encoded_object_path(target_object_path)}"
     headers = {
         "Authorization": f"Bearer {config.service_role_key}",
         "apikey": config.service_role_key,
@@ -733,9 +734,8 @@ def create_signed_url(
         response = http.post(sign_url, json=body, headers=headers)
         if not response.is_success:
             logger.warning(
-                "Supabase signed-URL mint failed for %s/%s status=%s body=%s",
-                thread_id,
-                filename,
+                "Supabase signed-URL mint failed for object_path=%s status=%s body=%s",
+                target_object_path,
                 response.status_code,
                 response.text[:200],
             )
@@ -744,9 +744,8 @@ def create_signed_url(
         signed_url = data.get("signedURL") or data.get("signed_url")
         if not isinstance(signed_url, str) or not signed_url:
             logger.warning(
-                "Supabase signed-URL response missing signedURL field for %s/%s",
-                thread_id,
-                filename,
+                "Supabase signed-URL response missing signedURL field for object_path=%s",
+                target_object_path,
             )
             return None
         # Supabase returns a path relative to ``/storage/v1`` — combine with
@@ -758,9 +757,8 @@ def create_signed_url(
         return f"{config.url}/storage/v1/{signed_url}"
     except httpx.HTTPError as exc:
         logger.warning(
-            "Supabase signed-URL mint error for %s/%s error=%s",
-            thread_id,
-            filename,
+            "Supabase signed-URL mint error for object_path=%s error=%s",
+            target_object_path,
             exc,
         )
         return None

@@ -49,6 +49,7 @@ Parameters:
 - `--reference-images`: Absolute paths to reference images (optional, space-separated)
 - `--output-file`: Absolute path to output image file (required)
 - `--aspect-ratio`: Aspect ratio of the generated image (optional, default: 16:9)
+- `--slide-visual`: Full-slide PPTX visual mode (quality=high, 16:9; optional)
 
 [!NOTE]
 Do NOT read the python file, just call it with the parameters.
@@ -70,7 +71,6 @@ Create prompt file: `/mnt/user-data/workspace/asian-woman.json`
     "accessories": "minimal jewelry, statement earrings, leather handbag",
     "era": "1990s"
   }],
-  "negative_prompt": "blurry face, deformed, low quality, overly sharp digital look, oversaturated colors, artificial lighting, studio setting, posed, selfie angle",
   "style": "Leica M11 street photography aesthetic, film-like rendering, natural color palette with slight warmth, bokeh background blur, analog photography feel",
   "composition": "medium shot, rule of thirds, subject slightly off-center, environmental context of Tokyo street visible, shallow depth of field isolating subject",
   "lighting": "neon lights from signs and storefronts, wet pavement reflections, soft ambient city glow, natural street lighting, rim lighting from background neons",
@@ -100,7 +100,6 @@ With reference images:
     "era": "Star Wars universe, post-Empire era"
   }],
   "prompt": "Character inspired by [Image 1] standing next to a vehicle inspired by [Image 2] on a bustling alien planet street in Star Wars universe aesthetic. Character wearing worn leather jacket with utility vest, cargo pants with tactical pouches, scuffed boots, belt with blaster holster. The vehicle adapted to Star Wars aesthetic with weathered metal panels, repulsor engines, desert dust covering, parked on the street. Exotic alien marketplace street with multi-level architecture, weathered metal structures, hanging market stalls with colorful awnings, alien species walking by as background characters. Twin suns casting warm golden light, atmospheric dust particles in air, moisture vaporators visible in distance. Gritty lived-in Star Wars aesthetic, practical effects look, film grain texture, cinematic composition.",
-  "negative_prompt": "clean futuristic look, sterile environment, overly CGI appearance, fantasy medieval elements, Earth architecture, modern city",
   "style": "Star Wars original trilogy aesthetic, lived-in universe, practical effects inspired, cinematic film look, slightly desaturated with warm tones",
   "composition": "medium wide shot, character in foreground with alien street extending into background, environmental storytelling, rule of thirds",
   "lighting": "warm golden hour lighting from twin suns, rim lighting on character, atmospheric haze, practical light sources from market stalls",
@@ -120,49 +119,19 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
   --aspect-ratio 16:9
 ```
 
-## Business Deck & Report Enrichment
+## Two modes
 
-When enriching slide decks, visual reports, or PDFs (the default for Sophia
-builder presentation tasks), follow this discipline:
+1. **Slide visuals (`--slide-visual`)** — for `.pptx` slides, this skill DOES render full slides
+   and technical drawings WITH text. Wrap rendered copy as "THE TEXT READS: ...", keep labels
+   8 words or fewer, put exact data in the prompt, and use `--slide-visual` (quality=high, 16:9).
+   Pass the first slide as `--reference-images` to later slides for consistency.
 
-**Budget**: PPTX presentation builds have a HARD CAP of 8 image-generation
-calls, but generated images are support assets for editable decks: hero
-images, section openers, atmospheric backgrounds, or illustrative scenes. Do
-not generate one screenshot per slide as the final presentation. PDF/report
-enrichment remains capped lower by the harness. Plan before generating:
-create the most important hero image first, then pass it via
-`--reference-images` to related image calls so the set stays coherent. Charts,
-technical diagrams, and data visuals are NOT this skill's job — use
-`generate_visual_asset` for charts and `generate_excalidraw_diagram` for
-technical diagrams (no image-generation cap, no API cost).
+2. **Illustrations (default)** — heroes, section art, concept illustrations, and ALL imagery for
+   PDF reports. Describe only the subject; NO text, labels, charts, or diagrams in the image
+   (the report/deck engine composes those). The script appends the brand style and anti-patterns.
 
-**Subjects that work for business content**: abstract/conceptual
-compositions (gradients, geometric forms, light fields), product and object
-renders, landscapes and architecture, textures, metaphoric scenes (paths,
-horizons, networks). AVOID: photorealistic identifiable people and faces,
-celebrities or public figures, brand logos and trademarks, stock-photo
-clichés (handshakes, suited crowds), and text inside images — rendered text
-is unreliable; the deck supplies the words.
-
-**Coherence**: all images in one deliverable must share an aesthetic. Anchor
-every prompt to the deck's theme/palette (e.g. "deep navy and warm gold
-accents, premium boardroom aesthetic" for the boardroom theme). Generate the
-hero FIRST, then pass it via `--reference-images` to subsequent related image
-calls so the set stays visually consistent.
-
-**Aspect ratios**: `16:9` for hero/full-bleed/section-divider images; `4:3`
-for content-card images placed beside text.
-
-**Naming**: write to `/mnt/user-data/outputs/visuals/hero-<desc>.png` and
-`/mnt/user-data/outputs/visuals/slide-<N>-<desc>.png`, then reference those
-paths from the presentation plan (`"layout": "full_bleed_image"`, `"image":
-...`) or the Markdown source before composing/rendering.
-
-**Failure handling**: if a call fails (content policy, auth, network), retry
-at most ONCE with a simplified, safer prompt. After that, continue the build
-with charts and text — never stall or fail a deliverable over imagery. If the
-failure is `content_policy`, drop the problematic concept entirely rather
-than rephrasing it.
+For PDF reports, technical diagrams use `generate_excalidraw_diagram` (graphviz) and charts use
+`generate_visual_asset` — NOT this skill. That deterministic path is unchanged.
 
 ## Common Scenarios
 

@@ -91,40 +91,102 @@ def _palette(values: list[str] | None) -> tuple[str, ...]:
     return tuple(clean[:8]) or _DEFAULT_PALETTE
 
 
-def _coerce_items(data: Any, *, max_items: int = 8) -> list[tuple[str, float]]:
+def _coerce_chart_point(item: Any) -> tuple[str, float]:
+    if not isinstance(item, dict):
+        raise VisualDataError(
+            "unlabeled_chart_data",
+            "every chart data point must be an object with explicit label and value fields",
+        )
+    label = str(item.get("label") or item.get("name") or item.get("title") or "").strip()
+    raw_value = item.get("value") if "value" in item else item.get("y")
+    if not label:
+        raise VisualDataError(
+            "unlabeled_chart_data",
+            "every chart data point needs an explicit label; placeholder Item N labels are not allowed",
+        )
+    try:
+        return label, float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise VisualDataError(
+            "invalid_chart_value",
+            "every chart data point needs a numeric value; fabricated fallback values are not allowed",
+        ) from exc
+
+
+def _add_chart_item(
+    *,
+    items: list[tuple[str, float]],
+    grouped: dict[str, float],
+    label: str,
+    value: float,
+    dedupe_labels: bool,
+) -> None:
+    if dedupe_labels:
+        grouped[label] = grouped.get(label, 0.0) + value
+    else:
+        items.append((label, value))
+
+
+def _validated_chart_data(data: Any) -> list[Any]:
+    if isinstance(data, list) and data:
+        return data
+    raise VisualDataError(
+        "unlabeled_chart_data",
+        "chart data must be a non-empty list of objects with explicit label and value fields",
+    )
+
+
+def _chart_value_or_none(value: float, *, drop_nonpositive: bool) -> float | None:
+    normalized = max(value, 0.0)
+    if drop_nonpositive and normalized <= 0:
+        return None
+    return normalized
+
+
+def _max_chart_items_reached(items: list[tuple[str, float]], *, max_items: int, dedupe_labels: bool) -> bool:
+    return not dedupe_labels and len(items) >= max_items
+
+
+def _final_chart_items(
+    items: list[tuple[str, float]],
+    grouped: dict[str, float],
+    *,
+    max_items: int,
+    dedupe_labels: bool,
+) -> list[tuple[str, float]]:
+    final_items = list(grouped.items())[:max_items] if dedupe_labels else items
+    if final_items:
+        return final_items
+    raise VisualDataError(
+        "unlabeled_chart_data",
+        "chart data must contain at least one labeled non-zero point",
+    )
+
+
+def _coerce_items(
+    data: Any,
+    *,
+    max_items: int = 8,
+    drop_nonpositive: bool = False,
+    dedupe_labels: bool = False,
+) -> list[tuple[str, float]]:
     items: list[tuple[str, float]] = []
-    if not isinstance(data, list) or not data:
-        raise VisualDataError(
-            "unlabeled_chart_data",
-            "chart data must be a non-empty list of objects with explicit label and value fields",
+    grouped: dict[str, float] = {}
+    for item in _validated_chart_data(data):
+        label, value = _coerce_chart_point(item)
+        normalized = _chart_value_or_none(value, drop_nonpositive=drop_nonpositive)
+        if normalized is None:
+            continue
+        _add_chart_item(
+            items=items,
+            grouped=grouped,
+            label=label,
+            value=normalized,
+            dedupe_labels=dedupe_labels,
         )
-    for item in data[:max_items]:
-        if not isinstance(item, dict):
-            raise VisualDataError(
-                "unlabeled_chart_data",
-                "every chart data point must be an object with explicit label and value fields",
-            )
-        label = str(item.get("label") or item.get("name") or item.get("title") or "").strip()
-        raw_value = item.get("value") if "value" in item else item.get("y")
-        if not label:
-            raise VisualDataError(
-                "unlabeled_chart_data",
-                "every chart data point needs an explicit label; placeholder Item N labels are not allowed",
-            )
-        try:
-            value = float(raw_value)
-        except (TypeError, ValueError) as exc:
-            raise VisualDataError(
-                "invalid_chart_value",
-                "every chart data point needs a numeric value; fabricated fallback values are not allowed",
-            ) from exc
-        items.append((label[:96], max(value, 0.0)))
-    if not items:
-        raise VisualDataError(
-            "unlabeled_chart_data",
-            "chart data must contain at least one labeled point",
-        )
-    return items
+        if _max_chart_items_reached(items, max_items=max_items, dedupe_labels=dedupe_labels):
+            break
+    return _final_chart_items(items, grouped, max_items=max_items, dedupe_labels=dedupe_labels)
 
 
 def _coerce_text_items(items: Any, *, max_items: int = 8) -> list[str]:
@@ -702,7 +764,13 @@ def _svg_for(
     fitted_title = _fit_title(title, width)
     top = _body_top(fitted_title)
     if kind == "bar_chart":
-        body = _bar_body(_coerce_items(data), colors, width, height, top)
+        body = _bar_body(
+            _coerce_items(data, drop_nonpositive=True, dedupe_labels=True),
+            colors,
+            width,
+            height,
+            top,
+        )
     elif kind == "line_chart":
         body = _line_body(_coerce_items(data), colors, width, height, top)
     elif kind in {"pie_chart", "donut_chart"}:

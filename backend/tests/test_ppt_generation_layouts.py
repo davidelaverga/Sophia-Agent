@@ -244,6 +244,14 @@ class TestGeneratePptLayouts:
         assert "function renderStat" in source       # new stat callout
         assert "function renderFullVisual" in source  # new full-visual layout
         assert "function renderTwoColumn" in source   # two-column layout
+        assert "function renderStatement" in source
+        assert "function renderImageForward" in source
+        assert "function addFullBleedVisual" in source
+        assert "if (!imageForward)" in source
+        assert 'valign: "middle"' in source
+        assert '"boardroom":' not in source
+        assert '"daylight":' not in source
+        assert '"ember":' not in source
 
     def test_missing_full_bleed_image_degrades_without_exception(self, tmp_path: Path, capsys) -> None:
         plan = {

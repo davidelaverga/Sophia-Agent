@@ -1077,7 +1077,7 @@ def test_signed_url_uses_parent_thread_id_when_state_has_it():
 
     captured_thread_id: list[str | None] = []
 
-    def _spy(thread_id, artifact_path):
+    def _spy(thread_id, artifact_path, *, storage_object_path=None):
         captured_thread_id.append(thread_id)
         return f"https://supabase.test/{thread_id}/{artifact_path}"
 
@@ -1106,7 +1106,7 @@ def test_signed_url_falls_back_to_builder_thread_id_when_parent_missing():
 
     captured_thread_id: list[str | None] = []
 
-    def _spy(thread_id, artifact_path):
+    def _spy(thread_id, artifact_path, *, storage_object_path=None):
         captured_thread_id.append(thread_id)
         return f"https://supabase.test/{thread_id}/{artifact_path}"
 
@@ -1127,3 +1127,32 @@ def test_signed_url_falls_back_to_builder_thread_id_when_parent_missing():
     # Falls back to builder_thread_id when parent_thread_id is missing
     # everywhere — keeps URL delivery functional even on partial state.
     assert captured_thread_id == ["builder-only-thread"]
+
+
+def test_signed_url_uses_storage_object_path_when_artifact_has_it():
+    runtime = _make_runtime(builder_thread_id="builder-thread")
+    state = _make_state(parent_thread_id="parent-thread", parent_user_id="alice")
+    artifact = _success_artifact(
+        storage_object_path="artifacts/alice/parent-thread/artifact_123/report.md",
+        storage_provider="supabase",
+    )
+
+    captured: list[tuple[str | None, str | None, str | None]] = []
+
+    def _spy(thread_id, artifact_path, *, storage_object_path=None):
+        captured.append((thread_id, artifact_path, storage_object_path))
+        return f"https://supabase.test/signed/{storage_object_path}"
+
+    with patch.object(builder_events, "_signed_artifact_url", side_effect=_spy):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=artifact, status="completed"
+        )
+
+    assert captured == [
+        (
+            "parent-thread",
+            "foo.md",
+            "artifacts/alice/parent-thread/artifact_123/report.md",
+        )
+    ]
+    assert payload["artifact_url"].endswith("/artifacts/alice/parent-thread/artifact_123/report.md")

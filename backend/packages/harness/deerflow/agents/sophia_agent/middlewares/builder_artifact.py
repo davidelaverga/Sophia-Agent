@@ -2005,6 +2005,9 @@ def _needs_fetch_before_write(state: dict[str, Any]) -> bool:
 
 
 def _pptx_skill_read_seen(state: dict[str, Any]) -> bool:
+    reads = _latched_builder_skill_reads(state)
+    if reads.get("pptx_skill_read"):
+        return True
     summaries = state.get("builder_tool_turn_summaries") or []
     return any(
         bool(summary.get("pptx_skill_read"))
@@ -2174,6 +2177,9 @@ def _visual_skill_flags_from_tool_calls(tool_calls: list[dict[str, Any]]) -> dic
 
 
 def _visual_design_skill_read_seen(state: dict[str, Any]) -> bool:
+    reads = _latched_builder_skill_reads(state)
+    if reads.get("visual_design_skill_read"):
+        return True
     summaries = state.get("builder_tool_turn_summaries") or []
     if any(
         bool(summary.get("visual_design_skill_read"))
@@ -2188,6 +2194,9 @@ def _visual_design_skill_read_seen(state: dict[str, Any]) -> bool:
 
 
 def _pdf_report_skill_read_seen(state: dict[str, Any]) -> bool:
+    reads = _latched_builder_skill_reads(state)
+    if reads.get("pdf_report_skill_read"):
+        return True
     summaries = state.get("builder_tool_turn_summaries") or []
     return any(
         bool(summary.get("pdf_report_skill_read"))
@@ -2210,6 +2219,61 @@ def _target_skill_read_seen(state: dict[str, Any], target_ext: str) -> bool:
     if target_ext in {".html", ".htm"}:
         return _visual_design_skill_read_seen(state)
     return True
+
+
+def _latched_builder_skill_reads(state: dict[str, Any]) -> dict[str, bool]:
+    reads = state.get("builder_skill_reads")
+    if isinstance(reads, dict):
+        return {
+            "pptx_skill_read": bool(reads.get("pptx_skill_read")),
+            "visual_design_skill_read": bool(reads.get("visual_design_skill_read")),
+            "pdf_report_skill_read": bool(reads.get("pdf_report_skill_read")),
+        }
+    summaries = state.get("builder_tool_turn_summaries") or []
+    for summary in reversed(summaries):
+        if not isinstance(summary, dict):
+            continue
+        summary_reads = summary.get("builder_skill_reads")
+        if isinstance(summary_reads, dict):
+            return {
+                "pptx_skill_read": bool(summary_reads.get("pptx_skill_read")),
+                "visual_design_skill_read": bool(summary_reads.get("visual_design_skill_read")),
+                "pdf_report_skill_read": bool(summary_reads.get("pdf_report_skill_read")),
+            }
+    return {
+        "pptx_skill_read": False,
+        "visual_design_skill_read": False,
+        "pdf_report_skill_read": False,
+    }
+
+
+def _latch_builder_skill_reads(state: dict[str, Any], turn_flags: dict[str, Any]) -> dict[str, bool]:
+    reads = _latched_builder_skill_reads(state)
+    for key in ("pptx_skill_read", "visual_design_skill_read", "pdf_report_skill_read"):
+        if turn_flags.get(key):
+            reads[key] = True
+    state["builder_skill_reads"] = reads
+    return reads
+
+
+def _windowed_visual_force_count(state: dict[str, Any]) -> int:
+    summaries = state.get("builder_tool_turn_summaries") or []
+    count = 0
+    for summary in summaries:
+        if not isinstance(summary, dict):
+            continue
+        names = summary.get("tool_names") or []
+        if any(name in {"read_file", "read_file_tool"} for name in names):
+            count += 1
+    return count
+
+
+def _builder_visual_force_count(state: dict[str, Any]) -> int:
+    try:
+        explicit = int(state.get("builder_visual_force_count", 0) or 0)
+    except (TypeError, ValueError):
+        explicit = 0
+    return max(explicit, _windowed_visual_force_count(state))
 
 
 # Phase 5c: the read_file path + human name for each gated target.
@@ -2728,17 +2792,18 @@ def _pptx_skill_correction_message(state: dict[str, Any]) -> str:
     )
 
 
-def _pptx_plan_correction_message() -> str:
+def _pptx_plan_correction_message(reason: str | None = None) -> str:
+    safe_reason = (reason or "invalid_plan_json").strip()[:240]
     return (
         "[Sophia/presentation-plan correction]\n"
-        "The PPTX generator rejected the presentation plan JSON. Do not switch "
-        "to HTML. Rewrite the plan as a valid JSON object under "
+        f"plan JSON invalid: {safe_reason}; re-emit valid JSON matching the deck schema. "
+        "Do not switch to HTML. Rewrite the plan as a valid JSON object under "
         "`/mnt/user-data/workspace/` and run the PPT generator once more.\n\n"
         "Minimum schema:\n"
         "{\n"
         '  "title": "Deck title",\n'
         '  "aspect_ratio": "16:9",\n'
-        '  "theme": "boardroom",\n'
+        '  "theme": "sophia_light",\n'
         '  "slides": [\n'
         '    {"slide_number": 1, "type": "title", "title": "Title", "subtitle": "Subtitle"},\n'
         '    {"slide_number": 2, "layout": "section_divider", "title": "Part One"},\n'
@@ -2747,11 +2812,18 @@ def _pptx_plan_correction_message() -> str:
         '"visual_path": "/mnt/user-data/outputs/visuals/system-flow.png"}\n'
         "  ]\n"
         "}\n\n"
-        "`theme` is optional (boardroom | daylight | ember | mist | terra | noir). Per-slide "
-        "`layout` is optional (title, content_text, content_image, "
-        "section_divider, quote, two_column, stat_band, closing) — omit "
+        "`theme` is optional (sophia_light | sophia_warm). Per-slide "
+        "`layout` is optional (cover, agenda, section, text+visual, "
+        "two-column, full-visual, stat, statement, summary) — omit "
         "it to infer from the slide fields. A text/layout/chart-only deck is "
         "valid."
+    )
+
+
+def _pptx_plan_error_reason(diagnostics: dict[str, Any]) -> str:
+    return (
+        str(diagnostics.get("pptx_generator_error_detail") or "").strip()
+        or str(diagnostics.get("pptx_generator_error_class") or "").strip()
     )
 
 
@@ -2837,6 +2909,7 @@ class BuilderArtifactState(AgentState):
     builder_non_artifact_turns: NotRequired[int]
     builder_last_tool_names: NotRequired[list[str]]
     builder_tool_turn_summaries: NotRequired[list[dict]]
+    builder_skill_reads: NotRequired[dict[str, bool]]
     # Phase 5c latch: the per-target skill-read gate forces the skill read at
     # most ONCE per build (the earlier-churn lesson), then never re-forces.
     builder_target_skill_read_forced: NotRequired[bool]
@@ -2892,6 +2965,7 @@ class BuilderArtifactState(AgentState):
     # (injected after repeated failed image-gen attempts so enrichment-by-
     # default cannot burn the turn budget on a broken environment).
     builder_image_generation_stop_emitted: NotRequired[bool]
+    builder_visual_force_count: NotRequired[int]
 
 
 class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
@@ -2911,7 +2985,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     @staticmethod
     def _append_turn_summary(state: BuilderArtifactState, summary: dict[str, Any]) -> list[dict]:
         history = list(state.get("builder_tool_turn_summaries", []) or [])
-        history.append(summary)
+        reads = _latch_builder_skill_reads(state, summary)
+        visual_force_count = _builder_visual_force_count(state)
+        enriched_summary = {
+            **summary,
+            "builder_skill_reads": dict(reads),
+            "builder_visual_force_count": visual_force_count,
+        }
+        history.append(enriched_summary)
         return history[-12:]
 
     @classmethod
@@ -3454,9 +3535,19 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if not _visuals_requested(state):
             return None
         if not _visual_design_skill_read_seen(state):
+            force_count = _builder_visual_force_count(state)
+            if force_count >= 2:
+                logger.warning(
+                    "[BuilderVisualDiagnostics] force_cap_reached count=%d; "
+                    "leaving visual skill workflow unforced",
+                    force_count,
+                )
+                return None
+            state["builder_visual_force_count"] = force_count + 1
             logger.warning(
                 "[BuilderVisualDiagnostics] visual-design skill not read yet; "
-                "forcing read_file before visual asset creation"
+                "forcing read_file before visual asset creation count=%d",
+                force_count + 1,
             )
             return self._forced_read_tool_choice()
         if (
@@ -5820,7 +5911,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return None
         logger.warning("BuilderArtifact: injecting PPTX plan JSON correction after invalid_plan_json")
         return {
-            "messages": [HumanMessage(content=_pptx_plan_correction_message())],
+            "messages": [HumanMessage(content=_pptx_plan_correction_message(_pptx_plan_error_reason(diagnostics)))],
             "builder_pptx_plan_correction_emitted": True,
         }
 
@@ -7206,6 +7297,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 "builder_non_artifact_turns": 0,
                                 "builder_last_tool_names": tool_names,
                                 "builder_tool_turn_summaries": history,
+                                "builder_skill_reads": state.get("builder_skill_reads"),
+                                "builder_visual_force_count": state.get("builder_visual_force_count", 0),
                                 "builder_research_diagnostics": research_diagnostics,
                                 "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
                                 "builder_task_started_at_ms": 0,
@@ -7261,6 +7354,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 "builder_non_artifact_turns": 0,
                                 "builder_last_tool_names": tool_names,
                                 "builder_tool_turn_summaries": history,
+                                "builder_skill_reads": state.get("builder_skill_reads"),
+                                "builder_visual_force_count": state.get("builder_visual_force_count", 0),
                                 "builder_research_diagnostics": research_diagnostics,
                                 "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
                                 "builder_task_started_at_ms": 0,
@@ -7301,6 +7396,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 "builder_non_artifact_turns": 0,
                                 "builder_last_tool_names": tool_names,
                                 "builder_tool_turn_summaries": history,
+                                "builder_skill_reads": state.get("builder_skill_reads"),
+                                "builder_visual_force_count": state.get("builder_visual_force_count", 0),
                                 "builder_research_diagnostics": research_diagnostics,
                                 "builder_task_started_at_ms": 0,
                                 "builder_consecutive_empty_emit_rejections": 0,
@@ -7313,6 +7410,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "builder_non_artifact_turns": non_artifact_turns,
                             "builder_last_tool_names": tool_names,
                             "builder_tool_turn_summaries": history,
+                            "builder_skill_reads": state.get("builder_skill_reads"),
+                            "builder_visual_force_count": state.get("builder_visual_force_count", 0),
                             "builder_research_diagnostics": research_diagnostics,
                             "builder_failure_diagnostics": diagnostics,
                             "builder_consecutive_empty_emit_rejections": consecutive_rejections,
@@ -7432,6 +7531,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "builder_non_artifact_turns": 0,
                         "builder_last_tool_names": tool_names,
                         "builder_tool_turn_summaries": history,
+                        "builder_skill_reads": state.get("builder_skill_reads"),
+                        "builder_visual_force_count": state.get("builder_visual_force_count", 0),
                         "builder_research_diagnostics": research_diagnostics,
                         "builder_task_started_at_ms": 0,
                         "builder_consecutive_empty_emit_rejections": 0,
@@ -7471,9 +7572,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 )
                 if recovered is not None:
                     recovered.update({
-                        "builder_last_tool_names": tool_names,
-                        "builder_tool_turn_summaries": history,
-                        "builder_research_diagnostics": research_diagnostics,
+                            "builder_last_tool_names": tool_names,
+                            "builder_tool_turn_summaries": history,
+                            "builder_skill_reads": state.get("builder_skill_reads"),
+                            "builder_visual_force_count": state.get("builder_visual_force_count", 0),
+                            "builder_research_diagnostics": research_diagnostics,
                     })
                     return recovered
 
@@ -7541,6 +7644,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "builder_non_artifact_turns": 0,
                         "builder_last_tool_names": tool_names,
                         "builder_tool_turn_summaries": history,
+                        "builder_skill_reads": state.get("builder_skill_reads"),
+                        "builder_visual_force_count": state.get("builder_visual_force_count", 0),
                         "builder_research_diagnostics": research_diagnostics,
                         "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
                         "builder_task_started_at_ms": 0,
@@ -7564,6 +7669,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     "builder_non_artifact_turns": non_artifact_turns,
                     "builder_last_tool_names": tool_names,
                     "builder_tool_turn_summaries": history,
+                    "builder_skill_reads": state.get("builder_skill_reads"),
+                    "builder_visual_force_count": state.get("builder_visual_force_count", 0),
                     "builder_research_diagnostics": research_diagnostics,
                     "builder_task_started_at_ms": builder_task_started_at_ms,
                     # PR #94: any non-emit turn breaks the empty-rejection
@@ -7623,6 +7730,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "builder_non_artifact_turns": 0,
                 "builder_last_tool_names": [],
                 "builder_tool_turn_summaries": history,
+                "builder_skill_reads": state.get("builder_skill_reads"),
+                "builder_visual_force_count": state.get("builder_visual_force_count", 0),
                 "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
                 "builder_consecutive_empty_emit_rejections": 0,
                 "builder_last_missing_emit_path": None,

@@ -12,6 +12,8 @@ from PIL import Image
 
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     BuilderArtifactMiddleware,
+    _pptx_skill_read_seen,
+    _visual_design_skill_read_seen,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -156,7 +158,53 @@ def test_invalid_plan_json_gets_pptx_plan_correction(tmp_path: Path) -> None:
     assert result is not None
     assert result["builder_pptx_plan_correction_emitted"] is True
     assert "presentation-plan correction" in result["messages"][0].content
+    assert "plan JSON invalid: invalid_plan_json; re-emit valid JSON matching the deck schema" in result["messages"][0].content
     assert "slides" in result["messages"][0].content
+
+
+def test_skill_read_flags_latch_after_summary_window_rolls() -> None:
+    state: dict = {}
+    history = BuilderArtifactMiddleware._append_turn_summary(
+        state,
+        {
+            "turn": 1,
+            "tool_names": ["read_file"],
+            "pptx_skill_read": True,
+            "visual_design_skill_read": True,
+        },
+    )
+    state = {
+        "builder_tool_turn_summaries": history,
+        "builder_skill_reads": state["builder_skill_reads"],
+    }
+
+    for turn in range(2, 16):
+        history = BuilderArtifactMiddleware._append_turn_summary(
+            state,
+            {"turn": turn, "tool_names": ["bash"], "pptx_skill_read": False, "visual_design_skill_read": False},
+        )
+        state = {
+            "builder_tool_turn_summaries": history,
+            "builder_skill_reads": state["builder_skill_reads"],
+        }
+
+    assert len(state["builder_tool_turn_summaries"]) == 12
+    assert state["builder_tool_turn_summaries"][0]["turn"] == 4
+    assert _pptx_skill_read_seen(state) is True
+    assert _visual_design_skill_read_seen(state) is True
+
+
+def test_visual_skill_forced_read_stops_after_cap() -> None:
+    middleware = BuilderArtifactMiddleware()
+    state = {
+        "delegation_context": {"task": "Create a visual presentation with diagrams"},
+    }
+
+    assert middleware._visual_tool_choice_for_state(state) == {"type": "tool", "name": "read_file"}
+    assert state["builder_visual_force_count"] == 1
+    assert middleware._visual_tool_choice_for_state(state) == {"type": "tool", "name": "read_file"}
+    assert state["builder_visual_force_count"] == 2
+    assert middleware._visual_tool_choice_for_state(state) is None
 
 
 def test_ppt_generation_script_can_create_no_image_deck(tmp_path: Path) -> None:
