@@ -12,12 +12,14 @@ from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionM
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_budget import BuilderBudgetMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_progress import BuilderProgressMiddleware
+from deerflow.sophia.observability import enable_langsmith_tracing_for_builder_runnable
 
 __all__ = [
     "BuilderBudgetMiddleware",
     "BuilderProgressMiddleware",
     "LoopDetectionMiddleware",
     "create_builder_todo_middleware",
+    "wrap_builder_agent_for_observability",
 ]
 
 _BUILDER_TODO_SYSTEM_PROMPT = """
@@ -50,3 +52,9 @@ def create_builder_todo_middleware() -> TodoMiddleware:
         tool_description=_BUILDER_TODO_TOOL_DESCRIPTION,
         reminder_instruction=_BUILDER_TODO_REMINDER,
     )
+
+
+def wrap_builder_agent_for_observability(agent):
+    """Apply builder-only observability wrappers without expanding builder_agent fan-out."""
+
+    return enable_langsmith_tracing_for_builder_runnable(agent)

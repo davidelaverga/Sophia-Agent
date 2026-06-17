@@ -194,6 +194,48 @@ def test_slide_qc_bash_result_records_verdict_feedback_payload(tmp_path: Path) -
     }
 
 
+def test_image_generation_and_slide_qc_bash_result_merge_diagnostics(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    image = outputs / "slide-01.png"
+    image.write_bytes(b"png-bytes")
+    request = SimpleNamespace(
+        state={"thread_data": {"outputs_path": str(outputs)}},
+        tool_call={
+            "name": "bash",
+            "args": {
+                "command": (
+                    "python /mnt/skills/public/image-generation/scripts/generate.py "
+                    "--prompt-file /mnt/user-data/workspace/slide-01.json "
+                    "--output-file /mnt/user-data/outputs/slide-01.png "
+                    "--aspect-ratio 16:9 && "
+                    "python /mnt/skills/public/image-generation/scripts/slide_qc.py "
+                    "--image-file /mnt/user-data/outputs/slide-01.png "
+                    "--spec-file /mnt/user-data/workspace/slide-01.txt"
+                )
+            },
+        },
+    )
+
+    delta = BuilderArtifactMiddleware._pptx_bash_result_delta(
+        request,
+        _tool_message('Successfully generated image\n[qc] PASS=False reasons=["garbled"]'),
+    )
+
+    assert delta == {
+        "image_generation_attempt_count": 1,
+        "image_generation_success_count": 1,
+        "image_generation_bytes_total": len(b"png-bytes"),
+        "image_generation_error_class": None,
+        "image_output_paths": ["/mnt/user-data/outputs/slide-01.png"],
+        "qc_invocation_count": 1,
+        "qc_pass_count": 0,
+        "qc_failure_count": 1,
+        "qc_results": [{"pass": False, "reasons": ["garbled"]}],
+        "qc_reasons": ["garbled"],
+    }
+
+
 def test_failed_image_generation_after_correction_does_not_force_fallback(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()

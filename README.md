@@ -395,12 +395,12 @@ See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions
 
 ### Sophia Builder Observability
 
-Sophia traces the `sophia_builder` graph to LangSmith project `sophia-builder` so deck builds can be inspected by plan, image prompts, tool output, QC verdicts, metadata tags, and `slide_qc` feedback. The companion graph is deliberately excluded in code with `tracing_context(enabled=False)` because companion turns can contain Mem0/personal context.
+Sophia traces only the `sophia_builder` graph to LangSmith project `sophia-builder` so deck builds can be inspected by plan, image prompts, tool output, QC verdicts, metadata tags, and `slide_qc` feedback. Keep process-wide `LANGSMITH_TRACING` unset or false on the shared worker; the builder graph opts in through its own wrapper so the companion graph never exports Mem0/personal context.
 
 Set these only on the `sophia-langgraph` worker service:
 
 ```bash
-LANGSMITH_TRACING=true
+SOPHIA_BUILDER_LANGSMITH_TRACING=true
 LANGSMITH_API_KEY=<write key>
 LANGSMITH_PROJECT=sophia-builder
 LANGSMITH_WORKSPACE_ID=<workspace id>   # only if the key spans multiple workspaces
@@ -513,7 +513,7 @@ Editing the local `config.yaml` does NOTHING to production. Always edit `config.
 | Service | Env vars |
 |---|---|
 | `sophia-gateway` | `ANTHROPIC_API_KEY`, `MEM0_API_KEY`, `STREAM_API_KEY`, `STREAM_API_SECRET`, `LANGGRAPH_URL`, `SOPHIA_VOICE_SERVER_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_WORKER_BOT_TOKEN` (Work bot only) |
-| `sophia-langgraph` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `MEM0_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WORKER_BOT_TOKEN` (Work bot only), `LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT=sophia-builder`, optional `LANGSMITH_WORKSPACE_ID` (any token referenced by `config.production.yaml` must be set here too) |
+| `sophia-langgraph` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `MEM0_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WORKER_BOT_TOKEN` (Work bot only), `SOPHIA_BUILDER_LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT=sophia-builder`, optional `LANGSMITH_WORKSPACE_ID` (any token referenced by `config.production.yaml` must be set here too) |
 | `sophia-voice` | (see `render.yaml` — STT/TTS keys, Stream credentials, etc.) |
 
 **To verify a deploy** worked, SSH into the Render service shell and run:

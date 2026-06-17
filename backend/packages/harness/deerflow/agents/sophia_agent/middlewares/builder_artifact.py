@@ -6776,21 +6776,28 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         command = str(args.get("command") or "")
         text = BuilderArtifactMiddleware._tool_message_text(result)
         state = request.state or {}
+        delta: dict[str, Any] = {}
         if any(marker in command for marker in _IMAGE_GENERATION_PATH_MARKERS):
-            return BuilderArtifactMiddleware._image_generation_bash_delta(
-                command=command,
-                text=text,
-                state=state,
+            delta = _merge_builder_pptx_diagnostics(
+                delta,
+                BuilderArtifactMiddleware._image_generation_bash_delta(
+                    command=command,
+                    text=text,
+                    state=state,
+                ),
             )
         if any(marker in command for marker in _SLIDE_QC_PATH_MARKERS):
-            return _slide_qc_bash_delta(command, text)
+            delta = _merge_builder_pptx_diagnostics(delta, _slide_qc_bash_delta(command, text))
         if any(marker in command for marker in _PPTX_GENERATOR_PATH_MARKERS):
-            return BuilderArtifactMiddleware._pptx_generation_bash_delta(
-                command=command,
-                text=text,
-                state=state,
+            delta = _merge_builder_pptx_diagnostics(
+                delta,
+                BuilderArtifactMiddleware._pptx_generation_bash_delta(
+                    command=command,
+                    text=text,
+                    state=state,
+                ),
             )
-        return None
+        return delta or None
 
     def _pptx_bash_result_command(
         self,

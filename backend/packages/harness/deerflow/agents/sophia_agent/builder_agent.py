@@ -23,7 +23,10 @@ from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
-from deerflow.agents.sophia_agent.builder_middlewares import build_builder_middleware_chain
+from deerflow.agents.sophia_agent.builder_middlewares import (
+    build_builder_middleware_chain,
+    wrap_builder_agent_for_observability,
+)
 from deerflow.agents.sophia_agent.state import SophiaState
 from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.agents.sophia_agent.vision_gate import supports_vision
@@ -221,4 +224,4 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
     # The delegated Builder path still enforces its runtime budget through
     # switch_to_builder -> SubagentExecutor.config.max_turns.
     agent.recursion_limit = 80
-    return agent
+    return wrap_builder_agent_for_observability(agent)

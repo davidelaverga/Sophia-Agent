@@ -130,10 +130,11 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
         return DummyAgent()
 
     monkeypatch.setattr(builder_module, "create_agent", _capture_builder)
-    builder_module._create_builder_agent(user_id="user_123")
+    builder_agent = builder_module._create_builder_agent(user_id="user_123")
 
     builder_types = [type(mw).__name__ for mw in captured_builder["middleware"]]
     builder_tool_names = [getattr(tool, "name", None) for tool in captured_builder["tools"]]
+    assert type(builder_agent).__name__ == "LangSmithBuilderTraceRunnable"
     assert "SandboxMiddleware" in builder_types
     assert "ToolErrorHandlingMiddleware" in builder_types
     assert "LLMErrorHandlingMiddleware" in builder_types

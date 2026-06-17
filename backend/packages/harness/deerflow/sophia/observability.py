@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from contextlib import nullcontext
 from typing import Any
 
@@ -33,6 +34,27 @@ def langsmith_tracing_disabled() -> Any:
     if tracing_context is None:
         return nullcontext()
     return tracing_context(enabled=False)
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def langsmith_builder_tracing_enabled() -> bool:
+    """Return whether the builder graph should opt into LangSmith tracing."""
+
+    return _env_flag("SOPHIA_BUILDER_LANGSMITH_TRACING")
+
+
+def langsmith_builder_tracing_context() -> Any:
+    """Context manager that enables tracing only for builder graph execution."""
+
+    if not langsmith_builder_tracing_enabled():
+        return nullcontext()
+    tracing_context = _tracing_context_factory()
+    if tracing_context is None:
+        return nullcontext()
+    return tracing_context(enabled=True)
 
 
 class LangSmithTraceDisabledRunnable(Runnable[Any, Any]):
@@ -84,6 +106,57 @@ class LangSmithTraceDisabledRunnable(Runnable[Any, Any]):
 
 def disable_langsmith_tracing_for_runnable(runnable: Any) -> LangSmithTraceDisabledRunnable:
     return LangSmithTraceDisabledRunnable(runnable)
+
+
+class LangSmithBuilderTraceRunnable(Runnable[Any, Any]):
+    """Proxy the builder graph while enabling LangSmith only for that runnable."""
+
+    def __init__(self, runnable: Any) -> None:
+        object.__setattr__(self, "_runnable", runnable)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._runnable, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "_runnable":
+            object.__setattr__(self, name, value)
+            return
+        setattr(self._runnable, name, value)
+
+    def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        with langsmith_builder_tracing_context():
+            return self._runnable.invoke(*args, **kwargs)
+
+    async def ainvoke(self, *args: Any, **kwargs: Any) -> Any:
+        with langsmith_builder_tracing_context():
+            return await self._runnable.ainvoke(*args, **kwargs)
+
+    def batch(self, *args: Any, **kwargs: Any) -> Any:
+        with langsmith_builder_tracing_context():
+            return self._runnable.batch(*args, **kwargs)
+
+    async def abatch(self, *args: Any, **kwargs: Any) -> Any:
+        with langsmith_builder_tracing_context():
+            return await self._runnable.abatch(*args, **kwargs)
+
+    def stream(self, *args: Any, **kwargs: Any) -> Any:
+        with langsmith_builder_tracing_context():
+            yield from self._runnable.stream(*args, **kwargs)
+
+    async def astream(self, *args: Any, **kwargs: Any) -> Any:
+        with langsmith_builder_tracing_context():
+            async for item in self._runnable.astream(*args, **kwargs):
+                yield item
+
+    def bind(self, *args: Any, **kwargs: Any) -> LangSmithBuilderTraceRunnable:
+        return LangSmithBuilderTraceRunnable(self._runnable.bind(*args, **kwargs))
+
+    def bind_tools(self, *args: Any, **kwargs: Any) -> LangSmithBuilderTraceRunnable:
+        return LangSmithBuilderTraceRunnable(self._runnable.bind_tools(*args, **kwargs))
+
+
+def enable_langsmith_tracing_for_builder_runnable(runnable: Any) -> LangSmithBuilderTraceRunnable:
+    return LangSmithBuilderTraceRunnable(runnable)
 
 
 def _current_run_tree() -> Any | None:

@@ -142,3 +142,28 @@ def test_trace_disabled_runnable_wraps_sync_and_async_execution(monkeypatch) -> 
         ("enter", False),
         ("exit", False),
     ]
+
+
+def test_builder_trace_runnable_uses_builder_only_env(monkeypatch) -> None:
+    events: list[tuple[str, bool | None]] = []
+
+    @contextmanager
+    def fake_tracing_context(*, enabled: bool | None = None, **_kwargs: Any):
+        events.append(("enter", enabled))
+        try:
+            yield
+        finally:
+            events.append(("exit", enabled))
+
+    monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "true")
+    monkeypatch.setattr(observability, "_tracing_context_factory", lambda: fake_tracing_context)
+    wrapped = observability.enable_langsmith_tracing_for_builder_runnable(_FakeRunnable())
+
+    assert wrapped.invoke({}) == "invoke"
+    assert list(wrapped.stream({})) == ["stream-1", "stream-2"]
+    assert events == [
+        ("enter", True),
+        ("exit", True),
+        ("enter", True),
+        ("exit", True),
+    ]
