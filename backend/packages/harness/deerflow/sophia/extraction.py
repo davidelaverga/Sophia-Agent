@@ -124,6 +124,12 @@ _DELIVERABLE_NOUNS = (
 _WEB_DELIVERABLE_FRAGMENT = (
     r"website|web\s+site|web\s+page|landing\s+page|web\s+app(?:lication)?"
 )
+# PowerPoint presentation aliases. The dispatch path
+# (``start_builder_task._PPTX_OUTPUT_RE``) routes "PowerPoint"/"pptx"/"power
+# point" as a presentation build, so a legacy "user asked for a PowerPoint about
+# X" memory must drop as task_history too. STRONG deliverables. ("slide deck" /
+# "slides" are already covered by the "slide"/"deck" nouns.)
+_PPTX_DELIVERABLE_FRAGMENT = r"powerpoints?|pptx|power\s*points?"
 # A deliverable word that MODIFIES a skill/activity ("presentation coaching",
 # "presentation practice", "report-writing skills") is not the requested
 # deliverable — it names a goal/context. This negative lookahead keeps the noun
@@ -160,7 +166,7 @@ _NOT_SKILL_MODIFIER = (
 # still matches) while removing that false-positive class.
 _DELIVERABLE_NOUN_RE = re.compile(
     r"\b(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
-    + "|" + _WEB_DELIVERABLE_FRAGMENT + r")s?\b" + _NOT_SKILL_MODIFIER
+    + "|" + _WEB_DELIVERABLE_FRAGMENT + "|" + _PPTX_DELIVERABLE_FRAGMENT + r")s?\b" + _NOT_SKILL_MODIFIER
 )
 # A genuine delivery *preference* ("prefers concise reports") is not a build
 # request. Match the preference VERB on a word boundary so a topic noun like
@@ -220,7 +226,7 @@ _TOPIC_MARKER_RE = re.compile(
 # "to be …" construction carry neither and stay preferences.
 _SINGULAR_DELIVERABLE_RE = re.compile(
     r"\ban?\s+(?:[\w-]+\s+){0,3}?(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
-    + "|" + _WEB_DELIVERABLE_FRAGMENT + r")s?\b"
+    + "|" + _WEB_DELIVERABLE_FRAGMENT + "|" + _PPTX_DELIVERABLE_FRAGMENT + r")s?\b"
 )
 _DEADLINE_RE = re.compile(
     r"\bdue\b|\btomorrow\b|\bby\s+(?:\w+day|tomorrow|tonight|noon|eod|cob|next\b|end\b|the\b|\d)"
@@ -246,7 +252,7 @@ _DELIVERABLE_CREATION_RE = re.compile(
 # (document/pdf/material/…) that could name an existing artifact.
 _STRONG_DELIVERABLE_NOUN_RE = re.compile(
     r"\b(?:presentation|report|deck|slide|webpage|infographic|spreadsheet|write-up|"
-    + _WEB_DELIVERABLE_FRAGMENT + r")s?\b" + _NOT_SKILL_MODIFIER
+    + _WEB_DELIVERABLE_FRAGMENT + "|" + _PPTX_DELIVERABLE_FRAGMENT + r")s?\b" + _NOT_SKILL_MODIFIER
 )
 # A request involving a third party is a relationship fact, NOT a build request
 # made of Sophia — never drop it. Two shapes: the third party is the asker
@@ -271,6 +277,9 @@ _THIRD_PARTY_REQUEST_RE = re.compile(
     # redirect ("user requested their manager to create a report") is preserved.
     rf"|\b(?:asked|asks|requested|requests|wanted|wants|needed|needs|told|tells|got|had)\s+"
     rf"(?:(?:the|their|a|an|our|my|your|his|her|its)\s+)?(?:{_THIRD_PARTY})\b\s+to\b"
+    # (3) third party is the SOURCE/producer: "a report FROM their manager" — the
+    # user asked for a deliverable the third party makes, not a build of Sophia.
+    rf"|\bfrom\s+(?:(?:the|their|a|an|our|my|your|his|her|its)\s+)?(?:{_THIRD_PARTY})\b"
 )
 # The deliverable WORD is not a requested artifact when it is used as a VERB
 # ("wants to report on harassment", "to document the abuse") — "report"/"document"

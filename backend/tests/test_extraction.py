@@ -1447,6 +1447,41 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User would like a deck about pricing"
         ) == "task_history"
 
+    def test_powerpoint_aliases_are_task_history(self):
+        """Codex P2: the dispatch (`start_builder_task._PPTX_OUTPUT_RE`) routes
+        'PowerPoint'/'pptx'/'power point' as a presentation build, so a prior
+        'User asked for a PowerPoint about Hermes' memory must drop as task_history
+        too (these aliases were absent from the deliverable noun set)."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked for a PowerPoint about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a pptx about Q3"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants a power point about the pricing model"
+        ) == "task_history"
+
+    def test_deliverable_requested_from_third_party_is_preserved(self):
+        """Codex P2: a deliverable the user requested FROM a third party
+        ('a report from their manager about Q3') is a workflow/relationship fact —
+        the third party produces it, not Sophia — so the third-party guard's new
+        'from <party>' arm keeps it."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked for a report from their manager about Q3"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants a deck from the team about sales"
+        ) is None
+        # A direct build (third party is data source, not producer) still drops.
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to build a report from scratch about Hermes"
+        ) == "task_history"
+
     def test_would_like_is_a_request_verb(self):
         """Codex P2: a polite 'would like' / "'d like" build request ('User would
         like a report about OpenClaw') must be recognized as task history — the
