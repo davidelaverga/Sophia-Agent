@@ -256,6 +256,16 @@ class TestGeneratePptLayouts:
         assert '"daylight":' not in source
         assert '"ember":' not in source
 
+    def test_js_compiler_treats_cli_slide_images_as_image_forward(self) -> None:
+        source = _JS_COMPILER_PATH.read_text(encoding="utf-8")
+
+        assert "const cliImageForward = Boolean(cliImagePath && visualPath);" in source
+        assert (
+            "const imageForward = Boolean(visualPath && (cliImageForward || isImageForwardSlide(slideInfo)));" in source
+        )
+        assert "renderSlide(pptx, slideInfo, plan, theme, visualPath, imageForward)" in source
+        assert "if (imageForward && visualPath)" in source
+
     def test_missing_full_bleed_image_degrades_without_exception(self, tmp_path: Path, capsys) -> None:
         plan = {
             "title": "Deck",

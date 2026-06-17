@@ -715,8 +715,8 @@ function renderSummary(pptx, slideInfo, theme) {
   return slide;
 }
 
-function renderSlide(pptx, slideInfo, plan, theme, visualPath) {
-  if (isImageForwardSlide(slideInfo) && visualPath) {
+function renderSlide(pptx, slideInfo, plan, theme, visualPath, imageForward = false) {
+  if (imageForward && visualPath) {
     const imageForwardSlide = renderImageForward(pptx, visualPath, theme);
     if (imageForwardSlide) {
       return imageForwardSlide;
@@ -744,10 +744,12 @@ function compiledSlideContext(pptx, args, plan, theme, slidesInfo, slideInfo, in
     : null;
   const planVisualPath = slideVisualPath(slideInfo, args.planFile, args.outputFile);
   const visualPath = usablePlanVisualPath(cliImagePath || planVisualPath);
+  const cliImageForward = Boolean(cliImagePath && visualPath);
+  const imageForward = Boolean(visualPath && (cliImageForward || isImageForwardSlide(slideInfo)));
   return {
-    slide: renderSlide(pptx, slideInfo, plan, theme, visualPath),
+    slide: renderSlide(pptx, slideInfo, plan, theme, visualPath, imageForward),
     visualPath,
-    imageForward: Boolean(isImageForwardSlide(slideInfo) && visualPath),
+    imageForward,
     totalSlides: slidesInfo.length,
   };
 }
