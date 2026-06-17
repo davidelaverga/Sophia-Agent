@@ -1251,6 +1251,39 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User is summarizing their feelings about work"
         ) is None
 
+    def test_deliverable_word_as_verb_or_help_object_is_preserved(self):
+        """Codex P2: the deliverable WORD is not a requested artifact when it is a
+        verb ('wants to report on harassment') or the object of a help/practice/
+        prep request ('asked for help with a presentation'). The topic-branch
+        drop must not silently exclude these durable memories on the lexical-only
+        read filters."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        # Deliverable word used as a verb.
+        assert _candidate_policy_rejection_reason(
+            "User wants to report on harassment at work"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants to document the abuse for HR"
+        ) is None
+        # Deliverable as the object of a help / practice / prep request.
+        assert _candidate_policy_rejection_reason(
+            "User asked for help with a presentation on Tuesday"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User needs help preparing for a presentation"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User asked me to help with their deck"
+        ) is None
+        # Guard rails: a genuine build request is still dropped (no verb/help cue).
+        assert _candidate_policy_rejection_reason(
+            "User asked for a report about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to build a deck about pricing"
+        ) == "task_history"
+
     def test_addressed_asked_for_build_requests_are_task_history(self):
         """Codex P2: 'asked me/you/us for a <deliverable>' (recipient before
         'for') is a build request, just like 'asked for'."""

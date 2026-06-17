@@ -241,6 +241,19 @@ _THIRD_PARTY_REQUEST_RE = re.compile(
     rf"|\b(?:asked|asks|wanted|wants|needed|needs|told|tells|got|had)\s+"
     rf"(?:(?:the|their|a|an|our|my|your|his|her|its)\s+)?(?:{_THIRD_PARTY})\b\s+to\b"
 )
+# The deliverable WORD is not a requested artifact when it is used as a VERB
+# ("wants to report on harassment", "to document the abuse") — "report"/"document"
+# double as verbs — so a request verb + "report on X" is not a build request.
+_DELIVERABLE_AS_VERB_RE = re.compile(r"\bto\s+report\b|\bto\s+documents?\b")
+# …or when the deliverable is the OBJECT of a help / practice / prep request
+# ("asked for help with a presentation", "needs help preparing for a report",
+# "practicing for the deck") — the user wants support with an existing/upcoming
+# deliverable, not for Sophia to build one. (Mirrors the skill-modifier exemption
+# for the pre-noun framing.)
+_HELP_OR_PRACTICE_RE = re.compile(
+    r"\bhelp(?:\s+(?:me|them|us|him|her))?\s+(?:with|on|prepare|prep|practic\w+|rehears\w+)\b"
+    r"|\b(?:practic\w+|rehears\w+|prepar\w+|prep)\s+for\b"
+)
 _DUPLICATE_STOPWORDS = {
     "a",
     "an",
@@ -783,7 +796,11 @@ def _is_deliverable_request(lowered: str) -> bool:
 
     A build request must carry a request verb (``_DELIVERABLE_REQUEST_RE``) —
     this separates a request from the user's own work ("user is building a report
-    tool"). The rest splits the request *intent* from the deliverable's *subject*
+    tool"). It must also be a request for the deliverable as an ARTIFACT: a
+    deliverable word used as a verb ("wants to report on harassment") or as the
+    object of a help/practice/prep request ("asked for help with a presentation")
+    is exempted up front (``_DELIVERABLE_AS_VERB_RE`` / ``_HELP_OR_PRACTICE_RE``).
+    The rest splits the request *intent* from the deliverable's *subject*
     at the first topic marker ("report ABOUT X"), because the guards below
     describe the request itself and must NOT be tripped by incidental words in the
     subject ("report about what customers PREFER", "report about what the CLIENT
@@ -803,6 +820,12 @@ def _is_deliverable_request(lowered: str) -> bool:
       STRONG noun, or a weak noun + create/build cue, marks it task history.
     """
     if not _DELIVERABLE_REQUEST_RE.search(lowered):
+        return False
+
+    # The deliverable word is not a requested ARTIFACT when it is used as a verb
+    # ("wants to report on harassment") or is the object of a help/practice/prep
+    # request ("asked for help with a presentation") — keep these durable memories.
+    if _DELIVERABLE_AS_VERB_RE.search(lowered) or _HELP_OR_PRACTICE_RE.search(lowered):
         return False
 
     topic_markers = list(_TOPIC_MARKER_RE.finditer(lowered))
