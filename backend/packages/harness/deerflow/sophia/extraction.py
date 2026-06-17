@@ -309,10 +309,11 @@ _THIRD_PARTY_REQUEST_RE = re.compile(
     # (3) third party is the PRODUCER: "a report FROM their manager" — the user
     # asked for a deliverable the third party makes, not a build of Sophia. The
     # negative lookahead excludes source-material phrases ("from customer
-    # feedback", "from the client notes"), where the party modifies a content noun
-    # and Sophia is still the one building — those must still drop.
+    # feedback", "from the client notes", and the possessive "from the client's
+    # notes" / "from their manager's feedback"), where the party modifies a content
+    # noun and Sophia is still the one building — those must still drop.
     rf"|\bfrom\s+(?:(?:the|their|a|an|our|my|your|his|her|its)\s+)?(?:{_THIRD_PARTY})\b"
-    rf"(?!\s+(?:{_SOURCE_MATERIAL_NOUNS}))"
+    rf"(?!(?:'s|’s)?\s+(?:{_SOURCE_MATERIAL_NOUNS}))"
 )
 # The deliverable WORD is not a requested artifact when it is used as a VERB
 # ("wants to report on harassment", "to document the abuse", "to brief them") —

@@ -1552,6 +1552,14 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         assert _candidate_policy_rejection_reason(
             "User asked for a report from the client notes about Hermes"
         ) == "task_history"
+        # Possessive source material ("from the client's notes", "from their
+        # manager's feedback") is also build input, not a producer — still drops.
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to build a report from the client's notes about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to create a report from their manager's feedback about Q3"
+        ) == "task_history"
         # Genuine producer (party is the head, not a material adjunct) still kept.
         assert _candidate_policy_rejection_reason(
             "User asked for a report from their manager about Q3"
