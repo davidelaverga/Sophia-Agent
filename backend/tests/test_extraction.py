@@ -1417,6 +1417,31 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked Sophia to build a deck about pricing"
         ) == "task_history"
 
+    def test_adjectival_preferred_does_not_exempt_a_concrete_build(self):
+        """Codex P2: an adjectival 'preferred' inside a concrete (singular) build
+        request must not short-circuit it into a kept delivery preference. The
+        one-off SINGULAR/deadline check runs before the prefer shortcut, so
+        'requested a report in their preferred format for OpenClaw' drops, while a
+        generic standing preference (no singular article) is still kept."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User requested a report in their preferred format for OpenClaw"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User requested a deck using their preferred template for Hermes"
+        ) == "task_history"
+        # Generic standing preferences (no singular article / deadline) stay.
+        assert _candidate_policy_rejection_reason(
+            "User wants their reports concise for the board"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants their preferred format used in reports"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User prefers concise reports, no bullet lists"
+        ) is None
+
     def test_addressed_asked_for_build_requests_are_task_history(self):
         """Codex P2: 'asked me/you/us for a <deliverable>' (recipient before
         'for') is a build request, just like 'asked for'."""

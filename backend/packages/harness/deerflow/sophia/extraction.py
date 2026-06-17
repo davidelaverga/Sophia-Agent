@@ -968,14 +968,21 @@ def _is_delivery_preference(lowered: str) -> bool:
       ("a detailed deck") or a deadline ("by Monday") marks a one-off styled build
       ("needs a detailed deck by Monday", "wants a concise report for the board"),
       which is task history, not a standing preference about how deliverables look.
+
+    The SINGULAR/deadline one-off check runs FIRST — before the preference verb —
+    so an adjectival "preferred" inside a concrete build ("requested a report in
+    their preferred format for OpenClaw", "a deck using their preferred template")
+    does not let `prefer*` short-circuit it into a kept preference. A standing
+    preference is generic ("prefers concise reports", "wants their reports
+    concise"), carrying no singular article or deadline, so it is unaffected.
     """
+    if _SINGULAR_DELIVERABLE_RE.search(lowered) or _DEADLINE_RE.search(lowered):
+        return False
     if _DELIVERY_PREFERENCE_RE.search(lowered):
         return True
     if _DELIVERABLE_CREATION_RE.search(lowered) or _TOPIC_MARKER_RE.search(lowered):
         return False
     if not _DELIVERY_STYLE_RE.search(lowered):
-        return False
-    if _SINGULAR_DELIVERABLE_RE.search(lowered) or _DEADLINE_RE.search(lowered):
         return False
     return True
 
