@@ -153,10 +153,11 @@ class TestRetrievalAsync:
         # Ensure search was called with normalized_brief, not raw message.
         assert captured["calls"][0]["query"] == "Compare AR glasses."
         assert captured["calls"][0]["user_id"] == "user-abc"
-        # Builder retrieval is restricted to durable style preferences so prior
-        # task-history (fact/decision "user requested a report on X") can't
-        # hijack the build subject. See fix/builder-memory-contamination.
-        assert captured["calls"][0]["categories"] == ["preference"]
+        # Builder retrieval covers durable build-relevant categories (style
+        # preferences + facts + relationships); prior task-history is removed by
+        # the content filter, not by excluding whole categories. See
+        # fix/builder-memory-contamination + codex review on PR #137.
+        assert captured["calls"][0]["categories"] == ["preference", "fact", "relationship"]
         # Over-fetch a pool (Mem0 filters categories after the score-ranked
         # fetch) rather than asking for only top_k. See codex review on PR #137.
         assert captured["calls"][0]["limit"] == _BUILDER_SEARCH_POOL
@@ -183,15 +184,15 @@ class TestRetrievalAsync:
         assert result["injected_memories"] == [f"m{i}" for i in range(5)]
 
     @pytest.mark.anyio
-    async def test_blank_or_nonpreference_category_rows_are_dropped(
+    async def test_task_history_filtered_by_content_durable_facts_kept(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Mem0 admits blank-category rows (it treats "" as a wildcard match), so a
-        # legacy / metadata-write-failed task-history row can come back even under
-        # categories=['preference']. The middleware must strictly drop anything
-        # that is not explicitly a preference before injecting, or an uncategorized
-        # "user requested creation of X" re-contaminates the brief. See codex
-        # review on PR #137.
+        # Codex P2 (PR #137): builder retrieval covers durable build-relevant
+        # categories (preference/fact/relationship) and filters task-history by
+        # CONTENT, not by excluding whole categories — so a direct Builder-as-Main
+        # run still sees durable facts ("daughter's name") for "make a card for my
+        # daughter", while episodic build-request rows are dropped regardless of
+        # the category they were written under (incl. a blank/mislabeled `fact`).
         captured = _patch_search(
             monkeypatch,
             [
@@ -199,17 +200,24 @@ class TestRetrievalAsync:
                 {"id": "m2", "content": "User asked Sophia to build a report on Y", "category": "fact"},
                 {"id": "m3", "content": "Prefers concise summaries", "category": "preference"},
                 {"id": "m4", "content": "Legacy row with no category key at all"},
+                {"id": "m5", "content": "User's daughter is named Lucy", "category": "fact"},
+                {"id": "m6", "content": "User's co-founder is Jorge", "category": "relationship"},
             ],
         )
         mw = BuilderMem0RetrievalMiddleware()
-        state = {"user_id": "u", "messages": [{"type": "human", "content": "build a deck"}]}
+        state = {"user_id": "u", "messages": [{"type": "human", "content": "make a card for my daughter"}]}
         result = await mw.abefore_agent(state, runtime=None)
 
-        # Only the genuine preference row survives; the blank-category build
-        # request, the fact, and the category-less legacy row are all dropped.
-        assert result["injected_memory_contents"] == ["Prefers concise summaries"]
-        assert result["injected_memories"] == ["m3"]
-        assert captured["calls"][0]["categories"] == ["preference"]
+        # Durable fact + relationship + preference survive; the task-history rows
+        # (blank-category build request, the mislabeled `fact` build request) and
+        # the category-less legacy row are all dropped.
+        assert result["injected_memory_contents"] == [
+            "Prefers concise summaries",
+            "User's daughter is named Lucy",
+            "User's co-founder is Jorge",
+        ]
+        assert result["injected_memories"] == ["m3", "m5", "m6"]
+        assert captured["calls"][0]["categories"] == ["preference", "fact", "relationship"]
 
     @pytest.mark.anyio
     async def test_no_user_id_skips(self, monkeypatch: pytest.MonkeyPatch) -> None:

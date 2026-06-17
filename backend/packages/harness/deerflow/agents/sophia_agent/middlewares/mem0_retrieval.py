@@ -71,18 +71,22 @@ _DEFAULT_TIMEOUT_SECONDS = 2.0
 # multi-paragraph memories that would dominate the prompt.
 _MAX_SNIPPET_CHARS = 600
 
-# Builder retrieval is restricted to durable *style preferences* — never the
-# episodic fact/decision task-history that pollutes brief-scoped vector search.
-# A "user requested creation of X" memory ranks ~1.0 against a near-identical
-# "report on Y" brief and hijacks the build subject (the OpenClaw-vs-Hermes
-# contamination bug). Limiting categories here keeps task-history out of the
-# Builder's injected memory. See fix/builder-memory-contamination.
-_BUILDER_MEMORY_CATEGORIES = ["preference"]  # builder needs deliverable-style prefs, not task history
+# Builder retrieval is restricted to DURABLE build-relevant categories — style
+# preferences, static facts (names/places/roles), and relationships (the people a
+# deliverable might be for) — and then task-history is filtered by CONTENT, not by
+# excluding whole categories. The original "preference only" rule starved direct
+# Builder-as-Main runs of useful facts (e.g. "make a card for my daughter" lost
+# the daughter's name); the episodic "user requested creation of X" rows that
+# actually cause the OpenClaw-vs-Hermes contamination are removed by the
+# policy-content filter below (``_candidate_policy_rejection_reason``) regardless
+# of which category they were written under. See fix/builder-memory-contamination
+# + codex review on PR #137.
+_BUILDER_MEMORY_CATEGORIES = ["preference", "fact", "relationship"]
 # Mem0 fetches `limit` rows by score and applies the category filter LOCALLY
-# afterwards, so asking for only top_k preference rows means a brief whose top
-# matches are all task-history would discard every row and surface zero
-# preferences even when preference memories rank just below. Over-fetch a larger
-# pool, then trim to top_k after the filter. See codex review on PR #137.
+# afterwards, so asking for only top_k rows means a brief whose top matches are all
+# task-history would discard every row and surface zero durable memories even when
+# they rank just below. Over-fetch a larger pool, then trim to top_k after the
+# category + content filter. See codex review on PR #137.
 _BUILDER_SEARCH_POOL = 25
 
 
@@ -179,9 +183,9 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
         # module-load time) until the first real call.
         from deerflow.sophia.mem0_client import search_memories
 
-        # Over-fetch a pool so the preference-only category filter (applied
-        # locally by Mem0 after the score-ranked fetch) still has candidates
-        # when the top rows are task-history; we trim back to top_k below.
+        # Over-fetch a pool so the category + content filter (applied locally
+        # after the score-ranked fetch) still has candidates when the top rows are
+        # task-history; we trim back to top_k below.
         pool = max(_BUILDER_SEARCH_POOL, self.top_k)
         try:
             results = await asyncio.wait_for(
@@ -189,9 +193,9 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
                     search_memories,
                     user_id,
                     query,
-                    _BUILDER_MEMORY_CATEGORIES,  # only style preferences — excludes fact/decision task history
+                    _BUILDER_MEMORY_CATEGORIES,  # durable build-relevant categories; task-history filtered by content below
                     None,  # context_mode — None keeps all
-                    pool,  # over-fetch; trimmed to top_k after the preference filter
+                    pool,  # over-fetch; trimmed to top_k after the category + content filter
                 ),
                 timeout=self.timeout_seconds,
             )
@@ -210,20 +214,33 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
         if not results:
             return results
 
-        # Mem0's category filter admits blank-category rows — it treats an empty
-        # category as a wildcard match (mem0_client: ``not m["category"] or ...``)
-        # — so a legacy or metadata-write-failed task-history memory can still come
-        # back under ``categories=['preference']``. Enforce the preference-only
-        # contract STRICTLY at the injection point so an uncategorized
-        # "user requested creation of X" can't re-contaminate the builder brief.
+        # Two-stage filter at the injection point:
+        #   1. category ∈ the durable build-relevant set (Mem0's own category
+        #      filter admits blank-category rows as wildcards, so re-enforce it).
+        #   2. content is NOT task-history / policy-rejected — this is what keeps a
+        #      "user requested creation of X" row (written under any category, incl.
+        #      a blank or mislabeled `fact`) from re-contaminating the brief, while
+        #      letting durable facts/relationships through. Lexical-only, lazy
+        #      import (mirrors the companion + start_builder_task read filters).
         # Then keep only the best top_k (score-ordered) for the prompt budget.
-        # See codex review on PR #137.
-        preferred = [
-            m
-            for m in results
-            if isinstance(m, dict) and m.get("category") in _BUILDER_MEMORY_CATEGORIES
-        ]
-        return preferred[: self.top_k]
+        # See fix/builder-memory-contamination + codex review on PR #137.
+        try:
+            from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+        except Exception:
+            _candidate_policy_rejection_reason = None
+
+        def _is_durable(entry: dict) -> bool:
+            if entry.get("category") not in _BUILDER_MEMORY_CATEGORIES:
+                return False
+            if _candidate_policy_rejection_reason is None:
+                return True
+            try:
+                return _candidate_policy_rejection_reason(str(entry.get("content") or "")) is None
+            except Exception:
+                return True
+
+        durable = [m for m in results if isinstance(m, dict) and _is_durable(m)]
+        return durable[: self.top_k]
 
     @staticmethod
     def _collect_snippets(results: list) -> tuple[list[str], list[str]]:
