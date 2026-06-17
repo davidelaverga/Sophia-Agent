@@ -29,6 +29,14 @@ export interface JournalEntry {
 export interface JournalResponse {
   entries: JournalEntry[]
   count: number
+  total_count?: number
+  totalCount?: number
+  limit?: number | null
+  offset?: number
+  next_offset?: number | null
+  nextOffset?: number | null
+  has_more?: boolean
+  hasMore?: boolean
 }
 
 export interface JournalEntryPresentation {
@@ -201,6 +209,24 @@ export function getJournalStatus(entry: JournalEntry): string | null {
 export function isSavedJournalEntry(entry: JournalEntry): boolean {
   const status = getJournalStatus(entry)
   return status !== 'pending_review' && status !== 'discarded'
+}
+
+export function isFavoriteJournalEntry(entry: JournalEntry): boolean {
+  const metadata = entry.metadata
+  if (!metadata || typeof metadata !== 'object') {
+    return false
+  }
+
+  return metadata.favorite === true || metadata.is_favorite === true || metadata.isFavorite === true
+}
+
+export function buildJournalFavoriteMetadata(entry: JournalEntry, favorite: boolean): Record<string, unknown> {
+  const metadata = entry.metadata && typeof entry.metadata === 'object'
+    ? { ...entry.metadata }
+    : {}
+
+  metadata.favorite = favorite
+  return metadata
 }
 
 export function getHighlightSourceId(entry: JournalEntry): string | null {

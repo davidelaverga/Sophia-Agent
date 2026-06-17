@@ -2,6 +2,7 @@
 
 import {
   AlertCircle,
+  ArrowLeft,
   Check,
   ChevronDown,
   Home,
@@ -9,6 +10,7 @@ import {
   Loader2,
   Pencil,
   Search,
+  Star,
   Trash2,
 } from 'lucide-react'
 import { useRouter, useSearchParams } from 'next/navigation'
@@ -27,6 +29,7 @@ import { useVisualTier } from '../hooks/useVisualTier'
 import { logger } from '../lib/error-logger'
 import {
   buildHighlightSet,
+  buildJournalFavoriteMetadata,
   formatJournalDateLabel,
   formatTimelineLabel,
   getHighlightSourceId,
@@ -35,6 +38,7 @@ import {
   getJournalImportancePresentation,
   getJournalStatus,
   getDaysAgo,
+  isFavoriteJournalEntry,
   journalPeriodAllowsEntry,
   JOURNAL_CATEGORIES,
   matchJournalSearch,
@@ -59,36 +63,10 @@ const MAX_TIMELINE_DAYS = 180
 const HIT_RADIUS = 28
 const MAX_SHADER_MEMORIES = 16
 const MAX_COMETS = 4
+const JOURNAL_VISIBLE_BATCH_SIZE = 50
 const CAMERA_POSITION = [0, 1.05, -1.4] as const
 const CAMERA_TARGET = [0, -0.05, 0.15] as const
 const CAMERA_FOV = 1.7
-
-const PROTOTYPE_LAYOUT_SEEDS: Array<[number, number, number, number]> = [
-  [-0.55, 0.35, 0.75, 0.65],
-  [0.7, 0.5, 0.7, 0.55],
-  [0.05, 0.2, 0.8, 0.6],
-  [-1.2, 0.55, 0.9, 0.8],
-  [1.45, 0.3, 0.55, 0.5],
-  [0.3, 0.75, 0.45, 0.42],
-  [-0.2, 0.95, 0.8, 0.7],
-  [-1.65, 0.25, 0.4, 0.38],
-  [1.7, 0.65, 0.55, 0.48],
-  [0.5, 1.25, 0.35, 0.35],
-  [-0.85, 1.1, 0.38, 0.4],
-  [1.15, 0.1, 0.6, 0.55],
-  [-1.5, 0.9, 0.3, 0.32],
-  [0.1, 0.55, 0.5, 0.45],
-  [1.5, 1.05, 0.28, 0.3],
-  [-0.4, 0.15, 0.42, 0.4],
-  [0.8, 1.5, 0.25, 0.3],
-  [-1.4, 1.35, 0.35, 0.35],
-  [-0.15, 1.55, 0.22, 0.28],
-  [1.55, 1.4, 0.3, 0.32],
-  [-1.75, 0.6, 0.4, 0.38],
-  [0.45, 1.75, 0.2, 0.25],
-  [-0.7, 1.8, 0.18, 0.25],
-  [1.2, 1.7, 0.15, 0.22],
-]
 
 type Vec3 = readonly [number, number, number]
 
@@ -222,20 +200,27 @@ function parseRgbTriplet(value: string): readonly [number, number, number] {
   return [parts[0] ?? 184, parts[1] ?? 168, parts[2] ?? 232]
 }
 
-function createSpiralLayoutSeed(index: number, seed: number): [number, number, number, number] {
+function createPoolLayoutSeed(
+  index: number,
+  seed: number,
+  totalCount: number,
+  category: JournalCategory | null,
+): [number, number, number, number] {
   const random = mulberry32(seed)
-  const ring = Math.floor(index / 6) + 1
-  const angle = index * 2.399963229728653 + random() * 0.5
-  const radius = 1.25 + ring * 0.22 + random() * 0.16
-  const worldX = clamp(Math.cos(angle) * radius, -1.9, 1.9)
-  const worldZ = clamp(0.45 + Math.sin(angle) * 0.28 + ring * 0.22 + random() * 0.18, 0.18, 1.95)
-  const brightness = clamp(0.22 + random() * 0.35, 0.15, 0.85)
-  const orbSize = clamp(0.24 + random() * 0.28, 0.2, 0.8)
-  return [worldX, worldZ, brightness, orbSize]
-}
+  const categoryIndex = category ? JOURNAL_CATEGORIES.indexOf(category) : 0
+  const normalizedIndex = index + 0.5
+  const normalizedCount = Math.max(totalCount, normalizedIndex + 1)
+  const recency = totalCount <= 1 ? 0 : index / (totalCount - 1)
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5))
+  const categoryOffset = (categoryIndex >= 0 ? categoryIndex : 0) * 0.38
+  const angle = index * goldenAngle + categoryOffset + (random() - 0.5) * 0.66
+  const radius = clamp(Math.sqrt(normalizedIndex / normalizedCount) * 1.18 + (random() - 0.5) * 0.18, 0.26, 1.28)
 
-function getLayoutSeed(index: number, seed: number): [number, number, number, number] {
-  return PROTOTYPE_LAYOUT_SEEDS[index] ?? createSpiralLayoutSeed(index, seed)
+  const worldX = clamp(Math.cos(angle) * radius * 1.55 + (random() - 0.5) * 0.18, -1.9, 1.9)
+  const worldZ = clamp(1.06 + Math.sin(angle) * radius * 0.78 + (recency - 0.5) * 0.2 + (random() - 0.5) * 0.12, 0.2, 1.95)
+  const brightness = clamp(0.34 + (1 - recency) * 0.28 + random() * 0.22, 0.2, 0.9)
+  const orbSize = clamp(0.3 + (1 - recency) * 0.18 + random() * 0.22, 0.24, 0.82)
+  return [worldX, worldZ, brightness, orbSize]
 }
 
 function poolToScreen(worldX: number, worldZ: number, width: number, height: number) {
@@ -338,7 +323,8 @@ function decorateEntries(entries: JournalEntry[]): { sceneEntries: SceneEntry[];
   const sceneEntries = sortedEntries.map((entry, index) => {
     const seed = createSeedFromString(`${entry.id}:${entry.created_at ?? 'none'}:${entry.category ?? 'memory'}`)
     const daysAgo = clamp(getDaysAgo(entry.created_at), 0, maxTimelineDays)
-    const [worldX, worldZ, brightness, orbSize] = getLayoutSeed(index, seed)
+    const category = normalizeJournalCategory(entry.category)
+    const [worldX, worldZ, brightness, orbSize] = createPoolLayoutSeed(index, seed, sortedEntries.length, category)
     const phase = index * 2.09 + 0.7
     const presentation = getJournalCategoryPresentation(entry.category)
 
@@ -386,7 +372,58 @@ function classNames(...values: Array<string | false | null | undefined>): string
 
 type PendingEntryAction = {
   id: string
-  kind: 'save' | 'delete'
+  kind: 'save' | 'delete' | 'favorite'
+}
+
+type JournalFilter = 'all' | 'favorites' | JournalCategory
+
+type NormalizedJournalPage = {
+  entries: JournalEntry[]
+  total: number
+  nextOffset: number | null
+}
+
+function firstNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    if (typeof value === 'number') {
+      return value
+    }
+  }
+  return null
+}
+
+function firstBoolean(...values: unknown[]): boolean | null {
+  for (const value of values) {
+    if (typeof value === 'boolean') {
+      return value
+    }
+  }
+  return null
+}
+
+function normalizeJournalPagePayload(payload: JournalResponse): NormalizedJournalPage {
+  const entries = Array.isArray(payload.entries) ? payload.entries : []
+  const total = firstNumber(payload.total_count, payload.totalCount) ?? entries.length
+  const nextOffset = firstNumber(payload.next_offset, payload.nextOffset)
+  const hasMore = firstBoolean(payload.has_more, payload.hasMore) ?? nextOffset !== null
+
+  return {
+    entries,
+    total,
+    nextOffset: hasMore ? nextOffset : null,
+  }
+}
+
+function mergeJournalPages(current: JournalEntry[], nextEntries: JournalEntry[], append: boolean): JournalEntry[] {
+  const combined = append ? [...current, ...nextEntries] : nextEntries
+  const seen = new Set<string>()
+  return combined.filter((entry) => {
+    if (seen.has(entry.id)) {
+      return false
+    }
+    seen.add(entry.id)
+    return true
+  })
 }
 
 export function JournalPageClient() {
@@ -395,13 +432,17 @@ export function JournalPageClient() {
   const highlightSet = useMemo(() => buildHighlightSet(searchParams.get('highlight')), [searchParams])
 
   const [entries, setEntries] = useState<JournalEntry[]>([])
+  const [remoteTotalCount, setRemoteTotalCount] = useState(0)
+  const [nextPageOffset, setNextPageOffset] = useState<number | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [isLoadingMore, setIsLoadingMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [activeFilter, setActiveFilter] = useState<'all' | JournalCategory>('all')
+  const [activeFilter, setActiveFilter] = useState<JournalFilter>('all')
   const [searchQuery, setSearchQuery] = useState('')
   const deferredSearchQuery = useDeferredValue(searchQuery)
   const [activePeriod, setActivePeriod] = useState<JournalPeriod>('all')
   const [timelinePosition, setTimelinePosition] = useState(MIN_TIMELINE_DAYS)
+  const [visibleLimit, setVisibleLimit] = useState(JOURNAL_VISIBLE_BATCH_SIZE)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<JournalViewMode>('pool')
@@ -410,6 +451,8 @@ export function JournalPageClient() {
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
   const [draftText, setDraftText] = useState('')
   const [entryActionError, setEntryActionError] = useState<string | null>(null)
+  const [entryActionErrorId, setEntryActionErrorId] = useState<string | null>(null)
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null)
   const [pendingEntryAction, setPendingEntryAction] = useState<PendingEntryAction | null>(null)
 
   const searchInputRef = useRef<HTMLInputElement>(null)
@@ -434,6 +477,104 @@ export function JournalPageClient() {
   const hoveredIdRef = useRef<string | null>(null)
   const highlightIdsRef = useRef<Set<string>>(new Set())
   const autoRevealRef = useRef(false)
+  const activeRequestKeyRef = useRef('')
+
+  const goBack = useCallback(() => {
+    haptic('light')
+    if (window.history.length > 1) {
+      router.back()
+      return
+    }
+
+    router.push('/')
+  }, [router])
+
+  const goHome = useCallback(() => {
+    haptic('light')
+    router.push('/')
+  }, [router])
+
+  const buildJournalQueryString = useCallback((offset: number) => {
+    const params = new URLSearchParams()
+    params.set('limit', String(JOURNAL_VISIBLE_BATCH_SIZE))
+    params.set('offset', String(offset))
+
+    if (activeFilter === 'favorites') {
+      params.set('favorite', 'true')
+    } else if (activeFilter !== 'all') {
+      params.set('category', activeFilter)
+    }
+
+    const search = deferredSearchQuery.trim()
+    if (search) {
+      params.set('search', search)
+    }
+
+    return params.toString()
+  }, [activeFilter, deferredSearchQuery])
+
+  const loadJournalPage = useCallback(async (
+    offset: number,
+    options: { append: boolean; signal?: AbortSignal } = { append: false },
+  ) => {
+    const query = buildJournalQueryString(offset)
+    const requestKey = query
+    activeRequestKeyRef.current = requestKey
+
+    if (options.append) {
+      setIsLoadingMore(true)
+      setLoadMoreError(null)
+    } else {
+      setIsLoading(true)
+      setError(null)
+      setLoadMoreError(null)
+      setEntries([])
+      setRemoteTotalCount(0)
+      setNextPageOffset(null)
+      setSelectedId(null)
+      autoRevealRef.current = false
+    }
+
+    try {
+      const response = await fetch(`/api/journal?${query}`, {
+        method: 'GET',
+        signal: options.signal,
+        cache: 'no-store',
+      })
+
+      if (!response.ok) {
+        throw new Error(`Journal request failed: ${response.status}`)
+      }
+
+      const payload = (await response.json()) as JournalResponse
+      if (activeRequestKeyRef.current !== requestKey) {
+        return
+      }
+
+      const page = normalizeJournalPagePayload(payload)
+      setRemoteTotalCount(page.total)
+      setNextPageOffset(page.nextOffset)
+      setEntries((current) => mergeJournalPages(current, page.entries, options.append))
+    } catch {
+      if (options.signal?.aborted) {
+        return
+      }
+
+      if (!options.append) {
+        setError('Could not load your journal right now.')
+      } else {
+        setLoadMoreError("Couldn't load more memories right now.")
+      }
+    } finally {
+      if (!options.signal?.aborted) {
+        if (options.append) {
+          setIsLoadingMore(false)
+        } else {
+          setIsLoading(false)
+        }
+      }
+    }
+  }, [buildJournalQueryString])
 
   const { sceneEntries, maxTimelineDays } = useMemo(() => decorateEntries(entries), [entries])
   const showInteractiveScene = !isLoading && !error && entries.length > 0
@@ -469,41 +610,10 @@ export function JournalPageClient() {
 
   useEffect(() => {
     const controller = new AbortController()
-
-    async function loadJournal() {
-      setIsLoading(true)
-      setError(null)
-
-      try {
-        const response = await fetch('/api/journal', {
-          method: 'GET',
-          signal: controller.signal,
-          cache: 'no-store',
-        })
-
-        if (!response.ok) {
-          throw new Error(`Journal request failed: ${response.status}`)
-        }
-
-        const payload = (await response.json()) as JournalResponse
-        setEntries(Array.isArray(payload.entries) ? payload.entries : [])
-      } catch {
-        if (controller.signal.aborted) {
-          return
-        }
-
-        setError('Could not load your journal right now.')
-      } finally {
-        if (!controller.signal.aborted) {
-          setIsLoading(false)
-        }
-      }
-    }
-
-    void loadJournal()
+    void loadJournalPage(0, { append: false, signal: controller.signal })
 
     return () => controller.abort()
-  }, [])
+  }, [loadJournalPage])
 
   useEffect(() => {
     if (sceneEntries.length === 0 || highlightSet.size === 0) {
@@ -523,7 +633,17 @@ export function JournalPageClient() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target
+      const isTextInput = target instanceof HTMLInputElement
+        || target instanceof HTMLTextAreaElement
+        || (target instanceof HTMLElement && target.isContentEditable)
+
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        searchInputRef.current?.focus()
+      }
+
+      if (!isTextInput && event.key === '/') {
         event.preventDefault()
         searchInputRef.current?.focus()
       }
@@ -574,10 +694,14 @@ export function JournalPageClient() {
     return () => window.removeEventListener('pointerdown', handlePointerDown)
   }, [periodMenuOpen])
 
-  const visibleEntries = useMemo(() => {
-    const nextEntries = sceneEntries.filter((entry) => {
+  const filteredEntries = useMemo(() => {
+    return sceneEntries.filter((entry) => {
       const category = normalizeJournalCategory(entry.category)
-      if (activeFilter !== 'all' && category !== activeFilter) {
+      if (activeFilter === 'favorites' && !isFavoriteJournalEntry(entry)) {
+        return false
+      }
+
+      if (activeFilter !== 'all' && activeFilter !== 'favorites' && category !== activeFilter) {
         return false
       }
 
@@ -591,22 +715,66 @@ export function JournalPageClient() {
 
       return entry.timelinePosition <= timelinePosition
     })
+  }, [activeFilter, activePeriod, deferredSearchQuery, sceneEntries, timelinePosition])
 
+  const visibleEntries = useMemo(() => {
+    const nextEntries = filteredEntries.slice(0, visibleLimit)
     visibleIdsRef.current = new Set(nextEntries.map((entry) => entry.id))
     return nextEntries
-  }, [activeFilter, activePeriod, deferredSearchQuery, sceneEntries, timelinePosition])
+  }, [filteredEntries, visibleLimit])
+
+  useEffect(() => {
+    setVisibleLimit(JOURNAL_VISIBLE_BATCH_SIZE)
+  }, [activeFilter, activePeriod, deferredSearchQuery, timelinePosition])
 
   const selectedEntry = useMemo(
     () => visibleEntries.find((entry) => entry.id === selectedId) ?? sceneEntries.find((entry) => entry.id === selectedId) ?? null,
     [sceneEntries, selectedId, visibleEntries],
   )
   const selectedImportance = selectedEntry ? getJournalImportancePresentation(getJournalImportance(selectedEntry)) : null
+  const selectedFavorite = selectedEntry ? isFavoriteJournalEntry(selectedEntry) : false
   const showDetailPanel = viewMode === 'pool' && selectedEntry
 
   const activeTimelineDaysAgo = maxTimelineDays - timelinePosition
   const timelineLabel = formatTimelineLabel(activeTimelineDaysAgo)
   const monthMarkers = useMemo(() => buildMonthMarkers(maxTimelineDays), [maxTimelineDays])
   const patterns = useMemo(() => summarizePatterns(visibleEntries), [visibleEntries])
+  const filteredCount = filteredEntries.length
+  const favoriteCount = useMemo(() => sceneEntries.filter(isFavoriteJournalEntry).length, [sceneEntries])
+  const loadedCount = sceneEntries.length
+  const totalCount = Math.max(remoteTotalCount, loadedCount)
+  const hasMoreVisibleEntries = visibleEntries.length < filteredCount
+  const hasMoreRemoteEntries = nextPageOffset !== null && loadedCount < totalCount
+  const hasMoreEntries = hasMoreVisibleEntries || hasMoreRemoteEntries
+  const hasActiveFilters = activeFilter !== 'all' || activePeriod !== 'all' || deferredSearchQuery.trim().length > 0 || timelinePosition < maxTimelineDays
+  const visibleCountTotal = hasMoreRemoteEntries ? totalCount : filteredCount
+  const visibleCount = visibleEntries.length
+  const loadMoreLabel = isLoadingMore ? 'Loading more memories...' : 'Load more memories'
+  const resultSummary = `${buildTimelineCount(visibleCount)} shown${
+    visibleCountTotal !== visibleCount ? ` of ${visibleCountTotal} matched` : ''
+  }${totalCount !== visibleCountTotal ? ` from ${totalCount} saved memories` : ''}`
+
+  const loadMoreEntries = useCallback(() => {
+    haptic('selection')
+    if (hasMoreVisibleEntries) {
+      setVisibleLimit((current) => current + JOURNAL_VISIBLE_BATCH_SIZE)
+      return
+    }
+
+    if (nextPageOffset !== null) {
+      setVisibleLimit((current) => current + JOURNAL_VISIBLE_BATCH_SIZE)
+      void loadJournalPage(nextPageOffset, { append: true })
+    }
+  }, [hasMoreVisibleEntries, loadJournalPage, nextPageOffset])
+
+  const clearJournalFilters = useCallback(() => {
+    haptic('selection')
+    setActiveFilter('all')
+    setActivePeriod('all')
+    setSearchQuery('')
+    setTimelinePosition(maxTimelineDays)
+    setVisibleLimit(JOURNAL_VISIBLE_BATCH_SIZE)
+  }, [maxTimelineDays])
 
   useEffect(() => {
     if (!showInteractiveScene || autoRevealRef.current || highlightSet.size > 0 || visibleEntries.length === 0) {
@@ -687,6 +855,7 @@ export function JournalPageClient() {
     const nextText = draftText.trim()
     if (!nextText) {
       setEntryActionError('Memory text cannot be empty.')
+      setEntryActionErrorId(entry.id)
       return
     }
 
@@ -726,6 +895,7 @@ export function JournalPageClient() {
     } catch (error) {
       logger.logError(error, { component: 'Journal', action: 'update_memory' })
       setEntryActionError("Couldn't update this memory right now.")
+      setEntryActionErrorId(entry.id)
       haptic('error')
     } finally {
       setPendingEntryAction((current) => (
@@ -760,6 +930,7 @@ export function JournalPageClient() {
     } catch (error) {
       logger.logError(error, { component: 'Journal', action: 'delete_memory' })
       setEntryActionError("Couldn't delete this memory right now.")
+      setEntryActionErrorId(entry.id)
       haptic('error')
     } finally {
       setPendingEntryAction((current) => (
@@ -767,6 +938,62 @@ export function JournalPageClient() {
       ))
     }
   }, [editingId, selectedId])
+
+  const toggleFavoriteEntry = useCallback(async (entry: SceneEntry) => {
+    const wasFavorite = isFavoriteJournalEntry(entry)
+    const nextFavorite = !wasFavorite
+    const nextMetadata = buildJournalFavoriteMetadata(entry, nextFavorite)
+
+    setPendingEntryAction({ id: entry.id, kind: 'favorite' })
+    setEntryActionError(null)
+    setEntries((current) => current.map((existing) => (
+      existing.id === entry.id
+        ? { ...existing, metadata: nextMetadata }
+        : existing
+    )))
+
+    try {
+      const response = await fetch(`/api/memories/${encodeURIComponent(entry.id)}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ metadata: nextMetadata }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`Journal favorite update failed: ${response.status}`)
+      }
+
+      const payload = (await response.json()) as Partial<JournalEntry>
+      setEntries((current) => current.map((existing) => (
+        existing.id === entry.id
+          ? {
+            ...existing,
+            content: typeof payload.content === 'string' && payload.content.trim() ? payload.content : existing.content,
+            category: typeof payload.category === 'string' ? payload.category : existing.category,
+            metadata: payload.metadata ?? nextMetadata,
+            created_at: payload.created_at ?? existing.created_at,
+          }
+          : existing
+      )))
+      haptic('success')
+    } catch (error) {
+      logger.logError(error, { component: 'Journal', action: 'favorite_memory' })
+      setEntries((current) => current.map((existing) => (
+        existing.id === entry.id
+          ? { ...existing, metadata: buildJournalFavoriteMetadata(existing, wasFavorite) }
+          : existing
+      )))
+      setEntryActionError("Couldn't update this favorite right now.")
+      setEntryActionErrorId(entry.id)
+      haptic('error')
+    } finally {
+      setPendingEntryAction((current) => (
+        current?.id === entry.id && current.kind === 'favorite' ? null : current
+      ))
+    }
+  }, [])
 
   const renderDeleteConfirm = useCallback((entry: SceneEntry) => {
     if (deleteConfirmId !== entry.id) {
@@ -1639,8 +1866,6 @@ export function JournalPageClient() {
     ? visibleEntries.find((entry) => entry.id === hoveredId) ?? null
     : null
 
-  const visibleCount = visibleEntries.length
-  const totalCount = sceneEntries.length
   const showOrbHint = !selectedId && !hoveredId && visibleEntries.length > 0
 
   if (isLoading) {
@@ -1666,7 +1891,7 @@ export function JournalPageClient() {
             <button className={styles.primaryAction} onClick={() => window.location.reload()}>
               Try again
             </button>
-            <button className={styles.secondaryAction} onClick={() => router.push('/')}>
+            <button className={styles.secondaryAction} onClick={goHome}>
               Return home
             </button>
           </div>
@@ -1675,7 +1900,7 @@ export function JournalPageClient() {
     )
   }
 
-  if (totalCount === 0) {
+  if (totalCount === 0 && !hasActiveFilters) {
     return (
       <div className={styles.page}>
         <div className={styles.overlayState}>
@@ -1683,7 +1908,7 @@ export function JournalPageClient() {
           <h1 className={styles.stateTitle}>No saved memories yet</h1>
           <p className={styles.stateText}>After a session recap, the memories you keep will appear here.</p>
           <div className={styles.overlayActions}>
-            <button className={styles.primaryAction} onClick={() => router.push('/')}>
+            <button className={styles.primaryAction} onClick={goHome}>
               Start a session
             </button>
           </div>
@@ -1694,16 +1919,25 @@ export function JournalPageClient() {
 
   return (
     <div className={styles.page}>
-      <canvas ref={poolCanvasRef} className={classNames(styles.canvasLayer, styles.poolCanvas)} />
-      <canvas ref={overlayCanvasRef} className={classNames(styles.canvasLayer, styles.overlayCanvas)} />
-      <canvas ref={hitCanvasRef} className={classNames(styles.canvasLayer, styles.hitCanvas)} />
+      <canvas ref={poolCanvasRef} className={classNames(styles.canvasLayer, styles.poolCanvas)} aria-hidden="true" />
+      <canvas ref={overlayCanvasRef} className={classNames(styles.canvasLayer, styles.overlayCanvas)} aria-hidden="true" />
+      <canvas ref={hitCanvasRef} className={classNames(styles.canvasLayer, styles.hitCanvas)} aria-hidden="true" />
 
-      <div className={styles.uiLayer}>
+      <div className={styles.uiLayer} aria-busy={isLoadingMore}>
         <div className={styles.topLeft}>
-          <button type="button" className={styles.topLeftButton} onClick={() => router.push('/')}>
+          <div className={styles.journalNav}>
+            <button type="button" className={styles.backButton} onClick={goBack} aria-label="Back to previous page">
+              <ArrowLeft className={styles.navIcon} />
+              <span>Back</span>
+            </button>
+            <button type="button" className={styles.homeButton} onClick={goHome} aria-label="Go home" title="Go home">
+              <Home className={styles.navIcon} />
+            </button>
+          </div>
+          <div className={styles.journalTitleBlock}>
             <h1 className={styles.topLeftTitle}>Journal</h1>
             <p className={styles.topLeftSub}><span className={styles.topLeftDot} /> Saved memories from your Sophia sessions</p>
-          </button>
+          </div>
         </div>
 
         <div className={styles.searchBar}>
@@ -1714,6 +1948,7 @@ export function JournalPageClient() {
             onChange={(event) => setSearchQuery(event.target.value)}
             className={styles.searchInput}
             placeholder="Search memories..."
+            aria-label="Search saved memories"
             spellCheck={false}
           />
           <span className={styles.keyboardHint}>Ctrl K</span>
@@ -1723,12 +1958,27 @@ export function JournalPageClient() {
           <button
             type="button"
             className={classNames(styles.filterPill, activeFilter === 'all' && styles.filterPillActive)}
+            aria-pressed={activeFilter === 'all'}
             onClick={() => {
               haptic('selection')
               setActiveFilter('all')
             }}
           >
             All
+          </button>
+          <button
+            type="button"
+            className={classNames(styles.filterPill, activeFilter === 'favorites' && styles.filterPillActive)}
+            aria-label={favoriteCount > 0 ? `Favorites (${favoriteCount})` : 'Favorites'}
+            aria-pressed={activeFilter === 'favorites'}
+            onClick={() => {
+              haptic('selection')
+              setActiveFilter('favorites')
+            }}
+          >
+            <Star className={styles.filterIcon} />
+            Favorites
+            {favoriteCount > 0 && <span className={styles.filterCount}>{favoriteCount}</span>}
           </button>
           {JOURNAL_CATEGORIES.map((category) => {
             const presentation = getJournalCategoryPresentation(category)
@@ -1737,6 +1987,7 @@ export function JournalPageClient() {
                 key={category}
                 type="button"
                 className={classNames(styles.filterPill, activeFilter === category && styles.filterPillActive)}
+                aria-pressed={activeFilter === category}
                 onClick={() => {
                   haptic('selection')
                   setActiveFilter(category)
@@ -1754,17 +2005,26 @@ export function JournalPageClient() {
               ref={periodButtonRef}
               type="button"
               className={styles.periodButton}
+              aria-haspopup="menu"
+              aria-expanded={periodMenuOpen}
               onClick={() => setPeriodMenuOpen((current) => !current)}
             >
               <span>{getPeriodLabel(activePeriod)}</span>
               <ChevronDown className={styles.periodChevron} />
             </button>
-            <div ref={periodMenuRef} className={classNames(styles.periodDropdown, periodMenuOpen && styles.periodDropdownOpen)}>
+            <div
+              ref={periodMenuRef}
+              className={classNames(styles.periodDropdown, periodMenuOpen && styles.periodDropdownOpen)}
+              role="menu"
+              aria-label="Journal time range"
+            >
               {(['all', 'month', 'week', 'today'] as JournalPeriod[]).map((period) => (
                 <button
                   key={period}
                   type="button"
                   className={classNames(styles.periodOption, activePeriod === period && styles.periodOptionActive)}
+                  role="menuitemradio"
+                  aria-checked={activePeriod === period}
                   onClick={() => {
                     haptic('selection')
                     setActivePeriod(period)
@@ -1777,12 +2037,13 @@ export function JournalPageClient() {
             </div>
           </div>
 
-          <div className={styles.viewToggle}>
+          <div className={styles.viewToggle} role="group" aria-label="Journal view">
             <button
               type="button"
               className={classNames(styles.viewToggleButton, viewMode === 'pool' && styles.viewToggleButtonActive)}
               onClick={() => setViewMode('pool')}
               aria-label="Pool view"
+              aria-pressed={viewMode === 'pool'}
             >
               Pool
             </button>
@@ -1791,26 +2052,30 @@ export function JournalPageClient() {
               className={classNames(styles.viewToggleButton, viewMode === 'list' && styles.viewToggleButtonActive)}
               onClick={() => setViewMode('list')}
               aria-label="List view"
+              aria-pressed={viewMode === 'list'}
             >
               List
             </button>
           </div>
-
-          <button type="button" className={styles.avatarButton} onClick={() => router.push('/')} aria-label="Go home">
-            <span className={styles.avatarGlow} />
-          </button>
         </div>
 
         <div className={styles.stats}>
           <div className={styles.statBlock}><div className={styles.statNumber}>{totalCount}</div><div className={styles.statLabel}>memories</div></div>
           <div className={styles.statBlock}><div className={styles.statNumber}>{visibleCount}</div><div className={styles.statLabel}>shown</div></div>
+          <div className={styles.statBlock}><div className={styles.statNumber}>{filteredCount}</div><div className={styles.statLabel}>matched</div></div>
           <div className={styles.statBlock}><div className={styles.statNumber}>{patterns.length}</div><div className={styles.statLabel}>emerging patterns</div></div>
+        </div>
+        <div className={styles.srOnly} role="status" aria-live="polite">
+          {resultSummary}
         </div>
 
         <div className={styles.timeline}>
           <div className={styles.timelineDate}>
             <span>{timelineLabel}</span>
-            <span className={styles.timelineCount}>{buildTimelineCount(visibleCount)}</span>
+            <span className={styles.timelineCount}>
+              {buildTimelineCount(visibleCount)}
+              {visibleCountTotal !== visibleCount ? ` of ${visibleCountTotal}` : ''}
+            </span>
             <span className={classNames(styles.timelineHint, timelinePosition !== maxTimelineDays && styles.timelineHintMuted)}>drag to explore</span>
           </div>
           <div className={styles.timelineTrack}>
@@ -1849,6 +2114,19 @@ export function JournalPageClient() {
               </button>
             ))}
           </div>
+          {hasMoreEntries && (
+            <button
+              type="button"
+              className={styles.loadMoreButton}
+              onClick={loadMoreEntries}
+              disabled={isLoadingMore}
+              aria-label={loadMoreLabel}
+            >
+              {isLoadingMore ? <Loader2 className={styles.actionSpinner} /> : null}
+              {loadMoreLabel}
+            </button>
+          )}
+          {loadMoreError && <div className={styles.loadMoreError} role="alert">{loadMoreError}</div>}
         </div>
 
         <div className={styles.patternsBar}>
@@ -1863,6 +2141,20 @@ export function JournalPageClient() {
         </div>
 
         <div className={classNames(styles.orbHint, !showOrbHint && styles.orbHintHidden)}>Select a memory to review what Sophia kept</div>
+
+        {filteredCount === 0 && viewMode === 'pool' && (
+          <div className={styles.filterEmptyState} role="status">
+            <h2 className={styles.filterEmptyTitle}>No memories match this view</h2>
+            <p className={styles.filterEmptyText}>
+              Try clearing the search, filters, or timeline window to bring more saved memories back into the pool.
+            </p>
+            {hasActiveFilters && (
+              <button type="button" className={styles.filterEmptyAction} onClick={clearJournalFilters}>
+                Clear filters
+              </button>
+            )}
+          </div>
+        )}
 
         <div
           ref={hoverLabelRef}
@@ -1903,7 +2195,7 @@ export function JournalPageClient() {
                     </span>
                   )}
                 </div>
-                <button type="button" className={styles.detailClose} onClick={() => setSelectedId(null)}>
+                <button type="button" className={styles.detailClose} onClick={() => setSelectedId(null)} aria-label="Close memory details">
                   ×
                 </button>
               </div>
@@ -1920,6 +2212,22 @@ export function JournalPageClient() {
                 <div className={styles.detailText}>{selectedEntry.content}</div>
               )}
               <div className={styles.detailActions}>
+                <button
+                  type="button"
+                  className={classNames(
+                    styles.detailActionButton,
+                    styles.favoriteAction,
+                    selectedFavorite && styles.favoriteActionActive,
+                  )}
+                  onClick={() => void toggleFavoriteEntry(selectedEntry)}
+                  disabled={pendingEntryAction?.id === selectedEntry.id}
+                  aria-pressed={selectedFavorite}
+                >
+                  {pendingEntryAction?.id === selectedEntry.id && pendingEntryAction.kind === 'favorite'
+                    ? <Loader2 className={styles.actionSpinner} />
+                    : <Star className={styles.actionIcon} />}
+                  {selectedFavorite ? 'Favorited' : 'Favorite'}
+                </button>
                 {editingId === selectedEntry.id ? (
                   <>
                     <button
@@ -1962,7 +2270,7 @@ export function JournalPageClient() {
                 </button>
               </div>
               {renderDeleteConfirm(selectedEntry)}
-              {entryActionError && (editingId === selectedEntry.id || deleteConfirmId === selectedEntry.id) && (
+              {entryActionError && entryActionErrorId === selectedEntry.id && (
                 <div className={styles.detailError}>
                   <AlertCircle className={styles.detailErrorIcon} />
                   {entryActionError}
@@ -1973,6 +2281,7 @@ export function JournalPageClient() {
                 <span className={styles.detailTag}>{selectedEntry.presentation.label}</span>
                 {selectedEntry.originalMemoryId && <span className={styles.detailTag}>Saved from recap</span>}
                 {selectedImportance && <span className={styles.detailTag}>{selectedImportance.label}</span>}
+                {selectedFavorite && <span className={styles.detailTag}>Favorite</span>}
                 {getJournalStatus(selectedEntry) && <span className={styles.detailTag}>{getJournalStatus(selectedEntry)}</span>}
               </div>
               <div className={styles.detailSession}>
@@ -1985,47 +2294,85 @@ export function JournalPageClient() {
         </div>
 
         {viewMode === 'list' && (
-          <div className={styles.listPanel}>
+          <div className={styles.listPanel} aria-label="Visible journal memories">
             <div className={styles.listPanelHeader}>
               <div>
                 <h2 className={styles.listTitle}>Visible memories</h2>
-                <p className={styles.listCount}>{buildTimelineCount(visibleCount)}</p>
+                <p className={styles.listCount}>
+                  {buildTimelineCount(visibleCount)}
+                  {visibleCountTotal !== visibleCount ? ` of ${visibleCountTotal} matched` : ''}
+                </p>
               </div>
+              {hasMoreEntries && (
+                <button
+                  type="button"
+                  className={styles.listLoadMoreButton}
+                  onClick={loadMoreEntries}
+                  disabled={isLoadingMore}
+                  aria-label={loadMoreLabel}
+                >
+                  {isLoadingMore ? <Loader2 className={styles.actionSpinner} /> : null}
+                  {isLoadingMore ? 'Loading...' : 'Load more'}
+                </button>
+              )}
             </div>
+            {loadMoreError && <div className={styles.listLoadMoreError} role="alert">{loadMoreError}</div>}
             <div className={styles.listCards}>
+              {filteredCount === 0 && (
+                <div className={styles.listEmptyState}>
+                  <h3 className={styles.listEmptyTitle}>No matching memories</h3>
+                  <p className={styles.listEmptyText}>Clear filters to see more of your saved Sophia memories.</p>
+                  {hasActiveFilters && (
+                    <button type="button" className={styles.listEmptyAction} onClick={clearJournalFilters}>
+                      Clear filters
+                    </button>
+                  )}
+                </div>
+              )}
               {visibleEntries.map((entry) => {
                 const highlighted = highlightSet.has(entry.id) || (entry.originalMemoryId ? highlightSet.has(entry.originalMemoryId) : false)
                 const importance = getJournalImportancePresentation(getJournalImportance(entry))
+                const favorite = isFavoriteJournalEntry(entry)
                 const isEditingEntry = editingId === entry.id
                 const isPendingEntry = pendingEntryAction?.id === entry.id
+                const listCardHeader = (
+                  <div className={styles.listCardTop}>
+                    <div className={styles.listBadgeGroup}>
+                      <span className={styles.listBadge} style={{ background: entry.presentation.pillBackground, color: entry.presentation.color }}>
+                        {entry.presentation.shortLabel}
+                      </span>
+                      {importance && (
+                        <span className={styles.listImportance}>
+                          <span className={styles.importanceDot} style={{ background: importance.color, boxShadow: `0 0 8px ${importance.glow}` }} />
+                          {importance.label}
+                        </span>
+                      )}
+                      {favorite && (
+                        <span className={styles.listFavoriteBadge}>
+                          <Star className={styles.listFavoriteIcon} />
+                          Favorite
+                        </span>
+                      )}
+                    </div>
+                    <span className={styles.listDate}>{entry.displayDate}</span>
+                  </div>
+                )
+                const listCardMeta = (
+                  <div className={styles.listMetaRow}>
+                    <div className={styles.listMeta}>
+                      {typeof entry.metadata?.session_type === 'string' ? `${entry.metadata.session_type} session` : 'Journal memory'}
+                    </div>
+                    {getJournalStatus(entry) && <span className={styles.listStatus}>{getJournalStatus(entry)}</span>}
+                  </div>
+                )
                 return (
                   <article
                     key={entry.id}
                     className={classNames(styles.listCard, highlighted && styles.listCardHighlighted, selectedId === entry.id && styles.listCardSelected)}
                   >
-                    <button
-                      type="button"
-                      className={styles.listCardSurface}
-                      onClick={() => {
-                        haptic('light')
-                        setSelectedId(entry.id)
-                      }}
-                    >
-                      <div className={styles.listCardTop}>
-                        <div className={styles.listBadgeGroup}>
-                          <span className={styles.listBadge} style={{ background: entry.presentation.pillBackground, color: entry.presentation.color }}>
-                            {entry.presentation.shortLabel}
-                          </span>
-                          {importance && (
-                            <span className={styles.listImportance}>
-                              <span className={styles.importanceDot} style={{ background: importance.color, boxShadow: `0 0 8px ${importance.glow}` }} />
-                              {importance.label}
-                            </span>
-                          )}
-                        </div>
-                        <span className={styles.listDate}>{entry.displayDate}</span>
-                      </div>
-                      {isEditingEntry ? (
+                    {isEditingEntry ? (
+                      <div className={styles.listCardSurface} aria-label={`${entry.presentation.shortLabel} memory`}>
+                        {listCardHeader}
                         <textarea
                           className={styles.listTextarea}
                           value={draftText}
@@ -2033,17 +2380,36 @@ export function JournalPageClient() {
                           rows={4}
                           aria-label={`Edit ${entry.presentation.shortLabel} memory`}
                         />
-                      ) : (
-                        <p className={styles.listText}>{entry.content}</p>
-                      )}
-                      <div className={styles.listMetaRow}>
-                        <div className={styles.listMeta}>
-                          {typeof entry.metadata?.session_type === 'string' ? `${entry.metadata.session_type} session` : 'Journal memory'}
-                        </div>
-                        {getJournalStatus(entry) && <span className={styles.listStatus}>{getJournalStatus(entry)}</span>}
+                        {listCardMeta}
                       </div>
-                    </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className={styles.listCardSurface}
+                        onClick={() => {
+                          haptic('light')
+                          setSelectedId(entry.id)
+                        }}
+                        aria-label={`Open ${entry.presentation.shortLabel} memory from ${entry.displayDate}`}
+                      >
+                        {listCardHeader}
+                        <p className={styles.listText}>{entry.content}</p>
+                        {listCardMeta}
+                      </button>
+                    )}
                     <div className={styles.listActions}>
+                      <button
+                        type="button"
+                        className={classNames(styles.listActionButton, styles.favoriteAction, favorite && styles.favoriteActionActive)}
+                        onClick={() => void toggleFavoriteEntry(entry)}
+                        disabled={isPendingEntry}
+                        aria-pressed={favorite}
+                      >
+                        {isPendingEntry && pendingEntryAction?.kind === 'favorite'
+                          ? <Loader2 className={styles.actionSpinner} />
+                          : <Star className={styles.actionIcon} />}
+                        {favorite ? 'Favorited' : 'Favorite'}
+                      </button>
                       {isEditingEntry ? (
                         <>
                           <button
@@ -2086,7 +2452,7 @@ export function JournalPageClient() {
                       </button>
                     </div>
                     {renderDeleteConfirm(entry)}
-                    {entryActionError && (isEditingEntry || deleteConfirmId === entry.id) && (
+                    {entryActionError && entryActionErrorId === entry.id && (
                       <div className={styles.listError}>
                         <AlertCircle className={styles.detailErrorIcon} />
                         {entryActionError}

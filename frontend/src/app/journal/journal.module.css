@@ -31,19 +31,75 @@
   z-index: 10;
 }
 
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .topLeft {
   position: fixed;
   top: 28px;
   left: 32px;
   z-index: 10;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
 }
 
-.topLeftButton {
-  display: block;
-  border: 0;
-  background: none;
-  color: inherit;
+.journalNav {
+  display: flex;
+  gap: 6px;
+  padding-top: 1px;
+}
+
+.backButton,
+.homeButton {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--cosmic-border-soft);
+  border-radius: 10px;
+  background: var(--cosmic-panel-soft);
+  color: var(--cosmic-text);
   cursor: pointer;
+  backdrop-filter: blur(14px);
+  transition: border-color 180ms ease, background 180ms ease, color 180ms ease, transform 180ms ease;
+}
+
+.backButton {
+  padding: 0 12px 0 10px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.homeButton {
+  width: 34px;
+  padding: 0;
+}
+
+.backButton:hover,
+.homeButton:hover {
+  border-color: var(--cosmic-border-strong);
+  background: var(--cosmic-hover-bg);
+  color: var(--cosmic-text-strong);
+  transform: translateY(-1px);
+}
+
+.navIcon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.journalTitleBlock {
   text-align: left;
 }
 
@@ -138,6 +194,9 @@
 
 .filterPill {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 5px 13px;
   border: 1px solid transparent;
   border-radius: 12px;
@@ -158,6 +217,24 @@
   color: var(--sophia-purple);
   border-color: var(--cosmic-border);
   background: var(--cosmic-active-bg);
+}
+
+.filterIcon {
+  width: 11px;
+  height: 11px;
+}
+
+.filterCount {
+  display: inline-flex;
+  min-width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--sophia-purple) 16%, transparent);
+  color: var(--sophia-purple);
+  font-size: 9px;
 }
 
 .topRight {
@@ -447,6 +524,43 @@
   color: var(--cosmic-text);
 }
 
+.loadMoreButton {
+  display: inline-flex;
+  align-self: center;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 0 14px;
+  border: 1px solid var(--cosmic-border-soft);
+  border-radius: 999px;
+  background: var(--cosmic-panel-soft);
+  color: var(--cosmic-text);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: border-color 180ms ease, background 180ms ease, color 180ms ease;
+}
+
+.loadMoreButton:hover {
+  border-color: var(--cosmic-border-strong);
+  background: var(--cosmic-hover-bg);
+  color: var(--cosmic-text-strong);
+}
+
+.loadMoreButton:disabled {
+  cursor: default;
+  opacity: 0.62;
+}
+
+.loadMoreError {
+  align-self: center;
+  margin-top: 6px;
+  color: var(--cosmic-danger);
+  font-size: 10px;
+}
+
 .patternsBar {
   position: fixed;
   right: 32px;
@@ -508,6 +622,49 @@
 
 .orbHintHidden {
   opacity: 0;
+}
+
+.filterEmptyState {
+  position: fixed;
+  top: 48%;
+  left: 50%;
+  z-index: 12;
+  display: grid;
+  width: min(360px, calc(100vw - 36px));
+  justify-items: center;
+  gap: 10px;
+  padding: 20px;
+  border: 1px solid var(--cosmic-border-soft);
+  border-radius: 18px;
+  background: var(--cosmic-panel);
+  box-shadow: var(--cosmic-shadow-md);
+  text-align: center;
+  transform: translate(-50%, -50%);
+  backdrop-filter: blur(24px);
+}
+
+.filterEmptyTitle {
+  color: var(--cosmic-text-strong);
+  font-family: var(--font-cormorant), Georgia, serif;
+  font-size: 24px;
+  font-weight: 400;
+}
+
+.filterEmptyText {
+  color: var(--cosmic-text-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.filterEmptyAction {
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--cosmic-border-soft);
+  border-radius: 999px;
+  background: var(--cosmic-hover-bg);
+  color: var(--cosmic-text-strong);
+  font-size: 11px;
+  cursor: pointer;
 }
 
 .hoverLabel {
@@ -740,6 +897,17 @@
   color: var(--cosmic-danger);
 }
 
+.favoriteAction {
+  border-color: color-mix(in srgb, var(--cosmic-amber) 32%, transparent);
+  color: var(--cosmic-amber);
+}
+
+.favoriteActionActive {
+  background: color-mix(in srgb, var(--cosmic-amber) 12%, transparent);
+  border-color: color-mix(in srgb, var(--cosmic-amber) 55%, transparent);
+  color: var(--cosmic-amber);
+}
+
 .actionIcon,
 .actionSpinner {
   width: 12px;
@@ -884,6 +1052,10 @@
 }
 
 .listPanelHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
   padding: 18px 18px 10px;
 }
 
@@ -901,11 +1073,71 @@
   letter-spacing: 0.03em;
 }
 
+.listLoadMoreButton {
+  display: inline-flex;
+  flex: 0 0 auto;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: 1px solid var(--cosmic-border-soft);
+  border-radius: 999px;
+  background: var(--cosmic-hover-bg);
+  color: var(--cosmic-text);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.listLoadMoreButton:disabled {
+  cursor: default;
+  opacity: 0.62;
+}
+
+.listLoadMoreError {
+  padding: 0 18px 8px;
+  color: var(--cosmic-danger);
+  font-size: 10px;
+}
+
 .listCards {
   display: grid;
   gap: 12px;
   overflow: auto;
   padding: 4px 16px 18px;
+}
+
+.listEmptyState {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  padding: 18px;
+  border: 1px dashed var(--cosmic-border-soft);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--cosmic-panel-strong) 80%, transparent);
+}
+
+.listEmptyTitle {
+  color: var(--cosmic-text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.listEmptyText {
+  color: var(--cosmic-text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.listEmptyAction {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--cosmic-border-soft);
+  border-radius: 999px;
+  background: var(--cosmic-hover-bg);
+  color: var(--cosmic-text);
+  font-size: 10px;
+  cursor: pointer;
 }
 
 .listCard {
@@ -938,6 +1170,10 @@
   background: transparent;
   text-align: left;
   cursor: pointer;
+}
+
+.listCardSurface:not(button) {
+  cursor: default;
 }
 
 .listCardTop {
@@ -1012,7 +1248,8 @@
 }
 
 .listImportance,
-.listStatus {
+.listStatus,
+.listFavoriteBadge {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -1020,6 +1257,15 @@
   font-size: 8px;
   letter-spacing: 0.05em;
   text-transform: uppercase;
+}
+
+.listFavoriteBadge {
+  color: var(--cosmic-amber);
+}
+
+.listFavoriteIcon {
+  width: 10px;
+  height: 10px;
 }
 
 .listActions {
@@ -1152,10 +1398,15 @@
 .periodOption:focus-visible,
 .viewToggleButton:focus-visible,
 .avatarButton:focus-visible,
-.topLeftButton:focus-visible,
+.backButton:focus-visible,
+.homeButton:focus-visible,
 .timelineMonth:focus-visible,
+.loadMoreButton:focus-visible,
+.filterEmptyAction:focus-visible,
 .detailClose:focus-visible,
 .detailActionButton:focus-visible,
+.listLoadMoreButton:focus-visible,
+.listEmptyAction:focus-visible,
 .listActionButton:focus-visible,
 .listCardSurface:focus-visible,
 .deleteConfirmCancel:focus-visible,
@@ -1197,6 +1448,7 @@
   .topLeft {
     top: 18px;
     left: 18px;
+    gap: 10px;
   }
 
   .topRight {
@@ -1244,8 +1496,53 @@
 }
 
 @media (max-width: 640px) {
+  .topLeft {
+    right: 18px;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .journalNav {
+    gap: 8px;
+  }
+
+  .backButton,
+  .homeButton {
+    min-height: 38px;
+  }
+
+  .homeButton {
+    width: 38px;
+  }
+
+  .topLeftTitle {
+    font-size: 24px;
+  }
+
+  .topLeftSub {
+    max-width: calc(100vw - 36px);
+    align-items: flex-start;
+    line-height: 1.35;
+  }
+
   .topRight {
+    top: 106px;
+    right: auto;
+    left: 18px;
     gap: 6px;
+  }
+
+  .searchBar {
+    top: 150px;
+  }
+
+  .filters {
+    top: 190px;
+  }
+
+  .listPanel {
+    top: 236px;
+    bottom: 138px;
   }
 
   .periodButton {

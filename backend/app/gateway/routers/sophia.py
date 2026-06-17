@@ -222,6 +222,33 @@ class JournalEntry(BaseModel):
 class JournalResponse(BaseModel):
     entries: list[JournalEntry] = Field(default_factory=list)
     count: int = Field(default=0)
+    total_count: int = Field(default=0)
+    limit: int | None = Field(default=None)
+    offset: int = Field(default=0)
+    next_offset: int | None = Field(default=None)
+    has_more: bool = Field(default=False)
+
+
+def _truthy_query_flag(value: bool | None) -> bool:
+    return value is True
+
+
+def _is_favorite_memory(memory: dict) -> bool:
+    metadata = memory.get("metadata") if isinstance(memory, dict) else None
+    if not isinstance(metadata, dict):
+        return False
+
+    return (
+        metadata.get("favorite") is True
+        or metadata.get("is_favorite") is True
+        or metadata.get("isFavorite") is True
+    )
+
+
+def _is_saved_journal_memory(memory: dict) -> bool:
+    metadata = memory.get("metadata") if isinstance(memory, dict) else None
+    status = metadata.get("status") if isinstance(metadata, dict) else None
+    return status not in {"pending_review", "discarded"}
 
 
 def _sort_memories_desc(memories: list[dict]) -> list[dict]:
@@ -1241,6 +1268,10 @@ async def journal(
     memory_type: str | None = Query(default=None, alias="type", description="Alias for category filter"),
     search: str | None = Query(default=None, description="Case-insensitive text search"),
     status: str | None = Query(default=None, description="Filter by metadata.status"),
+    saved_only: bool = Query(default=False, description="Exclude pending-review and discarded memories"),
+    favorite: bool | None = Query(default=None, description="Only return favorited memories"),
+    limit: int | None = Query(default=None, ge=1, le=100, description="Maximum entries to return"),
+    offset: int = Query(default=0, ge=0, description="Entry offset for pagination"),
 ) -> JournalResponse:
     _validate_user(user_id)
     client = _get_mem0_client()
@@ -1289,6 +1320,17 @@ async def journal(
 
         memories_raw = _sort_memories_desc(memories_raw)
         memories_raw = _dedupe_memories_by_id(memories_raw)
+        if saved_only and not status:
+            memories_raw = [memory for memory in memories_raw if _is_saved_journal_memory(memory)]
+        if _truthy_query_flag(favorite):
+            memories_raw = [memory for memory in memories_raw if _is_favorite_memory(memory)]
+
+        total_count = len(memories_raw)
+        page_memories = memories_raw[offset:]
+        if limit is not None:
+            page_memories = page_memories[:limit]
+        next_offset = offset + len(page_memories)
+        has_more = next_offset < total_count
 
         entries = [
             JournalEntry(
@@ -1298,9 +1340,17 @@ async def journal(
                 metadata=m.get("metadata"),
                 created_at=m.get("created_at"),
             )
-            for m in memories_raw
+            for m in page_memories
         ]
-        return JournalResponse(entries=entries, count=len(entries))
+        return JournalResponse(
+            entries=entries,
+            count=len(entries),
+            total_count=total_count,
+            limit=limit,
+            offset=offset,
+            next_offset=next_offset if has_more else None,
+            has_more=has_more,
+        )
     except Exception as e:
         logger.warning("Journal failed for %s: %s", user_id, e)
         raise HTTPException(status_code=503, detail="Memory service unavailable")
