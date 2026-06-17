@@ -1417,6 +1417,47 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked Sophia to build a deck about pricing"
         ) == "task_history"
 
+    def test_would_like_is_a_request_verb(self):
+        """Codex P2: a polite 'would like' / "'d like" build request ('User would
+        like a report about OpenClaw') must be recognized as task history — the
+        verb list previously only covered ask/request/want/need."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User would like a report about OpenClaw"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User would like a deck about pricing"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User'd like a presentation on Q3"
+        ) == "task_history"
+        # 'would like' with no deliverable noun, or with a help cue, is still kept.
+        assert _candidate_policy_rejection_reason(
+            "User would like to feel calmer at work"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User would like help with a presentation"
+        ) is None
+
+    def test_requested_third_party_redirect_is_preserved(self):
+        """Codex P2: a user→third-party redirect phrased with 'requested'
+        ('User requested their manager to create a report about Q3') is a
+        relationship/work fact, not a build request made of Sophia — the redirect
+        guard must include requested/requests, not only asked/wanted/etc."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User requested their manager to create a report about Q3"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User requested their boss to build a deck about sales"
+        ) is None
+        # A direct user→Sophia request (no third party) still drops.
+        assert _candidate_policy_rejection_reason(
+            "User requested a report about Q3"
+        ) == "task_history"
+
     def test_adjectival_preferred_does_not_exempt_a_concrete_build(self):
         """Codex P2: an adjectival 'preferred' inside a concrete (singular) build
         request must not short-circuit it into a kept delivery preference. The

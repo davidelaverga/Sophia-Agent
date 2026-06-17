@@ -103,6 +103,9 @@ _DELIVERABLE_REQUEST_RE = re.compile(
     r"|\bask(?:ed|s)\s+(?:" + _REQUEST_TIME_PHRASE + r"\s+)?to\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together)"
     r"|\bwant(?:ed|s)?\b"
     r"|\bneed(?:ed|s)?\b"
+    # polite request forms: "would like a report", "user'd like a deck", "would love"
+    r"|\bwould\s+(?:like|love)\b"
+    r"|\b'?d\s+(?:like|love)\b"
 )
 _DELIVERABLE_NOUNS = (
     "presentation", "report", "deck", "slide", "document", "pdf",
@@ -260,8 +263,10 @@ _THIRD_PARTY_REQUEST_RE = re.compile(
     # (1) third party is the asker: "boss asked", "manager requested"
     rf"\b(?:{_THIRD_PARTY})\b\s+"
     r"(?:asked|asks|requested|requests|wanted|wants|told|tells|needs|needed|demanded|demands|require[sd]?)\b"
-    # (2) third party is the redirected requestee: "wants their boss to", "asked the team to"
-    rf"|\b(?:asked|asks|wanted|wants|needed|needs|told|tells|got|had)\s+"
+    # (2) third party is the redirected requestee: "wants their boss to", "asked the team to",
+    # "requested their manager to" — include requested/requests so a user→third-party
+    # redirect ("user requested their manager to create a report") is preserved.
+    rf"|\b(?:asked|asks|requested|requests|wanted|wants|needed|needs|told|tells|got|had)\s+"
     rf"(?:(?:the|their|a|an|our|my|your|his|her|its)\s+)?(?:{_THIRD_PARTY})\b\s+to\b"
 )
 # The deliverable WORD is not a requested artifact when it is used as a VERB
