@@ -284,7 +284,7 @@ export function SessionEmptyState({
       {/* Voice hint */}
       <div className="mt-8 flex items-center gap-2 text-xs text-sophia-text2">
         <Mic className="w-3.5 h-3.5" />
-        <span>Or just start talking — voice is coming soon</span>
+        <span>Type a message, or start with voice when you are ready.</span>
       </div>
     </div>
   );

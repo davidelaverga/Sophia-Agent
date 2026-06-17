@@ -312,14 +312,14 @@ describe('ArtifactLibraryPanel', () => {
     render(<ArtifactLibraryPanel />);
 
     await screen.findByText('Launch Page');
-    await userEvent.click(screen.getByRole('button', { name: /delete launch page/i }));
+    await userEvent.click(screen.getByRole('button', { name: /hide launch page from library/i }));
 
     await waitFor(() => {
       expect(fetchMock()).toHaveBeenCalledWith('/api/artifacts/artifact-1', expect.objectContaining({
         method: 'DELETE',
       }));
     });
-    expect(confirmSpy).toHaveBeenCalledWith('Hide "Launch Page" from the artifact dashboard?');
+    expect(confirmSpy).toHaveBeenCalledWith('Hide "Launch Page" from the artifact library?');
     await waitFor(() => {
       expect(screen.queryByText('Launch Page')).not.toBeInTheDocument();
     });
@@ -338,6 +338,21 @@ describe('ArtifactLibraryPanel', () => {
     render(<ArtifactLibraryPanel />);
 
     expect(await screen.findByTestId('artifact-library-empty')).toHaveTextContent('No artifacts yet');
+    expect(screen.getByTestId('artifact-library-empty')).toHaveTextContent(
+      'Artifacts Sophia creates or saves for you will appear here.',
+    );
+  });
+
+  it('shows a load error instead of the empty state when the registry request fails', async () => {
+    fetchMock().mockRejectedValueOnce(new Error('network unavailable'));
+
+    render(<ArtifactLibraryPanel />);
+
+    expect(await screen.findByTestId('artifact-library-error')).toHaveTextContent('Unable to load artifacts');
+    expect(screen.getByTestId('artifact-library-error')).toHaveTextContent(
+      'Refresh the artifact library or try again in a moment.',
+    );
+    expect(screen.queryByTestId('artifact-library-empty')).not.toBeInTheDocument();
   });
 
   it('does not render raw content, hashes, signed URLs, or local paths', async () => {

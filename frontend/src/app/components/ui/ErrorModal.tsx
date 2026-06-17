@@ -72,8 +72,8 @@ const ERROR_CONFIGS: Record<ErrorType, {
     icon: TabletSmartphone,
     iconColor: 'text-sophia-purple',
     bgColor: 'bg-sophia-purple/20',
-    defaultTitle: 'Session Active Elsewhere',
-    defaultMessage: 'Another session is active in a different tab. Only one active session is allowed at a time.',
+    defaultTitle: 'Sophia is open in another tab',
+    defaultMessage: 'To keep the conversation in sync, only one tab can control this session at a time.',
   },
   backend_error: {
     icon: AlertTriangle,
@@ -268,8 +268,8 @@ export function MultiTabModal({ isOpen, onGoHome, onTakeOver }: PresetErrorModal
       isOpen={isOpen}
       errorType="multi_tab"
       actions={[
-        { label: 'Go Home', onClick: onGoHome || (() => {}), variant: 'secondary' },
-        { label: 'Use This Tab', onClick: onTakeOver || (() => {}), variant: 'primary' },
+        { label: 'Return home', onClick: onGoHome || (() => {}), variant: 'secondary' },
+        { label: 'Take over here', onClick: onTakeOver || (() => {}), variant: 'primary' },
       ]}
       dismissible={false}
     />

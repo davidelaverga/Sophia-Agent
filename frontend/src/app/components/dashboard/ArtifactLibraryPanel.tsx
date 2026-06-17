@@ -1,6 +1,7 @@
 'use client';
 
 import {
+  AlertCircle,
   Download,
   Eye,
   FileText,
@@ -79,11 +80,11 @@ const DATE_OPTIONS: Array<{ value: ArtifactDateFilter; label: string }> = [
 ];
 
 const OBSERVATORY_FILTERS: Array<{ value: ObservatoryFilter; label: string }> = [
-  { value: 'all', label: 'Deep field' },
-  { value: 'builder', label: 'Sophia-made' },
-  { value: 'recent', label: 'Recent light' },
+  { value: 'all', label: 'All artifacts' },
+  { value: 'builder', label: 'Made with Sophia' },
+  { value: 'recent', label: 'Recently opened' },
   { value: 'document', label: 'Documents' },
-  { value: 'visual', label: 'Visual bodies' },
+  { value: 'visual', label: 'Visuals' },
 ];
 
 const FIELD_POSITIONS = [
@@ -274,7 +275,7 @@ export function ArtifactLibraryPanel() {
 
   const handleDeleteArtifact = useCallback(async (artifact: ObservatoryArtifact) => {
     const label = artifact.title || artifact.filename;
-    if (!window.confirm(`Hide "${label}" from the artifact dashboard?`)) {
+    if (!window.confirm(`Hide "${label}" from the artifact library?`)) {
       return;
     }
     setDeletingArtifactId(artifact.artifact_id);
@@ -322,7 +323,7 @@ export function ArtifactLibraryPanel() {
             Artifact Observatory
           </h1>
           <p className={styles.subtitle}>
-            Durable works made with Sophia, suspended in a night field.
+            Artifacts Sophia creates or saves for you, ready to preview, download, and revisit.
           </p>
         </header>
 
@@ -344,14 +345,14 @@ export function ArtifactLibraryPanel() {
             className={cn(styles.modeButton, !atlasMode && styles.modeButtonActive)}
             onClick={() => setAtlasMode(false)}
           >
-            Observe
+            Field
           </button>
           <button
             type="button"
             className={cn(styles.modeButton, atlasMode && styles.modeButtonActive)}
             onClick={() => setAtlasMode(true)}
           >
-            Atlas
+            List
           </button>
         </div>
 
@@ -441,7 +442,7 @@ export function ArtifactLibraryPanel() {
           />
         </div>
 
-        {error && (
+        {error && visibleArtifacts.length > 0 && (
           <div className={styles.error}>
             {error}
           </div>
@@ -449,6 +450,8 @@ export function ArtifactLibraryPanel() {
 
         {loading ? (
           <ArtifactLibraryLoading />
+        ) : error && visibleArtifacts.length === 0 ? (
+          <ArtifactLibraryErrorState message={error} />
         ) : visibleArtifacts.length === 0 ? (
           <ArtifactLibraryEmptyState />
         ) : (
@@ -637,7 +640,7 @@ function ObservationPlate({
         </div>
         <div className={cn(styles.plateStatus, isOpen && styles.plateStatusOpen)}>
           <span className={styles.plateStatusDot} aria-hidden="true" />
-          <span>{isOpen ? 'Opened in lens' : 'Focused star'}</span>
+          <span>{isOpen ? 'Preview open' : 'Selected artifact'}</span>
         </div>
         <h2 className={styles.plateTitle}>
           <SplitText text={label} />
@@ -650,7 +653,7 @@ function ObservationPlate({
         {isOpen || previewLoading || previewError ? (
           <div className={styles.realPreview}>
             <div className={styles.realPreviewChrome}>
-              <span>Lens preview</span>
+              <span>Artifact preview</span>
               <span>{artifact.kindLabel}</span>
             </div>
             <div className={styles.realPreviewBody}>
@@ -682,7 +685,7 @@ function ObservationPlate({
 
       <dl className={styles.plateData}>
         <MetadataItem label="Origin" value={artifact.sourceLabel} />
-        <MetadataItem label="Storage" value={artifact.storageLabel} />
+        <MetadataItem label="Saved" value={artifact.storageLabel} />
         <MetadataItem label="Opened" value={formatOpenedCount(artifact.opened_count)} />
       </dl>
 
@@ -700,7 +703,7 @@ function ObservationPlate({
           onClick={onDelete}
           disabled={deleting || opening}
           className={cn(styles.action, styles.actionDanger)}
-          aria-label={`Delete ${label}`}
+          aria-label={`Hide ${label} from library`}
         >
           {deleting && <Loader2 className="h-4 w-4 animate-spin" />}
           {!deleting && <Trash2 className="h-4 w-4" aria-hidden="true" />}
@@ -891,6 +894,21 @@ function ArtifactLibraryEmptyState() {
     <div className={styles.emptyState} data-testid="artifact-library-empty">
       <FileText className="mx-auto h-8 w-8 opacity-60" />
       <p className="mt-3 text-[15px] font-medium">No artifacts yet</p>
+      <p className="mt-1 max-w-[260px] text-sm opacity-70">
+        Artifacts Sophia creates or saves for you will appear here.
+      </p>
+    </div>
+  );
+}
+
+function ArtifactLibraryErrorState({ message }: { message: string }) {
+  return (
+    <div className={styles.emptyState} data-testid="artifact-library-error">
+      <AlertCircle className="mx-auto h-8 w-8 opacity-70" />
+      <p className="mt-3 text-[15px] font-medium">{message}</p>
+      <p className="mt-1 max-w-[260px] text-sm opacity-70">
+        Refresh the artifact library or try again in a moment.
+      </p>
     </div>
   );
 }
@@ -1501,7 +1519,7 @@ function formatShortDate(value: string | null | undefined): string {
 function formatStorageStatus(value: string | null | undefined): string {
   const normalized = value?.trim().toLowerCase();
   if (!normalized) return 'Unknown';
-  if (normalized === 'available') return 'Available';
+  if (normalized === 'available') return 'Saved securely';
   if (normalized === 'missing') return 'Missing';
   if (normalized === 'supabase') return 'Supabase';
   return normalized.replace(/_/gu, ' ');
