@@ -1649,7 +1649,7 @@ export function JournalPageClient() {
         <div className={styles.overlayState}>
           <div className={styles.stateIcon}><Loader2 className={styles.spinner} /></div>
           <h1 className={styles.stateTitle}>Loading journal</h1>
-          <p className={styles.stateText}>Bringing Sophia&apos;s memory pool into view.</p>
+          <p className={styles.stateText}>Bringing Sophia&apos;s saved memories into view.</p>
         </div>
       </div>
     )
@@ -1702,7 +1702,7 @@ export function JournalPageClient() {
         <div className={styles.topLeft}>
           <button type="button" className={styles.topLeftButton} onClick={() => router.push('/')}>
             <h1 className={styles.topLeftTitle}>Journal</h1>
-            <p className={styles.topLeftSub}><span className={styles.topLeftDot} /> Your memories with Sophia</p>
+            <p className={styles.topLeftSub}><span className={styles.topLeftDot} /> Saved memories from your Sophia sessions</p>
           </button>
         </div>
 
@@ -1803,7 +1803,7 @@ export function JournalPageClient() {
 
         <div className={styles.stats}>
           <div className={styles.statBlock}><div className={styles.statNumber}>{totalCount}</div><div className={styles.statLabel}>memories</div></div>
-          <div className={styles.statBlock}><div className={styles.statNumber}>{visibleCount}</div><div className={styles.statLabel}>visible</div></div>
+          <div className={styles.statBlock}><div className={styles.statNumber}>{visibleCount}</div><div className={styles.statLabel}>shown</div></div>
           <div className={styles.statBlock}><div className={styles.statNumber}>{patterns.length}</div><div className={styles.statLabel}>emerging patterns</div></div>
         </div>
 
@@ -1862,7 +1862,7 @@ export function JournalPageClient() {
           {patterns.length > 4 && <span className={styles.patternMore}>+{patterns.length - 4}</span>}
         </div>
 
-        <div className={classNames(styles.orbHint, !showOrbHint && styles.orbHintHidden)}>Click a memory to explore</div>
+        <div className={classNames(styles.orbHint, !showOrbHint && styles.orbHintHidden)}>Select a memory to review what Sophia kept</div>
 
         <div
           ref={hoverLabelRef}
@@ -1978,7 +1978,7 @@ export function JournalPageClient() {
               <div className={styles.detailSession}>
                 {typeof selectedEntry.metadata?.session_type === 'string'
                   ? `From ${selectedEntry.metadata.session_type} session`
-                  : 'Stored in Sophia journal'}
+                  : 'Saved from your Sophia sessions'}
               </div>
             </>
           )}
