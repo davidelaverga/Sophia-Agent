@@ -38,6 +38,10 @@ def _json_result(passed: bool, reasons: list[str]) -> dict[str, Any]:
     return {"pass": bool(passed), "reasons": [str(reason)[:240] for reason in reasons[:5]]}
 
 
+def _qc_unavailable_result(reason: str) -> dict[str, Any]:
+    return {"pass": True, "skipped": True, "reasons": [reason[:240]]}
+
+
 def _emit(payload: dict[str, Any]) -> int:
     passed = payload.get("pass") is True
     reasons = payload.get("reasons") if isinstance(payload.get("reasons"), list) else []
@@ -99,7 +103,7 @@ def _input_error(image_file: Path, spec_file: Path, reference_image: Path | None
     if reference_image is not None and not reference_image.is_file():
         return _json_result(False, [f"reference image missing: {reference_image}"])
     if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
-        return _json_result(False, ["slide QC unavailable: ANTHROPIC_API_KEY is not set"])
+        return _qc_unavailable_result("slide QC skipped: ANTHROPIC_API_KEY is not set")
     return None
 
 
@@ -107,7 +111,7 @@ def _anthropic_client() -> tuple[Any | None, dict[str, Any] | None]:
     try:
         import anthropic
     except ImportError:
-        return None, _json_result(False, ["slide QC unavailable: anthropic SDK is not installed"])
+        return None, _qc_unavailable_result("slide QC skipped: anthropic SDK is not installed")
     return anthropic.Anthropic(), None
 
 

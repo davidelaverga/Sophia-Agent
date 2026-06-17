@@ -212,12 +212,12 @@ def test_explicit_image_request_enables_generation():
     ) is True
 
 
-def test_plain_deck_marker_no_longer_opts_out():
+def test_plain_deck_marker_opts_out():
     assert _image_generation_enabled(
         {"task": "Build a plain text-only deck about our roadmap"},
         artifact_target_ext=".pptx",
         task_type="presentation",
-    ) is True
+    ) is False
 
 
 def test_explain_does_not_match_plain_opt_out():
@@ -228,7 +228,7 @@ def test_explain_does_not_match_plain_opt_out():
     ) is True
 
 
-def test_minimal_style_no_longer_opts_out():
+def test_minimal_style_still_allows_default_deck_images():
     assert _image_generation_enabled(
         {"task": "A minimal deck, just bullets"},
         artifact_target_ext=".pptx",

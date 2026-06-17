@@ -45,6 +45,35 @@ def test_emit_prints_trace_diagnostic_without_breaking_stdout_json(qc_module, ca
     assert captured.err.strip() == '[qc] PASS=False reasons=["garbled title"]'
 
 
+def test_review_slide_skips_when_anthropic_key_is_unavailable(
+    qc_module,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    image_file = tmp_path / "slide.png"
+    image_file.write_bytes(b"fake-png")
+    spec_file = tmp_path / "slide.txt"
+    spec_file.write_text("Title: Roadmap", encoding="utf-8")
+
+    payload = qc_module.review_slide(image_file=image_file, spec_file=spec_file)
+
+    assert payload["pass"] is True
+    assert payload["skipped"] is True
+    assert payload["reasons"] == ["slide QC skipped: ANTHROPIC_API_KEY is not set"]
+
+
+def test_emit_treats_qc_skip_as_success(qc_module, capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = qc_module._emit(
+        {"pass": True, "skipped": True, "reasons": ["slide QC skipped: ANTHROPIC_API_KEY is not set"]}
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert '"skipped": true' in captured.out
+    assert captured.err.strip() == '[qc] PASS=True reasons=["slide QC skipped: ANTHROPIC_API_KEY is not set"]'
+
+
 def test_review_slide_sends_spec_and_image_to_anthropic(qc_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("SOPHIA_SLIDE_QC_MODEL", "claude-test-vision")

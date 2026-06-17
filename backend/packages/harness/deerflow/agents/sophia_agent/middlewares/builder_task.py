@@ -405,6 +405,28 @@ _POLISHED_DECK_IMAGE_MARKERS = (
     "full bleed",
 )
 
+_PLAIN_DECK_IMAGE_OPT_OUT_MARKERS = (
+    "plain",
+    "plain deck",
+    "plain slides",
+    "text-only",
+    "text only",
+    "text-only deck",
+    "text only deck",
+    "no images",
+    "no imagery",
+    "no illustrations",
+    "no visuals",
+    "without visuals",
+)
+
+
+def _plain_deck_image_opt_out_requested(text: str) -> bool:
+    return any(
+        re.search(rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])", text)
+        for marker in _PLAIN_DECK_IMAGE_OPT_OUT_MARKERS
+    )
+
 
 def _image_generation_enabled(
     delegation_context: dict[str, Any],
@@ -421,11 +443,11 @@ def _image_generation_enabled(
     """
     if artifact_target_ext in _IMAGE_OUTPUT_EXTENSIONS:
         return True
-    if _is_pptx_image_generation_target(artifact_target_ext, task_type):
-        return True
     task = str(delegation_context.get("task") or "").lower()
     description = str(delegation_context.get("description") or "").lower()
     combined = f"{task}\n{description}"
+    if _is_pptx_image_generation_target(artifact_target_ext, task_type):
+        return not _plain_deck_image_opt_out_requested(combined)
     if any(marker in combined for marker in _EXPLICIT_IMAGE_GENERATION_MARKERS):
         return True
     return False
