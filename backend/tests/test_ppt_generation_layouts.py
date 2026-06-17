@@ -247,6 +247,7 @@ class TestGeneratePptLayouts:
         assert "function renderStatement" in source
         assert "function renderImageForward" in source
         assert "function addFullBleedVisual" in source
+        assert 'sizing: { type: "cover", x: 0, y: 0, w: SLIDE_W, h: SLIDE_H }' in source
         assert "function usablePlanVisualPath" in source
         assert "Slide image missing, using text layout:" in source
         assert "if (!imageForward)" in source

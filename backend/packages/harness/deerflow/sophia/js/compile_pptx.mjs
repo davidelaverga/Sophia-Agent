@@ -277,6 +277,7 @@ function addFullBleedVisual(slide, visualPath) {
     y: 0,
     w: SLIDE_W,
     h: SLIDE_H,
+    sizing: { type: "cover", x: 0, y: 0, w: SLIDE_W, h: SLIDE_H },
   });
   return true;
 }
