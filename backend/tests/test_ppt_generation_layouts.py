@@ -271,6 +271,31 @@ class TestGeneratePptLayouts:
         assert "Slide image missing, using text layout:" in capsys.readouterr().err
         assert output.exists()
 
+    def test_missing_image_forward_cli_image_degrades_to_editable_text(self, tmp_path: Path, capsys) -> None:
+        plan = {
+            "title": "Deck",
+            "slides": [
+                {
+                    "slide_number": 1,
+                    "title": "Generated full-slide",
+                    "key_points": ["Fallback keeps the deck editable"],
+                    "image_path": "/mnt/user-data/outputs/slides/missing.png",
+                }
+            ],
+        }
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(json.dumps(plan), encoding="utf-8")
+        output = tmp_path / "deck.pptx"
+
+        message = gen.generate_ppt(str(plan_file), [str(tmp_path / "also-missing.png")], str(output))
+
+        assert message == "Successfully generated presentation with 1 slides (picture_count=0)"
+        assert "Slide image missing, using text layout:" in capsys.readouterr().err
+        prs = Presentation(str(output))
+        texts = " ".join(_slide_texts(prs.slides[0]))
+        assert "Generated full-slide" in texts
+        assert "Fallback keeps the deck editable" in texts
+
     def test_explicit_image_layout_without_image_ref_degrades(self, tmp_path: Path) -> None:
         plan = {"slides": [{"slide_number": 1, "layout": "content_image", "title": "No Image", "key_points": ["a"]}]}
         plan_file = tmp_path / "plan.json"

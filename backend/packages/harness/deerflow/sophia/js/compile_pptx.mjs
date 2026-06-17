@@ -269,7 +269,8 @@ function addVisual(slide, visualPath, box) {
 function addFullBleedVisual(slide, visualPath) {
   if (!visualPath) return false;
   if (!fs.existsSync(visualPath)) {
-    throw new Error(`Slide visual not found: ${visualPath}`);
+    console.error(`Slide image missing, using text layout: ${visualPath}`);
+    return false;
   }
   slide.addImage({
     path: visualPath,
@@ -624,8 +625,7 @@ function renderStatement(pptx, slideInfo, theme) {
 
 function renderImageForward(pptx, visualPath, theme) {
   const slide = newSlide(pptx, theme);
-  addFullBleedVisual(slide, visualPath);
-  return slide;
+  return addFullBleedVisual(slide, visualPath) ? slide : null;
 }
 
 function renderCoverFromContext(ctx) {
@@ -717,7 +717,10 @@ function renderSummary(pptx, slideInfo, theme) {
 
 function renderSlide(pptx, slideInfo, plan, theme, visualPath) {
   if (isImageForwardSlide(slideInfo) && visualPath) {
-    return renderImageForward(pptx, visualPath, theme);
+    const imageForwardSlide = renderImageForward(pptx, visualPath, theme);
+    if (imageForwardSlide) {
+      return imageForwardSlide;
+    }
   }
   const ctx = { pptx, slideInfo, plan, theme, visualPath };
   return rendererForSlideType(slideType(slideInfo))(ctx);
@@ -740,7 +743,7 @@ function compiledSlideContext(pptx, args, plan, theme, slidesInfo, slideInfo, in
     ? resolveAssetPath(args.slideImages[index], args.planFile, args.outputFile)
     : null;
   const planVisualPath = slideVisualPath(slideInfo, args.planFile, args.outputFile);
-  const visualPath = cliImagePath || usablePlanVisualPath(planVisualPath);
+  const visualPath = usablePlanVisualPath(cliImagePath || planVisualPath);
   return {
     slide: renderSlide(pptx, slideInfo, plan, theme, visualPath),
     visualPath,

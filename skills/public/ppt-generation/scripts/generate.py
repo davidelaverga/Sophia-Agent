@@ -121,8 +121,6 @@ def generate_ppt(
         image_from_cli = index < len(slide_images)
         image_path = slide_images[index] if image_from_cli else slide_visual_image_path(slide_info, plan_file, output_file)
         if image_path and not os.path.exists(image_path):
-            if image_from_cli:
-                raise FileNotFoundError(f"Slide image not found: {image_path}")
             # Degrade to the text layout instead of aborting the whole deck
             # (or leaving an empty visual card) on a missing file.
             print(
@@ -816,7 +814,7 @@ def slide_points(slide_info: dict) -> list[str]:
 
 
 def slide_visual_image_path(slide_info: dict, plan_file: str, output_file: str) -> str | None:
-    raw = slide_info.get("image") or slide_info.get("chart_path") or slide_info.get("visual_path")
+    raw = slide_info.get("image_path") or slide_info.get("image") or slide_info.get("chart_path") or slide_info.get("visual_path")
     if not isinstance(raw, str) or not raw.strip():
         return None
     return resolve_image_path(raw.strip(), plan_file, output_file)
