@@ -1447,6 +1447,33 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User would like a deck about pricing"
         ) == "task_history"
 
+    def test_singular_weak_deliverable_scoped_by_for_is_task_history(self):
+        """Codex P2: 'for' is not a topic marker (often an audience), but a
+        SINGULAR INDEFINITE weak deliverable scoped by a trailing 'for <X>'
+        ('a PDF for Hermes', 'a summary for OpenClaw') is a one-off build and must
+        drop, while plural/definite forms (existing-artifact retrieval) stay."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked for a PDF for Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a summary for OpenClaw"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a detailed document for the merger"
+        ) == "task_history"
+        # Existing-artifact retrieval / generic requests stay.
+        assert _candidate_policy_rejection_reason(
+            "User asked for the onboarding PDF for new hires"
+        ) is None  # definite "the", not a new build
+        assert _candidate_policy_rejection_reason(
+            "User asked for HR documents after the incident"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User asked for a PDF"
+        ) is None  # no trailing "for <X>"
+
     def test_transformation_output_verbs_are_creation_cues(self):
         """Codex P2: content-production / transformation verbs (summarize, compile,
         collate, assemble, turn/convert … into) are build cues, so a weak

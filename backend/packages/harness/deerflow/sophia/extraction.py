@@ -241,6 +241,16 @@ _SINGULAR_DELIVERABLE_RE = re.compile(
     r"\ban?\s+(?:[\w-]+\s+){0,3}?(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
     + "|" + _WEB_DELIVERABLE_FRAGMENT + "|" + _PPTX_DELIVERABLE_FRAGMENT + r")s?\b"
 )
+# A SINGULAR INDEFINITE deliverable immediately governing a "for <X>" phrase
+# ("a PDF for Hermes", "a summary for OpenClaw"). "for" is not a topic marker (it
+# is often an audience: "a report for the board"), so a weak deliverable scoped by
+# "for" is only treated as a build when it carries the indefinite article — a NEW
+# one — which separates it from retrieving an existing artifact ("the onboarding
+# PDF for new hires", "HR documents for the audit").
+_SINGULAR_DELIVERABLE_FOR_RE = re.compile(
+    r"\ban?\s+(?:[\w-]+\s+){0,3}?(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
+    + "|" + _WEB_DELIVERABLE_FRAGMENT + "|" + _PPTX_DELIVERABLE_FRAGMENT + r")s?\s+for\s+\w"
+)
 _DEADLINE_RE = re.compile(
     r"\bdue\b|\btomorrow\b|\bby\s+(?:\w+day|tomorrow|tonight|noon|eod|cob|next\b|end\b|the\b|\d)"
 )
@@ -1032,7 +1042,12 @@ def _subjectless_request_is_build(lowered: str) -> bool:
         return False
     if _STRONG_DELIVERABLE_NOUN_RE.search(lowered):
         return True
-    return bool(_DELIVERABLE_CREATION_RE.search(lowered))
+    if _DELIVERABLE_CREATION_RE.search(lowered):
+        return True
+    # A singular-indefinite weak deliverable scoped by a trailing "for <X>"
+    # ("a PDF for Hermes") is a one-off build — drop it. (Plural/definite forms,
+    # which read as existing-artifact retrieval, do not match.)
+    return bool(_SINGULAR_DELIVERABLE_FOR_RE.search(lowered))
 
 
 def _is_delivery_preference(lowered: str) -> bool:
