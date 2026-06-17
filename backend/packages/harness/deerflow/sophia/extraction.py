@@ -100,7 +100,7 @@ _DELIVERABLE_REQUEST_RE = re.compile(
     r"|\bask(?:ed|s)\s+sophia\b"
     # bare "asked to <create>" — gated on a creation stem so "asked to see/review"
     # an existing artifact is NOT a build request. Optional time phrase: "asked on Monday to build"
-    r"|\bask(?:ed|s)\s+(?:" + _REQUEST_TIME_PHRASE + r"\s+)?to\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together)"
+    r"|\bask(?:ed|s)\s+(?:" + _REQUEST_TIME_PHRASE + r"\s+)?to\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|assembl|convert)"
     r"|\bwant(?:ed|s)?\b"
     r"|\bneed(?:ed|s)?\b"
     # polite request forms: "would like a report", "user'd like a deck", "would love"
@@ -244,11 +244,18 @@ _DEADLINE_RE = re.compile(
 # matches bare write / writes / writing / wrote / written (and "write up") so
 # "asked Sophia to write a PDF about X" is recognized as a build cue — the
 # request-verb gate keeps it off the user's own writing ("user wrote a report").
+# Content-production verbs (summarize/compile/collate/assemble) and the
+# transformation phrase "turn/convert <X> into/to" are build cues too, so a weak
+# deliverable phrased as "summarize Hermes in a PDF" / "turn the notes into a
+# document" is recognized without an explicit "about <topic>".
 _DELIVERABLE_CREATION_RE = re.compile(
     r"\bcreat(?:e|es|ed|ing)\b|\bcreation\s+of\b|\bbuil[dt]s?\b|"
     r"\bmake\b|\bmakes\b|\bmaking\b|\bmade\b|\bdraft(?:s|ed|ing)?\b|"
     r"\bgenerat(?:e|es|ed|ing)\b|\bdesign(?:s|ed|ing)?\b|\bproduc(?:e|es|ed|ing)\b|"
-    r"\bprepar(?:e|es|ed|ing)\b|\bput\s+together\b|\bwr(?:ite|ites|iting|ote|itten)\b"
+    r"\bprepar(?:e|es|ed|ing)\b|\bput\s+together\b|\bwr(?:ite|ites|iting|ote|itten)\b|"
+    r"\bsummari[sz](?:e|es|ed|ing)\b|\bcompil(?:e|es|ed|ing)\b|"
+    r"\bcollat(?:e|es|ed|ing)\b|\bassembl(?:e|es|ed|ing)\b|"
+    r"\b(?:turn|convert)(?:s|ed|ing)?\s+[^.?!]{0,40}?\b(?:in)?to\b"
 )
 # STRONG deliverable nouns: things one asks Sophia to *produce*. A request verb
 # alone is enough to mark these as task history ("user asked for a report about

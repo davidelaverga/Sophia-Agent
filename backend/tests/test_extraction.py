@@ -1447,6 +1447,33 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User would like a deck about pricing"
         ) == "task_history"
 
+    def test_transformation_output_verbs_are_creation_cues(self):
+        """Codex P2: content-production / transformation verbs (summarize, compile,
+        collate, assemble, turn/convert … into) are build cues, so a weak
+        deliverable phrased as 'summarize Hermes in a PDF' or 'turn the notes into
+        a document' is task history even without an explicit 'about <topic>'."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to summarize Hermes in a PDF"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to compile the findings into a document"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked to convert the spec into a PDF"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants to turn the notes into a deck"
+        ) == "task_history"
+        # No deliverable noun (verbal summary) or no request verb → kept.
+        assert _candidate_policy_rejection_reason(
+            "User asked me to summarize the meeting"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User summarizes their day in a journal"
+        ) is None
+
     def test_builder_deliverable_types_summary_brief_article_explainer(self):
         """Codex P2: summary/brief/article/explainer are deliverable types the
         builder dispatches (HTML/PDF output regexes). They are WEAK nouns (verb
