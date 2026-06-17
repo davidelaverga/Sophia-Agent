@@ -75,13 +75,23 @@ _NON_DURABLE_MARKERS = ("temporary", "one-time", "one time", "codename")
 # preference guards bound the recall.
 #
 # An optional TIME phrase may sit between "asked"/recipient and "for"/"to"
-# ("asked on Tuesday for a report", "asked me yesterday to build a deck") — a
-# legacy memory often records when the ask happened. The phrase is a tightly
-# scoped temporal adverbial (the "on" form only matches a weekday name), so it
-# cannot swallow a topic phrase: "asked about the report for the team" and
-# "asked on pricing for clarity" still do NOT match the for-arm.
+# ("asked on Tuesday for a report", "asked on June 12 for a deck", "asked me
+# yesterday to build") — a legacy memory often records when the ask happened, and
+# the extraction prompt resolves temporals to ABSOLUTE dates. The phrase is a
+# tightly scoped temporal adverbial (the "on" form only matches a weekday or a
+# date), so it cannot swallow a topic phrase: "asked about the report for the
+# team" and "asked on pricing for clarity" still do NOT match the for-arm.
+# Absolute-date forms after "on": "June 12(, 2026)", ISO "2026-06-12", "06/12",
+# "the 12th".
+_ABSOLUTE_DATE = (
+    r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\w*\s+\d{1,2}(?:,?\s+\d{4})?"
+    r"|\d{4}-\d{1,2}-\d{1,2}"
+    r"|\d{1,2}/\d{1,2}(?:/\d{2,4})?"
+    r"|the\s+\d{1,2}(?:st|nd|rd|th)?"
+)
 _REQUEST_TIME_PHRASE = (
     r"(?:on\s+\w+day"
+    r"|on\s+(?:" + _ABSOLUTE_DATE + r")"
     r"|yesterday|today|earlier|again|recently|just\s+now|just"
     r"|this\s+(?:morning|afternoon|evening|week|month)"
     r"|last\s+(?:week|month|night|time)"
@@ -213,9 +223,8 @@ _DELIVERY_STYLE_RE = re.compile(
 # as a topic marker when it is NOT followed by a temporal expression.
 _TEMPORAL_AFTER_ON = (
     r"(?:(?:mon|tues|wednes|thurs|fri|satur|sun)days?\b"
-    r"|the\s+\d"
     r"|\d{1,2}(?:st|nd|rd|th)?\b"
-    r"|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\w*\s+\d)"
+    r"|" + _ABSOLUTE_DATE + r")"
 )
 _TOPIC_MARKER_RE = re.compile(
     r"\b(?:about|regarding|concerning|covering|comparing|"

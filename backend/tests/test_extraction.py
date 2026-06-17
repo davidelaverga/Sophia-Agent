@@ -1708,6 +1708,34 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked on Tuesday for help with their anxiety"
         ) is None
 
+    def test_absolute_date_time_phrase_in_asked_for_request(self):
+        """Codex P2: the extraction prompt resolves temporals to ABSOLUTE dates,
+        so the time phrase between asked/recipient and for/to must accept dates
+        ("asked on June 12 for a report", "on 2026-06-12", "on 06/12", "on the
+        12th"), not only weekdays/relative phrases."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked on June 12 for a report about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked on 2026-06-12 for a deck"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked on 06/12 for a PDF about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked on the 12th for a report about pricing"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked on June 12 to build a deck about Q3"
+        ) == "task_history"
+        # A genuine subject "on X" (not a date) where the deliverable follows is
+        # still kept.
+        assert _candidate_policy_rejection_reason(
+            "User wants to focus on the presentation next week"
+        ) is None
+
     def test_extended_deliverable_nouns_are_caught_lexically(self):
         """Codex P2: the lexical noun list (used by the synchronous companion
         filter with no LLM pass) must cover write-up / infographic / spreadsheet,
