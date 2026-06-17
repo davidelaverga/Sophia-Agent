@@ -867,11 +867,14 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         ) == "task_history"
 
     def test_weak_deliverable_noun_without_creation_cue_is_preserved(self):
-        """Codex P2 round 2: a WEAK/ambiguous noun + request verb is NOT enough.
+        """Codex P2 round 2: a WEAK/ambiguous noun + request verb is NOT enough
+        WHEN THERE IS NO SUBJECT.
 
         'document'/'material'/'pdf' could name an existing artifact, so a request
-        for one needs an explicit create/build cue before we drop it. Otherwise
-        durable context ("asked for HR documents after the incident") is lost.
+        for one with NO 'about <topic>' subject needs an explicit create/build cue
+        before we drop it. Otherwise durable context ("asked for HR documents
+        after the incident") is lost. (A topic-scoped weak noun IS dropped — see
+        test_topic_scoped_weak_deliverable_is_task_history.)
         """
         from deerflow.sophia.extraction import _candidate_policy_rejection_reason
 
@@ -881,6 +884,38 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         assert _candidate_policy_rejection_reason(
             "User asked for the onboarding materials"
         ) is None
+
+    def test_topic_scoped_weak_deliverable_is_task_history(self):
+        """Codex P2: a WEAK deliverable noun WITH a subject ("a PDF about X",
+        "a document about Y") is a topic-scoped build request — the subject-scoping
+        is the build signal, so no separate create/build cue is required. Without
+        this, 'User asked for a PDF about OpenClaw' returned None and the prior
+        build subject could still contaminate a new brief via the lexical-only
+        companion/builder read filters."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked for a PDF about OpenClaw"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia for a document about Q3 sales"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wanted a PDF about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked on Tuesday for a PDF about onboarding"
+        ) == "task_history"
+        # The no-subject weak-noun keep and the guards are unaffected.
+        assert _candidate_policy_rejection_reason(
+            "User asked for HR documents after the incident"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "Boss asked for a status report about Q3 revenue"
+        ) is None  # third party
+        assert _candidate_policy_rejection_reason(
+            "User prefers reports about competitors to be concise"
+        ) is None  # delivery preference
 
     def test_strong_deliverable_noun_request_is_task_history(self):
         """Codex P2 round 3: 'asked for a report about Hermes' must be dropped.

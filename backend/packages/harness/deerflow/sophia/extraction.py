@@ -782,9 +782,12 @@ def _is_deliverable_request(lowered: str) -> bool:
 
     - With a subject ("<deliverable> about <topic>"): the requested deliverable
       noun must appear in the intent; the third-party and delivery-preference
-      *verb* guards scan only the intent; then a STRONG noun (report/presentation/
-      deck/slide/webpage) or a create/build cue in the intent marks it task
-      history. Style words ("concise") do NOT exempt a deliverable about a topic.
+      *verb* guards scan only the intent; then ANY deliverable noun in the intent —
+      STRONG (report/presentation/deck) or weak (pdf/html/document/material) —
+      marks it task history. The subject-scoping IS the build signal ("a PDF about
+      X" = "make me a PDF on X"), so no separate create/build cue is required here
+      (unlike the no-subject branch). Style words ("concise") do NOT exempt a
+      deliverable about a topic.
     - Without a subject: a standing delivery preference ("prefers concise reports",
       "wants reports to be concise") is kept (``_is_delivery_preference``); a
       third-party request ("boss asked for a status report") is kept; otherwise a
@@ -813,7 +816,15 @@ def _is_deliverable_request(lowered: str) -> bool:
             return False
         if _DELIVERY_PREFERENCE_RE.search(intent):
             return False  # "prefers reports about X" — an explicit preference verb in the intent
-        return bool(_STRONG_DELIVERABLE_NOUN_RE.search(intent) or _DELIVERABLE_CREATION_RE.search(intent))
+        # A subject marker present ("<deliverable> ABOUT X") is itself the build
+        # signal: "a PDF about OpenClaw" means "make me a PDF on OpenClaw". So a
+        # deliverable noun in the intent — STRONG *or* weak (pdf/html/document/
+        # material) — marks it task history here; no separate create/build cue is
+        # required. (The no-topic branch below still requires strong-or-create for
+        # weak nouns, so "asked for HR documents" — existing artifacts, no subject
+        # — is kept.) intent is only set when a deliverable noun precedes the
+        # marker, so reaching here already guarantees one.
+        return True
 
     if not _DELIVERABLE_NOUN_RE.search(lowered):
         return False
