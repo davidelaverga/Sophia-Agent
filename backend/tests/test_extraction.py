@@ -1157,6 +1157,34 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked for a report about presentation coaching techniques"
         ) == "task_history"
 
+    def test_singular_support_role_modifiers_are_not_deliverables(self):
+        """Codex P2: a singular support-ROLE word after a deliverable noun (a
+        presentation *coach* / *mentor* / *tutor*) names a support goal, not a
+        build request — the lookahead exempted the gerund 'coaching' but not the
+        role noun 'coach', so 'wants a presentation coach' was wrongly dropped."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User wants a presentation coach before the board meeting"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User needs a presentation mentor for the investor pitch"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User is looking for a presentation coach"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User found a great report mentor"
+        ) is None
+        # A real deliverable in the same memory still drops (coach ignored, report kept).
+        assert _candidate_policy_rejection_reason(
+            "User wants a presentation coach and a report about Q3"
+        ) == "task_history"
+        # A deliverable ABOUT coaching is still a build request.
+        assert _candidate_policy_rejection_reason(
+            "User asked for a deck about presentation coaches"
+        ) == "task_history"
+
     def test_addressed_asked_for_build_requests_are_task_history(self):
         """Codex P2: 'asked me/you/us for a <deliverable>' (recipient before
         'for') is a build request, just like 'asked for'."""

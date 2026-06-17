@@ -126,8 +126,12 @@ _WEB_DELIVERABLE_FRAGMENT = (
 # deliverable — it names a goal/context. This negative lookahead keeps the noun
 # from matching when it is immediately followed by such an activity word or a
 # hyphen-compound, so those durable memories are not dropped as task_history.
+# Singular support-role words (a presentation *coach*/*mentor*/*tutor*) are
+# exempted too — "user wants a presentation coach" is a support goal, not a build
+# request — alongside the gerund "coaching".
 _NOT_SKILL_MODIFIER = (
-    r"(?!\s+(?:coaching|practice|prep|preparation|skills?|training|tips?|feedback|"
+    r"(?!\s+(?:coach(?:ing|es)?|mentor(?:s|ing|ship)?|tutor(?:s|ing)?|trainers?|"
+    r"instructors?|teachers?|practice|prep|preparation|skills?|training|tips?|feedback|"
     r"advice|help|anxiety|nerves|jitters|class(?:es)?|courses?|lessons?)|-)"
 )
 # Match the deliverable nouns on WORD BOUNDARIES (optional trailing plural).
