@@ -1284,6 +1284,30 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked Sophia to build a deck about pricing"
         ) == "task_history"
 
+    def test_strong_noun_in_non_deliverable_compound_is_preserved(self):
+        """Codex P2: a strong noun inside a common non-deliverable compound — a
+        school 'report card', a playing-card 'deck of cards' / 'card deck' — is a
+        durable fact, not a build deliverable, so the request-verb + strong-noun
+        test must not drop it. A real 'slide deck about X' is unaffected."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User needs a deck of cards for game night"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User asked for a report card from school"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User bought a card deck for poker night"
+        ) is None
+        # A genuine slide deck about a subject still drops.
+        assert _candidate_policy_rejection_reason(
+            "User asked for a slide deck about Q3"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to build a deck about pricing"
+        ) == "task_history"
+
     def test_addressed_asked_for_build_requests_are_task_history(self):
         """Codex P2: 'asked me/you/us for a <deliverable>' (recipient before
         'for') is a build request, just like 'asked for'."""

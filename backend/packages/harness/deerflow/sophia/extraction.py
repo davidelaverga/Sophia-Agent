@@ -254,6 +254,16 @@ _HELP_OR_PRACTICE_RE = re.compile(
     r"\bhelp(?:\s+(?:me|them|us|him|her))?\s+(?:with|on|prepare|prep|practic\w+|rehears\w+)\b"
     r"|\b(?:practic\w+|rehears\w+|prepar\w+|prep)\s+for\b"
 )
+# A STRONG noun inside a common NON-DELIVERABLE compound is not a build target:
+# a school "report card", a playing-card "deck of cards" / "card deck". These
+# satisfy the request-verb + strong-noun test ("needs a deck of cards", "asked
+# for a report card") but are durable facts, not deliverables. A real "slide deck
+# about X" does not match these compounds and still drops.
+_NON_DELIVERABLE_COMPOUND_RE = re.compile(
+    r"\breport\s+cards?\b"
+    r"|\bdecks?\s+of\s+cards?\b"
+    r"|\bcard\s+decks?\b"
+)
 _DUPLICATE_STOPWORDS = {
     "a",
     "an",
@@ -797,9 +807,11 @@ def _is_deliverable_request(lowered: str) -> bool:
     A build request must carry a request verb (``_DELIVERABLE_REQUEST_RE``) —
     this separates a request from the user's own work ("user is building a report
     tool"). It must also be a request for the deliverable as an ARTIFACT: a
-    deliverable word used as a verb ("wants to report on harassment") or as the
-    object of a help/practice/prep request ("asked for help with a presentation")
-    is exempted up front (``_DELIVERABLE_AS_VERB_RE`` / ``_HELP_OR_PRACTICE_RE``).
+    deliverable word used as a verb ("wants to report on harassment"), as the
+    object of a help/practice/prep request ("asked for help with a presentation"),
+    or a strong noun inside a non-deliverable compound ("a deck of cards", "a
+    report card") is exempted up front (``_DELIVERABLE_AS_VERB_RE`` /
+    ``_HELP_OR_PRACTICE_RE`` / ``_NON_DELIVERABLE_COMPOUND_RE``).
     The rest splits the request *intent* from the deliverable's *subject*
     at the first topic marker ("report ABOUT X"), because the guards below
     describe the request itself and must NOT be tripped by incidental words in the
@@ -824,8 +836,14 @@ def _is_deliverable_request(lowered: str) -> bool:
 
     # The deliverable word is not a requested ARTIFACT when it is used as a verb
     # ("wants to report on harassment") or is the object of a help/practice/prep
-    # request ("asked for help with a presentation") — keep these durable memories.
-    if _DELIVERABLE_AS_VERB_RE.search(lowered) or _HELP_OR_PRACTICE_RE.search(lowered):
+    # request ("asked for help with a presentation"), or when a strong noun sits
+    # inside a non-deliverable compound ("a deck of cards", "a report card") —
+    # keep these durable memories.
+    if (
+        _DELIVERABLE_AS_VERB_RE.search(lowered)
+        or _HELP_OR_PRACTICE_RE.search(lowered)
+        or _NON_DELIVERABLE_COMPOUND_RE.search(lowered)
+    ):
         return False
 
     topic_markers = list(_TOPIC_MARKER_RE.finditer(lowered))
