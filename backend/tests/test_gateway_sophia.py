@@ -1304,6 +1304,39 @@ class TestJournal:
         assert data["entries"][0]["id"] == "local:dup"
         assert data["entries"][0]["content"] == "Newer duplicate"
 
+    def test_paginates_journal_after_sorting(self, client, mock_mem0):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Oldest", "created_at": "2026-04-01T00:00:00+00:00"},
+            {"id": "m2", "memory": "Newest", "created_at": "2026-04-03T00:00:00+00:00"},
+            {"id": "m3", "memory": "Middle", "created_at": "2026-04-02T00:00:00+00:00"},
+        ]
+
+        resp = client.get("/api/sophia/test_user/journal?limit=1&offset=1")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 1
+        assert data["total_count"] == 3
+        assert data["entries"][0]["id"] == "m3"
+        assert data["next_offset"] == 2
+        assert data["has_more"] is True
+
+    def test_filters_saved_favorites_before_pagination(self, client, mock_mem0):
+        mock_mem0.get_all.return_value = [
+            {"id": "favorite-approved", "memory": "Favorite", "metadata": {"status": "approved", "favorite": True}},
+            {"id": "favorite-pending", "memory": "Pending favorite", "metadata": {"status": "pending_review", "favorite": True}},
+            {"id": "regular-approved", "memory": "Regular", "metadata": {"status": "approved"}},
+        ]
+
+        resp = client.get("/api/sophia/test_user/journal?favorite=true&saved_only=true&limit=10")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 1
+        assert data["total_count"] == 1
+        assert data["entries"][0]["id"] == "favorite-approved"
+        assert data["has_more"] is False
+
 
 # ---------------------------------------------------------------------------
 # Session Recap

@@ -1453,7 +1453,12 @@ def test_get_artifact_returns_404_when_local_missing_and_supabase_has_no_object(
 
     try:
         asyncio.run(
-            artifacts_router.get_artifact("thread-z", "mnt/user-data/outputs/report.md", request)
+            artifacts_router.get_artifact(
+                "thread-z",
+                "mnt/user-data/outputs/report.md",
+                request,
+                authenticated_user_id="test-user",
+            )
         )
     except fastapi.HTTPException as exc:
         assert exc.status_code == 404

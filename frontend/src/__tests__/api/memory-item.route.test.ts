@@ -56,6 +56,33 @@ describe('memory item route', () => {
     );
   });
 
+  it('forwards memory metadata updates to the Sophia gateway', async () => {
+    fetchSophiaApiMock.mockResolvedValue(
+      new Response(JSON.stringify({ id: 'mem-123', metadata: { favorite: true, status: 'approved' } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const request = {
+      nextUrl: new URL('http://localhost:3000/api/memories/mem-123'),
+      json: vi.fn().mockResolvedValue({ metadata: { favorite: true, status: 'approved' } }),
+    } as unknown as NextRequest;
+
+    const response = await updateMemory(request, { params: Promise.resolve({ memoryId: 'mem-123' }) });
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.metadata).toEqual({ favorite: true, status: 'approved' });
+    expect(fetchSophiaApiMock).toHaveBeenCalledWith(
+      '/api/sophia/user-123/memories/mem-123',
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({ metadata: { favorite: true, status: 'approved' } }),
+      }),
+    );
+  });
+
   it('rejects PUT requests for synthetic memory ids', async () => {
     isSyntheticMemoryIdMock.mockReturnValue(true);
 

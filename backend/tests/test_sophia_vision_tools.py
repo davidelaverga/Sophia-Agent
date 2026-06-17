@@ -584,6 +584,13 @@ def _rud_fake_paths(rud_mod, uploads: Path, outputs: Path):
     )
 
 
+def _document_payload_text(result: str) -> str:
+    parts = result.split("\n\n", 2)
+    if result.startswith("[") and len(parts) > 1:
+        return parts[1]
+    return parts[0]
+
+
 @pytest.mark.anyio
 async def test_read_user_document_offset_pages_through_large_file(tmp_path: Path, monkeypatch) -> None:
     """A document larger than the per-read cap is NOT truncated away: the
@@ -604,7 +611,7 @@ async def test_read_user_document_offset_pages_through_large_file(tmp_path: Path
             runtime=runtime, document_filename="big.md", tool_call_id="tc-1", offset=0
         )
     )
-    assert page1.count("A") == cap
+    assert _document_payload_text(page1).count("A") == cap
     assert f"of {total}" in page1
     assert f"offset={cap}" in page1
 
@@ -614,7 +621,7 @@ async def test_read_user_document_offset_pages_through_large_file(tmp_path: Path
             runtime=runtime, document_filename="big.md", tool_call_id="tc-2", offset=cap
         )
     )
-    assert page2.count("A") == cap
+    assert _document_payload_text(page2).count("A") == cap
     assert f"offset={cap * 2}" in page2
 
     # Final page (offset 2*cap): the 2000-byte tail + an end-of-document note.
@@ -623,7 +630,7 @@ async def test_read_user_document_offset_pages_through_large_file(tmp_path: Path
             runtime=runtime, document_filename="big.md", tool_call_id="tc-3", offset=cap * 2
         )
     )
-    assert page3.count("A") == 2000
+    assert _document_payload_text(page3).count("A") == 2000
     assert "End of document" in page3
     assert "offset=" not in page3  # nothing more to fetch
 

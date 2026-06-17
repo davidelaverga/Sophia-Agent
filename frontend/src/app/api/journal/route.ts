@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from 'next/server'
 
 import { logger } from '../../lib/error-logger'
-import { isSavedJournalEntry, type JournalEntry, type JournalResponse } from '../../lib/journal'
+import { isFavoriteJournalEntry, isSavedJournalEntry, type JournalEntry, type JournalResponse } from '../../lib/journal'
 import { fetchSophiaApi, resolveSophiaUserId } from '../_lib/sophia'
 
 function normalizeEntry(entry: Partial<JournalEntry>): JournalEntry | null {
@@ -24,6 +24,19 @@ function normalizeEntry(entry: Partial<JournalEntry>): JournalEntry | null {
   }
 }
 
+function normalizePageNumber(value: string | null, min: number, max: number): number | null {
+  if (!value) {
+    return null
+  }
+
+  const parsed = Number.parseInt(value, 10)
+  if (!Number.isInteger(parsed)) {
+    return null
+  }
+
+  return Math.min(Math.max(parsed, min), max)
+}
+
 export async function GET(request: NextRequest) {
   try {
     const userId = await resolveSophiaUserId()
@@ -38,6 +51,9 @@ export async function GET(request: NextRequest) {
     const category = request.nextUrl.searchParams.get('category') || request.nextUrl.searchParams.get('type')
     const search = request.nextUrl.searchParams.get('search')
     const status = request.nextUrl.searchParams.get('status')
+    const favorite = request.nextUrl.searchParams.get('favorite')
+    const limit = normalizePageNumber(request.nextUrl.searchParams.get('limit'), 1, 100)
+    const offset = normalizePageNumber(request.nextUrl.searchParams.get('offset'), 0, Number.MAX_SAFE_INTEGER)
     const savedOnly = request.nextUrl.searchParams.get('savedOnly') !== 'false'
 
     if (category) {
@@ -50,6 +66,22 @@ export async function GET(request: NextRequest) {
 
     if (status) {
       params.set('status', status)
+    }
+
+    if (savedOnly && !status) {
+      params.set('saved_only', 'true')
+    }
+
+    if (favorite === 'true') {
+      params.set('favorite', 'true')
+    }
+
+    if (limit !== null) {
+      params.set('limit', String(limit))
+    }
+
+    if (offset !== null) {
+      params.set('offset', String(offset))
     }
 
     const query = params.toString()
@@ -82,9 +114,39 @@ export async function GET(request: NextRequest) {
       entries = entries.filter(isSavedJournalEntry)
     }
 
+    if (favorite === 'true') {
+      entries = entries.filter(isFavoriteJournalEntry)
+    }
+
+    const upstreamTotal = typeof payload.total_count === 'number'
+      ? payload.total_count
+      : typeof payload.totalCount === 'number'
+        ? payload.totalCount
+        : entries.length
+    const responseOffset = typeof payload.offset === 'number' ? payload.offset : offset ?? 0
+    const responseLimit = typeof payload.limit === 'number' ? payload.limit : limit
+    const nextOffset = typeof payload.next_offset === 'number'
+      ? payload.next_offset
+      : typeof payload.nextOffset === 'number'
+        ? payload.nextOffset
+        : null
+    const hasMore = typeof payload.has_more === 'boolean'
+      ? payload.has_more
+      : typeof payload.hasMore === 'boolean'
+        ? payload.hasMore
+        : nextOffset !== null && nextOffset < upstreamTotal
+
     return NextResponse.json({
       entries,
       count: entries.length,
+      total_count: upstreamTotal,
+      totalCount: upstreamTotal,
+      limit: responseLimit,
+      offset: responseOffset,
+      next_offset: hasMore ? nextOffset : null,
+      nextOffset: hasMore ? nextOffset : null,
+      has_more: hasMore,
+      hasMore,
     })
   } catch (error) {
     logger.logError(error, { component: 'api/journal', action: 'list_journal_entries' })
