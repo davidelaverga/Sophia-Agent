@@ -1308,6 +1308,38 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked Sophia to build a deck about pricing"
         ) == "task_history"
 
+    def test_emotional_support_goal_with_deliverable_context_is_preserved(self):
+        """Codex P2: a strong noun naming the ACTIVITY CONTEXT of an emotional /
+        support goal ('wants confidence for presentations', 'improve presentation
+        confidence', 'scared of giving presentations') is not a requested
+        artifact. The emotional word comes before the deliverable, which separates
+        it from a real build whose subject is an emotion ('a report about anxiety'
+        — deliverable first — still drops)."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User wants confidence for presentations"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User needs to improve presentation confidence"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User is scared of giving presentations"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants to feel calm before the presentation"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User has anxiety around reports at work"
+        ) is None
+        # A real build whose SUBJECT is an emotion still drops (deliverable first).
+        assert _candidate_policy_rejection_reason(
+            "User asked for a report about their anxiety"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a report about Hermes"
+        ) == "task_history"
+
     def test_addressed_asked_for_build_requests_are_task_history(self):
         """Codex P2: 'asked me/you/us for a <deliverable>' (recipient before
         'for') is a build request, just like 'asked for'."""

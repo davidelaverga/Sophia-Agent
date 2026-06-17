@@ -128,11 +128,14 @@ _WEB_DELIVERABLE_FRAGMENT = (
 # hyphen-compound, so those durable memories are not dropped as task_history.
 # Singular support-role words (a presentation *coach*/*mentor*/*tutor*) are
 # exempted too — "user wants a presentation coach" is a support goal, not a build
-# request — alongside the gerund "coaching".
+# request — alongside the gerund "coaching". Emotional/support states modifying
+# the noun ("presentation confidence/anxiety/nerves/fear/stress") name a feeling
+# goal, not a requested artifact, so they are exempted as well.
 _NOT_SKILL_MODIFIER = (
     r"(?!\s+(?:coach(?:ing|es)?|mentor(?:s|ing|ship)?|tutor(?:s|ing)?|trainers?|"
     r"instructors?|teachers?|practice|prep|preparation|skills?|training|tips?|feedback|"
-    r"advice|help|anxiety|nerves|jitters|class(?:es)?|courses?|lessons?)|-)"
+    r"advice|help|anxiet(?:y|ies)|nerves|nervousness|jitters|confiden\w+|fear\w*|"
+    r"stress\w*|dread\w*|panic\w*|worr\w+|class(?:es)?|courses?|lessons?)|-)"
 )
 # Match the deliverable nouns on WORD BOUNDARIES (optional trailing plural).
 # A bare ``noun in content`` substring test silently fires inside unrelated
@@ -263,6 +266,23 @@ _NON_DELIVERABLE_COMPOUND_RE = re.compile(
     r"\breport\s+cards?\b"
     r"|\bdecks?\s+of\s+cards?\b"
     r"|\bcard\s+decks?\b"
+)
+# An emotional/support GOAL where a deliverable is the activity context, not the
+# requested artifact: "wants confidence FOR presentations", "scared OF giving
+# presentations", "calm BEFORE the presentation". The emotional word comes BEFORE
+# the deliverable (via a connector), which distinguishes it from a real build
+# whose subject happens to be an emotion ("a report ABOUT anxiety" — there the
+# deliverable precedes the feeling, so this does NOT match and it still drops).
+_EMOTIONAL_STATE = (
+    r"confiden\w+|anxiet(?:y|ies)|anxious|nervous\w*|nerves|scared|afraid|fearful|fear|"
+    r"stress\w*|worr\w+|calm\w*|comfortable|jitters|dread\w*|panic\w*|courage|imposter|impostor"
+)
+_EMOTIONAL_SUPPORT_RE = re.compile(
+    r"\b(?:" + _EMOTIONAL_STATE + r")\b"
+    r"[^.?!]{0,25}?\b(?:for|with|about|around|during|giving|delivering|before|ahead\s+of|of)\b"
+    r"[^.?!]{0,25}?\b(?:"
+    + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
+    + "|" + _WEB_DELIVERABLE_FRAGMENT + r")s?\b"
 )
 _DUPLICATE_STOPWORDS = {
     "a",
@@ -809,9 +829,11 @@ def _is_deliverable_request(lowered: str) -> bool:
     tool"). It must also be a request for the deliverable as an ARTIFACT: a
     deliverable word used as a verb ("wants to report on harassment"), as the
     object of a help/practice/prep request ("asked for help with a presentation"),
-    or a strong noun inside a non-deliverable compound ("a deck of cards", "a
-    report card") is exempted up front (``_DELIVERABLE_AS_VERB_RE`` /
-    ``_HELP_OR_PRACTICE_RE`` / ``_NON_DELIVERABLE_COMPOUND_RE``).
+    a strong noun inside a non-deliverable compound ("a deck of cards", "a report
+    card"), or the activity context of an emotional/support goal ("wants
+    confidence for presentations") is exempted up front (``_DELIVERABLE_AS_VERB_RE``
+    / ``_HELP_OR_PRACTICE_RE`` / ``_NON_DELIVERABLE_COMPOUND_RE`` /
+    ``_EMOTIONAL_SUPPORT_RE``).
     The rest splits the request *intent* from the deliverable's *subject*
     at the first topic marker ("report ABOUT X"), because the guards below
     describe the request itself and must NOT be tripped by incidental words in the
@@ -835,14 +857,16 @@ def _is_deliverable_request(lowered: str) -> bool:
         return False
 
     # The deliverable word is not a requested ARTIFACT when it is used as a verb
-    # ("wants to report on harassment") or is the object of a help/practice/prep
-    # request ("asked for help with a presentation"), or when a strong noun sits
-    # inside a non-deliverable compound ("a deck of cards", "a report card") —
-    # keep these durable memories.
+    # ("wants to report on harassment"), is the object of a help/practice/prep
+    # request ("asked for help with a presentation"), sits inside a non-deliverable
+    # compound ("a deck of cards", "a report card"), or names the activity context
+    # of an emotional/support goal ("wants confidence for presentations") — keep
+    # these durable memories.
     if (
         _DELIVERABLE_AS_VERB_RE.search(lowered)
         or _HELP_OR_PRACTICE_RE.search(lowered)
         or _NON_DELIVERABLE_COMPOUND_RE.search(lowered)
+        or _EMOTIONAL_SUPPORT_RE.search(lowered)
     ):
         return False
 
