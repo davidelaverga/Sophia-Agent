@@ -47,6 +47,9 @@ logger = logging.getLogger(__name__)
 _DEFAULT_GATEWAY_URL = "http://localhost:8001"
 _WEBHOOK_PATH = "/internal/builder-events"
 _WEBHOOK_TIMEOUT_SECONDS = 2.0
+_INTERNAL_STORAGE_OBJECT_SEGMENTS = frozenset(
+    {"ledger", "uploads", ".builder", "sources", "source_artifact"}
+)
 
 
 # Process-local LRU cache of task_ids that have already had their completion
@@ -167,6 +170,27 @@ def _storage_object_path_for_signing(artifact_path: str | None, storage_object_p
     return storage_object_path or (artifact_path if str(artifact_path or "").startswith("artifacts/") else None)
 
 
+def _artifact_storage_object_scope(object_path: str) -> tuple[str | None, str | None, str]:
+    parts = object_path.split("/")
+    if parts[0] == "artifacts":
+        if len(parts) < 5:
+            raise ValueError("Artifact storage path must belong to the artifact thread")
+        return parts[1].strip() or None, parts[2].strip() or None, "/".join(parts[4:])
+    return None, parts[0].strip() or None, "/".join(parts[1:])
+
+
+def _storage_object_addresses_internal_keyspace(relative_object_path: str) -> bool:
+    segments = [segment for segment in relative_object_path.split("/") if segment]
+    if any(segment in _INTERNAL_STORAGE_OBJECT_SEGMENTS for segment in segments):
+        return True
+    name = segments[-1].lower() if segments else ""
+    return (
+        name.endswith((".source.md", ".source.html", ".plan.json", ".manifest.json"))
+        or (name.startswith("_") and name.endswith(".py"))
+        or (name.startswith("test_") and name.endswith((".py", ".sh")))
+    )
+
+
 def _validated_storage_object_path_for_signing(
     *,
     thread_id: str | None,
@@ -181,13 +205,19 @@ def _validated_storage_object_path_for_signing(
         logger.debug("Skipping exact-object signing without a thread scope")
         return None
     try:
-        from app.gateway.artifact_registry import validate_artifact_storage_object_path
+        from deerflow.sophia.storage import supabase_artifact_store
 
-        return validate_artifact_storage_object_path(
-            object_path,
-            thread_id=thread_id,
-            user_id=user_id,
-        )
+        normalized = supabase_artifact_store.normalize_object_path(object_path)
+        object_user_id, object_thread_id, relative = _artifact_storage_object_scope(normalized)
+        if object_thread_id != str(thread_id).strip():
+            raise ValueError("Artifact storage path must belong to the artifact thread")
+        if user_id and object_user_id is not None:
+            expected_user_id = supabase_artifact_store.safe_object_path_segment(user_id, default="user")
+            if object_user_id != expected_user_id:
+                raise ValueError("Artifact storage path must belong to the artifact user")
+        if _storage_object_addresses_internal_keyspace(relative):
+            raise ValueError("Artifact references an internal keyspace")
+        return normalized
     except Exception:
         logger.debug("Refusing to sign unvalidated artifact storage path", exc_info=True)
         return None
