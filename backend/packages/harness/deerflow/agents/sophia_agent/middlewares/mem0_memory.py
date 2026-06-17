@@ -28,13 +28,21 @@ _VOICE_FASTCACHE_LOCK = threading.Lock()
 
 
 def _drop_task_history_memories(results: list[dict]) -> list[dict]:
-    """Drop build-request (task-history) memories before companion injection.
+    """Drop policy-rejected memories before companion injection.
 
     The companion's category selection always includes ``fact``, so a stored
     "user asked for a report about OpenClaw" fact would otherwise land in the
     companion's ``<memories>`` system block — and the model could echo that prior
     subject into a NEW build's ``start_builder_task(description=…)`` before any
     downstream filter runs. We strip those here so the model never sees them.
+
+    Drops ANY non-``None`` policy reason, not just ``task_history``:
+    ``_candidate_policy_rejection_reason`` returns the FIRST matching reason in
+    priority order (credential → non_durable → task_history), so a build request
+    whose subject contains a credential marker ("a report about API key rotation")
+    is reported as ``credential_like`` and would otherwise mask the task-history
+    signal and slip through. credential_like / non_durable records also should not
+    be injected into the prompt on their own merits.
 
     Lexical-only (``_candidate_policy_rejection_reason``) — this runs on every
     companion turn, which is voice-latency-sensitive, so it must stay synchronous
@@ -55,12 +63,12 @@ def _drop_task_history_memories(results: list[dict]) -> list[dict]:
             reason = _candidate_policy_rejection_reason(content)
         except Exception:
             reason = None
-        if reason == "task_history":
+        if reason is not None:
             dropped += 1
             continue
         kept.append(mem)
     if dropped:
-        logger.info("[Mem0Memory] dropped %d task-history memory(ies) before companion injection", dropped)
+        logger.info("[Mem0Memory] dropped %d policy-rejected memory(ies) before companion injection", dropped)
     return kept
 
 

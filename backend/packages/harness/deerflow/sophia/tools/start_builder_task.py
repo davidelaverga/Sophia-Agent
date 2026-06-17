@@ -810,7 +810,7 @@ def _resolve_thread_id(runtime: ToolRuntime[ContextT, SophiaState] | None) -> st
 
 
 def _drop_builder_task_history(snippets: list[str]) -> list[str]:
-    """Drop deliverable build-request snippets before they reach the builder.
+    """Drop policy-rejected memory snippets before they reach the builder.
 
     The companion injects broad-category memories (fact/preference/…) into
     ``injected_memory_contents``; a stored "user asked for a report about X"
@@ -821,6 +821,13 @@ def _drop_builder_task_history(snippets: list[str]) -> list[str]:
     task-history can't reach the builder even when a record slipped past
     write-time filtering or predates this fix. See
     fix/builder-memory-contamination + codex review on PR #137.
+
+    Drops ANY non-``None`` policy reason, not just ``task_history``:
+    ``_candidate_policy_rejection_reason`` returns the FIRST matching reason
+    (credential → non_durable → task_history), so a build request whose subject
+    contains a credential marker ("a report about API key rotation") reports as
+    ``credential_like`` and would otherwise mask the task-history signal; such
+    snippets must not reach the builder brief either.
     """
     # Lazy import keeps the deerflow.sophia.tools → deerflow.sophia.extraction
     # edge out of module load and avoids any import cycle.
@@ -835,8 +842,8 @@ def _drop_builder_task_history(snippets: list[str]) -> list[str]:
             reason = _candidate_policy_rejection_reason(snippet)
         except Exception:
             reason = None
-        if reason == "task_history":
-            logger.info("[start_builder_task] dropped task-history memory snippet from builder brief")
+        if reason is not None:
+            logger.info("[start_builder_task] dropped policy-rejected memory snippet (%s) from builder brief", reason)
             continue
         kept.append(snippet)
     return kept

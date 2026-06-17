@@ -1502,6 +1502,11 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         assert _candidate_policy_rejection_reason(
             "User requested a deck using their preferred template for Hermes"
         ) == "task_history"
+        # Same, but WITH a subject marker (topic branch): the adjectival
+        # "preferred" must not exempt the concrete singular build.
+        assert _candidate_policy_rejection_reason(
+            "User requested a report in their preferred format about OpenClaw"
+        ) == "task_history"
         # Generic standing preferences (no singular article / deadline) stay.
         assert _candidate_policy_rejection_reason(
             "User wants their reports concise for the board"

@@ -938,8 +938,15 @@ def _topic_scoped_request_is_build(lowered: str, topic_markers: list) -> bool:
         return False
     if _THIRD_PARTY_REQUEST_RE.search(intent):
         return False
-    if _DELIVERY_PREFERENCE_RE.search(intent):
-        return False  # "prefers reports about X" — an explicit preference verb in the intent
+    # A preference VERB in the intent exempts a GENERIC standing preference
+    # ("prefers reports about X") — but NOT a concrete singular/deadlined build
+    # whose intent merely carries an adjectival "preferred" ("requested a report
+    # in their preferred format about OpenClaw"). Mirror _is_delivery_preference's
+    # one-off precedence so the latter still drops.
+    if _DELIVERY_PREFERENCE_RE.search(intent) and not (
+        _SINGULAR_DELIVERABLE_RE.search(intent) or _DEADLINE_RE.search(intent)
+    ):
+        return False
     return True
 
 

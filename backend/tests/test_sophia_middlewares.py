@@ -2066,6 +2066,40 @@ class TestMem0MemoryMiddleware:
         assert "concise replies" in block
         assert result["injected_memories"] == ["m2", "m3"]
 
+    def test_credential_masked_build_request_dropped_before_injection(self):
+        """Codex P2: a build request whose subject contains a credential marker
+        ("a report about API key rotation") is classified credential_like first
+        (priority order in _candidate_policy_rejection_reason), which would mask
+        the task-history signal. The read filter drops ANY non-None policy reason,
+        so this build request — and standalone credential/non-durable records —
+        never reach the companion prompt."""
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
+
+        results = [
+            {"id": "c1", "content": "User asked for a report about API key rotation", "category": "fact"},
+            {"id": "m2", "content": "User's name is Davide", "category": "fact"},
+        ]
+        mw = Mem0MemoryMiddleware("user-1")
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            return_value=results,
+        ):
+            result = mw.before_agent(
+                {
+                    "messages": [_make_message("how's it going?")],
+                    "platform": "text",
+                    "context_mode": "work",
+                },
+                _make_runtime(thread_id="thread-cred", platform="text"),
+            )
+
+        block = result["system_prompt_blocks"][-1]
+        assert "API key rotation" not in block  # credential-masked build request removed
+        assert "Davide" in block
+        assert result["injected_memories"] == ["m2"]
+
     def test_voice_reuses_recent_similar_results(self):
         from unittest.mock import patch
 
