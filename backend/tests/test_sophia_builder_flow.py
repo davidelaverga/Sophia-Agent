@@ -286,11 +286,24 @@ def _stub_companion_for_chain_inspection(monkeypatch, companion_module, captured
     )
 
     def _capture(**kwargs):
+        captured["model"] = kwargs["model"]
         captured["middleware"] = kwargs["middleware"]
         captured["tools"] = kwargs["tools"]
         return _DummyAgent()
 
     monkeypatch.setattr(companion_module, "create_agent", _capture)
+
+
+def test_companion_disables_tracing_on_model_only(monkeypatch):
+    companion_module = importlib.import_module("deerflow.agents.sophia_agent.agent")
+    captured: dict = {}
+    _stub_companion_for_chain_inspection(monkeypatch, companion_module, captured)
+
+    agent = companion_module.make_sophia_agent({"configurable": {"user_id": "user_123"}})
+
+    assert type(captured["model"]).__name__ == "LangSmithTraceDisabledRunnable"
+    assert getattr(captured["model"], "_runnable") == {"model": "claude-haiku-4-5-20251001"}
+    assert type(agent).__name__ == "_DummyAgent"
 
 
 def test_async_subagent_middleware_always_attached(monkeypatch):

@@ -2266,24 +2266,11 @@ def _latch_builder_skill_reads(state: dict[str, Any], turn_flags: dict[str, Any]
     return reads
 
 
-def _windowed_visual_force_count(state: dict[str, Any]) -> int:
-    summaries = state.get("builder_tool_turn_summaries") or []
-    count = 0
-    for summary in summaries:
-        if not isinstance(summary, dict):
-            continue
-        names = summary.get("tool_names") or []
-        if any(name in {"read_file", "read_file_tool"} for name in names):
-            count += 1
-    return count
-
-
 def _builder_visual_force_count(state: dict[str, Any]) -> int:
     try:
-        explicit = int(state.get("builder_visual_force_count", 0) or 0)
+        return int(state.get("builder_visual_force_count", 0) or 0)
     except (TypeError, ValueError):
-        explicit = 0
-    return max(explicit, _windowed_visual_force_count(state))
+        return 0
 
 
 # Phase 5c: the read_file path + human name for each gated target.

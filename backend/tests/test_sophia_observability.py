@@ -80,6 +80,12 @@ class _FakeRunnable:
     def invoke(self, *_args: Any, **_kwargs: Any) -> str:
         return "invoke"
 
+    def bind(self, *_args: Any, **_kwargs: Any) -> _FakeRunnable:
+        return self
+
+    def bind_tools(self, *_args: Any, **_kwargs: Any) -> _FakeRunnable:
+        return self
+
     async def ainvoke(self, *_args: Any, **_kwargs: Any) -> str:
         return "ainvoke"
 
@@ -117,10 +123,16 @@ def test_trace_disabled_runnable_wraps_sync_and_async_execution(monkeypatch) -> 
     wrapped.recursion_limit = 80
     assert wrapped.recursion_limit == 80
     assert wrapped.invoke({}) == "invoke"
+    assert wrapped.bind(x=1).invoke({}) == "invoke"
+    assert wrapped.bind_tools([]).invoke({}) == "invoke"
     assert list(wrapped.stream({})) == ["stream-1", "stream-2"]
     assert asyncio.run(wrapped.ainvoke({})) == "ainvoke"
     assert asyncio.run(_collect_async_stream(wrapped.astream({}))) == ["astream-1", "astream-2"]
     assert events == [
+        ("enter", False),
+        ("exit", False),
+        ("enter", False),
+        ("exit", False),
         ("enter", False),
         ("exit", False),
         ("enter", False),

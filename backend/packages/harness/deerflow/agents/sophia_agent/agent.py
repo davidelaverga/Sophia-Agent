@@ -308,6 +308,7 @@ def make_sophia_agent(config: RunnableConfig):
         max_tokens=512 if voice_mode else 4096,
         timeout=60.0,
     )
+    model = disable_langsmith_tracing_for_runnable(model)
 
     # Native web tools (Tavily web_search + Jina web_fetch). Resolves an empty
     # list when no `tools:` providers are configured — the WebResearchGuidance
@@ -509,4 +510,4 @@ def make_sophia_agent(config: RunnableConfig):
     # Sophia typically needs 2 model calls per turn (response + tool + end_turn).
     # Set higher than default 25 to handle multi-tool turns gracefully.
     agent.recursion_limit = 50
-    return disable_langsmith_tracing_for_runnable(agent)
+    return agent

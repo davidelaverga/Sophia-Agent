@@ -36,7 +36,7 @@ def langsmith_tracing_disabled() -> Any:
 
 
 class LangSmithTraceDisabledRunnable(Runnable[Any, Any]):
-    """Proxy a graph/runnable while suppressing LangSmith around execution."""
+    """Proxy a runnable while suppressing LangSmith around its own execution."""
 
     def __init__(self, runnable: Any) -> None:
         object.__setattr__(self, "_runnable", runnable)
@@ -74,6 +74,12 @@ class LangSmithTraceDisabledRunnable(Runnable[Any, Any]):
         with langsmith_tracing_disabled():
             async for item in self._runnable.astream(*args, **kwargs):
                 yield item
+
+    def bind(self, *args: Any, **kwargs: Any) -> LangSmithTraceDisabledRunnable:
+        return LangSmithTraceDisabledRunnable(self._runnable.bind(*args, **kwargs))
+
+    def bind_tools(self, *args: Any, **kwargs: Any) -> LangSmithTraceDisabledRunnable:
+        return LangSmithTraceDisabledRunnable(self._runnable.bind_tools(*args, **kwargs))
 
 
 def disable_langsmith_tracing_for_runnable(runnable: Any) -> LangSmithTraceDisabledRunnable:

@@ -281,6 +281,20 @@ def test_visual_skill_forced_read_stops_after_cap() -> None:
     assert middleware._visual_tool_choice_for_state(state) is None
 
 
+def test_visual_skill_force_cap_ignores_unrelated_read_file_turns() -> None:
+    middleware = BuilderArtifactMiddleware()
+    state = {
+        "delegation_context": {"task": "Create a visual presentation with diagrams"},
+        "builder_tool_turn_summaries": [
+            {"tool_names": ["read_file"], "visual_design_skill_read": False},
+            {"tool_names": ["read_file_tool"], "visual_design_skill_read": False},
+        ],
+    }
+
+    assert middleware._visual_tool_choice_for_state(state) == {"type": "tool", "name": "read_file"}
+    assert state["builder_visual_force_count"] == 1
+
+
 def test_ppt_generation_script_can_create_no_image_deck(tmp_path: Path) -> None:
     plan = tmp_path / "plan.json"
     plan.write_text(
@@ -361,7 +375,7 @@ def test_ppt_generation_script_embeds_plan_chart_image(tmp_path: Path) -> None:
         assert any(name.startswith("ppt/media/") for name in archive.namelist())
 
 
-def test_ppt_generation_script_exits_nonzero_when_slide_image_missing(tmp_path: Path) -> None:
+def test_ppt_generation_script_degrades_when_slide_image_missing(tmp_path: Path) -> None:
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps({"aspect_ratio": "16:9", "slides": [{"title": "One"}]}), encoding="utf-8")
     output = tmp_path / "deck.pptx"
@@ -382,7 +396,6 @@ def test_ppt_generation_script_exits_nonzero_when_slide_image_missing(tmp_path: 
         timeout=15,
     )
 
-    assert result.returncode == 1
-    assert "FileNotFoundError" in result.stderr
-    assert "Slide image not found" in result.stderr
-    assert not output.exists()
+    assert result.returncode == 0
+    assert "Slide image missing, using text layout:" in result.stderr
+    assert output.exists()
