@@ -120,6 +120,80 @@ def test_pptx_generation_bash_result_classifies_missing_output(tmp_path: Path) -
     assert delta["pptx_generator_error_class"] == "missing_slide_image"
 
 
+def test_pptx_generation_bash_result_records_plan_and_slide_count(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    outputs = tmp_path / "outputs"
+    workspace.mkdir()
+    outputs.mkdir()
+    plan_file = workspace / "plan.json"
+    plan = {
+        "slides": [
+            {"title": "One", "image": "/mnt/user-data/outputs/slide-01.png"},
+            {"title": "Two"},
+        ]
+    }
+    plan_file.write_text(json.dumps(plan), encoding="utf-8")
+    request = SimpleNamespace(
+        state={
+            "thread_data": {
+                "workspace_path": str(workspace),
+                "outputs_path": str(outputs),
+            }
+        },
+        tool_call={
+            "name": "bash",
+            "args": {
+                "command": (
+                    "python /mnt/skills/public/ppt-generation/scripts/generate.py "
+                    "--plan-file /mnt/user-data/workspace/plan.json "
+                    "--output-file /mnt/user-data/outputs/deck.pptx"
+                )
+            },
+        },
+    )
+
+    delta = BuilderArtifactMiddleware._pptx_bash_result_delta(
+        request,
+        _tool_message("Successfully generated presentation with 2 slides (picture_count=1)"),
+    )
+
+    assert delta["pptx_generator_slide_count"] == 2
+    assert delta["pptx_plan_slide_count"] == 2
+    assert delta["pptx_plan_image_ref_count"] == 1
+    assert delta["pptx_plan_json"] == plan
+
+
+def test_slide_qc_bash_result_records_verdict_feedback_payload(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    request = SimpleNamespace(
+        state={"thread_data": {"outputs_path": str(outputs)}},
+        tool_call={
+            "name": "bash",
+            "args": {
+                "command": (
+                    "python /mnt/skills/public/image-generation/scripts/slide_qc.py "
+                    "--image-file /mnt/user-data/outputs/slide-01.png "
+                    "--spec-file /mnt/user-data/workspace/slide-01.txt"
+                )
+            },
+        },
+    )
+
+    delta = BuilderArtifactMiddleware._pptx_bash_result_delta(
+        request,
+        _tool_message('{"pass": false, "reasons": ["garbled"]}\nStd Error:\n[qc] PASS=False reasons=["garbled"]'),
+    )
+
+    assert delta == {
+        "qc_invocation_count": 1,
+        "qc_pass_count": 0,
+        "qc_failure_count": 1,
+        "qc_results": [{"pass": False, "reasons": ["garbled"]}],
+        "qc_reasons": ["garbled"],
+    }
+
+
 def test_failed_image_generation_after_correction_does_not_force_fallback(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()

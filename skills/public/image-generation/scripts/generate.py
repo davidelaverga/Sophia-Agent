@@ -362,6 +362,24 @@ def _call_image_api_or_fail(
         )
 
 
+def _emit_generation_request(
+    *,
+    slide_visual: bool,
+    quality: str | None,
+    size: str,
+    prompt: str,
+) -> None:
+    print(f"[gen] slide_visual={slide_visual} quality={quality} size={size}")
+    print(f"[gen] PROMPT_SENT: {prompt}")
+
+
+def _emit_generation_result(output_file: str, valid_refs: list[str]) -> None:
+    path = Path(output_file)
+    ext = path.suffix.lower() or ""
+    n_bytes = path.stat().st_size if path.exists() else 0
+    print(f"[gen] result: ext={ext} bytes={n_bytes} ref_images={len(valid_refs)}")
+
+
 def _assert_output_file_written(output_file: str) -> None:
     if not Path(output_file).exists() or Path(output_file).stat().st_size == 0:
         _fail("empty_output", "OpenAI image generation succeeded but no bytes landed on disk")
@@ -417,6 +435,12 @@ def generate_image(
         aspect_ratio=aspect_ratio,
         has_references=bool(valid_refs),
     )
+    _emit_generation_request(
+        slide_visual=slide_visual,
+        quality=quality,
+        size=resolved_size,
+        prompt=prompt,
+    )
 
     response = _call_image_api_or_fail(
         client,
@@ -430,6 +454,7 @@ def generate_image(
     if slide_visual:
         _normalize_slide_visual_aspect(output_file)
     _assert_output_file_written(output_file)
+    _emit_generation_result(output_file, valid_refs)
 
     return f"IMAGEGEN_OK model={_MODEL} output_file={output_file}"
 

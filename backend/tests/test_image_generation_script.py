@@ -265,7 +265,7 @@ class TestSlideVisualMode:
         )
 
     def test_slide_visual_uses_prompt_field_true_16x9_and_high_quality(
-        self, script_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, script_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
@@ -294,6 +294,11 @@ class TestSlideVisualMode:
         assert kwargs["prompt"].startswith('A professional slide. Title: "THE TEXT READS: Roadmap".')
         assert script_module._SOPHIA_SLIDE_STYLE in kwargs["prompt"]
         assert script_module._SOPHIA_SLIDE_AVOID in kwargs["prompt"]
+        captured = capsys.readouterr()
+        assert "[gen] slide_visual=True quality=high size=1536x1024" in captured.out
+        assert '[gen] PROMPT_SENT: A professional slide. Title: "THE TEXT READS: Roadmap".' in captured.out
+        assert "[gen] result: ext=.png bytes=" in captured.out
+        assert "ref_images=0" in captured.out
         with script_module.Image.open(output_file) as img:
             assert img.size == (160, 90)
 

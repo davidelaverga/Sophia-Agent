@@ -46,8 +46,18 @@ services:
         value: sophia-builder-artifacts
       - key: SOPHIA_GATEWAY_URL
         sync: false
-      - key: LANGCHAIN_TRACING_V2
-        value: "false"
+      # Builder-only LangSmith observability. The companion graph is wrapped
+      # with tracing_context(enabled=False) in code so Mem0/personal context is
+      # not exported even though the worker process has tracing enabled.
+      - key: LANGSMITH_TRACING
+        value: "true"
+      - key: LANGSMITH_PROJECT
+        value: sophia-builder
+      - key: LANGSMITH_API_KEY
+        sync: false
+      # Uncomment only if the write key spans multiple LangSmith workspaces.
+      # - key: LANGSMITH_WORKSPACE_ID
+      #   sync: false
 
   # ─────────────────────────────────────────────────────────────────
   # 2. Gateway API (REST + SSE proxy)

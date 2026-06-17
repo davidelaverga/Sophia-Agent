@@ -393,6 +393,23 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
 
+### Sophia Builder Observability
+
+Sophia traces the `sophia_builder` graph to LangSmith project `sophia-builder` so deck builds can be inspected by plan, image prompts, tool output, QC verdicts, metadata tags, and `slide_qc` feedback. The companion graph is deliberately excluded in code with `tracing_context(enabled=False)` because companion turns can contain Mem0/personal context.
+
+Set these only on the `sophia-langgraph` worker service:
+
+```bash
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=<write key>
+LANGSMITH_PROJECT=sophia-builder
+LANGSMITH_WORKSPACE_ID=<workspace id>   # only if the key spans multiple workspaces
+```
+
+Use a separate read-only LangSmith key for the official LangSmith MCP server (`langchain-ai/langsmith-mcp-server`) in local developer MCP config. The intended debug loop is `ls_list_runs(project_name="sophia-builder", is_root=True)` then `ls_read_run(run_id, hydrate_children=True)`.
+
+Release check: run one deck build, verify the builder trace contains `[gen] PROMPT_SENT`, `[qc] PASS=...`, deck metadata, decision tags, and `slide_qc` feedback, then verify no `sophia_companion` runs appear. Rollback is removing the LangSmith env vars; stdout diagnostics and metadata calls are harmless no-ops without an active trace.
+
 ### IM Channels
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
@@ -496,7 +513,7 @@ Editing the local `config.yaml` does NOTHING to production. Always edit `config.
 | Service | Env vars |
 |---|---|
 | `sophia-gateway` | `ANTHROPIC_API_KEY`, `MEM0_API_KEY`, `STREAM_API_KEY`, `STREAM_API_SECRET`, `LANGGRAPH_URL`, `SOPHIA_VOICE_SERVER_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_WORKER_BOT_TOKEN` (Work bot only) |
-| `sophia-langgraph` | `ANTHROPIC_API_KEY`, `MEM0_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WORKER_BOT_TOKEN` (any token referenced by `config.production.yaml` must be set here too) |
+| `sophia-langgraph` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `MEM0_API_KEY`, `LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT=sophia-builder`, optional `LANGSMITH_WORKSPACE_ID` (any token referenced by `config.production.yaml` must be set here too) |
 | `sophia-voice` | (see `render.yaml` — STT/TTS keys, Stream credentials, etc.) |
 
 **To verify a deploy** worked, SSH into the Render service shell and run:

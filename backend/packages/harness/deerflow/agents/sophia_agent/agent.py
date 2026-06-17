@@ -51,6 +51,7 @@ from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.agents.sophia_agent.vision_gate import supports_vision
 from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
+from deerflow.sophia.observability import disable_langsmith_tracing_for_runnable
 from deerflow.sophia.tools.emit_artifact import emit_artifact
 from deerflow.sophia.tools.read_user_document import read_user_document
 from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
@@ -508,4 +509,4 @@ def make_sophia_agent(config: RunnableConfig):
     # Sophia typically needs 2 model calls per turn (response + tool + end_turn).
     # Set higher than default 25 to handle multi-tool turns gracefully.
     agent.recursion_limit = 50
-    return agent
+    return disable_langsmith_tracing_for_runnable(agent)

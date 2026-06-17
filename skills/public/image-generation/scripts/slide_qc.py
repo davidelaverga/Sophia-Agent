@@ -39,6 +39,12 @@ def _json_result(passed: bool, reasons: list[str]) -> dict[str, Any]:
 
 
 def _emit(payload: dict[str, Any]) -> int:
+    passed = payload.get("pass") is True
+    reasons = payload.get("reasons") if isinstance(payload.get("reasons"), list) else []
+    print(
+        f"[qc] PASS={passed} reasons={json.dumps(reasons, ensure_ascii=False)}",
+        file=sys.stderr,
+    )
     print(json.dumps(payload, ensure_ascii=False))
     return 0 if payload.get("pass") is True else 1
 

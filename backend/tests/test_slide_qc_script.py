@@ -36,6 +36,15 @@ def test_parse_review_fails_closed_on_bad_output(qc_module) -> None:
     assert payload["reasons"] == ["QC reviewer returned non-JSON output"]
 
 
+def test_emit_prints_trace_diagnostic_without_breaking_stdout_json(qc_module, capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = qc_module._emit({"pass": False, "reasons": ["garbled title"]})
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out.strip() == '{"pass": false, "reasons": ["garbled title"]}'
+    assert captured.err.strip() == '[qc] PASS=False reasons=["garbled title"]'
+
+
 def test_review_slide_sends_spec_and_image_to_anthropic(qc_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("SOPHIA_SLIDE_QC_MODEL", "claude-test-vision")

@@ -62,6 +62,7 @@ from deerflow.sophia.builder_provider_fallback import (
     normalize_tool_choice_for_model,
 )
 from deerflow.sophia.builder_web_policy import extract_explicit_user_urls
+from deerflow.sophia.observability import annotate_builder_completion
 from deerflow.sophia.pptx_preview import maybe_render_pptx_preview
 from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.sophia.storage.supabase_mirror import maybe_mirror_file
@@ -180,6 +181,12 @@ _IMAGE_GENERATION_PATH_MARKERS = (
     "/mnt/skills/public/image-generation/scripts/generate.py",
     "/skills/image-generation/scripts/generate.py",
     "/mnt/skills/image-generation/scripts/generate.py",
+)
+_SLIDE_QC_PATH_MARKERS = (
+    "/skills/public/image-generation/scripts/slide_qc.py",
+    "/mnt/skills/public/image-generation/scripts/slide_qc.py",
+    "/skills/image-generation/scripts/slide_qc.py",
+    "/mnt/skills/image-generation/scripts/slide_qc.py",
 )
 # Enrichment discipline (product decision 2026-06-11): generated imagery is
 # on by default for decks, bounded by a hard per-build call cap enforced at
@@ -603,8 +610,11 @@ def _merge_builder_pptx_diagnostic_value(merged: dict, key: str, value: object) 
     if (key.endswith("_count") or key.endswith("_bytes_total")) and isinstance(value, int):
         merged[key] = int(merged.get(key, 0) or 0) + value
         return
-    if key in {"image_output_paths", "pptx_output_paths"} and isinstance(value, list):
+    if key in {"image_output_paths", "pptx_output_paths", "qc_reasons"} and isinstance(value, list):
         merged[key] = _merge_string_list(merged.get(key), value)
+        return
+    if key == "qc_results" and isinstance(value, list):
+        merged[key] = [*(merged.get(key) if isinstance(merged.get(key), list) else []), *value]
         return
     merged[key] = value
 
@@ -2625,6 +2635,111 @@ def _pptx_picture_count_from_text(text: str) -> int:
         return 0
 
 
+def _pptx_slide_count_from_text(text: str) -> int:
+    match = re.search(r"\bslide_count=(\d+)\b", text)
+    if match is None:
+        match = re.search(r"\bwith\s+(\d+)\s+slides\b", text, flags=re.IGNORECASE)
+    if match is None:
+        return 0
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return 0
+
+
+def _plan_image_ref_count(plan: dict[str, Any]) -> int:
+    slides = plan.get("slides")
+    if not isinstance(slides, list):
+        return 0
+    count = 0
+    for slide in slides:
+        if not isinstance(slide, dict):
+            continue
+        for key in ("image_path", "image", "chart_path", "visual_path"):
+            ref = slide.get(key)
+            if isinstance(ref, str) and ref.strip():
+                count += 1
+    return count
+
+
+def _pptx_plan_diagnostics_from_command(command: str, state: dict[str, Any]) -> dict[str, Any]:
+    plan_path = _command_flag_value(command, "--plan-file")
+    if not plan_path:
+        return {}
+    host_plan = BuilderArtifactMiddleware._host_path_for_plan_file(state, plan_path)
+    if host_plan is None or not host_plan.is_file():
+        return {"pptx_plan_path": plan_path}
+    try:
+        plan = json.loads(host_plan.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"pptx_plan_path": plan_path}
+    if not isinstance(plan, dict):
+        return {"pptx_plan_path": plan_path}
+    slides = plan.get("slides")
+    return {
+        "pptx_plan_path": plan_path,
+        "pptx_plan_json": plan,
+        "pptx_plan_slide_count": len(slides) if isinstance(slides, list) else 0,
+        "pptx_plan_image_ref_count": _plan_image_ref_count(plan),
+    }
+
+
+def _slide_qc_invocations_in_command(command: str) -> int:
+    return command.count("image-generation/scripts/slide_qc.py")
+
+
+def _slide_qc_results_from_text(text: str) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line.startswith("[qc]"):
+            continue
+        match = re.match(r"^\[qc\]\s+PASS=(true|false|True|False)\s+reasons=(.*)$", line)
+        if match is None:
+            continue
+        try:
+            reasons = json.loads(match.group(2))
+        except json.JSONDecodeError:
+            reasons = [match.group(2)] if match.group(2) else []
+        results.append(
+            {
+                "pass": match.group(1).lower() == "true",
+                "reasons": [str(reason) for reason in reasons] if isinstance(reasons, list) else [],
+            }
+        )
+    return results
+
+
+def _slide_qc_bash_delta(command: str, text: str) -> dict[str, Any]:
+    results = _slide_qc_results_from_text(text)
+    invocations = max(len(results), _slide_qc_invocations_in_command(command))
+    if invocations > len(results):
+        results.extend(
+            {
+                "pass": False,
+                "reasons": ["QC subprocess did not emit a parseable verdict"],
+            }
+            for _ in range(invocations - len(results))
+        )
+    passed = sum(1 for result in results if result.get("pass") is True)
+    failures = max(0, invocations - passed)
+    reasons = [
+        reason
+        for result in results
+        for reason in (result.get("reasons") or [])
+        if isinstance(reason, str)
+    ]
+    delta: dict[str, Any] = {
+        "qc_invocation_count": invocations,
+        "qc_pass_count": passed,
+        "qc_failure_count": failures,
+        "qc_results": results,
+    }
+    if reasons:
+        delta["qc_reasons"] = reasons
+    return delta
+
+
 def _pptx_generation_error_from_text(text: str) -> str:
     lowered = text.lower()
     if "slide image not found" in lowered:
@@ -4434,6 +4549,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     supabase_mirror_attempted=mirror_result not in {"skipped", "not_configured"},
                     supabase_mirror_result=mirror_result,
                 )
+        annotate_builder_completion(state, fallback)
         if _is_required_supabase_failure(mirror_result):
             fire_completion_webhook_from_artifact(
                 state=state,
@@ -6634,14 +6750,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         error_class = _classify_pptx_generation_error(state, output_path, text, exists)
         valid_pptx = error_class is None
         slide_count = len(_command_flag_values(command, "--slide-images"))
+        generated_slide_count = _pptx_slide_count_from_text(text)
         picture_count = _pptx_picture_count_from_text(text)
         logger.info(
             "[BuilderPptxGeneration] success=%s output_ext=%s bytes=%d "
-            "slide_image_count=%d picture_count=%d error_class=%s status_reason=%s",
+            "slide_image_count=%d slide_count=%d picture_count=%d "
+            "error_class=%s status_reason=%s",
             valid_pptx,
             PurePosixPath(str(output_path or "")).suffix.lower().lstrip(".") or None,
             bytes_count,
             slide_count,
+            generated_slide_count,
             picture_count,
             error_class,
             status_reason,
@@ -6651,7 +6770,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "pptx_generator_success_count": 1 if valid_pptx else 0,
             "pptx_generator_bytes_total": bytes_count if valid_pptx else 0,
             "pptx_generator_error_class": error_class,
+            "pptx_generator_slide_count": generated_slide_count,
             "pptx_generator_picture_count": picture_count,
+            **_pptx_plan_diagnostics_from_command(command, state),
         }
         if output_path and valid_pptx:
             delta["pptx_output_paths"] = [output_path]
@@ -6674,6 +6795,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 text=text,
                 state=state,
             )
+        if any(marker in command for marker in _SLIDE_QC_PATH_MARKERS):
+            return _slide_qc_bash_delta(command, text)
         if any(marker in command for marker in _PPTX_GENERATOR_PATH_MARKERS):
             return BuilderArtifactMiddleware._pptx_generation_bash_delta(
                 command=command,
@@ -7501,6 +7624,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         allow_web_research=allow_web_research,
                         sources_used=args.get("sources_used"),
                     )
+                    annotate_builder_completion(state, args)
                     log_middleware(
                         "BuilderArtifact",
                         f"builder artifact captured: type={args.get('artifact_type')}, "
@@ -7715,6 +7839,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             log_middleware("BuilderArtifact", "no builder artifact tool call, using fallback", _t0)
             # Fire an explicit failure webhook: this fallback has no real
             # deliverable, so it must not surface as a ready/completed card.
+            annotate_builder_completion(state, fallback)
             fire_completion_webhook_from_artifact(
                 state=state,
                 runtime=runtime,
