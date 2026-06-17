@@ -1220,6 +1220,37 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked for a deck about presentation coaches"
         ) == "task_history"
 
+    def test_subject_introducing_participle_is_a_topic_marker(self):
+        """Codex P2: a participle that scopes the deliverable to a subject
+        ('a PDF summarizing X', 'a document outlining Y', 'a report detailing Z')
+        introduces the subject exactly like 'about X' — so a weak noun in that
+        shape is a topic-scoped build request, not a kept memory. Without this,
+        'requested a PDF summarizing Hermes' had no 'about/on' marker and no create
+        verb, so the no-subject branch kept it and the prior subject leaked."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User requested a PDF summarizing Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User requested a document outlining Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a report detailing the Q3 results"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia for a PDF analyzing the market"
+        ) == "task_history"
+        # No deliverable noun before the participle → kept (the participle alone
+        # isn't a build request).
+        assert _candidate_policy_rejection_reason(
+            "User wants help summarizing their notes"
+        ) is None
+        # No request verb → the user's own summarizing activity is kept.
+        assert _candidate_policy_rejection_reason(
+            "User is summarizing their feelings about work"
+        ) is None
+
     def test_addressed_asked_for_build_requests_are_task_history(self):
         """Codex P2: 'asked me/you/us for a <deliverable>' (recipient before
         'for') is a build request, just like 'asked for'."""

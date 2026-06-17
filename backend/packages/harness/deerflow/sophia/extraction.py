@@ -173,7 +173,16 @@ _DELIVERY_STYLE_RE = re.compile(
 # third-party guards only scan who-is-asking, never incidental words in the topic
 # ("report about what the CLIENT REQUESTED"). "for" is excluded (a recipient, not
 # a subject: "report for the board").
-_TOPIC_MARKER_RE = re.compile(r"\b(?:about|on|regarding|concerning|covering|comparing)\b")
+#
+# Subject-introducing PARTICIPLES count too: "a PDF summarizing X", "a document
+# outlining Y", "a report detailing Z" scope the deliverable to a subject exactly
+# like "about X" (covering/comparing were already here). Without them a weak noun
+# in this shape ("requested a PDF summarizing Hermes") had no subject marker AND
+# no create cue, so the no-subject branch kept it and the prior subject leaked.
+_TOPIC_MARKER_RE = re.compile(
+    r"\b(?:about|on|regarding|concerning|covering|comparing|"
+    r"summari[sz]ing|outlining|detailing|describing|explaining|analy[sz]ing|highlighting)\b"
+)
 # One-off build signals — distinguish a SINGULAR styled request ("a detailed deck
 # by Monday", "a concise report for the board") from a standing/generic style
 # preference ("reports to be concise"). A singular article directly governing a
