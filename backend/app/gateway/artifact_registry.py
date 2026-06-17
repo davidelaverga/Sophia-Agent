@@ -29,6 +29,7 @@ from deerflow.sophia.session_store import SessionTranscriptStore
 from deerflow.sophia.storage import supabase_artifact_store
 
 logger = logging.getLogger(__name__)
+_KNOWN_ARTIFACT_ID = "artifact_2f8254e3547d87ab29e56bef"
 
 ArtifactSource = Literal[
     "builder",
@@ -808,6 +809,64 @@ class ArtifactRegistryFilters(BaseModel):
     include_hidden: bool = False
     sort: Literal["updated", "created", "recent", "title"] = "updated"
     limit: int = Field(default=100, ge=1, le=250)
+    diagnostics_trace_id: str | None = Field(default=None, exclude=True)
+
+
+def _safe_user_hash(user_id: str | None) -> str | None:
+    if not user_id:
+        return None
+    return hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:12]
+
+
+def _contains_known_artifact(records: list[ArtifactRecord] | None) -> bool:
+    return any(record.artifact_id == _KNOWN_ARTIFACT_ID for record in records or [])
+
+
+def _log_registry_list_query_result(
+    *,
+    user_id: str,
+    filters: ArtifactRegistryFilters,
+    table_name: str,
+    registry_backend: str,
+    raw_count: int | None,
+    effective_count: int | None = None,
+    filtered_count: int | None = None,
+    visible_count: int | None = None,
+    returned_records: list[ArtifactRecord] | None = None,
+    error: Exception | None = None,
+) -> None:
+    if not filters.diagnostics_trace_id:
+        return
+
+    payload: dict[str, object] = {
+        "event": "artifact_registry_list_query_result",
+        "trace_id": filters.diagnostics_trace_id,
+        "registry_backend": registry_backend,
+        "table_name": table_name,
+        "user_hash": _safe_user_hash(user_id),
+        "storage_status_filters_applied": [],
+        "artifact_type_present": bool(filters.artifact_type),
+        "source_present": bool(filters.source),
+        "thread_id_present": bool(filters.thread_id),
+        "session_id_present": bool(filters.session_id),
+        "search_present": bool(filters.search),
+        "include_hidden": filters.include_hidden,
+        "sort": filters.sort,
+        "limit": filters.limit,
+        "raw_result_count": raw_count,
+        "effective_visibility_count": effective_count,
+        "filtered_count": filtered_count,
+        "visible_deduped_count": visible_count,
+        "returned_count": len(returned_records or []),
+        "known_artifact_present": _contains_known_artifact(returned_records),
+    }
+    if error is not None:
+        payload["supabase_error_type"] = type(error).__name__
+        payload["supabase_error_message"] = str(error)[:200]
+        logger.warning("artifact_registry_list_query_result %s", json.dumps(payload, sort_keys=True))
+        return
+
+    logger.info("artifact_registry_list_query_result %s", json.dumps(payload, sort_keys=True))
 
 
 class ArtifactRegistryConfigurationError(RuntimeError):
@@ -985,12 +1044,25 @@ class LocalArtifactRegistry:
 
     def list(self, *, user_id: str, filters: ArtifactRegistryFilters | None = None) -> ArtifactListResponse:
         filters = filters if filters is not None else ArtifactRegistryFilters()
-        records = [self._with_effective_visibility(record) for record in self._read_records(user_id)]
+        raw_records = self._read_records(user_id)
+        records = [self._with_effective_visibility(record) for record in raw_records]
         records = self._apply_filters(records, filters)
+        filtered_count = len(records)
         if not filters.include_hidden:
             records = self._dedupe_visible(records)
         records = self._sort(records, filters.sort)
         limited = records[: filters.limit]
+        _log_registry_list_query_result(
+            user_id=user_id,
+            filters=filters,
+            table_name="local_registry_json",
+            registry_backend="local",
+            raw_count=len(raw_records),
+            effective_count=len(raw_records),
+            filtered_count=filtered_count,
+            visible_count=len(records),
+            returned_records=limited,
+        )
         return ArtifactListResponse(artifacts=limited, total=len(records))
 
     def mark_opened(self, artifact_id: str, *, user_id: str) -> ArtifactRecord | None:
@@ -1397,12 +1469,37 @@ class SupabaseArtifactRegistry(LocalArtifactRegistry):
 
     def list(self, *, user_id: str, filters: ArtifactRegistryFilters | None = None) -> ArtifactListResponse:
         filters = filters if filters is not None else ArtifactRegistryFilters()
-        records = [self._with_effective_visibility(record) for record in self._read_records(user_id)]
+        try:
+            raw_records = self._read_records(user_id)
+        except ArtifactRegistryStoreError as exc:
+            _log_registry_list_query_result(
+                user_id=user_id,
+                filters=filters,
+                table_name=self._config.table,
+                registry_backend="supabase",
+                raw_count=None,
+                returned_records=[],
+                error=exc,
+            )
+            raise
+        records = [self._with_effective_visibility(record) for record in raw_records]
         records = self._apply_filters(records, filters)
+        filtered_count = len(records)
         if not filters.include_hidden:
             records = self._dedupe_visible(records)
         records = self._sort(records, filters.sort)
         limited = records[: filters.limit]
+        _log_registry_list_query_result(
+            user_id=user_id,
+            filters=filters,
+            table_name=self._config.table,
+            registry_backend="supabase",
+            raw_count=len(raw_records),
+            effective_count=len(raw_records),
+            filtered_count=filtered_count,
+            visible_count=len(records),
+            returned_records=limited,
+        )
         return ArtifactListResponse(artifacts=limited, total=len(records))
 
     def mark_opened(self, artifact_id: str, *, user_id: str) -> ArtifactRecord | None:
@@ -1490,12 +1587,25 @@ class HybridArtifactRegistry(LocalArtifactRegistry):
 
     def list(self, *, user_id: str, filters: ArtifactRegistryFilters | None = None) -> ArtifactListResponse:
         filters = filters if filters is not None else ArtifactRegistryFilters()
-        records = [self._with_effective_visibility(record) for record in self._read_merged_records(user_id)]
+        raw_records = self._read_merged_records(user_id)
+        records = [self._with_effective_visibility(record) for record in raw_records]
         records = self._apply_filters(records, filters)
+        filtered_count = len(records)
         if not filters.include_hidden:
             records = self._dedupe_visible(records)
         records = self._sort(records, filters.sort)
         limited = records[: filters.limit]
+        _log_registry_list_query_result(
+            user_id=user_id,
+            filters=filters,
+            table_name="artifact_registry_records",
+            registry_backend="hybrid",
+            raw_count=len(raw_records),
+            effective_count=len(raw_records),
+            filtered_count=filtered_count,
+            visible_count=len(records),
+            returned_records=limited,
+        )
         return ArtifactListResponse(artifacts=limited, total=len(records))
 
     def mark_opened(self, artifact_id: str, *, user_id: str) -> ArtifactRecord | None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -24,6 +25,8 @@ from app.gateway.artifact_registry import (
 )
 from app.gateway.auth import require_authenticated_user
 from deerflow.sophia.session_store import SessionRecord, SessionStore
+
+KNOWN_ARTIFACT_ID = "artifact_2f8254e3547d87ab29e56bef"
 
 
 def _request(**overrides) -> ArtifactUpsertRequest:
@@ -101,6 +104,17 @@ def _supabase_registry(fake: FakeSupabaseArtifactPostgrest) -> SupabaseArtifactR
         ),
         client=client,
     )
+
+
+def _diagnostic_payloads(caplog: pytest.LogCaptureFixture, event: str) -> list[dict]:
+    payloads: list[dict] = []
+    for record in caplog.records:
+        message = record.getMessage()
+        if not message.startswith(f"{event} "):
+            continue
+        _, _, payload = message.partition(" ")
+        payloads.append(json.loads(payload))
+    return payloads
 
 
 def test_registry_default_storage_base_is_backend_users(monkeypatch) -> None:
@@ -246,6 +260,32 @@ def test_supabase_registry_persists_metadata_across_store_recreation() -> None:
     assert "<html" not in serialized
     assert "signed.example" not in serialized
     assert "artifact_url" not in serialized
+
+
+def test_supabase_registry_list_emits_safe_query_diagnostics(caplog) -> None:
+    fake = FakeSupabaseArtifactPostgrest()
+    registry = _supabase_registry(fake)
+    registry.upsert(_request(artifact_id=KNOWN_ARTIFACT_ID), user_id="user-1")
+    caplog.set_level(logging.INFO, logger=artifact_registry_module.__name__)
+
+    response = registry.list(
+        user_id="user-1",
+        filters=ArtifactRegistryFilters(diagnostics_trace_id="trace-supabase-list"),
+    )
+
+    assert response.total == 1
+    payload = _diagnostic_payloads(caplog, "artifact_registry_list_query_result")[-1]
+    assert payload["trace_id"] == "trace-supabase-list"
+    assert payload["registry_backend"] == "supabase"
+    assert payload["table_name"] == "artifact_registry_records"
+    assert payload["user_hash"] != "user-1"
+    assert payload["raw_result_count"] == 1
+    assert payload["returned_count"] == 1
+    assert payload["known_artifact_present"] is True
+
+    serialized_logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "user-1" not in serialized_logs
+    assert "service-role" not in serialized_logs
 
 
 def test_production_supabase_upsert_hides_missing_storage_object(monkeypatch) -> None:
@@ -872,6 +912,50 @@ def test_list_endpoint_hides_wrappers_by_default(tmp_path, monkeypatch) -> None:
     assert hidden_response.status_code == 200
     hidden_body = hidden_response.json()
     assert hidden_body["total"] == 2
+
+
+def test_list_endpoint_emits_safe_trace_diagnostics(tmp_path, monkeypatch, caplog) -> None:
+    client, registry = _owned_app(tmp_path, monkeypatch)
+    registry.upsert(
+        _request(
+            artifact_id=KNOWN_ARTIFACT_ID,
+            title="Sophia Test",
+            artifact_type="markdown",
+            renderer_kind="markdown",
+            mime_type="text/markdown",
+            local_path="outputs/sophia_test.md",
+        ),
+        user_id="user-1",
+    )
+    caplog.set_level(logging.INFO, logger=artifacts_router.__name__)
+    caplog.set_level(logging.INFO, logger=artifact_registry_module.__name__)
+
+    response = client.get(
+        "/api/artifacts?sort=created&limit=10",
+        headers={"x-sophia-artifact-trace-id": "trace-list-test"},
+    )
+
+    assert response.status_code == 200
+    gateway_payload = _diagnostic_payloads(caplog, "artifact_registry_list_gateway_result")[-1]
+    assert gateway_payload["trace_id"] == "trace-list-test"
+    assert gateway_payload["authenticated_user_present"] is True
+    assert gateway_payload["authenticated_user_hash"] != "user-1"
+    assert gateway_payload["thread_id_present"] is False
+    assert gateway_payload["limit"] == 10
+    assert gateway_payload["known_artifact_present"] is True
+    assert gateway_payload["response_artifact_count"] == 1
+
+    registry_payload = _diagnostic_payloads(caplog, "artifact_registry_list_query_result")[-1]
+    assert registry_payload["trace_id"] == "trace-list-test"
+    assert registry_payload["registry_backend"] == "local"
+    assert registry_payload["table_name"] == "local_registry_json"
+    assert registry_payload["user_hash"] != "user-1"
+    assert registry_payload["raw_result_count"] == 1
+    assert registry_payload["returned_count"] == 1
+    assert registry_payload["known_artifact_present"] is True
+
+    serialized_logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "user-1" not in serialized_logs
 
 
 def test_download_endpoint_serves_visible_artifact_by_registry_id(tmp_path, monkeypatch) -> None:
