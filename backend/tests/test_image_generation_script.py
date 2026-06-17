@@ -242,6 +242,17 @@ class TestEditPathWithReferenceImages:
 
 
 class TestSlideVisualMode:
+    def test_slide_visual_generation_size_uses_supported_openai_size(self, script_module) -> None:
+        assert (
+            script_module._resolve_request_size(
+                explicit_size=None,
+                slide_visual=True,
+                aspect_ratio="16:9",
+                has_references=False,
+            )
+            == "1536x1024"
+        )
+
     def test_slide_visual_reference_size_uses_supported_edit_size(self, script_module) -> None:
         assert (
             script_module._resolve_request_size(
@@ -266,7 +277,7 @@ class TestSlideVisualMode:
         output_file = tmp_path / "slide.png"
 
         fake_client = MagicMock()
-        fake_client.images.generate.return_value = _make_response_with_b64(_fake_b64_image())
+        fake_client.images.generate.return_value = _make_response_with_b64(_real_png_b64(width=160, height=100))
         with patch("openai.OpenAI", return_value=fake_client):
             script_module.generate_image(
                 prompt_file=str(prompt_file),
@@ -278,11 +289,13 @@ class TestSlideVisualMode:
 
         fake_client.images.generate.assert_called_once()
         kwargs = fake_client.images.generate.call_args.kwargs
-        assert kwargs["size"] == "1536x864"
+        assert kwargs["size"] == "1536x1024"
         assert kwargs["quality"] == "high"
         assert kwargs["prompt"].startswith('A professional slide. Title: "THE TEXT READS: Roadmap".')
         assert script_module._SOPHIA_SLIDE_STYLE in kwargs["prompt"]
         assert script_module._SOPHIA_SLIDE_AVOID in kwargs["prompt"]
+        with script_module.Image.open(output_file) as img:
+            assert img.size == (160, 90)
 
     def test_slide_visual_passes_quality_to_edit_path(
         self, script_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -296,7 +309,7 @@ class TestSlideVisualMode:
         output_file = tmp_path / "slide-two.png"
 
         fake_client = MagicMock()
-        fake_client.images.edit.return_value = _make_response_with_b64(_fake_b64_image())
+        fake_client.images.edit.return_value = _make_response_with_b64(_real_png_b64(width=160, height=100))
         with patch("openai.OpenAI", return_value=fake_client):
             script_module.generate_image(
                 prompt_file=str(prompt_file),
@@ -309,6 +322,8 @@ class TestSlideVisualMode:
         kwargs = fake_client.images.edit.call_args.kwargs
         assert kwargs["size"] == "1536x1024"
         assert kwargs["quality"] == "high"
+        with script_module.Image.open(output_file) as img:
+            assert img.size == (160, 90)
 
 
 class TestApiFailuresExitNonZero:
@@ -379,13 +394,17 @@ class TestApiFailuresExitNonZero:
 # ---------------------------------------------------------------------------
 
 
-def _real_png_bytes() -> bytes:
+def _real_png_bytes(*, width: int = 1, height: int = 1) -> bytes:
     """Return bytes of a 1x1 valid PNG so PIL.Image.verify() succeeds."""
     from io import BytesIO
 
     from PIL import Image
 
-    img = Image.new("RGB", (1, 1), color=(255, 0, 0))
+    img = Image.new("RGB", (width, height), color=(255, 0, 0))
     buf = BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
+
+
+def _real_png_b64(*, width: int = 1, height: int = 1) -> str:
+    return base64.b64encode(_real_png_bytes(width=width, height=height)).decode("ascii")

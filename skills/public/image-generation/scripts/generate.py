@@ -45,9 +45,10 @@ _ASPECT_TO_SIZE = {
     "3:2": "1536x1024",
 }
 _DEFAULT_SIZE = "1536x1024"
-_SLIDE_VISUAL_SIZE = "1536x864"
+_SLIDE_VISUAL_SIZE = "1536x1024"
 _SLIDE_VISUAL_EDIT_SIZE = "1536x1024"
-_EDIT_SUPPORTED_SIZES = {"auto", "1024x1024", "1536x1024", "1024x1536"}
+_OPENAI_SUPPORTED_SIZES = {"auto", "1024x1024", "1536x1024", "1024x1536"}
+_SLIDE_VISUAL_ASPECT_RATIO = 16 / 9
 
 _MODEL = "gpt-image-2"
 
@@ -173,7 +174,7 @@ def _resolve_request_size(
     has_references: bool,
 ) -> str:
     resolved = explicit_size or (_SLIDE_VISUAL_SIZE if slide_visual else _resolve_size(aspect_ratio))
-    if has_references and resolved not in _EDIT_SUPPORTED_SIZES:
+    if has_references and resolved not in _OPENAI_SUPPORTED_SIZES:
         return _SLIDE_VISUAL_EDIT_SIZE if slide_visual else _DEFAULT_SIZE
     return resolved
 
@@ -366,6 +367,32 @@ def _assert_output_file_written(output_file: str) -> None:
         _fail("empty_output", "OpenAI image generation succeeded but no bytes landed on disk")
 
 
+def _normalize_slide_visual_aspect(output_file: str) -> None:
+    try:
+        with Image.open(output_file) as img:
+            width, height = img.size
+            if width <= 0 or height <= 0:
+                raise ValueError("Image has invalid dimensions")
+            current_ratio = width / height
+            if abs(current_ratio - _SLIDE_VISUAL_ASPECT_RATIO) < 0.001:
+                return
+            if current_ratio > _SLIDE_VISUAL_ASPECT_RATIO:
+                crop_width = max(1, round(height * _SLIDE_VISUAL_ASPECT_RATIO))
+                left = max(0, (width - crop_width) // 2)
+                box = (left, 0, left + crop_width, height)
+            else:
+                crop_height = max(1, round(width / _SLIDE_VISUAL_ASPECT_RATIO))
+                top = max(0, (height - crop_height) // 2)
+                box = (0, top, width, top + crop_height)
+            img.crop(box).save(output_file)
+    except Exception as e:
+        _fail(
+            "empty_output",
+            f"OpenAI image generation succeeded but the slide visual could not be normalized: {type(e).__name__}",
+            raw_error=_extract_raw_error(e),
+        )
+
+
 def generate_image(
     prompt_file: str,
     reference_images: list[str],
@@ -400,6 +427,8 @@ def generate_image(
     )
     payload = _extract_payload_or_fail(response)
     _decode_to_file(payload, output_file)
+    if slide_visual:
+        _normalize_slide_visual_aspect(output_file)
     _assert_output_file_written(output_file)
 
     return f"IMAGEGEN_OK model={_MODEL} output_file={output_file}"
@@ -463,8 +492,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--size",
         default=None,
         help=(
-            "Explicit OpenAI image size. Defaults to 1536x864 for --slide-visual generation, "
-            "1536x1024 for --slide-visual edits, otherwise aspect-ratio mapping."
+            "Explicit OpenAI image size. Defaults to 1536x1024 for --slide-visual generation "
+            "and edits, otherwise aspect-ratio mapping."
         ),
     )
     parser.add_argument(
