@@ -855,51 +855,68 @@ def _is_deliverable_request(lowered: str) -> bool:
     """
     if not _DELIVERABLE_REQUEST_RE.search(lowered):
         return False
-
-    # The deliverable word is not a requested ARTIFACT when it is used as a verb
-    # ("wants to report on harassment"), is the object of a help/practice/prep
-    # request ("asked for help with a presentation"), sits inside a non-deliverable
-    # compound ("a deck of cards", "a report card"), or names the activity context
-    # of an emotional/support goal ("wants confidence for presentations") — keep
-    # these durable memories.
-    if (
-        _DELIVERABLE_AS_VERB_RE.search(lowered)
-        or _HELP_OR_PRACTICE_RE.search(lowered)
-        or _NON_DELIVERABLE_COMPOUND_RE.search(lowered)
-        or _EMOTIONAL_SUPPORT_RE.search(lowered)
-    ):
+    if _is_non_artifact_deliverable_use(lowered):
         return False
 
     topic_markers = list(_TOPIC_MARKER_RE.finditer(lowered))
     if topic_markers:
-        # Split at the topic marker that actually introduces the subject: the
-        # first one with the requested deliverable named BEFORE it. Earlier markers
-        # can be temporal ("asked Sophia ON MONDAY to build a report about X" — the
-        # split must land on "about", not "on Monday", or the intent has no noun).
-        intent = None
-        for marker in topic_markers:
-            candidate = lowered[: marker.start()]
-            if _DELIVERABLE_NOUN_RE.search(candidate):
-                intent = candidate
-                break
-        if intent is None:
-            # A subject is present but the deliverable noun is only AFTER it
-            # ("wants to focus on the presentation") — not a build request.
-            return False
-        if _THIRD_PARTY_REQUEST_RE.search(intent):
-            return False
-        if _DELIVERY_PREFERENCE_RE.search(intent):
-            return False  # "prefers reports about X" — an explicit preference verb in the intent
-        # A subject marker present ("<deliverable> ABOUT X") is itself the build
-        # signal: "a PDF about OpenClaw" means "make me a PDF on OpenClaw". So a
-        # deliverable noun in the intent — STRONG *or* weak (pdf/html/document/
-        # material) — marks it task history here; no separate create/build cue is
-        # required. (The no-topic branch below still requires strong-or-create for
-        # weak nouns, so "asked for HR documents" — existing artifacts, no subject
-        # — is kept.) intent is only set when a deliverable noun precedes the
-        # marker, so reaching here already guarantees one.
-        return True
+        return _topic_scoped_request_is_build(lowered, topic_markers)
+    return _subjectless_request_is_build(lowered)
 
+
+def _is_non_artifact_deliverable_use(lowered: str) -> bool:
+    """The deliverable word is present but is NOT a requested artifact — keep it.
+
+    Four shapes: a deliverable word used as a verb ("wants to report on
+    harassment"); the object of a help/practice/prep request ("asked for help with
+    a presentation"); a strong noun inside a non-deliverable compound ("a deck of
+    cards", "a report card"); or the activity context of an emotional/support goal
+    ("wants confidence for presentations").
+    """
+    return bool(
+        _DELIVERABLE_AS_VERB_RE.search(lowered)
+        or _HELP_OR_PRACTICE_RE.search(lowered)
+        or _NON_DELIVERABLE_COMPOUND_RE.search(lowered)
+        or _EMOTIONAL_SUPPORT_RE.search(lowered)
+    )
+
+
+def _topic_scoped_request_is_build(lowered: str, topic_markers: list) -> bool:
+    """Resolve a request that carries a subject marker ("<deliverable> about X").
+
+    Splits at the first topic marker with the requested deliverable named BEFORE
+    it — earlier markers can be temporal ("asked Sophia ON MONDAY to build a report
+    about X"), so the split must land on "about", not "on Monday", or the intent
+    has no noun. A subject marker present is itself the build signal ("a PDF about
+    OpenClaw" = "make me a PDF on OpenClaw"), so ANY deliverable noun in the intent
+    — strong or weak — marks task history, unless the intent is a third-party or
+    delivery-preference request.
+    """
+    intent = None
+    for marker in topic_markers:
+        candidate = lowered[: marker.start()]
+        if _DELIVERABLE_NOUN_RE.search(candidate):
+            intent = candidate
+            break
+    if intent is None:
+        # A subject is present but the deliverable noun is only AFTER it
+        # ("wants to focus on the presentation") — not a build request.
+        return False
+    if _THIRD_PARTY_REQUEST_RE.search(intent):
+        return False
+    if _DELIVERY_PREFERENCE_RE.search(intent):
+        return False  # "prefers reports about X" — an explicit preference verb in the intent
+    return True
+
+
+def _subjectless_request_is_build(lowered: str) -> bool:
+    """Resolve a request with no subject marker.
+
+    A standing delivery preference ("prefers concise reports") or a third-party
+    request ("boss asked for a status report") is kept; otherwise a STRONG noun, or
+    a weak noun + create/build cue, marks it task history. (Weak nouns alone could
+    name an existing artifact — "asked for HR documents" — so they stay.)
+    """
     if not _DELIVERABLE_NOUN_RE.search(lowered):
         return False
     if _THIRD_PARTY_REQUEST_RE.search(lowered):
