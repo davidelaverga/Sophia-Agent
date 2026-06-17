@@ -132,7 +132,7 @@ class TestGeneratePathWithoutReferenceImages:
         openai_ctor.assert_called_once_with(api_key="sk-test")
         fake_client.images.generate.assert_called_once_with(
             model="gpt-image-2",
-            prompt="a clear blue sky",
+            prompt=f"a clear blue sky\n\n{script_module._SOPHIA_IMAGE_STYLE}\n\n{script_module._SOPHIA_IMAGE_AVOID}",
             size="1536x1024",
         )
         fake_client.images.edit.assert_not_called()
@@ -167,11 +167,51 @@ class TestEditPathWithReferenceImages:
         fake_client.images.edit.assert_called_once()
         kwargs = fake_client.images.edit.call_args.kwargs
         assert kwargs["model"] == "gpt-image-2"
-        assert kwargs["prompt"] == "variation of the input"
+        assert kwargs["prompt"] == (
+            f"variation of the input\n\n{script_module._SOPHIA_IMAGE_STYLE}\n\n"
+            f"{script_module._SOPHIA_IMAGE_AVOID}"
+        )
         assert kwargs["size"] == "1024x1024"
+        assert "quality" not in kwargs
         # When exactly one reference is provided, pass a single file handle
         # (not a list) — matches the OpenAI SDK's expectation.
         assert not isinstance(kwargs["image"], list)
+
+    def test_default_mode_preserves_structured_prompt_fields(
+        self, script_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+        prompt_file = tmp_path / "prompt.json"
+        prompt_file.write_text(
+            (
+                '{"prompt": "Portrait of Sophia", '
+                '"style": "editorial watercolor", '
+                '"composition": {"framing": "three-quarter", "negative_space": true}, '
+                '"lighting": ["soft window light", "gold rim"]}'
+            ),
+            encoding="utf-8",
+        )
+        ref_file = tmp_path / "ref.png"
+        ref_file.write_bytes(_real_png_bytes())
+        output_file = tmp_path / "out.png"
+
+        fake_client = MagicMock()
+        fake_client.images.edit.return_value = _make_response_with_b64(_fake_b64_image())
+        with patch("openai.OpenAI", return_value=fake_client):
+            script_module.generate_image(
+                prompt_file=str(prompt_file),
+                reference_images=[str(ref_file)],
+                output_file=str(output_file),
+                aspect_ratio="1:1",
+            )
+
+        prompt = fake_client.images.edit.call_args.kwargs["prompt"]
+        assert "Portrait of Sophia" in prompt
+        assert "style: editorial watercolor" in prompt
+        assert 'composition: {"framing": "three-quarter", "negative_space": true}' in prompt
+        assert 'lighting: ["soft window light", "gold rim"]' in prompt
+        assert script_module._SOPHIA_IMAGE_STYLE in prompt
 
     def test_calls_images_edit_with_list_when_multiple_references(
         self, script_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -199,6 +239,91 @@ class TestEditPathWithReferenceImages:
         kwargs = fake_client.images.edit.call_args.kwargs
         assert isinstance(kwargs["image"], list)
         assert len(kwargs["image"]) == 2
+
+
+class TestSlideVisualMode:
+    def test_slide_visual_generation_size_uses_supported_openai_size(self, script_module) -> None:
+        assert (
+            script_module._resolve_request_size(
+                explicit_size=None,
+                slide_visual=True,
+                aspect_ratio="16:9",
+                has_references=False,
+            )
+            == "1536x1024"
+        )
+
+    def test_slide_visual_reference_size_uses_supported_edit_size(self, script_module) -> None:
+        assert (
+            script_module._resolve_request_size(
+                explicit_size=None,
+                slide_visual=True,
+                aspect_ratio="16:9",
+                has_references=True,
+            )
+            == "1536x1024"
+        )
+
+    def test_slide_visual_uses_prompt_field_true_16x9_and_high_quality(
+        self, script_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+        prompt_file = tmp_path / "slide.json"
+        prompt_file.write_text(
+            '{"prompt": "A professional slide. Title: \\"THE TEXT READS: Roadmap\\".", "ignored": "x"}',
+            encoding="utf-8",
+        )
+        output_file = tmp_path / "slide.png"
+
+        fake_client = MagicMock()
+        fake_client.images.generate.return_value = _make_response_with_b64(_real_png_b64(width=160, height=100))
+        with patch("openai.OpenAI", return_value=fake_client):
+            script_module.generate_image(
+                prompt_file=str(prompt_file),
+                reference_images=[],
+                output_file=str(output_file),
+                aspect_ratio="16:9",
+                slide_visual=True,
+            )
+
+        fake_client.images.generate.assert_called_once()
+        kwargs = fake_client.images.generate.call_args.kwargs
+        assert kwargs["size"] == "1536x1024"
+        assert kwargs["quality"] == "high"
+        assert kwargs["prompt"].startswith('A professional slide. Title: "THE TEXT READS: Roadmap".')
+        assert script_module._SOPHIA_SLIDE_STYLE in kwargs["prompt"]
+        assert script_module._SOPHIA_SLIDE_AVOID in kwargs["prompt"]
+        with script_module.Image.open(output_file) as img:
+            assert img.size == (160, 90)
+
+    def test_slide_visual_passes_quality_to_edit_path(
+        self, script_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+        prompt_file = tmp_path / "slide.json"
+        prompt_file.write_text('{"prompt": "Slide two"}', encoding="utf-8")
+        ref_file = tmp_path / "ref.png"
+        ref_file.write_bytes(_real_png_bytes())
+        output_file = tmp_path / "slide-two.png"
+
+        fake_client = MagicMock()
+        fake_client.images.edit.return_value = _make_response_with_b64(_real_png_b64(width=160, height=100))
+        with patch("openai.OpenAI", return_value=fake_client):
+            script_module.generate_image(
+                prompt_file=str(prompt_file),
+                reference_images=[str(ref_file)],
+                output_file=str(output_file),
+                aspect_ratio="16:9",
+                slide_visual=True,
+            )
+
+        kwargs = fake_client.images.edit.call_args.kwargs
+        assert kwargs["size"] == "1536x1024"
+        assert kwargs["quality"] == "high"
+        with script_module.Image.open(output_file) as img:
+            assert img.size == (160, 90)
 
 
 class TestApiFailuresExitNonZero:
@@ -269,13 +394,17 @@ class TestApiFailuresExitNonZero:
 # ---------------------------------------------------------------------------
 
 
-def _real_png_bytes() -> bytes:
+def _real_png_bytes(*, width: int = 1, height: int = 1) -> bytes:
     """Return bytes of a 1x1 valid PNG so PIL.Image.verify() succeeds."""
     from io import BytesIO
 
     from PIL import Image
 
-    img = Image.new("RGB", (1, 1), color=(255, 0, 0))
+    img = Image.new("RGB", (width, height), color=(255, 0, 0))
     buf = BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
+
+
+def _real_png_b64(*, width: int = 1, height: int = 1) -> str:
+    return base64.b64encode(_real_png_bytes(width=width, height=height)).decode("ascii")

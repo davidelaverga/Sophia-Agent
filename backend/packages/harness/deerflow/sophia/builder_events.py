@@ -47,6 +47,9 @@ logger = logging.getLogger(__name__)
 _DEFAULT_GATEWAY_URL = "http://localhost:8001"
 _WEBHOOK_PATH = "/internal/builder-events"
 _WEBHOOK_TIMEOUT_SECONDS = 2.0
+_INTERNAL_STORAGE_OBJECT_SEGMENTS = frozenset(
+    {"ledger", "uploads", ".builder", "sources", "source_artifact"}
+)
 
 
 # Process-local LRU cache of task_ids that have already had their completion
@@ -163,17 +166,106 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt else None
 
 
-def _signed_artifact_url(thread_id: str | None, artifact_path: str | None) -> str | None:
-    """Mint a signed Supabase URL for the artifact, or None on any failure."""
-    if not thread_id or not artifact_path:
+def _storage_object_path_for_signing(artifact_path: str | None, storage_object_path: str | None) -> str | None:
+    return storage_object_path or (artifact_path if str(artifact_path or "").startswith("artifacts/") else None)
+
+
+def _artifact_storage_object_scope(object_path: str) -> tuple[str | None, str | None, str]:
+    parts = object_path.split("/")
+    if parts[0] == "artifacts":
+        if len(parts) < 5:
+            raise ValueError("Artifact storage path must belong to the artifact thread")
+        return parts[1].strip() or None, parts[2].strip() or None, "/".join(parts[4:])
+    return None, parts[0].strip() or None, "/".join(parts[1:])
+
+
+def _storage_object_addresses_internal_keyspace(relative_object_path: str) -> bool:
+    segments = [segment for segment in relative_object_path.split("/") if segment]
+    if any(segment in _INTERNAL_STORAGE_OBJECT_SEGMENTS for segment in segments):
+        return True
+    name = segments[-1].lower() if segments else ""
+    return (
+        name.endswith((".source.md", ".source.html", ".plan.json", ".manifest.json"))
+        or (name.startswith("_") and name.endswith(".py"))
+        or (name.startswith("test_") and name.endswith((".py", ".sh")))
+    )
+
+
+def _validated_storage_object_path_for_signing(
+    *,
+    thread_id: str | None,
+    artifact_path: str | None,
+    storage_object_path: str | None,
+    user_id: str | None,
+) -> str | None:
+    object_path = _storage_object_path_for_signing(artifact_path, storage_object_path)
+    if not object_path:
         return None
+    if not thread_id:
+        logger.debug("Skipping exact-object signing without a thread scope")
+        return None
+    try:
+        from deerflow.sophia.storage import supabase_artifact_store
+
+        normalized = supabase_artifact_store.normalize_object_path(object_path)
+        object_user_id, object_thread_id, relative = _artifact_storage_object_scope(normalized)
+        if object_thread_id != str(thread_id).strip():
+            raise ValueError("Artifact storage path must belong to the artifact thread")
+        if user_id and object_user_id is not None:
+            expected_user_id = supabase_artifact_store.safe_object_path_segment(user_id, default="user")
+            if object_user_id != expected_user_id:
+                raise ValueError("Artifact storage path must belong to the artifact user")
+        if _storage_object_addresses_internal_keyspace(relative):
+            raise ValueError("Artifact references an internal keyspace")
+        return normalized
+    except Exception:
+        logger.debug("Refusing to sign unvalidated artifact storage path", exc_info=True)
+        return None
+
+
+def _call_create_signed_url(
+    *,
+    thread_id: str | None,
+    artifact_path: str | None,
+    object_path: str | None,
+) -> str | None:
     try:
         from deerflow.sophia.storage.supabase_artifact_store import create_signed_url
 
-        return create_signed_url(thread_id=thread_id, filename=artifact_path)
+        return create_signed_url(
+            thread_id=thread_id or "",
+            filename=artifact_path or "",
+            object_path=object_path,
+        )
     except Exception:  # pragma: no cover - defensive: never let this raise
         logger.debug("Failed to mint signed artifact URL", exc_info=True)
         return None
+
+
+def _signed_artifact_url(
+    thread_id: str | None,
+    artifact_path: str | None,
+    *,
+    storage_object_path: str | None = None,
+    authenticated_user_id: str | None = None,
+) -> str | None:
+    """Mint a signed Supabase URL for the artifact, or None on any failure."""
+    raw_object_path = _storage_object_path_for_signing(artifact_path, storage_object_path)
+    object_path = _validated_storage_object_path_for_signing(
+        thread_id=thread_id,
+        artifact_path=artifact_path,
+        storage_object_path=storage_object_path,
+        user_id=authenticated_user_id,
+    )
+    if raw_object_path and not object_path:
+        return None
+    if not object_path and (not thread_id or not artifact_path):
+        return None
+    return _call_create_signed_url(
+        thread_id=thread_id,
+        artifact_path=artifact_path,
+        object_path=object_path,
+    )
 
 
 _ARTIFACT_PATH_PREFIXES = (
@@ -455,6 +547,8 @@ def _artifact_signed_url(
     builder_thread_id: str | None,
     artifact_storage_path: str | None,
     artifact_filename: str | None,
+    storage_object_path: str | None,
+    authenticated_user_id: str | None,
 ) -> str | None:
     # Sign against the SAME thread_id ``BuilderArtifactMiddleware`` uploads
     # to: parent_thread_id (the conversation thread). The channel adapter's
@@ -464,6 +558,8 @@ def _artifact_signed_url(
     return _signed_artifact_url(
         parent_thread_id or builder_thread_id,
         artifact_storage_path or artifact_filename,
+        storage_object_path=storage_object_path,
+        authenticated_user_id=authenticated_user_id,
     )
 
 
@@ -473,16 +569,20 @@ def _artifact_signed_url_with_result(
     builder_thread_id: str | None,
     artifact_storage_path: str | None,
     artifact_filename: str | None,
+    storage_object_path: str | None,
+    authenticated_user_id: str | None,
 ) -> tuple[str | None, str]:
     signing_thread_id = parent_thread_id or builder_thread_id
     signing_path = artifact_storage_path or artifact_filename
-    if not signing_thread_id or not signing_path:
+    if _skip_artifact_signing(signing_thread_id, signing_path, storage_object_path):
         return None, "skipped"
     url = _artifact_signed_url(
         parent_thread_id=parent_thread_id,
         builder_thread_id=builder_thread_id,
         artifact_storage_path=artifact_storage_path,
         artifact_filename=artifact_filename,
+        storage_object_path=storage_object_path,
+        authenticated_user_id=authenticated_user_id,
     )
     if url:
         return url, "signed_url_created"
@@ -494,6 +594,14 @@ def _artifact_signed_url_with_result(
     except Exception:  # pragma: no cover - defensive only
         logger.debug("Failed to inspect Supabase signing config", exc_info=True)
     return None, "signed_url_failed"
+
+
+def _skip_artifact_signing(
+    signing_thread_id: Any,
+    signing_path: str | None,
+    storage_object_path: str | None,
+) -> bool:
+    return not storage_object_path and (not signing_thread_id or not signing_path)
 
 
 def _coerce_phantom_success(
@@ -734,11 +842,16 @@ def build_completion_payload_from_artifact(
     )
     artifact_storage_path = _relative_output_artifact_path(artifact_path)
     artifact_filename = _artifact_filename(artifact_path)
+    storage_object_path = artifact_dict.get("storage_object_path")
+    if not isinstance(storage_object_path, str) or not storage_object_path.strip():
+        storage_object_path = None
     artifact_url, signed_url_result = _artifact_signed_url_with_result(
         parent_thread_id=parent_thread_id,
         builder_thread_id=builder_thread_id,
         artifact_storage_path=artifact_storage_path,
         artifact_filename=artifact_filename,
+        storage_object_path=storage_object_path,
+        authenticated_user_id=user_id,
     )
 
     task_brief = _task_brief(delegation)

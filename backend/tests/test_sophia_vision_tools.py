@@ -598,13 +598,16 @@ async def test_read_user_document_offset_pages_through_large_file(tmp_path: Path
     monkeypatch.setattr(rud_mod, "get_paths", lambda: _rud_fake_paths(rud_mod, uploads, tmp_path / "outputs"))
     runtime = _make_runtime("t1", {})
 
+    def partial_payload(page: str) -> str:
+        return page.split("\n\n", 1)[1].rsplit("\n\n[PARTIAL VIEW", 1)[0]
+
     # Page 1 (offset 0): exactly cap bytes of content + a "continue" footer.
     page1 = _content(
         await rud_mod.read_user_document.coroutine(
             runtime=runtime, document_filename="big.md", tool_call_id="tc-1", offset=0
         )
     )
-    assert page1.count("A") == cap
+    assert partial_payload(page1) == "A" * cap
     assert f"of {total}" in page1
     assert f"offset={cap}" in page1
 
@@ -614,7 +617,7 @@ async def test_read_user_document_offset_pages_through_large_file(tmp_path: Path
             runtime=runtime, document_filename="big.md", tool_call_id="tc-2", offset=cap
         )
     )
-    assert page2.count("A") == cap
+    assert partial_payload(page2) == "A" * cap
     assert f"offset={cap * 2}" in page2
 
     # Final page (offset 2*cap): the 2000-byte tail + an end-of-document note.

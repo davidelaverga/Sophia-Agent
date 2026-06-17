@@ -1441,6 +1441,7 @@ def test_get_artifact_returns_404_when_local_missing_and_supabase_has_no_object(
         raise AssertionError(f"Unexpected virtual path: {virtual_path}")
 
     monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", resolve_path)
+    monkeypatch.setattr(artifacts_router, "_session_store", OwnedSophiaSessionStore("thread-z", "user-1"))
     monkeypatch.setattr(
         artifacts_router.supabase_artifact_store,
         "download_artifact",
@@ -1453,7 +1454,12 @@ def test_get_artifact_returns_404_when_local_missing_and_supabase_has_no_object(
 
     try:
         asyncio.run(
-            artifacts_router.get_artifact("thread-z", "mnt/user-data/outputs/report.md", request)
+            artifacts_router.get_artifact(
+                "thread-z",
+                "mnt/user-data/outputs/report.md",
+                request,
+                authenticated_user_id="user-1",
+            )
         )
     except fastapi.HTTPException as exc:
         assert exc.status_code == 404

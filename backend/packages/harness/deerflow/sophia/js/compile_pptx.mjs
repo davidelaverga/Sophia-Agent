@@ -38,6 +38,8 @@ const THEMES = {
 };
 
 const DEFAULT_THEME = "sophia_light";
+const SLIDE_W = 13.333;
+const SLIDE_H = 7.5;
 
 function parseArgs(argv) {
   const args = { slideImages: [] };
@@ -124,6 +126,13 @@ function slideVisualPath(slideInfo, planFile, outputFile) {
   );
 }
 
+function usablePlanVisualPath(visualPath) {
+  if (!visualPath) return null;
+  if (fs.existsSync(visualPath)) return visualPath;
+  console.error(`Slide image missing, using text layout: ${visualPath}`);
+  return null;
+}
+
 function normalizeLayout(value) {
   return asString(value, "")
     .toLowerCase()
@@ -136,7 +145,8 @@ function slideType(slideInfo) {
   const raw = normalizeLayout(slideInfo.type) || normalizeLayout(slideInfo.layout) || "content";
   if (raw === "title") return "cover";
   if (["section_divider", "divider"].includes(raw)) return "section";
-  if (["closing", "conclusion", "takeaways"].includes(raw)) return "summary";
+  if (["statement", "closing", "quote", "closer"].includes(raw)) return "statement";
+  if (["conclusion", "takeaways"].includes(raw)) return "summary";
   if (["stat_band", "metrics"].includes(raw)) return "stat";
   if (["title_visual", "cover"].includes(raw)) return "cover";
   return raw;
@@ -218,22 +228,25 @@ function addTitle(slide, title, theme, box) {
 
 function addBullets(slide, bullets, theme, box) {
   if (!bullets.length) return;
-  const runs = bullets.slice(0, box.max || 6).map((bullet) => ({
+  const visibleBullets = bullets.slice(0, box.max || 6);
+  const runs = visibleBullets.map((bullet) => ({
     text: bullet,
     options: { bullet: { type: "bullet" }, breakLine: true },
   }));
+  const paraSpaceAfterPt = box.spaceAfter ?? Math.max(4, Math.min(12, 34 / Math.max(visibleBullets.length, 1)));
   slide.addText(runs, {
     x: box.x,
     y: box.y,
     w: box.w,
     h: box.h,
     fontFace: FONT_BODY,
-    fontSize: box.fontSize || 16,
+    fontSize: box.fontSize || 18,
     color: theme.body,
     breakLine: false,
     fit: "shrink",
+    valign: "middle",
     margin: 0.06,
-    paraSpaceAfterPt: box.spaceAfter || 8,
+    paraSpaceAfterPt,
   });
 }
 
@@ -251,6 +264,26 @@ function addVisual(slide, visualPath, box) {
     sizing: { type: "contain", x: box.x, y: box.y, w: box.w, h: box.h },
   });
   return true;
+}
+
+function addFullBleedVisual(slide, visualPath) {
+  if (!visualPath) return false;
+  if (!fs.existsSync(visualPath)) {
+    throw new Error(`Slide visual not found: ${visualPath}`);
+  }
+  slide.addImage({
+    path: visualPath,
+    x: 0,
+    y: 0,
+    w: SLIDE_W,
+    h: SLIDE_H,
+    sizing: { type: "cover", x: 0, y: 0, w: SLIDE_W, h: SLIDE_H },
+  });
+  return true;
+}
+
+function isImageForwardSlide(slideInfo) {
+  return typeof slideInfo.image_path === "string" && slideInfo.image_path.trim();
 }
 
 // A surface card with a line border (no stripe). Used by stat / visual surfaces.
@@ -373,11 +406,11 @@ function renderTextVisual(pptx, slideInfo, theme, visualPath) {
     addCard(slide, theme, { x: 7.15, y: 1.6, w: 5.35, h: 4.85 });
     addVisual(slide, visualPath, { x: 7.35, y: 1.8, w: 4.95, h: 4.45 });
     addBullets(slide, slideBullets(slideInfo), theme, {
-      x: 0.82, y: 1.7, w: 5.95, h: 4.7, fontSize: 16, max: 6,
+      x: 0.82, y: 1.7, w: 5.95, h: 4.7, fontSize: 18, max: 6,
     });
   } else {
     addBullets(slide, slideBullets(slideInfo), theme, {
-      x: 0.9, y: 1.7, w: 10.9, h: 4.7, fontSize: 16, max: 6,
+      x: 0.9, y: 1.7, w: 10.9, h: 4.7, fontSize: 18, max: 6,
     });
   }
   return slide;
@@ -522,6 +555,126 @@ function renderContent(pptx, slideInfo, theme, visualPath) {
   return renderTextVisual(pptx, slideInfo, theme, visualPath);
 }
 
+function firstPresentText(values, fallback = "") {
+  const normalized = values.map((value) => asString(value, "")).find(Boolean);
+  return normalized || fallback;
+}
+
+function statementText(slideInfo) {
+  return firstPresentText(
+    [slideInfo.statement, slideInfo.quote, slideInfo.title, slideInfo.subtitle],
+    "A clear next step.",
+  );
+}
+
+function statementSupport(slideInfo, statement) {
+  const support = firstPresentText([slideInfo.attribution, slideInfo.subtitle, slideInfo.support]);
+  return support === statement ? "" : support;
+}
+
+function statementFontSize(statement) {
+  return statement.length > 90 ? 30 : 38;
+}
+
+function addStatementSupport(slide, support, theme) {
+  if (!support) return;
+  slide.addText(support, {
+    x: 2.2,
+    y: 4.25,
+    w: 8.9,
+    h: 0.46,
+    fontFace: FONT_BODY,
+    fontSize: 16,
+    color: theme.accent,
+    align: "center",
+    fit: "shrink",
+    margin: 0,
+  });
+}
+
+function renderStatement(pptx, slideInfo, theme) {
+  const slide = newSlide(pptx, theme);
+  slide.background = { color: theme.surface };
+  slide.addShape(SHAPE.rect, {
+    x: 0,
+    y: 0,
+    w: SLIDE_W,
+    h: SLIDE_H,
+    fill: { color: theme.surface },
+    line: { color: theme.surface, transparency: 100 },
+  });
+  const statement = statementText(slideInfo);
+  slide.addText(statement, {
+    x: 1.35,
+    y: 2.35,
+    w: 10.65,
+    h: 1.65,
+    fontFace: FONT_HEAD,
+    fontSize: statementFontSize(statement),
+    bold: true,
+    color: theme.ink,
+    align: "center",
+    valign: "middle",
+    fit: "shrink",
+    margin: 0,
+  });
+  addStatementSupport(slide, statementSupport(slideInfo, statement), theme);
+  return slide;
+}
+
+function renderImageForward(pptx, visualPath, theme) {
+  const slide = newSlide(pptx, theme);
+  addFullBleedVisual(slide, visualPath);
+  return slide;
+}
+
+function renderCoverFromContext(ctx) {
+  return renderCover(ctx.pptx, ctx.slideInfo, ctx.plan, ctx.theme, ctx.visualPath);
+}
+
+function renderAgendaFromContext(ctx) {
+  return renderAgenda(ctx.pptx, ctx.slideInfo, ctx.theme);
+}
+
+function renderSectionFromContext(ctx) {
+  return renderSection(ctx.pptx, ctx.slideInfo, ctx.theme, ctx.visualPath);
+}
+
+function renderStatementFromContext(ctx) {
+  return renderStatement(ctx.pptx, ctx.slideInfo, ctx.theme);
+}
+
+function renderSummaryFromContext(ctx) {
+  return renderSummary(ctx.pptx, ctx.slideInfo, ctx.theme);
+}
+
+function renderStatFromContext(ctx) {
+  return renderStat(ctx.pptx, ctx.slideInfo, ctx.theme);
+}
+
+function renderTwoColumnFromContext(ctx) {
+  return renderTwoColumn(ctx.pptx, ctx.slideInfo, ctx.theme);
+}
+
+function renderContentFromContext(ctx) {
+  return renderContent(ctx.pptx, ctx.slideInfo, ctx.theme, ctx.visualPath);
+}
+
+const SLIDE_RENDERERS = {
+  cover: renderCoverFromContext,
+  agenda: renderAgendaFromContext,
+  section: renderSectionFromContext,
+  statement: renderStatementFromContext,
+  summary: renderSummaryFromContext,
+  stat: renderStatFromContext,
+};
+
+const TWO_COLUMN_TYPES = new Set(["two_column", "two_columns", "comparison", "matrix"]);
+
+function rendererForSlideType(type) {
+  return SLIDE_RENDERERS[type] || (TWO_COLUMN_TYPES.has(type) ? renderTwoColumnFromContext : renderContentFromContext);
+}
+
 // 5. summary — title + points mirroring agenda.
 function renderSummary(pptx, slideInfo, theme) {
   const slide = newSlide(pptx, theme);
@@ -563,16 +716,11 @@ function renderSummary(pptx, slideInfo, theme) {
 }
 
 function renderSlide(pptx, slideInfo, plan, theme, visualPath) {
-  const type = slideType(slideInfo);
-  if (type === "cover") return renderCover(pptx, slideInfo, plan, theme, visualPath);
-  if (type === "agenda") return renderAgenda(pptx, slideInfo, theme);
-  if (type === "section") return renderSection(pptx, slideInfo, theme, visualPath);
-  if (type === "summary") return renderSummary(pptx, slideInfo, theme);
-  if (type === "stat") return renderStat(pptx, slideInfo, theme);
-  if (["two_column", "two_columns", "comparison", "matrix"].includes(type)) {
-    return renderTwoColumn(pptx, slideInfo, theme);
+  if (isImageForwardSlide(slideInfo) && visualPath) {
+    return renderImageForward(pptx, visualPath, theme);
   }
-  return renderContent(pptx, slideInfo, theme, visualPath);
+  const ctx = { pptx, slideInfo, plan, theme, visualPath };
+  return rendererForSlideType(slideType(slideInfo))(ctx);
 }
 
 function addNotes(slide, slideInfo) {
@@ -585,6 +733,39 @@ function addNotes(slide, slideInfo) {
 function resolveTheme(plan) {
   const requested = asString(plan.theme, DEFAULT_THEME).toLowerCase().replaceAll("-", "_");
   return THEMES[requested] || THEMES[DEFAULT_THEME];
+}
+
+function compiledSlideContext(pptx, args, plan, theme, slidesInfo, slideInfo, index) {
+  const cliImagePath = index < args.slideImages.length
+    ? resolveAssetPath(args.slideImages[index], args.planFile, args.outputFile)
+    : null;
+  const planVisualPath = slideVisualPath(slideInfo, args.planFile, args.outputFile);
+  const visualPath = cliImagePath || usablePlanVisualPath(planVisualPath);
+  return {
+    slide: renderSlide(pptx, slideInfo, plan, theme, visualPath),
+    visualPath,
+    imageForward: Boolean(isImageForwardSlide(slideInfo) && visualPath),
+    totalSlides: slidesInfo.length,
+  };
+}
+
+function renderCompiledSlide(pptx, args, plan, theme, slidesInfo, slideInfo, index) {
+  const ctx = compiledSlideContext(pptx, args, plan, theme, slidesInfo, slideInfo, index);
+  const imageForward = ctx.imageForward;
+  if (!imageForward) {
+    addFooter(ctx.slide, theme, index, ctx.totalSlides);
+  }
+  addNotes(ctx.slide, slideInfo);
+  return ctx;
+}
+
+function incrementPictureCount(count, visualPath) {
+  return visualPath ? count + 1 : count;
+}
+
+function incrementTextRunCount(count, slideInfo, imageForward) {
+  if (imageForward) return count;
+  return count + 1 + slideBullets(slideInfo).length;
 }
 
 async function compilePptx(args) {
@@ -610,15 +791,9 @@ async function compilePptx(args) {
   let textRunCount = 0;
 
   slidesInfo.forEach((slideInfo, index) => {
-    const cliImagePath = index < args.slideImages.length
-      ? resolveAssetPath(args.slideImages[index], args.planFile, args.outputFile)
-      : null;
-    const visualPath = cliImagePath || slideVisualPath(slideInfo, args.planFile, args.outputFile);
-    const slide = renderSlide(pptx, slideInfo, plan, theme, visualPath);
-    addFooter(slide, theme, index, slidesInfo.length);
-    addNotes(slide, slideInfo);
-    if (visualPath) pictureCount += 1;
-    textRunCount += 1 + slideBullets(slideInfo).length;
+    const rendered = renderCompiledSlide(pptx, args, plan, theme, slidesInfo, slideInfo, index);
+    pictureCount = incrementPictureCount(pictureCount, rendered.visualPath);
+    textRunCount = incrementTextRunCount(textRunCount, slideInfo, rendered.imageForward);
   });
 
   fs.mkdirSync(path.dirname(path.resolve(args.outputFile)), { recursive: true });

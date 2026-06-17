@@ -297,6 +297,7 @@ def test_autowire_drops_refs_to_missing_files(tmp_path) -> None:
         "slides": [
             {"type": "title", "title": "Deck"},
             {"title": "Roadmap", "image": "/mnt/user-data/outputs/visuals/missing.png"},
+            {"title": "Generated full-slide", "image_path": "/mnt/user-data/outputs/slides/missing.png"},
         ],
     }
     plan_file = workspace / "plan.json"
@@ -316,6 +317,7 @@ def test_autowire_drops_refs_to_missing_files(tmp_path) -> None:
 
     rewritten = _json.loads(plan_file.read_text(encoding="utf-8"))
     assert "image" not in rewritten["slides"][1]
+    assert "image_path" not in rewritten["slides"][2]
 
 
 def test_autowire_leaves_valid_plans_untouched(tmp_path) -> None:

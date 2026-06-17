@@ -274,6 +274,39 @@ def test_signed_url_request_encodes_object_path_segments(monkeypatch) -> None:
     )
 
 
+def test_signed_url_can_sign_exact_uploaded_object_path(monkeypatch) -> None:
+    _configure(monkeypatch)
+    captured: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(str(request.url))
+        if "/object/sign/" in str(request.url):
+            return httpx.Response(200, json={"signedURL": "/object/sign/sophia-builder-artifacts/token"})
+        return httpx.Response(200)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    object_path = supabase_artifact_store.upload_artifact_object(
+        "artifacts/user-1/session-1/artifact-abc/report #1.md",
+        b"# report",
+        client=client,
+    )
+    supabase_artifact_store.create_signed_url(
+        thread_id="session-1",
+        filename="report #1.md",
+        object_path=object_path,
+        client=client,
+    )
+
+    assert captured[0] == (
+        "https://example.supabase.co/storage/v1/object/"
+        "sophia-builder-artifacts/artifacts/user-1/session-1/artifact-abc/report%20%231.md"
+    )
+    assert captured[1] == (
+        "https://example.supabase.co/storage/v1/object/sign/"
+        "sophia-builder-artifacts/artifacts/user-1/session-1/artifact-abc/report%20%231.md"
+    )
+
+
 def test_list_artifacts_recurses_into_supabase_folder_records(monkeypatch) -> None:
     _configure(monkeypatch)
     prefixes: list[str] = []

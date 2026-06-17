@@ -68,8 +68,9 @@ def test_visual_composition_directives_carry_the_toolkit() -> None:
 
     assert "generate_excalidraw_diagram" in directives
     assert "graphviz" in directives
-    assert "chart-visualization" in directives
-    assert "image-generation" in directives
+    assert "generate_visual_asset" in directives
+    assert "gpt-image-2" in directives
+    assert "--slide-visual" in directives
     assert "ppt-generation" in directives
     assert "pdf-report" in directives
     assert "hallmark" in directives
@@ -81,12 +82,15 @@ def test_ppt_generation_skill_carries_deck_design_system() -> None:
     skill = Path(__file__).resolve().parents[2] / "skills/public/ppt-generation/SKILL.md"
     text = skill.read_text()
 
-    assert "Cambria" in text and "Calibri" in text
-    assert "Never Aptos/Georgia" in text
-    assert "ppt-generation/scripts/generate.py" not in text or "compile_pptx" in text or "plan" in text
-    assert "sophia_light" in text
-    assert "generate_excalidraw_diagram" in text
-    assert "stat" in text  # the five slide types incl. the stat callout
+    assert "How slides are built (image-forward)" in text
+    assert "gpt-image-2" in text
+    assert "--slide-visual" in text
+    assert "THE TEXT READS:" in text
+    assert "slide_qc.py" in text
+    assert "statement" in text
+    assert "image_path" in text
+    assert "visual_path" in text
+    assert "generate_visual_asset" in text
 
 
 def test_pdf_report_skill_is_source_first_and_renderer_backed() -> None:
