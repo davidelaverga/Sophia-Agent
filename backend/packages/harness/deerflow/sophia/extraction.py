@@ -130,12 +130,19 @@ _WEB_DELIVERABLE_FRAGMENT = (
 # exempted too — "user wants a presentation coach" is a support goal, not a build
 # request — alongside the gerund "coaching". Emotional/support states modifying
 # the noun ("presentation confidence/anxiety/nerves/fear/stress") name a feeling
-# goal, not a requested artifact, so they are exempted as well.
+# goal, not a requested artifact, so they are exempted as well. Project/product
+# words ("report generator/tool/app", "slide builder") mark the user's OWN
+# software project — the classifier keeps the user's own work — so they are
+# exempted too (the hyphenated "report-generator" already matches the trailing
+# ``|-`` rule; this covers the space-separated form).
 _NOT_SKILL_MODIFIER = (
     r"(?!\s+(?:coach(?:ing|es)?|mentor(?:s|ing|ship)?|tutor(?:s|ing)?|trainers?|"
     r"instructors?|teachers?|practice|prep|preparation|skills?|training|tips?|feedback|"
     r"advice|help|anxiet(?:y|ies)|nerves|nervousness|jitters|confiden\w+|fear\w*|"
-    r"stress\w*|dread\w*|panic\w*|worr\w+|class(?:es)?|courses?|lessons?)|-)"
+    r"stress\w*|dread\w*|panic\w*|worr\w+|"
+    r"generators?|tools?|apps?|applications?|platforms?|builders?|engines?|software|"
+    r"bots?|pipelines?|frameworks?|librar(?:y|ies)|plugins?|extensions?|saas|"
+    r"class(?:es)?|courses?|lessons?)|-)"
 )
 # Match the deliverable nouns on WORD BOUNDARIES (optional trailing plural).
 # A bare ``noun in content`` substring test silently fires inside unrelated

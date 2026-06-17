@@ -1389,6 +1389,34 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User wants to check in on Monday about the presentation"
         ) is None
 
+    def test_deliverable_named_user_project_is_preserved(self):
+        """Codex P2: a deliverable word naming the user's OWN software project —
+        'report generator', 'presentation app', 'slide builder' — is the user's
+        work, which the classifier keeps. The request verb + strong noun must not
+        drop it. (Hyphenated 'report-generator' was already exempt; this covers
+        the space-separated form.)"""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User wants to create a report generator for their startup"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User is building a presentation app"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants to build a report tool"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User is developing a PDF generator"
+        ) is None
+        # A genuine deliverable request still drops (no project/product word).
+        assert _candidate_policy_rejection_reason(
+            "User asked for a report about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to build a deck about pricing"
+        ) == "task_history"
+
     def test_addressed_asked_for_build_requests_are_task_history(self):
         """Codex P2: 'asked me/you/us for a <deliverable>' (recipient before
         'for') is a build request, just like 'asked for'."""
