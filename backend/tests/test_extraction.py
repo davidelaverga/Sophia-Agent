@@ -1340,6 +1340,55 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked for a report about Hermes"
         ) == "task_history"
 
+    def test_exemption_phrase_in_subject_does_not_exempt_real_build(self):
+        """Codex P2: the non-artifact exemptions are scoped to the request INTENT,
+        never the deliverable's subject. A real build whose TOPIC happens to
+        contain a verb/help/practice/emotional phrase must still drop."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked for a deck about practicing for interviews"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a report about help with presentations"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a report about how to document harassment"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to build a deck about confidence for public speaking"
+        ) == "task_history"
+        # The exemption still fires when the phrase is in the INTENT (request side).
+        assert _candidate_policy_rejection_reason(
+            "User wants to report on harassment at work"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User asked for help with a presentation about Q3"
+        ) is None
+
+    def test_temporal_on_only_marker_still_drops_dated_request(self):
+        """Codex P2: a temporal 'on <weekday/date>' is not a subject marker. A
+        dated request ('asked on Tuesday for a report', 'asked on Tuesday to build
+        a deck') must drop just like the undated form — the temporal 'on' must not
+        leave the topic split empty and wrongly keep it. A genuine 'on <subject>'
+        ('focus on the presentation') is still a subject and is kept."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked on Tuesday for a report for Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked on Tuesday to build a deck for Hermes"
+        ) == "task_history"
+        # Genuine subject 'on X' (not temporal) where the deliverable is the
+        # object of 'on' is still kept.
+        assert _candidate_policy_rejection_reason(
+            "User wants to focus on the presentation next week"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants to check in on Monday about the presentation"
+        ) is None
+
     def test_addressed_asked_for_build_requests_are_task_history(self):
         """Codex P2: 'asked me/you/us for a <deliverable>' (recipient before
         'for') is a build request, just like 'asked for'."""

@@ -182,9 +182,22 @@ _DELIVERY_STYLE_RE = re.compile(
 # like "about X" (covering/comparing were already here). Without them a weak noun
 # in this shape ("requested a PDF summarizing Hermes") had no subject marker AND
 # no create cue, so the no-subject branch kept it and the prior subject leaked.
+#
+# "on" is special: it introduces a subject ("report ON Hermes") OR a TIME ("asked
+# ON Tuesday for a report"). A temporal "on <weekday/date>" is NOT a subject — if
+# treated as one it leaves the topic split with no deliverable before it and the
+# request is wrongly kept (the deliverable is after the date). So "on" only counts
+# as a topic marker when it is NOT followed by a temporal expression.
+_TEMPORAL_AFTER_ON = (
+    r"(?:(?:mon|tues|wednes|thurs|fri|satur|sun)days?\b"
+    r"|the\s+\d"
+    r"|\d{1,2}(?:st|nd|rd|th)?\b"
+    r"|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\w*\s+\d)"
+)
 _TOPIC_MARKER_RE = re.compile(
-    r"\b(?:about|on|regarding|concerning|covering|comparing|"
+    r"\b(?:about|regarding|concerning|covering|comparing|"
     r"summari[sz]ing|outlining|detailing|describing|explaining|analy[sz]ing|highlighting)\b"
+    r"|\bon\b(?!\s+" + _TEMPORAL_AFTER_ON + r")"
 )
 # One-off build signals — distinguish a SINGULAR styled request ("a detailed deck
 # by Monday", "a concise report for the board") from a standing/generic style
@@ -831,14 +844,14 @@ def _is_deliverable_request(lowered: str) -> bool:
     object of a help/practice/prep request ("asked for help with a presentation"),
     a strong noun inside a non-deliverable compound ("a deck of cards", "a report
     card"), or the activity context of an emotional/support goal ("wants
-    confidence for presentations") is exempted up front (``_DELIVERABLE_AS_VERB_RE``
-    / ``_HELP_OR_PRACTICE_RE`` / ``_NON_DELIVERABLE_COMPOUND_RE`` /
-    ``_EMOTIONAL_SUPPORT_RE``).
-    The rest splits the request *intent* from the deliverable's *subject*
-    at the first topic marker ("report ABOUT X"), because the guards below
-    describe the request itself and must NOT be tripped by incidental words in the
-    subject ("report about what customers PREFER", "report about what the CLIENT
-    REQUESTED"):
+    confidence for presentations") is exempted (``_is_non_artifact_deliverable_use``).
+    That exemption is scoped to the request INTENT, never the subject — a real
+    "deck about practicing for interviews" must still drop, since "practicing for"
+    is the topic, not the request. The rest splits the request *intent* from the
+    deliverable's *subject* at the first topic marker ("report ABOUT X"), because
+    the guards below describe the request itself and must NOT be tripped by
+    incidental words in the subject ("report about what customers PREFER", "report
+    about what the CLIENT REQUESTED"):
 
     - With a subject ("<deliverable> about <topic>"): the requested deliverable
       noun must appear in the intent; the third-party and delivery-preference
@@ -854,8 +867,6 @@ def _is_deliverable_request(lowered: str) -> bool:
       STRONG noun, or a weak noun + create/build cue, marks it task history.
     """
     if not _DELIVERABLE_REQUEST_RE.search(lowered):
-        return False
-    if _is_non_artifact_deliverable_use(lowered):
         return False
 
     topic_markers = list(_TOPIC_MARKER_RE.finditer(lowered))
@@ -902,6 +913,11 @@ def _topic_scoped_request_is_build(lowered: str, topic_markers: list) -> bool:
         # A subject is present but the deliverable noun is only AFTER it
         # ("wants to focus on the presentation") — not a build request.
         return False
+    # Scope the non-artifact exemptions to the request INTENT, never the subject:
+    # "asked for a deck about practicing for interviews" is a real deck build — the
+    # "practicing for" lives in the topic and must not exempt the request.
+    if _is_non_artifact_deliverable_use(intent):
+        return False
     if _THIRD_PARTY_REQUEST_RE.search(intent):
         return False
     if _DELIVERY_PREFERENCE_RE.search(intent):
@@ -918,6 +934,11 @@ def _subjectless_request_is_build(lowered: str) -> bool:
     name an existing artifact — "asked for HR documents" — so they stay.)
     """
     if not _DELIVERABLE_NOUN_RE.search(lowered):
+        return False
+    # No subject marker, so the whole snippet IS the request — apply the
+    # non-artifact exemptions here ("wants confidence for presentations",
+    # "a deck of cards", "help with a presentation").
+    if _is_non_artifact_deliverable_use(lowered):
         return False
     if _THIRD_PARTY_REQUEST_RE.search(lowered):
         return False
