@@ -139,21 +139,19 @@ _PPTX_DELIVERABLE_FRAGMENT = r"powerpoints?|pptx|power\s*points?"
 # exempted too — "user wants a presentation coach" is a support goal, not a build
 # request — alongside the gerund "coaching". Emotional/support states modifying
 # the noun ("presentation confidence/anxiety/nerves/fear/stress") name a feeling
-# goal, not a requested artifact, so they are exempted as well. Project/product
-# words ("report generator/tool/app", "slide builder") mark the user's OWN
-# software project — the classifier keeps the user's own work — so they are
-# exempted too (the hyphenated "report-generator" already matches the trailing
-# ``|-`` rule; this covers the space-separated form).
+# goal, not a requested artifact, so they are exempted as well. Person/role
+# compounds ("website developer", "presentation designer") are a request for a
+# PERSON, not the artifact, so they are exempted regardless of direction.
+# NOTE: project/product words ("report generator/tool/app") are NOT here — a
+# compound like "report generator" is the user's own project ONLY when there is
+# no Sophia-directed build subject, so it is exempted by
+# ``_PROJECT_PRODUCT_COMPOUND_RE`` in the no-subject branch only (a Sophia-directed
+# "build a report generator ABOUT X" must still drop).
 _NOT_SKILL_MODIFIER = (
     r"(?!\s+(?:coach(?:ing|es)?|mentor(?:s|ing|ship)?|tutor(?:s|ing)?|trainers?|"
     r"instructors?|teachers?|practice|prep|preparation|skills?|training|tips?|feedback|"
     r"advice|help|anxiet(?:y|ies)|nerves|nervousness|jitters|confiden\w+|fear\w*|"
-    r"stress\w*|dread\w*|panic\w*|worr\w+|"
-    r"generators?|tools?|apps?|applications?|platforms?|builders?|engines?|software|"
-    r"bots?|pipelines?|frameworks?|librar(?:y|ies)|plugins?|extensions?|saas|"
-    # person/role compounds ("website developer", "presentation designer") — a
-    # request for a PERSON, not the artifact.
-    r"developers?|designers?|"
+    r"stress\w*|dread\w*|panic\w*|worr\w+|developers?|designers?|"
     r"class(?:es)?|courses?|lessons?)|-)"
 )
 # Match the deliverable nouns on WORD BOUNDARIES (optional trailing plural).
@@ -268,6 +266,15 @@ _THIRD_PARTY = (
     r"boss|manager|supervisor|colleague|co-?worker|client|customer|teammate|"
     r"recruiter|director|investor|stakeholder|ceo|cto|cfo|hr|team|lead"
 )
+# Content/source-material nouns. In "from <party>", a party (esp. client/customer)
+# immediately followed by one of these is a SOURCE the deliverable is built FROM
+# ("a report from customer FEEDBACK", "from the client NOTES"), NOT a person who
+# produces it — so the producer arm below must not exempt that Sophia build.
+_SOURCE_MATERIAL_NOUNS = (
+    r"feedback|notes?|data|materials?|info(?:rmation)?|input|research|insights?|"
+    r"comments?|reviews?|surveys?|tickets?|complaints?|interviews?|transcripts?|"
+    r"records?|logs?|metrics?|analytics|emails?|messages?|docs?|files?"
+)
 _THIRD_PARTY_REQUEST_RE = re.compile(
     # (1) third party is the asker: "boss asked", "manager requested"
     rf"\b(?:{_THIRD_PARTY})\b\s+"
@@ -277,9 +284,13 @@ _THIRD_PARTY_REQUEST_RE = re.compile(
     # redirect ("user requested their manager to create a report") is preserved.
     rf"|\b(?:asked|asks|requested|requests|wanted|wants|needed|needs|told|tells|got|had)\s+"
     rf"(?:(?:the|their|a|an|our|my|your|his|her|its)\s+)?(?:{_THIRD_PARTY})\b\s+to\b"
-    # (3) third party is the SOURCE/producer: "a report FROM their manager" — the
-    # user asked for a deliverable the third party makes, not a build of Sophia.
+    # (3) third party is the PRODUCER: "a report FROM their manager" — the user
+    # asked for a deliverable the third party makes, not a build of Sophia. The
+    # negative lookahead excludes source-material phrases ("from customer
+    # feedback", "from the client notes"), where the party modifies a content noun
+    # and Sophia is still the one building — those must still drop.
     rf"|\bfrom\s+(?:(?:the|their|a|an|our|my|your|his|her|its)\s+)?(?:{_THIRD_PARTY})\b"
+    rf"(?!\s+(?:{_SOURCE_MATERIAL_NOUNS}))"
 )
 # The deliverable WORD is not a requested artifact when it is used as a VERB
 # ("wants to report on harassment", "to document the abuse") — "report"/"document"
@@ -323,6 +334,17 @@ _EMOTIONAL_SUPPORT_RE = re.compile(
     r"[^.?!]{0,25}?\b(?:"
     + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
     + "|" + _WEB_DELIVERABLE_FRAGMENT + r")s?\b"
+)
+# A deliverable word naming the user's OWN software project/product: "report
+# generator", "presentation app", "slide builder", "PDF tool". This is exempted
+# ONLY in the no-subject branch — a Sophia-directed build WITH a subject ("build
+# a report generator ABOUT OpenClaw") is still a build request and must drop, so
+# the topic branch does not consult this.
+_PROJECT_PRODUCT_COMPOUND_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
+    + "|" + _WEB_DELIVERABLE_FRAGMENT + "|" + _PPTX_DELIVERABLE_FRAGMENT + r")s?\s+"
+    r"(?:generators?|tools?|apps?|applications?|platforms?|builders?|engines?|software|"
+    r"bots?|pipelines?|frameworks?|librar(?:y|ies)|plugins?|extensions?|saas)\b"
 )
 _DUPLICATE_STOPWORDS = {
     "a",
@@ -973,6 +995,12 @@ def _subjectless_request_is_build(lowered: str) -> bool:
     # non-artifact exemptions here ("wants confidence for presentations",
     # "a deck of cards", "help with a presentation").
     if _is_non_artifact_deliverable_use(lowered):
+        return False
+    # A project/product compound with NO subject is the user's own work
+    # ("a report generator for their startup") — keep. (A Sophia-directed build
+    # WITH a subject lands in the topic branch and is not consulted here, so
+    # "build a report generator about OpenClaw" still drops.)
+    if _PROJECT_PRODUCT_COMPOUND_RE.search(lowered):
         return False
     if _THIRD_PARTY_REQUEST_RE.search(lowered):
         return False

@@ -1482,6 +1482,46 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked Sophia to build a report from scratch about Hermes"
         ) == "task_history"
 
+    def test_from_party_source_material_is_not_a_producer(self):
+        """Codex P2: 'from <party>' counts as a third-party producer only when the
+        party is the producer, NOT when it modifies source material ("from customer
+        feedback", "from the client notes") — there Sophia builds the deliverable
+        FROM that material, so it must still drop."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to create a report from customer feedback about OpenClaw"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a report from the client notes about Hermes"
+        ) == "task_history"
+        # Genuine producer (party is the head, not a material adjunct) still kept.
+        assert _candidate_policy_rejection_reason(
+            "User asked for a report from their manager about Q3"
+        ) is None
+
+    def test_sophia_directed_project_build_with_subject_drops(self):
+        """Codex P2: a project/product compound is the user's own work only when
+        there is NO subject. A Sophia-directed build of a generator/tool WITH a
+        subject ("build a report generator about OpenClaw") is a build request and
+        must drop; the user's own project ("a report generator for their startup")
+        still keeps."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to build a report generator about OpenClaw"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a presentation app about the merger"
+        ) == "task_history"
+        # No subject → the user's own project is kept.
+        assert _candidate_policy_rejection_reason(
+            "User wants to create a report generator for their startup"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants to build a report tool"
+        ) is None
+
     def test_would_like_is_a_request_verb(self):
         """Codex P2: a polite 'would like' / "'d like" build request ('User would
         like a report about OpenClaw') must be recognized as task history — the
