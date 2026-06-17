@@ -1447,6 +1447,36 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User would like a deck about pricing"
         ) == "task_history"
 
+    def test_builder_deliverable_types_summary_brief_article_explainer(self):
+        """Codex P2: summary/brief/article/explainer are deliverable types the
+        builder dispatches (HTML/PDF output regexes). They are WEAK nouns (verb
+        'brief me', adjective 'brief chat', 'read an article'), so they drop only
+        when topic-scoped or create-cued, and a bare/verbal/adjectival use stays."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked for a brief about OpenClaw"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants a summary about the Q3 numbers"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for an article about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to write an explainer about pricing"
+        ) == "task_history"
+        # Verb 'to brief', adjective 'brief chat', and reading an article are kept.
+        assert _candidate_policy_rejection_reason(
+            "User asked me to brief them about Q3"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants a brief chat before the call"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User read an article about competitors"
+        ) is None
+
     def test_powerpoint_aliases_are_task_history(self):
         """Codex P2: the dispatch (`start_builder_task._PPTX_OUTPUT_RE`) routes
         'PowerPoint'/'pptx'/'power point' as a presentation build, so a prior

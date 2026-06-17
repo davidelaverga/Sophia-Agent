@@ -111,6 +111,12 @@ _DELIVERABLE_NOUNS = (
     "presentation", "report", "deck", "slide", "document", "pdf",
     "html", "material", "deliverable", "artifact", "webpage",
     "infographic", "spreadsheet", "write-up",
+    # WEAK deliverable types the builder dispatches (HTML/PDF output regexes):
+    # summary/brief/article/explainer. Ambiguous (verb "brief me", adjective
+    # "brief chat", "read an article"), so they are NOT in the STRONG set — they
+    # drop only when topic-scoped ("a brief about X") or with a create cue, and a
+    # bare/verbal/adjectival use is kept. "to brief" is exempted as a verb below.
+    "summary", "brief", "article", "explainer",
 )
 # Frontend / web deliverables. The frontend dispatch path
 # (``start_builder_task._HTML_OUTPUT_RE``) treats these bare nouns as build
@@ -293,9 +299,10 @@ _THIRD_PARTY_REQUEST_RE = re.compile(
     rf"(?!\s+(?:{_SOURCE_MATERIAL_NOUNS}))"
 )
 # The deliverable WORD is not a requested artifact when it is used as a VERB
-# ("wants to report on harassment", "to document the abuse") — "report"/"document"
-# double as verbs — so a request verb + "report on X" is not a build request.
-_DELIVERABLE_AS_VERB_RE = re.compile(r"\bto\s+report\b|\bto\s+documents?\b")
+# ("wants to report on harassment", "to document the abuse", "to brief them") —
+# report/document/brief double as verbs — so a request verb + "report on X" /
+# "brief them" is not a build request.
+_DELIVERABLE_AS_VERB_RE = re.compile(r"\bto\s+report\b|\bto\s+documents?\b|\bto\s+brief\b")
 # …or when the deliverable is the OBJECT of a help / practice / prep request
 # ("asked for help with a presentation", "needs help preparing for a report",
 # "practicing for the deck") — the user wants support with an existing/upcoming
