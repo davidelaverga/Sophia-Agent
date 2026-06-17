@@ -765,7 +765,7 @@ def _svg_for(
     top = _body_top(fitted_title)
     if kind == "bar_chart":
         body = _bar_body(
-            _coerce_items(data, drop_nonpositive=True, dedupe_labels=True),
+            _coerce_items(data, drop_nonpositive=True),
             colors,
             width,
             height,

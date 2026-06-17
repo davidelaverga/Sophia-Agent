@@ -45,7 +45,7 @@ _ASPECT_TO_SIZE = {
     "3:2": "1536x1024",
 }
 _DEFAULT_SIZE = "1536x1024"
-_SLIDE_VISUAL_SIZE = "1536x1024"
+_SLIDE_VISUAL_SIZE = "1536x864"
 _SLIDE_VISUAL_EDIT_SIZE = "1536x1024"
 _OPENAI_SUPPORTED_SIZES = {"auto", "1024x1024", "1536x1024", "1024x1536"}
 _SLIDE_VISUAL_ASPECT_RATIO = 16 / 9
@@ -388,21 +388,24 @@ def _assert_output_file_written(output_file: str) -> None:
 def _normalize_slide_visual_aspect(output_file: str) -> None:
     try:
         with Image.open(output_file) as img:
-            width, height = img.size
+            source = img.convert("RGBA")
+            width, height = source.size
             if width <= 0 or height <= 0:
                 raise ValueError("Image has invalid dimensions")
             current_ratio = width / height
             if abs(current_ratio - _SLIDE_VISUAL_ASPECT_RATIO) < 0.001:
                 return
             if current_ratio > _SLIDE_VISUAL_ASPECT_RATIO:
-                crop_width = max(1, round(height * _SLIDE_VISUAL_ASPECT_RATIO))
-                left = max(0, (width - crop_width) // 2)
-                box = (left, 0, left + crop_width, height)
+                canvas_width = width
+                canvas_height = max(1, round(width / _SLIDE_VISUAL_ASPECT_RATIO))
             else:
-                crop_height = max(1, round(width / _SLIDE_VISUAL_ASPECT_RATIO))
-                top = max(0, (height - crop_height) // 2)
-                box = (0, top, width, top + crop_height)
-            img.crop(box).save(output_file)
+                canvas_width = max(1, round(height * _SLIDE_VISUAL_ASPECT_RATIO))
+                canvas_height = height
+            canvas = Image.new("RGBA", (canvas_width, canvas_height), (255, 255, 255, 255))
+            left = max(0, (canvas_width - width) // 2)
+            top = max(0, (canvas_height - height) // 2)
+            canvas.alpha_composite(source, (left, top))
+            canvas.convert("RGB").save(output_file)
     except Exception as e:
         _fail(
             "empty_output",

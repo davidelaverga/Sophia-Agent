@@ -250,7 +250,7 @@ class TestSlideVisualMode:
                 aspect_ratio="16:9",
                 has_references=False,
             )
-            == "1536x1024"
+            == "1536x864"
         )
 
     def test_slide_visual_reference_size_uses_supported_edit_size(self, script_module) -> None:
@@ -289,18 +289,18 @@ class TestSlideVisualMode:
 
         fake_client.images.generate.assert_called_once()
         kwargs = fake_client.images.generate.call_args.kwargs
-        assert kwargs["size"] == "1536x1024"
+        assert kwargs["size"] == "1536x864"
         assert kwargs["quality"] == "high"
         assert kwargs["prompt"].startswith('A professional slide. Title: "THE TEXT READS: Roadmap".')
         assert script_module._SOPHIA_SLIDE_STYLE in kwargs["prompt"]
         assert script_module._SOPHIA_SLIDE_AVOID in kwargs["prompt"]
         captured = capsys.readouterr()
-        assert "[gen] slide_visual=True quality=high size=1536x1024" in captured.out
+        assert "[gen] slide_visual=True quality=high size=1536x864" in captured.out
         assert '[gen] PROMPT_SENT: A professional slide. Title: "THE TEXT READS: Roadmap".' in captured.out
         assert "[gen] result: ext=.png bytes=" in captured.out
         assert "ref_images=0" in captured.out
         with script_module.Image.open(output_file) as img:
-            assert img.size == (160, 90)
+            assert img.size == (178, 100)
 
     def test_slide_visual_passes_quality_to_edit_path(
         self, script_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -328,7 +328,25 @@ class TestSlideVisualMode:
         assert kwargs["size"] == "1536x1024"
         assert kwargs["quality"] == "high"
         with script_module.Image.open(output_file) as img:
-            assert img.size == (160, 90)
+            assert img.size == (178, 100)
+
+    def test_slide_visual_normalization_pads_instead_of_cropping(
+        self,
+        script_module,
+        tmp_path: Path,
+    ) -> None:
+        output_file = tmp_path / "slide.png"
+        image = script_module.Image.new("RGB", (160, 100), (255, 255, 255))
+        image.putpixel((0, 0), (255, 0, 0))
+        image.putpixel((159, 99), (0, 0, 255))
+        image.save(output_file)
+
+        script_module._normalize_slide_visual_aspect(str(output_file))
+
+        with script_module.Image.open(output_file) as normalized:
+            assert normalized.size == (178, 100)
+            assert normalized.getpixel((9, 0)) == (255, 0, 0)
+            assert normalized.getpixel((168, 99)) == (0, 0, 255)
 
 
 class TestApiFailuresExitNonZero:
