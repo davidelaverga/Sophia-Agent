@@ -1176,6 +1176,45 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked me how their presentation went"
         ) is None
 
+    def test_intervening_time_phrase_in_asked_for_request(self):
+        """Codex P2: a legacy memory often records WHEN the ask happened
+        ('asked on Tuesday for a report', 'asked yesterday for a deck'). The
+        for-arm / to-arm previously required 'for'/'to' to immediately follow
+        'asked' or the recipient, so the time phrase blocked the match and the
+        prior task-history row contaminated a new build. A tightly scoped
+        temporal adverbial is now allowed between them."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked on Tuesday for a report about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked yesterday for a deck about pricing"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked me yesterday to build a report about the launch"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked on Monday to create a deck about the merger"
+        ) == "task_history"
+        # Recipient + time + for, where the bare "asked sophia" arm can't help.
+        assert _candidate_policy_rejection_reason(
+            "User asked me last week for a report about onboarding"
+        ) == "task_history"
+        # The time phrase must NOT let a TOPIC phrase masquerade as the for-arm:
+        # "asked about the report for the team" is asking about an existing
+        # artifact, and "on pricing" is a topic, not a weekday — both kept.
+        assert _candidate_policy_rejection_reason(
+            "User asked about the report for the team"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User asked on pricing for clarity"
+        ) is None
+        # Still no deliverable noun → kept even with a time phrase + request verb.
+        assert _candidate_policy_rejection_reason(
+            "User asked on Tuesday for help with their anxiety"
+        ) is None
+
     def test_extended_deliverable_nouns_are_caught_lexically(self):
         """Codex P2: the lexical noun list (used by the synchronous companion
         filter with no LLM pass) must cover write-up / infographic / spreadsheet,

@@ -73,17 +73,34 @@ _NON_DURABLE_MARKERS = ("temporary", "one-time", "one time", "codename")
 # "asked about the report" or "asked to see the report"; want/need are bare (they
 # govern the deliverable directly: "wants a report"). The noun + third-party +
 # preference guards bound the recall.
+#
+# An optional TIME phrase may sit between "asked"/recipient and "for"/"to"
+# ("asked on Tuesday for a report", "asked me yesterday to build a deck") — a
+# legacy memory often records when the ask happened. The phrase is a tightly
+# scoped temporal adverbial (the "on" form only matches a weekday name), so it
+# cannot swallow a topic phrase: "asked about the report for the team" and
+# "asked on pricing for clarity" still do NOT match the for-arm.
+_REQUEST_TIME_PHRASE = (
+    r"(?:on\s+\w+day"
+    r"|yesterday|today|earlier|again|recently|just\s+now|just"
+    r"|this\s+(?:morning|afternoon|evening|week|month)"
+    r"|last\s+(?:week|month|night|time)"
+    r"|the\s+other\s+(?:day|week)"
+    r"|(?:a\s+)?(?:while|moment|day|week|month)s?\s+ago"
+    r"|\d+\s+(?:days?|weeks?|months?|hours?)\s+ago)"
+)
 _DELIVERABLE_REQUEST_RE = re.compile(
     r"\b(?:requested|requests)\b"
-    # "asked for" / "asked {sophia,me,you,us} for" (recipient optional)
-    r"|\bask(?:ed|s)\s+(?:(?:sophia|me|you|us)\s+)?for\b"
-    # "asked {sophia,me,you,us} to <anything>" (recipient-directed)
-    r"|\bask(?:ed|s)\s+(?:sophia|me|you|us)\s+to\b"
+    # "asked for" / "asked {sophia,me,you,us} for" (recipient optional) with an
+    # optional intervening time phrase: "asked on Tuesday for", "asked me yesterday for"
+    r"|\bask(?:ed|s)\s+(?:(?:sophia|me|you|us)\s+)?(?:" + _REQUEST_TIME_PHRASE + r"\s+)?for\b"
+    # "asked {sophia,me,you,us} to <anything>" (recipient-directed), optional time phrase
+    r"|\bask(?:ed|s)\s+(?:sophia|me|you|us)\s+(?:" + _REQUEST_TIME_PHRASE + r"\s+)?to\b"
     # bare "asked sophia" (Sophia-directed)
     r"|\bask(?:ed|s)\s+sophia\b"
     # bare "asked to <create>" — gated on a creation stem so "asked to see/review"
-    # an existing artifact is NOT a build request.
-    r"|\bask(?:ed|s)\s+to\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together)"
+    # an existing artifact is NOT a build request. Optional time phrase: "asked on Monday to build"
+    r"|\bask(?:ed|s)\s+(?:" + _REQUEST_TIME_PHRASE + r"\s+)?to\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together)"
     r"|\bwant(?:ed|s)?\b"
     r"|\bneed(?:ed|s)?\b"
 )
