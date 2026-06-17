@@ -145,6 +145,9 @@ _NOT_SKILL_MODIFIER = (
     r"stress\w*|dread\w*|panic\w*|worr\w+|"
     r"generators?|tools?|apps?|applications?|platforms?|builders?|engines?|software|"
     r"bots?|pipelines?|frameworks?|librar(?:y|ies)|plugins?|extensions?|saas|"
+    # person/role compounds ("website developer", "presentation designer") — a
+    # request for a PERSON, not the artifact.
+    r"developers?|designers?|"
     r"class(?:es)?|courses?|lessons?)|-)"
 )
 # Match the deliverable nouns on WORD BOUNDARIES (optional trailing plural).
@@ -283,14 +286,17 @@ _HELP_OR_PRACTICE_RE = re.compile(
     r"|\b(?:practic\w+|rehears\w+|prepar\w+|prep)\s+for\b"
 )
 # A STRONG noun inside a common NON-DELIVERABLE compound is not a build target:
-# a school "report card", a playing-card "deck of cards" / "card deck". These
-# satisfy the request-verb + strong-noun test ("needs a deck of cards", "asked
-# for a report card") but are durable facts, not deliverables. A real "slide deck
-# about X" does not match these compounds and still drops.
+# a school "report card", a playing-card "deck of cards" / "card deck", a "deck
+# chair"/"deck shoes"/"deck hand" (furniture/nautical), a "slide rule"
+# (calculator). These satisfy the request-verb + strong-noun test ("needs a deck
+# of cards", "wants a deck chair") but are durable facts, not deliverables. A real
+# "slide deck about X" does not match these compounds and still drops.
 _NON_DELIVERABLE_COMPOUND_RE = re.compile(
     r"\breport\s+cards?\b"
     r"|\bdecks?\s+of\s+cards?\b"
     r"|\bcard\s+decks?\b"
+    r"|\bdecks?\s+(?:chairs?|hands?|shoes?)\b"
+    r"|\bslide\s+rules?\b"
 )
 # An emotional/support GOAL where a deliverable is the activity context, not the
 # requested artifact: "wants confidence FOR presentations", "scared OF giving

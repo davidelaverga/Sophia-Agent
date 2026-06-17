@@ -1417,6 +1417,36 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked Sophia to build a deck about pricing"
         ) == "task_history"
 
+    def test_strong_noun_in_everyday_compound_is_preserved(self):
+        """Codex P2: a strong deliverable word used in an everyday non-deliverable
+        compound — a 'deck chair'/'deck shoes' (furniture/nautical), a 'slide rule'
+        (calculator), a 'website developer'/'presentation designer' (a person) —
+        is a durable fact, not a build request, even with a want/need verb."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User wants a deck chair for the patio"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User needs a website developer"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User needs a slide rule"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants a presentation designer for their team"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants deck shoes for sailing"
+        ) is None
+        # A real deliverable (no everyday-compound head) still drops.
+        assert _candidate_policy_rejection_reason(
+            "User asked for a slide deck about Q3"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User would like a deck about pricing"
+        ) == "task_history"
+
     def test_would_like_is_a_request_verb(self):
         """Codex P2: a polite 'would like' / "'d like" build request ('User would
         like a report about OpenClaw') must be recognized as task history — the
