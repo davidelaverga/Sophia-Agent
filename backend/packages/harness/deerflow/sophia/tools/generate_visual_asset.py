@@ -136,11 +136,17 @@ def _validated_chart_data(data: Any) -> list[Any]:
     )
 
 
-def _chart_value_or_none(value: float, *, drop_nonpositive: bool) -> float | None:
-    normalized = max(value, 0.0)
-    if drop_nonpositive and normalized <= 0:
+def _chart_value_or_none(
+    value: float,
+    *,
+    drop_nonpositive: bool,
+    preserve_sign: bool,
+) -> float | None:
+    if drop_nonpositive and value <= 0:
         return None
-    return normalized
+    if preserve_sign:
+        return value
+    return max(value, 0.0)
 
 
 def _max_chart_items_reached(items: list[tuple[str, float]], *, max_items: int, dedupe_labels: bool) -> bool:
@@ -168,13 +174,18 @@ def _coerce_items(
     *,
     max_items: int = 8,
     drop_nonpositive: bool = False,
+    preserve_sign: bool = False,
     dedupe_labels: bool = False,
 ) -> list[tuple[str, float]]:
     items: list[tuple[str, float]] = []
     grouped: dict[str, float] = {}
     for item in _validated_chart_data(data):
         label, value = _coerce_chart_point(item)
-        normalized = _chart_value_or_none(value, drop_nonpositive=drop_nonpositive)
+        normalized = _chart_value_or_none(
+            value,
+            drop_nonpositive=drop_nonpositive,
+            preserve_sign=preserve_sign,
+        )
         if normalized is None:
             continue
         _add_chart_item(
@@ -327,25 +338,33 @@ def _svg_shell(width: int, height: int, title: FittedText, body: str) -> str:
 def _bar_body(data: list[tuple[str, float]], colors: tuple[str, ...], width: int, height: int, top: int) -> str:
     chart_x, chart_w = 70, width - 120
     chart_h = height - top - 78
-    axis_y = top + chart_h
-    max_v = max(value for _, value in data) or 1.0
+    max_v = max(max(value for _, value in data), 0.0)
+    min_v = min(min(value for _, value in data), 0.0)
+    span = max(max_v - min_v, 1.0)
+    zero_y = top + chart_h - ((0.0 - min_v) / span * chart_h)
     gap = 12
     bar_w = max(24, (chart_w - gap * (len(data) - 1)) / len(data))
     rotate = len(data) > 6
-    parts = [f'<line x1="{chart_x}" y1="{axis_y}" x2="{chart_x + chart_w}" y2="{axis_y}" stroke="#94a3b8"/>']
+    parts = [f'<line x1="{chart_x}" y1="{zero_y:.1f}" x2="{chart_x + chart_w}" y2="{zero_y:.1f}" stroke="#94a3b8"/>']
     for i, (label, value) in enumerate(data):
-        h = chart_h * (value / max_v)
+        value_y = top + chart_h - ((value - min_v) / span * chart_h)
         x = chart_x + i * (bar_w + gap)
-        y = axis_y - h
+        h = abs(zero_y - value_y)
+        y = min(value_y, zero_y)
+        if h < 2:
+            h = 2.0
+            y = zero_y - 1.0
         cx = x + bar_w / 2
         parts.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{h:.1f}" rx="8" fill="{colors[i % len(colors)]}"/>')
-        parts.append(_plain_text(cx, y - 8, f"{value:g}", 12))
+        value_label_y = y - 8 if value >= 0 else y + h + 16
+        parts.append(_plain_text(cx, value_label_y, f"{value:g}", 12))
         if rotate:
-            budget = max((height - axis_y - 26) / 0.5, 60.0)
+            label_y = top + chart_h + 22
+            budget = max((height - label_y - 20) / 0.5, 60.0)
             fitted = _fit_text(label, budget, 12, 1)
-            parts.append(_text_block(cx, axis_y + 18, fitted, class_name="small", anchor="end", extra=f'transform="rotate(-30 {cx:.1f} {axis_y + 18:.1f})"'))
+            parts.append(_text_block(cx, label_y, fitted, class_name="small", anchor="end", extra=f'transform="rotate(-30 {cx:.1f} {label_y:.1f})"'))
         else:
-            parts.append(_text_block(cx, axis_y + 22, _fit_text(label, bar_w + gap - 6, 12, 2), class_name="small", anchor="middle"))
+            parts.append(_text_block(cx, top + chart_h + 22, _fit_text(label, bar_w + gap - 6, 12, 2), class_name="small", anchor="middle"))
     return "".join(parts)
 
 
@@ -765,7 +784,7 @@ def _svg_for(
     top = _body_top(fitted_title)
     if kind == "bar_chart":
         body = _bar_body(
-            _coerce_items(data, drop_nonpositive=True),
+            _coerce_items(data, preserve_sign=True),
             colors,
             width,
             height,

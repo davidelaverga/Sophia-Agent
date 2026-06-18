@@ -93,7 +93,7 @@ def test_generate_visual_asset_rejects_unlabeled_chart_data(tmp_path) -> None:
     assert "placeholder" in payload["hint"]
 
 
-def test_bar_chart_preserves_duplicate_labels_and_drops_zero_bars(tmp_path) -> None:
+def test_bar_chart_preserves_duplicate_labels_zero_and_negative_bars(tmp_path) -> None:
     outputs = tmp_path / "outputs"
     long_label = "Operational resilience and human escalation readiness"
 
@@ -107,7 +107,7 @@ def test_bar_chart_preserves_duplicate_labels_and_drops_zero_bars(tmp_path) -> N
                 {"label": long_label, "series": "Sophia", "value": 5},
                 {"label": "Memory continuity", "series": "Baseline", "value": 0},
                 {"label": "Memory continuity", "series": "Sophia", "value": 7},
-                {"label": "Zero only", "series": "Baseline", "value": 0},
+                {"label": "Profit/loss delta", "series": "Baseline", "value": -3},
             ],
             output_name="capability-profile",
         )
@@ -115,14 +115,38 @@ def test_bar_chart_preserves_duplicate_labels_and_drops_zero_bars(tmp_path) -> N
 
     assert payload["success"] is True
     svg = (outputs / "visuals" / "capability-profile.svg").read_text(encoding="utf-8")
-    assert svg.count("Operational resilience and human") == 2
-    assert svg.count("escalation readiness") == 2
-    assert svg.count("Memory continuity") == 1
-    assert "Zero only" not in svg
-    assert ">0<" not in svg
+    assert svg.count("Operational resilience") == 2
+    assert svg.count("Memory continuity") == 2
+    assert "Profit/loss delta" in svg
+    assert ">0<" in svg
+    assert ">-3<" in svg
     assert ">4<" in svg
     assert ">5<" in svg
     assert ">9<" not in svg
+
+
+def test_bar_chart_preserves_all_nonpositive_data(tmp_path) -> None:
+    outputs = tmp_path / "outputs"
+
+    payload = _payload(
+        generate_visual_asset.func(
+            runtime=_runtime(outputs),
+            visual_type="bar_chart",
+            title="Net deltas",
+            data=[
+                {"label": "Flat", "value": 0},
+                {"label": "Loss", "value": -8},
+            ],
+            output_name="net-deltas",
+        )
+    )
+
+    assert payload["success"] is True
+    svg = (outputs / "visuals" / "net-deltas.svg").read_text(encoding="utf-8")
+    assert "Flat" in svg
+    assert "Loss" in svg
+    assert ">0<" in svg
+    assert ">-8<" in svg
 
 
 # --- VQ-1: text-fit engine ----------------------------------------------------
