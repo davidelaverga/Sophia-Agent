@@ -1653,12 +1653,24 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         assert _candidate_policy_rejection_reason(
             "User plans to build a deck for the offsite"
         ) is None
+        # A self-improvement goal ("get BETTER at …") is still own work — kept.
+        assert _candidate_policy_rejection_reason(
+            "User wants to get better at presentations"
+        ) is None
         # A request OF Sophia (not own work) still drops.
         assert _candidate_policy_rejection_reason(
             "User wants a presentation about Q3"
         ) == "task_history"
         assert _candidate_policy_rejection_reason(
             "User wants Sophia to build a deck about Q3"
+        ) == "task_history"
+        # RECEIPT requests ("to GET/RECEIVE a <deliverable>") are builds, not own
+        # work — they want the artifact delivered, so they drop.
+        assert _candidate_policy_rejection_reason(
+            "User wants to get a report about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User would like to receive a presentation on Hermes"
         ) == "task_history"
 
     def test_request_verb_must_be_in_intent_not_subject(self):

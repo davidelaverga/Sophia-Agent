@@ -601,10 +601,17 @@ _SOPHIA_DIRECTED_RE = re.compile(
 # report"). Combined (in _is_non_artifact_deliverable_use) with a NOT-Sophia-
 # directed check so "wants Sophia to build a deck" / "asked Sophia to …" still
 # drop. "to ask" is excluded (delegating the ask is not own work).
+# RECEIPT verbs ("to GET a report", "to RECEIVE a presentation", "to OBTAIN/ACQUIRE
+# a deck") are NOT own work — they want the artifact delivered, i.e. a build — so
+# they are excluded when followed by an article. The article gate keeps genuine
+# self-improvement goals ("wants to GET BETTER at presentations") as own work.
 _OWN_WORK_RE = re.compile(
     r"\b(?:want(?:ed|s)?|need(?:ed|s)?|plan(?:ned|s|ning)?|hop(?:e|ed|es|ing)|"
     r"aim(?:ed|s|ing)?|tr(?:y|ies|ied|ying)|going|wish(?:ed|es)?|intend(?:ed|s)?|"
-    r"would\s+like)\s+to\s+(?!ask\b)\w"
+    r"would\s+like)\s+to\s+(?!ask\b)"
+    r"(?!(?:get|gets|getting|receiv\w+|obtain\w*|acquir\w+)\s+"
+    r"(?:an?|the|some|several|multiple|few|two|three|four|\d+|another|its|their|his|her|our|my|your)\b)"
+    r"\w"
 )
 _DUPLICATE_STOPWORDS = {
     "a",
