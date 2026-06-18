@@ -410,7 +410,7 @@ LANGSMITH_WORKSPACE_ID=<workspace id>   # only if the key spans multiple workspa
 
 Use a separate read-only LangSmith key for the official LangSmith MCP server (`langchain-ai/langsmith-mcp-server`) in local developer MCP config. The intended debug loop is `ls_list_runs(project_name="Sophia", is_root=True)` then `ls_read_run(run_id, hydrate_children=True)`.
 
-Release check: run one deck build, verify the trace appears under project `Sophia` in the EU LangSmith workspace and contains `[gen] PROMPT_SENT`, `[qc] PASS=...`, deck metadata, decision tags, and `slide_qc` feedback. Rollback is removing the LangSmith env vars; stdout diagnostics and metadata calls are harmless no-ops without an active trace.
+Release check: run one deck build, verify the trace appears under project `Sophia` in the EU LangSmith workspace and contains `[gen] PROMPT_SENT`, `[qc] PASS=...`, deck metadata, decision tags, and `slide_qc` feedback. Generated slide visuals should also emit same-project `Sophia Image Generation OpenAI Call` tool traces when the image subprocess inherits LangSmith env vars. Rollback is removing the LangSmith env vars; stdout diagnostics and metadata calls are harmless no-ops without an active trace.
 
 ### IM Channels
 

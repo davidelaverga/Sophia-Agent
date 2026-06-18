@@ -140,6 +140,59 @@ class TestGeneratePathWithoutReferenceImages:
         assert output_file.stat().st_size > 0
         assert "IMAGEGEN_OK model=gpt-image-2" in result
 
+    def test_langsmith_trace_records_sanitized_image_call(
+        self, script_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        prompt = "create a precise launch slide"
+        ref_file = tmp_path / "secret-reference-name.png"
+        ref_file.write_bytes(_real_png_bytes())
+        fake_client = MagicMock()
+        fake_client.images.edit.return_value = _make_response_with_b64(_fake_b64_image())
+        captured: dict[str, Any] = {}
+
+        class FakeTraceContext:
+            def __enter__(self) -> FakeTraceContext:
+                return self
+
+            def __exit__(self, *_exc: object) -> None:
+                return None
+
+            def end(self, *, outputs: dict[str, Any]) -> None:
+                captured["outputs"] = outputs
+
+        def fake_trace_context(**kwargs: Any) -> FakeTraceContext:
+            captured["inputs"] = script_module._image_trace_inputs(**kwargs)
+            return FakeTraceContext()
+
+        monkeypatch.setattr(script_module, "_langsmith_trace_context", fake_trace_context)
+
+        script_module._call_image_api_with_trace(
+            fake_client,
+            prompt=prompt,
+            valid_refs=[str(ref_file)],
+            size="1536x1024",
+            quality="high",
+        )
+
+        assert captured["inputs"] == {
+            "provider": "openai",
+            "model": "gpt-image-2",
+            "endpoint": "images.edit",
+            "prompt": prompt,
+            "prompt_truncated": False,
+            "reference_image_count": 1,
+            "reference_images": ["secret-reference-name.png"],
+            "size": "1536x1024",
+            "quality": "high",
+        }
+        assert captured["outputs"] == {
+            "provider": "openai",
+            "model": "gpt-image-2",
+            "response_data_count": 1,
+            "has_b64_payload": True,
+        }
+        fake_client.images.edit.assert_called_once()
+
 
 class TestEditPathWithReferenceImages:
     def test_calls_images_edit_when_one_reference_image_provided(

@@ -29,6 +29,7 @@ import json as _json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from PIL import Image
 
@@ -51,6 +52,9 @@ _OPENAI_SUPPORTED_SIZES = {"auto", "1024x1024", "1536x1024", "1024x1536"}
 _SLIDE_VISUAL_ASPECT_RATIO = 16 / 9
 
 _MODEL = "gpt-image-2"
+_TRUTHY_VALUES = {"1", "true", "yes", "on"}
+_TRACE_PROMPT_MAX = 12000
+_LANGSMITH_CLIENT: Any | None = None
 
 _SOPHIA_SLIDE_STYLE = (
     "Visual system: a premium, editorial presentation slide. Generous white space, "
@@ -160,6 +164,108 @@ def _classify_exception(exc: BaseException) -> str:
     if "size" in text and any(token in text for token in ("invalid", "unsupported", "not one of")):
         return "invalid_size"
     return "api_error"
+
+
+def _env_flag_preferred(*names: str) -> bool:
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and value.strip():
+            return value.strip().lower() in _TRUTHY_VALUES
+    return False
+
+
+def _langsmith_tracing_configured() -> bool:
+    if not _env_flag_preferred("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGCHAIN_TRACING"):
+        return False
+    return bool((os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY") or "").strip())
+
+
+def _langsmith_client() -> Any | None:
+    global _LANGSMITH_CLIENT
+    if not _langsmith_tracing_configured():
+        return None
+    if _LANGSMITH_CLIENT is not None:
+        return _LANGSMITH_CLIENT
+    try:
+        from langsmith import Client
+
+        _LANGSMITH_CLIENT = Client()
+    except Exception:
+        return None
+    return _LANGSMITH_CLIENT
+
+
+def _truncate_trace_text(value: str, limit: int = _TRACE_PROMPT_MAX) -> tuple[str, bool]:
+    if len(value) <= limit:
+        return value, False
+    return value[:limit] + "...[truncated]", True
+
+
+def _trace_reference_name(path: str) -> str:
+    try:
+        return Path(path).name
+    except Exception:
+        return str(path)
+
+
+def _image_trace_inputs(*, prompt: str, valid_refs: list[str], size: str, quality: str | None) -> dict[str, Any]:
+    traced_prompt, truncated = _truncate_trace_text(prompt)
+    return {
+        "provider": "openai",
+        "model": _MODEL,
+        "endpoint": "images.edit" if valid_refs else "images.generate",
+        "prompt": traced_prompt,
+        "prompt_truncated": truncated,
+        "reference_image_count": len(valid_refs),
+        "reference_images": [_trace_reference_name(path) for path in valid_refs],
+        "size": size,
+        "quality": quality,
+    }
+
+
+def _image_trace_outputs(response: object) -> dict[str, Any]:
+    data = getattr(response, "data", None)
+    count = len(data) if isinstance(data, list) else 0
+    first = data[0] if count else None
+    return {
+        "provider": "openai",
+        "model": _MODEL,
+        "response_data_count": count,
+        "has_b64_payload": bool(getattr(first, "b64_json", None)),
+    }
+
+
+def _langsmith_trace_context(*, prompt: str, valid_refs: list[str], size: str, quality: str | None) -> Any | None:
+    client = _langsmith_client()
+    if client is None:
+        return None
+    try:
+        from langsmith import trace
+
+        return trace(
+            "Sophia Image Generation OpenAI Call",
+            run_type="tool",
+            inputs=_image_trace_inputs(prompt=prompt, valid_refs=valid_refs, size=size, quality=quality),
+            metadata={
+                "ls_provider": "openai",
+                "ls_model_name": _MODEL,
+                "image_endpoint": "edit" if valid_refs else "generate",
+            },
+            tags=["sophia", "image_generation", "openai"],
+            client=client,
+        )
+    except Exception:
+        return None
+
+
+def _flush_langsmith_traces() -> None:
+    client = _LANGSMITH_CLIENT
+    if client is None:
+        return
+    try:
+        client.flush(timeout=5)
+    except Exception:
+        pass
 
 
 def _resolve_size(aspect_ratio: str) -> str:
@@ -316,6 +422,26 @@ def _call_image_api(
     return _call_generate(client, prompt=prompt, size=size, quality=quality)
 
 
+def _call_image_api_with_trace(
+    client: object,
+    *,
+    prompt: str,
+    valid_refs: list[str],
+    size: str,
+    quality: str | None,
+) -> object:
+    trace_context = _langsmith_trace_context(prompt=prompt, valid_refs=valid_refs, size=size, quality=quality)
+    if trace_context is None:
+        return _call_image_api(client, prompt=prompt, valid_refs=valid_refs, size=size, quality=quality)
+    with trace_context as run:
+        response = _call_image_api(client, prompt=prompt, valid_refs=valid_refs, size=size, quality=quality)
+        try:
+            run.end(outputs=_image_trace_outputs(response))
+        except Exception:
+            pass
+        return response
+
+
 def _openai_client_from_env() -> object:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -347,7 +473,7 @@ def _call_image_api_or_fail(
     quality: str | None,
 ) -> object:
     try:
-        return _call_image_api(
+        return _call_image_api_with_trace(
             client,
             prompt=prompt,
             valid_refs=valid_refs,
@@ -445,13 +571,16 @@ def generate_image(
         prompt=prompt,
     )
 
-    response = _call_image_api_or_fail(
-        client,
-        prompt=prompt,
-        valid_refs=valid_refs,
-        size=resolved_size,
-        quality=quality,
-    )
+    try:
+        response = _call_image_api_or_fail(
+            client,
+            prompt=prompt,
+            valid_refs=valid_refs,
+            size=resolved_size,
+            quality=quality,
+        )
+    finally:
+        _flush_langsmith_traces()
     payload = _extract_payload_or_fail(response)
     _decode_to_file(payload, output_file)
     if slide_visual:
