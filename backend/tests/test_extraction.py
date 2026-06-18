@@ -1276,12 +1276,31 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         assert _candidate_policy_rejection_reason(
             "User asked me to help with their deck"
         ) is None
+        # Gerund / direct-object prep + revision forms with no trailing "for"
+        # ("help preparing the presentation", "help revising the report") — coaching
+        # / support on an EXISTING deliverable, so the memory is preserved.
+        assert _candidate_policy_rejection_reason(
+            "User needs help preparing the presentation"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User asked for help preparing the report"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants help revising the deck about Q3"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User asked for help reviewing the proposal"
+        ) is None
         # Guard rails: a genuine build request is still dropped (no verb/help cue).
         assert _candidate_policy_rejection_reason(
             "User asked for a report about Hermes"
         ) == "task_history"
         assert _candidate_policy_rejection_reason(
             "User asked Sophia to build a deck about pricing"
+        ) == "task_history"
+        # The exemption is prep/revision only — "help CREATING" is still a build.
+        assert _candidate_policy_rejection_reason(
+            "User needs help creating a deck about pricing"
         ) == "task_history"
 
     def test_strong_noun_in_non_deliverable_compound_is_preserved(self):

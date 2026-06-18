@@ -405,8 +405,16 @@ _DELIVERABLE_AS_VERB_RE = re.compile(r"\bto\s+report\b|\bto\s+documents?\b|\bto\
 # "practicing for the deck") — the user wants support with an existing/upcoming
 # deliverable, not for Sophia to build one. (Mirrors the skill-modifier exemption
 # for the pre-noun framing.)
+# The first arm also covers gerund / direct-object prep + revision forms with no
+# trailing "for" ("help preparing the presentation", "help revising the report",
+# "help editing/reviewing/polishing/finalizing the deck") — these are coaching /
+# support on an EXISTING deliverable, so the memory is preserved. Note the verb set
+# is deliberately prep/revision only — creation verbs (create/build/make) are NOT
+# here, so "needs help CREATING a deck about X" still drops as a build request.
 _HELP_OR_PRACTICE_RE = re.compile(
-    r"\bhelp(?:\s+(?:me|them|us|him|her))?\s+(?:with|on|prepare|prep|practic\w+|rehears\w+)\b"
+    r"\bhelp(?:\s+(?:me|them|us|him|her))?\s+(?:with|on|prepar\w*|prep|practic\w+|"
+    r"rehears\w+|revis\w+|edit\w*|review\w*|polish\w*|finaliz\w+|finalis\w+|refin\w+|"
+    r"proofread\w*)\b"
     r"|\b(?:practic\w+|rehears\w+|prepar\w+|prep)\s+for\b"
 )
 # A request whose OBJECT is feedback/advice/support — not the deliverable. "wants
