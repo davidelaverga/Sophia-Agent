@@ -1502,6 +1502,48 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User wants Sophia to build a deck about Q3"
         ) == "task_history"
 
+    def test_request_verb_must_be_in_intent_not_subject(self):
+        """Codex P2: the request verb must occur in the INTENT, not only the
+        subject. 'User keeps a report about what the client requested in Q3' is a
+        durable existing-artifact fact (the request verb is inside the topic), so
+        it must be kept; 'asked for a report about Hermes' (verb in intent) drops."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User keeps a report about what the client requested in Q3"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User has a deck about what the team wanted for the launch"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User asked for a report about Hermes"
+        ) == "task_history"
+
+    def test_causative_and_want_need_sophia_directed_builds_drop(self):
+        """Codex P2: a Sophia-directed build framed causatively ('wants to have
+        Sophia build a report about OpenClaw', 'get Sophia to build a deck') or
+        with want/need ('wants Sophia to build a report generator for OpenClaw',
+        'needs you to create a PDF tool') must drop — not be kept as own-work or
+        the user's own project."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User wants to have Sophia build a report about OpenClaw"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants to get Sophia to build a deck about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants Sophia to build a report generator for OpenClaw"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User needs you to create a PDF tool for Acme"
+        ) == "task_history"
+        # The user's own project (no Sophia direction) still keeps.
+        assert _candidate_policy_rejection_reason(
+            "User wants to create a report generator for their startup"
+        ) is None
+
     def test_passive_third_party_request_is_preserved(self):
         """Codex P2: a passive third-party request ('User was requested by their
         boss to draft a deck about Q3', 'was asked by HR to …') is a work

@@ -401,12 +401,16 @@ _PROJECT_PRODUCT_COMPOUND_RE = re.compile(
     r"(?:generators?|tools?|apps?|applications?|platforms?|builders?|engines?|software|"
     r"bots?|pipelines?|frameworks?|librar(?:y|ies)|plugins?|extensions?|saas)\b"
 )
-# A request explicitly directed at Sophia ("asked/requested Sophia/me/you/us …",
-# "asked/requested to build/create/…") — used to deny the project/product
-# exemption above (a build Sophia is asked to do is task history, even if the
-# deliverable is a "generator").
+# A request explicitly directed at Sophia: any directing verb (ask/request/want/
+# need/tell/have/get/expect/'d like) aimed at Sophia/me/you/us — including
+# causative delegation ("wants to HAVE Sophia build", "GET Sophia to build") and
+# want/need-phrased ("wants Sophia to build", "needs you to create") — or the bare
+# "asked/requested to <create>". Used to deny the project/product and own-work
+# exemptions (a build Sophia is directed to do is task history, even if the
+# deliverable is a "generator" or framed as the user's intent).
 _SOPHIA_DIRECTED_RE = re.compile(
-    r"\b(?:ask(?:ed|s)|request(?:ed|s))\s+(?:sophia|me|you|us)\b"
+    r"\b(?:ask(?:ed|s)?|request(?:ed|s)?|want(?:ed|s)?|need(?:ed|s)?|tell(?:s|ing)?|told|"
+    r"have|having|had|get(?:s|ting)?|got|expect(?:ed|s|ing)?|'?d\s+like|would\s+like)\s+(?:sophia|me|you|us)\b"
     r"|\b(?:ask(?:ed|s)|request(?:ed|s))\s+(?:" + _REQUEST_TIME_PHRASE + r"\s+)?to\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|assembl|convert|export|render)"
 )
 # An OWN-WORK goal/commitment: the user states THEIR OWN intent to act on a
@@ -1040,6 +1044,13 @@ def _topic_scoped_request_is_build(lowered: str, topic_markers: list) -> bool:
     if intent is None:
         # A subject is present but the deliverable noun is only AFTER it
         # ("wants to focus on the presentation") — not a build request.
+        return False
+    # The request VERB must be in the intent, not only in the subject. The global
+    # gate in _is_deliverable_request accepts a request verb anywhere, so a durable
+    # existing-artifact fact whose SUBJECT happens to mention one ("keeps a report
+    # about what the client REQUESTED in Q3") would otherwise drop — require it in
+    # the intent so only an actual request of the deliverable counts.
+    if not _DELIVERABLE_REQUEST_RE.search(intent):
         return False
     # Scope the non-artifact exemptions to the request INTENT, never the subject:
     # "asked for a deck about practicing for interviews" is a real deck build — the
