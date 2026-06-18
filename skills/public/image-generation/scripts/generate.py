@@ -350,11 +350,15 @@ def _validate_reference_image(image_path: str) -> bool:
 
 
 def _filter_valid_references(reference_images: list[str]) -> list[str]:
-    valid = [p for p in reference_images if _validate_reference_image(p)]
-    if len(valid) < len(reference_images):
-        skipped = len(reference_images) - len(valid)
-        print(f"Note: {skipped} reference image(s) were skipped due to validation failure.", file=sys.stderr)
-    return valid
+    invalid = [p for p in reference_images if not _validate_reference_image(p)]
+    if invalid:
+        names = ", ".join(_trace_reference_name(path) for path in invalid)
+        _fail(
+            "invalid_reference_image",
+            f"Reference image validation failed for {len(invalid)} file(s): {names}",
+            exit_code=2,
+        )
+    return list(reference_images)
 
 
 def _decode_to_file(b64_payload: str, output_file: str) -> None:

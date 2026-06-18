@@ -30,6 +30,15 @@ def _write_png(path: Path) -> None:
     Image.new("RGB", (320, 180), color=(40, 140, 180)).save(path)
 
 
+def _write_minimal_pptx(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types></Types>")
+        archive.writestr("_rels/.rels", "<Relationships></Relationships>")
+        archive.writestr("ppt/presentation.xml", "<p:presentation></p:presentation>")
+        archive.writestr("ppt/slides/slide1.xml", "x" * 2048)
+
+
 def test_image_generation_bash_result_records_output_bytes(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
@@ -162,6 +171,51 @@ def test_pptx_generation_bash_result_records_plan_and_slide_count(tmp_path: Path
     assert delta["pptx_plan_slide_count"] == 2
     assert delta["pptx_plan_image_ref_count"] == 1
     assert delta["pptx_plan_json"] == plan
+
+
+def test_chained_pptx_generation_uses_ppt_generator_output_flag(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    outputs = tmp_path / "outputs"
+    workspace.mkdir()
+    outputs.mkdir()
+    slide = outputs / "slide-01.png"
+    slide.write_bytes(b"png-bytes")
+    deck = outputs / "deck.pptx"
+    _write_minimal_pptx(deck)
+    plan_file = workspace / "plan.json"
+    plan_file.write_text(json.dumps({"slides": [{"title": "One", "image_path": str(slide)}]}), encoding="utf-8")
+    request = SimpleNamespace(
+        state={"thread_data": {"workspace_path": str(workspace), "outputs_path": str(outputs)}},
+        tool_call={
+            "name": "bash",
+            "args": {
+                "command": (
+                    "python /mnt/skills/public/image-generation/scripts/generate.py "
+                    "--prompt-file /mnt/user-data/workspace/slide-01.json "
+                    "--output-file /mnt/user-data/outputs/slide-01.png && "
+                    "python /mnt/skills/public/ppt-generation/scripts/generate.py "
+                    "--plan-file /mnt/user-data/workspace/plan.json "
+                    "--slide-images /mnt/user-data/outputs/slide-01.png "
+                    "--output-file /mnt/user-data/outputs/deck.pptx"
+                )
+            },
+        },
+    )
+
+    delta = BuilderArtifactMiddleware._pptx_bash_result_delta(
+        request,
+        _tool_message("Successfully generated image\nSuccessfully generated presentation with 1 slides (picture_count=1)"),
+    )
+
+    assert delta["image_generation_success_count"] == 1
+    assert delta["image_output_paths"] == ["/mnt/user-data/outputs/slide-01.png"]
+    assert delta["pptx_generator_success_count"] == 1
+    assert delta["pptx_generator_error_class"] is None
+    assert delta["pptx_generator_bytes_total"] == deck.stat().st_size
+    assert delta["pptx_output_paths"] == ["/mnt/user-data/outputs/deck.pptx"]
+    assert delta["pptx_generator_slide_count"] == 1
+    assert delta["pptx_generator_picture_count"] == 1
+    assert delta["pptx_plan_slide_count"] == 1
 
 
 def test_pptx_diagnostic_merge_keeps_latest_absolute_deck_counts() -> None:

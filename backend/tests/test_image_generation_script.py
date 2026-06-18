@@ -294,6 +294,35 @@ class TestEditPathWithReferenceImages:
         assert isinstance(kwargs["image"], list)
         assert len(kwargs["image"]) == 2
 
+    def test_invalid_reference_image_exits_before_openai_call(
+        self, script_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+        prompt_file = tmp_path / "prompt.json"
+        prompt_file.write_text("compose this", encoding="utf-8")
+        invalid_ref = tmp_path / "broken.png"
+        invalid_ref.write_text("not an image", encoding="utf-8")
+        output_file = tmp_path / "out.png"
+
+        fake_client = MagicMock()
+        with patch("openai.OpenAI", return_value=fake_client):
+            with pytest.raises(SystemExit) as excinfo:
+                script_module.generate_image(
+                    prompt_file=str(prompt_file),
+                    reference_images=[str(invalid_ref)],
+                    output_file=str(output_file),
+                    aspect_ratio="16:9",
+                )
+
+        assert excinfo.value.code == 2
+        assert not fake_client.images.generate.called
+        assert not fake_client.images.edit.called
+        assert not output_file.exists()
+        stderr = capsys.readouterr().err
+        assert "IMAGEGEN_FAIL reason=invalid_reference_image" in stderr
+        assert "broken.png" in stderr
+
 
 class TestSlideVisualMode:
     def test_slide_visual_generation_size_uses_supported_openai_size(self, script_module) -> None:

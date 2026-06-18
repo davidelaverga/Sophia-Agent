@@ -2122,6 +2122,30 @@ def _command_flag_values(command: str, flag: str) -> list[str]:
     return values
 
 
+def _command_segment_for_marker(command: str, markers: tuple[str, ...]) -> str:
+    parts = _command_parts(command)
+    if not parts:
+        return command
+    marker_index = next(
+        (
+            index
+            for index, part in enumerate(parts)
+            if any(marker in part for marker in markers)
+        ),
+        None,
+    )
+    if marker_index is None:
+        return command
+    separators = {"&&", "||", ";", "|"}
+    start = marker_index
+    while start > 0 and parts[start - 1] not in separators:
+        start -= 1
+    end = marker_index + 1
+    while end < len(parts) and parts[end] not in separators:
+        end += 1
+    return shlex.join(parts[start:end])
+
+
 def _empty_pptx_skill_flags() -> dict[str, Any]:
     return {
         "pptx_skill_read": False,
@@ -6745,11 +6769,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         text: str,
         state: dict[str, Any],
     ) -> dict[str, Any]:
-        output_path = _command_flag_value(command, "--output-file")
+        pptx_command = _command_segment_for_marker(command, _PPTX_GENERATOR_PATH_MARKERS)
+        output_path = _command_flag_value(pptx_command, "--output-file")
         exists, bytes_count, status_reason = _virtual_output_status(state, output_path)
         error_class = _classify_pptx_generation_error(state, output_path, text, exists)
         valid_pptx = error_class is None
-        slide_count = len(_command_flag_values(command, "--slide-images"))
+        slide_count = len(_command_flag_values(pptx_command, "--slide-images"))
         generated_slide_count = _pptx_slide_count_from_text(text)
         picture_count = _pptx_picture_count_from_text(text)
         logger.info(
@@ -6773,7 +6798,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             # Absolute properties of the latest compiled deck; retries replace these counts.
             "pptx_generator_slide_count": generated_slide_count,
             "pptx_generator_picture_count": picture_count,
-            **_pptx_plan_diagnostics_from_command(command, state),
+            **_pptx_plan_diagnostics_from_command(pptx_command, state),
         }
         if output_path and valid_pptx:
             delta["pptx_output_paths"] = [output_path]
