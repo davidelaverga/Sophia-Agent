@@ -1852,6 +1852,66 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User has a chart of the org structure"
         ) is None
 
+    def test_present_tense_directed_verbs_are_task_history(self):
+        """Codex P2: the request gate must cover present-tense directed verbs
+        ('tells/tasks/has Sophia ...') that _SOPHIA_DIRECTED_RE already recognizes,
+        or _is_deliverable_request returns False before the Sophia-direction check
+        runs and the prior build subject survives."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User tells Sophia to build a report about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User tasks Sophia to build a deck about Q3"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User has Sophia make a deck about pricing"
+        ) == "task_history"
+
+    def test_support_word_modifying_deliverable_is_task_history(self):
+        """Codex P2: a support word used as an ADJECTIVE on a deliverable ('a
+        feedback report', 'a critique report') is a one-off report build, not a
+        support request — it must drop. A support word that is the actual request
+        OBJECT ('feedback on their presentation', 'critique on their pitch deck')
+        is still kept."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User wants a feedback report about Q3 performance"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a critique report about the launch"
+        ) == "task_history"
+        # The support word as the true object is still exempt.
+        assert _candidate_policy_rejection_reason(
+            "User wants feedback on their presentation about Q2"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants critique on their pitch deck"
+        ) is None
+
+    def test_deliverable_from_source_material_is_task_history(self):
+        """Codex P2: a singular deliverable built FROM source material ('a PDF from
+        customer feedback', 'a summary from client notes') is a build — the
+        'from <source-material>' phrase is the input Sophia synthesizes. A
+        third-party PRODUCER ('a PDF from the vendor') is still kept."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked for a PDF from customer feedback"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a summary from client notes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants a deck from the survey responses"
+        ) == "task_history"
+        # A third-party producer (a person/org makes it) is kept.
+        assert _candidate_policy_rejection_reason(
+            "User asked for a PDF from the vendor"
+        ) is None
+
     def test_document_of_subject_is_task_history(self):
         """Codex P2: a singular weak DOCUMENT deliverable scoped by 'of <subject>'
         ('an executive summary of Q3 revenue', 'an outline of the proposal') is a

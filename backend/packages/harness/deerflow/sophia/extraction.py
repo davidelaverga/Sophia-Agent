@@ -147,7 +147,7 @@ _DELIVERABLE_REQUEST_RE = re.compile(
     # directed forms at Sophia/me/you/us with non-ask verbs ("told Sophia to build",
     # "had me create", "got Sophia to …") — so the gate doesn't drop them before the
     # Sophia-directed check; ask/request are already covered above.
-    r"|\b(?:told|tasked|got|had|expect(?:ed|s|ing)?|instruct(?:ed|s)?|direct(?:ed|s)?)\s+(?:sophia|me|you|us)\b"
+    r"|\b(?:told|tells|tasked|tasks|got|gets|had|has|expect(?:ed|s|ing)?|instruct(?:ed|s)?|direct(?:ed|s)?)\s+(?:sophia|me|you|us)\b"
 )
 _DELIVERABLE_NOUNS = (
     "presentation", "report", "deck", "slide", "document", "pdf",
@@ -309,12 +309,15 @@ _SINGULAR_DELIVERABLE_FOR_RE = re.compile(
     + "|" + _WEB_DELIVERABLE_FRAGMENT + "|" + _PPTX_DELIVERABLE_FRAGMENT + r")s?\s+for\s+\w"
 )
 # A build-VISUAL deliverable scoped by "of <subject>" ("chart OF Q2 revenue",
-# "diagram OF the architecture") — "of" introduces the data the visual depicts, so
-# it is a build. Limited to the unambiguous build-visuals; "image" is excluded
-# because "image of my cat" is usually an existing photo, not a generated visual.
+# "diagram OF the architecture", "timeline OF milestones", "matrix OF features") —
+# "of" introduces the data the visual depicts, so it is a build. Covers the same
+# visual markers BuilderTaskMiddleware._VISUAL_REQUEST_MARKERS dispatches on;
+# "image" is excluded because "image of my cat" is usually an existing photo, not a
+# generated visual.
 _VISUAL_OF_RE = re.compile(
     r"\b(?:charts?|diagrams?|graphs?|infographics?|flowcharts?|illustrations?|"
-    r"mockups?|wireframes?)\s+of\s+\w"
+    r"mockups?|wireframes?|timelines?|maps?|matrix|matrices|quadrants?|"
+    r"visualizations?|visualisations?)\s+of\s+\w"
 )
 # A weak DOCUMENT deliverable scoped by "of <subject>" ("a summary OF Q3 revenue",
 # "an outline OF the proposal") is a one-off build — the builder treats summary as a
@@ -411,6 +414,18 @@ _THIRD_PARTY_REQUEST_RE = re.compile(
     rf"|\b(?:asked|requested|told|tasked|assigned|instructed|directed)\s+by\s+"
     rf"(?:(?:the|their|a|an|our|my|your|his|her|its)\s+)?(?:{_THIRD_PARTY})\b"
 )
+# A singular deliverable built FROM source material ("a PDF FROM customer feedback",
+# "a summary FROM client notes", "a deck FROM the survey responses") is a build —
+# the "from <source-material>" phrase is the input Sophia synthesizes into the
+# artifact. Distinct from a third-party PRODUCER ("a PDF from the vendor"), which
+# _THIRD_PARTY_REQUEST_RE keeps: _SOURCE_MATERIAL_NOUNS names inputs, not people, and
+# this build signal is only consulted AFTER the third-party exemption.
+_DELIVERABLE_FROM_SOURCE_RE = re.compile(
+    r"\ban?\s+(?:[\w-]+\s+){0,3}?(?:"
+    + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
+    + "|" + _WEB_DELIVERABLE_FRAGMENT + "|" + _PPTX_DELIVERABLE_FRAGMENT
+    + r")s?\s+from\s+(?:[\w'-]+\s+){0,3}?(?:" + _SOURCE_MATERIAL_NOUNS + r")\b"
+)
 # The deliverable WORD is not a requested artifact when it is used as a VERB
 # ("wants to report on harassment", "to document the abuse", "to brief them") —
 # report/document/brief double as verbs — so a request verb + "report on X" /
@@ -448,12 +463,16 @@ _HELP_OR_PRACTICE_RE = re.compile(
 # A request whose OBJECT is feedback/advice/support — not the deliverable. "wants
 # feedback on their presentation", "needs support after reading a report" — the
 # user wants input/support about an existing artifact, not for Sophia to build it.
+# The trailing negative lookahead ensures the support word is the actual request
+# OBJECT, not an ADJECTIVE on a deliverable noun: "wants a feedback report",
+# "asked for a critique report" are one-off report builds and must still drop.
 _SUPPORT_REQUEST_RE = re.compile(
     r"\b(?:want(?:ed|s)?|need(?:ed|s)?|ask(?:ed|s)|request(?:ed|s)|look(?:ing|ed|s)?|"
     r"get(?:ting|s)?|seek(?:ing|s)?|'?d\s+like|would\s+like|hop(?:e|es|ed|ing))\s+"
     r"(?:for\s+|some\s+|more\s+|[\w']+\s+){0,2}?"
     r"(?:feedback|advice|input|thoughts?|opinions?|guidance|support|critique|"
     r"reassurance|encouragement|validation|perspective|pointers?|tips?)\b"
+    r"(?!\s+(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS) + r")s?\b)"
 )
 # A STRONG noun inside a common NON-DELIVERABLE compound is not a build target:
 # a school "report card", a playing-card "deck of cards" / "card deck", a "deck
@@ -1234,9 +1253,14 @@ def _subjectless_request_is_build(lowered: str) -> bool:
     # which read as existing-artifact retrieval, do not match.)
     if _SINGULAR_DELIVERABLE_FOR_RE.search(lowered):
         return True
-    # A build-visual ("chart of Q2 revenue") or a singular weak document deliverable
-    # ("a summary of Q3 revenue") scoped by "of <subject>" is a build.
-    return bool(_VISUAL_OF_RE.search(lowered) or _DOCUMENT_OF_RE.search(lowered))
+    # A build-visual ("chart of Q2 revenue"), a singular weak document deliverable
+    # scoped by "of <subject>" ("a summary of Q3 revenue"), or a deliverable built
+    # "from <source material>" ("a PDF from customer feedback") is a build.
+    return bool(
+        _VISUAL_OF_RE.search(lowered)
+        or _DOCUMENT_OF_RE.search(lowered)
+        or _DELIVERABLE_FROM_SOURCE_RE.search(lowered)
+    )
 
 
 def _is_delivery_preference(lowered: str) -> bool:
