@@ -199,7 +199,7 @@ _WEB_DELIVERABLE_FRAGMENT = (
 # point" as a presentation build, so a legacy "user asked for a PowerPoint about
 # X" memory must drop as task_history too. STRONG deliverables. ("slide deck" /
 # "slides" are already covered by the "slide"/"deck" nouns.)
-_PPTX_DELIVERABLE_FRAGMENT = r"powerpoints?|pptx|power\s*points?"
+_PPTX_DELIVERABLE_FRAGMENT = r"powerpoints?|pptx|power\s*points?|slide\s+decks?"
 # A deliverable word that MODIFIES a skill/activity ("presentation coaching",
 # "presentation practice", "report-writing skills") is not the requested
 # deliverable — it names a goal/context. This negative lookahead keeps the noun

@@ -941,6 +941,13 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         assert _candidate_policy_rejection_reason(
             "User requested reports about Hermes"
         ) == "task_history"
+        # "slide deck" is a multi-word PPTX target — singular and plural drop.
+        assert _candidate_policy_rejection_reason(
+            "User requested slide decks about Q3"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants a slide deck about pricing"
+        ) == "task_history"
         assert _candidate_policy_rejection_reason(
             "User logs feature requests about the product"
         ) is None
