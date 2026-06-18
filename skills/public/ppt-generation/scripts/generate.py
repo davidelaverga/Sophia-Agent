@@ -18,7 +18,7 @@ from pptx.util import Inches, Pt
 
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 
-_IMAGE_DEPENDENT_LAYOUTS = {"full_bleed_image", "content_image"}
+_IMAGE_DEPENDENT_LAYOUTS = {"image_forward", "full_bleed_image", "content_image"}
 
 
 def _pptxgenjs_enabled() -> bool:
@@ -128,7 +128,7 @@ def generate_ppt(
                 file=sys.stderr,
             )
             image_path = None
-        layout_name = resolve_layout(slide_info, image_path)
+        layout_name = resolve_layout(slide_info, image_path, cli_image=image_from_cli)
         if image_path is None and layout_name in _IMAGE_DEPENDENT_LAYOUTS:
             # Explicit image layout without a usable image: re-resolve as if
             # no layout was requested. Title-typed slides keep the title
@@ -248,7 +248,26 @@ def slide_theme(plan: dict) -> dict:
     return THEMES.get(key, THEMES["daylight"])
 
 
-def resolve_layout(slide_info: dict, image_path: str | None) -> str:
+def _text_ref(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _image_forward_ref(slide_info: dict) -> str | None:
+    image_path = _text_ref(slide_info.get("image_path"))
+    if image_path:
+        return image_path
+    image = _text_ref(slide_info.get("image"))
+    if image and str(slide_info.get("layout") or "").strip().lower() == "full_bleed_image":
+        return image
+    return None
+
+
+def resolve_layout(slide_info: dict, image_path: str | None, *, cli_image: bool = False) -> str:
+    if image_path and (cli_image or _image_forward_ref(slide_info)):
+        return "image_forward"
     explicit = str(slide_info.get("layout") or "").strip().lower()
     if explicit in LAYOUT_DISPATCH:
         return explicit
@@ -460,6 +479,10 @@ def add_full_bleed_image_slide(slide, slide_info: dict, plan: dict, image_path: 
     # Picture first so the overlay band sits above it in z-order.
     add_full_bleed_picture(slide, image_path, slide_width, slide_height)
     add_overlay_band(slide, theme, slide_width, slide_height, str(slide_info.get("title") or ""), str(slide_info.get("subtitle") or ""))
+
+
+def add_image_forward_slide(slide, slide_info: dict, plan: dict, image_path: str, slide_width, slide_height) -> None:
+    add_full_bleed_picture(slide, image_path, slide_width, slide_height)
 
 
 def add_section_divider_slide(slide, slide_info: dict, plan: dict, image_path: str | None, slide_width, slide_height) -> None:
@@ -675,6 +698,7 @@ LAYOUT_DISPATCH = {
     "title": add_title_slide,
     "content_text": add_text_layout_slide,
     "content_image": add_content_with_image_slide,
+    "image_forward": add_image_forward_slide,
     "full_bleed_image": add_full_bleed_image_slide,
     "section_divider": add_section_divider_slide,
     "quote": add_quote_slide,
@@ -684,18 +708,19 @@ LAYOUT_DISPATCH = {
 }
 
 
-_VISUAL_ANCHOR_LAYOUTS = {"full_bleed_image", "content_image", "section_divider", "quote", "stat_band"}
+_VISUAL_ANCHOR_LAYOUTS = {"image_forward", "full_bleed_image", "content_image", "section_divider", "quote", "stat_band"}
 
 
 def _has_image_ref(slide_info: dict) -> bool:
-    raw = slide_info.get("image") or slide_info.get("chart_path") or slide_info.get("visual_path")
-    return isinstance(raw, str) and bool(raw.strip())
+    return any(_text_ref(slide_info.get(key)) for key in ("image", "chart_path", "visual_path"))
 
 
 def _lint_resolved_layout(slide_info: dict) -> str:
     # Silent mirror of resolve_layout (no stderr) using the raw image ref as the
     # image signal — lint runs before any on-disk existence checks.
     explicit = str(slide_info.get("layout") or "").strip().lower()
+    if _image_forward_ref(slide_info):
+        return "image_forward"
     if explicit in LAYOUT_DISPATCH:
         return explicit
     if str(slide_info.get("type") or "").lower() == "title":

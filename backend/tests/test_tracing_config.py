@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from deerflow.config import tracing_config as tracing_module
 
 
@@ -69,3 +71,11 @@ def test_defaults_when_project_not_set(monkeypatch):
     cfg = tracing_module.get_tracing_config()
 
     assert cfg.project == "deer-flow"
+
+
+def test_compose_allows_env_file_to_disable_langsmith_tracing() -> None:
+    compose = Path(__file__).resolve().parents[2] / "docker/docker-compose.yaml"
+    text = compose.read_text(encoding="utf-8")
+
+    assert "- LANGSMITH_TRACING=" not in text
+    assert "LANGSMITH_TRACING and LANGSMITH_API_KEY are read from ../.env" in text

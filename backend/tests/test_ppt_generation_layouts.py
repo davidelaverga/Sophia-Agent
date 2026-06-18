@@ -29,6 +29,7 @@ _ALL_LAYOUTS = {
     "title",
     "content_text",
     "content_image",
+    "image_forward",
     "full_bleed_image",
     "section_divider",
     "quote",
@@ -93,6 +94,15 @@ class TestResolveLayout:
 
     def test_image_resolves_content_image(self) -> None:
         assert gen.resolve_layout({"title": "Chart"}, "/tmp/chart.png") == "content_image"
+
+    def test_image_path_resolves_image_forward(self) -> None:
+        assert gen.resolve_layout({"title": "Generated", "image_path": "/tmp/slide.png"}, "/tmp/slide.png") == "image_forward"
+
+    def test_cli_image_resolves_image_forward(self) -> None:
+        assert gen.resolve_layout({"title": "Generated"}, "/tmp/slide.png", cli_image=True) == "image_forward"
+
+    def test_visual_path_resolves_content_image(self) -> None:
+        assert gen.resolve_layout({"title": "Chart", "visual_path": "/tmp/chart.png"}, "/tmp/chart.png") == "content_image"
 
     def test_no_image_resolves_content_text(self) -> None:
         assert gen.resolve_layout({"title": "Plain"}, None) == "content_text"
@@ -351,7 +361,7 @@ class TestGeneratePptLayouts:
         # Legacy dark styles keep resolving to a dark theme.
         assert gen.slide_theme(plan) is gen.THEMES["boardroom"]
 
-    def test_slide_images_are_composed_with_editable_text_not_image_album(self, tmp_path: Path) -> None:
+    def test_slide_images_are_rendered_image_forward_without_text_overlay(self, tmp_path: Path) -> None:
         hero = _write_png(tmp_path / "hero.png")
         plan = {
             "title": "Open Claw",
@@ -379,11 +389,31 @@ class TestGeneratePptLayouts:
 
         assert message == "Successfully generated presentation with 2 slides (picture_count=2)"
         prs = Presentation(str(output))
-        assert "Open Claw Assistant" in _slide_texts(prs.slides[0])
-        assert "Runtime Loop" in _slide_texts(prs.slides[1])
-        body_text = " ".join(_slide_texts(prs.slides[1]))
-        assert "Observe" in body_text
-        assert "Verify" in body_text
+        assert _slide_texts(prs.slides[0]) == []
+        assert _slide_texts(prs.slides[1]) == []
+
+    def test_image_path_is_rendered_image_forward_without_text_overlay(self, tmp_path: Path) -> None:
+        hero = _write_png(tmp_path / "slide.png")
+        plan = {
+            "title": "Image Forward",
+            "slides": [
+                {
+                    "slide_number": 1,
+                    "title": "Generated full-slide",
+                    "key_points": ["Already rendered inside the image"],
+                    "image_path": str(hero),
+                }
+            ],
+        }
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(json.dumps(plan), encoding="utf-8")
+        output = tmp_path / "deck.pptx"
+
+        message = gen.generate_ppt(str(plan_file), [], str(output))
+
+        assert message == "Successfully generated presentation with 1 slides (picture_count=1)"
+        prs = Presentation(str(output))
+        assert _slide_texts(prs.slides[0]) == []
 
     def test_design_language_deck_terra_and_noir(self, tmp_path: Path) -> None:
         png = _write_png(tmp_path / "visuals" / "chart.png")
