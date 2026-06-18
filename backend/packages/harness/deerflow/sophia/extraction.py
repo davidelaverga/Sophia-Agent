@@ -101,15 +101,18 @@ _REQUEST_TIME_PHRASE = (
     r"|\d+\s+(?:days?|weeks?|months?|hours?)\s+ago)"
 )
 # "asked [recipient] if/whether <subject> could/can [be] <create>" — an indirect
-# build request. An optional recipient ("asked ME if I could make…", "asked YOU
-# whether we could build…") may sit between the verb and "if/whether". The optional
-# "be/get" covers PASSIVE phrasing where the modal is not immediately followed by
-# the creation verb ("asked whether a report could BE created", "… can BE made").
-# Defined standalone so the topic-scoped resolver can recognize this whole-string
-# pattern even after the topic split strips the trailing modal+verb out of the
-# request intent.
+# build request. An optional recipient may sit between the verb and "if/whether",
+# but ONLY the assistant (sophia|me|you|us) — "asked ME if I could make…", "asked
+# YOU whether we could build…". Third-party pronoun recipients (him|her|them) are
+# deliberately excluded: "User asked THEM if they could make a deck" is work
+# delegated to other people, a durable relationship/delegation fact to KEEP, and
+# _THIRD_PARTY_REQUEST_RE does not cover bare pronouns. The optional "be/get" covers
+# PASSIVE phrasing where the modal is not immediately followed by the creation verb
+# ("asked whether a report could BE created", "… can BE made"). Defined standalone
+# so the topic-scoped resolver can recognize this whole-string pattern even after
+# the topic split strips the trailing modal+verb out of the request intent.
 _ASKED_IF_BUILD_RE = re.compile(
-    r"\bask(?:ed|s)\s+(?:(?:sophia|me|you|us|him|her|them)\s+)?(?:if|whether)\b"
+    r"\bask(?:ed|s)\s+(?:(?:sophia|me|you|us)\s+)?(?:if|whether)\b"
     r"[^.?!]{0,40}?\b(?:could|can|would|will)\s+"
     r"(?:be\s+|get\s+)?(?:creat|buil[dt]|mak|made|draft|generat|design|produc|"
     r"prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|"

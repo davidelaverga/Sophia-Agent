@@ -2380,6 +2380,17 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         assert _candidate_policy_rejection_reason(
             "User asked Sophia whether she could draft a summary about the merger"
         ) == "task_history"
+        # Third-party pronoun recipients (him/her/them) are work delegated to OTHER
+        # people — a durable delegation fact, not a build request to Sophia — kept.
+        assert _candidate_policy_rejection_reason(
+            "User asked them if they could make a deck about OpenClaw"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User asked him whether he could build a report about Q3"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User asked her if she could create a presentation about pricing"
+        ) is None
         # An asked-if WITHOUT a build verb is a status/approval question — kept.
         assert _candidate_policy_rejection_reason(
             "User asked if the report about Hermes is ready"
