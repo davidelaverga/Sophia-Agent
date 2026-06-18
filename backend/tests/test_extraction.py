@@ -2147,9 +2147,24 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         assert _candidate_policy_rejection_reason(
             "User wants a deck from the team about sales"
         ) is None
+        # External producers (vendor/supplier/contractor/agency/consultant/...) are
+        # recognized parties too, so a STRONG-noun deliverable from them is kept.
+        assert _candidate_policy_rejection_reason(
+            "User asked for a report from the vendor"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants a report from the contractor"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User asked for a report from the consultant about Q3"
+        ) is None
         # A direct build (third party is data source, not producer) still drops.
         assert _candidate_policy_rejection_reason(
             "User asked Sophia to build a report from scratch about Hermes"
+        ) == "task_history"
+        # 'vendor' as a topic word (not a producer) still drops.
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to build a report about vendor management"
         ) == "task_history"
 
     def test_from_party_source_material_is_not_a_producer(self):

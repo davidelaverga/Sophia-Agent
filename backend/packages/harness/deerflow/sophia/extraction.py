@@ -379,7 +379,10 @@ _STRONG_DELIVERABLE_NOUN_RE = re.compile(
 # Sophia / me / you are NOT third parties, so genuine user→Sophia requests match.
 _THIRD_PARTY = (
     r"boss|manager|supervisor|colleague|co-?worker|client|customer|teammate|"
-    r"recruiter|director|investor|stakeholder|ceo|cto|cfo|hr|team|lead"
+    r"recruiter|director|investor|stakeholder|ceo|cto|cfo|hr|team|lead|"
+    # External producers — "a report FROM the vendor/supplier/contractor" is a
+    # deliverable the third party makes, not a build of Sophia, so it is kept.
+    r"vendor|supplier|contractor|agency|freelancer|consultant|partner"
 )
 # Content/source-material nouns. In "from <party>", a party (esp. client/customer)
 # immediately followed by one of these is a SOURCE the deliverable is built FROM
