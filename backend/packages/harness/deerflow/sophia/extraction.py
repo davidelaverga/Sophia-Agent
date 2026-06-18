@@ -100,6 +100,18 @@ _REQUEST_TIME_PHRASE = (
     r"|(?:a\s+)?(?:while|moment|day|week|month)s?\s+ago"
     r"|\d+\s+(?:days?|weeks?|months?|hours?)\s+ago)"
 )
+# "asked if/whether <assistant> could/can [be] <create>" — an indirect build
+# request. The optional "be/get" covers PASSIVE phrasing where the modal is not
+# immediately followed by the creation verb ("asked whether a report could BE
+# created", "asked whether a deck can BE made"). Defined standalone so the
+# topic-scoped resolver can recognize this whole-string pattern even after the
+# topic split strips the trailing modal+verb out of the request intent.
+_ASKED_IF_BUILD_RE = re.compile(
+    r"\bask(?:ed|s)\s+(?:if|whether)\b[^.?!]{0,40}?\b(?:could|can|would|will)\s+"
+    r"(?:be\s+|get\s+)?(?:creat|buil[dt]|mak|made|draft|generat|design|produc|"
+    r"prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|"
+    r"assembl|convert|export|render)"
+)
 _DELIVERABLE_REQUEST_RE = re.compile(
     # "requested/requests" only as a VERB governing a deliverable (followed by a
     # determiner/number/possessive, "to", or "creation of") — NOT the plural noun
@@ -118,9 +130,10 @@ _DELIVERABLE_REQUEST_RE = re.compile(
     # bare "asked to <create>" — gated on a creation stem so "asked to see/review"
     # an existing artifact is NOT a build request. Optional time phrase: "asked on Monday to build"
     r"|\bask(?:ed|s)\s+(?:" + _REQUEST_TIME_PHRASE + r"\s+)?to\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|assembl|convert|export|render)"
-    # "asked if/whether <assistant> could/can <create>" — an indirect build request.
-    r"|\bask(?:ed|s)\s+(?:if|whether)\b[^.?!]{0,40}?\b(?:could|can|would|will)\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|assembl|convert|export|render)"
-    r"|\bwant(?:ed|s)?\b"
+    # "asked if/whether <assistant> could/can [be] <create>" — indirect/passive build
+    # request (see _ASKED_IF_BUILD_RE).
+    + r"|" + _ASKED_IF_BUILD_RE.pattern
+    + r"|\bwant(?:ed|s)?\b"
     r"|\bneed(?:ed|s)?\b"
     # polite request forms: "would like a report", "user'd like a deck", "would love"
     r"|\bwould\s+(?:like|love)\b"
@@ -147,6 +160,12 @@ _DELIVERABLE_NOUNS = (
     # generate_excalidraw_diagram; companion_provider_fallback treats them as build
     # intent). Weak — "an image of my cat" could be an existing photo.
     "chart", "image", "diagram", "graph", "illustration", "mockup", "wireframe", "flowchart",
+    # Remaining builder visual-request markers
+    # (BuilderTaskMiddleware._VISUAL_REQUEST_MARKERS) not already named above. Weak —
+    # "a timeline of events", "a map of the area", "the org matrix", "a quadrant
+    # chart" are ordinary nouns, so they drop only when topic-scoped ("a timeline
+    # about X") or with a create cue; bare/ordinary uses are kept.
+    "timeline", "map", "matrix", "quadrant", "visual", "visualization", "visualisation",
     # Format/extension deliverables the dispatch recognizes
     # (start_builder_task._REQUESTED_OUTPUT_EXTENSION_PATTERNS): csv/json/markdown/
     # docx/xlsx/excel. Weak. (Bare "md" is omitted — too ambiguous: doctor/state.)
@@ -1096,7 +1115,10 @@ def _topic_scoped_request_is_build(lowered: str, topic_markers: list) -> bool:
     # existing-artifact fact whose SUBJECT happens to mention one ("keeps a report
     # about what the client REQUESTED in Q3") would otherwise drop — require it in
     # the intent so only an actual request of the deliverable counts.
-    if not _DELIVERABLE_REQUEST_RE.search(intent):
+    # Exception: an indirect/passive "asked whether <deliverable> about X could be
+    # created" carries the modal+verb AFTER the topic, so it never survives the
+    # split into the intent — recognize that whole-string pattern explicitly.
+    if not _DELIVERABLE_REQUEST_RE.search(intent) and not _ASKED_IF_BUILD_RE.search(lowered):
         return False
     # Scope the non-artifact exemptions to the request INTENT, never the subject:
     # "asked for a deck about practicing for interviews" is a real deck build — the

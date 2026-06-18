@@ -2271,6 +2271,65 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User wanted me to make reports the way they prefer"
         ) is None
 
+    def test_builder_visual_request_markers_are_deliverable_nouns(self):
+        """Codex P2: visual-request markers the builder dispatches on
+        (BuilderTaskMiddleware._VISUAL_REQUEST_MARKERS) — timeline/map/matrix/
+        quadrant/visual/visualization — must count as deliverable nouns so a
+        legacy 'asked Sophia to make a timeline about X' memory drops as
+        task_history instead of contaminating a new subject.
+        """
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to create a timeline about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a matrix about the competitive options"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User requested a quadrant about the portfolio"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a visualization about the funnel"
+        ) == "task_history"
+        # Ordinary, non-request uses of these weak nouns are preserved.
+        assert _candidate_policy_rejection_reason(
+            "User keeps a timeline of the family's history"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User showed me a map of the hiking trail"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User is in the upper-right quadrant of the chart"
+        ) is None
+
+    def test_passive_asked_if_build_request_is_task_history(self):
+        """Codex P2: the asked-if/whether arm matched only a modal IMMEDIATELY
+        followed by a creation verb, so passive phrasing where the verb trails a
+        'be'/'get' ('asked whether a report could BE created', '... can BE made')
+        slipped through. The arm now tolerates the passive auxiliary, and the
+        topic-scoped resolver recognizes the whole-string pattern even when the
+        topic split strips the trailing modal+verb out of the request intent.
+        """
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked whether a report about Hermes could be created"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked whether a deck can be made about Q3"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked if a summary could be generated about the merger"
+        ) == "task_history"
+        # An asked-if WITHOUT a build verb is a status/approval question — kept.
+        assert _candidate_policy_rejection_reason(
+            "User asked if the report about Hermes is ready"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User asked whether the deck about Q3 was approved"
+        ) is None
+
 
 class TestTaskHistoryLLMClassifier:
     """The Haiku task-history classifier and its integration into the filter."""
