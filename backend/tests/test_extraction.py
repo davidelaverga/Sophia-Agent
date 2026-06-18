@@ -1519,6 +1519,41 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User wants to create a report generator for their startup"
         ) is None
 
+    def test_format_extension_deliverables_csv_json_markdown(self):
+        """Codex P2: format/extension deliverables the dispatch recognizes
+        (csv/json/markdown/docx/xlsx/excel) are weak nouns — drop topic-scoped or
+        create-cued."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to create a CSV about OpenClaw"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a JSON about the config"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to write a markdown about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a docx about Q3"
+        ) == "task_history"
+
+    def test_client_requirements_specs_are_source_material(self):
+        """Codex P2: 'from client requirements/specs/briefs' is source material the
+        deliverable is built FROM, not a third-party producer — those must drop."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to build a report from client requirements about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to create a report from the client's specs about Q3"
+        ) == "task_history"
+        # Genuine producer still kept.
+        assert _candidate_policy_rejection_reason(
+            "User asked for a report from their manager about Q3"
+        ) is None
+
     def test_visual_deliverables_chart_image_diagram(self):
         """Codex P2: visual deliverables the builder produces (chart, image,
         diagram, graph, …) are weak deliverable nouns — drop topic-scoped or

@@ -134,6 +134,10 @@ _DELIVERABLE_NOUNS = (
     # generate_excalidraw_diagram; companion_provider_fallback treats them as build
     # intent). Weak — "an image of my cat" could be an existing photo.
     "chart", "image", "diagram", "graph", "illustration", "mockup", "wireframe", "flowchart",
+    # Format/extension deliverables the dispatch recognizes
+    # (start_builder_task._REQUESTED_OUTPUT_EXTENSION_PATTERNS): csv/json/markdown/
+    # docx/xlsx/excel. Weak. (Bare "md" is omitted — too ambiguous: doctor/state.)
+    "csv", "json", "markdown", "docx", "xlsx", "excel",
 )
 # Frontend / web deliverables. The frontend dispatch path
 # (``start_builder_task._HTML_OUTPUT_RE``) treats these bare nouns as build
@@ -314,7 +318,8 @@ _THIRD_PARTY = (
 _SOURCE_MATERIAL_NOUNS = (
     r"feedback|notes?|data|materials?|info(?:rmation)?|input|research|insights?|"
     r"comments?|reviews?|surveys?|tickets?|complaints?|interviews?|transcripts?|"
-    r"records?|logs?|metrics?|analytics|emails?|messages?|docs?|files?"
+    r"records?|logs?|metrics?|analytics|emails?|messages?|docs?|files?|"
+    r"requirements?|specs?|specifications?|guidelines?|criteria|instructions?|briefs?|requests?"
 )
 _THIRD_PARTY_REQUEST_RE = re.compile(
     # (1) third party is the asker: "boss asked", "manager requested"
