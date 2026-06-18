@@ -1617,6 +1617,35 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked for a report from their manager about Q3"
         ) is None
 
+    def test_directed_verbs_in_request_gate(self):
+        """Codex P2: the request gate must accept non-ask directed verbs (told/
+        had/got/expects … Sophia/me/you/us), else 'User told Sophia to build a
+        report about OpenClaw' never reaches the Sophia-directed/deliverable
+        checks and is kept."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User told Sophia to build a report about OpenClaw"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User had me create a deck about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User got Sophia to build a report generator for OpenClaw"
+        ) == "task_history"
+
+    def test_outline_file_canvas_deliverable_nouns(self):
+        """Codex P2: outline/file/canvas are companion build-intent artifacts —
+        weak deliverable nouns that drop topic-scoped or create-cued."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to create an outline about OpenClaw"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a file about Q3 metrics"
+        ) == "task_history"
+
     def test_visual_of_subject_is_task_history(self):
         """Codex P2: a build-visual scoped by 'of <subject>' ('chart of Q2
         revenue', 'diagram of the architecture') is a build — 'of' introduces the

@@ -157,7 +157,7 @@ class TestRetrievalAsync:
         # preferences + facts + relationships); prior task-history is removed by
         # the content filter, not by excluding whole categories. See
         # fix/builder-memory-contamination + codex review on PR #137.
-        assert captured["calls"][0]["categories"] == ["preference", "fact", "relationship", "decision", "commitment", "lesson"]
+        assert captured["calls"][0]["categories"] is None  # all categories; task-history filtered by content
         # Over-fetch a pool (Mem0 filters categories after the score-ranked
         # fetch) rather than asking for only top_k. See codex review on PR #137.
         assert captured["calls"][0]["limit"] == _BUILDER_SEARCH_POOL
@@ -199,7 +199,7 @@ class TestRetrievalAsync:
                 {"id": "m1", "content": "User requested creation of a deck about X", "category": ""},
                 {"id": "m2", "content": "User asked Sophia to build a report on Y", "category": "fact"},
                 {"id": "m3", "content": "Prefers concise summaries", "category": "preference"},
-                {"id": "m4", "content": "Legacy row with no category key at all"},
+                {"id": "m4", "content": "User asked Sophia to build a PDF about Z"},  # category-less task-history -> dropped by content
                 {"id": "m5", "content": "User's daughter is named Lucy", "category": "fact"},
                 {"id": "m6", "content": "User's co-founder is Jorge", "category": "relationship"},
                 {"id": "m7", "content": "Decided to delay the launch by two weeks", "category": "decision"},
@@ -219,7 +219,7 @@ class TestRetrievalAsync:
             "Decided to delay the launch by two weeks",
         ]
         assert result["injected_memories"] == ["m3", "m5", "m6", "m7"]
-        assert captured["calls"][0]["categories"] == ["preference", "fact", "relationship", "decision", "commitment", "lesson"]
+        assert captured["calls"][0]["categories"] is None  # all categories; task-history filtered by content
 
     @pytest.mark.anyio
     async def test_no_user_id_skips(self, monkeypatch: pytest.MonkeyPatch) -> None:

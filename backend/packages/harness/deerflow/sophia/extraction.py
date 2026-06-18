@@ -116,6 +116,10 @@ _DELIVERABLE_REQUEST_RE = re.compile(
     # polite request forms: "would like a report", "user'd like a deck", "would love"
     r"|\bwould\s+(?:like|love)\b"
     r"|\b'?d\s+(?:like|love)\b"
+    # directed forms at Sophia/me/you/us with non-ask verbs ("told Sophia to build",
+    # "had me create", "got Sophia to …") — so the gate doesn't drop them before the
+    # Sophia-directed check; ask/request are already covered above.
+    r"|\b(?:told|tasked|got|had|expect(?:ed|s|ing)?|instruct(?:ed|s)?|direct(?:ed|s)?)\s+(?:sophia|me|you|us)\b"
 )
 _DELIVERABLE_NOUNS = (
     "presentation", "report", "deck", "slide", "document", "pdf",
@@ -138,6 +142,8 @@ _DELIVERABLE_NOUNS = (
     # (start_builder_task._REQUESTED_OUTPUT_EXTENSION_PATTERNS): csv/json/markdown/
     # docx/xlsx/excel. Weak. (Bare "md" is omitted — too ambiguous: doctor/state.)
     "csv", "json", "markdown", "docx", "xlsx", "excel",
+    # Document aliases the companion build-intent path treats as artifacts. Weak.
+    "outline", "file", "canvas",
 )
 # Frontend / web deliverables. The frontend dispatch path
 # (``start_builder_task._HTML_OUTPUT_RE``) treats these bare nouns as build

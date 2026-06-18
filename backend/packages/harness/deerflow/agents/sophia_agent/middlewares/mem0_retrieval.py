@@ -71,20 +71,18 @@ _DEFAULT_TIMEOUT_SECONDS = 2.0
 # multi-paragraph memories that would dominate the prompt.
 _MAX_SNIPPET_CHARS = 600
 
-# Builder retrieval covers the DURABLE build-relevant categories — style
-# preferences, static facts (names/places/roles), relationships (the people a
-# deliverable might be for), and the user's decisions / commitments / lessons
-# (e.g. "decided to delay the launch by two weeks" for a timeline) — and then
-# task-history is filtered by CONTENT, not by excluding whole categories. The
-# original "preference only" rule starved direct Builder-as-Main runs of useful
-# facts/decisions (e.g. "make a card for my daughter" lost the daughter's name);
-# the episodic "user requested creation of X" rows that actually cause the
-# OpenClaw-vs-Hermes contamination are removed by the policy-content filter below
+# Builder retrieval fetches ALL categories (so Mem0's custom/context categories —
+# project, deadline, career, colleague, … — and the standard durable ones reach a
+# direct Builder-as-Main run) and filters task-history by CONTENT, not by an
+# allow-list. The episodic "user requested creation of X" rows that cause the
+# OpenClaw-vs-Hermes contamination are removed by the policy-content filter
 # (``_candidate_policy_rejection_reason``) regardless of which category they were
-# written under. Only the companion-emotional categories (feeling / pattern /
-# ritual_context) are left out as noise for a build brief. See
+# written under, so an allow-list adds no protection and only starves builds of
+# useful durable context (the "preference only" rule lost a daughter's name; the
+# later allow-list still dropped `project`/`decision`/etc.). Only the
+# companion-emotional categories are excluded as noise for a build brief. See
 # fix/builder-memory-contamination + codex review on PR #137.
-_BUILDER_MEMORY_CATEGORIES = ["preference", "fact", "relationship", "decision", "commitment", "lesson"]
+_BUILDER_EXCLUDED_CATEGORIES = frozenset({"feeling", "pattern", "ritual_context"})
 # Mem0 fetches `limit` rows by score and applies the category filter LOCALLY
 # afterwards, so asking for only top_k rows means a brief whose top matches are all
 # task-history would discard every row and surface zero durable memories even when
@@ -196,9 +194,9 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
                     search_memories,
                     user_id,
                     query,
-                    _BUILDER_MEMORY_CATEGORIES,  # durable build-relevant categories; task-history filtered by content below
+                    None,  # all categories — task-history filtered by content below
                     None,  # context_mode — None keeps all
-                    pool,  # over-fetch; trimmed to top_k after the category + content filter
+                    pool,  # over-fetch; trimmed to top_k after the content filter
                 ),
                 timeout=self.timeout_seconds,
             )
@@ -218,12 +216,13 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
             return results
 
         # Two-stage filter at the injection point:
-        #   1. category ∈ the durable build-relevant set (Mem0's own category
-        #      filter admits blank-category rows as wildcards, so re-enforce it).
+        #   1. drop only the companion-emotional NOISE categories (feeling /
+        #      pattern / ritual_context) — everything else (durable + custom
+        #      context categories) is build-relevant.
         #   2. content is NOT task-history / policy-rejected — this is what keeps a
-        #      "user requested creation of X" row (written under any category, incl.
-        #      a blank or mislabeled `fact`) from re-contaminating the brief, while
-        #      letting durable facts/relationships through. Lexical-only, lazy
+        #      "user requested creation of X" row (written under ANY category, incl.
+        #      a blank/mislabeled one) from re-contaminating the brief, while
+        #      letting durable facts/decisions/projects through. Lexical-only, lazy
         #      import (mirrors the companion + start_builder_task read filters).
         # Then keep only the best top_k (score-ordered) for the prompt budget.
         # See fix/builder-memory-contamination + codex review on PR #137.
@@ -233,7 +232,7 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
             _candidate_policy_rejection_reason = None
 
         def _is_durable(entry: dict) -> bool:
-            if entry.get("category") not in _BUILDER_MEMORY_CATEGORIES:
+            if (entry.get("category") or "") in _BUILDER_EXCLUDED_CATEGORIES:
                 return False
             if _candidate_policy_rejection_reason is None:
                 return True
