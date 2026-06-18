@@ -1852,6 +1852,36 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User has a chart of the org structure"
         ) is None
 
+    def test_document_of_subject_is_task_history(self):
+        """Codex P2: a singular weak DOCUMENT deliverable scoped by 'of <subject>'
+        ('an executive summary of Q3 revenue', 'an outline of the proposal') is a
+        one-off build — the builder treats summary as a buildable document type, and
+        'of' introduces the subject. Plural ('summaries of the meetings') or definite
+        ('the summary of the book club') forms read as existing-artifact retrieval
+        and are kept."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User needs an executive summary of Q3 revenue"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a summary of the merger"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants an outline of the proposal"
+        ) == "task_history"
+        # Plural / definite forms read as existing-artifact retrieval — kept.
+        assert _candidate_policy_rejection_reason(
+            "User keeps summaries of all their meetings"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User asked for the summary of the book club"
+        ) is None
+        # A standing preference over summaries is kept.
+        assert _candidate_policy_rejection_reason(
+            "User prefers concise summaries"
+        ) is None
+
     def test_visual_deliverables_chart_image_diagram(self):
         """Codex P2: visual deliverables the builder produces (chart, image,
         diagram, graph, …) are weak deliverable nouns — drop topic-scoped or

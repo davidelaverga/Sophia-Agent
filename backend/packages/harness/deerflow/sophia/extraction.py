@@ -316,6 +316,16 @@ _VISUAL_OF_RE = re.compile(
     r"\b(?:charts?|diagrams?|graphs?|infographics?|flowcharts?|illustrations?|"
     r"mockups?|wireframes?)\s+of\s+\w"
 )
+# A weak DOCUMENT deliverable scoped by "of <subject>" ("a summary OF Q3 revenue",
+# "an outline OF the proposal") is a one-off build — the builder treats summary as a
+# buildable document type, and "of" introduces the subject. Limited to singular,
+# indefinite forms ("a/an … summary of …"): plural ("summaries of the meetings") or
+# definite ("the summary of the book club") read as existing-artifact retrieval and
+# are kept. Only nouns that are themselves in _DELIVERABLE_NOUNS qualify, so the
+# subjectless noun gate is already satisfied when this fires.
+_DOCUMENT_OF_RE = re.compile(
+    r"\ban?\s+(?:[\w-]+\s+){0,3}?(?:summary|outline)\s+of\s+\w"
+)
 _DEADLINE_RE = re.compile(
     # "by <temporal>" — note bare "by the" is NOT a deadline (it is often a passive
     # actor: "reviewed BY THE team"); "the" only counts before a temporal noun.
@@ -1224,8 +1234,9 @@ def _subjectless_request_is_build(lowered: str) -> bool:
     # which read as existing-artifact retrieval, do not match.)
     if _SINGULAR_DELIVERABLE_FOR_RE.search(lowered):
         return True
-    # A build-visual scoped by "of <subject>" ("chart of Q2 revenue") is a build.
-    return bool(_VISUAL_OF_RE.search(lowered))
+    # A build-visual ("chart of Q2 revenue") or a singular weak document deliverable
+    # ("a summary of Q3 revenue") scoped by "of <subject>" is a build.
+    return bool(_VISUAL_OF_RE.search(lowered) or _DOCUMENT_OF_RE.search(lowered))
 
 
 def _is_delivery_preference(lowered: str) -> bool:
