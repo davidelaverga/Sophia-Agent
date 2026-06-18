@@ -2045,6 +2045,48 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked on Tuesday for help with their anxiety"
         ) is None
 
+    def test_on_the_count_is_a_subject_not_a_date(self):
+        """Codex P2: 'on the <number>' without an ordinal suffix ('on the 3
+        options') is a count/subject, not a date — only 'on the 5th' is temporal."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked for a document on the 3 options"
+        ) == "task_history"
+        # 'on the 5th' (ordinal) stays temporal; the dated request still drops.
+        assert _candidate_policy_rejection_reason(
+            "User asked on the 12th for a report about pricing"
+        ) == "task_history"
+
+    def test_doc_page_deliverable_nouns(self):
+        """Codex P2: doc/page are document build nouns in BuilderCommandMiddleware
+        — weak deliverable nouns that drop topic-scoped or create-cued."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to create a doc about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a page about OpenClaw"
+        ) == "task_history"
+
+    def test_by_the_actor_is_not_a_deadline(self):
+        """Codex P2: 'by the <actor>' ('reviewed by the team') is a passive agent,
+        not a deadline, so it must not break a standing delivery preference. 'by
+        the end / the 5th / Friday' stays a deadline."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User wants reports to be reviewed by the team before delivery"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants reports to be signed off by the lead"
+        ) is None
+        # A real deadline still makes a singular styled request a one-off build.
+        assert _candidate_policy_rejection_reason(
+            "User wants a concise report by the end of day"
+        ) == "task_history"
+
     def test_numeric_on_count_is_a_subject_not_a_date(self):
         """Codex P2: a bare 'on <number>' that COUNTS the subject ('a PDF on 10
         competitors', 'document on 3 options') is a subject marker, not a date —

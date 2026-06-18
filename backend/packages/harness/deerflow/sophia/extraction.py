@@ -87,7 +87,8 @@ _ABSOLUTE_DATE = (
     r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\w*\s+\d{1,2}(?:,?\s+\d{4})?"
     r"|\d{4}-\d{1,2}-\d{1,2}"
     r"|\d{1,2}/\d{1,2}(?:/\d{2,4})?"
-    r"|the\s+\d{1,2}(?:st|nd|rd|th)?"
+    # "the 5th" — ordinal suffix REQUIRED so "the 3 options" (a count) is not a date.
+    r"|the\s+\d{1,2}(?:st|nd|rd|th)\b"
 )
 _REQUEST_TIME_PHRASE = (
     r"(?:on\s+\w+day"
@@ -146,7 +147,9 @@ _DELIVERABLE_NOUNS = (
     # docx/xlsx/excel. Weak. (Bare "md" is omitted — too ambiguous: doctor/state.)
     "csv", "json", "markdown", "docx", "xlsx", "excel",
     # Document aliases the companion build-intent path treats as artifacts. Weak.
-    "outline", "file", "canvas",
+    # ("doc"/"page" are document build nouns in BuilderCommandMiddleware's one-page
+    # command regex; weak so a journal/web "page" without a request verb stays.)
+    "outline", "file", "canvas", "doc", "page",
 )
 # Frontend / web deliverables. The frontend dispatch path
 # (``start_builder_task._HTML_OUTPUT_RE``) treats these bare nouns as build
@@ -284,7 +287,11 @@ _VISUAL_OF_RE = re.compile(
     r"mockups?|wireframes?)\s+of\s+\w"
 )
 _DEADLINE_RE = re.compile(
-    r"\bdue\b|\btomorrow\b|\bby\s+(?:\w+day|tomorrow|tonight|noon|eod|cob|next\b|end\b|the\b|\d)"
+    # "by <temporal>" — note bare "by the" is NOT a deadline (it is often a passive
+    # actor: "reviewed BY THE team"); "the" only counts before a temporal noun.
+    r"\bdue\b|\btomorrow\b|\bby\s+(?:\w+day|tomorrow|tonight|noon|eod|cob|next\b|end\b|\d"
+    r"|the\s+(?:end|eod|cob|close|deadline|weekend|morning|afternoon|evening|\d"
+    r"|mon|tues|wednes|thurs|fri|satur|sun))"
 )
 # An explicit create/build cue. Combined with a request verb + deliverable noun
 # it marks a build request made *of Sophia*, and distinguishes it from a request
