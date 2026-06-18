@@ -6770,6 +6770,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "pptx_generator_success_count": 1 if valid_pptx else 0,
             "pptx_generator_bytes_total": bytes_count if valid_pptx else 0,
             "pptx_generator_error_class": error_class,
+            # Absolute properties of the latest compiled deck; retries replace these counts.
             "pptx_generator_slide_count": generated_slide_count,
             "pptx_generator_picture_count": picture_count,
             **_pptx_plan_diagnostics_from_command(command, state),

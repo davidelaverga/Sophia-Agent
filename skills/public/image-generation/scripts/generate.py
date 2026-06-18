@@ -1,12 +1,12 @@
 """Image generation script for the ``image-generation`` skill.
 
-Backed by OpenAI's ``gpt-image-2`` model. Wraps two endpoints:
+Backed by OpenAI image models. Wraps two endpoints:
 
-- ``client.images.generate(...)`` for prompts without reference images.
+- ``client.images.generate(...)`` with ``gpt-image-2`` for prompts without reference images.
 - ``client.images.edit(...)``     for prompts that condition on one or more
-  reference images. This is the path ``ppt-generation`` uses to keep visual
-  consistency across slides ("use the previous slide as a reference for the
-  next slide").
+  reference images, using an edit-supported model. This is the path
+  ``ppt-generation`` uses to keep visual consistency across slides ("use the
+  previous slide as a reference for the next slide").
 
 CLI surface is intentionally identical to the previous Gemini-backed
 script so ``ppt-generation/scripts/generate.py`` and the upstream SKILL.md
@@ -51,7 +51,8 @@ _SLIDE_VISUAL_EDIT_SIZE = "1536x1024"
 _OPENAI_SUPPORTED_SIZES = {"auto", "1024x1024", "1536x1024", "1024x1536"}
 _SLIDE_VISUAL_ASPECT_RATIO = 16 / 9
 
-_MODEL = "gpt-image-2"
+_GENERATE_MODEL = "gpt-image-2"
+_EDIT_MODEL = "gpt-image-1.5"
 _TRUTHY_VALUES = {"1", "true", "yes", "on"}
 _TRACE_PROMPT_MAX = 12000
 _LANGSMITH_CLIENT: Any | None = None
@@ -208,11 +209,16 @@ def _trace_reference_name(path: str) -> str:
         return str(path)
 
 
+def _image_request_model(valid_refs: list[str]) -> str:
+    return _EDIT_MODEL if valid_refs else _GENERATE_MODEL
+
+
 def _image_trace_inputs(*, prompt: str, valid_refs: list[str], size: str, quality: str | None) -> dict[str, Any]:
+    model = _image_request_model(valid_refs)
     traced_prompt, truncated = _truncate_trace_text(prompt)
     return {
         "provider": "openai",
-        "model": _MODEL,
+        "model": model,
         "endpoint": "images.edit" if valid_refs else "images.generate",
         "prompt": traced_prompt,
         "prompt_truncated": truncated,
@@ -223,13 +229,13 @@ def _image_trace_inputs(*, prompt: str, valid_refs: list[str], size: str, qualit
     }
 
 
-def _image_trace_outputs(response: object) -> dict[str, Any]:
+def _image_trace_outputs(response: object, *, model: str) -> dict[str, Any]:
     data = getattr(response, "data", None)
     count = len(data) if isinstance(data, list) else 0
     first = data[0] if count else None
     return {
         "provider": "openai",
-        "model": _MODEL,
+        "model": model,
         "response_data_count": count,
         "has_b64_payload": bool(getattr(first, "b64_json", None)),
     }
@@ -239,6 +245,7 @@ def _langsmith_trace_context(*, prompt: str, valid_refs: list[str], size: str, q
     client = _langsmith_client()
     if client is None:
         return None
+    model = _image_request_model(valid_refs)
     try:
         from langsmith import trace
 
@@ -248,7 +255,7 @@ def _langsmith_trace_context(*, prompt: str, valid_refs: list[str], size: str, q
             inputs=_image_trace_inputs(prompt=prompt, valid_refs=valid_refs, size=size, quality=quality),
             metadata={
                 "ls_provider": "openai",
-                "ls_model_name": _MODEL,
+                "ls_model_name": model,
                 "image_endpoint": "edit" if valid_refs else "generate",
             },
             tags=["sophia", "image_generation", "openai"],
@@ -376,9 +383,9 @@ def _extract_b64(response: object) -> str:
     )
 
 
-def _image_request_kwargs(prompt: str, size: str, quality: str | None) -> dict[str, object]:
+def _image_request_kwargs(prompt: str, size: str, quality: str | None, *, model: str) -> dict[str, object]:
     kwargs: dict[str, object] = {
-        "model": _MODEL,
+        "model": model,
         "prompt": prompt,
         "size": size,
     }
@@ -388,7 +395,7 @@ def _image_request_kwargs(prompt: str, size: str, quality: str | None) -> dict[s
 
 
 def _call_generate(client: object, *, prompt: str, size: str, quality: str | None) -> object:
-    return client.images.generate(**_image_request_kwargs(prompt, size, quality))
+    return client.images.generate(**_image_request_kwargs(prompt, size, quality, model=_GENERATE_MODEL))
 
 
 def _call_edit(
@@ -401,7 +408,7 @@ def _call_edit(
 ) -> object:
     ref_handles = [open(p, "rb") for p in valid_refs]
     try:
-        kwargs = _image_request_kwargs(prompt, size, quality)
+        kwargs = _image_request_kwargs(prompt, size, quality, model=_EDIT_MODEL)
         kwargs["image"] = ref_handles if len(ref_handles) > 1 else ref_handles[0]
         return client.images.edit(**kwargs)
     finally:
@@ -430,13 +437,14 @@ def _call_image_api_with_trace(
     size: str,
     quality: str | None,
 ) -> object:
+    model = _image_request_model(valid_refs)
     trace_context = _langsmith_trace_context(prompt=prompt, valid_refs=valid_refs, size=size, quality=quality)
     if trace_context is None:
         return _call_image_api(client, prompt=prompt, valid_refs=valid_refs, size=size, quality=quality)
     with trace_context as run:
         response = _call_image_api(client, prompt=prompt, valid_refs=valid_refs, size=size, quality=quality)
         try:
-            run.end(outputs=_image_trace_outputs(response))
+            run.end(outputs=_image_trace_outputs(response, model=model))
         except Exception:
             pass
         return response
@@ -588,7 +596,7 @@ def generate_image(
     _assert_output_file_written(output_file)
     _emit_generation_result(output_file, valid_refs)
 
-    return f"IMAGEGEN_OK model={_MODEL} output_file={output_file}"
+    return f"IMAGEGEN_OK model={_image_request_model(valid_refs)} output_file={output_file}"
 
 
 def preflight() -> int:
@@ -614,7 +622,7 @@ def preflight() -> int:
         from openai import OpenAI  # transitive dep via langchain-openai
 
         client = OpenAI(timeout=10.0, max_retries=0)
-        client.models.retrieve("gpt-image-2")
+        client.models.retrieve(_GENERATE_MODEL)
     except Exception as exc:  # noqa: BLE001 — classify, never crash preflight
         reason = _classify_exception(exc)
         # An unknown-model 404 still proves key+egress work; only hard
@@ -626,7 +634,7 @@ def preflight() -> int:
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate images using OpenAI gpt-image-2")
+    parser = argparse.ArgumentParser(description="Generate images using OpenAI image models")
     parser.add_argument(
         "--preflight",
         action="store_true",

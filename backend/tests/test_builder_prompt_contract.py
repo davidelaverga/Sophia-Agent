@@ -89,6 +89,7 @@ def test_ppt_generation_skill_carries_deck_design_system() -> None:
     assert "gpt-image-2" in text
     assert "--slide-visual" in text
     assert "python /mnt/skills/public/image-generation/scripts/generate.py --slide-visual" in text
+    assert "reference-conditioned calls to the edit-supported `gpt-image-1.5` model" in text
     assert "Run scripts/generate.py with `--slide-visual`" not in text
     assert "THE TEXT READS:" in text
     assert "slide_qc.py" in text
@@ -99,6 +100,16 @@ def test_ppt_generation_skill_carries_deck_design_system() -> None:
     assert "If the user asked for a plain, text-only, no-image" in text
     assert "Do not run the image-generation script" in text
     assert "deterministic editable PPTX" in text
+
+
+def test_image_generation_skill_declares_reference_edit_model() -> None:
+    skill = Path(__file__).resolve().parents[2] / "skills/public/image-generation/SKILL.md"
+    text = skill.read_text()
+
+    assert "Fresh generations use `gpt-image-2`" in text
+    assert "reference-conditioned edits use `gpt-image-1.5`" in text
+    assert "the image edit endpoint does not support `gpt-image-2`" in text
+    assert "client.images.edit" in text
 
 
 def test_pdf_report_skill_is_source_first_and_renderer_backed() -> None:

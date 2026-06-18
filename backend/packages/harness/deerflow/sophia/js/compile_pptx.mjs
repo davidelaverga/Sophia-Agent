@@ -266,6 +266,10 @@ function addVisual(slide, visualPath, box) {
   return true;
 }
 
+function fullBleedImageSizing() {
+  return { type: "cover", x: 0, y: 0, w: SLIDE_W, h: SLIDE_H };
+}
+
 function addFullBleedVisual(slide, visualPath) {
   if (!visualPath) return false;
   if (!fs.existsSync(visualPath)) {
@@ -278,7 +282,7 @@ function addFullBleedVisual(slide, visualPath) {
     y: 0,
     w: SLIDE_W,
     h: SLIDE_H,
-    sizing: { type: "cover", x: 0, y: 0, w: SLIDE_W, h: SLIDE_H },
+    sizing: fullBleedImageSizing(),
   });
   return true;
 }
