@@ -932,6 +932,21 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         assert _candidate_policy_rejection_reason(
             "User requested a deck on the new pricing model"
         ) == "task_history"
+        # 'requested/requests' + a bare PLURAL deliverable ("requested slides",
+        # "requested reports") is a build too — but the plural NOUN "feature
+        # requests" / "support requests" (a preposition follows) is NOT.
+        assert _candidate_policy_rejection_reason(
+            "User requested slides about OpenClaw"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User requested reports about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User logs feature requests about the product"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User tracks support requests in a spreadsheet"
+        ) is None
 
     def test_third_party_requester_is_preserved(self):
         """A request involving a third party is a relationship fact, not a build

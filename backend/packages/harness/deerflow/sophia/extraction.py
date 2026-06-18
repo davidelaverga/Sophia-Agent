@@ -236,6 +236,19 @@ _DELIVERABLE_NOUN_RE = re.compile(
     r"\b(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
     + "|" + _WEB_DELIVERABLE_FRAGMENT + "|" + _PPTX_DELIVERABLE_FRAGMENT + r")s?\b" + _NOT_SKILL_MODIFIER
 )
+# "requested/requests" directly followed by a PLURAL deliverable noun ("requested
+# slides about X", "requested reports about Hermes"). _DELIVERABLE_REQUEST_RE's
+# "requested" arm only accepts a determiner/number/possessive, "to", or "creation
+# of" after the verb (to avoid matching the plural NOUN "feature requests"), so a
+# bare plural deliverable slips through. Requiring the trailing plural "s"
+# immediately after the verb keeps the noun forms out: "feature requests about X" /
+# "support requests in a spreadsheet" have a preposition (not a deliverable) after
+# "requests", so they do not match. (This regex is defined here, after the noun
+# fragments, and folded into the request gate via ``_has_request_verb``.)
+_REQUESTED_PLURAL_DELIVERABLE_RE = re.compile(
+    r"\brequest(?:ed|s)\s+(?:(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
+    + "|" + _WEB_DELIVERABLE_FRAGMENT + r")s|" + _PPTX_DELIVERABLE_FRAGMENT + r")\b"
+)
 # A genuine delivery *preference* ("prefers concise reports") is not a build
 # request. Match the preference VERB on a word boundary so a topic noun like
 # "report on consumer preferences" does NOT exempt itself (the bare substring
@@ -1113,6 +1126,18 @@ def _candidate_policy_rejection_reason(content: str) -> str | None:
     return None
 
 
+def _has_request_verb(text: str) -> bool:
+    """True when ``text`` carries a deliverable request verb.
+
+    Combines the main ``_DELIVERABLE_REQUEST_RE`` gate with the
+    ``requested <plural deliverable>`` arm (which lives in a separate regex because
+    it is built from the deliverable-noun fragments defined later in the module).
+    """
+    return bool(
+        _DELIVERABLE_REQUEST_RE.search(text) or _REQUESTED_PLURAL_DELIVERABLE_RE.search(text)
+    )
+
+
 def _is_deliverable_request(lowered: str) -> bool:
     """True for 'user asked for a <deliverable>' task-history snippets.
 
@@ -1148,7 +1173,7 @@ def _is_deliverable_request(lowered: str) -> bool:
       third-party request ("boss asked for a status report") is kept; otherwise a
       STRONG noun, or a weak noun + create/build cue, marks it task history.
     """
-    if not _DELIVERABLE_REQUEST_RE.search(lowered):
+    if not _has_request_verb(lowered):
         return False
 
     topic_markers = list(_TOPIC_MARKER_RE.finditer(lowered))
@@ -1219,7 +1244,7 @@ def _topic_scoped_request_is_build(lowered: str, topic_markers: list) -> bool:
     # Exception: an indirect/passive "asked whether <deliverable> about X could be
     # created" carries the modal+verb AFTER the topic, so it never survives the
     # split into the intent — recognize that whole-string pattern explicitly.
-    if not _DELIVERABLE_REQUEST_RE.search(intent) and not _ASKED_IF_BUILD_RE.search(lowered):
+    if not _has_request_verb(intent) and not _ASKED_IF_BUILD_RE.search(lowered):
         return False
     # Scope the non-artifact exemptions to the request INTENT, never the subject:
     # "asked for a deck about practicing for interviews" is a real deck build — the
