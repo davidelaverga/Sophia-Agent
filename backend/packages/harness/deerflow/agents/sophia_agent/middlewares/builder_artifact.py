@@ -606,7 +606,20 @@ def _merge_builder_pptx_diagnostics(
     return merged
 
 
+_PPTX_DIAGNOSTIC_LATEST_COUNT_KEYS = frozenset(
+    {
+        "pptx_generator_picture_count",
+        "pptx_generator_slide_count",
+        "pptx_plan_image_ref_count",
+        "pptx_plan_slide_count",
+    }
+)
+
+
 def _merge_builder_pptx_diagnostic_value(merged: dict, key: str, value: object) -> None:
+    if key in _PPTX_DIAGNOSTIC_LATEST_COUNT_KEYS:
+        merged[key] = value
+        return
     if (key.endswith("_count") or key.endswith("_bytes_total")) and isinstance(value, int):
         merged[key] = int(merged.get(key, 0) or 0) + value
         return

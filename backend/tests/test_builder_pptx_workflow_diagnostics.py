@@ -12,6 +12,7 @@ from PIL import Image
 
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     BuilderArtifactMiddleware,
+    _merge_builder_pptx_diagnostics,
     _pptx_skill_read_seen,
     _visual_design_skill_read_seen,
 )
@@ -161,6 +162,37 @@ def test_pptx_generation_bash_result_records_plan_and_slide_count(tmp_path: Path
     assert delta["pptx_plan_slide_count"] == 2
     assert delta["pptx_plan_image_ref_count"] == 1
     assert delta["pptx_plan_json"] == plan
+
+
+def test_pptx_diagnostic_merge_keeps_latest_absolute_deck_counts() -> None:
+    merged = _merge_builder_pptx_diagnostics(
+        {
+            "pptx_generator_attempt_count": 1,
+            "pptx_generator_success_count": 1,
+            "pptx_generator_bytes_total": 128,
+            "pptx_generator_slide_count": 5,
+            "pptx_generator_picture_count": 4,
+            "pptx_plan_slide_count": 5,
+            "pptx_plan_image_ref_count": 4,
+        },
+        {
+            "pptx_generator_attempt_count": 1,
+            "pptx_generator_success_count": 1,
+            "pptx_generator_bytes_total": 256,
+            "pptx_generator_slide_count": 5,
+            "pptx_generator_picture_count": 4,
+            "pptx_plan_slide_count": 5,
+            "pptx_plan_image_ref_count": 4,
+        },
+    )
+
+    assert merged["pptx_generator_attempt_count"] == 2
+    assert merged["pptx_generator_success_count"] == 2
+    assert merged["pptx_generator_bytes_total"] == 384
+    assert merged["pptx_generator_slide_count"] == 5
+    assert merged["pptx_generator_picture_count"] == 4
+    assert merged["pptx_plan_slide_count"] == 5
+    assert merged["pptx_plan_image_ref_count"] == 4
 
 
 def test_slide_qc_bash_result_records_verdict_feedback_payload(tmp_path: Path) -> None:
