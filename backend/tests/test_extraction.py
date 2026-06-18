@@ -2370,12 +2370,25 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         assert _candidate_policy_rejection_reason(
             "User asked if a summary could be generated about the merger"
         ) == "task_history"
+        # Recipient-prefixed asked-if ("asked ME/YOU/US if/whether ... could ...").
+        assert _candidate_policy_rejection_reason(
+            "User asked me if I could make a deck about OpenClaw"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked you whether we could build a report about Q3"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia whether she could draft a summary about the merger"
+        ) == "task_history"
         # An asked-if WITHOUT a build verb is a status/approval question — kept.
         assert _candidate_policy_rejection_reason(
             "User asked if the report about Hermes is ready"
         ) is None
         assert _candidate_policy_rejection_reason(
             "User asked whether the deck about Q3 was approved"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User asked me if the report about Hermes is ready"
         ) is None
 
 
