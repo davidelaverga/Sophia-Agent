@@ -472,8 +472,11 @@ _SUPPORT_REQUEST_RE = re.compile(
     r"(?:for\s+|some\s+|more\s+|[\w']+\s+){0,2}?"
     r"(?:feedback|advice|input|thoughts?|opinions?|guidance|support|critique|"
     r"reassurance|encouragement|validation|perspective|pointers?|tips?)\b"
+    # The trailing "s?" must cover the web fragment too ("feedback websites",
+    # "critique web apps"), so NOUNS|WEB share one "s?"; the pptx fragment carries
+    # its own internal plural.
     r"(?!\s+(?:(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
-    + r")s?|" + _WEB_DELIVERABLE_FRAGMENT + r"|" + _PPTX_DELIVERABLE_FRAGMENT + r")\b)"
+    + r"|" + _WEB_DELIVERABLE_FRAGMENT + r")s?|" + _PPTX_DELIVERABLE_FRAGMENT + r")\b)"
 )
 # A STRONG noun inside a common NON-DELIVERABLE compound is not a build target:
 # a school "report card", a playing-card "deck of cards" / "card deck", a "deck
@@ -1204,6 +1207,13 @@ def _topic_scoped_request_is_build(lowered: str, topic_markers: list) -> bool:
     # "practicing for" lives in the topic and must not exempt the request.
     if _is_non_artifact_deliverable_use(intent):
         return False
+    # A deliverable built FROM source material ("a PDF from customer support tickets
+    # about refunds") is a build even with a trailing topic marker — check it BEFORE
+    # the third-party producer exemption, which would otherwise read "from customer
+    # support" as a producer and keep it. Mirrors the subjectless ordering. Scanned
+    # over the whole snippet so the source phrase is found regardless of the split.
+    if _DELIVERABLE_FROM_SOURCE_RE.search(lowered):
+        return True
     if _THIRD_PARTY_REQUEST_RE.search(intent):
         return False
     # A preference VERB in the intent exempts a GENERIC standing preference

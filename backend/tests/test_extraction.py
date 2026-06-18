@@ -1884,12 +1884,19 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked for a critique report about the launch"
         ) == "task_history"
         # The guard also covers web / PPTX deliverable aliases that live outside
-        # _DELIVERABLE_NOUNS ("a critique PowerPoint", "a feedback website").
+        # _DELIVERABLE_NOUNS ("a critique PowerPoint", "a feedback website"),
+        # including their PLURAL forms ("feedback websites", "critique web apps").
         assert _candidate_policy_rejection_reason(
             "User asked for a critique PowerPoint about the launch"
         ) == "task_history"
         assert _candidate_policy_rejection_reason(
             "User wants a feedback website about Q3"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants feedback websites about Q3"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for critique web apps about launch"
         ) == "task_history"
         # The support word as the true object is still exempt.
         assert _candidate_policy_rejection_reason(
@@ -1926,6 +1933,14 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         ) == "task_history"
         assert _candidate_policy_rejection_reason(
             "User wants a summary from client discovery-call notes"
+        ) == "task_history"
+        # The guard also fires in the TOPIC branch (a trailing "about <subject>"
+        # routes there) — it runs before the third-party producer exemption.
+        assert _candidate_policy_rejection_reason(
+            "User asked for a PDF from customer support tickets about refunds"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants a summary from client discovery-call notes about churn"
         ) == "task_history"
         # A third-party producer (a person/org makes it) is kept — including when a
         # source noun appears in a SEPARATE later phrase ("about the feedback").
