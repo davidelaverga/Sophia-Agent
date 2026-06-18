@@ -437,6 +437,7 @@ _PROJECT_PRODUCT_COMPOUND_RE = re.compile(
 # deliverable is a "generator" or framed as the user's intent).
 _SOPHIA_DIRECTED_RE = re.compile(
     r"\b(?:ask(?:ed|s)?|request(?:ed|s)?|want(?:ed|s)?|need(?:ed|s)?|tell(?:s|ing)?|told|"
+    r"tasked|tasks?|instruct(?:ed|s)?|direct(?:ed|s)?|"
     r"have|having|had|get(?:s|ting)?|got|expect(?:ed|s|ing)?|'?d\s+like|would\s+like)\s+(?:sophia|me|you|us)\b"
     r"|\b(?:ask(?:ed|s)|request(?:ed|s))\s+(?:" + _REQUEST_TIME_PHRASE + r"\s+)?to\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|assembl|convert|export|render)"
 )

@@ -1645,6 +1645,27 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User requested their manager to create a report about Q3"
         ) is None
 
+    def test_sophia_directed_re_covers_all_directed_verbs(self):
+        """Codex P2: _SOPHIA_DIRECTED_RE must cover the same directed verbs as the
+        request gate (incl. tasked/instructed/directed), else a Sophia-directed
+        project build like 'instructed Sophia to build a report generator for
+        OpenClaw' is wrongly kept as the user's own project."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User instructed Sophia to build a report generator for OpenClaw"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User tasked Sophia to build a report tool for Acme"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User directed me to create a slide builder for X"
+        ) == "task_history"
+        # The user's own project (no Sophia direction) still keeps.
+        assert _candidate_policy_rejection_reason(
+            "User wants to create a report generator for their startup"
+        ) is None
+
     def test_directed_verbs_in_request_gate(self):
         """Codex P2: the request gate must accept non-ask directed verbs (told/
         had/got/expects … Sophia/me/you/us), else 'User told Sophia to build a
