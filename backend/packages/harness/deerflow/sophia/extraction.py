@@ -100,7 +100,10 @@ _REQUEST_TIME_PHRASE = (
     r"|\d+\s+(?:days?|weeks?|months?|hours?)\s+ago)"
 )
 _DELIVERABLE_REQUEST_RE = re.compile(
-    r"\b(?:requested|requests)\b"
+    # "requested/requests" only as a VERB governing a deliverable (followed by a
+    # determiner/number/possessive, "to", or "creation of") — NOT the plural noun
+    # ("feature requests", "support requests in a spreadsheet").
+    r"\brequest(?:ed|s)\s+(?:(?:an?|the|some|several|multiple|few|two|three|four|\d+|that|another|its|their|his|her|our|my|your|sophia|me|you|us)\s+|to\b|creation\s+of\b)"
     # "asked for" / "asked {sophia,me,you,us} for" (recipient optional) with an
     # optional intervening time phrase: "asked on Tuesday for", "asked me yesterday for"
     r"|\bask(?:ed|s)\s+(?:(?:sophia|me|you|us)\s+)?(?:" + _REQUEST_TIME_PHRASE + r"\s+)?for\b"

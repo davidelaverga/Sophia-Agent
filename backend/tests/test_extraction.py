@@ -1617,6 +1617,34 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked for a report from their manager about Q3"
         ) is None
 
+    def test_requests_as_plural_noun_is_not_a_request_verb(self):
+        """Codex P2: 'requests' as a plural NOUN ('feature requests', 'support
+        requests') must not satisfy the request gate. It counts only as a verb
+        governing a deliverable (followed by a determiner/number/'to'/'creation
+        of')."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User tracks feature requests in a spreadsheet"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User triages support requests for the team"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User requested feedback on the proposal"
+        ) is None
+        # Verb uses governing a deliverable still drop.
+        assert _candidate_policy_rejection_reason(
+            "User requested a report about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User requested creation of a PDF about the merger"
+        ) == "task_history"
+        # Third-party redirect with 'requested' still kept.
+        assert _candidate_policy_rejection_reason(
+            "User requested their manager to create a report about Q3"
+        ) is None
+
     def test_directed_verbs_in_request_gate(self):
         """Codex P2: the request gate must accept non-ask directed verbs (told/
         had/got/expects … Sophia/me/you/us), else 'User told Sophia to build a
