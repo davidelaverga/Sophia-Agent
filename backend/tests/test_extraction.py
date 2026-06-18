@@ -1474,6 +1474,34 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked for a PDF"
         ) is None  # no trailing "for <X>"
 
+    def test_own_work_commitment_goals_are_preserved(self):
+        """Codex P2: an OWN-WORK goal where the user states their own intent to act
+        ('needs to prepare a presentation by Monday', 'wants to finish the report
+        by Friday') is a durable commitment, not a build request of Sophia. The
+        'to <verb>' infinitive after want/need is the tell ('wants TO finish' vs
+        'wants A report'); a Sophia-directed phrasing still drops."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User needs to prepare a presentation by Monday"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants to finish the report by Friday"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants to write a proposal about the merger"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User plans to build a deck for the offsite"
+        ) is None
+        # A request OF Sophia (not own work) still drops.
+        assert _candidate_policy_rejection_reason(
+            "User wants a presentation about Q3"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants Sophia to build a deck about Q3"
+        ) == "task_history"
+
     def test_requested_to_sophia_project_build_drops(self):
         """Codex P2: _SOPHIA_DIRECTED_RE must recognize 'requested' forms too, so
         'requested Sophia to build a report generator for OpenClaw' is not exempted
@@ -1587,8 +1615,8 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked to convert the spec into a PDF"
         ) == "task_history"
         assert _candidate_policy_rejection_reason(
-            "User wants to turn the notes into a deck"
-        ) == "task_history"
+            "User asked me to turn the notes into a deck"
+        ) == "task_history"  # Sophia-directed; "wants to turn …" alone is own-work (kept)
         # No deliverable noun (verbal summary) or no request verb → kept.
         assert _candidate_policy_rejection_reason(
             "User asked me to summarize the meeting"

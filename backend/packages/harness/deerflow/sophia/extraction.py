@@ -399,6 +399,18 @@ _SOPHIA_DIRECTED_RE = re.compile(
     r"\b(?:ask(?:ed|s)|request(?:ed|s))\s+(?:sophia|me|you|us)\b"
     r"|\b(?:ask(?:ed|s)|request(?:ed|s))\s+(?:" + _REQUEST_TIME_PHRASE + r"\s+)?to\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|assembl|convert|export|render)"
 )
+# An OWN-WORK goal/commitment: the user states THEIR OWN intent to act on a
+# deliverable ("needs to prepare a presentation by Monday", "wants to finish the
+# report by Friday") — the user does it, not Sophia. The infinitive "to <verb>"
+# right after want/need/plan/… is the tell ("wants TO finish" vs "wants A
+# report"). Combined (in _is_non_artifact_deliverable_use) with a NOT-Sophia-
+# directed check so "wants Sophia to build a deck" / "asked Sophia to …" still
+# drop. "to ask" is excluded (delegating the ask is not own work).
+_OWN_WORK_RE = re.compile(
+    r"\b(?:want(?:ed|s)?|need(?:ed|s)?|plan(?:ned|s|ning)?|hop(?:e|ed|es|ing)|"
+    r"aim(?:ed|s|ing)?|tr(?:y|ies|ied|ying)|going|wish(?:ed|es)?|intend(?:ed|s)?|"
+    r"would\s+like)\s+to\s+(?!ask\b)\w"
+)
 _DUPLICATE_STOPWORDS = {
     "a",
     "an",
@@ -980,18 +992,22 @@ def _is_deliverable_request(lowered: str) -> bool:
 def _is_non_artifact_deliverable_use(lowered: str) -> bool:
     """The deliverable word is present but is NOT a requested artifact — keep it.
 
-    Four shapes: a deliverable word used as a verb ("wants to report on
+    Five shapes: a deliverable word used as a verb ("wants to report on
     harassment"); the object of a help/practice/prep request ("asked for help with
     a presentation"); a strong noun inside a non-deliverable compound ("a deck of
-    cards", "a report card"); or the activity context of an emotional/support goal
-    ("wants confidence for presentations").
+    cards", "a report card"); the activity context of an emotional/support goal
+    ("wants confidence for presentations"); or an OWN-WORK goal where the user
+    states their own intent to act ("needs to prepare a presentation by Monday",
+    "wants to finish the report") — unless the request is Sophia-directed.
     """
-    return bool(
+    if (
         _DELIVERABLE_AS_VERB_RE.search(lowered)
         or _HELP_OR_PRACTICE_RE.search(lowered)
         or _NON_DELIVERABLE_COMPOUND_RE.search(lowered)
         or _EMOTIONAL_SUPPORT_RE.search(lowered)
-    )
+    ):
+        return True
+    return bool(_OWN_WORK_RE.search(lowered) and not _SOPHIA_DIRECTED_RE.search(lowered))
 
 
 def _topic_scoped_request_is_build(lowered: str, topic_markers: list) -> bool:
