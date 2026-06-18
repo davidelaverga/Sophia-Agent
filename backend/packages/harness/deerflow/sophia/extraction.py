@@ -1245,6 +1245,33 @@ def _is_non_artifact_deliverable_use(lowered: str) -> bool:
     return bool(_OWN_WORK_RE.search(lowered) and not _SOPHIA_DIRECTED_RE.search(lowered))
 
 
+def _topic_scoped_preference_exempts(intent: str, lowered: str) -> bool:
+    """True when a topic-scoped request is actually a standing delivery preference.
+
+    Two forms, neither of which exempts a one-off (singular article / deadline) or
+    an explicit build (creation cue):
+    - a preference VERB in the INTENT ("prefers reports about X") — checked on the
+      intent so a "preferred" inside the SUBJECT ("reports about their preferred
+      vendor") does not exempt a build; mirrors _is_delivery_preference's one-off
+      precedence.
+    - a style PREDICATE over the whole snippet ("wants reports about competitors TO
+      BE concise", "… should include citations") — the predicate trails the
+      subject, so it is scanned over ``lowered``. Bare style adjectives are excluded
+      (a "concise report about X" is a styled build, not a preference).
+    """
+    if _DELIVERY_PREFERENCE_RE.search(intent) and not (
+        _SINGULAR_DELIVERABLE_RE.search(intent) or _DEADLINE_RE.search(intent)
+    ):
+        return True
+    if _DELIVERY_STYLE_PREDICATE_RE.search(lowered) and not (
+        _SINGULAR_DELIVERABLE_RE.search(lowered)
+        or _DEADLINE_RE.search(lowered)
+        or _DELIVERABLE_CREATION_RE.search(lowered)
+    ):
+        return True
+    return False
+
+
 def _topic_scoped_request_is_build(lowered: str, topic_markers: list) -> bool:
     """Resolve a request that carries a subject marker ("<deliverable> about X").
 
@@ -1294,27 +1321,7 @@ def _topic_scoped_request_is_build(lowered: str, topic_markers: list) -> bool:
         return True
     if _THIRD_PARTY_REQUEST_RE.search(intent):
         return False
-    # A preference VERB in the intent exempts a GENERIC standing preference
-    # ("prefers reports about X") — but NOT a concrete singular/deadlined build
-    # whose intent merely carries an adjectival "preferred" ("requested a report
-    # in their preferred format about OpenClaw"). Checked on the INTENT so a
-    # "preferred" inside the SUBJECT ("reports about their preferred vendor") does
-    # not exempt a build. Mirror _is_delivery_preference's one-off precedence.
-    if _DELIVERY_PREFERENCE_RE.search(intent) and not (
-        _SINGULAR_DELIVERABLE_RE.search(intent) or _DEADLINE_RE.search(intent)
-    ):
-        return False
-    # A standing STYLE PREDICATE scoped to a category of deliverables ("wants reports
-    # about competitors TO BE concise", "… should include citations") is also a
-    # preference. The predicate trails the subject, so it is scanned over the whole
-    # snippet; guarded by no one-off (singular/deadline) and no creation cue, so a
-    # styled one-off build ("make a concise report about Hermes") still drops. (Bare
-    # style adjectives are excluded — "concise report about X" is a styled build.)
-    if _DELIVERY_STYLE_PREDICATE_RE.search(lowered) and not (
-        _SINGULAR_DELIVERABLE_RE.search(lowered)
-        or _DEADLINE_RE.search(lowered)
-        or _DELIVERABLE_CREATION_RE.search(lowered)
-    ):
+    if _topic_scoped_preference_exempts(intent, lowered):
         return False
     return True
 
