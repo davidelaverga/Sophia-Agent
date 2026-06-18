@@ -390,6 +390,16 @@ _HELP_OR_PRACTICE_RE = re.compile(
     r"\bhelp(?:\s+(?:me|them|us|him|her))?\s+(?:with|on|prepare|prep|practic\w+|rehears\w+)\b"
     r"|\b(?:practic\w+|rehears\w+|prepar\w+|prep)\s+for\b"
 )
+# A request whose OBJECT is feedback/advice/support — not the deliverable. "wants
+# feedback on their presentation", "needs support after reading a report" — the
+# user wants input/support about an existing artifact, not for Sophia to build it.
+_SUPPORT_REQUEST_RE = re.compile(
+    r"\b(?:want(?:ed|s)?|need(?:ed|s)?|ask(?:ed|s)|request(?:ed|s)|look(?:ing|ed|s)?|"
+    r"get(?:ting|s)?|seek(?:ing|s)?|'?d\s+like|would\s+like|hop(?:e|es|ed|ing))\s+"
+    r"(?:for\s+|some\s+|more\s+|[\w']+\s+){0,2}?"
+    r"(?:feedback|advice|input|thoughts?|opinions?|guidance|support|critique|"
+    r"reassurance|encouragement|validation|perspective|pointers?|tips?)\b"
+)
 # A STRONG noun inside a common NON-DELIVERABLE compound is not a build target:
 # a school "report card", a playing-card "deck of cards" / "card deck", a "deck
 # chair"/"deck shoes"/"deck hand" (furniture/nautical), a "slide rule"
@@ -1039,9 +1049,11 @@ def _is_deliverable_request(lowered: str) -> bool:
 def _is_non_artifact_deliverable_use(lowered: str) -> bool:
     """The deliverable word is present but is NOT a requested artifact — keep it.
 
-    Five shapes: a deliverable word used as a verb ("wants to report on
-    harassment"); the object of a help/practice/prep request ("asked for help with
-    a presentation"); a strong noun inside a non-deliverable compound ("a deck of
+    Shapes: a deliverable word used as a verb ("wants to report on harassment");
+    the object of a help/practice/prep request ("asked for help with a
+    presentation"); a request whose object is feedback/advice/support, not the
+    deliverable ("wants feedback on their presentation", "needs support after
+    reading a report"); a strong noun inside a non-deliverable compound ("a deck of
     cards", "a report card"); the activity context of an emotional/support goal
     ("wants confidence for presentations"); or an OWN-WORK goal where the user
     states their own intent to act ("needs to prepare a presentation by Monday",
@@ -1050,6 +1062,7 @@ def _is_non_artifact_deliverable_use(lowered: str) -> bool:
     if (
         _DELIVERABLE_AS_VERB_RE.search(lowered)
         or _HELP_OR_PRACTICE_RE.search(lowered)
+        or _SUPPORT_REQUEST_RE.search(lowered)
         or _NON_DELIVERABLE_COMPOUND_RE.search(lowered)
         or _EMOTIONAL_SUPPORT_RE.search(lowered)
     ):

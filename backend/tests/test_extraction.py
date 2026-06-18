@@ -1474,6 +1474,26 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked for a PDF"
         ) is None  # no trailing "for <X>"
 
+    def test_feedback_support_request_about_a_deliverable_is_preserved(self):
+        """Codex P2: when the request's OBJECT is feedback/advice/support (not the
+        deliverable), it is not a build request — 'wants feedback on their
+        presentation about Q2', 'needs support after reading a report' are kept."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User wants feedback on their presentation about Q2"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User needs support after reading a report on climate change"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User asked for advice on their deck about pricing"
+        ) is None
+        # A real build request (object IS the deliverable) still drops.
+        assert _candidate_policy_rejection_reason(
+            "User asked for a report about Hermes"
+        ) == "task_history"
+
     def test_own_work_commitment_goals_are_preserved(self):
         """Codex P2: an OWN-WORK goal where the user states their own intent to act
         ('needs to prepare a presentation by Monday', 'wants to finish the report
