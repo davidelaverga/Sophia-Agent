@@ -118,6 +118,18 @@ _ASKED_IF_BUILD_RE = re.compile(
     r"prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|"
     r"assembl|convert|export|render)"
 )
+# "asked that <subject> be/get <created>" — the passive/subjunctive indirect build
+# request ("asked that a report about Hermes BE created", "asked that the deck BE
+# made"). Gated on a passive creation verb so non-build subjunctives ("asked that a
+# report be REVIEWED", "asked that the team be INFORMED") do NOT match. Like
+# _ASKED_IF_BUILD_RE, defined standalone so the topic-scoped resolver can recognize
+# the whole-string pattern after the split strips the trailing "be <verb>".
+_ASKED_THAT_BUILD_RE = re.compile(
+    r"\bask(?:ed|s)\s+that\b[^.?!]{0,40}?\b(?:be|get)\s+"
+    r"(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|"
+    r"wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|"
+    r"assembl|convert|export|render)"
+)
 _DELIVERABLE_REQUEST_RE = re.compile(
     # "requested/requests" only as a VERB governing a deliverable (followed by a
     # determiner/number/possessive, "to", or "creation of") — NOT the plural noun
@@ -137,8 +149,10 @@ _DELIVERABLE_REQUEST_RE = re.compile(
     # an existing artifact is NOT a build request. Optional time phrase: "asked on Monday to build"
     r"|\bask(?:ed|s)\s+(?:" + _REQUEST_TIME_PHRASE + r"\s+)?to\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|assembl|convert|export|render)"
     # "asked if/whether <assistant> could/can [be] <create>" — indirect/passive build
-    # request (see _ASKED_IF_BUILD_RE).
+    # request (see _ASKED_IF_BUILD_RE). "asked that <subject> be <create>" — passive
+    # subjunctive build request (see _ASKED_THAT_BUILD_RE).
     + r"|" + _ASKED_IF_BUILD_RE.pattern
+    + r"|" + _ASKED_THAT_BUILD_RE.pattern
     + r"|\bwant(?:ed|s)?\b"
     r"|\bneed(?:ed|s)?\b"
     # polite request forms: "would like a report", "user'd like a deck", "would love"
@@ -1244,7 +1258,11 @@ def _topic_scoped_request_is_build(lowered: str, topic_markers: list) -> bool:
     # Exception: an indirect/passive "asked whether <deliverable> about X could be
     # created" carries the modal+verb AFTER the topic, so it never survives the
     # split into the intent — recognize that whole-string pattern explicitly.
-    if not _has_request_verb(intent) and not _ASKED_IF_BUILD_RE.search(lowered):
+    if (
+        not _has_request_verb(intent)
+        and not _ASKED_IF_BUILD_RE.search(lowered)
+        and not _ASKED_THAT_BUILD_RE.search(lowered)
+    ):
         return False
     # Scope the non-artifact exemptions to the request INTENT, never the subject:
     # "asked for a deck about practicing for interviews" is a real deck build — the

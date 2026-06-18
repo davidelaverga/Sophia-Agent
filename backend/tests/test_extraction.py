@@ -2605,6 +2605,21 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         assert _candidate_policy_rejection_reason(
             "User asked if a summary could be generated about the merger"
         ) == "task_history"
+        # Passive "asked THAT <subject> be <created>" build requests.
+        assert _candidate_policy_rejection_reason(
+            "User asked that a report about Hermes be created"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked that the deck be made about Q3"
+        ) == "task_history"
+        # Non-build subjunctives ("asked that a report be REVIEWED / the team be
+        # INFORMED") are NOT builds — kept.
+        assert _candidate_policy_rejection_reason(
+            "User asked that a report be reviewed"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User asked that the team be informed about layoffs"
+        ) is None
         # Recipient-prefixed asked-if ("asked ME/YOU/US if/whether ... could ...").
         assert _candidate_policy_rejection_reason(
             "User asked me if I could make a deck about OpenClaw"
