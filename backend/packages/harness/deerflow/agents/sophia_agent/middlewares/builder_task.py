@@ -938,6 +938,15 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 "MUST be emit_builder_artifact regardless of remaining turn count. Each long write "
                 "costs 90+ seconds of LLM output, so re-writing the same file twice burns the budget.\n"
             )
+        pptx_visual_guidance = (
+            "Slides use gpt-image-2 full-slide visuals when image-generation is listed for this run; "
+            "hard quantitative charts and QC-failed image slides fall back to deterministic chart/diagram/text composition "
+            "with honest diagnostics."
+            if image_generation_enabled
+            else "Image generation is disabled for this run. For PPTX/presentation output, preserve any plain/text-only/no-image constraint: "
+            "build an editable deterministic deck with slide text, shapes, simple diagrams, tables, and charts; do not run the image-generation script "
+            "or add generated hero/full-slide visuals."
+        )
 
         sections.append(
             "<completion_instruction>\n"
@@ -986,10 +995,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "    * **PDF**: follow the PDF workflow card. A valid render is terminal-ready; emit immediately "
             "unless Sophia asks for one layout repair.\n"
             "    * **PPTX / presentation**: follow the PPTX workflow card. Reading SKILL.md alone is not "
-            "completion; normal success requires deck composition and a valid .pptx. Slides use "
-            "gpt-image-2 full-slide visuals; PDF/HTML diagrams use local visual tools. Hard quantitative "
-            "charts and QC-failed image slides fall back to deterministic chart/diagram/text composition "
-            "with honest diagnostics.\n"
+            f"completion; normal success requires deck composition and a valid .pptx. {pptx_visual_guidance} "
+            "PDF/HTML diagrams use local visual tools.\n"
             "    * **HTML**: follow the HTML workflow card. Standalone browser-renderable HTML is a text "
             "deliverable, not a frontend app unless the user requested app behavior.\n"
             "    * **Standalone chart / image**: use the chart-visualization or image-generation skill. The "

@@ -76,13 +76,16 @@ def test_visual_composition_directives_carry_the_toolkit() -> None:
     assert "hallmark" in directives
     assert "read the matching skill" in directives
     assert "monotony" in directives
+    assert "plain, text-only, no-image" in directives
+    assert "do not call image-generation" in directives
+    assert "editable deterministic PPTX" in directives
 
 
 def test_ppt_generation_skill_carries_deck_design_system() -> None:
     skill = Path(__file__).resolve().parents[2] / "skills/public/ppt-generation/SKILL.md"
     text = skill.read_text()
 
-    assert "How slides are built (image-forward)" in text
+    assert "How slides are built" in text
     assert "gpt-image-2" in text
     assert "--slide-visual" in text
     assert "python /mnt/skills/public/image-generation/scripts/generate.py --slide-visual" in text
@@ -93,6 +96,9 @@ def test_ppt_generation_skill_carries_deck_design_system() -> None:
     assert "image_path" in text
     assert "visual_path" in text
     assert "generate_visual_asset" in text
+    assert "If the user asked for a plain, text-only, no-image" in text
+    assert "Do not run the image-generation script" in text
+    assert "deterministic editable PPTX" in text
 
 
 def test_pdf_report_skill_is_source_first_and_renderer_backed() -> None:

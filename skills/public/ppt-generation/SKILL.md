@@ -12,12 +12,20 @@ The skill carries the **judgment**; the renderer (`compile_pptx.mjs`) enforces t
 ## 1. Art-direct, then build
 Write a **visual plan** first — one line per slide: `Slide N | the one idea | treatment | tool`. Only after the whole plan is checked for variety (§3) do you generate visuals and compose.
 
-## How slides are built (image-forward)
+## How slides are built
 
-Each slide is generated as a full-slide visual with gpt-image-2 — including its title, text,
-and any technical drawing — using the structured plan + Sophia's brand style as the spec.
-Compose the prompt as an artifact spec (the script appends brand style and anti-patterns, so
-write only the content):
+Default deck builds are image-forward: each slide is generated as a full-slide visual with
+gpt-image-2 — including its title, text, and any technical drawing — using the structured
+plan + Sophia's brand style as the spec.
+
+If the user asked for a plain, text-only, no-image, no-imagery, no-illustration, or
+no-visuals deck, preserve that constraint. Do not run the image-generation script, do not
+make generated hero slides, and do not add `image_path` / `--slide-images` just because this
+skill was read. Compose a deterministic editable PPTX instead: use slide text, shapes,
+tables, simple diagrams, and deterministic charts through the PPT generator workflow.
+
+For image-forward runs, compose the prompt as an artifact spec (the script appends brand style
+and anti-patterns, so write only the content):
 
 - Declare the artifact ("a professional presentation slide, 16:9").
 - Wrap EVERY rendered string as "THE TEXT READS: ...". Keep each label 8 words or fewer.
@@ -27,15 +35,18 @@ write only the content):
 - Run `python /mnt/skills/public/image-generation/scripts/generate.py --slide-visual`
   (sets quality=high, 16:9). Generate slide 1 first, then pass it as
   `--reference-images` to every later slide for one consistent look.
-- Always give the cover a generated hero treatment.
+- For image-forward runs, give the cover a generated hero treatment. For plain/no-image runs,
+  use a clean typographic cover instead.
 
 Routing: concept, architecture, process, section, cover, statement, and qualitative-comparison
 slides are gpt-image-2 full slides. A slide whose point IS hard quantitative data (real numbers
 the audience reads) uses a deterministic chart (generate_visual_asset) embedded in an
-engine-composed slide instead — accuracy must not depend on image rendering.
+engine-composed slide instead — accuracy must not depend on image rendering. For plain/no-image
+decks, route every slide through deterministic engine-composed text/shape/chart layouts.
 
 QC: every generated slide is checked; a failed slide is regenerated once, then falls back to a
-deterministic engine-composed slide. Never ship a slide with garbled text or wrong data.
+deterministic engine-composed slide. Plain/no-image decks skip generated-slide QC because there
+are no generated slide images. Never ship a slide with garbled text or wrong data.
 Run the check with `python /mnt/skills/public/image-generation/scripts/slide_qc.py --image-file <slide.png> --spec-file <slide-spec.txt>`; pass slide 1 as `--reference-image` for later slides.
 
 Slide types in the plan: `cover` · `agenda` · `section` · `content` (subtype `text+visual` |

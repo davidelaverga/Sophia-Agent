@@ -13,10 +13,13 @@ You are building an artifact for someone — a deck, a report, a page. Your job 
 - Match the visual budget to the content: technical-heavy → vary among diagram types; **light on technical content → invest heavily in image-generated visuals and typography.** A non-technical artifact as bullet lists is the worst outcome.
 
 ## 2. How a visual gets realized — by medium
-- **Slides (`.pptx`)** — generate full-slide visuals and technical drawings with gpt-image-2
-  (`--slide-visual`, "THE TEXT READS:" technique, brand style appended). Hard quantitative
-  charts use a deterministic chart embedded in an engine slide. Every slide is QC-checked with a
-  deterministic fallback.
+- **Slides (`.pptx`)** — default visual decks generate full-slide visuals and technical
+  drawings with gpt-image-2 (`--slide-visual`, "THE TEXT READS:" technique, brand style
+  appended). Hard quantitative charts use a deterministic chart embedded in an engine slide.
+  Every generated slide is QC-checked with a deterministic fallback. If the user asks for a
+  plain, text-only, no-image, no-imagery, no-illustration, or no-visuals deck, preserve that
+  opt-out: do not call image-generation, do not create generated hero slides, and build an
+  editable deterministic PPTX with text, shapes, tables, simple diagrams, and charts.
 - **PDF reports (`.pdf`)** — UNCHANGED: graphviz (`generate_excalidraw_diagram`) for connected
   diagrams, `generate_visual_asset` for charts, image-generation for decorative illustrations
   only (no text). Do not use gpt-image-2 for report diagrams or charts.

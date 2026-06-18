@@ -112,3 +112,23 @@ class TestVisualCapabilityPrompt:
         result = BuilderTaskMiddleware().before_agent(_make_state("presentation"), _make_runtime())
         briefing = _briefing(result)
         assert "<missing_capability>" not in briefing
+
+    def test_plain_presentation_prompt_preserves_no_image_opt_out(self) -> None:
+        state = _make_state("presentation")
+        state["delegation_context"]["task"] = "Build a plain text-only deck about the roadmap with no images"
+
+        result = BuilderTaskMiddleware().before_agent(state, _make_runtime())
+
+        briefing = _briefing(result)
+        assert "image-generation" not in _skill_names_section(briefing)
+        assert "Image generation is disabled for this run" in briefing
+        assert "do not run the image-generation script" in briefing
+        assert "Slides use gpt-image-2 full-slide visuals" not in briefing
+
+
+def _skill_names_section(briefing: str) -> str:
+    start = briefing.find("<skill_system>")
+    end = briefing.find("</skill_system>")
+    if start == -1 or end == -1:
+        return ""
+    return briefing[start:end]
