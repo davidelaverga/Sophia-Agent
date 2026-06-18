@@ -110,7 +110,7 @@ _DELIVERABLE_REQUEST_RE = re.compile(
     r"|\bask(?:ed|s)\s+sophia\b"
     # bare "asked to <create>" — gated on a creation stem so "asked to see/review"
     # an existing artifact is NOT a build request. Optional time phrase: "asked on Monday to build"
-    r"|\bask(?:ed|s)\s+(?:" + _REQUEST_TIME_PHRASE + r"\s+)?to\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|assembl|convert)"
+    r"|\bask(?:ed|s)\s+(?:" + _REQUEST_TIME_PHRASE + r"\s+)?to\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|assembl|convert|export|render)"
     r"|\bwant(?:ed|s)?\b"
     r"|\bneed(?:ed|s)?\b"
     # polite request forms: "would like a report", "user'd like a deck", "would love"
@@ -127,6 +127,9 @@ _DELIVERABLE_NOUNS = (
     # drop only when topic-scoped ("a brief about X") or with a create cue, and a
     # bare/verbal/adjectival use is kept. "to brief" is exempted as a verb below.
     "summary", "brief", "article", "explainer",
+    # Common document deliverables (weak — could name an existing doc): proposal,
+    # memo, whitepaper, newsletter, essay.
+    "proposal", "memo", "whitepaper", "newsletter", "essay",
 )
 # Frontend / web deliverables. The frontend dispatch path
 # (``start_builder_task._HTML_OUTPUT_RE``) treats these bare nouns as build
@@ -139,6 +142,7 @@ _DELIVERABLE_NOUNS = (
 # (website → websites, landing page → landing pages, web app → web apps).
 _WEB_DELIVERABLE_FRAGMENT = (
     r"website|web\s+site|web\s+page|landing\s+page|web\s+app(?:lication)?"
+    r"|single[-\s]page\s+(?:app|site)"
 )
 # PowerPoint presentation aliases. The dispatch path
 # (``start_builder_task._PPTX_OUTPUT_RE``) routes "PowerPoint"/"pptx"/"power
@@ -274,6 +278,7 @@ _DELIVERABLE_CREATION_RE = re.compile(
     r"\bprepar(?:e|es|ed|ing)\b|\bput\s+together\b|\bwr(?:ite|ites|iting|ote|itten)\b|"
     r"\bsummari[sz](?:e|es|ed|ing)\b|\bcompil(?:e|es|ed|ing)\b|"
     r"\bcollat(?:e|es|ed|ing)\b|\bassembl(?:e|es|ed|ing)\b|"
+    r"\bexport(?:s|ed|ing)?\b|\brender(?:s|ed|ing)?\b|"
     r"\b(?:turn|convert)(?:s|ed|ing)?\s+[^.?!]{0,40}?\b(?:in)?to\b"
 )
 # STRONG deliverable nouns: things one asks Sophia to *produce*. A request verb
@@ -371,14 +376,23 @@ _EMOTIONAL_SUPPORT_RE = re.compile(
 )
 # A deliverable word naming the user's OWN software project/product: "report
 # generator", "presentation app", "slide builder", "PDF tool". This is exempted
-# ONLY in the no-subject branch — a Sophia-directed build WITH a subject ("build
-# a report generator ABOUT OpenClaw") is still a build request and must drop, so
-# the topic branch does not consult this.
+# ONLY in the no-subject branch AND only when the request is NOT Sophia-directed —
+# a Sophia-directed build of one ("asked Sophia to build a report generator for
+# OpenClaw", "build a report generator ABOUT OpenClaw") is still a build request
+# and must drop. The user's OWN work ("wants to create a report generator for
+# their startup") has no Sophia direction, so it stays.
 _PROJECT_PRODUCT_COMPOUND_RE = re.compile(
     r"\b(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
     + "|" + _WEB_DELIVERABLE_FRAGMENT + "|" + _PPTX_DELIVERABLE_FRAGMENT + r")s?\s+"
     r"(?:generators?|tools?|apps?|applications?|platforms?|builders?|engines?|software|"
     r"bots?|pipelines?|frameworks?|librar(?:y|ies)|plugins?|extensions?|saas)\b"
+)
+# A request explicitly directed at Sophia ("asked Sophia/me/you/us …", "asked to
+# build/create/…") — used to deny the project/product exemption above (a build
+# Sophia is asked to do is task history, even if the deliverable is a "generator").
+_SOPHIA_DIRECTED_RE = re.compile(
+    r"\bask(?:ed|s)\s+(?:sophia|me|you|us)\b"
+    r"|\bask(?:ed|s)\s+(?:" + _REQUEST_TIME_PHRASE + r"\s+)?to\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|assembl|convert|export|render)"
 )
 _DUPLICATE_STOPWORDS = {
     "a",
@@ -1031,10 +1045,12 @@ def _subjectless_request_is_build(lowered: str) -> bool:
     if _is_non_artifact_deliverable_use(lowered):
         return False
     # A project/product compound with NO subject is the user's own work
-    # ("a report generator for their startup") — keep. (A Sophia-directed build
-    # WITH a subject lands in the topic branch and is not consulted here, so
-    # "build a report generator about OpenClaw" still drops.)
-    if _PROJECT_PRODUCT_COMPOUND_RE.search(lowered):
+    # ("a report generator for their startup") — keep — UNLESS the request is
+    # Sophia-directed ("asked Sophia to build a report generator for OpenClaw"),
+    # which is a build request and must drop even though "for OpenClaw" is not a
+    # topic marker. (A subject-marked "… about OpenClaw" already drops via the
+    # topic branch, which never consults this exemption.)
+    if _PROJECT_PRODUCT_COMPOUND_RE.search(lowered) and not _SOPHIA_DIRECTED_RE.search(lowered):
         return False
     if _THIRD_PARTY_REQUEST_RE.search(lowered):
         return False

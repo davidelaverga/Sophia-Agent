@@ -1474,6 +1474,65 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked for a PDF"
         ) is None  # no trailing "for <X>"
 
+    def test_document_deliverables_proposal_memo_etc(self):
+        """Codex P2: common document deliverables (proposal, memo, whitepaper,
+        newsletter, essay) the builder produces are weak nouns — drop topic-scoped
+        or create-cued."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to draft a proposal about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a memo about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a whitepaper about the protocol"
+        ) == "task_history"
+
+    def test_single_page_app_is_a_web_deliverable(self):
+        """Codex P2: 'single-page app/site' is dispatched as frontend
+        (_HTML_OUTPUT_RE), so it must be a recognized web deliverable."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to build a single-page app about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a single page site about pricing"
+        ) == "task_history"
+
+    def test_export_render_are_creation_cues(self):
+        """Codex P2: export/render are build cues (PDF dispatch accepts
+        'render/export … as PDF'), so a weak deliverable phrased 'export Hermes as
+        a PDF' is task history without an explicit 'about'."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to export Hermes as a PDF"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to render Hermes as a PDF"
+        ) == "task_history"
+
+    def test_sophia_directed_generator_build_with_for_drops(self):
+        """Codex P2: a project/product compound is the user's own work only when
+        NOT Sophia-directed. 'asked Sophia to build a report generator for
+        OpenClaw' ('for', not 'about', so no topic marker) is a build request and
+        drops; the user's own 'a report generator for their startup' stays."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to build a report generator for OpenClaw"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked to build a slide tool for the Hermes launch"
+        ) == "task_history"
+        # The user's own project (no Sophia direction) still keeps.
+        assert _candidate_policy_rejection_reason(
+            "User wants to create a report generator for their startup"
+        ) is None
+
     def test_transformation_output_verbs_are_creation_cues(self):
         """Codex P2: content-production / transformation verbs (summarize, compile,
         collate, assemble, turn/convert … into) are build cues, so a weak
