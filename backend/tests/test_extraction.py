@@ -1617,6 +1617,37 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked for a report from their manager about Q3"
         ) is None
 
+    def test_asked_if_assistant_could_build_is_task_history(self):
+        """Codex P2: an indirect 'asked if/whether <assistant> could/can <create>'
+        build request ('asked if Sophia could build a presentation about Hermes')
+        is task history."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked if Sophia could build a presentation about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked whether you could create a report about Q3"
+        ) == "task_history"
+        # 'asked if' with no create cue / deliverable is not a build request.
+        assert _candidate_policy_rejection_reason(
+            "User asked if the meeting went well"
+        ) is None
+
+    def test_requests_that_relative_clause_is_not_a_request_verb(self):
+        """Codex P2: 'requests that <verb>' (a relative clause on the noun
+        'requests') must not match as a request verb — 'feature requests that
+        mention reports' is durable project context. 'requested that a report be
+        created' (verb + article) still drops."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User tracks feature requests that mention reports in Linear"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User requested that a report be created about Hermes"
+        ) == "task_history"
+
     def test_requests_as_plural_noun_is_not_a_request_verb(self):
         """Codex P2: 'requests' as a plural NOUN ('feature requests', 'support
         requests') must not satisfy the request gate. It counts only as a verb

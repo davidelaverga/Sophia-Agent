@@ -104,7 +104,10 @@ _DELIVERABLE_REQUEST_RE = re.compile(
     # "requested/requests" only as a VERB governing a deliverable (followed by a
     # determiner/number/possessive, "to", or "creation of") — NOT the plural noun
     # ("feature requests", "support requests in a spreadsheet").
-    r"\brequest(?:ed|s)\s+(?:(?:an?|the|some|several|multiple|few|two|three|four|\d+|that|another|its|their|his|her|our|my|your|sophia|me|you|us)\s+|to\b|creation\s+of\b)"
+    # "that" must be followed by an article/recipient ("requested THAT A report")
+    # so a noun-relative clause ("feature requests THAT MENTION reports") is not a
+    # verb match.
+    r"\brequest(?:ed|s)\s+(?:(?:an?|the|some|several|multiple|few|two|three|four|\d+|another|its|their|his|her|our|my|your|sophia|me|you|us)\s+|that\s+(?:an?|the|sophia|me|you|us)\b|to\b|creation\s+of\b)"
     # "asked for" / "asked {sophia,me,you,us} for" (recipient optional) with an
     # optional intervening time phrase: "asked on Tuesday for", "asked me yesterday for"
     r"|\bask(?:ed|s)\s+(?:(?:sophia|me|you|us)\s+)?(?:" + _REQUEST_TIME_PHRASE + r"\s+)?for\b"
@@ -115,6 +118,8 @@ _DELIVERABLE_REQUEST_RE = re.compile(
     # bare "asked to <create>" — gated on a creation stem so "asked to see/review"
     # an existing artifact is NOT a build request. Optional time phrase: "asked on Monday to build"
     r"|\bask(?:ed|s)\s+(?:" + _REQUEST_TIME_PHRASE + r"\s+)?to\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|assembl|convert|export|render)"
+    # "asked if/whether <assistant> could/can <create>" — an indirect build request.
+    r"|\bask(?:ed|s)\s+(?:if|whether)\b[^.?!]{0,40}?\b(?:could|can|would|will)\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|assembl|convert|export|render)"
     r"|\bwant(?:ed|s)?\b"
     r"|\bneed(?:ed|s)?\b"
     # polite request forms: "would like a report", "user'd like a deck", "would love"
