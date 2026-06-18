@@ -78,4 +78,5 @@ def test_compose_allows_env_file_to_disable_langsmith_tracing() -> None:
     text = compose.read_text(encoding="utf-8")
 
     assert "- LANGSMITH_TRACING=" not in text
-    assert "LANGSMITH_TRACING and LANGSMITH_API_KEY are read from ../.env" in text
+    assert "- SOPHIA_BUILDER_LANGSMITH_TRACING=" not in text
+    assert "SOPHIA_BUILDER_LANGSMITH_TRACING, and LANGSMITH_API_KEY are read from ../.env" in text

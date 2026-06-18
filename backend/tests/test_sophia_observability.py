@@ -167,3 +167,23 @@ def test_builder_trace_runnable_uses_builder_only_env(monkeypatch) -> None:
         ("enter", True),
         ("exit", True),
     ]
+
+
+def test_builder_trace_runnable_honors_global_langsmith_false(monkeypatch) -> None:
+    events: list[tuple[str, bool | None]] = []
+
+    @contextmanager
+    def fake_tracing_context(*, enabled: bool | None = None, **_kwargs: Any):
+        events.append(("enter", enabled))
+        try:
+            yield
+        finally:
+            events.append(("exit", enabled))
+
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "true")
+    monkeypatch.setattr(observability, "_tracing_context_factory", lambda: fake_tracing_context)
+    wrapped = observability.enable_langsmith_tracing_for_builder_runnable(_FakeRunnable())
+
+    assert wrapped.invoke({}) == "invoke"
+    assert events == []

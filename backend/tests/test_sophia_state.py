@@ -3,7 +3,11 @@
 from pathlib import Path
 from typing import get_type_hints
 
-from deerflow.agents.sophia_agent.state import SophiaState, _merge_builder_write_diagnostics
+from deerflow.agents.sophia_agent.state import (
+    SophiaState,
+    _merge_builder_pptx_diagnostics,
+    _merge_builder_write_diagnostics,
+)
 
 
 def test_sophia_state_has_messages():
@@ -64,6 +68,38 @@ def test_builder_write_diagnostics_merges_deliverable_paths():
         "/mnt/user-data/outputs/report.html",
         "/mnt/user-data/outputs/deck.md",
     ]
+
+
+def test_builder_pptx_diagnostics_merges_qc_lists_and_latest_deck_counts():
+    current = {
+        "qc_invocation_count": 1,
+        "qc_failure_count": 1,
+        "qc_results": [{"pass": False, "reasons": ["garbled"]}],
+        "qc_reasons": ["garbled"],
+        "pptx_generator_slide_count": 5,
+        "pptx_generator_picture_count": 4,
+    }
+    update = {
+        "qc_invocation_count": 1,
+        "qc_pass_count": 1,
+        "qc_results": [{"pass": True, "reasons": []}],
+        "qc_reasons": ["garbled"],
+        "pptx_generator_slide_count": 5,
+        "pptx_generator_picture_count": 4,
+    }
+
+    merged = _merge_builder_pptx_diagnostics(current, update)
+
+    assert merged["qc_invocation_count"] == 2
+    assert merged["qc_failure_count"] == 1
+    assert merged["qc_pass_count"] == 1
+    assert merged["qc_results"] == [
+        {"pass": False, "reasons": ["garbled"]},
+        {"pass": True, "reasons": []},
+    ]
+    assert merged["qc_reasons"] == ["garbled"]
+    assert merged["pptx_generator_slide_count"] == 5
+    assert merged["pptx_generator_picture_count"] == 4
 
 
 def test_skills_reorganized():

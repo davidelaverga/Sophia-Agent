@@ -40,9 +40,15 @@ def _env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_flag_is_false(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"0", "false", "no", "off"}
+
+
 def langsmith_builder_tracing_enabled() -> bool:
     """Return whether the builder graph should opt into LangSmith tracing."""
 
+    if _env_flag_is_false("LANGSMITH_TRACING"):
+        return False
     return _env_flag("SOPHIA_BUILDER_LANGSMITH_TRACING")
 
 

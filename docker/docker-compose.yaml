@@ -110,10 +110,10 @@ services:
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
-      # Sophia LangSmith observability. LANGSMITH_TRACING and LANGSMITH_API_KEY are read from ../.env.
+      # Sophia LangSmith observability. LANGSMITH_TRACING,
+      # SOPHIA_BUILDER_LANGSMITH_TRACING, and LANGSMITH_API_KEY are read from ../.env.
       - LANGSMITH_ENDPOINT=${LANGSMITH_ENDPOINT:-https://eu.api.smith.langchain.com}
       - LANGSMITH_PROJECT=${LANGSMITH_PROJECT:-Sophia}
-      - SOPHIA_BUILDER_LANGSMITH_TRACING=${SOPHIA_BUILDER_LANGSMITH_TRACING:-true}
       # Legacy alias retained for older local configs; LANGSMITH_TRACING wins.
       - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2:-false}
     env_file:

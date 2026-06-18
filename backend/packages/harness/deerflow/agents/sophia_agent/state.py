@@ -162,17 +162,34 @@ def _merge_builder_pptx_diagnostics(
 
     merged = dict(current)
     for key, value in update.items():
-        if key.endswith("_count") and isinstance(value, int):
-            merged[key] = int(merged.get(key, 0) or 0) + value
-            continue
-        if key in {"image_output_paths", "pptx_output_paths"} and isinstance(value, list):
-            merged[key] = _merge_string_list(merged.get(key), value)
-            continue
-        if key.endswith("_bytes_total") and isinstance(value, int):
-            merged[key] = int(merged.get(key, 0) or 0) + value
-            continue
-        merged[key] = value
+        _merge_builder_pptx_diagnostic_value(merged, key, value)
     return merged
+
+
+_PPTX_DIAGNOSTIC_LATEST_COUNT_KEYS = frozenset(
+    {
+        "pptx_generator_picture_count",
+        "pptx_generator_slide_count",
+        "pptx_plan_image_ref_count",
+        "pptx_plan_slide_count",
+    }
+)
+
+
+def _merge_builder_pptx_diagnostic_value(merged: dict, key: str, value: object) -> None:
+    if key in _PPTX_DIAGNOSTIC_LATEST_COUNT_KEYS:
+        merged[key] = value
+        return
+    if (key.endswith("_count") or key.endswith("_bytes_total")) and isinstance(value, int):
+        merged[key] = int(merged.get(key, 0) or 0) + value
+        return
+    if key in {"image_output_paths", "pptx_output_paths", "qc_reasons"} and isinstance(value, list):
+        merged[key] = _merge_string_list(merged.get(key), value)
+        return
+    if key == "qc_results" and isinstance(value, list):
+        merged[key] = [*(merged.get(key) if isinstance(merged.get(key), list) else []), *value]
+        return
+    merged[key] = value
 
 
 def _merge_builder_visual_diagnostics(
