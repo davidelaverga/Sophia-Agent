@@ -503,7 +503,8 @@ _NON_DELIVERABLE_COMPOUND_RE = re.compile(
 # the absence of a creation cue by its caller, so a genuine "create a report
 # dashboard about Q3" still drops.
 _DELIVERABLE_MODIFIER_COMPOUND_RE = re.compile(
-    r"\b(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS) + r")s?\s+"
+    r"\b(?:(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
+    + r"|" + _WEB_DELIVERABLE_FRAGMENT + r")s?|" + _PPTX_DELIVERABLE_FRAGMENT + r")\s+"
     r"(?:storage|notifications?|reminders?|alerts?|digests?|folders?|drives?|"
     r"dashboards?|channels?|workspaces?|backups?|syncs?|subscriptions?|management|"
     r"settings|integrations?|automations?|workflows?|feeds?|inbox(?:es)?|portals?|"

@@ -1353,6 +1353,16 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         assert _candidate_policy_rejection_reason(
             "User wants document storage"
         ) is None
+        # Web / PPTX deliverable aliases as the modifier are covered too.
+        assert _candidate_policy_rejection_reason(
+            "User wants website storage on S3"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants web app notifications on Slack"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants PowerPoint backups on Google Drive"
+        ) is None
         # Guard rails: a real build still drops — deliverable as head noun, or a
         # creation cue over the modifier compound.
         assert _candidate_policy_rejection_reason(
