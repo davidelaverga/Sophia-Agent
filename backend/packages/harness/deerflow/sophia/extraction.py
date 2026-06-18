@@ -502,13 +502,16 @@ _NON_DELIVERABLE_COMPOUND_RE = re.compile(
 # platform, which _TOPIC_MARKER_RE otherwise treats as a subject. This is gated on
 # the absence of a creation cue by its caller, so a genuine "create a report
 # dashboard about Q3" still drops.
+# The suffix set is deliberately limited to PURE storage/notification/sync/config
+# features — you "store/notify/sync", not "build", these. Build-target-capable
+# nouns (dashboard/portal/hub/tracker/workspace) are NOT here: "a web app dashboard
+# about Q3", "a report portal" are one-off builds and must still drop.
 _DELIVERABLE_MODIFIER_COMPOUND_RE = re.compile(
     r"\b(?:(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
     + r"|" + _WEB_DELIVERABLE_FRAGMENT + r")s?|" + _PPTX_DELIVERABLE_FRAGMENT + r")\s+"
     r"(?:storage|notifications?|reminders?|alerts?|digests?|folders?|drives?|"
-    r"dashboards?|channels?|workspaces?|backups?|syncs?|subscriptions?|management|"
-    r"settings|integrations?|automations?|workflows?|feeds?|inbox(?:es)?|portals?|"
-    r"hubs?|trackers?)\b"
+    r"channels?|backups?|syncs?|subscriptions?|management|settings|integrations?|"
+    r"automations?|feeds?|inbox(?:es)?)\b"
 )
 # An emotional/support GOAL where a deliverable is the activity context, not the
 # requested artifact: "wants confidence FOR presentations", "scared OF giving

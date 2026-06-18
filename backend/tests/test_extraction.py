@@ -1371,6 +1371,18 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         assert _candidate_policy_rejection_reason(
             "User asked Sophia to create a report dashboard about Q3"
         ) == "task_history"
+        # Build-target-capable suffix nouns (dashboard/portal/tracker/...) are NOT
+        # preference features — they drop even with NO creation cue, for both
+        # regular and web/PPT alias modifiers.
+        assert _candidate_policy_rejection_reason(
+            "User wants a report dashboard about Q3"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants a web app dashboard about Q3 revenue"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants a website portal about pricing"
+        ) == "task_history"
 
     def test_adjectival_brief_before_interaction_word_is_preserved(self):
         """Codex P2: 'brief' is an ADJECTIVE when it modifies a conversation /
