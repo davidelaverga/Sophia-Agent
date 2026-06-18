@@ -393,22 +393,24 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
 
-### Sophia Builder Observability
+### Sophia LangSmith Observability
 
-Sophia traces only the `sophia_builder` graph to LangSmith project `sophia-builder` so deck builds can be inspected by plan, image prompts, tool output, QC verdicts, metadata tags, and `slide_qc` feedback. Keep process-wide `LANGSMITH_TRACING` unset or false on the shared worker; the builder graph opts in through its own wrapper so the companion graph never exports Mem0/personal context.
+Sophia sends traces to the EU LangSmith endpoint under project `Sophia` so runs can be inspected by graph, plan, image prompts, tool output, QC verdicts, metadata tags, and `slide_qc` feedback.
 
 Set these only on the `sophia-langgraph` worker service:
 
 ```bash
-SOPHIA_BUILDER_LANGSMITH_TRACING=true
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com
+LANGSMITH_PROJECT=Sophia
 LANGSMITH_API_KEY=<write key>
-LANGSMITH_PROJECT=sophia-builder
+SOPHIA_BUILDER_LANGSMITH_TRACING=true
 LANGSMITH_WORKSPACE_ID=<workspace id>   # only if the key spans multiple workspaces
 ```
 
-Use a separate read-only LangSmith key for the official LangSmith MCP server (`langchain-ai/langsmith-mcp-server`) in local developer MCP config. The intended debug loop is `ls_list_runs(project_name="sophia-builder", is_root=True)` then `ls_read_run(run_id, hydrate_children=True)`.
+Use a separate read-only LangSmith key for the official LangSmith MCP server (`langchain-ai/langsmith-mcp-server`) in local developer MCP config. The intended debug loop is `ls_list_runs(project_name="Sophia", is_root=True)` then `ls_read_run(run_id, hydrate_children=True)`.
 
-Release check: run one deck build, verify the builder trace contains `[gen] PROMPT_SENT`, `[qc] PASS=...`, deck metadata, decision tags, and `slide_qc` feedback, then verify no `sophia_companion` runs appear. Rollback is removing the LangSmith env vars; stdout diagnostics and metadata calls are harmless no-ops without an active trace.
+Release check: run one deck build, verify the trace appears under project `Sophia` in the EU LangSmith workspace and contains `[gen] PROMPT_SENT`, `[qc] PASS=...`, deck metadata, decision tags, and `slide_qc` feedback. Rollback is removing the LangSmith env vars; stdout diagnostics and metadata calls are harmless no-ops without an active trace.
 
 ### IM Channels
 
@@ -513,7 +515,7 @@ Editing the local `config.yaml` does NOTHING to production. Always edit `config.
 | Service | Env vars |
 |---|---|
 | `sophia-gateway` | `ANTHROPIC_API_KEY`, `MEM0_API_KEY`, `STREAM_API_KEY`, `STREAM_API_SECRET`, `LANGGRAPH_URL`, `SOPHIA_VOICE_SERVER_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_WORKER_BOT_TOKEN` (Work bot only) |
-| `sophia-langgraph` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `MEM0_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WORKER_BOT_TOKEN` (Work bot only), `SOPHIA_BUILDER_LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT=sophia-builder`, optional `LANGSMITH_WORKSPACE_ID` (any token referenced by `config.production.yaml` must be set here too) |
+| `sophia-langgraph` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `MEM0_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WORKER_BOT_TOKEN` (Work bot only), `LANGSMITH_TRACING=true`, `LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com`, `SOPHIA_BUILDER_LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT=Sophia`, optional `LANGSMITH_WORKSPACE_ID` (any token referenced by `config.production.yaml` must be set here too) |
 | `sophia-voice` | (see `render.yaml` — STT/TTS keys, Stream credentials, etc.) |
 
 **To verify a deploy** worked, SSH into the Render service shell and run:

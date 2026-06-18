@@ -46,13 +46,16 @@ services:
         value: sophia-builder-artifacts
       - key: SOPHIA_GATEWAY_URL
         sync: false
-      # Builder-only LangSmith observability. Do not enable process-wide
-      # LANGSMITH_TRACING on this shared worker; the builder graph opts in
-      # through code so companion Mem0/personal context stays out of traces.
+      # LangSmith observability for Sophia runs. Secrets are set in the Render
+      # dashboard; non-secret routing values live in the blueprint.
+      - key: LANGSMITH_TRACING
+        value: "true"
+      - key: LANGSMITH_ENDPOINT
+        value: https://eu.api.smith.langchain.com
       - key: SOPHIA_BUILDER_LANGSMITH_TRACING
         value: "true"
       - key: LANGSMITH_PROJECT
-        value: sophia-builder
+        value: Sophia
       - key: LANGSMITH_API_KEY
         sync: false
       # Uncomment only if the write key spans multiple LangSmith workspaces.
