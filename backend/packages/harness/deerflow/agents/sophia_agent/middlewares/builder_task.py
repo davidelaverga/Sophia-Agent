@@ -454,7 +454,9 @@ def _image_generation_enabled(
 
 
 def _is_pptx_image_generation_target(artifact_target_ext: str, task_type: str) -> bool:
-    return artifact_target_ext == ".pptx" or task_type in {"presentation", "slides", "slide_deck", "deck"}
+    if artifact_target_ext:
+        return artifact_target_ext == ".pptx"
+    return task_type in {"presentation", "slides", "slide_deck", "deck"}
 
 
 def _visuals_requested(delegation_context: dict[str, Any]) -> bool:

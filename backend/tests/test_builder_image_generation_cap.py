@@ -21,6 +21,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
 )
 from deerflow.agents.sophia_agent.middlewares.builder_task import (
     _image_generation_enabled,
+    _is_pptx_image_generation_target,
 )
 
 _SCRIPT = "/mnt/skills/public/image-generation/scripts/generate.py"
@@ -178,6 +179,17 @@ def test_presentation_task_enables_image_generation_by_default():
         artifact_target_ext=".pptx",
         task_type="presentation",
     ) is True
+
+
+def test_presentation_task_fallback_only_applies_without_resolved_extension():
+    assert _is_pptx_image_generation_target("", "presentation") is True
+    assert _is_pptx_image_generation_target(".pptx", "document") is True
+    assert _is_pptx_image_generation_target(".pdf", "presentation") is False
+    assert _image_generation_enabled(
+        {"task": "Build a presentation and export it as a PDF"},
+        artifact_target_ext=".pdf",
+        task_type="presentation",
+    ) is False
 
 
 def test_polished_presentation_task_enables_image_generation():
