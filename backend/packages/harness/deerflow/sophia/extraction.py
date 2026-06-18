@@ -458,6 +458,21 @@ _NON_DELIVERABLE_COMPOUND_RE = re.compile(
     r"|\bdecks?\s+(?:chairs?|hands?|shoes?)\b"
     r"|\bslide\s+rules?\b"
 )
+# A deliverable word used only as a MODIFIER of a system / output-channel /
+# preference noun ("document storage", "report notifications", "presentation
+# backups", "report alerts") names a durable preference about where/how artifacts
+# live or how the user is notified — NOT a request to build an artifact. The "on X"
+# in "document storage on Google Drive" / "report notifications on Slack" is a
+# platform, which _TOPIC_MARKER_RE otherwise treats as a subject. This is gated on
+# the absence of a creation cue by its caller, so a genuine "create a report
+# dashboard about Q3" still drops.
+_DELIVERABLE_MODIFIER_COMPOUND_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS) + r")s?\s+"
+    r"(?:storage|notifications?|reminders?|alerts?|digests?|folders?|drives?|"
+    r"dashboards?|channels?|workspaces?|backups?|syncs?|subscriptions?|management|"
+    r"settings|integrations?|automations?|workflows?|feeds?|inbox(?:es)?|portals?|"
+    r"hubs?|trackers?)\b"
+)
 # An emotional/support GOAL where a deliverable is the activity context, not the
 # requested artifact: "wants confidence FOR presentations", "scared OF giving
 # presentations", "calm BEFORE the presentation". The emotional word comes BEFORE
@@ -1111,6 +1126,13 @@ def _is_non_artifact_deliverable_use(lowered: str) -> bool:
         or _SUPPORT_REQUEST_RE.search(lowered)
         or _NON_DELIVERABLE_COMPOUND_RE.search(lowered)
         or _EMOTIONAL_SUPPORT_RE.search(lowered)
+    ):
+        return True
+    # Deliverable-as-modifier preference ("document storage", "report
+    # notifications") — only when there is no creation cue, so a genuine
+    # "create a report dashboard about X" still drops.
+    if _DELIVERABLE_MODIFIER_COMPOUND_RE.search(lowered) and not _DELIVERABLE_CREATION_RE.search(
+        lowered
     ):
         return True
     return bool(_OWN_WORK_RE.search(lowered) and not _SOPHIA_DIRECTED_RE.search(lowered))

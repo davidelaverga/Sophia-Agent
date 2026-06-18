@@ -1327,6 +1327,41 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked Sophia to build a deck about pricing"
         ) == "task_history"
 
+    def test_deliverable_as_modifier_preference_is_preserved(self):
+        """Codex P2: a deliverable word used only as a MODIFIER of a system /
+        output-channel / preference noun ('document storage on Google Drive',
+        'report notifications on Slack', 'presentation backups on Dropbox') names a
+        durable preference, not a build request. _TOPIC_MARKER_RE treats the 'on
+        <platform>' as a subject, so without an exemption the topic-scoped resolver
+        would drop it. A genuine build with a creation cue ('create a report
+        dashboard about Q3') still drops."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User wants document storage on Google Drive"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants report notifications on Slack"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants presentation backups on Dropbox"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User prefers report alerts via email"
+        ) is None
+        # No subject marker (subjectless form) — still a preference, still kept.
+        assert _candidate_policy_rejection_reason(
+            "User wants document storage"
+        ) is None
+        # Guard rails: a real build still drops — deliverable as head noun, or a
+        # creation cue over the modifier compound.
+        assert _candidate_policy_rejection_reason(
+            "User wants a report about Google Drive"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to create a report dashboard about Q3"
+        ) == "task_history"
+
     def test_adjectival_brief_before_interaction_word_is_preserved(self):
         """Codex P2: 'brief' is an ADJECTIVE when it modifies a conversation /
         interaction word ('brief conversations about work stress', 'brief daily
