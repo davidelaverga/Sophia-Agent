@@ -2602,6 +2602,18 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         assert _candidate_policy_rejection_reason(
             "User asked me if the report about Hermes is ready"
         ) is None
+        # An asked-if whose SUBJECT is a named third party ("asked if the client
+        # could make ...") is delegation/relationship context, not a Sophia build —
+        # kept. (Pronoun subjects stay ambiguous with Sophia and still drop above.)
+        assert _candidate_policy_rejection_reason(
+            "User asked if the client could make a deck about OpenClaw"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User asked whether the boss could build a report about Q3"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User asked me if the team could make a deck about pricing"
+        ) is None
 
 
 class TestTaskHistoryLLMClassifier:

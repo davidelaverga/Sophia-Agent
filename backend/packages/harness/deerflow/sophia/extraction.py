@@ -417,6 +417,16 @@ _THIRD_PARTY_REQUEST_RE = re.compile(
     rf"|\b(?:asked|requested|told|tasked|assigned|instructed|directed)\s+by\s+"
     rf"(?:(?:the|their|a|an|our|my|your|his|her|its)\s+)?(?:{_THIRD_PARTY})\b"
 )
+# "asked [recipient] if/whether <named third party> could/can …" — the user is
+# wondering whether a THIRD PARTY (client/boss/HR/team/…) could produce the
+# deliverable, i.e. delegation/relationship context, NOT a build request made of
+# Sophia. _ASKED_IF_BUILD_RE's free-form gap would otherwise match this shape and
+# drop it. Limited to NAMED parties: pronoun subjects ("asked if SHE could …") are
+# ambiguous with Sophia ("asked Sophia whether she could …") and still drop.
+_ASKED_IF_THIRD_PARTY_RE = re.compile(
+    rf"\bask(?:ed|s)\s+(?:(?:sophia|me|you|us)\s+)?(?:if|whether)\s+"
+    rf"(?:(?:the|a|an|their|our|my|your|his|her|its)\s+)?(?:{_THIRD_PARTY})\b"
+)
 # A singular deliverable built FROM source material ("a PDF FROM customer feedback",
 # "a summary FROM client notes", "a deck FROM the survey responses") is a build —
 # the "from <source-material>" phrase is the input Sophia synthesizes into the
@@ -1166,6 +1176,7 @@ def _is_non_artifact_deliverable_use(lowered: str) -> bool:
         or _SUPPORT_REQUEST_RE.search(lowered)
         or _NON_DELIVERABLE_COMPOUND_RE.search(lowered)
         or _EMOTIONAL_SUPPORT_RE.search(lowered)
+        or _ASKED_IF_THIRD_PARTY_RE.search(lowered)
     ):
         return True
     # Deliverable-as-modifier preference ("document storage", "report
