@@ -24,8 +24,9 @@ write only the content):
 - State the layout in one explicit sentence (columns, sections, where the visual sits).
 - For a technical drawing, list nodes and labeled connections, each wrapped "THE TEXT READS: ...".
 - Put EXACT data in the prompt; the model renders what you give it and will not invent numbers.
-- Run scripts/generate.py with `--slide-visual` (sets quality=high, 16:9). Generate slide 1
-  first, then pass it as `--reference-images` to every later slide for one consistent look.
+- Run `python /mnt/skills/public/image-generation/scripts/generate.py --slide-visual`
+  (sets quality=high, 16:9). Generate slide 1 first, then pass it as
+  `--reference-images` to every later slide for one consistent look.
 - Always give the cover a generated hero treatment.
 
 Routing: concept, architecture, process, section, cover, statement, and qualitative-comparison

@@ -85,6 +85,8 @@ def test_ppt_generation_skill_carries_deck_design_system() -> None:
     assert "How slides are built (image-forward)" in text
     assert "gpt-image-2" in text
     assert "--slide-visual" in text
+    assert "python /mnt/skills/public/image-generation/scripts/generate.py --slide-visual" in text
+    assert "Run scripts/generate.py with `--slide-visual`" not in text
     assert "THE TEXT READS:" in text
     assert "slide_qc.py" in text
     assert "statement" in text
