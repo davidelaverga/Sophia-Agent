@@ -400,6 +400,18 @@ _THIRD_PARTY_REQUEST_RE = re.compile(
 # report/document/brief double as verbs — so a request verb + "report on X" /
 # "brief them" is not a build request.
 _DELIVERABLE_AS_VERB_RE = re.compile(r"\bto\s+report\b|\bto\s+documents?\b|\bto\s+brief\b")
+# "brief" is also an ADJECTIVE when it modifies a conversation / interaction word
+# ("brief conversations about work stress", "brief daily check-ins", "a brief chat
+# about the project") — that is a communication preference, not a "brief" document
+# deliverable, so the memory is kept. Up to two adjectives may sit between "brief"
+# and the interaction noun ("brief daily syncs"). A real "brief" document ("a brief
+# about the merger", "a brief report about Q3") has no interaction word and still
+# drops as a build request.
+_ADJECTIVAL_BRIEF_RE = re.compile(
+    r"\bbrief\s+(?:[\w-]+\s+){0,2}?(?:chats?|conversations?|convos?|check[-\s]?ins?|"
+    r"catch[-\s]?ups?|calls?|talks?|syncs?|discussions?|huddles?|stand[-\s]?ups?|"
+    r"meetings?|messages?|chit[-\s]?chats?|hellos?|one[-\s]on[-\s]ones?)\b"
+)
 # …or when the deliverable is the OBJECT of a help / practice / prep request
 # ("asked for help with a presentation", "needs help preparing for a report",
 # "practicing for the deck") — the user wants support with an existing/upcoming
@@ -1088,6 +1100,7 @@ def _is_non_artifact_deliverable_use(lowered: str) -> bool:
     """
     if (
         _DELIVERABLE_AS_VERB_RE.search(lowered)
+        or _ADJECTIVAL_BRIEF_RE.search(lowered)
         or _HELP_OR_PRACTICE_RE.search(lowered)
         or _SUPPORT_REQUEST_RE.search(lowered)
         or _NON_DELIVERABLE_COMPOUND_RE.search(lowered)

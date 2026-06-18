@@ -1327,6 +1327,35 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked Sophia to build a deck about pricing"
         ) == "task_history"
 
+    def test_adjectival_brief_before_interaction_word_is_preserved(self):
+        """Codex P2: 'brief' is an ADJECTIVE when it modifies a conversation /
+        interaction word ('brief conversations about work stress', 'brief daily
+        check-ins', 'a brief chat') — a communication preference, not a 'brief'
+        document deliverable. The read-path filters must keep it. A real 'brief'
+        document ('a brief about the merger', 'a brief report about Q3') has no
+        interaction word and still drops."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User wants brief conversations about work stress"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants a brief chat about the project"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User prefers brief check-ins"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User likes brief daily syncs about progress"
+        ) is None
+        # A genuine 'brief' document deliverable still drops.
+        assert _candidate_policy_rejection_reason(
+            "User asked for a brief about the merger"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants a brief report about Q3"
+        ) == "task_history"
+
     def test_emotional_support_goal_with_deliverable_context_is_preserved(self):
         """Codex P2: a strong noun naming the ACTIVITY CONTEXT of an emotional /
         support goal ('wants confidence for presentations', 'improve presentation
