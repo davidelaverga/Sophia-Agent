@@ -1291,6 +1291,18 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         assert _candidate_policy_rejection_reason(
             "User asked for help reviewing the proposal"
         ) is None
+        # "to"-infinitive prep/revision forms ("help to prepare a presentation",
+        # "help to revise the report") are coaching support too — preserved.
+        assert _candidate_policy_rejection_reason(
+            "User needs help to prepare a presentation"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants help to revise the report"
+        ) is None
+        # ...but "help to CREATE" is still a build.
+        assert _candidate_policy_rejection_reason(
+            "User needs help to create a deck about pricing"
+        ) == "task_history"
         # Guard rails: a genuine build request is still dropped (no verb/help cue).
         assert _candidate_policy_rejection_reason(
             "User asked for a report about Hermes"
