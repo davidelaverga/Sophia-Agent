@@ -1035,9 +1035,27 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         assert _candidate_policy_rejection_reason(
             "User wants decks to be short and skimmable"
         ) is None
-        # But a styled build request that names a subject still drops.
+        # A STYLE PREDICATE scoped to a category of deliverables is a standing
+        # preference even WITH a topic marker ("reports about competitors TO BE
+        # concise", "... should include citations") — the predicate trails the
+        # subject, so the "about X" scopes the category, not a one-off build.
+        assert _candidate_policy_rejection_reason(
+            "User wants reports about competitors to be concise"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants reports about sales to include citations"
+        ) is None
+        # But a singular styled build that names a subject still drops (one-off),
+        # as does a styled build with a creation cue.
         assert _candidate_policy_rejection_reason(
             "User wants a concise report about Hermes"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants reports about Q3 to be created by Monday"
+        ) == "task_history"
+        # A "preferred" inside the SUBJECT does not exempt a one-off build.
+        assert _candidate_policy_rejection_reason(
+            "User wants a report about their preferred vendor"
         ) == "task_history"
 
     def test_styled_one_off_build_is_not_a_preference(self):

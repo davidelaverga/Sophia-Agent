@@ -282,6 +282,15 @@ _DELIVERY_STYLE_RE = re.compile(
     r"|\b(?:bullet|bullets|citations?|footnotes?|headlines?)\b|\bno\s+(?:jargon|bullets?|paragraphs?|fluff)\b"
     r"|\bplain\s+language\b|\bexecutive\s+summary\b|\bone[\s-]pager?\b"
 )
+# The PREDICATE subset of the style phrasing ("… to be/include/have …", "… should
+# be/…"). Used in the topic branch to recognize a STANDING style preference scoped
+# to a category of deliverables ("wants reports about competitors TO BE concise") —
+# distinct from a styled one-off build ("a concise report about Hermes"), which the
+# bare style adjectives would over-match. The bare adjectives are deliberately
+# excluded here because "concise report about X" is a build, not a preference.
+_DELIVERY_STYLE_PREDICATE_RE = re.compile(
+    r"\bto\s+(?:be|include|have|contain|use|avoid|cover)\b|\bshould\s+(?:be|include|have)\b"
+)
 # A topic marker introduces the deliverable's *subject* ("report ABOUT X",
 # "presentation ON Y"). It does double duty: (1) it tells a styled deliverable
 # noun apart from a standing style preference ("concise report about Hermes" is a
@@ -1288,10 +1297,23 @@ def _topic_scoped_request_is_build(lowered: str, topic_markers: list) -> bool:
     # A preference VERB in the intent exempts a GENERIC standing preference
     # ("prefers reports about X") — but NOT a concrete singular/deadlined build
     # whose intent merely carries an adjectival "preferred" ("requested a report
-    # in their preferred format about OpenClaw"). Mirror _is_delivery_preference's
-    # one-off precedence so the latter still drops.
+    # in their preferred format about OpenClaw"). Checked on the INTENT so a
+    # "preferred" inside the SUBJECT ("reports about their preferred vendor") does
+    # not exempt a build. Mirror _is_delivery_preference's one-off precedence.
     if _DELIVERY_PREFERENCE_RE.search(intent) and not (
         _SINGULAR_DELIVERABLE_RE.search(intent) or _DEADLINE_RE.search(intent)
+    ):
+        return False
+    # A standing STYLE PREDICATE scoped to a category of deliverables ("wants reports
+    # about competitors TO BE concise", "… should include citations") is also a
+    # preference. The predicate trails the subject, so it is scanned over the whole
+    # snippet; guarded by no one-off (singular/deadline) and no creation cue, so a
+    # styled one-off build ("make a concise report about Hermes") still drops. (Bare
+    # style adjectives are excluded — "concise report about X" is a styled build.)
+    if _DELIVERY_STYLE_PREDICATE_RE.search(lowered) and not (
+        _SINGULAR_DELIVERABLE_RE.search(lowered)
+        or _DEADLINE_RE.search(lowered)
+        or _DELIVERABLE_CREATION_RE.search(lowered)
     ):
         return False
     return True
