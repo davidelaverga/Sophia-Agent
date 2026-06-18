@@ -1883,12 +1883,23 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         assert _candidate_policy_rejection_reason(
             "User asked for a critique report about the launch"
         ) == "task_history"
+        # The guard also covers web / PPTX deliverable aliases that live outside
+        # _DELIVERABLE_NOUNS ("a critique PowerPoint", "a feedback website").
+        assert _candidate_policy_rejection_reason(
+            "User asked for a critique PowerPoint about the launch"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants a feedback website about Q3"
+        ) == "task_history"
         # The support word as the true object is still exempt.
         assert _candidate_policy_rejection_reason(
             "User wants feedback on their presentation about Q2"
         ) is None
         assert _candidate_policy_rejection_reason(
             "User wants critique on their pitch deck"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User wants feedback on their website"
         ) is None
 
     def test_deliverable_from_source_material_is_task_history(self):
@@ -1907,9 +1918,22 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
         assert _candidate_policy_rejection_reason(
             "User wants a deck from the survey responses"
         ) == "task_history"
-        # A third-party producer (a person/org makes it) is kept.
+        # The source-material noun may carry modifiers ("customer support TICKETS",
+        # "client discovery-call NOTES") — checked before the third-party producer
+        # exemption so a modified source phrase still drops.
+        assert _candidate_policy_rejection_reason(
+            "User asked for a PDF from customer support tickets"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants a summary from client discovery-call notes"
+        ) == "task_history"
+        # A third-party producer (a person/org makes it) is kept — including when a
+        # source noun appears in a SEPARATE later phrase ("about the feedback").
         assert _candidate_policy_rejection_reason(
             "User asked for a PDF from the vendor"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User asked for a report from the manager about the feedback"
         ) is None
 
     def test_document_of_subject_is_task_history(self):

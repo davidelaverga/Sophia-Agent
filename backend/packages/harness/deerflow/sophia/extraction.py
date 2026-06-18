@@ -472,7 +472,8 @@ _SUPPORT_REQUEST_RE = re.compile(
     r"(?:for\s+|some\s+|more\s+|[\w']+\s+){0,2}?"
     r"(?:feedback|advice|input|thoughts?|opinions?|guidance|support|critique|"
     r"reassurance|encouragement|validation|perspective|pointers?|tips?)\b"
-    r"(?!\s+(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS) + r")s?\b)"
+    r"(?!\s+(?:(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
+    + r")s?|" + _WEB_DELIVERABLE_FRAGMENT + r"|" + _PPTX_DELIVERABLE_FRAGMENT + r")\b)"
 )
 # A STRONG noun inside a common NON-DELIVERABLE compound is not a build target:
 # a school "report card", a playing-card "deck of cards" / "card deck", a "deck
@@ -1240,6 +1241,17 @@ def _subjectless_request_is_build(lowered: str) -> bool:
     # topic branch, which never consults this exemption.)
     if _PROJECT_PRODUCT_COMPOUND_RE.search(lowered) and not _SOPHIA_DIRECTED_RE.search(lowered):
         return False
+    # A deliverable built FROM source material ("a PDF from customer support
+    # tickets") is a build — checked BEFORE the third-party exemption because the
+    # producer guard there only excludes a source noun IMMEDIATELY after the party
+    # word, so a modified source phrase ("from customer support TICKETS", "from
+    # client discovery-call NOTES") would otherwise be kept as a producer request.
+    # _DELIVERABLE_FROM_SOURCE_RE tolerates up to three modifier words but still
+    # requires the phrase to lead from "from" to a source-material noun, so a true
+    # producer ("from the vendor", "from the manager about the feedback") does not
+    # match and falls through to the third-party keep.
+    if _DELIVERABLE_FROM_SOURCE_RE.search(lowered):
+        return True
     if _THIRD_PARTY_REQUEST_RE.search(lowered):
         return False
     if _is_delivery_preference(lowered):
@@ -1253,14 +1265,10 @@ def _subjectless_request_is_build(lowered: str) -> bool:
     # which read as existing-artifact retrieval, do not match.)
     if _SINGULAR_DELIVERABLE_FOR_RE.search(lowered):
         return True
-    # A build-visual ("chart of Q2 revenue"), a singular weak document deliverable
-    # scoped by "of <subject>" ("a summary of Q3 revenue"), or a deliverable built
-    # "from <source material>" ("a PDF from customer feedback") is a build.
-    return bool(
-        _VISUAL_OF_RE.search(lowered)
-        or _DOCUMENT_OF_RE.search(lowered)
-        or _DELIVERABLE_FROM_SOURCE_RE.search(lowered)
-    )
+    # A build-visual ("chart of Q2 revenue") or a singular weak document deliverable
+    # scoped by "of <subject>" ("a summary of Q3 revenue") is a build. (The
+    # "from <source material>" signal is handled above, before the third-party keep.)
+    return bool(_VISUAL_OF_RE.search(lowered) or _DOCUMENT_OF_RE.search(lowered))
 
 
 def _is_delivery_preference(lowered: str) -> bool:
