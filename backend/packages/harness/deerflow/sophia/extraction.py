@@ -241,7 +241,10 @@ _DELIVERY_STYLE_RE = re.compile(
 # as a topic marker when it is NOT followed by a temporal expression.
 _TEMPORAL_AFTER_ON = (
     r"(?:(?:mon|tues|wednes|thurs|fri|satur|sun)days?\b"
-    r"|\d{1,2}(?:st|nd|rd|th)?\b"
+    # An ORDINAL day ("on the 5th"); the suffix is REQUIRED so a bare cardinal that
+    # counts the subject ("on 10 competitors", "on 3 options") stays a topic
+    # marker, not a date.
+    r"|\d{1,2}(?:st|nd|rd|th)\b"
     r"|" + _ABSOLUTE_DATE + r")"
 )
 _TOPIC_MARKER_RE = re.compile(

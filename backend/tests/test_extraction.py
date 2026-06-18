@@ -2017,6 +2017,27 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked on Tuesday for help with their anxiety"
         ) is None
 
+    def test_numeric_on_count_is_a_subject_not_a_date(self):
+        """Codex P2: a bare 'on <number>' that COUNTS the subject ('a PDF on 10
+        competitors', 'document on 3 options') is a subject marker, not a date —
+        only an ordinal ('on the 5th') is temporal. So the weak deliverable + this
+        subject drops."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked for a PDF on 10 competitors"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a document on 3 options"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants a report on 5 key metrics"
+        ) == "task_history"
+        # A genuine dated request (ordinal) still works (drops via the report).
+        assert _candidate_policy_rejection_reason(
+            "User asked on the 12th for a report about pricing"
+        ) == "task_history"
+
     def test_absolute_date_time_phrase_in_asked_for_request(self):
         """Codex P2: the extraction prompt resolves temporals to ABSOLUTE dates,
         so the time phrase between asked/recipient and for/to must accept dates
