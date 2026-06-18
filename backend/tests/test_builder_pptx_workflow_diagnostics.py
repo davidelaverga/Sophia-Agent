@@ -101,6 +101,69 @@ def test_image_generation_bash_result_parses_machine_readable_failure(tmp_path: 
     assert delta["image_generation_error_class"] == "org_not_verified"
 
 
+def test_chained_preflight_and_image_generation_records_both_diagnostics(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    image = outputs / "slide-01.png"
+    image.write_bytes(b"png-bytes")
+    request = SimpleNamespace(
+        state={"thread_data": {"outputs_path": str(outputs)}},
+        tool_call={
+            "name": "bash",
+            "args": {
+                "command": (
+                    "python /mnt/skills/public/image-generation/scripts/generate.py --preflight && "
+                    "python /mnt/skills/public/image-generation/scripts/generate.py "
+                    "--prompt-file /mnt/user-data/workspace/slide-01.json "
+                    "--output-file /mnt/user-data/outputs/slide-01.png "
+                    "--slide-visual"
+                )
+            },
+        },
+    )
+
+    delta = BuilderArtifactMiddleware._pptx_bash_result_delta(
+        request,
+        _tool_message('{"preflight": "ok"}\nSuccessfully generated image'),
+    )
+
+    assert delta["image_generation_preflight"] == "ok"
+    assert delta["image_generation_attempt_count"] == 1
+    assert delta["image_generation_success_count"] == 1
+    assert delta["image_generation_bytes_total"] == len(b"png-bytes")
+    assert delta["image_output_paths"] == ["/mnt/user-data/outputs/slide-01.png"]
+
+
+def test_failed_preflight_in_chain_does_not_count_unrun_generation(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    request = SimpleNamespace(
+        state={"thread_data": {"outputs_path": str(outputs)}},
+        tool_call={
+            "name": "bash",
+            "args": {
+                "command": (
+                    "python /mnt/skills/public/image-generation/scripts/generate.py --preflight && "
+                    "python /mnt/skills/public/image-generation/scripts/generate.py "
+                    "--prompt-file /mnt/user-data/workspace/slide-01.json "
+                    "--output-file /mnt/user-data/outputs/slide-01.png "
+                    "--slide-visual"
+                )
+            },
+        },
+    )
+
+    delta = BuilderArtifactMiddleware._pptx_bash_result_delta(
+        request,
+        _tool_message('{"preflight": "failed", "reason": "env_missing"}'),
+    )
+
+    assert delta == {
+        "image_generation_preflight": "failed",
+        "image_generation_skip_reason": "env_missing",
+    }
+
+
 def test_pptx_generation_bash_result_classifies_missing_output(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()

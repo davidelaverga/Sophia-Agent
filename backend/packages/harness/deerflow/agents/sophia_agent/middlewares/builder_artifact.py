@@ -305,6 +305,14 @@ def _image_generation_invocations_in_command(command: str) -> int:
     return command.count("image-generation/scripts/generate.py")
 
 
+def _image_generation_billable_invocations_in_command(command: str) -> int:
+    return sum(
+        1
+        for segment in _command_segments_for_marker(command, _IMAGE_GENERATION_PATH_MARKERS)
+        if "--preflight" not in _command_parts(segment)
+    )
+
+
 def _autowire_plan_path(request: "ToolCallRequest") -> str | None:
     """Plan-file path when the bash call is an autowire-eligible pptx run."""
     tool_name = str(request.tool_call.get("name") or "")
@@ -2144,6 +2152,23 @@ def _command_segment_for_marker(command: str, markers: tuple[str, ...]) -> str:
     while end < len(parts) and parts[end] not in separators:
         end += 1
     return shlex.join(parts[start:end])
+
+
+def _command_segments_for_marker(command: str, markers: tuple[str, ...]) -> list[str]:
+    parts = _command_parts(command)
+    if not parts:
+        return [command] if any(marker in command for marker in markers) else []
+    separators = {"&&", "||", ";", "|"}
+    segments: list[str] = []
+    start = 0
+    for index, part in enumerate([*parts, "&&"]):
+        if part not in separators:
+            continue
+        segment = parts[start:index]
+        if segment and any(any(marker in item for marker in markers) for item in segment):
+            segments.append(shlex.join(segment))
+        start = index + 1
+    return segments
 
 
 def _empty_pptx_skill_flags() -> dict[str, Any]:
@@ -6652,9 +6677,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         text: str,
         state: dict[str, Any],
     ) -> dict[str, Any]:
-        if "--preflight" in command:
-            return _image_generation_preflight_delta(text)
-        output_path = _command_flag_value(command, "--output-file")
+        image_segments = _command_segments_for_marker(command, _IMAGE_GENERATION_PATH_MARKERS)
+        preflight_delta: dict[str, Any] = {}
+        if any("--preflight" in _command_parts(segment) for segment in image_segments):
+            preflight_delta = _image_generation_preflight_delta(text)
+            if preflight_delta.get("image_generation_preflight") != "ok":
+                return preflight_delta
+        billable_segments = [
+            segment
+            for segment in image_segments
+            if "--preflight" not in _command_parts(segment)
+        ]
+        if not billable_segments:
+            return preflight_delta
+        image_command = " && ".join(billable_segments)
+        output_path = _command_flag_value(image_command, "--output-file")
         exists, bytes_count, status_reason = _virtual_output_status(state, output_path)
         suffix = PurePosixPath(str(output_path or "")).suffix.lower()
         valid_image = exists and bytes_count > 0 and suffix in _PPTX_IMAGE_EXTENSIONS
@@ -6668,8 +6705,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             error_class,
             status_reason,
         )
-        in_command = max(1, _image_generation_invocations_in_command(command))
+        in_command = max(1, len(billable_segments))
         delta: dict[str, Any] = {
+            **preflight_delta,
             "image_generation_attempt_count": in_command,
             "image_generation_success_count": 1 if valid_image else 0,
             "image_generation_bytes_total": bytes_count if valid_image else 0,
@@ -6987,8 +7025,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         in_command = _image_generation_invocations_in_command(command)
         if in_command <= 0:
             return None
-        if "--preflight" in command:
-            # VQ-3: the preflight check is free — never counted, never blocked.
+        billable_in_command = _image_generation_billable_invocations_in_command(command)
+        if billable_in_command <= 0:
+            # VQ-3: preflight-only checks are free — never counted, never blocked.
             return None
         state = request.state or {}
         attempts = _pptx_diagnostic_count(state, "image_generation_attempt_count")
@@ -7003,7 +7042,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "generate_excalidraw_diagram Mermaid technical diagrams, and text layouts — "
                 "a chart/diagram/text deliverable is valid."
             )
-        elif attempts + in_command > _image_generation_max_calls(state):
+        elif attempts + billable_in_command > _image_generation_max_calls(state):
             generated = [
                 path
                 for path in (diagnostics.get("image_output_paths") or [])
@@ -7016,7 +7055,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             )
             rejection = (
                 f"Error: image generation budget reached ({attempts}/{_image_generation_max_calls(state)} "
-                f"calls used; this command adds {in_command}).{generated_note} Continue composing "
+                f"calls used; this command adds {billable_in_command}).{generated_note} Continue composing "
                 "with the existing assets, charts, and text. Do not retry image generation."
             )
         if rejection is None:
@@ -7025,7 +7064,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "[BuilderImageGeneration] phase=call_blocked attempts=%d in_command=%d "
             "successes=%d error_class=%s",
             attempts,
-            in_command,
+            billable_in_command,
             successes,
             error_class,
         )

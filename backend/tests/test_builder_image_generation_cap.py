@@ -98,6 +98,20 @@ def test_chained_command_that_would_exceed_cap_is_rejected():
     assert "budget reached" in result.update["messages"][0].content
 
 
+def test_preflight_chained_with_generation_counts_only_real_generation():
+    state = _state_with_image_diagnostics(image_generation_attempt_count=_IMAGE_GENERATION_MAX_CALLS)
+    command = f"python {_SCRIPT} --preflight && python {_SCRIPT} --slide-visual --prompt-file p.json"
+
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(command, state)
+    )
+
+    assert isinstance(result, Command)
+    content = result.update["messages"][0].content
+    assert "budget reached" in content
+    assert "this command adds 1" in content
+
+
 def test_non_bash_tools_are_ignored():
     request = SimpleNamespace(
         tool_call={"id": "tc-w", "name": "write_file_tool", "args": {"command": _SCRIPT}},
@@ -124,6 +138,24 @@ def test_terminal_error_short_circuits_after_single_failure():
     assert "unavailable" in content
     assert "missing_api_key" in content
     assert "generate_visual_asset" in content
+
+
+def test_preflight_chained_with_generation_honors_terminal_error_short_circuit():
+    state = _state_with_image_diagnostics(
+        image_generation_attempt_count=1,
+        image_generation_success_count=0,
+        image_generation_error_class="missing_api_key",
+    )
+    command = f"python {_SCRIPT} --preflight && python {_SCRIPT} --slide-visual --prompt-file p.json"
+
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(command, state)
+    )
+
+    assert isinstance(result, Command)
+    content = result.update["messages"][0].content
+    assert "unavailable" in content
+    assert "missing_api_key" in content
 
 
 def test_transient_error_does_not_short_circuit():
