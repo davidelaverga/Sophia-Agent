@@ -1617,6 +1617,29 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked for a report from their manager about Q3"
         ) is None
 
+    def test_visual_of_subject_is_task_history(self):
+        """Codex P2: a build-visual scoped by 'of <subject>' ('chart of Q2
+        revenue', 'diagram of the architecture') is a build — 'of' introduces the
+        data the visual depicts. 'image of …' is excluded (an existing photo)."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked for a chart of Q2 revenue"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a diagram of the architecture"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User wants a graph of monthly sales"
+        ) == "task_history"
+        # "image of <X>" stays (usually an existing photo); no request verb stays.
+        assert _candidate_policy_rejection_reason(
+            "User wants an image of the beach for their wallpaper"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User has a chart of the org structure"
+        ) is None
+
     def test_visual_deliverables_chart_image_diagram(self):
         """Codex P2: visual deliverables the builder produces (chart, image,
         diagram, graph, …) are weak deliverable nouns — drop topic-scoped or

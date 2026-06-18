@@ -71,17 +71,20 @@ _DEFAULT_TIMEOUT_SECONDS = 2.0
 # multi-paragraph memories that would dominate the prompt.
 _MAX_SNIPPET_CHARS = 600
 
-# Builder retrieval is restricted to DURABLE build-relevant categories — style
-# preferences, static facts (names/places/roles), and relationships (the people a
-# deliverable might be for) — and then task-history is filtered by CONTENT, not by
-# excluding whole categories. The original "preference only" rule starved direct
-# Builder-as-Main runs of useful facts (e.g. "make a card for my daughter" lost
-# the daughter's name); the episodic "user requested creation of X" rows that
-# actually cause the OpenClaw-vs-Hermes contamination are removed by the
-# policy-content filter below (``_candidate_policy_rejection_reason``) regardless
-# of which category they were written under. See fix/builder-memory-contamination
-# + codex review on PR #137.
-_BUILDER_MEMORY_CATEGORIES = ["preference", "fact", "relationship"]
+# Builder retrieval covers the DURABLE build-relevant categories — style
+# preferences, static facts (names/places/roles), relationships (the people a
+# deliverable might be for), and the user's decisions / commitments / lessons
+# (e.g. "decided to delay the launch by two weeks" for a timeline) — and then
+# task-history is filtered by CONTENT, not by excluding whole categories. The
+# original "preference only" rule starved direct Builder-as-Main runs of useful
+# facts/decisions (e.g. "make a card for my daughter" lost the daughter's name);
+# the episodic "user requested creation of X" rows that actually cause the
+# OpenClaw-vs-Hermes contamination are removed by the policy-content filter below
+# (``_candidate_policy_rejection_reason``) regardless of which category they were
+# written under. Only the companion-emotional categories (feeling / pattern /
+# ritual_context) are left out as noise for a build brief. See
+# fix/builder-memory-contamination + codex review on PR #137.
+_BUILDER_MEMORY_CATEGORIES = ["preference", "fact", "relationship", "decision", "commitment", "lesson"]
 # Mem0 fetches `limit` rows by score and applies the category filter LOCALLY
 # afterwards, so asking for only top_k rows means a brief whose top matches are all
 # task-history would discard every row and surface zero durable memories even when

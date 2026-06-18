@@ -157,7 +157,7 @@ class TestRetrievalAsync:
         # preferences + facts + relationships); prior task-history is removed by
         # the content filter, not by excluding whole categories. See
         # fix/builder-memory-contamination + codex review on PR #137.
-        assert captured["calls"][0]["categories"] == ["preference", "fact", "relationship"]
+        assert captured["calls"][0]["categories"] == ["preference", "fact", "relationship", "decision", "commitment", "lesson"]
         # Over-fetch a pool (Mem0 filters categories after the score-ranked
         # fetch) rather than asking for only top_k. See codex review on PR #137.
         assert captured["calls"][0]["limit"] == _BUILDER_SEARCH_POOL
@@ -202,22 +202,24 @@ class TestRetrievalAsync:
                 {"id": "m4", "content": "Legacy row with no category key at all"},
                 {"id": "m5", "content": "User's daughter is named Lucy", "category": "fact"},
                 {"id": "m6", "content": "User's co-founder is Jorge", "category": "relationship"},
+                {"id": "m7", "content": "Decided to delay the launch by two weeks", "category": "decision"},
             ],
         )
         mw = BuilderMem0RetrievalMiddleware()
         state = {"user_id": "u", "messages": [{"type": "human", "content": "make a card for my daughter"}]}
         result = await mw.abefore_agent(state, runtime=None)
 
-        # Durable fact + relationship + preference survive; the task-history rows
-        # (blank-category build request, the mislabeled `fact` build request) and
-        # the category-less legacy row are all dropped.
+        # Durable fact + relationship + preference + decision survive; the
+        # task-history rows (blank-category build request, the mislabeled `fact`
+        # build request) and the category-less legacy row are all dropped.
         assert result["injected_memory_contents"] == [
             "Prefers concise summaries",
             "User's daughter is named Lucy",
             "User's co-founder is Jorge",
+            "Decided to delay the launch by two weeks",
         ]
-        assert result["injected_memories"] == ["m3", "m5", "m6"]
-        assert captured["calls"][0]["categories"] == ["preference", "fact", "relationship"]
+        assert result["injected_memories"] == ["m3", "m5", "m6", "m7"]
+        assert captured["calls"][0]["categories"] == ["preference", "fact", "relationship", "decision", "commitment", "lesson"]
 
     @pytest.mark.anyio
     async def test_no_user_id_skips(self, monkeypatch: pytest.MonkeyPatch) -> None:

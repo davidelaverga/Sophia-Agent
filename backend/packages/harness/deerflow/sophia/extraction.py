@@ -263,6 +263,14 @@ _SINGULAR_DELIVERABLE_FOR_RE = re.compile(
     r"\ban?\s+(?:[\w-]+\s+){0,3}?(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
     + "|" + _WEB_DELIVERABLE_FRAGMENT + "|" + _PPTX_DELIVERABLE_FRAGMENT + r")s?\s+for\s+\w"
 )
+# A build-VISUAL deliverable scoped by "of <subject>" ("chart OF Q2 revenue",
+# "diagram OF the architecture") — "of" introduces the data the visual depicts, so
+# it is a build. Limited to the unambiguous build-visuals; "image" is excluded
+# because "image of my cat" is usually an existing photo, not a generated visual.
+_VISUAL_OF_RE = re.compile(
+    r"\b(?:charts?|diagrams?|graphs?|infographics?|flowcharts?|illustrations?|"
+    r"mockups?|wireframes?)\s+of\s+\w"
+)
 _DEADLINE_RE = re.compile(
     r"\bdue\b|\btomorrow\b|\bby\s+(?:\w+day|tomorrow|tonight|noon|eod|cob|next\b|end\b|the\b|\d)"
 )
@@ -1105,7 +1113,10 @@ def _subjectless_request_is_build(lowered: str) -> bool:
     # A singular-indefinite weak deliverable scoped by a trailing "for <X>"
     # ("a PDF for Hermes") is a one-off build — drop it. (Plural/definite forms,
     # which read as existing-artifact retrieval, do not match.)
-    return bool(_SINGULAR_DELIVERABLE_FOR_RE.search(lowered))
+    if _SINGULAR_DELIVERABLE_FOR_RE.search(lowered):
+        return True
+    # A build-visual scoped by "of <subject>" ("chart of Q2 revenue") is a build.
+    return bool(_VISUAL_OF_RE.search(lowered))
 
 
 def _is_delivery_preference(lowered: str) -> bool:
