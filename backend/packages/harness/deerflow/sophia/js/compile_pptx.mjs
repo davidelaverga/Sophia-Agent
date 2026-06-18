@@ -284,7 +284,12 @@ function addFullBleedVisual(slide, visualPath) {
 }
 
 function isImageForwardSlide(slideInfo) {
-  return typeof slideInfo.image_path === "string" && slideInfo.image_path.trim();
+  const hasImagePath = typeof slideInfo.image_path === "string" && slideInfo.image_path.trim();
+  const hasLegacyFullBleedImage =
+    typeof slideInfo.image === "string" &&
+    slideInfo.image.trim() &&
+    normalizeLayout(slideInfo.layout) === "full_bleed_image";
+  return Boolean(hasImagePath || hasLegacyFullBleedImage);
 }
 
 // A surface card with a line border (no stripe). Used by stat / visual surfaces.

@@ -266,6 +266,15 @@ class TestGeneratePptLayouts:
         assert "renderSlide(pptx, slideInfo, plan, theme, visualPath, imageForward)" in source
         assert "if (imageForward && visualPath)" in source
 
+    def test_js_compiler_treats_legacy_full_bleed_image_refs_as_image_forward(self) -> None:
+        source = _JS_COMPILER_PATH.read_text(encoding="utf-8")
+
+        assert "const hasImagePath = typeof slideInfo.image_path === \"string\" && slideInfo.image_path.trim();" in source
+        assert "const hasLegacyFullBleedImage =" in source
+        assert "typeof slideInfo.image === \"string\"" in source
+        assert "normalizeLayout(slideInfo.layout) === \"full_bleed_image\"" in source
+        assert "return Boolean(hasImagePath || hasLegacyFullBleedImage);" in source
+
     def test_missing_full_bleed_image_degrades_without_exception(self, tmp_path: Path, capsys) -> None:
         plan = {
             "title": "Deck",
