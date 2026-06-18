@@ -1502,6 +1502,27 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User wants Sophia to build a deck about Q3"
         ) == "task_history"
 
+    def test_passive_third_party_request_is_preserved(self):
+        """Codex P2: a passive third-party request ('User was requested by their
+        boss to draft a deck about Q3', 'was asked by HR to …') is a work
+        obligation, not a request made of Sophia — the third-party guard's passive
+        'by <party>' arm keeps it."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User was requested by their boss to draft a deck about Q3"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User was asked by HR to prepare a report about compliance"
+        ) is None
+        assert _candidate_policy_rejection_reason(
+            "User was tasked by the client to build a deck about pricing"
+        ) is None
+        # A direct user->Sophia request still drops.
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to build a deck about pricing"
+        ) == "task_history"
+
     def test_requested_to_sophia_project_build_drops(self):
         """Codex P2: _SOPHIA_DIRECTED_RE must recognize 'requested' forms too, so
         'requested Sophia to build a report generator for OpenClaw' is not exempted

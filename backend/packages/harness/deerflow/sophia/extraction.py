@@ -338,6 +338,11 @@ _THIRD_PARTY_REQUEST_RE = re.compile(
     # noun and Sophia is still the one building — those must still drop.
     rf"|\bfrom\s+(?:(?:the|their|a|an|our|my|your|his|her|its)\s+)?(?:{_THIRD_PARTY})\b"
     rf"(?!(?:'s|’s)?\s+(?:{_SOURCE_MATERIAL_NOUNS}))"
+    # (4) PASSIVE: the third party is the asker in passive voice ("was requested
+    # BY their boss", "asked by HR", "tasked by the client") — a work obligation,
+    # not a request made of Sophia.
+    rf"|\b(?:asked|requested|told|tasked|assigned|instructed|directed)\s+by\s+"
+    rf"(?:(?:the|their|a|an|our|my|your|his|her|its)\s+)?(?:{_THIRD_PARTY})\b"
 )
 # The deliverable WORD is not a requested artifact when it is used as a VERB
 # ("wants to report on harassment", "to document the abuse", "to brief them") —
