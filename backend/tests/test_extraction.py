@@ -1474,6 +1474,43 @@ class TestCandidatePolicyRejectionReasonTaskHistory:
             "User asked for a PDF"
         ) is None  # no trailing "for <X>"
 
+    def test_requested_to_sophia_project_build_drops(self):
+        """Codex P2: _SOPHIA_DIRECTED_RE must recognize 'requested' forms too, so
+        'requested Sophia to build a report generator for OpenClaw' is not exempted
+        as the user's own project."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User requested Sophia to build a report generator for OpenClaw"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User requested me to build a slide tool for the launch"
+        ) == "task_history"
+        # The user's own project (no Sophia direction) still keeps.
+        assert _candidate_policy_rejection_reason(
+            "User wants to create a report generator for their startup"
+        ) is None
+
+    def test_visual_deliverables_chart_image_diagram(self):
+        """Codex P2: visual deliverables the builder produces (chart, image,
+        diagram, graph, …) are weak deliverable nouns — drop topic-scoped or
+        create-cued, while an existing-photo use stays."""
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to create a diagram about OpenClaw"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked for a chart about Q3 revenue"
+        ) == "task_history"
+        assert _candidate_policy_rejection_reason(
+            "User asked Sophia to make an image about the brand"
+        ) == "task_history"
+        # An existing photo (weak noun, no topic/create cue) stays.
+        assert _candidate_policy_rejection_reason(
+            "User wants an image of the beach for their wallpaper"
+        ) is None
+
     def test_document_deliverables_proposal_memo_etc(self):
         """Codex P2: common document deliverables (proposal, memo, whitepaper,
         newsletter, essay) the builder produces are weak nouns — drop topic-scoped

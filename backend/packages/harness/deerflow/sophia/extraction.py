@@ -130,6 +130,10 @@ _DELIVERABLE_NOUNS = (
     # Common document deliverables (weak — could name an existing doc): proposal,
     # memo, whitepaper, newsletter, essay.
     "proposal", "memo", "whitepaper", "newsletter", "essay",
+    # Visual deliverables the builder produces (generate_visual_asset /
+    # generate_excalidraw_diagram; companion_provider_fallback treats them as build
+    # intent). Weak — "an image of my cat" could be an existing photo.
+    "chart", "image", "diagram", "graph", "illustration", "mockup", "wireframe", "flowchart",
 )
 # Frontend / web deliverables. The frontend dispatch path
 # (``start_builder_task._HTML_OUTPUT_RE``) treats these bare nouns as build
@@ -387,12 +391,13 @@ _PROJECT_PRODUCT_COMPOUND_RE = re.compile(
     r"(?:generators?|tools?|apps?|applications?|platforms?|builders?|engines?|software|"
     r"bots?|pipelines?|frameworks?|librar(?:y|ies)|plugins?|extensions?|saas)\b"
 )
-# A request explicitly directed at Sophia ("asked Sophia/me/you/us …", "asked to
-# build/create/…") — used to deny the project/product exemption above (a build
-# Sophia is asked to do is task history, even if the deliverable is a "generator").
+# A request explicitly directed at Sophia ("asked/requested Sophia/me/you/us …",
+# "asked/requested to build/create/…") — used to deny the project/product
+# exemption above (a build Sophia is asked to do is task history, even if the
+# deliverable is a "generator").
 _SOPHIA_DIRECTED_RE = re.compile(
-    r"\bask(?:ed|s)\s+(?:sophia|me|you|us)\b"
-    r"|\bask(?:ed|s)\s+(?:" + _REQUEST_TIME_PHRASE + r"\s+)?to\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|assembl|convert|export|render)"
+    r"\b(?:ask(?:ed|s)|request(?:ed|s))\s+(?:sophia|me|you|us)\b"
+    r"|\b(?:ask(?:ed|s)|request(?:ed|s))\s+(?:" + _REQUEST_TIME_PHRASE + r"\s+)?to\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|assembl|convert|export|render)"
 )
 _DUPLICATE_STOPWORDS = {
     "a",
