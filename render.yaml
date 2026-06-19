@@ -46,10 +46,11 @@ services:
         value: sophia-builder-artifacts
       - key: SOPHIA_GATEWAY_URL
         sync: false
-      # LangSmith observability for Sophia runs. Secrets are set in the Render
+      # Keep global LangSmith autotracing off; Sophia builder tracing is attached
+      # explicitly via graph callbacks below. Secrets are set in the Render
       # dashboard; non-secret routing values live in the blueprint.
       - key: LANGSMITH_TRACING
-        value: "true"
+        value: "false"
       - key: LANGSMITH_ENDPOINT
         value: https://eu.api.smith.langchain.com
       - key: SOPHIA_BUILDER_LANGSMITH_TRACING

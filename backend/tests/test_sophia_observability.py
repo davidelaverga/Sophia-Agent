@@ -206,12 +206,14 @@ def test_builder_trace_runnable_uses_explicit_builder_context(monkeypatch) -> No
     assert context_kwargs[0]["tags"] == ["sophia_builder", "custom-tag"]
 
 
-def test_builder_trace_runnable_honors_global_langsmith_false(monkeypatch) -> None:
+def test_builder_trace_runnable_allows_global_langsmith_false(monkeypatch) -> None:
     events: list[tuple[str, bool | None]] = []
+    context_kwargs: list[dict[str, Any]] = []
 
     @contextmanager
-    def fake_tracing_context(*, enabled: bool | None = None, **_kwargs: Any):
+    def fake_tracing_context(*, enabled: bool | None = None, **kwargs: Any):
         events.append(("enter", enabled))
+        context_kwargs.append(kwargs)
         try:
             yield
         finally:
@@ -219,15 +221,19 @@ def test_builder_trace_runnable_honors_global_langsmith_false(monkeypatch) -> No
 
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
     monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_key")
+    monkeypatch.setenv("LANGSMITH_PROJECT", "Sophia")
     monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "true")
     _reset_tracing_cache()
     monkeypatch.setattr(observability, "_tracing_context_factory", lambda: fake_tracing_context)
+    monkeypatch.setattr(observability, "_langsmith_client", lambda *_args, **_kwargs: "client")
+    monkeypatch.setattr(observability, "_builder_langsmith_tracer", lambda **_kwargs: object())
     runnable = _FakeRunnable()
     wrapped = observability.enable_langsmith_tracing_for_builder_runnable(runnable)
 
-    assert wrapped is runnable
+    assert wrapped is not runnable
     assert wrapped.invoke({}) == "invoke"
-    assert events == []
+    assert events == [("enter", True), ("exit", True)]
+    assert context_kwargs[0]["project_name"] == "Sophia"
 
 
 def test_builder_trace_runnable_requires_api_key(monkeypatch) -> None:

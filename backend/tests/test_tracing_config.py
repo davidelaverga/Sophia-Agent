@@ -106,3 +106,11 @@ def test_compose_allows_env_file_to_disable_langsmith_tracing() -> None:
     assert "- LANGSMITH_TRACING=" not in text
     assert "- SOPHIA_BUILDER_LANGSMITH_TRACING=" not in text
     assert "SOPHIA_BUILDER_LANGSMITH_TRACING, and LANGSMITH_API_KEY are read from ../.env" in text
+
+
+def test_render_keeps_global_langsmith_tracing_disabled_for_builder_scope() -> None:
+    render = Path(__file__).resolve().parents[2] / "render.yaml"
+    text = render.read_text(encoding="utf-8")
+
+    assert "key: LANGSMITH_TRACING\n        value: \"false\"" in text
+    assert "key: SOPHIA_BUILDER_LANGSMITH_TRACING\n        value: \"true\"" in text

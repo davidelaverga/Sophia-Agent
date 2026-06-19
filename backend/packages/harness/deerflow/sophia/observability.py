@@ -53,12 +53,10 @@ def _env_flag_is_false(name: str) -> bool:
 def langsmith_builder_tracing_enabled() -> bool:
     """Return whether the builder graph should opt into LangSmith tracing."""
 
-    if _env_flag_is_false("LANGSMITH_TRACING"):
-        return False
     if not _env_flag("SOPHIA_BUILDER_LANGSMITH_TRACING"):
         return False
     try:
-        return get_tracing_config().is_configured
+        return bool(get_tracing_config().api_key)
     except Exception:  # noqa: BLE001 - config should never block builder execution.
         logger.warning("Could not resolve LangSmith tracing config", exc_info=True)
         return False

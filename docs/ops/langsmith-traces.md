@@ -4,7 +4,9 @@ Sophia builder traces write to the EU LangSmith endpoint and the `Sophia`
 project. Runtime tracing requires:
 
 ```bash
-export LANGSMITH_TRACING=true
+# Keep global LangSmith autotracing disabled so companion/process runs do not
+# leak into LangSmith. Builder tracing is attached explicitly in code.
+export LANGSMITH_TRACING=false
 export SOPHIA_BUILDER_LANGSMITH_TRACING=true
 export LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com
 export LANGSMITH_PROJECT=Sophia
