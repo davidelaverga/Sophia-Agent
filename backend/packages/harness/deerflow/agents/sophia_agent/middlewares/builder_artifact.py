@@ -3730,7 +3730,6 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     force_count,
                 )
                 return None
-            state["builder_visual_force_count"] = force_count + 1
             logger.warning(
                 "[BuilderVisualDiagnostics] visual-design skill not read yet; "
                 "forcing read_file before visual asset creation count=%d",
@@ -5420,13 +5419,58 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
           nor a generator exists — the model has produced nothing on disk
           and needs to land at least one file before emit is forced.
         """
-        return (
+        choice, _update = self._force_choice_plan_for_state(state, runtime)
+        return choice
+
+    def _force_choice_plan_for_state(
+        self,
+        state: BuilderArtifactState,
+        runtime: Runtime | None = None,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        choice = (
             self._pdf_terminal_tool_choice_for_state(state)
             or self._simple_pdf_tool_choice_for_state(state)
             or self._research_tool_choice_for_state(state)
-            or self._visual_tool_choice_for_state(state)
-            or self._pdf_render_source_tool_choice_for_state(state)
+        )
+        if choice is not None:
+            return choice, None
+
+        visual_choice = self._visual_tool_choice_for_state(state)
+        if visual_choice is not None:
+            return visual_choice, {
+                "builder_visual_force_count": _builder_visual_force_count(state) + 1,
+            }
+
+        choice = (
+            self._pdf_render_source_tool_choice_for_state(state)
             or self._completion_tool_choice_for_state(state, runtime)
+        )
+        if choice is not None:
+            return choice, None
+        return None, None
+
+    @staticmethod
+    def _model_result_with_state_update(result: Any, update: dict[str, Any] | None) -> Any:
+        if not update:
+            return result
+        if isinstance(result, Command):
+            command_update = result.update
+            if isinstance(command_update, dict):
+                command_update = {**command_update, **update}
+            elif command_update is None:
+                command_update = update
+            else:
+                command_update = update
+            return Command(
+                graph=result.graph,
+                update=command_update,
+                resume=result.resume,
+                goto=result.goto,
+            )
+        return (
+            Command(update={"messages": [result], **update})
+            if isinstance(result, AIMessage)
+            else result
         )
 
     def _simple_pdf_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
@@ -6341,11 +6385,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         handler: Callable[[ModelRequest], Any],
     ) -> Any:
         """Force tool_choice when ceiling is imminent (two-stage)."""
-        choice = self._force_choice_for_state(request.state, request.runtime)
+        choice, state_update = self._force_choice_plan_for_state(request.state, request.runtime)
         if choice is not None:
             choice = self._provider_normalized_tool_choice(request.model, choice)
             request = request.override(tool_choice=choice)
-        return handler(request)
+        return self._model_result_with_state_update(handler(request), state_update)
 
     @override
     async def awrap_model_call(
@@ -6354,11 +6398,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         handler: Callable[[ModelRequest], Awaitable[Any]],
     ) -> Any:
         """Async variant — same two-stage logic as wrap_model_call."""
-        choice = self._force_choice_for_state(request.state, request.runtime)
+        choice, state_update = self._force_choice_plan_for_state(request.state, request.runtime)
         if choice is not None:
             choice = self._provider_normalized_tool_choice(request.model, choice)
             request = request.override(tool_choice=choice)
-        return await handler(request)
+        return self._model_result_with_state_update(await handler(request), state_update)
 
     @staticmethod
     def _provider_normalized_tool_choice(model: Any, choice: dict[str, Any]) -> Any:

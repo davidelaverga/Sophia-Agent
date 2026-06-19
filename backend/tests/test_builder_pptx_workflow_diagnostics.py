@@ -7,7 +7,8 @@ import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.types import Command
 from PIL import Image
 
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
@@ -510,9 +511,11 @@ def test_visual_skill_forced_read_stops_after_cap() -> None:
     }
 
     assert middleware._visual_tool_choice_for_state(state) == {"type": "tool", "name": "read_file"}
-    assert state["builder_visual_force_count"] == 1
+    assert "builder_visual_force_count" not in state
+    state["builder_visual_force_count"] = 1
     assert middleware._visual_tool_choice_for_state(state) == {"type": "tool", "name": "read_file"}
-    assert state["builder_visual_force_count"] == 2
+    assert state["builder_visual_force_count"] == 1
+    state["builder_visual_force_count"] = 2
     assert middleware._visual_tool_choice_for_state(state) is None
 
 
@@ -527,7 +530,53 @@ def test_visual_skill_force_cap_ignores_unrelated_read_file_turns() -> None:
     }
 
     assert middleware._visual_tool_choice_for_state(state) == {"type": "tool", "name": "read_file"}
-    assert state["builder_visual_force_count"] == 1
+    assert "builder_visual_force_count" not in state
+
+
+def test_visual_skill_force_count_persists_from_wrap_model_call_update() -> None:
+    middleware = BuilderArtifactMiddleware()
+    state = {
+        "delegation_context": {"task": "Create a visual presentation with diagrams"},
+    }
+    captured = {}
+    request = SimpleNamespace(
+        state=state,
+        runtime=None,
+        model=object(),
+    )
+
+    def _override(**kwargs):
+        captured["tool_choice"] = kwargs["tool_choice"]
+        return SimpleNamespace(state=state, runtime=None, model=object())
+
+    request.override = _override
+
+    result = middleware.wrap_model_call(request, lambda _request: AIMessage(content="reading"))
+
+    assert isinstance(result, Command)
+    assert captured["tool_choice"] == {"type": "tool", "name": "read_file"}
+    assert result.update["builder_visual_force_count"] == 1
+    assert result.update["messages"][0].content == "reading"
+    assert "builder_visual_force_count" not in state
+
+
+def test_visual_skill_force_count_uses_persisted_state_to_stop_after_cap() -> None:
+    middleware = BuilderArtifactMiddleware()
+    state = {
+        "delegation_context": {"task": "Create a visual presentation with diagrams"},
+        "builder_visual_force_count": 2,
+    }
+    request = SimpleNamespace(
+        state=state,
+        runtime=None,
+        model=object(),
+        override=lambda **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected override")),
+    )
+    expected = AIMessage(content="fallback")
+
+    result = middleware.wrap_model_call(request, lambda received: expected)
+
+    assert result is expected
 
 
 def test_ppt_generation_script_can_create_no_image_deck(tmp_path: Path) -> None:
